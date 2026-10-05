@@ -9,6 +9,7 @@
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicI32, AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
+use std::time::Instant;
 
 use super::dxgi::{self, Caller, Fallback};
 use super::frame::{self, Frame, FrameVia};
@@ -1684,13 +1685,19 @@ impl Backend for WindowsBackend {
     fn set_captured_keys(&self, keys: &[Captured]) {
         // Built, and the old set freed, outside the lock, so the hook waits for a swap and
         // nothing more.
-        let keys = keys.to_vec();
-        if keys.is_empty() {
+        let new = keys.to_vec();
+        if new.is_empty() {
             // No overlay holds keys any more: the next one's first let-through is explained
             // again, even in the same window (`report_capture_passes`).
             PASS_SAID_FOR.with(|said| said.set([None; 5]));
         }
-        let old = std::mem::replace(&mut locked(&KEY_STATE).set, keys);
+        let old = std::mem::replace(&mut locked(&KEY_STATE).set, new);
+        if old.as_slice() != keys {
+            // The arrows noted under the set before are written now, and the next ones are
+            // noted again (`note_arrow_let_through`).
+            report_arrow_notes();
+            ARROW_NOTED.store(0, Ordering::Relaxed);
+        }
         drop(old);
     }
 
@@ -2057,6 +2064,7 @@ impl Backend for WindowsBackend {
             events.on_key(k.vk, k.mask, k.owner, k.repeat, k.pressed);
         }
         report_capture_passes();
+        report_arrow_notes();
         // Game controllers, from the hub their own thread feeds (never a thread-local: that
         // thread is not this one). After the activations, so a press is handled against the
         // window that is in front now.
@@ -2532,15 +2540,16 @@ fn forget_seen_keys() {
     HOOK_MODS.with(|m| m.set(Mods::default()));
 }
 
-/// The keyboard went where the hook is not called — a window of a higher integrity level came
-/// to the front, the session was locked, disconnected or suspended, or Windows removed the
-/// hook — so a key the hook saw go down may go up unseen. Forgets what the hook recorded as held
-/// from key-downs alone: a **screen reader's modifier** (else every captured key would be let
-/// through to the screen reader until that modifier next went up in front of a window the hook
-/// sees), a **pending modifier tap** (else a tap could fire at a release that ends a
-/// combination) and the **captured keys held down** (else the next deliberate press of one
-/// would read as the keyboard's auto-repeat, [`CAPTURED_HELD`], and a key its busy module let go
-/// of would not be passed on to the program until that key next went up, [`KEPT_BACK`]).
+/// The keyboard went where the hook is not called — a window of a higher integrity level or one
+/// of this application's own came to the front, the session was locked, disconnected or
+/// suspended, or Windows removed the hook — so a key the hook saw go down may go up unseen.
+/// Forgets what the hook recorded as held from key-downs alone: a **screen reader's modifier**
+/// (else every captured key would be let through to the screen reader until that modifier next
+/// went up in front of a window the hook sees), a **pending modifier tap** (else a tap could fire
+/// at a release that ends a combination) and the **captured keys held down** (else the next
+/// deliberate press of one would read as the keyboard's auto-repeat, [`CAPTURED_HELD`], and a key
+/// its busy module let go of would not be passed on to the program until that key next went up,
+/// [`KEPT_BACK`]).
 /// Returns how long ago the screen reader's modifier was seen going down, when it was recorded as
 /// held, for the watch's log line.
 ///
@@ -2555,6 +2564,7 @@ pub(super) fn forget_keys_held_out_of_sight() -> Option<u32> {
     TAP_ARMED.store(0, Ordering::Relaxed);
     CAPTURED_HELD.clear();
     KEPT_BACK.clear();
+    ARROW_NOTED_HELD.store(0, Ordering::Relaxed);
     if SCREEN_READER_MOD_DOWN.swap(false, Ordering::Relaxed) {
         // SAFETY: reads the tick clock.
         let now = unsafe { GetTickCount() };
@@ -2577,9 +2587,11 @@ pub(super) fn wake_pump() {
 
 /// Runs on the hook's own thread (`keyboard_hook_thread`) for every key event on the machine.
 unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // Before anything, whatever the code: counted for the watch's re-install line. One relaxed add.
+    hook_watch_thread::HOOK_ENTERED.fetch_add(1, Ordering::Relaxed);
     if code == HC_ACTION as i32 {
-        // First, for every event of every kind: the watch compares when the hook was last
-        // called with the key-downs raw input saw (`hook_watch`). One relaxed store.
+        // Then, for every event of every kind, before anything is read: the watch compares when the
+        // hook was last called with the key-downs raw input saw (`hook_watch`). One relaxed store.
         let now = GetTickCount();
         hook_watch_thread::note_hook_call(now);
         let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
@@ -2707,7 +2719,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                         }
                     };
                     if let Some((owner, front)) = taken {
-                        let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: None };
+                        let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: None, queued: Some(Instant::now()) };
                         locked(&KEY_QUEUE).push(Taken { vk: generic, mask: tap, owner, repeat: false, pressed });
                         wake_pump();
                     }
@@ -2738,6 +2750,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             if is_up {
                 CAPTURED_HELD.up(vk);
                 KEPT_BACK.up(vk);
+                arrow_up(vk);
             }
             // The hotkeys' record of which keys are held (`hotkey_hook::Table`) is kept for every
             // key that is not a modifier, whatever happens to it below: the captured keys'
@@ -2852,7 +2865,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                         let repeat = CAPTURED_HELD.taken_down(vk);
                         // The press as it was: the window, the count of keys let through so far,
                         // and the key it was pressed on — the keypad's Enter is VK_RETURN too.
-                        let pressed = Pressed { front: foreground, seq: LET_THROUGH.load(Ordering::Relaxed), phys: physical_key(kb) };
+                        let pressed = Pressed { front: foreground, seq: LET_THROUGH.load(Ordering::Relaxed), phys: physical_key(kb), queued: Some(Instant::now()) };
                         locked(&KEY_QUEUE).push(Taken { vk, mask, owner, repeat, pressed });
                         wake_pump();
                         if hotkeys_filed {
@@ -2899,10 +2912,162 @@ fn modifier_generic(vk: u32) -> Option<u32> {
 
 /// A key event the hook lets go on towards the program, counted in [`LET_THROUGH`] when it is a
 /// key-down of a key that is not a modifier (`generic`, [`modifier_generic`]) and not the
-/// hotkeys' masking key. One relaxed add.
+/// hotkeys' masking key. One relaxed add, and with tracing on an arrow's note for the log
+/// ([`note_arrow_let_through`]).
 fn count_let_through(is_down: bool, generic: Option<u32>, vk: u32) {
     if is_down && generic.is_none() && vk != u32::from(VK_MASK_KEY) {
         LET_THROUGH.fetch_add(1, Ordering::Relaxed);
+        // With tracing on, an arrow's state of the window in front, for the log
+        // (`note_arrow_let_through`).
+        if let Some(bit) = arrow_bit(vk).filter(|_| crate::appcfg::trace()) {
+            note_arrow_let_through(vk, bit);
+        }
+    }
+}
+
+/// An arrow key-down the hook let go on towards the program, with what the hook read at it: the
+/// window in front, and its thread's focus, active and capture windows and flags
+/// (`GetGUIThreadInfo(0)`). For the line [`report_arrow_notes`] writes on the pump. Atomics, so
+/// the pump takes no lock to read it; `ready` is set last and taken by the pump.
+struct ArrowNote {
+    vk: AtomicU32,
+    /// The tick the hook read it at.
+    at: AtomicU32,
+    front: AtomicIsize,
+    /// `GetGUIThreadInfo` answered; else `flags` holds its error.
+    read: AtomicBool,
+    focus: AtomicIsize,
+    active: AtomicIsize,
+    capture: AtomicIsize,
+    flags: AtomicU32,
+    ready: AtomicBool,
+}
+
+impl ArrowNote {
+    const fn new() -> Self {
+        ArrowNote {
+            vk: AtomicU32::new(0),
+            at: AtomicU32::new(0),
+            front: AtomicIsize::new(0),
+            read: AtomicBool::new(false),
+            focus: AtomicIsize::new(0),
+            active: AtomicIsize::new(0),
+            capture: AtomicIsize::new(0),
+            flags: AtomicU32::new(0),
+            ready: AtomicBool::new(false),
+        }
+    }
+}
+
+/// How many arrows are noted after each change of the captured set.
+const ARROW_NOTES_MAX: u32 = 5;
+static ARROW_NOTES: [ArrowNote; ARROW_NOTES_MAX as usize] = [const { ArrowNote::new() }; ARROW_NOTES_MAX as usize];
+/// How many of [`ARROW_NOTES`] the hook has taken since the captured set last changed; set back
+/// to 0 by `set_captured_keys` when it does.
+static ARROW_NOTED: AtomicU32 = AtomicU32::new(0);
+/// The arrows noted on their key-down and not released since, one bit each (`arrow_bit`): a held
+/// arrow's auto-repeat is not noted again, so one held Right does not use up every note. Cleared
+/// by the arrow's key-up, which every key-up passes ([`arrow_up`]), and with the rest of what the
+/// hook recorded as held ([`forget_keys_held_out_of_sight`]).
+static ARROW_NOTED_HELD: AtomicU32 = AtomicU32::new(0);
+
+/// An arrow's bit in [`ARROW_NOTED_HELD`] (left, up, right, down), and `None` for any other key.
+fn arrow_bit(vk: u32) -> Option<u32> {
+    (0x25..=0x28).contains(&vk).then(|| 1 << (vk - 0x25))
+}
+
+/// A key-up of `vk`: when it is an arrow, its next key-down is a press of its own, noted again.
+fn arrow_up(vk: u32) {
+    if let Some(bit) = arrow_bit(vk) {
+        ARROW_NOTED_HELD.fetch_and(!bit, Ordering::Relaxed);
+    }
+}
+
+/// (The hook's thread, tracing on.) Notes an arrow key-down let through (a press, not a held
+/// arrow's repeat) while a module's scope is pinned to the window in front, and while fewer than
+/// [`ARROW_NOTES_MAX`] were noted since the captured set changed: those are the arrows that
+/// reached no overlay in a window one watches, and arrows typed into another program, or a held
+/// one repeating, would use the notes up before the one in question. The scope is looked up in
+/// the key table under its lock, as for every captured key. `GetForegroundWindow` and
+/// `GetGUIThreadInfo(0)` are calls the hook makes for captured keys as well; neither sends a
+/// message. The rest is relaxed stores and a wake of the pump.
+fn note_arrow_let_through(vk: u32, bit: u32) {
+    if ARROW_NOTED.load(Ordering::Relaxed) >= ARROW_NOTES_MAX
+        || ARROW_NOTED_HELD.load(Ordering::Relaxed) & bit != 0
+    {
+        return;
+    }
+    // SAFETY: a plain query.
+    let front = unsafe { GetForegroundWindow() } as isize;
+    if front == 0 || !locked(&KEY_STATE).owners.iter().any(|o| o.scope == front) {
+        return;
+    }
+    ARROW_NOTED_HELD.fetch_or(bit, Ordering::Relaxed);
+    // An add rather than a store, so that the pump setting it back to 0 meanwhile is not undone.
+    let Some(slot) = ARROW_NOTES.get(ARROW_NOTED.fetch_add(1, Ordering::Relaxed) as usize) else {
+        return;
+    };
+    // SAFETY: plain queries into a zeroed structure whose size is set, as the call needs.
+    unsafe {
+        let mut gti: GUITHREADINFO = std::mem::zeroed();
+        gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+        let read = GetGUIThreadInfo(0, &mut gti) != 0;
+        // Its error at once, before another call can leave one of its own.
+        let error = if read { 0 } else { GetLastError() };
+        slot.vk.store(vk, Ordering::Relaxed);
+        slot.at.store(GetTickCount(), Ordering::Relaxed);
+        slot.front.store(front, Ordering::Relaxed);
+        slot.read.store(read, Ordering::Relaxed);
+        slot.focus.store(gti.hwndFocus as isize, Ordering::Relaxed);
+        slot.active.store(gti.hwndActive as isize, Ordering::Relaxed);
+        slot.capture.store(gti.hwndCapture as isize, Ordering::Relaxed);
+        slot.flags.store(if read { gti.flags } else { error }, Ordering::Relaxed);
+    }
+    slot.ready.store(true, Ordering::Release);
+    wake_pump();
+}
+
+/// (The pump.) Writes the arrows [`note_arrow_let_through`] noted, one line each:
+/// `arrow vk 0x27 let through: window 0x… thread focus 0x… class '…'; active 0x…; capture 0x…;
+/// flags 0x…`. The class is read here, not in the hook; it sends the window no message.
+fn report_arrow_notes() {
+    for (i, slot) in ARROW_NOTES.iter().enumerate() {
+        if !slot.ready.swap(false, Ordering::Acquire) {
+            continue;
+        }
+        let at = slot.at.load(Ordering::Relaxed);
+        let front = slot.front.load(Ordering::Relaxed);
+        let state = if slot.read.load(Ordering::Relaxed) {
+            let focus = slot.focus.load(Ordering::Relaxed);
+            let focus = if focus == 0 {
+                "none".to_string()
+            } else {
+                let mut buf = [0u16; 256];
+                // SAFETY: a plain query, given its buffer's length; a window gone since reads as
+                // an empty class.
+                let n = unsafe { GetClassNameW(focus as HWND, buf.as_mut_ptr(), buf.len() as i32) };
+                format!("{focus:#x} class '{}'", String::from_utf16_lossy(&buf[..n.max(0) as usize]))
+            };
+            format!(
+                "thread focus {focus}; active {:#x}; capture {:#x}; flags {:#x}",
+                slot.active.load(Ordering::Relaxed),
+                slot.capture.load(Ordering::Relaxed),
+                slot.flags.load(Ordering::Relaxed)
+            )
+        } else {
+            format!("its thread could not be read (GetGUIThreadInfo error {})", slot.flags.load(Ordering::Relaxed))
+        };
+        // SAFETY: reads the tick clock.
+        let ago = unsafe { GetTickCount() }.wrapping_sub(at);
+        crate::logging::line(
+            "keys",
+            &format!(
+                "arrow vk {:#04x} let through: window {front:#x} {state} ({ago} ms ago; {} of the first \
+                 {ARROW_NOTES_MAX} since the captured set changed)",
+                slot.vk.load(Ordering::Relaxed),
+                i + 1
+            ),
+        );
     }
 }
 
@@ -3076,21 +3241,23 @@ fn settle_hotkey(id: i32, route: Route) -> bool {
                     if first_for_window {
                         // The hook should have seen this press and did not; every press the
                         // hook lets through on purpose was noted as expected. What is left: an
-                        // elevated window in front — a hook of an ordinary process is not
-                        // called for input to it, RegisterHotKey is, which is why it stays —
-                        // a hook running late, whose own press then follows and is dropped
-                        // with a line of its own, or a hook Windows removed after it timed out,
-                        // which the keyboard watch installs again (`hook_watch`).
+                        // elevated window or one of this application's own in front — Windows
+                        // does not call the hook for input to either, and RegisterHotKey still
+                        // delivers it, which is why it stays — a hook running late, whose own
+                        // press then follows and is dropped with a line of its own, or a hook
+                        // Windows removed after it timed out, which the keyboard watch installs
+                        // again (`hook_watch`).
                         crate::logging::line(
                             "keys",
                             &format!(
                                 "hotkey id {id} arrived through RegisterHotKey, not through the \
                                  keyboard hook (said once per window in front): an elevated \
-                                 window is in front, or the hook ran late (a \"not dispatched a \
-                                 second time\" line then follows), or Windows has removed the \
-                                 hook after it timed out (captured keys would then have stopped \
-                                 too, until the keyboard watch installs it again: a \"keyboard \
-                                 hook was installed again\" line)"
+                                 window or one of this application's own is in front, or the \
+                                 hook ran late (a \"not dispatched a second time\" line then \
+                                 follows), or Windows has removed the hook after it timed out \
+                                 (captured keys would then have stopped too, until the keyboard \
+                                 watch installs it again: a \"keyboard hook was installed again\" \
+                                 line)"
                             ),
                         );
                     }
@@ -3211,7 +3378,7 @@ fn cloaked(hwnd: HWND) -> bool {
     hr >= 0 && value != 0
 }
 
-fn process_exe(pid: u32) -> Option<String> {
+pub(super) fn process_exe(pid: u32) -> Option<String> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
@@ -3841,11 +4008,16 @@ mod hook_carry_over_tests {
     use super::*;
     use crate::backend::MASK_ALT;
 
+    /// The hook's records are statics, and the two tests here set and forget them: they take
+    /// turns, or one would forget what the other has just recorded.
+    static RECORDS: Mutex<()> = Mutex::new(());
+
     /// What a re-install keeps and what it forgets: `forget_seen_keys`, which the hook's thread
-    /// runs right after the swap. Sets the backend's statics, which no other test touches, and
-    /// no hook is installed in a test run; puts them back afterwards.
+    /// runs right after the swap. Sets the backend's statics, which no test outside this module
+    /// touches, and no hook is installed in a test run; puts them back afterwards.
     #[test]
     fn a_reinstall_keeps_the_application_s_keys_and_forgets_what_the_old_hook_saw() {
+        let _turn = locked(&RECORDS);
         let captured = vec![
             Captured { vk: 0x09, mask: 0, owner: 1 },
             Captured { vk: 0x09, mask: 1, owner: 1 },
@@ -3929,6 +4101,46 @@ mod hook_carry_over_tests {
         CAPTURED_HELD.clear();
         *locked(&HOOK_HOTKEYS) = None;
         SCREEN_READER_PASSED.with(|s| s.borrow_mut().clear());
+    }
+
+    /// What the watch does as a window comes to the front (`hook_watch_thread::front_came`): one of
+    /// this application's own — the module manager, where Windows does not call the hook — forgets
+    /// what the hook recorded as held, as NVDA's menu does, whatever the levels say; another
+    /// program's ordinary window forgets nothing.
+    #[test]
+    fn a_window_of_this_application_coming_to_the_front_forgets_what_the_hook_recorded() {
+        let _turn = locked(&RECORDS);
+        const MEDIUM: u32 = 0x2000;
+        // NVDA's Insert seen going down, a modifier tap pending, and Tab taken and still held.
+        let record = || {
+            SCREEN_READER_MOD_DOWN.store(true, Ordering::Relaxed);
+            TAP_ARMED.store(0xA4, Ordering::Relaxed);
+            CAPTURED_HELD.taken_down(0x09);
+            KEPT_BACK.taken_down(0x09);
+        };
+        let mut said = false;
+        record();
+        hook_watch_thread::front_came(Some(MEDIUM), false, Some(MEDIUM), &mut said);
+        assert!(SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed), "another program's window: kept");
+        assert_eq!(TAP_ARMED.load(Ordering::Relaxed), 0xA4);
+        assert!(KEPT_BACK.is_held(0x09));
+        assert!(!said);
+
+        hook_watch_thread::front_came(Some(MEDIUM), true, Some(MEDIUM), &mut said);
+        assert!(!SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed), "its key-up goes where the hook is not called");
+        assert_eq!(TAP_ARMED.load(Ordering::Relaxed), 0);
+        assert!(!KEPT_BACK.is_held(0x09));
+        assert!(!CAPTURED_HELD.taken_down(0x09), "Tab's key-up may have gone by unseen: a new press");
+        assert!(said, "the screen reader's modifier forgotten is said, once");
+
+        // With this process's own level unread, its own window is still one the hook is not called for.
+        record();
+        hook_watch_thread::front_came(None, true, None, &mut said);
+        assert!(!SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed));
+        assert!(!KEPT_BACK.is_held(0x09));
+
+        CAPTURED_HELD.clear();
+        KEPT_BACK.clear();
     }
 
     /// A captured key-up follows its key-down: swallowed only when the key-down was.
@@ -4108,7 +4320,7 @@ mod hook_carry_over_tests {
         assert!(hook.contains("                return 1;\n            }\n            // Neither a capture nor a hotkey took it: it goes on towards the program.\n            count_let_through(is_down, generic, vk);\n        }\n    }\n    CallNextHookEx("));
         // Taken with each press: a captured key, a tap, a hotkey however it came.
         assert_eq!(hook.matches("seq: LET_THROUGH.load(Ordering::Relaxed)").count(), 2, "the captured key and the tap");
-        assert!(hook.contains("phys: physical_key(kb) };\n                        locked(&KEY_QUEUE).push(Taken { vk, mask, owner, repeat, pressed });"));
+        assert!(hook.contains("phys: physical_key(kb), queued: Some(Instant::now()) };\n                        locked(&KEY_QUEUE).push(Taken { vk, mask, owner, repeat, pressed });"));
         let code = &SRC[..SRC.find("mod hook_carry_over_tests {").unwrap()];
         assert_eq!(code.matches("locked(&HOTKEY_QUEUE).push((").count(), 4);
         assert_eq!(code.matches("}, LET_THROUGH.load(Ordering::Relaxed)));").count(), 4, "every hotkey press with its count");

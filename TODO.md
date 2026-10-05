@@ -4681,7 +4681,7 @@ decision, hooked into one interface the overlay runtime provides.
       keyboard focus then, the keys that went through, whether it was still seen two ticks
       after an Escape, a test that has not answered for 20 ticks. In a calibrating run an
       `opensMenu` press saves `<overlay>-<control>-menu-before.png`, `-menu-after-600.png`,
-      `-menu-after-1500.png` (docs/api/calibrating.md). Scenarios against a scripted host in
+      `-menu-after-1500.png` (docs/api/overlay.md, O.calibrating). Scenarios against a scripted host in
       `crates/host/src/overlay_menu_tests.rs`: 46 since the "holding its place" and menu-shot
       items further down. Host bug fixed on the way: a captured Return or Escape was recorded
       twice (the Windows hook and the macOS tap noted it in two branches).
@@ -4720,8 +4720,8 @@ decision, hooked into one interface the overlay runtime provides.
       taken ON A MAC at the next session (Retina, points, macOS rendering differ from the
       Windows shots), and list them in that session's plan. sforzando on macOS: `newWindow`
       saw its lists in the 09-18 session; confirm there.
-  - How to take the shots: tick "Calibration keys in overlays" in the module manager's
-      Application settings tab and reload the modules. Then press the control, wait two
+  - How to take the shots: tick "Calibration keys and pictures in overlays" under Installed →
+      Overlay runtime → Settings… (no reload). Then press the control, wait two
       seconds without a key, and close the menu with Escape; the log's
       `[calibrate] … menu shot` lines name the three files in
       `modules/overlay-runtime/calibration/`. Kontakt 8 in REAPER, classic view: Tab to
@@ -5005,7 +5005,7 @@ decision, hooked into one interface the overlay runtime provides.
       when the menu's first answer and the user's first key arrive. The later two are
       `snapshotAsync` with `at`, captured off the event loop and written when they arrive. The pictures now cover the
       origin whole (for a window, its frame too) rather than the content rectangle grown by the
-      controls' points, and the log line says where the content begins. docs/api/calibrating.md.
+      controls' points, and the log line says where the content begins. docs/api/overlay.md, O.calibrating.
 - [ ] **Accessibility context checks block the event loop while Kontakt loads** (2026-09-26,
       NVDA test of phase 1). After Kontakt's Load dialog the overlay came back only after ~4 s:
       `uia.findAny(Komplete Kontrol) blocked the pump for 2075 ms`, `uia.findAny(Kontakt 8/Kontakt
@@ -5195,6 +5195,25 @@ an NVDA menu or dialog (NVDA+N, NVDA+F7, NVDA+Ctrl+G …) or an elevated window 
       again whether or not it was lost (ahead of NVDA's each time, which is the order a host
       started after the screen reader has anyway); and three counted misses, not five, make a
       re-install (`MISSES_TO_REHOOK`), so three real keystrokes at most reach the plugin first.
+- [x] **Windows: keys typed into this application's own windows are not counted as missed, and
+      what the hook recorded is forgotten when one of them comes to the front** (2026-10-05).
+      Tab pressed in the module manager installed the hook again, the lines saying 3, then 6, 12
+      and 24 key-downs had reached raw input and not the hook, with no call in between: Windows
+      does not call a process's low-level keyboard hook for keys going to its own windows (the
+      HTML probe page showed the same; Microsoft documents nothing, the mechanism is unknown). A
+      key-down raw input reports with `RIM_INPUT` — this process had the foreground when it was
+      pressed, the key's own report rather than a later foreground query — is not counted
+      (`hook_watch::counts`), as keys for a window of a higher integrity level or another
+      desktop already were not; the re-install line keeps what D1 added (foreground count, window
+      in front, hook entries), for any other case. When one of this application's windows comes
+      to the front, the watch has the backend forget the screen reader's modifier, the pending
+      modifier tap, the captured keys held and the keys kept back (`hook_watch::front_unseen`,
+      `hook_watch_thread::front_came`), with the line `a window the keyboard hook is not called
+      for came to the front (one of this application's own: …) while the keyboard hook had a
+      screen reader's modifier recorded as held … forgotten`, once per session like the others.
+      The "arrived through RegisterHotKey" line names this application's windows among its
+      reasons. Tests: `hook_watch` (the counting rule, a replay of that session, the window in
+      front) and `hook_carry_over_tests` (the records forgotten). Docs: keys.md, hotkey.md.
 - [ ] **Live (Windows), with NVDA:**
   - **first, on the build that was running on 2026-09-27** (it settles what happened): NVDA
       started before the application, an overlay active (Komplete Kontrol in REAPER), press
@@ -5239,6 +5258,9 @@ an NVDA menu or dialog (NVDA+N, NVDA+F7, NVDA+Ctrl+G …) or an elevated window 
       seeing keys` line. If one appears, the host's hotkeys would fire inside that window after
       it (our hook first again, hotkeys ignore the scope): document it, or leave those windows
       out of the count;
+  - Tab pressed twenty times in the module manager, and in a module's Settings… dialog: no
+      `the hook stopped seeing keys` line; then back into an overlay, a captured Tab works at
+      once;
   - twenty keys typed in an **elevated** command prompt and in NVDA's settings dialog: no
       `the hook stopped seeing keys` line;
   - a **Remote Desktop** connection to the session: one `connected to a remote client` line,
@@ -5254,6 +5276,14 @@ an NVDA menu or dialog (NVDA+N, NVDA+F7, NVDA+Ctrl+G …) or an elevated window 
   - a main-thread stall of over a second (a probe OCR loop) while pressing keys: `the system
       disabled the event tap N time(s) because a callback took longer …` appears after the
       stall, and the tap works right after;
+  - whether the event tap is called for keys going to this application's own windows, which
+      the Windows hook is not (2026-10-05): with a module that captures a key for every window
+      (no `host.keys.scope`), press that key in the module manager. The module's callback running
+      and the manager not getting the key say it is. Its place (`kCGHIDEventTap`, where keys enter
+      the window server, before it is decided which application gets them) says it should be.
+      Nothing on a Mac counts missed keys, so no re-creation follows either way; if it is not, a
+      key held across a switch to the manager stays recorded as held (`held_back`, `TAP_ARMED`),
+      and the tap needs the forgetting the Windows watch does;
   - withdraw Accessibility from the application while it runs, then give it back. Not known
       which the system does: switch the tap off (re-enable lines, then at most one `created
       again … The new tap is off as well` line and silence), or invalidate its port (`the event
@@ -5348,7 +5378,7 @@ the macOS system events) are not in this list. Done for Windows and the shared c
       `sound.md`.
 - [x] **Menu shots: the first two openings of each control** per overlay and VM; the third says
       so once (`overlay-runtime`, `_menuShots`; test in `overlay_menu_tests.rs`). Docs:
-      `calibrating.md`. Counted per overlay and control object (weak keys), not per label, so
+      `overlay.md` (O.calibrating). Counted per overlay and control object (weak keys), not per label, so
       overlays that share a label keep their own counts.
 - [x] **`host.ocr.read` keys are forgotten** once no read with them waits (`ocr/lua.rs`,
       `forget_settled`), as `snapshotAsync`'s are. Docs: `ocr.md`.
@@ -5951,8 +5981,8 @@ of it. Named stops are unchanged. What only the real systems can answer:
       events, not in a delay. Also listen for a value said twice: an unnamed edit field or combo
       box whose value NVDA announces itself, and whose text the overlay then reads out again.
 - [ ] **Are the rectangles where the element is drawn — UIA's on Windows, Accessibility's on the
-      Mac?** Switch on **Calibration keys in overlays** in the Application settings tab and
-      reload the modules; walk a few unnamed stops, and on one of them press the calibration
+      Mac?** Switch on **Calibration keys and pictures in overlays** under Installed → Overlay
+      runtime → Settings… (no reload); walk a few unnamed stops, and on one of them press the calibration
       shot key — Ctrl+Alt+Shift+S, Command+Option+Shift+S on a Mac — which saves a picture of
       the plug-in window into the module's `calibration/` folder. Send that PNG back with the
       log's `read at x,y wxh` lines: the regions are compared against the picture here, which
@@ -6248,7 +6278,8 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       `dialog-<choice>-<zoom>pct.png`, beside the runtime's calibration, menu and menu item shots.
 - [ ] **Stage 1 on the Mac tester's Avenger** — asynchronous: a CI build and written instructions,
       and the tester sends back the log, both calibration folders and his notes. With
-      **Calibration keys in overlays** ticked and the modules reloaded (Command-Shift-F5):
+      **Calibration keys and pictures in overlays** ticked under Installed → Overlay runtime →
+      Settings… (no reload):
       1. **Logic**, Avenger at whatever zoom it is at: into its window, Command-Shift-F6. Heard:
          "Preset, <name>". Log: `attachEmbedded: [host-panel] panel of 'Inst 1' … identify=true
          — 'VPS Avenger'` and `[avenger] 'Inst 1' (<w>x<h>): VPS Avenger, the zoom field reads
@@ -7043,6 +7074,77 @@ kind of place that says how long the first held the loop.
       switch, for as long as two reads take, and when keys waited the log's `a timer waited` line
       names its place. B4 left it as the plan has it (log only); with a callback it
       would hold nothing.
+- [x] **Melodyne's analysis read-out, back, and the note area's defects** (the maintainer's
+      decisions of 2026-10-05; inv-1.md, inv-3.md). The read-out dropped by accident on 2026-08-13
+      returns as a static text "Analysis" at the end of the Tab ring, Alt+A, saying the pass or
+      "idle" from the looks, reading nothing itself. A look every 500 ms while the overlay is in
+      front takes a picture of the disc's place with `snapshotAsync` (key, `at`) and decides from
+      its pixels — the caption band halving what is under it, 13 rows, and the rim around the
+      centre the band gives — then reads the pass name from that picture with a callback; a look is
+      also made as the overlay comes to the front, so the read-out has its answer by the arrival
+      sentence. "Busy: <pass>" once, after the arrival sentence has been said (not only begun:
+      `O:stillHere` `spoken`, runtime 0.4.1), and not after the read-out has said the pass;
+      "Analysis finished" once, after two looks in a row without the disc in the same stay. The note area takes its frames the same way (profile of
+      the snapshot in the callback, every check asked again, the snapshot released on every path),
+      tests each frame for the disc and compares nothing while it is up or an analysis is known;
+      frames carry a mark and go when the gate closes or the stay changes; a re-baseline forgets
+      the note's position and the bar lines; its picture holds the disc's place too, for windows
+      wider than about 1790 px. The read-outs' silence belongs to a stay and is the picture's to
+      say: the watcher takes one `snapshotAsync` picture of the strip per tick and reads from it
+      which boxes are drawn, whether each holds a value (ink in three rows or more against its own
+      fill — a value 8-9 rows, the dash one, Fade's empty box none, on the calibration captures) and
+      the text; an empty read of a value is not silence, and Fade, Time and Note Separation are. No
+      live capture on the watcher's tick any more; `boxDrawn` reads the watcher's memo. Log lines:
+      every sentence of the note area with its evidence, the gate opening and closing, the analysis
+      found and finished, and every hundred frames their cost. A static text takes a `hotkey`
+      (runtime 0.4.1). Melodyne 0.1.4.
+- [ ] **NVDA check of the analysis read-out, before it is committed**: load a file into Melodyne
+      and hear "Busy: <pass>" after the arrival sentence, never over it, also when coming back with
+      the focus on "Inspector"; Alt+A says the pass while it runs and "idle" after; coming back
+      onto "Analysis" says the pass once, with no "Busy" after it; "Analysis finished" once; no
+      "left/right, … step" while the disc is up; under Time, and under Fade, a note moved with
+      Ctrl+Right is still said, and under Pitch with a note selected nothing of the note area is;
+      Space plays with the focus on "Analysis".
+- [ ] **Melodyne's disc at another window size**: the disc and its band were measured on one
+      capture of a 962x660 window, centred 4 px above the client area's middle, and the band is
+      looked for 8 rows up and down. A calibration shot of an analysis in a window of another size,
+      and one of another pass (Percussive, Melodic), would say whether the centre and the caption
+      hold; the log's `analysis found` line names the pass when it does.
+- [ ] **What the note area costs the event loop now**: the capture is off it, the reduction of a
+      910x522 profile and the comparison are not. The `[melodyne] note area: 100 frames, …` line
+      says how much; measure on a release build before deciding whether a profile on the image
+      worker is worth a general API.
+- [x] **Diagnostics for the dead arrows and the hook re-installs** (inv-4.md, D1-D4, and inv-1.md's
+      profile split). A re-install for missed key-downs says for how many this process had the
+      foreground (`RIM_INPUT`), the window in front when the watch asked, and how often the hook was
+      entered since the first missed key-down — the key before the one the witness first found the
+      hook silent at — with how long before that key it was last called. With trace on, the first
+      five arrow presses let through after each change of the captured set while a module's scope is
+      pinned to the window in front (not a held arrow's repeats) are written with the window in
+      front and its thread's focus, active and capture windows. The deactivate line names the
+      foreground when nothing is in front; the `[observe]` line splits a profile into capture,
+      reduction and tables, snapshots included; every `dispatch` line says how long the key waited in
+      the queue. Docs: keys.md, screen.md.
+- [x] **A module's setting no longer puts back an Application settings switch on disk.** The host
+      saved its whole store as read at start, so the next module setting or enable after a switch
+      ticked in the Application settings tab wrote the old switch back (`flush_if_dirty`); the
+      `[app]` table is now taken from the file at every save (`Store::save_keeping_app_on_disk`).
+      And a module setting stored with another value than its default is written to the log the
+      first time a run defines it: `[settings] com.platform.overlay calibrate is true as stored (its
+      default is false)`, which the log header said of calibration while it was an application
+      switch. Docs: settings.md, overlay.md.
+- [x] **Komplete Kontrol defines its setting as it loads** (found moving calibration into the
+      runtime). The open item here said its Settings… stayed greyed until a reload: the Installed
+      tab enables Settings… from the settings a module had defined when the list was built, at
+      start and on a reload, and Komplete Kontrol was read as defining its one only when its
+      overlay first came to the front. That came from reading the code and was never seen live,
+      and the reading was wrong: the define was in the module's `activate`, which the loader runs
+      as the module loads (`populate_vm`), before the list is built. It now defines it at the top
+      level, as the runtime does calibration, and keeps the value in a local that `define` and its
+      `onChange` set; only its own VM reads it, in the overlays `activate` makes. Its code runs in
+      Kontakt's VM too, and the setting stays one, under Komplete Kontrol's id. Komplete Kontrol
+      0.1.1; test in `overlay_host_panel_tests.rs`. If the button is ever seen greyed, the cause is
+      not where the setting is defined.
 - [x] **The slow-reads switch removed; a key a busy module let go of goes to the next module or to
       the program** (the maintainer's decisions of 2026-10-05; pk-built.md). The Application tab's
       "Slow every text read by 2 seconds, for testing" is gone, and with it what only it used: the

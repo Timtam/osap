@@ -904,7 +904,7 @@ unsafe extern "C-unwind" fn tap_callback(
     // the press as it was: the window, the count of keys let through so far, and the keycode
     // itself — the keypad's Enter is not Return, though both are VK_RETURN to the host.
     let repeat = CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventAutorepeat) != 0;
-    let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: Some(keycode) };
+    let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: Some(keycode), queued: Some(Instant::now()) };
     queue::push_key(Taken { vk, mask, owner, repeat, pressed });
     note_suppressed(keycode);
 
@@ -983,7 +983,7 @@ fn modifier_changed(keycode: u16, flags: CGEventFlags) {
     let front = FOREGROUND.load(Ordering::Relaxed);
     match decide(modifier.vk, MASK_TAP, front, false) {
         Some(Some(Capture::Take { owner })) => {
-            let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: None };
+            let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: None, queued: Some(Instant::now()) };
             queue::push_key(Taken { vk: modifier.vk, mask: MASK_TAP, owner, repeat: false, pressed });
             logging::trace("macos", || format!("tap: modifier tap vk {:#04x} for module {owner}", modifier.vk));
         }

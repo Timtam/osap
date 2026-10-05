@@ -226,7 +226,7 @@ fn press(h: &Host, spec: &str, front: isize) -> Option<Capture> {
 /// A key-down the hook takes in window `front` now: with the count of keys let through so far, as
 /// the hook would take it, and no physical key.
 fn at(h: &Host, front: isize) -> Pressed {
-    Pressed { front, seq: h.backend.let_through(), phys: None }
+    Pressed { front, seq: h.backend.let_through(), phys: None, queued: None }
 }
 
 /// The pump's delivery of a key-down of `spec` the hook took for `owner` in window `front`.
@@ -855,7 +855,7 @@ fn a_key_typed_after_it_reached_the_program_first_and_it_is_not_passed_on() {
     mailbox::run_queued(&*h);
     assert_eq!(h.backend.take_passed(), vec![(0x09, 0, vec![KEY_DOWN, KEY_UP])], "Tab only: Down came before it");
     // The same, decided directly: a press whose count is behind the backend's.
-    let before = Pressed { front: W1, seq: h.backend.let_through().wrapping_sub(1), phys: None };
+    let before = Pressed { front: W1, seq: h.backend.let_through().wrapping_sub(1), phys: None, queued: None };
     assert_eq!(captures::pass_on(&*h, 0x2E, 0, before), PassedOn::NotSent(NotPassed::Overtaken));
 
     // Down held: the press and its first repeat wait; the capture goes, and the repeats after it

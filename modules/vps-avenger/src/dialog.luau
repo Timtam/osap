@@ -35,6 +35,7 @@
 -- of MENU is still being compared against, the header overlay then holds its place with no keys,
 -- and the buttons' clicks would be refused as covered — each said. TODO.md, "VPS Avenger".
 
+local O = host.require("com.platform.overlay")
 local G = host.include("src/geometry.luau")
 local H = host.include("src/header.luau")
 
@@ -91,7 +92,7 @@ end
 -- were read (marks 1 and 2), and where the table puts them (3 and 4).
 local shots = {}
 local function boxShot(origin, k, rect, box, label)
-  if not host.calibrating then return end
+  if not O.calibrating() then return end
   local zoom = H.zoom(origin)
   local name = string.format("dialog-%s-%dpct", (string.gsub(label, "[^%w]+", "-")), zoom or 0)
   if shots[name] then return end

@@ -656,7 +656,7 @@ fn choose_menu_item_checks_its_spec_and_its_opener_first() {
         end
         assert(o:chooseMenuItem(spec({ 21, 14 })) == false and done[1] == "false:inactive")
         T.front(o)
-        S.calibrating = true
+        T.calibrate(true)
         local lists = S.windowLists
         S.k = nil
         assert(o:chooseMenuItem(spec({ 21, 14 })) == false and done[2] == "false:unplaced", tostring(done[2]))
@@ -751,7 +751,7 @@ fn a_menu_item_with_no_tests_is_reported_and_opens_nothing() {
 fn the_menu_item_shot_is_taken_before_the_click_and_written_after_it() {
     run(r##"
         local S = T.S
-        S.calibrating = true
+        T.calibrate(true)
         local o = T.header({ T.O.menuTests.newWindow })
         T.press(o)
         local snaps = S.snaps

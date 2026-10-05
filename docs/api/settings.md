@@ -4,7 +4,7 @@ sidebar_position: 15
 toc_max_heading_level: 2
 ---
 
-Typed, validated settings, declared by the module and edited by the user in the module manager. For the few choices a module should not make on somebody's behalf — Komplete Kontrol has exactly one, an opt-out for automatically closing KK's library browser. Held per module and persisted in `settings.toml` beside the application (for where that is on each platform, see the platform sections of [`set`](#host-settings-set)), so they survive a restart. There is no fallback location: if that folder cannot be written, settings do not persist, and the log says so once.
+Typed, validated settings, declared by the module and edited by the user in the module manager. For the few choices a module should not make on somebody's behalf — Komplete Kontrol has exactly one, an opt-out for automatically closing KK's library browser, and the overlay runtime one, the calibration switch every overlay module asks ([`O.calibrating`](overlay.md#o-calibrating)). Held per module and persisted in `settings.toml` beside the application (for where that is on each platform, see the platform sections of [`set`](#host-settings-set)), so they survive a restart. There is no fallback location: if that folder cannot be written, settings do not persist, and the log says so once.
 
 `define` is the load-bearing call: it fixes the setting's kind from its default and carries the label, the bounds and the permitted choices, and **the module manager builds the settings dialog out of precisely that** — one native checkbox, number field or dropdown per setting, for a screen reader to read. Everything else works only on what was defined: `get` raises for a key that never was, and `onChange` fires for the dialog as well as for `set`, so nothing has to poll its own settings.
 
@@ -42,6 +42,12 @@ returns the **current effective value** (`boolean | number | string`).
 Returns a persisted value if one exists *and* its kind matches the default;
 otherwise it writes `default` to the store and returns it. Other value types
 (table, nil) raise an error.
+
+A persisted value that differs from the default is written to the log the first
+time a run defines it, once per module and key however many VMs define it:
+`[settings] com.platform.overlay calibrate is true as stored (its default is false)`.
+So a log says which settings were not at their default from the start, before
+anything the module does with them.
 
 Neither value is checked against `min`, `max` or `oneOf` here: those are enforced
 on `set` and in the settings dialog only. A persisted value of the right kind is
@@ -85,7 +91,7 @@ host.settings.set("speed", 2.0)
 host.settings.set("mode", "safe")
 ```
 
-The file is replaced whole on every save: the store is written to a temporary file of its own beside `settings.toml` (named `settings.<random>.toml.tmp`), flushed to disk, and renamed over `settings.toml`. A crash in the middle leaves the old file or the new one, never a cut-off one, and so does a power cut on a volume that can flush. At worst a temporary file is left behind; nothing reads it, and the application removes it at its next start once it is a minute old. A save that fails leaves `settings.toml` as it was and is logged once per session. On a volume that cannot flush, the save goes through without the flush, and that is logged once per session too; a power cut right after such a save can lose it.
+The modules' part of the file is the application's copy, read at start; the `[app]` table — the application's own switches — is taken from the file as it stands at each save, since the Application settings tab writes those to the file itself. So a switch changed in that tab stays as it was set when a module's setting is saved after it. The file is replaced whole on every save: the store is written to a temporary file of its own beside `settings.toml` (named `settings.<random>.toml.tmp`), flushed to disk, and renamed over `settings.toml`. A crash in the middle leaves the old file or the new one, never a cut-off one, and so does a power cut on a volume that can flush. At worst a temporary file is left behind; nothing reads it, and the application removes it at its next start once it is a minute old. A save that fails leaves `settings.toml` as it was and is logged once per session. On a volume that cannot flush, the save goes through without the flush, and that is logged once per session too; a power cut right after such a save can lose it.
 
 ### Windows
 

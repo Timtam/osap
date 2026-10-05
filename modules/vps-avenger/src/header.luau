@@ -46,6 +46,7 @@
 -- read as Avenger's is Avenger's still: its first read there is a read for the zoom, and a read
 -- that misses the header there is "lost", read again, never a "no".
 
+local O = host.require("com.platform.overlay")
 local G = host.include("src/geometry.luau")
 
 local H = {}
@@ -388,7 +389,7 @@ end
 -- picture, at every zoom the tester visits.
 local shots = {}
 local function headerShot(ctrl, band, k, zoom, h)
-  if not host.calibrating then return end
+  if not O.calibrating() then return end
   local name = string.format("header-%dpct-%dx%d", zoom or 0, ctrl.client.w, ctrl.client.h)
   if shots[name] then return end
   shots[name] = true

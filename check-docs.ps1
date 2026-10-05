@@ -54,7 +54,7 @@ foreach ($pattern in @(
 # What hangs off `host` itself, derived rather than listed.
 #
 # It was a hand-kept list, justified as short and slow-changing. It then reported
-# `host.calibrating` — which is real, registered at lib.rs, and had simply never been added to
+# `host.calibrating` — which was real, registered at lib.rs, and had simply never been added to
 # the list — as a name the host does not provide. A checker that cries wolf gets switched off,
 # and every one of these is one regex from the source that registers it.
 $hostTables = @()

@@ -686,6 +686,8 @@ pub fn run_gui(
     mut drain_changes: impl FnMut() -> Vec<ModuleChange> + 'static,
     // The text of Details… for a loaded module, by its index.
     details: impl Fn(usize) -> String + 'static,
+    // A loaded module's settings with the values stored now, by its index, for Settings….
+    settings_of: impl Fn(usize) -> Vec<SettingDesc> + 'static,
     // Announcing belongs to the host: it owns the single speech engine — a second one is an
     // error on macOS, where both of the `tts` crate's backends register the same Objective-C
     // class name — and it owns the rule about when the application may speak at all. So the
@@ -1145,16 +1147,22 @@ pub fn run_gui(
                 };
                 let found = {
                     let rb = rows.borrow();
-                    rb.get(sel).map(|r| (r.module_idx, r.settings.clone(), r.why_not(),
-                        r.unsupported.is_some()))
+                    rb.get(sel).map(|r| (r.module_idx, r.why_not(), r.unsupported.is_some()))
                 };
-                if let Some((_, _, why, true)) = &found {
+                if let Some((_, why, true)) = &found {
                     modal_message(&frame, "Not loaded", why, false);
                     return;
                 }
-                let Some((Some(module_idx), settings, _, _)) = found else {
+                let Some((Some(module_idx), _, _)) = found else {
                     return;
                 };
+                // The values stored now, not the row's: the row is built at startup and on a
+                // reload, so a dialog opened from it showed a change made since as undone, and its
+                // OK, which applies every field, undid it. Kept in the row as well, for the button.
+                let settings = settings_of(module_idx);
+                if let Some(r) = rows.borrow_mut().get_mut(sel) {
+                    r.settings = settings.clone();
+                }
                 if settings.is_empty() {
                     modal_message(&frame, "Settings", "This module has no settings.", false);
                     return;

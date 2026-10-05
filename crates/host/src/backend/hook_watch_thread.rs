@@ -9,7 +9,9 @@
 //! - **Raw Input from the keyboard** (usage page 1, usage 6, `RIDEV_INPUTSINK`, so it arrives
 //!   whichever window is in front). Posted to this window, never waited for, so no timeout can
 //!   take it away — the witness the hook's own silence cannot be. Only the physical key-downs
-//!   are compared with the hook's calls ([`note_hook_call`]).
+//!   are compared with the hook's calls ([`note_hook_call`]), and of those only the ones raw
+//!   input does not report as pressed while this process had the foreground, which Windows does
+//!   not call the hook for (`hook_watch::counts`).
 //! - **Session changes** (`WTSRegisterSessionNotification`): unlocked, connected to the console
 //!   or to a remote client again.
 //! - **Suspend and resume** (`RegisterSuspendResumeNotification` with a callback: a
@@ -17,8 +19,9 @@
 //!   reaches ordinary windows, and the callback needs no window at all).
 //! - **The window in front** (`SetWinEventHook`, `EVENT_SYSTEM_FOREGROUND`, out of context, so
 //!   delivered here). Not for the hook's survival: for what it recorded as held. When a window
-//!   the hook is not called for comes to the front — and at every session change and suspend
-//!   above — a key it saw go down can go up unseen, and the backend forgets what it recorded
+//!   the hook is not called for comes to the front — one above this process's integrity level,
+//!   or one of this process's own ([`front_came`]) — and at every session change and suspend
+//!   above, a key it saw go down can go up unseen, and the backend forgets what it recorded
 //!   from key-downs alone ([`super::windows::forget_keys_held_out_of_sight`]). Here rather than
 //!   on the pump, whose foreground events can wait behind a long OCR call: a record forgotten
 //!   late could be one the user has made since.
@@ -84,11 +87,12 @@ use windows_sys::Win32::UI::Input::{
     RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEKEYBOARD,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageTime,
-    GetMessageW, GetWindowThreadProcessId, PostMessageW, PostThreadMessageW, RegisterClassW,
-    RegisterWindowMessageW, DEVICE_NOTIFY_CALLBACK, EVENT_SYSTEM_FOREGROUND, HWND_MESSAGE, MSG,
-    WINEVENT_OUTOFCONTEXT, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_INPUT, WM_SETTINGCHANGE,
-    WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassNameW, GetForegroundWindow,
+    GetMessageTime, GetMessageW, GetWindowThreadProcessId, PostMessageW, PostThreadMessageW,
+    RegisterClassW, RegisterWindowMessageW, DEVICE_NOTIFY_CALLBACK, EVENT_SYSTEM_FOREGROUND,
+    HWND_MESSAGE, MSG, WINEVENT_OUTOFCONTEXT, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_INPUT, WM_SETTINGCHANGE, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use super::hook_watch::{self, Change, Outcome, Reason, Verdict, Witness};
@@ -117,6 +121,10 @@ static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 /// One relaxed store per call, from inside the hook; a millisecond of precision lost against a
 /// comparison with a second of slack.
 static HOOK_CALLED_AT: AtomicU32 = AtomicU32::new(0);
+/// How often the hook procedure was entered, for any code, wrapping: one relaxed add as its
+/// first statement, before anything else. Read only for the re-install line, which says how often
+/// the hook was entered while it missed key-downs (`hook_watch::MissedRun`).
+pub(super) static HOOK_ENTERED: AtomicU32 = AtomicU32::new(0);
 /// The hook's thread, where re-installs are asked for.
 static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
 /// This thread's message-only window, 0 until it exists.
@@ -128,8 +136,8 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 /// re-install for a session change while it waits for one.
 static LOST_REPLY: AtomicU64 = AtomicU64::new(0);
 
-/// The hook was called, at `now` (`GetTickCount`). Called first thing in the hook, for every
-/// key event of every kind.
+/// The hook was called, at `now` (`GetTickCount`). Called in the hook for every key event of every
+/// kind, before anything but the count of its entries ([`HOOK_ENTERED`]).
 pub(super) fn note_hook_call(now: u32) {
     HOOK_CALLED_AT.store(record_of_call(now), Ordering::Relaxed);
 }
@@ -252,12 +260,59 @@ struct State {
 struct Keys {
     witness: Witness,
     look: Look,
+    /// The run of missed key-downs counted now, for the re-install line ([`Run`]).
+    run: Run,
+    /// The key-down the witness counted last — its `prev`, which the next verdict judges — as the
+    /// run takes it; `None` before the first and once the count starts afresh.
+    last: Option<Counted>,
+    /// What the last re-install the witness asked for adds to its line, with the reason it was
+    /// asked with: used by the reply for that reason.
+    asked: Option<(Reason, hook_watch::MissedRun)>,
     /// A re-install asked of the hook's thread and not answered yet.
     pending: Option<Reason>,
     /// Said that the hook's thread has not answered, for the current `pending`.
     said_unanswered: bool,
     /// Said that a request could not be posted.
     said_post_failed: bool,
+}
+
+/// A key-down the witness counted, as raw input reported it.
+#[derive(Clone, Copy)]
+struct Counted {
+    /// Its time.
+    at: u32,
+    /// [`HOOK_ENTERED`] when raw input's report of it was handled here.
+    entered: u32,
+    /// Raw input reported it with `RIM_INPUT`: this process had the foreground.
+    ours: bool,
+}
+
+/// What the watch notes of a run of missed key-downs, for the re-install line. Diagnostics only:
+/// the witness decides by its own count.
+///
+/// The key-down a verdict finds missed is the one BEFORE the key it is given: `Missed` at key B
+/// says the hook was not called since the previous counted key, A. So the run is made of those
+/// previous keys — the first missed key-down is A, and its time is what the hook's last call is
+/// measured against.
+#[derive(Default)]
+struct Run {
+    /// The first missed key-down's time.
+    first_at: u32,
+    /// [`HOOK_ENTERED`] when raw input's report of the first missed key-down was handled.
+    entered_at_first: u32,
+    /// How many of the run's key-downs raw input reported with `RIM_INPUT`.
+    foreground: u32,
+}
+
+impl Run {
+    /// The witness found the key-down it counted before this one, `prev`, missed: the `nth` of
+    /// its run.
+    fn missed(&mut self, nth: u32, prev: Counted) {
+        if nth == 1 {
+            *self = Run { first_at: prev.at, entered_at_first: prev.entered, foreground: 0 };
+        }
+        self.foreground += u32::from(prev.ours);
+    }
 }
 
 thread_local! {
@@ -370,6 +425,9 @@ fn arm_keys() {
         s.keys = Some(Keys {
             witness: Witness::default(),
             look: Look { own_level, desktop, cache: None },
+            run: Run::default(),
+            last: None,
+            asked: None,
             pending: None,
             said_unanswered: false,
             said_post_failed: false,
@@ -543,7 +601,7 @@ fn register_foreground() -> Result<HWINEVENTHOOK, u32> {
 }
 
 /// A window came to the front. If it is one the hook is not called for, what the hook recorded
-/// as held from key-downs alone is forgotten — see `hook_watch::keys_go_unseen`.
+/// as held from key-downs alone is forgotten — see [`front_came`].
 unsafe extern "system" fn foreground_changed(
     _hook: HWINEVENTHOOK,
     event: u32,
@@ -562,17 +620,10 @@ unsafe extern "system" fn foreground_changed(
         with_state(|s| {
             let State { keys, said_forgot, .. } = s;
             let Some(k) = keys.as_mut() else { return };
-            let level = level_of_window(&mut k.look, hwnd as isize);
-            if hook_watch::keys_go_unseen(k.look.own_level, level.flatten()) {
-                let what = format!(
-                    "a window the keyboard hook is not called for came to the front ({})",
-                    match level.flatten() {
-                        Some(l) => format!("integrity level {l:#06x}, above this process's"),
-                        None => "its integrity level could not be read".to_string(),
-                    }
-                );
-                forget_out_of_sight(said_forgot, &what);
-            }
+            // A window gone by now has no process: its level counts as unread.
+            let (ours, level) = process_of_window(&mut k.look, hwnd as isize)
+                .map_or((false, None), |(pid, level)| (pid == std::process::id(), level));
+            front_came(k.look.own_level, ours, level, said_forgot);
         });
     });
     if caught.is_err() {
@@ -580,6 +631,16 @@ unsafe extern "system" fn foreground_changed(
         if !SAID.swap(true, Ordering::Relaxed) {
             crate::logging::line("keys", "the keyboard watch panicked handling a foreground change");
         }
+    }
+}
+
+/// A window came to the front: one of this process's own (`ours`), or one of a process at `level`
+/// (`None`: unread, or gone). When the hook is not called for the keys going to it — the module
+/// manager or a module's dialog, NVDA's menu, an elevated program (`hook_watch::front_unseen`) —
+/// what it recorded as held is forgotten, and the line names which it was.
+pub(super) fn front_came(own_level: Option<u32>, ours: bool, level: Option<u32>, said_forgot: &mut bool) {
+    if let Some(unseen) = hook_watch::front_unseen(own_level, ours, level) {
+        forget_out_of_sight(said_forgot, &unseen.words());
     }
 }
 
@@ -623,7 +684,7 @@ unsafe extern "system" fn watch_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
     // An unwind out of a window procedure is an abort; whatever goes wrong in here must cost
     // the watch at most, never the process that carries the user's keyboard overlay.
     let caught = std::panic::catch_unwind(|| match msg {
-        WM_INPUT => on_raw_input(lparam as HRAWINPUT),
+        WM_INPUT => on_raw_input(wparam, lparam as HRAWINPUT),
         WM_WTSSESSION_CHANGE => {
             system(system_events::from_wts(wparam as u32));
             on_change(
@@ -728,7 +789,11 @@ fn take_lost_reply() {
     }
 }
 
-fn on_raw_input(handle: HRAWINPUT) {
+/// One `WM_INPUT`: `wparam` says whether this process had the foreground when the input came
+/// (`GET_RAWINPUT_CODE_WPARAM` is `RIM_INPUT`). Such a key went to one of this process's windows,
+/// which Windows does not call the hook for, so it is not counted (`hook_watch::counts`); the
+/// re-install line says how many of a run's keys were.
+fn on_raw_input(wparam: WPARAM, handle: HRAWINPUT) {
     // SAFETY: a RAWINPUT buffer on the stack, its size passed in and out; a keyboard report
     // fits (the union's largest member is the mouse's). Anything that does not fit is refused
     // by the call with (UINT)-1 and skipped.
@@ -766,11 +831,71 @@ fn on_raw_input(handle: HRAWINPUT) {
         }
         let Some(k) = s.keys.as_mut() else { return };
         let look = &mut k.look;
-        let verdict = k.witness.key_down(time, last_hook_call(), || hook_can_see_now(look));
-        if let Verdict::Rehook { downs } = verdict {
-            request(k, Reason::Missed { downs });
+        let ours = hook_watch::to_this_process(wparam);
+        let verdict =
+            k.witness.key_down(time, last_hook_call(), || hook_watch::counts(ours, || hook_can_see_now(look)));
+        let now = Counted { at: time, entered: HOOK_ENTERED.load(Ordering::Relaxed), ours };
+        if let Some(downs) = follow(&mut k.run, &mut k.last, verdict, now) {
+            let reason = Reason::Missed { downs };
+            k.asked = Some((reason, missed_run(&k.run)));
+            request(k, reason);
         }
     });
+}
+
+/// What the witness's verdict on key-down `now` adds to the run of missed key-downs, following
+/// the witness's own `prev` in `last`: every counted key becomes the one the next verdict judges,
+/// and a key not counted changes nothing. The number of key-downs, when the verdict asks for a
+/// re-install.
+fn follow(run: &mut Run, last: &mut Option<Counted>, verdict: Verdict, now: Counted) -> Option<u32> {
+    match verdict {
+        Verdict::First | Verdict::Seen => *last = Some(now),
+        Verdict::NotCounted => {}
+        Verdict::Missed { streak } => {
+            run.missed(streak, last.unwrap_or(now));
+            *last = Some(now);
+        }
+        Verdict::Rehook { downs } => {
+            run.missed(downs, last.unwrap_or(now));
+            // The witness starts its count afresh: the next key-down is its first.
+            *last = None;
+            return Some(downs);
+        }
+    }
+    None
+}
+
+/// What the re-install line says of the run of missed key-downs `run` that asks for it: read
+/// now, on this thread, when the witness asks.
+fn missed_run(run: &Run) -> hook_watch::MissedRun {
+    // SAFETY: plain queries; GetClassNameW reads the class of a window of any process without
+    // sending it a message, and is given its buffer's length.
+    let front = unsafe {
+        let fg = GetForegroundWindow();
+        let mut pid = 0u32;
+        if fg.is_null() || GetWindowThreadProcessId(fg, &mut pid) == 0 {
+            None
+        } else {
+            let mut buf = [0u16; 256];
+            let n = GetClassNameW(fg, buf.as_mut_ptr(), buf.len() as i32);
+            Some(hook_watch::FrontWindow {
+                hwnd: fg as isize,
+                class: String::from_utf16_lossy(&buf[..n.max(0) as usize]),
+                exe: super::windows::process_exe(pid).unwrap_or_default(),
+                pid,
+                ours: pid == std::process::id(),
+            })
+        }
+    };
+    let entered = HOOK_ENTERED.load(Ordering::Relaxed);
+    hook_watch::MissedRun {
+        foreground: run.foreground,
+        front,
+        entered: entered.wrapping_sub(run.entered_at_first),
+        entered_total: entered,
+        first_at: run.first_at,
+        last_call: last_hook_call(),
+    }
 }
 
 /// A session change or a suspend/resume (`what`, for the log). Every one that means anything
@@ -868,14 +993,18 @@ fn settle(reason: Reason, outcome: Outcome) {
     let now = unsafe { GetTickCount() };
     let by_witness = matches!(reason, Reason::Missed { .. });
     let mut needed = hook_watch::MISSES_TO_REHOOK;
+    let mut run = None;
     with_state(|s| {
         let Some(k) = s.keys.as_mut() else { return };
         k.pending = None;
         k.said_unanswered = false;
         k.witness.rehooked(by_witness, outcome.installed(), now);
         needed = k.witness.needed();
+        if k.asked.as_ref().is_some_and(|(asked, _)| *asked == reason) {
+            run = k.asked.take().map(|(_, run)| run);
+        }
     });
-    let mut text = hook_watch::line(reason, outcome);
+    let mut text = hook_watch::line(reason, outcome, run.as_ref());
     if needed != hook_watch::MISSES_TO_REHOOK {
         // Only after a re-install the witness asked for, or a failed one: say how long the
         // next one takes, so a log with several of them in a row reads as the back-off it is.
@@ -889,7 +1018,8 @@ fn settle(reason: Reason, outcome: Outcome) {
 
 /// Whether the hook could have seen a key pressed now: the keyboard is on our desktop, and the
 /// window in front belongs to a process no higher than ours (see `hook_watch::hook_sees`).
-/// Asked only while the hook looks as if it missed a key.
+/// Asked only while the hook looks as if it missed a key, and not for a key raw input reported
+/// as gone to this process (`hook_watch::counts`).
 fn hook_can_see_now(look: &mut Look) -> bool {
     if !input_desktop_is(look.desktop.as_deref()) {
         return false;
@@ -899,28 +1029,28 @@ fn hook_can_see_now(look: &mut Look) -> bool {
     if fg.is_null() {
         return false;
     }
-    match level_of_window(look, fg as isize) {
-        Some(level) => hook_watch::hook_sees(look.own_level, level),
+    match process_of_window(look, fg as isize) {
+        Some((_, level)) => hook_watch::hook_sees(look.own_level, level),
         None => false,
     }
 }
 
-/// The integrity level of the process a window belongs to: `None` when the window has no
-/// process (it is gone), `Some(None)` when the level could not be read. The last window asked
+/// The process a window belongs to and its integrity level: `None` when the window has no
+/// process (it is gone), a level of `None` when it could not be read. The last window asked
 /// about is remembered with its process, so the witness asking again and again while the same
 /// window stays in front costs one query.
-fn level_of_window(look: &mut Look, window: isize) -> Option<Option<u32>> {
+fn process_of_window(look: &mut Look, window: isize) -> Option<(u32, Option<u32>)> {
     let mut pid = 0u32;
     // SAFETY: a plain query; it validates the handle.
     if unsafe { GetWindowThreadProcessId(window as HWND, &mut pid) } == 0 {
         return None;
     }
     Some(match look.cache {
-        Some((w, p, level)) if w == window && p == pid => level,
+        Some((w, p, level)) if w == window && p == pid => (pid, level),
         _ => {
             let level = level_of_pid(pid);
             look.cache = Some((window, pid, level));
-            level
+            (pid, level)
         }
     })
 }
@@ -1072,6 +1202,30 @@ mod tests {
         assert_ne!(unsafe { windows_sys::Win32::UI::Accessibility::UnhookWinEvent(events) }, 0);
         // SAFETY: our own window, on this thread.
         unsafe { DestroyWindow(hwnd) };
+    }
+
+    /// The run of missed key-downs begins at the first key the hook did not see — the key before
+    /// the one the witness first found it silent at — so the line measures the hook's last call
+    /// against that key, and counts the foreground and the hook's entries from it. A key that went
+    /// to this process is never counted, so only that first key can be one: here it is, judged
+    /// seen by the key before it.
+    #[test]
+    fn the_missed_run_begins_at_the_first_key_the_hook_did_not_see() {
+        let mut witness = Witness::default();
+        let (mut run, mut last, mut downs) = (Run::default(), None, None);
+        // The hook was last called at 8000, for the key at 7990; then it is called no more.
+        let call = Some(8_000);
+        for (at, entered, ours) in
+            [(7_990, 100, false), (10_000, 101, true), (15_000, 102, false), (16_000, 103, false), (17_000, 104, false)]
+        {
+            let verdict = witness.key_down(at, call, || hook_watch::counts(ours, || true));
+            downs = downs.or(follow(&mut run, &mut last, verdict, Counted { at, entered, ours }));
+        }
+        assert_eq!(downs, Some(3), "three missed key-downs ask for a re-install");
+        assert_eq!(run.first_at, 10_000, "the first key the hook did not see, not the next one");
+        assert_eq!(run.entered_at_first, 101);
+        assert_eq!(run.foreground, 1, "of the three missed keys, 10000, 15000 and 16000, the first");
+        assert!(last.is_none(), "the count starts afresh");
     }
 
     #[test]

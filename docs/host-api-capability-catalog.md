@@ -15,7 +15,7 @@ ahead of the implementation. The plan stands; what follows describes where it is
   runs, while ownership stays with the VM. Names are still not validated against a known set —
   a manifest may declare `"telepathy"` and load — and a handful of namespaces are ungated
   because gating them would mean every manifest names them: `os`, `require`, `tryRequire`,
-  `include`, `epoch`, `now`, `inputEpoch`, `calibrating`, `json`. The names that count are
+  `include`, `epoch`, `now`, `inputEpoch`, `json`. The names that count are
   the namespaces' own — `window`, `screen`, `element`, … ([the full list](api/index.md#capabilities));
   the finer-grained names this catalogue sketches, such as `window.read`, were never built
   and unlock nothing. Nothing is granted per capability by the user: the list is shown once,

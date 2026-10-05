@@ -170,6 +170,32 @@ fn menus_asks_for_a_menu_open_now_and_one_opened_since() {
     "#);
 }
 
+/// `spoken`: an announcement begun is not yet one said. An OCR control's sentence is said when its
+/// read answers, so a mark holds for `spoken` until then — where `said` moved as it began — and not
+/// once the sentence is out. A control with nothing to read is spoken as it begins.
+#[test]
+fn spoken_asks_for_an_announcement_said_not_only_begun() {
+    run(r#"
+        local S = T.S
+        local o = T.fields()
+        o:focusNext()
+        local m = o:here()
+        o:focusPrev()
+        assert(o.focus == 1 and #S.reads == 1, "Preset's read is out: " .. T.dump())
+        assert(T.still(o, m, { said = true }) == "false: a later announcement was made")
+        assert(T.still(o, m, { spoken = true }) == "true", "begun, not said")
+        T.answerList(1, { value = { status = "text", text = "Init Patch" } })
+        assert(T.last().text == "Preset, button, Alt+P, Init Patch", T.last().text)
+        assert(T.still(o, m, { spoken = true }) == "false: a later announcement was spoken",
+          T.still(o, m, { spoken = true }))
+        assert(T.still(o, m, { keys = true, menus = true }) == "true", "no key and no menu: the announcements moved")
+
+        m = o:here()
+        o:focusNext()
+        assert(T.still(o, m, { spoken = true }) == "false: a later announcement was spoken", "Init is said at once")
+    "#);
+}
+
 /// The same on a Mac: nothing in a mark is the platform's.
 #[test]
 fn on_a_mac_a_mark_is_the_same() {
@@ -204,7 +230,7 @@ fn still_here_raises_for_anything_but_its_own_mark_and_options() {
         err = raised(function() local r = o:stillHere(other:here()); return r end)
         assert(string.find(err, "overlay 'Synth': stillHere was handed a mark of overlay 'Other'", 1, true), err)
         err = raised(function() local r = o:stillHere(o:here(), { key = true }); return r end)
-        assert(string.find(err, "stillHere has no option 'key' (it has focus, keys, said, menus and place)", 1, true), err)
+        assert(string.find(err, "stillHere has no option 'key' (it has focus, keys, said, spoken, menus and place)", 1, true), err)
         err = raised(function() local r = o:stillHere(o:here(), true); return r end)
         assert(string.find(err, "stillHere's options are a table, got boolean", 1, true), err)
     "#);
@@ -445,19 +471,55 @@ fn a_recognize_in_a_text_hook_waits_and_its_reading_is_said() {
 // The runtime's version.
 // ---------------------------------------------------------------------------------------------
 
-/// The runtime is 0.3.1 (handlers, step B3; `host.ocr.recognize` with a callback), so a module
-/// that depends on `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads
-/// against it, and against nothing older.
+/// The runtime is 0.4.1 (calibration as its own setting, `O.calibrating()`, and a static text's
+/// `hotkey`), so a module that depends on `"com.platform.overlay >= 0.2"` — as one that takes a
+/// mark has to — still loads against it, and so does one that asks for 0.4 or 0.4.1, and neither
+/// against anything older.
 #[test]
-fn the_runtime_is_0_3_so_a_module_that_asks_for_0_2_loads() {
+fn the_runtime_is_0_4_so_a_module_that_asks_for_0_2_loads() {
     let m = module_manifest::ModuleManifest::parse(include_str!("../../../modules/overlay-runtime/module.toml"))
         .expect("the runtime's manifest parses");
     assert_eq!(m.id, "com.platform.overlay");
-    assert_eq!(m.version, "0.3.1");
-    for spec in ["com.platform.overlay >= 0.2", "com.platform.overlay >= 0.3"] {
+    assert_eq!(m.version, "0.4.1");
+    for spec in [
+        "com.platform.overlay >= 0.2",
+        "com.platform.overlay >= 0.3",
+        "com.platform.overlay >= 0.4",
+        "com.platform.overlay >= 0.4.1",
+    ] {
         let req = module_manifest::dep_constraint(spec).unwrap();
         let id = module_manifest::dep_id(spec);
         assert!(crate::check_dep_version("com.example.x", id, req, &m.version).is_ok(), "{spec}");
         assert!(crate::check_dep_version("com.example.x", id, req, "0.1.0").is_err(), "{spec}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// A static text's hotkey (0.4.1).
+// ---------------------------------------------------------------------------------------------
+
+/// A read-out with a key of its own: pressing it moves the focus there and says the control,
+/// interrupting, without the key's name — and Space and Return, which a static text never takes,
+/// stay the application's. With `hotkeyKeepsFocus` it is said and the focus stays where it was.
+#[test]
+fn a_static_texts_hotkey_moves_the_focus_to_it_and_says_it() {
+    run(r#"
+        local S = T.S
+        local o = T.fields(function(o)
+          o:addStaticText({ label = "Analysis", hotkey = "Alt+A", text = function() return "idle" end })
+          o:addStaticText({ label = "Level", hotkey = "Alt+L", hotkeyKeepsFocus = true,
+            text = function() return "-6 dB" end })
+        end)
+        assert(S.holding["Space"], "Space is the OCR button's while the focus is on it")
+        local said = #S.speech
+        S.hotkeyFns["Alt+A"]()
+        assert(o.focus == 3, "the focus moved to the read-out: " .. o.focus)
+        assert(T.said(said) == "Analysis, idle", T.said(said))
+        assert(T.last().interrupt == true, "said interrupting")
+        assert(not S.holding["Space"] and not S.holding["Return"], "Space and Return are not taken there")
+        said = #S.speech
+        S.hotkeyFns["Alt+L"]()
+        assert(o.focus == 3, "the focus stayed: " .. o.focus)
+        assert(T.said(said) == "Level, -6 dB", T.said(said))
+    "#);
 }

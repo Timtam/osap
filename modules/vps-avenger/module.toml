@@ -1,8 +1,8 @@
 id = "com.platform.vps-avenger"
 name = "VPS Avenger"
-version = "0.1.1"
+version = "0.1.2"
 license = "GPL-3.0-or-later"
-dependencies = ["com.platform.overlay >= 0.2", "com.platform.daw-hosts"]
+dependencies = ["com.platform.overlay >= 0.4", "com.platform.daw-hosts"]
 # The catalog of Avenger's expansions (modules/vps-avenger-presets), when it is installed:
 # the preset's expansion, category, oscillators and macros, and the neighbour ◀ and ▶ lead to,
 # said marked as the database's (src/presets.luau). Without it the module is what it was.

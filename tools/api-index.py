@@ -38,7 +38,7 @@ NS_ORDER = [
     'host.config', 'host.os', 'host.log', 'host.path', 'host.resource', 'host.json',
     'host.require',
     'host.tryRequire', 'host.include', 'host.epoch', 'host.now', 'host.inputEpoch',
-    'host.arbiter', 'host.calibrating', 'Concepts',
+    'host.arbiter', 'Concepts',
 ]
 
 NS_BLURB = {
@@ -272,7 +272,7 @@ CAPABILITIES = [
     'module supplies is its own code, though, and needs `window` if it calls `host.window`.',
     '',
     'Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, '
-    '`host.epoch`, `host.now`, `host.inputEpoch`, `host.calibrating` or `host.json`, nor on '
+    '`host.epoch`, `host.now`, `host.inputEpoch` or `host.json`, nor on '
     '`host.keys.normalize`, `describe` and `check` — the rest of `host.keys` needs `keys`. A '
     'clock, a counter, a platform name, a way to reach a declared dependency and a parser of '
     'strings the module already holds are not worth asking permission for, and gating them would '
@@ -444,9 +444,9 @@ def build_index(entries):
 # `host.set("<ns>", <var>)` names a namespace and the local holding it; `<var>.set("<fn>", …)`
 # names a call inside it. That is every binding the host registers, plus what the Luau prelude
 # adds on top. Anything here without an entry is a call a module author can make and cannot
-# read about — which is how `host.os.pick`, `host.arbiter`, `host.now`, `host.inputEpoch`,
-# `host.calibrating` and `host.resource.exists` went undocumented while a checker that only
-# looked the other way reported everything as fine.
+# read about — which is how `host.os.pick`, `host.arbiter`, `host.now`, `host.inputEpoch` and
+# `host.resource.exists`, among others, went undocumented while a checker that only looked the
+# other way reported everything as fine.
 
 # Names the host registers that are not module surface. Kept short and justified, because an
 # allowlist is where a checker goes to die.

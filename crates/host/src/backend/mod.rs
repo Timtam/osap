@@ -1492,6 +1492,9 @@ pub struct Pressed {
     /// it), macOS the keycode. `None` for a hotkey, whose press the system matched, and for a key
     /// whose event carried no scan code.
     pub phys: Option<u16>,
+    /// When the hook or the tap queued the key for the main thread, for the trace's `dispatch`
+    /// line: how long it waited there. `None` for a hotkey.
+    pub queued: Option<std::time::Instant>,
 }
 
 /// How many keys one module's record of keys let through for a menu holds until it is read
@@ -3281,7 +3284,7 @@ mod pass_on_tests {
 
     /// Pressed in `front`, with 7 key-downs let through before it.
     fn at(front: isize) -> Pressed {
-        Pressed { front, seq: 7, phys: None }
+        Pressed { front, seq: 7, phys: None, queued: None }
     }
 
     /// The keyboard with `front` in front, the key `key_held` or not, `mods` held, no screen
@@ -3453,7 +3456,7 @@ mod pass_on_tests {
         assert!(rest[key_down..].starts_with("if etype != CGEventType::KeyDown {\n        return pass;\n    }"));
         assert_eq!(rest[key_down..].matches("return through();").count(), 4);
         assert!(rest.contains("        return through(); // not a keyboard event we can name"));
-        assert!(rest.contains("let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: Some(keycode) };"));
+        assert!(rest.contains("let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: Some(keycode), queued: Some(Instant::now()) };"));
         let pass = body(INPUT, "pub fn pass_on(");
         assert!(pass.contains("let code = phys\n        .or_else(|| keys::vk_to_keycode_for(vk, mask))"));
         assert!(pass.contains("let src = pass_source()"));

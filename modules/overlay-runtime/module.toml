@@ -6,11 +6,15 @@ name = "Overlay runtime"
 # is taken before its control's hooks, a binding is first evaluated on the next tick, nothing
 # but a stepper is read before a press, and the hooks asked on every scan run in a coroutine of
 # the runtime's own (docs/api/overlay.md, "Where a hook runs"). Nothing a module calls is new.
-# 0.3.1 reads with host.ocr.recognize and a callback, as the application asks now.
-version = "0.3.1"
+# 0.3.1 reads with host.ocr.recognize and a callback, as the application asks now. 0.4.0 holds
+# calibration as a setting of its own (Installed → Overlay runtime → Settings…), which a module
+# asks with O.calibrating(), and so depends on "com.platform.overlay >= 0.4". 0.4.1 gives a static
+# text a `hotkey`, which says it, and O:stillHere a `spoken` option, an announcement said rather than
+# begun; a module that uses either depends on "com.platform.overlay >= 0.4.1".
+version = "0.4.1"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true
 
 [capabilities]
-require = ["window", "element", "screen", "ocr", "input", "speech", "hotkey", "keys", "timer", "log", "path", "resource", "arbiter"]
+require = ["window", "element", "screen", "ocr", "input", "speech", "hotkey", "keys", "timer", "log", "path", "resource", "arbiter", "settings"]

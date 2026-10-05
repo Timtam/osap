@@ -144,17 +144,23 @@ A Reload of a stopped module rebuilds it and leaves it off, and the reload key's
 counts the stopped modules that stay off ("11 modules reloaded; 1 stopped module stays
 off"). Details… says when and why it was stopped.
 
-### Settings…
+### Settings… {#settings}
 
 Opens a per-module dialog built from the settings the module declared via
 [`host.settings.define`](api/settings.md#host-settings-define): a native control per
 setting (checkbox / number field / dropdown / text), each labelled for the screen
-reader. Changes are validated and persisted; a module can react live via
-`host.settings.onChange`. **OK applies every field**, changed or not, so every
+reader. It shows the values stored when it opens — a change made since the application
+started, in this dialog or by the module's own code, included. Changes are validated and
+persisted, and each one that changed a value is logged (`[settings] <module id> <key> is now
+<value>`); a module can react live via `host.settings.onChange`. **OK applies every field**, changed or not, so every
 setting's `onChange` callbacks fire — and the button works for a disabled module
 too, whose `onChange` callbacks then fire as well. For a module the application
 stopped they do not run; the values are saved, and the module reads them when it is
 turned on again and built afresh.
+
+The **Overlay runtime** has one: **Calibration keys and pictures in overlays, for writing an
+overlay**, the switch every overlay module asks ([`O.calibrating`](api/overlay.md#o-calibrating)).
+It takes effect immediately.
 
 ### Details… {#details}
 
@@ -397,10 +403,12 @@ On every system:
 
 - **Detailed (trace) logging** — takes effect immediately.
 - **Save the images OCR was given** — takes effect immediately.
-- **Calibration keys in overlays** — reload modules to apply.
 - **Load modules not meant for this system** (their `supported_os` excludes it) — restart to
   apply.
 - **Run without a window** — restart to apply.
+
+Calibration, for writing an overlay, is not among them: it concerns only the overlay runtime,
+so it is that module's own setting ([Settings…](#settings)).
 
 On Windows only:
 
@@ -431,8 +439,8 @@ action. A modal would mean opening it, changing something, confirming, and only 
 out what it did; a tab is somewhere you can be, tick something, hear the result, and untick
 it.
 
-Every label says **when its setting takes effect** — immediately, after reloading modules, or
-after a restart — because a setting that appears to do nothing is worse than one that admits
+Every label says **when its setting takes effect** — immediately, the next time the window
+opens, or after a restart — because a setting that appears to do nothing is worse than one that admits
 it needs a restart. Under each checkbox is a sentence saying what the setting is for.
 Changes are written to `settings.toml` beside the application, so they survive a restart.
 

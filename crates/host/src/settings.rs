@@ -49,6 +49,18 @@ impl Value {
     }
 }
 
+/// As the log writes it: `true`, `3`, `0.5`, and a string in quotes, so an empty one shows.
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Bool(b) => write!(f, "{b}"),
+            Value::Int(i) => write!(f, "{i}"),
+            Value::Float(x) => write!(f, "{x}"),
+            Value::Str(s) => write!(f, "{s:?}"),
+        }
+    }
+}
+
 /// A registered setting's schema (in-memory; not persisted). Drives validation
 /// and the settings GUI.
 #[derive(Debug, Clone)]
@@ -371,6 +383,29 @@ impl Store {
         }
     }
 
+    /// `save`, with the `[app]` table as the file holds it now rather than as this copy does: the
+    /// save of the host's own store, which is read once at start.
+    ///
+    /// The Application settings tab saves its switches straight to the file (load, change, save),
+    /// so the host's copy of `[app]` is the one read at start. Saved as it was, the next module
+    /// setting or enable written after a switch in that tab put the switch back on disk — trace
+    /// ticked in the tab, then calibration ticked under the overlay runtime's Settings…, and the
+    /// next start had trace off. A file that cannot be read or does not parse keeps this copy's
+    /// table: a save never loses the switches to a read that failed.
+    pub fn save_keeping_app_on_disk(&mut self) {
+        self.take_app_from(&store_path());
+        self.save();
+    }
+
+    /// Takes the `[app]` table of the file at `path` in place of this copy's, and keeps this
+    /// copy's when the file cannot be read or does not parse.
+    fn take_app_from(&mut self, path: &Path) {
+        let on_disk = std::fs::read_to_string(path).ok().and_then(|t| toml::from_str::<Store>(&t).ok());
+        if let Some(on_disk) = on_disk {
+            self.app = on_disk.app;
+        }
+    }
+
     /// `save`, to a path of the caller's choosing, saying what went wrong instead of logging
     /// it — the part of `save` a test can run. `Ok(Some(_))` is a save that went through
     /// without its flush (see `replace_file`).
@@ -596,6 +631,34 @@ mod store_save_tests {
         assert!(back.disabled_ids().contains("com.example.b"));
 
         assert_eq!(names(dir.path()), vec!["settings.toml".to_string()]);
+    }
+
+    /// The host's save takes `[app]` from the file: a switch the Application settings tab saved
+    /// after the host read the store outlives the host's next save, and a file that does not
+    /// parse leaves the host's own copy as it was.
+    #[test]
+    fn the_hosts_save_keeps_the_switches_the_settings_tab_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        // The host's copy, read at start: trace off.
+        let mut host = Store::empty();
+        host.set_app_flag("trace", false);
+        host.save_to(&path).unwrap();
+        // The tab loads the file, ticks trace and saves it.
+        let mut tab: Store = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        tab.set_app_flag("trace", true);
+        tab.save_to(&path).unwrap();
+        // Then a module's setting changes in the host's copy, which is saved.
+        host.set("com.platform.overlay", "calibrate", Value::Bool(true));
+        host.take_app_from(&path);
+        host.save_to(&path).unwrap();
+        let back: Store = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back.app_flag("trace"), Some(true), "the tab's switch was put back");
+        assert_eq!(back.get("com.platform.overlay", "calibrate"), Some(Value::Bool(true)));
+
+        std::fs::write(&path, "this is [not toml").unwrap();
+        host.take_app_from(&path);
+        assert_eq!(host.app_flag("trace"), Some(true), "a file that does not parse takes nothing away");
     }
 
     /// A save that cannot complete leaves the old store exactly as it was, says why, and

@@ -4,7 +4,6 @@
 # sat unloaded through an entire refactor that way.
 #
 #   .\run-dev.ps1                 build if needed, then run every module in modules/
-#   .\run-dev.ps1 -Calibrate      the same, with the calibration keys armed
 #   .\run-dev.ps1 -Build          force a rebuild first
 #   .\run-dev.ps1 -Only kontakt,cinematic-studio-strings
 #                                 just those, by directory name
@@ -15,7 +14,6 @@
 #                                 .\run-dev.ps1 -Tools -Only hotkey-test-a,hotkey-test-b
 [CmdletBinding()]
 param(
-  [switch]$Calibrate,
   [switch]$Build,
   [switch]$Release,
   [switch]$Examples,
@@ -67,10 +65,7 @@ $dirs = Get-ChildItem $srcDir -Directory |
 
 if (-not $dirs) { throw "no modules found in $srcDir$(if ($Only) { " matching: $($Only -join ', ')" })" }
 
-if ($Calibrate) { $env:AUTOMATION_PLATFORM_CALIBRATE = "1" }
-else { Remove-Item Env:\AUTOMATION_PLATFORM_CALIBRATE -ErrorAction SilentlyContinue }
-
-Write-Host "Starting the $profileDir build with $($dirs.Count) module(s) from $srcDir$(if ($Calibrate) { ' (calibrating)' }):"
+Write-Host "Starting the $profileDir build with $($dirs.Count) module(s) from ${srcDir}:"
 $dirs | ForEach-Object { Write-Host "  $(Split-Path $_ -Leaf)" }
 
 Start-Process -FilePath $exe -ArgumentList $dirs -WorkingDirectory $root

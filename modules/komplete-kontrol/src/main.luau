@@ -72,11 +72,19 @@ local KK_DIALOG_SLOT = "com.platform.kk-dialog"
 -- Turn OFF in the manager's Settings dialog if you keep the browser open on purpose
 -- (e.g. to browse for another instrument). (ReaHotkey's CloseKKBrowser defaults off; we
 -- default it on by choice.)
--- The setting is DEFINED in activate(), NOT here at module level: this module is a
--- `code_module`, so its code is evaluated inside every dependent's VM (e.g. Kontakt
--- imports its standalone-window matcher). A module-level define would then register the
--- setting in those VMs too; activate() runs only in this module's OWN VM.
+-- Defined here, as the module loads, as the overlay runtime defines calibration. This module
+-- is a `code_module`, so this runs in every dependent's VM too (Kontakt imports its
+-- standalone-window matcher); a code module's settings are stored under its own id, whichever
+-- VM defines them, so it is still one setting, under Komplete Kontrol. Held in a local that
+-- define and the onChange below set; only this module's own VM reads it, in the overlays
+-- activate() makes.
 local CLOSE_KK_BROWSER = "closeKKBrowser"
+local closeKKBrowser = host.settings.define(CLOSE_KK_BROWSER, true, {
+  label = "Automatically close Komplete Kontrol's library browser",
+}) == true
+host.settings.onChange(CLOSE_KK_BROWSER, function(new)
+  closeKKBrowser = new == true
+end)
 
 -- A Komplete Kontrol Qt control (same Qt class as Kontakt; the UIA name is what
 -- distinguishes it). Non-relational, so the identity cache is safe here.
@@ -121,7 +129,7 @@ end
 -- loaded instrument) and the setting is on, close it — revealing the instrument so the
 -- higher-specificity Kontakt/library overlay can detect it and take over.
 local function onKKActive(o)
-  local enabled = host.settings.get(CLOSE_KK_BROWSER)
+  local enabled = closeKKBrowser
   local p = enabled and browserToggle(o:hwnd()) or nil
   host.log.info(string.format(
     "KK overlay active: auto-close=%s browserToggle=%s",
@@ -205,10 +213,6 @@ return {
   -- module is imported as a code dependency into another VM): the KK base overlay + the
   -- standalone overlays + dialogs.
   activate = function()
-    -- Defined here (not at module level) so it only registers in this module's own VM.
-    host.settings.define(CLOSE_KK_BROWSER, true, {
-      label = "Automatically close Komplete Kontrol's library browser",
-    })
     local ov = O.new("Komplete Kontrol")
     addChrome(ov)
     -- Auto-close on activate (opt-out): reveals an instrument the browser is hiding.

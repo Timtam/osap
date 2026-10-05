@@ -30,7 +30,7 @@ Ownership is unaffected, and deliberately so. A hotkey or a timer that a depende
 
 **Receiving window events needs no declaration.** The host delivers foreground and focus changes to the callbacks registered with `host.window.onTrigger` and `onFocus` through a handle of its own, not through the module's `host` table. So a module that attaches an overlay declares `window` only if its own code calls `host.window`: the overlay runtime registers the triggers with its own manifest's permission, and a module that registered none is skipped. A gate or a matcher's `where` function the module supplies is its own code, though, and needs `window` if it calls `host.window`.
 
-Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, `host.epoch`, `host.now`, `host.inputEpoch`, `host.calibrating` or `host.json`, nor on `host.keys.normalize`, `describe` and `check` — the rest of `host.keys` needs `keys`. A clock, a counter, a platform name, a way to reach a declared dependency and a parser of strings the module already holds are not worth asking permission for, and gating them would mean every manifest names them — which is the same as naming none. `host.keys.check` reads one thing besides its string: for a Ctrl+Alt chord on Windows or an Option chord on a Mac, the character the keyboard layout in use types with it, unless it is asked with `layout = false`.
+Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, `host.epoch`, `host.now`, `host.inputEpoch` or `host.json`, nor on `host.keys.normalize`, `describe` and `check` — the rest of `host.keys` needs `keys`. A clock, a counter, a platform name, a way to reach a declared dependency and a parser of strings the module already holds are not worth asking permission for, and gating them would mean every manifest names them — which is the same as naming none. `host.keys.check` reads one thing besides its string: for a Ctrl+Alt chord on Windows or an Option chord on a Mac, the character the keyboard layout in use types with it, unless it is asked with `layout = false`.
 
 The list is also shown to the user before installing from GitHub — for the module chosen and for every dependency the install adds — and again before an update that asks for a capability the installed version did not, or starts using a module it did not (see [the module manager](../module-manager.md#browse-tab)). Nothing is granted or refused per capability, and a module copied into `modules/` by hand is not reviewed at all. It is not a security boundary on its own — a module still runs arbitrary Luau, and the declaration is the module's own word — but it is now the word the platform holds it to.
 
@@ -68,6 +68,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | | |
 |---|---|
 | [`Bindings — O.window / O.embedded / :with / O.hosts / O:bind`](overlay#bindings) | `O.window(matcher, opts?) -> Binding` · `O.embedded(spec, opts?) -> Binding` · `Binding:with(over) -> Binding` · `O.hosts(...)… |
+| [`O.calibrating()`](overlay#o-calibrating) | Whether calibration is switched on |
 | [`O.contentSize(origin)`](overlay#o-contentsize) | The width and height of an origin's **content**, which is what coordinates are measured against |
 | [`O.doubleClick(x, y)`](overlay#o-doubleclick) | Two clicks at the same point, far enough apart in time to **be** a double-click. |
 | [`O.layer`](overlay#o-layer) | The specificity ladder within a slot, named |
@@ -83,7 +84,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O:addHotspotToggle(opts)`](overlay#o-addhotspottoggle) | Appends a toggle whose on/off state is read from a **single pixel** at its click point (ReaHotkey's `HotspotToggleButton`) |
 | [`O:addOCRButton(opts)`](overlay#o-addocrbutton) | Appends a button whose label/value is read live by OCR over a region; activating re-reads it then clicks the region centre. |
 | [`O:addPassThrough(opts)`](overlay#o-addpassthrough) | Appends a stop that hands Tab to the plug-in's own focusable elements, for a plug-in window that does not move focus on Tab by itself. |
-| [`O:addStaticText(label)`](overlay#o-addstatictext) | Appends a static text control: Tab-reachable and read aloud on focus, but with no activation (Enter does nothing). |
+| [`O:addStaticText(label)`](overlay#o-addstatictext) | Appends a static text control: Tab-reachable and read aloud on focus. |
 | [`O:addStepper(opts)`](overlay#o-addstepper) | Appends a **value changed with Left and Right**, where the module knows how to change it. |
 | [`O:afterIdle(key, ms, fn)`](overlay#o-afteridle) | Runs `fn` **once**, `ms` after the last call carrying the same `key`. |
 | [`O:attach(matcher, opts)`](overlay#o-attach) | Binds the overlay as a **standalone** context |
@@ -366,12 +367,6 @@ Deciding which of several overlays owns a contested slot.
 | [`host.arbiter.unregister(slot, handle)`](arbiter#host-arbiter-unregister) | Withdraws the claim and promotes whoever is next. |
 | [`host.arbiter.winner(slot)`](arbiter#host-arbiter-winner) | The module id currently holding `slot`, or `nil` when nothing matches. |
 | [`host.arbiter.winnerSpecificity(slot)`](arbiter#host-arbiter-winnerspecificity) | The rank of whoever currently holds `slot`, or `nil` when nothing matches. |
-
-## host.calibrating
-
-| | |
-|---|---|
-| [`host.calibrating`](calibrating#host-calibrating) | A value rather than a function — read it, do not call it. |
 
 ## Concepts
 

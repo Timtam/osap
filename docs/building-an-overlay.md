@@ -140,18 +140,18 @@ end })
 
 `here`, `stillHere` and `whole` came with version 0.2 of the overlay runtime, so a module that uses them says so in its manifest: `dependencies = ["com.platform.overlay >= 0.2"]`.
 
-### Finding the coordinates — the calibrator
+### Finding the coordinates — the calibrator {#calibrator}
 
 Do not derive coordinates from another tool's numbers, and do not trust a value because *something* about it looks right. A cautionary tale from this repo: a set of toggles was calibrated by sampling colours, the colours matched, and the positions were taken to be right — they were 16 px off, on the caption row *under* the buttons. Three of five sampled near-black there and reported "off" forever, and the overlay had shipped like that.
 
-Tick **Calibration keys in overlays** in the module manager's Application settings tab and reload the modules (or, for a launch without a window, start the app with `AUTOMATION_PLATFORM_CALIBRATE=1`), and three keys arm on whichever overlay is active. They are written `Ctrl+Alt+Shift+…`: Ctrl+Alt+Shift on Windows, and Command+Option+Shift on a Mac (a spec's Ctrl is Command there), which is off Control+Option, VoiceOver's layer.
+Tick **Calibration keys and pictures in overlays** in the overlay runtime's own settings — the module manager's Installed list, **Overlay runtime**, **Settings…** — and three keys arm on the next overlay to come to the front, with no reload (for a launch without a window, see [`O.calibrating`](api/overlay.md#o-calibrating)). Every module built on the runtime asks it the same switch. They are written `Ctrl+Alt+Shift+…`: Ctrl+Alt+Shift on Windows, and Command+Option+Shift on a Mac (a spec's Ctrl is Command there), which is off Control+Option, VoiceOver's layer.
 
 | Key | What it does |
 | --- | --- |
 | `Ctrl+Alt+Shift+S` | Screenshot of the coordinate window with a **crosshair** where each control will actually click, plus a log line per control: resolved screen point, the pixel read there, and whether it is `rawOrigin`. |
 | `Ctrl+Alt+Shift+T` | Crops a template around the **focused** control and writes it into `calibration/`. |
 | `Ctrl+Alt+Shift+V` | Counts **every** match of the focused control's template in the region. |
-| (no key) | Activating a control declared with `opensMenu` saves three pictures of the overlay's origin whole — a snapshot just before it acts, written once the other two are in, and ~600 ms and ~1500 ms after — as `<overlay>-<control>-menu-before.png`, `-menu-after-600.png` and `-menu-after-1500.png`. What a menu test for a menu drawn inside the plug-in is written from; see [calibrating](api/calibrating.md#host-calibrating). |
+| (no key) | Activating a control declared with `opensMenu` saves three pictures of the overlay's origin whole — a snapshot just before it acts, written once the other two are in, and ~600 ms and ~1500 ms after — as `<overlay>-<control>-menu-before.png`, `-menu-after-600.png` and `-menu-after-1500.png`. What a menu test for a menu drawn inside the plug-in is written from; see [`O.calibrating`](api/overlay.md#o-calibrating). |
 | (no key) | A control that chooses an item in its menu also saves `<overlay>-<control>-menu-item.png` on those presses: the menu, with a crosshair on the item, just before it is clicked. What an item's offset is measured from. |
 
 The screenshot is the one that matters: "is my control on its button?" becomes a glance instead of arithmetic. The crosshairs are magenta, a colour these dark plugin interfaces do not use, and are numbered by ticks so they match the log lines.

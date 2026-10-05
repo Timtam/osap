@@ -1450,7 +1450,7 @@ fn initialize_and_save_are_refused_where_their_box_would_lie_off_the_screen() {
 fn a_calibrating_run_draws_where_the_overlay_clicks_and_reads() {
     run_mac(r##"
         local S = T.S
-        S.calibrating = true
+        T.calibrate(true)
         rawset(T.host.element, "rawDump", function() return {} end)
         local W = T.float(80)
         S.listed = { W }

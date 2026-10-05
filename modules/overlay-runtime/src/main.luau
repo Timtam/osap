@@ -82,6 +82,14 @@ function O.contentSize(o)
   return w, h
 end
 
+-- Calibration, switched on under Installed → Overlay runtime → Settings…: this runtime's own
+-- setting, one value for every module built on it (a code module's settings are stored under its
+-- own id, whichever VM defines them). Held here, set by define at load and by the onChange below,
+-- and never asked of host.settings.get, which raises in a dependent whose runtime failed to
+-- reload. See O.calibrating and the Calibration section.
+local calibrating = host.settings.define("calibrate", false, {
+  label = "Calibration keys and pictures in overlays, for writing an overlay — takes effect immediately",
+}) == true
 -- One line per VM when the calibration keys arm (see the Calibration section).
 local calibrationAnnounced = false
 
@@ -91,6 +99,39 @@ Overlay.__index = Overlay
 -- Every overlay this VM made, held weakly: which of them are active decides who sets back the
 -- module's key scope and menu flag (see _deactivate).
 local overlaysMade = setmetatable({}, { __mode = "k" })
+
+-- Whether calibration is switched on: the calibration keys of the overlay in front, the menu shots
+-- and the picture of a search that missed, and whatever a module built on the runtime measures
+-- only for somebody writing an overlay. A read of the local above.
+function O.calibrating()
+  return calibrating
+end
+
+-- The dialog's change reaches every VM that carries the runtime, as a handler of its module. The
+-- keys are taken when an overlay comes to the front, so one already in front keeps what it holds
+-- until it leaves; the line says how many were, in a VM that made overlays.
+host.settings.onChange("calibrate", function(new)
+  new = new == true
+  if new == calibrating then return end
+  calibrating = new
+  calibrationAnnounced = false
+  local made, active = 0, 0
+  for o in pairs(overlaysMade) do
+    made += 1
+    if o.active then active += 1 end
+  end
+  if made == 0 then return end
+  local after
+  if new then
+    after = "the keys arm the next time an overlay comes to the front"
+  elseif active > 0 then
+    after = "the one in front keeps its keys until it leaves"
+  else
+    after = "no overlay holds the keys"
+  end
+  host.log.info(("[calibrate] %s — %d overlay(s) here, %d in front; %s"):format(
+    new and "on" or "off", made, active, after))
+end)
 
 function O.new(label)
   local o = setmetatable(
@@ -136,9 +177,11 @@ function O.new(label)
       _stay = 0,
       -- How many of its own keys have reached it (ownKey), how many announcements it has begun
       -- (speakControl) and how many times a menu has opened over it (_menuChange): an answer to a
-      -- read asked before any of them moved on is not spoken.
+      -- read asked before any of them moved on is not spoken. And how many announcements it has
+      -- actually said: one that waits for its read is begun long before it is heard.
       _keys = 0,
       _said = 0,
+      _spoken = 0,
       _menuOpens = 0,
       -- Token of the dynamically (re)captured Space key, or false. Space activates the
       -- focused control like Return, but is released while an editable field is focused
@@ -370,6 +413,11 @@ function Overlay:addStaticText(labelOrOpts)
       -- promise of an action it does not perform.
       text = labelOrOpts.text,
       when = labelOrOpts.when,
+      -- `hotkey`: a read-out the user checks often is worth a key, and pressing it says the
+      -- control, since there is nothing to press. Space and Return stay the application's, as on
+      -- any static text: Melodyne's "Analysis" sits beside its play/stop.
+      hotkey = labelOrOpts.hotkey,
+      hotkeyKeepsFocus = labelOrOpts.hotkeyKeepsFocus == true,
     })
   end
   return add(self, { kind = "static", label = labelOrOpts })
@@ -1176,6 +1224,7 @@ local function markAt(self, index)
     control = self.controls[index],
     keys = self._keys,
     said = self._said,
+    spoken = self._spoken,
     menuOpens = self._menuOpens,
   }, Mark)
 end
@@ -1201,6 +1250,7 @@ local function stillHereAt(self, m, opts)
   end
   if opts.keys and self._keys ~= m.keys then return false, "a later key reached the overlay" end
   if opts.said and self._said ~= m.said then return false, "a later announcement was made" end
+  if opts.spoken and self._spoken ~= m.spoken then return false, "a later announcement was spoken" end
   if opts.menus and self:menuOpen() then return false, "a menu is open over the overlay" end
   if (opts.menus or opts.menusSince) and self._menuOpens ~= m.menuOpens then
     return false, "a menu opened over the overlay since"
@@ -1215,13 +1265,13 @@ function Overlay:here()
   return markAt(self, self.focus)
 end
 
-local STILL_HERE_OPTS = { focus = true, keys = true, said = true, menus = true, place = true }
+local STILL_HERE_OPTS = { focus = true, keys = true, said = true, spoken = true, menus = true, place = true }
 
 -- Whether what `mark` noted still holds: true, or false and why. Always asked, unless `place =
 -- false`: the overlay still active, in the same stay in front, on the same window. And with
 -- `focus = true` the same focus on the same control, `keys = true` no key of the overlay's own
--- since, `said = true` no announcement since, `menus = true` no menu open over it and none opened
--- since. A mark from another overlay, anything but a mark, or an option it does not know raises:
+-- since, `said = true` no announcement begun since, `spoken = true` none said since, `menus =
+-- true` no menu open over it and none opened since. A mark from another overlay, anything but a mark, or an option it does not know raises:
 -- a typo in an option would otherwise check nothing, silently.
 function Overlay:stillHere(mark, opts)
   if getmetatable(mark) ~= Mark then
@@ -1239,7 +1289,7 @@ function Overlay:stillHere(mark, opts)
     end
     for k in pairs(opts) do
       if not STILL_HERE_OPTS[k] then
-        error(("overlay '%s': stillHere has no option '%s' (it has focus, keys, said, menus and place)")
+        error(("overlay '%s': stillHere has no option '%s' (it has focus, keys, said, spoken, menus and place)")
           :format(tostring(self.label), tostring(k)), 2)
       end
     end
@@ -1917,7 +1967,7 @@ local function valueOfNow(self, c, done)
         --
         -- Written only in a calibrating run, and only once per control, so a polling overlay
         -- cannot fill the disk with the same disappointment.
-        if host.calibrating and not c._savedMiss then
+        if calibrating and not c._savedMiss then
           c._savedMiss = true
           -- Sanitised inline: safeName is declared with the calibration helpers far below this
           -- point, and a local is not visible above its own declaration.
@@ -2117,6 +2167,7 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
       end
     end
     host.speech.output(tabMessage(tab, c.typeLabel or "tab control"), { interrupt = true })
+    self._spoken += 1
     return
   end
   -- A pass-through announces that Tab goes INTO the plugin from here, because nothing else
@@ -2129,6 +2180,7 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   if c.kind == "passthrough" then
     c._net, c._at, c._n, c._leaveOn = nil, nil, nil, nil
     host.speech.output((c.label or "") .. ", Tab to step through them", { interrupt = true })
+    self._spoken += 1
     return
   end
   -- `ocrLabel`: read the control's NAME off the screen instead of announcing a fixed one,
@@ -2229,6 +2281,8 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
     if value then parts[#parts + 1] = value end
     for _, part in ipairs(after) do parts[#parts + 1] = part end
     host.speech.output(table.concat(parts, ", "), { interrupt = not queued })
+    -- Said, not only begun: what waits to follow the sentence asks this (O:stillHere, `spoken`).
+    self._spoken += 1
     if not needsValue then return end
     valueOf(self, c, function(value)
       -- The utterance the user actually hears, logged for the one control type whose value
@@ -2939,6 +2993,10 @@ function Overlay:activate(index)
     -- The menu this click opened has an item to choose: chosen when a menu test sees it (see
     -- "Choosing an item" in the Menus section).
     if c.menuItem ~= nil then self:_armPick(c, nil, c.retries) end
+  elseif c.kind == "static" then
+    -- Nothing to press, so activating a static text says it: its hotkey is pressed to hear it.
+    -- Space and Return never get here, since a static text does not take them.
+    speakControl(self, i, false)
   elseif (c.kind == "custom" or c.kind == "stepper") and c.onActivate then
     -- A stepper can be ACTIVATED as well as stepped, where the control it stands for has
     -- something a press means. ON:EAR's two are the case that asked for it: a double-click
@@ -3445,10 +3503,10 @@ function Overlay:_registerHotkeys(suspended)
     -- rebuilding the overlay's registration (see _suspendCapturedKeys).
     self.capturedSpecs[#self.capturedSpecs + 1] = { spec = spec, fn = fn }
   end
-  -- Calibration keys, only in a calibrating run (see the section above). Captured, so
-  -- they act on the overlay that is active — the one that knows its own coordinates.
-  if host.calibrating then
-    -- Say so once per VM: whether the flag took is otherwise invisible, and "I pressed
+  -- Calibration keys, only while calibration is on (see the Calibration section). Captured,
+  -- so they act on the overlay that is active — the one that knows its own coordinates.
+  if calibrating then
+    -- Say so once per VM: whether the setting took is otherwise invisible, and "I pressed
     -- the key and nothing happened" has two very different causes.
     if not calibrationAnnounced then
       calibrationAnnounced = true
@@ -4131,9 +4189,26 @@ function Overlay:_deactivate()
   -- log said what had taken it away in between — the tester switching apps, or the overlay
   -- losing its own window.
   local a = host.window.active()
-  host.log.info(string.format("[deactivate] '%s' — in front now: '%s' (%s)",
+  -- With nothing in front, what host.window.foreground() says: active() drops a hidden window,
+  -- which can still have the keyboard.
+  local f = ""
+  if not a then
+    local read, fg = pcall(host.window.foreground)
+    if not read then
+      f = (" — foreground could not be read (%s)"):format(tostring(fg))
+    elseif type(fg) ~= "table" then
+      -- nil is no foreground window, or one the platform cannot name: a macOS application that
+      -- does not answer, a read that timed out. The words the menu's own reading uses.
+      f = " — foreground: no window the platform names"
+    else
+      f = (" — foreground %s, pid %s, shown %s"):format(
+        type(fg.id) == "number" and ("0x%x"):format(fg.id) or tostring(fg.id),
+        tostring(fg.pid), tostring(fg.shown))
+    end
+  end
+  host.log.info(string.format("[deactivate] '%s' — in front now: '%s' (%s)%s",
     tostring(self.label), tostring(a and a.title or "nothing"),
-    tostring(a and a.app and a.app.exe or "?")))
+    tostring(a and a.app and a.app.exe or "?"), f))
   -- Its keys go FIRST, while the scope still pins them to the window it is leaving: unpinned
   -- first, they would take a key pressed in the window that came forward — the hook runs on a
   -- thread of its own — and the key would then be dropped, its capture released.
@@ -6406,7 +6481,7 @@ function Overlay:_menuOpening(c)
   -- Whether this press was photographed, so the item it chooses is photographed with it (see
   -- _pickShot): the same first two openings per control, not a count of its own.
   self._pressShot = false
-  if host.calibrating then self._pressShot = self:_menuShots(c) == true end
+  if calibrating then self._pressShot = self:_menuShots(c) == true end
 end
 
 -- One of the overlay's own keys arrived with no menu counted open: the user is back in the
@@ -7122,12 +7197,12 @@ function Overlay:_menuHoldEnds()
 end
 
 -- ── Calibration ──────────────────────────────────────────────────────────────
--- Armed only when the app runs with AUTOMATION_PLATFORM_CALIBRATE=1, and captured (not
--- registered as global hotkeys) so the keys belong to whichever overlay is ACTIVE — which
--- is also the only overlay that can answer where its controls land, since the coordinate
--- frame (origin, frame offset, rawOrigin, landmark anchoring) is its own. A separate tool
--- would have to reimplement that resolution, and would then be measuring something other
--- than what the overlay clicks.
+-- Armed only while calibration is switched on (O.calibrating, this runtime's own setting), at
+-- the next activation, and captured (not registered as global hotkeys) so the keys belong to
+-- whichever overlay is ACTIVE — which is also the only overlay that can answer where its
+-- controls land, since the coordinate frame (origin, frame offset, rawOrigin, landmark
+-- anchoring) is its own. A separate tool would have to reimplement that resolution, and would
+-- then be measuring something other than what the overlay clicks.
 --
 --   Ctrl+Alt+Shift+S  a screenshot of the coordinate window with a CROSSHAIR on every
 --                     control where it will actually click, plus the pixel read there

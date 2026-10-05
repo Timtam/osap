@@ -318,7 +318,7 @@ struct Shared {
     /// Now the first refusal is logged, the rest counted, and the count said when the key is
     /// granted. Forgotten per module on toggle and when its registrations go.
     os_refused: RefCell<HashMap<(usize, String), u32>>,
-    /// The captured-set line (under trace or calibrate) waiting for the end of the tick, and
+    /// The captured-set line (under trace) waiting for the end of the tick, and
     /// the last one written. `refresh_captured` runs once per key an overlay captures, so an
     /// activation of eight keys wrote eight growing lines of up to 500 bytes; the tick writes
     /// the set once, and only when it differs from the last one written.
@@ -499,6 +499,9 @@ struct Observations {
     /// because each is a compositor frame and they were invisible.
     pixels: u32,
     pixel_us: u128,
+    /// `host.screen.profile` calls this epoch, those on a snapshot among them, and their time
+    /// split three ways ([`ProfileCost`]).
+    profile: ProfileCost,
     /// Total time spent INSIDE these bindings this epoch, cache hits included. The
     /// backend call is only half of what one costs: every hit still rebuilds the answer
     /// as fresh Lua tables, once per calling overlay, in each of nine VMs.
@@ -516,6 +519,68 @@ struct Observations {
     /// the conversions are free; it was a unit too coarse to see them, and it retired a
     /// correct hypothesis. Sub-millisecond costs need a sub-millisecond clock.
     binding_us: u128,
+}
+
+/// What `host.screen.profile` cost in one epoch, on the screen and on snapshots alike: a live
+/// profile is also one of the epoch's pixel reads, a snapshot's is not, and both run their
+/// reduction on the main thread. Microseconds.
+#[derive(Default)]
+struct ProfileCost {
+    calls: u32,
+    /// Of `calls`, those on a snapshot: their "capture" is the clip, no screen.
+    on_snapshot: u32,
+    capture_us: u128,
+    reduction_us: u128,
+    tables_us: u128,
+}
+
+impl ProfileCost {
+    /// One call: from its start to the picture, to the reduction's end, and to its tables' end.
+    fn add(&mut self, start: Instant, captured: Instant, reduced: Instant, end: Instant, snapshot: bool) {
+        self.calls += 1;
+        self.on_snapshot += u32::from(snapshot);
+        self.capture_us += captured.duration_since(start).as_micros();
+        self.reduction_us += reduced.duration_since(captured).as_micros();
+        self.tables_us += end.duration_since(reduced).as_micros();
+    }
+
+    /// The observe line's words for it, empty when there was no call:
+    /// `; profile ×2 94.0 ms = capture 18.1 + reduction 66.3 + tables 9.6 (1 on a snapshot)`.
+    fn clause(&self) -> String {
+        if self.calls == 0 {
+            return String::new();
+        }
+        let ms = |us: u128| us as f64 / 1000.0;
+        let snapshots = if self.on_snapshot > 0 { format!(" ({} on a snapshot)", self.on_snapshot) } else { String::new() };
+        format!(
+            "; profile ×{} {:.1} ms = capture {:.1} + reduction {:.1} + tables {:.1}{snapshots}",
+            self.calls,
+            ms(self.capture_us + self.reduction_us + self.tables_us),
+            ms(self.capture_us),
+            ms(self.reduction_us),
+            ms(self.tables_us)
+        )
+    }
+}
+
+#[cfg(test)]
+mod profile_cost_tests {
+    use super::ProfileCost;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_profile_cost_splits_into_capture_reduction_and_tables_and_counts_snapshots() {
+        let t0 = Instant::now();
+        let at = |us: u64| t0 + Duration::from_micros(us);
+        let mut c = ProfileCost::default();
+        assert_eq!(c.clause(), "", "no call, no words");
+        c.add(t0, at(18_100), at(84_400), at(92_000), false);
+        c.add(t0, at(0), at(2_000), at(2_000), true);
+        assert_eq!(
+            c.clause(),
+            "; profile ×2 94.0 ms = capture 18.1 + reduction 68.3 + tables 7.6 (1 on a snapshot)"
+        );
+    }
 }
 
 impl Shared {
@@ -538,8 +603,9 @@ impl Shared {
     /// the total is just the overlay count, a number the arbiter roster already prints,
     /// so the total no longer decides. What earns an epoch a line is the OS actually
     /// being interrogated (two or more distinct questions got past the cache), a rebuild
-    /// cost that a whole-millisecond clock can see, or any pixel read — each one a
-    /// compositor frame. The total keeps only a sanity bound: one question per overlay is
+    /// cost that a whole-millisecond clock can see, any pixel read — each one a
+    /// compositor frame — or any profile, a snapshot's included, whose reduction runs on the
+    /// event loop wherever its picture came from. The total keeps only a sanity bound: one question per overlay is
     /// what an idle tick costs, and 251 was the most seen with every library loaded, so a
     /// thousand in one epoch is somebody asking in a loop, whatever the cache made of it.
     fn observations(&self) -> std::cell::RefMut<'_, Observations> {
@@ -555,6 +621,7 @@ impl Shared {
             if reached_os >= 2
                 || obs.binding_us >= 1000
                 || obs.pixels > 0
+                || obs.profile.calls > 0
                 || obs.asked >= 1000
                 || !duplication.is_empty()
             {
@@ -563,13 +630,14 @@ impl Shared {
                     &format!(
                         "epoch served {} of {} OS question(s) from cache ({} actually \
                          asked), {:.1} ms rebuilding Lua tables in window.controls and \
-                         window.focusChain, plus {} screen pixel read(s) costing {:.1} ms{duplication}",
+                         window.focusChain, plus {} screen pixel read(s) costing {:.1} ms{}{duplication}",
                         obs.served,
                         obs.asked,
                         obs.asked - obs.served,
                         obs.binding_us as f64 / 1000.0,
                         obs.pixels,
-                        obs.pixel_us as f64 / 1000.0
+                        obs.pixel_us as f64 / 1000.0,
+                        obs.profile.clause()
                     ),
                 );
             }
@@ -586,6 +654,7 @@ impl Shared {
             obs.binding_us = 0;
             obs.pixels = 0;
             obs.pixel_us = 0;
+            obs.profile = ProfileCost::default();
         }
         obs
     }
@@ -981,6 +1050,19 @@ pub(crate) fn open_on_change(
 /// The last `onChange` registration id handed out: positive, never reused.
 static NEXT_ON_CHANGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// A module setting `define` found stored with another value than its default: one `[settings]`
+/// line per module and key a run, however many VMs define it (a code module's setting is defined
+/// in every VM that carries it). The log header names the application's switches; this names a
+/// module's, which change how the rest of the log reads as much — calibration among them.
+fn note_stored_setting(id: &str, key: &str, value: &settings::Value, default: &settings::Value) {
+    static SAID: std::sync::Mutex<std::collections::BTreeSet<(String, String)>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let first = SAID.lock().unwrap_or_else(|e| e.into_inner()).insert((id.to_string(), key.to_string()));
+    if first {
+        logging::line("settings", &format!("{id} {key} is {value} as stored (its default is {default})"));
+    }
+}
+
 /// Drops every `onChange` registration made from a VM `gone` names, and every key left with
 /// none.
 ///
@@ -1158,7 +1240,7 @@ impl Shared {
 
     /// Hands the hook the scopes and menu flags of enabled modules, after one of them changed.
     fn refresh_key_owners(&self) {
-        if appcfg::trace() || appcfg::calibrate() {
+        if appcfg::trace() {
             let set = self.captures.set(|i| self.module_on(i));
             self.note_captured_line(&set);
         }
@@ -1182,12 +1264,12 @@ impl Shared {
 
     /// The captured-set line, waiting for the end of the tick.
     ///
-    /// Under TRACE, not only under calibration. The trace switch promises in its own help text to
-    /// record "every decision the key handling made", and this is the decision: which keys the
-    /// application will not see. It sat behind the calibration switch, which is about measuring
-    /// coordinates inside an overlay and needs a module reload to arm — so the one line that
-    /// answers "who is holding my arrow keys" was unavailable to the person asking. An evening
-    /// went into guessing at it instead.
+    /// Under TRACE. The trace switch promises in its own help text to record "every decision the
+    /// key handling made", and this is the decision: which keys the application will not see. It
+    /// once sat behind the calibration switch alone, which is about measuring coordinates inside
+    /// an overlay — so the one line that answers "who is holding my arrow keys" was unavailable to
+    /// the person asking, and an evening went into guessing at it instead. Calibration is the
+    /// overlay runtime's own setting now, and the host's key lines are trace's alone.
     ///
     /// WHO holds each key, not just which, in the order that decides, with each module's scope
     /// and flag: a key is suppressed while an enabled module scoped to the window in front
@@ -1197,7 +1279,7 @@ impl Shared {
     /// once per key an overlay captures, so an activation of eight keys wrote eight growing
     /// lines, and over days of calibrating that was most of the log.
     fn note_captured_line(&self, set: &[backend::Captured]) {
-        if appcfg::trace() || appcfg::calibrate() {
+        if appcfg::trace() {
             let ids = self.ids.borrow();
             let line = self
                 .captures
@@ -1829,19 +1911,21 @@ impl Shared {
         }
     }
 
-    /// Persists the store immediately (enable/disable is a deliberate action).
+    /// Persists the store immediately (enable/disable is a deliberate action). The `[app]` table
+    /// is the file's: the Application settings tab saves it itself (`save_keeping_app_on_disk`).
     fn save_config(&self) {
         self.sync_enabled_into_store();
-        self.store.borrow().save();
+        self.store.borrow_mut().save_keeping_app_on_disk();
     }
 
-    /// Flushes pending setting changes to disk (coalesced; driven by the loop).
+    /// Flushes pending setting changes to disk (coalesced; driven by the loop), with the file's
+    /// `[app]` table, as `save_config`.
     fn flush_if_dirty(&self) {
         if !self.dirty.replace(false) {
             return;
         }
         self.sync_enabled_into_store();
-        self.store.borrow().save();
+        self.store.borrow_mut().save_keeping_app_on_disk();
     }
 
     /// Fires the timers whose time has come (driven by the loop tick) — see
@@ -1888,6 +1972,12 @@ impl Shared {
         let id = self.ids.borrow()[idx].clone();
         let old = self.store.borrow_mut().set(&id, key, value.clone());
         self.dirty.set(true);
+        // A line per change, as the Application settings tab writes for its own: otherwise the log
+        // shows a module's setting only through what the module does next. OK applies every
+        // field, so one left as it was writes nothing.
+        if old.as_ref() != Some(&value) {
+            logging::line("settings", &format!("{id} {key} is now {value}"));
+        }
         // From the dialog every `onChange` is queued: it runs in the next tick's queued phase,
         // never inside the dialog's own event.
         self.fire_on_change(idx, key, &value, old.as_ref(), None);
@@ -4413,10 +4503,10 @@ fn reload_module_tree(
     Ok(report)
 }
 
-/// Builds the manager's display row for module `idx`: its settings (schema +
-/// stored/default values), enabled state, and declared dependencies. Used both
-/// for the startup snapshot and when a hot-loaded module is added to the list.
-fn module_info(shared: &Shared, m: &Module, idx: usize) -> gui::ModuleInfo {
+/// Module `idx`'s settings as the manager shows them: each one's schema and the value stored now
+/// (its default when none is), sorted by label. Read again whenever Settings… opens, so the dialog
+/// shows what a change since — its own OK or the module's `set` — left there.
+fn setting_descs(shared: &Shared, id: &str, idx: usize) -> Vec<gui::SettingDesc> {
     let mut settings: Vec<gui::SettingDesc> = {
         let schemas = shared.schemas.borrow();
         let store = shared.store.borrow();
@@ -4428,7 +4518,7 @@ fn module_info(shared: &Shared, m: &Module, idx: usize) -> gui::ModuleInfo {
                         key: key.clone(),
                         label: f.label.clone(),
                         kind: f.kind,
-                        value: store.get(&m.id, key).unwrap_or_else(|| f.default.clone()),
+                        value: store.get(id, key).unwrap_or_else(|| f.default.clone()),
                         min: f.min,
                         max: f.max,
                         choices: f.choices.clone(),
@@ -4438,6 +4528,14 @@ fn module_info(shared: &Shared, m: &Module, idx: usize) -> gui::ModuleInfo {
             .unwrap_or_default()
     };
     settings.sort_by(|a, b| a.label.cmp(&b.label));
+    settings
+}
+
+/// Builds the manager's display row for module `idx`: its settings (schema +
+/// stored/default values), enabled state, and declared dependencies. Used both
+/// for the startup snapshot and when a hot-loaded module is added to the list.
+fn module_info(shared: &Shared, m: &Module, idx: usize) -> gui::ModuleInfo {
+    let settings = setting_descs(shared, &m.id, idx);
     gui::ModuleInfo {
         name: m.name.clone(),
         version: m.version.clone(),
@@ -5057,6 +5155,14 @@ impl Manager {
                         let shared = self.shared.clone();
                         let modules = self.modules.clone();
                         move |idx: usize| module_details(&shared, &modules.borrow(), idx)
+                    },
+                    // Settings…: the module's settings with the values stored now.
+                    {
+                        let shared = self.shared.clone();
+                        move |idx: usize| {
+                            let id = shared.ids.borrow().get(idx).cloned().unwrap_or_default();
+                            setting_descs(&shared, &id, idx)
+                        }
                     },
                     move |text: &str| speak_shared.announce(text),
                     {
@@ -5739,12 +5845,17 @@ impl HostEvents for Dispatcher<'_> {
         // simply do nothing with it" — the two are indistinguishable from the outside, and for
         // a user who cannot see the screen they are indistinguishable from each other twice
         // over. Behind trace, for the reasons written at note_captured_line.
-        if appcfg::trace() || appcfg::calibrate() {
+        if appcfg::trace() {
             let id = self.shared.ids.borrow().get(owner).cloned().unwrap_or_else(|| "?".to_string());
+            // How long the key waited for this thread since the hook or the tap queued it.
+            let waited = pressed
+                .queued
+                .map(|q| format!(", after {:.1} ms in the queue", q.elapsed().as_secs_f64() * 1000.0))
+                .unwrap_or_default();
             logging::line(
                 "keys",
                 &format!(
-                    "dispatch vk 0x{vk:02X}/m{mods} to {id}, pressed in window {:#x}{}",
+                    "dispatch vk 0x{vk:02X}/m{mods} to {id}, pressed in window {:#x}{}{waited}",
                     pressed.front,
                     if repeat { ", a repeat" } else { "" }
                 ),
@@ -5908,7 +6019,7 @@ pub(crate) fn open_hotkey_in<H: captures::KeyHost + mailbox::MailHost>(
         // (`captures::pass_on_released`). No physical key: the system matched the press. Not a
         // repeat, and no module let go of it before this one.
         captures::Target::Gone(captures::Gone::Released) if queued => {
-            let pressed = backend::Pressed { front: front.unwrap_or(0), seq, phys: None };
+            let pressed = backend::Pressed { front: front.unwrap_or(0), seq, phys: None, queued: None };
             captures::pass_on_released(h, owner, spec, binding, (false, pressed), Vec::new());
             return Opened::Gone;
         }
@@ -6019,10 +6130,9 @@ impl mailbox::MailHost for Shared {
 /// Which `host.<key>` a manifest's capability name unlocks.
 ///
 /// Everything not in here is free: `os`, `require`, `tryRequire`, `include`, `epoch`, `now`,
-/// `inputEpoch`, `calibrating`, `match`, `json`. A clock, a counter, a platform name, a way to
-/// reach a declared dependency and a parser of strings the module already holds are not worth
-/// asking permission for, and gating them would mean every manifest names them, which is the
-/// same as naming none.
+/// `inputEpoch`, `match`, `json`. A clock, a counter, a platform name, a way to reach a declared
+/// dependency and a parser of strings the module already holds are not worth asking permission
+/// for, and gating them would mean every manifest names them, which is the same as naming none.
 ///
 /// `config` is the second name of the settings table, so it answers to the same capability
 /// rather than to one of its own — nothing declares `"config"` and nothing should have to.
@@ -7439,6 +7549,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                     Err(why) => return with_reason(lua, mlua::Value::Nil, why),
                 },
             };
+            let captured = Instant::now();
             // The reduction reads only the area it is given, and nothing at all from a buffer
             // shorter than its own size: a capture that came back short — a clipped region, a
             // backend that rounded a dimension — would otherwise index past the end, and a panic
@@ -7448,6 +7559,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             let Some((columns, rows)) = profile::profile(pic.image(), area, want_cols, want_rows, dark_t) else {
                 return with_reason(lua, mlua::Value::Nil, SHORT_CAPTURE.to_string());
             };
+            let reduced = Instant::now();
             let axis = |lua: &Lua, a: profile::Axis| -> mlua::Result<Table> {
                 let t = lua.create_table()?;
                 t.set("min", lua.create_sequence_from(a.min)?)?;
@@ -7479,12 +7591,16 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             // traversal and the six sequences are the only part that grows with the region, and
             // leaving them outside the measurement would hide them from the one report this
             // project uses to find event-loop stalls — while making this call look free. A
-            // snapshot's profile touched no screen and is not counted.
+            // snapshot's profile touched no screen and is not counted as a pixel read; its
+            // reduction runs here all the same, so the profile's own split counts both.
+            let end = Instant::now();
+            let mut obs = sh.observations();
             if pic.is_live() {
-                let mut obs = sh.observations();
                 obs.pixels += 1;
-                obs.pixel_us += t0.elapsed().as_micros();
+                obs.pixel_us += end.duration_since(t0).as_micros();
             }
+            obs.profile.add(t0, captured, reduced, end, !pic.is_live());
+            drop(obs);
             one_value(mlua::Value::Table(out))
         })?,
     )?;
@@ -8043,10 +8159,13 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                         _ => {
                             store.set(&id, &key, def.clone());
                             sh.dirty.set(true);
-                            def
+                            def.clone()
                         }
                     }
                 };
+                if current != def {
+                    note_stored_setting(&id, &key, &current, &def);
+                }
                 value_to_lua(lua, &current)
             },
         )?,
@@ -8205,20 +8324,6 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // `include` is deliberately NOT installed here. It has to hand over the module's GATED
     // view, which does not exist yet at this point — see the call after `gated_view` in
     // `run_module_code`, and the note on `install_include` about why the two tables differ.
-
-    // host.calibrating — true while "Calibration keys in overlays" is on (the Application
-    // settings tab, or the AUTOMATION_PLATFORM_CALIBRATE variable for a launch with no window
-    // to click in). The overlay runtime arms its calibration keys only then, so a normal user
-    // never has those combinations taken away.
-    //
-    // Read once, when the VM is built — which is exactly why that setting's label says "reload
-    // modules to apply" and not "immediately". Modules also use it to gate MEASUREMENTS that
-    // are too expensive to run for somebody who is not measuring: a capture per selection
-    // change is an instrument, not a feature.
-    host.set(
-        "calibrating",
-        appcfg::calibrate(),
-    )?;
 
     Ok(host)
 }

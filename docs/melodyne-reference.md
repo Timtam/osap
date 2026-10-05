@@ -310,6 +310,15 @@ wenigstens eines etwas enthielt, sie erscheinen also gar nicht. Die neue Zeile w
 leeren Fall geschrieben; die Lücke schließt sich beim bloßen Benutzen, ohne dass jemand auf einen
 Bildschirm sehen muss.
 
+**[KAL] Ob ein Kästchen einen Wert hält, sagen die Pixel, nicht die OCR.** Gemessen in den Zeilen
+63–72 jedes Kästchens gegen seine eigene Füllung (194 bzw. 209): ein Wert („0 ct", „0.00 dB",
+`Melodyne-2/4-clean.png`) hat Tinte in 8–9 Zeilen, bis hinunter auf 0; der Strich
+(`Melodyne-clean.png`, beide Kästchen) eine einzige Zeile mit 94; das leere Kästchen unter Fade
+(`Melodyne-3-clean.png`) keine. Tinte heißt dabei 40 oder mehr unter der Füllung — der obere Rand
+des Kästchens liegt nur 13–23 darunter. Das Overlay nimmt drei Zeilen oder mehr als Wert und
+entscheidet so, ob die Anzeigen schweigen (`inkIn`); ein leerer OCR-Lesevorgang trennt diese
+drei Fälle nicht.
+
 **Geometrie Pitch-Tool [FIG]:** Feld 1 außen x**284–380** (96 px), Feld 2 außen x**392–488** (96 px) — **gleich breit**, Abstand **12 px**, Höhe außen 24 px (Rahmen y14/y37), innen 21 px. Text horizontal zentriert (Tinte-Mitte 331,0 vs. Feldmitte 332,0 / 441,0 vs. 440,0). Feldinnenfläche Luminanz ≈ 209, Toolbar-Panel 191, Tinte ≤ 130.
 **[FIG]** Rechts vom Inspector stehen **weitere Toolbar-Buttons** (~x500–620) — der Inspector ist nicht das rechteste Element.
 
@@ -449,6 +458,8 @@ Alle **[Q]**, sofern nicht anders markiert:
 
 **[LÜCKE — vollständig]** Der Fortschrittsindikator. Gründliche Suche über 280 Seiten: `spinner` 0, `hourglass` 0, `busy` 0, `Analyzing` 0, `Detecting` 0, `Please wait` 0, `percent complete` 0. Der **einzige** Handbuchtreffer für „progress indicator" betrifft eine **Rechenpause innerhalb des NA-Modus** (`M5tour_NA_Mode_2`), nicht die Lade-Detection. *„Polyphonic Detection"* existiert **nicht** als großgeschriebenes UI-Label; kleingeschrieben kommt „polyphonic detection" 3× in der Prosa vor. Die einzigen großgeschriebenen `… Detection`-Labels sind **„Sibilant Detection"** (3×) und **„Tempo Detection"** (2×).
 **[FORUM]** SIBIAC hat aufgegeben: *„Sibiac does not support the description or reporting of the analysis progress."* / *„During that time you can not edit anything."* → **Keine Vorarbeit zum Abschauen.**
+
+**[KAL]** Auf dem Bildschirm ist der Fortschrittsindikator eine **Scheibe in der Mitte des Editors** (`modules/overlay-runtime/calibration/Melodyne-clean.png`, Fenster 962x660): Mittelpunkt 4 px über der Mitte des Client-Bereichs (481,326), Radius 52, der Rand ein 2 px breiter Ring (Luminanz 71–137 gegen 181–250 innen und 188–250 außen). Sie füllt sich wie ein Kuchendiagramm — der ungefüllte Teil ist durchsichtig, der gefüllte macht 250 zu 188 —, und quer darüber liegt ein 13 Zeilen hohes Band (y 320–332), das alles darunter **halbiert** (250 → 137, 188 → 106) und den Namen des Durchgangs weiß trägt: „Polyphonic Detection" steht dort also doch, großgeschrieben. Das Overlay erkennt die Scheibe an Band und Ring, aus Pixeln, und liest nur den Namen per OCR (`modules/melodyne/src/main.luau`, „What Melodyne is busy with"). **Ungemessen:** ob die Scheibe bei anderen Fenstergrößen ebenfalls 4 px über der Mitte sitzt, und wie die anderen Durchgänge heißen.
 
 **[INF, aber besser als Pixel]** Detection schreibt in den Audio-Cache → **Dateisystem-Watch statt Bildschirm.** Siehe §12 und den Pfadwiderspruch in §3.7.
 

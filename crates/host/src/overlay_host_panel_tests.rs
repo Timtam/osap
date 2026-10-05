@@ -1413,3 +1413,72 @@ fn kontakt_clicks_its_menu_row_only_while_its_program_stays_in_front() {
           T.dump())
     "##);
 }
+
+/// Komplete Kontrol's one setting is defined as the module loads, before `activate`, and not
+/// again in it. Its value is a local that `define` and `onChange` set, so the scenario's settings
+/// have no `get`. Stored off, the standalone overlay arriving over an open library browser leaves
+/// it open; ticked in the dialog, the next arrival closes it.
+#[test]
+fn komplete_kontrol_defines_its_setting_as_it_loads_and_never_asks_get() {
+    run(r##"
+        local S = T.S
+        local made = T.collect()
+        T.modules("modules/komplete-kontrol/")
+        rawset(T.host, "path", function(p) return "C:/modules/komplete-kontrol/" .. p end)
+        -- The setting as the host keeps it: `define` answers what is stored, `onChange` files the
+        -- callback the dialog's OK runs. No `get`: asking it fails the scenario.
+        local defined, changed = {}, nil
+        rawset(T.host, "settings", T.strict("host.settings", {
+          define = function(key, default, opts)
+            defined[#defined + 1] = { key = key, default = default, label = opts and opts.label }
+            return false
+          end,
+          onChange = function(key, cb)
+            assert(key == "closeKKBrowser", "watches " .. key)
+            changed = cb
+          end,
+        }))
+        local KK = T.source("modules/komplete-kontrol/src/main.luau")(T.host)
+        assert(#defined == 1, "defined as the module loads: " .. #defined)
+        assert(defined[1].key == "closeKKBrowser" and defined[1].default == true
+          and defined[1].label == "Automatically close Komplete Kontrol's library browser",
+          "an opt-out, on unless unticked, with its label")
+        assert(changed, "and watched")
+        KK.activate()
+        T.runDue()
+        assert(#defined == 1, "not defined again when it activates")
+
+        -- The standalone application in front, its library browser open: the toggle that closes it.
+        local KKW = { id = 300, title = "Komplete Kontrol", class = "NINormalWindow",
+          app = { pid = 4242, exe = "Komplete Kontrol.exe" },
+          bounds = { x = 0, y = 0, w = 1000, h = 700 }, client = { x = 8, y = 30, w = 984, h = 662 } }
+        S.listed = { KKW, T.FX }
+        rawset(T.host.element, "classNavPoint", function(_, class)
+          if class == "FileTypeSelector" then return { x = 40, y = 60 } end
+          return nil
+        end)
+        local function standalone()
+          for _, o in ipairs(made) do
+            if o.label == "Komplete Kontrol" and o.active then return o end
+          end
+          return nil
+        end
+        T.show(KKW)
+        T.runDue()
+        assert(standalone(), "the standalone overlay is up: " .. T.dump())
+        assert(#S.clicks == 0, "stored off: the browser stays open")
+        assert(T.count("KK overlay active: auto-close=false") == 1, T.dump())
+
+        -- Ticked in the dialog: the next arrival closes the browser.
+        changed(true, false)
+        T.show(T.FX)
+        T.runDue()
+        assert(not standalone(), T.dump())
+        T.show(KKW)
+        T.runDue()
+        assert(standalone(), T.dump())
+        assert(#S.clicks == 1 and S.clicks[1][1] == 40 and S.clicks[1][2] == 60,
+          "the browser's toggle clicked: " .. #S.clicks)
+        assert(T.count("KK overlay active: auto-close=true browserToggle=40,60") == 1, T.dump())
+    "##);
+}

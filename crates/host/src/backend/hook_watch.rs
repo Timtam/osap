@@ -42,6 +42,14 @@
 //! - *Another desktop* — the lock screen, the secure desktop of a UAC prompt or Ctrl+Alt+Del. A
 //!   hook sees the desktop it was installed on, and so does raw input; the backend asks which
 //!   desktop has the keyboard before it counts a key.
+//! - *A window of this process in front* — the module manager, a module's dialog. Windows does not
+//!   call a process's low-level keyboard hook for keys going to that process's own windows, and
+//!   Microsoft documents nothing of it: on 2026-10-05 Tab pressed in the module manager installed
+//!   the hook again, the lines saying 3, then 6, 12 and 24 key-downs in a row had reached raw input
+//!   and not the hook, with no call in between, and the HTML probe page had shown the same before.
+//!   Raw input says with each key whether this process had the foreground when it was pressed
+//!   (`RIM_INPUT`), so [`counts`] leaves such a key out by the key's own report — not by asking
+//!   which window is in front once the witness gets to it, by when the user may have switched.
 //! - *Injected input* — the hook sees it (`LLKHF_INJECTED`), raw input reports it with no
 //!   device handle. [`physical_down`] counts only keys with a device, so a program that types
 //!   keys can neither make the hook look dead nor alive.
@@ -71,8 +79,8 @@
 //! was still there saw them. The keys owed a key-up for a screen reader are kept either way: a
 //! stray key-up is harmless, a swallowed owed one leaves a key held. Independently of any
 //! re-install, the watch has the backend forget the first two whenever the keyboard goes where
-//! the hook cannot follow — a window of a higher integrity level in front, a locked or
-//! disconnected session, a suspend ([`keys_go_unseen`]).
+//! the hook cannot follow — a window of a higher integrity level or one of this process's own in
+//! front, a locked or disconnected session, a suspend ([`front_unseen`]).
 //!
 //! **The chain.** Windows calls low-level keyboard hooks newest first, so a hook installed again
 //! is first again: ahead of every hook installed since the application started — a screen
@@ -291,9 +299,77 @@ pub(crate) fn swap<H: Copy>(
     (after, outcome)
 }
 
-/// The one line a re-install writes to the log.
-pub(crate) fn line(reason: Reason, outcome: Outcome) -> String {
-    let why = reason.words();
+/// What the watch saw of a run of missed key-downs, for the re-install line the run asked for.
+/// Diagnostics only: none of it decides anything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MissedRun {
+    /// How many of the run's key-downs raw input reported with `RIM_INPUT`: this process had the
+    /// foreground when the key was pressed (`RIM_INPUTSINK` otherwise). Such a key is never
+    /// counted ([`counts`]), so only the run's first can be one: the key the first miss was judged
+    /// from, which the hook need not have seen.
+    pub foreground: u32,
+    /// The window in front when the watch asked for the re-install; `None` when there was none.
+    pub front: Option<FrontWindow>,
+    /// How often the hook procedure was entered, for any code, since raw input's report of the
+    /// first missed key-down — the key before the one the witness first found the hook silent at —
+    /// and since the process started.
+    pub entered: u32,
+    pub entered_total: u32,
+    /// The run's first key-down, and the hook's last call (`None`: never called), as ticks.
+    pub first_at: u32,
+    pub last_call: Option<u32>,
+}
+
+/// A window in front, as [`MissedRun`] names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FrontWindow {
+    pub hwnd: isize,
+    pub class: String,
+    /// The process's image name, empty when it could not be read.
+    pub exe: String,
+    pub pid: u32,
+    /// Whether it is this process's own window.
+    pub ours: bool,
+}
+
+/// The words a missed run adds to the reason in the re-install line.
+pub(crate) fn missed_words(run: &MissedRun) -> String {
+    let front = match &run.front {
+        Some(w) => format!(
+            "window in front {:#x} class '{}' {} pid {} (this application: {})",
+            w.hwnd,
+            w.class,
+            if w.exe.is_empty() { "?" } else { &w.exe },
+            w.pid,
+            if w.ours { "yes" } else { "no" }
+        ),
+        None => "no window in front".to_string(),
+    };
+    let last = match run.last_call {
+        None => "never called".to_string(),
+        Some(call) => {
+            let before = run.first_at.wrapping_sub(call) as i32;
+            if before >= 0 {
+                format!("last called {before} ms before it")
+            } else {
+                format!("last called {} ms after it", -(before as i64))
+            }
+        }
+    };
+    format!(
+        "this process in the foreground for {} of them; {front}; hook entered {} times since the \
+         first missed key ({} in all), {last}",
+        run.foreground, run.entered, run.entered_total
+    )
+}
+
+/// The one line a re-install writes to the log. `run` is what the watch saw of the missed
+/// key-downs that asked for it, when they did.
+pub(crate) fn line(reason: Reason, outcome: Outcome, run: Option<&MissedRun>) -> String {
+    let why = match run {
+        Some(run) => format!("{}; {}", reason.words(), missed_words(run)),
+        None => reason.words(),
+    };
     match outcome {
         Outcome::Installed { old } => {
             let before = match old {
@@ -419,6 +495,65 @@ pub(crate) fn keys_go_unseen(own: Option<u32>, foreground: Option<u32>) -> bool 
     own.is_some() && !hook_sees(own, foreground)
 }
 
+/// Why the keys going to a window that came to the front go by unseen by the hook — see
+/// [`front_unseen`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unseen {
+    /// One of this process's own windows: Windows does not call the hook for keys going to them.
+    OwnWindow,
+    /// A window of a process above ours, at this level; `None` when its level could not be read.
+    Above(Option<u32>),
+}
+
+impl Unseen {
+    /// The words the log uses for the window that came to the front.
+    pub(crate) fn words(self) -> String {
+        let which = match self {
+            Unseen::OwnWindow => {
+                "one of this application's own: Windows does not call its hook for keys going to them"
+                    .to_string()
+            }
+            Unseen::Above(Some(level)) => format!("integrity level {level:#06x}, above this process's"),
+            Unseen::Above(None) => "its integrity level could not be read".to_string(),
+        };
+        format!("a window the keyboard hook is not called for came to the front ({which})")
+    }
+}
+
+/// Whether the keys going to the window that came to the front go by unseen by the hook of a
+/// process at `own`, and why: the window is one of this process's own (`ours`) — whatever the
+/// levels say — or one of a process at `foreground` that [`keys_go_unseen`] says the hook is not
+/// called for. `None` when the hook is called for them, and nothing has to be forgotten.
+pub(crate) fn front_unseen(own: Option<u32>, ours: bool, foreground: Option<u32>) -> Option<Unseen> {
+    if ours {
+        Some(Unseen::OwnWindow)
+    } else if keys_go_unseen(own, foreground) {
+        Some(Unseen::Above(foreground))
+    } else {
+        None
+    }
+}
+
+/// `RIM_INPUT`: the input code (`GET_RAWINPUT_CODE_WPARAM`, the low byte of a `WM_INPUT`'s
+/// `wParam`) of input that came while this process had the foreground. `RIM_INPUTSINK`, 1, is
+/// every other.
+const RIM_INPUT: usize = 0;
+
+/// Whether raw input reported a key with `RIM_INPUT` — `wparam` is its `WM_INPUT`'s: this process
+/// had the foreground when the key was pressed, so the key went to one of its windows. Decided by
+/// the system as the key came, not when the watch gets to it.
+pub(crate) fn to_this_process(wparam: usize) -> bool {
+    wparam & 0xFF == RIM_INPUT
+}
+
+/// Whether a key-down the hook was not called for counts as one it missed. Never one that went to
+/// a window of this process ([`to_this_process`]): Windows does not call the process's own hook
+/// for those. Otherwise `hook_could_see` decides — the desktop that has the keyboard and the window
+/// in front ([`hook_sees`]) — asked only then, since it costs system calls.
+pub(crate) fn counts(to_this_process: bool, hook_could_see: impl FnOnce() -> bool) -> bool {
+    !to_this_process && hook_could_see()
+}
+
 /// Whether a registration Windows refused is tried again at the `n`th physical key-down since
 /// (1-based): the 1st, 2nd, 4th, 8th and so on. A service that starts late — the Remote Desktop
 /// services behind `WTSRegisterSessionNotification`, early after sign-in — is caught within a
@@ -464,8 +599,8 @@ pub(crate) enum Verdict {
     First,
     /// The hook was called since the previous key-down: it is alive.
     Seen,
-    /// The hook could not have seen this key (see [`hook_sees`] and the backend's desktop
-    /// check); it is not counted.
+    /// The hook could not have seen this key (see [`counts`]: a window of this process, one
+    /// above it, another desktop); it is not counted.
     NotCounted,
     /// The hook was not called since the previous key-down; `streak` in a row now.
     Missed { streak: u32 },
@@ -500,8 +635,9 @@ impl Default for Witness {
 impl Witness {
     /// A physical key-down stamped `time`, with the hook last called at `last_call`. `visible`
     /// is asked only when the key would count as missed, and says whether the hook could have
-    /// seen it at all (the window in front, the desktop that has the keyboard): those questions
-    /// cost system calls, and a hook that was called needs none of them.
+    /// seen it at all ([`counts`]: where the key went, the window in front, the desktop that has
+    /// the keyboard): those questions cost system calls, and a hook that was called needs none of
+    /// them.
     pub(crate) fn key_down(
         &mut self,
         time: u32,
@@ -1033,6 +1169,74 @@ mod tests {
         assert!(!keys_go_unseen(None, None));
     }
 
+    /// A window of this application coming to the front is one whose keys go by unseen, whatever
+    /// the levels say, so what the hook recorded as held is forgotten as for NVDA's menu; another
+    /// program's ordinary window is not.
+    #[test]
+    fn keys_go_unseen_in_front_of_a_window_of_this_application_too() {
+        const MEDIUM: u32 = 0x2000;
+        assert_eq!(front_unseen(Some(MEDIUM), true, Some(MEDIUM)), Some(Unseen::OwnWindow));
+        assert_eq!(front_unseen(None, true, None), Some(Unseen::OwnWindow), "levels unread");
+        assert_eq!(front_unseen(Some(MEDIUM), false, Some(0x2010)), Some(Unseen::Above(Some(0x2010))));
+        assert_eq!(front_unseen(Some(MEDIUM), false, None), Some(Unseen::Above(None)));
+        assert_eq!(front_unseen(Some(MEDIUM), false, Some(MEDIUM)), None, "another program's window");
+        assert_eq!(front_unseen(None, false, Some(0x3000)), None, "our own level unknown");
+        assert_eq!(
+            Unseen::OwnWindow.words(),
+            "a window the keyboard hook is not called for came to the front (one of this \
+             application's own: Windows does not call its hook for keys going to them)"
+        );
+        assert_eq!(
+            Unseen::Above(Some(0x2010)).words(),
+            "a window the keyboard hook is not called for came to the front (integrity level \
+             0x2010, above this process's)"
+        );
+        assert!(Unseen::Above(None).words().ends_with("(its integrity level could not be read)"));
+    }
+
+    /// Raw input's own report says where a key went: `RIM_INPUT` (0) in the low byte of
+    /// `WM_INPUT`'s `wParam` is a key pressed while this process had the foreground. Such a key is
+    /// never counted, and the system is not asked about it.
+    #[test]
+    fn a_key_that_went_to_this_process_is_not_counted_and_nothing_is_asked_about_it() {
+        assert!(to_this_process(0), "RIM_INPUT");
+        assert!(!to_this_process(1), "RIM_INPUTSINK");
+        assert!(to_this_process(0x100), "only the low byte is the code");
+        assert!(!counts(true, || panic!("asked the system about a key that went to this process")));
+        assert!(counts(false, || true));
+        assert!(!counts(false, || false), "a window above ours, or another desktop");
+    }
+
+    /// The session of 2026-10-05: the hook called for every key in another program's window, then
+    /// Tab pressed again and again in the module manager — keys Windows does not call this
+    /// process's hook for — then back. No re-install, however many. The first key there is judged
+    /// by the one before it, which the hook saw; the rest are not counted and move no reference.
+    /// The same keys reported as gone to another program's window (`RIM_INPUTSINK`), with no call,
+    /// are what a removed hook looks like, and install it again after three.
+    #[test]
+    fn tab_in_this_application_s_own_window_never_installs_the_hook_again() {
+        let mut w = Witness::default();
+        let (v, last) = run(&mut w, 10_000, 300, 5, true, None);
+        assert!(v[1..].iter().all(|v| *v == Verdict::Seen), "{v:?}");
+        // Key-downs 1.5 s apart from `start`, the hook last called at `last`, each reported with
+        // the input code `code`.
+        let keys = |w: &mut Witness, start: u32, n: u32, last: Option<u32>, code: usize| -> Vec<Verdict> {
+            (0..n)
+                .map(|i| w.key_down(start + i * 1_500, last, || counts(to_this_process(code), || true)))
+                .collect()
+        };
+        let v = keys(&mut w, 20_000, 60, last, 0);
+        assert_eq!(v[0], Verdict::Seen, "the hook was called for the key before it");
+        assert!(v[1..].iter().all(|v| *v == Verdict::NotCounted), "{v:?}");
+        assert_eq!(w.streak, 0);
+        assert_eq!(w.prev, Some(20_000), "the keys not counted move no reference");
+        // Back in the other program, the hook called for the key: alive.
+        assert_eq!(w.key_down(200_000, Some(200_001), || panic!("not asked")), Verdict::Seen);
+        // The same keys gone elsewhere, with no call since: the hook is gone, and installed again.
+        let v = keys(&mut w, 210_000, MISSES_TO_REHOOK + 1, Some(200_001), 1);
+        assert_eq!(v.last(), Some(&Verdict::Rehook { downs: MISSES_TO_REHOOK }), "{v:?}");
+    }
+
     #[test]
     fn a_refused_registration_is_tried_again_at_every_doubling() {
         let tried: Vec<u64> = (1..=100).filter(|&n| retry_at(n)).collect();
@@ -1042,22 +1246,70 @@ mod tests {
 
     #[test]
     fn the_log_line_names_the_reason_the_old_hook_and_the_chain() {
-        let l = line(Reason::Resumed, Outcome::Installed { old: Old::Removed });
+        let l = line(Reason::Resumed, Outcome::Installed { old: Old::Removed }, None);
         assert!(l.contains("resumed"), "{l}");
         assert!(l.contains("still installed"), "{l}");
         assert!(l.contains("first in the chain"), "{l}");
         assert!(!l.contains("forgotten"), "a hook still installed saw the key-ups: {l}");
-        let l = line(Reason::Unlocked, Outcome::Installed { old: Old::AlreadyGone });
+        let l = line(Reason::Unlocked, Outcome::Installed { old: Old::AlreadyGone }, None);
         assert!(l.contains("unlocked"), "{l}");
         assert!(l.contains("had already removed"), "{l}");
         assert!(l.contains("was forgotten"), "{l}");
-        let l = line(Reason::Resumed, Outcome::Reverted { error: 5 });
+        let l = line(Reason::Resumed, Outcome::Reverted { error: 5 }, None);
         assert!(l.contains("was not installed again"), "{l}");
         assert!(l.contains("UnhookWindowsHookEx error 5"), "{l}");
-        let l = line(Reason::Missed { downs: 5 }, Outcome::Installed { old: Old::AlreadyGone });
+        let l = line(Reason::Missed { downs: 5 }, Outcome::Installed { old: Old::AlreadyGone }, None);
         assert!(l.contains("the hook stopped seeing keys the system delivered: 5 key-downs"), "{l}");
-        let l = line(Reason::Missed { downs: 10 }, Outcome::Failed { error: 8 });
+        let l = line(Reason::Missed { downs: 10 }, Outcome::Failed { error: 8 }, None);
         assert!(l.contains("failed (SetWindowsHookExW error 8)"), "{l}");
         assert!(l.contains("10 key-downs"), "{l}");
+    }
+
+    #[test]
+    fn a_missed_run_says_where_the_keys_went_and_how_often_the_hook_was_entered() {
+        let run = MissedRun {
+            foreground: 0,
+            front: Some(FrontWindow {
+                hwnd: 0x72195a,
+                class: "REAPERwnd".to_string(),
+                exe: "reaper.exe".to_string(),
+                pid: 4321,
+                ours: false,
+            }),
+            entered: 0,
+            entered_total: 51_234,
+            first_at: 20_000,
+            last_call: Some(15_988),
+        };
+        let l = line(Reason::Missed { downs: 3 }, Outcome::Installed { old: Old::Removed }, Some(&run));
+        assert!(
+            l.contains(
+                "3 key-downs in a row reached raw input and not the hook; this process in the \
+                 foreground for 0 of them; window in front 0x72195a class 'REAPERwnd' reaper.exe \
+                 pid 4321 (this application: no); hook entered 0 times since the first missed key \
+                 (51234 in all), last called 4012 ms before it); the old hook was still installed"
+            ),
+            "{l}"
+        );
+        let other = MissedRun { front: None, last_call: None, ..run.clone() };
+        assert!(missed_words(&other).contains("; no window in front; "), "{}", missed_words(&other));
+        assert!(missed_words(&other).ends_with("(51234 in all), never called"));
+        let late = MissedRun { last_call: Some(20_050), ..run.clone() };
+        assert!(missed_words(&late).ends_with("last called 50 ms after it"));
+        // The run's first key, judged from, can be one that went to this process; and the window
+        // in front when the watch asks can be one of its own, the user having switched since.
+        let ours = MissedRun {
+            foreground: 1,
+            front: Some(FrontWindow {
+                hwnd: 0x3305ae,
+                class: "wxWindowNR".to_string(),
+                exe: String::new(),
+                pid: 1234,
+                ours: true,
+            }),
+            ..run
+        };
+        assert!(missed_words(&ours).starts_with("this process in the foreground for 1 of them;"));
+        assert!(missed_words(&ours).contains("0x3305ae class 'wxWindowNR' ? pid 1234 (this application: yes)"));
     }
 }

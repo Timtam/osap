@@ -142,7 +142,8 @@ local S = {
     id = 7, class = "Qt661QWindowIcon{0}1", app = { pid = 4242 },
     client = { x = 100, y = 50, w = 800, h = 600 }, bounds = { x = 92, y = 19, w = 816, h = 639 },
   },
-  calibrating = false,
+  calibrating = false, -- the runtime's calibration setting, as stored: see T.calibrate
+  onCalibrate = {}, -- the callbacks host.settings.onChange("calibrate") was handed
   exists = {},      -- host.resource.exists(path)
   menuOpen = {},    -- every host.keys.menuOpen(b), in order
   logs = {},
@@ -426,6 +427,21 @@ T.host = strict("host", {
     end,
   }),
   resource = strict("host.resource", { exists = function(p) return S.exists[p] == true end }),
+  -- The runtime's one setting, as the host keeps it: `define` answers what is stored, and
+  -- `onChange` files the callback T.calibrate calls. Any other key is not the runtime's, and
+  -- raises.
+  settings = strict("host.settings", {
+    define = function(key, default, opts)
+      assert(key == "calibrate", "the scripted host has no setting " .. tostring(key))
+      assert(default == false and type(opts) == "table" and type(opts.label) == "string",
+        "calibration is a switch, off unless ticked, with a label for the dialog")
+      return S.calibrating
+    end,
+    onChange = function(key, cb)
+      assert(key == "calibrate", "the scripted host has no setting " .. tostring(key))
+      S.onCalibrate[#S.onCalibrate + 1] = cb
+    end,
+  }),
   -- An arbiter with the one rule these scenarios need: a claim that matches is activated, one that
   -- stops matching is deactivated. One claimant per slot, so nothing is outranked. The host calls
   -- onActivate and onDeactivate through `Function::call`, where nothing can wait, and so does
@@ -455,12 +471,15 @@ T.host = strict("host", {
   }),
 })
 S.claims = {}
--- `host.calibrating` is a plain value, which the strict table would refuse while it is nil.
-setmetatable(T.host, { __index = function(_, k)
-  if k == "calibrating" then return S.calibrating end
-  S.missing[#S.missing + 1] = "host." .. tostring(k)
-  error(("the scripted host has no host.%s"):format(tostring(k)), 2)
-end })
+
+-- Calibration ticked (or unticked) under Installed → Overlay runtime → Settings…, and OK: stored,
+-- and every callback the runtime filed for it runs as a handler of the module, as the dialog's
+-- change reaches it on the next tick.
+function T.calibrate(on)
+  local old = S.calibrating
+  S.calibrating = on
+  for _, cb in ipairs(S.onCalibrate) do T.call("setting", cb, on, old) end
+end
 
 -- An overlay over plug-in control 7 that is in front and holds its keys, with `tests` as its
 -- menu tests (nil: none). Two controls: one that opens a menu, as Kontakt's snapshot dropdown
@@ -603,7 +622,7 @@ function T.submit(what, opts, cb)
   assert(type(cb) == "function", "host.ocr.recognize: cb is not a function")
   if S.readRaises then error(S.readRaises, 0) end
   S.reads[#S.reads + 1] = { region = regions[1], regions = regions, names = names, list = list, key = key,
-    cb = cb, asked = S.now, answered = false }
+    snapshot = opts and opts.snapshot, cb = cb, asked = S.now, answered = false }
 end
 
 -- The checks of a read's arguments both forms make: the regions as corners, the names by index,
@@ -883,10 +902,10 @@ impl MailHost for Scripted {
 /// `T.hostCall(f, …)`, a plain `Function::call` as the host makes when it calls Lua back — an
 /// arbiter's onActivate and onDeactivate, an onChange, an included file's top level, none of
 /// which can wait; `T.call(kind, f, …)`, an event of the scenario's module through the real
-/// mailbox, run as a handler — "key", "hotkey", "timer", "window", "focus" or "answer" — which
-/// says what became of it (`Ran`, `Parked`, `Queued`, `Dropped`); `T.queued()`, the tick's queued
-/// phase; the tests' wait point `T.waitPoint(name)`, `T.release(name, value)` and
-/// `T.waiting(name)`; the tests' entry `T.task` and `T.settle()`, which hands the reads its
+/// mailbox, run as a handler — "key", "hotkey", "timer", "window", "focus", "answer" or
+/// "setting" — which says what became of it (`Ran`, `Parked`, `Queued`, `Dropped`); `T.queued()`,
+/// the tick's queued phase; the tests' wait point `T.waitPoint(name)`, `T.release(name, value)`
+/// and `T.waiting(name)`; the tests' entry `T.task` and `T.settle()`, which hands the reads its
 /// handlers and tasks wait for their readings; and `host.ocr.recognize`, the host's own, with
 /// `T.submit` as its callback form, raising where it cannot wait.
 pub(crate) fn harness(lua: &Lua) -> Table {
@@ -920,6 +939,7 @@ pub(crate) fn harness(lua: &Lua) -> Table {
                 "window" => (false, "window trigger"),
                 "focus" => (false, "focus change"),
                 "answer" => (false, "ocr.recognize"),
+                "setting" => (false, "settings onChange"),
                 other => return Err(mlua::Error::external(format!("T.call: no event of kind '{other}'"))),
             };
             Ok(format!("{:?}", mailbox::deliver(&*hh, IDX, lua, Event::Call { f, args, input, what })))
@@ -2111,7 +2131,8 @@ fn nothing_in_front_holds_only_a_menu_the_tests_still_see() {
         T.tick(2)
         assert(not o.active, "the tests no longer see it: out: " .. T.dump())
         assert(T.count("no longer holding its place — in front now: nothing") == 1, T.dump())
-        assert(T.count("[deactivate] 'Komplete Kontrol' — in front now: 'nothing' (?)") == 1, T.dump())
+        assert(T.count("[deactivate] 'Komplete Kontrol' — in front now: 'nothing' (?) — foreground: no window the platform names") == 1,
+          T.dump())
         assert(#S.focusCalls == 0, "nothing brought back")
         assert(T.count("no test sees the menu any more; the keyboard goes to no window the platform "
           .. "names, and the menu's window 'Komplete Kontrol' (reaper.exe) is id=900 of pid 4242 — "
@@ -2256,7 +2277,10 @@ fn the_kk_menu_hidden_after_escape_brings_the_window_of_the_press_back_and_the_f
         assert(T.host.window.active() == MENU, "the host still answers the menu's window, kept for the epoch")
         T.tick(1)
         assert(#S.focusCalls == 1 and S.focusCalls[1] == 3149930, "the window of the press, once: " .. T.dump())
-        assert(S.fgAsks - asks == 1, "one reading of the window that gets the keyboard: " .. (S.fgAsks - asks))
+        -- One reading of the window that gets the keyboard, and one more for the deactivate line
+        -- below, which names it when nothing is in front.
+        assert(S.fgAsks - asks == 2,
+          "one reading of the window that gets the keyboard and one for the deactivate line: " .. (S.fgAsks - asks))
         assert(T.count("[menu] 'Komplete Kontrol': no test sees the menu any more, but its window "
           .. "'Komplete Kontrol' (reaper.exe) still gets the keyboard and is not shown — bringing back "
           .. "'FX: Track 1 \"test\"' (reaper.exe), where 'Komplete Kontrol menu' was pressed: accepted") == 1, T.dump())
@@ -2265,7 +2289,8 @@ fn the_kk_menu_hidden_after_escape_brings_the_window_of_the_press_back_and_the_f
         -- nothing in front now that the call has turned the epoch over. The hold is over.
         assert(not o.active and not o:_heldOnMenu(), T.dump())
         assert(T.count("no longer holding its place — in front now: nothing") == 1, T.dump())
-        assert(T.count("[deactivate] 'Komplete Kontrol' — in front now: 'nothing' (?)") == 1, T.dump())
+        assert(T.count("[deactivate] 'Komplete Kontrol' — in front now: 'nothing' (?) — foreground "
+          .. "0x7f1328, pid 4242, shown false") == 1, T.dump())
         assert(T.count("the keyboard goes to") == 0, "it was brought back, so no other reading is logged")
         assert(o._menu.open == false and T.open() == false, "the menu is over: " .. T.history(1))
         -- Windows completes it: the FX window in front, the keyboard in KK, and REAPER's event.
@@ -2749,7 +2774,9 @@ fn the_window_of_the_press_comes_back_only_while_the_menus_own_window_gets_the_k
         T.hide(T.POPUP)
         T.event()
         assert(not o.active and #S.focusCalls == 0, "never held: " .. T.dump())
-        assert(S.fgAsks == asks, "not even asked, with no hold")
+        -- Asked once, by the deactivate line alone: nothing is in front.
+        assert(S.fgAsks == asks + 1 and T.count("in front now: 'nothing' (?) — foreground ") > 0,
+          "asked by the deactivate line alone, with no hold")
         assert(T.count("bringing back") == 0 and T.count("is not listed for its process") == 0, T.dump())
         assert(T.count("the keyboard goes to") == 7,
           "one reading per hold that ended with no test seeing the menu: " .. T.dump())
@@ -2916,7 +2943,7 @@ fn menu_shots_are_taken_in_a_calibrating_run_only() {
         T.press(o)
         T.run(3000)
         assert(#S.shots == 0 and S.snaps == 0 and #S.asyncs == 0, "no pictures outside a calibrating run")
-        S.calibrating = true
+        T.calibrate(true)
         local pressedAt = S.now
         T.press(o)
         T.run(2000)
@@ -2955,7 +2982,7 @@ fn menu_shots_are_taken_in_a_calibrating_run_only() {
 fn the_menu_shots_put_one_capture_before_the_click_and_write_afterwards() {
     run(r#"
         local S = T.S
-        S.calibrating = true
+        T.calibrate(true)
         local o = T.overlay({ T.O.menuTests.nativePopup })
         -- A control whose visibility and point cost a lookup each: not asked on the press.
         local asked = 0
@@ -3000,7 +3027,7 @@ fn the_menu_shots_put_one_capture_before_the_click_and_write_afterwards() {
 fn menu_shots_do_not_overwrite_earlier_ones() {
     run(r#"
         local S = T.S
-        S.calibrating = true
+        T.calibrate(true)
         S.exists["calibration/Kontakt-8-in-a-DAW-Snapshot-menu-menu-before.png"] = true
         S.exists["calibration/Kontakt-8-in-a-DAW-Snapshot-menu-2-menu-before.png"] = true
         local o = T.overlay({ T.O.menuTests.nativePopup })
@@ -3015,13 +3042,42 @@ fn menu_shots_do_not_overwrite_earlier_ones() {
     "#);
 }
 
+/// Calibration is ticked in the manager, which is in front, so the overlay is not: it takes effect
+/// with no reload, and the overlay holds the three keys the next time it comes to the front, said
+/// once. Unticked the same way, its next activation holds none of them.
+#[test]
+fn calibration_ticked_while_the_overlay_is_out_arms_its_keys_at_the_next_activation() {
+    run(r#"
+        local S = T.S
+        local keys = { "Ctrl+Alt+Shift+S", "Ctrl+Alt+Shift+T", "Ctrl+Alt+Shift+V" }
+        local o = T.embedded({ T.O.menuTests.nativePopup })
+        assert(o.active and not T.holds(keys[1]), "no calibration keys while it is off")
+        T.show(T.OTHER)
+        assert(not o.active, T.dump())
+        T.calibrate(true)
+        assert(T.count("[calibrate] on — 1 overlay(s) here, 0 in front; the keys arm the next time "
+          .. "an overlay comes to the front") == 1, T.dump())
+        T.show(T.FX, { T.KK, T.WRAP, T.FX })
+        assert(o.active, T.dump())
+        for _, k in ipairs(keys) do assert(T.holds(k), k .. " is not held") end
+        assert(T.count("[calibrate] armed") == 1, T.dump())
+        T.show(T.OTHER)
+        T.calibrate(false)
+        assert(T.count("[calibrate] off — 1 overlay(s) here, 0 in front; no overlay holds the keys") == 1,
+          T.dump())
+        T.show(T.FX, { T.KK, T.WRAP, T.FX })
+        assert(o.active, T.dump())
+        for _, k in ipairs(keys) do assert(not T.holds(k), k .. " is still held") end
+    "#);
+}
+
 /// The menu shots are taken of the first two openings of each control in a session, and the
 /// third says once that the rest are not: days of calibrating wrote three PNGs at every opening.
 #[test]
 fn menu_shots_are_taken_of_the_first_two_openings_of_a_control() {
     run(r#"
         local S = T.S
-        S.calibrating = true
+        T.calibrate(true)
         local o = T.overlay({ T.O.menuTests.nativePopup })
         for _ = 1, 4 do
           T.press(o)
@@ -3091,7 +3147,7 @@ fn an_identity_that_could_not_be_told_yet_is_asked_again() {
 fn menu_shots_are_counted_per_overlay_and_control_not_per_label() {
     run(r#"
         local S = T.S
-        S.calibrating = true
+        T.calibrate(true)
         local a = T.overlay(nil, "Kontakt 8 - Library")
         local b = T.overlay(nil, "Kontakt 8 - Library")
         local ca, cb = { label = "Snapshot menu" }, { label = "Snapshot menu" }

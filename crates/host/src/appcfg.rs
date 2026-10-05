@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// One switch: how it is stored, how it is named to a person, and when it starts to matter.
 pub struct Switch {
-    /// Key in the `[app]` table of `settings.toml` — and, for the five in `LEGACY_ENV` only,
+    /// Key in the `[app]` table of `settings.toml` — and, for the four in `LEGACY_ENV` only,
     /// the suffix of its environment variable.
     pub key: &'static str,
     /// What the tab calls it. Carries the "when does this take effect" note, because a
@@ -45,7 +45,6 @@ pub struct Switch {
 }
 
 static TRACE: AtomicBool = AtomicBool::new(false);
-static CALIBRATE: AtomicBool = AtomicBool::new(false);
 static OCR_DEBUG: AtomicBool = AtomicBool::new(false);
 static IGNORE_SUPPORTED_OS: AtomicBool = AtomicBool::new(false);
 static HEADLESS: AtomicBool = AtomicBool::new(false);
@@ -62,10 +61,11 @@ static DESKTOP_DUPLICATION_GEN: AtomicU32 = AtomicU32::new(0);
 ///
 /// `load` and `set` used to OR every switch with its `AUTOMATION_PLATFORM_<KEY>` variable, so
 /// each new setting silently brought a new environment variable with it — five of them already
-/// had, and nothing documents or uses those. These five are the ones CI jobs and the tester's
+/// had, and nothing documents or uses those. These four are the ones CI jobs and the tester's
 /// scripts set, and they stay for the launches that have no window to click in. Everything
-/// newer is configured in the Application settings tab, full stop.
-const LEGACY_ENV: [&str; 5] = ["trace", "calibrate", "ocr_debug", "ignore_supported_os", "headless"];
+/// newer is configured in the Application settings tab, full stop. (The fifth, calibration, is
+/// the overlay runtime's own setting now, and its variable went with it.)
+const LEGACY_ENV: [&str; 4] = ["trace", "ocr_debug", "ignore_supported_os", "headless"];
 
 /// Every application setting, in the order the tab shows them: the ones that take effect
 /// immediately first, so the two that need a restart are not the first thing read out.
@@ -91,16 +91,6 @@ pub const SWITCHES: &[Switch] = &[
         os: None,
         default_on: false,
         state: &OCR_DEBUG,
-    },
-    Switch {
-        key: "calibrate",
-        label: "Calibration keys in overlays — reload modules to apply",
-        help: "Arms the measuring keys inside whichever overlay is active: a screenshot with \
-               a crosshair on every control, cropping a template around the focused one, and \
-               counting that template's matches. For authoring an overlay, not for using one.",
-        os: None,
-        default_on: false,
-        state: &CALIBRATE,
     },
     Switch {
         key: "ignore_supported_os",
@@ -243,7 +233,7 @@ pub fn env_name(key: &str) -> String {
 /// variable wins until the process is restarted without it, and saying so is the difference
 /// between a control that lies and one that explains.
 ///
-/// Only the five in [`LEGACY_ENV`] can be forced; for every other key this is false whatever
+/// Only the four in [`LEGACY_ENV`] can be forced; for every other key this is false whatever
 /// the environment says.
 pub fn forced_by_env(key: &str) -> bool {
     forced_in(key, |name| std::env::var_os(name))
@@ -322,9 +312,6 @@ pub fn active() -> Vec<String> {
 pub fn trace() -> bool {
     TRACE.load(Ordering::Relaxed)
 }
-pub fn calibrate() -> bool {
-    CALIBRATE.load(Ordering::Relaxed)
-}
 pub fn ocr_debug() -> bool {
     OCR_DEBUG.load(Ordering::Relaxed)
 }
@@ -399,9 +386,9 @@ mod tests {
     }
 
     #[test]
-    fn only_the_five_legacy_switches_can_be_forced_by_a_variable() {
+    fn only_the_four_legacy_switches_can_be_forced_by_a_variable() {
         // The project's rule is no new environment variables, and the generic OR in `load` and
-        // `set` broke it silently for every switch added after the five. An environment in
+        // `set` broke it silently for every switch added after the first five. An environment in
         // which every variable is set, passed in rather than made with `set_var` (see
         // `forced_in`): the newer switches stay unforced, and a legacy one is forced.
         let all_set = |_: &str| Some(std::ffi::OsString::from("1"));
@@ -412,8 +399,9 @@ mod tests {
         for key in LEGACY_ENV {
             assert!(switch(key).is_some(), "{key} is in LEGACY_ENV but is not a switch");
         }
-        // And the documented five are exactly these.
-        assert_eq!(LEGACY_ENV.len(), 5);
+        // And the documented four are exactly these; calibration's variable went with it.
+        assert_eq!(LEGACY_ENV.len(), 4);
+        assert!(!forced_in("calibrate", all_set));
     }
 
     #[cfg(windows)]
