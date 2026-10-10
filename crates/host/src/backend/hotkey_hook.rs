@@ -136,8 +136,9 @@ pub(crate) fn mods_to_mask(mods: u32) -> u8 {
 /// see a bare modifier: Alt released activates the window's menu bar, Win released opens
 /// Start, and Alt+Shift — or Ctrl+Shift, where the user chose it — switches the input language.
 /// The registered path never had this problem, because the key still went through Windows
-/// before it became a hotkey. AutoHotkey solves it the same way for its hook hotkeys: an
-/// unassigned key pressed and released while the modifier is still down (see the backend).
+/// before it became a hotkey. AutoHotkey solves it the same way for its hook hotkeys: a key
+/// pressed and released while the modifier is still down, here the code that stands for no key
+/// (see the backend).
 /// Ctrl alone and Shift alone do nothing when tapped, so they need nothing.
 pub(crate) fn needs_mask_key(mask: u8) -> bool {
     mask & (MASK_ALT | MASK_WIN) != 0 || mask & (MASK_CTRL | MASK_SHIFT) == (MASK_CTRL | MASK_SHIFT)

@@ -97,8 +97,9 @@ impl Budget {
 /// lines, which is how the timeouts came to be missing everywhere at once: there was no
 /// single place to put them.
 fn automation(cell: &RefCell<Option<IUIAutomation>>) -> std::cell::RefMut<'_, Option<IUIAutomation>> {
-    // The app's main thread already RoInitialize's COM (MTA) for WinRT OCR;
-    // this is a harmless S_FALSE there and initializes the MTA otherwise.
+    // The event loop's thread is already in a single-threaded apartment (wxWidgets puts it
+    // there): this answers RPC_E_CHANGED_MODE there, and the automation object lives in that
+    // apartment. On a thread with no apartment yet it enters the multithreaded one.
     let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let mut borrow = cell.borrow_mut();
     if borrow.is_none() {

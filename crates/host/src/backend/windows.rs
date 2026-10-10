@@ -178,11 +178,13 @@ const PASS_ON_MARK: usize = 0x5041_5353;
 /// How many key-downs the hook has let go on towards the program, wrapping: every key-down that is
 /// not a modifier's and that it does not swallow — typed keys no capture took, keys let through for
 /// a menu or a screen reader, a held key's repeats, keys another program or this one's `host.input`
-/// sent — and never one marked [`PASS_ON_MARK`], nor the hotkeys' masking key ([`VK_MASK_KEY`]),
-/// which means nothing to anyone. Each captured key and each hotkey press carries the count of its
-/// press (`crate::backend::Pressed::seq`), and a key passed on later is sent only while the count has
-/// not moved since: else a key typed after it has reached the program first
-/// (`crate::backend::NotPassed::Overtaken`). One relaxed add per key-down.
+/// sent — and never one marked [`PASS_ON_MARK`], nor one of 0xFF: the hotkeys' masking key
+/// ([`VK_MASK_KEY`]), and the code Windows gives a key that has no virtual key of its own, so such
+/// a key typed after a captured one does not count as overtaking it. Each captured key and each
+/// hotkey press carries the count of its press (`crate::backend::Pressed::seq`), and a key passed
+/// on later is sent only while the count has not moved since: else a key typed after it has
+/// reached the program first (`crate::backend::NotPassed::Overtaken`). One relaxed add per
+/// key-down.
 static LET_THROUGH: AtomicU32 = AtomicU32::new(0);
 /// Hotkey presses, drained by the pump: ids the message-only window proc received as
 /// `WM_HOTKEY` on the pump's thread, and ids the keyboard hook matched itself on its own (see
@@ -239,11 +241,14 @@ static REPEAT_MS_IN_FORCE: AtomicU32 = AtomicU32::new(hotkey_hook::REPEAT_MS);
 
 /// The key sent to mask a swallowed hotkey's modifiers — see `hotkey_hook::needs_mask_key`.
 ///
-/// 0xE8 is listed as unassigned in the virtual-key table, so no application and no screen
-/// reader binds it; it is the key AutoHotkey documents for the same job, as the one with the
-/// fewest side effects. Its default there is Ctrl, which a screen reader takes as "stop
-/// speaking", and would silence the announcement the hotkey is about to make.
-const VK_MASK_KEY: u16 = 0xE8;
+/// 0xFF is the code Windows gives a key that has no virtual key of its own (`VK__none_` in the
+/// keyboard layouts' `kbd.h`): it names no key. Any key between a modifier's press and its
+/// release masks the modifier, so this one does the job and nothing else. AutoHotkey's default
+/// for the same job is Ctrl, a key press that programs act on; the unassigned 0xE8 it documents
+/// as the alternative, and this hook sent before, is a code a program may still give a meaning
+/// of its own. A key of 0xFF from the keyboard is not counted as let through either
+/// ([`LET_THROUGH`]).
+const VK_MASK_KEY: u16 = 0xFF;
 
 /// Whether a screen reader's modifier key is held, as OUR OWN HOOK saw it go past.
 ///
@@ -2907,9 +2912,9 @@ fn modifier_generic(vk: u32) -> Option<u32> {
 }
 
 /// A key event the hook lets go on towards the program, counted in [`LET_THROUGH`] when it is a
-/// key-down of a key that is not a modifier (`generic`, [`modifier_generic`]) and not the
-/// hotkeys' masking key. One relaxed add, and with tracing on an arrow's note for the log
-/// ([`note_arrow_let_through`]).
+/// key-down of a key that is not a modifier (`generic`, [`modifier_generic`]) and not 0xFF, the
+/// hotkeys' masking key and the code of a key with no virtual key of its own. One relaxed add,
+/// and with tracing on an arrow's note for the log ([`note_arrow_let_through`]).
 fn count_let_through(is_down: bool, generic: Option<u32>, vk: u32) {
     if is_down && generic.is_none() && vk != u32::from(VK_MASK_KEY) {
         LET_THROUGH.fetch_add(1, Ordering::Relaxed);
@@ -4353,6 +4358,22 @@ mod hook_carry_over_tests {
         for vk in [0x09, 0x0D, 0x14, 0x2D, 0x60, 0x25, 0x56, u32::from(VK_MASK_KEY)] {
             assert_eq!(modifier_generic(vk), None, "{vk:#x}");
         }
+    }
+
+    /// The key that masks a swallowed hotkey's modifiers is 0xFF, the code no keyboard layout
+    /// gives a key that has a virtual key: Windows gives it to the keys that have none. 0xE8, the
+    /// unassigned code sent before, is a code a program may still give a meaning of its own. The
+    /// pages name the same code, and that no key-down of it is counted as let through.
+    #[test]
+    fn the_masking_key_is_the_code_that_stands_for_no_key() {
+        assert_eq!(VK_MASK_KEY, 0xFF);
+        const HOTKEY: &str = include_str!("../../../../docs/api/hotkey.md");
+        const KEYS: &str = include_str!("../../../../docs/api/keys.md");
+        const NO_KEY: &str = "the code Windows gives a key that has no virtual key of its own";
+        assert!(HOTKEY.contains("presses and releases the virtual key 0xFF while the modifiers"));
+        assert!(HOTKEY.contains(NO_KEY) && KEYS.contains(NO_KEY));
+        assert!(KEYS.contains("but for those of 0xFF: the masking key"));
+        assert!(!HOTKEY.contains("0xE8") && !KEYS.contains("0xE8"));
     }
 
     /// The mark, where it has to be: every event `send_marked` sends carries it, and the hook lets
