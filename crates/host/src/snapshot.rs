@@ -1802,6 +1802,20 @@ fn profile_opts(opts: Option<&Table>, now_ms: f64, on_snapshot: bool) -> mlua::R
     Ok((key, at))
 }
 
+/// The options of `fname` only its callback form takes, at the call without a callback: each of
+/// `names` that is not `nil` raises, the first of them in the order given. Refused rather than
+/// passed over, so a module that writes a `key` or an `at` there learns at once that nothing
+/// replaces and nothing waits for the time it named (the maintainer's decision of 2026-10-10).
+pub(crate) fn callback_only(opts: Option<&Table>, fname: &str, names: &[&str]) -> mlua::Result<()> {
+    let Some(t) = opts else { return Ok(()) };
+    for name in names {
+        if !matches!(t.get::<Value>(*name)?, Value::Nil) {
+            return Err(err(format!("{fname}: opts.{name} is only taken with a callback (the second argument)")));
+        }
+    }
+    Ok(())
+}
+
 /// A region of `fname` within `limit` pixels: corners past it raise (the module wrote them), a
 /// window region past it at the window's current size is answered.
 fn within_limit(r: Rect, window: bool, fname: &str, limit: i64) -> mlua::Result<Result<Rect, String>> {
@@ -3121,6 +3135,30 @@ mod tests {
             within_limit(big, true, "host.screen.profile", frame::MAX_FRAME_PIXELS).unwrap(),
             Err("at the window's current size the region is 10000x5000, 50000000 pixels; the limit is 40000000".to_string())
         );
+    }
+
+    /// Without a callback, `key` and `at` raise, `key` first; one that is `nil` is no option at
+    /// all, and the words are the ones docs/api/screen.md gives. The callback form reads both as
+    /// the test above has it.
+    #[test]
+    fn a_profile_without_a_callback_refuses_key_and_at() {
+        const DOC: &str = include_str!("../../../docs/api/screen.md");
+        const KEY: &str = "host.screen.profile: opts.key is only taken with a callback (the second argument)";
+        const AT: &str = "host.screen.profile: opts.at is only taken with a callback (the second argument)";
+        let lua = Lua::new();
+        let opts = |src: &str| -> Table { lua.load(src).eval().unwrap() };
+        let check = |src: &str| callback_only(Some(&opts(src)), "host.screen.profile", &["key", "at"]);
+        assert_eq!(err_text(check("return { key = 'k' }")), KEY);
+        assert_eq!(err_text(check("return { at = 1500 }")), AT);
+        assert_eq!(err_text(check("return { at = 1500, key = 'k' }")), KEY, "key is asked about first");
+        assert_eq!(err_text(check("return { key = false }")), KEY, "any value but nil");
+        check("return { key = nil, at = nil, region = { 0, 0, 10, 10 }, axes = 'rows' }").unwrap();
+        callback_only(None, "host.screen.profile", &["key", "at"]).unwrap();
+        let both = profile_opts(Some(&opts("return { key = 'k', at = 1500 }")), 1000.0, false).unwrap();
+        assert_eq!(both, (Some("k".to_string()), Some(1500.0)), "the callback form takes them");
+        for m in [KEY, AT] {
+            assert!(DOC.contains(&format!("`{m}`")), "docs/api/screen.md does not give `{m}`");
+        }
     }
 
     #[test]

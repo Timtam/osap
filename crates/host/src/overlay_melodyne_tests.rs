@@ -215,6 +215,12 @@ rawset(T.host.screen, "profile", function(opts, cb)
   else
     assert(cb == nil, "a box's or a body's rows are profiled on the event loop")
   end
+  -- As the host does: without a callback, `key` and then `at` raise.
+  for _, k in ipairs(cb == nil and { "key", "at" } or {}) do
+    if opts[k] ~= nil then
+      error(("host.screen.profile: opts.%s is only taken with a callback (the second argument)"):format(k), 2)
+    end
+  end
   local p = profile(opts)
   if cb == nil then return p end
   S.reductions[#S.reductions + 1] = { key = opts.key, cb = cb, p = p }

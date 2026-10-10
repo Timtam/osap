@@ -7300,10 +7300,13 @@ kind of place that says how long the first held the loop.
       window the tap noted at the press is what decides, as for every capture. Provoked only where a
       module is busy while its overlay lets a key go: the log line is the evidence, or a probe step
       written for it.
-- [ ] **The rest, as a mailbox per module** (b0-final.md): B5, the example (`examples/ocr`)
-      reading in a callback, the tools, and CI failing on `could not wait here` from then on; step
-      11, the waits of a read moved off the loop and the input barrier removed; and step 12, the
-      places that still cannot wait raising, once B5 is in and that CI line has stayed green since.
+- [ ] **The rest, as a mailbox per module** (b0-final.md, wbr-final.md): B5, the example
+      (`examples/ocr`) reading in a callback, the tools, and CI failing on `could not wait here`
+      from then on; step 11, the waits of a read moved off the loop and the input barrier removed;
+      and step 12, the places that still cannot wait raising, once B5 is in and that CI line has
+      stayed green since. With them the `host.screen` calls that capture become waits
+      (wbr-final.md, W1a to W4). Done: `profile` without a callback raises for `key` and `at`
+      (P, 2026-10-10).
 - [x] **The review of K, B1a, B2 and B3** (2026-10-04, three reviews; kb-final.md). The overlays
       of one module share its key scope and menu flag: the one that comes to the front pins the
       scope, only the last to leave sets it back, and the flag is then what the ones in front say

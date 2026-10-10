@@ -7551,7 +7551,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // host.screen.profile(opts, cb) — the same answer, off the event loop: the capture on the
     // `screen-capture` thread (none for a snapshot), the reduction on the image worker, and only
     // the answer's tables here, as `cb` runs (snapshot.rs, `profile_async`). Without a callback
-    // the call is what it always was.
+    // the call is what it always was, but for `key` and `at`, which raise there.
     let sh = shared.clone();
     screen.set(
         "profile",
@@ -7610,6 +7610,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 sh.profile_async(lua, idx, cb, opts.as_ref(), snap, region, (want_cols, want_rows), dark_t)?;
                 return Ok(mlua::MultiValue::new());
             }
+            // `key` and `at` are the callback form's. Here they raise, before anything is
+            // answered, rather than being passed over.
+            snapshot::callback_only(opts.as_ref(), F, &["key", "at"])?;
             let (rx, ry, rw, rh) = match region {
                 Ok(r) => (r.x, r.y, r.w, r.h),
                 Err(why) => return with_reason(lua, mlua::Value::Nil, why),
@@ -10333,6 +10336,19 @@ mod ocr_wiring_tests {
         // host.screen.pending, beside them.
         let pending = screen.iter().find(|b| b.0 == "pending").expect("host.screen.pending").1;
         assert!(pending.contains("snapshot::pending(lua, shared, idx)"));
+    }
+
+    /// Without a callback, `profile` refuses `key` and `at` (snapshot.rs, `callback_only`, tested
+    /// there): once the callback form has gone its way, so that form still reads both, and before
+    /// anything is answered or captured.
+    #[test]
+    fn a_profile_without_a_callback_refuses_key_and_at_before_it_answers() {
+        let api = body(LIB, "fn install_host_api(");
+        let binding = bindings(api, "screen").into_iter().find(|b| b.0 == "profile").expect("host.screen.profile").1;
+        let refused = binding.find("snapshot::callback_only(opts.as_ref(), F, &[\"key\", \"at\"])?;").expect("key and at refused");
+        assert!(binding.find("return Ok(mlua::MultiValue::new());").expect("the callback form") < refused);
+        assert!(refused < binding.find("Err(why) => return with_reason(").unwrap(), "after a reason was answered");
+        assert!(refused < binding.find("sh.backend.capture(").unwrap(), "after a capture");
     }
 
     /// Which requests hold their module's input is `snap_queue::holds_input`'s decision (tested
