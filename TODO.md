@@ -7416,6 +7416,29 @@ kind of place that says how long the first held the loop.
       a `reveal` probe's settle, which asked only that the overlay was active on the same window,
       asks the stay too (no module sets `reveal` yet). Not run on a Mac, where a calibration shot's pixels now come from
       `pixels`' captures instead of `pixel`'s tile, both at point resolution.
+      Step V2, the same day (wbr-final.md): Melodyne made ready for them as well (0.1.7). Its tool
+      bar is one `host.screen.pixels` over all thirteen points, the six icons and the variants'
+      probes, read once per input epoch, where its first look read up to seven pixels one at a
+      time (a compositor frame each); the check of what a variant step reached, and the strip's
+      greys in the log line after a tool switch, are one read each too (they were up to three and
+      eleven). Which read-out boxes are drawn, the `when` of "Inspector" and "Pitch deviation", is
+      the watcher's last picture's answer however old, and never a read of the screen: both count
+      as drawn before the first picture of a stay in front, and after a tool switch until a
+      picture asked once the switch's hold has lifted (one asked before it, or while the strip may
+      not have repainted, can show the old tool's boxes and is not taken); they read both points
+      live whenever that answer was half a second old. The boxes' rows are profiled with a
+      callback, both at once under keys of their own (`left box`, `right box`), beside the
+      watcher's read of the same picture, which is asked at once as before; the read is judged
+      once it and both profiles have answered, and a tick asks nothing while one is out. The plan
+      had the read asked only after the profiles; asked beside them, no turn of the event loop
+      comes before each announcement. Tested in the scripted host, which now has `host.input.post`
+      and takes a box's profile only with a callback: the arrival's look at the tool bar, the
+      variant check and the greys are one read each; the stops' `when` reads nothing, stands
+      however old, counts as drawn after a switch and in a new stay, and takes no picture asked
+      before the switch or during its hold, nor one of the stay before; the profiles go out
+      together beside the read, a read answered first is judged when the last profile answers, a
+      tick asks nothing meanwhile, and an overlay gone by then says nothing. Each fails against
+      the module from before. Nothing on a Mac: Melodyne is Windows only.
 - [ ] **NVDA check of step V1 (session B, with V2 and T2)** — nothing should sound different.
       Kontakt with a CSS library in REAPER: a hotspot toggle pressed (its state said after the
       press, as before); the snapshot camera and its dropdown with the bar shut and open (the bar
@@ -7426,6 +7449,16 @@ kind of place that says how long the first held the loop.
       after reading the camera again` line after a press with the bar shut would mean the camera's
       own click takes the overlay out of the front and back, or onto another window, within the
       quarter second, and that check would then take every such press's click away.
+- [ ] **NVDA check of step V2 (session B, with V1 and T2)** — nothing should sound different; the
+      tool bar may answer a little sooner. Melodyne standalone: arriving on the tool bar (the tool
+      and its variant said, as before); Tab around the ring, F1 to F6, and Up and Down through a
+      tool's variants (the variant reached said). "Inspector" and "Pitch deviation" under Pitch,
+      Formant, Time and Fade: offered or left out as before, though both are offered for half a
+      second after a tool switch or a variant's last press, and a tick at most more, and on coming
+      back to Melodyne until the watcher's first picture, a tick at most. The read-outs while
+      walking notes with the arrow keys, said as before and as quickly, and the note area's moves
+      under Time. Bring the log's `fields after asking for tool=` lines, whose greys should all be
+      numbers, and the `selection watch` lines with their cost.
 - [ ] **Step 12a never ran on a Mac** (type-checked only, with the ocr-bench build): the read
       thread's ladder with `counts` in place of `!on_event_loop` (the pass made only for the
       counts, the `gave up … rather than keep the reads behind it waiting` line), and ocr-bench's

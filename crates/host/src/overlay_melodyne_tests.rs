@@ -45,6 +45,13 @@
 //! callback — and the frame is measured when it answers, its checks asked again; one frame is out
 //! at a time, from its picture to its profile (`host.screen.pending`).
 //!
+//! Then for step V2 of the plan for the `host.screen` waits (wbr-final.md, 2026-10-10), before any
+//! of them waits: the tool bar is one `pixels` call — its first look, the check of a variant step
+//! and the strip's greys after it alike; which read-out boxes are drawn is the watcher's last
+//! picture's answer in its stay, never a read of the screen, and a picture asked before a tool
+//! switch's hold lifted is not taken for the new tool's; and the boxes' rows are profiled with a
+//! callback, both at once beside the read, which is judged once all three have answered.
+//!
 //! The scenarios answer the module's reads by hand, with what Melodyne would show, and hand the
 //! note-area measurement column profiles made up for it (`T.frame`) and pictures with or without
 //! the disc and with the read-out boxes as Melodyne draws them (`T.picture`, `T.strip`): what they
@@ -77,6 +84,8 @@ S.rowProfiles = 0
 S.leftBox = true
 S.shows = { left = "value", right = "value" }
 S.inkProfiles = 0
+S.bar = {}
+S.pictures = {}
 
 -- What the read-out boxes show: "value", "dash" or "empty", the left box and the right one (the
 -- left one's when only one is given).
@@ -108,10 +117,12 @@ function T.strip(cx, cy)
   return grey(191)
 end
 
--- A point of the screen as a live read sees it: the strip, and every other point the harness's
--- S.pixel, which lights no tool.
+-- A point of the screen as a live read sees it: a point of the tool bar a scenario drew (S.bar,
+-- "x,y" in client coordinates, a colour), the strip, and every other point the harness's S.pixel,
+-- which lights no tool.
 function T.screenAt(x, y)
-  return T.strip(x - T.MEL.client.x, y - T.MEL.client.y) or S.pixel
+  local cx, cy = x - T.MEL.client.x, y - T.MEL.client.y
+  return S.bar[cx .. "," .. cy] or T.strip(cx, cy) or S.pixel
 end
 
 -- A point of a picture of the editor, as it was when `shows` was taken (now when not given):
@@ -209,11 +220,17 @@ local function profile(opts)
   return snap.shows and snap.shows.frame or S.frame
 end
 rawset(T.host.screen, "profile", function(opts, cb)
-  if opts.axes == "columns" then
-    assert(type(cb) == "function", "the note area's profile is reduced off the event loop, with a callback")
+  local box = opts.axes == "rows" and opts.region[2] < T.MEL.client.y + 60 + 16
+  if opts.axes == "columns" or box then
+    assert(type(cb) == "function",
+      "the note area's profile and a read-out box's are reduced off the event loop, with a callback")
     assert(type(opts.key) == "string" and opts.key ~= "", "under a key")
+    -- The host answers an older one with the key "replaced"; the module asks while none is out.
+    for _, r in ipairs(S.reductions) do
+      assert(r.key ~= opts.key, "a profile under '" .. opts.key .. "' asked while one is out")
+    end
   else
-    assert(cb == nil, "a box's or a body's rows are profiled on the event loop")
+    assert(cb == nil, "a body's rows are profiled on the event loop")
   end
   -- As the host does: without a callback, `key` and then `at` raise.
   for _, k in ipairs(cb == nil and { "key", "at" } or {}) do
@@ -295,7 +312,10 @@ rawset(T.host.screen, "snapshotAsync", function(opts, cb)
     if S.asyncs[i].key == opts.key then table.remove(S.asyncs, i) end
   end
   snapshotAsync(opts, function(snap, why, info)
-    if snap then snap.shows = shows() end
+    if snap then
+      snap.shows = shows()
+      S.pictures[opts.key] = snap
+    end
     if snap and change then
       info = table.clone(info)
       info.changed = not samePicture(change.from and change.from.shows, snap.shows)
@@ -414,6 +434,9 @@ function T.melodyne()
   rawset(T.host, "inputEpoch", function() return S.inputEpoch end)
   -- A tool's hotkey (F1 to F6) selects its tab once the modifiers are up: they are.
   rawset(T.host.keys, "modifiersDown", function() return false end)
+  -- The variant stepper's function keys, posted to Melodyne's window: kept in S.posted.
+  S.posted = {}
+  rawset(T.host.input, "post", function(_, key) S.posted[#S.posted + 1] = key end)
   T.answerWaits(function(what)
     local function one(r)
       S.recognized[#S.recognized + 1] = { r[1], r[2], r[3], r[4] }
@@ -447,12 +470,29 @@ function T.snapOf(key)
   return nil
 end
 
+-- The read-out boxes' profiles that are out, answered in the order they were asked, as the image
+-- worker's answers come on the host's next turns — nothing else that is due.
+function T.inks()
+  local i = 1
+  while i <= #S.reductions do
+    local r = S.reductions[i]
+    if r.key == "left box" or r.key == "right box" then
+      table.remove(S.reductions, i)
+      S.epoch += 1
+      T.call("answer", r.cb, r.p)
+    else
+      i += 1
+    end
+  end
+end
+
 -- Melodyne's polls, run as the host runs a host.timer.every: what became of the handler. The
--- watcher's picture is then taken and answered, and the note area's and the analysis look's with
--- everything else that is due, as on the host's next turns.
+-- watcher's picture is then taken and answered, and the boxes' profiles asked from it; the note
+-- area's and the analysis look's with everything else that is due, as on the host's next turns.
 function T.watch()
   local ran = T.call("timer", S.polls[120])
   T.snapOf("selection")
+  T.inks()
   return ran
 end
 function T.measure()
@@ -2023,5 +2063,149 @@ fn the_step_follows_the_zoom_and_a_press_is_one_step_every_time() {
         T.ok(T.to(340, bars) == "right, 2 beats", T.said())
         T.ok(T.to(360, bars) == "right, one beat", T.said())
         T.ok(T.to(363, bars) == "right, one fine step", T.said())
+    "#);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The tool bar and the read-out boxes, ready for screen reads that wait (V2, 2026-10-10).
+// ---------------------------------------------------------------------------------------------
+
+/// The tool bar is one read of the screen: its first look on arrival — which tool is lit and which
+/// of its variants — reads every point of it in one `pixels` call, the check of what a variant step
+/// reached is one more, and so are the strip's greys in the reading after the step. They were a
+/// `pixel` each: five reads on arrival, three for the check and eleven for the greys.
+#[test]
+fn the_tool_bar_is_one_read_of_the_screen() {
+    run(r#"
+        local S = T.S
+        -- The Pitch tool lit and Pitch Drift's two probes black; every other point of the tool
+        -- bar the inactive grey.
+        S.pixel = { r = 218, g = 218, b = 218 }
+        S.bar["100,60"] = { r = 252, g = 252, b = 252 }
+        S.bar["111,62"], S.bar["112,69"] = { r = 0, g = 0, b = 0 }, { r = 0, g = 0, b = 0 }
+        local o = T.melodyne()
+        S.now += 400
+        T.runDue()
+        T.ok(o.active and T.said() == "Pitch Drift tool, has vertical variations tab selected, horizontal tool bar, F2",
+          T.said())
+        T.ok(S.pixels == 1, "the arrival's look at the tool bar is one read: " .. S.pixels)
+        T.ok(T.key("Up") == "Ran" and S.speech[#S.speech].text == "Pitch Modulation tool", T.said())
+        S.now += 180
+        T.runDue()
+        T.ok(#S.posted == 1 and S.posted[1] == "F2", "the function key posted once: " .. #S.posted)
+        local before = S.pixels
+        S.now += 180
+        T.runDue()
+        T.ok(S.pixels == before + 1, "the check of what was reached is one read: " .. (S.pixels - before))
+        T.ok(T.count("[melodyne] variant: asked for 2 (Pitch Modulation), probes report 3") == 1, T.dump())
+        before = S.pixels
+        S.now += 400
+        T.runDue()
+        T.ok(S.pixels == before + 1, "the reading after the step reads the strip's greys at once: "
+          .. (S.pixels - before))
+        T.ok(T.count('[melodyne] fields after asking for tool=Pitch Modulation: left="" right=""') == 1
+          and T.count("greys 212:191 218:157 ") == 1, T.dump())
+    "#);
+}
+
+/// Which boxes are drawn — the read-out stops' `when` — is the watcher's last picture's answer,
+/// however old, and never a read of the screen: drawn before the first picture of a stay, and
+/// after a tool switch until a picture asked once its hold has lifted; one asked before the switch,
+/// or while the strip may not have repainted, shows the old tool's boxes and is not taken. It used
+/// to read both points live whenever that answer was half a second old.
+#[test]
+fn which_boxes_are_drawn_is_the_watchers_answer_and_never_a_read_of_the_screen() {
+    run(r#"
+        local S = T.S
+        local o = T.melodyne()
+        local function shown(label)
+          for _, c in ipairs(o.controls) do
+            if c.label == label then return c.when == nil or c.when(o) == true end
+          end
+          error("no control " .. label)
+        end
+        S.now += 1000
+        local reads = S.pixels
+        T.ok(shown("Inspector") and shown("Pitch deviation"), "before the first picture both count as drawn")
+        T.ok(S.pixels == reads, "nothing read to say so: " .. (S.pixels - reads))
+        T.watch()
+        T.boxes("0.00 dB")
+        T.ok(shown("Inspector") and not shown("Pitch deviation"), "the picture shows the left box alone")
+        S.rightBox = true
+        S.now += 1000
+        T.ok(not shown("Pitch deviation"), "its answer stands, however old")
+        T.ok(S.pixels == reads, "never a read of the screen: " .. (S.pixels - reads))
+
+        T.hotkey("F2")
+        T.ok(shown("Pitch deviation"), "after a tool switch both count as drawn")
+        S.rightBox = false
+        S.now += 500
+        T.call("timer", S.polls[120])
+        S.now += 10
+        T.hotkey("F4")
+        T.snapOf("selection")
+        T.inks()
+        T.ok(shown("Pitch deviation"), "a picture asked before the switch is not the new tool's")
+        T.boxes("0.00 dB")
+        S.now += 120
+        T.watch()
+        T.boxes("0.00 dB")
+        T.ok(shown("Pitch deviation"), "nor one asked while the switch's hold is up")
+        S.now += 380
+        T.watch()
+        T.boxes("0.00 dB")
+        T.ok(not shown("Pitch deviation"), "the first one asked once it has lifted is")
+
+        T.show(T.OTHER)
+        T.show(T.MEL)
+        T.ok(o.active, "Melodyne in front again, a new stay, and no tick between")
+        T.ok(shown("Pitch deviation"), "the last stay's picture is not this one's")
+        T.watch()
+        T.boxes("0.00 dB")
+        T.ok(not shown("Pitch deviation"), "its own first picture is")
+        T.ok(S.pixels == reads, "and still nothing read: " .. (S.pixels - reads))
+    "#);
+}
+
+/// What each box holds is profiled off the event loop, both boxes at once and each under a key of
+/// its own, beside the read of the same picture, which is asked at once; the read is judged once it
+/// and both profiles have answered, whichever comes last, and Melodyne's keys run meanwhile; a tick
+/// while one is out asks nothing; an overlay gone by then says nothing. The boxes were profiled in
+/// the picture's answer, on the event loop.
+#[test]
+fn the_boxes_are_profiled_off_the_event_loop_beside_the_read() {
+    run(r#"
+        local S = T.S
+        T.watching("A4", "+12 ct")
+        S.now += 120
+        T.call("timer", S.polls[120])
+        T.ok(T.snapOf("selection") == "Ran", "the picture's answer")
+        T.ok(#S.reductions == 2 and S.reductions[1].key == "left box" and S.reductions[2].key == "right box",
+          "both boxes asked at once, each under its own key: " .. #S.reductions)
+        local r = T.lastRead("selection")
+        T.ok(T.readsOf("selection") == 2 and r.snapshot == S.pictures["selection"],
+          "the read asked beside them, of the same picture")
+        T.ok(S.pictures["selection"].released, "the picture let go: they keep their own pixels")
+        T.ok(T.key("Tab") == "Ran", "a key of Melodyne's own runs while they are out")
+        local said = #S.speech
+        T.boxes("B4", "+12 ct")
+        T.ok(#S.speech == said, "the read answered first: nothing said yet: " .. T.said(said + 1))
+        T.call("timer", S.polls[120])
+        T.ok(S.snapKeys["selection"] == 2, "a tick while they are out asks nothing")
+        local first = table.remove(S.reductions, 1)
+        S.epoch += 1
+        T.ok(T.call("answer", first.cb, first.p) == "Ran", "the left box's answer, a handler of its own")
+        T.ok(#S.speech == said, "nor once one has answered: " .. T.said(said + 1))
+        T.inks()
+        T.ok(T.said(said + 1) == "B4", "once both have, the read is judged: " .. T.said(said + 1))
+
+        S.now += 120
+        T.call("timer", S.polls[120])
+        T.snapOf("selection")
+        T.boxes("C4", "+12 ct")
+        T.show(T.OTHER)
+        said = #S.speech
+        T.inks()
+        T.ok(#S.speech == said, "the overlay left before the last answer: " .. T.said(said + 1))
     "#);
 }

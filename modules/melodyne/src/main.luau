@@ -83,44 +83,76 @@ local function nearer(p, a, b)
   return da <= db
 end
 
-local function at(ov, x, y)
-  local o = ov:origin()
-  if not (o and o.client) then return nil end
-  return host.screen.pixel(o.client.x + x, o.client.y + y)
+-- Every point of the tool bar that says something, in client coordinates: each tool's icon, then
+-- each variant's probes. A tool's `lit` and a variant's `seen` say where their readings sit in it.
+local TOOL_POINTS = {}
+for _, tool in ipairs(TOOLS) do
+  TOOL_POINTS[#TOOL_POINTS + 1] = tool.at
+  tool.lit = #TOOL_POINTS
+end
+for _, tool in ipairs(TOOLS) do
+  for _, v in ipairs(tool.variants or {}) do
+    v.seen = {}
+    for _, probe in ipairs(v.probes) do
+      TOOL_POINTS[#TOOL_POINTS + 1] = probe
+      v.seen[#v.seen + 1] = #TOOL_POINTS
+    end
+  end
 end
 
--- Which tool Melodyne currently has selected, or nil when none reads as lit.
+-- The tool bar as it is now: a colour for every point of TOOL_POINTS, or nil when it could not
+-- be read.
+--
+-- ONE `pixels` call, which is one capture: thirteen points in a strip 120 pixels wide. They used
+-- to be a `pixel` each, and a pixel read costs a fixed compositor frame — around 17 ms, measured,
+-- whatever its size — so the first look at the tool bar, which tool and then which of its
+-- variants, could read seven of them: a tenth of a second between a Tab and its announcement.
+local function readToolBar(ov)
+  local o = ov:origin()
+  if not (o and o.client) then return nil end
+  local pts = {}
+  for i, p in ipairs(TOOL_POINTS) do
+    pts[i] = { o.client.x + p[1], o.client.y + p[2] }
+  end
+  return host.screen.pixels(pts)
+end
+
+-- Which tool a reading of the tool bar shows selected, or nil when none reads as lit.
 --
 -- Asked on arrival, so the tool bar reports where the APPLICATION is rather than where this
 -- control last put it. That distinction is the whole point: Melodyne has F1 to F6 for the same
 -- job, and a control that only remembers its own last move is confidently wrong the moment the
 -- user reaches for the shortcut.
-local function activeTool(ov)
+local function activeTool(seen)
+  if not seen then return nil end
   for i, tool in ipairs(TOOLS) do
-    local p = at(ov, tool.at[1], tool.at[2])
-    if p and nearer(p, ACTIVE, IDLE) then return i end
+    if nearer(seen[tool.lit], ACTIVE, IDLE) then return i end
   end
   return nil
 end
 
--- Which tool is active, asked at most once per input epoch.
+-- The tool bar, read at most once per input epoch.
 --
--- `activeTool` costs up to six pixel reads, and a pixel read costs a fixed compositor frame —
--- around 17 ms, measured, whatever its size. Two things now ask the question on every focus
--- move (the read-outs below, to know which of them exist), so asking it six times per move
--- would put a tenth of a second between a Tab and its announcement.
+-- Even one capture is a compositor frame, and the tool bar is asked about on every focus move
+-- that announces it — which tool, which variant, and whose value the left read-out shows — so
+-- they share the one reading.
 --
 -- Keyed on `inputEpoch` rather than `epoch`: which tool is selected changes only when
 -- something ACTS — the user pressing a function key, or us clicking an icon — and that is
 -- exactly what turns that counter over. An ordinary epoch would re-read on every question.
-local toolMemo = { gen = -1, index = nil }
-local function activeToolCached(ov)
+local toolBarMemo = { gen = -1, seen = nil }
+local function toolBarCached(ov)
   local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
-  if toolMemo.gen ~= gen then
-    toolMemo.gen = gen
-    toolMemo.index = activeTool(ov)
+  if toolBarMemo.gen ~= gen then
+    toolBarMemo.gen = gen
+    toolBarMemo.seen = readToolBar(ov)
   end
-  return toolMemo.index
+  return toolBarMemo.seen
+end
+
+-- Which tool is active, from the reading of this input epoch.
+local function activeToolCached(ov)
+  return activeTool(toolBarCached(ov))
 end
 
 -- A read-out change that the user CAUSED by changing tool is not news.
@@ -166,15 +198,15 @@ local selectedToolName = nil
 --
 -- For the log, and the restraint is the point. Recording which tool a read-out belonged to is
 -- how we will learn what the second field holds under the tools nobody has measured yet, but
--- the read-outs change while the user walks from note to note with the arrow keys, and six
--- screen reads at a compositor frame each on that path would buy that knowledge with the
+-- the read-outs change while the user walks from note to note with the arrow keys, and a
+-- capture of the tool bar at a compositor frame on that path would buy that knowledge with the
 -- responsiveness of the thing being described. So: free when the epoch already asked, absent
 -- otherwise. It fills in whenever the user has just been in the overlay, which is exactly when
 -- somebody is looking at a read-out anyway.
 local function activeToolIfKnown()
   local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
-  if toolMemo.gen ~= gen then return nil end
-  local i = toolMemo.index
+  if toolBarMemo.gen ~= gen then return nil end
+  local i = activeTool(toolBarMemo.seen)
   return i and TOOLS[i] and TOOLS[i].name or nil
 end
 
@@ -183,7 +215,7 @@ end
 -- Three different facts wear the same word otherwise, and the log is where the difference will
 -- matter: a probed name was read off the screen just now, a selected one is what we clicked and
 -- could have been overridden inside Melodyne since, and "?" is the honest answer when neither
--- is available and the alternative would be six screen reads on the note-stepping path.
+-- is available and the alternative would be a screen read on the note-stepping path.
 local function toolForLog()
   local probed = activeToolIfKnown()
   if probed then return probed .. " (probed)" end
@@ -191,16 +223,16 @@ local function toolForLog()
   return "?"
 end
 
--- Which variant of a tool is live: the first whose probe points ALL read near-black, else the
--- base. Only meaningful while that tool's icon is lit, since the probes read its glyph against
--- the lit white box.
-local function activeVariant(ov, tool)
+-- Which variant of a tool a reading of the tool bar shows live: the first whose probe points ALL
+-- read near-black, else the base. Only meaningful while that tool's icon is lit, since the probes
+-- read its glyph against the lit white box.
+local function activeVariant(seen, tool)
+  if not seen then return 1 end
   for i, v in ipairs(tool.variants or {}) do
-    if #v.probes > 0 then
+    if #v.seen > 0 then
       local all = true
-      for _, probe in ipairs(v.probes) do
-        local p = at(ov, probe[1], probe[2])
-        if not (p and nearer(p, BLACK, WHITE)) then all = false break end
+      for _, k in ipairs(v.seen) do
+        if not nearer(seen[k], BLACK, WHITE) then all = false break end
       end
       if all then return i + 1 end
     end
@@ -208,24 +240,18 @@ local function activeVariant(ov, tool)
   return 1
 end
 
--- The same reading, asked at most once per input epoch per tool.
+-- The same, from the reading of this input epoch.
 --
 -- Three callers want it while the tool bar is being announced — the tab's `current`, its
--- `verticalName`, and the left read-out's owner name — and each probe point is a screen read at
--- a compositor frame. Landing on the tool bar was measured at 89 to 110 ms of pure announcement
--- because of it, which is a tenth of a second of silence after a Tab.
+-- `verticalName`, and the left read-out's owner name. Each probe point was a screen read at a
+-- compositor frame of its own, and landing on the tool bar was measured at 89 to 110 ms of pure
+-- announcement because of it; now they are points of the tool's own reading.
 --
 -- Keyed on the input epoch for the reason `activeToolCached` is: which variant is live changes
 -- only when something ACTS, and that is exactly what turns the counter over. A user walking the
 -- Tab ring does not turn it, so the walk is free after the first look.
-local variantMemo = { gen = -1, tool = nil, index = 1 }
 local function activeVariantCached(ov, tool)
-  local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
-  if variantMemo.gen ~= gen or variantMemo.tool ~= tool then
-    variantMemo.gen, variantMemo.tool = gen, tool
-    variantMemo.index = activeVariant(ov, tool)
-  end
-  return variantMemo.index
+  return activeVariant(toolBarCached(ov), tool)
 end
 
 local ov = O.new("Melodyne")
@@ -285,7 +311,7 @@ local function selectVariant(o, tool, target)
         -- and the third entry was unreachable. Of the eight sub-tools only three were ever
         -- mapped by anyone, so a probe that says "1" means "nothing to see here" far more
         -- often than it means "still on the base tool".
-        local seen = activeVariant(o, tool)
+        local seen = activeVariant(readToolBar(o), tool)
         if seen ~= target then
           host.log.info(("[melodyne] variant: asked for %d (%s), probes report %d")
             :format(target, tool.variants[target - 1].name, seen))
@@ -347,8 +373,8 @@ do
       selectedToolName = TOOLS[i] and TOOLS[i].name or nil
       holdReadouts()
       -- Which boxes exist is a property of the tool, so the answer we are holding is stale from
-      -- this instant. Not measured here: the next question asks, and it will come within
-      -- milliseconds anyway.
+      -- this instant. Not measured here: the watcher's first picture asked once the hold has lifted
+      -- says, and until then both boxes count as drawn.
       if forgetBoxes then forgetBoxes() end
       -- And every tool switch is a MEASUREMENT of what that tool puts in the two boxes.
       --
@@ -365,8 +391,8 @@ do
       if not i then return nil end
       -- The TOOL is re-detected whenever anything ACTED, because its probe is a clean
       -- bright-against-grey reading and Melodyne's own F-keys change it behind our back. Not on
-      -- every announcement, though: this runs each time the tool bar is spoken, and six screen
-      -- reads at a compositor frame each measured 89 to 110 ms of silence after a Tab. The
+      -- every announcement, though: this runs each time the tool bar is spoken, and a capture is
+      -- a compositor frame of silence after a Tab (one per icon measured 89 to 110 ms). The
       -- input epoch is exactly the right clock — it turns over when a key or a click happens,
       -- which is the only way the tool can have changed, and a walk around the Tab ring does
       -- not turn it.
@@ -557,7 +583,8 @@ local BOX_PROBES = {
 }
 local BOX_EDGE_CONTRAST = 20
 
--- Is the right box drawn RIGHT NOW?
+-- Is a box drawn RIGHT NOW? What the watcher's latest picture of this stay showed, however old
+-- it is.
 --
 -- This is the same question the removed `when` predicate answered by asking which tool was
 -- selected — from a table of tool names taken out of five documentation figures, which left out
@@ -567,53 +594,36 @@ local BOX_EDGE_CONTRAST = 20
 --
 -- Read from the watcher's own pictures: every one of them holds both boxes' probes, and the
 -- watcher notes what they show here (rememberBoxes), eight times a second while the overlay is in
--- front, at no cost of its own. Read from the screen here only when that is older than the memo
--- below — a menu open, the first moment of a stay — for a key that walks the Tab ring, one
--- `pixels` call for both points.
+-- front, at no cost of its own. NEVER from the screen here. This is a `when`, asked on every walk
+-- of the Tab ring and as the overlay comes to the front, where a read of the screen holds the
+-- event loop for a compositor frame and cannot wait for its picture; it used to read both points
+-- live whenever the watcher's answer was half a second old — a menu open, the first moment of a
+-- stay.
 --
--- Defaults to DRAWN when the pixels cannot be read. A control that quietly vanishes tells a
--- user who cannot see the screen nothing about why, and "there is a stop here that says no
--- value" is a far smaller failure than "the stop you were looking for is gone".
--- Held for a while, and NOT keyed on the input epoch.
---
--- Which boxes are drawn is a property of the TOOL, not of the selection — and the input epoch
--- turns over on every keystroke, so an epoch-keyed memo re-measured twice on every arrow press
--- while the user walked notes, which is the one path that must stay quick. A short time window
--- plus an explicit invalidation when we change tool matches what actually varies: free during a
--- walk, fresh immediately after a switch, and self-healing within half a second if the tool ever
--- changes without our seeing it.
-local BOX_MEMO_MS = 500
-local boxMemo = { left = { at = nil, drawn = true }, right = { at = nil, drawn = true } }
+-- DRAWN when there is no picture to go by: before the watcher's first in a stay — the Melodyne
+-- the overlay comes back to, or another of its windows, need not have the tool it left behind —
+-- and after a tool switch until a picture asked once its hold has lifted (forgetBoxes), since which
+-- boxes are drawn is a property of the TOOL. A control that quietly vanishes tells a user who
+-- cannot see the screen nothing about why, and "there is a stop here that says no value" is a far
+-- smaller failure than "the stop you were looking for is gone".
+local boxMemo = nil
 forgetBoxes = function()
-  boxMemo.left.at, boxMemo.right.at = nil, nil
+  boxMemo = nil
 end
--- What a picture showed of the boxes, noted for boxDrawn: `drawn` as boxesIn answers it.
-local function rememberBoxes(drawn)
-  local now = host.now and host.now() or nil
-  boxMemo.left.drawn, boxMemo.left.at = drawn.left, now
-  boxMemo.right.drawn, boxMemo.right.at = drawn.right, now
+-- What a picture asked at `asked`, in the stay `mark` notes, showed of the boxes, noted for
+-- boxDrawn: `drawn` as boxesIn answers it. Not one asked before a tool switch's hold lifted: the
+-- strip does not repaint within one tick (holdReadouts), so a picture asked just after the switch
+-- can show the old tool's boxes as surely as one asked before it — and kept, it would hide a stop
+-- the new tool draws until the next tick.
+local function rememberBoxes(drawn, mark, asked)
+  if asked ~= nil and asked < holdUntil then return end
+  boxMemo = { left = drawn.left, right = drawn.right, mark = mark }
 end
-local function boxDrawn(o, which)
-  local m, p = boxMemo[which], BOX_PROBES[which]
-  local now = host.now and host.now() or nil
-  if m.at and now and (now - m.at) < BOX_MEMO_MS then return m.drawn end
-  -- Both points in one `pixels` call, which is one capture: two `pixel` calls were a compositor
-  -- frame each.
-  local origin = o:origin()
-  local seen = nil
-  if origin and origin.client then
-    seen = host.screen.pixels({
-      { origin.client.x + p.edge[1], origin.client.y + p.edge[2] },
-      { origin.client.x + p.gap[1], origin.client.y + p.gap[2] },
-    })
-  end
-  local edge, gap = seen and seen[1], seen and seen[2]
-  m.drawn = (edge == nil or gap == nil) or (gap.r - edge.r) > BOX_EDGE_CONTRAST
-  m.at = now
-  return m.drawn
+local function boxDrawn(which)
+  return boxMemo == nil or not ov:stillHere(boxMemo.mark) or boxMemo[which]
 end
-local function leftBoxDrawn(o) return boxDrawn(o, "left") end
-local function rightBoxDrawn(o) return boxDrawn(o, "right") end
+local function leftBoxDrawn() return boxDrawn("left") end
+local function rightBoxDrawn() return boxDrawn("right") end
 
 -- What the left field is showing, in the words of the tool that owns it. Nil when no tool
 -- reads as lit, in which case the label alone is the honest answer.
@@ -806,7 +816,7 @@ local function selectionRegions(o)
   -- An earlier version of this file skipped the read too, and was wrong for a different reason:
   -- it asked which TOOL was selected and looked the answer up in a list. Skipping because we
   -- LOOKED and the box is not drawn is the same saving without the claim.
-  if not boxDrawn(o, "right") then return { box(NOTE_REGION) } end
+  if not boxDrawn("right") then return { box(NOTE_REGION) } end
   -- BOTH boxes, one screen touch. A list of regions in one host.ocr.recognize is photographed
   -- together and each region recognised out of that one picture — which is the whole cost here:
   -- the recognition measured 4-6 ms against a capture's fixed ~17. Two separate calls put this
@@ -843,9 +853,9 @@ end
 -- bare tool bar beside each — every point BOX_PROBES and BOX_INK name.
 local STRIP = { 212, 60, 372, 76 }
 
--- Which boxes are drawn in picture `snap` of the window whose client area `origin` names: {
--- left, right } as boxDrawn answers them, from the same four points in one `pixels` call; nil
--- when the picture does not hold them.
+-- Which boxes are drawn in picture `snap` of the window whose client area `origin` names, { left,
+-- right }, from the four points of BOX_PROBES in one `pixels` call; nil when the picture does not
+-- hold them.
 local function boxesIn(snap, origin)
   local pts = {}
   for _, which in ipairs({ "left", "right" }) do
@@ -881,27 +891,61 @@ end
 local INK_ROWS, INK_CONTRAST = 3, 40
 local BOX_INK = { left = { 220, 63, 287, 73 }, right = { 300, 63, 367, 73 } }
 
--- Whether box `which` holds a value in picture `snap`: true or false, nil when the picture does
--- not hold the box. A profile of its rows, read from the picture: ten rows of 67 pixels.
-local function inkIn(snap, origin, which)
+-- The keys the two boxes' profiles go under: one each, since a newer profile with a key replaces
+-- the one out before it.
+local INK_KEYS = { left = "left box", right = "right box" }
+
+-- Whether box `which` holds a value in picture `snap`, handed to `done`: true or false, nil when
+-- the picture does not hold the box. A profile of its rows, ten rows of 67 pixels, reduced off the
+-- event loop and answered as a handler of its own.
+--
+-- WITH A CALLBACK, for the reason the watcher's read has one. This runs in the answer to the
+-- watcher's picture, a handler of this module's, and a handler that waits keeps Melodyne's own
+-- keys waiting with it. A profile without a callback is to wait for the image worker, as every
+-- `host.screen` call that captures or walks a region is to, and two of them eight times a second
+-- would put Tab and the F-keys back behind the watcher.
+local function inkIn(snap, origin, which, done)
   local b = BOX_INK[which]
-  local p = host.screen.profile({
-    snapshot = snap, axes = "rows",
+  host.screen.profile({
+    snapshot = snap, axes = "rows", key = INK_KEYS[which],
     region = {
       origin.client.x + b[1], origin.client.y + b[2],
       origin.client.x + b[3], origin.client.y + b[4],
     },
-  })
-  if not (p and p.rows and p.rows.min and p.rows.max and #p.rows.max > 0) then return nil end
-  -- The fill is the lightest pixel of a row, in most rows: a value never fills a row.
-  local lightest = table.clone(p.rows.max)
-  table.sort(lightest)
-  local fill = lightest[(#lightest + 1) // 2]
-  local rows = 0
-  for _, darkest in ipairs(p.rows.min) do
-    if darkest <= fill - INK_CONTRAST then rows += 1 end
+  }, function(p)
+    if not (p and p.rows and p.rows.min and p.rows.max and #p.rows.max > 0) then
+      return done(nil)
+    end
+    -- The fill is the lightest pixel of a row, in most rows: a value never fills a row.
+    local lightest = table.clone(p.rows.max)
+    table.sort(lightest)
+    local fill = lightest[(#lightest + 1) // 2]
+    local rows = 0
+    for _, darkest in ipairs(p.rows.min) do
+      if darkest <= fill - INK_CONTRAST then rows += 1 end
+    end
+    done(rows >= INK_ROWS)
+  end)
+end
+
+-- What picture `snap` shows in the boxes `drawn` says are drawn, both asked at once and handed to
+-- `done` once both have answered: { left, right }, a box that is not drawn holding none, or nil
+-- when a drawn one could not be measured. At once when neither is drawn.
+local function inksIn(snap, origin, drawn, done)
+  local ink, out, failed = { left = false, right = false }, 0, false
+  for _, which in ipairs({ "left", "right" }) do
+    if drawn[which] then out += 1 end
   end
-  return rows >= INK_ROWS
+  if out == 0 then return done(ink) end
+  for _, which in ipairs({ "left", "right" }) do
+    if drawn[which] then
+      inkIn(snap, origin, which, function(has)
+        if has == nil then failed = true else ink[which] = has end
+        out -= 1
+        if out == 0 then done(not failed and ink or nil) end
+      end)
+    end
+  end
 end
 
 -- Whether the read-outs say nothing at all, from one read and the picture it was read from: false
@@ -2494,14 +2538,22 @@ reportFieldsAfterSwitch = function(toolName, afterMs)
     if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
     local _, note, pitch = readSelection(ov)
     if note == nil then return end
-    -- Pixels at ~17 ms each, once per tool switch, in a callback already waiting for a repaint.
+    -- The greys along the strip in one `pixels` call: one capture, once per tool switch, in a
+    -- callback already waiting for a repaint — a `pixel` each was eleven compositor frames.
     -- Nowhere near the Tab path and nowhere near note-stepping.
+    local origin = ov:origin()
+    local seen = nil
+    if origin and origin.client then
+      local pts = {}
+      for i, x in ipairs(EDGE_ROW) do
+        pts[i] = { origin.client.x + x, origin.client.y + 67 }
+      end
+      seen = host.screen.pixels(pts)
+    end
     local edges = {}
     for i, x in ipairs(EDGE_ROW) do
-      local p = at(ov, x, 67)
-      edges[i] = string.format("%d:%s", x, p and tostring(p.r) or "?")
+      edges[i] = string.format("%d:%s", x, seen and tostring(seen[i].r) or "?")
     end
-    local origin = ov:origin()
     local wide = ""
     if origin and origin.client then
       local r = host.ocr.recognize({
@@ -2548,7 +2600,8 @@ end)
 -- The watcher's reads go under one key, and one is out at a time: a tick asks only once the
 -- last one has answered (host.ocr.pending), which holds across a disable too, where the answer is
 -- dropped and a flag set before the read would stay set. Its picture goes under the same key, a
--- snapshot's own: a tick whose picture has not come yet replaces it with its own.
+-- snapshot's own: a tick whose picture has not come yet replaces it with its own. The boxes'
+-- profiles (inksIn) go under keys of their own, and a tick while one is out asks nothing either.
 local WATCH_KEY = "selection"
 
 host.timer.every(WATCH_MS, function()
@@ -2576,6 +2629,7 @@ host.timer.every(WATCH_MS, function()
     return
   end
   if host.ocr.pending(WATCH_KEY) then return end
+  if host.screen.pending(INK_KEYS.left) or host.screen.pending(INK_KEYS.right) then return end
   local origin = ov:origin()
   if not (origin and origin.client) then return end
   local function onScreen(r)
@@ -2594,7 +2648,8 @@ host.timer.every(WATCH_MS, function()
   -- And ONE PICTURE, taken off the event loop at a set time, which is the moment of the question:
   -- the boxes' borders, what each holds and the text in them are all read from it. Which boxes are
   -- drawn used to be two points of the live screen, a compositor frame on the event loop every half
-  -- second for as long as the overlay was in front.
+  -- second for as long as the overlay was in front. What each box holds is profiled off the event
+  -- loop too, beside the read.
   --
   -- That answer is about the moment it was asked in, so it is checked against that moment: the
   -- mark says whether the overlay is still in front, on the same window and in the same stay,
@@ -2613,28 +2668,14 @@ host.timer.every(WATCH_MS, function()
     -- time eight times a second (see selectionRegions) — and is taken for drawn when the picture
     -- cannot say, as boxDrawn takes it.
     local drawn = boxesIn(snap, origin)
-    local ink = nil
-    if drawn then
-      rememberBoxes(drawn)
-      local left, right = false, false
-      if drawn.left then left = inkIn(snap, origin, "left") end
-      if drawn.right then right = inkIn(snap, origin, "right") end
-      if left ~= nil and right ~= nil then ink = { left = left, right = right } end
-    end
+    if drawn then rememberBoxes(drawn, mark, asked) end
     local regions = { onScreen(NOTE_REGION) }
     if drawn == nil or drawn.right then regions[2] = onScreen(PITCH_REGION) end
-    host.ocr.recognize(regions, { snapshot = snap, key = WATCH_KEY }, function(list)
-      if asked then
-        watchReads = watchReads + 1
-        watchCost = watchCost + (host.now() - asked)
-        if watchReads >= 100 then
-          host.log.info((
-            "[melodyne] selection watch: %d reads, asked every %d ms at most, %.1f ms each on"
-            .. " average from asking to the answer"
-          ):format(watchReads, WATCH_MS, watchCost / watchReads))
-          watchReads, watchCost = 0, 0
-        end
-      end
+    -- The read and the boxes' profiles are asked together, and the read is judged once all of them
+    -- have answered, whichever comes last: asking the read only after the profiles had answered
+    -- would put a turn of the event loop in front of every announcement.
+    local list, ink, inked = nil, nil, drawn == nil
+    local function judge()
       local combined, note, pitch, both = selectionOf(list)
       if combined == nil then return end
       -- Gone since, or another window, or the same window in another stay: what the boxes said
@@ -2706,8 +2747,29 @@ host.timer.every(WATCH_MS, function()
       if #parts > 0 then
         host.speech.output(table.concat(parts, ", "), { interrupt = true })
       end
+    end
+    if drawn then
+      inksIn(snap, origin, drawn, function(answer)
+        ink, inked = answer, true
+        if list then judge() end
+      end)
+    end
+    host.ocr.recognize(regions, { snapshot = snap, key = WATCH_KEY }, function(answer)
+      if asked then
+        watchReads = watchReads + 1
+        watchCost = watchCost + (host.now() - asked)
+        if watchReads >= 100 then
+          host.log.info((
+            "[melodyne] selection watch: %d reads, asked every %d ms at most, %.1f ms each on"
+            .. " average from asking to the answer"
+          ):format(watchReads, WATCH_MS, watchCost / watchReads))
+          watchReads, watchCost = 0, 0
+        end
+      end
+      list = answer
+      if inked then judge() end
     end)
-    snap:release() -- the read keeps its own pixels until it is answered
+    snap:release() -- the read and the profiles keep their own pixels until they are answered
   end)
 end)
 
