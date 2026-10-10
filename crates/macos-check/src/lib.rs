@@ -179,6 +179,14 @@ pub fn snapshot_lane_calls() {
     let _: fn(&[Rect], i64) -> (Vec<Rect>, Vec<usize>) = snap_queue::group;
     let _: fn(Round, &str, Instant) -> RoundDone = Round::fail;
     let _: fn(&Round) -> Vec<(i32, i32, i32, i32)> = Round::tuples;
+    let _: fn(&mut Round) -> Vec<backend::CompareReq> = Round::take_compares;
+    // The first-read comparison a request carries, which `capture_source.rs` hands out and the
+    // capture thread and the image worker make.
+    let _: fn(bool) -> backend::CompareSlot = backend::CompareSlot::new;
+    let _: fn(&Arc<backend::CompareSlot>, &str, (i32, i32, i32, i32)) -> Option<backend::CompareReq> =
+        backend::CompareSlot::take;
+    let _: fn(&backend::CompareReq, backend::CompareFn) = backend::CompareReq::make;
+    let _: fn(&backend::CompareReq, bool) = backend::CompareReq::settle;
     let _: fn(Option<Cand>, Option<Cand>) -> Option<Pick> = snap_queue::choose;
     let _: fn(&Scheduler<u8, u8>, bool, Instant) -> Option<Cand> = Scheduler::peek_capture;
     let _: fn(&mut Scheduler<u8, u8>, u8, ocr::sched::Ticket, u8, usize, Instant) -> ocr::sched::Submitted =

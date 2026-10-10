@@ -18,7 +18,7 @@ use super::hook_watch_thread;
 use super::hotkey_hook::{self, Down, Mods, OsPress, Route, NO_ID};
 use super::{
     capture_decision, menu_flag_owners, scope_of, Backend, Capture, CaptureFn, CaptureSource,
-    CapturedImage, Captured, ControlInfo, DumpNode, HostEvents, MouseButton, OcrLine, OcrShot,
+    CapturedImage, CompareFn, Captured, ControlInfo, DumpNode, HostEvents, MouseButton, OcrLine, OcrShot,
     OcrText, OcrThread, OcrWord, OcrWorker, OwnerKeys, Pressed, Recognise, Taken, WinInfo, CAPTURE_FAILED,
     DUPLICATION_UNANSWERED,
 };
@@ -899,6 +899,38 @@ fn foreground_client() -> Option<(i32, i32, i32, i32)> {
     }
 }
 
+/// A module's first-read comparison (`Backend::compare_capture_sources`), made by `caller`: the
+/// event loop for a call that reads synchronously, else the thread about to capture for the read
+/// that carries it, which waits for duplication as any read of its own does.
+fn compare_sources(who: &str, read: (i32, i32, i32, i32), caller: Caller) -> bool {
+    let Some((region, window)) = dxgi::comparison_region(read, foreground_client()) else {
+        return true; // nothing this path could read, so nothing to compare
+    };
+    // Its own duplication read, so the module's read is not held up or changed by it — and when
+    // duplication cannot answer yet (still opening, backing off), a later read asks again.
+    let dup = match dxgi::capture(&[region], caller) {
+        Ok(mut images) => match images.pop() {
+            Some(img) => img,
+            None => return true,
+        },
+        Err(_) => return false,
+    };
+    let (x, y, w, h) = region;
+    let what = if window {
+        format!("the foreground window's {w}x{h} client area at {x},{y} (the read itself was {}x{})", read.2, read.3)
+    } else {
+        format!("the {w}x{h} region it read at {x},{y}")
+    };
+    dxgi::log_comparison(who, &what, &dup, capture_screen(x, y, w, h).as_ref());
+    true
+}
+
+/// The comparison the `screen-capture` thread and the image worker make (`Backend::compare_fn`,
+/// `OcrWorker::compare`): a plain `fn`, as [`capture_on_worker`] is.
+fn compare_on_worker(who: &str, read: (i32, i32, i32, i32)) -> bool {
+    compare_sources(who, read, Caller::Worker)
+}
+
 /// The standard pixel read, unchanged: `GetPixel` on the screen DC.
 fn pixel_gdi(x: i32, y: i32) -> (u8, u8, u8) {
     // The SCREEN, deliberately, and with a caveat the callers have to know: this is what is
@@ -1331,27 +1363,7 @@ impl Backend for WindowsBackend {
     }
 
     fn compare_capture_sources(&self, who: &str, read: (i32, i32, i32, i32)) -> bool {
-        let Some((region, window)) = dxgi::comparison_region(read, foreground_client()) else {
-            return true; // nothing this path could read, so nothing to compare
-        };
-        // Its own duplication read, so the module's read is not held up or changed by it —
-        // and when duplication cannot answer yet (still opening, backing off), a later read
-        // asks again.
-        let dup = match dxgi::capture(&[region], Caller::Pump) {
-            Ok(mut images) => match images.pop() {
-                Some(img) => img,
-                None => return true,
-            },
-            Err(_) => return false,
-        };
-        let (x, y, w, h) = region;
-        let what = if window {
-            format!("the foreground window's {w}x{h} client area at {x},{y} (the read itself was {}x{})", read.2, read.3)
-        } else {
-            format!("the {w}x{h} region it read at {x},{y}")
-        };
-        dxgi::log_comparison(who, &what, &dup, capture_screen(x, y, w, h).as_ref());
-        true
+        compare_sources(who, read, Caller::Pump)
     }
 
     fn capture(&self, x: i32, y: i32, w: i32, h: i32, src: CaptureSource) -> Result<CapturedImage, String> {
@@ -1362,6 +1374,10 @@ impl Backend for WindowsBackend {
 
     fn capture_fn(&self) -> CaptureFn {
         capture_on_worker
+    }
+
+    fn compare_fn(&self) -> CompareFn {
+        compare_on_worker
     }
 
     fn frame(&self, r: Rect, src: CaptureSource) -> Result<Frame, String> {
@@ -1382,6 +1398,7 @@ impl Backend for WindowsBackend {
             recognise: ocr_recognise,
             languages: ocr_languages,
             frames: frames_on_capture_thread,
+            compare: compare_on_worker,
             // One standard capture may span monitors here: `BitBlt` of the virtual screen.
             display_of: |_, _| 0,
             shot_of: ocr_shot_of,
@@ -4736,6 +4753,7 @@ mod capture_tests {
             asked,
             holds: true,
             cancel: Arc::new(AtomicBool::new(false)),
+            compare: None,
         };
         let rounds = std::thread::spawn(move || {
             let mut lane = SnapLane::default();

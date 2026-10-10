@@ -460,7 +460,8 @@ pub(crate) enum Caller {
     /// The event loop, which every captured key and hotkey waits for (the keyboard hook itself
     /// has a thread of its own).
     Pump,
-    /// The image worker.
+    /// A thread of the host's own: the image worker, or `screen-capture` (a text read's or a
+    /// snapshot's capture, and the first-read comparison it carries).
     Worker,
 }
 

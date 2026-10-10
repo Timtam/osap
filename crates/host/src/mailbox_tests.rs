@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use crate::backend::gamepad::{Axis, Button, Family, PadEvent, PadEventKind};
-use crate::backend::{CaptureSource, WinInfo};
+use crate::backend::WinInfo;
 use crate::gamepad_api::Delivery;
 use crate::image_search::VmOwner;
 use crate::mailbox::{self, Delivered, Event, MailHost, Mailboxes, Opened, PadKind, Phase, Why};
@@ -95,9 +95,6 @@ impl ReadHost for Host {
     }
     fn report_error(&self, idx: usize, context: &str, message: &str) {
         self.errors.borrow_mut().push((idx, context.to_string(), message.to_string()));
-    }
-    fn read_source(&self, _: &Lua, _: (i32, i32, i32, i32)) -> CaptureSource {
-        CaptureSource::Standard
     }
 }
 

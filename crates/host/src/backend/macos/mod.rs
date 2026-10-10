@@ -254,6 +254,8 @@ impl Backend for MacBackend {
             recognise: ocr::recognise_shot,
             languages: ocr::languages,
             frames: ocr::frames_for_round,
+            // One way of reading the screen here: nothing to compare.
+            compare: super::no_comparison,
             display_of: capture::display_id_at,
             shot_of: ocr::shot_of,
         }

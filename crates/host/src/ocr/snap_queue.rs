@@ -45,7 +45,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::backend::frame::{Frame, FrameVia};
-use crate::backend::{CaptureSource, CAPTURE_FAILED};
+use crate::backend::{CaptureSource, CompareReq, CAPTURE_FAILED};
 
 use super::change::{Outcome, Seen, Wait, NO_PICTURE};
 use super::policy::{AGING, MIN_ROUND_DUPLICATION, MIN_ROUND_MACOS, MIN_ROUND_STANDARD, UNION_MAX};
@@ -83,6 +83,9 @@ pub struct SnapReq {
     pub holds: bool,
     /// Set by the event loop when nobody waits for the answer any more.
     pub cancel: Arc<AtomicBool>,
+    /// The module's first-read comparison, when this request carries it: the capture thread makes
+    /// it before the round's captures ([`Round::take_compares`]).
+    pub compare: Option<CompareReq>,
 }
 
 impl SnapReq {
@@ -450,6 +453,12 @@ impl Round {
         self.rects.iter().map(Rect::tuple).collect()
     }
 
+    /// The first-read comparisons its requests carry, taken out of them: the capture thread makes
+    /// them before the round's captures, and a change wait that goes on carries none any more.
+    pub fn take_compares(&mut self) -> Vec<CompareReq> {
+        self.members.iter_mut().filter_map(|(req, _)| req.compare.take()).collect()
+    }
+
     /// Answers every request of the round from `frames`, one per planned capture in order (a
     /// missing one, or one that does not cover its rectangle, is a failed capture), each picture
     /// stamped with `input_epoch` — `host.inputEpoch()` once the captures had come back: a plain
@@ -629,6 +638,7 @@ mod tests {
             asked,
             holds,
             cancel: Arc::new(AtomicBool::new(false)),
+            compare: None,
         }
     }
 

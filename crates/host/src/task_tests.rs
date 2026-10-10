@@ -32,7 +32,8 @@ use std::time::{Duration, Instant};
 
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
-use crate::backend::{CaptureSource, OcrLine, OcrText, OcrWord, OcrWorker, Recognise};
+use crate::backend::{CaptureSource, Compare, OcrLine, OcrText, OcrWord, OcrWorker, Recognise};
+use crate::capture_source;
 use crate::image_search::VmOwner;
 use crate::mailbox::{self, Event, MailHost, Mailboxes, Opened, Why};
 use crate::ocr::lang::Languages;
@@ -126,6 +127,20 @@ fn fake_recognise(shot: &Fake, _: &[(i32, i32, i32, i32)], ctx: &Recognise) -> V
     })
 }
 
+/// Every first-read comparison the fake made: the module, and the thread it was made on.
+static COMPARED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Notes the comparison; made, unless the module's name says it cannot be yet.
+fn fake_compare(who: &str, _: (i32, i32, i32, i32)) -> bool {
+    locked(&COMPARED).push((who.to_string(), std::thread::current().name().unwrap_or("?").to_string()));
+    !who.contains("not yet")
+}
+
+/// The threads `who`'s comparisons were made on, in order.
+fn compared(who: &str) -> Vec<String> {
+    locked(&COMPARED).iter().filter(|(w, _)| w == who).map(|(_, t)| t.clone()).collect()
+}
+
 pub(crate) fn worker() -> OcrWorker<Fake> {
     OcrWorker {
         present: true,
@@ -138,6 +153,7 @@ pub(crate) fn worker() -> OcrWorker<Fake> {
             crate::loop_guard::off_loop("the fake snapshot round");
             regions.iter().map(|_| Err("no snapshots here".to_string())).collect()
         },
+        compare: fake_compare,
         display_of: |_, _| 0,
         shot_of: |_, regions| {
             crate::loop_guard::off_loop("the fake snapshot's pixels");
@@ -201,9 +217,6 @@ impl ReadHost for Host {
     }
     fn report_error(&self, idx: usize, context: &str, message: &str) {
         self.errors.borrow_mut().push((idx, context.to_string(), message.to_string()));
-    }
-    fn read_source(&self, _: &Lua, _: (i32, i32, i32, i32)) -> CaptureSource {
-        CaptureSource::Standard
     }
 }
 
@@ -569,6 +582,34 @@ fn the_blocking_call_raises_for_a_key_where_it_cannot_wait() {
     assert!(yes(&lua, "return okKey == false and plain == 'held the loop'"));
     assert!(err.contains(&format!("mod.luau:2: {}", task::wait_message(Case::CannotWait))), "{err}");
     assert_eq!(h.legacy.borrow().len(), 2);
+}
+
+/// In a module that reads through desktop duplication, its first read carries the comparison of
+/// the two ways of reading to the capture thread, which makes it there — never the event loop, in
+/// either form. Made, never again for the VM; not made yet, every read carries it again.
+#[test]
+fn the_first_read_comparison_goes_with_the_read_to_the_capture_thread() {
+    let h = host();
+    let dup = CaptureSource::Duplication { or_standard: true };
+    let lua = vm(&h, 1);
+    capture_source::record_for_a_test(&lua, "com.dup.made", dup);
+    run(&lua, "host.ocr.recognize({ 9401, 5, 9431, 15 }, function(r) first = r.text end)");
+    settle(&h);
+    run(&lua, "task.run(function() second = host.ocr.recognize({ 9402, 5, 9432, 15 }).text end)");
+    settle(&h);
+    assert!(yes(&lua, "return first == '9401,5' and second == '9402,5'"));
+    assert_eq!(compared("com.dup.made"), ["screen-capture"], "once, on the capture thread");
+    assert_eq!(capture_source::compare_state(&lua), Some(Compare::Done));
+    let later = vm(&h, 2);
+    capture_source::record_for_a_test(&later, "com.dup.not yet", dup);
+    run(&later, "host.ocr.recognize({ 9403, 5, 9433, 15 }, function(r) a = r.text end)");
+    settle(&h);
+    run(&later, "task.run(function() b = host.ocr.recognize({ 9404, 5, 9434, 15 }).text end)");
+    settle(&h);
+    assert!(yes(&later, "return a == '9403,5' and b == '9404,5'"));
+    assert_eq!(compared("com.dup.not yet"), ["screen-capture", "screen-capture"], "asked again until made");
+    assert_eq!(capture_source::compare_state(&later), Some(Compare::Owed));
+    assert!(h.legacy.borrow().is_empty() && errors(&h).is_empty(), "{:?}", errors(&h));
 }
 
 // ── Where a task cannot wait ─────────────────────────────────────────────────────────────────

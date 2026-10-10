@@ -7311,6 +7311,13 @@ kind of place that says how long the first held the loop.
       run, only compiled. `examples/screen`'s comment points at "Where it waits" in ocr.md and says
       the `host.screen` calls do not wait yet: W1a points it at screen.md's own section and drops
       the "yet".
+      Step 11.1, the same day: the first-read comparison of a module that reads through desktop
+      duplication goes with the read handed to a thread (a text read, `snapshotAsync`, `profile`
+      with a callback, the three image-worker calls) and is made there, before that read's
+      capture, never on the event loop. One read carries it at a time, and one that ends before its
+      picture leaves it to the module's next read. The calls that read synchronously still make it
+      on the loop until W1a to W3 make them waits. Tested with fakes only; nothing changes on a
+      Mac, where every module reads the standard way.
 - [x] **The review of K, B1a, B2 and B3** (2026-10-04, three reviews; kb-final.md). The overlays
       of one module share its key scope and menu flag: the one that comes to the front pins the
       scope, only the last to leave sets it back, and the flag is then what the ones in front say

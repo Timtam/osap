@@ -69,7 +69,6 @@ use std::time::{Duration, Instant};
 
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
-use crate::backend::CaptureSource;
 use crate::image_search::VmOwner;
 use crate::mailbox::{self, Event, MailHost, Mailboxes, Opened, Why};
 use crate::ocr::lua::{self as reads, OcrState, ReadHost};
@@ -873,9 +872,6 @@ impl ReadHost for Scripted {
         if let Ok(errors) = lua.named_registry_value::<Table>("__scripted_task_errors") {
             let _ = errors.raw_push(message);
         }
-    }
-    fn read_source(&self, _: &Lua, _: (i32, i32, i32, i32)) -> CaptureSource {
-        CaptureSource::Standard
     }
 }
 

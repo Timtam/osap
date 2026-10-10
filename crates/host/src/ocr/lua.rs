@@ -73,8 +73,6 @@ pub(crate) trait ReadHost: 'static {
     fn bump_epoch(&self);
     /// A module's callback failed: the log line and the dialog.
     fn report_error(&self, idx: usize, context: &str, message: &str);
-    /// Which picture a read of `first` from `lua`'s module sees (`capture_source::read_source`).
-    fn read_source(&self, lua: &Lua, first: (i32, i32, i32, i32)) -> CaptureSource;
 }
 
 impl ReadHost for Shared {
@@ -102,9 +100,6 @@ impl ReadHost for Shared {
     }
     fn report_error(&self, idx: usize, context: &str, message: &str) {
         self.report_callback_error(idx, context, message);
-    }
-    fn read_source(&self, lua: &Lua, first: (i32, i32, i32, i32)) -> CaptureSource {
-        capture_source::read_source(lua, &*self.backend, first)
     }
 }
 
@@ -827,14 +822,16 @@ pub(crate) fn submit<H: ReadHost>(
         // Nothing to photograph and no source to choose: the snapshot is the picture, and a
         // read of it makes no first-read comparison.
         Some(f) => h.ocr().submit_on_frame(
-            Spec { regions: rects, lang: args.lang, source: CaptureSource::Standard },
+            Spec { regions: rects, lang: args.lang, source: CaptureSource::Standard, compare: None },
             ticket,
             f,
         ),
+        // The comparison, when it is owed, goes with the read and is made on the capture thread.
         None => {
             let first = rects.iter().find(|r| !r.is_empty()).copied().unwrap_or_default();
-            let source = h.read_source(lua, first.tuple());
-            h.ocr().submit(Spec { regions: rects, lang: args.lang, source }, ticket)
+            let source = capture_source::vm_source(lua);
+            let compare = capture_source::take_compare(lua, first.tuple());
+            h.ocr().submit(Spec { regions: rects, lang: args.lang, source, compare }, ticket)
         }
     };
     // After the queue answered, and only when it took the read. Nothing is delivered before

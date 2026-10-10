@@ -8,6 +8,8 @@
 //! and every backend's `pump_pending` drains. See that module for why.
 
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Game controllers, observed from the background. Outside the [`Backend`] trait on purpose.
 pub mod gamepad;
@@ -398,6 +400,123 @@ pub enum CaptureSource {
 /// more.
 pub type CaptureFn = fn(&[(i32, i32, i32, i32)], CaptureSource) -> Vec<Result<CapturedImage, String>>;
 
+/// The first-read comparison as a thread that captures makes it ([`Backend::compare_fn`],
+/// [`OcrWorker::compare`]): `who` is the module, the region the one its read asked for. `false`
+/// when it could not be made yet — duplication still opening, or backing off — so a later read
+/// asks again. A plain `fn`, as [`CaptureFn`] is, so no thread touches the `Rc` backend.
+pub type CompareFn = fn(&str, (i32, i32, i32, i32)) -> bool;
+
+/// The comparison of a platform with one way of reading the screen: there is nothing to compare,
+/// so it is made at once.
+pub fn no_comparison(_who: &str, _region: (i32, i32, i32, i32)) -> bool {
+    true
+}
+
+/// Where a VM's first-read comparison stands (`capture_source.rs`), as the tests read it.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compare {
+    /// To be made by the VM's next read.
+    Owed,
+    /// One request carries it to the thread that captures for that request.
+    InFlight,
+    /// Made: never again for this VM.
+    Done,
+}
+
+/// A VM's first-read comparison, shared between the event loop, which hands it to a read
+/// ([`CompareSlot::take`]), and the thread that makes it. Holds 0 while it is owed, `u64::MAX`
+/// once it is made, and in flight the number of the one request that carries it: a request that
+/// ends without making it gives it back only while it is still that request's.
+#[derive(Debug)]
+pub struct CompareSlot(AtomicU64);
+
+const COMPARE_OWED: u64 = 0;
+const COMPARE_DONE: u64 = u64::MAX;
+
+/// The number of the next request to carry a comparison, for the whole process.
+static NEXT_CARRIER: AtomicU64 = AtomicU64::new(1);
+
+impl CompareSlot {
+    /// A VM's comparison: owed for one that reads through desktop duplication, made for every
+    /// other, which has nothing to compare.
+    pub fn new(owed: bool) -> CompareSlot {
+        CompareSlot(AtomicU64::new(if owed { COMPARE_OWED } else { COMPARE_DONE }))
+    }
+
+    #[cfg(test)]
+    pub fn state(&self) -> Compare {
+        match self.0.load(Ordering::SeqCst) {
+            COMPARE_OWED => Compare::Owed,
+            COMPARE_DONE => Compare::Done,
+            _ => Compare::InFlight,
+        }
+    }
+
+    /// Hands the comparison to a read of `region` by module `who` when it is owed. From then on it
+    /// is in flight until that request makes it or ends without making it; `None` while it is in
+    /// flight or made.
+    pub fn take(self: &Arc<Self>, who: &str, region: (i32, i32, i32, i32)) -> Option<CompareReq> {
+        let n = NEXT_CARRIER.fetch_add(1, Ordering::Relaxed);
+        self.0.compare_exchange(COMPARE_OWED, n, Ordering::SeqCst, Ordering::SeqCst).ok()?;
+        Some(CompareReq(Arc::new(Carried { slot: self.clone(), n, who: who.to_string(), region })))
+    }
+}
+
+/// The comparison one request carries to the thread that captures for it ([`CompareSlot::take`]).
+/// Cloned with the request it travels in, and settled once: by [`CompareReq::make`] or
+/// [`CompareReq::settle`]. When the last clone goes without that — a read superseded, refused or
+/// joined to another, a snapshot cancelled, a search ended — it is owed again, for the module's
+/// next read.
+#[derive(Clone, Debug)]
+pub struct CompareReq(Arc<Carried>);
+
+#[derive(Debug)]
+struct Carried {
+    slot: Arc<CompareSlot>,
+    n: u64,
+    who: String,
+    region: (i32, i32, i32, i32),
+}
+
+impl CompareReq {
+    /// Makes the comparison through `compare` on the calling thread: the thread about to capture
+    /// for the request, before it does. Nothing when it is no longer this request's to make. One
+    /// that panics counts as made, since it would fail the same way at every read.
+    pub fn make(&self, compare: CompareFn) {
+        let c = &*self.0;
+        if c.slot.0.load(Ordering::SeqCst) != c.n {
+            return;
+        }
+        let made = match crate::logging::contain(|| compare(&c.who, c.region)) {
+            Ok(made) => made,
+            Err(report) => {
+                crate::logging::line(
+                    "capture",
+                    &format!("[{}] the first-read comparison failed inside the application and is not made again: {report}", c.who),
+                );
+                true
+            }
+        };
+        self.settle(made);
+    }
+
+    /// Records whether it was made: done for good, or owed again for the module's next read.
+    pub fn settle(&self, made: bool) {
+        let c = &*self.0;
+        let to = if made { COMPARE_DONE } else { COMPARE_OWED };
+        let _ = c.slot.0.compare_exchange(c.n, to, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+
+impl Drop for Carried {
+    fn drop(&mut self) {
+        // Given back only while it is still this request's: made, or carried by a later request,
+        // it stays as it is.
+        let _ = self.slot.0.compare_exchange(self.n, COMPARE_OWED, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+
 /// The first words of every error a capture gives when the screen could not be read — and,
 /// alone, the whole error of the standard path, which cannot say more: an empty region, one too
 /// large to allocate for, or a read the operating system refused. [`DUPLICATION_UNANSWERED`]
@@ -585,6 +704,9 @@ pub struct OcrWorker<S = OcrShot> {
     /// Photographs a snapshot round, on the capture thread: `host.screen.snapshotAsync`'s
     /// pictures and change waits share the thread with the text reads' captures.
     pub frames: FramesFn,
+    /// Makes a module's first-read comparison, on the capture thread, before the capture of the
+    /// read or the snapshot that carries it ([`CompareReq`]).
+    pub compare: CompareFn,
     /// Which display the screen point lies on, as a number two points on one display share: the
     /// capture thread never plans one capture of regions on two displays, which on macOS can
     /// differ in scale. 0 for every point where one capture may span displays (Windows), and
@@ -615,6 +737,7 @@ impl OcrWorker {
             recognise: |_, regions, _| regions.iter().map(|_| Err(NO_RECOGNISER.to_string())).collect(),
             languages: crate::ocr::lang::Languages::default,
             frames: |regions, _, _| regions.iter().map(|_| Err(CAPTURE_FAILED.to_string())).collect(),
+            compare: no_comparison,
             display_of: |_, _| 0,
             shot_of: |_, _| OcrShot::default(),
         }
@@ -969,6 +1092,13 @@ pub trait Backend {
     /// `capture` per region, callable off the main thread (used by the async image worker).
     fn capture_fn(&self) -> CaptureFn;
 
+    /// The first-read comparison the image worker makes before it captures for a task that
+    /// carries one ([`CompareReq`]), off the main thread as [`Backend::capture_fn`] is. The
+    /// default is a platform with one way of reading the screen, which has nothing to compare.
+    fn compare_fn(&self) -> CompareFn {
+        no_comparison
+    }
+
     /// Captures `r` through `src` as a [`frame::Frame`], on the calling thread (the event loop):
     /// the pixels as `capture` gives them, when they came back, which path answered, and on
     /// macOS the backing-store image beside them. What `host.screen.snapshot` keeps. An error
@@ -999,7 +1129,9 @@ pub trait Backend {
     /// Reads `region` through both sources — the region a module just read, or the
     /// foreground window when that region is too small to say anything — and logs whether
     /// the two pictures agree, naming the module `who`. The first-read comparison of a module
-    /// that declared `[screen] capture = "duplication"`, taken once per VM build.
+    /// that declared `[screen] capture = "duplication"`, taken once per VM build. This is the
+    /// event loop's: a call that reads the screen synchronously makes it here, while every read
+    /// handed to a thread carries it there ([`CompareReq`], [`Backend::compare_fn`]).
     ///
     /// `false` when it could not be made yet (duplication still opening, backing off), so the
     /// caller asks again at the module's next read. Everywhere but Windows there is only one

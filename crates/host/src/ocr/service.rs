@@ -47,7 +47,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::backend::frame::Frame;
-use crate::backend::{CaptureSource, OcrText, OcrThread, OcrWorker, Recognise, NO_RECOGNISER};
+use crate::backend::{CaptureSource, CompareReq, OcrText, OcrThread, OcrWorker, Recognise, NO_RECOGNISER};
 use crate::logging;
 
 use super::lang::{self, LangReq, Languages};
@@ -82,12 +82,25 @@ type Clock = fn() -> Instant;
 
 /// What one read asks for. Two reads that ask for the same thing before the first is
 /// photographed share one capture and one recognition.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Spec {
     pub regions: Vec<Rect>,
     pub lang: LangReq,
     pub source: CaptureSource,
+    /// The module's first-read comparison, when this read carries it: made on the capture thread
+    /// before the picture is taken (`capture_source::take_compare`).
+    pub compare: Option<CompareReq>,
 }
+
+/// The same request whatever comparison it carries: one that joins another read gives its
+/// comparison back for the module's next read (`CompareReq`), and the picture is the same.
+impl PartialEq for Spec {
+    fn eq(&self, other: &Spec) -> bool {
+        self.regions == other.regions && self.lang == other.lang && self.source == other.source
+    }
+}
+
+impl Eq for Spec {}
 
 /// A finished job, handed to the event loop: one reading per region, for every ticket.
 pub struct Done {
@@ -668,8 +681,11 @@ fn capture_loop<S: Send + 'static>(inner: Arc<Inner<S>>, worker: OcrWorker<S>, s
     }
 }
 
-/// A text read's picture, handed to the recogniser.
+/// A text read's picture, handed to the recogniser — after the first-read comparison it carries.
 fn capture_for_read<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, id: JobId, spec: Spec) {
+    if let Some(c) = &spec.compare {
+        c.make(worker.compare);
+    }
     let regions: Vec<(i32, i32, i32, i32)> = spec.regions.iter().map(Rect::tuple).collect();
     let (pixels, bytes) = if worker.present {
         match logging::contain(|| (worker.capture)(&regions, spec.source)) {
@@ -696,10 +712,14 @@ fn capture_for_read<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, 
 /// Snapshot rounds slower than `ROUND_SLOW` this session, for the log.
 static SLOW_ROUNDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// One round of the snapshot lane: its captures, then — outside the lock — its comparisons and
-/// cuts, then its answers. A panic in the capture is every capture of the round failing; one in
-/// the host's own code for a request answers that request (`Round::run`).
-fn snapshot_round<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, round: Round, snaps: &Sender<SnapDone>) {
+/// One round of the snapshot lane: the first-read comparisons its requests carry, its captures,
+/// then — outside the lock — its comparisons and cuts, then its answers. A panic in the capture
+/// is every capture of the round failing; one in the host's own code for a request answers that
+/// request (`Round::run`).
+fn snapshot_round<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, mut round: Round, snaps: &Sender<SnapDone>) {
+    for c in round.take_compares() {
+        c.make(worker.compare);
+    }
     let began = Instant::now();
     let rects = round.tuples();
     let (source, poll) = (round.source, round.poll);
@@ -1006,7 +1026,7 @@ fn contained(what: &str, report: &str) {
 mod tests {
     use super::*;
     use crate::backend::frame::FrameVia;
-    use crate::backend::{CapturedImage, OcrLine, OcrWord};
+    use crate::backend::{CapturedImage, Compare, CompareSlot, OcrLine, OcrWord};
     use crate::ocr::change::{ChangeSpec, Wait};
     use crate::ocr::sched::Owner;
     use crate::ocr::snap_queue::{min_round, ChangeInfo, SnapKind, SnapOutcome, SnapTicket};
@@ -1105,11 +1125,25 @@ mod tests {
         if regions.iter().any(|r| r.0 == 5585) {
             locked(&WITHDRAWN_TAKEN).push(5585);
         }
+        if regions.iter().any(|r| r.0 == 4343) {
+            locked(&FIRST_READ).push("captured 4343".into());
+        }
         (regions.to_vec(), 16)
     }
 
     /// The withdrawal test's read, should it ever be photographed.
     static WITHDRAWN_TAKEN: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+    /// The first-read comparisons the fake made — the module and the thread — and the captures of
+    /// x = 4343 and 4344 between them, in order.
+    static FIRST_READ: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    /// Notes each comparison with its thread; made, unless the module's name says it is not yet.
+    fn fake_compare(who: &str, _: (i32, i32, i32, i32)) -> bool {
+        let thread = std::thread::current().name().unwrap_or("?").to_string();
+        locked(&FIRST_READ).push(format!("compared {who} on {thread}"));
+        !who.contains("not yet")
+    }
 
     fn line_of(text: String, word_x: i32) -> OcrText {
         let word = OcrWord { text: text.clone(), x: word_x, y: 0, w: 10, h: 10 };
@@ -1191,6 +1225,9 @@ mod tests {
                 if x == 4242 {
                     locked(&SNAP_THREADS).push(std::thread::current().name().unwrap_or("?").to_string());
                 }
+                if x == 4344 {
+                    locked(&FIRST_READ).push("captured 4344".into());
+                }
                 if matches!(x, 5556 | 5557 | 6001) {
                     locked(&SNAP_ORDER).push(x);
                 }
@@ -1228,6 +1265,7 @@ mod tests {
             recognise: fake_recognise,
             languages: fake_langs,
             frames: fake_frames,
+            compare: fake_compare,
             // x from 6000 to 6999 is a second display: the barrier test's module never shares a
             // capture with the other module's requests beside it.
             display_of: |x, _| u32::from((6000..7000).contains(&x)),
@@ -1238,7 +1276,7 @@ mod tests {
     const A: Owner = Owner { idx: 1, gen: 5 };
 
     fn spec(x: i32) -> Spec {
-        Spec { regions: vec![Rect::new(x, 2, 30, 10)], lang: LangReq::Default, source: CaptureSource::Standard }
+        Spec { regions: vec![Rect::new(x, 2, 30, 10)], lang: LangReq::Default, source: CaptureSource::Standard, compare: None }
     }
 
     fn ticket(id: TicketId, key: Option<&str>) -> Ticket {
@@ -1381,6 +1419,7 @@ mod tests {
             regions: vec![Rect::new(7, 0, 20, 10), Rect::new(50, 50, 0, 10)],
             lang: LangReq::Tags(vec!["en".into()]),
             source: CaptureSource::Standard,
+            compare: None,
         };
         s.submit(sp, ticket(1, None));
         let done = collect(&s, 1);
@@ -1477,7 +1516,7 @@ mod tests {
     }
 
     fn spec_at(x: i32, y: i32) -> Spec {
-        Spec { regions: vec![Rect::new(x, y, 30, 10)], lang: LangReq::Default, source: CaptureSource::Standard }
+        Spec { regions: vec![Rect::new(x, y, 30, 10)], lang: LangReq::Default, source: CaptureSource::Standard, compare: None }
     }
 
     fn of(owner: Owner, id: TicketId, prio: Priority) -> Ticket {
@@ -1493,7 +1532,7 @@ mod tests {
         let (s, stop) = Service::spawn_with(worker(), Limits { hang: Duration::from_millis(600), ..Limits::POLICY }, Instant::now);
         let other = Owner { idx: 3, gen: 1 };
         let regions = (0..5).map(|i| Rect::new(100 + i * 40, 77, 30, 10)).collect();
-        s.submit(Spec { regions, lang: LangReq::Default, source: CaptureSource::Standard }, ticket(1, None));
+        s.submit(Spec { regions, lang: LangReq::Default, source: CaptureSource::Standard, compare: None }, ticket(1, None));
         std::thread::sleep(Duration::from_millis(330));
         let out = s.submit(spec_at(40, 2), of(other, 2, Priority::Interactive));
         assert!(out.refused.is_none(), "330 ms into a job whose regions answer every 100 ms: {:?}", out.refused);
@@ -1634,7 +1673,7 @@ mod tests {
     fn the_exit_stops_a_job_between_regions() {
         let (s, stop) = Service::spawn(worker());
         let regions = (0..20).map(|i| Rect::new(100 + i * 40, 81, 30, 10)).collect();
-        s.submit(Spec { regions, lang: LangReq::Default, source: CaptureSource::Standard }, ticket(1, None));
+        s.submit(Spec { regions, lang: LangReq::Default, source: CaptureSource::Standard, compare: None }, ticket(1, None));
         std::thread::sleep(Duration::from_millis(120));
         let t = Instant::now();
         stop.shutdown(Duration::from_secs(2));
@@ -1763,6 +1802,65 @@ mod tests {
         stop.shutdown(Duration::from_secs(2));
     }
 
+    /// The first-read comparison a read or a snapshot carries is made on the capture thread, before
+    /// its picture — never on the thread that asked, which stands where the event loop stands — and
+    /// once: made, it is done for good; not made yet, it is owed for the module's next read.
+    #[test]
+    fn the_first_read_comparison_is_made_on_the_capture_thread_before_the_picture() {
+        let _loop = crate::loop_guard::mark_for_a_test();
+        let (s, stop) = Service::spawn(worker());
+        let read = Arc::new(CompareSlot::new(true));
+        let mut sp = spec(4343);
+        sp.compare = read.take("first.read", (4343, 2, 30, 10));
+        s.submit(sp, ticket(1, None));
+        assert_eq!(collect(&s, 1)[0].readings[0].status, Status::Text);
+        assert_eq!(read.state(), Compare::Done);
+        let snap_slot = Arc::new(CompareSlot::new(true));
+        let mut req = snap(2, Rect::new(4344, 0, 10, 10), SnapKind::Plain, Instant::now());
+        req.compare = snap_slot.take("first.snapshot not yet", (4344, 0, 10, 10));
+        s.submit_snap(req);
+        assert_eq!(collect_snaps(&s, 1).len(), 1);
+        assert_eq!(snap_slot.state(), Compare::Owed, "not made yet, so the next read asks again");
+        let seen: Vec<String> =
+            locked(&FIRST_READ).iter().filter(|l| l.contains("first.") || l.contains("434")).cloned().collect();
+        assert_eq!(
+            seen,
+            [
+                "compared first.read on screen-capture",
+                "captured 4343",
+                "compared first.snapshot not yet on screen-capture",
+                "captured 4344",
+            ]
+        );
+        stop.shutdown(Duration::from_secs(2));
+    }
+
+    /// A read that carries the comparison and is dropped before its picture — withdrawn, or joined
+    /// to the same read asked before it — gives it back for the module's next read, unmade.
+    #[test]
+    fn a_read_dropped_before_its_picture_gives_the_comparison_back() {
+        let (s, stop) = Service::spawn(worker());
+        hold(5587);
+        s.submit(spec(5587), ticket(1, None)); // holds the capture thread
+        let slot = Arc::new(CompareSlot::new(true));
+        let region = (5588, 2, 30, 10);
+        let mut sp = spec(5588);
+        sp.compare = slot.take("dropped.read", region);
+        s.submit(sp, ticket(2, None));
+        assert_eq!(slot.state(), Compare::InFlight);
+        assert!(s.withdraw(2));
+        assert_eq!(slot.state(), Compare::Owed, "withdrawn before its picture");
+        s.submit(spec(5589), ticket(3, None));
+        let mut joining = spec(5589);
+        joining.compare = slot.take("dropped.read", region);
+        assert!(s.submit(joining, ticket(4, None)).joined, "the same read, so one picture for both");
+        assert_eq!(slot.state(), Compare::Owed, "the read it joined carries none");
+        release(5587);
+        assert_eq!(collect(&s, 3).iter().map(|d| d.tickets.len()).sum::<usize>(), 3);
+        assert!(!locked(&FIRST_READ).iter().any(|l| l.contains("dropped.read")), "never made");
+        stop.shutdown(Duration::from_secs(2));
+    }
+
     /// A read of a snapshot counts in the picture budget what its regions cover of it, not the
     /// whole snapshot once per read.
     #[test]
@@ -1786,6 +1884,7 @@ mod tests {
             asked,
             holds,
             cancel: Arc::new(AtomicBool::new(false)),
+            compare: None,
         }
     }
 

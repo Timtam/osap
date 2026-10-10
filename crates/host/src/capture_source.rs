@@ -8,14 +8,14 @@
 //! and lib.rs and image_search.rs only call in at the places where a VM is built, a read is
 //! made, or a batch of image searches is captured.
 
-use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use mlua::{Function, Lua};
 use module_manifest::{ModuleManifest, ScreenDecl};
 
-use crate::backend::{self, Backend, CaptureFn, CaptureSource, CapturedImage};
+use crate::backend::{self, Backend, CaptureFn, CaptureSource, CapturedImage, CompareReq, CompareSlot};
 use crate::logging;
 
 /// One `code_module` dependency whose code runs inside a dependent's VM, with what the
@@ -189,9 +189,10 @@ struct VmCapture {
     src: CaptureSource,
     /// The VM owner's id, which the comparison line names.
     who: String,
-    /// Whether this VM's first-read comparison is still to be made. Per VM, so every module
-    /// that declares duplication gets its own answer, under its own name.
-    compare: Cell<bool>,
+    /// Where this VM's first-read comparison stands. Per VM, so every module that declares
+    /// duplication gets its own answer, under its own name; shared with the request that carries
+    /// it to a thread, which makes it there.
+    compare: Arc<CompareSlot>,
 }
 
 /// The source for reads made from this VM — the standard one for a VM built before this
@@ -200,12 +201,14 @@ pub(crate) fn vm_source(lua: &Lua) -> CaptureSource {
     lua.app_data_ref::<VmCapture>().map(|v| v.src).unwrap_or_default()
 }
 
-/// The source for a read of `region` from this VM — what every screen and OCR binding asks.
+/// The source for a read of `region` from this VM that captures on the event loop: the
+/// bindings that read the screen synchronously.
 ///
 /// The first time after the VM was built with duplication, it also has the backend compare
 /// the two sources and log the answer under the module's name: the question an author has
 /// right after declaring the key and reloading. Asked again at later reads until the backend
-/// could make it (duplication may still be opening). A VM that reads the standard way pays
+/// could make it (duplication may still be opening). Not while a request handed to a thread
+/// carries it ([`take_compare`]): that thread makes it. A VM that reads the standard way pays
 /// one app-data lookup, as `vm_source` does.
 pub(crate) fn read_source(lua: &Lua, backend: &dyn Backend, region: (i32, i32, i32, i32)) -> CaptureSource {
     read_source_with(lua, region, |who, r| backend.compare_capture_sources(who, r))
@@ -220,10 +223,36 @@ fn read_source_with(
     let Some(v) = lua.app_data_ref::<VmCapture>() else {
         return CaptureSource::Standard;
     };
-    if v.compare.get() && compare(&v.who, region) {
-        v.compare.set(false);
+    if let Some(req) = v.compare.take(&v.who, region) {
+        req.settle(compare(&v.who, region));
     }
     v.src
+}
+
+/// This VM's first-read comparison for a read of `region` that a thread captures for — a text
+/// read, a snapshot or a profile with a callback, an asynchronous search — when it is still owed:
+/// the request carries it, and that thread makes it before its capture, never the event loop.
+/// `None` when there is none to make, or another request carries it. The request's source is
+/// [`vm_source`].
+pub(crate) fn take_compare(lua: &Lua, region: (i32, i32, i32, i32)) -> Option<CompareReq> {
+    let v = lua.app_data_ref::<VmCapture>()?;
+    v.compare.take(&v.who, region)
+}
+
+/// Where this VM's first-read comparison stands; `None` for a VM built before any source was
+/// recorded.
+#[cfg(test)]
+pub(crate) fn compare_state(lua: &Lua) -> Option<backend::Compare> {
+    lua.app_data_ref::<VmCapture>().map(|v| v.compare.state())
+}
+
+/// Records `src` for this VM as [`apply`] would for module `id`, on every platform (off Windows
+/// `apply` reads a declared duplication the standard way): for the tests of the read paths, which
+/// make the comparison with a fake.
+#[cfg(test)]
+pub(crate) fn record_for_a_test(lua: &Lua, id: &str, src: CaptureSource) {
+    let compare = Arc::new(CompareSlot::new(matches!(src, CaptureSource::Duplication { .. })));
+    lua.set_app_data(VmCapture { src, who: id.to_string(), compare });
 }
 
 /// Resolves and records the source for the VM being built for `manifest`, and says so in the
@@ -238,8 +267,9 @@ pub(crate) fn apply(lua: &Lua, id: &str, manifest: &ModuleManifest, deps: &mut [
         logging::line("capture", l);
     }
     // The author's question after declaring it is "does it change anything for this
-    // application?", and the first read of the freshly built VM answers it — see `read_source`.
-    let compare = Cell::new(matches!(src, CaptureSource::Duplication { .. }));
+    // application?", and the first read of the freshly built VM answers it — see `read_source`
+    // and `take_compare`.
+    let compare = Arc::new(CompareSlot::new(matches!(src, CaptureSource::Duplication { .. })));
     lua.set_app_data(VmCapture { src, who: id.to_string(), compare });
 }
 
@@ -423,6 +453,8 @@ pub(crate) fn capture_frames(capture: CaptureFn, keys: &[FrameKey]) -> Vec<(Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::Compare;
+    use std::cell::Cell;
     use std::sync::Mutex;
 
     fn decl(capture: Option<&str>, fallback: Option<&str>) -> ScreenDecl {
@@ -651,6 +683,79 @@ mod tests {
         // A VM reading the standard way never compares.
         assert_eq!(read(&built(CaptureSource::Standard)), CaptureSource::Standard);
         assert_eq!(asked.get(), 4);
+    }
+
+    fn could_not(_: &str, _: (i32, i32, i32, i32)) -> bool {
+        false
+    }
+
+    fn could(_: &str, _: (i32, i32, i32, i32)) -> bool {
+        true
+    }
+
+    fn falls_over(_: &str, _: (i32, i32, i32, i32)) -> bool {
+        panic!("{}inside the comparison", crate::EXPECTED_PANIC)
+    }
+
+    /// The three states: owed until a request takes it, then in flight — one request carries it,
+    /// and neither another request nor a call that reads on the event loop makes it meanwhile —
+    /// then made for good, or owed again when that request could not make it or ended without
+    /// making it. A request that ends after a later one took it does not take it from that one.
+    #[test]
+    fn one_request_carries_the_comparison_and_one_that_ends_without_it_gives_it_back() {
+        let on_loop = Cell::new(0u32);
+        let read_on_loop = |lua: &Lua| {
+            read_source_with(lua, (1, 1, 1, 1), |_, _| {
+                on_loop.set(on_loop.get() + 1);
+                true
+            })
+        };
+        // A VM that reads the standard way has nothing to compare: made from the start.
+        let standard = built(CaptureSource::Standard);
+        assert_eq!(compare_state(&standard), Some(Compare::Done));
+        assert!(take_compare(&standard, (0, 0, 100, 100)).is_none());
+        assert!(take_compare(&Lua::new(), (0, 0, 100, 100)).is_none(), "nor does a VM with no source");
+        let lua = Lua::new();
+        record_for_a_test(&lua, "com.game.menu", DUP_ONLY);
+        assert_eq!(compare_state(&lua), Some(Compare::Owed));
+        // Taken by a request: in flight, and no other request or event-loop read makes it.
+        let first = take_compare(&lua, (0, 0, 100, 100)).expect("owed, so the request carries it");
+        assert_eq!(compare_state(&lua), Some(Compare::InFlight));
+        assert!(take_compare(&lua, (0, 0, 100, 100)).is_none(), "one request at a time");
+        assert_eq!(read_on_loop(&lua), DUP_ONLY);
+        assert_eq!(on_loop.get(), 0, "not made on the event loop while a request carries it");
+        // Copied with its request, and given back when the last copy ends without making it.
+        let copy = first.clone();
+        drop(first);
+        assert_eq!(compare_state(&lua), Some(Compare::InFlight));
+        drop(copy);
+        assert_eq!(compare_state(&lua), Some(Compare::Owed), "a dropped request gives it back");
+        // Could not be made yet: owed again, and the request that tried no longer holds it.
+        let tried = take_compare(&lua, (0, 0, 100, 100)).unwrap();
+        let tried_copy = tried.clone();
+        tried.make(could_not);
+        assert_eq!(compare_state(&lua), Some(Compare::Owed));
+        let next = take_compare(&lua, (0, 0, 100, 100)).unwrap();
+        drop(tried);
+        drop(tried_copy);
+        assert_eq!(compare_state(&lua), Some(Compare::InFlight), "the next request keeps it");
+        next.make(could_not);
+        next.make(could);
+        assert_eq!(compare_state(&lua), Some(Compare::Owed), "a request makes it once at most");
+        // Made: never again, by a request or on the event loop.
+        let last = take_compare(&lua, (0, 0, 100, 100)).unwrap();
+        last.make(could);
+        drop(last);
+        assert_eq!(compare_state(&lua), Some(Compare::Done));
+        assert!(take_compare(&lua, (0, 0, 100, 100)).is_none());
+        read_on_loop(&lua);
+        assert_eq!(on_loop.get(), 0);
+        // One that panics counts as made: it would fail the same way at every read.
+        crate::quiet_expected_panics();
+        let other = Lua::new();
+        record_for_a_test(&other, "com.game.other", DUP);
+        take_compare(&other, (0, 0, 100, 100)).unwrap().make(falls_over);
+        assert_eq!(compare_state(&other), Some(Compare::Done));
     }
 
     #[test]

@@ -1619,7 +1619,9 @@ impl Shared {
             st.ready.borrow_mut().push((p, why));
             return Ok(());
         }
-        let source = capture_source::read_source(lua, &*self.backend, rect.tuple());
+        // The comparison, when it is owed, goes with the request and is made on the capture thread.
+        let source = capture_source::vm_source(lua);
+        let compare = capture_source::take_compare(lua, rect.tuple());
         let at = args.at_ms.map(|ms| instant_at(ms).max(now));
         let (kind, holds) = match args.change {
             Some(c) => {
@@ -1642,6 +1644,7 @@ impl Shared {
             asked: now,
             holds,
             cancel: p.cancel.clone(),
+            compare,
         };
         st.pending.borrow_mut().insert(p.id, p);
         self.ocr.submit_snap(req);
@@ -1939,7 +1942,8 @@ impl Shared {
         match snap {
             Some(frame) => self.reduce(p, frame),
             None => {
-                let source = capture_source::read_source(lua, &*self.backend, rect.tuple());
+                let source = capture_source::vm_source(lua);
+                let compare = capture_source::take_compare(lua, rect.tuple());
                 let at = at_ms.map(|ms| instant_at(ms).max(now));
                 let req = SnapReq {
                     ticket: SnapTicket { id: p.id, owner, prio: p.prio },
@@ -1951,6 +1955,7 @@ impl Shared {
                     // plain `snapshotAsync` does; a timed one does not.
                     holds: snap_queue::holds_input(at.is_some(), false, false),
                     cancel: p.cancel.clone(),
+                    compare,
                 };
                 st.pending.borrow_mut().insert(p.id, p);
                 self.ocr.submit_snap(req);

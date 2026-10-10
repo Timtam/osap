@@ -29,7 +29,7 @@ use std::time::Duration;
 use mlua::{Function, Lua, Value};
 
 use crate::backend::stub::StubBackend;
-use crate::backend::{self, Backend, Capture, CaptureSource, NotPassed, OwnerKeys, PassWhy, Pressed, Stroke};
+use crate::backend::{self, Backend, Capture, NotPassed, OwnerKeys, PassWhy, Pressed, Stroke};
 use crate::captures::{self, Arrived, Captures, Gone, KeyHost, PassedOn};
 use crate::image_search::VmOwner;
 use crate::mailbox::{self, Delivered, Event, MailHost, Mailboxes, Opened, Why};
@@ -89,9 +89,6 @@ impl ReadHost for Host {
     }
     fn report_error(&self, idx: usize, context: &str, message: &str) {
         self.errors.borrow_mut().push((idx, context.to_string(), message.to_string()));
-    }
-    fn read_source(&self, _: &Lua, _: (i32, i32, i32, i32)) -> CaptureSource {
-        CaptureSource::Standard
     }
 }
 

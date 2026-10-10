@@ -24,7 +24,7 @@ use mlua::{
 use rayon::prelude::*;
 
 use crate::backend::frame::Frame;
-use crate::backend::{CaptureFn, CaptureSource, CapturedImage};
+use crate::backend::{CaptureFn, CaptureSource, CapturedImage, CompareFn, CompareReq};
 use crate::vm_guard::host_call;
 use crate::capture_source;
 use crate::cells;
@@ -326,6 +326,9 @@ pub(crate) enum Haystack {
         /// with the task, so a held search sent again on re-enable reads the way it was first
         /// asked to.
         source: CaptureSource,
+        /// The module's first-read comparison, when this task carries it: the worker makes it
+        /// before the batch's captures (`capture_source::take_compare`).
+        compare: Option<CompareReq>,
     },
     /// A snapshot the module passed, read where `region` lies in it — already cut to it at the
     /// call — and never captured. Shared with the module's handle, not copied: a snapshot
@@ -387,7 +390,7 @@ impl ImageTask {
             Job::Profile { .. } => false,
         };
         match &self.hay {
-            Haystack::Screen { region, source } if !unresolved => Some((*region, *source)),
+            Haystack::Screen { region, source, .. } if !unresolved => Some((*region, *source)),
             _ => None,
         }
     }
@@ -502,14 +505,16 @@ pub(crate) struct ImageResult {
 /// match", a panicking batch as "could not look", and the thread carries on.
 pub(crate) fn spawn_image_worker(
     capture: CaptureFn,
+    compare: CompareFn,
     tasks: Receiver<ImageTask>,
     results: Sender<ImageResult>,
 ) {
-    std::thread::spawn(move || worker_loop(capture, tasks, results));
+    std::thread::spawn(move || worker_loop(capture, compare, tasks, results));
 }
 
 fn worker_loop(
     capture: CaptureFn,
+    compare: CompareFn,
     tasks: Receiver<ImageTask>,
     results: Sender<ImageResult>,
 ) {
@@ -538,6 +543,12 @@ fn worker_loop(
         }
         if batch.is_empty() {
             continue;
+        }
+        // The first-read comparisons the tasks carry, before the batch's captures.
+        for t in &batch {
+            if let Haystack::Screen { compare: Some(c), .. } = &t.hay {
+                c.make(compare);
+            }
         }
         let out = match logging::contain(|| run_batch(&batch, capture)) {
             Ok(out) => out,
@@ -977,7 +988,7 @@ pub(crate) fn discard_image_in(pending: &RefCell<HashMap<u64, PendingImage>>, mu
 pub(crate) fn test_pending(lua: &Lua, gens: &HashMap<usize, u64>, id: u64, scope: usize, cb: Function) -> PendingImage {
     let task = ImageTask {
         id,
-        hay: Haystack::Screen { region: (0, 0, 10, 10), source: CaptureSource::Standard },
+        hay: Haystack::Screen { region: (0, 0, 10, 10), source: CaptureSource::Standard, compare: None },
         job: Job::Search { entries: Vec::new(), tol: 0, scales: vec![1.0], mode: Mode::First, unresolved: None },
     };
     pending(lua, gens, scope, cb, vec![None], task).expect("the entry is made")
@@ -1654,10 +1665,10 @@ pub(crate) fn image_search_multi(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> 
 /// What a queued task reads, decided here on the main thread — the worker never sees a Lua
 /// state: `region` of the snapshot when the call was given one (already cut to it or found
 /// inside it at the call), which is never captured and never asks the module's source; else
-/// `region` of the screen through this VM's source. `region` may instead be why there is
-/// nothing to read this time, answered on the worker without a capture.
+/// `region` of the screen through this VM's source, with the VM's first-read comparison when it
+/// is owed. `region` may instead be why there is nothing to read this time, answered on the
+/// worker without a capture.
 fn haystack(
-    sh: &Shared,
     lua: &Lua,
     snap: Option<Arc<Frame>>,
     region: Result<(i32, i32, i32, i32), String>,
@@ -1665,9 +1676,12 @@ fn haystack(
     match (snap, region) {
         (Some(frame), Ok(r)) => (Haystack::Frame { frame, region: geo::Rect::from_tuple(r) }, None),
         (Some(frame), Err(why)) => (Haystack::Frame { frame, region: geo::Rect::default() }, Some(why)),
-        (None, Ok(r)) => (Haystack::Screen { region: r, source: capture_source::read_source(lua, &*sh.backend, r) }, None),
+        (None, Ok(r)) => (
+            Haystack::Screen { region: r, source: capture_source::vm_source(lua), compare: capture_source::take_compare(lua, r) },
+            None,
+        ),
         (None, Err(why)) => {
-            (Haystack::Screen { region: (0, 0, 0, 0), source: capture_source::vm_source(lua) }, Some(why))
+            (Haystack::Screen { region: (0, 0, 0, 0), source: capture_source::vm_source(lua), compare: None }, Some(why))
         }
     }
 }
@@ -1691,7 +1705,7 @@ fn enqueue(
     let tol = read_tol(opts);
     let scales = read_scales(opts);
     // The one place both async searches decide what the worker reads.
-    let (hay, unresolved) = haystack(sh, lua, snap, region);
+    let (hay, unresolved) = haystack(lua, snap, region);
     submit(sh, lua, scope, cb, names, hay, Job::Search { entries, tol, scales, mode, unresolved })
 }
 
@@ -1711,7 +1725,7 @@ pub(crate) fn enqueue_cells(
     names: Vec<Option<String>>,
     snap: Option<Arc<Frame>>,
 ) -> mlua::Result<()> {
-    let (hay, unresolved) = haystack(sh, lua, snap, rect);
+    let (hay, unresolved) = haystack(lua, snap, rect);
     let job = Job::Cells(Arc::new(CellsJob { matcher: Arc::new(matcher), unresolved }));
     submit(sh, lua, scope, cb, names, hay, job)
 }
@@ -2393,13 +2407,13 @@ mod tests {
         let states: Vec<Box<[u8]>> = vec![vec![0u8; 4].into(), vec![255u8; 4].into()];
         let matcher = cells::Matcher { spec, states, item_of: vec![0, 1] };
         let job = Job::Cells(Arc::new(CellsJob { matcher: Arc::new(matcher), unresolved: unresolved.map(str::to_string) }));
-        ImageTask { id, hay: Haystack::Screen { region, source: CaptureSource::Standard }, job }
+        ImageTask { id, hay: Haystack::Screen { region, source: CaptureSource::Standard, compare: None }, job }
     }
 
     fn task(id: u64, region: (i32, i32, i32, i32), entries: Vec<(Arc<Decoded>, Option<Rect>)>, mode: Mode) -> ImageTask {
         ImageTask {
             id,
-            hay: Haystack::Screen { region, source: CaptureSource::Standard },
+            hay: Haystack::Screen { region, source: CaptureSource::Standard, compare: None },
             job: Job::Search { entries, tol: 0, scales: Vec::new(), mode, unresolved: None },
         }
     }
@@ -2407,7 +2421,7 @@ mod tests {
     /// A screen task read through `source` instead.
     fn set_source(t: &mut ImageTask, source: CaptureSource) {
         let region = t.region();
-        t.hay = Haystack::Screen { region, source };
+        t.hay = Haystack::Screen { region, source, compare: None };
     }
 
     fn source_of(t: &ImageTask) -> CaptureSource {
@@ -2544,7 +2558,7 @@ mod tests {
         crate::quiet_expected_panics();
         let (task_tx, task_rx) = mpsc::channel();
         let (res_tx, res_rx) = mpsc::channel();
-        spawn_image_worker(panics_at_666, task_rx, res_tx);
+        spawn_image_worker(panics_at_666, crate::backend::no_comparison, task_rx, res_tx);
         task_tx.send(task(1, (666, 0, 10, 10), vec![(dot([255, 0, 0]), None)], Mode::First)).unwrap();
         let first = res_rx.recv_timeout(Duration::from_secs(10)).expect("an answer, not silence");
         assert_eq!(first.id, 1);
@@ -2553,6 +2567,36 @@ mod tests {
         let second = res_rx.recv_timeout(Duration::from_secs(10)).expect("the worker survived");
         assert_eq!(second.id, 2);
         assert_eq!(second.found(), Ok(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]));
+    }
+
+    /// The first-read comparison a task carries is made on the worker, before the batch's
+    /// capture — never on the thread that asked, which stands where the event loop stands.
+    #[test]
+    fn the_worker_makes_a_tasks_first_read_comparison_before_its_capture() {
+        static SEEN: Mutex<Vec<(String, std::thread::ThreadId)>> = Mutex::new(Vec::new());
+        fn compare(who: &str, _: (i32, i32, i32, i32)) -> bool {
+            SEEN.lock().unwrap().push((format!("compared {who}"), std::thread::current().id()));
+            true
+        }
+        fn capture(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+            SEEN.lock().unwrap().push(("captured".to_string(), std::thread::current().id()));
+            two_dots(regions, src)
+        }
+        let _loop = crate::loop_guard::mark_for_a_test();
+        let (task_tx, task_rx) = mpsc::channel();
+        let (res_tx, res_rx) = mpsc::channel();
+        spawn_image_worker(capture, compare, task_rx, res_tx);
+        let slot = Arc::new(crate::backend::CompareSlot::new(true));
+        let region = (0, 0, 10, 10);
+        let mut t = task(1, region, vec![(dot([255, 0, 0]), None)], Mode::First);
+        t.hay = Haystack::Screen { region, source: CaptureSource::Standard, compare: slot.take("image.worker", region) };
+        task_tx.send(t).unwrap();
+        let answer = res_rx.recv_timeout(Duration::from_secs(10)).expect("an answer");
+        assert_eq!(answer.found(), Ok(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]));
+        assert_eq!(slot.state(), crate::backend::Compare::Done);
+        let seen = SEEN.lock().unwrap().clone();
+        assert_eq!(seen.iter().map(|(what, _)| what.as_str()).collect::<Vec<_>>(), ["compared image.worker", "captured"]);
+        assert!(seen.iter().all(|(_, thread)| *thread != std::thread::current().id()), "on the worker");
     }
 
     /// The worker's panics are reported by the worker, with their place, and kept from the
