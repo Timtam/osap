@@ -24,9 +24,6 @@
 //!   one refused when every waiting ticket has a key) and `TOTAL` jobs.
 //! - **A budget for pictures.** While captured-but-unrecognised pixels exceed the budget the
 //!   caller passes, background captures wait; interactive ones never do.
-//! - **The module about to act goes first.** `expedite` marks a module's pictures still to be
-//!   taken as urgent — the input barrier does, before a click — and an urgent job is
-//!   photographed before any other, whatever the budget.
 //! - **A read a person now waits on goes as theirs.** `promote` makes a ticket interactive, and
 //!   its job with it — a handler waiting for a poll's read when a key queues behind it. A job
 //!   already being recognised runs on as it started.
@@ -72,8 +69,6 @@ struct Job<S, P> {
     id: JobId,
     spec: S,
     prio: Priority,
-    /// A module waiting for this picture is about to act (`expedite`).
-    urgent: bool,
     tickets: Vec<Ticket>,
     stage: Stage,
     asked: Instant,
@@ -112,11 +107,11 @@ pub const TOO_MANY: &str = "too many reads waiting — put regions that belong t
 /// Which kind of waiting capture goes first on the capture thread — the order `take_capture`
 /// has always taken OCR pictures in. The snapshot lane beside it (`snap_queue.rs`) ranks its own
 /// requests by the same classes, so the two are weighed against each other with one rule
-/// (`snap_queue::choose`): a lower class first, then the one due earlier.
+/// (`snap_queue::choose`): a lower class first, then the one due earlier. Acting does not move a
+/// module's pictures up: a module that clicks while one of its pictures waits does not wait for
+/// it, and the picture keeps its place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Class {
-    /// A module about to act waits for it (`expedite`).
-    Urgent,
     /// A background request that has waited `AGING`.
     Aged,
     Interactive,
@@ -210,7 +205,6 @@ impl<S: Clone + PartialEq, P> Scheduler<S, P> {
             id,
             spec,
             prio: ticket.prio,
-            urgent: false,
             tickets: vec![ticket],
             stage: Stage::AwaitCapture,
             asked: now,
@@ -245,7 +239,6 @@ impl<S: Clone + PartialEq, P> Scheduler<S, P> {
             id,
             spec,
             prio: ticket.prio,
-            urgent: false,
             tickets: vec![ticket],
             stage: Stage::Captured,
             asked: now,
@@ -333,15 +326,12 @@ impl<S: Clone + PartialEq, P> Scheduler<S, P> {
         }
     }
 
-    /// The next job to photograph, and its class: an urgent one (`expedite`) whatever the
-    /// budget; then a background job that has waited `AGING`; then interactive ones; then the
-    /// rest in the order asked. Background jobs only while the picture budget is not exceeded.
+    /// The next job to photograph, and its class: a background job that has waited `AGING`; then
+    /// interactive ones; then the rest in the order asked. Background jobs only while the picture
+    /// budget is not exceeded.
     fn pick_capture(&self, over_budget: bool, now: Instant) -> Option<(usize, Class)> {
         let waiting = |j: &Job<S, P>| j.stage == Stage::AwaitCapture;
         let background = |j: &Job<S, P>| waiting(j) && j.prio == Priority::Background;
-        if let Some(i) = self.jobs.iter().position(|j| waiting(j) && j.urgent) {
-            return Some((i, Class::Urgent));
-        }
         if !over_budget {
             if let Some(i) =
                 self.jobs.iter().position(|j| background(j) && now.saturating_duration_since(j.asked) >= AGING)
@@ -373,21 +363,6 @@ impl<S: Clone + PartialEq, P> Scheduler<S, P> {
         job.stage = Stage::Capturing;
         job.capture_started = Some(now);
         Some((job.id, job.spec.clone()))
-    }
-
-    /// Module `idx` is about to act (the input barrier): its pictures still to be taken go
-    /// before every other, whatever the budget. True when it has any.
-    pub fn expedite(&mut self, idx: usize) -> bool {
-        let mut any = false;
-        for job in self
-            .jobs
-            .iter_mut()
-            .filter(|j| j.stage == Stage::AwaitCapture && j.tickets.iter().any(|t| t.owner.idx == idx))
-        {
-            job.urgent = true;
-            any = true;
-        }
-        any
     }
 
     /// The picture for `id` is taken. `false` when nobody waits for it any more — superseded or
@@ -533,11 +508,12 @@ impl<S: Clone + PartialEq, P> Scheduler<S, P> {
         found
     }
 
-    /// Whether module `idx` has no picture still to be taken — what the input barrier waits for.
-    pub fn barrier_clear(&self, idx: usize) -> bool {
-        !self.jobs.iter().any(|j| {
-            matches!(j.stage, Stage::AwaitCapture | Stage::Capturing)
-                && j.tickets.iter().any(|t| t.owner.idx == idx)
+    /// Whether module `idx` has a picture still to be taken: a job of its waiting for its capture
+    /// or being captured. A read of a snapshot has its picture from the start. Only asked, never
+    /// waited for: acting meanwhile is noted (`ocr::lua::note_acting`).
+    pub fn picture_due(&self, idx: usize) -> bool {
+        self.jobs.iter().any(|j| {
+            matches!(j.stage, Stage::AwaitCapture | Stage::Capturing) && j.tickets.iter().any(|t| t.owner.idx == idx)
         })
     }
 
@@ -883,25 +859,11 @@ mod tests {
         assert_eq!(s.len(), 1, "only the recognition in progress is left");
         assert_eq!(s.captured_bytes(), 0, "the pictures waiting for the recogniser are dropped");
         assert!(!s.interactive_waiting());
-        assert!(s.barrier_clear(C.idx), "nothing left to photograph for anybody");
+        assert_eq!(s.peek_capture(false, now), None, "nothing left to photograph for anybody");
         assert!(s.cancel_all().is_empty(), "nothing more to take");
         assert!(s.finished(running.id).is_empty(), "the late answer finds nobody");
         assert!(s.is_empty());
         assert!(s.submit("after", bg(6, A, None), now).job.is_some());
-    }
-
-    #[test]
-    fn the_barrier_clears_once_the_modules_pictures_are_taken() {
-        let now = Instant::now();
-        let mut s = Sched::new();
-        assert!(s.barrier_clear(A.idx), "nothing asked: nothing to wait for");
-        s.submit("r", bg(1, A, None), now);
-        assert!(!s.barrier_clear(A.idx));
-        assert!(s.barrier_clear(B.idx), "another module's reads do not hold A's input");
-        let (id, _) = s.take_capture(false, now).unwrap();
-        assert!(!s.barrier_clear(A.idx), "being taken is not taken");
-        assert!(s.captured(id, 0, 0, now));
-        assert!(s.barrier_clear(A.idx));
     }
 
     #[test]
@@ -999,31 +961,50 @@ mod tests {
         assert!(!s.interactive_waiting());
     }
 
-    /// The input barrier's module goes first — before an interactive job asked earlier, and
-    /// whatever the budget — and only its own pictures do.
+    /// The capture order has three classes — a poll's picture that has waited `AGING`, then the
+    /// interactive ones, then the rest — and none above them for a module about to act: a click
+    /// waits for no picture any more (step 11.3), so nothing puts a module's own pictures first.
     #[test]
-    fn an_expedited_modules_picture_is_taken_first_whatever_the_budget() {
+    fn the_capture_order_has_three_classes() {
+        // A fourth class does not build here: it is a decision to make, not an addition.
+        let rank = |c: Class| match c {
+            Class::Aged => 0,
+            Class::Interactive => 1,
+            Class::Background => 2,
+        };
+        let mut all = [Class::Background, Class::Interactive, Class::Aged];
+        all.sort();
+        assert_eq!(all.map(rank), [0, 1, 2]);
+        // Over the budget an interactive picture is taken, and a module's own poll asked before it
+        // waits for the budget like any other's.
         let now = Instant::now();
         let mut s = Sched::new();
-        s.submit("tab", fg(1, B, None), now);
-        s.submit("mine", bg(2, A, None), now);
-        s.submit("other", bg(3, C, None), now);
-        assert!(!s.expedite(9), "a module with nothing waiting has nothing to hurry");
-        assert!(s.expedite(A.idx));
-        let (_, spec) = s.take_capture(true, now).unwrap();
-        assert_eq!(spec, "mine");
-        let (_, spec) = s.take_capture(true, now).unwrap();
-        assert_eq!(spec, "tab");
-        assert!(s.take_capture(true, now).is_none(), "C's is not hurried");
-        // A picture already being taken is not waiting any more: nothing to mark.
-        let mut s = Sched::new();
         s.submit("mine", bg(1, A, None), now);
-        s.take_capture(false, now).unwrap();
-        assert!(!s.expedite(A.idx));
+        s.submit("tab", fg(2, B, None), now);
+        assert_eq!(s.take_capture(true, now).map(|(_, spec)| spec), Some("tab"));
+        assert!(s.take_capture(true, now).is_none(), "the module's own poll is not hurried");
+    }
+
+    /// A module's picture is due while its job waits for the capture or is being captured, and
+    /// no longer once it is taken; a read of a snapshot has its picture from the start.
+    #[test]
+    fn a_picture_is_due_until_it_is_taken() {
+        let now = Instant::now();
+        let mut s = Sched::new();
+        assert!(!s.picture_due(A.idx), "nothing asked");
+        s.submit("r", bg(1, A, None), now);
+        assert!(s.picture_due(A.idx));
+        assert!(!s.picture_due(B.idx), "another module's read is not B's");
+        let (id, _) = s.take_capture(false, now).unwrap();
+        assert!(s.picture_due(A.idx), "being taken is not taken");
+        assert!(s.captured(id, 0, 0, now));
+        assert!(!s.picture_due(A.idx), "taken, and waiting for the recogniser");
+        s.submit_captured("of a snapshot", bg(2, B, None), 0, 0, now);
+        assert!(!s.picture_due(B.idx), "a read of a snapshot photographs nothing");
     }
 
     /// `peek_capture` names the job `take_capture` then takes, with its class, in every one of
-    /// the orders above: urgent, aged, interactive, background, and nothing over the budget.
+    /// the orders above: aged, interactive, background, and nothing over the budget.
     #[test]
     fn peek_capture_agrees_with_take_capture() {
         let t0 = Instant::now();
@@ -1032,10 +1013,7 @@ mod tests {
         assert_eq!(s.peek_capture(false, t0), None);
         s.submit("poll", bg(1, A, None), t0);
         s.submit("tab", fg(2, B, None), t0);
-        s.submit("mine", bg(3, C, None), t0);
-        assert!(s.expedite(C.idx));
-        let cases: [(bool, Instant, Class, &str); 4] = [
-            (true, t0, Class::Urgent, "mine"),
+        let cases: [(bool, Instant, Class, &str); 3] = [
             (false, later, Class::Aged, "poll"),
             (true, later, Class::Interactive, "tab"),
             (false, t0, Class::Background, "late"),
@@ -1066,7 +1044,6 @@ mod tests {
         let id = out.job.unwrap();
         assert!(!out.joined && out.refused.is_none());
         assert_eq!(s.stage(id), Some(Stage::Captured));
-        assert!(s.barrier_clear(A.idx), "nothing to photograph: the input barrier does not wait for it");
         assert_eq!(s.captured_bytes(), 4096);
         assert!(s.take_capture(false, now).is_none(), "nothing to capture");
         // The same spec live does not join it: its picture is the snapshot's, not a new one.

@@ -47,10 +47,6 @@ pub const BBOX_FLOOR: i64 = 65_536;
 /// Interactive captures always proceed.
 pub const CAPTURED_BUDGET: usize = 256 * 1024 * 1024;
 
-/// How long `host.input.*` and `host.window.focus` wait for the calling module's pending
-/// capture to be taken.
-pub const BARRIER: Duration = Duration::from_millis(50);
-
 /// How often, at most, the language list is read again after a language did not resolve — a
 /// language pack installed while the application runs is picked up without a restart.
 pub const LANG_REREAD: Duration = Duration::from_secs(30);

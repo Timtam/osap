@@ -170,12 +170,9 @@ pub fn snapshot_lane_calls() {
     let _: fn(&mut SnapLane, Instant) -> Option<Round> = SnapLane::take;
     let _: fn(&SnapLane) -> Option<Instant> = SnapLane::next_wake;
     let _: fn(&mut SnapLane, Instant) -> Vec<SnapDone> = SnapLane::sweep_cancelled;
-    let _: fn(&SnapLane, usize) -> bool = SnapLane::barrier_clear;
-    let _: fn(&mut SnapLane, usize) -> bool = SnapLane::expedite;
+    let _: fn(&SnapLane, usize) -> bool = SnapLane::picture_due;
     let _: fn(&mut SnapLane, RoundDone, Instant) -> Vec<SnapDone> = SnapLane::finish;
     let _: fn(Round, Vec<Result<Frame, String>>, Instant, u64) -> RoundDone = Round::run;
-    let _: fn(bool, bool, bool) -> bool = snap_queue::holds_input;
-    let _: fn(&Frame, Rect, &[Rect], backend::CaptureSource) -> bool = snap_queue::from_usable;
     let _: fn(&[Rect], i64) -> (Vec<Rect>, Vec<usize>) = snap_queue::group;
     let _: fn(Round, &str, Instant) -> RoundDone = Round::fail;
     let _: fn(&Round) -> Vec<(i32, i32, i32, i32)> = Round::tuples;
@@ -189,6 +186,7 @@ pub fn snapshot_lane_calls() {
     let _: fn(&backend::CompareReq, bool) = backend::CompareReq::settle;
     let _: fn(Option<Cand>, Option<Cand>) -> Option<Pick> = snap_queue::choose;
     let _: fn(&Scheduler<u8, u8>, bool, Instant) -> Option<Cand> = Scheduler::peek_capture;
+    let _: fn(&Scheduler<u8, u8>, usize) -> bool = Scheduler::picture_due;
     let _: fn(&mut Scheduler<u8, u8>, u8, ocr::sched::Ticket, u8, usize, Instant) -> ocr::sched::Submitted =
         Scheduler::submit_captured;
 }

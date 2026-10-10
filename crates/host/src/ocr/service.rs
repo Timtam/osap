@@ -6,11 +6,10 @@
 //! press raised can be gone by then. Recognition runs on the second thread, one job at a time,
 //! next to a game that wants the rest of the machine.
 //!
-//! **Read, then act, stays safe.** A module that reads a field and then clicks it expects the
-//! read to see the field before the click. The click is synchronous and the read is not, so
-//! `host.input.*` and `host.window.focus` wait — up to `policy::BARRIER` — until the calling
-//! module's pending pictures are taken ([`Service::barrier`]), and those pictures go before
-//! every other waiting one meanwhile.
+//! **Read, then act, is the module's to order.** A module that reads a field and then clicks it
+//! acts once the read is answered — after the call returns in a handler, or in its callback. Input
+//! never waits for a picture here: a click made while a read is out may be in its picture, and the
+//! picture's `inputEpoch` says whether it can be.
 //!
 //! **A hang is a region that does not come back**, not a long job: the recognisers report each
 //! region they answer, and new reads are refused only when none has been answered for
@@ -23,9 +22,9 @@
 //! `host.screen.snapshotAsync`'s: a snapshot is the same act as the first half of a read. The
 //! snapshots wait in a lane of their own beside the reads' queue (`snap_queue.rs`) — plain ones,
 //! timed ones and the rounds of change waits — and the thread takes whichever of the two is more
-//! urgent by one rule (`snap_queue::choose`). The input barrier covers both. A read of a snapshot
-//! the module holds is not photographed at all: it goes to the recogniser with the snapshot's
-//! pixels ([`Service::submit_on_frame`], `OcrWorker::shot_of`).
+//! urgent by one rule (`snap_queue::choose`). A read of a snapshot the module holds is not
+//! photographed at all: it goes to the recogniser with the snapshot's pixels
+//! ([`Service::submit_on_frame`], `OcrWorker::shot_of`).
 //!
 //! What stays as it was: the Windows neural recogniser still starts beside `Windows.Media.Ocr`
 //! for every small region, inside the recognise stage exactly as `recognize` runs it, and its
@@ -196,8 +195,6 @@ struct Inner<S> {
     capture_cv: Condvar,
     /// The recognise thread waits here for a job to recognise.
     recognise_cv: Condvar,
-    /// The event loop's input barrier waits here for pictures to be taken.
-    barrier_cv: Condvar,
     stop: AtomicBool,
     /// Interactive work is waiting: a background recognition skips its optional passes.
     preempt: AtomicBool,
@@ -275,7 +272,6 @@ impl<S: Send + 'static> Service<S> {
             }),
             capture_cv: Condvar::new(),
             recognise_cv: Condvar::new(),
-            barrier_cv: Condvar::new(),
             stop: AtomicBool::new(false),
             preempt: AtomicBool::new(false),
             input_epoch: AtomicU64::new(0),
@@ -330,7 +326,7 @@ impl<S: Send + 'static> Service<S> {
     /// goes to the recogniser with the snapshot's pixels, the part its regions cover counting in
     /// the picture budget until they are recognised ([`snapshot_read_bytes`]). The same keys,
     /// limits and refusal while the recogniser hangs as `submit`; it is never shared with another
-    /// read, and the input barrier never waits for it — its picture predates the call.
+    /// read — its picture predates the call.
     pub fn submit_on_frame(&self, spec: Spec, ticket: Ticket, frame: Arc<Frame>) -> Submitted {
         let now = (self.inner.clock)();
         let mut st = locked(&self.inner.state);
@@ -342,7 +338,6 @@ impl<S: Send + 'static> Service<S> {
         self.inner.preempt.store(st.sched.interactive_waiting(), Ordering::Relaxed);
         drop(st);
         self.inner.recognise_cv.notify_one();
-        self.inner.barrier_cv.notify_all();
         out
     }
 
@@ -361,12 +356,20 @@ impl<S: Send + 'static> Service<S> {
     }
 
     /// The event loop set some requests' cancel flags: the capture thread answers them now,
-    /// rather than at its next round, and an input barrier waiting on one looks again.
+    /// rather than at its next round.
     pub fn wake_snaps(&self) {
         // Under the lock, so a thread between its check and its wait cannot miss the wake.
         let _st = locked(&self.inner.state);
         self.inner.capture_cv.notify_one();
-        self.inner.barrier_cv.notify_all();
+    }
+
+    /// Whether module `idx` has a picture on the capture thread still to be taken that is meant to
+    /// show the screen as it was at the call: a text read's (`Scheduler::picture_due`), or a
+    /// snapshot request's (`SnapLane::picture_due`). A look under the lock, which the thread
+    /// never holds across a capture; nothing waits.
+    pub fn picture_due(&self, idx: usize) -> bool {
+        let st = locked(&self.inner.state);
+        st.sched.picture_due(idx) || st.lane.picture_due(idx)
     }
 
     /// Finished jobs since the last call.
@@ -400,7 +403,6 @@ impl<S: Send + 'static> Service<S> {
         let stale = st.sched.supersede(owner, key);
         self.inner.preempt.store(st.sched.interactive_waiting(), Ordering::Relaxed);
         drop(st);
-        self.inner.barrier_cv.notify_all();
         // Dropped jobs may have freed pictures from the budget a background capture waits on,
         // or taken away the job the recogniser was about to start.
         self.inner.capture_cv.notify_one();
@@ -414,7 +416,6 @@ impl<S: Send + 'static> Service<S> {
         let gone = st.sched.cancel_owner(idx);
         self.inner.preempt.store(st.sched.interactive_waiting(), Ordering::Relaxed);
         drop(st);
-        self.inner.barrier_cv.notify_all();
         // Dropped jobs may have freed pictures from the budget a background capture waits on.
         self.inner.capture_cv.notify_one();
         gone
@@ -429,7 +430,6 @@ impl<S: Send + 'static> Service<S> {
         self.inner.preempt.store(st.sched.interactive_waiting(), Ordering::Relaxed);
         drop(st);
         if found {
-            self.inner.barrier_cv.notify_all();
             // A dropped job may have freed pictures from the budget a background capture waits
             // on, or taken away the job the recogniser was about to start.
             self.inner.capture_cv.notify_one();
@@ -476,9 +476,7 @@ impl<S: Send + 'static> Service<S> {
         let failed = st.sched.cancel_all();
         self.inner.preempt.store(st.sched.interactive_waiting(), Ordering::Relaxed);
         drop(st);
-        // Nothing is left to photograph: an input barrier stops waiting, and the pictures that
-        // went free the budget.
-        self.inner.barrier_cv.notify_all();
+        // The pictures that went free the budget.
         self.inner.capture_cv.notify_one();
         if !failed.is_empty() {
             logging::line(
@@ -487,40 +485,6 @@ impl<S: Send + 'static> Service<S> {
             );
         }
         Some((failed, why))
-    }
-
-    /// Waits until module `idx` has no picture left to be taken — of a text read, a plain
-    /// snapshot, or the first of a change wait without `from` — for at most `bound`. True when it
-    /// has none; false when the wait ran out. Its pictures go first meanwhile: the module is
-    /// about to act, and a click that lands before the picture is what this is for.
-    pub fn barrier(&self, idx: usize, bound: Duration) -> bool {
-        let deadline = Instant::now() + bound;
-        let clear = |st: &State<S>| st.sched.barrier_clear(idx) && st.lane.barrier_clear(idx);
-        let mut st = locked(&self.inner.state);
-        if clear(&st) {
-            return true;
-        }
-        let reads = st.sched.expedite(idx);
-        let snaps = st.lane.expedite(idx);
-        if reads || snaps {
-            // Woken now, it takes the lock the moment the wait below releases it.
-            self.inner.capture_cv.notify_one();
-        }
-        loop {
-            if clear(&st) {
-                return true;
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return false;
-            }
-            st = self
-                .inner
-                .barrier_cv
-                .wait_timeout(st, deadline - now)
-                .map(|(g, _)| g)
-                .unwrap_or_else(|e| e.into_inner().0);
-        }
     }
 
     /// The languages the recognise thread published, waiting for them at most `bound` — they
@@ -602,7 +566,6 @@ fn shutdown<S>(inner: &Inner<S>, bound: Duration) {
         let _st = locked(&inner.state);
         inner.capture_cv.notify_all();
         inner.recognise_cv.notify_all();
-        inner.barrier_cv.notify_all();
     }
     let started = Instant::now();
     let deadline = started + bound;
@@ -707,7 +670,6 @@ fn capture_for_read<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, 
         inner.preempt.store(st.sched.interactive_waiting(), Ordering::Relaxed);
     }
     inner.recognise_cv.notify_one();
-    inner.barrier_cv.notify_all();
 }
 
 /// Snapshot rounds slower than `ROUND_SLOW` this session, for the log.
@@ -760,7 +722,6 @@ fn snapshot_round<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, mu
             break; // the event loop is gone
         }
     }
-    inner.barrier_cv.notify_all();
 }
 
 // ── The recognise thread ────────────────────────────────────────────────────────────────────
@@ -1048,13 +1009,9 @@ mod tests {
         }
     }
 
-    /// The regions photographed in the barrier-order test, in the order they were taken.
-    static ORDER: Mutex<Vec<i32>> = Mutex::new(Vec::new());
-
-    /// Regions from x = 5580 to 5589 whose picture is held until their test lets it go. The
-    /// barrier tests ask whether the barrier gives up at its bound *while* the picture is still
-    /// being taken; a clock cannot show that on a loaded machine (a 50 ms timed wait on a CI Mac
-    /// came back only when the 200 ms picture woke it).
+    /// Regions from x = 5580 to 5589 whose picture is held until their test lets it go: a picture
+    /// still being taken, for the tests of what happens meanwhile, which a clock cannot show on a
+    /// loaded machine (a 50 ms timed wait on a CI Mac came back only when a 200 ms picture woke it).
     static HELD: Mutex<Vec<i32>> = Mutex::new(Vec::new());
     static HELD_CV: Condvar = Condvar::new();
 
@@ -1106,22 +1063,15 @@ mod tests {
         }
     }
 
-    /// Photographs at once, except a region at x = 555, which takes 200 ms, and a held one
-    /// (5580 to 5589), which waits for its release, at most 10 s; panics at x = 667; notes the
-    /// order of x = 556, 557 and 5001.
+    /// Photographs at once, except a held region (5580 to 5589), which waits for its release, at
+    /// most 10 s; panics at x = 667.
     fn fake_capture(regions: &[(i32, i32, i32, i32)], _: CaptureSource) -> (Fake, usize) {
         CAPTURES.fetch_add(1, Ordering::SeqCst);
         if regions.iter().any(|r| r.0 == 667) {
             panic!("{}inside the fake capture", crate::EXPECTED_PANIC);
         }
-        if regions.iter().any(|r| r.0 == 555) {
-            std::thread::sleep(Duration::from_millis(200));
-        }
         for r in regions {
             wait_while_held(r.0);
-        }
-        for r in regions.iter().filter(|r| matches!(r.0, 556 | 557 | 5001)) {
-            locked(&ORDER).push(r.0);
         }
         if regions.iter().any(|r| r.0 == 5585) {
             locked(&WITHDRAWN_TAKEN).push(5585);
@@ -1205,13 +1155,11 @@ mod tests {
     /// (x, fake milliseconds).
     static SNAP_THREADS: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static FAKE_ROUNDS: Mutex<Vec<(i32, u64)>> = Mutex::new(Vec::new());
-    /// The snapshot barrier test's captures at x = 5556, 5557 and 6001, in the order taken.
-    static SNAP_ORDER: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
     /// Snapshot rounds: a frame of each rectangle, grey 10 — except that from x = 7000 to 7099
     /// it turns 200 once the fake clock passes 100 ms, with the fake clock's time as `taken`.
-    /// Panics at x = 668; takes 200 ms at x = 555; waits for a held region's release (5580 to
-    /// 5589); notes its thread at x = 4242.
+    /// Panics at x = 668; waits for a held region's release (5580 to 5589); notes its thread at
+    /// x = 4242.
     fn fake_frames(rects: &[(i32, i32, i32, i32)], _: CaptureSource, _: bool) -> Vec<Result<Frame, String>> {
         rects
             .iter()
@@ -1219,18 +1167,12 @@ mod tests {
                 if x == 668 {
                     panic!("{}inside the fake snapshot capture", crate::EXPECTED_PANIC);
                 }
-                if x == 555 {
-                    std::thread::sleep(Duration::from_millis(200));
-                }
                 wait_while_held(x);
                 if x == 4242 {
                     locked(&SNAP_THREADS).push(std::thread::current().name().unwrap_or("?").to_string());
                 }
                 if x == 4344 {
                     locked(&FIRST_READ).push("captured 4344".into());
-                }
-                if matches!(x, 5556 | 5557 | 6001) {
-                    locked(&SNAP_ORDER).push(x);
                 }
                 let fake = x >= 7000 && x < 8000;
                 let ms = FAKE_MS.load(Ordering::SeqCst);
@@ -1267,9 +1209,7 @@ mod tests {
             languages: fake_langs,
             frames: fake_frames,
             compare: fake_compare,
-            // x from 6000 to 6999 is a second display: the barrier test's module never shares a
-            // capture with the other module's requests beside it.
-            display_of: |x, _| u32::from((6000..7000).contains(&x)),
+            display_of: |_, _| 0,
             shot_of: fake_shot_of,
         }
     }
@@ -1440,35 +1380,6 @@ mod tests {
         let (s, stop) = Service::spawn(worker());
         let l = s.languages(Duration::from_secs(5)).expect("published");
         assert_eq!(l, fake_langs());
-        stop.shutdown(Duration::from_secs(2));
-    }
-
-    #[test]
-    fn the_barrier_returns_once_the_picture_is_taken() {
-        let (s, stop) = Service::spawn(worker());
-        assert!(s.barrier(A.idx, Duration::ZERO), "nothing asked, nothing to wait for");
-        s.submit(spec(999), ticket(1, None));
-        let t = Instant::now();
-        assert!(s.barrier(A.idx, Duration::from_secs(5)));
-        assert!(t.elapsed() < Duration::from_secs(5));
-        // The recognition (60 ms) is still running: the barrier did not wait for it.
-        assert!(s.drain().is_empty());
-        collect(&s, 1);
-        stop.shutdown(Duration::from_secs(2));
-    }
-
-    #[test]
-    fn the_barrier_gives_up_at_its_bound() {
-        let (s, stop) = Service::spawn(worker());
-        hold(5581);
-        s.submit(spec(5581), ticket(1, None));
-        let t = Instant::now();
-        // The picture cannot be taken before `release`: a barrier that waited for it would come
-        // back true only after the capture's own 10 s cap.
-        assert!(!s.barrier(A.idx, Duration::from_millis(50)), "the picture is held until released");
-        assert!(t.elapsed() >= Duration::from_millis(50), "{:?}", t.elapsed());
-        release(5581);
-        collect(&s, 1);
         stop.shutdown(Duration::from_secs(2));
     }
 
@@ -1686,49 +1597,6 @@ mod tests {
         assert_eq!(r.last().unwrap().error.as_deref(), Some(crate::backend::CLOSING));
     }
 
-    /// A module about to act has its picture taken before reads other modules asked for
-    /// earlier — interactive ones included.
-    #[test]
-    fn the_barrier_puts_its_modules_picture_first() {
-        let (s, stop) = Service::spawn(worker());
-        let b = Owner { idx: 2, gen: 1 };
-        s.submit(spec(555), of(b, 1, Priority::Interactive)); // holds the capture thread 200 ms
-        std::thread::sleep(Duration::from_millis(20));
-        s.submit(spec(556), of(b, 2, Priority::Interactive));
-        s.submit(spec(557), of(b, 3, Priority::Interactive));
-        s.submit(spec(5001), ticket(4, None));
-        assert!(s.barrier(A.idx, Duration::from_secs(2)));
-        collect(&s, 4);
-        let order = locked(&ORDER).clone();
-        assert_eq!(order.first(), Some(&5001), "{order:?}");
-        stop.shutdown(Duration::from_secs(2));
-    }
-
-    /// A module about to act has its snapshot taken before rounds other modules asked for
-    /// earlier — interactive ones included: the barrier hurries the snapshot lane as it hurries
-    /// the text reads.
-    #[test]
-    fn the_barrier_puts_its_modules_snapshot_first() {
-        let (s, stop) = Service::spawn(worker());
-        let b = Owner { idx: 2, gen: 1 };
-        let of_b = |id: u64, x: i32| {
-            let mut q = snap(id, Rect::new(x, 0, 10, 10), SnapKind::Plain, Instant::now());
-            q.ticket.owner = b;
-            q.ticket.prio = Priority::Interactive;
-            q
-        };
-        s.submit_snap(of_b(1, 555)); // holds the capture thread 200 ms
-        std::thread::sleep(Duration::from_millis(20));
-        s.submit_snap(of_b(2, 5556));
-        s.submit_snap(of_b(3, 5557));
-        s.submit_snap(snap(4, Rect::new(6001, 0, 10, 10), SnapKind::Plain, Instant::now()));
-        assert!(s.barrier(A.idx, Duration::from_secs(2)));
-        assert_eq!(collect_snaps(&s, 4).len(), 4);
-        let order = locked(&SNAP_ORDER).clone();
-        assert_eq!(order.first(), Some(&6001), "{order:?}");
-        stop.shutdown(Duration::from_secs(2));
-    }
-
     /// The pictures of a round carry the input epoch the event loop last noted before their
     /// captures came back.
     #[test]
@@ -1876,14 +1744,12 @@ mod tests {
     }
 
     fn snap(id: u64, region: Rect, kind: SnapKind, asked: Instant) -> SnapReq {
-        let holds = matches!(kind, SnapKind::Plain);
         SnapReq {
             ticket: SnapTicket { id, owner: A, prio: Priority::Background },
             region,
             source: CaptureSource::Standard,
             kind,
             asked,
-            holds,
             cancel: Arc::new(AtomicBool::new(false)),
             compare: None,
         }
@@ -1953,20 +1819,28 @@ mod tests {
         stop.shutdown(Duration::from_secs(2));
     }
 
-    /// A plain snapshot holds the module's input as a text read does; one taken at a set time
-    /// does not.
+    /// A change wait without `from`, asked before an input, may take its baseline after it:
+    /// nothing holds a module's input back for a picture it asked for (step 11.3), and the picture
+    /// says so by its `inputEpoch`. A module that must compare with the screen from before its
+    /// click takes a snapshot first, clicks in its callback and passes the snapshot as `from`.
     #[test]
-    fn the_barrier_waits_for_plain_snapshots_not_delayed_ones() {
+    fn a_change_wait_without_from_may_take_its_baseline_after_an_input() {
         let (s, stop) = Service::spawn(worker());
-        s.submit_snap(snap(1, Rect::new(20, 0, 10, 10), SnapKind::At(Instant::now() + Duration::from_millis(600)), Instant::now()));
-        assert!(s.barrier(A.idx, Duration::ZERO), "a timed snapshot does not hold input");
-        hold(5582);
-        s.submit_snap(snap(2, Rect::new(5582, 0, 10, 10), SnapKind::Plain, Instant::now()));
-        let t = Instant::now();
-        assert!(!s.barrier(A.idx, Duration::from_millis(50)), "the picture is held until released");
-        assert!(t.elapsed() >= Duration::from_millis(50), "{:?}", t.elapsed());
-        release(5582);
-        assert_eq!(collect_snaps(&s, 2).len(), 2);
+        let r = Rect::new(5581, 0, 10, 10);
+        hold(5581);
+        s.note_input_epoch(30);
+        // No time to wait: its first picture, its baseline, is its answer.
+        s.submit_snap(snap(1, r, wait(r, 0, Instant::now()), Instant::now()));
+        // The module clicks while that picture is still being taken.
+        s.note_input_epoch(31);
+        release(5581);
+        match &collect_snaps(&s, 1)[0].outcome {
+            SnapOutcome::Picture { frame, frames: 1, change: Some(info) } => {
+                assert_eq!(frame.input_epoch, 31, "the baseline is from after the click");
+                assert!(!info.changed);
+            }
+            _ => panic!("not the baseline"),
+        }
         stop.shutdown(Duration::from_secs(2));
     }
 

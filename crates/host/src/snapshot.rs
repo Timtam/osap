@@ -71,7 +71,7 @@ use crate::ocr::policy::{
     WAIT_MAX, WAIT_MIN_PIXELS, WAIT_SETTLE, WAIT_TIMEOUT, WAIT_TOLERANCE,
 };
 use crate::ocr::sched::Owner;
-use crate::ocr::snap_queue::{self, ChangeInfo, SnapDone, SnapId, SnapKind, SnapOutcome, SnapReq, SnapTicket};
+use crate::ocr::snap_queue::{ChangeInfo, SnapDone, SnapId, SnapKind, SnapOutcome, SnapReq, SnapTicket};
 use crate::ocr::types::{current_priority, enter_priority, Priority, Rect};
 use crate::region::{self, ScreenRect};
 use crate::region_lua::{self, PointArg};
@@ -1030,8 +1030,8 @@ impl PendingSnap {
         }
     }
 
-    /// With the image worker: a profile's picture being reduced. Such a request holds no input —
-    /// its picture is taken — and is answered from the worker, never from the capture thread.
+    /// With the image worker: a profile's picture being reduced. Such a request is no longer with
+    /// the capture thread — its picture is taken — and is answered from the worker.
     fn reducing(&self) -> bool {
         self.profile.as_ref().is_some_and(|j| j.task.is_some())
     }
@@ -1087,8 +1087,9 @@ impl SnapState {
         !self.pending.borrow().is_empty() || !self.ready.borrow().is_empty()
     }
 
-    /// Whether module `idx` has a request with the thread: the input barrier then asks the
-    /// thread whether one of them holds its input. A profile being reduced is not with it.
+    /// Whether module `idx` has a request with the thread: `host.input.*` and `host.window.focus`
+    /// then ask the thread whether one of its pictures is still to be taken (`Shared::note_acting`).
+    /// A profile being reduced is not with it.
     pub(crate) fn has_pending_for(&self, idx: usize) -> bool {
         self.pending.borrow().values().any(|p| p.owner.idx == idx && !p.reducing())
     }
@@ -1623,18 +1624,13 @@ impl Shared {
         let source = capture_source::vm_source(lua);
         let compare = capture_source::take_compare(lua, rect.tuple());
         let at = args.at_ms.map(|ms| instant_at(ms).max(now));
-        let (kind, holds) = match args.change {
+        let kind = match args.change {
             Some(c) => {
                 let start = at.unwrap_or(now);
-                // Its first picture is its baseline when it has no `from`, or one it cannot
-                // compare with: input waits for that picture, unless the module asked for it at
-                // a later time anyway.
-                let usable = c.from.as_ref().is_some_and(|f| snap_queue::from_usable(f, rect, &c.watch, source));
-                let holds = snap_queue::holds_input(at.is_some(), true, usable);
                 let wait = Box::new(Wait::new(rect, &c.watch, c.spec, c.from, start));
-                (SnapKind::Change { wait, start }, holds)
+                SnapKind::Change { wait, start }
             }
-            None => (at.map_or(SnapKind::Plain, SnapKind::At), snap_queue::holds_input(at.is_some(), false, false)),
+            None => at.map_or(SnapKind::Plain, SnapKind::At),
         };
         let req = SnapReq {
             ticket: SnapTicket { id: p.id, owner, prio: p.prio },
@@ -1642,7 +1638,6 @@ impl Shared {
             source,
             kind,
             asked: now,
-            holds,
             cancel: p.cancel.clone(),
             compare,
         };
@@ -1951,9 +1946,6 @@ impl Shared {
                     source,
                     kind: at.map_or(SnapKind::Plain, SnapKind::At),
                     asked: now,
-                    // A plain one holds the module's input until its picture is taken, as a
-                    // plain `snapshotAsync` does; a timed one does not.
-                    holds: snap_queue::holds_input(at.is_some(), false, false),
                     cancel: p.cancel.clone(),
                     compare,
                 };
@@ -2955,8 +2947,9 @@ mod tests {
     }
 
     /// A profile's picture is taken as a snapshot's is, then reduced on the image worker — the
-    /// request still on the list, charged what the picture holds and holding no input — and its
-    /// answer is the call's own table, built only as it runs, with the picture's moment.
+    /// request still on the list, charged what the picture holds and no longer with the capture
+    /// thread — and its answer is the call's own table, built only as it runs, with the picture's
+    /// moment.
     #[test]
     fn a_profiles_picture_goes_to_the_worker_and_its_answer_carries_the_moment() {
         let lua = Lua::new();
@@ -2964,7 +2957,7 @@ mod tests {
         let process = Rc::new(Cell::new(0));
         let r = Rect::new(10, 20, 30, 40);
         let id = add_profile(&st, &lua, &process, Some("area"), r, reservation_for(r, false));
-        assert!(st.has_pending_for(A.idx), "its picture holds the module's input, as a plain snapshot's does");
+        assert!(st.has_pending_for(A.idx), "with the capture thread, as a plain snapshot is");
         let mut f = test_frame(10, 20, 30, 40);
         f.input_epoch = 5;
         let frame = Arc::new(f);
@@ -2972,7 +2965,7 @@ mod tests {
         let task = to_worker_now(&st, done(id, SnapOutcome::Picture { frame: frame.clone(), frames: 1, change: None }), 9001);
         assert!(matches!(task.job, Job::Profile { cols: true, rows: true, dark: 128 }));
         assert!(matches!(&task.hay, Haystack::Frame { region, .. } if *region == r), "the region, of the picture taken");
-        assert!(!st.has_pending_for(A.idx), "being reduced, it holds no input");
+        assert!(!st.has_pending_for(A.idx), "being reduced, it is not with the capture thread");
         assert!(st.waiting_with(A, "area"), "and is still out");
         assert_eq!(process.get(), frame.bytes(), "charged what the picture holds");
         run_reduced(&st, &task, &process);

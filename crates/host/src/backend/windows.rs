@@ -4751,7 +4751,6 @@ mod capture_tests {
             source: CaptureSource::Standard,
             kind: SnapKind::Change { wait: Box::new(Wait::new(region, &[], spec, None, asked)), start: asked },
             asked,
-            holds: true,
             cancel: Arc::new(AtomicBool::new(false)),
             compare: None,
         };

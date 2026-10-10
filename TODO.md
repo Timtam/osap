@@ -4090,10 +4090,12 @@ What only a person, a Mac or a measurement can settle:
       check of step B4", below).
 - [ ] **Migrate the overlay runtime's `speakControl`**: the name spoken at once, the OCR value
       appended when it arrives, and the callback returning on `newer` (the focus moved) or on a
-      changed pinned window. Only an `ocrLabel` control waits for its read before speaking. The
-      input barrier is what keeps read-then-click right for the `opensMenu` buttons (sforzando,
-      u-he, Soundiron, Impact Soundworks) and the Komplete Kontrol OCR edit field; an NVDA test
-      with each of them is the gate.
+      changed pinned window. Only an `ocrLabel` control waits for its read before speaking.
+      Read-then-click for the `opensMenu` buttons (sforzando, u-he, Soundiron, Impact Soundworks)
+      and the Komplete Kontrol OCR edit field does not rest on the input barrier, which step 11.3
+      removed: since B3 the click comes after the read is answered (the runtime's `ocr`/`ocredit`
+      branch of `activate`, and `speakControl`'s `finish`). An NVDA test with each of them is
+      still the gate.
 - [ ] **Kontakt's file-menu read** waits in its timer's handler since B1b+M, and keeps building its
       own rows (`ocrRows`) until the reading's rows are compared with it on both platforms.
 - [ ] **The language list at load:** in the first headless run the list was not known within the
@@ -4107,8 +4109,9 @@ What only a person, a Mac or a measurement can settle:
 - [ ] **O1** — WinRT engine creation against `RecognizeAsync` (decides whether the recogniser
       should keep one engine per language).
 - [ ] **O3 / O16** — how long reads wait: before the capture, the capture, before the recogniser,
-      per lane, p50 and p95, with Melodyne polling and while tabbing through an overlay; and the
-      input barrier's waits. The log's "ocr: N region(s) … waited" line covers jobs over 100 ms.
+      per lane, p50 and p95, with Melodyne polling and while tabbing through an overlay. The log's
+      "ocr: N region(s) … waited" line covers jobs over 100 ms. (The input barrier's waits were
+      part of this until step 11.3 removed it.)
 - [ ] **O4** — a synchronous `recognize` inline against the same read queued and waited for.
 - [ ] **O5** — confirmation only: Windows with the resolver hands `"de-DE"` for `"de"`; whether
       `TryCreateFromLanguage("de")` alone would have worked is now moot.
@@ -4343,9 +4346,9 @@ in this order, and what is not built:
       `snapshot` key on `pixel`, `profile`, the five image searches, `template{ capture }`, the
       cells calls, `save` and `saveMarked` — and the asynchronous half ("Snapshots taken off the
       event loop, and change waits" below) — `host.screen.snapshotAsync` on the `screen-capture`
-      thread, as a lane beside the OCR captures with the input barrier over both, at once, at a
-      set time or as a change wait, and `host.ocr.read` on a snapshot. What is left are the
-      measurements and live checks listed in those two sections.
+      thread, as a lane beside the OCR captures with the input barrier over both (until step
+      11.3), at once, at a set time or as a change wait, and `host.ocr.read` on a snapshot. What
+      is left are the measurements and live checks listed in those two sections.
 - [ ] **Step 7 — own input tagged, scan codes, hold, new key names** (`host.input.send`; item
       e1 of the small-API design as the critique revised it). Not built:
   - **Own input tagged.** Every `SendInput` of the host — keys and mouse — carries a tag in
@@ -4501,13 +4504,13 @@ The second half of step 6 is built: `host.screen.snapshotAsync` takes a snapshot
 than `tolerance`; optionally until they stand still for `settle`; at most 2 s) — and
 `host.ocr.read { snapshot = s }` recognises a snapshot without a capture (ocr/change.rs,
 ocr/snap_queue.rs, ocr/service.rs, snapshot.rs; docs/api/screen.md "host.screen.snapshotAsync",
-docs/api/ocr.md "On a snapshot"). One capture thread for both, one priority rule, one input
-barrier; the DXGI engine is unchanged and change waits poll on every path
-(docs/screen-frame-sharing-design.md, section 6). The callback is `cb(snap, why, info)`, exactly
-once, and dropped for a module disabled, reloaded or removed first. Built with unit tests of
-the wait, the lane, the scheduler's two new calls, the service (a test of the capture
-loop on a stepped clock among them) and the Luau side. What only a person, a Mac or a measurement
-can settle:
+docs/api/ocr.md "On a snapshot"). One capture thread for both, one priority rule, and one input
+barrier until step 11.3 removed it (2026-10-10); the DXGI engine is unchanged and change waits
+poll on every path (docs/screen-frame-sharing-design.md, section 6). The callback is
+`cb(snap, why, info)`, exactly once, and dropped for a module disabled, reloaded or removed
+first. Built with unit tests of the wait, the lane, the scheduler's two new calls, the service
+(a test of the capture loop on a stepped clock among them) and the Luau side. What only a
+person, a Mac or a measurement can settle:
 
 - [ ] **S3** — change-wait rounds through the standard path: their pacing (a GDI capture costs a
       compositor frame, so rounds run back to back) and the CPU the `screen-capture` thread uses
@@ -4556,18 +4559,20 @@ can settle:
       baseline and a still spell's first picture as point-sized copies — against the 7-fold
       charge. The capture probe's macOS jobs require every snapshot callback it asked for.
 - [ ] **NVDA and JAWS with a real module:** a callback spoken promptly after a D-pad press
-      (press, change, speech), and a click held behind a plain `snapshotAsync` by the input
-      barrier (read, then act), under load — Melodyne's selection watcher polling beside it.
+      (press, change, speech), under load — Melodyne's selection watcher polling beside it. (A
+      click held behind a plain `snapshotAsync` was part of this until step 11.3 removed the input
+      barrier: a module clicks in the callback now.)
 - [ ] **Decided while planning, for the maintainer to confirm:** the callback is `cb(snap, why, info)`, not `cb(snap, info)` with `info.error`; a newer
       request with the same key answers the older one `nil` and a reason even when its picture was
       already taken (no `newer` as `host.ocr.read` has); `at` is a `host.now()` time, not a delay;
       the input barrier covers plain requests and a change wait's first picture without `from` or
-      `at`, not timed requests or waits with `from`; `host.ocr.read` on a snapshot cuts each region
-      to the snapshot, and a region with nothing in it fails alone; `recognize` and
-      `recognizeMany` raise for a `snapshot` key instead of ignoring it; `snapshotAsync`'s keys are
-      their own (a text read with the same key never replaces one); per module the oldest request
-      is ended, in the whole application the newest refused; the change wait lives in
-      `ocr/change.rs`, beside the thread that drives it.
+      `at`, not timed requests or waits with `from` (void since step 11.3, 2026-10-10: the
+      maintainer removed the barrier, and nothing holds a module's input for a picture);
+      `host.ocr.read` on a snapshot cuts each region to the snapshot, and a region with nothing
+      in it fails alone; `recognize` and `recognizeMany` raise for a `snapshot` key instead of
+      ignoring it; `snapshotAsync`'s keys are their own (a text read with the same key never
+      replaces one); per module the oldest request is ended, in the whole application the newest
+      refused; the change wait lives in `ocr/change.rs`, beside the thread that drives it.
 - [x] **Headless check of the asynchronous half** (debug build, 1920x1080, standard path,
       2026-09-26): a plain `snapshotAsync` of 300x100 was answered 24 ms after the call, its
       picture taken 7 ms after it; `at = host.now() + 150` was taken 170 ms after the call; a
@@ -7129,16 +7134,16 @@ kind of place that says how long the first held the loop.
 - [x] **`host.screen.profile` with a callback** (the maintainer's decision of 2026-10-09, in place
       of a separate `profileAsync`): `profile(opts, cb)` returns at once; a region's picture is
       taken on `screen-capture` as a plain or timed `snapshotAsync`'s is (`at`, the input barrier
-      without it), a snapshot's is the snapshot, held until it is reduced; the reduction runs on the
-      image worker; only the tables are built on the event loop, as `cb(profile)` runs as a handler
-      of its module, with the picture's `time` and `inputEpoch`, or `cb(nil, reason)`. It is one of
-      the module's snapshot requests (16 per VM, 64 in all) and charged against the snapshot
-      budget until its answer is handed over; its `key` is its own, and a newer one ends an older
-      one wherever it is, the worker skipping a reduction it has not begun. New
-      `host.screen.pending(key)`, for `snapshotAsync` and `profile` alike. Dropped with a disabled,
-      reloaded or stopped module. Without a callback the call is unchanged. Melodyne's note area
-      keeps its picture (the disc in the frame, a move's body, the unchanged-picture skip) and has
-      it profiled with a callback, one frame out at a time. Docs: screen.md, ocr.md,
+      without it until step 11.3), a snapshot's is the snapshot, held until it is reduced; the
+      reduction runs on the image worker; only the tables are built on the event loop, as
+      `cb(profile)` runs as a handler of its module, with the picture's `time` and `inputEpoch`, or
+      `cb(nil, reason)`. It is one of the module's snapshot requests (16 per VM, 64 in all) and
+      charged against the snapshot budget until its answer is handed over; its `key` is its own,
+      and a newer one ends an older one wherever it is, the worker skipping a reduction it has not
+      begun. New `host.screen.pending(key)`, for `snapshotAsync` and `profile` alike. Dropped with
+      a disabled, reloaded or stopped module. Without a callback the call is unchanged. Melodyne's
+      note area keeps its picture (the disc in the frame, a move's body, the unchanged-picture
+      skip) and has it profiled with a callback, one frame out at a time. Docs: screen.md, ocr.md,
       module-runtime-and-lifecycle.md, timer.md. Not run live yet: the NVDA check of Melodyne 0.1.5
       below covers it.
 - [x] **Melodyne's pass name, its note steps under Time, and pictures that did not change** (the
@@ -7328,6 +7333,40 @@ kind of place that says how long the first held the loop.
       it either. Melodyne turns its pass reads to the user's language only once the list is known:
       a read refused before it is published says nothing about English. Scripted host only;
       nothing audible changes.
+      Step 11.3, the same day: the input barrier is gone (the maintainer's decision 2).
+      `host.input.*` and `host.window.focus` act at once instead of waiting up to 50 ms for the
+      pictures the module has out, and those pictures no longer go before every other on
+      `screen-capture`: the capture order has three classes (aged, interactive, background). A
+      module that acts while the capture thread has yet to take a picture of its own that is to
+      show the screen at the call (a text read's, a plain snapshot request's or one whose `at` had
+      passed, a change wait's baseline when no `from` holds what it watches; the thread is asked
+      under its lock, nothing waits) is named in the log once a session — `[<m>] acted (<call>)
+      while a picture it asked for was not taken yet; that picture may show the input — act once
+      the picture is answered: after the call returns in a handler, or in its callback` — and a
+      picture's `inputEpoch` says whether an input can be in it. Nothing in the tree leant on the
+      barrier: the OCR buttons and the OCREdit click after the answer since B3, and Kontakt, ON:EAR
+      and Avenger act after their waits, with checks (8df17ff). A change wait without `from` asked
+      before a click of the module's own may now take its baseline after the click; screen.md gives
+      the remedy (`snapshotAsync` first, click in its callback, `from = snap`). Tested with fakes;
+      the scripted host's scenarios pass unchanged. Nothing Mac-specific: the host side is shared,
+      and on a Mac the 50 ms were often shorter than one capture (36-91 ms), so input there mostly
+      went ahead already; type-checked only.
+- [ ] **NVDA check of step 11.3 (session A), before it is committed** — nothing should sound
+      different; what changed is that a click, a key or a focus no longer waits for a picture the
+      module has out. Windows, at the reads' own speed: sforzando's "Instrument" (an `opensMenu`
+      OCR button: the value said, then the click, then the menu read), and sforzando in REAPER
+      freshly loaded, recognised although it was not drawn yet at the first look (carried over
+      from B5); one u-he or Soundiron `opensMenu` OCR button, the same way; Komplete Kontrol's
+      "Save as" OCREdit (the value said, then the caret in the field, typing goes there); Kontakt
+      Ctrl+L, Ctrl+S and Ctrl+R (the file menu read in English and the right entry clicked);
+      Melodyne's F-keys while its watcher polls (the tool switches at once and its name is said,
+      the read-outs do not talk over it); Avenger's preset steps once the plug-in is at hand
+      (Q3 = A: this part may stay open after the commit). Bring the log's `acted (` lines: each
+      names a module that acted while a picture of its own was still to be taken; a timed one
+      still to come, such as a calibrating run's menu shots, and one taken but not answered yet do
+      not count. Melodyne may be named once, since its watcher asks for a picture every few
+      ticks and its answers are judged by when they were asked; any other module named is a
+      place to look at.
 - [x] **The review of K, B1a, B2 and B3** (2026-10-04, three reviews; kb-final.md). The overlays
       of one module share its key scope and menu flag: the one that comes to the front pins the
       scope, only the last to leave sets it back, and the flag is then what the ones in front say

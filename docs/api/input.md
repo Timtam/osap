@@ -12,7 +12,22 @@ All of it is blind clicking at screen coordinates, and **nothing here asks what 
 
 Dragging is deliberately not a press, a warp and a release: the movement is paced over sixteen injected steps and blocks the calling thread for about sixty milliseconds on Windows, because a control that reads the *speed* of a gesture answers an instantaneous jump with an enormous change.
 
-**A read comes first.** Every call on this page but `cursorPos` first waits — up to 50 ms, and only when the calling module has a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) whose picture has not been taken yet — until that picture is taken, and that picture goes before every other read's meanwhile. A module that reads a field and then clicks it therefore reads the field as it was before the click. When the picture is not taken within 50 ms the input goes ahead, and the log says so once per module. A module with no read pending pays a lookup and nothing else.
+**Acting does not wait for a read.** Every call on this page but `cursorPos` acts at once, also while the calling module has a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize), a [`snapshotAsync`](./screen.md#host-screen-snapshotasync) or a [`profile` with a callback](./screen.md#profile-with-a-callback) still out — and so does [`host.window.focus`](./window.md#host-window-focus). A picture that is not taken yet when the input is made may show the screen after it. So a module that reads a field and then clicks it clicks once the read is answered: after the call returns in a handler, where it [waits](./ocr.md#where-it-waits), or in its callback. Whether an input could be in a picture is what the picture's `inputEpoch` says, against [`host.inputEpoch()`](./timer.md#host-inputepoch) as it stood before the input — except after a [`post`](#host-input-post), which does not turn it over, and after a `host.window.focus`, which turns it over only once the window has come forward: after those two, compare the picture's `time` with `host.now()` noted after the act ([`host.inputEpoch`](./timer.md#host-inputepoch)).
+
+When a module acts while the capture thread has yet to take a picture it asked for that is meant to show the screen as it was at the call, the log says so, once a session per module, naming the call that acted. Those pictures are a text read's, but not one of a snapshot, whose picture is the snapshot's; a plain `snapshotAsync`'s or `profile`'s with a callback, and a timed one's whose `at` had already passed at the call; and the first picture of a change wait, which is its baseline, unless the wait has a `from` that holds every watched region:
+
+`[<module>] acted (host.input.click) while a picture it asked for was not taken yet; that picture may show the input — act once the picture is answered: after the call returns in a handler, or in its callback`
+
+A picture asked for with an `at` still to come at the call is meant to come after whatever the module does next, and is not counted; nor are a change wait's rounds after its baseline, which are there to see what the module does, nor a picture already taken whose answer is not back yet — a text read's while it is being recognised, say. Nothing here waits: the note costs a lookup of the module's requests and, while one is out, a look at the capture thread's queue under its lock, which that thread never holds across a capture.
+
+```luau
+-- Read the field, then click it: in the read's callback the picture is of the field as it was
+-- before the click, however long the capture took.
+host.ocr.recognize({ 400, 300, 520, 320 }, function(r)
+  if r.status == "text" then host.speech.output(r.text) end
+  host.input.click(460, 310)
+end)
+```
 
 Sending a shortcut is the call that catches authors out. On Windows the synthesised key inherits whatever the user is still physically holding, so a key sent from inside a hotkey callback arrives with that hotkey's modifiers attached — which is why the overlay waits for the modifiers to come up before it sends anything.
 

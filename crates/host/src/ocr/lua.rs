@@ -1169,31 +1169,11 @@ impl Shared {
         drop_from(self, n);
     }
 
-    /// The input barrier: before `host.input.*` or `host.window.focus` acts for the module that
-    /// owns `lua`, its pending pictures are taken — its text reads', its plain snapshots' and the
-    /// first of its change waits without `from` — up to `policy::BARRIER`. A module that reads a
-    /// field and then clicks it gets the field as it was before the click.
-    pub(crate) fn ocr_barrier(&self, lua: &Lua) {
+    /// `call` — `host.input.*` or `host.window.focus` — acts for the module that owns `lua`, at
+    /// once: it never waits for a picture ([`note_acting`]).
+    pub(crate) fn note_acting(&self, lua: &Lua, call: &str) {
         let Some(o) = vm_owner(lua) else { return };
-        if !self.ocr_state.pending.borrow().values().any(|p| p.owner.idx == o.idx)
-            && !self.snap_state.has_pending_for(o.idx)
-        {
-            return;
-        }
-        let started = Instant::now();
-        if !self.ocr.barrier(o.idx, policy::BARRIER) {
-            let id = self.ids.borrow().get(o.idx).cloned().unwrap_or_default();
-            if self.ocr_state.once(format!("barrier\u{1}{}", o.idx)) {
-                logging::line(
-                    "ocr",
-                    &format!(
-                        "[{id}] input waited {} ms for its pending picture (a text read's or a \
-                         snapshot's) and went ahead without it; said once",
-                        started.elapsed().as_millis()
-                    ),
-                );
-            }
-        }
+        note_acting(self, o.idx, call, self.snap_state.has_pending_for(o.idx));
     }
 
     /// The language the blocking `recognize` hands the engine for `req`: what it resolves to in the
@@ -1212,6 +1192,32 @@ impl Shared {
         }
         resolved
     }
+}
+
+/// The line a module's input is noted with, once a session, when it acts while a picture it asked
+/// for is still to be taken ([`note_acting`]).
+pub(crate) fn acting_line(id: &str, call: &str) -> String {
+    format!(
+        "[{id}] acted ({call}) while a picture it asked for was not taken yet; that picture may show \
+         the input — act once the picture is answered: after the call returns in a handler, or in \
+         its callback"
+    )
+}
+
+/// Module `idx` acts through `call` (`host.input.*`, `host.window.focus`). Acting never waits for
+/// a picture: a click made while the capture thread has yet to take one of the module's pictures
+/// may be in it, as the picture's `inputEpoch` tells for the input that turns it over. While one
+/// of its reads is out — or, with `snaps_out`, one of its snapshot requests — the thread is asked
+/// whether such a picture is still to be taken, one meant to show the screen as it was at the call
+/// (`Service::picture_due`); when it is, the log says so, once a session per module. True when it
+/// did.
+pub(crate) fn note_acting<H: ReadHost>(h: &H, idx: usize, call: &str, snaps_out: bool) -> bool {
+    let reads_out = h.ocr_state().pending.borrow().values().any(|p| p.owner.idx == idx);
+    if !(reads_out || snaps_out) || !h.ocr().picture_due(idx) || !h.ocr_state().once(format!("acted\u{1}{idx}")) {
+        return false;
+    }
+    logging::line("ocr", &acting_line(&h.module_id(idx), call));
+    true
 }
 
 /// The once-a-session line for a question about the languages asked before they are known.

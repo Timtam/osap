@@ -323,10 +323,16 @@ free until it ends.
 **Signature:** `host.window.focus(id: number) -> boolean`
 
 Brings the window with that handle to the front and gives it the keyboard. Returns whether
-the system accepted it. Like `host.input.*`, it first waits — up to 50 ms, and only while the
-calling module has a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) whose picture has not been
-taken — until that picture is taken, and puts that picture before every other read's, so a read
-asked for just before sees the screen as it was.
+the system accepted it. Like `host.input.*`, it acts at once, also while the calling module has a
+[`host.ocr.recognize`](./ocr.md#host-ocr-recognize) or a snapshot request out: a picture asked for
+just before and not taken yet may show the window in front. Read first and focus once the read is
+answered, and the log notes a module that does not, once a session (see
+[Acting does not wait for a read](./input.md)). The picture's `inputEpoch` does not tell a focus:
+[`host.inputEpoch()`](./timer.md#host-inputepoch) turns over only when the window has come
+forward and the event loop has heard of it, a turn of the loop later at the earliest, so a picture
+taken right after the call can carry the value from before it. To know whether a picture came after
+a focus, note `host.now()` after the call and compare the picture's `time` with it, or focus in the
+read's callback.
 
 **Believe the answer.** Both platforms can decline — Windows refuses a foreground change
 under conditions it does not explain, and on macOS the window's own application has to be

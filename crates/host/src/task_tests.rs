@@ -14,8 +14,8 @@
 //! is `fire`: due timers, then the readings, as the loop runs them.
 //!
 //! The fake recogniser reads every region as "x,y" — its corner — and can be held: a capture of
-//! a region whose x a test `hold`s waits until it lets go, and so does a recognition of one whose
-//! x it `hold_recognition`s; so no test times a picture, it holds it. Every test reads at x
+//! a region whose x a test `hold`s waits until it lets go, a snapshot round's as well, and so does
+//! a recognition of one whose x it `hold_recognition`s; so no test times a picture, it holds it. Every test reads at x
 //! coordinates of its own, since these lists are shared by the tests running beside it.
 //!
 //! The test's own thread stands where the event loop stands, and is marked as the loop's for as
@@ -26,8 +26,8 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use mlua::{Function, Lua, MultiValue, Table, Value};
@@ -38,8 +38,10 @@ use crate::image_search::VmOwner;
 use crate::mailbox::{self, Event, MailHost, Mailboxes, Opened, Why};
 use crate::ocr::lang::Languages;
 use crate::ocr::lua::{self as reads, Delivered, OcrState, ReadHost};
+use crate::ocr::sched::Owner;
 use crate::ocr::service::{Service, ShutdownHandle};
-use crate::ocr::types::{current_priority, enter_priority, Priority};
+use crate::ocr::snap_queue::{SnapKind, SnapReq, SnapTicket};
+use crate::ocr::types::{current_priority, enter_priority, Priority, Rect};
 use crate::task::{self, Case, Tasks};
 use crate::timers::{self, Timers};
 
@@ -172,6 +174,9 @@ pub(crate) fn worker() -> OcrWorker<Fake> {
         languages: || Languages { available: vec!["en-US".into()], fast: vec![], preferred: vec!["en-US".into()] },
         frames: |regions, _, _| {
             crate::loop_guard::off_loop("the fake snapshot round");
+            for r in regions {
+                wait_while_held(r.0, true);
+            }
             regions.iter().map(|_| Err("no snapshots here".to_string())).collect()
         },
         compare: fake_compare,
@@ -677,6 +682,69 @@ fn the_language_list_answers_at_once_and_is_known_before_the_recogniser_answers_
     assert!(yes(&lua, "return waited == '9412,5' and afterWait == 'en-US'"));
     assert!(yes(&lua, "return #host.ocr.languages() == 1"));
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+}
+
+/// A module that acts while a read of its own is out acts at once — `host.input.*` and
+/// `host.window.focus` note it and go on (lib.rs holds that this is all they do first): the
+/// picture is still being taken when the note returns. The log says so once a session per module
+/// (`OcrState::once`, said, not counted, here), in the words docs/api/input.md gives, while the
+/// capture thread has the picture still to take: a module with nothing out says nothing, nor one
+/// whose read is taken and being recognised, nor one with only a timed snapshot request still to
+/// come — the overlay runtime's menu shots, asked just before the click they are to show — and a
+/// plain snapshot request counts as a read does. The read is answered as usual afterwards.
+#[test]
+fn acting_with_a_read_out_waits_for_nothing_and_is_noted_once() {
+    const DOC: &str = include_str!("../../../docs/api/input.md");
+    let h = host();
+    let lua = vm(&h, 1);
+    let _other = vm(&h, 2);
+    let recognising = vm(&h, 3);
+    // First, while the capture thread is free: a read taken and being recognised.
+    hold_recognition(9454);
+    run(&recognising, "host.ocr.recognize({ 9454, 5, 9484, 15 }, function(r) seen = r.text end)");
+    wait_recognising(9454);
+    assert!(!reads::note_acting(&*h, 3, "host.input.click", false), "its picture is taken: nothing said");
+    assert!(!h.state.has_said("acted\u{1}3"));
+
+    hold(9451);
+    run(&lua, "host.ocr.recognize({ 9451, 5, 9481, 15 }, function(r) text = r.text end)");
+    assert!(reads::note_acting(&*h, 1, "host.input.click", false), "noted");
+    assert!(!taken(9451), "the picture is still held: the click waited for nothing");
+    assert!(h.state.has_said("acted\u{1}1"));
+    assert!(!reads::note_acting(&*h, 1, "host.input.send", false), "once a session");
+    assert!(!reads::note_acting(&*h, 2, "host.input.click", false), "nothing of its own out: nothing said");
+
+    // The capture thread is held at 9451 now, so module 2's requests wait behind it.
+    let snap = |x: i32, kind: SnapKind| SnapReq {
+        ticket: SnapTicket { id: x as u64, owner: Owner { idx: 2, gen: 1 }, prio: Priority::Interactive },
+        region: Rect::new(x, 5, 30, 10),
+        source: CaptureSource::Standard,
+        kind,
+        asked: Instant::now(),
+        cancel: Arc::new(AtomicBool::new(false)),
+        compare: None,
+    };
+    h.ocr.submit_snap(snap(9452, SnapKind::At(Instant::now() + Duration::from_secs(60))));
+    assert!(!reads::note_acting(&*h, 2, "host.input.click", true), "a timed picture still to come is not counted");
+    hold(9453);
+    h.ocr.submit_snap(snap(9453, SnapKind::Plain));
+    assert!(reads::note_acting(&*h, 2, "host.window.focus", true), "a plain snapshot request counts");
+    release(9453);
+    release(9454);
+    release(9451);
+    settle(&h);
+    assert!(yes(&lua, "return text == '9451,5'"));
+    assert!(yes(&recognising, "return seen == '9454,5'"));
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    let line = reads::acting_line("m1", "host.input.click");
+    assert_eq!(
+        line,
+        "[m1] acted (host.input.click) while a picture it asked for was not taken yet; that picture may \
+         show the input — act once the picture is answered: after the call returns in a handler, or in \
+         its callback"
+    );
+    let doc = reads::acting_line("<module>", "host.input.click");
+    assert!(DOC.contains(&format!("`{doc}`")), "docs/api/input.md does not give `{doc}`");
 }
 
 // ── Where a task cannot wait ─────────────────────────────────────────────────────────────────

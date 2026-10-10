@@ -219,6 +219,13 @@ impl Wait {
         self.deadline
     }
 
+    /// Whether the next picture is to be the baseline, as far as is known before it is taken: there
+    /// is none yet, and no `from` that holds every watched rectangle. Whether a `from` was taken the
+    /// way the rounds are is known only from that picture.
+    pub fn baseline_due(&self) -> bool {
+        self.baseline.is_none() && !self.from.as_ref().is_some_and(|f| self.watch.iter().all(|w| f.rect.contains(w)))
+    }
+
     /// `f` as a picture this wait only compares with: `f` itself when it is exactly the watched
     /// box and keeps nothing beside its pixels, else a copy of the box's point-sized pixels —
     /// never a larger capture, nor macOS's backing image, held for the rest of the wait.

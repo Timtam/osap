@@ -5,10 +5,9 @@
 //! **One capture thread.** The pictures of `host.ocr.recognize` and of `snapshotAsync` are the same
 //! act — a capture at the call, off the event loop — so they are taken by one thread, the one
 //! `ocr/service.rs` runs, and weighed against each other by one rule: the class of `sched.rs`
-//! (urgent, aged, interactive, background), then whichever has been due longer, and on a tie the
-//! text read ([`choose`]). A stream of change-wait rounds a controller keeps asking for cannot
-//! starve a poll's text read beyond `AGING`, and a long text capture delays a due round by that
-//! one capture.
+//! (aged, interactive, background), then whichever has been due longer, and on a tie the text read
+//! ([`choose`]). A stream of change-wait rounds a controller keeps asking for cannot starve a
+//! poll's text read beyond `AGING`, and a long text capture delays a due round by that one capture.
 //!
 //! **Three kinds of request.** A plain one is photographed as soon as the thread can; a timed one
 //! (`at`) not before its moment; a change wait (`change`, `change.rs`) once per round from its
@@ -18,8 +17,8 @@
 //! **A round** is the most urgent due request and the others that can share its picture
 //! ([`SnapLane::take`]). Through the standard path that is ONE capture: every due request whose
 //! region lies inside the round's rectangle, or whose union with it covers at most `UNION_MAX`
-//! pixels, on the same display — in order of urgency, so a request about to be clicked past is
-//! never photographed after another module's large capture; the others go next round. Through
+//! pixels, on the same display — in order of urgency, so the most urgent request is never
+//! photographed behind another module's large capture; the others go next round. Through
 //! desktop duplication every due request of that source goes, each distinct region a piece of
 //! one request ([`plan_round`]). The comparisons of change waits, and the cutting of each answer
 //! out of a shared capture, happen in [`Round::run`], outside the service's lock; a change wait
@@ -29,14 +28,13 @@
 //! `Cancelled` for one whose flag the event loop set (a newer request with its key, its module
 //! disabled, reloaded or removed; the event loop has already answered those or dropped them).
 //!
-//! **Read, then act.** A plain request, and a change wait without `at` whose baseline will be its
-//! own first picture, hold the owner's `host.input.*` and `host.window.focus` (the service's
-//! barrier) until that picture is taken, the way a pending text read does: the picture is of the
-//! screen before the click ([`holds_input`]).
-//!
-//! **Which input a picture predates.** Each picture carries `host.inputEpoch()` as it stood once
-//! the capture had come back (`Frame::input_epoch`, from the service's mirror of it): input the
-//! host drives after that turns the epoch over after the picture was taken.
+//! **Which input a picture predates.** Nothing here waits for a module's input or holds it: a
+//! click its module makes while a request waits may be in the picture. Each picture carries
+//! `host.inputEpoch()` as it stood once the capture had come back (`Frame::input_epoch`, from the
+//! service's mirror of it): input the host drives after that turns the epoch over after the
+//! picture was taken, so a module tells by that whether its input could be in it. The lane only
+//! answers, when asked, whether a module has a picture still to be taken that is meant to show
+//! the screen as it was at the call ([`SnapLane::picture_due`]): acting meanwhile is noted.
 //!
 //! Pure apart from the frame type; borrowed by `crates/macos-check`.
 
@@ -44,7 +42,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::backend::frame::{Frame, FrameVia};
+use crate::backend::frame::Frame;
 use crate::backend::{CaptureSource, CompareReq, CAPTURE_FAILED};
 
 use super::change::{Outcome, Seen, Wait, NO_PICTURE};
@@ -79,8 +77,6 @@ pub struct SnapReq {
     pub source: CaptureSource,
     pub kind: SnapKind,
     pub asked: Instant,
-    /// Holds the owner's input until its first picture is taken (see the file's comment).
-    pub holds: bool,
     /// Set by the event loop when nobody waits for the answer any more.
     pub cancel: Arc<AtomicBool>,
     /// The module's first-read comparison, when this request carries it: the capture thread makes
@@ -103,6 +99,18 @@ impl SnapReq {
 
     fn is_wait(&self) -> bool {
         matches!(self.kind, SnapKind::Change { .. })
+    }
+
+    /// Whether its next picture is meant to show the screen as it was at the call: a plain
+    /// request's, a timed one's whose moment had passed at the call, and a change wait's while that
+    /// picture is to be its baseline. A timed request's still to come, and a change wait's later
+    /// rounds, are meant to come after whatever its module does next ([`SnapLane::picture_due`]).
+    fn shows_the_call(&self) -> bool {
+        self.first_due() <= self.asked
+            && match &self.kind {
+                SnapKind::Change { wait, .. } => wait.baseline_due(),
+                SnapKind::Plain | SnapKind::At(_) => true,
+            }
     }
 }
 
@@ -198,50 +206,18 @@ pub fn group(regions: &[Rect], max: i64) -> (Vec<Rect>, Vec<usize>) {
     (rects, at)
 }
 
-/// Whether a request holds its module's input until its first picture is taken: it is taken
-/// at once (not `timed`), and either it is not a change wait, or it is one whose baseline will be
-/// that first picture — it has no `from`, or one [`from_usable`] says it cannot compare with. A
-/// click made before that picture would be in it.
-pub fn holds_input(timed: bool, change: bool, from_usable: bool) -> bool {
-    !timed && !(change && from_usable)
-}
-
-/// The way a request through `source` is photographed when nothing falls back: the standard
-/// path's `Gdi`, desktop duplication's `Duplication` — or `None` on macOS, where the call cannot
-/// tell ScreenCaptureKit's pictures from the older functions' in advance.
-pub fn first_choice_via(source: CaptureSource) -> Option<FrameVia> {
-    if cfg!(target_os = "macos") {
-        return None;
-    }
-    Some(match source {
-        CaptureSource::Standard => FrameVia::Gdi,
-        CaptureSource::Duplication { .. } => FrameVia::Duplication,
-    })
-}
-
-/// Whether a change wait over `region` watching `watch` (screen rectangles, all of `region`
-/// when empty) can compare its first round with `from`, as far as the call can tell: `from`
-/// holds every watched rectangle cut to the region, and was taken the way the rounds will be
-/// when nothing falls back. The wait itself decides again at its first round (`change.rs`).
-pub fn from_usable(from: &Frame, region: Rect, watch: &[Rect], source: CaptureSource) -> bool {
-    let holds = |w: &Rect| region.intersect(w).is_some_and(|c| from.rect.contains(&c));
-    let covered = if watch.is_empty() { holds(&region) } else { watch.iter().all(holds) };
-    covered && first_choice_via(source).is_none_or(|v| v == from.via)
-}
-
 struct Entry {
     req: SnapReq,
     /// Not photographed before this.
     due: Instant,
-    /// Its owner is about to act (`expedite`).
-    urgent: bool,
 }
 
 /// The requests waiting for a round. See the file's comment.
 pub struct SnapLane {
     waiting: Vec<Entry>,
-    /// The requests of the round being taken now: (id, owner index, holds input).
-    taking: Vec<(SnapId, usize, bool)>,
+    /// The requests of the round being taken now: whose, and whether the picture is meant to show
+    /// the screen as it was at the call ([`SnapReq::shows_the_call`]).
+    taking: Vec<(usize, bool)>,
     /// Which display a point lies on (`OcrWorker::display_of`): one standard capture never
     /// spans two.
     display_of: fn(i32, i32) -> u32,
@@ -292,7 +268,7 @@ impl SnapLane {
 
     pub fn submit(&mut self, req: SnapReq) {
         let due = req.first_due();
-        self.waiting.push(Entry { req, due, urgent: false });
+        self.waiting.push(Entry { req, due });
     }
 
     /// Requests waiting or being taken.
@@ -313,9 +289,6 @@ impl SnapLane {
     }
 
     fn class(e: &Entry, now: Instant) -> Class {
-        if e.urgent {
-            return Class::Urgent;
-        }
         match e.req.ticket.prio {
             Priority::Interactive => Class::Interactive,
             Priority::Background if now.saturating_duration_since(e.due) >= AGING => Class::Aged,
@@ -370,11 +343,19 @@ impl SnapLane {
         let mut slots: Vec<Option<Entry>> = std::mem::take(&mut self.waiting).into_iter().map(Some).collect();
         let members: Vec<Entry> = chosen.iter().filter_map(|&i| slots[i].take()).collect();
         self.waiting = slots.into_iter().flatten().collect();
-        self.taking = members.iter().map(|e| (e.req.ticket.id, e.req.ticket.owner.idx, e.req.holds)).collect();
+        self.taking = members.iter().map(|e| (e.req.ticket.owner.idx, e.req.shows_the_call())).collect();
         let regions: Vec<Rect> = members.iter().map(|e| e.req.region).collect();
         let (rects, at) = plan_round(&regions, source);
         let poll = members.iter().all(|e| e.req.is_wait());
         Some(Round { source, rects, poll, members: members.into_iter().map(|e| e.req).zip(at).collect(), started: now })
+    }
+
+    /// Whether module `idx` has a request waiting or being taken whose next picture is meant to
+    /// show the screen as it was at the call ([`SnapReq::shows_the_call`]). Only asked, never
+    /// waited for: acting meanwhile is noted (`ocr::lua::note_acting`).
+    pub fn picture_due(&self, idx: usize) -> bool {
+        self.waiting.iter().any(|e| e.req.ticket.owner.idx == idx && !e.req.cancelled() && e.req.shows_the_call())
+            || self.taking.iter().any(|&(i, shows)| i == idx && shows)
     }
 
     /// When the next waiting request falls due, for the thread's sleep; `None` when none waits.
@@ -392,23 +373,6 @@ impl SnapLane {
             .collect()
     }
 
-    /// Whether module `idx` has no request that holds its input.
-    pub fn barrier_clear(&self, idx: usize) -> bool {
-        !self.waiting.iter().any(|e| e.req.holds && e.req.ticket.owner.idx == idx && !e.req.cancelled())
-            && !self.taking.iter().any(|&(_, i, holds)| holds && i == idx)
-    }
-
-    /// Module `idx` is about to act: its requests that hold its input go first. True when it has
-    /// any waiting.
-    pub fn expedite(&mut self, idx: usize) -> bool {
-        let mut any = false;
-        for e in self.waiting.iter_mut().filter(|e| e.req.holds && e.req.ticket.owner.idx == idx) {
-            e.urgent = true;
-            any = true;
-        }
-        any
-    }
-
     /// A round's results: the requests it ended are answered — `Cancelled` when their flag was
     /// set meanwhile — and the change waits that go on wait for their next round, no sooner than
     /// `min_round` after this one started and no later than their deadline.
@@ -423,18 +387,17 @@ impl SnapLane {
                         if cancel.load(Ordering::Acquire) { SnapOutcome::Cancelled } else { outcome };
                     out.push(SnapDone { id, outcome, asked, ended: now });
                 }
-                Step::Again(mut req) => {
+                Step::Again(req) => {
                     if req.cancelled() {
                         out.push(SnapDone { id: req.ticket.id, outcome: SnapOutcome::Cancelled, asked: req.asked, ended: now });
                         continue;
                     }
-                    req.holds = false;
                     let deadline = match &req.kind {
                         SnapKind::Change { wait, .. } => wait.deadline(),
                         _ => now,
                     };
                     let due = (done.started + gap).min(deadline);
-                    self.waiting.push(Entry { req, due, urgent: false });
+                    self.waiting.push(Entry { req, due });
                 }
             }
         }
@@ -629,14 +592,12 @@ mod tests {
     }
 
     fn req(id: SnapId, owner: Owner, region: Rect, kind: SnapKind, asked: Instant) -> SnapReq {
-        let holds = matches!(kind, SnapKind::Plain);
         SnapReq {
             ticket: SnapTicket { id, owner, prio: Priority::Background },
             region,
             source: CaptureSource::Standard,
             kind,
             asked,
-            holds,
             cancel: Arc::new(AtomicBool::new(false)),
             compare: None,
         }
@@ -683,6 +644,53 @@ mod tests {
         assert_eq!(done.len(), 2);
         assert!(Arc::ptr_eq(picture(&done[0]), picture(&done[1])), "one picture for both");
         assert!(lane.is_empty());
+    }
+
+    /// Which pictures acting is noted against: a plain request's until it is taken, being taken
+    /// included; a timed one's only when its moment had passed at the call; a change wait's first,
+    /// its baseline, unless it has a `from` that holds what it watches. Never a timed one's still
+    /// to come — the overlay runtime's menu shots are asked just before the click they are to
+    /// show — nor a change wait's later rounds, nor a cancelled request's.
+    #[test]
+    fn a_picture_is_due_while_it_is_to_show_the_screen_at_the_call() {
+        let t0 = Instant::now();
+        let r = Rect::new(10, 10, 20, 20);
+        let spec = ChangeSpec { tolerance: 16, min_pixels: 4, settle: Duration::ZERO, timeout: Duration::from_millis(1000) };
+        let wait_from = |from: Option<Rect>, start: Instant| SnapKind::Change {
+            wait: Box::new(Wait::new(r, &[], spec, from.map(|f| Arc::new(solid(f, 9, t0))), start)),
+            start,
+        };
+        let due = |kind: SnapKind, asked: Instant| {
+            let mut lane = SnapLane::default();
+            lane.submit(req(1, A, r, kind, asked));
+            lane.picture_due(A.idx)
+        };
+        assert!(due(SnapKind::Plain, t0));
+        assert!(!due(SnapKind::At(t0 + Duration::from_millis(600)), t0), "a timed picture still to come");
+        assert!(due(SnapKind::At(t0), t0), "an at already past is taken at once, as a plain one is");
+        assert!(due(wait_from(None, t0), t0), "a change wait's first picture is its baseline");
+        assert!(!due(wait_from(Some(r), t0), t0), "its from is its baseline");
+        assert!(due(wait_from(Some(Rect::new(10, 10, 5, 5)), t0), t0), "a from that misses what it watches is not");
+        assert!(!due(wait_from(None, t0 + Duration::from_millis(600)), t0), "a timed change wait");
+
+        let mut lane = SnapLane::default();
+        lane.submit(req(1, A, r, SnapKind::Plain, t0));
+        assert!(!lane.picture_due(B.idx), "another module's request is not B's");
+        let round = lane.take(t0).expect("due");
+        assert!(lane.picture_due(A.idx), "being taken is not taken");
+        let frames = round.rects.iter().map(|x| Ok(solid(*x, 9, t0))).collect();
+        lane.finish(round.run(frames, t0, 0), t0);
+        assert!(!lane.picture_due(A.idx), "taken");
+
+        lane.submit(req(2, A, r, wait_from(None, t0), t0));
+        let (_, done) = turn(&mut lane, t0, &|x| Ok(solid(x, 9, t0)));
+        assert!(done.is_empty(), "the wait goes on");
+        assert!(!lane.picture_due(A.idx), "its later rounds are to see what the module does");
+
+        let gone = req(3, B, r, SnapKind::Plain, t0);
+        gone.cancel.store(true, Ordering::Release);
+        lane.submit(gone);
+        assert!(!lane.picture_due(B.idx), "a cancelled request is answered without a picture");
     }
 
     #[test]
@@ -733,7 +741,6 @@ mod tests {
         assert!(rects.is_empty() && done.is_empty());
         let (_, done) = turn(&mut lane, t0 + 80 * MS, &|r| Ok(solid(r, 1, t0 + 80 * MS)));
         assert_eq!(done.len(), 1);
-        assert!(lane.barrier_clear(A.idx), "a timed snapshot never holds input");
     }
 
     #[test]
@@ -817,50 +824,13 @@ mod tests {
     }
 
     #[test]
-    fn barrier_counts_plain_and_first_frame_without_from_only() {
-        let t0 = Instant::now();
-        let r = Rect::new(0, 0, 10, 10);
-        let mut lane = SnapLane::default();
-        assert!(lane.barrier_clear(A.idx));
-        lane.submit(req(1, A, r, SnapKind::At(t0 + 50 * MS), t0));
-        assert!(lane.barrier_clear(A.idx), "a timed one does not hold");
-        let mut w = req(2, A, r, wait_kind(r, 500, 0, t0), t0);
-        w.holds = true; // no from, no at
-        lane.submit(w);
-        assert!(!lane.barrier_clear(A.idx), "a wait's first picture holds");
-        assert!(lane.barrier_clear(B.idx), "another module's requests do not hold A's input");
-        let round = lane.take(t0).unwrap();
-        assert!(!lane.barrier_clear(A.idx), "being taken is not taken");
-        let done = round.run(vec![Ok(solid(r, 1, t0))], t0, 0);
-        lane.finish(done, t0);
-        assert!(lane.barrier_clear(A.idx), "its later rounds do not hold");
-        lane.submit(req(3, A, r, SnapKind::Plain, t0));
-        assert!(!lane.barrier_clear(A.idx), "a plain one holds");
-    }
-
-    #[test]
-    fn expedite_makes_plain_urgent() {
-        let t0 = Instant::now();
-        let r = Rect::new(0, 0, 10, 10);
-        let mut lane = SnapLane::default();
-        lane.submit(req(1, A, r, SnapKind::Plain, t0));
-        assert_eq!(lane.candidate(t0).unwrap().class, Class::Background);
-        assert!(!lane.expedite(B.idx));
-        assert!(lane.expedite(A.idx));
-        assert_eq!(lane.candidate(t0).unwrap().class, Class::Urgent);
-        let mut lane = SnapLane::default();
-        lane.submit(req(1, A, r, SnapKind::At(t0), t0));
-        assert!(!lane.expedite(A.idx), "a timed one is never hurried: it does not hold input");
-    }
-
-    #[test]
     fn choose_orders_classes_then_due() {
         let t0 = Instant::now();
         let c = |class, ms: u32| Some(Cand { class, due: t0 + ms * MS });
         assert_eq!(choose(None, None), None);
         assert_eq!(choose(c(Class::Background, 0), None), Some(Pick::Ocr));
         assert_eq!(choose(None, c(Class::Background, 0)), Some(Pick::Snap));
-        assert_eq!(choose(c(Class::Interactive, 0), c(Class::Urgent, 9)), Some(Pick::Snap), "the lower class");
+        assert_eq!(choose(c(Class::Background, 0), c(Class::Interactive, 9)), Some(Pick::Snap), "the lower class");
         assert_eq!(choose(c(Class::Aged, 9), c(Class::Interactive, 0)), Some(Pick::Ocr));
         assert_eq!(choose(c(Class::Interactive, 5), c(Class::Interactive, 3)), Some(Pick::Snap), "due longer");
         assert_eq!(choose(c(Class::Interactive, 3), c(Class::Interactive, 3)), Some(Pick::Ocr), "a tie: the text read");
@@ -964,9 +934,9 @@ mod tests {
         assert_eq!(group(&[huge, inside, Rect::new(3000, 0, 10, 10)], UNION_MAX).0.len(), 2);
     }
 
-    /// A module about to act (urgent) is photographed alone when the other due requests cannot
-    /// share its capture: never after another module's large capture in the same round, and the
-    /// barrier waits for its round only. The other goes next round.
+    /// The most urgent request is photographed alone when the other due requests cannot share its
+    /// capture: never behind another module's large capture in the same round. The other goes
+    /// next round.
     #[test]
     fn an_urgent_request_is_not_bundled_behind_a_large_capture() {
         let t0 = Instant::now();
@@ -974,15 +944,14 @@ mod tests {
         let full = Rect::new(0, 0, 1920, 1080);
         let mut lane = SnapLane::default();
         lane.submit(req(1, B, full, wait_kind(full, 500, 0, t0), t0));
-        lane.submit(req(2, A, small, SnapKind::Plain, t0 + MS));
-        assert!(lane.expedite(A.idx));
+        let mut key = req(2, A, small, SnapKind::Plain, t0 + MS);
+        key.ticket.prio = Priority::Interactive;
+        lane.submit(key);
         let round = lane.take(t0 + MS).unwrap();
-        assert_eq!(round.ids(), vec![2], "only the urgent request, whose union with the screen is past the limit");
+        assert_eq!(round.ids(), vec![2], "only the interactive request, whose union with the screen is past the limit");
         assert_eq!(round.rects, vec![small]);
-        assert!(!lane.barrier_clear(A.idx));
         let done = round.run(vec![Ok(solid(small, 1, t0))], t0 + MS, 0);
         lane.finish(done, t0 + MS);
-        assert!(lane.barrier_clear(A.idx));
         let next = lane.take(t0 + MS).unwrap();
         assert_eq!(next.ids(), vec![1], "the large one next");
     }
@@ -1080,35 +1049,7 @@ mod tests {
         let out = lane.finish(done, t0);
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|d| matches!(&d.outcome, SnapOutcome::Failed { why, .. } if why == ROUND_FAILED)));
-        assert!(lane.is_empty() && lane.barrier_clear(A.idx));
-    }
-
-    /// Which requests hold their module's input until their first picture.
-    #[test]
-    fn holds_input_by_kind() {
-        assert!(holds_input(false, false, false), "a plain request");
-        assert!(!holds_input(true, false, false), "a timed one never");
-        assert!(holds_input(false, true, false), "a wait without a usable from: its first picture is its baseline");
-        assert!(!holds_input(false, true, true), "a wait that compares with its from");
-        assert!(!holds_input(true, true, false), "a timed wait never");
-    }
-
-    /// A `from` counts as usable at the call when it holds every watched rectangle cut to the
-    /// region and, off macOS, was taken the way the rounds will be.
-    #[test]
-    fn from_usable_needs_the_watch_and_the_path() {
-        let region = Rect::new(100, 100, 40, 30);
-        let from = |r: Rect, via| Frame::from_image(r, crate::backend::CapturedImage { w: r.w as u32, h: r.h as u32, rgba: vec![0; (r.w * r.h * 4) as usize] }, Instant::now(), via, None).unwrap();
-        let whole = from(region, FrameVia::Gdi);
-        assert!(from_usable(&whole, region, &[], CaptureSource::Standard));
-        let part = from(Rect::new(100, 100, 10, 30), FrameVia::Gdi);
-        assert!(!from_usable(&part, region, &[], CaptureSource::Standard), "not all of the region");
-        assert!(from_usable(&part, region, &[Rect::new(90, 100, 15, 30)], CaptureSource::Standard), "the watch cut to the region is inside it");
-        assert!(!from_usable(&part, region, &[Rect::new(90, 100, 15, 30), Rect::new(120, 100, 5, 5)], CaptureSource::Standard));
-        if !cfg!(target_os = "macos") {
-            assert!(!from_usable(&whole, region, &[], DUP), "taken the standard way, compared through duplication");
-            assert!(from_usable(&from(region, FrameVia::Duplication), region, &[], DUP));
-        }
+        assert!(lane.is_empty(), "nothing is left being taken");
     }
 
     /// Requests of every kind, some cancelled at random moments, all through a simulated thread

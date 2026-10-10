@@ -6904,9 +6904,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "focus",
         lua.create_function(move |lua, id: isize| {
             host_call!("host.window.focus");
-            // A read of the window before focusing it sees it as it was: the module's pending
-            // OCR pictures are taken first.
-            sh.ocr_barrier(lua);
+            // At once, whatever the module's reads: a picture still out may show the window in
+            // front (said once in the log).
+            sh.note_acting(lua, "host.window.focus");
             let accepted = sh.backend.focus_window(id);
             // A focus change is a fresh observation of the world, so the cache that served
             // the last one is turned over — the same way a click does it. Without this, a
@@ -7989,8 +7989,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "move",
         lua.create_function(move |lua, (x, y): (i32, i32)| {
             host_call!("host.input.move");
-            // Read, then act: this module's pending OCR pictures are taken first.
-            sh.ocr_barrier(lua);
+            // At once: a picture of this module's still out may show it (said once in the log).
+            sh.note_acting(lua, "host.input.move");
             sh.bump_input_epoch();
             sh.backend.mouse_move(x, y);
             Ok(())
@@ -8001,8 +8001,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "click",
         lua.create_function(move |lua, (x, y, opts): (i32, i32, Option<Table>)| {
             host_call!("host.input.click");
-            // Read, then act: this module's pending OCR pictures are taken first.
-            sh.ocr_barrier(lua);
+            // At once: a picture of this module's still out may show it (said once in the log).
+            sh.note_acting(lua, "host.input.click");
             sh.bump_input_epoch();
             let button = button_from(opts.as_ref());
             sh.backend.mouse_click(x, y, button);
@@ -8016,8 +8016,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "post",
         lua.create_function(move |lua, (hwnd, key): (i64, String)| {
             host_call!("host.input.post");
-            // Read, then act: this module's pending OCR pictures are taken first.
-            sh.ocr_barrier(lua);
+            // At once: a picture of this module's still out may show it (said once in the log).
+            sh.note_acting(lua, "host.input.post");
             sh.backend
                 .key_post(hwnd as isize, &key)
                 .map_err(mlua::Error::external)
@@ -8028,8 +8028,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "mouseDown",
         lua.create_function(move |lua, (x, y, opts): (i32, i32, Option<Table>)| {
             host_call!("host.input.mouseDown");
-            // Read, then act: this module's pending OCR pictures are taken first.
-            sh.ocr_barrier(lua);
+            // At once: a picture of this module's still out may show it (said once in the log).
+            sh.note_acting(lua, "host.input.mouseDown");
             sh.bump_input_epoch();
             let button = button_from(opts.as_ref());
             sh.backend.mouse_down(x, y, button);
@@ -8044,8 +8044,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "mouseUp",
         lua.create_function(move |lua, (x, y, opts): (i32, i32, Option<Table>)| {
             host_call!("host.input.mouseUp");
-            // Read, then act: this module's pending OCR pictures are taken first.
-            sh.ocr_barrier(lua);
+            // At once: a picture of this module's still out may show it (said once in the log).
+            sh.note_acting(lua, "host.input.mouseUp");
             sh.bump_input_epoch();
             let button = button_from(opts.as_ref());
             sh.backend.mouse_up(x, y, button);
@@ -8058,8 +8058,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "drag",
         lua.create_function(move |lua, (x1, y1, x2, y2, opts): (i32, i32, i32, i32, Option<Table>)| {
             host_call!("host.input.drag");
-            // Read, then act: this module's pending OCR pictures are taken first.
-            sh.ocr_barrier(lua);
+            // At once: a picture of this module's still out may show it (said once in the log).
+            sh.note_acting(lua, "host.input.drag");
             sh.bump_input_epoch();
             let button = button_from(opts.as_ref());
             sh.backend.mouse_drag(x1, y1, x2, y2, button);
@@ -8082,8 +8082,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "scroll",
         lua.create_function(move |lua, (x, y, notches): (i32, i32, f64)| {
             host_call!("host.input.scroll");
-            // Read, then act: this module's pending OCR pictures are taken first.
-            sh.ocr_barrier(lua);
+            // At once: a picture of this module's still out may show it (said once in the log).
+            sh.note_acting(lua, "host.input.scroll");
             sh.bump_input_epoch();
             let delta = (notches * 120.0).round() as i32;
             sh.backend.mouse_scroll(x, y, delta);
@@ -8095,8 +8095,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "send",
         lua.create_function(move |lua, combo: String| {
             host_call!("host.input.send");
-            // Read, then act: this module's pending OCR pictures are taken first.
-            sh.ocr_barrier(lua);
+            // At once: a picture of this module's still out may show it (said once in the log).
+            sh.note_acting(lua, "host.input.send");
             sh.bump_input_epoch();
             sh.backend.key_send(&combo).map_err(mlua::Error::external)
         })?,
@@ -8106,8 +8106,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "text",
         lua.create_function(move |lua, text: String| {
             host_call!("host.input.text");
-            // Read, then act: this module's pending OCR pictures are taken first.
-            sh.ocr_barrier(lua);
+            // At once: a picture of this module's still out may show it (said once in the log).
+            sh.note_acting(lua, "host.input.text");
             sh.bump_input_epoch();
             sh.backend.type_text(&text);
             Ok(())
@@ -10029,7 +10029,7 @@ fn win_to_table(lua: &Lua, w: &WinInfo) -> mlua::Result<Table> {
 /// has none, and what it asks is cheap enough not to need one: local on Windows, two
 /// accessibility reads on macOS (see `Backend::foreground_window`).
 ///
-/// No OCR barrier either: it reads, it does not act.
+/// Nothing noted as acting either: it reads, it does not act.
 fn foreground_fn(lua: &Lua, read: impl Fn() -> Option<backend::Foreground> + 'static) -> mlua::Result<Function> {
     lua.create_function(move |lua, ()| {
         host_call!("host.window.foreground");
@@ -10107,11 +10107,11 @@ mod foreground_binding_tests {
         let (_, text) = bindings(api, "win").into_iter().find(|b| b.0 == "foreground").expect("host.window.foreground");
         let text = text.split("// host.window.controls").next().unwrap();
         assert!(text.contains("foreground_fn(lua, move || sh.backend.foreground_window())"), "{text}");
-        for not in ["observations", "bump_epoch", "bump_input_epoch", "ocr_barrier"] {
+        for not in ["observations", "bump_epoch", "bump_input_epoch", "note_acting"] {
             assert!(!text.contains(not), "host.window.foreground reaches `{not}`: {text}");
         }
         let f = body(LIB, "fn foreground_fn(");
-        for not in ["observations", "bump_epoch", "ocr_barrier"] {
+        for not in ["observations", "bump_epoch", "note_acting"] {
             assert!(!f.contains(not), "foreground_fn reaches `{not}`");
         }
     }
@@ -10197,12 +10197,12 @@ mod focus_step_binding_tests {
     }
 }
 
-/// Where `host.ocr.recognize`'s rules meet the event loop: the input barrier, the interactive lane,
-/// dropping a module's reads, the legacy call's language. None of these places can be reached by
-/// a unit test — they are methods of `Shared`, whose speech engines a test must not open — and
-/// deleting any one of them left every other test green. So each is checked where it is written:
-/// a crude check on the source, which fails loudly when the code it looks for moves, rather than
-/// silently when the rule goes.
+/// Where `host.ocr.recognize`'s rules meet the event loop: acting while a picture is out, the
+/// interactive lane, dropping a module's reads, the legacy call's language. None of these places
+/// can be reached by a unit test — they are methods of `Shared`, whose speech engines a test must
+/// not open — and deleting any one of them left every other test green. So each is checked where
+/// it is written: a crude check on the source, which fails loudly when the code it looks for
+/// moves, rather than silently when the rule goes.
 #[cfg(test)]
 mod ocr_wiring_tests {
     use super::{align_many, backend, one_value, pixel_coords, png_path_only, region, region_arg_on, with_reason};
@@ -10238,11 +10238,12 @@ mod ocr_wiring_tests {
             .collect()
     }
 
-    /// Read, then act: every `host.input` call that acts, and `host.window.focus`, waits for the
-    /// module's pending pictures first. A new `host.input` call has to be put in one list or
-    /// the other.
+    /// Every `host.input` call that acts, and `host.window.focus`, acts at once and notes it
+    /// (`note_acting`, tested in task_tests.rs): nothing on its way waits for the module's
+    /// pictures, whose answer the module waits for itself. A new `host.input` call has to be put
+    /// in one list or the other.
     #[test]
-    fn every_acting_call_waits_for_the_modules_pending_pictures() {
+    fn every_acting_call_notes_acting_and_waits_for_no_picture() {
         const ACTING: [&str; 9] = ["move", "click", "post", "mouseDown", "mouseUp", "drag", "scroll", "send", "text"];
         const READ_ONLY: [&str; 1] = ["cursorPos"];
         let api = body(LIB, "fn install_host_api(");
@@ -10250,17 +10251,25 @@ mod ocr_wiring_tests {
         assert_eq!(input.len(), ACTING.len() + READ_ONLY.len(), "{:?}", input.iter().map(|b| b.0).collect::<Vec<_>>());
         for (name, text) in input {
             if ACTING.contains(&name) {
-                assert!(text.contains("sh.ocr_barrier(lua);"), "host.input.{name} does not wait for the OCR barrier");
+                let call = format!("sh.note_acting(lua, \"host.input.{name}\");");
+                assert!(text.contains(&call), "host.input.{name} does not note acting");
             } else {
                 assert!(READ_ONLY.contains(&name), "host.input.{name} is new: does it act (ACTING) or only read?");
             }
         }
         let focus = bindings(api, "win").into_iter().find(|b| b.0 == "focus").expect("host.window.focus");
-        assert!(focus.1.contains("sh.ocr_barrier(lua);"), "host.window.focus does not wait for the OCR barrier");
-        // The one barrier covers the snapshots' pictures too: it does not return early for a
-        // module whose only pending pictures are snapshots.
-        let barrier = body(OCR_LUA, "pub(crate) fn ocr_barrier(");
-        assert!(barrier.contains("self.snap_state.has_pending_for(o.idx)"), "the barrier skips a module's pending snapshots");
+        assert!(focus.1.contains("sh.note_acting(lua, \"host.window.focus\");"), "host.window.focus does not note acting");
+        // Snapshots count as reads do, and nothing on the way waits: the read service is only asked
+        // whether a picture is still to be taken, a look under its lock.
+        const SERVICE: &str = include_str!("ocr/service.rs");
+        let shared = body(OCR_LUA, "pub(crate) fn note_acting(&self,");
+        assert!(shared.contains("self.snap_state.has_pending_for(o.idx)"), "a module's pending snapshots are left out");
+        let note = body(OCR_LUA, "pub(crate) fn note_acting<H: ReadHost>(");
+        assert_eq!(note.matches(".ocr()").count(), note.matches(".ocr().picture_due(idx)").count(), "acting asks the service more");
+        let due = body(SERVICE, "pub fn picture_due(&self,");
+        for not in ["self.ocr.", "wait", "barrier"] {
+            assert!(!shared.contains(not) && !note.contains(not) && !due.contains(not), "acting reaches `{not}`");
+        }
     }
 
     /// Both ticks, the GUI one and the headless one, deliver the snapshots' answers.
@@ -10321,7 +10330,6 @@ mod ocr_wiring_tests {
         assert!(!f.contains("profile::profile(") && !f.contains("backend.capture("), "profile_async captures or reduces");
         assert!(f.contains("self.ocr.submit_snap(req);"), "a region's picture is the capture thread's");
         assert!(f.contains("Some(frame) => self.reduce(p, frame),"), "a snapshot goes straight to the worker");
-        assert!(f.contains("holds: snap_queue::holds_input(at.is_some(), false, false),"), "it holds input as a plain or timed snapshot does");
         assert!(f.contains("prio: current_priority(),"));
         let fire = body(SNAP, "pub(crate) fn fire_snapshot_results(");
         let on = fire.find("Answer::Picture { frame, .. } if p.profile.is_some() => self.reduce(p, frame),").expect("a profile's picture goes on");
@@ -10351,18 +10359,12 @@ mod ocr_wiring_tests {
         assert!(refused < binding.find("sh.backend.capture(").unwrap(), "after a capture");
     }
 
-    /// Which requests hold their module's input is `snap_queue::holds_input`'s decision (tested
-    /// there), asked with what the call knows: whether it is timed, whether it is a change wait,
-    /// and whether its `from` can be compared with — never a flag of the call's own. Also what
-    /// the call does with its charge: reserved by the region's form (`snapshot::reserve_for`,
-    /// tested there), and given back when the application's limit refuses the request.
+    /// What `snapshotAsync` does with its charge: reserved by the region's form
+    /// (`snapshot::reserve_for`, tested there), and given back when the application's limit
+    /// refuses the request.
     #[test]
-    fn snap_async_asks_holds_input_with_what_the_call_knows() {
+    fn snap_async_reserves_by_the_form_and_gives_a_refused_charge_back() {
         let f = body(SNAP, "pub(crate) fn snap_async(");
-        assert!(f.contains("snap_queue::from_usable(f, rect, &c.watch, source)"));
-        assert!(f.contains("snap_queue::holds_input(at.is_some(), true, usable)"), "a change wait");
-        assert!(f.contains("snap_queue::holds_input(at.is_some(), false, false)"), "a plain or timed request");
-        assert_eq!(f.matches("holds_input(").count(), 2, "every request's holds comes from holds_input");
         // The budget by the form the region was given in: a window region's overrun is answered.
         assert!(f.contains("reserve_for(lua, &self.snap_bytes, reservation_for(*r, change), FA, &args.form)?"));
         // A request the application's limit refuses gives its charge back before it is queued.
