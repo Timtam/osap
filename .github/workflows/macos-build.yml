@@ -842,10 +842,10 @@ jobs:
 
       # The guard (crates/host/src/vm_guard.rs, stops.rs): the capture probe's callbacks are
       # short, and its reads wait in their timers' handlers, which counts on no clock — so a
-      # `[guard] [<module>] stopped` line is a bug, in the host or in the probe. A read that could
-      # not wait held the event loop instead (`could not wait here`, task.rs): the probe has none,
-      # and until step B5 makes this an error it is a warning.
-      - name: No module was stopped, and every read waited
+      # `[guard] [<module>] stopped` line is a bug, in the host or in the probe. So is a call that
+      # could not wait and held the event loop instead (`could not wait here`, task.rs): the probe
+      # makes every call in a handler of its own. Both are looked for before either fails the step.
+      - name: No module was stopped, and every call waited
         if: ${{ !cancelled() }}
         run: |
           log=dist/AutomationPlatform/automation-platform.log
@@ -853,14 +853,17 @@ jobs:
             echo "::warning::no capture-probe log to look at"
             exit 0
           fi
+          found=0
           if grep -q "could not wait here" "$log"; then
-            echo "::warning::a text read could not wait and held the event loop: $(grep -m1 'could not wait here' "$log")"
+            echo "::error::a call could not wait and held the event loop: $(grep -m1 'could not wait here' "$log")"
+            found=1
           fi
           if grep -q "\[guard\] \[[^]]*\] stopped" "$log"; then
             echo "::error::the guard stopped a module: $(grep -m1 '\[guard\] \[[^]]*\] stopped' "$log")"
-            exit 1
+            found=1
           fi
-          echo "no module was stopped"
+          if [ "$found" != 0 ]; then exit 1; fi
+          echo "no module was stopped, and every call waited"
 
   # What Apple Vision's text recognition costs, measured by the download itself:
   # `automation-platform ocr-bench` reads fixed pictures it carries (crates/host/src/ocr/bench.rs,
@@ -1363,14 +1366,18 @@ jobs:
             echo "::error::text recognition ran on the event loop on the newer macOS: $(grep -m1 '\[loop\] text recognition on the event loop' automation-platform.log)"
             exit 1
           fi
-          # The guard's stop and a read that could not wait, as in the build job.
+          # A call that could not wait and the guard's stop, as in the build job: both are looked
+          # for before either fails the step.
+          found=0
           if grep -q "could not wait here" automation-platform.log; then
-            echo "::warning::a text read could not wait and held the event loop on the newer macOS: $(grep -m1 'could not wait here' automation-platform.log)"
+            echo "::error::a call could not wait and held the event loop on the newer macOS: $(grep -m1 'could not wait here' automation-platform.log)"
+            found=1
           fi
           if grep -q "\[guard\] \[[^]]*\] stopped" automation-platform.log; then
             echo "::error::the guard stopped a module on the newer macOS: $(grep -m1 '\[guard\] \[[^]]*\] stopped' automation-platform.log)"
-            exit 1
+            found=1
           fi
+          if [ "$found" != 0 ]; then exit 1; fi
           echo "----- what served the captures -----"
           grep "os macos\|screen recording:\|screen capture paths\|screen captures are coming from\|ScreenCaptureKit refused\|first screen capture\|first capture for reading text\|CAPTURE PROBE:" automation-platform.log || true
 
