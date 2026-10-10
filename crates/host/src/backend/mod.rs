@@ -25,12 +25,14 @@ mod windows;
 /// Windows builds. See the file.
 #[cfg(windows)]
 mod hotkey_hook;
-/// Keeping the keyboard hook alive for days: when to install it again, and the comparison of
-/// raw input with the hook's calls that notices a hook Windows removed. Pure; see the file.
+/// Keeping the keyboard hook alive for days: when to install it again, when to take it out of
+/// the chain for this process's own windows, and the comparison of raw input with the hook's
+/// calls that notices a hook Windows removed. Pure; see the file.
 #[cfg(windows)]
 mod hook_watch;
 /// The thread that watches the keyboard hook on Windows — raw input, session and power
-/// notifications — and asks the hook's thread to install it again. See the file.
+/// notifications, the window in front — and asks the hook's thread to install it again, or to
+/// take it out of the chain while one of this process's windows is in front. See the file.
 #[cfg(windows)]
 mod hook_watch_thread;
 /// DXGI Desktop Duplication, the second way of reading the screen on Windows — for the modules

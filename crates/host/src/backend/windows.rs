@@ -2,7 +2,8 @@
 //! window enumeration (Win32), global hotkeys (`RegisterHotKey` + `GetMessage`, and matched
 //! in the low-level keyboard hook as well — see `hotkey_hook.rs`), the low-level keyboard
 //! hook on a thread of its own (`keyboard_hook_thread`) and the watch that installs it again when
-//! Windows removed it (`hook_watch.rs`, `hook_watch_thread.rs`),
+//! Windows removed it, and takes it out of the chain while one of this application's windows is in
+//! front (`hook_watch.rs`, `hook_watch_thread.rs`),
 //! foreground-change events (`SetWinEventHook`), and screen capture (GDI, or desktop
 //! duplication for the modules that declare it — see `dxgi.rs`).
 
@@ -2378,10 +2379,19 @@ fn popup_menu_open() -> bool {
 ///
 /// **Installed again, here, when the watch asks.** Windows removes a low-level hook that timed
 /// out without telling it; the watch (`hook_watch_thread`) asks after every resume and unlock,
-/// and when raw input shows the hook has stopped being called (`hook_watch`), and posts `hook_watch_thread::WM_APP_REHOOK` to
-/// this thread — the only message ever posted to it — and [`reinstall`] swaps the hook. It is
-/// the one other thing this thread does, a few times in a session at most. The answer goes back
-/// to the watch, which writes the log line: no file is written on this thread.
+/// and when raw input shows the hook has stopped being called (`hook_watch`), and posts
+/// `hook_watch_thread::WM_APP_REHOOK` to this thread, and [`reinstall`] swaps the hook.
+///
+/// **Out of the chain while one of this application's windows is in front.** Windows calls
+/// neither the hook nor the hooks behind it for keys going to this process's windows
+/// (`hook_watch::Place`), so the watch posts `hook_watch_thread::WM_APP_UNHOOK` when one of them
+/// comes to the front, and [`take_out`] takes the hook out; when a window of another program comes
+/// to the front, `WM_APP_REHOOK` again, and [`reinstall`] installs it, first in the chain.
+///
+/// Those two are the only messages ever posted to this thread, and the one other thing it does, a
+/// few times in a session at most, or once per switch between this application's windows and
+/// another program's. The answer goes back to the watch, which writes the log line: no file is
+/// written on this thread.
 ///
 /// It never ends, and never needs to: Windows removes the hook with the process. It answers
 /// `ready` with its thread id, for the watch to post to.
@@ -2400,11 +2410,15 @@ fn keyboard_hook_thread(ready: std::sync::mpsc::SyncSender<Result<u32, String>>)
         drop(ready);
         // GetMessageW is where Windows delivers the hook's calls, as sent messages, and it
         // returns only for a posted one — which is the watch's request to install the hook
-        // again, and nothing else.
+        // again or to take it out, and nothing else.
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             if msg.hwnd.is_null() && msg.message == hook_watch_thread::WM_APP_REHOOK {
                 reinstall(hmod, msg.wParam);
+                continue;
+            }
+            if msg.hwnd.is_null() && msg.message == hook_watch_thread::WM_APP_UNHOOK {
+                take_out(msg.wParam);
                 continue;
             }
             let _ = TranslateMessage(&msg);
@@ -2415,7 +2429,7 @@ fn keyboard_hook_thread(ready: std::sync::mpsc::SyncSender<Result<u32, String>>)
 
 thread_local! {
     /// (The hook's thread.) The hook currently installed, for taking it out when a new one
-    /// replaces it.
+    /// replaces it; null while it is out of the chain ([`take_out`]).
     static HOOK: Cell<HHOOK> = const { Cell::new(std::ptr::null_mut()) };
     /// (The hook's thread.) Hooks of ours an earlier re-install could not take out, tried again
     /// at every later one — see `hook_watch::swap`. Empty unless `UnhookWindowsHookEx` refused
@@ -2439,11 +2453,14 @@ thread_local! {
 /// old one did. What the old hook remembered of keys going by is forgotten
 /// ([`forget_seen_keys`]) only when Windows had removed it: a hook still installed saw every
 /// key-up, and forgetting its record would drop a screen reader's modifier held across the swap.
+///
+/// **Back from out of the chain** ([`take_out`]) there is no old hook: the new one simply goes in,
+/// first in the chain, and nothing is forgotten — that was done as it went out.
 unsafe fn reinstall(hmod: HMODULE, reason: usize) {
     let current = HOOK.with(|h| h.get());
     let (now, outcome) = STALE_HOOKS.with(|stale| {
         hook_watch::swap(
-            current,
+            (!current.is_null()).then_some(current),
             &mut stale.borrow_mut(),
             || {
                 let new = SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_keyboard_proc), hmod, 0);
@@ -2456,16 +2473,51 @@ unsafe fn reinstall(hmod: HMODULE, reason: usize) {
             |hook| if UnhookWindowsHookEx(hook) != 0 { Ok(()) } else { Err(GetLastError()) },
         )
     });
-    HOOK.with(|h| h.set(now));
-    if outcome.forget_seen_keys() {
-        forget_seen_keys();
-    }
+    HOOK.with(|h| h.set(now.unwrap_or(std::ptr::null_mut())));
+    forget_after(outcome);
     hook_watch_thread::report(reason, outcome);
 }
 
+/// Takes the hook out of the chain, on the hook's thread, while one of this application's windows
+/// is in front (`reason` is `hook_watch::Reason::Out`, as encoded), and reports the outcome back to
+/// the watch (`hook_watch::take_out`, where it is tested). The hooks an earlier swap could not take
+/// out go with it. A hook `UnhookWindowsHookEx` refuses stays in the chain, and the next
+/// [`reinstall`] swaps it.
+///
+/// **What carries over** is what a re-install carries over: the captured set, the granted hotkeys,
+/// the modules' scopes and menu flags stay as they are, for the hook that comes back. What the
+/// hook recorded of keys going by is forgotten ([`forget_seen_keys`]), since it sees no key-up
+/// until it is back; the keys owed a key-up for a screen reader stay owed.
+unsafe fn take_out(reason: usize) {
+    let current = HOOK.with(|h| h.get());
+    let (now, outcome) = STALE_HOOKS.with(|stale| {
+        hook_watch::take_out((!current.is_null()).then_some(current), &mut stale.borrow_mut(), |hook| {
+            if UnhookWindowsHookEx(hook) != 0 {
+                Ok(())
+            } else {
+                Err(GetLastError())
+            }
+        })
+    });
+    HOOK.with(|h| h.set(now.unwrap_or(std::ptr::null_mut())));
+    forget_after(outcome);
+    hook_watch_thread::report(reason, outcome);
+}
+
+/// (The hook's thread.) What the hook forgets once its thread has swapped it or taken it out:
+/// what it recorded of keys going by, when the outcome says it may have missed their key-ups
+/// (`hook_watch::Outcome::forget_seen_keys`) — Windows had removed the old one, or it went out of
+/// the chain — and nothing otherwise.
+fn forget_after(outcome: hook_watch::Outcome) {
+    if outcome.forget_seen_keys() {
+        forget_seen_keys();
+    }
+}
+
 /// (The hook's thread.) What a re-installed hook forgets of the keys the old one saw go by when
-/// Windows had removed the old one — the ones whose key-up it missed, and which would otherwise
-/// stay wrong for good:
+/// Windows had removed the old one, and what a hook taken out of the chain forgets as it goes
+/// ([`take_out`]) — the ones whose key-up it missed or will miss, and which would otherwise stay
+/// wrong for good:
 ///
 /// - a **screen reader's modifier** seen going down and never up, and a **pending modifier
 ///   tap** ([`forget_keys_held_out_of_sight`]);
@@ -2498,12 +2550,12 @@ fn forget_seen_keys() {
 /// held, for the watch's log line.
 ///
 /// Any thread: a handful of atomics. The watch calls it on those events; the hook's thread after
-/// a re-install that found the old hook gone. The cost of forgetting too much is one keystroke
-/// made while a screen reader's modifier was held across such a moment, which is then taken by
-/// a capture of it instead of going to the screen reader, the repeat of a captured key held
-/// across it, which reads as a new press, and a key passed on to the program while it is still
-/// held across it — `GetAsyncKeyState` is asked as well, and says so for every key whose key-down
-/// reached the system.
+/// a re-install that found the old hook gone, and after taking the hook out of the chain. The
+/// cost of forgetting too much is one keystroke made while a screen reader's modifier was held
+/// across such a moment, which is then taken by a capture of it instead of going to the screen
+/// reader, the repeat of a captured key held across it, which reads as a new press, and a key
+/// passed on to the program while it is still held across it — `GetAsyncKeyState` is asked as
+/// well, and says so for every key whose key-down reached the system.
 pub(super) fn forget_keys_held_out_of_sight() -> Option<u32> {
     TAP_ARMED.store(0, Ordering::Relaxed);
     CAPTURED_HELD.clear();
@@ -4043,6 +4095,78 @@ mod hook_carry_over_tests {
             st.owners.clear();
         }
         CAPTURED_HELD.clear();
+        *locked(&HOOK_HOTKEYS) = None;
+        SCREEN_READER_PASSED.with(|s| s.borrow_mut().clear());
+    }
+
+    /// The module manager comes to the front and the hook's thread takes the hook out of the chain
+    /// (`take_out`, with a stand-in for `UnhookWindowsHookEx`): the captured set, the modules'
+    /// scopes and flags and the granted hotkeys stay for the hook that comes back, and what the
+    /// hook recorded of keys going by is forgotten, the hook thread's record of the modifiers
+    /// included, since it sees no key-up until it is back. Coming back forgets nothing more, and
+    /// keeps the keys the application set.
+    #[test]
+    fn a_hook_out_of_the_chain_keeps_the_application_s_keys_and_forgets_what_it_recorded() {
+        let _turn = locked(&RECORDS);
+        let captured = vec![Captured { vk: 0x09, mask: 0, owner: 1 }, Captured { vk: 0x20, mask: 0, owner: 2 }];
+        let owners = vec![OwnerKeys { owner: 1, scope: 0x1234, menu: false }];
+        {
+            let mut st = locked(&KEY_STATE);
+            st.set = captured.clone();
+            st.owners = owners.clone();
+        }
+        {
+            let mut t = locked(&HOOK_HOTKEYS);
+            assert!(hotkey_hook::file_if_granted(&mut t, true, 7, 0x56, 0x1));
+        }
+        // In a plug-in before the switch: Tab taken and held, a screen reader's Insert down, Alt
+        // held for a tap, a key owed its key-up.
+        CAPTURED_HELD.taken_down(0x09);
+        KEPT_BACK.taken_down(0x09);
+        SCREEN_READER_MOD_DOWN.store(true, Ordering::Relaxed);
+        TAP_ARMED.store(0xA4, Ordering::Relaxed);
+        HOOK_MODS.with(|m| {
+            let mut mods = Mods::default();
+            mods.on_key(0xA4, true);
+            m.set(mods);
+        });
+        SCREEN_READER_PASSED.with(|s| s.borrow_mut().push(0x20));
+
+        let mut stale = Vec::new();
+        let (now, outcome) = hook_watch::take_out(Some(1u32), &mut stale, |_| Ok(()));
+        assert_eq!(now, None, "nothing of ours left in the chain");
+        forget_after(outcome);
+        assert!(!SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed));
+        assert_eq!(TAP_ARMED.load(Ordering::Relaxed), 0);
+        assert!(!KEPT_BACK.is_held(0x09));
+        assert!(!CAPTURED_HELD.is_held(0x09));
+        assert_eq!(HOOK_MODS.with(|m| m.get()), Mods::default(), "the hook thread's record too");
+        assert!(SCREEN_READER_PASSED.with(|s| s.borrow().contains(&0x20)), "still owed its key-up");
+
+        // Back, first in the chain: nothing to take out, nothing more forgotten.
+        TAP_ARMED.store(0xA5, Ordering::Relaxed);
+        let (now, outcome) = hook_watch::swap(now, &mut stale, || Ok(2u32), |_| panic!("nothing to take out"));
+        assert_eq!((now, outcome), (Some(2), hook_watch::Outcome::Installed { old: hook_watch::Old::WasOut }));
+        forget_after(outcome);
+        assert_eq!(TAP_ARMED.load(Ordering::Relaxed), 0xA5, "recorded since: kept");
+        {
+            let st = locked(&KEY_STATE);
+            assert_eq!(st.set, captured);
+            assert_eq!(st.owners, owners);
+        }
+        {
+            let t = locked(&HOOK_HOTKEYS);
+            let t = t.as_ref().unwrap();
+            assert!(t.holds(7));
+            assert_eq!(t.lookup(0x56, MASK_ALT), 7);
+        }
+
+        {
+            let mut st = locked(&KEY_STATE);
+            st.set.clear();
+            st.owners.clear();
+        }
+        TAP_ARMED.store(0, Ordering::Relaxed);
         *locked(&HOOK_HOTKEYS) = None;
         SCREEN_READER_PASSED.with(|s| s.borrow_mut().clear());
     }

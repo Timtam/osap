@@ -7929,18 +7929,43 @@ time limit; a module past either is stopped until the next start.
 - [ ] **URGENT: NVDA's own key handling breaks once the user interacts with this application**
       (reported by the maintainer on 2026-10-10; it has happened for a while). After opening the tray
       menu or the module manager, NVDA no longer interrupts speech on Tab, arrow keys reach the
-      program but NVDA does not read the character under the caret (the braille cursor moves), as
-      if NVDA's keyboard hook did not see the keys. NVDA's log (%TEMP%\nvda-old.log of that day)
-      has "watchdog.waitForFreezeRecovery ... Starting freeze recovery" at 17:34:58, 17:50:11,
-      17:51:02, 17:51:47 and 19:25:40, and each lines up with an event-loop stall of ours:
-      "uia.findAny(Komplete Kontrol) blocked the pump for 2281 ms" (1791647509), "... for 1008 ms"
-      (1791653140), a 429 ms focus dispatch (1791646498). While NVDA recovers from a freeze its
-      keyboard handler passes keys through unprocessed. Our windows (tray, manager, dialogs) live
-      on the thread that also runs the module pump, so NVDA's accessibility calls into them wait for
-      every long pump iteration; and our UIA searches into REAPER compete with NVDA's own. Find the
-      mechanism (our UI thread blocked under NVDA's calls; our UIA calls; our keyboard hook ahead of
-      NVDA's in the chain; injected keys, which NVDA ignores) and fix it so that NVDA is never held
-      up by this application.
+      window but NVDA does not read the character under the caret (the braille cursor moves), as
+      if NVDA's keyboard hook did not see the keys.
+      **Cause, confirmed live on 2026-10-10:** for keys going to this application's own windows,
+      Windows calls neither our low-level keyboard hook nor the hooks behind it in the chain.
+      With NVDA started after the application (its hook ahead of ours) NVDA worked inside the
+      module manager (characters read on arrows in "Search modules", NVDA+T, Tab cutting speech)
+      and outside; after restarting only the application (ours ahead again) NVDA read no
+      characters inside the manager, and worked outside our windows. Restarting NVDA helped
+      because it put NVDA's hook first; every start of the application put ours first again.
+      The raw input registration (RIDEV_INPUTSINK) was there in both runs, so it is not the cause
+      and stays. NVDA's freeze recoveries that day (17:34:58, 17:50:11, 17:51:02, 17:51:47,
+      19:25:40) are a separate, transient effect of 0.5 to 4 s during REAPER stalls, not the
+      lasting state; and NVDA does not ignore injected keys (handleInjectedKeys is on by default),
+      as this entry first said.
+      **Fix in place (2026-10-10), not yet confirmed live:** the keyboard hook is taken out of the
+      chain while a window of this application is in front, and installed again, first in the
+      chain, when a window of another program comes to the front (hook_watch::Place,
+      hook_watch_thread::follow_front; docs/api/keys.md, "Out of the chain in this application's
+      own windows"). A foreground event the watch never hears is made up for at the next key-down
+      raw input reports. While the hook is out the watch counts no key, and a resume or unlock
+      only looks at the window in front; captures and hotkeys carry over, held records are
+      forgotten. Log: "[keys] the keyboard hook is out while one of our windows is in front
+      ('<title>')" and "[keys] the keyboard hook is back, first in the chain ('<title>' (<exe>) in
+      front)", once per switch.
+      **Open:**
+      - The maintainer's live check, with NVDA started BEFORE the application (the order that
+        failed): in the module manager and a module's Settings dialog, arrows read the character,
+        NVDA+T reads the title and Tab cuts speech; the tray menu's items are read; one "out" and
+        one "back" line per switch, none while moving between our own windows.
+      - Captured keys right after switching back from the manager to a plug-in (Alt+Tab, then Tab
+        at once): the hook comes back when the watch hears of the foreground change, so check that
+        the first Tab reaches the overlay.
+      - The transient causes stay open: our UIA calls into a stalled REAPER, made on the event
+        loop, prolong NVDA's freeze recoveries (and a timeout is cached as "not a Kontakt"); the
+        event loop asks the window that just lost the foreground about itself as the foreground
+        passes to our window; our image workers run at normal priority beside the screen reader's
+        hook thread.
 - [ ] **A key that quits the application.** Windows: Ctrl+Shift+Alt+Win+Q, beside the reload key
       (Ctrl+Shift+Win+Alt+F5). macOS: a chord of the same family, chosen with the same care as
       the reload key (Cmd+Shift+F5, see RELOAD_HOTKEY_MACOS in crates/host/src/lib.rs):

@@ -86,7 +86,27 @@
 //! is first again: ahead of every hook installed since the application started — a screen
 //! reader started or restarted since then included. That is the order the application has
 //! whenever it is started after the screen reader, which is the usual order, and the line in the
-//! log says so every time.
+//! log says so every time. It is first again, too, whenever it comes back after a window of this
+//! process (below).
+//!
+//! **Out of the chain while a window of this process is in front** ([`Place`]). Windows does not
+//! only skip the hook for keys going to this process's own windows: it skips the hooks behind it
+//! in the chain as well, and Microsoft documents neither. Seen live on 2026-10-10 with a screen
+//! reader, whose hook reads out the keys typed into the module manager. Started after the
+//! application, its hook ahead of ours, it read them; with only the application started again,
+//! ours ahead, it read none there, and every key in other programs' windows. So the watch has the
+//! hook taken out of the chain when one of this process's windows comes to the front — it does
+//! nothing there anyway — and installed again when a window of another program does, first in
+//! the chain as at start. Raw input stays registered: it was registered in both runs, and the
+//! screen reader read the keys in the first, so it cuts nobody's hook off. While the hook is out
+//! the witness counts no key, and a re-install for a resume or an unlock waits for the next window
+//! of another program, where the hook is installed afresh anyway. A foreground event the watch
+//! never gets would leave the hook out in front of another program, with nothing to count that
+//! could bring it back, so the window in front is looked at again at every physical key-down while
+//! the hook is out, at one that went to this process while it is in, and at a resume or an unlock
+//! while it is out ([`Place::looks_at_key`], [`Place::looks_at_change`]). The captured set and the
+//! granted hotkeys stay as they are; what the hook recorded as held is forgotten as it goes out,
+//! since it sees no key-up until it is back.
 //!
 //! Everything here is integers and decisions: no OS call, so the tests run wherever Windows
 //! builds.
@@ -122,6 +142,13 @@ pub(crate) enum Reason {
     RemoteConnected,
     /// The witness saw `downs` physical key-downs in a row that the hook was not called for.
     Missed { downs: u32 },
+    /// A window of another program came to the front after one of this process's own: the hook,
+    /// out of the chain while that window was in front, goes back in ([`Place`]).
+    Back,
+    /// One of this process's own windows came to the front: the hook is taken out of the chain
+    /// ([`Place`]). Not a re-install: the hook's thread takes the hook out and installs none
+    /// ([`take_out`]).
+    Out,
 }
 
 impl Reason {
@@ -134,6 +161,8 @@ impl Reason {
             Reason::ConsoleConnected => 3,
             Reason::RemoteConnected => 4,
             Reason::Missed { downs } => 5 | ((downs as usize) << 8),
+            Reason::Back => 6,
+            Reason::Out => 7,
         }
     }
 
@@ -144,6 +173,8 @@ impl Reason {
             3 => Some(Reason::ConsoleConnected),
             4 => Some(Reason::RemoteConnected),
             5 => Some(Reason::Missed { downs: (w >> 8) as u32 }),
+            6 => Some(Reason::Back),
+            7 => Some(Reason::Out),
             _ => None,
         }
     }
@@ -161,6 +192,11 @@ impl Reason {
                 "the hook stopped seeing keys the system delivered: {downs} key-downs in a row \
                  reached raw input and not the hook"
             ),
+            Reason::Back => {
+                "a window of another program came to the front after one of this application's own"
+                    .to_string()
+            }
+            Reason::Out => "one of this application's own windows came to the front".to_string(),
         }
     }
 }
@@ -174,11 +210,16 @@ pub(crate) enum Old {
     AlreadyGone,
     /// `UnhookWindowsHookEx` failed otherwise, with this error — and taking the NEW one out
     /// again failed as well, so both are in the chain. The old one is tried again at every
-    /// later re-install ([`swap`]'s `stale`).
+    /// later re-install ([`swap`]'s `stale`). Taking the hook out ([`take_out`]): it stays in the
+    /// chain, current, and the next re-install swaps it.
     Failed(u32),
+    /// There was no hook of ours in the chain to take out: it was out while one of this
+    /// process's windows was in front ([`Place`]), or putting it back after one had failed.
+    WasOut,
 }
 
-/// A re-install's outcome, as the hook's thread reports it.
+/// What the hook's thread did with a request — a re-install, or taking the hook out of the chain
+/// — as it reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     /// The new hook is in; `old` is what happened to the one before it.
@@ -190,6 +231,10 @@ pub(crate) enum Outcome {
     /// was taken out again rather than leave two of ours, each handling every key the other
     /// lets through. Everything is as it was before the re-install.
     Reverted { error: u32 },
+    /// The hook was asked out of the chain ([`Reason::Out`]); `old` is what became of the one in
+    /// it: taken out, removed by Windows already, none there ([`Old::WasOut`]), or still in
+    /// ([`Old::Failed`]).
+    TakenOut { old: Old },
 }
 
 /// `ERROR_INVALID_HOOK_HANDLE`, from WinError.h.
@@ -206,6 +251,11 @@ impl Outcome {
             Outcome::Installed { old: Old::Failed(e) } => (3, e),
             Outcome::Failed { error } => (4, error),
             Outcome::Reverted { error } => (5, error),
+            Outcome::Installed { old: Old::WasOut } => (6, 0),
+            Outcome::TakenOut { old: Old::Removed } => (7, 0),
+            Outcome::TakenOut { old: Old::AlreadyGone } => (8, 0),
+            Outcome::TakenOut { old: Old::Failed(e) } => (9, e),
+            Outcome::TakenOut { old: Old::WasOut } => (10, 0),
         };
         ((kind << 24) | (code & 0x00FF_FFFF)) as isize
     }
@@ -219,6 +269,11 @@ impl Outcome {
             3 => Some(Outcome::Installed { old: Old::Failed(code) }),
             4 => Some(Outcome::Failed { error: code }),
             5 => Some(Outcome::Reverted { error: code }),
+            6 => Some(Outcome::Installed { old: Old::WasOut }),
+            7 => Some(Outcome::TakenOut { old: Old::Removed }),
+            8 => Some(Outcome::TakenOut { old: Old::AlreadyGone }),
+            9 => Some(Outcome::TakenOut { old: Old::Failed(code) }),
+            10 => Some(Outcome::TakenOut { old: Old::WasOut }),
             _ => None,
         }
     }
@@ -228,12 +283,18 @@ impl Outcome {
         matches!(self, Outcome::Installed { .. })
     }
 
-    /// Whether what the hook remembered of keys going by has to be forgotten: only when Windows
-    /// had removed the old hook, which then missed their key-ups. A hook still installed saw
+    /// Whether what the hook remembered of keys going by has to be forgotten: when Windows had
+    /// removed the old hook, which then missed their key-ups, and when the hook was taken out of
+    /// the chain, which from then on sees no key-up until it is back. A hook still installed saw
     /// every key the new one would have, so its record is right, and forgetting it would drop
-    /// a screen reader's modifier held across the swap.
+    /// a screen reader's modifier held across the swap; a hook that comes back from out of the
+    /// chain has recorded nothing since it went.
     pub(crate) fn forget_seen_keys(self) -> bool {
-        matches!(self, Outcome::Installed { old: Old::AlreadyGone })
+        matches!(
+            self,
+            Outcome::Installed { old: Old::AlreadyGone }
+                | Outcome::TakenOut { old: Old::Removed | Old::AlreadyGone }
+        )
     }
 }
 
@@ -252,43 +313,77 @@ pub(crate) fn unpack_reply(packed: u64) -> Option<(Reason, Outcome)> {
 
 /// The swap itself, with the two system calls passed in so that its order can be tested:
 /// `set` installs a new hook (`SetWindowsHookExW`; `Err` is `GetLastError`), `unhook` takes one
-/// out (`UnhookWindowsHookEx`; `Err` is `GetLastError`). `current` is the hook installed now,
-/// `stale` the hooks of ours an earlier swap could not take out. Returns the hook that is
-/// current afterwards, and the outcome.
+/// out (`UnhookWindowsHookEx`; `Err` is `GetLastError`). `current` is the hook installed now —
+/// `None` while it is out of the chain ([`take_out`]) — and `stale` the hooks of ours an earlier
+/// swap could not take out. Returns the hook that is current afterwards, and the outcome.
 ///
 /// **New first, then old out.** The caller handles no message between the calls, so a key
 /// arriving meanwhile waits for the new hook, which is first in the chain, and by the time it
 /// goes on the old one is out: no key handled twice, none without a hook of ours.
 ///
 /// - `set` fails: nothing is taken out; the old hook stays, and it may still work.
+/// - There is no old one: the new one is simply in ([`Old::WasOut`]).
 /// - The old one answers `ERROR_INVALID_HOOK_HANDLE`: Windows had removed it.
 /// - The old one fails otherwise: it is still in the chain, and two hooks of ours would handle
 ///   every key the first lets through a second time. So the new one is taken out again and the
 ///   state is what it was ([`Outcome::Reverted`]). Only if that fails too do both stay; the old
 ///   one is then kept in `stale` and tried again at every later swap ([`Old::Failed`]).
 pub(crate) fn swap<H: Copy>(
-    current: H,
+    current: Option<H>,
     stale: &mut Vec<H>,
     set: impl FnOnce() -> Result<H, u32>,
     mut unhook: impl FnMut(H) -> Result<(), u32>,
-) -> (H, Outcome) {
+) -> (Option<H>, Outcome) {
     let new = match set() {
         Ok(new) => new,
         Err(error) => return (current, Outcome::Failed { error }),
     };
     let earlier = std::mem::take(stale);
-    let (after, outcome) = match unhook(current) {
-        Ok(()) => (new, Outcome::Installed { old: Old::Removed }),
-        Err(ERROR_INVALID_HOOK_HANDLE) => (new, Outcome::Installed { old: Old::AlreadyGone }),
-        Err(error) => match unhook(new) {
-            Ok(()) | Err(ERROR_INVALID_HOOK_HANDLE) => (current, Outcome::Reverted { error }),
-            Err(_) => {
-                stale.push(current);
-                (new, Outcome::Installed { old: Old::Failed(error) })
-            }
+    let (after, outcome) = match current {
+        None => (new, Outcome::Installed { old: Old::WasOut }),
+        Some(current) => match unhook(current) {
+            Ok(()) => (new, Outcome::Installed { old: Old::Removed }),
+            Err(ERROR_INVALID_HOOK_HANDLE) => (new, Outcome::Installed { old: Old::AlreadyGone }),
+            Err(error) => match unhook(new) {
+                Ok(()) | Err(ERROR_INVALID_HOOK_HANDLE) => (current, Outcome::Reverted { error }),
+                Err(_) => {
+                    stale.push(current);
+                    (new, Outcome::Installed { old: Old::Failed(error) })
+                }
+            },
         },
     };
-    // Hooks an earlier swap could not take out: out now, gone by now, or still refusing.
+    take_stale_out(earlier, stale, &mut unhook);
+    (Some(after), outcome)
+}
+
+/// Takes the hook out of the chain while one of this process's windows is in front
+/// ([`Reason::Out`], [`Place`]), with `unhook` passed in as for [`swap`]. `current` is the hook in
+/// the chain now, `None` when none is; the hooks in `stale` are tried again here as well. Returns
+/// the hook in the chain afterwards — `None`, unless `UnhookWindowsHookEx` refused it
+/// ([`Old::Failed`]: it stays current, and the next re-install swaps it) — and the outcome,
+/// [`Outcome::TakenOut`].
+pub(crate) fn take_out<H: Copy>(
+    current: Option<H>,
+    stale: &mut Vec<H>,
+    mut unhook: impl FnMut(H) -> Result<(), u32>,
+) -> (Option<H>, Outcome) {
+    let earlier = std::mem::take(stale);
+    let (after, old) = match current {
+        None => (None, Old::WasOut),
+        Some(hook) => match unhook(hook) {
+            Ok(()) => (None, Old::Removed),
+            Err(ERROR_INVALID_HOOK_HANDLE) => (None, Old::AlreadyGone),
+            Err(error) => (Some(hook), Old::Failed(error)),
+        },
+    };
+    take_stale_out(earlier, stale, &mut unhook);
+    (after, Outcome::TakenOut { old })
+}
+
+/// Hooks an earlier swap could not take out: out now, gone by now, or still refusing — and then
+/// back in `stale` for the next try.
+fn take_stale_out<H: Copy>(earlier: Vec<H>, stale: &mut Vec<H>, unhook: &mut impl FnMut(H) -> Result<(), u32>) {
     for h in earlier {
         if let Err(e) = unhook(h) {
             if e != ERROR_INVALID_HOOK_HANDLE {
@@ -296,7 +391,6 @@ pub(crate) fn swap<H: Copy>(
             }
         }
     }
-    (after, outcome)
 }
 
 /// What the watch saw of a run of missed key-downs, for the re-install line the run asked for.
@@ -372,19 +466,7 @@ pub(crate) fn line(reason: Reason, outcome: Outcome, run: Option<&MissedRun>) ->
     };
     match outcome {
         Outcome::Installed { old } => {
-            let before = match old {
-                Old::Removed => "the old hook was still installed and has been taken out".to_string(),
-                Old::AlreadyGone => "Windows had already removed the old hook — it had stopped \
-                                     being called, so captured keys and the hotkeys the hook \
-                                     matches were not working until now"
-                    .to_string(),
-                Old::Failed(e) => format!(
-                    "taking the old hook out failed (UnhookWindowsHookEx error {e}), and so did \
-                     taking the new one out again: both are in the chain, and a key the new one \
-                     lets through reaches the old one too and is handled a second time, until \
-                     the old one can be taken out — tried again at every re-install"
-                ),
-            };
+            let before = old_words(old);
             let forgot = if outcome.forget_seen_keys() {
                 "; what the old hook had recorded as held (a screen reader's modifier, a pending \
                  modifier tap) was forgotten, since it missed the key-ups"
@@ -413,6 +495,184 @@ pub(crate) fn line(reason: Reason, outcome: Outcome, run: Option<&MissedRun>) ->
              twice; the old hook stays as it was. Tried again when the hook misses more \
              key-downs, and at the next resume or unlock"
         ),
+        Outcome::TakenOut { old } => {
+            format!("the keyboard hook was taken out of the chain ({why}): {}", old_words(old))
+        }
+    }
+}
+
+/// What became of the old hook, as the lines say it.
+fn old_words(old: Old) -> String {
+    match old {
+        Old::Removed => "the old hook was still installed and has been taken out".to_string(),
+        Old::AlreadyGone => "Windows had already removed the old hook — it had stopped being \
+                             called, so captured keys and the hotkeys the hook matches were not \
+                             working until now"
+            .to_string(),
+        Old::Failed(e) => format!(
+            "taking the old hook out failed (UnhookWindowsHookEx error {e}), and so did taking the \
+             new one out again: both are in the chain, and a key the new one lets through reaches \
+             the old one too and is handled a second time, until the old one can be taken out — \
+             tried again at every re-install"
+        ),
+        Old::WasOut => "no hook of ours was in the chain: it had been taken out while one of our \
+                        windows was in front, and putting it back had failed"
+            .to_string(),
+    }
+}
+
+/// Whether the hook is meant to be in the chain of low-level keyboard hooks, or out of it while
+/// one of this process's own windows is in front — what the watch has asked the hook's thread
+/// for. See the top of this file for why; the hook's thread does the moves in the order they were
+/// asked, so the last one asked is where the hook ends up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Place {
+    out: bool,
+}
+
+/// What the watch asks the hook's thread for as a window comes to the front.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Move {
+    /// Take the hook out of the chain: one of this process's own windows came to the front.
+    Out,
+    /// Install it again, first in the chain: a window of another program came to the front.
+    In,
+}
+
+impl Move {
+    /// The reason the request carries to the hook's thread and back.
+    pub(crate) fn reason(self) -> Reason {
+        match self {
+            Move::Out => Reason::Out,
+            Move::In => Reason::Back,
+        }
+    }
+}
+
+impl Place {
+    /// A window came to the front: one of this process's own (`ours`), or another program's. The
+    /// move that takes, if any — out at the first of this process's windows, in at the first
+    /// window of another program after them — is handed to `post`, which asks the hook's thread
+    /// and says whether it could; the place changes only then, so a move that could not be asked
+    /// for is asked for again at the next window that comes to the front. Windows of this process
+    /// one after another (the module manager, then a module's dialog), or of other programs one
+    /// after another, move nothing.
+    pub(crate) fn front(&mut self, ours: bool, post: impl FnOnce(Move) -> bool) -> Option<Move> {
+        let wanted = match (ours, self.out) {
+            (true, false) => Move::Out,
+            (false, true) => Move::In,
+            _ => return None,
+        };
+        if !post(wanted) {
+            return None;
+        }
+        self.out = wanted == Move::Out;
+        Some(wanted)
+    }
+
+    /// Whether the hook is out of the chain, or asked out.
+    #[cfg(test)]
+    fn is_out(self) -> bool {
+        self.out
+    }
+
+    /// A physical key-down for the witness ([`Witness::key_down`]), judged only while the hook is
+    /// meant to be in the chain. While it is out no key is the hook's to have seen, so none is
+    /// counted, none moves the witness's reference, and nothing is asked about it: `None`. Raw
+    /// input still reports them — keys going to other programs too, in the moment before the
+    /// window in front is another program's; once it is, the key makes the watch put the hook back
+    /// first ([`Place::looks_at_key`]) and is the first of the fresh count.
+    pub(crate) fn key_down(
+        self,
+        witness: &mut Witness,
+        time: u32,
+        last_call: Option<u32>,
+        visible: impl FnOnce() -> bool,
+    ) -> Option<Verdict> {
+        (!self.out).then(|| witness.key_down(time, last_call, visible))
+    }
+
+    /// What a session change or a suspend/resume ([`on_session_change`], [`on_power`]) asks of the
+    /// hook here. While it is out, a re-install becomes a fresh count only: installing the hook
+    /// now would put it back in the chain in front of one of this process's own windows, and it is
+    /// installed afresh, first in the chain, as soon as a window of another program comes to the
+    /// front.
+    pub(crate) fn change(self, change: Change) -> Change {
+        match change {
+            Change::Rehook(_) if self.out => Change::Restart,
+            other => other,
+        }
+    }
+
+    /// Whether a physical key-down makes the watch look at the window in front again
+    /// ([`Place::front`] with it), for a foreground event it never got or a move it could not ask
+    /// for: every key-down while the hook is out, and while it is in, one that raw input reports as
+    /// gone to this process (`to_this_process`, `RIM_INPUT`). Nothing else brings the hook back if
+    /// the event for another program's window is lost, and captures would stay dead in front of
+    /// it until the next switch. A place that agrees with the window in front moves nothing, so
+    /// looking again costs two queries and asks the hook's thread for nothing.
+    pub(crate) fn looks_at_key(self, to_this_process: bool) -> bool {
+        self.out || to_this_process
+    }
+
+    /// Whether a session change or a suspend/resume makes the watch look at the window in front
+    /// again: one that asks for a re-install ([`Change::Rehook`]: a resume, an unlock, a connect)
+    /// while the hook is out. The keyboard comes back then from where no foreground event reaches
+    /// the watch, and a window of another program may be in front by now.
+    pub(crate) fn looks_at_change(self, change: Change) -> bool {
+        self.out && matches!(change, Change::Rehook(_))
+    }
+}
+
+/// A window that came to the front, as the lines of [`move_line`] name it: its title in quotes,
+/// or its class when it has none, and for another program's window the program (`exe`, empty
+/// when it could not be read) — `'Modules'`, `'REAPER v7.22' (reaper.exe)`.
+pub(crate) fn window_words(title: &str, class: &str, exe: Option<&str>) -> String {
+    let name = if title.is_empty() { format!("untitled, class '{class}'") } else { format!("'{title}'") };
+    match exe {
+        Some(exe) => format!("{name} ({})", if exe.is_empty() { "?" } else { exe }),
+        None => name,
+    }
+}
+
+/// The one line a move of the hook writes ([`Reason::Out`], [`Reason::Back`]), once its outcome
+/// is in; `window` names the window that came to the front ([`window_words`]). Quiet: a few words
+/// for each change, more only when something went wrong.
+pub(crate) fn move_line(reason: Reason, outcome: Outcome, window: &str) -> String {
+    match (reason, outcome) {
+        (Reason::Out, Outcome::TakenOut { old: Old::Removed | Old::WasOut }) => {
+            format!("the keyboard hook is out while one of our windows is in front ({window})")
+        }
+        (Reason::Out, Outcome::TakenOut { old: Old::AlreadyGone }) => format!(
+            "the keyboard hook is out while one of our windows is in front ({window}); Windows had \
+             already removed it — it had stopped being called"
+        ),
+        (Reason::Out, Outcome::TakenOut { old: Old::Failed(e) }) => format!(
+            "the keyboard hook could not be taken out while one of our windows is in front \
+             ({window}): UnhookWindowsHookEx error {e}, so it stays in the chain; it is installed \
+             again, first in the chain, when a window of another program comes to the front"
+        ),
+        (Reason::Back, Outcome::Installed { old: Old::WasOut | Old::Removed }) => {
+            format!("the keyboard hook is back, first in the chain ({window} in front)")
+        }
+        (Reason::Back, Outcome::Installed { old }) => format!(
+            "the keyboard hook is back, first in the chain ({window} in front); {}",
+            old_words(old)
+        ),
+        (Reason::Back, Outcome::Failed { error }) => format!(
+            "the keyboard hook could not be put back ({window} in front): SetWindowsHookExW error \
+             {error}. Captured keys and the hotkeys the hook matches do not work until it is \
+             (RegisterHotKey still delivers hotkeys); tried again when it misses key-downs, and \
+             when a window of another program next comes to the front after one of ours"
+        ),
+        (Reason::Back, Outcome::Reverted { error }) => format!(
+            "the keyboard hook stays where it was ({window} in front): it could not be taken out \
+             while one of our windows was in front, and now the new one went in but the old one \
+             could not be taken out (UnhookWindowsHookEx error {error}), so the new one was taken \
+             out again rather than leave two hooks of ours handling every key twice"
+        ),
+        // Not a pair the hook's thread answers with; said as a re-install would be.
+        _ => line(reason, outcome, None),
     }
 }
 
@@ -1006,6 +1266,8 @@ mod tests {
             Reason::RemoteConnected,
             Reason::Missed { downs: 5 },
             Reason::Missed { downs: 320 },
+            Reason::Back,
+            Reason::Out,
         ] {
             assert_eq!(Reason::decode(r.encode()), Some(r));
         }
@@ -1014,8 +1276,13 @@ mod tests {
             Outcome::Installed { old: Old::Removed },
             Outcome::Installed { old: Old::AlreadyGone },
             Outcome::Installed { old: Old::Failed(5) },
+            Outcome::Installed { old: Old::WasOut },
             Outcome::Failed { error: 1428 },
             Outcome::Reverted { error: 5 },
+            Outcome::TakenOut { old: Old::Removed },
+            Outcome::TakenOut { old: Old::AlreadyGone },
+            Outcome::TakenOut { old: Old::Failed(5) },
+            Outcome::TakenOut { old: Old::WasOut },
         ] {
             assert_eq!(Outcome::decode(o.encode()), Some(o));
             assert_ne!(o.encode(), 0);
@@ -1044,35 +1311,39 @@ mod tests {
         fn with(first: u32) -> Chain {
             Chain { installed: vec![first], next: first + 1, ..Chain::default() }
         }
+        /// `SetWindowsHookExW`, as this chain answers it.
+        fn set(&mut self) -> Result<u32, u32> {
+            self.calls.push("set".to_string());
+            if let Some(e) = self.set_fails {
+                return Err(e);
+            }
+            let h = self.next;
+            self.next += 1;
+            self.installed.insert(0, h); // newest first, as Windows calls them
+            Ok(h)
+        }
+        /// `UnhookWindowsHookEx`, as this chain answers it.
+        fn unhook(&mut self, h: u32) -> Result<(), u32> {
+            self.calls.push(format!("unhook {h}"));
+            if let Some(&(_, e)) = self.refuse.iter().find(|(r, _)| *r == h) {
+                return Err(e);
+            }
+            if self.removed_by_windows.contains(&h) || !self.installed.contains(&h) {
+                return Err(ERROR_INVALID_HOOK_HANDLE);
+            }
+            self.installed.retain(|&x| x != h);
+            Ok(())
+        }
         fn swap(&mut self, current: u32, stale: &mut Vec<u32>) -> (u32, Outcome) {
+            let (after, outcome) = self.swap_from(Some(current), stale);
+            (after.expect("a swap with a hook in the chain leaves one in it"), outcome)
+        }
+        fn swap_from(&mut self, current: Option<u32>, stale: &mut Vec<u32>) -> (Option<u32>, Outcome) {
             let this = std::cell::RefCell::new(self);
-            swap(
-                current,
-                stale,
-                || {
-                    let mut c = this.borrow_mut();
-                    c.calls.push("set".to_string());
-                    if let Some(e) = c.set_fails {
-                        return Err(e);
-                    }
-                    let h = c.next;
-                    c.next += 1;
-                    c.installed.insert(0, h); // newest first, as Windows calls them
-                    Ok(h)
-                },
-                |h| {
-                    let mut c = this.borrow_mut();
-                    c.calls.push(format!("unhook {h}"));
-                    if let Some(&(_, e)) = c.refuse.iter().find(|(r, _)| *r == h) {
-                        return Err(e);
-                    }
-                    if c.removed_by_windows.contains(&h) || !c.installed.contains(&h) {
-                        return Err(ERROR_INVALID_HOOK_HANDLE);
-                    }
-                    c.installed.retain(|&x| x != h);
-                    Ok(())
-                },
-            )
+            swap(current, stale, || this.borrow_mut().set(), |h| this.borrow_mut().unhook(h))
+        }
+        fn take_out(&mut self, current: Option<u32>, stale: &mut Vec<u32>) -> (Option<u32>, Outcome) {
+            take_out(current, stale, |h| self.unhook(h))
         }
     }
 
@@ -1155,6 +1426,204 @@ mod tests {
         assert_eq!(c.swap(4, &mut stale), (5, Outcome::Installed { old: Old::Removed }));
         assert_eq!(stale, [9]);
         assert_eq!(c.installed, [5, 9]);
+    }
+
+    /// The module manager comes to the front: nothing of ours is left in the chain, ahead of the
+    /// hook another program installed before ours, and what the hook recorded as held is
+    /// forgotten. Another program's window comes to the front: the hook is installed, nothing is
+    /// taken out on the way, and it is first in the chain again — ahead of a hook installed while
+    /// it was out as well, as when the application starts — with nothing forgotten, since nothing
+    /// was recorded while it was out.
+    #[test]
+    fn out_of_the_chain_for_our_windows_and_back_first_in_it() {
+        let mut c = Chain::with(1);
+        c.installed.push(90); // installed before ours, so behind it
+        let mut stale = Vec::new();
+        let (now, outcome) = c.take_out(Some(1), &mut stale);
+        assert_eq!((now, outcome), (None, Outcome::TakenOut { old: Old::Removed }));
+        assert_eq!(c.installed, [90], "nothing of ours ahead of it");
+        assert!(outcome.forget_seen_keys(), "out of the chain, the hook sees no key-up");
+        // A program that installs a hook meanwhile is first, for now.
+        c.installed.insert(0, 91);
+        let (now, outcome) = c.swap_from(now, &mut stale);
+        assert_eq!((now, outcome), (Some(2), Outcome::Installed { old: Old::WasOut }));
+        assert_eq!(c.installed, [2, 91, 90], "first in the chain, as at start");
+        assert_eq!(c.calls, ["unhook 1", "set"], "nothing taken out on the way back");
+        assert!(!outcome.forget_seen_keys(), "nothing was recorded while it was out");
+        assert!(outcome.installed());
+    }
+
+    #[test]
+    fn taking_out_a_hook_windows_removed_one_that_refuses_and_none() {
+        // Removed by Windows already: out all the same, and its record forgotten.
+        let mut c = Chain::with(1);
+        c.installed.clear();
+        c.removed_by_windows.push(1);
+        let (now, outcome) = c.take_out(Some(1), &mut Vec::new());
+        assert_eq!((now, outcome), (None, Outcome::TakenOut { old: Old::AlreadyGone }));
+        assert!(outcome.forget_seen_keys());
+        // Refused: it stays in the chain and current, its record stays right, and the way back
+        // swaps it — new first, then old out.
+        let mut c = Chain::with(1);
+        c.refuse.push((1, 5));
+        let mut stale = Vec::new();
+        let (now, outcome) = c.take_out(Some(1), &mut stale);
+        assert_eq!((now, outcome), (Some(1), Outcome::TakenOut { old: Old::Failed(5) }));
+        assert!(!outcome.forget_seen_keys(), "still in the chain: what it recorded is right");
+        assert!(stale.is_empty(), "current, not stale");
+        c.refuse.clear();
+        assert_eq!(c.swap_from(now, &mut stale), (Some(2), Outcome::Installed { old: Old::Removed }));
+        assert_eq!(c.installed, [2]);
+        // None in the chain — a way back that failed — and one left over from an earlier swap:
+        // that one is tried, and nothing else.
+        let mut c = Chain::default();
+        c.installed.push(7);
+        let mut stale = vec![7];
+        assert_eq!(c.take_out(None, &mut stale), (None, Outcome::TakenOut { old: Old::WasOut }));
+        assert_eq!(c.calls, ["unhook 7"]);
+        assert!(stale.is_empty() && c.installed.is_empty());
+        // A way back that fails leaves the hook out; the next one installs it.
+        let mut c = Chain { set_fails: Some(8), ..Chain::default() };
+        let (now, outcome) = c.swap_from(None, &mut Vec::new());
+        assert_eq!((now, outcome), (None, Outcome::Failed { error: 8 }));
+        c.set_fails = None;
+        assert_eq!(c.swap_from(now, &mut Vec::new()).1, Outcome::Installed { old: Old::WasOut });
+    }
+
+    /// The module manager, a module's dialog over it, the manager again: out once. Another
+    /// program's window, then another: in once. A move that could not be asked for leaves the
+    /// place as it was, and is asked for at the next window.
+    #[test]
+    fn out_at_the_first_of_our_windows_and_in_once_at_another_program_s() {
+        let mut place = Place::default();
+        let mut asked = Vec::new();
+        let mut front = |place: &mut Place, ours: bool, posted: bool| {
+            place.front(ours, |m| {
+                asked.push(m);
+                posted
+            })
+        };
+        assert_eq!(front(&mut place, false, true), None, "another program's: the hook stays in");
+        assert_eq!(front(&mut place, true, true), Some(Move::Out));
+        assert!(place.is_out());
+        assert_eq!(front(&mut place, true, true), None, "a module's dialog");
+        assert_eq!(front(&mut place, true, true), None, "the module manager again");
+        assert_eq!(front(&mut place, false, true), Some(Move::In));
+        assert!(!place.is_out());
+        assert_eq!(front(&mut place, false, true), None, "another program's window after it");
+        // Not posted: nothing changes, and the next window asks again.
+        assert_eq!(front(&mut place, true, false), None);
+        assert!(!place.is_out());
+        assert_eq!(front(&mut place, true, true), Some(Move::Out));
+        assert_eq!(front(&mut place, false, false), None);
+        assert!(place.is_out());
+        assert_eq!(front(&mut place, false, true), Some(Move::In));
+        assert_eq!(asked, [Move::Out, Move::In, Move::Out, Move::Out, Move::In, Move::In]);
+        assert_eq!(Move::Out.reason(), Reason::Out);
+        assert_eq!(Move::In.reason(), Reason::Back);
+    }
+
+    /// The span with the hook out: raw input goes on reporting keys — to this application's
+    /// windows, and to another program's in the moment before the window in front is its — and
+    /// the hook, out, is called for none of them. None is counted or asked about, and no
+    /// re-install comes of them, however many; an unlock or a resume meanwhile only starts the
+    /// count afresh (the window in front is looked at then: the next test). With the hook back,
+    /// the count starts afresh and the keys are judged again.
+    /// The same keys with the hook meant to be in the chain are what a removed hook looks like.
+    #[test]
+    fn while_the_hook_is_out_no_key_is_counted_and_nothing_installs_it_again() {
+        let mut w = Witness::default();
+        let (_, last) = run(&mut w, 10_000, 300, 5, true, None);
+        let mut place = Place::default();
+        assert_eq!(place.front(true, |_| true), Some(Move::Out));
+        for i in 0..60 {
+            let judged = place.key_down(&mut w, 20_000 + i * 1_500, last, || {
+                panic!("asked about a key while the hook is out")
+            });
+            assert_eq!(judged, None);
+        }
+        assert_eq!((w.prev, w.streak), (Some(11_200), 0), "the witness untouched");
+        for change in [on_session_change(8), on_session_change(1), on_session_change(3), on_power(0x12)] {
+            assert_eq!(place.change(change), Change::Restart, "{change:?} while out");
+        }
+        assert_eq!(place.change(on_session_change(7)), Change::Restart);
+        assert_eq!(place.change(Change::Nothing), Change::Nothing);
+        // Back in: the watch starts the count afresh, the hook is called again.
+        assert_eq!(place.front(false, |_| true), Some(Move::In));
+        w.restart();
+        assert_eq!(place.change(on_session_change(8)), Change::Rehook(Reason::Unlocked), "in the chain again");
+        assert_eq!(place.key_down(&mut w, 200_000, Some(200_001), || panic!("not asked")), Some(Verdict::First));
+        assert_eq!(place.key_down(&mut w, 200_300, Some(200_301), || panic!("not asked")), Some(Verdict::Seen));
+        // The same keys, the hook meant to be in and never called: installed again after three.
+        let mut w = Witness::default();
+        let v: Vec<_> = (0..=MISSES_TO_REHOOK)
+            .map(|i| Place::default().key_down(&mut w, 20_000 + i * 1_500, last, || true))
+            .collect();
+        assert_eq!(v.last(), Some(&Some(Verdict::Rehook { downs: MISSES_TO_REHOOK })), "{v:?}");
+    }
+
+    /// The foreground event for another program's window never comes, or the move back could not
+    /// be asked for: the next key-down looks at the window in front and brings the hook back, and
+    /// so does a resume, an unlock or a connect while it is out. While the hook is in, only a key
+    /// that went to this process looks — the event for one of its windows lost — and a key where
+    /// the place already agrees with the window in front moves nothing.
+    #[test]
+    fn a_foreground_event_never_heard_is_made_up_at_the_next_key_and_at_an_unlock() {
+        let mut place = Place::default();
+        assert!(!place.looks_at_key(false), "in, a key to another program: nothing to look at");
+        assert!(place.looks_at_key(true), "in, a key to one of our windows");
+        assert_eq!(place.front(true, |_| true), Some(Move::Out));
+        assert!(place.looks_at_key(true), "out: every key looks");
+        assert_eq!(place.front(true, |_| panic!("asked for a move it is in already")), None);
+        // The switch to another program unheard: its first key brings the hook back.
+        assert!(place.looks_at_key(false));
+        assert_eq!(place.front(false, |_| true), Some(Move::In));
+        assert!(!place.looks_at_key(false));
+        // A move back that could not be asked for is asked for again at the next key.
+        assert_eq!(place.front(true, |_| true), Some(Move::Out));
+        assert_eq!(place.front(false, |_| false), None);
+        assert!(place.looks_at_key(false), "still out");
+        assert_eq!(place.front(false, |_| true), Some(Move::In));
+        // The keyboard back from a lock or a sleep while the hook is out: looked at. On the way
+        // there, or with the hook in (which a re-install of its own answers), not.
+        assert_eq!(place.front(true, |_| true), Some(Move::Out));
+        for change in [on_session_change(8), on_session_change(1), on_session_change(3), on_power(0x12)] {
+            assert!(place.looks_at_change(change), "{change:?} while out");
+        }
+        for change in [on_session_change(7), on_session_change(2), on_session_change(4), on_power(0x4)] {
+            assert!(!place.looks_at_change(change), "{change:?} while out");
+        }
+        assert!(!place.looks_at_change(Change::Nothing));
+        assert_eq!(place.front(false, |_| true), Some(Move::In));
+        assert!(!place.looks_at_change(on_session_change(8)), "in: a re-install of its own");
+    }
+
+    #[test]
+    fn the_move_lines_name_the_window_and_say_more_only_when_something_went_wrong() {
+        assert_eq!(window_words("Modules", "wxWindowNR", None), "'Modules'");
+        assert_eq!(window_words("REAPER", "REAPERwnd", Some("reaper.exe")), "'REAPER' (reaper.exe)");
+        assert_eq!(window_words("", "#32770", Some("")), "untitled, class '#32770' (?)");
+        assert_eq!(
+            move_line(Reason::Out, Outcome::TakenOut { old: Old::Removed }, "'Modules'"),
+            "the keyboard hook is out while one of our windows is in front ('Modules')"
+        );
+        assert_eq!(
+            move_line(Reason::Back, Outcome::Installed { old: Old::WasOut }, "'REAPER' (reaper.exe)"),
+            "the keyboard hook is back, first in the chain ('REAPER' (reaper.exe) in front)"
+        );
+        let l = move_line(Reason::Out, Outcome::TakenOut { old: Old::AlreadyGone }, "'Modules'");
+        assert!(l.ends_with("('Modules'); Windows had already removed it — it had stopped being called"), "{l}");
+        let l = move_line(Reason::Out, Outcome::TakenOut { old: Old::Failed(5) }, "'Modules'");
+        assert!(l.contains("could not be taken out") && l.contains("UnhookWindowsHookEx error 5"), "{l}");
+        let l = move_line(Reason::Back, Outcome::Failed { error: 8 }, "'REAPER' (reaper.exe)");
+        assert!(l.contains("could not be put back") && l.contains("SetWindowsHookExW error 8"), "{l}");
+        let l = move_line(Reason::Back, Outcome::Installed { old: Old::AlreadyGone }, "'REAPER' (reaper.exe)");
+        assert!(l.starts_with("the keyboard hook is back") && l.contains("had already removed"), "{l}");
+        let l = move_line(Reason::Back, Outcome::Reverted { error: 5 }, "'REAPER' (reaper.exe)");
+        assert!(l.contains("stays where it was") && l.contains("error 5"), "{l}");
+        // A re-install for missed keys after a way back that failed.
+        let l = line(Reason::Missed { downs: 3 }, Outcome::Installed { old: Old::WasOut }, None);
+        assert!(l.contains("no hook of ours was in the chain"), "{l}");
     }
 
     #[test]
