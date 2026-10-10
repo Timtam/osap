@@ -7906,6 +7906,21 @@ time limit; a module past either is stopped until the next start.
 
 ## The application's own keys, and what reload-all rereads (2026-10-10, from the maintainer)
 
+- [ ] **URGENT: NVDA's own key handling breaks once the user interacts with this application**
+      (reported by the maintainer on 2026-10-10; it has happened for a while). After opening the tray
+      menu or the module manager, NVDA no longer interrupts speech on Tab, arrow keys reach the
+      program but NVDA does not read the character under the caret (the braille cursor moves), as
+      if NVDA's keyboard hook did not see the keys. NVDA's log (%TEMP%\nvda-old.log of that day)
+      has "watchdog.waitForFreezeRecovery ... Starting freeze recovery" at 17:34:58, 17:50:11,
+      17:51:02, 17:51:47 and 19:25:40, and each lines up with an event-loop stall of ours:
+      "uia.findAny(Komplete Kontrol) blocked the pump for 2281 ms" (1791647509), "... for 1008 ms"
+      (1791653140), a 429 ms focus dispatch (1791646498). While NVDA recovers from a freeze its
+      keyboard handler passes keys through unprocessed. Our windows (tray, manager, dialogs) live
+      on the thread that also runs the module pump, so NVDA's accessibility calls into them wait for
+      every long pump iteration; and our UIA searches into REAPER compete with NVDA's own. Find the
+      mechanism (our UI thread blocked under NVDA's calls; our UIA calls; our keyboard hook ahead of
+      NVDA's in the chain; injected keys, which NVDA ignores) and fix it so that NVDA is never held
+      up by this application.
 - [ ] **A key that quits the application.** Windows: Ctrl+Shift+Alt+Win+Q, beside the reload key
       (Ctrl+Shift+Win+Alt+F5). macOS: a chord of the same family, chosen with the same care as
       the reload key (Cmd+Shift+F5, see RELOAD_HOTKEY_MACOS in crates/host/src/lib.rs):
