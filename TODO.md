@@ -4115,7 +4115,8 @@ What only a person, a Mac or a measurement can settle:
       and the Komplete Kontrol OCR edit field does not rest on the input barrier, which step 11.3
       removed: since B3 the click comes after the read is answered (the runtime's `ocr`/`ocredit`
       branch of `activate`, and `speakControl`'s `finish`). An NVDA test with each of them is
-      still the gate.
+      still the gate: sforzando's, u-he's and Soundiron's passed in session A (2026-10-10);
+      Impact Soundworks' and the Komplete Kontrol field are left.
 - [ ] **Kontakt's file-menu read** waits in its timer's handler since B1b+M, and keeps building its
       own rows (`ocrRows`) until the reading's rows are compared with it on both platforms.
 - [ ] **The language list at load:** in the first headless run the list was not known within the
@@ -7397,7 +7398,7 @@ kind of place that says how long the first held the loop.
       counts, the `gave up … rather than keep the reads behind it waiting` line), and ocr-bench's
       own ladder. The next ocr-bench run in CI says whether `prod`'s figures stayed where they
       were.
-- [ ] **NVDA check of step 11.3 (session A), before it is committed** — nothing should sound
+- [x] **NVDA check of step 11.3 (session A), before it is committed** — nothing should sound
       different; what changed is that a click, a key or a focus no longer waits for a picture the
       module has out. Windows, at the reads' own speed: sforzando's "Instrument" (an `opensMenu`
       OCR button: the value said, then the click, then the menu read), and sforzando in REAPER
@@ -7412,7 +7413,20 @@ kind of place that says how long the first held the loop.
       still to come, such as a calibrating run's menu shots, and one taken but not answered yet do
       not count. Melodyne may be named once, since its watcher asks for a picture every few
       ticks and its answers are judged by when they were asked; any other module named is a
-      place to look at.
+      place to look at. Passed on 2026-10-10 (build 2da1d39, step 12a included): sforzando's
+      "Instrument", and sforzando inserted fresh in REAPER recognised; u-he's and Soundiron's
+      `opensMenu` buttons, the value and then the menu; Kontakt's Ctrl+L, Ctrl+S and Ctrl+R in
+      REAPER; Melodyne's F-keys. The log's one `acted (` line was Melodyne's
+      (`host.input.click`), the one expected; no `could not wait here`, no `[guard] … stopped`.
+      Melodyne said ", " as it came up: the first frames of a stay read its read-out boxes as
+      "† -" and then a lone dot in each, and the dots were said; since 4294d84 (Melodyne 0.1.6) a
+      value has a letter or a digit in it. Kontakt's Load and Save held the loop up to 1.7 s while
+      REAPER built its file dialog ("Kontakt's identity questions hold the event loop while
+      REAPER opens a file dialog", below). Komplete Kontrol's "Save as" and Avenger were not
+      tested: the next item.
+- [ ] **What NVDA session A left of step 11.3's check** — Komplete Kontrol's "Save as" OCREdit
+      (the value said, then the caret in the field, typing goes there), and Avenger's preset steps
+      once the plug-in is at hand (Q3 = A). Bring the log's `acted (` lines, read as above.
 - [x] **The review of K, B1a, B2 and B3** (2026-10-04, three reviews; kb-final.md). The overlays
       of one module share its key scope and menu flag: the one that comes to the front pins the
       scope, only the last to leave sets it back, and the flag is then what the ones in front say
@@ -7489,9 +7503,33 @@ Follow-ups this work found and did not take on:
       `host.window.active().app.pid` before the 250 ms, before the read and after it, taking a Qt
       menu for the same process. That a Qt menu answers with Kontakt's process on Windows and on a
       Mac, inside a DAW and standalone, is reasoned, not seen: the NVDA check above and the Mac
-      session show it when load, save and reset still click.
+      session show it when load, save and reset still click. On Windows in REAPER they did
+      (session A, 2026-10-10); a Mac and the standalone are left.
 - [ ] **UIA on a thread of its own** (a multithreaded apartment, as Microsoft's UI Automation
       threading notes recommend), its calls as waits. Measure first.
+- [ ] **Kontakt's identity questions hold the event loop while REAPER opens a file dialog**
+      (2026-10-10, session A, Kontakt 8 in REAPER). Load and Save Multi worked, but the timer
+      after the click on the entry held the loop: `uia.findAny(Komplete Kontrol) blocked the pump
+      for 1459 ms`, `[pump] one iteration took 1524 ms (… timers 1524 …)`, then `in front now:
+      'Load'`; for Save, 1541 ms and `findAny(Kontakt 8/Kontakt 7)` 164 ms, 1710 ms in all. No
+      pixel, image, text or snapshot work in either. The runtime's menu tick (150 ms, Kontakt's
+      VM) resolves the active cell's origin first (`originFirst`); the click had turned the
+      epoch, so the cell's relational `identify` (`bareOfVersion`, `cacheIdentity = false`)
+      asked `isKK` and `variantIndex` of the plug-in control again by UI Automation while
+      REAPER's thread was building the dialog. Reset multi, whose dialog is Kontakt's own, cost
+      90 ms. Both times exceed `UIA_TIMEOUT_MS` (1000 ms), and `element_find_any` reads an error
+      as "not found", so that "no" may be the timeout's. The press itself costs 250-323 ms a
+      step, two steps per Load or Save: `kontaktPaneName` (`findAny`, 62-73 ms) and
+      `pluginLocate` (145-248 ms) in the hotkey's timers. Way B's slices (V1, T2, W1a-W3t) move
+      `host.screen` and leave all of this. "UIA on a thread of its own" would cover the press,
+      which runs in handlers, but not the identity: `askedEveryTime` runs it under `noWait`,
+      because scans and the arbiter's `_activate` ask it too. What would: keep `isKK`, and the
+      `variantIndex` of a control that is not a Komplete Kontrol, per control id, as Komplete
+      Kontrol's own module keeps `isKK`, so that only the composition is relational and the
+      window's control list answers it; first `findAny` tells a timeout from "not found", so a
+      timed-out "no" is not kept. Same cause as "Accessibility context checks block the event
+      loop while Kontakt loads" (2026-09-26); the return from the dialog cost 311 ms here, in a
+      window event's recheck.
 - [ ] **Luau's interrupt against a module that never ends.** Decide first whether there may be
       a limit at all.
 - [ ] **A real thread per module** ("way A"), only if measurements after the mailbox and the
