@@ -137,7 +137,8 @@ for vIdx, v in ipairs(D.VARIANTS) do
   -- each answers "which view am I in?" differently — so the question belongs to the cell,
   -- which knows its version from the moment the window opened.
   --
-  --   Kontakt 8  modern ↔ classic, read from a pixel of its own top bar. It also offers a
+  --   Kontakt 8  modern ↔ classic, read from a pixel of its chrome under the top bar (the
+  --              rack header's last button, or the play view's scroll bar). It also offers a
   --              toggle: F10 on Windows, the only way back from the modern view without
   --              reading a menu that carries no accessibility information; on a Mac, where
   --              F10 is not Kontakt's key, the entry in that menu, read by OCR (header.luau).
@@ -145,7 +146,9 @@ for vIdx, v in ipairs(D.VARIANTS) do
   --              Kontakt 8 command, and offering it here pressed a key that does nothing.
   --
   -- Sharing Kontakt 8's pixel probe across both is what hid every one of Kontakt 7's
-  -- header controls: it measures a bar Kontakt 7 does not have.
+  -- header controls: it measures chrome Kontakt 7 does not draw (its two calibration shots
+  -- read 6..41 where Kontakt 8's view is read now: play by Kontakt 8's rule, or neither view,
+  -- which leaves the play view standing all the same).
   local isK8 = v.name == "Kontakt 8"
   local common = {
     version = v.name,

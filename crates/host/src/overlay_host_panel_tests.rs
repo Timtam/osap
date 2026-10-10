@@ -1515,10 +1515,10 @@ function T.kontakt8()
     S.clicks[#S.clicks + 1] = { x, y }
     S.inputEpoch += 1
   end)
-  -- The two probe points of a plug-in at 100,50, 800 wide: the view 262 from the right edge on row
-  -- 24, the editor 652 from it on row 46.
-  T.VIEW_AT, T.EDIT_AT = "638,74", "248,96"
-  T.PLAY, T.CLASSIC = { r = 24, g = 24, b = 24 }, { r = 99, g = 99, b = 99 }
+  -- The two probe points of a plug-in at 100,50, 800 wide: the view 15 from the right edge on row
+  -- 59, the editor 652 from it on row 46.
+  T.VIEW_AT, T.EDIT_AT = "885,109", "248,96"
+  T.PLAY, T.CLASSIC = { r = 26, g = 26, b = 26 }, { r = 86, g = 86, b = 86 }
   T.RACK, T.EDITOR = { r = 71, g = 71, b = 71 }, { r = 134, g = 134, b = 134 }
   S.at = { [T.VIEW_AT] = T.PLAY, [T.EDIT_AT] = T.RACK }
   S.viewReads = {}
@@ -1605,7 +1605,7 @@ fn kontakt_8s_view_change_between_two_tabs_is_read_by_the_next_scan() {
         S.at[T.VIEW_AT] = T.CLASSIC
         assert(T.tabFrom(ov, "Reset multi") == "Switch to play view", T.dump())
         assert(#S.viewReads == 2, "read once after the act: " .. #S.viewReads)
-        assert(T.count("[view] classic (probe at 638,74 reads 99,99,99)") == 1, T.dump())
+        assert(T.count("[view] classic (probe at 885,109 reads 86,86,86)") == 1, T.dump())
         local held = T.holds()
         assert(string.find(held, " Ctrl+P ", 1, true), "the rack's arrows hold their keys: " .. held)
         assert(cell.inRack(ov) and not cell.inEdit(ov), "the rack, not the editor")
@@ -1624,7 +1624,9 @@ fn kontakt_8s_view_change_between_two_tabs_is_read_by_the_next_scan() {
 
 /// A reading of the view that is neither view's — another window drawn over the plug-in — is not
 /// kept: the last view stands, the log says where it was read, and the next scan in a later epoch
-/// reads again until the view is recognised.
+/// reads again until the view is recognised. The play view's scroll thumb, 3 px right of the
+/// point, reads 71 — near enough to the classic view's 86 that a wider tolerance took it for that —
+/// and is neither too.
 #[test]
 fn kontakt_8s_unrecognised_view_reading_is_not_kept() {
     run(&format!("{}{}", K8, r##"
@@ -1635,15 +1637,21 @@ fn kontakt_8s_unrecognised_view_reading_is_not_kept() {
         T.acted()
         S.at[T.VIEW_AT] = { r = 255, g = 255, b = 255 }
         assert(T.tabFrom(ov, "Reset multi") == "Switch to play view", "the classic view stands")
-        assert(T.count("[view] unrecognised reading 255 at (638,74) — origin 100,50 800x600, foreground 1 "
+        assert(T.count("[view] unrecognised reading 255 at (885,109) — origin 100,50 800x600, foreground 1 "
           .. "— keeping 'classic'") == 1, T.dump())
         assert(T.tabFrom(ov, "Reset multi") == "Switch to play view")
         assert(#S.viewReads == 3, "read again at the next Tab: " .. #S.viewReads)
         S.at[T.VIEW_AT] = T.PLAY
         assert(T.tabFrom(ov, "Reset multi") == "Switch to classic view", T.dump())
-        assert(T.count("[view] play (probe at 638,74 reads 24,24,24)") == 1, T.dump())
+        assert(T.count("[view] play (probe at 885,109 reads 26,26,26)") == 1, T.dump())
         T.tabFrom(ov, "Reset multi")
         assert(#S.viewReads == 4, "kept: " .. #S.viewReads)
+        T.acted()
+        S.at[T.VIEW_AT] = T.RACK
+        assert(T.tabFrom(ov, "Reset multi") == "Switch to classic view", "the play view stands")
+        assert(T.count("[view] unrecognised reading 71 at (885,109) — origin 100,50 800x600, foreground 1 "
+          .. "— keeping 'play'") == 1, T.dump())
+        assert(T.count("reads 71,71,71") == 0, T.dump())
         T.viewReadsWaitable()
     "##));
 }
@@ -1717,7 +1725,7 @@ fn kontakt_8s_view_read_before_kontakt_redrew_is_replaced_at_the_next_key() {
         assert(T.tabFrom(ov, "Reset multi") == "Switch to play view",
           "the Tab after the redraw reads the classic view: " .. T.dump())
         assert(reads() == n + 1, "read once by the Tab after the redraw")
-        assert(T.count("[view] classic (probe at 638,74 reads 99,99,99)") == 1, T.dump())
+        assert(T.count("[view] classic (probe at 885,109 reads 86,86,86)") == 1, T.dump())
         local held = T.holds()
         assert(string.find(held, " Ctrl+P ", 1, true) and string.find(held, " Alt+E ", 1, true),
           "the rack's keys are held: " .. held)
@@ -1732,7 +1740,7 @@ fn kontakt_8s_view_read_before_kontakt_redrew_is_replaced_at_the_next_key() {
         redraw(T.PLAY)
         assert(T.tabFrom(ov, "Reset multi") == "Switch to classic view",
           "the Tab after the redraw reads the play view: " .. T.dump())
-        assert(T.count("[view] play (probe at 638,74 reads 24,24,24)") == 1, T.dump())
+        assert(T.count("[view] play (probe at 885,109 reads 26,26,26)") == 1, T.dump())
         local _, notTaken = T.holds()
         assert(string.find(notTaken, " Ctrl+P ", 1, true) and string.find(notTaken, " Alt+E ", 1, true),
           "the rack's keys are not taken in the play view: " .. notTaken)

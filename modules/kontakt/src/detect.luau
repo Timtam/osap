@@ -514,12 +514,31 @@ end
 
 -- Which VIEW Kontakt is in — the modern one, or the classic rack.
 --
--- Nothing accessible can be asked, so it is read from a single pixel in Kontakt's OWN top
--- bar: an icon that is present there only in the classic view. Measured across two
--- calibration shots of the same window, (24,24,24) modern against (99,99,99) classic. Its
--- being Kontakt chrome rather than the loaded library's UI is the point — the library
--- changes with every instrument, this does not. It belongs to the right-hand cluster
--- (Update, CPU, …), so it is measured from the right edge.
+-- Nothing accessible can be asked, so it is read from a single pixel of Kontakt's OWN chrome,
+-- just below the top bar at the right edge. The classic view draws its rack's header bar there,
+-- and the bar's last button (the rack's collapse button; in the instrument editor, its arrow to
+-- the next instrument) has its face 10..26 px in from the edge; the play view draws its
+-- instrument's scroll bar, 3..17 px in, with the thumb at 7..12 and the track either side of it.
+-- The point is on the button's face, below its glyph, and on the track left of the thumb:
+-- (86,86,86) classic against (26,26,26) modern. Its being Kontakt chrome rather than the
+-- loaded library's UI is the point — the library changes with every instrument, this does not.
+-- The rack and the play view's instrument panel both hang off the right edge, with the side pane
+-- added to their left, so it is measured from the right edge.
+--
+-- The margin across is 2 px, the track's: 3 px right of the point the play view draws the thumb,
+-- 71, wherever the instrument is scrolled to its top (19 of the 21 shots), and 3 px left the
+-- library's own UI, which can read anything. Down the column there is more: rows 54..62 in the
+-- rack (its glyph above, the button's border below), 46..62 in the editor, and 38 to 571 or
+-- further in the play view. The play view has only ever been captured 679 px high, where every
+-- instrument needed its scroll bar; one that fits a taller window may be drawn without one.
+--
+-- It used to be an icon in the top bar, 262 px from the right edge on row 24, that only the
+-- classic view draws: 99 against the bar's 24. That icon is the leftmost of the bar's right-hand
+-- cluster, and the cluster starts with Kontakt's "Update" button while an update is waiting. With
+-- Kontakt up to date (the two shots of 2026-10-10) the button is gone, the icon sits 69 px
+-- further right, and the old point read the bar's own 24 in BOTH views, which is the play view's
+-- answer: the overlay never saw the classic view, though F10 had switched it. Nothing in the top
+-- bar moves the rack's header.
 --
 -- A PROBE of the overlay runtime (O:probe), not a read of its own: this backs `when` predicates,
 -- which run on every focus move in the runtime's own coroutine, where nothing may read the
@@ -541,12 +560,13 @@ end
 -- A single pixel is a weak signal, so it is used only for what is safe to get wrong: which
 -- LABEL a view-toggle carries, and whether a control that needs the classic view is
 -- offered. Never to decide where to click.
-local VIEW_PROBE_FROM_RIGHT, VIEW_PROBE_Y = 262, 24
+local VIEW_PROBE_FROM_RIGHT, VIEW_PROBE_Y = 15, 59
+local VIEW_PLAY, VIEW_CLASSIC, VIEW_TOLERANCE = 26, 86, 10
 
 -- EDIT MODE, the third view the classic/play question cannot express.
 --
--- Kontakt's instrument editor reads as CLASSIC to the probe above — measured, both edit shots
--- give it 99, exactly what the rack gives — so every rack control was being offered there, with
+-- Kontakt's instrument editor reads as CLASSIC to the probe above — measured, all ten edit shots
+-- give it 86, exactly what the rack gives — so every rack control was being offered there, with
 -- its coordinates pointing at whatever the editor happens to draw in that spot. That is the
 -- defect this exists to fix, and it is not the probe being wrong: two states genuinely share
 -- one answer, so a second question is needed rather than a better first one.
@@ -555,15 +575,17 @@ local VIEW_PROBE_FROM_RIGHT, VIEW_PROBE_Y = 262, 24
 -- width and hangs off the right edge, with the side pane added to its left. So a point measured
 -- from the right is at the same place on the panel whether that pane is open or shut, which a
 -- left-anchored one is not — 652 px in lands on the "Edit Mode" caption at 1010 wide and at
--- 664 alike. Across 27 shots it reads 134 in edit mode and 71 in EVERY classic-rack shot,
--- spanning 664..1010 px of width and 679..965 of height. The play-view readings vary (14, 24,
--- 36, 200) and do not matter: this question is only asked once the first one has said classic.
+-- 664 alike. Across 37 classic shots it reads 134 in all 10 of the editor and 71 in all 27 of
+-- the rack, spanning 664..1209 px of width and 679..987 of height; the rack of 2026-10-10, with
+-- Kontakt up to date, reads 71 too, while its editor has not been captured. The play-view
+-- readings vary (14, 24, 36, 200) and do not matter: this question is only asked once the first
+-- one has said classic.
 local EDIT_PROBE_FROM_RIGHT, EDIT_PROBE_Y = 652, 46
 local EDIT_PROBE_VALUE, RACK_PROBE_VALUE, EDIT_PROBE_TOLERANCE = 134, 71, 25
 
 -- Where the view probe reads on screen, against the CONTENT's right edge, not the window frame's:
--- standalone, the frame is 16 px wider than the plugin, which is enough to read a neighbouring
--- icon instead. nil while the overlay has no origin.
+-- standalone, the frame is 16 px wider than the plugin, which would put the point outside the
+-- plug-in, on the window's own frame. nil while the overlay has no origin.
 local function viewPoint(o)
   local origin = o:origin()
   if not (origin and origin.client and origin.bounds) then return nil end
@@ -573,11 +595,15 @@ end
 -- What a reading of the view probe says: true for classic, false for play, nil for neither — and
 -- the brightness it read.
 --
--- MEASURED, and better than its own comment used to claim: the probe point reads brightness 24
--- in the play view and 99 in the classic one, with the threshold at 60 sitting squarely between
--- them. That is not a weak signal, and it does not flap — the alternation once blamed on it was
--- the VIEW genuinely toggling twice, from a change that fired two mechanisms at once. Recorded so
--- nobody reopens this: a UIA replacement was tried and is WORSE. "Status bar" and "Navigator" do
+-- MEASURED, and better than its own comment used to claim: the probe point reads brightness 26
+-- in the play view and 86 in the classic one, in 58 calibration shots of Kontakt 8 — 21 of the
+-- play view (649..1353 px wide, all 679 high), 27 of the rack (664..1209 wide, 679..987 high),
+-- 10 of the editor (664..1010 wide, 679..794 high), the two of 2026-10-10 without the Update
+-- button and the rest with it — and so does every pixel of the 5x5 around it, so an origin a
+-- point or two off reads the same. That is not a weak signal, and
+-- it does not flap — the alternation once blamed on it was the VIEW genuinely toggling twice,
+-- from a change that fired two mechanisms at once. Recorded so nobody reopens this: a UIA
+-- replacement was tried and is WORSE. "Status bar" and "Navigator" do
 -- appear in one view each in the calibrator's dump, but that walks the RAW tree, whereas `findAny`
 -- is a condition-based search and finds "Status bar" in BOTH — so the named probe answered
 -- "classic" always and left the user unable to leave the classic view. Verifying with one
@@ -588,14 +614,28 @@ end
 -- is on without ever asking whether it came from the right world. The first read after our app
 -- starts can happen before the plug-in has painted, or while something else is still in front —
 -- and the answer was then kept until the user clicked something, which is exactly the "toggle it
--- twice and it comes right" they reported. The two states read 24 and 99 across every calibration
+-- twice and it comes right" they reported. The two states read 26 and 86 across every calibration
 -- shot. Anything else is not this probe's question being answered wrongly, it is a different
--- picture.
+-- picture. What the rule cannot catch is a layout that puts one view's value under the point in
+-- the other view, and that is how the top bar's icon failed: its play reading was the bar's own
+-- background, which the bar has wherever the icon is not.
+--
+-- WITHIN 10, not the old point's 20. Each of the 1,450 pixels measured (the 5x5 in each of the 58
+-- shots) reads exactly 26 or 86, so 10 leaves room only for drift, and it is what keeps the play
+-- view's thumb, 71 and 3 px from the point, from counting as the classic view: within 20 of 86 it
+-- did, and a point 3 px off in the play view said classic outright; within 10 it is neither, and
+-- the last view stands. The rack's own background, also 71, reads as neither too. At 10, nothing
+-- within 11 px of the point reads as the other view in any of the 58 shots: in the classic view
+-- the nearest is 12 rows down, the rack header's lower edge (34) above the rack's own scroll bar
+-- (26); in the play view it is the library's UI, 11..15 px away in 7 shots and not within 20 in
+-- the rest.
 local function viewOf(p)
   if not p then return nil, nil end
   local v = (p.r + p.g + p.b) / 3
-  if math.abs(v - 24) > 20 and math.abs(v - 99) > 20 then return nil, v end
-  return v > 60, v
+  if math.abs(v - VIEW_PLAY) > VIEW_TOLERANCE and math.abs(v - VIEW_CLASSIC) > VIEW_TOLERANCE then
+    return nil, v
+  end
+  return math.abs(v - VIEW_CLASSIC) <= VIEW_TOLERANCE, v
 end
 
 -- The two probes of a Kontakt 8 overlay that offers the view's controls, kept in `ov.state`. An

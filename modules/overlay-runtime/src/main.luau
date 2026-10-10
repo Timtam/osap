@@ -4033,12 +4033,12 @@ end
 -- Every screen probe in every module has the same exposure, and it is not a flaky reading — it
 -- is the wrong window. `host.screen.pixel` returns the COMPOSITED desktop, and for a moment
 -- after a focus change that still shows whatever was in front before. Measured on Kontakt's
--- view probe: with REAPER behind a browser the same point reads 255,255,255 from the screen and
--- 99,99,99 from the window rendered by itself.
+-- view probe, then in its top bar: with REAPER behind a browser the same point reads 255,255,255
+-- from the screen and 99,99,99 from the window rendered by itself.
 --
 -- Activation is exactly when this bites, because that IS the focus change, and it is also when
 -- a user is listening hardest. Rejecting improbable values does not save it: Kontakt's two
--- states read 24 and 99, and 24 is what almost any dark chrome reads, so a stale glance is
+-- states read 26 and 86, and 26 is what almost any dark chrome reads, so a stale glance is
 -- accepted as a confident answer.
 --
 -- So the fix has to be temporal, and it belongs here rather than in each module: 250 ms after an

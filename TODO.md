@@ -7556,6 +7556,26 @@ kind of place that says how long the first held the loop.
       expected is looked for at every key until the overlay is on another window. A calibrating
       run's menu item shot (Avenger's menus) is a `snapshotAsync`, and the item's click waits for
       it.
+- [ ] **Kontakt 8's view point, moved below the top bar (Kontakt 0.1.4), never read live.** The
+      top bar's icon (262 from the right edge, row 24) moves 69 px right when Kontakt has no
+      update waiting, and the old point then read the bar's 24, the play view's answer, in both
+      views (two shots of 2026-10-10 in REAPER, before and after F10). The point is now 15 from the
+      right edge on row 59: the last button of the rack's header, 86, against the track of the play
+      view's scroll bar, 26, each within 10 (the thumb, 3 px right of the point, reads 71, which
+      is neither), in all 58 Kontakt 8 shots and over the 5x5 around it: 21 play (649..1353 px
+      wide, all 679 high), 27 rack (664..1209 wide, 679..987 high), 10 editor (664..1010 wide,
+      679..794 high).
+      Not seen: a live reading (the next session should bring `[view] classic (probe at … reads
+      86,86,86)` after F10 and `reads 26,26,26` back in the play view); the play view taller than
+      679, where an instrument that fits may be drawn without its scroll bar; the play view with no
+      instrument loaded; any panel the classic view can show above the rack, which would push the
+      rack's header down; the play view's scroll bar under the mouse, in case its thumb is then
+      drawn wider or lighter; the instrument editor of Kontakt's current version, whose own point
+      (652 from the right, row 46) is measured at 134 only in shots with the Update button (the
+      current rack reads 71, as before); the rack's button with the mouse over it, which most
+      likely reads as neither and keeps the last view; Kontakt 8 on a Mac, whose classic view has
+      never been captured (see the Mac session's list); widths and heights outside those shots.
+      Kontakt 7 does not read it (UIA, `detect.isRackView`).
 - [ ] **Kontakt's view changed by the user's own keys** (found reviewing the fix of T2,
       2026-10-10; as it was before probes): F10 pressed by hand, or "Switch to Classic View" chosen
       in Kontakt's menu with the keyboard, turns over no input epoch, so the view probes are read

@@ -232,17 +232,18 @@ So a Tab after an act reads once, and Tabs in a row read nothing (an `everyEpoch
 **Cost.** Declaring one costs nothing. A scan with nothing due works out each probe's points — its function called, or its list placed — and compares a key. A scan with probes due adds one `host.screen.pixels` over all their points, on the event loop: one capture of the box around them when they lie within 2,000,000 pixels of each other (see [its Cost](screen.md#host-screen-pixels)).
 
 ```luau
--- Kontakt 8's view, from one pixel of its top bar, measured from the right edge: 24 in the play
--- view, 99 in the classic one.
+-- Kontakt 8's view, from one pixel below its top bar, measured from the right edge: 26 in the
+-- play view (its scroll bar's track), 86 in the classic one (a button of the rack's header).
+-- Within 10, not more: the scroll bar's thumb, 3 px to the right, reads 71, and must be neither.
 local view = ov:probe("view", function(o)
   local origin = o:origin()
   local c = origin and origin.client
   if not c then return nil end -- no window now: nothing is read, the last view stands
-  return { { c.x + c.w - 262, c.y + 24 } }
+  return { { c.x + c.w - 15, c.y + 59 } }
 end, { read = function(colours)
   local v = (colours[1].r + colours[1].g + colours[1].b) / 3
-  if math.abs(v - 24) <= 20 then return "play" end
-  if math.abs(v - 99) <= 20 then return "classic" end
+  if math.abs(v - 26) <= 10 then return "play" end
+  if math.abs(v - 86) <= 10 then return "classic" end
   return nil -- another picture: the last view stands, and the next scan looks again
 end })
 
