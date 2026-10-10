@@ -1863,14 +1863,18 @@ fn a_pass_name_with_accented_letters_is_taken_and_one_with_a_symbol_is_not() {
 
 /// The pass is read in English. A read answered "failed" with no language, where English is not
 /// among the recogniser's languages, turns the reads to the user's own language; one where English
-/// is there — a read refused, say — leaves them in English.
+/// is there — a read refused, say — leaves them in English, and so does one answered before the
+/// language list is known, when `resolveLanguage` answers nil for every language.
 #[test]
 fn where_english_is_not_read_the_pass_is_read_in_the_users_language() {
     run(r#"
         local S = T.S
         S.disc = true
-        local english = "en-US"
-        rawset(T.host.ocr, "resolveLanguage", function(lang) return lang == "en" and english or nil end)
+        local english, known = "en-US", { "de-DE", "en-US" }
+        rawset(T.host.ocr, "languages", function() return table.clone(known) end)
+        rawset(T.host.ocr, "resolveLanguage", function(lang)
+          return #known > 0 and lang == "en" and english or nil
+        end)
         T.melodyne()
         local function failed()
           local r = T.reading("", "failed")
@@ -1882,7 +1886,11 @@ fn where_english_is_not_read_the_pass_is_read_in_the_users_language() {
         T.answer(r, failed(), failed())
         T.look()
         T.ok(T.lastRead("analysis pass").lang == "en", "English is there: still in English")
-        english = nil
+        english, known = nil, {}
+        T.answer(T.lastRead("analysis pass"), failed(), failed())
+        T.look()
+        T.ok(T.lastRead("analysis pass").lang == "en", "the list not known yet: still in English")
+        known = { "de-DE" }
         T.answer(T.lastRead("analysis pass"), failed(), failed())
         T.ok(T.count("[melodyne] analysis pass: English is not read here; the user's language from now on")
           == 1, T.dump())

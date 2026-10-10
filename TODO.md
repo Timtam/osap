@@ -4097,10 +4097,13 @@ What only a person, a Mac or a measurement can settle:
 - [ ] **Kontakt's file-menu read** waits in its timer's handler since B1b+M, and keeps building its
       own rows (`ocrRows`) until the reading's rows are compared with it on both platforms.
 - [ ] **The language list at load:** in the first headless run the list was not known within the
-      50 ms `languages()` waits, so a module asking in its top-level code got `{}` (it was known a
-      moment later). Measure how long the recognise thread's first `AvailableRecognizerLanguages`
-      and `GlobalizationPreferences.Languages` take; if it is routinely over 50 ms, publish the
-      last session's list at start and replace it when the fresh one arrives.
+      50 ms `languages()` waited then, so a module asking in its top-level code got `{}` (it was
+      known a moment later). Since step 11.2 (2026-10-10) `languages()` and `resolveLanguage()`
+      never wait: they answer `{}` and `nil` until the list is published, and a read the
+      recogniser answers comes after it. Measure how long the recognise thread's first
+      `AvailableRecognizerLanguages` and `GlobalizationPreferences.Languages` take; if a module
+      asking at load routinely finds nothing, publish the last session's list at start and
+      replace it when the fresh one arrives.
 - [ ] **O1** — WinRT engine creation against `RecognizeAsync` (decides whether the recogniser
       should keep one engine per language).
 - [ ] **O3 / O16** — how long reads wait: before the capture, the capture, before the recogniser,
@@ -7318,6 +7321,13 @@ kind of place that says how long the first held the loop.
       picture leaves it to the module's next read. The calls that read synchronously still make it
       on the loop until W1a to W3 make them waits. Tested with fakes only; nothing changes on a
       Mac, where every module reads the standard way.
+      Step 11.2, the same day: `host.ocr.languages()` and `resolveLanguage()` answer at once,
+      `{}` and `nil` before the recognise thread has published its list (said once in the log),
+      instead of waiting up to 50 ms on the loop; a read the recogniser answers comes after the
+      list, so its callback never finds it missing. The blocking `recognize` no longer waits for
+      it either. Melodyne turns its pass reads to the user's language only once the list is known:
+      a read refused before it is published says nothing about English. Scripted host only;
+      nothing audible changes.
 - [x] **The review of K, B1a, B2 and B3** (2026-10-04, three reviews; kb-final.md). The overlays
       of one module share its key scope and menu flag: the one that comes to the front pins the
       scope, only the last to leave sets it back, and the flag is then what the ones in front say
@@ -7418,8 +7428,8 @@ Follow-ups this work found and did not take on:
       installed every one of them is answered `"failed"`: Kontakt's load, save and reset say "Menu
       could not be read", with the reason in the log, and sforzando on Windows is found by its UIA
       pane alone. A list, `{ "en", (host.ocr.languages())[1] }`, would read there in the user's
-      language, but `languages()` can hold the event loop up to 50 ms in the first moments after the
-      start.
+      language, but asked at load, before the recognise thread has published its languages,
+      `languages()` answers `{}` without waiting, so the list would be `{ "en" }` alone.
 - [ ] **`LADDER_BUDGET`**, to be judged again now that it no longer protects the event loop.
 - [ ] **Whether `ocr-warm-up` is still needed.** Measure first.
 - [ ] **`host.window.focus` and `inputEpoch`** (a review of steps 1 to 3): `focus` turns over

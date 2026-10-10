@@ -292,9 +292,9 @@ The languages the platform's recogniser reads, the one a read without `lang` use
 
 **Signature:** `host.ocr.languages()` → `{ string }`
 
-Tags as the platform spells them (`"de-DE"`, `"en-US"`, `"zh-Hans"`), each once. The list is read by the recognise thread as the first thing it does after the application starts; a call made before that has finished waits for it for up to 50 ms and then answers from what is known — `{}` — and the log says so, once. It is read again when a language did not resolve, at most every 30 seconds, so a language installed while the application runs is picked up without a restart.
+Tags as the platform spells them (`"de-DE"`, `"en-US"`, `"zh-Hans"`), each once. The list is read by the recognise thread as the first thing it does after the application starts; a call made before that has finished answers at once from what is known — `{}` — and the log says so, once (`the recognition languages are not known yet; answering from what is known, which is nothing`). A read the recogniser answers comes after the list, since its language is resolved on that thread after it: asked in that read's callback, or in a handler after that read, the list is there. Only a read answered without the recogniser — refused, or a window region with nothing to read — can come sooner. It is read again when a language did not resolve, at most every 30 seconds, so a language installed while the application runs is picked up without a restart.
 
-Never raises. Costs a lock and a copy of a short list; the event loop waits only in the case above.
+Never raises, and never waits: it costs a lock and a copy of a short list.
 
 ```luau
 local langs = host.ocr.languages()
@@ -315,7 +315,7 @@ Which language a read with this `lang` would use here.
 
 **Signature:** `host.ocr.resolveLanguage(lang: string | { string } | nil)` → `string?`
 
-`lang` is what a read takes: a tag, a list of tags in order of preference, or `nil` for the user's language. Returns the platform's tag it resolves to — `"de"` answers `"de-DE"` where that is installed — or `nil` when nothing here reads it, or when the list is not known yet (see [`languages`](#host-ocr-languages)). Raises when `lang` is not a well-formed tag, a non-empty list of them or `nil`. Costs what `languages` does, plus the matching.
+`lang` is what a read takes: a tag, a list of tags in order of preference, or `nil` for the user's language. Returns the platform's tag it resolves to — `"de"` answers `"de-DE"` where that is installed — or `nil` when nothing here reads it, or when the list is not known yet (see [`languages`](#host-ocr-languages)): it does not wait for the list, which is known once the recogniser has answered a read. Raises when `lang` is not a well-formed tag, a non-empty list of them or `nil`. Costs what `languages` does, plus the matching.
 
 ```luau
 -- Asked a second after the module loads, not while it loads: in the first moments after the

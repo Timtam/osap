@@ -127,6 +127,27 @@ fn fake_recognise(shot: &Fake, _: &[(i32, i32, i32, i32)], ctx: &Recognise) -> V
     })
 }
 
+/// Whether the language list of the holder that holds it is still held back (`held_langs`).
+static LANGS_HELD: Mutex<bool> = Mutex::new(true);
+static LANGS_CV: Condvar = Condvar::new();
+
+/// The fake's language list, published only once the test lets it go (`release_langs`), 10 s at
+/// most: a recognise thread that has not published its list yet, without a clock. One test
+/// holds it, so the flag is its own.
+fn held_langs() -> Languages {
+    let until = Instant::now() + Duration::from_secs(10);
+    let mut held = locked(&LANGS_HELD);
+    while *held && Instant::now() < until {
+        held = LANGS_CV.wait_timeout(held, until.saturating_duration_since(Instant::now())).map(|(g, _)| g).unwrap_or_else(|e| e.into_inner().0);
+    }
+    (worker().languages)()
+}
+
+fn release_langs() {
+    *locked(&LANGS_HELD) = false;
+    LANGS_CV.notify_all();
+}
+
 /// Every first-read comparison the fake made: the module, and the thread it was made on.
 static COMPARED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
@@ -299,6 +320,10 @@ fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     let ocr = lua.create_table().unwrap();
     let hh = h.clone();
     ocr.set("pending", lua.create_function(move |lua, key: Value| reads::pending(&*hh, lua, idx, key)).unwrap()).unwrap();
+    let hh = h.clone();
+    ocr.set("languages", lua.create_function(move |lua, ()| reads::languages_value(&*hh, lua)).unwrap()).unwrap();
+    let hh = h.clone();
+    ocr.set("resolveLanguage", lua.create_function(move |_, v: Value| reads::resolve_value(&*hh, &v)).unwrap()).unwrap();
     let hh = h.clone();
     let submit = lua
         .create_function(move |lua, (what, opts, cb): (Value, Value, Value)| reads::read(&*hh, lua, idx, what, opts, cb))
@@ -610,6 +635,48 @@ fn the_first_read_comparison_goes_with_the_read_to_the_capture_thread() {
     assert_eq!(compared("com.dup.not yet"), ["screen-capture", "screen-capture"], "asked again until made");
     assert_eq!(capture_source::compare_state(&later), Some(Compare::Owed));
     assert!(h.legacy.borrow().is_empty() && errors(&h).is_empty(), "{:?}", errors(&h));
+}
+
+/// Before the recognise thread has published its language list, `languages` answers `{}` and
+/// `resolveLanguage` `nil` at once — they never wait for it — and the log says so, once a session
+/// through `OcrState::once` (said, not counted, here). A read the recogniser answers comes after
+/// the list: its language is resolved on that thread, after it. So that read's callback, or a
+/// handler after it, always finds the list, and `nil` there never means "not known yet".
+#[test]
+fn the_language_list_answers_at_once_and_is_known_before_the_recogniser_answers_a_read() {
+    let h = holder(Service::spawn(OcrWorker { languages: held_langs, ..worker() }));
+    let lua = vm(&h, 1);
+    run(
+        &lua,
+        "early = #host.ocr.languages()\n\
+         earlyResolved = host.ocr.resolveLanguage('en')\n\
+         again = #host.ocr.languages()\n\
+         host.ocr.recognize({ 9411, 5, 9441, 15 }, function(r)\n\
+           text = r.text\n\
+           inCallback = host.ocr.languages()[1]\n\
+           resolved = host.ocr.resolveLanguage(nil)\n\
+         end)\n\
+         task.run(function()\n\
+           waited = host.ocr.recognize({ 9412, 5, 9442, 15 }).text\n\
+           afterWait = host.ocr.resolveLanguage('en')\n\
+         end)\n",
+    );
+    assert!(yes(&lua, "return early == 0 and earlyResolved == nil and again == 0"), "answered at once, from nothing");
+    assert!(h.state.has_said("langs-late"), "the line is said");
+    // Both photographed at the call, and neither answered: the recogniser reads the list first.
+    let until = Instant::now() + Duration::from_secs(10);
+    while !(taken(9411) && taken(9412)) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    fire(&h);
+    assert!(taken(9411) && taken(9412));
+    assert!(yes(&lua, "return text == nil and waited == nil"), "no read is answered before the list");
+    release_langs();
+    settle(&h);
+    assert!(yes(&lua, "return text == '9411,5' and inCallback == 'en-US' and resolved == 'en-US'"));
+    assert!(yes(&lua, "return waited == '9412,5' and afterWait == 'en-US'"));
+    assert!(yes(&lua, "return #host.ocr.languages() == 1"));
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
 }
 
 // ── Where a task cannot wait ─────────────────────────────────────────────────────────────────

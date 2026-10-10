@@ -51,10 +51,6 @@ pub const CAPTURED_BUDGET: usize = 256 * 1024 * 1024;
 /// capture to be taken.
 pub const BARRIER: Duration = Duration::from_millis(50);
 
-/// How long `languages()`, `resolveLanguage()` and a legacy `lang` wait for the language list
-/// the recognise thread publishes first thing.
-pub const LANG_WAIT: Duration = Duration::from_millis(50);
-
 /// How often, at most, the language list is read again after a language did not resolve — a
 /// language pack installed while the application runs is picked up without a restart.
 pub const LANG_REREAD: Duration = Duration::from_secs(30);

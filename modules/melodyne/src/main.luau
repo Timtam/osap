@@ -1309,8 +1309,10 @@ local function askPass(snap, cx, mx, top, a)
   host.ocr.recognize(crops, { snapshot = snap, key = PASS_KEY, lang = passLang },
     function(list)
       local first = list[1]
+      -- Only against a known list: before it is published, resolveLanguage answers nil for every
+      -- language, and a read refused that early says nothing about English.
       if passLang and first and first.status == "failed" and first.lang == ""
-        and host.ocr.resolveLanguage(passLang) == nil then
+        and #host.ocr.languages() > 0 and host.ocr.resolveLanguage(passLang) == nil then
         host.log.info("[melodyne] analysis pass: English is not read here; the user's language from now on")
         passLang = nil
       end

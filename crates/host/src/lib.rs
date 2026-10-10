@@ -7915,13 +7915,13 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     ocr.set(
         "languages",
-        lua.create_function(move |lua, ()| { host_call!("host.ocr.languages"); sh.ocr_languages_value(lua) })?,
+        lua.create_function(move |lua, ()| { host_call!("host.ocr.languages"); ocr::lua::languages_value(&*sh, lua) })?,
     )?;
     // host.ocr.resolveLanguage(tag | { tag } | nil) -> string? — what `lang` would read with.
     let sh = shared.clone();
     ocr.set(
         "resolveLanguage",
-        lua.create_function(move |_, v: mlua::Value| { host_call!("host.ocr.resolveLanguage"); sh.ocr_resolve_value(&v) })?,
+        lua.create_function(move |_, v: mlua::Value| { host_call!("host.ocr.resolveLanguage"); ocr::lua::resolve_value(&*sh, &v) })?,
     )?;
 
     // host.ocr.pending(key) -> boolean — whether a read of this module with `key` is still waiting

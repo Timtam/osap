@@ -524,7 +524,8 @@ impl<S: Send + 'static> Service<S> {
     }
 
     /// The languages the recognise thread published, waiting for them at most `bound` — they
-    /// are its first act, so only the first moments after start ever wait.
+    /// are its first act, so only the first moments after start can wait. The bindings ask with
+    /// `Duration::ZERO` and never wait (`ocr::lua::known_langs`); a test waits for them.
     pub fn languages(&self, bound: Duration) -> Option<Languages> {
         if !self.worker.present {
             return Some(Languages::default());
@@ -1433,7 +1434,7 @@ mod tests {
         stop.shutdown(Duration::from_secs(2));
     }
 
-    /// The languages are published before any job runs, and a caller waits only briefly.
+    /// The languages are published before any job runs.
     #[test]
     fn the_language_list_is_the_first_thing_published() {
         let (s, stop) = Service::spawn(worker());

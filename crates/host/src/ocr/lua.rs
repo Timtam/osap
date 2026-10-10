@@ -602,6 +602,12 @@ impl OcrState {
         self.said.borrow_mut().insert(key)
     }
 
+    /// Whether the line said once under `key` was said.
+    #[cfg(test)]
+    pub(crate) fn has_said(&self, key: &str) -> bool {
+        self.said.borrow().contains(key)
+    }
+
     /// Whether a read of `owner` with `key` is still waiting for its answer — or its answer waits
     /// in the module's mailbox.
     fn waiting_with(&self, owner: Owner, key: &str) -> bool {
@@ -1190,50 +1196,13 @@ impl Shared {
         }
     }
 
-    /// The published languages, waiting `LANG_WAIT` at most; `None` (said once) when they are not
-    /// known yet.
-    fn ocr_langs(&self) -> Option<lang::Languages> {
-        let l = self.ocr.languages(policy::LANG_WAIT);
-        if l.is_none() && self.ocr_state.once("langs-late".to_string()) {
-            logging::line(
-                "ocr",
-                "the recognition languages were not known yet within 50 ms; answering from what is \
-                 known, which is nothing",
-            );
-        }
-        l
-    }
-
-    /// `host.ocr.languages()`.
-    pub(crate) fn ocr_languages_value(&self, lua: &Lua) -> mlua::Result<Table> {
-        let list = self.ocr_langs().map(|l| lang::listed(&l)).unwrap_or_default();
-        let t = lua.create_table_with_capacity(list.len(), 0)?;
-        for tag in list {
-            t.raw_push(tag)?;
-        }
-        Ok(t)
-    }
-
-    /// `host.ocr.resolveLanguage(tag | {tag} | nil)`.
-    pub(crate) fn ocr_resolve_value(&self, v: &Value) -> mlua::Result<Option<String>> {
-        let req = lang_request(v, "host.ocr.resolveLanguage")?;
-        let Some(langs) = self.ocr_langs() else { return Ok(None) };
-        match lang::resolve(&req, &langs) {
-            Ok(tag) => Ok(Some(tag)),
-            Err(_) => {
-                self.ocr.reread_languages();
-                Ok(None)
-            }
-        }
-    }
-
     /// The language the blocking `recognize` hands the engine for `req`: what it resolves to in the
     /// published list, as a read's does — `Ok(None)`, the engine's own default, only while the list
     /// is not known yet and no tag was asked for, and the first tag as written while it is not known
     /// and one was — or `Err` with why nothing here reads it, which every region is answered
     /// `"failed"` with, said in the log once per request.
     pub(crate) fn ocr_legacy_lang(&self, req: &LangReq) -> Result<Option<String>, String> {
-        let langs = self.ocr_langs();
+        let langs = known_langs(self);
         let resolved = legacy_lang(req, langs.as_ref());
         if let Err(why) = &resolved {
             self.ocr.reread_languages();
@@ -1242,6 +1211,46 @@ impl Shared {
             }
         }
         resolved
+    }
+}
+
+/// The once-a-session line for a question about the languages asked before they are known.
+const LANGS_NOT_KNOWN: &str =
+    "the recognition languages are not known yet; answering from what is known, which is nothing";
+
+/// The languages the recognise thread published, as they stand: never waited for. `None` before
+/// they are published — the thread's first act, so only in the first moments after start — said
+/// in the log once a session. A read the recogniser answers comes after it: its language is
+/// resolved on that thread, after the list.
+fn known_langs<H: ReadHost>(h: &H) -> Option<lang::Languages> {
+    let l = h.ocr().languages(std::time::Duration::ZERO);
+    if l.is_none() && h.ocr_state().once("langs-late".to_string()) {
+        logging::line("ocr", LANGS_NOT_KNOWN);
+    }
+    l
+}
+
+/// `host.ocr.languages()`: the published list, the default first; `{}` before it is published.
+pub(crate) fn languages_value<H: ReadHost>(h: &H, lua: &Lua) -> mlua::Result<Table> {
+    let list = known_langs(h).map(|l| lang::listed(&l)).unwrap_or_default();
+    let t = lua.create_table_with_capacity(list.len(), 0)?;
+    for tag in list {
+        t.raw_push(tag)?;
+    }
+    Ok(t)
+}
+
+/// `host.ocr.resolveLanguage(tag | {tag} | nil)`: `nil` for a language nothing here reads, and
+/// before the list is published.
+pub(crate) fn resolve_value<H: ReadHost>(h: &H, v: &Value) -> mlua::Result<Option<String>> {
+    let req = lang_request(v, "host.ocr.resolveLanguage")?;
+    let Some(langs) = known_langs(h) else { return Ok(None) };
+    match lang::resolve(&req, &langs) {
+        Ok(tag) => Ok(Some(tag)),
+        Err(_) => {
+            h.ocr().reread_languages();
+            Ok(None)
+        }
     }
 }
 
