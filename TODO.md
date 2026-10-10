@@ -7975,9 +7975,13 @@ time limit; a module past either is stopped until the next start.
       - Captured keys right after switching back from the manager to a plug-in (Alt+Tab, then Tab
         at once): the hook comes back when the watch hears of the foreground change, so check that
         the first Tab reaches the overlay.
-      - The transient causes stay open: our UIA calls into a stalled REAPER, made on the event
-        loop, prolong NVDA's freeze recoveries (and a timeout is cached as "not a Kontakt"); our
-        image workers run at normal priority beside the screen reader's hook thread.
+      - The transient cause stays open: our UIA calls into a stalled REAPER, made on the event
+        loop, prolong NVDA's freeze recoveries (and a timeout is cached as "not a Kontakt").
+      - Done 2026-10-10: the image worker and the matching pool (rayon's global pool, built at
+        start-up) run below normal priority on Windows, so they no longer compete with other
+        programs' normal-priority threads, a keyboard hook's among them; the keyboard hook's own
+        thread stays at THREAD_PRIORITY_HIGHEST. The ONNX runtime's threads of the neural text
+        recogniser are not among them and keep normal priority.
       - Done 2026-10-10, live check open: as the foreground passes to one of our windows, an
         overlay lets go and asks nothing there (no context, no gate, no menu test, nothing of the
         window that lost the foreground) at that event and at every focus change inside our

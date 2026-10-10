@@ -503,13 +503,63 @@ pub(crate) struct ImageResult {
 /// reported it: the overlay runtime's landmark gate waits for its callback before it searches
 /// again, so its overlays simply stopped appearing. Now a panicking entry is answered as "no
 /// match", a panicking batch as "could not look", and the thread carries on.
+///
+/// Below normal priority, as the matching pool is ([`below_normal_priority`]).
 pub(crate) fn spawn_image_worker(
     capture: CaptureFn,
     compare: CompareFn,
     tasks: Receiver<ImageTask>,
     results: Sender<ImageResult>,
 ) {
-    std::thread::spawn(move || worker_loop(capture, compare, tasks, results));
+    std::thread::spawn(move || {
+        below_normal_priority();
+        worker_loop(capture, compare, tasks, results)
+    });
+}
+
+/// Lowers the calling thread below normal priority, on Windows (`THREAD_PRIORITY_BELOW_NORMAL`);
+/// nothing elsewhere.
+///
+/// For the image worker and the matching pool, the application's heaviest work: while an overlay
+/// is in front its matches keep every logical processor busy several times a second ("batch of 16
+/// read(s) took 216 ms … across 16 thread-pool tasks"). At normal priority they compete with every
+/// other program's normal-priority threads for those processors — among them another program's
+/// low-level keyboard hook, which Windows calls for every key on the machine and waits for. Below
+/// normal they take what the others leave: as fast as before on a machine that is otherwise idle,
+/// behind everybody else's work on one that is not. The keyboard hook's own thread runs at the
+/// highest normal priority and is none of these.
+pub(crate) fn below_normal_priority() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+        };
+        // SAFETY: the calling thread's pseudo-handle, which needs no closing.
+        unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) };
+    }
+}
+
+/// The matching pool as it is built: rayon's pool, one thread per logical processor, each
+/// lowered below normal priority as it starts ([`below_normal_priority`]).
+fn matching_pool() -> rayon::ThreadPoolBuilder {
+    rayon::ThreadPoolBuilder::new()
+        .thread_name(|i| format!("image-match-{i}"))
+        .start_handler(|_| below_normal_priority())
+}
+
+/// Builds rayon's global pool, where the matches run ([`matching_pool`]): at start-up, before the
+/// image worker exists, so before anything matches. A pool already built — by a dependency that
+/// matched in parallel first — keeps its threads at normal priority, and the log says so.
+pub(crate) fn build_matching_pool() {
+    if let Err(e) = matching_pool().build_global() {
+        logging::line(
+            "image",
+            &format!(
+                "the image matching pool could not be built ({e}); the matches run on the pool \
+                 that was there, at normal priority"
+            ),
+        );
+    }
 }
 
 fn worker_loop(
@@ -2567,6 +2617,40 @@ mod tests {
         let second = res_rx.recv_timeout(Duration::from_secs(10)).expect("the worker survived");
         assert_eq!(second.id, 2);
         assert_eq!(second.found(), Ok(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]));
+    }
+
+    /// On Windows the matches run below normal priority: a task on the matching pool — one built
+    /// as the global pool is, so that whatever another test did to the global pool first does not
+    /// matter — and the image worker, where the capture runs, both see
+    /// `THREAD_PRIORITY_BELOW_NORMAL`. The thread that asked is left as it was.
+    #[cfg(windows)]
+    #[test]
+    fn the_matches_run_below_normal_priority() {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, GetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_NORMAL,
+        };
+        // SAFETY: the calling thread's pseudo-handle.
+        let priority = || unsafe { GetThreadPriority(GetCurrentThread()) };
+        let pool = matching_pool().num_threads(2).build().expect("the pool is built");
+        let seen: Vec<i32> = pool.install(|| (0..8).into_par_iter().map(|_| priority()).collect());
+        assert!(seen.iter().all(|p| *p == THREAD_PRIORITY_BELOW_NORMAL), "{seen:?}");
+        assert_eq!(priority(), THREAD_PRIORITY_NORMAL, "the asking thread keeps its priority");
+        static AT_CAPTURE: Mutex<Option<i32>> = Mutex::new(None);
+        fn capture(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+            // SAFETY: the calling thread's pseudo-handle.
+            *AT_CAPTURE.lock().unwrap() = Some(unsafe { GetThreadPriority(GetCurrentThread()) });
+            two_dots(regions, src)
+        }
+        let (task_tx, task_rx) = mpsc::channel();
+        let (res_tx, res_rx) = mpsc::channel();
+        spawn_image_worker(capture, crate::backend::no_comparison, task_rx, res_tx);
+        task_tx.send(task(1, (0, 0, 10, 10), vec![(dot([255, 0, 0]), None)], Mode::First)).unwrap();
+        res_rx.recv_timeout(Duration::from_secs(10)).expect("an answer");
+        assert_eq!(*AT_CAPTURE.lock().unwrap(), Some(THREAD_PRIORITY_BELOW_NORMAL));
+        // The keyboard hook's thread is none of these: it stays at the highest normal priority.
+        const HOOK: &str = include_str!("backend/windows.rs");
+        let at = HOOK.find("fn keyboard_hook_thread(").unwrap();
+        assert!(HOOK[at..at + 200].contains("SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);"));
     }
 
     /// The first-read comparison a task carries is made on the worker, before the batch's

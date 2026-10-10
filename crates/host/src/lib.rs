@@ -4732,6 +4732,7 @@ impl Manager {
         let (image_result_tx, image_results) = std::sync::mpsc::channel::<ImageResult>();
         // Capture and comparison fn pointers taken before `backend` is moved into Shared — they
         // are `Copy` and `Send`, so the worker can capture without the non-`Send` Rc backend.
+        image_search::build_matching_pool();
         image_search::spawn_image_worker(backend.capture_fn(), backend.compare_fn(), image_task_rx, image_result_tx);
         let shared = Rc::new(Shared {
             backend,
