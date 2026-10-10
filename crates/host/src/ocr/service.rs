@@ -1123,7 +1123,7 @@ mod tests {
     }
 
     /// Reads "x,y lang" for every region, one at a time through `Recognise::each` as the platform
-    /// recognisers do. Slowly for x = 999 (60 ms); for y = 77, 100 ms; for y = 78, 400 ms; for
+    /// recognisers do. Slowly for x = 999 (60 ms); for y = 77, 100 ms; for y = 78, 1500 ms; for
     /// y = 81, 50 ms; a held region (x = 5590 to 5599) until its release. Panics at x = 666. At
     /// y = 79 it says whether it may be preempted; at y = 80 it answers a word no screen has
     /// (x = i32::MAX), which the host's own arithmetic cannot place.
@@ -1136,7 +1136,7 @@ mod tests {
             let pause = match (x, y) {
                 (999, _) => 60,
                 (_, 77) => 100,
-                (_, 78) => 400,
+                (_, 78) => 1500,
                 (_, 81) => 50,
                 _ => 0,
             };
@@ -1484,12 +1484,13 @@ mod tests {
         Ticket { id, owner, key: None, prio }
     }
 
-    /// Five regions at 100 ms each against a hang bound of 150 ms: a long job that keeps
-    /// answering is not a hang. One region of 400 ms is, and the refusal says so; the first read
-    /// after it is taken again.
+    /// Five regions at 100 ms each against a hang bound of 600 ms: a long job that keeps
+    /// answering is not a hang. One region of 1500 ms is, and the refusal says so; the first read
+    /// after it is taken again. The margins are wide because a 100 ms sleep on a macOS runner has
+    /// overshot the 150 ms bound this test used to have.
     #[test]
     fn a_hang_is_a_region_that_does_not_come_back_not_a_long_job() {
-        let (s, stop) = Service::spawn_with(worker(), Limits { hang: Duration::from_millis(150), ..Limits::POLICY }, Instant::now);
+        let (s, stop) = Service::spawn_with(worker(), Limits { hang: Duration::from_millis(600), ..Limits::POLICY }, Instant::now);
         let other = Owner { idx: 3, gen: 1 };
         let regions = (0..5).map(|i| Rect::new(100 + i * 40, 77, 30, 10)).collect();
         s.submit(Spec { regions, lang: LangReq::Default, source: CaptureSource::Standard }, ticket(1, None));
@@ -1499,9 +1500,9 @@ mod tests {
         collect(&s, 2);
 
         s.submit(spec_at(10, 78), ticket(3, None));
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(Duration::from_millis(1000));
         let out = s.submit(spec_at(41, 2), of(other, 4, Priority::Interactive));
-        let why = out.refused.expect("250 ms without a region answered, against a bound of 150");
+        let why = out.refused.expect("1000 ms without a region answered, against a bound of 600");
         assert!(why.starts_with("the text recogniser has not answered a region for"), "{why}");
         collect(&s, 1);
         assert!(s.submit(spec_at(42, 2), of(other, 5, Priority::Interactive)).refused.is_none(), "over");
