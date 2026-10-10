@@ -1,5 +1,7 @@
 //! Image search as a module sees it: template handles, the five search bindings, the worker
-//! that captures and matches off the event loop, and the delivery of its answers.
+//! that captures and matches off the event loop, and the delivery of its answers. The worker also
+//! reduces the pictures of `host.screen.profile` given a callback (`Job::Profile`), whose requests
+//! and answers are snapshot.rs's.
 //!
 //! The matcher is `template.rs`; this file is everything around it that knows about Lua, about
 //! modules, or about threads. It lives outside `lib.rs` so that the part of the host every
@@ -27,6 +29,7 @@ use crate::vm_guard::host_call;
 use crate::capture_source;
 use crate::cells;
 use crate::ocr::policy::IMAGE_PER_OWNER;
+use crate::profile;
 use crate::ocr::types as geo;
 use crate::region::{self, ScreenRect};
 use crate::snapshot::{self, Picture};
@@ -219,6 +222,12 @@ fn ended() -> std::sync::MutexGuard<'static, Option<HashSet<u64>>> {
     ENDED.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Task `id`, sent and no longer wanted: the worker skips it if it has not begun it, and its
+/// answer is let go if it has. For the profiles' reductions, whose requests snapshot.rs ends.
+pub(crate) fn end_task(id: u64) {
+    ended().get_or_insert_with(HashSet::new).insert(id);
+}
+
 /// Takes every entry owned by module `owner`'s VM out of the map. Matched on the OWNER, never
 /// on the scope the call was made under.
 fn purge_owner(map: &mut HashMap<u64, PendingImage>, owner: usize) -> Vec<PendingImage> {
@@ -266,7 +275,8 @@ const HELD_CELLS: &str = "the module was disabled while the read waited";
 /// a caller's in-flight flag.
 fn resend(task: &ImageTask) -> ImageTask {
     match &task.job {
-        Job::Search { .. } => task.clone(),
+        // A profile is never held: its request is snapshot.rs's, dropped with its module.
+        Job::Search { .. } | Job::Profile { .. } => task.clone(),
         Job::Cells(c) => ImageTask {
             job: Job::Cells(Arc::new(CellsJob {
                 matcher: c.matcher.clone(),
@@ -343,6 +353,11 @@ pub(crate) enum Job {
     /// cells task shares its capture with every search of the same region and source in its
     /// batch.
     Cells(Arc<CellsJob>),
+    /// `host.screen.profile` with a callback: the part of a picture the task's region covers,
+    /// reduced per column and row (`profile.rs`). Always a picture already taken — the
+    /// `screen-capture` thread's, or a snapshot the module passed — so the worker never captures
+    /// for it. Its request waits in snapshot.rs (`SnapState`), not here, and is answered there.
+    Profile { cols: bool, rows: bool, dark: u8 },
 }
 
 /// A `matchCellsAsync` call's work.
@@ -369,6 +384,7 @@ impl ImageTask {
         let unresolved = match &self.job {
             Job::Search { unresolved, .. } => unresolved.is_some(),
             Job::Cells(c) => c.unresolved.is_some(),
+            Job::Profile { .. } => false,
         };
         match &self.hay {
             Haystack::Screen { region, source } if !unresolved => Some((*region, *source)),
@@ -390,6 +406,7 @@ impl ImageTask {
         match &self.job {
             Job::Search { mode, .. } => mode.binding(),
             Job::Cells(_) => "matchCellsAsync",
+            Job::Profile { .. } => "profile",
         }
     }
 }
@@ -412,10 +429,26 @@ pub(crate) enum Outcome {
     Search(Result<Vec<Option<ScreenHit>>, String>),
     /// A cells match: the live cells and their ranking, or why there are none.
     Cells(Result<(Vec<u8>, cells::Ranked), String>),
+    /// A profile's reduction, or why there is none.
+    Profile(Result<Box<Reduced>, String>),
+}
+
+/// A profile's reduction, as the worker hands it back: plain data, the Lua tables are built when
+/// the callback runs.
+pub(crate) struct Reduced {
+    pub(crate) columns: Option<profile::Axis>,
+    pub(crate) rows: Option<profile::Axis>,
+    /// What was reduced, on screen.
+    pub(crate) rect: geo::Rect,
+    /// How long the reduction took on the worker, for the observation line.
+    pub(crate) took: Duration,
 }
 
 /// What a search is answered when its batch panicked inside the host.
 const SEARCH_PANICKED: &str = "internal error: the search could not be made";
+
+/// What a profile is answered when its reduction, or its batch, panicked inside the host.
+pub(crate) const PROFILE_FAILED: &str = "internal error: the profile could not be made";
 
 impl Outcome {
     /// The answer of a task whose batch panicked: could not look.
@@ -423,6 +456,7 @@ impl Outcome {
         match &t.job {
             Job::Search { .. } => Outcome::Search(Err(SEARCH_PANICKED.to_string())),
             Job::Cells(_) => Outcome::Cells(Err("internal error: the cells could not be computed".to_string())),
+            Job::Profile { .. } => Outcome::Profile(Err(PROFILE_FAILED.to_string())),
         }
     }
 }
@@ -508,7 +542,7 @@ fn worker_loop(
         let out = match logging::contain(|| run_batch(&batch, capture)) {
             Ok(out) => out,
             Err(report) => {
-                contained("a search batch", "every search in it was answered nil, could not look", &report);
+                contained("a batch", "every search, cells match and profile in it was answered nil", &report);
                 // Every task is still answered. A callback that never fires is worse than a
                 // wrong one: a caller that waits for it before searching again never does.
                 let n = batch.len() as u32;
@@ -627,6 +661,27 @@ fn answer(t: &ImageTask, frame: Option<Result<&CapturedImage, &str>>) -> Outcome
             None => picture(t, frame).map(|pic| match_task(&pic, entries, *tol, scales, *mode)),
         }),
         Job::Cells(job) => Outcome::Cells(cells_task(t, job, frame)),
+        Job::Profile { cols, rows, dark } => Outcome::Profile(profile_task(t, *cols, *rows, *dark)),
+    }
+}
+
+/// A profile's reduction of its picture: the part of it the task's region covers, which was cut
+/// to the picture before the task was sent. A panic in the reduction is answered, like a
+/// template's, rather than taking the worker with it.
+fn profile_task(t: &ImageTask, cols: bool, rows: bool, dark: u8) -> Result<Box<Reduced>, String> {
+    // Never the screen: a profile's task is sent with its picture.
+    let Haystack::Frame { frame, region } = &t.hay else { return Err(PROFILE_FAILED.to_string()) };
+    let area = frame.area(*region).ok_or_else(|| snapshot::NO_OVERLAP.to_string())?;
+    let began = Instant::now();
+    match logging::contain(|| profile::profile(&frame.img, area, cols, rows, dark)) {
+        Ok(Some((columns, rows))) => Ok(Box::new(Reduced { columns, rows, rect: *region, took: began.elapsed() })),
+        // The picture holds fewer bytes than its own size says: read nothing, as the call on the
+        // event loop does.
+        Ok(None) => Err(SHORT_CAPTURE.to_string()),
+        Err(report) => {
+            contained("a profile", "it was answered nil", &report);
+            Err(PROFILE_FAILED.to_string())
+        }
     }
 }
 
@@ -745,6 +800,7 @@ impl Shared {
                 let outcome = match &p.task.job {
                     Job::Search { .. } => Outcome::Search(Err(why)),
                     Job::Cells(_) => Outcome::Cells(Err(why)),
+                    Job::Profile { .. } => Outcome::Profile(Err(why)),
                 };
                 // In the lane it was asked from, through its module's mailbox (`open_image`).
                 let _prio = crate::ocr::types::enter_priority(p.prio);
@@ -778,7 +834,7 @@ impl Shared {
                 logging::line(
                     "image",
                     &format!(
-                        "batch of {} search(es) took {} ms (capture {}, match {} across {} thread-pool tasks)",
+                        "batch of {} read(s) took {} ms (capture {}, match and reduction {} across {} thread-pool tasks)",
                         res.batch,
                         res.capture_ms + res.match_ms,
                         res.capture_ms,
@@ -786,6 +842,18 @@ impl Shared {
                         res.batch
                     ),
                 );
+            }
+            // A profile's reduction: its request waits in snapshot.rs, which hands the answer over
+            // (`deliver_reduced`) — or has let it go, ended or dropped meanwhile.
+            if let Outcome::Profile(reduced) = res.outcome {
+                if let Some(p) = self.snap_state.reduced(res.id) {
+                    if !bumped {
+                        self.bump_epoch();
+                        bumped = true;
+                    }
+                    self.deliver_reduced(p, reduced);
+                }
+                continue;
             }
             let entry = self.pending_image.borrow_mut().remove(&res.id);
             let Some(mut p) = entry else { continue };
@@ -915,6 +983,19 @@ pub(crate) fn test_pending(lua: &Lua, gens: &HashMap<usize, u64>, id: u64, scope
     pending(lua, gens, scope, cb, vec![None], task).expect("the entry is made")
 }
 
+/// What the worker answers `t` with, its picture already there: a profile's, or a snapshot's
+/// search — for other files' tests.
+#[cfg(test)]
+pub(crate) fn test_answer(t: &ImageTask) -> Outcome {
+    answer(t, None)
+}
+
+/// Whether task `id` was ended and the worker has not taken it off the list yet.
+#[cfg(test)]
+pub(crate) fn test_ended(id: u64) -> bool {
+    ended().as_ref().is_some_and(|s| s.contains(&id))
+}
+
 /// A search's answer that found nothing.
 #[cfg(test)]
 pub(crate) fn test_found_nothing() -> Outcome {
@@ -943,9 +1024,12 @@ fn result_args(lua: &Lua, task: &ImageTask, names: &[Option<String>], outcome: O
             }
         }
         (_, Outcome::Cells(Err(why))) => vec![Value::Nil, reason(lua, why)],
-        // A search answered as cells, or the reverse: cannot happen, as the worker answers each
-        // task by its own job. Answered as "could not look" rather than unwrapped.
-        (Job::Cells(_), Outcome::Search(_)) => vec![Value::Nil, reason(lua, "internal error".to_string())],
+        // A search answered as cells, or the reverse, or a profile here at all: cannot happen, as
+        // the worker answers each task by its own job and a profile is answered in snapshot.rs.
+        // Answered as "could not look" rather than unwrapped.
+        (Job::Cells(_) | Job::Profile { .. }, Outcome::Search(_)) | (_, Outcome::Profile(_)) => {
+            vec![Value::Nil, reason(lua, "internal error".to_string())]
+        }
     };
     MultiValue::from_vec(values)
 }
@@ -2285,12 +2369,20 @@ mod tests {
             match &self.outcome {
                 Outcome::Search(f) => f.clone(),
                 Outcome::Cells(_) => panic!("a cells answer where a search's was expected"),
+                Outcome::Profile(_) => panic!("a profile where a search's answer was expected"),
             }
         }
         fn cells(&self) -> &Result<(Vec<u8>, cells::Ranked), String> {
             match &self.outcome {
                 Outcome::Cells(c) => c,
                 Outcome::Search(_) => panic!("a search's answer where a cells answer was expected"),
+                Outcome::Profile(_) => panic!("a profile where a cells answer was expected"),
+            }
+        }
+        fn profile(&self) -> &Result<Box<Reduced>, String> {
+            match &self.outcome {
+                Outcome::Profile(p) => p,
+                _ => panic!("another answer where a profile was expected"),
             }
         }
     }
@@ -2607,6 +2699,48 @@ mod tests {
         // A region of the snapshot the dot is not in: looked, and not there.
         let out = run_batch(&[on_frame(task(2, (110, 200, 5, 3), vec![(dot([0, 255, 0]), None)], Mode::First), &frame)], no_capture);
         assert_eq!(out[0].found(), Ok(vec![None]));
+    }
+
+    /// A profile's task — `host.screen.profile` with a callback — is the reduction of the picture
+    /// it carries, where its region lies in it: exactly what the call without a callback answers
+    /// for the same part of the same picture. It never reaches the capture routine, and a screen
+    /// task of its batch is captured as if it were not there.
+    #[test]
+    fn a_profile_task_is_reduced_from_its_picture_without_a_capture() {
+        let frame = scene_frame();
+        let profile_of = |id: u64, region: geo::Rect| ImageTask {
+            id,
+            hay: Haystack::Frame { frame: frame.clone(), region },
+            job: Job::Profile { cols: true, rows: true, dark: 128 },
+        };
+        for region in [geo::Rect::new(100, 200, 20, 12), geo::Rect::new(102, 201, 10, 8), geo::Rect::new(103, 202, 1, 1)] {
+            let t = profile_of(1, region);
+            assert!(!t.captures(), "nothing is captured for it");
+            let out = run_batch(&[t], no_capture);
+            let got = out[0].profile().as_ref().expect("reduced");
+            let want = profile::profile(&frame.img, frame.area(region).unwrap(), true, true, 128).unwrap();
+            assert_eq!((got.columns.clone(), got.rows.clone()), want, "{region:?}");
+            assert_eq!(got.rect, region, "the part reduced, on screen");
+            assert_eq!(out[0].capture_ms, 0);
+        }
+        thread_local! {
+            static ASKED: std::cell::RefCell<Vec<(i32, i32, i32, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        fn record(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+            ASKED.with(|a| a.borrow_mut().extend(regions.iter().copied()));
+            scene_capture(regions, src)
+        }
+        let out = run_batch(&[profile_of(1, geo::Rect::new(100, 200, 20, 12)), task(2, (0, 0, 4, 4), vec![(dot([255, 0, 0]), None)], Mode::First)], record);
+        assert_eq!(ASKED.with(|a| a.borrow().clone()), vec![(0, 0, 4, 4)], "only the screen task is captured");
+        assert!(out[0].profile().is_ok());
+        // Columns or rows alone, and a batch that panicked: answered, never left without an answer.
+        let mut t = profile_of(3, geo::Rect::new(100, 200, 20, 12));
+        t.job = Job::Profile { cols: false, rows: true, dark: 128 };
+        let out = run_batch(&[t.clone()], no_capture);
+        let got = out[0].profile().as_ref().unwrap();
+        assert!(got.columns.is_none() && got.rows.as_ref().is_some_and(|r| r.min.len() == 12));
+        assert!(matches!(Outcome::failed(&t), Outcome::Profile(Err(why)) if why == PROFILE_FAILED));
+        assert_eq!(t.binding(), "profile");
     }
 
     /// A snapshot region that had nothing to read at the call — no overlap, or a minimised

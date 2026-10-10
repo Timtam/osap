@@ -1115,6 +1115,60 @@ local function discCentre(origin, cw, ch)
   return origin.client.x + cw // 2, origin.client.y + ch // 2 + DISC_DY
 end
 
+-- Where the disc's centre IS across, in snapshot `snap`, for a disc found about `cx` whose band's
+-- middle row is `cy`: the screen column, or `cx` when the rim does not say.
+--
+-- Half the client width is where the centre was on the one window size measured, and the rim test
+-- above finds the disc two pixels either side of it. The pass name's crop needs more: two pixels
+-- left of the centre both crops read "Polyphonic Detectior", which passes every test a read is put
+-- to. Its row is measured already — the band's own top (discIn); one row off, both crops read "o
+-- honic Detecti" — and now its column is too. On twelve rows
+-- clear of the band, 10 to 30 above and below its middle, the rim crosses twice, as far left of
+-- the centre as right of it; each crossing is the darkness-weighted middle of the darkest pixel of
+-- its side and the two either side of it, and the centre is the median of the rows' midpoints. On
+-- both captures with a disc this put it at 481.0 and 480.85 from guesses up to 4 px off on either
+-- side. More than 3 px from `cx` is something else dark beside the rim — a note seen through the
+-- unfilled part of the pie — and the guess stands.
+local CROSS_ROWS = { -30, -26, -22, -18, -14, -10, 10, 14, 18, 22, 26, 30 }
+local RIM_R = 52
+local function discX(snap, cx, cy)
+  local pts, sides = {}, {}
+  for _, dy in ipairs(CROSS_ROWS) do
+    local ex = math.floor(math.sqrt(RIM_R * RIM_R - dy * dy))
+    for _, from in ipairs({ cx - ex - 7, cx + ex - 6 }) do
+      sides[#sides + 1] = { from = from, first = #pts + 1 }
+      for x = from, from + 12 do pts[#pts + 1] = { x, cy + dy } end
+    end
+  end
+  local px = host.screen.pixels(pts, { snapshot = snap })
+  if not px then return cx end
+  local function crossing(side)
+    local lum, k, top = {}, 1, -math.huge
+    for i = 1, 13 do
+      lum[i] = luminance(px[side.first + i - 1])
+      if lum[i] < lum[k] then k = i end
+      top = math.max(top, lum[i])
+    end
+    local sum, weight = 0, 0
+    for i = math.max(1, k - 2), math.min(13, k + 2) do
+      sum += (side.from + i - 1) * (top - lum[i])
+      weight += top - lum[i]
+    end
+    return weight > 0 and sum / weight or nil
+  end
+  local mids = {}
+  for i = 1, #sides, 2 do
+    local left, right = crossing(sides[i]), crossing(sides[i + 1])
+    if left and right then mids[#mids + 1] = (left + right) / 2 end
+  end
+  if #mids == 0 then return cx end
+  table.sort(mids)
+  local n = #mids
+  local m = n % 2 == 1 and mids[(n + 1) // 2] or (mids[n // 2] + mids[n // 2 + 1]) / 2
+  if math.abs(m - cx) > 3 then return cx end
+  return round(m)
+end
+
 -- The picture discIn needs around a centre: the band's columns and rows, and the rim's points out
 -- to RIM_OUTSIDE, with a few pixels to spare.
 local function discRegion(cx, cy)
@@ -1134,8 +1188,10 @@ local DISC_KEY = "analysis disc"
 local PASS_KEY = "analysis pass"
 
 -- The analysis seen in this stay: where the overlay was when its disc was first seen, the pass
--- name once read, whether "Busy" was said, and how many looks in a row since found no disc. nil
--- when there is none.
+-- name once taken (see countPass) with the looks that read each name, the last name read and how
+-- many looks in a row read it, and the reads that were not taken, how far across from the window's
+-- middle the disc's centre was measured, whether "Busy" was said, and how many looks in a row since
+-- found no disc. nil when there is none.
 local analysis = nil
 -- Where the overlay was at the last look that found no disc: the read-out says "idle" after one.
 local idleMark = nil
@@ -1147,7 +1203,7 @@ local function analysingHere()
   return analysis ~= nil and ov:stillHere(analysis.mark)
 end
 
--- "Busy: <pass>", once per analysis, once its name is read — and after the overlay's own arrival
+-- "Busy: <pass>", once per analysis, once its name is taken — and after the overlay's own arrival
 -- sentence, never in front of it. Both are queued, so the one handed to speech first is heard
 -- first; until an announcement of this stay has been SAID, the next look asks again. Said, not
 -- begun: a sentence that reads its control — "Inspector", "Pitch deviation" — begins at once and
@@ -1162,33 +1218,118 @@ end
 -- The pass name, read from the look's own picture, with a callback. One read out at a time; an
 -- empty or failed one says nothing, and the next look reads again.
 --
--- The band from rim to rim, and a column more of the rim on each side. Melodyne cuts the caption
--- at the disc: on the capture its letters run from 50 px left of the centre to 49 right of it, the
--- band's own width, and the rim is 51 to 53 out. Two columns of margin keep a centre one pixel off
--- at another window size from cutting a letter, and stay inside the rim, which is dark like the
--- band; the light page outside it would read as a stroke.
-local function askPass(snap, cx, top, a)
+-- The caption alone, without the rim. Melodyne cuts the caption at the disc: on both captures with
+-- a disc (Melodyne-clean.png, Melodyne-5-clean.png) its ink runs from 50 px left of the centre to
+-- 50 right of it, the band's whole inside, and the rim begins at 51 on the right and 52 on the
+-- left. The rim is not dark like the band everywhere: on the right it reads 127-148, lighter than
+-- the band where the pie has filled it (106), and the recogniser's upscaling makes it a bar after
+-- the last letter — the "l" of "Detectionl", which Windows' recogniser answered for most of a live
+-- analysis. The crop from rim to rim read neither capture right. Columns 50 left of the centre to
+-- 49 right of it read "Polyphonic Detection" on both, in English and in German, and in 40 of 41
+-- fill states of the disc made from the two captures. The centre is the measured one (discX).
+--
+-- In English, which is what Melodyne shows here: over those fill states the English recogniser
+-- read the name in 40, the user's German one in 37. Where English cannot be read — a Windows
+-- without its text recognition — the first read that says so (answered "failed" with no
+-- language, and English not among the recogniser's languages) turns the reads to the user's own
+-- language for the rest of the session. The languages are asked only then, after a read has
+-- answered, when their list is known and asking does not wait. A Melodyne in another language
+-- shows its own name; how the English recogniser reads its accents is not measured, and a name
+-- that is not read is "busy", never a misreading.
+--
+-- And TWICE, in one call: the same crop and one a column narrower on the left. Windows' recogniser
+-- answers a crop one pixel off with another misreading, while a name that is really there reads
+-- the same in both — so a read whose two crops differ is not taken. Over the 41 fill states the two
+-- agreed in 39, and every time on the right name. Each crop is a region of its own, so each keeps
+-- the neural recogniser that answers when Windows' reads nothing — every exact read of the live
+-- session came from it.
+local PASS_COLS = { -50, -49 }
+local passLang = "en"
+-- Looks in a row that must have read a name before it is the pass: one agreeing read can still be
+-- a misreading that both crops share, and a name the pass really has is read again from the next
+-- picture.
+local PASS_LOOKS = 2
+
+-- Defined below, with the clock that makes it: the read of a first name asks for the next picture
+-- at once.
+local look
+
+-- A name as Melodyne prints one: words of letters, one space between them, nothing else — letters
+-- of the Latin script, which is what the English recogniser reads and what a translated Melodyne's
+-- accented letters are. Not Luau's %a, which knows no letter past ASCII. A misreading that slipped
+-- through comes out as "Pöbhffoiü@.petectionl".
+local function passLike(text)
+  if utf8.len(text) == nil then return false end
+  local before = 32
+  for _, c in utf8.codes(text) do
+    local letter = (c >= 65 and c <= 90) or (c >= 97 and c <= 122)
+      or (c >= 0xC0 and c <= 0x24F and c ~= 0xD7 and c ~= 0xF7)
+    if not (letter or (c == 32 and before ~= 32)) then return false end
+    before = c
+  end
+  return before ~= 32
+end
+
+-- One look's read, counted: a name both crops read the same, or a read not taken. A name is the
+-- pass once PASS_LOOKS looks in a row have read it — a read not taken between them counts neither
+-- way — so a pass that follows another is taken at its second read however long the one before it
+-- ran, and a misreading both crops shared once never is. The log says when a name is taken and the
+-- first read that was not; the finished line counts the rest. True when the read counted for a
+-- name.
+local function countPass(a, one, two)
+  if one ~= two or not passLike(one) then
+    a.rejected += 1
+    if a.rejected == 1 then
+      host.log.info(("[melodyne] analysis pass: not taken, read %q and %q"):format(one, two))
+    end
+    return false
+  end
+  a.looks[one] = (a.looks[one] or 0) + 1
+  a.counted += 1
+  if a.last == one then a.inRow += 1 else a.last, a.inRow = one, 1 end
+  if a.inRow < PASS_LOOKS or one == a.pass then return true end
+  host.log.info(a.pass == nil
+    and ("[melodyne] analysis found: %q (%d looks read it, %d reads not taken; the disc's centre %+d px"
+      .. " across from the window's middle)"):format(one, a.looks[one], a.rejected, a.offset)
+    or ("[melodyne] analysis pass now %q, was %q (%d looks in a row)"):format(one, a.pass, a.inRow))
+  a.pass = one
+  return true
+end
+
+-- The first name an analysis reads is not said on its own, and the next look would be up to half a
+-- second away — after the arrival sentence, which says "busy" for want of a name. So that read asks
+-- for the next picture at once: once per analysis, after its first counted read, so a recogniser
+-- that keeps answering new names never keeps the capture thread busy. `cx` is where the disc was
+-- looked for, `mx` where its centre was measured.
+local function askPass(snap, cx, mx, top, a)
   if host.ocr.pending(PASS_KEY) then return end
-  local band = { cx - 52, top, cx + 53, top + BAND_ROWS }
-  host.ocr.recognize(band, { snapshot = snap, key = PASS_KEY },
-    function(r)
-      local text = field(r)
-      text = text and trimmed(text) or ""
-      if text == "" then return end
-      if analysis ~= a or not ov:stillHere(a.mark) or nativeMenuOpen() then return end
-      if a.pass ~= text then
-        host.log.info(a.pass == nil and ("[melodyne] analysis found: %q"):format(text)
-          or ("[melodyne] analysis pass now %q, was %q"):format(text, a.pass))
-        a.pass = text
+  a.offset = mx - cx
+  local crops = {}
+  for i, dx in ipairs(PASS_COLS) do crops[i] = { mx + dx, top, mx + 50, top + BAND_ROWS } end
+  host.ocr.recognize(crops, { snapshot = snap, key = PASS_KEY, lang = passLang },
+    function(list)
+      local first = list[1]
+      if passLang and first and first.status == "failed" and first.lang == ""
+        and host.ocr.resolveLanguage(passLang) == nil then
+        host.log.info("[melodyne] analysis pass: English is not read here; the user's language from now on")
+        passLang = nil
       end
+      local one, two = field(list[1]), field(list[2])
+      if one == nil or two == nil then return end
+      one, two = trimmed(one), trimmed(two)
+      if one == "" and two == "" then return end
+      if analysis ~= a or not ov:stillHere(a.mark) or nativeMenuOpen() then return end
+      local counted = countPass(a, one, two)
       sayBusy(a)
+      if counted and a.pass == nil and a.counted == 1 then look() end
     end)
 end
 
 -- A look that found the disc: the analysis of this stay, begun now when there was none.
 local function discFound(mark)
   if not analysingHere() then
-    analysis = { mark = mark, pass = nil, said = false, misses = 0 }
+    analysis = { mark = mark, pass = nil, looks = {}, last = nil, inRow = 0, counted = 0,
+      rejected = 0, offset = 0, said = false, misses = 0 }
   end
   analysis.misses = 0
   sayBusy(analysis)
@@ -1208,14 +1349,16 @@ local function discMissing(mark)
   a.misses += 1
   if a.misses < 2 then return end
   analysis = nil
-  host.log.info(("[melodyne] analysis finished: %s")
-    :format(a.pass and ("%q"):format(a.pass) or "its pass was never read"))
+  local same = a.pass and a.looks[a.pass] or 0
+  host.log.info(("[melodyne] analysis finished: %s (%d looks read it, %d another name, %d reads not taken)")
+    :format(a.pass and ("%q"):format(a.pass) or "no name was taken", same, a.counted - same,
+      a.rejected))
   host.speech.output("Analysis finished", { interrupt = false })
 end
 
 -- One look: a picture of the disc's place, taken off the event loop at a set time — now — so that
 -- it does not hold back Melodyne's own clicks, and decided in its callback.
-local function look()
+look = function()
   if not ov.active then
     analysis, idleMark = nil, nil
     return
@@ -1233,7 +1376,7 @@ local function look()
     -- Answered a moment later: still the same Melodyne in the same stay, and no menu over it.
     local top = nil
     if ov:stillHere(mark) and not nativeMenuOpen() then top = discIn(snap, cx, cy) end
-    if top then askPass(snap, cx, top, discFound(mark)) end
+    if top then askPass(snap, cx, discX(snap, cx, top + 6), top, discFound(mark)) end
     snap:release() -- the pass name's read keeps its own pixels until it is answered
     if top == false then discMissing(mark) end
   end)
@@ -1305,9 +1448,9 @@ local NOTE_AREA = { 48, 118, 958, 640 }
 -- Faster than the first guess, because the announcement is per FRAME and the user presses per
 -- KEY. At 400 ms two quick presses land in one frame and are announced as one move of double the
 -- size, which reads as "the values are not continuous" — and they were not. The capture is taken
--- on the capture thread; what the event loop pays per frame is the reduction and the comparison,
--- which the log reports every hundred frames, and only under the tools that have nothing else to
--- say.
+-- on the capture thread and reduced on the image worker; what the event loop pays per frame is the
+-- profile's tables and the comparison, which the log reports every hundred frames, and only under
+-- the tools that have nothing else to say.
 local NOTE_AREA_MS = 200
 local AREA_KEY = "note area"
 local lastAreaSize = nil
@@ -1341,34 +1484,27 @@ local prevLines = nil
 -- same stay. Frames used to survive a closed gate and a trip away, and the first frame of a stay
 -- was once compared with one more than two minutes old.
 local areaMark = nil
+-- The picture the profile above was made from, and its region as text: the next picture is asked
+-- to be compared with it (measureNoteArea). nil whenever there is no profile to compare with.
+local areaSnap, areaSnapRegion = nil, nil
+-- Whether the frame above is one the last frame was compared with instead of itself — half a move
+-- drawn (measureMove) — so that the next one is not held as well.
+local heldOnce = false
+
+-- The picture above, let go.
+local function dropAreaSnap()
+  if areaSnap then areaSnap:release() end
+  areaSnap, areaSnapRegion = nil, nil
+end
 
 -- Everything a frame is compared with, gone: the next frame is a baseline.
 local function dropFrames()
-  lastArea, lastAreaMin, lastAreaSize, lastArrival, prevLines, areaMark = nil, nil, nil, nil, nil, nil
+  lastArea, lastAreaMin, lastAreaSize, lastArrival, prevLines, areaMark =
+    nil, nil, nil, nil, nil, nil
+  heldOnce = false
+  dropAreaSnap()
 end
 
--- A distance as a FRACTION OF A BAR, named when it is close to a simple one.
---
--- Melodyne moves a note by whole grid units, so pressing the key twice does the same thing
--- twice; the measurement of it carries about two pixels of noise. Read out to the percent that
--- became "33, 38, 31, 35, 33, 34" for six identical presses, which sounds random and is not.
--- The user called it inconsistent, and he was describing my arithmetic rather than his edit.
---
--- The measured ratios sat at 0.31 to 0.38 against a bar that stayed within 98 to 102 pixels, so
--- the honest reading is a third of a bar, six times. Naming the nearest simple fraction when the
--- measurement is within five hundredths of it says exactly that and stays silent about a
--- precision the picture does not carry. Anything further from a named fraction keeps the
--- percentage, because inventing a name for 0.44 would be worse than admitting the number.
---
--- Fractions of a BAR, still, never note values: those need a time signature, and
--- bar.beat.sixteenth tells us how the transport counts, not how many beats a bar holds.
-local FRACTIONS = {
-  { 1 / 16, "a sixteenth of a bar" }, { 1 / 12, "a twelfth of a bar" },
-  { 1 / 8, "an eighth of a bar" }, { 1 / 6, "a sixth of a bar" },
-  { 1 / 4, "a quarter of a bar" }, { 1 / 3, "a third of a bar" },
-  { 1 / 2, "half a bar" }, { 2 / 3, "two thirds of a bar" },
-  { 3 / 4, "three quarters of a bar" }, { 1, "a bar" },
-}
 -- The TIME SIGNATURE, read from the top bar, and it is what turns a measurement into a sentence.
 --
 -- "One step" says nothing a person can act on, and the user said so. The missing piece was in
@@ -1423,10 +1559,18 @@ end
 -- measurement was being read out as "a quarter, a third, two thirds".
 --
 -- Melodyne moves a note by whole grid units, so the honest unit is the one he keeps using. The
--- median of the recent displacements IS that unit, whatever the zoom and whatever the grid is
--- set to, and the announcement becomes a count of steps: what he did, not what I inferred about
--- the ruler behind it. His own run bears it out — 33, 34, 35, 44 and then a 90, which is two.
-local stepHistory, barHistory = {}, {}
+-- median of the recent displacements IS that unit, whatever the grid is set to, and the
+-- announcement becomes a count of steps: what he did, not what I inferred about the ruler behind
+-- it. His own run bears it out — 33, 34, 35, 44 and then a 90, which is two.
+--
+-- Kept AS A PART OF THE BAR the move was measured against (barFor, which no longer takes a
+-- bar half as wide again as the frame's others), so that the unit follows the zoom at once: a
+-- step of 20 px learned at a bar of 80 is 30 px at a bar of 120. Kept in pixels, the steps
+-- learned before a zoom were the wrong size for the next half-dozen presses, and a window of half
+-- as much again of a beat around them, which the zoom was to wash through, kept a step of the
+-- wrong size and refused every grid but the beat: a sixteenth was a fine step, an eighth flipped
+-- between that and a beat.
+local stepHistory = {}
 local function median(t)
   if #t == 0 then return nil end
   local s = table.clone(t)
@@ -1438,41 +1582,67 @@ local function remember(t, v)
   if #t > 12 then table.remove(t, 1) end
 end
 
--- How big one press is, and in what: beats when the numbers agree on it, steps otherwise.
---
--- Both ingredients are noisy on their own — the displacement carries about two pixels, the bar
--- detector wandered between 35 and 136 in one session — so both are taken as MEDIANS of the
--- last dozen, where the noise cancels and a zoom change washes through within a few presses.
--- Then: how many steps fit in a bar, against how many beats the time signature says a bar
--- holds. When those agree, one step IS one beat, and the announcement can say so.
-local function stepsFor(px, barW, beats)
-  -- A nudge must not teach the step size: the median is what a PRESS OF THE GRID KEY does, and
-  -- feeding it one-pixel moves would drag it down until a real step counted as several.
-  if px >= 8 then remember(stepHistory, px) end
-  if barW and barW > 0 then remember(barHistory, barW) end
-  local unit = median(stepHistory)
-  if not unit or unit < 4 then return nil, nil end
-  -- A move well under one unit is Melodyne's NUDGE: Ctrl+Alt is the same gesture with the grid
-  -- switched off, and it moves one to four pixels where a grid step moves thirty-four. Rounding
-  -- that to the nearest number of steps gives zero, and the old code then reported it as one —
-  -- a fine nudge announced as a whole beat. It gets its own word instead, and no quantity: at
-  -- one to four pixels the measurement carries a quarter of its own size in noise, and a number
-  -- built on that would be decoration.
-  if px < unit * 0.5 then return 1, "fine step" end
-  local n = math.max(1, math.floor(px / unit + 0.5))
-  local bar = median(barHistory)
-  if beats and bar and bar > unit then
-    local perBar = bar / unit
-    if math.abs(perBar - beats) <= 0.6 then return n, "beat" end
-  end
-  return n, "step"
+-- A move under a sixteenth of a bar teaches no step. A nudge must not teach the step size: the
+-- median is what a PRESS OF THE GRID KEY does, and feeding it nudges would drag it down until a
+-- real step counted as several. A nudge measured 1 to 4 px against bars of 102 to 136, where a
+-- sixteenth is 6 to 8.5, and a nudge of 3 px measured up to 4.5 on the notes of the calibration
+-- captures moved in Python at a bar of 80, where it is 5 — learned, at a twentieth, it was one step
+-- and the nudges after it steps too. A grid of sixteenths in 4/4 is at the edge of this, and a
+-- finer one is a nudge to it.
+local STEP_FLOOR = 16
+
+-- The unit a move is counted in, against bar `bar`: the step he has been making, else — before he
+-- has made one — a beat, the bar over the time signature's beats. nil when there is neither, or
+-- when it is under 4 pixels, where the picture's noise is as large as the unit.
+local function unitFor(beats, bar)
+  if not bar then return nil end
+  local learned = median(stepHistory)
+  local unit = learned and learned * bar or (beats and bar / beats) or nil
+  if unit and unit < 4 then return nil end
+  return unit
 end
 
-local function asFraction(ratio)
-  for _, f in ipairs(FRACTIONS) do
-    if math.abs(ratio - f[1]) <= 0.05 then return f[2] end
+-- What a move of `px` pixels against bar `bar` is said as, after its direction: "one beat", "2
+-- beats", "one step", "3 steps", "one fine step"; nil when there is nothing to measure it by. The
+-- same for every move, whichever threshold of ink it was seen at. A move told for certain (`learn`)
+-- and not under STEP_FLOOR is a step and is learned first, so the first one is one step of whatever
+-- grid he uses; one whose size was not told for certain teaches nothing.
+--
+-- Whole beats first, when the time signature is read: a move within a quarter of a beat of one or
+-- more beats is said in beats, whatever step was learned — two presses that landed in one frame,
+-- or a first move of two beats, are "2 beats", not one step of a grid of two.
+--
+-- A move under half the unit is Melodyne's NUDGE: Ctrl+Alt is the same gesture with the grid
+-- switched off, and it moves a few pixels where a grid step moves a beat. Rounding that to the
+-- nearest number of steps gives zero, and the code once reported it as one — a fine nudge
+-- announced as a whole beat. It gets its own word instead, and no quantity: at a few pixels the
+-- measurement carries a quarter of its own size in noise, and a number built on that would be
+-- decoration. Half the unit, not a number of pixels: the split was a fixed 12 px, measured at a
+-- beat of 34, and at a bar of 80 px — a beat of 20 — it called every grid step a nudge or said
+-- nothing at all.
+--
+-- Other steps are counted in beats when as many of them fit in a bar as the time signature says,
+-- and otherwise in steps — never as a fraction of a bar. Fractions were said once, a quarter, then
+-- a third, for six presses of one step; and on the note of the session of 2026-10-05, moved 20 px
+-- in Python, its halves measure 21 px one way and 23 the other: 0.26 and 0.29 of a bar of 80, where
+-- a quarter is 0.25 and a third 0.33. Counted against his own steps, a press is one step every
+-- time.
+local function moveWords(px, beats, bar, learn)
+  if not bar then return nil end
+  if learn and px >= bar / STEP_FLOOR then remember(stepHistory, px / bar) end
+  if beats and bar / beats >= 4 then
+    local n = px / (bar / beats)
+    local whole = math.floor(n + 0.5)
+    if whole >= 1 and math.abs(n - whole) <= 0.25 then
+      return whole == 1 and "one beat" or (whole .. " beats")
+    end
   end
-  return nil
+  local unit = unitFor(beats, bar)
+  if unit == nil then return px < bar / STEP_FLOOR and "one fine step" or nil end
+  if px < unit / 2 then return "one fine step" end
+  local n = math.max(1, math.floor(px / unit + 0.5))
+  local word = (beats and math.abs(bar / unit - beats) <= 0.6) and "beat" or "step"
+  return n == 1 and ("one " .. word) or (n .. " " .. word .. "s")
 end
 
 -- The bar lines, found in the same profile that finds the note.
@@ -1519,6 +1689,26 @@ local function barWidthAt(lines, col)
   return lines[#lines] - lines[#lines - 1]
 end
 
+-- The width of a bar across one frame: the median gap between its bar lines; nil with fewer than
+-- two.
+local function barWidthOf(lines)
+  if #lines < 2 then return nil end
+  local gaps = {}
+  for i = 2, #lines do gaps[#gaps + 1] = lines[i] - lines[i - 1] end
+  return median(gaps)
+end
+
+-- The bar a move at column `col` is measured against: the one around it, unless that is half as
+-- wide again as the frame's other bars, or narrower by as much — a line found where there is none,
+-- or one missed: one session gave widths from 36 to 136 — and then theirs.
+local function barFor(lines, col)
+  local typical = barWidthOf(lines)
+  if not typical then return nil end
+  local here = barWidthAt(lines, col)
+  if here and here >= typical / 1.5 and here <= typical * 1.5 then return here end
+  return typical
+end
+
 -- By how many columns did the changed part of the picture MOVE?
 --
 -- The first attempt tracked the strongest run from frame to frame, and the log showed why that
@@ -1551,8 +1741,9 @@ end
 -- should hold what its neighbour one shift back held a moment ago. So a good fit is now a small
 -- number where standing still is a large one, and the two are finally measuring different
 -- things.
-local MAX_SHIFT = 60
-local function bestShift(prevMin, minv, cols)
+--
+-- Searched to half a bar either way, which is what the 60 px it once was came to at a bar of 110.
+local function bestShift(prevMin, minv, cols, maxShift)
   local function score(k)
     local sum, n = 0, 0
     for _, i in ipairs(cols) do
@@ -1566,7 +1757,7 @@ local function bestShift(prevMin, minv, cols)
     return sum / n
   end
   local best, bestScore = 0, math.huge
-  for k = -MAX_SHIFT, MAX_SHIFT do
+  for k = -maxShift, maxShift do
     local s = score(k)
     if s < bestScore then best, bestScore = k, s end
   end
@@ -1582,7 +1773,19 @@ local function noteAreaSay(text, runs, arrived, frame)
   host.speech.output(text, { interrupt = true })
 end
 
--- The NUDGE pass, at a third of the coarse threshold, saying only that and which way.
+-- Ink ARRIVING in a column, or leaving it, in rows: three, a third of the eight the runs above are
+-- built on.
+--
+-- How many rows a column changes by says how much ink the note carries at its edge more than how
+-- far it moved: once a move passes the few pixels of an edge's taper, 20 px and 34 px change a
+-- column alike (shapes from the calibration captures, moved in Python). The notes of August
+-- carried 9 to 14 rows there; those of the session of 2026-10-05, at a bar of 80 px, 3 to 7, so
+-- their grid steps were seen at three or not at all. And at eight the halves of a move are its
+-- darkest columns, not its extent: a note of 24 px moved 34 showed two columns on each side. So a
+-- move is seen at three — and sized at half its own peak (halves) — and the threshold decides
+-- nothing about what it is called (moveWords).
+-- Ctrl+Alt, Melodyne's Nudge — the same gesture with the grid off — moves a few pixels where a grid
+-- step moves a beat.
 --
 -- AND IT HAS A FLOOR THAT NO THRESHOLD CAN LOWER. Asked to report a Ctrl+Alt nudge it answered
 -- "nothing (0 arrived, 0 left)" four times running: not one column of the note area changed by
@@ -1592,44 +1795,351 @@ end
 -- a hundredth of a beat is a third of a pixel and does not exist on screen; even a tenth of a
 -- beat is 3.4 pixels, which is about where the one successful fine reading of the evening sat.
 -- Lowering the threshold further would not find the movement, it would start reporting
--- anti-aliasing as motion.
+-- anti-aliasing as motion. The remedy is not sensitivity but magnification: at twice the zoom the
+-- same nudge is twice the pixels. This channel measures what the picture holds, and the user sets
+-- that with the zoom. Nor does an idle picture change a column by three: of the 49 frames the fine
+-- pass looked at in the session of 2026-10-05, 44 found nothing at three, four were the moves
+-- pressed, and in one three columns gained ink and none lost it.
+local ARRIVED = 3
+
+-- FULL-HEIGHT COLUMNS ARE NOT NOTES, and skipping them is what the ink channel was for.
 --
--- The remedy is not sensitivity but magnification: at twice the zoom the same nudge is twice
--- the pixels. This channel measures what the picture holds, and the user sets that with the
--- zoom.
+-- Melodyne's playback cursor is a line spanning the whole editor, measured at 470 to 516
+-- dark rows against 29 to 57 for a note blob. While the transport runs it crosses the area
+-- several times a second, arriving in a new column each frame — so the user pressed Play and
+-- was read a sentence every 200 ms. I measured that separation on his own capture hours ago
+-- and then wrote an arrival test that could not tell the two apart.
 --
--- Called from two places, and that is the point: it was written for "the coarse pass found
--- nothing at all", but a frame can carry runs that came from the MEAN channel while the ink
--- shows no arrival at the coarse threshold — and then the coarse pass falls silent and the fine
--- one was never reached. The user pressed Ctrl+Alt into that gap twice.
-local function sayFineMove(minv, prevMin, runs, frame)
-  local fa, faN, fd, fdN = 0, 0, 0, 0
-  for i = 1, #minv do
+-- And a cursor that MOVED says the frame holds no edit. Selecting a note takes the cursor to it —
+-- walking notes with the arrows moved it in lockstep with the transport read-out — while the
+-- cursor does not follow an edit: twelve semitone moves and four time moves left the transport
+-- unchanged. The selection's highlight is three to four rows of ink, so a walk from note to note
+-- would otherwise read as a move from one to the other.
+--
+-- But the bar lines are full height too: 470 to 519 dark rows on every calibration capture, at
+-- exactly the columns barLines finds. When the view scrolls they move with the music, and counted
+-- as the cursor they silenced the edit that made Melodyne scroll. So a full-height column that
+-- came or went counts as the cursor only where the view's own move does not explain it: one that
+-- was there the view's move away, or beside it, or past the edge it scrolled in from.
+local FULL_HEIGHT = 150
+
+-- The two halves of whatever moved between two frames: the columns that gained ARRIVED rows of ink
+-- or more, and the ones that lost as many — how many of each, the first and the last, and the
+-- arrivals' own list — `size`, the same halves at half their own peak change, which a move is
+-- measured from (stepOf), and how many full-height columns came or went that the view's move of
+-- `shift` px (nil or 0 when it did not move) does not explain: the cursor.
+--
+-- Over the WHOLE profile, not over the runs. The runs are a summary written for the log —
+-- grouped, gap-tolerant, one to three columns wide — and building a centroid inside them left
+-- samples of two and five columns. Every column that changed enough counts here; it costs three
+-- passes over 910 numbers.
+--
+-- At half the peak, because a note's ink is not even along it. At three rows a half takes in the
+-- taper of the note's ends and, along a note drawn as a waveform, every column whose thickness the
+-- move changed: the note of calibration/Melodyne-5-clean.png, moved 20 px either way in Python,
+-- had halves 34.5 and 33 columns wide on average at three rows, which said "two beats", and 23 and
+-- 21 at half their peaks, which said one; the notes of Melodyne-3-clean.png, 170 moves, said the
+-- same at both.
+local function halves(minv, prevMin, shift)
+  local n = #minv
+  local h = { cols = {}, cursor = 0, aN = 0, aMin = math.huge, aMax = -math.huge, aPeak = 0,
+    dN = 0, dMin = math.huge, dMax = -math.huge, dPeak = 0 }
+  local change, fullNow, fullWas = {}, {}, {}
+  for i = 1, n do
     local now, was = minv[i] or 0, prevMin[i] or 0
-    if now < 150 and was < 150 then
-      if now >= was + 3 then fa, faN = fa + i, faN + 1
-      elseif was >= now + 3 then fd, fdN = fd + i, fdN + 1 end
+    fullNow[i], fullWas[i] = now >= FULL_HEIGHT, was >= FULL_HEIGHT
+    local c = (now < FULL_HEIGHT and was < FULL_HEIGHT) and now - was or 0
+    change[i] = c
+    if c >= ARRIVED then
+      h.aN += 1
+      h.aMin, h.aMax, h.aPeak = math.min(h.aMin, i), math.max(h.aMax, i), math.max(h.aPeak, c)
+      h.cols[#h.cols + 1] = i
+    elseif c <= -ARRIVED then
+      h.dN += 1
+      h.dMin, h.dMax, h.dPeak = math.min(h.dMin, i), math.max(h.dMax, i), math.max(h.dPeak, -c)
     end
   end
-  if faN == 0 or fdN == 0 then
-    if O.calibrating() then
-      host.log.info(("[melodyne] fine pass: nothing (%d arrived, %d left)"):format(faN, fdN))
+  local k = shift or 0
+  local function explained(full, j)
+    return k ~= 0 and (j < 1 or j > n or full[j] or full[j - 1] or full[j + 1]) == true
+  end
+  for i = 1, n do
+    if fullNow[i] ~= fullWas[i] then
+      local ok
+      if fullWas[i] then ok = explained(fullNow, i + k) else ok = explained(fullWas, i - k) end
+      if not ok then h.cursor += 1 end
     end
-    return
   end
-  local d = fa / faN - fd / fdN
-  if O.calibrating() then
-    host.log.info(("[melodyne] fine pass: %.1f px (%d arrived, %d left)"):format(d, faN, fdN))
+  local s = { aN = 0, aSum = 0, aMin = math.huge, aMax = -math.huge,
+    dN = 0, dSum = 0, dMin = math.huge, dMax = -math.huge }
+  local ta, td = math.max(ARRIVED, h.aPeak / 2), math.max(ARRIVED, h.dPeak / 2)
+  for i = 1, n do
+    local c = change[i]
+    if h.aN > 0 and c >= ta then
+      s.aN += 1
+      s.aSum += i
+      s.aMin, s.aMax = math.min(s.aMin, i), math.max(s.aMax, i)
+    elseif h.dN > 0 and -c >= td then
+      s.dN += 1
+      s.dSum += i
+      s.dMin, s.dMax = math.min(s.dMin, i), math.max(s.dMax, i)
+    end
   end
-  if math.abs(d) < 1 or math.abs(d) > 12 then return end
-  noteAreaSay((d > 0 and "right" or "left") .. ", one fine step", runs, faN, frame)
+  h.size = s
+  return h
 end
+
+-- How much redder than blue, on average, a row of the columns ink arrived in must have become to
+-- be one of the note's rows. Melodyne draws a note orange and yellow, edged in red, on a page of
+-- greys — where red and blue are equal — so red over blue is the note, the light middle of a blob
+-- included, which the dark count misses.
+local NOTE_COLOUR = 8
+
+-- Whether the columns between the two halves of a move hold the note's body, on the note's own
+-- rows: true, false, or nil when the pictures cannot say — no rows turned the note's colour, or
+-- the halves have no columns between them. `now` is the frame's picture and `before` the one the
+-- last profile was made from; three small profiles of them, the arrival columns' rows in each and
+-- the columns between on the note's rows.
+--
+-- On the note's rows, because the whole column is no test: other notes at other pitches stand in
+-- the same columns, and a blob's light middle has fewer dark pixels than the page's grid lines.
+local function bodyBetween(h, dir, frame, now, before)
+  if not (now and before) or now.released or before.released then return nil end
+  local lo, hi
+  if dir > 0 then lo, hi = h.dMax + 1, h.aMin - 1 else lo, hi = h.aMax + 1, h.dMin - 1 end
+  if hi < lo then return nil end
+  local x0 = frame.origin.client.x + NOTE_AREA[1] - 1
+  local top, bottom = frame.origin.client.y + NOTE_AREA[2], frame.origin.client.y + frame.y2
+  local block = { x0 + h.aMin, top, x0 + h.aMax + 1, bottom }
+  local pn = host.screen.profile({ snapshot = now, region = block, axes = "rows" })
+  local pb = host.screen.profile({ snapshot = before, region = block, axes = "rows" })
+  if not (pn and pb and pn.rows and pb.rows and pn.rows.r and pb.rows.r) then return nil end
+  if #pn.rows.r ~= #pb.rows.r then return nil end
+  local first, last = nil, nil
+  for i = 1, #pn.rows.r do
+    if (pn.rows.r[i] - pn.rows.b[i]) - (pb.rows.r[i] - pb.rows.b[i]) >= NOTE_COLOUR then
+      first, last = first or i, i
+    end
+  end
+  if first == nil then return nil end
+  local arrived, was = 0, 0
+  for i = first, last do
+    arrived += pn.rows.r[i] - pn.rows.b[i]
+    was += pb.rows.r[i] - pb.rows.b[i]
+  end
+  arrived, was = arrived / (last - first + 1), was / (last - first + 1)
+  local g = host.screen.profile({
+    snapshot = now, region = { x0 + lo, top + first - 1, x0 + hi + 1, top + last }, axes = "rows",
+  })
+  if not (g and g.rows and g.rows.r and #g.rows.r > 0) then return nil end
+  local gap = 0
+  for i = 1, #g.rows.r do gap += g.rows.r[i] - g.rows.b[i] end
+  return gap / #g.rows.r - was >= (arrived - was) / 2
+end
+
+-- Which way the ink flowed between two frames, in pixels: one-dimensional optical flow. Where a
+-- profile shifts by a little, what changed in a column is minus the shift times the slope there,
+-- so the shift that explains the change best is minus the sum of change times slope over the sum
+-- of the slopes squared — over the columns that changed and their neighbours, the cursor's left
+-- out. A witness of the direction for a change that is no rigid move (stepOf).
+local function flowOf(minv, prevMin)
+  local num, den = 0, 0
+  for i = 2, #minv - 1 do
+    local near = false
+    for j = i - 1, i + 1 do
+      local now, was = minv[j] or 0, prevMin[j] or 0
+      if now >= FULL_HEIGHT or was >= FULL_HEIGHT then
+        near = false
+        break
+      end
+      if math.abs(now - was) >= ARRIVED then near = true end
+    end
+    if near then
+      local slope = ((prevMin[i + 1] - prevMin[i - 1]) + (minv[i + 1] - minv[i - 1])) / 4
+      num -= (minv[i] - prevMin[i]) * slope
+      den += slope * slope
+    end
+  end
+  return den > 0 and num / den or 0
+end
+
+-- WHICH WAY, and HOW FAR, from the two halves of one move: the direction (1 right, -1 left, 0 when
+-- the pictures cannot say), the distance in pixels — or, when they cannot tell which it is, nil
+-- and the two distances it may be — and how it was told, for the log.
+--
+-- Which way is the centroids': where the darkness appeared against where it left. Whatever the
+-- magnitude, if a thing moved right then the columns that got darker lie to the right of the
+-- columns that got lighter — eleven signs of eleven in the test that earned it, where a correlation
+-- had aliased onto the neighbouring notes.
+--
+-- But only of a rigid move, whose halves lie apart: what arrived on one side, what left on the
+-- other. Where they overlap, more changed than one note moving. A note moved in a legato phrase
+-- stretches the note before it and squeezes the one after, and on the phrase of
+-- calibration/Melodyne-5-clean.png modelled so, the centroids pointed the wrong way at every step
+-- from 2 to 34 px while the ink's flow (flowOf) pointed the right way, by 1.6 to 3.4 px. So where
+-- the halves overlap the flow says the direction, when it comes to a pixel or more, and otherwise
+-- the sentence says only that something moved — as for a note 119 px long nudged by 3 and 4 px,
+-- where it stayed under one. No distance there: what the halves add up to is the neighbours' as
+-- much as the note's.
+--
+-- How far is not the distance between them, and that was the fine pass's mistake. For a note at
+-- least as wide as its move, each half is the move's width and the note's body lies between them,
+-- so the centroids are the NOTE'S WIDTH apart; for a narrower note, each half is the note and the
+-- page lies between them, so the centroids are the move apart and the halves the note's width.
+-- Both cases give the same two numbers, the other way round. At a bar of 80 px the fine pass said
+-- 10 and 21 px for what may have been steps of 20 — or the note's width. So the picture between
+-- the halves decides (bodyBetween), and where it cannot, the sentence says only what both numbers
+-- agree on (sayMove). Both numbers come from the halves at half their peak (halves); whether they
+-- overlap, from the halves at three rows.
+--
+-- Tried on three notes of calibration/Melodyne-3-clean.png and two beside others, moved in Python
+-- by steps of a beat and nudges of 2 to 4 px, both ways, at beats of 20 and 36 px: 158 moves said
+-- right, 6 by their direction alone and 6 as "moved" — nudges of a note 119 px long, whose halves
+-- are scattered along it — and none wrong. Following the last arrival instead says a note's width
+-- for a move back the other way, and about half a step for a nudge after a step. On the note of
+-- the session of 2026-10-05, of which there is no picture after its analysis — its waveform, drawn
+-- during the analysis, moved in Python — 20 px either way is one beat and 34 px two.
+local function stepOf(h, frame, now, before, minv, prevMin)
+  if not (h.aMax < h.dMin or h.dMax < h.aMin) then
+    local flow = flowOf(minv, prevMin)
+    local how = ("halves that overlap, the ink's flow %.1f px"):format(flow)
+    if math.abs(flow) >= 1 then return flow > 0 and 1 or -1, nil, nil, how end
+    return 0, nil, nil, how
+  end
+  local s = h.size
+  local ac, dc = s.aSum / s.aN, s.dSum / s.dN
+  local dir = ac > dc and 1 or -1
+  local apart, wide = math.abs(ac - dc), (s.aN + s.dN) / 2
+  if math.abs(apart - wide) < 1.5 then return dir, apart, nil, "the halves touch" end
+  local body = bodyBetween(s, dir, frame, now, before)
+  if body == true then return dir, wide, nil, "the note's body between the halves" end
+  if body == false then return dir, apart, nil, "the page between the halves" end
+  return dir, nil, { wide, apart }, "nothing between the halves to tell by"
+end
+
+-- SPOKEN, when nothing else in this window will say anything.
+--
+-- Under Time, Time Handle, Note Separation and Fade there is no read-out to change and no
+-- number anywhere in the application: the position belongs to the cursor and the cursor does
+-- not follow an edit (measured — twelve semitone moves and four time moves, transport
+-- unchanged throughout). A blind user pressing Ctrl+Right there gets silence, which is
+-- indistinguishable from a key that did nothing.
+--
+-- The condition is measured rather than assumed: we speak only when the read-outs themselves
+-- are silent (silentHere), so the pitch, formant and amplitude tools — which do have a number
+-- and do announce it — are never talked over.
+--
+-- Said once the time signature is known: at once when this input epoch has read it, and
+-- otherwise when its read answers. Then the sentence is about a moment that has passed, so it is
+-- said only about the Melodyne it was measured in — the overlay still in front, on the same
+-- window, in the same stay — with no menu drawn over it, and while the read-outs are still silent:
+-- a tool switched to one that has a number meanwhile is announced by the read-out watcher, and
+-- this would talk over it. Nor once an analysis has begun since.
+--
+-- `px` is the move, or nil with `readings`, the two it may be: then the words both readings come
+-- to, and the direction alone when they differ, which is still true where a guess is not. Nothing
+-- to measure the move by says the direction alone as well, and a direction the pictures cannot
+-- tell (`dir` 0) says "moved".
+local function sayMove(o, dir, px, readings, bar, runs, arrived, frame)
+  local side = dir > 0 and "right" or dir < 0 and "left" or "moved"
+  withBeatsPerBar(o, function(beats)
+    if not o:stillHere(frame.mark) then return end
+    if nativeMenuOpen() then return end
+    if not silentHere() or analysingHere() then return end
+    local words
+    if px then
+      words = moveWords(px, beats, bar, true)
+    elseif readings and dir ~= 0 then
+      local one, two = moveWords(readings[1], beats, bar, false), moveWords(readings[2], beats, bar, false)
+      if one == two then words = one end
+    end
+    if O.calibrating() then
+      local unit = unitFor(beats, bar)
+      host.log.info(("[melodyne] move of %s px, against a unit of %s px, bar %s px, time signature %s")
+        :format(px and ("%.1f"):format(px)
+          or (readings and ("%.1f or %.1f"):format(readings[1], readings[2]) or "?"),
+          unit and ("%.1f"):format(unit) or "?", tostring(bar or "?"), tostring(beats or "?")))
+    end
+    noteAreaSay(words and (side .. ", " .. words) or side, runs, arrived, frame)
+  end)
+end
+
+-- One frame's move, measured and said. `lines` are the frame's bar lines, `viewShift` how far they
+-- moved since the last frame (nil when not known), `now` and `before` the two pictures compared.
+--
+-- Answers true when the frame is to be HELD: half a move, ink that arrived with none that left or
+-- the other way round. Twenty frames of forty-nine once showed one half alone at eight rows — "0
+-- arrived, 1 left" or the reverse — and a frame can land mid-redraw, the note gone from its old
+-- place and not drawn yet in the new one. So the next frame is compared with the one before this
+-- instead, and has both halves. Once: a change that is still half at the next frame is let go.
+local function measureMove(o, frame, minv, prevMin, lines, viewShift, runs, now, before)
+  local h = halves(minv, prevMin, viewShift)
+  if h.cursor > 0 then
+    if O.calibrating() then
+      host.log.info(("[melodyne] move: nothing, the cursor moved (%d columns): the selection or the"
+        .. " playhead, not an edit"):format(h.cursor))
+    end
+    return false
+  end
+  if h.aN == 0 or h.dN == 0 then
+    local hold = (h.aN > 0 or h.dN > 0) and not heldOnce
+    if O.calibrating() then
+      host.log.info(("[melodyne] move: nothing (%d arrived, %d left)%s")
+        :format(h.aN, h.dN, hold and "; the next frame is compared with the one before" or ""))
+    end
+    return hold
+  end
+  local s = h.size
+  local ac = s.aSum / s.aN
+  local dir, px, readings, how = nil, nil, nil, nil
+  if viewShift and viewShift ~= 0 then
+    -- The view moved under the note: the halves describe the scroll as much as the edit. What the
+    -- note did is how far its arrival moved, less the view's own move.
+    if lastArrival then
+      local real = ac - lastArrival - viewShift
+      if real ~= 0 then dir, px = real > 0 and 1 or -1, math.abs(real) end
+    end
+    how = ("the last arrival, less the view's move of %d px"):format(viewShift)
+  else
+    dir, px, readings, how = stepOf(h, frame, now, before, minv, prevMin)
+  end
+  local bar = barFor(lines, math.floor(ac))
+  lastArrival = ac
+  if O.calibrating() then
+    -- The correlation, as a SECOND OPINION in the log and nothing more. It is the estimate that
+    -- aliased onto the neighbouring notes, and a shift it agrees on is a small reassurance while a
+    -- disagreement is worth seeing.
+    local corr = "?"
+    if bar then
+      local k, fit, still = bestShift(prevMin, minv, h.cols, math.floor(bar / 2))
+      if fit < math.huge then corr = ("%d px (fit %.1f against %.1f standing still)"):format(k, fit, still) end
+    end
+    local x = NOTE_AREA[1] - 1
+    host.log.info((
+      "[melodyne] move: %s %s px, by %s; %d arrived at x%d-%d, %d left at x%d-%d; at half their peak"
+      .. " %d at x%d-%d and %d at x%d-%d; bar %s px; correlation %s"
+    ):format(dir == nil and "nothing" or (dir > 0 and "right" or dir < 0 and "left" or "moved"),
+      px and ("%.1f"):format(px) or (readings and ("%.1f or %.1f"):format(readings[1], readings[2]) or "?"),
+      how or "?", h.aN, h.aMin + x, h.aMax + x, h.dN, h.dMin + x, h.dMax + x,
+      s.aN, s.aMin + x, s.aMax + x, s.dN, s.dMin + x, s.dMax + x, tostring(bar or "?"), corr))
+  end
+  -- Under a pixel the picture holds no move — at a beat of 34 px a hundredth of a beat is a third of
+  -- a pixel — and what is left at that size is anti-aliasing. Anything the picture does hold is
+  -- said, if only as its direction.
+  if not dir or (px and px < 1) then return false end
+  sayMove(o, dir, px, readings, bar, runs, h.aN, frame)
+  return false
+end
+
+-- The transport read-out beside a frame's runs, while calibrating: one read out at a time.
+local TRANSPORT_KEY = "transport"
 
 -- One frame of the note area, profiled: compared with the last one of the same stay, and what
 -- moved is logged and, while the read-outs are silent, said. `frame` is what the tick knew when it
 -- asked for the picture — its mark, the window's size, the region's clamped corners, the origin —
--- and when the picture was taken.
-local function measureFrame(o, p, frame)
+-- and when the picture was taken; `now` is the picture, and `before` the one the last profile was
+-- made from, when it is of the same place on the screen (nil otherwise).
+local function measureFrame(o, p, frame, now, before)
   if not (p and p.columns and p.columns.mean and p.columns.dark) then return end
   -- A window that changed size re-baselines instead of being diffed: the whole picture moved,
   -- and every column would be a run. The column COUNT cannot catch this by itself — it is
@@ -1652,7 +2162,9 @@ local function measureFrame(o, p, frame)
   local mean, minv = p.columns.mean, p.columns.dark
   local prev, prevMin = lastArea, lastAreaMin
   lastArea, lastAreaMin, areaMark = mean, minv, frame.mark
+  local lines = barLines(mean)
   if not (prev and prevMin) or #prev ~= #mean then
+    prevLines, heldOnce = lines, false
     -- The region is in the line because it is a GUESS clamped to this window, and a wrong one
     -- is otherwise invisible: a profile of the wrong pixels looks exactly like a profile of the
     -- right ones.
@@ -1701,21 +2213,6 @@ local function measureFrame(o, p, frame)
   -- than it is — by one column in the ordinary case, which is the whole width of the feature
   -- these runs turned out to be.
   if from then runs[#runs + 1] = { from = from, to = #mean - gap, peak = peak, peakMin = peakMin } end
-  -- NOTHING AT THE COARSE SETTING? Look again, more finely, for a nudge.
-  --
-  -- Ctrl+Alt is Melodyne's Nudge — the same gesture with the grid off — and it moves one to four
-  -- pixels where a grid step moves thirty-four. The ink it displaces scales with it: a grid step
-  -- shows up as nine to sixteen changed rows in a column, so a nudge shows two to four, and the
-  -- run detector needs eight. It was not being announced because it was never being SEEN.
-  --
-  -- Lowering the main threshold instead would let anti-aliasing flicker into every measurement,
-  -- so the fine pass runs only when the coarse one found nothing, and it may only ever say that
-  -- something small happened and which way. At this size the measurement carries a quarter of
-  -- itself in noise, and any number built on it would be decoration.
-  if #runs == 0 then
-    if silentHere() then sayFineMove(minv, prevMin, 0, frame) end
-    return
-  end
   -- A MASS change is the view moving, not a note moving, and it is the one case where the
   -- differential premise fails outright. It showed up the first evening: walking past the right
   -- edge made Melodyne scroll, and two frames reported 48 and 53 runs while the position jumped
@@ -1725,258 +2222,52 @@ local function measureFrame(o, p, frame)
     host.log.info(("[melodyne] note area: %d run(s) — the view moved, re-baselining"):format(#runs))
     -- The positions go with the picture: the next arrival measured against a note's place in the
     -- old view would be said as a move of the view's size.
-    lastArea, lastAreaMin, lastArrival, prevLines = nil, nil, nil, nil
+    lastArea, lastAreaMin, lastArrival, prevLines, heldOnce = nil, nil, nil, nil, false
     return
   end
-  -- Ranked by whichever channel saw the most, so a blob move is not buried under a cursor move.
-  table.sort(runs, function(a, b)
-    return math.max(a.peak, a.peakMin) > math.max(b.peak, b.peakMin)
-  end)
-  -- SPOKEN, when nothing else in this window will say anything.
+  -- HOW FAR DID THE VIEW ITSELF MOVE? Everything above is window-relative.
   --
-  -- Under Time, Time Handle, Note Separation and Fade there is no read-out to change and no
-  -- number anywhere in the application: the position belongs to the cursor and the cursor does
-  -- not follow an edit (measured — twelve semitone moves and four time moves, transport
-  -- unchanged throughout). A blind user pressing Ctrl+Right there gets silence, which is
-  -- indistinguishable from a key that did nothing.
+  -- Melodyne scrolls to follow a note being dragged out of view. When it does, the note and
+  -- the whole picture move together, a window-relative measurement sees an enormous
+  -- displacement, and it grows with every press — which is exactly what the user heard: 39,
+  -- 39, 47, 59, 54, with the changed columns spread across two hundred pixels at once.
   --
-  -- The condition is measured rather than assumed: we speak only when the read-outs themselves
-  -- said nothing this tick, so the pitch, formant and amplitude tools — which do have a number
-  -- and do announce it — are never talked over.
-  --
-  -- What is said is a DISPLACEMENT, in bars, because that is what the picture actually
-  -- supports. "Eleven pixels" is not an answer a musician can act on, and a note value would
-  -- assume a time signature nobody has measured: bar.beat.sixteenth tells us how the transport
-  -- counts, not how many beats a bar holds. A fraction of a bar assumes nothing.
-  if silentHere() and #runs >= 1 then
-    -- Every column that changed, and nothing else. See bestShift for why the surroundings must
-    -- stay out of it.
-    -- Only the columns where something ARRIVED — where the picture got DARKER than it was here.
-    --
-    -- The changed set holds both halves of a move: the columns the note came to, and the ones
-    -- it left. Those two are mirror images, so a shifted comparison fits the first at +d and the
-    -- second at -d about equally well, and which of them wins is a coin toss. That is exactly
-    -- what the user heard: "left" for a Ctrl+Right and back again, with the fit looking healthy
-    -- every time — 5 to 14 against 25 to 40 standing still. The estimator was measuring
-    -- correctly and answering a question with two answers.
-    --
-    -- Where a dark thing IS now has one answer to "where was that darkness a moment ago". So the
-    -- arrival columns alone are scored, and the sign follows from the physics rather than from
-    -- whichever half of the change happened to be larger.
-    -- A LOWER bar for "arrived" than for "changed at all", and deliberately so. The run list is
-    -- built from either channel, so a run can exist because the mean moved while the minimum
-    -- barely did; requiring the full change threshold again here left half the frames with fewer
-    -- than four arrival columns and therefore silent. The user heard a value, two gaps, another
-    -- value — correct numbers that sounded like noise because of what was missing between them.
-    -- Ink ARRIVING in a column, in rows. A blob covers 30 to 57 rows where the page floor is
-    -- about 19, so eight rows is a clear arrival and still well above the flicker of anti-
-    -- aliasing on a redraw.
-    local ARRIVED = 8
-    local cols = {}
-    for _, r in ipairs(runs) do
-      for i = r.from, r.to do
-        -- MORE ink than before. The comparison points the other way from the luminance one it
-        -- replaces, and getting that backwards would invert every direction this speaks.
-        -- Same exclusion as the centroid below: a full-height column is the playback cursor,
-        -- not a note, and it must not enter the comparison either.
-        local now, was = minv[i] or 0, prevMin[i] or 0
-        if now < 150 and was < 150 and now >= was + ARRIVED then cols[#cols + 1] = i end
+  -- The bar lines are the anchor, and they are already found reliably (verified against a real
+  -- capture: eight lines, no false positives, on a picture full of blobs). They belong to the
+  -- MUSIC, so if they moved, the view moved by that much, and the note's real displacement is
+  -- what is left after subtracting it. A scroll with no edit then measures zero, which is the
+  -- truth, instead of the largest number of the session. Each line is matched with the nearest
+  -- of the last frame's within half a bar, and the median of those offsets is the view's move:
+  -- a line entering or leaving the view at the edge must not drag the estimate with it.
+  local viewShift = nil
+  if prevLines and #prevLines >= 2 and #lines >= 2 then
+    local reach = (barWidthOf(lines) or 0) / 2
+    local offs = {}
+    for _, a in ipairs(lines) do
+      local best, bestD = nil, math.huge
+      for _, b in ipairs(prevLines) do
+        local d = math.abs(a - b)
+        if d < bestD then best, bestD = b, d end
       end
+      if best and bestD <= reach then offs[#offs + 1] = a - best end
     end
-    -- Kept as a SECOND OPINION in the log and nothing more. It is the estimate that aliased,
-    -- and a shift it agrees on is a small reassurance while a disagreement is worth seeing.
-    local corr, sBest, sStill = bestShift(prevMin, minv, cols)
-    -- WHERE THE DARKNESS APPEARED against WHERE IT LEFT — a sign that cannot alias.
-    --
-    -- The correlation above is the wrong instrument for this picture and the user's test proved
-    -- it: three deliberate Ctrl+Rights, the runs marching right in every frame (327, 345, 380,
-    -- 467), and the answers were -44, -26, +47. Notes in a phrase sit 8 to 40 pixels apart while
-    -- the search window reaches 60, so a shifted copy fits the NEIGHBOURING note as well as the
-    -- right one. A quasi-periodic picture has several equally good alignments and which wins is
-    -- an accident; no threshold repairs that.
-    --
-    -- Centroids cannot make that mistake. Whatever the magnitude, if a thing moved right then
-    -- the columns that got darker lie to the right of the columns that got lighter. It says
-    -- nothing reliable about HOW FAR — for a move shorter than the note's own width the two
-    -- centroids are a note-width apart, not a displacement apart — which is exactly why it is
-    -- logged beside the correlation rather than spoken instead of it.
-    -- Over the WHOLE profile, not over the runs.
-    --
-    -- The runs are a summary written for the log — grouped, gap-tolerant, one to three columns
-    -- wide — and building a centroid inside them left samples of two and five columns. Two
-    -- correct answers out of a sample that small is indistinguishable from two lucky guesses,
-    -- and this estimate exists precisely because the last one was believed too early. Every
-    -- column that changed enough counts here; it costs one pass over 887 numbers.
-    local aSum, aN, dSum, dN = 0, 0, 0, 0
-    -- FULL-HEIGHT COLUMNS ARE NOT NOTES, and skipping them is what the ink channel was for.
-    --
-    -- Melodyne's playback cursor is a line spanning the whole editor, measured at 470 to 516
-    -- dark rows against 29 to 57 for a note blob. While the transport runs it crosses the area
-    -- several times a second, arriving in a new column each frame — so the user pressed Play and
-    -- was read a sentence every 200 ms. I measured that separation on his own capture hours ago
-    -- and then wrote an arrival test that could not tell the two apart.
-    local FULL_HEIGHT = 150
-    for i = 1, #minv do
-      local now, was = minv[i] or 0, prevMin[i] or 0
-      if now < FULL_HEIGHT and was < FULL_HEIGHT then
-        if now >= was + ARRIVED then aSum, aN = aSum + i, aN + 1
-        elseif was >= now + ARRIVED then dSum, dN = dSum + i, dN + 1 end
-      end
-    end
-    -- WHERE THE NOTE IS NOW, tracked from frame to frame — not where it is against where it was
-    -- within one frame.
-    --
-    -- Requiring both halves in the same 200 ms picture cost twenty frames out of forty-nine, and
-    -- every one of those silences reads "0 arrived, 1 left" or "1 arrived, 0 left". A frame lands
-    -- mid-redraw: the note is already gone from the old place and not yet drawn in the new one,
-    -- or the reverse. Half the answer is there and I threw it away.
-    --
-    -- The arrival columns ARE the note's new position, so successive arrivals are successive
-    -- positions and their difference is the step. The user's own run says it plainly — arrivals
-    -- at 379, 345, 311, 276, 242, 208, 174, 139, 105, 70, a difference of 34 every time. The
-    -- departure side is kept only for the log, where it is a second witness.
-    local arrivalX = aN > 0 and (aSum / aN) or nil
-    local centroid = (arrivalX and lastArrival) and (arrivalX - lastArrival) or nil
-    if arrivalX then lastArrival = arrivalX end
-    if O.calibrating() then
-      host.log.info(("[melodyne] centroid says %s by %s px (%d arrived, %d left)")
-        :format(
-          centroid and (centroid > 0 and "right" or "left") or "nothing",
-          centroid and string.format("%.0f", math.abs(centroid)) or "?", aN, dN))
-    end
-    -- SPOKEN AGAIN, on the centroid and not on the correlation, because a controlled test
-    -- earned it: five Ctrl+Rights followed by five Ctrl+Lefts produced
-    --
-    --   right 13, right 27, right 56, right 22, right 22, right 21
-    --   left 21, left 22, left 22, left 56, left 27
-    --
-    -- Eleven signs out of eleven, and the magnitudes come back MIRRORED — the same journey
-    -- retraced. That symmetry is the part no estimator can fake by guessing, and it is why this
-    -- is evidence where "two correct answers" was not.
-    --
-    -- A sample floor rather than a fit threshold: the failures that remain are frames with two
-    -- or three changed columns, where a centroid is an average of almost nothing. Five columns
-    -- on each side keeps every frame of the test above and drops exactly those.
-    -- HOW FAR DID THE VIEW ITSELF MOVE? Everything above is window-relative, and that is the
-    -- flaw underneath every version of this so far.
-    --
-    -- Melodyne scrolls to follow a note being dragged out of view. When it does, the note and
-    -- the whole picture move together, a window-relative measurement sees an enormous
-    -- displacement, and it grows with every press — which is exactly what the user heard: 39,
-    -- 39, 47, 59, 54, with the changed columns spread across two hundred pixels at once. The
-    -- earlier test that came back eleven-for-eleven and mirrored simply never scrolled.
-    --
-    -- The bar lines are the anchor, and they are already found reliably (verified against a real
-    -- capture: eight lines, no false positives, on a picture full of blobs). They belong to the
-    -- MUSIC, so if they moved, the view moved by that much, and the note's real displacement is
-    -- what is left after subtracting it. A scroll with no edit then measures zero, which is the
-    -- truth, instead of the largest number of the session.
-    local lines = barLines(mean)
-    local viewShift = nil
-    if prevLines and #prevLines >= 2 and #lines >= 2 then
-      -- Median of the nearest-neighbour offsets: a line entering or leaving the view at the
-      -- edge must not drag the estimate with it.
-      local offs = {}
-      for _, a in ipairs(lines) do
-        local best, bestD = nil, math.huge
-        for _, b in ipairs(prevLines) do
-          local d = math.abs(a - b)
-          if d < bestD then best, bestD = b, d end
-        end
-        if best and bestD <= MAX_SHIFT then offs[#offs + 1] = a - best end
-      end
-      if #offs >= 2 then
-        table.sort(offs)
-        viewShift = offs[math.floor(#offs / 2) + 1]
-      end
-    end
-    prevLines = lines
-    local real = centroid and (centroid - (viewShift or 0)) or nil
-    if O.calibrating() then
-      host.log.info(("[melodyne] view moved %s px, so the note moved %s px")
-        :format(viewShift and tostring(viewShift) or "?",
-          real and string.format("%.0f", real) or "?"))
-    end
-    -- SPOKEN. Earned on the ink channel by a controlled test, and by the same standard of
-    -- evidence that the earlier attempt failed to meet:
-    --
-    --   right  +32 +26 +40 +41
-    --   left   -41 -40 -26 -32 -36 -44 -41
-    --
-    -- Eleven signs, all correct, with the magnitudes mirrored — 32, 26, 40, 41 out and 41, 40,
-    -- 26, 32 back, the same journey retraced. The raw runs corroborate it independently: 786,
-    -- 819, 854, 888, 922 and exactly back down the same columns. And unlike every earlier
-    -- version, this channel was measured against the picture BEFORE anything was built on it.
-    --
-    -- A magnitude floor rather than a sample floor. The ink channel reports single columns, so
-    -- a run of five on each side — the rule the previous attempt used — would have silenced six
-    -- of these eleven correct measurements and reproduced exactly the disconnected feel the user
-    -- reported. Both sides must be present, since a centroid needs two, and the move must be
-    -- worth mentioning.
-    -- No departure requirement any more: a step is the distance between two positions, and both
-    -- of those come from the arrival side alone.
-    -- Two pixels, not eight: the fine nudge lives between one and four, and eight was silencing
-    -- the whole of Ctrl+Alt. The run detection above is what keeps noise out — an idle picture
-    -- produces no changed columns at all, so there is nothing here to be jittery about.
-    local confident = real ~= nil and aN >= 1 and math.abs(real) >= 2
-    local moved = real or 0
-    if O.calibrating() then
-      host.log.info(("[melodyne] correlation says %d px (fit %.1f against %.1f standing still)")
-        :format(corr, sBest, sStill))
-    end
-    if confident then
-      -- Scaled where the note ARRIVED, since that is where it now is and the bars are not
-      -- evenly spaced.
-      local barW = barWidthAt(lines, math.floor(arrivalX or 1))
-      local dir = moved > 0 and "right" or "left"
-      -- Said once the time signature is known: at once when this input epoch has read it, and
-      -- otherwise when its read answers. Then the sentence is about a moment that has passed, so
-      -- it is said only about the Melodyne it was measured in — the overlay still in front, on
-      -- the same window, in the same stay — with no menu drawn over it, and while the read-outs
-      -- are still silent: a tool switched to one that has a number meanwhile is announced by the
-      -- read-out watcher, and this would talk over it. Nor once an analysis has begun since.
-      local arrived = aN
-      withBeatsPerBar(o, function(beats)
-        if not o:stillHere(frame.mark) then return end
-        if nativeMenuOpen() then return end
-        if not silentHere() or analysingHere() then return end
-        local n, unit = stepsFor(math.abs(moved), barW, beats)
-        if n then
-          if O.calibrating() then
-            host.log.info(("[melodyne] spoke %d %s(s): %d px, bar %s px, time signature %s")
-              :format(n, unit, math.abs(moved), tostring(barW), tostring(beats)))
-          end
-          local word = n == 1 and ("one " .. unit) or (n .. " " .. unit .. "s")
-          noteAreaSay(dir .. ", " .. word, #runs, arrived, frame)
-        elseif barW and barW > 0 then
-          local ratio = math.abs(moved) / barW
-          local pct = math.floor(ratio * 100 + 0.5)
-          local named = asFraction(ratio)
-          -- Both numbers, because the user heard the percentage SHRINK while the pixel step held
-          -- steady at 33 to 35 — one grid step per press, six presses running. The bars are not
-          -- equally wide (99 to 131 measured across one view), so the same distance is a smaller
-          -- fraction of a wider bar, and the fraction moved while the edit did not. Whether that
-          -- is Melodyne slowing down or my line detector calling two different things a bar is
-          -- exactly what these two numbers side by side will show.
-          if O.calibrating() then
-            host.log.info(("[melodyne] spoke %s: %d px against a bar of %d px (ratio %.3f) at x%d")
-              :format(named or (pct .. "%"), math.abs(moved), barW, ratio,
-                math.floor(arrivalX or 1) + NOTE_AREA[1] - 1))
-          end
-          noteAreaSay(named and (dir .. ", " .. named) or ("%s, %d%% of a bar"):format(dir, pct),
-            #runs, arrived, frame)
-        else
-          -- Nothing to scale by at all: the direction is still true, and a pixel count is not.
-          noteAreaSay(dir, #runs, arrived, frame)
-        end
-      end)
-    else
-      -- The coarse pass had runs but nothing it would say: no ink arrival at its threshold, or a
-      -- move under two pixels. That is exactly where a nudge lives, so ask the fine pass rather
-      -- than falling silent — the gap the user kept pressing Ctrl+Alt into.
-      sayFineMove(minv, prevMin, #runs, frame)
+    if #offs >= 2 then
+      table.sort(offs)
+      viewShift = offs[math.floor(#offs / 2) + 1]
     end
   end
+  local held = false
+  if silentHere() then
+    held = measureMove(o, frame, minv, prevMin, lines, viewShift, #runs, now, before)
+  end
+  -- A held frame leaves the comparison with the frame before it, bar lines and all.
+  if held then lastArea, lastAreaMin = prev, prevMin else prevLines = lines end
+  heldOnce = held
+  -- The runs are logged only while calibrating: during ordinary use this fires whenever a note
+  -- moves, and a log that writes on every edit is a log nobody reads.
+  if #runs == 0 or not O.calibrating() then return end
+  -- Ranked by whichever channel saw the most, so a blob move is not buried under a cursor move.
+  --
   -- WHAT the moving feature is, settled by correlation rather than by argument.
   --
   -- It is two pixels wide, very nearly full height, and 130 to 180 units of column mean darker
@@ -1987,18 +2278,12 @@ local function measureFrame(o, p, frame)
   -- The transport read-out in the top bar prints that position as bar.beat.sixteenth. If it
   -- changes in lockstep with these runs, the line IS the cursor and its x is the cursor's
   -- position; if it sits still while the runs march, the line belongs to the selection instead.
-  -- Either answer is worth having and neither requires anybody to look at a screen. One OCR per
-  -- moved frame, only while calibrating.
-  local transport = ""
-  if O.calibrating() and origin.client then
-    local tr = host.ocr.recognize({
-      region = {
-        origin.client.x + TRANSPORT_REGION[1], origin.client.y + TRANSPORT_REGION[2],
-        origin.client.x + TRANSPORT_REGION[3], origin.client.y + TRANSPORT_REGION[4],
-      },
-    })
-    transport = trimmed(tr and tr.text)
-  end
+  -- Either answer is worth having and neither requires anybody to look at a screen. One read per
+  -- moved frame, only while calibrating — with a callback, since this is a poll's answer and a
+  -- read that waited would hold Melodyne's keys behind it — and the runs logged with its answer.
+  table.sort(runs, function(a, b)
+    return math.max(a.peak, a.peakMin) > math.max(b.peak, b.peakMin)
+  end)
   local parts = {}
   for i = 1, math.min(#runs, 6) do
     local r = runs[i]
@@ -2010,12 +2295,17 @@ local function measureFrame(o, p, frame)
     parts[#parts + 1] = string.format("x%d-%d(mean%d min%d)",
       NOTE_AREA[1] + r.from - 1, NOTE_AREA[1] + r.to - 1, math.floor(r.peak + 0.5), r.peakMin)
   end
-  -- Logged only while calibrating: during ordinary use this fires whenever a note moves, and
-  -- a log that writes on every edit is a log nobody reads.
-  if O.calibrating() then
-    host.log.info(("[melodyne] note area: %d run(s) moved, strongest %s  transport=%q")
-      :format(#runs, table.concat(parts, " "), transport))
+  local line = ("[melodyne] note area: %d run(s) moved, strongest %s"):format(#runs, table.concat(parts, " "))
+  if not origin.client or host.ocr.pending(TRANSPORT_KEY) then
+    host.log.info(line .. "  transport not read")
+    return
   end
+  host.ocr.recognize({
+    origin.client.x + TRANSPORT_REGION[1], origin.client.y + TRANSPORT_REGION[2],
+    origin.client.x + TRANSPORT_REGION[3], origin.client.y + TRANSPORT_REGION[4],
+  }, { key = TRANSPORT_KEY }, function(r)
+    host.log.info(("%s  transport=%q"):format(line, trimmed(field(r) or "?")))
+  end)
 end
 
 -- Whether the note area is measured now, and why not. It runs for TWO reasons, and neither of
@@ -2042,13 +2332,43 @@ local function logGate(open, why)
     lastLeft, lastRight))
 end
 
--- Frames measured, the event loop's time in their callbacks, and from asking to the answer, for a
--- line every hundred frames.
-local areaFrames, areaLoop, areaWait = 0, 0, 0
+-- Frames measured, how many of them were the picture the last profile was made from, the event
+-- loop's time in their callbacks, and from asking to the answer, for a line every hundred frames.
+local areaFrames, areaSame, areaLoop, areaWait = 0, 0, 0, 0
+
+-- One frame: `loop` ms of the event loop in its callbacks, answered at `answered` — the picture's
+-- callback for one like the last or one with the disc, the profile's for the others.
+local function countFrame(loop, frame, same, answered)
+  areaFrames += 1
+  if same then areaSame += 1 end
+  areaLoop += loop
+  areaWait += answered - frame.asked
+  if areaFrames < 100 then return end
+  host.log.info(("[melodyne] note area: %d frames, %d of them the picture before, %d ms on the event"
+    .. " loop for them (%.1f each), %.1f ms from asking to the answer on average")
+    :format(areaFrames, areaSame, math.floor(areaLoop), areaLoop / areaFrames, areaWait / areaFrames))
+  areaFrames, areaSame, areaLoop, areaWait = 0, 0, 0, 0
+end
 
 -- One tick of the note area: the picture is taken off the event loop, at a set time so that it
--- does not hold back Melodyne's own clicks, and profiled in the callback, after everything that
--- decided to take it has been asked again — it is about the moment it was asked in.
+-- does not hold back Melodyne's own clicks, and looked at in the callback, after everything that
+-- decided to take it has been asked again — it is about the moment it was asked in. Its profile is
+-- reduced on the image worker, and the frame is measured when that answers, everything asked once
+-- more: it was 32 of the 46 ms a frame cost the event loop in the debug build of 2026-10-05, the
+-- reduction of 910 x 522 pixels, and only its tables, another 4 there, are the loop's now. The
+-- picture stays the module's until then: the disc is looked for in it, and a move's body
+-- (bodyBetween) is read from it and from the one before.
+--
+-- And COMPARED, on the capture thread, with the picture the last profile was made from: a picture
+-- in which not one pixel changed is let go unprofiled, since its profile would be the last one's
+-- and the comparison would find nothing — no reduction on the worker, and no tables or comparison
+-- on the event loop. While nobody edits, nothing should change; the hundred-frame line counts how
+-- often it did not. Exact, so it decides nothing the profile would not have: no tolerance, and one
+-- pixel is a change. The wait's timeout of 1 ms is not a time anything is waited for: the picture
+-- taken at `at` is the answer, different or not, and whether it is the same is its bytes against
+-- the last picture's. What it costs instead is on the capture thread — the two pictures' bytes
+-- compared when they are the same, measured at about half a millisecond in a release build and 24
+-- to 28 in a debug one — and the last profiled picture, held while the gate is open.
 local function measureNoteArea(o)
   local open, why = noteAreaGate(o)
   logGate(open, why)
@@ -2062,6 +2382,9 @@ local function measureNoteArea(o)
   -- answers, and the next frame is compared with the one it was measured on — as when this tick
   -- waited for the read. One read out at a time, across a disable too, without a flag.
   if host.ocr.pending(TIMESIG_KEY) then return end
+  -- One frame out at a time, from its picture to its profile's answer: the next one is compared
+  -- with this one, so it waits. Across a disable too, which drops both, without a flag.
+  if host.screen.pending(AREA_KEY) then return end
   if nativeMenuOpen() then return end
   local origin = o:origin()
   if not (origin and origin.client) then return end
@@ -2081,48 +2404,75 @@ local function measureNoteArea(o)
   -- find its points missing from a picture of the note area alone and let the frame through.
   -- Profiled is the note area alone.
   local disc = discRegion(cx, cy)
+  local region = {
+    math.min(area[1], disc[1]), math.min(area[2], disc[2]),
+    math.max(area[3], disc[3]), math.max(area[4], disc[4]),
+  }
+  local regionText = table.concat(region, ",")
+  local from = (areaSnap ~= nil and areaSnapRegion == regionText) and areaSnap or nil
+  -- Whether the frame is still about the Melodyne it was asked for, asked again in each callback.
+  local function fresh()
+    return o:stillHere(frame.mark) and not nativeMenuOpen() and not host.ocr.pending(TIMESIG_KEY)
+      and (noteAreaGate(o))
+  end
   host.screen.snapshotAsync({
-    region = {
-      math.min(area[1], disc[1]), math.min(area[2], disc[2]),
-      math.max(area[3], disc[3]), math.max(area[4], disc[4]),
-    },
-    key = AREA_KEY, at = frame.asked,
-  }, function(snap)
+    region = region, key = AREA_KEY, at = frame.asked,
+    change = from and { from = from, timeout = 1, tolerance = 0, minPixels = 1 } or nil,
+  }, function(snap, _, info)
     if not snap then return end
     local began = host.now()
-    local fresh = o:stillHere(frame.mark) and not nativeMenuOpen()
-      and not host.ocr.pending(TIMESIG_KEY) and (noteAreaGate(o))
-    local busy, p = nil, nil
-    if fresh then
-      -- The analysis disc in this very frame — the looks above may not have seen it yet — and the
-      -- frame is not compared at all. Then the profile of the note area: columns only, since a
-      -- note's identity is a horizontal position, and dark below 190, where Melodyne's light page
-      -- separates the measured classes.
-      busy = discIn(snap, cx, cy)
-      if not busy then
-        p = host.screen.profile({ snapshot = snap, region = area, axes = "columns", dark = 190 })
-      end
-    end
-    frame.taken = snap.time
-    snap:release()
-    if not fresh then
+    if not fresh() then
+      snap:release()
       if not noteAreaGate(o) then dropFrames() end
       return
     end
-    if busy then
+    -- The same picture as the one the last profile was made from, and that profile is still the
+    -- one frames are compared with, of this stay and this window size. `rebased` is a comparison
+    -- that was not made — the two pictures taken two different ways — and is no answer. The frame
+    -- would have been compared with that profile and found nothing, which lets go of a held one.
+    if from ~= nil and from == areaSnap and info ~= nil and info.changed == false
+      and not info.rebased and lastAreaSize == frame.size and areaMark ~= nil
+      and o:stillHere(areaMark) then
+      snap:release()
+      heldOnce = false
+      countFrame(host.now() - began, frame, true, began)
+      return
+    end
+    frame.taken = snap.time
+    -- The analysis disc in this very frame — the looks above may not have seen it yet — and the
+    -- frame is not compared at all. It is counted all the same: the look was the event loop's.
+    if discIn(snap, cx, cy) then
+      snap:release()
       dropFrames()
-    else
-      measureFrame(o, p, frame)
+      countFrame(host.now() - began, frame, false, began)
+      return
     end
-    areaFrames += 1
-    areaLoop += host.now() - began
-    areaWait += began - frame.asked
-    if areaFrames >= 100 then
-      host.log.info(("[melodyne] note area: %d frames, %d ms on the event loop for them (%.1f each),"
-        .. " %.1f ms from asking to the answer on average")
-        :format(areaFrames, math.floor(areaLoop), areaLoop / areaFrames, areaWait / areaFrames))
-      areaFrames, areaLoop, areaWait = 0, 0, 0
-    end
+    local loop = host.now() - began
+    -- Then the profile of the note area, reduced on the image worker: columns only, since a note's
+    -- identity is a horizontal position, and dark below 190, where Melodyne's light page separates
+    -- the measured classes. Under the frame's key, so the next tick waits for it.
+    host.screen.profile({ snapshot = snap, region = area, axes = "columns", dark = 190, key = AREA_KEY },
+      function(p)
+        local answered = host.now()
+        if not fresh() then
+          snap:release()
+          if not noteAreaGate(o) then dropFrames() end
+          return
+        end
+        -- The picture before only when it is of the same place on the screen: after the window
+        -- moved the profiles still compare, the client area being the same, and the pictures do not.
+        measureFrame(o, p, frame, snap, areaSnapRegion == regionText and areaSnap or nil)
+        -- Kept while its profile is the one the next frame is compared with; let go otherwise, and
+        -- with it the one before when there is nothing to compare with any more.
+        if p ~= nil and p.columns ~= nil and lastAreaMin == p.columns.dark then
+          dropAreaSnap()
+          areaSnap, areaSnapRegion = snap, regionText
+        else
+          snap:release()
+          if lastAreaMin == nil then dropAreaSnap() end
+        end
+        countFrame(loop + host.now() - answered, frame, false, answered)
+      end)
   end)
 end
 

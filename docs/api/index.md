@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 164 entries.
+Every call the platform offers a module, in one place. 165 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -57,7 +57,7 @@ Where habits from other tools mislead, and the section that says what happens he
 - **Tesseract or other OCR language codes.** `lang` is a language tag such as `"de"` or `"de-DE"`, matched against what the platform's recogniser reads. A three-letter code such as `"eng"` is a well-formed tag that no recogniser lists, so it does not raise: the read is answered `"failed"`, naming the languages that are there. Write `"en"` — [Recognition language](ocr.md#recognition-language). [`host.ocr.recognize`](ocr.md#host-ocr-recognize) recognises off the event loop: given a callback it answers there, and without one it waits in its handler, holding only its own module ([Where it waits](ocr.md#where-it-waits)).
 - **AutoHotkey.** `ahk_class` belongs inside the `windows` block of a [matcher](window.md#matchers); `SetTimer` is [`host.timer.every`](timer.md#host-timer-every), stopped with [`host.timer.cancel`](timer.md#host-timer-cancel); `Send` is [`host.input.send`](input.md#host-input-send), virtual keys only; `ImageSearch`'s second corner is exclusive here.
 - **A keyboard hook that only listens.** A [capture](keys.md#host-keys-capture) takes the key away; there is no listen-only mode for ordinary keys, only the `"<modifier> tap"` form watches without taking.
-- **A script host with threads or async.** Every callback runs on one thread; one that runs past 2 seconds of processor time or 10 seconds in all is stopped, with its module ([the limits](../module-runtime-and-lifecycle.md#limits)), and below that it holds everything while it runs. The slow work of [`host.ocr.recognize`](ocr.md#host-ocr-recognize), [`matchCellsAsync`](screen.md#host-screen-matchcellsasync), [`imageSearchAsync`](screen.md#host-screen-imagesearchasync), [`imageSearchEach`](screen.md#host-screen-imagesearcheach) and [`snapshotAsync`](screen.md#host-screen-snapshotasync) runs on threads of the host's own and answers in a callback — a text read without one answers the handler that waits for it, and only its own module waits; the other screen calls hold the loop until they return. Which call runs where: [Threads](../module-runtime-and-lifecycle.md#threads).
+- **A script host with threads or async.** Every callback runs on one thread; one that runs past 2 seconds of processor time or 10 seconds in all is stopped, with its module ([the limits](../module-runtime-and-lifecycle.md#limits)), and below that it holds everything while it runs. The slow work of [`host.ocr.recognize`](ocr.md#host-ocr-recognize), [`matchCellsAsync`](screen.md#host-screen-matchcellsasync), [`imageSearchAsync`](screen.md#host-screen-imagesearchasync), [`imageSearchEach`](screen.md#host-screen-imagesearcheach), [`snapshotAsync`](screen.md#host-screen-snapshotasync) and [`profile`](screen.md#profile-with-a-callback) given a callback runs on threads of the host's own and answers in a callback — a text read without one answers the handler that waits for it, and only its own module waits; the other screen calls hold the loop until they return. Which call runs where: [Threads](../module-runtime-and-lifecycle.md#threads).
 - **A manifest that names its target window.** `module.toml` has no window or process field; matching is Luau — see the [manifest](../module-package-format.md).
 
 
@@ -141,10 +141,11 @@ Reading pixels, profiling a region, reducing one to a grid of cells, and finding
 | [`host.screen.imageSearchMulti(templates, opts?)`](screen#host-screen-imagesearchmulti) | Captures the region **once** and tries each template against that one frame, returning two values |
 | [`host.screen.matchCells(opts, states)`](screen#host-screen-matchcells) | Reads the region exactly as `cells` does, and says which of `states` it looks most like. |
 | [`host.screen.matchCellsAsync(opts, states, cb)`](screen#host-screen-matchcellsasync) | `matchCells`, with the capture, the reduction and the comparison on the image worker thread. |
+| [`host.screen.pending(key)`](screen#host-screen-pending) | Whether a request of this module with `key` is still out |
 | [`host.screen.pixel(x, y, opts?)`](screen#host-screen-pixel) | Reads the colour of one screen pixel |
 | [`host.screen.pixels(points, opts?)`](screen#host-screen-pixels) | Reads the colour at every point of `points` and returns them as one list, in the order asked — one value, and nothing after it. |
 | [`host.screen.predicate(expr)`](screen#host-screen-predicate) | Checks a colour test for the cells calls and returns it in its canonical form, or raises, naming the column, when it does not parse. |
-| [`host.screen.profile(opts?)`](screen#host-screen-profile) | Takes **one** capture of `opts.region` and reduces each of its columns and rows to a few statistics |
+| [`host.screen.profile(opts?, cb?)`](screen#host-screen-profile) | Takes **one** capture of `opts.region` and reduces each of its columns and rows to a few statistics |
 | [`host.screen.save(path, opts?)`](screen#host-screen-save) | Captures `opts.region` and writes it to `path` as a PNG |
 | [`host.screen.saveMarked(path, opts)`](screen#host-screen-savemarked) | Everything `save` does |
 | [`host.screen.size()`](screen#host-screen-size) | Returns the primary screen dimensions in pixels as `{ w, h }`. |

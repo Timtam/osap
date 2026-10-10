@@ -389,8 +389,9 @@ CAPABILITIES = [
     '[`host.ocr.recognize`](ocr.md#host-ocr-recognize), '
     '[`matchCellsAsync`](screen.md#host-screen-matchcellsasync), '
     '[`imageSearchAsync`](screen.md#host-screen-imagesearchasync), '
-    '[`imageSearchEach`](screen.md#host-screen-imagesearcheach) and '
-    '[`snapshotAsync`](screen.md#host-screen-snapshotasync) runs on threads of the host\'s '
+    '[`imageSearchEach`](screen.md#host-screen-imagesearcheach), '
+    '[`snapshotAsync`](screen.md#host-screen-snapshotasync) and '
+    '[`profile`](screen.md#profile-with-a-callback) given a callback runs on threads of the host\'s '
     'own and answers in a callback — a text read without one answers the handler that waits '
     'for it, and only its own module waits; the other screen calls hold the loop until they '
     'return. Which call runs where: [Threads](../module-runtime-and-lifecycle.md#threads).',

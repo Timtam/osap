@@ -149,7 +149,7 @@ fn fractions<const N: usize>(v: &Value, what: &str, shape: &Shape<N>) -> Result<
 }
 
 /// Whether a table is written in the window form: it has `window` or `fraction`.
-fn window_form(t: &Table) -> bool {
+pub(crate) fn window_form(t: &Table) -> bool {
     ["window", "fraction"].iter().any(|k| t.contains_key(*k).unwrap_or(false))
 }
 

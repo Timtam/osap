@@ -502,6 +502,8 @@ struct Observations {
     /// `host.screen.profile` calls this epoch, those on a snapshot among them, and their time
     /// split three ways ([`ProfileCost`]).
     profile: ProfileCost,
+    /// `host.screen.profile` answers given to a callback this epoch ([`ProfileCbCost`]).
+    profile_cb: ProfileCbCost,
     /// Total time spent INSIDE these bindings this epoch, cache hits included. The
     /// backend call is only half of what one costs: every hit still rebuilds the answer
     /// as fresh Lua tables, once per calling overlay, in each of nine VMs.
@@ -563,9 +565,48 @@ impl ProfileCost {
     }
 }
 
+/// What `host.screen.profile` with a callback cost in one epoch: the answers handed over, the event
+/// loop's share of each — its Lua tables, built as the callback runs — and beside it the reduction,
+/// which ran on the image worker. Their pictures were taken on the `screen-capture` thread, whose
+/// own lines time them. Microseconds.
+#[derive(Default)]
+struct ProfileCbCost {
+    calls: u32,
+    /// Of `calls`, those of a snapshot: nothing was captured for them.
+    on_snapshot: u32,
+    reduction_us: u128,
+    tables_us: u128,
+}
+
+impl ProfileCbCost {
+    /// One answer: its reduction on the worker, and its tables on the event loop.
+    fn add(&mut self, reduction: Duration, tables: Duration, snapshot: bool) {
+        self.calls += 1;
+        self.on_snapshot += u32::from(snapshot);
+        self.reduction_us += reduction.as_micros();
+        self.tables_us += tables.as_micros();
+    }
+
+    /// The observe line's words for it, empty when there was none:
+    /// `; profile with a callback ×2: tables 1.2 ms on the event loop, reduction 30.4 ms on the image worker (1 of a snapshot)`.
+    fn clause(&self) -> String {
+        if self.calls == 0 {
+            return String::new();
+        }
+        let ms = |us: u128| us as f64 / 1000.0;
+        let snapshots = if self.on_snapshot > 0 { format!(" ({} of a snapshot)", self.on_snapshot) } else { String::new() };
+        format!(
+            "; profile with a callback ×{}: tables {:.1} ms on the event loop, reduction {:.1} ms on the image worker{snapshots}",
+            self.calls,
+            ms(self.tables_us),
+            ms(self.reduction_us)
+        )
+    }
+}
+
 #[cfg(test)]
 mod profile_cost_tests {
-    use super::ProfileCost;
+    use super::{ProfileCbCost, ProfileCost};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -579,6 +620,19 @@ mod profile_cost_tests {
         assert_eq!(
             c.clause(),
             "; profile ×2 94.0 ms = capture 18.1 + reduction 68.3 + tables 7.6 (1 on a snapshot)"
+        );
+    }
+
+    /// A profile with a callback is counted apart: only its tables are the event loop's.
+    #[test]
+    fn a_profile_with_a_callback_counts_its_tables_on_the_loop_and_its_reduction_on_the_worker() {
+        let mut c = ProfileCbCost::default();
+        assert_eq!(c.clause(), "", "no answer, no words");
+        c.add(Duration::from_micros(30_100), Duration::from_micros(900), false);
+        c.add(Duration::from_micros(300), Duration::from_micros(300), true);
+        assert_eq!(
+            c.clause(),
+            "; profile with a callback ×2: tables 1.2 ms on the event loop, reduction 30.4 ms on the image worker (1 of a snapshot)"
         );
     }
 }
@@ -605,9 +659,10 @@ impl Shared {
     /// being interrogated (two or more distinct questions got past the cache), a rebuild
     /// cost that a whole-millisecond clock can see, any pixel read — each one a
     /// compositor frame — or any profile, a snapshot's included, whose reduction runs on the
-    /// event loop wherever its picture came from. The total keeps only a sanity bound: one question per overlay is
-    /// what an idle tick costs, and 251 was the most seen with every library loaded, so a
-    /// thousand in one epoch is somebody asking in a loop, whatever the cache made of it.
+    /// event loop wherever its picture came from, or one given a callback, whose tables do.
+    /// The total keeps only a sanity bound: one question per overlay is what an idle tick
+    /// costs, and 251 was the most seen with every library loaded, so a thousand in one
+    /// epoch is somebody asking in a loop, whatever the cache made of it.
     fn observations(&self) -> std::cell::RefMut<'_, Observations> {
         let now = self.epoch.get();
         let now_input = self.input_epoch.get();
@@ -622,6 +677,7 @@ impl Shared {
                 || obs.binding_us >= 1000
                 || obs.pixels > 0
                 || obs.profile.calls > 0
+                || obs.profile_cb.calls > 0
                 || obs.asked >= 1000
                 || !duplication.is_empty()
             {
@@ -630,14 +686,15 @@ impl Shared {
                     &format!(
                         "epoch served {} of {} OS question(s) from cache ({} actually \
                          asked), {:.1} ms rebuilding Lua tables in window.controls and \
-                         window.focusChain, plus {} screen pixel read(s) costing {:.1} ms{}{duplication}",
+                         window.focusChain, plus {} screen pixel read(s) costing {:.1} ms{}{}{duplication}",
                         obs.served,
                         obs.asked,
                         obs.asked - obs.served,
                         obs.binding_us as f64 / 1000.0,
                         obs.pixels,
                         obs.pixel_us as f64 / 1000.0,
-                        obs.profile.clause()
+                        obs.profile.clause(),
+                        obs.profile_cb.clause()
                     ),
                 );
             }
@@ -655,6 +712,7 @@ impl Shared {
             obs.pixels = 0;
             obs.pixel_us = 0;
             obs.profile = ProfileCost::default();
+            obs.profile_cb = ProfileCbCost::default();
         }
         obs
     }
@@ -7454,6 +7512,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // host.screen.snapshotAsync(opts, cb) — the picture taken on the `screen-capture` thread that
     // host.ocr.recognize photographs on: at once, at a set time, or when the region changes.
     screen.set("snapshotAsync", snapshot::snapshot_async(lua, shared, idx)?)?;
+    // host.screen.pending(key) — whether this module's `snapshotAsync` or `profile` with a callback
+    // with that key is still out (snapshot.rs).
+    screen.set("pending", snapshot::pending(lua, shared, idx)?)?;
     let sh = shared.clone();
     screen.set(
         "size",
@@ -7486,12 +7547,27 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // to read out of a picture, and none of it is expressible with point probes.
     //
     // Counted as one screen touch in the observation log, because that is exactly what it is.
+    //
+    // host.screen.profile(opts, cb) — the same answer, off the event loop: the capture on the
+    // `screen-capture` thread (none for a snapshot), the reduction on the image worker, and only
+    // the answer's tables here, as `cb` runs (snapshot.rs, `profile_async`). Without a callback
+    // the call is what it always was.
     let sh = shared.clone();
     screen.set(
         "profile",
-        lua.create_function(move |lua, opts: Option<Table>| {
+        lua.create_function(move |lua, (opts, cb): (Option<Table>, mlua::Value)| {
             host_call!("host.screen.profile");
             const F: &str = "host.screen.profile";
+            let cb = match cb {
+                mlua::Value::Nil => None,
+                mlua::Value::Function(f) => Some(f),
+                other => {
+                    return Err(mlua::Error::external(format!(
+                        "{F}: the callback (second argument) must be a function, got {}",
+                        describe_value(&other)
+                    )))
+                }
+            };
             // Every argument is read before anything is answered, so a mistake in `axes`
             // raises whether or not there is anything to read this time. A snapshot first: a
             // region left out is then the whole snapshot rather than the screen.
@@ -7516,13 +7592,6 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                     )))
                 }
             };
-            let (rx, ry, rw, rh) = match region {
-                Ok(r) => (r.x, r.y, r.w, r.h),
-                Err(why) => return with_reason(lua, mlua::Value::Nil, why),
-            };
-            if rw <= 0 || rh <= 0 {
-                return with_reason(lua, mlua::Value::Nil, format!("{EMPTY_REGION} ({rw}x{rh})"));
-            }
             // How many pixels in each column/row are darker than `dark`.
             //
             // The third statistic, and for finding a SHAPE it is the only one of the three that
@@ -7537,6 +7606,17 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 .as_ref()
                 .and_then(|o| o.get::<u8>("dark").ok())
                 .unwrap_or(128);
+            if let Some(cb) = cb {
+                sh.profile_async(lua, idx, cb, opts.as_ref(), snap, region, (want_cols, want_rows), dark_t)?;
+                return Ok(mlua::MultiValue::new());
+            }
+            let (rx, ry, rw, rh) = match region {
+                Ok(r) => (r.x, r.y, r.w, r.h),
+                Err(why) => return with_reason(lua, mlua::Value::Nil, why),
+            };
+            if rw <= 0 || rh <= 0 {
+                return with_reason(lua, mlua::Value::Nil, format!("{EMPTY_REGION} ({rw}x{rh})"));
+            }
             let t0 = Instant::now();
             // The picture: the part of the snapshot the region covers, or a capture made now.
             let pic = match snap {
@@ -7560,33 +7640,12 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 return with_reason(lua, mlua::Value::Nil, SHORT_CAPTURE.to_string());
             };
             let reduced = Instant::now();
-            let axis = |lua: &Lua, a: profile::Axis| -> mlua::Result<Table> {
-                let t = lua.create_table()?;
-                t.set("min", lua.create_sequence_from(a.min)?)?;
-                t.set("max", lua.create_sequence_from(a.max)?)?;
-                t.set("dark", lua.create_sequence_from(a.dark)?)?;
-                t.set("mean", lua.create_sequence_from(a.mean)?)?;
-                t.set("r", lua.create_sequence_from(a.r)?)?;
-                t.set("g", lua.create_sequence_from(a.g)?)?;
-                t.set("b", lua.create_sequence_from(a.b)?)?;
-                Ok(t)
-            };
             // The rectangle read: the region asked for, or, on a snapshot, its part inside it.
             let (ox, oy) = match &pic {
                 snapshot::Picture::Snap { rect, .. } => (rect.x, rect.y),
                 snapshot::Picture::Live { .. } => (rx, ry),
             };
-            let out = lua.create_table()?;
-            out.set("x", ox)?;
-            out.set("y", oy)?;
-            out.set("w", area.w)?;
-            out.set("h", area.h)?;
-            if let Some(c) = columns {
-                out.set("columns", axis(lua, c)?)?;
-            }
-            if let Some(r) = rows {
-                out.set("rows", axis(lua, r)?)?;
-            }
+            let out = profile_table(lua, (ox, oy, area.w as i32, area.h as i32), columns, rows)?;
             // Timed to HERE, not to the end of the capture. The capture is a fixed frame; the
             // traversal and the six sequences are the only part that grows with the region, and
             // leaving them outside the measurement would hide them from the one report this
@@ -9050,6 +9109,40 @@ fn button_from(opts: Option<&Table>) -> MouseButton {
     }
 }
 
+/// `host.screen.profile`'s answer as Luau tables: `{ x, y, w, h, columns?, rows? }`, each axis the
+/// seven sequences the reference lists, in its order. Built on the event loop in either form — by
+/// the call without a callback, and as a callback's answer runs (snapshot.rs, `call_args`).
+pub(crate) fn profile_table(
+    lua: &Lua,
+    (x, y, w, h): (i32, i32, i32, i32),
+    columns: Option<profile::Axis>,
+    rows: Option<profile::Axis>,
+) -> mlua::Result<Table> {
+    let axis = |a: profile::Axis| -> mlua::Result<Table> {
+        let t = lua.create_table()?;
+        t.set("min", lua.create_sequence_from(a.min)?)?;
+        t.set("max", lua.create_sequence_from(a.max)?)?;
+        t.set("dark", lua.create_sequence_from(a.dark)?)?;
+        t.set("mean", lua.create_sequence_from(a.mean)?)?;
+        t.set("r", lua.create_sequence_from(a.r)?)?;
+        t.set("g", lua.create_sequence_from(a.g)?)?;
+        t.set("b", lua.create_sequence_from(a.b)?)?;
+        Ok(t)
+    };
+    let out = lua.create_table()?;
+    out.set("x", x)?;
+    out.set("y", y)?;
+    out.set("w", w)?;
+    out.set("h", h)?;
+    if let Some(c) = columns {
+        out.set("columns", axis(c)?)?;
+    }
+    if let Some(r) = rows {
+        out.set("rows", axis(r)?)?;
+    }
+    Ok(out)
+}
+
 /// A region argument of a call that reads its corners loosely — `profile`, the image searches,
 /// `save`, `saveMarked`, `template{ capture }` — read by the Region form's one reader
 /// (`region_lua::read_loose`) and resolved now.
@@ -10206,6 +10299,42 @@ mod ocr_wiring_tests {
         assert!(enqueue.contains("let prio = current_priority();") && enqueue.contains("Queued { ev, prio }"));
     }
 
+    /// `host.screen.profile` given a callback does nothing on the event loop but read its
+    /// arguments and file the request: the capture is the `screen-capture` thread's (a snapshot's
+    /// picture is taken already), the reduction the image worker's, and the answer — its tables —
+    /// is a handler of its module, handed over in the lane it was asked from and counted in the
+    /// observation line. `snapshot.rs` and `image_search.rs` hold what each step does; this holds
+    /// that the steps are where they are.
+    #[test]
+    fn a_profile_with_a_callback_captures_and_reduces_off_the_event_loop() {
+        let api = body(LIB, "fn install_host_api(");
+        let screen = bindings(api, "screen");
+        let binding = screen.iter().find(|b| b.0 == "profile").expect("host.screen.profile").1;
+        let handed = binding.find("sh.profile_async(lua, idx, cb, ").expect("the callback form");
+        let returned = binding[handed..].find("return Ok(mlua::MultiValue::new());").expect("and returns at once") + handed;
+        assert!(returned < binding.find("sh.backend.capture(").unwrap(), "the callback form captures on the loop");
+        assert!(returned < binding.find("profile::profile(").unwrap(), "the callback form reduces on the loop");
+        let f = body(SNAP, "pub(crate) fn profile_async(");
+        assert!(!f.contains("profile::profile(") && !f.contains("backend.capture("), "profile_async captures or reduces");
+        assert!(f.contains("self.ocr.submit_snap(req);"), "a region's picture is the capture thread's");
+        assert!(f.contains("Some(frame) => self.reduce(p, frame),"), "a snapshot goes straight to the worker");
+        assert!(f.contains("holds: snap_queue::holds_input(at.is_some(), false, false),"), "it holds input as a plain or timed snapshot does");
+        assert!(f.contains("prio: current_priority(),"));
+        let fire = body(SNAP, "pub(crate) fn fire_snapshot_results(");
+        let on = fire.find("Answer::Picture { frame, .. } if p.profile.is_some() => self.reduce(p, frame),").expect("a profile's picture goes on");
+        assert!(on < fire.find("mailbox::deliver(").unwrap(), "before anything is delivered");
+        assert!(body(SNAP, "fn reduce(").contains("self.image_tasks.send(sent)"));
+        assert!(body(IMAGES, "pub(crate) fn fire_image_results(").contains("self.deliver_reduced(p, reduced);"));
+        let deliver = body(SNAP, "pub(crate) fn deliver_reduced(");
+        let lane = deliver.find("let _prio = enter_priority(p.prio);").expect("no priority scope");
+        assert!(lane < deliver.find("mailbox::deliver(self, idx, &lua, Event::Snapshot").expect("not through the mailbox"));
+        assert!(body(SNAP, "pub(crate) fn open_snapshot(").contains("self.observations().profile_cb.add("));
+        assert!(body(IMAGES, "fn profile_task(").contains("let Haystack::Frame { frame, region } = &t.hay else"), "the worker captures for it");
+        // host.screen.pending, beside them.
+        let pending = screen.iter().find(|b| b.0 == "pending").expect("host.screen.pending").1;
+        assert!(pending.contains("snapshot::pending(lua, shared, idx)"));
+    }
+
     /// Which requests hold their module's input is `snap_queue::holds_input`'s decision (tested
     /// there), asked with what the call knows: whether it is timed, whether it is a change wait,
     /// and whether its `from` can be compared with — never a flag of the call's own. Also what
@@ -10401,7 +10530,11 @@ mod ocr_wiring_tests {
     #[test]
     fn profile_sets_each_statistic_under_its_own_name() {
         let api = body(LIB, "fn install_host_api(");
-        let profile = bindings(api, "screen").into_iter().find(|b| b.0 == "profile").expect("host.screen.profile").1;
+        let binding = bindings(api, "screen").into_iter().find(|b| b.0 == "profile").expect("host.screen.profile").1;
+        assert!(binding.contains("let out = profile_table(lua, "), "host.screen.profile builds its answer elsewhere");
+        // A callback's answer is built by the same function.
+        assert!(body(SNAP, "fn call_args(").contains("crate::profile_table(&lua, r.rect.tuple(), r.columns, r.rows)?"));
+        let profile = body(LIB, "pub(crate) fn profile_table(");
         let mut at = 0;
         for k in ["min", "max", "dark", "mean", "r", "g", "b"] {
             let line = format!("t.set(\"{k}\", lua.create_sequence_from(a.{k})?)?;");

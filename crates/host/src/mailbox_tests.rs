@@ -808,6 +808,56 @@ fn a_busy_modules_snapshot_answer_runs_once_it_is_free_and_is_judged_when_it_run
     assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
 }
 
+/// The answer of a `host.screen.profile` with a callback is a handler of its module: it waits in
+/// a busy module's mailbox and runs once the module is free, through the host's own arm
+/// (`open_snapshot_in`), with its table and the picture's moment — and `host.screen.pending` holds
+/// its key out all the while. A newer profile with its key made meanwhile answers it `nil, reason`
+/// when it runs; a disable drops it unrun, and the key is no longer out.
+#[test]
+fn a_busy_modules_profile_answer_waits_as_a_handler_and_its_key_is_out_until_it_runs() {
+    let h = host();
+    let a = vm(&h, 1);
+    let owner = reads::owner_of(&a, &h.gens.borrow(), 1);
+    let pending = |key: &str| {
+        crate::snapshot::pending_in(&h.snaps, &h.gens.borrow(), &a, 1, &Value::String(a.create_string(key).unwrap())).unwrap()
+    };
+    let cb: Function = a
+        .load(
+            "return function(p, why) heard[#heard + 1] = p and (p.w .. 'x' .. p.h .. ' ' .. p.columns.min[1] .. ' at ' .. p.time .. '/' .. p.inputEpoch) or ('nil: ' .. why) end",
+        )
+        .eval()
+        .unwrap();
+    let rect = crate::ocr::types::Rect::new(5, 6, 3, 2);
+    let answer = |p| Event::Snapshot { p: Box::new(p), answer: crate::snapshot::test_reduced(rect, 77) };
+    let p = crate::snapshot::test_profile(&h.snaps, &a, owner, Some("area"), cb.clone(), rect, (1234, 9));
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    assert_eq!(mailbox::deliver(&*h, 1, &a, answer(p)), Delivered::Queued, "a busy module's answer waits");
+    assert!(pending("area") && !pending("other"), "its key is out while it waits in the mailbox");
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), "3x2 77 at 1234/9");
+    assert!(!pending("area"), "and not once it ran");
+    // A newer profile with the key, made while the answer waited: superseded when it runs.
+    let older = crate::snapshot::test_profile(&h.snaps, &a, owner, Some("area"), cb.clone(), rect, (1, 1));
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    assert_eq!(mailbox::deliver(&*h, 1, &a, answer(older)), Delivered::Queued);
+    let _newer = crate::snapshot::test_profile(&h.snaps, &a, owner, Some("area"), cb.clone(), rect, (2, 2));
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), format!("3x2 77 at 1234/9 | nil: {}", crate::snapshot::SUPERSEDED));
+    // Disabled while it waits: dropped, never run, and its key no longer out.
+    let p = crate::snapshot::test_profile(&h.snaps, &a, owner, Some("late"), cb, rect, (3, 3));
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    assert_eq!(mailbox::deliver(&*h, 1, &a, answer(p)), Delivered::Queued);
+    h.enabled.borrow_mut()[1] = false;
+    mailbox::drop_owner(&*h, 1, Why::Disabled);
+    task::drop_owner(&*h, 1);
+    assert!(!pending("late"), "a disabled module's answers are dropped");
+    assert_eq!(heard(&a), format!("3x2 77 at 1234/9 | nil: {}", crate::snapshot::SUPERSEDED));
+    assert!(h.discarded.borrow().iter().any(|d| d.1 == "snapshot" && d.2 == Why::Disabled));
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
 // ── Teardown while a module waits ────────────────────────────────────────────────────────────
 
 /// A disable while the module waits: its handler never goes on, not even after a quick enable,

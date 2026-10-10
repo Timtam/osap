@@ -7110,10 +7110,87 @@ kind of place that says how long the first held the loop.
       looked for 8 rows up and down. A calibration shot of an analysis in a window of another size,
       and one of another pass (Percussive, Melodic), would say whether the centre and the caption
       hold; the log's `analysis found` line names the pass when it does.
-- [ ] **What the note area costs the event loop now**: the capture is off it, the reduction of a
-      910x522 profile and the comparison are not. The `[melodyne] note area: 100 frames, …` line
-      says how much; measure on a release build before deciding whether a profile on the image
-      worker is worth a general API.
+- [ ] **What the note area costs the event loop now**: the capture is off it, and since
+      `host.screen.profile` takes a callback (below) so is the reduction of its 910x522 profile;
+      the profile's tables, the comparison and `bodyBetween`'s small row profiles of a move are
+      not. The `[melodyne] note area: 100 frames, …` line says how much, and the `[observe]` line's
+      `profile with a callback` clause what the tables and the worker's reduction took: 46 ms a
+      frame in the debug build of 2026-10-05 (reduction 32, tables 4.3), where a debug test build
+      of 2026-10-09 put the reduction at 30-35 ms — the image worker's now — and the columns'
+      tables at 0.5-0.8 ms. One calibration stay on a release build gives the real figure. A
+      picture identical to the last profiled one is still not profiled (Melodyne 0.1.5, a change
+      wait against it); whether Melodyne's idle note area is byte-identical between frames is what
+      the line's count says. Open: skipping byte-equal rows in `change.rs`'s `differs` (24-28 ms
+      debug, 0.5 ms release for an unchanged 910x522 picture on the capture thread), and the
+      opt-level of Luau and the host in dev builds.
+- [x] **`host.screen.profile` with a callback** (the maintainer's decision of 2026-10-09, in place
+      of a separate `profileAsync`): `profile(opts, cb)` returns at once; a region's picture is
+      taken on `screen-capture` as a plain or timed `snapshotAsync`'s is (`at`, the input barrier
+      without it), a snapshot's is the snapshot, held until it is reduced; the reduction runs on the
+      image worker; only the tables are built on the event loop, as `cb(profile)` runs as a handler
+      of its module, with the picture's `time` and `inputEpoch`, or `cb(nil, reason)`. It is one of
+      the module's snapshot requests (16 per VM, 64 in all) and charged against the snapshot
+      budget until its answer is handed over; its `key` is its own, and a newer one ends an older
+      one wherever it is, the worker skipping a reduction it has not begun. New
+      `host.screen.pending(key)`, for `snapshotAsync` and `profile` alike. Dropped with a disabled,
+      reloaded or stopped module. Without a callback the call is unchanged. Melodyne's note area
+      keeps its picture (the disc in the frame, a move's body, the unchanged-picture skip) and has
+      it profiled with a callback, one frame out at a time. Docs: screen.md, ocr.md,
+      module-runtime-and-lifecycle.md, timer.md. Not run live yet: the NVDA check of Melodyne 0.1.5
+      below covers it.
+- [x] **Melodyne's pass name, its note steps under Time, and pictures that did not change** (the
+      maintainer's live session of 2026-10-05). The pass name is read inside the disc's rim —
+      columns -50..+49 and -49..+49 of the centre in one call, `lang = "en"` — where the old crop
+      took the right rim, lighter than the filled band, as an "l" ("Detectionl"). The centre is
+      measured from the rim's crossings on twelve rows clear of the band (481.0 and 480.85 on both
+      captures from guesses 4 px off), since two pixels left of it both crops read "Polyphonic
+      Detectior"; the `analysis found` line says how far it was from the window's middle. A read
+      counts only when both crops read the same Latin letters and spaces (accented ones too), and
+      a name is the pass once two looks in a row have read it, so a pass that follows another is
+      taken at its second look; the first counted read asks for the next picture at once, once per
+      analysis. A read answered "failed" with no language where English is not among the
+      recogniser's languages turns the reads to the user's language. "Busy" and Alt+A wait for a
+      taken name. A note move is measured from the two halves of one frame, seen at 3 rows of ink
+      and sized at half each half's peak (the October note's texture made them 34 columns for a
+      20 px move): the halves touch (the move is their distance), or the note's body lies between
+      them in its colour on its own rows (their width), or the page does (their distance);
+      otherwise the words both readings agree on, else the direction alone. Halves that overlap are
+      no rigid move: the ink's flow gives the direction, or the sentence is "moved". A frame whose
+      cursor moved is no edit; full-height bar lines that moved with a scroll are no cursor, so an
+      edit that made Melodyne scroll is measured against the view's move. Half a move holds the
+      baseline for one frame, and a picture identical to the one before lets the hold go. Words:
+      whole beats when the time signature is read; else the learned step — kept as a part of the
+      bar, so it follows the zoom, learned from moves of a sixteenth of a bar or more — counted in
+      beats when it is one, else in steps; under half the unit "one fine step". No fractions of a
+      bar: the October note's halves measure 21 and 23 px for a 20 px move. Not a regression of
+      bc7d61d: at a bar of 80 px the notes changed 3-7 rows, under the coarse 8. The calibration
+      transport read takes a callback. Scenarios in overlay_melodyne_tests.rs; Python mirrors on
+      the calibration captures in the session's scratch. Melodyne 0.1.5.
+- [x] **NVDA check of Melodyne 0.1.5, before it is committed** (2026-10-09, done; the steps
+      under Time are the open item below): load a file and hear "Busy:
+      Polyphonic Detection" — no misreading — and Alt+A say the same name; under Time at the zoom
+      of 2026-10-05 (bars about 80 px), Ctrl+Right says "right, one beat" where Melodyne shows a
+      time signature and "right, one step" where it shows a dash, Ctrl+Alt+Right "right, one fine
+      step", Ctrl+Left "left, one beat" (or "left, one step"); walking notes with plain Left and
+      Right says nothing of the note area. The `[melodyne] note area: 100 frames, N of them the
+      picture before` line says how often a picture was the same, and `analysis found` how far the
+      disc's centre was from the window's middle.
+- [ ] **Melodyne's steps under Time are still inconsistent** (NVDA check of 2026-10-09; deferred
+      by the maintainer on 2026-10-10: the core application comes first, module details later).
+      The analysis read-out is right: the pass was found after two looks agreed (8 reads not
+      taken, 24 over the whole pass), and "Analysis finished" came once. Under Time, presses
+      meant as the same Ctrl+Right were said as "one beat", "2 beats", "one step" and "one
+      fine step" within seconds of each other (log 1791597119-159: 24 sentences, runs 0-4,
+      arrivals 1-24 columns, frame age 87-165 ms). Which key each sentence answered is not in the
+      log, so the next look needs the key beside the sentence, and the two calibration shots of
+      the item below. The callback profile costs the loop 4.0-4.6 ms of tables per frame in a
+      debug build (reduction 31-37 ms on the image worker).
+- [ ] **Melodyne's note steps on a picture after the analysis**: the step measurement was tried on
+      notes of calibration/Melodyne-3-clean.png and on the October note of Melodyne-5-clean.png,
+      drawn during the analysis, moved in Python; there is no picture of the document of
+      2026-10-05 after its analysis. Two calibration shots under Time, the note selected, before
+      and after one Ctrl+Right at a bar of about 80 px, would show its halves at half their peak
+      and whether the cursor stays where it was.
 - [x] **Diagnostics for the dead arrows and the hook re-installs** (inv-4.md, D1-D4, and inv-1.md's
       profile split). A re-install for missed key-downs says for how many this process had the
       foreground (`RIM_INPUT`), the window in front when the watch asked, and how often the hook was
@@ -7492,6 +7569,30 @@ time limit; a module past either is stopped until the next start.
          speech (AVSpeech or VoiceOver's announcement) while VoiceOver reads the window that took
          the focus, so two voices may speak at once. The window says everything the sentence says.
       The memory limit is mlua's allocator, the same on both.
+
+## The application's own keys, and what reload-all rereads (2026-10-10, from the maintainer)
+
+- [ ] **A key that quits the application.** Windows: Ctrl+Shift+Alt+Win+Q, beside the reload key
+      (Ctrl+Shift+Win+Alt+F5). macOS: a chord of the same family, chosen with the same care as
+      the reload key (Cmd+Shift+F5, see RELOAD_HOTKEY_MACOS in crates/host/src/lib.rs):
+      Control-Option chords are dead under VoiceOver, Cmd+Shift+Q is the system's Log Out and
+      Cmd+Option+Shift+Q logs out without asking, so neither may be used; measure the candidate
+      on the Mac before it is fixed. It quits the same way the tray's Exit does (modules
+      deactivated, the recognisers released, the log closed), says one short sentence before it
+      goes, and is listed beside the reload key in the log's start lines, the manager and the
+      docs.
+- [ ] **Reload-all must reread the manifests and resolve the module set again.** Observed by the
+      maintainer: after editing a module's module.toml (its dependencies, for example) and
+      pressing the reload key, the module dies with an error that does not say why.
+      reload_module (lib.rs) rereads the module's own manifest, but reload_everything orders the
+      rebuild by the dependency lists from BEFORE the reload, rebuilds only the modules that
+      were loaded (a dependency added on disk is not discovered), and other state derived from
+      the manifests at start (the memory limit summed per VM, capability grants, the code
+      dependencies copied into a VM, settings schemas, the manager's rows) may stay stale. Find
+      which of these produced the error, then make reload-all do what a restart does for the
+      manifests: read every manifest first, resolve dependencies and order on the new graph,
+      load new modules and drop removed ones, and when a manifest is wrong, say which module and
+      which entry, spoken and in the error window.
 
 ## Dev tools
 
