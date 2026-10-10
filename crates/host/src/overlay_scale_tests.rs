@@ -21,6 +21,10 @@
 //! and every point it clicks, over a grid of window sizes and places, is held against the formula
 //! its own geometry used before — to the pixel — with a few of those points written out as
 //! numbers, so the two cannot drift together unnoticed.
+//!
+//! And for the step that readies the tree for reads of the screen that wait (2026-10-10): a
+//! calibration shot reads the pixels under its crosshairs in one read, ON:EAR's Close clicks only
+//! while its panel is still where its pixel was read, and its "Show all" reads its rows in one read.
 
 use std::path::PathBuf;
 
@@ -430,6 +434,49 @@ fn the_calibration_shot_of_a_scaled_overlay_says_its_factor_and_regions() {
         assert(T.logged("[calibrate]" .. string.format("  %2d %-24s screen (%d,%d)  pixel %s", 1, "Preset",
           224, 64, "20,20,20")), "the line as it always was: " .. T.dump())
         assert(T.count("region (", lines) == 0 and T.count("scale", lines) == 0, T.dump())
+    "##);
+}
+
+/// A calibration shot reads the pixel under every crosshair — the controls' and a menu opener's —
+/// in one read of the screen, where it read one pixel per crosshair, and each line names the pixel
+/// under its own crosshair. A read that fails leaves every pixel "?", and says why first.
+#[test]
+fn a_calibration_shot_reads_every_crosshairs_pixel_in_one_read() {
+    run(r##"
+        local S = T.S
+        local o = T.scaled(function(o)
+          o:addHotspotButton({ label = "Undo", at = { 10, 20 } })
+          o:addHotspotButton({ label = "Hidden", at = { 50, 60 }, when = function() return false end })
+          o:addOCRButton({ label = "Preset", region = { 34, 7, 214, 22 }, readOnly = true })
+        end, false)
+        o._pickControls = { Zoom = { kind = "pick", label = "Zoom", at = { 21, 14 } } }
+        local asked, fails = {}, nil
+        rawset(T.host.screen, "pixels", function(points)
+          asked[#asked + 1] = points
+          if fails then return nil, fails end
+          local out = {}
+          for i in ipairs(points) do out[i] = { r = i, g = 2 * i, b = 3 * i } end
+          return out
+        end)
+        assert(o:calibrationShot() == true)
+        assert(#asked == 1 and S.pixels == 0, "one read, and no pixel read on its own: " .. #asked .. ", " .. S.pixels)
+        local pts = {}
+        for _, p in ipairs(asked[1]) do pts[#pts + 1] = p[1] .. "," .. p[2] end
+        assert(table.concat(pts, " ") == "110,70 224,64 121,64", table.concat(pts, " "))
+        local function line(n, label, x, y, px, tail)
+          return "[calibrate]" .. string.format("  %2d %-24s screen (%d,%d)  pixel %s", n, label, x, y, px) .. (tail or "")
+        end
+        assert(T.logged(line(1, "Undo", 110, 70, "1,2,3")), T.dump())
+        assert(T.logged(line(2, "Preset", 224, 64, "2,4,6")), T.dump())
+        assert(T.logged(line(3, "Zoom", 121, 64, "3,6,9", "  [menu opener]")), T.dump())
+        assert(T.logged("[calibrate]" .. string.format("  -- %-24s hidden (its `when` is false)", "Hidden")), T.dump())
+        local from = #S.logs + 1
+        fails = "the screen capture failed"
+        assert(o:calibrationShot() == true)
+        assert(T.count("[calibrate]  the pixels could not be read: the screen capture failed", from) == 1, T.dump())
+        assert(T.logged(line(1, "Undo", 110, 70, "?")) and T.logged(line(3, "Zoom", 121, 64, "?", "  [menu opener]")),
+          T.dump())
+        assert(T.count("  pixel ?", from) == 3, T.dump())
     "##);
 }
 
@@ -989,5 +1036,113 @@ fn on_ear_grid_down_says_nothing_once_another_window_came_to_the_front_and_reads
         answer = nil
         press(tile)
         assert(reads == 4, "the grid read again before the tile's click: " .. reads)
+    "##);
+}
+
+/// ON:EAR's Close reads the pixel under it, for its log line, before it clicks, and a read of the
+/// screen can wait: another window in front by the time the pixel is read takes the click away —
+/// nothing focused, nothing clicked, and the log says why. Nothing changed, it clicks.
+#[test]
+fn on_ear_close_clicks_nothing_once_another_window_came_to_the_front_during_its_pixel() {
+    run(r##"
+        local S = T.S
+        local made = T.collect()
+        T.module("modules/ik-on-ear/")
+        local speakers
+        for _, o in ipairs(made) do
+          if o.label == "Speaker Browser" then speakers = o end
+        end
+        local here = { id = 7, app = { pid = 4242 }, client = { x = 0, y = 0, w = 1920, h = 1009 },
+          bounds = { x = 0, y = 0, w = 1920, h = 1009 } }
+        local there = { id = 5000, app = { pid = 777 }, client = { x = 0, y = 0, w = 800, h = 600 },
+          bounds = { x = 0, y = 0, w = 800, h = 600 } }
+        S.origin = here
+        T.front(speakers)
+        local close
+        for i, c in ipairs(speakers.controls) do
+          if c.label == "Close" then close = i end
+        end
+        local during = function() S.origin = there end
+        rawset(T.host.screen, "pixel", function()
+          S.pixels += 1
+          if during then during() end
+          return S.pixel
+        end)
+        speakers:activate(close)
+        assert(S.pixels == 1 and #S.clicks == 0 and #S.focusCalls == 0, "a click in the other window: " .. T.lastClick())
+        assert(T.count("[on-ear] 'Speaker Browser' Close not clicking after its pixel was read — the overlay is on "
+          .. "another window now") == 1, T.dump())
+        during, S.origin = nil, here
+        speakers:activate(close)
+        assert(T.lastClick() == "1539,151", "Close where the design puts it: " .. T.lastClick())
+    "##);
+}
+
+/// ON:EAR's "Show all" is in force when none of the rows on screen reads selected, and it reads
+/// those rows — the first four — together, in one read of the screen, where it read them one pixel
+/// at a time. A row reading selected says nothing; so does a read that failed.
+#[test]
+fn on_ear_show_all_reads_its_rows_in_one_read() {
+    run(r##"
+        local S = T.S
+        local made = T.collect()
+        T.module("modules/ik-on-ear/")
+        local speakers
+        for _, o in ipairs(made) do
+          if o.label == "Speaker Browser" then speakers = o end
+        end
+        S.origin = { id = 7, app = { pid = 4242 }, client = { x = 30, y = 40, w = 826, h = 481 },
+          bounds = { x = 30, y = 40, w = 826, h = 481 } }
+        S.dump = { { name = "SpeakerBrowserWindow", ctype = 50032, depth = 1, bounds = { x = 150, y = 100, w = 600, h = 360 } } }
+        for r = 1, 6 do
+          S.dump[#S.dump + 1] = { name = "Row " .. r, ctype = 50020, depth = 2,
+            bounds = { x = 170, y = 140 + 20 * r, w = 180, h = 16 } }
+        end
+        T.front(speakers)
+        local show
+        for i, c in ipairs(speakers.controls) do
+          if c.label == "Show all" then show = i end
+        end
+        local OFF, ON = { r = 26, g = 26, b = 26 }, { r = 46, g = 46, b = 46 }
+        local asked, lit, fails = {}, nil, nil
+        rawset(T.host.screen, "pixels", function(points)
+          asked[#asked + 1] = points
+          if fails then return nil, fails end
+          local out = {}
+          for i in ipairs(points) do out[i] = i == lit and ON or OFF end
+          return out
+        end)
+        local text = speakers.controls[show].text
+        assert(text(speakers) == "in force")
+        assert(#asked == 1 and S.pixels == 0, "one read, and no pixel read on its own: " .. #asked .. ", " .. S.pixels)
+        local pts = {}
+        for _, p in ipairs(asked[1]) do pts[#pts + 1] = p[1] .. "," .. p[2] end
+        assert(table.concat(pts, " ") == "340,168 340,188 340,208 340,228",
+          "the first four rows, 170 into each, at its middle: " .. table.concat(pts, " "))
+        lit = 3
+        T.turn()
+        assert(text(speakers) == nil, "a category is in force")
+        lit, fails = nil, "screen capture failed"
+        T.turn()
+        assert(text(speakers) == nil, "nothing read is no answer")
+        assert(#asked == 3 and S.pixels == 0, #asked .. ", " .. S.pixels)
+
+        -- The Headphone Browser's Favorites is a filter of its own, which no row's state answers: it
+        -- reads no row at all. Its "Show all" reads them as the speakers' does.
+        local headphones
+        for _, o in ipairs(made) do
+          if o.label == "Headphone Browser" then headphones = o end
+        end
+        S.dump[1].name = "HeadphonesBrowserWindow"
+        fails = nil
+        T.front(headphones)
+        local favorites, all
+        for _, c in ipairs(headphones.controls) do
+          if c.label == "Favorites" then favorites = c end
+          if c.label == "Show all" then all = c end
+        end
+        T.turn()
+        assert(favorites.text(headphones) == nil and #asked == 3, "Favorites read the rows: " .. #asked)
+        assert(all.text(headphones) == "in force" and #asked == 4 and #asked[4] == 4, #asked)
     "##);
 }

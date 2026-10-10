@@ -10,8 +10,11 @@ name = "Overlay runtime"
 # calibration as a setting of its own (Installed → Overlay runtime → Settings…), which a module
 # asks with O.calibrating(), and so depends on "com.platform.overlay >= 0.4". 0.4.1 gives a static
 # text a `hotkey`, which says it, and O:stillHere a `spoken` option, an announcement said rather than
-# begun; a module that uses either depends on "com.platform.overlay >= 0.4.1".
-version = "0.4.1"
+# begun; a module that uses either depends on "com.platform.overlay >= 0.4.1". 0.4.2 checks that
+# the overlay is still where a press was made before it clicks after reading a pixel (a hotspot
+# toggle, a panel's reveal), reads a calibration shot's pixels in one read, and keeps an
+# O.memoByEpoch answer under the epoch it was given in. Nothing a module calls is new.
+version = "0.4.2"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

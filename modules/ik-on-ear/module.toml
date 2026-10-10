@@ -1,6 +1,6 @@
 id = "com.platform.ik-on-ear"
 name = "IK Multimedia ARC ON:EAR"
-version = "0.1.1"
+version = "0.1.2"
 license = "GPL-3.0-or-later"
 dependencies = ["com.platform.overlay >= 0.2"]
 # Windows only, and for a narrower reason than "the calls do not exist there".

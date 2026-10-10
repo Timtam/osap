@@ -17,6 +17,11 @@
 //! error message with the next. The scripted host fails a scenario that leaves such a line, or that
 //! asked it for anything it does not have (`finish` in `overlay_menu_tests.rs`), which is where a
 //! `recognize` that cannot wait in a hook is found.
+//!
+//! And for the step that readies the tree for reads of the screen that wait (2026-10-10): the
+//! runtime's own clicks after a pixel — a hotspot toggle's, a `reveal` probe's — are made only while
+//! the overlay is still where the pixel was read, and `O.memoByEpoch` keeps an answer under the
+//! epoch it came back in.
 
 use super::overlay_focus_read_tests::FR;
 use super::overlay_menu_tests::run_with;
@@ -267,6 +272,177 @@ fn an_ocr_buttons_click_goes_by_its_control_not_by_the_focus() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The runtime's own clicks after a pixel, and O.memoByEpoch (0.4.2).
+// ---------------------------------------------------------------------------------------------
+
+/// The scripted pixel with something happening while it is read, as it can once a read of the
+/// screen waits: `T.during(fn)` runs `fn` inside the next reads, `T.during(nil)` stops it. And the
+/// overlay's window replaced by another one, `T.elsewhere()`, and back, `T.backHere()`.
+const DURING: &str = r##"
+local S = T.S
+local during = nil
+rawset(T.host.screen, "pixel", function()
+  S.pixels += 1
+  if during then during() end
+  return S.pixel
+end)
+function T.during(fn) during = fn end
+local here = S.origin
+function T.elsewhere()
+  S.origin = { id = 8, class = here.class, app = here.app, client = here.client, bounds = here.bounds }
+end
+function T.backHere() S.origin = here end
+"##;
+
+fn run_during(scenario: &str) {
+    run_with("windows", &format!("{FR}\n{MK}\n{DURING}"), scenario)
+}
+
+/// A hotspot toggle's press reads the pixel under it before its click, and a read of the screen can
+/// wait: the click is made only while the overlay is still where the key was pressed. Another
+/// window in front by the time the pixel is read takes the click away — nothing clicked, nothing
+/// waiting to be announced, and the log says why. So does another window drawn over the point
+/// meanwhile, with the overlay still in front: the point is asked again after the read. Nothing
+/// changed, the same press clicks.
+#[test]
+fn a_hotspot_toggle_clicks_nothing_once_another_window_came_to_the_front_during_its_pixel() {
+    run_during(r#"
+        local S = T.S
+        local o = T.fields(function(o)
+          o:addHotspotToggle({ label = "Mute", at = { 20, 30 }, onColor = { 255, 255, 255 }, offColor = { 20, 20, 20 } })
+        end)
+        local timers = #S.after
+        T.during(T.elsewhere)
+        o:activate(3)
+        assert(S.pixels == 1 and #S.clicks == 0, "a click in the other window: " .. T.dump())
+        assert(#S.after == timers, "nothing waits to announce it")
+        assert(T.count("[overlay] Synth: 'Mute' not clicking after reading its pixel — the overlay is on another "
+          .. "window now") == 1, T.dump())
+        T.backHere()
+        local owns = T.host.window.ownsPoint
+        T.during(function() rawset(T.host.window, "ownsPoint", function() return false end) end)
+        o:activate(3)
+        assert(S.pixels == 2 and #S.clicks == 0, "a click on the window drawn over it: " .. T.dump())
+        assert(#S.after == timers, "nothing waits to announce it")
+        assert(T.count("Synth: 'Mute' at (120,80) is inside our window's frame but another window is drawn there "
+          .. "— not clicking") == 1, T.dump())
+        rawset(T.host.window, "ownsPoint", owns)
+        T.during(nil)
+        o:activate(3)
+        assert(#S.clicks == 1 and S.clicks[1][1] == 120 and S.clicks[1][2] == 80, "clicked: " .. T.dump())
+    "#);
+}
+
+/// A graphical toggle's `reveal` probe reads closed, and the probe is clicked to open the panel —
+/// only while the overlay is still where the probe was read. Another window in front by then takes
+/// the click away, and with it the toggle's own click after the panel opened; the log says why.
+#[test]
+fn a_reveal_probe_opens_nothing_once_another_window_came_to_the_front_during_its_pixel() {
+    run_during(r#"
+        local S = T.S
+        local o = T.fields(function(o)
+          o:addGraphicalToggle({ label = "Reverb", region = { 40, 40, 60, 60 }, onImage = "C:/on.png",
+            offImage = "C:/off.png", reveal = { at = { 10, 12 }, closedColor = { 20, 20, 20 } } })
+        end)
+        local timers = #S.after
+        T.during(T.elsewhere)
+        o:activate(3)
+        assert(S.pixels == 1 and #S.clicks == 0, "a click in the other window: " .. T.dump())
+        assert(#S.after == timers, "nothing waits to follow the probe's click")
+        assert(T.count("[overlay] Synth: 'Reverb' not going on after reading its panel's probe — the overlay is "
+          .. "on another window now") == 1, T.dump())
+        T.during(nil)
+        T.backHere()
+        o:activate(3)
+        assert(#S.clicks == 1 and S.clicks[1][1] == 110 and S.clicks[1][2] == 62, "the probe clicked: " .. T.dump())
+        assert(#S.after == timers + 1, "the toggle's click waits for the panel")
+    "#);
+}
+
+/// The same probe reading open, or not at all, lets the toggle's own click go ahead at once — and
+/// that click too is made only while the overlay is still where the probe was read: another window
+/// in front by then takes it away, and the log says why. Nothing changed, the toggle clicks the
+/// middle of its region.
+#[test]
+fn a_reveal_probe_reading_open_lets_no_click_follow_once_another_window_came_to_the_front_during_it() {
+    run_during(r#"
+        local S = T.S
+        local o = T.fields(function(o)
+          o:addGraphicalToggle({ label = "Reverb", region = { 40, 40, 60, 60 }, onImage = "C:/on.png",
+            offImage = "C:/off.png", reveal = { at = { 10, 12 }, closedColor = { 20, 20, 20 } } })
+        end)
+        local after = "[overlay] Synth: 'Reverb' not going on after reading its panel's probe — the overlay is "
+          .. "on another window now"
+        local timers = #S.after
+        -- Open, and another window in front by the time the probe is read: the toggle is not clicked.
+        S.pixel = { r = 240, g = 240, b = 240 }
+        T.during(T.elsewhere)
+        o:activate(3)
+        assert(S.pixels == 1 and #S.clicks == 0, "a click in the other window: " .. T.dump())
+        assert(#S.after == timers and T.count(after) == 1, T.dump())
+        -- Not read at all: the same.
+        S.pixel = nil
+        T.backHere()
+        o:activate(3)
+        assert(S.pixels == 2 and #S.clicks == 0, "a click in the other window: " .. T.dump())
+        assert(#S.after == timers and T.count(after) == 2, T.dump())
+        -- Open, nothing changed: the toggle's click, at once, and its state read waiting for the redraw.
+        S.pixel = { r = 240, g = 240, b = 240 }
+        T.during(nil)
+        T.backHere()
+        o:activate(3)
+        assert(#S.clicks == 1 and S.clicks[1][1] == 150 and S.clicks[1][2] == 100, "the toggle clicked: " .. T.dump())
+        assert(#S.after == timers + 1, "the state read waits for the redraw")
+    "#);
+}
+
+/// Once the probe opened the panel, the toggle's click `settle` ms later is made only while the
+/// overlay is still where the probe was read: out of the front and back again on the same window
+/// meanwhile, it is not made, and the log says why.
+#[test]
+fn a_reveal_probes_toggle_clicks_nothing_once_the_overlay_left_the_front_while_its_panel_opened() {
+    run_during(r#"
+        local S = T.S
+        local o = T.fields(function(o)
+          o:addGraphicalToggle({ label = "Reverb", region = { 40, 40, 60, 60 }, onImage = "C:/on.png",
+            offImage = "C:/off.png", reveal = { at = { 10, 12 }, closedColor = { 20, 20, 20 } } })
+        end)
+        o:activate(3)
+        assert(#S.clicks == 1 and S.clicks[1][1] == 110 and S.clicks[1][2] == 62, "the probe clicked: " .. T.dump())
+        o._lastActiveId = S.origin.id
+        o:_deactivate()
+        o:_activate()
+        assert(o.active, "back on the same window")
+        S.now += 250
+        T.runDue()
+        assert(#S.clicks == 1, "the toggle clicked in another stay: " .. T.dump())
+        assert(T.count("[overlay] Synth: 'Reverb' not going on after opening its panel — the overlay left the "
+          .. "front and came back since") == 1, T.dump())
+    "#);
+}
+
+/// O.memoByEpoch keeps an answer under the epoch it was given in, read when its function returns:
+/// a function during whose work the epoch turned over — as other events turn it while the function
+/// waits for a read — is asked once, not again at the next call in the epoch it answered in. A later
+/// epoch asks again.
+#[test]
+fn memo_by_epoch_keeps_an_answer_under_the_epoch_it_was_given_in() {
+    run(r#"
+        local S = T.S
+        local asked = 0
+        local memo = T.O.memoByEpoch(function()
+          asked += 1
+          S.epoch += 1
+          return "answer " .. asked
+        end)
+        assert(memo() == "answer 1" and asked == 1)
+        assert(memo() == "answer 1" and asked == 1, "asked again in the epoch it answered in: " .. asked)
+        T.turn()
+        assert(memo() == "answer 2" and asked == 2, "a later epoch asks again: " .. asked)
+    "#);
+}
+
+// ---------------------------------------------------------------------------------------------
 // O:toScreenRect(r, { whole = true }).
 // ---------------------------------------------------------------------------------------------
 
@@ -471,16 +647,16 @@ fn a_recognize_in_a_text_hook_waits_and_its_reading_is_said() {
 // The runtime's version.
 // ---------------------------------------------------------------------------------------------
 
-/// The runtime is 0.4.1 (calibration as its own setting, `O.calibrating()`, and a static text's
-/// `hotkey`), so a module that depends on `"com.platform.overlay >= 0.2"` — as one that takes a
-/// mark has to — still loads against it, and so does one that asks for 0.4 or 0.4.1, and neither
-/// against anything older.
+/// The runtime is 0.4.2 (calibration as its own setting, `O.calibrating()`, a static text's
+/// `hotkey`, and the checks after its own pixels), so a module that depends on
+/// `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads against it, and
+/// so does one that asks for 0.4 or 0.4.1, and neither against anything older.
 #[test]
 fn the_runtime_is_0_4_so_a_module_that_asks_for_0_2_loads() {
     let m = module_manifest::ModuleManifest::parse(include_str!("../../../modules/overlay-runtime/module.toml"))
         .expect("the runtime's manifest parses");
     assert_eq!(m.id, "com.platform.overlay");
-    assert_eq!(m.version, "0.4.1");
+    assert_eq!(m.version, "0.4.2");
     for spec in [
         "com.platform.overlay >= 0.2",
         "com.platform.overlay >= 0.3",

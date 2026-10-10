@@ -1864,26 +1864,39 @@ local REVEAL_TOLERANCE = 30
 --
 -- Asynchronous, because we cannot sleep — the 250 ms ReaHotkey spends blocked is a timer
 -- here, and everything after it is a continuation. Which means it can land in a different
--- world: the continuation re-checks that the overlay is still active on the SAME window,
--- exactly as the hotspot `points` sequence does, so a reveal started in one plug-in cannot
--- deliver its answer into another.
+-- world: the continuation re-checks that the overlay is still where the probe was read —
+-- active, in the same stay in front, on the SAME window — so a reveal started in one plug-in
+-- cannot deliver its answer into another.
 --
 -- Fails OPEN. If the probe cannot be read at all we carry on rather than refuse: a control
 -- that silently stops responding is worse than one that acts on a panel that was already
 -- open, and clicking the probe when it is open is what ReaHotkey's own colour test avoids.
+--
+-- The probe is a read of the screen, and a read can wait: the overlay must still be where the
+-- probe was read before anything follows it — the probe's click when it reads closed, the
+-- toggle's own click or its state read when it reads open or not at all — or that lands in
+-- whatever came to the front meanwhile. Where it is not, nothing follows, and the log says why.
 local function ensureRevealed(self, c, done)
   local r = c.reveal
   if not r or not r.at or not r.closedColor then return done() end
   local px, py = placePoint(self, c, r.at[1], r.at[2])
   -- A probe that cannot be placed now cannot be read either: fail open, as for a failed read.
   if not px then return done() end
+  local mark = markAt(self, self.focus)
+  local function gone(after)
+    local fine, why = stillHereAt(self, mark)
+    if fine then return false end
+    host.log.info(string.format("[overlay] %s: '%s' not going on %s — %s",
+      tostring(self.label), tostring(c.label), after, why))
+    return true
+  end
   local p = host.screen.pixel(px, py)
+  if gone("after reading its panel's probe") then return end
   if not p or colorDist(p, r.closedColor) > REVEAL_TOLERANCE then return done() end
   if refuseOutside(self, c, px, py) then return end
-  local pinned = self:hwnd()
   host.input.click(px, py)
   host.timer.after(r.settle or 250, function()
-    if self.active and self:hwnd() == pinned then done() end
+    if not gone("after opening its panel") then done() end
   end)
 end
 
@@ -3183,7 +3196,21 @@ function Overlay:activate(index)
     --
     -- The reads cost a compositor frame each, which is affordable here and nowhere near the
     -- keystroke path: this runs when somebody deliberately pressed something.
+    --
+    -- A read of the screen can wait, so the overlay must still be where the key was pressed
+    -- before the click: one landing in a window that came to the front meanwhile is the mistake
+    -- pressing again cannot undo. Not clicked, it is logged.
+    local mark = markAt(self, i)
     local before = host.screen.pixel(px, py)
+    local fine, why = stillHereAt(self, mark)
+    if not fine then
+      host.log.info(string.format("[overlay] %s: '%s' not clicking after reading its pixel — %s",
+        tostring(self.label), tostring(c.label), why))
+      return
+    end
+    -- And the point asked again after the read: a tooltip or a notification drawn over it
+    -- meanwhile leaves the overlay where it was and takes the click all the same.
+    if refuseOutside(self, c, px, py) then return end
     host.input.click(px, py)
     -- Announced when the state has actually CHANGED, not a fixed moment later. A control that
     -- redraws in thirty milliseconds is announced in thirty; one that takes half a second is
@@ -4886,14 +4913,17 @@ end
 --
 -- Only the CURRENT epoch is held — one slot, not a growing table — so nothing accumulates
 -- and a stale answer cannot be read after the world has moved.
+--
+-- The answer is kept under the epoch it was given in, read after `fn` returns. An `fn` that
+-- waits — a read without a callback — lets other events turn the epoch over meanwhile, and
+-- kept under the epoch it was asked in, its answer would be worked out again at the next call.
 function O.memoByEpoch(fn)
   local epoch, value = nil, nil
   return function(...)
-    local now = host.epoch and host.epoch() or 0
-    if epoch == now and value ~= nil then return value end
+    if value ~= nil and epoch == (host.epoch and host.epoch() or 0) then return value end
     local v = fn(...)
     if v ~= nil then
-      epoch, value = now, v
+      epoch, value = host.epoch and host.epoch() or 0, v
     end
     return v
   end
@@ -7474,7 +7504,32 @@ function Overlay:calibrationShot()
     return false
   end
   local marks, points, openers = calibrationMarks(self)
+  -- The pixel under every crosshair, the controls' and the openers', in one read of the screen:
+  -- one capture where they lie close together, where a read per point took one each. Cut toward
+  -- zero, as a single pixel's read cuts a point. All or nothing: a read that fails leaves every
+  -- pixel "?", and says why first.
+  local function cut(v) return v < 0 and math.ceil(v) or math.floor(v) end
+  local asked, slot = {}, {}
+  for i in ipairs(self.controls) do
+    local p = points[i]
+    if p then
+      asked[#asked + 1] = { cut(p.x), cut(p.y) }
+      slot[p] = #asked
+    end
+  end
+  for _, op in ipairs(openers) do
+    if op.n then
+      asked[#asked + 1] = { cut(op.x), cut(op.y) }
+      slot[op] = #asked
+    end
+  end
+  local read, unread = host.screen.pixels(asked)
+  local function pixelAt(p)
+    local px = read and read[slot[p]]
+    return px and string.format("%d,%d,%d", px.r, px.g, px.b) or "?"
+  end
   local lines = {}
+  if not read then lines[1] = "  the pixels could not be read: " .. tostring(unread) end
   for i, c in ipairs(self.controls) do
     local p = points[i]
     -- A hidden control is still listed, marked, so its absence is visible rather than
@@ -7482,11 +7537,10 @@ function Overlay:calibrationShot()
     if p == nil then
       lines[#lines + 1] = string.format("  -- %-24s hidden (its `when` is false)", tostring(c.label))
     elseif p then
-      local px = host.screen.pixel(p.x, p.y)
       lines[#lines + 1] = string.format(
         "  %2d %-24s screen (%d,%d)  pixel %s%s%s",
         p.n, tostring(c.label), p.x, p.y,
-        px and string.format("%d,%d,%d", px.r, px.g, px.b) or "?",
+        pixelAt(p),
         c.rawOrigin and "  [rawOrigin]" or "",
         self:_calibrationPlaces(c)
       )
@@ -7497,9 +7551,8 @@ function Overlay:calibrationShot()
   end
   for _, op in ipairs(openers) do
     if op.n then
-      local px = host.screen.pixel(op.x, op.y)
       lines[#lines + 1] = string.format("  %2d %-24s screen (%d,%d)  pixel %s  [menu opener]",
-        op.n, op.label, op.x, op.y, px and string.format("%d,%d,%d", px.r, px.g, px.b) or "?")
+        op.n, op.label, op.x, op.y, pixelAt(op))
     else
       lines[#lines + 1] = string.format("  -- %-24s no position  [menu opener]", op.label)
     end

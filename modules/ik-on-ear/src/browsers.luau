@@ -347,7 +347,16 @@ local function chooser(spec)
     onActivate = function()
       local x, y = b:toScreen(spec.close[1], spec.close[2])
       if not x then return end
+      -- Where the press was made: the pixel below is a read of the screen, which can wait, and a
+      -- window that came to the front meanwhile would take the click.
+      local mark = b:here()
       local q = host.screen.pixel(x, y)
+      local fine, why = b:stillHere(mark)
+      if not fine then
+        host.log.info(("[on-ear] '%s' Close not clicking after its pixel was read — %s")
+          :format(spec.name, tostring(why)))
+        return
+      end
       host.log.info(("[on-ear] '%s' Close clicking (%d,%d), pixel there %s")
         :format(spec.name, x, y, q and ("%d,%d,%d"):format(q.r, q.g, q.b) or "unreadable"))
       clickAt(x, y)
@@ -466,36 +475,36 @@ local function chooser(spec)
     label = f.label,
     at = { f.at[1], f.at[2] },
     text = function()
-      local sawRow = false
+      -- Only the FIRST filter is the "everything" one. Favorites is a filter in its own
+      -- right, and no row being selected says nothing about whether it is the one in force:
+      -- so it reads nothing.
+      if f.label ~= spec.filters[1].label then return nil end
       local o = b:origin()
       if not (o and o.client) then return nil end
-      -- The rows on screen, not the first eight in the model — and at most four of them.
-      -- Each of these is a screen touch costing a compositor frame, and the question only
-      -- needs an answer, not a census: one row reading "selected" settles it, and a filter
-      -- that is in force is drawn at the top of the list where the first few are.
+      -- The rows on screen, not the first eight in the model — and at most four of them, read
+      -- together: one read of the screen, where a read per row cost a compositor frame each.
+      -- The question only needs an answer, not a census: one row reading "selected" settles
+      -- it, and a filter that is in force is drawn at the top of the list where the first few
+      -- are.
       local rows = visibleRows()
+      local probes = {}
       for i = 1, math.min(#rows, 4) do
-        local r = rows[i]
-        local pt = r and rowPoint(r)
-        if pt then
-          local q = host.screen.pixel(o.client.x + pt[1], o.client.y + pt[2])
-          if q then
-            sawRow = true
-            local don = math.abs(q.r - ROW_ON[1]) + math.abs(q.g - ROW_ON[2])
-              + math.abs(q.b - ROW_ON[3])
-            local doff = math.abs(q.r - ROW_OFF[1]) + math.abs(q.g - ROW_OFF[2])
-              + math.abs(q.b - ROW_OFF[3])
-            -- A category is in force, so this is not.
-            if don < doff then return nil end
-          end
-        end
+        local pt = rowPoint(rows[i])
+        if pt then probes[#probes + 1] = { o.client.x + pt[1], o.client.y + pt[2] } end
       end
       -- Silent when no row could be read at all: "in force" would then be a guess dressed as
       -- a reading, and the categories above will have said nothing either.
-      if not sawRow then return nil end
-      -- Only the FIRST filter is the "everything" one. Favorites is a filter in its own
-      -- right, and no row being selected says nothing about whether it is the one in force.
-      if f.label ~= spec.filters[1].label then return nil end
+      if #probes == 0 then return nil end
+      local seen = host.screen.pixels(probes)
+      if not seen then return nil end
+      for _, q in ipairs(seen) do
+        local don = math.abs(q.r - ROW_ON[1]) + math.abs(q.g - ROW_ON[2])
+          + math.abs(q.b - ROW_ON[3])
+        local doff = math.abs(q.r - ROW_OFF[1]) + math.abs(q.g - ROW_OFF[2])
+          + math.abs(q.b - ROW_OFF[3])
+        -- A category is in force, so this is not.
+        if don < doff then return nil end
+      end
       return "in force"
     end,
   })

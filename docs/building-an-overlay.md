@@ -148,7 +148,7 @@ Tick **Calibration keys and pictures in overlays** in the overlay runtime's own 
 
 | Key | What it does |
 | --- | --- |
-| `Ctrl+Alt+Shift+S` | Screenshot of the coordinate window with a **crosshair** where each control will actually click, plus a log line per control: resolved screen point, the pixel read there, and whether it is `rawOrigin`. |
+| `Ctrl+Alt+Shift+S` | Screenshot of the coordinate window with a **crosshair** where each control will actually click, plus a log line per control: resolved screen point, the pixel read there, and whether it is `rawOrigin`. Every crosshair's pixel comes from one read of the screen ([`host.screen.pixels`](api/screen.md#host-screen-pixels)); when that read fails, the lines start with `the pixels could not be read: <why>` and every pixel is `?`. |
 | `Ctrl+Alt+Shift+T` | Crops a template around the **focused** control and writes it into `calibration/`. |
 | `Ctrl+Alt+Shift+V` | Counts **every** match of the focused control's template in the region. |
 | (no key) | Activating a control declared with `opensMenu` saves three pictures of the overlay's origin whole — a snapshot just before it acts, written once the other two are in, and ~600 ms and ~1500 ms after — as `<overlay>-<control>-menu-before.png`, `-menu-after-600.png` and `-menu-after-1500.png`. What a menu test for a menu drawn inside the plug-in is written from; see [`O.calibrating`](api/overlay.md#o-calibrating). |

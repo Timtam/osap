@@ -412,15 +412,29 @@ local function snapshotAction(cell, fromRight, y, opensMenu)
       host.input.click(ctrl.client.x + O.contentSize(ctrl) - fromRight, ctrl.client.y + y)
       if opensMenu then host.timer.after(MENU_SETTLE, function() verifyMenuOpened(o) end) end
     end
+    -- Where the press was made. Reading the camera is a read of the screen, which can wait, and
+    -- another window can come to the front meanwhile, or in the quarter second the bar is given:
+    -- so the overlay must still be where the press was made before each click.
+    local mark = o:here()
+    local function gone(what)
+      local fine, why = o:stillHere(mark)
+      if fine then return false end
+      host.log.info(("Kontakt: not clicking %s — %s"):format(what, tostring(why)))
+      return true
+    end
     if snapshotBarUp(cell, ctrl) then
+      if gone("the snapshot control after reading the camera") then return end
       clickTarget()
       return
     end
     local cx, cy = cameraPoint(cell, ctrl)
     if not cx then return end
+    if gone("the camera after reading it") then return end
     host.input.click(cx, cy)
     host.timer.after(250, function()
-      if snapshotBarUp(cell, ctrl) then
+      local up = snapshotBarUp(cell, ctrl)
+      if gone("the snapshot control after reading the camera again") then return end
+      if up then
         clickTarget()
       else
         host.log.info("Kontakt: snapshot bar did not appear — not clicking")

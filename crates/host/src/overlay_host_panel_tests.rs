@@ -1414,6 +1414,82 @@ fn kontakt_clicks_its_menu_row_only_while_its_program_stays_in_front() {
     "##);
 }
 
+/// Kontakt's snapshot controls read the camera's pixel before they click — whether the bar is up,
+/// and again a quarter second after pressing the camera — and a read of the screen can wait: the
+/// overlay must still be where the press was made before each click. Another window in front by
+/// the time the camera is read takes the click away, on every path, and the log says why. Without
+/// a change, each path clicks as it did.
+#[test]
+fn kontakt_snapshot_controls_click_nothing_once_another_window_came_to_the_front_after_the_camera_is_read() {
+    run(r##"
+        local S = T.S
+        T.modules("modules/kontakt/")
+        local A = T.host.include("src/actions.luau")
+        -- Kontakt 8's camera, 305 from the right edge on row 87; lit while the bar is up.
+        local cell = { header = { camera = { fromRight = 305, y = 87, litAbove = 128 } } }
+        local o = T.O.new("Kontakt 8")
+        o:addCustomButton({ label = "Next snapshot", onActivate = function() end })
+        T.front(o)
+        local here = S.origin
+        local there = { id = 5000, app = { pid = 777 }, client = { x = 0, y = 0, w = 800, h = 600 },
+          bounds = { x = 0, y = 0, w = 800, h = 600 } }
+        local LIT, DARK = { r = 240, g = 240, b = 240 }, { r = 20, g = 20, b = 20 }
+        local during = nil
+        rawset(T.host.screen, "pixel", function()
+          S.pixels += 1
+          if during then during() end
+          return S.pixel
+        end)
+        local function elsewhere() S.origin = there end
+        local press = A.snapshotAction(cell, 200, 118, false)
+        local function lastClick()
+          local c = S.clicks[#S.clicks]
+          return c and (c[1] .. "," .. c[2]) or "none"
+        end
+        local function later(ms)
+          S.now += ms
+          T.runDue()
+        end
+
+        -- The bar up: the snapshot control is clicked at once, 200 from the right edge on row 118.
+        S.pixel = LIT
+        press(o)
+        assert(#S.clicks == 1 and lastClick() == "700,168", lastClick())
+        -- Another window in front by the time the camera is read: nothing clicked.
+        during = elsewhere
+        press(o)
+        assert(#S.clicks == 1, "a click in the other window: " .. lastClick())
+        assert(T.count("Kontakt: not clicking the snapshot control after reading the camera — the overlay is on "
+          .. "another window now") == 1, T.dump())
+
+        -- The bar down: the camera is clicked, and not once another window is in front.
+        during, S.origin, S.pixel = elsewhere, here, DARK
+        press(o)
+        assert(#S.clicks == 1, "a click in the other window: " .. lastClick())
+        assert(T.count("Kontakt: not clicking the camera after reading it — the overlay is on another window now") == 1,
+          T.dump())
+
+        -- The camera clicked, and another window in front by the time the camera is read again:
+        -- the snapshot control is not clicked.
+        during, S.origin = nil, here
+        local timers = #S.after
+        press(o)
+        assert(#S.clicks == 2 and lastClick() == "595,137" and #S.after == timers + 1, "the camera: " .. lastClick())
+        S.pixel, during = LIT, elsewhere
+        later(250)
+        assert(#S.clicks == 2, "a click in the other window: " .. lastClick())
+        assert(T.count("Kontakt: not clicking the snapshot control after reading the camera again — the overlay is "
+          .. "on another window now") == 1, T.dump())
+
+        -- Nothing changes: the camera, then the snapshot control once the bar is up.
+        during, S.origin, S.pixel = nil, here, DARK
+        press(o)
+        S.pixel = LIT
+        later(250)
+        assert(#S.clicks == 4 and lastClick() == "700,168", lastClick())
+    "##);
+}
+
 /// Komplete Kontrol's one setting is defined as the module loads, before `activate`, and not
 /// again in it. Its value is a local that `define` and `onChange` set, so the scenario's settings
 /// have no `get`. Stored off, the standalone overlay arriving over an open library browser leaves

@@ -158,6 +158,7 @@ local S = {
   nativeAsks = 0,
   windowLists = 0,
   pixels = 0,
+  pixelLists = 0,   -- host.screen.pixels calls: one read of the screen each
   registered = 0,
   unregistered = 0,
   nextId = 0,
@@ -400,6 +401,21 @@ T.host = strict("host", {
   }),
   screen = strict("host.screen", {
     pixel = function() S.pixels += 1; return S.pixel end,
+    -- S.pixel at every point, from one read; the points checked as the host checks them — a list
+    -- of { x, y } in whole numbers — so a point the host would refuse is refused here too. All or
+    -- nothing, as the host's: no S.pixel is no list, and the host's reason for a failed capture.
+    pixels = function(points)
+      S.pixelLists += 1
+      for i, p in ipairs(points) do
+        assert(type(p) == "table" and #p == 2 and p[1] == math.floor(p[1]) and p[2] == math.floor(p[2]),
+          "host.screen.pixels: points[" .. i .. "] is not { x, y } in whole numbers")
+      end
+      if #points == 0 then return {} end
+      if S.pixel == nil then return nil, "screen capture failed" end
+      local out = {}
+      for i in ipairs(points) do out[i] = S.pixel end
+      return out
+    end,
     saveMarked = function(path, opts)
       S.order[#S.order + 1] = "save"
       S.shots[#S.shots + 1] = { path = path, region = opts.region, marks = #opts.marks, at = S.now }

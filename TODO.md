@@ -7393,6 +7393,39 @@ kind of place that says how long the first held the loop.
       `could not wait here` checks stay, for the screen calls' line, and a `recognize` of the
       capture probe that raised fails every job now (it only warned on Windows and the newer
       macOS).
+      Step V1, the same day (wbr-final.md): the tree made ready for `host.screen` calls that wait,
+      while none waits yet. Every place that reads a pixel in a handler and then clicks takes a mark
+      before the read and checks the place before the click: the runtime's hotspot toggle, whose
+      point is also asked again after the read (another window drawn over it refuses the click),
+      and a graphical toggle's `reveal` probe, whatever the probe reads and again once the panel's
+      `settle` is over (runtime 0.4.2); Kontakt's snapshot controls on all three paths, the
+      camera's second look a quarter second after its click included (Kontakt 0.1.2, which now
+      depends on `com.platform.overlay >= 0.2`); and ON:EAR's Close (0.1.2). A click not made is
+      logged in `stillHere`'s words. Reads that came one after the other are one
+      `host.screen.pixels`: a calibration shot's crosshairs, controls and menu openers together
+      (one line says why when the read fails, and every pixel is then `?`), and ON:EAR's "Show
+      all" rows; its Favorites, which no row's state answers, reads none. `O.memoByEpoch` keeps an
+      answer under the epoch it came back in, read when its function returns, so a function that
+      waits is not asked again in the same dispatch; timer.md's example reads the epoch after the
+      work. Tested in the scripted host: a window switch between each read and its click makes no
+      click, the memo, the two batched reads; the scripted `pixels` is all or nothing, as the
+      host's. While a pixel answers at once, the checks right after a read never fail. The two
+      made a quarter second after a click can, today: Kontakt's camera, which clicked the snapshot
+      control or said "Snapshots not available" whatever had happened since, now does neither
+      once the overlay is no longer active, left the front and came back, or is on another window;
+      a `reveal` probe's settle, which asked only that the overlay was active on the same window,
+      asks the stay too (no module sets `reveal` yet). Not run on a Mac, where a calibration shot's pixels now come from
+      `pixels`' captures instead of `pixel`'s tile, both at point resolution.
+- [ ] **NVDA check of step V1 (session B, with V2 and T2)** — nothing should sound different.
+      Kontakt with a CSS library in REAPER: a hotspot toggle pressed (its state said after the
+      press, as before); the snapshot camera and its dropdown with the bar shut and open (the bar
+      opened, the snapshot menu up). ON:EAR's "Show all", Favorites and Close if a device is at
+      hand (Q3 = A: this part may stay open). In a calibrating run, a calibration shot's lines
+      name a pixel under each crosshair. Bring the log's `not clicking` and `not going on` lines:
+      with nothing waiting there should be none. A `Kontakt: not clicking the snapshot control
+      after reading the camera again` line after a press with the bar shut would mean the camera's
+      own click takes the overlay out of the front and back, or onto another window, within the
+      quarter second, and that check would then take every such press's click away.
 - [ ] **Step 12a never ran on a Mac** (type-checked only, with the ocr-bench build): the read
       thread's ladder with `counts` in place of `!on_event_loop` (the pass made only for the
       counts, the `gave up … rather than keep the reads behind it waiting` line), and ocr-bench's

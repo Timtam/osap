@@ -165,13 +165,15 @@ Memoize an expensive observation against it, so repeats within one dispatch are 
 ```luau
 local cachedEpoch, cached = -1, nil
 local function expensiveThing()
-    local e = host.epoch()
-    if e ~= cachedEpoch then
-        cached, cachedEpoch = reallyWorkItOut(), e
+    if host.epoch() ~= cachedEpoch then
+        cached = reallyWorkItOut()
+        cachedEpoch = host.epoch()   -- after the work, not before it
     end
     return cached
 end
 ```
+
+The epoch is read after the work because work that waits — a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) without a callback — lets other events turn it over meanwhile, and an answer kept under the epoch it was asked in would be worked out again at the next call.
 
 Deliberately **not** time-based, and it does not advance on an idle tick. A stale answer here means acting on the wrong screen position, and "it was fresh 50 ms ago" is not a safety property.
 
