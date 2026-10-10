@@ -4305,7 +4305,70 @@ local RECHECK_SLOW_POLL_MS = 50
 -- Set only while the poll loop runs its overlays' rechecks; see joinPoll.
 local inPoll = false
 
+-- The window in front when it is one of this application's own (its `own`), or nil: asked once
+-- per epoch for every overlay of the VM, as host.window.active() keeps its answer for the epoch
+-- anyway — so an outranked overlay, which asks nothing else, pays one comparison for it.
+local ownFront = { epoch = nil, win = false }
+local function ownInFront()
+  local e = host.epoch and host.epoch() or nil
+  if e == nil or e ~= ownFront.epoch then
+    local a = host.window.active()
+    ownFront = { epoch = e, win = (a ~= nil and a.own == true) and a or false }
+  end
+  return ownFront.win or nil
+end
+
+-- Whether one of this application's own windows has the keyboard, for an overlay the arbiter is
+-- about to bring up (_won): the window in front as ownInFront reads it, or, with no window shown in
+-- front, the one that gets the keyboard, host.window.foreground(), read afresh — the hidden window
+-- the tray icon puts in front for its menu on Windows is no window to active(). Read only there:
+-- an election is rare, and a recheck reading the foreground as well would ask the host once more
+-- at every event while nothing shown is in front.
+local function ownHasKeyboard()
+  if ownInFront() then return true end
+  if host.window.active() ~= nil then return false end
+  local read, f = pcall(host.window.foreground)
+  return read and type(f) == "table" and f.own == true
+end
+
+-- The arbiter made this overlay its slot's winner (its onActivate). Not while one of this
+-- application's own windows has the keyboard: the arbiter elects again at every report, so when
+-- the winner's recheck runs before the others' it can elect a claim whose last report, made in
+-- the other program's window, still says it matches — an overlay outranked until then skipped its
+-- rechecks — and in front of the tray's hidden window no recheck sees our window at all. Such an
+-- overlay reports that it does not match instead of coming up, and the arbiter elects again at
+-- once (its loop settles a report made inside onActivate).
+function Overlay:_won()
+  if ownHasKeyboard() then
+    self.activeCtx = false
+    self._ctxSince = nil
+    host.arbiter.setMatching(self._slot, self._claim, false)
+    return
+  end
+  self:_activate()
+end
+
 function Overlay:_recheck()
+  -- One of this application's own windows in front (`own`, which the host sets from the
+  -- window's process): the module manager, a dialog of the host's. No overlay lives there, so
+  -- nothing is asked — no context, no gate, no menu test, and nothing of the window that has
+  -- just lost the foreground, whose plug-in a context would otherwise look for again, over UIA,
+  -- while the application's own window waits for the event loop to be read. The overlay lets
+  -- go; one on a slot reports that it does not match. Before the outranked test, so a claim
+  -- outranked until now says so at its own recheck too; one the arbiter elects before that does
+  -- not come up (_won).
+  local a = ownInFront()
+  if a then
+    self.activeCtx = false
+    self._ctxSince = nil
+    if self._menu then self:_menuNotHeld(a) end
+    if self._slot then
+      host.arbiter.setMatching(self._slot, self._claim, false)
+    else
+      self:_deactivate()
+    end
+    return
+  end
   -- Nothing to learn: something at least as specific already holds the slot (see
   -- _outranked). The arbiter keeps whatever this overlay last reported, which is at most one
   -- poll interval old and is corrected the moment the winner lets go — the same contract the
@@ -4762,7 +4825,7 @@ function Overlay:_join(slot, specificity, pollMs)
       self._claim = host.arbiter.register(
         self._slot,
         self._specificity,
-        function() self:_activate() end,
+        function() self:_won() end,
         function() self:_deactivate() end
       )
       if pollMs then

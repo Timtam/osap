@@ -17,8 +17,12 @@ name = "Overlay runtime"
 # the pixels a `when` answers from, O:probe, read in the handler before a scan, and read at every
 # key after an act the module said would change them (O:expectChange) until they do; a module that
 # uses either depends on "com.platform.overlay >= 0.5". A calibrating run's menu item shot is
-# asked off the event loop, and the item is clicked once it is in.
-version = "0.5.0"
+# asked off the event loop, and the item is clicked once it is in. 0.5.1 lets go in front of one of
+# this application's own windows (a window table's `own`) and asks nothing there, not even the
+# window that lost the foreground; an overlay the arbiter elects while one of them has the keyboard
+# (host.window.foreground()'s `own` when none is shown) does not come up. Nothing a module calls is
+# new.
+version = "0.5.1"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

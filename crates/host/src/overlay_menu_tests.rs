@@ -339,14 +339,15 @@ T.host = strict("host", {
       end)
     end,
     -- The window that gets the keyboard, shown or not, read afresh on every call — never kept.
-    -- nil with nothing in front, and on a Mac while the application does not answer.
+    -- nil with nothing in front, and on a Mac while the application does not answer. `own` as the
+    -- window table says it: the host's from the process, the scenario's here.
     foreground = function()
       S.fgAsks += 1
       if S.fgRaises then error(S.fgRaises, 0) end
       if mac() and S.busy then return nil end
       local w = S.front
       if not w then return nil end
-      return { id = w.id, pid = w.app and w.app.pid, shown = not w.hidden }
+      return { id = w.id, pid = w.app and w.app.pid, shown = not w.hidden, own = w.own == true }
     end,
     -- The titled, shown top-level windows, of the given processes only when `pids` is given: an
     -- untitled window is not listed, although active() reports it.

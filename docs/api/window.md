@@ -40,6 +40,7 @@ Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, 
   id    = 0x000A12,        -- native window handle (HWND), integer
   title = "REAPER",        -- window title
   class = "REAPERwnd",     -- window class name
+  own   = false,           -- a window of this application's own process
   app = {
     name = "reaper",       -- exe stem (filename without extension)
     exe  = "reaper.exe",   -- executable file name
@@ -49,6 +50,8 @@ Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, 
   client = { x = 8, y = 31, w = 1904, h = 1001 },  -- client area (screen px)
 }
 ```
+
+`own` is `true` for a window of this application's own process — the module manager, a dialog of the host's — and `false` for every other: the host compares the window's process id with its own, on both platforms, and asks nothing else. The [overlay runtime](./overlay.md#bindings) lets go of the front on it.
 
 `client` is the window's client area in screen pixels: `x`/`y` its origin, which overlay regions are expressed relative to, and `w`/`h` its size. It is also what a window region reads: `{ window = w, fraction = { x1, y1, x2, y2 } }` is a rectangle in fractions of `client.w` and `client.h`, from `client.x` and `client.y` (see [the Region form](./screen.md#region-form)), so the table must come from `host.window`, or at least carry a `client` with those four whole numbers. Every `host.screen` and `host.ocr` call that takes a region takes that form, and [`host.screen.pixel`](./screen.md#host-screen-pixel) a point `{ window = w, fraction = { x, y } }`; an [overlay](./overlay.md) control's `region` and `ocrLabel` options take only corners, relative to the overlay's origin. The fractions resolve against the `client` the table carries at the call, never a fresh one: a table from `active()` is the one kept for the epoch (above), so in a [`host.timer.every`](./timer.md#host-timer-every) poll the rectangle is the one the window had when the epoch last turned over, and a window moved or resized since then without an event in between is read at its old place. `find` asks the operating system afresh on every call.
 
@@ -234,9 +237,9 @@ reported: it is visible to that test. An untitled window is reported too, unlike
 
 ## host.window.foreground() {#host-window-foreground}
 
-**Signature:** `host.window.foreground() -> { id: number, pid: number, shown: boolean }?`
+**Signature:** `host.window.foreground() -> { id: number, pid: number, shown: boolean, own: boolean }?`
 
-The foreground window right now, whether or not anybody can see it: its `id`, its process's `pid`, and whether it is `shown`. It is the window the keys the user presses go to, unless a hotkey or a keyboard hook takes them first — this host's captured keys among them — and apart from two platform cases: a Windows Store app, and on macOS a panel that takes the keys without its application coming to the front (see the platform sections). `nil` when there is no foreground window, or when the platform cannot say which it is.
+The foreground window right now, whether or not anybody can see it: its `id`, its process's `pid`, and whether it is `shown`. `own` says whether it is one of this application's own windows, as a [window table](#window-table)'s `own` does. It is the window the keys the user presses go to, unless a hotkey or a keyboard hook takes them first — this host's captured keys among them — and apart from two platform cases: a Windows Store app, and on macOS a panel that takes the keys without its application coming to the front (see the platform sections). `nil` when there is no foreground window, or when the platform cannot say which it is.
 
 It answers the two things [`active()`](#host-window-active) cannot. `active()` drops a window that
 is not shown, although keys still go to it — a program that hides a popup instead of closing it can

@@ -7976,10 +7976,24 @@ time limit; a module past either is stopped until the next start.
         at once): the hook comes back when the watch hears of the foreground change, so check that
         the first Tab reaches the overlay.
       - The transient causes stay open: our UIA calls into a stalled REAPER, made on the event
-        loop, prolong NVDA's freeze recoveries (and a timeout is cached as "not a Kontakt"); the
-        event loop asks the window that just lost the foreground about itself as the foreground
-        passes to our window; our image workers run at normal priority beside the screen reader's
-        hook thread.
+        loop, prolong NVDA's freeze recoveries (and a timeout is cached as "not a Kontakt"); our
+        image workers run at normal priority beside the screen reader's hook thread.
+      - Done 2026-10-10, live check open: as the foreground passes to one of our windows, an
+        overlay lets go and asks nothing there (no context, no gate, no menu test, nothing of the
+        window that lost the foreground) at that event and at every focus change inside our
+        windows after it (a window table's `own`, overlay runtime 0.5.1); an overlay the arbiter
+        elects meanwhile on a report it made in the other program's window, or while the tray's
+        hidden window has the keyboard (host.window.foreground()'s `own`), does not come up. To
+        see live: no "[recheck]", "[observe] uia..." or "[activate]" line between "[deactivate]
+        ... in front now: 'Automation Platform ...'" and the next window of another program.
+        It does NOT remove the 293 ms of 2026-10-10 (uia.findAny(Komplete Kontrol)): that recheck
+        ran in the focus dispatch one pump iteration BEFORE the "[deactivate] 'Kontakt 8' — in
+        front now: 'Automation Platform — Modules ...'" line ("[pump] ... focus-change 330"),
+        with REAPER still in front and the context matching, where nothing says yet that our
+        window is coming. It is a UIA call on the event loop like the transient cause above and
+        goes with it (UIA off the event loop; whether a window is a Komplete Kontrol, cached per
+        window). To see it live: the "[dispatch] focus" line just before that "[deactivate]"
+        line, and any "[observe] uia.findAny ... blocked the pump" before it.
 - [ ] **A key that quits the application.** Windows: Ctrl+Shift+Alt+Win+Q, beside the reload key
       (Ctrl+Shift+Win+Alt+F5). macOS: a chord of the same family, chosen with the same care as
       the reload key (Cmd+Shift+F5, see RELOAD_HOTKEY_MACOS in crates/host/src/lib.rs):

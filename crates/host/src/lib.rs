@@ -54,6 +54,10 @@ mod overlay_melodyne_tests;
 /// handler before a scan, against the same scripted host.
 #[cfg(test)]
 mod overlay_probe_tests;
+/// The overlay runtime in front of one of this application's own windows (runtime 0.5.1): it lets
+/// go and asks nothing there, against the same scripted host.
+#[cfg(test)]
+mod overlay_own_window_tests;
 /// Tasks and their two waits against a real Luau VM and a real read service over a fake
 /// recogniser.
 #[cfg(test)]
@@ -9902,6 +9906,8 @@ fn win_to_table(lua: &Lua, w: &WinInfo) -> mlua::Result<Table> {
     t.set("id", w.hwnd)?;
     t.set("title", w.title.clone())?;
     t.set("class", w.class.clone())?;
+    // A window of this application's own process: the module manager, a dialog of the host's.
+    t.set("own", is_own_process(w.pid))?;
 
     let app = lua.create_table()?;
     let name = w
@@ -9933,6 +9939,12 @@ fn win_to_table(lua: &Lua, w: &WinInfo) -> mlua::Result<Table> {
     Ok(t)
 }
 
+/// Whether process `pid` is this application's own: what a window table's and
+/// `host.window.foreground()`'s `own` say.
+fn is_own_process(pid: u32) -> bool {
+    pid == std::process::id()
+}
+
 /// `host.window.foreground()`, over whatever `read` asks — the backend in the host, a script
 /// in the tests below.
 ///
@@ -9957,6 +9969,7 @@ fn foreground_fn(lua: &Lua, read: impl Fn() -> Option<backend::Foreground> + 'st
         out.set("id", f.id)?;
         out.set("pid", f.pid)?;
         out.set("shown", f.shown)?;
+        out.set("own", is_own_process(f.pid))?;
         Ok(Some(out))
     })
 }
@@ -10008,9 +10021,47 @@ mod foreground_binding_tests {
             .unwrap();
         assert_eq!(
             seen,
-            "id,pid,shown=8327976/4242/true/boolean id,pid,shown=8327976/4242/false/boolean nil"
+            "id,own,pid,shown=8327976/4242/true/boolean id,own,pid,shown=8327976/4242/false/boolean nil"
         );
         assert_eq!(asked.get(), 3, "asked on every call");
+    }
+
+    /// `own` says whether a window is this application's own, from its process: true for this
+    /// process's id and false for any other, in a window table and in `host.window.foreground()`'s
+    /// answer alike. The overlay runtime lets go on it, asking nothing.
+    #[test]
+    fn own_says_whether_the_window_is_this_applications() {
+        let lua = Lua::new();
+        let win = |pid| WinInfo {
+            hwnd: 0x501474,
+            title: "Automation Platform — Modules".into(),
+            class: "wxWindowNR".into(),
+            pid,
+            exe: "automation-platform.exe".into(),
+            bundle_id: String::new(),
+            x: 0,
+            y: 0,
+            w: 800,
+            h: 600,
+            client_x: 8,
+            client_y: 30,
+            client_w: 784,
+            client_h: 562,
+        };
+        let me = std::process::id();
+        let other = me.wrapping_add(1);
+        assert!(win_to_table(&lua, &win(me)).unwrap().get::<bool>("own").unwrap());
+        assert!(!win_to_table(&lua, &win(other)).unwrap().get::<bool>("own").unwrap());
+        let script = Rc::new(RefCell::new(vec![
+            Some(backend::Foreground { id: 1, pid: me, shown: true }),
+            Some(backend::Foreground { id: 2, pid: other, shown: false }),
+        ]));
+        let s = script.clone();
+        let f = foreground_fn(&lua, move || s.borrow_mut().remove(0)).unwrap();
+        let first: Table = f.call(()).unwrap();
+        let second: Table = f.call(()).unwrap();
+        assert!(first.get::<bool>("own").unwrap());
+        assert!(!second.get::<bool>("own").unwrap());
     }
 
     /// The binding in `install_host_api` asks the backend's `foreground_window` and nothing
