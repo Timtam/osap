@@ -7926,6 +7926,13 @@ time limit; a module past either is stopped until the next start.
 
 ## The application's own keys, and what reload-all rereads (2026-10-10, from the maintainer)
 
+- [ ] **Kontakt's view toggle says nothing when the view has changed** (2026-10-10, the maintainer:
+      the classic view is recognised again, but switching is silent). On Windows the toggle sends
+      F10 and the overlay sees the new view only at the next key, when the ring changes without a
+      word. Say the new view once it is seen, e.g. "Classic view": after the toggle, look for the
+      change off the event loop (a probe read with a callback, once the W slices make probe reads
+      wait) and announce it in the same stay; never a timer that decides the view. Module detail,
+      after the core work.
 - [ ] **URGENT: NVDA's own key handling breaks once the user interacts with this application**
       (reported by the maintainer on 2026-10-10; it has happened for a while). After opening the tray
       menu or the module manager, NVDA no longer interrupts speech on Tab, arrow keys reach the
