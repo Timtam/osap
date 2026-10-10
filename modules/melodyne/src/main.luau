@@ -753,8 +753,13 @@ end
 -- they disagree. Every width the recogniser might hand back, and the three-hyphen form too:
 -- two Celemony figures and five pages say one dash, one English page says three, so the
 -- reference document's own instruction is to tolerate both (§7).
+--
+-- So a value is what has a letter or a digit in it — a note name, cents, decibels, a position —
+-- and nothing else is. That covers every dash above, and the recogniser catching a box while
+-- Melodyne is still drawing it: on 2026-10-10 the first frames of a stay read "† -" and then a
+-- lone dot in each box, and the dots were said, which the user heard as ", ".
 local function speakable(v)
-  return v ~= "" and v ~= "-" and v ~= "–" and v ~= "—" and v ~= "--" and v ~= "---"
+  return type(v) == "string" and v:find("%w") ~= nil
 end
 
 -- TWO reads, one per field, and one announcement.

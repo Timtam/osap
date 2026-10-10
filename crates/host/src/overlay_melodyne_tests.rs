@@ -695,6 +695,23 @@ fn a_box_that_changed_is_said_and_one_that_did_not_is_not() {
     "#);
 }
 
+/// A reading without a letter or a digit is no value: the first frames of a stay read a stray
+/// glyph beside a dash and then a lone dot in each box, and the dots were said as ", ".
+#[test]
+fn a_reading_without_a_letter_or_a_digit_is_not_said() {
+    run(r#"
+        local S = T.S
+        T.watching("† -", "")
+        local said = #S.speech
+        T.watch()
+        T.boxes(".", ".")
+        T.ok(#S.speech == said, "nothing said for two dots: " .. T.said(said + 1))
+        T.watch()
+        T.boxes("A4", "+0 ct")
+        T.ok(T.said(said + 1) == "A4, +0 ct", T.said(said + 1))
+    "#);
+}
+
 /// One read out at a time: a tick while the last read is out asks nothing; once it has answered,
 /// the next tick asks again.
 #[test]
