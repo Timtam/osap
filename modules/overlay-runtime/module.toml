@@ -13,8 +13,12 @@ name = "Overlay runtime"
 # begun; a module that uses either depends on "com.platform.overlay >= 0.4.1". 0.4.2 checks that
 # the overlay is still where a press was made before it clicks after reading a pixel (a hotspot
 # toggle, a panel's reveal), reads a calibration shot's pixels in one read, and keeps an
-# O.memoByEpoch answer under the epoch it was given in. Nothing a module calls is new.
-version = "0.4.2"
+# O.memoByEpoch answer under the epoch it was given in. Nothing a module calls is new. 0.5.0 holds
+# the pixels a `when` answers from, O:probe, read in the handler before a scan, and read at every
+# key after an act the module said would change them (O:expectChange) until they do; a module that
+# uses either depends on "com.platform.overlay >= 0.5". A calibrating run's menu item shot is
+# asked off the event loop, and the item is clicked once it is in.
+version = "0.5.0"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

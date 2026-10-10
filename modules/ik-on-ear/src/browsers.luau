@@ -600,11 +600,7 @@ local function chooser(spec)
   local TILE_EDGE_DX = -81 -- one pixel inside the left border, from the tile's centre
   local GROUND_NEAR, EDGE_FAR = 8, 30
 
-  local function tileFilled(tx, ty)
-    local x, y = b:toScreen(tx + TILE_EDGE_DX, ty)
-    if not x then return true end
-    local q = host.screen.pixel(x, y)
-    if not q then return true end
+  local function edgeAt(q)
     local d = math.abs(q.r - TILE_OFF[1]) + math.abs(q.g - TILE_OFF[2]) + math.abs(q.b - TILE_OFF[3])
     if d > EDGE_FAR then return true end
     if d < GROUND_NEAR then return false end
@@ -633,17 +629,18 @@ local function chooser(spec)
     return spec.tiles.rows[r] + gridShift
   end
 
-  -- HOW MANY positions hold anything, asked once per epoch and in as few screen touches as
-  -- possible.
+  -- HOW MANY positions hold anything, from one PROBE over every position's left border (O:probe).
   --
-  -- A pixel read is a GDI screen touch costing a fixed ~16.7 ms whatever it reads — one
-  -- compositor frame — and this project has measured that before. Fifteen of them, which is
-  -- what a per-tile `when` would cost, is a quarter of a second added to every Tab, and
-  -- getting a quarter of a second OFF each Tab was a whole afternoon earlier in this file.
+  -- A `when` asks it for every tile on every Tab, and a `when` must not read the screen: it runs
+  -- where nothing can wait. So the overlay runtime reads the probe in the handler before a scan —
+  -- every border in one capture, about one compositor frame (~16.7 ms), where the halving this
+  -- replaced read up to five pixels one at a time — and on EVERY Tab (`everyEpoch`), not only
+  -- after something acted. The user's own typing refills the grid: the caret stays in the search
+  -- field while the Tab ring moves on, and keys typed there turn over no input epoch. A count kept
+  -- from before them would hide the speakers a broader search brings back, with no symptom at all.
   --
-  -- A grid fills in order, so the answer is one number and it can be found by halving. The
-  -- last position is checked first because the ordinary case is a full grid, and that case
-  -- then costs a single read; only a filtered grid pays the four.
+  -- A grid fills in order, so the answer is the last position with a border. Until the probe has
+  -- been read every position is offered, the same direction as the reading above.
   local tileCount = #spec.tiles.cols * #spec.tiles.rows
 
   local function tileAt(i)
@@ -652,27 +649,32 @@ local function chooser(spec)
     return spec.tiles.cols[c], rowY(r)
   end
 
-  local lastFilled = nil
-  local filledCount = O.memoByEpoch(function()
-    if tileFilled(tileAt(tileCount)) then
-      return tileCount
+  local tiles = b:probe("tiles", function()
+    local points = {}
+    for i = 1, tileCount do
+      local tx, ty = tileAt(i)
+      local x, y = b:toScreen(tx + TILE_EDGE_DX, ty)
+      if not x then return nil end
+      points[i] = { x, y }
     end
-    local lo, hi = 0, tileCount -- lo is known filled (or none), hi known empty
-    while hi - lo > 1 do
-      local mid = (lo + hi) // 2
-      if tileFilled(tileAt(mid)) then
-        lo = mid
-      else
-        hi = mid
+    return points
+  end, { read = function(colours, last)
+    local n = 0
+    for i = #colours, 1, -1 do
+      if edgeAt(colours[i]) then
+        n = i
+        break
       end
     end
-    if lo ~= lastFilled then
-      lastFilled = lo
-      host.log.info(("[on-ear] %s: %d of %d positions hold a speaker")
-        :format(spec.name, lo, tileCount))
+    if n ~= last then
+      host.log.info(("[on-ear] %s: %d of %d positions hold a speaker"):format(spec.name, n, tileCount))
     end
-    return lo
-  end)
+    return n
+  end, everyEpoch = true })
+
+  local function filledCount()
+    return tiles() or tileCount
+  end
 
   -- What the list shows now, for the scroller to report: the name in its first row.
   -- A row's own child, and only that. Matching on position alone picked up the list's

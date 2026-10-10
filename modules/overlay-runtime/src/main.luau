@@ -240,8 +240,11 @@ end
 -- its own Tab's scan. So those run in a coroutine of the runtime's own, where a host wait cannot
 -- stop the handler: one coroutine for a whole pass over them — a scan for the next control, a
 -- menu tick's questions — and each hook inline inside it. host.ocr.recognize without a callback
--- finds itself "in a coroutine the module made" there; with a callback, like a pixel, a snapshot
--- or an image search, it is fine. A hook that yields there anyway is ended, with an error the
+-- finds itself "in a coroutine the module made" there, and raises; with a callback it is fine.
+-- Nor does such a hook read the screen: a host.screen call that captures is to wait where it can,
+-- and could not wait there. What a `when` needs of the screen is a PROBE of its overlay, which the
+-- runtime reads in the handler before a scan, and the `when` answers from that reading (see
+-- Overlay:probe, below O.memoByEpoch). A hook that yields there anyway is ended, with an error the
 -- caller's guard logs — a menu test's alone (see _menuAsk); a `when`'s ends the scan it was in.
 --
 -- The overlay's origin is resolved BEFORE a pass, outside it: a stored `identify` asked for a new
@@ -254,6 +257,10 @@ end
 -- so a test can hold a scan to one.
 local passDepth = 0
 local passesMade = 0
+
+-- Reads overlay `o`'s probes whose key has changed, where the handler can wait; set in the
+-- Probes section, below O.memoByEpoch.
+local freshenProbes
 
 -- Runs fn(...) in a pass of its own, even inside another: a coroutine of the runtime's, where a
 -- host wait cannot stop the module's handler. For a hook known to yield (a menu test, see
@@ -285,9 +292,18 @@ local function originFirst(o)
   if passDepth == 0 and o.active then pcall(o.origin, o) end
 end
 
--- One pass over the hooks asked on every scan: the overlay's origin first, outside the pass,
--- then `fn(...)` in the pass.
+-- One pass over the hooks asked on every scan: the overlay's origin first, outside the pass, then
+-- its probes (they need the origin), then `fn(...)` in the pass.
 local function scanPass(self, fn, ...)
+  originFirst(self)
+  freshenProbes(self)
+  return noWait(fn, ...)
+end
+
+-- The same without the probes, for the menu tests' rounds: they come on the menu tick's own clock
+-- or with a window event, not after the overlay acted, and a probe read then could be of a screen
+-- not redrawn yet (see the Probes section).
+local function originPass(self, fn, ...)
   originFirst(self)
   return noWait(fn, ...)
 end
@@ -3363,13 +3379,19 @@ end
 --     stays active when focus moves to another matching plugin window, so a winner
 --     frozen at registration would go stale (Alt+M would keep firing Komplete Kontrol's
 --     menu after focus moved to a bare Kontakt).
--- Re-run whenever the visible set can have changed: a tab switch (see selectTab) and a
--- change of coordinate origin (see _recheck).
+-- Re-run whenever the visible set can have changed: a tab switch (see selectTab), a
+-- change of coordinate origin (see _recheck) and a probe reading that changed (see the
+-- Probes section).
 function Overlay:_syncControlHotkeys()
   -- While a plug-in menu is open this overlay owns no keys at all (see
   -- _suspendControlHotkeys), and a re-sync from any other cause must not quietly take them
   -- back — a tab switch or an origin change while a menu is up would otherwise undo it.
   if self._hotkeysSuspended then return end
+  -- The probes first, where the handler can wait: a reading that changed asks for this very sync
+  -- (see the Probes section), and asked from the claimants' scans below it would run inside it.
+  -- An overlay taken out of the front while its read waited has had its keys taken already.
+  freshenProbes(self, true)
+  if not self.active then return end
   for _, id in ipairs(self.controlHotkeys or {}) do
     host.hotkey.unregister(id)
   end
@@ -4168,7 +4190,9 @@ function Overlay:_activate()
       end
       -- Queued, not interrupting: see `speakControl`. Nobody pressed a key to hear this.
       if self.active then
-        -- Again, for a view that changed during the delay.
+        -- Again, for a view that changed during the delay. On a slot this is the first scan in a
+        -- handler since the overlay came forward, so its probes are read here: the arbiter's call
+        -- that brought it forward could not wait for them (see the Probes section).
         if self:_refocusIfHidden() then self:_syncNativeKeys() end
         if self.focus > 0 then speakControl(self, self.focus, false, false, true) end
       end
@@ -4927,6 +4951,333 @@ function O.memoByEpoch(fn)
     end
     return v
   end
+end
+
+-- ── Probes: the pixels a `when` answers from ─────────────────────────────────
+-- A `when` is asked for every control on every scan, in the runtime's own coroutine, where the
+-- handler cannot wait (see "Where a hook runs"). It must not read the screen there: a host.screen
+-- call that captures is to wait for its picture, and there it could not. Yet a plug-in's view is
+-- often told by a pixel — Kontakt's classic view, ON:EAR's filled tiles, ReaHotkey's
+-- PixelGetColor in every visibility check. So the overlay holds those pixels as PROBES: the module
+-- declares the points, and the runtime reads every probe of the overlay that is due in one
+-- host.screen.pixels, in the handler, before a scan — a Tab's, a press's, a hotkey's claimants', the
+-- check 350 ms after the overlay came to the front. The `when` then answers from the reading.
+--
+-- A probe is due when its KEY has changed since it was last read: the window the overlay is on,
+-- host.inputEpoch() — which our own input, a window coming forward and a controller press turn
+-- over, and the user's keys do not — the state generation, which the check 250 ms after an
+-- overlay came to the front turns over (see CONFIRM_DELAY), and the points themselves. So a Tab
+-- after an act reads once and Tabs in a row read nothing, as Kontakt's view probe did by hand. A
+-- probe declared `everyEpoch` is due in every epoch as well, for what the user's own keys change:
+-- one capture per Tab, as ON:EAR's grid count cost before it was a probe.
+--
+-- Once per act is a reading of the screen as it is at the first key after the act, and a plug-in
+-- may not have redrawn by then: Kontakt's view after its F10, which a Tab straight after the press
+-- read before Kontakt had, and kept until the next act (NVDA session, 2026-10-10). Only the module
+-- knows which of its acts change what a probe shows, so it says so — O:expectChange, before the
+-- act — and until a reading kept of one of the probes it named differs from what that probe held
+-- at the call, each of them is due in every epoch, as an `everyEpoch` probe is. The redraw is
+-- waited for by reading again at each key, not by any time: a key that comes before it reads the
+-- view before, and the next key reads again. Once the change is read, Tabs in a row read nothing
+-- again. A change expected on one window is not looked for on another.
+--
+-- Never read on the menu tick, whatever it asks — a menu test, a recheck, the hotkeys taken back
+-- as a menu closes: it comes on its own clock, and a reading it took a few milliseconds after
+-- Kontakt's F10, before Kontakt redrew, would stand as fresh until the next act. Nor in what a
+-- menu test's answer or the menu item shot's answer goes on to do when it comes in a callback of
+-- its own — an item clicked and its pick's onDone, the hotkeys taken back — which is the tick's
+-- work done a little later (asMenuTick). The next handler that scans reads it, as Kontakt's own
+-- probe did. Where nothing can wait — the arbiter's call that brings the overlay to the front —
+-- nothing is read either: the last reading stands, and the check 350 ms later reads and corrects
+-- it before the arrival is said.
+--
+-- `read(colours, last, points)` says what a reading means; nil is a reading it does not
+-- recognise, which is not kept: the last value stands, and the probe is read again at the first
+-- scan of a later epoch — not again in the same one, so a covered plug-in costs one capture per
+-- key, not one per hook. A value that changed asks the hotkeys to be synced again, since the
+-- controls that claim them may have shown or hidden.
+
+-- A probe's `read` is running, or the menu tick is: readers answer what stands, and read nothing.
+local probing = false
+local menuTicking = false
+
+-- Whether a probe may be read here: in a handler, outside every pass, where the handler can wait,
+-- and not on the menu tick.
+local function mayReadProbes()
+  return passDepth == 0 and not probing and not menuTicking and coroutine.isyieldable()
+end
+
+-- Runs fn(...) as the menu tick's work, with no probe read in it: the tick itself, and a menu
+-- test's answer or the menu item shot's answer that comes in a callback of its own.
+local function asMenuTick(fn, ...)
+  local was = menuTicking
+  menuTicking = true
+  local ok, err = pcall(fn, ...)
+  menuTicking = was
+  if not ok then error(err, 0) end
+end
+
+-- Whether two values of a probe are the same: equal, or two lists of colours with the same
+-- channels at every place.
+local function sameReading(a, b)
+  if a == b then return true end
+  if type(a) ~= "table" or type(b) ~= "table" or #a ~= #b then return false end
+  for i = 1, #a do
+    local x, y = a[i], b[i]
+    if type(x) ~= "table" or type(y) ~= "table" or x.r ~= y.r or x.g ~= y.g or x.b ~= y.b then
+      return false
+    end
+  end
+  return true
+end
+
+-- Probe `p`'s points on screen now, each rounded to the nearest whole pixel, or nil when they
+-- cannot be placed now: no origin, no scale factor, or a function that answered none.
+local function placeProbe(self, p)
+  local pts = p.points
+  if type(pts) == "function" then
+    pts = pts(self)
+    if type(pts) ~= "table" then return nil end
+  end
+  local out = {}
+  for i, q in ipairs(pts) do
+    if type(q) ~= "table" or type(q[1]) ~= "number" or type(q[2]) ~= "number" then return nil end
+    local x, y = q[1], q[2]
+    if type(p.points) ~= "function" then
+      x, y = placePoint(self, p.place, x, y)
+      if x == nil then return nil end
+    end
+    out[i] = { math.floor(x + 0.5), math.floor(y + 0.5) }
+  end
+  return out
+end
+
+-- The same, guarded: a points function that raises, or a frame function that raises as a list is
+-- placed, reads nothing and is said once per message, rather than end the scan it was asked before.
+local function probePoints(self, p)
+  local ok, v = pcall(placeProbe, self, p)
+  if ok then return v end
+  if p.saidPoints ~= tostring(v) then
+    p.saidPoints = tostring(v)
+    host.log.info(("[probe] '%s' '%s': its points raised: %s — not read")
+      :format(tostring(self.label), p.name, tostring(v)))
+  end
+  return nil
+end
+
+-- An expected change done with (O:expectChange): read, or looked for on another window. Each probe
+-- named with it that has not been named in a later one since stops expecting.
+local function endExpecting(x)
+  for p in pairs(x.from) do
+    if p.expecting == x then p.expecting = nil end
+  end
+end
+
+freshenProbes = function(self, noSync)
+  local probes = self._probes
+  if not probes or not self.active or not mayReadProbes() then return end
+  -- Guarded, as originFirst is: an origin that raises reads nothing here, and is raised again
+  -- inside the hook that asks it, and logged there, rather than end the Tab that scans.
+  local okOrigin, o = pcall(self.origin, self)
+  if not okOrigin or not o then return end
+  local base = tostring(o.id) .. "@" .. tostring(host.inputEpoch()) .. "/" .. tostring(stateGen)
+  local epoch = host.epoch()
+  -- A change expected on another window is not this one's to show.
+  for _, p in ipairs(probes) do
+    local x = p.expecting
+    if x and x.at ~= nil and x.at ~= tostring(o.id) then endExpecting(x) end
+  end
+  local due, all = {}, {}
+  for _, p in ipairs(probes) do
+    local pts = probePoints(self, p)
+    if pts then
+      local at = {}
+      for i, q in ipairs(pts) do at[i] = q[1] .. "," .. q[2] end
+      local plain = base .. "|" .. table.concat(at, " ")
+      local key = plain
+      -- `everyEpoch`, or a change expected and not read yet: due again in every epoch.
+      if p.everyEpoch or p.expecting then key = plain .. "#" .. tostring(epoch) end
+      if key ~= p.key and p.tried ~= key .. "#" .. tostring(epoch) then
+        due[#due + 1] = { p = p, points = pts, key = key, plain = plain, from = #all + 1 }
+        for _, q in ipairs(pts) do all[#all + 1] = q end
+      end
+    end
+  end
+  if #due == 0 then return end
+  -- One read for every point that is due, in the order the probes were declared. Where the overlay
+  -- is, first: once host.screen.pixels waits, the arbiter can take the overlay out of the front
+  -- while its handler waits, and a reading of the window it left is kept under no key and registers
+  -- no hotkey.
+  local okMark, mark = pcall(self.here, self)
+  if not okMark then return end
+  local colours, why = {}, nil
+  if #all > 0 then
+    local ok, got, reason = pcall(host.screen.pixels, all)
+    if not ok then
+      why = tostring(got)
+    elseif got == nil then
+      why = tostring(reason)
+    else
+      colours = got
+    end
+  end
+  if why then
+    if self._probesFailed ~= why then
+      self._probesFailed = why
+      host.log.info(("[probe] '%s': %d probe(s) not read — %s"):format(tostring(self.label), #due, why))
+    end
+    for _, d in ipairs(due) do d.p.tried = d.key .. "#" .. tostring(epoch) end
+    return
+  end
+  local okStill, still, moved = pcall(stillHereAt, self, mark)
+  if not (okStill and still) then
+    host.log.info(("[probe] '%s': %d probe(s) read and not kept — %s"):format(tostring(self.label),
+      #due, okStill and tostring(moved) or tostring(still)))
+    return
+  end
+  self._probesFailed = nil
+  -- Each probe's value is set before the next one's `read` runs, so a `read` may ask an earlier
+  -- probe's reader what it holds now.
+  local changed, seen = false, {}
+  probing = true
+  for _, d in ipairs(due) do
+    local p = d.p
+    local mine = table.move(colours, d.from, d.from + #d.points - 1, 1, {})
+    local value = mine
+    if p.read then
+      local ok, v = pcall(p.read, mine, p.value, d.points)
+      if ok then
+        value = v
+      else
+        value = nil
+        if not p.saidRaise then
+          p.saidRaise = true
+          host.log.info(("[probe] '%s' '%s': its read raised: %s — the last value stands")
+            :format(tostring(self.label), p.name, tostring(v)))
+        end
+      end
+    end
+    if value == nil then
+      p.tried = d.key .. "#" .. tostring(epoch)
+    else
+      if not sameReading(value, p.value) then changed = true end
+      p.value, p.key, p.tried = value, d.key, nil
+      local x = p.expecting
+      if x and not sameReading(value, x.from[p].value) then seen[#seen + 1] = x end
+    end
+  end
+  probing = false
+  -- The change expected is read: every probe named with it is due again only when its key changes,
+  -- and one read in this capture stands under its key without the epoch, so the next Tab reads
+  -- nothing.
+  for _, x in ipairs(seen) do endExpecting(x) end
+  for _, d in ipairs(due) do
+    local p = d.p
+    if p.key == d.key and not p.everyEpoch and not p.expecting then p.key = d.plain end
+  end
+  if changed and not noSync and self.active then self:_syncControlHotkeys() end
+end
+
+-- A PROBE of this overlay: points read for its `when`s, and what they mean. Returns its reader,
+-- `reader() -> value?`. See the section above, and docs/api/overlay.md#o-probe.
+--
+--   name      names it in the log, and once per overlay
+--   points    { {x, y}, … } in the overlay's own coordinates, placed as O:toScreen places them
+--             (`opts.rawOrigin` as a rawOrigin control's), or function(overlay) -> { {x, y}, … }?
+--             in screen coordinates; nil from it is "cannot be placed now"
+--   opts      read = function(colours, last, points) -> value?, rawOrigin = true,
+--             everyEpoch = true: due in every epoch as well, for what the user's own keys change —
+--             typing into the plug-in's search field refills ON:EAR's grid, and turns over no
+--             inputEpoch — at one capture per Tab
+--
+-- Declared before the overlay is bound, as a control is: the binding is what starts the scans.
+function Overlay:probe(name, points, opts)
+  assertUnbound(self, "probe")
+  local who = tostring(self.label)
+  if type(name) ~= "string" or name == "" then
+    error(("overlay '%s': probe takes a name, got %s"):format(who, type(name)), 2)
+  end
+  for _, p in ipairs(self._probes or {}) do
+    if p.name == name then
+      error(("overlay '%s': a probe named '%s' is declared already"):format(who, name), 2)
+    end
+  end
+  if type(points) == "table" then
+    for i, q in ipairs(points) do
+      if type(q) ~= "table" or type(q[1]) ~= "number" or type(q[2]) ~= "number" then
+        error(("overlay '%s': probe '%s': points[%d] is not {x, y}"):format(who, name, i), 2)
+      end
+    end
+  elseif type(points) ~= "function" then
+    error(("overlay '%s': probe '%s' takes a list of {x, y} or a function, got %s")
+      :format(who, name, type(points)), 2)
+  end
+  if opts ~= nil and type(opts) ~= "table" then
+    error(("overlay '%s': probe '%s': its options are a table, got %s"):format(who, name, type(opts)), 2)
+  end
+  for k, v in pairs(opts or {}) do
+    if k == "read" then
+      if type(v) ~= "function" then
+        error(("overlay '%s': probe '%s': read is a function, got %s"):format(who, name, type(v)), 2)
+      end
+    elseif k ~= "rawOrigin" and k ~= "everyEpoch" then
+      error(("overlay '%s': probe '%s' has no option '%s' (it has read, rawOrigin and everyEpoch)")
+        :format(who, name, tostring(k)), 2)
+    end
+  end
+  local p = {
+    name = name,
+    points = points,
+    read = opts and opts.read,
+    place = (opts and opts.rawOrigin) and { rawOrigin = true } or nil,
+    everyEpoch = opts ~= nil and opts.everyEpoch == true,
+    value = nil, -- what the last kept reading says
+    key = nil,   -- the key it was read under
+    tried = nil, -- "<key>#<epoch>" of a reading not kept, or of a read that failed
+    expecting = nil, -- the change O:expectChange said is coming, until it is read
+  }
+  self._probes = self._probes or {}
+  self._probes[#self._probes + 1] = p
+  return function()
+    if mayReadProbes() then freshenProbes(self) end
+    return p.value
+  end
+end
+
+-- What the module is about to do will change what the probes named show: a view toggle's key, a
+-- click that opens a panel. Until a reading kept of one of them differs from what it holds now,
+-- each of them is due in every epoch — read at each key of the overlay's, not only at the first
+-- after the act — so a plug-in that redraws after that key has come is read at the next. Then
+-- each is due again only when its key changes. See the Probes section, and
+-- docs/api/overlay.md#o-expectchange.
+--
+-- It reads nothing: what a probe holds at the call is what a later reading must differ from, so it
+-- is called before the act, or in the same handler right after it. A probe named again in a later
+-- call takes the later one's. Gone when the overlay is on another window than at the call.
+function Overlay:expectChange(...)
+  local who = tostring(self.label)
+  local n = select("#", ...)
+  if n == 0 then
+    error(("overlay '%s': expectChange takes the names of one or more of its probes"):format(who), 2)
+  end
+  local byName = {}
+  for _, p in ipairs(self._probes or {}) do byName[p.name] = p end
+  local x = { from = {} }
+  for i = 1, n do
+    local name = select(i, ...)
+    if type(name) ~= "string" then
+      error(("overlay '%s': expectChange takes probe names, got %s"):format(who, type(name)), 2)
+    end
+    local p = byName[name]
+    if not p then
+      error(("overlay '%s': expectChange: no probe named '%s'"):format(who, name), 2)
+    end
+    x.from[p] = { value = p.value }
+  end
+  -- The window it is expected on: an origin that raises, or none, looks for it on any.
+  local ok, o = pcall(self.origin, self)
+  x.at = ok and o and o.id ~= nil and tostring(o.id) or nil
+  for p in pairs(x.from) do p.expecting = x end
 end
 
 -- ── Bindings ─────────────────────────────────────────────────────────────────
@@ -6292,7 +6643,8 @@ function Overlay:_menuAsk(t)
     answered = true
     if t.asking ~= q then return end -- asked before the overlay left the front
     t.asking = nil
-    self:_menuAnswer(t, v ~= nil and v ~= false, v)
+    -- As on the tick, whenever the answer comes: no probe is read in what it goes on to do.
+    asMenuTick(self._menuAnswer, self, t, v ~= nil and v ~= false, v)
   end
   local function failed(err)
     if not t.saidFailed then
@@ -6342,7 +6694,7 @@ end
 -- own when a window event asks it (_menuHold, _menuKeysBack).
 function Overlay:_menuRound(now, tick)
   if passDepth == 0 then
-    local ok, err = pcall(scanPass, self, self._menuRound, self, now, tick)
+    local ok, err = pcall(originPass, self, self._menuRound, self, now, tick)
     if not ok and not menuPassEnded(err) then error(err, 0) end
     return
   end
@@ -6380,7 +6732,7 @@ function Overlay:_menuRound(now, tick)
   end
 end
 
-local function menuTickFn()
+local function menuTickBody()
   menuTick += 1
   local anyActive = false
   for _, o in ipairs(menuWatched) do
@@ -6454,6 +6806,11 @@ local function menuTickFn()
     end
   end
   applyMenuState()
+end
+
+-- The tick, with no probe read anywhere in it (see the Probes section).
+local function menuTickFn()
+  asMenuTick(menuTickBody)
 end
 
 -- Runs `tests` for this overlay — what `menus = { … }` on a binding does. Returns the overlay.
@@ -6790,6 +7147,8 @@ function Overlay:_pickSeen(t, value)
   local c = p.c
   local m = menuRectOf(value)
   if p.clicked then return self:_pickFollow(t, m) end
+  -- The menu item shot is being taken, and the item is clicked once it is in (_pickShot).
+  if p.shooting then return end
   if not m then
     -- nativePopup and the accessibility tests say only "a menu is open": nowhere to place an
     -- item. Another test on the list may say where; this one's word is noted once.
@@ -6850,23 +7209,41 @@ function Overlay:_pickSeen(t, value)
   local covered, checked = self:_pickCovered(c, m, x, y)
   if covered == "refused" then return self:_pickEnd("refused", "refused, and said") end
   if covered then return self:_pickEnd("covered", covered) end
-  -- In a calibrating run, the menu with a crosshair on the item, before the click takes it away.
-  local writeShot = p.shoot and self:_pickShot(c, m, x, y) or nil
-  host.log.info((PICK_LOG .. "— test '%s' sees the menu at %s%s (%s); choosing item (%s,%s) at "
-    .. "(%d,%d)"):format(tostring(self.label), tostring(c.label), t.name, where,
-    m.kind == "window" and (" (window id " .. tostring(m.id) .. ")") or "", checked,
-    tostring(item[1]), tostring(item[2]), x, y))
-  host.input.click(x, y)
-  -- Written on a later pass: a PNG takes the event loop for hundreds of milliseconds in a debug
-  -- build, and the click is what the user is waiting for.
-  if writeShot then host.timer.after(0, writeShot) end
-  if p.retries <= 0 then
-    -- Not followed (`retries = 0`): chosen at its click.
-    self._pick = nil
-    self:_pickDone(p, true, nil)
-    return
+  -- `between`: clicked between two ticks, in the item shot's answer — the next tick is then the
+  -- click's own, as a pass's tick is for a click made in it, so the menu has a whole tick to take it
+  -- before a test's answer can count against it (_pickFollow).
+  local function choose(how, between)
+    host.log.info((PICK_LOG .. "— test '%s' sees the menu at %s%s (%s); choosing item (%s,%s) at "
+      .. "(%d,%d)"):format(tostring(self.label), tostring(c.label), t.name, where,
+      m.kind == "window" and (" (window id " .. tostring(m.id) .. ")") or "", how,
+      tostring(item[1]), tostring(item[2]), x, y))
+    host.input.click(x, y)
+    if p.retries <= 0 then
+      -- Not followed (`retries = 0`): chosen at its click.
+      self._pick = nil
+      self:_pickDone(p, true, nil)
+      return
+    end
+    p.clicked = { x = x, y = y, menu = m, tick = menuTick + (between and 1 or 0), clicks = 1 }
   end
-  p.clicked = { x = x, y = y, menu = m, tick = menuTick, clicks = 1 }
+  if not p.shoot then return choose(checked) end
+  -- In a calibrating run, the menu with a crosshair on the item, before the click takes it away:
+  -- its picture is asked off the event loop, and the item is clicked once it is in — if the pick
+  -- still waits for it, the overlay is still on its window and nothing covers the item, the checks
+  -- a click made again after a tick gets (_pickFollow).
+  p.shooting = true
+  self:_pickShot(c, m, x, y, function(write)
+    -- Written on a later pass, the click made or not: a PNG takes the event loop for hundreds of
+    -- milliseconds in a debug build, and the click is what the user is waiting for.
+    host.timer.after(0, write)
+    if self._pick ~= p then return end
+    p.shooting = nil
+    if not self.active or self:hwnd() ~= p.pinned then return self:_pickEnd("moved") end
+    local again, how = self:_pickCovered(c, m, x, y)
+    if again == "refused" then return self:_pickEnd("refused", "refused, and said") end
+    if again then return self:_pickEnd("covered", again) end
+    choose(how, true)
+  end)
 end
 
 -- An answer after the item's click, `m` its rectangle or nil (step 5). The same menu, on a
@@ -7724,28 +8101,35 @@ end
 -- shots' later two come after the click has closed the menu, and the calibration shot is of the
 -- plug-in, with no menu open. What a tester sends back so an item offset can be measured.
 --
--- The capture is made here, before the click — one snapshot — and the PNG is written by the
--- function returned, which the caller runs on a later pass, after the click.
-function Overlay:_pickShot(c, m, x, y)
+-- The capture is asked for here — one snapshotAsync, since the menu tick's pass that sees the menu
+-- cannot wait for a picture — and `andThen(write)` runs in its answer, or at once when it cannot be
+-- asked: the caller clicks the item there, after the picture, and runs `write`, which writes the
+-- PNG, on a later pass.
+function Overlay:_pickShot(c, m, x, y, andThen)
   local who, what = tostring(self.label), tostring(c and c.label or "control")
   local pad = 12
   local region = { m.x - pad, m.y - pad, m.x + m.w + pad, m.y + m.h + pad }
-  local fine, snap, why = pcall(host.screen.snapshot, { region = region })
-  if not fine then snap, why = nil, snap end
   local stem = shotPath(who .. "-" .. what, "-menu-item")
-  return function()
-    local path = host.path("calibration/" .. stem .. "-menu-item.png")
-    local ok = false
-    if snap then
-      local okc, saved, reason = pcall(host.screen.saveMarked, path,
-        { snapshot = snap, marks = { { x = x, y = y } } })
-      ok, why = okc and saved == true, okc and reason or saved
-      pcall(snap.release, snap)
+  local function writer(snap, why)
+    return function()
+      local path = host.path("calibration/" .. stem .. "-menu-item.png")
+      local ok = false
+      if snap then
+        local okc, saved, reason = pcall(host.screen.saveMarked, path,
+          { snapshot = snap, marks = { { x = x, y = y } } })
+        ok, why = okc and saved == true, okc and reason or saved
+        pcall(snap.release, snap)
+      end
+      host.log.info(("[calibrate] '%s' '%s': menu item shot, (%d,%d)-(%d,%d), the item marked at "
+        .. "(%d,%d) -> %s (%s)"):format(who, what, region[1], region[2], region[3], region[4], x, y,
+        path, ok and "true" or ("false: " .. tostring(why or "no reason given"))))
     end
-    host.log.info(("[calibrate] '%s' '%s': menu item shot, (%d,%d)-(%d,%d), the item marked at "
-      .. "(%d,%d) -> %s (%s)"):format(who, what, region[1], region[2], region[3], region[4], x, y,
-      path, ok and "true" or ("false: " .. tostring(why or "no reason given"))))
   end
+  local asked, err = pcall(host.screen.snapshotAsync, { region = region }, function(snap, why)
+    -- The pass's work, a little later: no probe is read in it, nor in the pick's onDone at the click.
+    asMenuTick(andThen, writer(snap, why))
+  end)
+  if not asked then andThen(writer(nil, err)) end
 end
 
 -- Crops `size` pixels around the FOCUSED control and writes it as a template. The size a

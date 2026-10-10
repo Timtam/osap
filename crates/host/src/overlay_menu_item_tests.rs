@@ -746,20 +746,30 @@ fn a_menu_item_with_no_tests_is_reported_and_opens_nothing() {
 }
 
 /// In a calibrating run the item is photographed with its menu, a crosshair on the point about to
-/// be clicked: one snapshot before the click, the PNG written after it.
+/// be clicked: the picture is asked off the event loop on the tick a test sees the menu — that pass
+/// cannot wait for it — and the item is clicked in its answer, after it; the PNG is written on the
+/// pass after that. A retry is not photographed again.
 #[test]
-fn the_menu_item_shot_is_taken_before_the_click_and_written_after_it() {
+fn the_menu_item_shot_is_asked_off_the_loop_and_the_item_clicked_once_it_is_in() {
     run(r##"
         local S = T.S
         T.calibrate(true)
         local o = T.header({ T.O.menuTests.newWindow })
         T.press(o)
-        local snaps = S.snaps
+        local snaps, asked = S.snaps, #S.asyncs
         T.popup(300, 362, 80, 120, 200)
         T.tick(1)
-        assert(S.snaps == snaps + 1, "one snapshot for the item")
+        assert(S.snaps == snaps, "no picture taken on the event loop")
+        assert(#S.asyncs == asked + 1, "one picture asked for the item: " .. #S.asyncs - asked)
+        local r = S.asyncs[#S.asyncs]
+        assert(r.region[1] == 350 and r.region[2] == 68 and r.region[3] == 494 and r.region[4] == 292,
+          "the menu, 12 round")
+        assert(#S.clicks == 1, "the item waits for its picture: " .. T.clickAt(2))
+        T.tick(1)
+        assert(#S.clicks == 2 and T.clickAt(2) == "372,100", "clicked once the picture is in: " .. T.clickAt(2))
         local i = #S.order
-        assert(S.order[i] == "click" and S.order[i - 1] == "snapshot", table.concat(S.order, " "))
+        while S.order[i] ~= "click" do i -= 1 end
+        assert(S.order[i - 1] == "snapshotAsync", table.concat(S.order, " "))
         T.runDue()
         local shot
         for _, s in ipairs(S.shots) do
@@ -772,8 +782,30 @@ fn the_menu_item_shot_is_taken_before_the_click_and_written_after_it() {
         assert(T.count("[calibrate] 'Avenger' 'Load preset': menu item shot, (350,68)-(494,292), "
           .. "the item marked at (372,100) -> C:/modules/overlay-runtime/calibration/Avenger-Load-preset-menu-item.png (true)") == 1, T.dump())
         -- A retry is not photographed again.
+        asked = #S.asyncs
         T.tick(1)
-        assert(S.snaps == snaps + 1, "one shot per press")
+        assert(#S.clicks == 3 and #S.asyncs == asked and S.snaps == snaps, "one shot per press")
+    "##);
+}
+
+/// The overlay leaves the front while the item's picture is being taken: the pick is over, and the
+/// answer clicks nothing — the picture is still written, the crosshair where the item would have been.
+#[test]
+fn an_item_whose_pick_ended_while_its_picture_was_taken_is_not_clicked() {
+    run(r##"
+        local S = T.S
+        T.calibrate(true)
+        local o = T.header({ T.O.menuTests.newWindow })
+        T.press(o)
+        T.popup(300, 362, 80, 120, 200)
+        T.tick(1)
+        assert(#S.clicks == 1, "the opener only")
+        o:_deactivate()
+        T.tick(2)
+        assert(#S.clicks == 1, "an item clicked after the overlay left: " .. T.clickAt(2))
+        assert(T.count("[menu item] 'Avenger': 'Load preset' not chosen — the overlay left the front first") == 1, T.dump())
+        assert(T.count("[calibrate] 'Avenger' 'Load preset': menu item shot, (350,68)-(494,292), "
+          .. "the item marked at (372,100)") == 1, T.dump())
     "##);
 }
 

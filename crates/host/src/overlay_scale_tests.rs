@@ -25,6 +25,8 @@
 //! And for the step that readies the tree for reads of the screen that wait (2026-10-10): a
 //! calibration shot reads the pixels under its crosshairs in one read, ON:EAR's Close clicks only
 //! while its panel is still where its pixel was read, and its "Show all" reads its rows in one read.
+//! And for the step after it (T2): which grid positions ON:EAR offers is one probe of its chooser,
+//! read in the handler before a scan at every Tab, never by the tiles' `when`.
 
 use std::path::PathBuf;
 
@@ -45,14 +47,18 @@ S.owns = true
 S.ocr = nil     -- function(region) -> text, for host.ocr.recognize
 S.dump = {}     -- host.element.rawDump(id)
 
+-- Input the module drives turns host.inputEpoch over, as the host's does; nothing else here does.
+S.inputEpoch = 0
+rawset(T.host, "inputEpoch", function() return S.inputEpoch end)
 rawset(T.host, "input", T.strict("host.input", {
   click = function(x, y, opts)
+    S.inputEpoch += 1
     S.clicks[#S.clicks + 1] = { x, y, button = opts and opts.button }
     S.order[#S.order + 1] = "click"
   end,
-  move = function(x, y) S.moves[#S.moves + 1] = { x, y } end,
-  scroll = function() end,
-  drag = function() end,
+  move = function(x, y) S.inputEpoch += 1; S.moves[#S.moves + 1] = { x, y } end,
+  scroll = function() S.inputEpoch += 1 end,
+  drag = function() S.inputEpoch += 1 end,
 }))
 rawset(T.host.window, "ownsPoint", function(id, x, y)
   if type(S.owns) == "function" then return S.owns(id, x, y) end
@@ -1144,5 +1150,70 @@ fn on_ear_show_all_reads_its_rows_in_one_read() {
         T.turn()
         assert(favorites.text(headphones) == nil and #asked == 3, "Favorites read the rows: " .. #asked)
         assert(all.text(headphones) == "in force" and #asked == 4 and #asked[4] == 4, #asked)
+    "##);
+}
+
+/// Which positions of a chooser's grid hold a speaker is one probe over every position's left
+/// border: read in the Tab's handler before the scan, every border in one read, and not by the tiles'
+/// `when`s. Before it is read every position is offered; after it, the positions past the last
+/// border are not. It is read at every Tab, once: the user's typing in the search field refills the
+/// grid with nothing the overlay did, and the next Tab sees it.
+#[test]
+fn on_ear_offers_the_grid_positions_from_one_probe_read_before_the_scan() {
+    run(r##"
+        local S = T.S
+        local made = T.collect()
+        T.module("modules/ik-on-ear/")
+        local speakers
+        for _, o in ipairs(made) do
+          if o.label == "Speaker Browser" then speakers = o end
+        end
+        -- The design's own size, at the screen's corner: one design pixel is one screen pixel.
+        S.origin = { id = 7, app = { pid = 4242 }, client = { x = 0, y = 0, w = 1920, h = 1009 },
+          bounds = { x = 0, y = 0, w = 1920, h = 1009 } }
+        local EDGE, GROUND = { r = 50, g = 50, b = 50 }, { r = 24, g = 24, b = 24 }
+        local filled, reads = 7, {}
+        rawset(T.host.screen, "pixels", function(points)
+          local _, inPass = T.O._passes()
+          reads[#reads + 1] = { points = points, where = T.whereNow(), yieldable = coroutine.isyieldable(),
+            inPass = inPass }
+          local out = {}
+          for i in ipairs(points) do out[i] = i <= filled and EDGE or GROUND end
+          return out
+        end)
+        T.front(speakers)
+        local tile = {}
+        for i, c in ipairs(speakers.controls) do
+          local n = string.match(c.label, "^Speaker (%d+)$")
+          if n then tile[tonumber(n)] = i end
+        end
+        local function offered(n) return speakers.controls[tile[n]].when() == true end
+        assert(offered(15) and #reads == 0, "every position before the probe is read, and nothing read")
+        speakers.focus = tile[1]
+        T.tab()
+        assert(#reads == 1 and #reads[1].points == 15, "every border in one read: " .. #reads)
+        local p = reads[1].points
+        assert(p[1][1] == 666 and p[1][2] == 264 and p[6][1] == 666 and p[6][2] == 457
+          and p[15][1] == 1440 and p[15][2] == 650, "81 left of each tile's centre, row by row")
+        assert(speakers.focus == tile[2])
+        assert(T.count("[on-ear] Speaker Browser: 7 of 15 positions hold a speaker") == 1, T.dump())
+        assert(offered(7) and not offered(8) and not offered(15))
+        speakers.focus = tile[7]
+        T.tab()
+        assert(#reads == 2, "one read per Tab: " .. #reads)
+        assert(speakers.focus ~= tile[8] and speakers.focus ~= tile[7], "past the last speaker")
+        -- A broader search typed into the field, the ring on a tile: the grid is full, nothing the
+        -- overlay did turned the input epoch over, and the next Tab reads it.
+        filled = 15
+        speakers.focus = tile[1]
+        T.tab()
+        assert(#reads == 3 and offered(15), "the refilled grid at the next Tab: " .. #reads)
+        -- One handler, two scans: one read.
+        T.turn()
+        T.call("key", function() speakers:focusNext(); speakers:focusNext() end)
+        assert(#reads == 4, "once in a handler: " .. #reads)
+        for i, r in ipairs(reads) do
+          assert(r.where == "handler" and r.yieldable and not r.inPass, "read " .. i .. " where it cannot wait")
+        end
     "##);
 }

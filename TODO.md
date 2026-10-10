@@ -7439,6 +7439,71 @@ kind of place that says how long the first held the loop.
       together beside the read, a read answered first is judged when the last profile answers, a
       tick asks nothing meanwhile, and an overlay gone by then says nothing. Each fails against
       the module from before. Nothing on a Mac: Melodyne is Windows only.
+      Step T2, the same day (wbr-final.md; Q2 = A): no `when` of the tree reads the screen. The
+      overlay runtime holds the pixels a `when` answers from as probes (`O:probe`, runtime 0.5.0):
+      a module declares the points and what a reading means, and the runtime reads every probe of
+      an overlay that is due with one `host.screen.pixels`, in the handler before a scan — a Tab's,
+      a press's, a hotkey's claimants', the check 350 ms after the overlay came to the front, a
+      calibration shot — or when a reader is asked in a handler outside a scan. Due: its key has
+      changed since the last reading — the window, `host.inputEpoch`, the look again 250 ms after
+      an overlay came to the front, the points. So a Tab after an act reads once, and Tabs in a row
+      read nothing. Where nothing can wait, as the arbiter brings an overlay to the front, nothing
+      is read: the last reading stands, and the 350 ms check reads and corrects before the arrival
+      is said. A reading the module does not recognise is not kept, and is read again in a later
+      epoch, never twice in one. A value that changed registers the overlay's hotkeys again: a
+      control a probe shows holds its key from the next scan that reads it (the next Tab, press or
+      hotkey of the overlay's, not the F10 itself), where before the keys followed only the next
+      arrival (Ctrl+P after F10 into Kontakt's rack). Not on the menu tick, against the plan's
+      list: a reading taken there, a few milliseconds after F10, would be of the view before it and
+      kept as fresh (finding 13); nor in what a menu test's answer or the menu item shot's answer
+      goes on to do in a callback of its own (an item's click and its onDone, the keys taken back);
+      no menu test asks a probe. A reading the overlay left while it was taken is not kept and
+      registers no key (`O:stillHere`, ready for the wait of step W1b), and an origin that raises
+      reads no probe rather than stop the Tab's scan. Kontakt 0.1.3: the view and editor pixels are
+      two probes of each Kontakt 8 overlay whose header asks them (not inside Komplete Kontrol, not
+      standalone on a Mac), with their rules and log lines; the editor's probe reads the view's
+      point too, so both are judged from one picture. A Tab that came before Kontakt had redrawn
+      after F10 read the view before it, and read once per act, that stood until the next act:
+      "Switch to classic view" offered in the classic view, the rack's controls hidden, and a
+      second Return switching back (NVDA session, the same day). So a module says which of its
+      acts change what a probe shows (`O:expectChange`, runtime 0.5.0): the probes named are read
+      at every key until a reading kept of one of them differs from what it held at the call, then
+      again only when their key changes, and on another window the change is not looked for. No
+      time decides: a key before the redraw reads the view still drawn, and the next reads again.
+      Kontakt's view toggle names both probes (before F10; on a Mac once its menu entry is
+      clicked), the instrument editor's button the editor's, and the toggle's F10 is in the log,
+      `[kontakt] view toggle: F10 for '<row>'`. ON:EAR 0.1.3: which grid positions hold a
+      speaker is one probe over all fifteen borders, one capture where the halving read up to five
+      pixels one at a time; until it is read, every position is offered. It is read at every Tab
+      (`everyEpoch`), as the count was before: the user's typing in the search field refills the
+      grid while the ring is on a tile, and turns over no input epoch. Both depend on
+      `com.platform.overlay >= 0.5`. And a calibrating run's menu item shot is a `snapshotAsync`,
+      since the pass that sees the menu cannot wait: the item is clicked in its answer, a tick
+      later than on other presses, after the checks a click made again gets, and the first
+      follow-up that counts comes a tick after that. Tested in the scripted host: a probe read once
+      in the Tab's handler and not per Tab; due again after an act and after the look again;
+      nothing read in the arbiter's call, and the 350 ms check moving the focus off a control it
+      hides; an unrecognised reading not kept and read once per epoch; one call for every probe
+      due, in order, a `read` asking an earlier probe; a changed value taking a key; a reader in a
+      handler reading first; nothing on the menu tick, in a menu test's answer that came in a
+      callback, or in the item shot's answer with its onDone; a failed capture; a reading the
+      overlay left not kept and taking no key; an origin that raises reading nothing, the Tab's
+      scan going on; an `everyEpoch` probe read once per Tab; a change expected read at every key
+      until it shows and then at none, ended for every probe named by any one of them, nothing
+      read yet ended by the first reading, not ended by a reading not recognised or one the same as
+      before, and not looked for on another window; the raises of both. Kontakt 8's header built
+      from its cell: F10 and the next Tab reading the classic view, the ring and the keys
+      following, Tabs in a row reading nothing, the editor, an unrecognised reading kept out;
+      Return on either toggle, and Alt+V in either view with Alt held as the hotkey comes and the
+      claimant chosen once it is up, with a Tab before Kontakt redrew reading the view still drawn,
+      the next key the view redrawn and the Tabs after it nothing; Alt+E the same for the editor;
+      every F10 in the log. ON:EAR's
+      grid offered from one read of its borders, and refilled by typing seen at the next Tab with
+      nothing acted. The item shot asked off the loop and the click after it, and none once the pick
+      ended. Every probe read recorded where it was made: none where a capture could not wait. Each
+      fails against the code from before. Docs: overlay.md (`O:probe`; Where a hook runs, its table
+      and example; Coming to the front; the menu item shot), building-an-overlay.md,
+      screen-frame-sharing-design.md.
 - [ ] **NVDA check of step V1 (session B, with V2 and T2)** — nothing should sound different.
       Kontakt with a CSS library in REAPER: a hotspot toggle pressed (its state said after the
       press, as before); the snapshot camera and its dropdown with the bar shut and open (the bar
@@ -7459,6 +7524,60 @@ kind of place that says how long the first held the loop.
       walking notes with the arrow keys, said as before and as quickly, and the note area's moves
       under Time. Bring the log's `fields after asking for tool=` lines, whose greys should all be
       numbers, and the `selection watch` lines with their cost.
+- [ ] **NVDA check of step T2 (session B, with V1 and V2)** — nothing should sound different but
+      one thing. Kontakt 8 in REAPER, bare: F10 (Alt+V) between the classic and the play view, and
+      the instrument editor opened and closed (Alt+E). Which header controls Tab offers in each
+      view: in the play view "Switch to classic view" and no rack arrows; in the rack "Switch to
+      play view", the instrument and multi arrows and the snapshot controls; in the editor its
+      sections and no arrows. The new thing: the keys of the controls a view shows work after the
+      next Tab, without leaving the plug-in first: Alt+V into the rack, Tab, then Ctrl+P. Straight
+      after Alt+V, before any other key of the overlay's, Ctrl+P still reaches Kontakt or REAPER:
+      the switch itself is not read (finding 13). Arrival in each view, from another window: the
+      arrival names a control of that view. Bring the log's `[view]` and `[keys] 'Kontakt 8'
+      holds:` lines; a `[probe] … not read` line is a capture that failed. After each Return or
+      Alt+V on the toggle, a `[kontakt] view toggle: F10 for …` line, and a `[view] classic` or
+      `[view] play` line at the first key of the overlay's after Kontakt has redrawn: a key pressed
+      before the redraw reads the view still drawn, and the next key reads again. Neither that
+      line nor a `[view] unrecognised reading …` line by then would mean the probe point is wrong
+      for this layout; an unrecognised line says what was read, and where. A key that came before
+      Kontakt redrew leaves the rack's keys untaken until the next key of the overlay's. F10
+      pressed by hand, not through the toggle, is read only after the next act or arrival, as
+      before. ON:EAR's speaker grid
+      after a search: only the positions that hold a speaker are offered, and all of them — also
+      after typing more into the search field, or deleting from it, while the ring is on a tile,
+      and when Tab goes straight to the last tile of a panel just opened (Q3 = A: this part may
+      stay open).
+- [ ] **Step T2 never ran on a Mac** (the scripted host only): a Kontakt 8 in a DAW reads its view
+      and editor pixels with one `host.screen.pixels`, one ScreenCaptureKit capture (36 to 91 ms
+      measured) where its `pixel` had the tile, once after each act, at each key after the view
+      toggle's menu entry or the editor's button until the change is read, and in the 350 ms check
+      after arriving; without the Screen Recording permission the probes read the wallpaper, which
+      the view's rule most likely does not recognise, so the last view stands, and a change
+      expected is looked for at every key until the overlay is on another window. A calibrating
+      run's menu item shot (Avenger's menus) is a `snapshotAsync`, and the item's click waits for
+      it.
+- [ ] **Kontakt's view changed by the user's own keys** (found reviewing the fix of T2,
+      2026-10-10; as it was before probes): F10 pressed by hand, or "Switch to Classic View" chosen
+      in Kontakt's menu with the keyboard, turns over no input epoch, so the view probes are read
+      only after the next act of the module's or the next arrival, and the ring offers the other
+      view's controls until then. Either an `everyEpoch` read for Kontakt 8, one capture per key,
+      once a probe's read waits (W1b), or the overlay told of such a key. The maintainer's call.
+- [ ] **A rack key of Kontakt's pressed between the toggle and the redraw** (found reviewing the
+      fix of T2; so in 4294d84 already): the rack's and the editor's hotkeys follow only the next
+      key of the overlay's that reads the view. Pressed straight after Return or Alt+V into the play
+      view, before Kontakt has redrawn, Ctrl+P, Ctrl+N or Alt+E read the classic view still drawn
+      and click the rack's coordinates into the play view (the defect `header.luau` describes for
+      the rack controls); pressed after the redraw, the key is taken and nothing is said
+      (`Overlay:activate`, a hidden control's hotkey). Into the rack, Ctrl+P before any other key
+      reaches REAPER (finding 13). Whether a hidden control's hotkey says "not available now", as
+      Return on a hidden control does, is the maintainer's call.
+- [ ] **Melodyne's tool bar reading, kept for an act** (found reviewing the fix of T2; so in
+      4294d84 already): `toolBarCached` reads once per input epoch. A tool's hotkey clicks its icon,
+      and a Tab straight after it asks the Inspector before Melodyne has repainted: that reading is
+      kept for the act, the tool bar's `current` puts the tool bar back on the old tool, and Up and
+      Down click the old tool's variant icons. The same shape as Kontakt's view after F10, and the
+      same cure: after its own click the module knows which tool it chose, and reads again at each
+      question until the strip shows it. A Melodyne refinement, after the W slices.
 - [ ] **Step 12a never ran on a Mac** (type-checked only, with the ocr-bench build): the read
       thread's ladder with `counts` in place of `!on_event_loop` (the pass made only for the
       counts, the `gave up … rather than keep the reads behind it waiting` line), and ocr-bench's
@@ -7541,13 +7660,15 @@ Follow-ups this work found and did not take on:
       costs nothing; while `identify` answers nil, its count goes up by two, and the eighth "could
       not tell" comes after four evaluations. Asking each control id once per evaluation would
       keep the count to what the docs say.
-- [ ] **The synchronous `host.screen` captures** (the maintainer's decision 3, the next work), and
-      with them a `read` of a snapshot that was taken on the event loop. Perhaps later
-      `snapshotAsync` as a wait, which would let Avenger's preset step be written in a line.
-      A condition from step B3: where such a wait cannot wait — in the runtime's coroutine
-      for the hooks asked on every scan, in a coroutine of the module's own, where Luau cannot
-      stop — it captures on the event loop as today, for good, and never raises: Melodyne's
-      `when` reads pixels (screen-frame-sharing-design.md, section 6).
+- [ ] **The synchronous `host.screen` captures** (the maintainer's decision 3; wbr-final.md, W1a
+      to W4 and 12b), and with them a `read` of a snapshot that was taken on the event loop.
+      Perhaps later `snapshotAsync` as a wait, which would let Avenger's preset step be written in
+      a line. Where such a wait cannot wait — in the runtime's coroutine for the hooks asked on
+      every scan, in a coroutine of the module's own, where Luau cannot stop — it captures on the
+      event loop and is logged, until 12b makes it raise there (decided 2026-10-10; step B3's "for
+      good, and never raises" no longer holds). No `when` of the tree reads the screen any more:
+      Melodyne's read-out boxes are its watcher's answer (V2), and Kontakt's view and ON:EAR's
+      filled tiles are probes of their overlays, read in the handler before a scan (T2).
 - [ ] **A capture that hangs on Windows.** The read service's hang clock runs only while a
       recognition runs; on the Mac `SCK_TIMEOUT` bounds a capture, but the GDI capture has no
       bound. Since B1b+M a module waits for its reads, so a capture that never returns leaves it

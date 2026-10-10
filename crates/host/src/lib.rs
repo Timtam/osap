@@ -50,6 +50,10 @@ mod overlay_handler_tests;
 /// area's time signature, read with a callback, and what their answers may still say.
 #[cfg(test)]
 mod overlay_melodyne_tests;
+/// The overlay runtime's probes (runtime 0.5.0): the pixels a `when` answers from, read in the
+/// handler before a scan, against the same scripted host.
+#[cfg(test)]
+mod overlay_probe_tests;
 /// Tasks and their two waits against a real Luau VM and a real read service over a fake
 /// recogniser.
 #[cfg(test)]

@@ -43,8 +43,8 @@ Every callback of a module runs as a [handler](../module-runtime-and-lifecycle.m
 | a control's `text`; a tab control's `current` and `verticalName` | in the handler of the key, timer or window event that announces the control | yes |
 | a control's `onActivate`; a stepper's `onStep` | in the handler of the key or hotkey that pressed it | yes |
 | a stored [`identify`](#o-attachembedded) — one whose verdict is kept — asked for a control it has no verdict for | in the handler of the event that resolves the overlay's origin; in the arbiter's call, a plain call, when that is the first to resolve it — an overlay on a `slot` brought to the front by the arbiter choosing again, after another claimant left | yes, but not in the arbiter's call |
-| `when`; an `identify` asked at every evaluation (`cacheIdentity = false`, or a `control` function's where the DAW gives no panel); a binding's `present`; a [menu test](#o-menutests) | in a coroutine of the runtime's own, one per scan or tick | no: it must answer at once |
-| a `menuItem` function and the `onDone` of [`O:chooseMenuItem`](#o-choosemenuitem) | inside the menu tick's coroutine when a test answers at once; otherwise in the handler of the test's callback, and `onDone` also in a key's handler, or in the arbiter's call as the overlay leaves the front | no: it must answer at once |
+| `when`; an `identify` asked at every evaluation (`cacheIdentity = false`, or a `control` function's where the DAW gives no panel); a binding's `present`; a [menu test](#o-menutests) | in a coroutine of the runtime's own, one per scan or tick | no: it must answer at once, and reads no screen — a pixel a `when` needs is a [probe](#o-probe)'s |
+| a `menuItem` function and the `onDone` of [`O:chooseMenuItem`](#o-choosemenuitem) | inside the menu tick's coroutine when a test answers at once; otherwise in the handler of the test's callback, and `onDone` also in a key's handler, in the arbiter's call as the overlay leaves the front, or — in a calibrating run, on a press whose item is photographed — in the handler of the [menu item shot](#o-calibrating)'s answer, right after the item's click | no: it must answer at once; a [probe](#o-probe)'s reader answers what stands, and reads nothing on the tick or in either callback |
 | the overlay's own [`onActivate` and `onDeactivate`](#o-onactivate) | on a `slot`, in the arbiter's call, a plain call; without one, in the handler of whatever looked at the overlay again — a window or focus event, a `pollMatch` poll, the runtime's own timers (the first evaluation of a binding, the check 250 ms after it came to the front), the menu tick | no: on a slot nothing can wait there, and either way the overlay is half way into or out of the front |
 | a [library](#o-gate)'s `gate` | in the handler of whatever looked at the overlay again, outside any scan | yes, but a read with a callback keeps the module's keys free |
 
@@ -52,28 +52,34 @@ Every callback of a module runs as a [handler](../module-runtime-and-lifecycle.m
 
 **Where it may wait**, the overlay checks afterwards that what it was doing still stands. A sentence notes where the overlay is before its control's first hook runs — in front, in which stay, on which window, the focus and the control, the keys of its own, the announcements, the menus opened — and after each of `text`, `current` and `verticalName` it asks whether that still holds, as [`O:stillHere`](#o-here) does with `focus`, `keys` and `said`, and a menu opened since (a menu that was open before the hook does not count against it). When it no longer holds, nothing of the sentence is said, the log says `[read] '<label>' not spoken after its text: <why>` (`after its current`, `after its verticalName`) in `stillHere`'s words, and an OCR button's click is not made: `[read] '<label>': not clicking — <why>`. Without a wait nothing changes between the two, and the sentence is said as it always was. A module's own `onActivate` or `onStep` that reads and then acts — as VPS Avenger's preset steps read the name, then click — takes [`O:here()`](#o-here) before the read and asks `O:stillHere` after it, before it acts: the runtime cannot check that for it. The runtime does the same around its own reads of a pixel before a click: a [hotspot toggle](#o-addhotspottoggle)'s press, and a [graphical toggle](#o-addgraphicaltoggle)'s `reveal` probe.
 
-**Where it must not wait**, the hooks run in a coroutine the runtime makes: one for a whole scan — every `when` of a Tab's search for the next control, every claimant of a shared hotkey, every test a menu tick asks — and each hook inline inside it; a hook asked on its own, such as the `when` of the control Return presses, has one to itself. That is one coroutine per scan or per lone hook. To the host it is a coroutine the module made: `host.ocr.recognize` without a callback does not wait there, and raises — the hook then raises with it ([Where it waits](ocr.md#where-it-waits)). A pixel, a snapshot, an image search and [`host.ocr.recognize`](ocr.md#host-ocr-recognize) with a callback answer at once and are fine. A `coroutine.yield` of the hook's own is ended with the error `a hook asked on every scan yielded; it must return at once`: a `when` asked on its own then hides its control, as a `when` that raises does; inside a scan the yield reaches past that guard, and the scan — and with it the key that started it — ends with that error. A menu test that yields has failed, as one that raises has: the tick goes on, the tests after it are asked on the next tick, and the test itself is asked in a coroutine of its own from then on, where it fails alone.
+**Where it must not wait**, the hooks run in a coroutine the runtime makes: one for a whole scan — every `when` of a Tab's search for the next control, every claimant of a shared hotkey, every test a menu tick asks — and each hook inline inside it; a hook asked on its own, such as the `when` of the control Return presses, has one to itself. That is one coroutine per scan or per lone hook. To the host it is a coroutine the module made: `host.ocr.recognize` without a callback does not wait there, and raises — the hook then raises with it ([Where it waits](ocr.md#where-it-waits)). Nor does such a hook read the screen itself: a `host.screen` call there that captures — a pixel, a snapshot, a search without a callback — takes its picture on the event loop and holds every module while it does, on every scan. What a `when` needs of the screen is declared as a [probe](#o-probe): the runtime reads it in the handler before the scan, one capture for all the overlay's probes and only after something acted (or at every Tab: for a probe declared so, and while a change the module [expects](#o-expectchange) has not been read), and the `when` answers from that reading. A call with a callback — [`host.ocr.recognize`](ocr.md#host-ocr-recognize), [`snapshotAsync`](screen.md#host-screen-snapshotasync), [`imageSearchAsync`](screen.md#host-screen-imagesearchasync) — asks and returns at once, and is fine there. A `coroutine.yield` of the hook's own is ended with the error `a hook asked on every scan yielded; it must return at once`: a `when` asked on its own then hides its control, as a `when` that raises does; inside a scan the yield reaches past that guard, and the scan — and with it the key that started it — ends with that error. A menu test that yields has failed, as one that raises has: the tick goes on, the tests after it are asked on the next tick, and the test itself is asked in a coroutine of its own from then on, where it fails alone.
 
 **The overlay's own origin is resolved before every such coroutine**, outside it, so a stored `identify` asked for it runs in the handler. One reached inside the coroutine all the same — another overlay's origin asked by a `when`, say, after a plug-in made its control anew — is not asked there: that evaluation finds no control (not counted towards the eight of [`attachEmbedded`](#o-attachembedded)), nothing of it is kept for the [epoch](timer.md#host-epoch), and the overlay looks again on its module's next turn, once per epoch, through a recheck of its own. Logged once per control: `attachEmbedded: [<class>] id=<id>, identify is not asked inside a scan of the overlay's hooks — '<overlay>' looks again on its next turn`.
 
 **The first evaluation of a binding** runs on the module's next turn, about 15 ms after it was made ([`host.timer.after(0)`](timer.md#host-timer-after)), not inside the call: a binding is made at a module's top level, where nothing can wait. An overlay whose window or plug-in is in front at load comes up a tick later.
 
-**Coming to the front** resolves the origin once more, guarded: a `control` function that raises there is logged, `[overlay] <label>: its origin raised as it came to the front: <message>`, and the overlay still comes up whole — its keys taken, its scope its window — as on a window whose handle it does not know.
+**Coming to the front** resolves the origin once more, guarded: a `control` function that raises there is logged, `[overlay] <label>: its origin raised as it came to the front: <message>`, and the overlay still comes up whole — its keys taken, its scope its window — as on a window whose handle it does not know. On a `slot` its [probes](#o-probe) are not read there, where nothing can wait: a `when` asked as it comes forward answers from the last reading, and the check 350 ms later, before the arrival is said, reads them and moves the focus off a control they now hide.
 
 **Before a press**, only a stepper's value is read, because its announcement waits for that value to change. No other control's `text` is asked before its `onActivate` runs; a module that needs what its `text` works out asks for it in `onActivate` itself.
 
 ```luau
--- Asked on every scan, in the runtime's coroutine: one pixel, at once.
+-- One pixel of the plug-in's own, read for the `when` below in the handler before each scan.
+local browser = ov:probe("browser", { { 640, 12 } })
+
+-- Asked on every scan, in the runtime's coroutine: it answers from the probe, at once.
 ov:addCustomButton({
   label = "Close library browser",
-  when = function(o)
-    local c = o:origin().client
-    local p = host.screen.pixel(c.x + 640, c.y + 12)
-    return p ~= nil and p.r > 200
+  when = function()
+    local c = browser()
+    return c ~= nil and c[1].r > 200
   end,
   onActivate = function(o)
     local x, y = o:toScreen(640, 12)
-    if x then host.input.click(x, y) end
+    if not x then return end
+    -- The click shuts the browser: the probe is read at every key until it says so, so a Tab that
+    -- comes before the plug-in has redrawn does not keep this control in the ring.
+    o:expectChange("browser")
+    host.input.click(x, y)
   end,
 })
 
@@ -185,13 +191,116 @@ ov:group(bare, function(ov)
 end)
 ```
 
-A `when` predicate must return exactly `true`; anything else counts as hidden. A hidden control is not Tab-reachable, its hotkey does nothing, and it does not claim a key combination that a visible sibling wants. A `when` runs in the runtime's own coroutine, once per scan, and must answer at once: no read that waits ([Where a hook runs](#where-a-hook-runs)).
+A `when` predicate must return exactly `true`; anything else counts as hidden. A hidden control is not Tab-reachable, its hotkey does nothing, and it does not claim a key combination that a visible sibling wants. A `when` runs in the runtime's own coroutine, once per scan, and must answer at once: no read that waits, and no read of the screen — a pixel it needs is a [probe](#o-probe)'s ([Where a hook runs](#where-a-hook-runs)).
 
 A control's `hotkey` also **moves the overlay's focus** to that control, silently, before activating it — ReaHotkey's `TriggerHotkey` does the same. So after Ctrl+L for "Load instrument" and a dialog closed again, the overlay comes back on "Load instrument", and Tab carries on from there. The control then holds the keys a focused control holds (Space and Return for a button). `hotkeyKeepsFocus = true`, accepted by every constructor that takes a `hotkey`, opts out: Melodyne's "Menu bar" uses it, because focus on a button would take Space, which is Melodyne's play/stop. This changed on 2026-09-19 and affects every overlay with hotkeys on Windows as well (Kontakt, Komplete Kontrol, Soundiron, u-he).
 
 Space or Return on a focused control that has **hidden itself** since focus reached it acts on the visible control that shares its hotkey — Kontakt's "Switch to classic view" and "Switch to play view" share Alt+V and swap places on every press. With no such control, the overlay says "… is not available now" instead of doing nothing without a word.
 
 Two controls **share** a hotkey when their specs name the same key on this platform, however they are written: the runtime compares them through [`host.keys.normalize`](keys.md#host-keys-normalize), so `"Cmd+S"` beside an inherited `"Ctrl+S"` is one claim on every platform (both are the Ctrl role, which is Command on a Mac). The key is spoken on focus in the platform's words through [`host.keys.describe`](keys.md#host-keys-describe) — `"Alt+V"` is "Option+V" on a Mac, and a tab's `hotkeyLabel` is said the same way when it is a key spec. A hotkey the host would refuse — one that is not a key spec, one the system keeps for itself, a modifier tap, or a key the platform has no code for (the reasons [`host.keys.check`](keys.md#host-keys-check) marks "raises") — is reported when the overlay binds, naming the control, left out of the `[keys] … holds:` line with its reason instead of being registered, and not spoken when the control or tab is focused.
+
+## O\:probe(name, points, opts?) {#o-probe}
+
+**Signature:** `O:probe(name: string, points: { {number, number} } | ((overlay) -> { {number, number} }?), opts: { read: ((colours: { Colour }, last: any, points: { {number, number} }) -> any)?, rawOrigin: boolean?, everyEpoch: boolean? }?) -> () -> any`, where `Colour` is [`host.screen.pixel`](screen.md#host-screen-pixel)'s
+
+The pixels a `when` answers from, which the runtime reads in the handler before a scan. A `when` runs where nothing can wait, on every scan, and reads no screen there ([Where a hook runs](#where-a-hook-runs)); a probe is points of the plug-in that the runtime reads for it — every probe of the overlay that is due, with one [`host.screen.pixels`](screen.md#host-screen-pixels) — in the handler before a scan, and the `when` asks the probe's **reader** what was read. A ReaHotkey `PixelGetColor` in a visibility check is a probe here. Since version 0.5.0 of the runtime: a module that declares one depends on `"com.platform.overlay >= 0.5"`.
+
+**The points** are a list of `{x, y}` in the overlay's own coordinates, placed as [`O:toScreen`](#o-toscreen) places them — through the frame and the scale, or as a `rawOrigin` control's with `opts.rawOrigin = true` — or a function of the overlay answering a list of screen points, asked each time the probe could be due, for points that move: measured from the right edge, after a scroll. Each point is rounded to the nearest whole pixel. A function that answers `nil`, and a point that cannot be placed now (no origin, no [scale](#o-scale) factor), read nothing: the probe keeps its value. A function that raises reads nothing either, nor does a list placed through a [frame](#o-frame) function that raises, logged once per message: `[probe] '<overlay>' '<name>': its points raised: <message> — not read`. An origin that raises reads no probe of the overlay, and says nothing here: the hook that asks the origin next raises with it and is logged as it always is. An empty list reads no pixel and is still handed to `read`.
+
+**When it is read.** A probe is **due** when its key has changed since it was last read: the window the overlay is on (its origin's `id`), [`host.inputEpoch()`](timer.md#host-inputepoch) — which the module's own input, a window coming forward and a controller press turn over, and the user's own keys do not — the check 250 ms after an overlay of the module came to the front (the runtime's look again, which a reading taken while the screen still showed the window before needs), and its points on screen. A probe declared with **`everyEpoch = true`** is due in every new [epoch](timer.md#host-epoch) as well — at each Tab, each key of the overlay's and the other events the epoch lists — for what the user's own keys change in the plug-in, which turns over no input epoch: ON:EAR's speaker grid, which the user's typing in its search field refills while the Tab ring is elsewhere. It costs one capture per Tab. A probe whose change the module [expects](#o-expectchange) is due in every new epoch too, until a reading of the change is kept. A due probe is read:
+
+- before a scan in a handler: a Tab's or Shift+Tab's search for the next control, a press of Return or Space (the `when` of the control pressed, and of those sharing its hotkey), a control's hotkey (its claimants'), the check 350 ms after the overlay came to the front, a calibration shot;
+- when its reader is called in a handler outside a scan — in a `text`, an `onActivate`, a timer's callback;
+- before the overlay's control hotkeys are registered again.
+
+So a Tab after an act reads once, and Tabs in a row read nothing (an `everyEpoch` probe once each, and one whose change is expected once each until the change is read). It is **not** read inside a scan (a `when`, a `present`, a menu test: the reader answers what stands); on the menu tick, nor in anything the tick runs, such as the hotkeys taken back as a menu closes; nor in what a menu test's answer goes on to do when it comes in a callback of its own, or the answer of a calibrating run's [menu item shot](#o-calibrating) — the item clicked, a pick's `onDone`, the hotkeys taken back — since a reading right after the item's click would be of the menu still drawn; where nothing can wait (the arbiter's call that brings an overlay on a `slot` to the front, its `onActivate` and `onDeactivate`, a module's top level); nor while the overlay is not in front. The probes due in one handler are read in one call, in the order they were declared.
+
+**A reading is of the screen as it is at that key.** A plug-in that has not redrawn by the first key after an act is read as it was, and once per act, that reading stands until the next act: no time decides when a redraw is done. An act of the module's that is meant to change what a probe shows says so with [`O:expectChange`](#o-expectchange), before it, and the probe is then read at each key until a reading shows the change. Without it, a Tab pressed quickly after a click that shuts a panel can keep the panel's controls in the ring until the next act. What the user's own keys change in the plug-in turns over no input epoch either, and is read after the next act, or at every Tab with `everyEpoch`.
+
+**`read(colours, last, points)`** says what a reading means: `colours` one [`Colour`](screen.md#host-screen-pixel) per point, in order; `last` the probe's value before this reading; `points` the screen points read. Its answer is the probe's value. **`nil` is a reading it does not recognise**, which is not kept: the value stays as it was, and the probe is due again at the first scan in a later [epoch](timer.md#host-epoch) — not again in the same one, so a plug-in covered by another window costs one capture per key, not one per hook. Without `read` the value is the list of colours itself. Each probe's value is set before the next one's `read` runs, so a `read` may call an earlier probe's reader for what it holds now; a reader called inside a `read` reads nothing. A `read` runs in the handler, outside the scan, and should not wait; one that raises counts as `nil`, logged once per probe: `[probe] '<overlay>' '<name>': its read raised: <message> — the last value stands`.
+
+**The reader**, `reader()`, answers the probe's value, or `nil` before a reading was first kept. The value outlives a stay in front and a change of window: an overlay that comes to the front on another window answers the last value until the first scan there reads it.
+
+**A value that changed** — compared with `==`, and a list of colours colour by colour — registers the overlay's control hotkeys again, since the controls whose `when` asks the probe may have shown or hidden, and a hidden control claims no combination ([`O:group`](#o-group)); the `[keys] '<overlay>' holds: …` line says so when what is held changes.
+
+**A capture that fails** reads nothing: every probe that was due keeps its value and is due again in a later epoch, logged once until a read succeeds: `[probe] '<overlay>': <n> probe(s) not read — <reason>` ([failure reasons](screen.md#failure-reasons)).
+
+**A reading the overlay has left** is not kept: when the overlay is no longer where it was as the read was asked — out of the front, in another stay there, on another window, as [`O:stillHere`](#o-here) asks without options — nothing of it is kept and no hotkey is registered, logged each time: `[probe] '<overlay>': <n> probe(s) read and not kept — <why>` in `stillHere`'s words. The probes stay due, and the next scan where the overlay is reads them.
+
+**What raises**, at the call: a probe declared after the overlay is bound (`overlay '<label>': probe must be called BEFORE binding it — the binding is what starts it`), a name that is not a non-empty string or is already one of the overlay's probes, `points` that is neither a list of `{x, y}` nor a function, `opts` that is not a table, an option other than `read`, `rawOrigin` and `everyEpoch`, and a `read` that is not a function.
+
+**Cost.** Declaring one costs nothing. A scan with nothing due works out each probe's points — its function called, or its list placed — and compares a key. A scan with probes due adds one `host.screen.pixels` over all their points, on the event loop: one capture of the box around them when they lie within 2,000,000 pixels of each other (see [its Cost](screen.md#host-screen-pixels)).
+
+```luau
+-- Kontakt 8's view, from one pixel of its top bar, measured from the right edge: 24 in the play
+-- view, 99 in the classic one.
+local view = ov:probe("view", function(o)
+  local origin = o:origin()
+  local c = origin and origin.client
+  if not c then return nil end -- no window now: nothing is read, the last view stands
+  return { { c.x + c.w - 262, c.y + 24 } }
+end, { read = function(colours)
+  local v = (colours[1].r + colours[1].g + colours[1].b) / 3
+  if math.abs(v - 24) <= 20 then return "play" end
+  if math.abs(v - 99) <= 20 then return "classic" end
+  return nil -- another picture: the last view stands, and the next scan looks again
+end })
+
+ov:addCustomButton({
+  label = "Switch to classic view",
+  hotkey = "Alt+V",
+  when = function() return view() == "play" end,
+  onActivate = function(o)
+    -- Kontakt may redraw after the next key has come: the view is read at every key until it
+    -- reads "classic" (O:expectChange).
+    o:expectChange("view")
+    host.input.send("F10")
+  end,
+})
+```
+
+### Windows
+
+Read through `host.screen.pixels`: a `BitBlt` of the box around the points through the standard path, about one compositor frame (16.7 ms) for points close together; under a declared `capture = "duplication"` a 1×1 piece of one duplication request each, up to 60 ms ([`host.screen.pixels`](screen.md#host-screen-pixels)). Coordinates are device pixels.
+
+### macOS
+
+Read through `host.screen.pixels`: one capture of the box at point resolution, afresh on every call, with colours downsampled from a Retina display, so a `read` compares with a tolerance. Coordinates are points. Without the Screen Recording permission the colours are the wallpaper's: a `read` that recognises only the plug-in's own colours answers `nil`, and the last value stands.
+
+## O\:expectChange(name, ...) {#o-expectchange}
+
+**Signature:** `O:expectChange(name: string, ...: string) -> ()`
+
+Says that what the module is about to do will change what the [probes](#o-probe) named show: a view toggle's key, a click that opens or shuts a panel. A probe is read once after an act, at the first key that scans, and a plug-in may not have redrawn by then; that reading would stand until the next act. With this, each probe named is due in every new [epoch](timer.md#host-epoch) — read before the scan of each Tab, each key of the overlay's and the other handlers the probe lists — until a reading of one of them is kept that differs from the value that probe held at the call. A key that comes before the redraw reads the screen as it was, and the next key reads again. No time decides anything: the redraw is waited for only by reading again at the next key. Since version 0.5.0 of the runtime: a module that calls it depends on `"com.platform.overlay >= 0.5"`.
+
+**It reads nothing itself.** The value each probe holds at the call is what a later reading must differ from, so it is called before the act, or in the same handler right after it, before anything reads the probes. A probe with nothing read yet has `nil` there, and the first reading kept ends it.
+
+**When it ends.** At the first kept reading of any probe named that differs from that probe's value at the call — compared as a [value that changed](#o-probe) is — the change counts as read for every probe named: each is due again only when its key changes, and a probe read in that capture stands under its key, so the Tabs after it read nothing (one named that was not read in it, its points not placed then, is read once more at the next key). A reading `read` does not recognise, a capture that fails and a reading the overlay left are not kept, and end nothing. A probe named again in a later call takes the later one's value and ends with the later one. The overlay on another window than at the call (another origin `id`) ends it at the next read there; an overlay with no origin at the call looks for the change on any window. An act that changed nothing — a key the plug-in did not take — leaves the probes due at every key until the overlay is on another window, or a later call names them.
+
+**What raises**, at the call: no name (`overlay '<label>': expectChange takes the names of one or more of its probes`), a name that is not a string (`overlay '<label>': expectChange takes probe names, got <type>`), and a name that is not one of the overlay's probes (`overlay '<label>': expectChange: no probe named '<name>'`).
+
+**Cost.** The call costs a look at the overlay's origin and a table. Each key while the change is not read costs one [`host.screen.pixels`](screen.md#host-screen-pixels) over the points of the overlay's due probes, as a probe's read does, on the event loop until those reads wait: usually one or two keys after the act. Once the change is read, Tabs in a row cost nothing again.
+
+```luau
+-- Kontakt 8's view toggle: F10, which Kontakt may draw after the next key has come.
+ov:addCustomButton({
+  label = "Switch to classic view",
+  hotkey = "Alt+V",
+  when = function() return view() == "play" end,
+  onActivate = function(o)
+    o:expectChange("view", "editor") -- both read from one picture, until either shows the change
+    host.input.send("F10")
+  end,
+})
+```
+
+### Windows
+
+Nothing of its own. Each read while the change is not read is the probe's: about one compositor frame (16.7 ms) for points close together ([`O:probe`](#o-probe)).
+
+### macOS
+
+Nothing of its own. Each read while the change is not read is the probe's: one capture of the box around the points, afresh on every read ([`O:probe`](#o-probe)), which took 36 to 91 ms through ScreenCaptureKit where it was measured.
 
 ## Bindings — O.window / O.embedded / \:with / O.hosts / O\:bind {#bindings}
 
@@ -1156,7 +1265,7 @@ At the call itself `why` is `inactive` (the overlay is not in front: nothing sai
 
 A menu that stays open after its item was refused keeps the keys, as any open menu does: `Escape` goes to it, and a module that knows how its plug-in's popup closes can close it in `onDone` — [`O:menuOpen`](#o-menuopen) says whether a menu still counts as open. A menu that appears after the item was dropped is an ordinary menu: nothing is chosen in it.
 
-The log says every step: `[menu item] '<overlay>': '<label>' opening its menu, clicking (x,y)`; `… clicked its opener — the item is chosen when a menu test sees the menu, for up to 8000 ms`; `… — test 'newWindow' sees the menu at 362,80 120x200 (window id 300) (its window id 300 is asked what is drawn there); choosing item (10,20) at (372,100)`; `… — test 'newWindow' still sees the menu at … a tick after the item's click, which it did not take: clicking (372,100) again, 2 of 4`; `… chosen — clicked 1 time(s) at (372,100); the menu has closed`; or a `not chosen` line from the table. In a calibrating run, a press that was photographed also writes the **menu item shot** — the menu with a crosshair on the item, taken just before its first click (see [`O.calibrating`](#o-calibrating)) — and the calibration shot marks the opener of every label this method has been called with, at the `at` it was last given, as `[menu opener]`, after the overlay's controls.
+The log says every step: `[menu item] '<overlay>': '<label>' opening its menu, clicking (x,y)`; `… clicked its opener — the item is chosen when a menu test sees the menu, for up to 8000 ms`; `… — test 'newWindow' sees the menu at 362,80 120x200 (window id 300) (its window id 300 is asked what is drawn there); choosing item (10,20) at (372,100)`; `… — test 'newWindow' still sees the menu at … a tick after the item's click, which it did not take: clicking (372,100) again, 2 of 4`; `… chosen — clicked 1 time(s) at (372,100); the menu has closed`; or a `not chosen` line from the table. In a calibrating run, a press that was photographed also writes the **menu item shot** — the menu with a crosshair on the item, taken before its first click, which waits for it (see [`O.calibrating`](#o-calibrating)) — and the calibration shot marks the opener of every label this method has been called with, at the `at` it was last given, as `[menu opener]`, after the overlay's controls.
 
 **Cost.** The opener's placement and click, one origin resolution at the press; per answer that sees a menu, the item's placement and one `ownsPoint`; per retry, the same again and one click; a calibrating run adds one capture before the item's first click. Nothing is asked of the screen that the menu tests were not asking anyway.
 
@@ -1360,13 +1469,13 @@ end
 
 They are what a module's own [menu test](#o-menutests) is written from. A menu a plug-in paints inside its own window has no window, no accessibility element and no notification, and the difference between the "before" picture and the "after" ones is the pixels that only an open menu has.
 
-**The menu item shot.** A control that chooses an item in its menu ([`O:chooseMenuItem`](#o-choosemenuitem), or a hotspot with `menuItem`) clicks the item on the pass in which a test sees the menu, so the pictures above — the later two taken 600 and 1500 ms after the press — show the menu already closed. On a press that was photographed (the first two of each control), the item is photographed as well: one [snapshot](screen.md#host-screen-snapshot) of the menu's rectangle as the test gave it, 12 pixels round, taken just before the item's first click, and written after it, on the next pass, with a crosshair on the point clicked. A click the menu did not take and that is made again is not photographed again:
+**The menu item shot.** A control that chooses an item in its menu ([`O:chooseMenuItem`](#o-choosemenuitem), or a hotspot with `menuItem`) clicks the item on the pass in which a test sees the menu, so the pictures above — the later two taken 600 and 1500 ms after the press — show the menu already closed. On a press that was photographed (the first two of each control), the item is photographed as well: one [`snapshotAsync`](screen.md#host-screen-snapshotasync) of the menu's rectangle as the test gave it, 12 pixels round, asked on the pass in which the test sees the menu — which cannot wait for a picture — and the item's first click is made once the picture is in, after the checks a click made again gets: the item still waiting for its menu, the overlay still on its window, nothing drawn over the item. On those presses the item is clicked about one tick later than on the others. The picture is written on the pass after its answer, with a crosshair on the point clicked, whether the click was made or not. A click the menu did not take and that is made again is not photographed again:
 
 | File, under `modules/overlay-runtime/calibration/` | Taken |
 | --- | --- |
-| `<overlay>-<control>-menu-item.png` | just before the item is first clicked |
+| `<overlay>-<control>-menu-item.png` | before the item is first clicked, which waits for it |
 
-numbered like the other pictures (`<overlay>-<control>-2-menu-item.png`, …). Its log line gives the rectangle captured, the item's point and the path: `[calibrate] '<overlay>' '<control>': menu item shot, (x1,y1)-(x2,y2), the item marked at (x,y) -> <path> (true)` — or `(false: …)` with the reason, and the click is made either way. It is the picture an item's offset is measured from: the offset is from the menu's top-left corner, which is the picture's corner plus 12.
+numbered like the other pictures (`<overlay>-<control>-2-menu-item.png`, …). Its log line gives the rectangle captured, the item's point and the path: `[calibrate] '<overlay>' '<control>': menu item shot, (x1,y1)-(x2,y2), the item marked at (x,y) -> <path> (true)` — or `(false: …)` with the reason, and the click is made either way; a picture that cannot be asked for gives that line its reason, and the item is clicked at once. It is the picture an item's offset is measured from: the offset is from the menu's top-left corner, which is the picture's corner plus 12.
 
 **A scaled overlay's calibration shot** ([`O:scale`](#o-scale)). Its first line adds the factor its crosshairs were placed with and the frame, `… scale 1.6000 about (0,0), frame (0,0) -> …`, or `no scale now (<why>)`; each control's line adds every region it reads as the screen rectangle, `region (x1,y1)-(x2,y2)` (and `ocrLabel (…)`), since the authored numbers are not where it reads. A control with no factor now has no crosshair and is listed with `no position`. In any overlay, the line of a control that chooses a menu item ends `then item (dx,dy) of its menu` (or `then an item of its menu`, for a `menuItem` function): the opener is what the crosshair marks, and the item is in the menu item shot. An opener a module's own code has asked [`O:chooseMenuItem`](#o-choosemenuitem) to click — a stepper's, which no control's `at` names — is marked too once it has been asked for, at the `at` it was last given, after the controls, in label order: `  n <label> screen (x,y)  pixel r,g,b  [menu opener]` (or `-- <label> no position  [menu opener]` when it cannot be placed now).
 
@@ -1386,13 +1495,13 @@ ov:addHotspotButton({ label = "Preset menu", at = { 412, 118 }, hotkey = "Alt+M"
 
 `settings.toml` is next to the `.exe`. The keys are Ctrl+Alt+Shift+S, T and V.
 
-The capture before the click goes through the module's [source](screen.md#which-picture-a-read-sees): through the standard path about one compositor frame (~16.7 ms) for a plug-in-sized rectangle. Writing a PNG is the larger cost of a shot — several times larger in a debug build than in a release build — and it runs on the event loop when a picture is written: never between the key and the click, and not before the 600 ms picture has arrived. The menu item shot puts one capture of the same kind, of the menu's rectangle, between the menu being seen and the item's click, and its PNG is written on the pass after the click.
+The capture before the click goes through the module's [source](screen.md#which-picture-a-read-sees): through the standard path about one compositor frame (~16.7 ms) for a plug-in-sized rectangle. Writing a PNG is the larger cost of a shot — several times larger in a debug build than in a release build — and it runs on the event loop when a picture is written: never between the key and the click, and not before the 600 ms picture has arrived. The menu item shot is one capture of the same kind, of the menu's rectangle, taken on the `screen-capture` thread between the menu being seen and the item's click, which waits for it, and its PNG is written on the pass after the click.
 
 ### macOS {#o-calibrating-macos}
 
 `settings.toml` is in the folder that holds the `.app` (see [`host.settings.set`](settings.md#host-settings-set) for a translocated copy). The keys are Command+Option+Shift+S, T and V — a spec's Ctrl is Command there — off Control+Option, which is VoiceOver's.
 
-The capture before the click is taken at the display's own resolution and kept at up to five times the bytes of the rectangle (see [`host.screen.snapshot`](screen.md#host-screen-snapshot)), for the 1.5 seconds until the last picture has arrived; the pictures of a maximised window held at once come close to a module's snapshot budget, and a capture the budget refuses is written as `(false: …)`. The menu item shot is one more capture, of the menu's rectangle only, held until the next pass writes it. Without the Screen Recording permission the pictures show the wallpaper.
+The capture before the click is taken at the display's own resolution and kept at up to five times the bytes of the rectangle (see [`host.screen.snapshot`](screen.md#host-screen-snapshot)), for the 1.5 seconds until the last picture has arrived; the pictures of a maximised window held at once come close to a module's snapshot budget, and a capture the budget refuses is written as `(false: …)`. The menu item shot is one more capture, of the menu's rectangle only, taken by ScreenCaptureKit on the `screen-capture` thread while the item's click waits for it, and held until the next pass writes it. Without the Screen Recording permission the pictures show the wallpaper.
 
 ## Plugin base + library overlays (the cell model) {#plugin-base-library-overlays}
 

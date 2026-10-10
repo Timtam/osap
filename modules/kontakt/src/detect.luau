@@ -521,9 +521,22 @@ end
 -- changes with every instrument, this does not. It belongs to the right-hand cluster
 -- (Update, CPU, …), so it is measured from the right edge.
 --
--- Memoized per dispatch pass: this backs `when` predicates, which run on every focus move,
--- and one screen pixel costs a compositor frame (~17 ms) — a handful of controls asking
--- separately would add a tenth of a second to every keypress.
+-- A PROBE of the overlay runtime (O:probe), not a read of its own: this backs `when` predicates,
+-- which run on every focus move in the runtime's own coroutine, where nothing may read the
+-- screen. The runtime reads it in the handler before a scan, the editor's point below in the same
+-- capture, once something acted since the last reading — our F10, a click in Kontakt's menu, a
+-- window coming forward — or the check 250 ms after an overlay came to the front turned the state
+-- generation over. Tabs in a row read nothing. But the first key after our F10 may come before
+-- Kontakt has redrawn its header, and read once per act, that reading stood for the whole act: the
+-- ring kept offering "Switch to classic view" in the classic view, with the rack's controls hidden,
+-- and a second Return switched Kontakt back (NVDA session, 2026-10-10). So the view toggle and the
+-- instrument editor's button say that they change what these probes show (O:expectChange), and
+-- the runtime reads them again at every key until a reading shows the change: a reading taken too
+-- early is replaced at the next key, and a Return or an Alt+V reads before it settles which toggle
+-- it means. Once the change is read, Tabs in a row read nothing again. As the arbiter brings the
+-- overlay to the front nothing can be read, and the last reading stands until the check 350 ms
+-- later. The user's own F10, which turns over no input epoch, is read only after the next act or
+-- arrival, as before probes.
 --
 -- A single pixel is a weak signal, so it is used only for what is safe to get wrong: which
 -- LABEL a view-toggle carries, and whether a control that needs the classic view is
@@ -548,126 +561,126 @@ local VIEW_PROBE_FROM_RIGHT, VIEW_PROBE_Y = 262, 24
 local EDIT_PROBE_FROM_RIGHT, EDIT_PROBE_Y = 652, 46
 local EDIT_PROBE_VALUE, RACK_PROBE_VALUE, EDIT_PROBE_TOLERANCE = 134, 71, 25
 
-local editKey, editCache = nil, false
-local function isEditView(origin, ov)
-  if not (origin and origin.client and origin.bounds) then return false end
-  local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
-  -- Keyed on the runtime's state generation as well, which turns over 250 ms after any overlay
-  -- activates. Without it a reading taken while the screen still showed the PREVIOUS window
-  -- survived until the user acted — the "it thinks I am in the play view until I toggle twice"
-  -- that this probe was reported for.
-  local key = tostring(origin.id) .. "@" .. tostring(gen) .. "/" .. tostring(O.stateGeneration())
-  if editKey == key then return editCache end
-  editKey = key
-  local w = O.contentSize(origin)
-  if w <= EDIT_PROBE_FROM_RIGHT then
-    editCache = false
-    return false
-  end
-  local p = host.screen.pixel(
-    origin.client.x + w - EDIT_PROBE_FROM_RIGHT,
-    origin.client.y + EDIT_PROBE_Y
-  )
-  -- Same rule as the view probe above, and for the same failure: "not 134" was being treated as
-  -- "the editor is closed", so a reading taken before the plug-in painted said closed and stuck.
-  -- The rack reads 71 and the editor 134; anything else is a different picture.
-  local v = p ~= nil and (p.r + p.g + p.b) / 3 or nil
-  if v == nil or (math.abs(v - EDIT_PROBE_VALUE) > EDIT_PROBE_TOLERANCE
-                  and math.abs(v - RACK_PROBE_VALUE) > EDIT_PROBE_TOLERANCE) then
-    editKey = nil
-    host.log.info(string.format(
-      "[view] unrecognised editor reading %s at (%d,%d) — origin %d,%d %dx%d — keeping '%s'",
-      v and string.format("%d", v) or "nothing",
-      origin.client.x + w - EDIT_PROBE_FROM_RIGHT, origin.client.y + EDIT_PROBE_Y,
-      origin.client.x, origin.client.y, w, select(2, O.contentSize(origin)),
-      editCache and "open" or "closed"))
-    return editCache
-  end
-  local was = editCache
-  editCache = math.abs(v - EDIT_PROBE_VALUE) <= EDIT_PROBE_TOLERANCE
-  if editCache ~= was then
-    host.log.info(string.format("[view] instrument editor %s (probe reads %s)",
-      editCache and "open" or "closed",
-      p and string.format("%d", (p.r + p.g + p.b) / 3) or "nothing"))
-  end
-  return editCache
+-- Where the view probe reads on screen, against the CONTENT's right edge, not the window frame's:
+-- standalone, the frame is 16 px wider than the plugin, which is enough to read a neighbouring
+-- icon instead. nil while the overlay has no origin.
+local function viewPoint(o)
+  local origin = o:origin()
+  if not (origin and origin.client and origin.bounds) then return nil end
+  return { origin.client.x + O.contentSize(origin) - VIEW_PROBE_FROM_RIGHT, origin.client.y + VIEW_PROBE_Y }
 end
 
-local viewKey, viewCache = nil, false
-local function isClassicView(origin, ov)
-  if not (origin and origin.client and origin.bounds) then return false end
-  -- Keyed on `inputEpoch`, NOT `epoch`. Which view Kontakt is in can only change when
-  -- something acts — our F10, or a click in its menu — and both go through host.input,
-  -- which turns that counter over. `epoch` also turns over on every timer tick and every
-  -- key the USER presses, and this probe gates which header controls exist, so it is
-  -- consulted on every focus move: against `epoch` that meant one fresh screen read per
-  -- Tab, measured at 21-38 ms of a ~70 ms step, to re-answer a question whose answer
-  -- pressing Tab cannot have changed.
-  local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
-  local key = tostring(origin.id) .. "@" .. tostring(gen) .. "/" .. tostring(O.stateGeneration())
-  if viewKey == key then return viewCache end
-  viewKey = key
+-- What a reading of the view probe says: true for classic, false for play, nil for neither — and
+-- the brightness it read.
+--
+-- MEASURED, and better than its own comment used to claim: the probe point reads brightness 24
+-- in the play view and 99 in the classic one, with the threshold at 60 sitting squarely between
+-- them. That is not a weak signal, and it does not flap — the alternation once blamed on it was
+-- the VIEW genuinely toggling twice, from a change that fired two mechanisms at once. Recorded so
+-- nobody reopens this: a UIA replacement was tried and is WORSE. "Status bar" and "Navigator" do
+-- appear in one view each in the calibrator's dump, but that walks the RAW tree, whereas `findAny`
+-- is a condition-based search and finds "Status bar" in BOTH — so the named probe answered
+-- "classic" always and left the user unable to leave the classic view. Verifying with one
+-- traversal and deciding with another is the mistake; the numbers above are from the thing that
+-- actually runs.
+--
+-- ACCEPT ONLY A RECOGNISED READING. This was `> 60`, and a threshold answers which SIDE a number
+-- is on without ever asking whether it came from the right world. The first read after our app
+-- starts can happen before the plug-in has painted, or while something else is still in front —
+-- and the answer was then kept until the user clicked something, which is exactly the "toggle it
+-- twice and it comes right" they reported. The two states read 24 and 99 across every calibration
+-- shot. Anything else is not this probe's question being answered wrongly, it is a different
+-- picture.
+local function viewOf(p)
+  if not p then return nil, nil end
+  local v = (p.r + p.g + p.b) / 3
+  if math.abs(v - 24) > 20 and math.abs(v - 99) > 20 then return nil, v end
+  return v > 60, v
+end
 
-  -- MEASURED, and better than its own comment used to claim: the probe point reads
-  -- brightness 24 in the play view and 99 in the classic one, with the threshold at 60 sitting
-  -- squarely between them. That is not a weak signal, and it does not flap — the alternation
-  -- once blamed on it was the VIEW genuinely toggling twice, from a change that fired two
-  -- mechanisms at once. Recorded so nobody reopens this: a UIA replacement was tried and is
-  -- WORSE. "Status bar" and "Navigator" do appear in one view each in the calibrator's dump,
-  -- but that walks the RAW tree, whereas `findAny` is a condition-based search and finds
-  -- "Status bar" in BOTH — so the named probe answered "classic" always and left the user
-  -- unable to leave the classic view. Verifying with one traversal and deciding with another
-  -- is the mistake; the numbers above are from the thing that actually runs.
-  --
-  -- Against the CONTENT's right edge, not the window frame's: standalone, the frame is
-  -- 16 px wider than the plugin, which is enough to read a neighbouring icon instead.
-  local p = host.screen.pixel(
-    origin.client.x + O.contentSize(origin) - VIEW_PROBE_FROM_RIGHT,
-    origin.client.y + VIEW_PROBE_Y
-  )
-  -- ACCEPT ONLY A RECOGNISED READING, and do not remember an unrecognised one.
-  --
-  -- This was `> 60`, and a threshold answers which SIDE a number is on without ever asking
-  -- whether it came from the right world. The first read after our app starts can happen before
-  -- the plug-in has painted, or while something else is still in front — and the answer was then
-  -- cached against `inputEpoch`, which only turns over when we act. So one bad reading stuck
-  -- until the user clicked something, which is exactly the "toggle it twice and it comes right"
-  -- they reported.
-  --
-  -- The two states read 24 and 99 across every calibration shot. Anything else is not this
-  -- probe's question being answered wrongly, it is a different picture, and the honest response
-  -- is to keep the previous answer and leave the cache unset so the next poll looks again.
-  local v = p ~= nil and (p.r + p.g + p.b) / 3 or nil
-  if v == nil or (math.abs(v - 24) > 20 and math.abs(v - 99) > 20) then
-    viewKey = nil
-    -- WITH THE POINT AND THE WINDOW, because "unrecognised" on its own says only that the
-    -- number is wrong, not where it came from. A reading of 255 is not a misread of Kontakt's
-    -- chrome, it is a different surface; the only way to tell a stale origin from an unpainted
-    -- window from something on top is to record where the pixel was taken.
-    host.log.info(string.format(
-      "[view] unrecognised reading %s at (%d,%d) — origin %d,%d %dx%d, foreground %s — keeping '%s'",
-      v and string.format("%d", v) or "nothing",
-      origin.client.x + O.contentSize(origin) - VIEW_PROBE_FROM_RIGHT,
-      origin.client.y + VIEW_PROBE_Y,
-      origin.client.x, origin.client.y, O.contentSize(origin), select(2, O.contentSize(origin)),
-      tostring((host.window.active() or {}).id), viewCache and "classic" or "play"))
-    return viewCache
-  end
-  local was = viewCache
-  viewCache = v > 60
-  -- Only on a CHANGE of answer, so this cannot log per focus move — but with the reading in
-  -- it, because "the detection is wrong" and "the detection is right about a state I did not
-  -- expect it to see" are different problems and the number tells them apart.
-  if viewCache ~= was then
-    host.log.info(string.format(
-      "[view] %s (probe at %d,%d reads %s)",
-      viewCache and "classic" or "play",
-      origin.client.x + O.contentSize(origin) - VIEW_PROBE_FROM_RIGHT,
-      origin.client.y + VIEW_PROBE_Y,
-      p and string.format("%d,%d,%d", p.r, p.g, p.b) or "nothing"
-    ))
-  end
-  return viewCache
+-- The two probes of a Kontakt 8 overlay that offers the view's controls, kept in `ov.state`. An
+-- unrecognised reading is not kept: the previous answer stands, and the next scan looks again.
+local function viewProbes(ov)
+  local view = ov:probe("view", function(o)
+    local at = viewPoint(o)
+    return at and { at } or nil
+  end, { read = function(c, last, pts)
+    local classic, v = viewOf(c[1])
+    if classic == nil then
+      -- WITH THE POINT AND THE WINDOW, because "unrecognised" on its own says only that the
+      -- number is wrong, not where it came from. A reading of 255 is not a misread of Kontakt's
+      -- chrome, it is a different surface; the only way to tell a stale origin from an unpainted
+      -- window from something on top is to record where the pixel was taken.
+      local origin = ov:origin() or {}
+      local w, h = O.contentSize(origin)
+      local cl = origin.client or { x = 0, y = 0 }
+      host.log.info(string.format(
+        "[view] unrecognised reading %s at (%d,%d) — origin %d,%d %dx%d, foreground %s — keeping '%s'",
+        v and string.format("%d", v) or "nothing", pts[1][1], pts[1][2], cl.x, cl.y, w, h,
+        tostring((host.window.active() or {}).id), last and "classic" or "play"))
+      return nil
+    end
+    -- Only on a CHANGE of answer, so this cannot log per focus move — but with the reading in it,
+    -- because "the detection is wrong" and "the detection is right about a state I did not expect
+    -- it to see" are different problems and the number tells them apart. Nothing read yet counts
+    -- as the play view, as the answer meanwhile does.
+    if classic ~= (last == true) then
+      local p = c[1]
+      host.log.info(string.format("[view] %s (probe at %d,%d reads %d,%d,%d)",
+        classic and "classic" or "play", pts[1][1], pts[1][2], p.r, p.g, p.b))
+    end
+    return classic
+  end })
+  -- The editor's point, with the view's point first: this question is only asked once the first
+  -- one has said classic, and in the play view its answer is "closed" whatever the point reads.
+  local edit = ov:probe("editor", function(o)
+    local at = viewPoint(o)
+    if not at then return nil end
+    local origin = o:origin()
+    local w = O.contentSize(origin)
+    if w <= EDIT_PROBE_FROM_RIGHT then return { at } end
+    return { at, { origin.client.x + w - EDIT_PROBE_FROM_RIGHT, origin.client.y + EDIT_PROBE_Y } }
+  end, { read = function(c, last, pts)
+    local classic = viewOf(c[1])
+    -- The view itself not recognised: the view probe has said so, and both look again.
+    if classic == nil then return nil end
+    if not classic or c[2] == nil then return false end
+    -- Same rule as the view probe, and for the same failure: "not 134" was being treated as "the
+    -- editor is closed", so a reading taken before the plug-in painted said closed and stuck. The
+    -- rack reads 71 and the editor 134; anything else is a different picture.
+    local q = c[2]
+    local v = (q.r + q.g + q.b) / 3
+    if math.abs(v - EDIT_PROBE_VALUE) > EDIT_PROBE_TOLERANCE
+      and math.abs(v - RACK_PROBE_VALUE) > EDIT_PROBE_TOLERANCE then
+      local origin = ov:origin() or {}
+      local w, h = O.contentSize(origin)
+      local cl = origin.client or { x = 0, y = 0 }
+      host.log.info(string.format(
+        "[view] unrecognised editor reading %d at (%d,%d) — origin %d,%d %dx%d — keeping '%s'",
+        v, pts[2][1], pts[2][2], cl.x, cl.y, w, h, last and "open" or "closed"))
+      return nil
+    end
+    local open = math.abs(v - EDIT_PROBE_VALUE) <= EDIT_PROBE_TOLERANCE
+    if open ~= (last == true) then
+      host.log.info(string.format("[view] instrument editor %s (probe reads %d)",
+        open and "open" or "closed", v))
+    end
+    return open
+  end })
+  ov.state.kontaktView = { view = view, edit = edit }
+end
+
+-- Whether overlay `ov` sees Kontakt's classic view (the rack or the editor), and whether that is
+-- the instrument editor. Nothing read yet is the play view and a closed editor, as an overlay
+-- without the probes (a Kontakt 7's) always answers.
+local function isClassicView(ov)
+  local p = ov and ov.state and ov.state.kontaktView
+  return p ~= nil and p.view() == true
+end
+
+local function isEditView(ov)
+  local p = ov and ov.state and ov.state.kontaktView
+  return p ~= nil and p.edit() == true
 end
 
 -- The "Kontakt N" identity element's name under `hwnd`, or nil. Used to scope a
@@ -717,6 +730,7 @@ return {
   constantFrame = constantFrame,
   onHostPanel = onHostPanel,
   kontaktPaneName = kontaktPaneName,
+  viewProbes = viewProbes,
   isClassicView = isClassicView,
   isEditView = isEditView,
   isRackView = isRackView,

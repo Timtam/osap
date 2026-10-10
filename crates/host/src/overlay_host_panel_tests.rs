@@ -25,6 +25,11 @@
 //! Kontakt 7's FILE needs LIBRARY beside it, Kontakt 8's own name a wider box, and a miss is asked
 //! again up to eight times in a stay; daw-hosts' REAPER origin finds the FX list by where it is, and
 //! its focus key searches only the entries the platform can match and says when it has no origin.
+//!
+//! And for step T2 of the host.screen waits (2026-10-10): Kontakt 8's view and editor pixels are
+//! probes of its overlay, read in the handler before a scan and only after an act, never by a
+//! `when`; after its F10, and after its editor's button, at every key until the change is read, so
+//! a reading taken before Kontakt redrew is replaced at the next key.
 
 use std::path::PathBuf;
 
@@ -1488,6 +1493,288 @@ fn kontakt_snapshot_controls_click_nothing_once_another_window_came_to_the_front
         later(250)
         assert(#S.clicks == 4 and lastClick() == "700,168", lastClick())
     "##);
+}
+
+/// Kontakt 8's header in a DAW, built for real from its cell, with its view read through the
+/// overlay's probes (runtime 0.5.0): `T.kontakt8()` gives the overlay in front over S.origin, the
+/// view and editor points' colours in `S.at`, and `S.viewReads`, where each read of the probes was
+/// made. host.inputEpoch turns over on the module's own input (F10, a click) and on `T.acted()`, not
+/// on a Tab.
+const K8: &str = r##"
+local S = T.S
+function T.kontakt8()
+  T.modules("modules/kontakt/")
+  S.inputEpoch, S.sent = 0, {}
+  rawset(T.host, "inputEpoch", function() return S.inputEpoch end)
+  rawset(T.host.input, "send", function(key)
+    S.sent[#S.sent + 1] = key
+    S.inputEpoch += 1
+    S.epoch += 1
+  end)
+  rawset(T.host.input, "click", function(x, y)
+    S.clicks[#S.clicks + 1] = { x, y }
+    S.inputEpoch += 1
+  end)
+  -- The two probe points of a plug-in at 100,50, 800 wide: the view 262 from the right edge on row
+  -- 24, the editor 652 from it on row 46.
+  T.VIEW_AT, T.EDIT_AT = "638,74", "248,96"
+  T.PLAY, T.CLASSIC = { r = 24, g = 24, b = 24 }, { r = 99, g = 99, b = 99 }
+  T.RACK, T.EDITOR = { r = 71, g = 71, b = 71 }, { r = 134, g = 134, b = 134 }
+  S.at = { [T.VIEW_AT] = T.PLAY, [T.EDIT_AT] = T.RACK }
+  S.viewReads = {}
+  rawset(T.host.screen, "pixels", function(points)
+    local _, inPass = T.O._passes()
+    S.viewReads[#S.viewReads + 1] = { n = #points, where = T.whereNow(),
+      yieldable = coroutine.isyieldable(), inPass = inPass }
+    local out = {}
+    for i, p in ipairs(points) do out[i] = S.at[p[1] .. "," .. p[2]] or S.pixel end
+    return out
+  end)
+  local C = T.host.include("src/cells.luau")
+  local header = T.host.include("src/header.luau")
+  local cell
+  for _, c in ipairs(C.all) do
+    if c.key == "Kontakt 8 in a DAW" then cell = c end
+  end
+  local ov = T.O.new("Kontakt 8")
+  header.add(ov, cell, false)
+  ov:frame(cell.frame)
+  T.front(ov)
+  return ov, cell
+end
+
+-- Something the module did acted on the screen.
+function T.acted()
+  S.inputEpoch += 1
+  S.epoch += 1
+end
+
+-- The index of the control labelled `label`.
+function T.index(ov, label)
+  for i, c in ipairs(ov.controls) do
+    if c.label == label then return i end
+  end
+end
+
+-- A Tab from the control labelled `from`, and the label it lands on.
+function T.tabFrom(ov, from)
+  ov.focus = T.index(ov, from)
+  T.tab()
+  return ov.controls[ov.focus].label
+end
+
+-- Every read of the probes was made where a capture may wait: in a handler, outside every pass.
+function T.viewReadsWaitable()
+  for i, r in ipairs(S.viewReads) do
+    assert(r.where == "handler" and r.yieldable and not r.inPass,
+      ("read %d made where it cannot wait: %s"):format(i, r.where))
+  end
+end
+
+-- The last `[keys] 'Kontakt 8' holds:` line: what it holds, and what it does not take.
+function T.holds()
+  for i = #S.logs, 1, -1 do
+    local held, not_ = string.match(S.logs[i], "^%[keys%] 'Kontakt 8' holds: (.-) | not taken: (.*)$")
+    if held then return " " .. held .. " ", " " .. not_ .. " " end
+  end
+end
+"##;
+
+/// Kontakt 8's view between two Tabs: the view and the editor's points are read in the Tab's
+/// handler, in one read; Tabs in a row read nothing; F10 turns the input epoch over, and the next
+/// Tab reads the classic view, offers its controls in the ring and holds their keys — a `when`
+/// reads no screen of its own. Once that change is read, Tabs in a row read nothing again. Every
+/// read is made where it may wait.
+#[test]
+fn kontakt_8s_view_change_between_two_tabs_is_read_by_the_next_scan() {
+    run(&format!("{}{}", K8, r##"
+        local S = T.S
+        local ov, cell = T.kontakt8()
+        assert(#S.viewReads == 0, "nothing read outside a handler")
+        assert(T.tabFrom(ov, "Reset multi") == "Switch to classic view", T.dump())
+        assert(#S.viewReads == 1 and S.viewReads[1].n == 3, "the view and the editor's points in one read")
+        for _ = 1, 3 do T.tabFrom(ov, "Reset multi") end
+        assert(#S.viewReads == 1, "Tabs in a row read nothing: " .. #S.viewReads)
+        local _, notTaken = T.holds()
+        assert(string.find(notTaken, " Ctrl+P ", 1, true), "the rack's arrows claim nothing in the play view")
+        -- Return on the toggle: F10, and Kontakt draws its classic view.
+        ov.focus = T.index(ov, "Switch to classic view")
+        S.epoch += 1
+        T.call("key", function() ov:activate() end)
+        assert(S.sent[#S.sent] == "F10", "F10 sent")
+        S.at[T.VIEW_AT] = T.CLASSIC
+        assert(T.tabFrom(ov, "Reset multi") == "Switch to play view", T.dump())
+        assert(#S.viewReads == 2, "read once after the act: " .. #S.viewReads)
+        assert(T.count("[view] classic (probe at 638,74 reads 99,99,99)") == 1, T.dump())
+        local held = T.holds()
+        assert(string.find(held, " Ctrl+P ", 1, true), "the rack's arrows hold their keys: " .. held)
+        assert(cell.inRack(ov) and not cell.inEdit(ov), "the rack, not the editor")
+        for _ = 1, 3 do T.tabFrom(ov, "Reset multi") end
+        assert(#S.viewReads == 2, "the change read, Tabs in a row read nothing: " .. #S.viewReads)
+        -- The instrument editor opened: the next Tab after the click reads it.
+        T.acted()
+        S.at[T.EDIT_AT] = T.EDITOR
+        T.tabFrom(ov, "Reset multi")
+        assert(#S.viewReads == 3 and cell.inEdit(ov) and not cell.inRack(ov), T.dump())
+        assert(T.count("[view] instrument editor open (probe reads 134)") == 1, T.dump())
+        assert(ov.controls[T.index(ov, "Instrument editor")].text(ov) == "open, press to close")
+        T.viewReadsWaitable()
+    "##));
+}
+
+/// A reading of the view that is neither view's — another window drawn over the plug-in — is not
+/// kept: the last view stands, the log says where it was read, and the next scan in a later epoch
+/// reads again until the view is recognised.
+#[test]
+fn kontakt_8s_unrecognised_view_reading_is_not_kept() {
+    run(&format!("{}{}", K8, r##"
+        local S = T.S
+        local ov = T.kontakt8()
+        S.at[T.VIEW_AT] = T.CLASSIC
+        assert(T.tabFrom(ov, "Reset multi") == "Switch to play view", T.dump())
+        T.acted()
+        S.at[T.VIEW_AT] = { r = 255, g = 255, b = 255 }
+        assert(T.tabFrom(ov, "Reset multi") == "Switch to play view", "the classic view stands")
+        assert(T.count("[view] unrecognised reading 255 at (638,74) — origin 100,50 800x600, foreground 1 "
+          .. "— keeping 'classic'") == 1, T.dump())
+        assert(T.tabFrom(ov, "Reset multi") == "Switch to play view")
+        assert(#S.viewReads == 3, "read again at the next Tab: " .. #S.viewReads)
+        S.at[T.VIEW_AT] = T.PLAY
+        assert(T.tabFrom(ov, "Reset multi") == "Switch to classic view", T.dump())
+        assert(T.count("[view] play (probe at 638,74 reads 24,24,24)") == 1, T.dump())
+        T.tabFrom(ov, "Reset multi")
+        assert(#S.viewReads == 4, "kept: " .. #S.viewReads)
+        T.viewReadsWaitable()
+    "##));
+}
+
+/// Return on Kontakt 8's view toggle, through the captured key: F10 goes out, and the next key
+/// comes before Kontakt has redrawn its header. Read once per act, that key's reading stood until
+/// the next act, and the play view it read kept "Switch to classic view" in the classic view's ring
+/// with the rack's controls hidden (NVDA session, 2026-10-10). The toggle says it changes the view
+/// (O:expectChange): the key before the redraw reads the view still drawn, the key after it reads
+/// the classic view — the ring offers "Switch to play view" and the rack's keys are held — and the
+/// Tabs after that read nothing. The same in reverse from the classic view, and for Alt+V in
+/// either, pressed as a user presses it: the claimant is chosen once Alt is up, from what that
+/// moment reads. The instrument editor's button says the same of the editor. Every F10 is in the
+/// log, and every read is made where it may wait.
+#[test]
+fn kontakt_8s_view_read_before_kontakt_redrew_is_replaced_at_the_next_key() {
+    run(&format!("{}{}", K8, r##"
+        local S = T.S
+        -- Alt is held while Alt+V's callback runs, as it is under the user's finger.
+        S.altDown = false
+        rawset(T.host.keys, "modifiersDown", function() return S.altDown end)
+        local ov, cell = T.kontakt8()
+        local function label() return ov.controls[ov.focus].label end
+        local function reads() return #S.viewReads end
+        -- Return, as the captured key delivers it: the epoch turns over first.
+        local function enter()
+          assert(S.holding["Return"], "Return is not captured on '" .. label() .. "'")
+          S.epoch += 1
+          T.call("key", S.captured["Return"])
+        end
+        -- One of the overlay's hotkeys, as the host delivers it: the epoch turns over first, and not
+        -- the input epoch — it is the user's key. Alt is still held, so nothing is done yet; Alt
+        -- comes up, and the runtime's look 15 ms on chooses the claimant from what it reads then
+        -- and presses it.
+        local function hotkey(spec)
+          local held = false
+          for _, s in pairs(S.hot) do held = held or s == spec end
+          assert(held, spec .. " is not held")
+          local sent, clicks = #S.sent, #S.clicks
+          S.altDown = true
+          S.epoch += 1
+          T.call("hotkey", S.hotkeyFns[spec])
+          assert(#S.sent == sent and #S.clicks == clicks, "nothing done while Alt is held")
+          S.altDown = false
+          S.now += 15
+          T.runDue()
+        end
+        local function f10s() return #S.sent end
+        local function redraw(view) S.at[T.VIEW_AT] = view end
+        -- A Tab before Kontakt has redrawn: it reads, and the view it reads is the one still drawn.
+        local function tabBefore(classic)
+          local n = reads()
+          T.tab()
+          assert(reads() == n + 1, "the Tab before the redraw reads: " .. reads())
+          assert(cell.inClassic(ov) == classic, "the Tab before the redraw read the view still drawn")
+        end
+        -- Tabs in a row after the change was read read nothing.
+        local function tabsReadNothing()
+          local n = reads()
+          for _ = 1, 3 do T.tabFrom(ov, "Reset multi") end
+          assert(reads() == n, "the change read, Tabs in a row read nothing: " .. reads() - n)
+        end
+
+        -- Return on "Switch to classic view"; a Tab before Kontakt redraws, then the redraw.
+        assert(T.tabFrom(ov, "Reset multi") == "Switch to classic view", T.dump())
+        enter()
+        assert(f10s() == 1 and S.sent[1] == "F10", "F10 sent")
+        tabBefore(false)
+        redraw(T.CLASSIC)
+        local n = reads()
+        assert(T.tabFrom(ov, "Reset multi") == "Switch to play view",
+          "the Tab after the redraw reads the classic view: " .. T.dump())
+        assert(reads() == n + 1, "read once by the Tab after the redraw")
+        assert(T.count("[view] classic (probe at 638,74 reads 99,99,99)") == 1, T.dump())
+        local held = T.holds()
+        assert(string.find(held, " Ctrl+P ", 1, true) and string.find(held, " Alt+E ", 1, true),
+          "the rack's keys are held: " .. held)
+        assert(cell.inRack(ov), "the rack")
+        tabsReadNothing()
+
+        -- Return on "Switch to play view", the same in reverse.
+        assert(T.tabFrom(ov, "Reset multi") == "Switch to play view")
+        enter()
+        assert(f10s() == 2, "F10 sent: " .. f10s())
+        tabBefore(true)
+        redraw(T.PLAY)
+        assert(T.tabFrom(ov, "Reset multi") == "Switch to classic view",
+          "the Tab after the redraw reads the play view: " .. T.dump())
+        assert(T.count("[view] play (probe at 638,74 reads 24,24,24)") == 1, T.dump())
+        local _, notTaken = T.holds()
+        assert(string.find(notTaken, " Ctrl+P ", 1, true) and string.find(notTaken, " Alt+E ", 1, true),
+          "the rack's keys are not taken in the play view: " .. notTaken)
+        tabsReadNothing()
+
+        -- Alt+V in the play view; a Tab before Kontakt redraws. Alt+V in the classic view then
+        -- reads it and means "Switch to play view".
+        hotkey("Alt+V")
+        assert(f10s() == 3 and label() == "Switch to classic view", label())
+        tabBefore(false)
+        redraw(T.CLASSIC)
+        hotkey("Alt+V")
+        assert(label() == "Switch to play view", "Alt+V in the classic view: " .. label())
+        assert(f10s() == 4 and T.count("[view] classic (probe") == 2, T.dump())
+        -- And in the play view again, after a Tab that read the classic view still drawn.
+        tabBefore(true)
+        redraw(T.PLAY)
+        hotkey("Alt+V")
+        assert(label() == "Switch to classic view", "Alt+V in the play view: " .. label())
+        assert(f10s() == 5 and T.count("[view] play (probe") == 2, T.dump())
+
+        -- Into the rack once more, and Alt+E opens the instrument editor: a Tab before Kontakt
+        -- draws it still reads the rack, the next one the editor.
+        tabBefore(false)
+        redraw(T.CLASSIC)
+        T.tab()
+        assert(cell.inRack(ov), "the rack: " .. T.dump())
+        tabsReadNothing()
+        hotkey("Alt+E")
+        assert(#S.clicks == 1, "the editor's button clicked")
+        n = reads()
+        T.tab()
+        assert(reads() == n + 1 and cell.inRack(ov), "the Tab before the redraw read the rack still drawn")
+        S.at[T.EDIT_AT] = T.EDITOR
+        T.tab()
+        assert(cell.inEdit(ov) and T.count("[view] instrument editor open (probe reads 134)") == 1, T.dump())
+        tabsReadNothing()
+
+        assert(T.count("[kontakt] view toggle: F10 for 'Switch to Classic View'") == 3, T.dump())
+        assert(T.count("[kontakt] view toggle: F10 for 'Switch to Play View'") == 2, T.dump())
+        T.viewReadsWaitable()
+    "##));
 }
 
 /// Komplete Kontrol's one setting is defined as the module loads, before `activate`, and not

@@ -7,6 +7,7 @@
 
 local O = host.require("com.platform.overlay")
 local A = host.include("src/actions.luau")
+local D = host.include("src/detect.luau")
 local geo = host.include("src/geometry.luau")
 
 -- Komplete Kontrol's chrome comes from the Komplete Kontrol MODULE, not from a copy here:
@@ -430,6 +431,13 @@ local function addResizeControls(ov, cell)
   end
 end
 
+-- Kontakt 8's view or its instrument editor is about to change, by our key or our click: the
+-- probes named (detect.viewProbes) are read again at every key of the overlay's until a reading
+-- shows the change, not only at the first after it, which may come before Kontakt has redrawn.
+local function viewChanges(o, cell, ...)
+  if cell.viewProbes then o:expectChange(...) end
+end
+
 local function addRackControls(ov, cell)
   -- The view toggle, by Kontakt's OWN keyboard shortcut (F10) rather than through its
   -- menu: the menu entry reads "Switch to Classic View   F10", and a shortcut the
@@ -468,11 +476,18 @@ local function addRackControls(ov, cell)
     local ROWS = { classic = "Switch to Classic View", play = "Switch to Play View" }
     local function toggle(o, first, second)
       if not mac then
+        -- In the log as the Mac's menu read is: without it a press left no line of its own, and a
+        -- view that did not follow could not be told from an F10 never sent but by the `gen` of
+        -- the next [focus] line.
+        host.log.info(string.format("[kontakt] view toggle: F10 for '%s'", first))
+        viewChanges(o, cell, "view", "editor")
         host.input.send("F10")
         return
       end
       host.log.info(string.format("[kontakt] view toggle: reading Kontakt's menu for '%s'", first))
       A.invokeMenuItem(cell, o, { first, second }, function(chosen)
+        -- Right after the entry's click, before anything reads the probes again.
+        viewChanges(o, cell, "view", "editor")
         host.speech.output(chosen .. ", activated", { interrupt = true })
       end)
     end
@@ -525,6 +540,7 @@ local function addRackControls(ov, cell)
         host.speech.output("The instrument editor button is off screen", { interrupt = true })
         return
       end
+      viewChanges(o, cell, "editor")
       host.input.click(origin.client.x + w - WRENCH_FROM_RIGHT, origin.client.y + WRENCH_Y)
     end,
   })
@@ -660,6 +676,9 @@ end
 -- Everything a cell's overlay carries before a library adds its own controls.
 -- `isLibrary` marks the overlay as one a sample library is building on top of.
 local function add(ov, cell, isLibrary)
+  -- Kontakt 8's view, which the header's `when`s and the status toggles ask: the overlay's own
+  -- probes (detect.viewProbes).
+  if cell.viewProbes then D.viewProbes(ov) end
   if cell.where == "in-kk" then
     kk.chrome(ov)
   elseif cell.where == "standalone" then

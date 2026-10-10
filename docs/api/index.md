@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 165 entries.
+Every call the platform offers a module, in one place. 167 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -90,6 +90,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O:attach(matcher, opts)`](overlay#o-attach) | Binds the overlay as a **standalone** context |
 | [`O:attachEmbedded(spec, opts)`](overlay#o-attachembedded) | Binds the overlay as an **embedded** context: active while keyboard focus is inside a plug-in hosted in a DAW. |
 | [`O:chooseMenuItem(spec) — choosing an item in a plug-in's menu`](overlay#o-choosemenuitem) | Opens a plug-in's own popup menu and chooses an item in it |
+| [`O:expectChange(name, ...)`](overlay#o-expectchange) | Says that what the module is about to do will change what the probes named show |
 | [`O:focusNext()`](overlay#o-focusnext) | Moves focus to the next control (wrapping) and speaks it, moving the mouse onto OCR controls if `hoverToRead` is set. |
 | [`O:focusPrev()`](overlay#o-focusprev) | Moves focus to the previous control (wrapping) and speaks it. |
 | [`O:frame(fn)`](overlay#o-frame) | Shifts the overlay's whole coordinate frame |
@@ -99,6 +100,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O:menuOpen()`](overlay#o-menuopen) | Whether a menu counts as open over the overlay now: one of its menu tests' word is that one is. |
 | [`O:onActivate(fn) / O:onDeactivate(fn)`](overlay#o-onactivate) | Hooks the module runs each time the overlay comes to the front and each time it leaves it. |
 | [`O:origin() / O:hwnd()`](overlay#o-origin) | The active context's coordinate window — the plugin control when embedded, the window when standalone — and its handle. |
+| [`O:probe(name, points, opts?)`](overlay#o-probe) | The pixels a `when` answers from, which the runtime reads in the handler before a scan. |
 | [`O:resume(on)`](overlay#o-resume) | Whether the overlay, coming to the front again on the window it was last in front on, resumes on the control the user was on (`true`, the default |
 | [`O:scale(fn, opts?)`](overlay#o-scale) | Scales every authored coordinate of the overlay by the factor `fn` answers, for a plug-in that zooms its whole interface. |
 | [`O:toScreen(x, y, opts?) / O:toScreenRect(r, opts?)`](overlay#o-toscreen) | Where an authored point, or an authored rectangle `{x1, y1, x2, y2}`, lands on screen now |
