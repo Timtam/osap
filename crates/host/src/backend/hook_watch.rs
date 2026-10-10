@@ -626,53 +626,184 @@ impl Place {
 
 /// A window that came to the front, as the lines of [`move_line`] name it: its title in quotes,
 /// or its class when it has none, and for another program's window the program (`exe`, empty
-/// when it could not be read) — `'Modules'`, `'REAPER v7.22' (reaper.exe)`.
+/// when it could not be read) — `'Modules'`, `'REAPER v7.22' (reaper.exe)`. A window with neither
+/// a title nor a class to read is gone by now: `a window that is gone`.
 pub(crate) fn window_words(title: &str, class: &str, exe: Option<&str>) -> String {
-    let name = if title.is_empty() { format!("untitled, class '{class}'") } else { format!("'{title}'") };
+    let name = match (title.is_empty(), class.is_empty()) {
+        (false, _) => format!("'{title}'"),
+        (true, false) => format!("untitled, class '{class}'"),
+        (true, true) => "a window that is gone".to_string(),
+    };
     match exe {
         Some(exe) => format!("{name} ({})", if exe.is_empty() { "?" } else { exe }),
         None => name,
     }
 }
 
+/// What a move's line says after the window that came to the front ([`move_line`]): for a move
+/// out, the window of another program that was in front before it (`before`, [`window_words`]);
+/// for a move back, how long this process's windows were in front (`ours_for_ms`, from the move
+/// out to this one). Empty when there is nothing to say: the hook went out with no other program's
+/// window seen before, at the start.
+pub(crate) fn move_after(reason: Reason, before: Option<&str>, ours_for_ms: Option<u32>) -> String {
+    match (reason, before, ours_for_ms) {
+        (Reason::Out, Some(before), _) => format!(", after {before}"),
+        (Reason::Back, _, Some(ms)) => {
+            format!(", after {} with our windows in front", crate::modal_spans::seconds(u64::from(ms)))
+        }
+        _ => String::new(),
+    }
+}
+
 /// The one line a move of the hook writes ([`Reason::Out`], [`Reason::Back`]), once its outcome
-/// is in; `window` names the window that came to the front ([`window_words`]). Quiet: a few words
-/// for each change, more only when something went wrong.
-pub(crate) fn move_line(reason: Reason, outcome: Outcome, window: &str) -> String {
+/// is in; `window` names the window that came to the front ([`window_words`]), and `after` is what
+/// [`move_after`] says about the windows before it. Quiet: a few words for each change, more only
+/// when something went wrong.
+pub(crate) fn move_line(reason: Reason, outcome: Outcome, window: &str, after: &str) -> String {
     match (reason, outcome) {
         (Reason::Out, Outcome::TakenOut { old: Old::Removed | Old::WasOut }) => {
-            format!("the keyboard hook is out while one of our windows is in front ({window})")
+            format!("the keyboard hook is out while one of our windows is in front ({window}){after}")
         }
         (Reason::Out, Outcome::TakenOut { old: Old::AlreadyGone }) => format!(
-            "the keyboard hook is out while one of our windows is in front ({window}); Windows had \
-             already removed it — it had stopped being called"
+            "the keyboard hook is out while one of our windows is in front ({window}){after}; \
+             Windows had already removed it — it had stopped being called"
         ),
         (Reason::Out, Outcome::TakenOut { old: Old::Failed(e) }) => format!(
             "the keyboard hook could not be taken out while one of our windows is in front \
-             ({window}): UnhookWindowsHookEx error {e}, so it stays in the chain; it is installed \
-             again, first in the chain, when a window of another program comes to the front"
+             ({window}){after}: UnhookWindowsHookEx error {e}, so it stays in the chain; it is \
+             installed again, first in the chain, when a window of another program comes to the \
+             front"
         ),
         (Reason::Back, Outcome::Installed { old: Old::WasOut | Old::Removed }) => {
-            format!("the keyboard hook is back, first in the chain ({window} in front)")
+            format!("the keyboard hook is back, first in the chain ({window} in front){after}")
         }
         (Reason::Back, Outcome::Installed { old }) => format!(
-            "the keyboard hook is back, first in the chain ({window} in front); {}",
+            "the keyboard hook is back, first in the chain ({window} in front){after}; {}",
             old_words(old)
         ),
         (Reason::Back, Outcome::Failed { error }) => format!(
-            "the keyboard hook could not be put back ({window} in front): SetWindowsHookExW error \
-             {error}. Captured keys and the hotkeys the hook matches do not work until it is \
+            "the keyboard hook could not be put back ({window} in front){after}: SetWindowsHookExW \
+             error {error}. Captured keys and the hotkeys the hook matches do not work until it is \
              (RegisterHotKey still delivers hotkeys); tried again when it misses key-downs, and \
              when a window of another program next comes to the front after one of ours"
         ),
         (Reason::Back, Outcome::Reverted { error }) => format!(
-            "the keyboard hook stays where it was ({window} in front): it could not be taken out \
-             while one of our windows was in front, and now the new one went in but the old one \
-             could not be taken out (UnhookWindowsHookEx error {error}), so the new one was taken \
-             out again rather than leave two hooks of ours handling every key twice"
+            "the keyboard hook stays where it was ({window} in front){after}: it could not be taken \
+             out while one of our windows was in front, and now the new one went in but the old \
+             one could not be taken out (UnhookWindowsHookEx error {error}), so the new one was \
+             taken out again rather than leave two hooks of ours handling every key twice"
         ),
         // Not a pair the hook's thread answers with; said as a re-install would be.
         _ => line(reason, outcome, None),
+    }
+}
+
+/// How late a key-down may reach the hook before the watch writes a line about it
+/// ([`late_key_said`]).
+pub(crate) const LATE_KEY_MS: u32 = 250;
+
+/// Whether a key-down that reached the hook `late` ms after it was pressed (as
+/// `hotkey_hook::lateness` measures it: 0 for an injected one, whose stamp is its sender's) is
+/// said in the log ([`late_key_line`]): at [`LATE_KEY_MS`] or more. Key-ups are not said; their
+/// key-down was.
+pub(crate) fn late_key_said(is_down: bool, late: u32) -> bool {
+    is_down && late >= LATE_KEY_MS
+}
+
+/// The line for key-downs that reached the hook [`LATE_KEY_MS`] or more after they were pressed
+/// since the line before ([`LateKeys`]): the one most late of them (`late` ms, virtual key `vk`),
+/// with the window that was in front at the first (`front`, [`window_words`]), and how many more
+/// there were (`more`). The hook cannot tell what held them: a hook ahead of ours in the chain is
+/// called first and keeps every hook after it waiting, and a machine too busy to run our hook's
+/// thread does the same.
+pub(crate) fn late_key_line(late: u32, vk: u32, front: &str, more: u32) -> String {
+    let mut text = format!(
+        "a key reached our keyboard hook {late} ms after it was pressed (vk {vk:#04x}, {front} in \
+         front): it was held that long before our hook was called — by a hook ahead of ours in \
+         the chain, or by a machine too busy to run our hook's thread"
+    );
+    if more > 0 {
+        text.push_str(&format!(
+            "; {more} more key-down(s) came {LATE_KEY_MS} ms or more late since the line before \
+             (this one names the most late; a line at most once a minute)"
+        ));
+    }
+    text
+}
+
+/// The least time between two lines about late key-downs ([`LateKeys`]).
+pub(crate) const LATE_LINE_EVERY_MS: u32 = 60_000;
+
+/// Key-downs that reached the hook late, as the watch hears of them: how many (`count`), the one
+/// most late of them (`late` ms, virtual key `vk`), and the window in front at the first, as its
+/// line names it (`front`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LateBatch {
+    pub(crate) count: u32,
+    pub(crate) late: u32,
+    pub(crate) vk: u32,
+    pub(crate) front: String,
+}
+
+impl LateBatch {
+    /// This batch and `later` as one: both counts, the most late of the two, the first's window.
+    fn and(self, later: LateBatch) -> LateBatch {
+        let (late, vk) = if later.late > self.late { (later.late, later.vk) } else { (self.late, self.vk) };
+        LateBatch { count: self.count.saturating_add(later.count), late, vk, front: self.front }
+    }
+}
+
+/// What the watch does with late key-downs that came ([`LateKeys::came`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LateSay {
+    /// Write their line now ([`late_key_line`], `count - 1` more).
+    Now(LateBatch),
+    /// Keep them for a line once a minute has passed since the last; `Some(ms)` for the first kept
+    /// since then: a timer of that many milliseconds is to call [`LateKeys::due`].
+    Kept(Option<u32>),
+}
+
+/// How the lines about late key-downs are spaced, so that keys late one after another — a key held
+/// with auto-repeat while a hook ahead of ours is slow, a busy machine — do not write a line
+/// each: the first after [`LATE_LINE_EVERY_MS`] without a line is said at once, and the ones after
+/// it are counted and said in one line when that time has passed since it, then again a minute
+/// later, as long as they come. Ticks are `GetTickCount`'s, wrapping.
+#[derive(Debug, Default)]
+pub(crate) struct LateKeys {
+    /// When the last line was written.
+    last_line: Option<u32>,
+    /// The key-downs since it, not said yet.
+    kept: Option<LateBatch>,
+}
+
+impl LateKeys {
+    /// Late key-downs came (`batch`) at `now`: said at once, with any kept, when no line was
+    /// written in the last [`LATE_LINE_EVERY_MS`]; else kept until then.
+    pub(crate) fn came(&mut self, now: u32, batch: LateBatch) -> LateSay {
+        let first_kept = self.kept.is_none();
+        let all = match self.kept.take() {
+            Some(kept) => kept.and(batch),
+            None => batch,
+        };
+        let since = self.last_line.map(|at| now.wrapping_sub(at));
+        match since {
+            Some(since) if since < LATE_LINE_EVERY_MS => {
+                self.kept = Some(all);
+                LateSay::Kept(first_kept.then_some(LATE_LINE_EVERY_MS - since))
+            }
+            _ => {
+                self.last_line = Some(now);
+                LateSay::Now(all)
+            }
+        }
+    }
+
+    /// The timer [`LateKeys::came`] asked for ran out, at `now`: the key-downs kept since the last
+    /// line, for a line now, if any are.
+    pub(crate) fn due(&mut self, now: u32) -> Option<LateBatch> {
+        let kept = self.kept.take()?;
+        self.last_line = Some(now);
+        Some(kept)
     }
 }
 
@@ -1604,26 +1735,102 @@ mod tests {
         assert_eq!(window_words("REAPER", "REAPERwnd", Some("reaper.exe")), "'REAPER' (reaper.exe)");
         assert_eq!(window_words("", "#32770", Some("")), "untitled, class '#32770' (?)");
         assert_eq!(
-            move_line(Reason::Out, Outcome::TakenOut { old: Old::Removed }, "'Modules'"),
+            move_line(Reason::Out, Outcome::TakenOut { old: Old::Removed }, "'Modules'", ""),
             "the keyboard hook is out while one of our windows is in front ('Modules')"
         );
         assert_eq!(
-            move_line(Reason::Back, Outcome::Installed { old: Old::WasOut }, "'REAPER' (reaper.exe)"),
+            move_line(Reason::Back, Outcome::Installed { old: Old::WasOut }, "'REAPER' (reaper.exe)", ""),
             "the keyboard hook is back, first in the chain ('REAPER' (reaper.exe) in front)"
         );
-        let l = move_line(Reason::Out, Outcome::TakenOut { old: Old::AlreadyGone }, "'Modules'");
+        let l = move_line(Reason::Out, Outcome::TakenOut { old: Old::AlreadyGone }, "'Modules'", "");
         assert!(l.ends_with("('Modules'); Windows had already removed it — it had stopped being called"), "{l}");
-        let l = move_line(Reason::Out, Outcome::TakenOut { old: Old::Failed(5) }, "'Modules'");
+        let l = move_line(Reason::Out, Outcome::TakenOut { old: Old::Failed(5) }, "'Modules'", "");
         assert!(l.contains("could not be taken out") && l.contains("UnhookWindowsHookEx error 5"), "{l}");
-        let l = move_line(Reason::Back, Outcome::Failed { error: 8 }, "'REAPER' (reaper.exe)");
+        let l = move_line(Reason::Back, Outcome::Failed { error: 8 }, "'REAPER' (reaper.exe)", "");
         assert!(l.contains("could not be put back") && l.contains("SetWindowsHookExW error 8"), "{l}");
-        let l = move_line(Reason::Back, Outcome::Installed { old: Old::AlreadyGone }, "'REAPER' (reaper.exe)");
+        let l = move_line(Reason::Back, Outcome::Installed { old: Old::AlreadyGone }, "'REAPER' (reaper.exe)", "");
         assert!(l.starts_with("the keyboard hook is back") && l.contains("had already removed"), "{l}");
-        let l = move_line(Reason::Back, Outcome::Reverted { error: 5 }, "'REAPER' (reaper.exe)");
+        let l = move_line(Reason::Back, Outcome::Reverted { error: 5 }, "'REAPER' (reaper.exe)", "");
         assert!(l.contains("stays where it was") && l.contains("error 5"), "{l}");
         // A re-install for missed keys after a way back that failed.
         let l = line(Reason::Missed { downs: 3 }, Outcome::Installed { old: Old::WasOut }, None);
         assert!(l.contains("no hook of ours was in the chain"), "{l}");
+    }
+
+    /// A move out names the other program's window that was in front before ours, a move back how
+    /// long ours were in front; a window that is gone by the time it is named says so.
+    #[test]
+    fn the_move_lines_say_what_was_in_front_before_and_for_how_long() {
+        let after = move_after(Reason::Out, Some("'REAPER' (reaper.exe)"), None);
+        assert_eq!(
+            move_line(Reason::Out, Outcome::TakenOut { old: Old::Removed }, "'Modules'", &after),
+            "the keyboard hook is out while one of our windows is in front ('Modules'), after \
+             'REAPER' (reaper.exe)"
+        );
+        let after = move_after(Reason::Back, None, Some(12_345));
+        assert_eq!(
+            move_line(Reason::Back, Outcome::Installed { old: Old::WasOut }, "'REAPER' (reaper.exe)", &after),
+            "the keyboard hook is back, first in the chain ('REAPER' (reaper.exe) in front), after \
+             12.3 s with our windows in front"
+        );
+        assert_eq!(move_after(Reason::Back, None, Some(80)), ", after 0.0 s with our windows in front");
+        assert_eq!(move_after(Reason::Out, None, None), "", "armed with ours in front: none before");
+        assert_eq!(move_after(Reason::Back, None, None), "");
+        assert_eq!(move_after(Reason::Resumed, Some("'x'"), Some(5)), "");
+        let l = move_line(Reason::Out, Outcome::TakenOut { old: Old::AlreadyGone }, "'Modules'", ", after 'x'");
+        assert!(l.contains("('Modules'), after 'x'; Windows had already removed it"), "{l}");
+        assert_eq!(window_words("", "", Some("")), "a window that is gone (?)");
+        assert_eq!(window_words("", "", None), "a window that is gone");
+    }
+
+    /// Late key-downs one after another write a line a minute at most: the first after a quiet
+    /// minute at once, the ones after it counted, with the most late of them and the window in
+    /// front at the first, into one line a minute after the last — and nothing when none came.
+    #[test]
+    fn late_key_downs_write_a_line_a_minute_at_most() {
+        let b = |count, late, vk, front: &str| LateBatch { count, late, vk, front: front.to_string() };
+        let mut l = LateKeys::default();
+        assert_eq!(l.came(1_000, b(1, 300, 0x41, "'A'")), LateSay::Now(b(1, 300, 0x41, "'A'")));
+        // Within the minute: kept, and the first asks for the timer of what is left of it.
+        assert_eq!(l.came(11_000, b(2, 900, 0x42, "'B'")), LateSay::Kept(Some(50_000)));
+        assert_eq!(l.came(12_000, b(1, 400, 0x43, "'C'")), LateSay::Kept(None));
+        assert_eq!(l.due(61_000), Some(b(3, 900, 0x42, "'B'")));
+        assert_eq!(late_key_line(900, 0x42, "'B'", 2).matches("2 more key-down(s)").count(), 1);
+        // The timer for nothing kept: no line.
+        assert_eq!(l.due(61_500), None);
+        // A minute from that line on, the next is said at once.
+        assert_eq!(l.came(70_000, b(1, 260, 0x44, "'D'")), LateSay::Kept(Some(51_000)));
+        assert_eq!(l.came(121_000, b(1, 270, 0x45, "'E'")), LateSay::Now(b(2, 270, 0x45, "'D'")));
+        // Ticks wrap.
+        let mut l = LateKeys::default();
+        assert!(matches!(l.came(u32::MAX - 10, b(1, 300, 0x41, "'A'")), LateSay::Now(_)));
+        assert_eq!(l.came(20, b(1, 300, 0x41, "'A'")), LateSay::Kept(Some(LATE_LINE_EVERY_MS - 31)));
+    }
+
+    /// A key-down that reached the hook 250 ms or more after it was pressed is said, with the
+    /// window in front and how many more there were; a key-up, or one less late, is not.
+    #[test]
+    fn a_key_down_that_reached_the_hook_late_is_said_once_with_how_many_more() {
+        assert!(late_key_said(true, 250));
+        assert!(late_key_said(true, 5_000));
+        assert!(!late_key_said(true, 249));
+        assert!(!late_key_said(false, 900), "a key-up: its key-down was said");
+        assert!(!late_key_said(true, 0), "on time, or injected");
+        let l = late_key_line(812, 0x09, "'REAPER' (reaper.exe)", 0);
+        assert_eq!(
+            l,
+            "a key reached our keyboard hook 812 ms after it was pressed (vk 0x09, 'REAPER' \
+             (reaper.exe) in front): it was held that long before our hook was called — by a hook \
+             ahead of ours in the chain, or by a machine too busy to run our hook's thread"
+        );
+        let l = late_key_line(300, 0x41, "'Modules'", 3);
+        assert!(
+            l.ends_with(
+                "; 3 more key-down(s) came 250 ms or more late since the line before (this one \
+                 names the most late; a line at most once a minute)"
+            ),
+            "{l}"
+        );
     }
 
     #[test]

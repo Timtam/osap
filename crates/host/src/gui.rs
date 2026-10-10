@@ -2522,6 +2522,24 @@ fn report_error(
     });
 }
 
+/// `dialog.show_modal()`, with a `[gui]` line as it opens and one as it closes: how long it was
+/// open, how many pump iterations ran inside it — the pump goes on from its timer inside the
+/// dialog's own loop — and the longest of them (`crate::modal_spans`). Two lines per dialog, on
+/// the event loop, where the dialog is.
+fn show_modal_said(dialog: &Dialog, title: &str) -> i32 {
+    crate::logging::line("gui", &format!("dialog '{title}' is open"));
+    let span = crate::modal_spans::open();
+    let opened = std::time::Instant::now();
+    let res = dialog.show_modal();
+    let inside = crate::modal_spans::close(span);
+    let ms = opened.elapsed().as_millis() as u64;
+    crate::logging::line(
+        "gui",
+        &crate::modal_spans::closed_line(&format!("dialog '{title}'"), ms, inside),
+    );
+    res
+}
+
 /// A modal message dialog whose body text is screen-reader-accessible: the
 /// message lives in a focused, read-only multiline text control. (A bare
 /// StaticText isn't focusable, so a wxMessageDialog's body is only reachable by
@@ -2572,7 +2590,7 @@ fn modal_message(parent: &Frame, title: &str, message: &str, yes_no: bool) -> bo
     dialog.set_sizer_and_fit(dlg_sizer, true);
 
     text.set_focus(); // read the message aloud when the dialog opens
-    let res = dialog.show_modal();
+    let res = show_modal_said(&dialog, title);
     dialog.destroy();
     if yes_no {
         res == ID_YES
@@ -2631,7 +2649,7 @@ fn review_dialog(
     dialog.set_sizer_and_fit(dlg_sizer, true);
 
     text.set_focus(); // read the review aloud when the dialog opens
-    let res = dialog.show_modal();
+    let res = show_modal_said(&dialog, title);
     dialog.destroy();
     // Anything but one of the offered answers — the close box, Escape, a destroyed dialog —
     // is a no.
@@ -2742,7 +2760,7 @@ fn open_settings_dialog(
     dlg_sizer.add(&panel, 1, SizerFlag::Expand, 0);
     dialog.set_sizer_and_fit(dlg_sizer, true);
 
-    if dialog.show_modal() == ID_OK {
+    if show_modal_said(&dialog, title) == ID_OK {
         for (key, ctl) in &controls {
             let value: Option<settings::Value> = match ctl {
                 Ctl::Bool(c) => Some(settings::Value::Bool(c.get_value())),

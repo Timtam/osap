@@ -2617,6 +2617,11 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             // machine was too loaded to schedule it, the events queued meanwhile arrive in
             // order, late, and each is judged as of its own moment — see `hotkey_hook`.
             let late = hotkey_hook::lateness(now, kb.time, kb.flags & LLKHF_INJECTED != 0);
+            // A key-down held 250 ms or more before it got here: kept for the watch's line
+            // (`hook_watch_thread::note_late_key`), atomics and at most one post.
+            if hook_watch::late_key_said(is_down, late) {
+                hook_watch_thread::note_late_key(vk, late);
+            }
             // GetAsyncKeyState, NOT GetKeyState: a low-level hook runs on the thread
             // that installed it, and GetKeyState reports that THREAD's view of the
             // keyboard — updated only by the messages it retrieves. Our thread never
@@ -4358,6 +4363,21 @@ mod hook_carry_over_tests {
         for vk in [0x09, 0x0D, 0x14, 0x2D, 0x60, 0x25, 0x56, u32::from(VK_MASK_KEY)] {
             assert_eq!(modifier_generic(vk), None, "{vk:#x}");
         }
+    }
+
+    /// A key-down that reached the hook late is kept for the watch's line as soon as the hook knows
+    /// how late it is, before anything is matched, so a key that is swallowed counts as well.
+    #[test]
+    fn a_late_key_down_is_kept_for_the_watch_before_anything_is_matched() {
+        const SRC: &str = include_str!("windows.rs");
+        let at = SRC.find("unsafe extern \"system\" fn ll_keyboard_proc(").unwrap();
+        let hook = &SRC[at..at + SRC[at..].find("\n}\n").unwrap()];
+        let late = hook.find("let late = hotkey_hook::lateness(").unwrap();
+        let kept = hook
+            .find("if hook_watch::late_key_said(is_down, late) {\n                hook_watch_thread::note_late_key(vk, late);")
+            .expect("the hook keeps late key-downs for the watch");
+        assert!(late < kept);
+        assert!(kept < hook.find("let mask = HOOK_MODS.with(").unwrap());
     }
 
     /// The key that masks a swallowed hotkey's modifiers is 0xFF, the code no keyboard layout

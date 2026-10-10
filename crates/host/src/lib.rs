@@ -95,6 +95,7 @@ mod stops;
 mod stops_tests;
 mod gui;
 mod image_search;
+mod modal_spans;
 /// One running copy per user: the lock, and the request a second start sends — see the file.
 mod instance;
 mod json;
@@ -5138,6 +5139,9 @@ impl Manager {
                         shared.settle_stops();
                         let stops_ms = t.elapsed().as_millis();
                         let pump_ms = pump_started.elapsed().as_millis();
+                        // Counted for a dialog or a menu of ours this iteration ran inside, if
+                        // any is open; one load otherwise.
+                        modal_spans::iteration(pump_ms as u64);
                         if pump_ms >= 250 {
                             // The hazard is different on each platform, and the line has to
                             // name the right one: a Mac tester's log full of "Windows stops

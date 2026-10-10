@@ -7951,8 +7951,22 @@ time limit; a module past either is stopped until the next start.
       raw input reports. While the hook is out the watch counts no key, and a resume or unlock
       only looks at the window in front; captures and hotkeys carry over, held records are
       forgotten. Log: "[keys] the keyboard hook is out while one of our windows is in front
-      ('<title>')" and "[keys] the keyboard hook is back, first in the chain ('<title>' (<exe>) in
-      front)", once per switch.
+      ('<title>'), after '<title>' (<exe>)" and "[keys] the keyboard hook is back, first in the
+      chain ('<title>' (<exe>) in front), after <s> s with our windows in front", once per switch.
+      **Diagnostics (2026-10-10):** "[gui] dialog '<title>' is open" / "... closed after <s> s; <n>
+      pump iteration(s) ran inside it, the longest <ms> ms" around every modal dialog; on Windows
+      "[gui] the tray menu is open (our hidden tray window took the foreground)" / "the tray menu
+      closed after ...; in front now: ..." from the system's menu events on the keyboard watch's
+      thread (modal_spans.rs), a menu whose end went unheard closed once none of its popups is
+      shown; "[keys] a key reached our keyboard hook <ms> ms after it was pressed (vk ..., ... in
+      front) ..." for a key-down 250 ms or more late, at most one line a minute (the first at
+      once, the ones after it counted into the next).
+      **Live, 2026-10-10 evening:** characters were still not read inside the module manager
+      (arrows over the letters of "kontakt" in a field there) and were read again once it was
+      closed. That application was the build of 21:06, started 21:06 and still running at 22:11;
+      its binary holds none of the fix's lines ("is out while one of our windows" is not in it),
+      so it ran without the fix, and the result is the one the cause above predicts. The live
+      check below is still to be made with a build that has the fix.
       **Open:**
       - The maintainer's live check, with NVDA started BEFORE the application (the order that
         failed): in the module manager and a module's Settings dialog, arrows read the character,

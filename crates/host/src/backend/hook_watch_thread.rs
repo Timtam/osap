@@ -3,8 +3,9 @@
 //! and, once the hook is installed, asks the hook's thread to install it again when one of them
 //! says it is needed; the session and power notifications among them, and the display
 //! broadcasts a second, hidden top-level window hears, are also the host's system events (the
-//! last section below). The decisions are in [`super::hook_watch`]; this file is the plumbing
-//! around them.
+//! last section below). Two more things are only told to the log: this process's menus, and keys
+//! that reached the hook late. The decisions are in [`super::hook_watch`]; this file is the
+//! plumbing around them.
 //!
 //! - **Raw Input from the keyboard** (usage page 1, usage 6, `RIDEV_INPUTSINK`, so it arrives
 //!   whichever window is in front). Posted to this window, never waited for, so no timeout can
@@ -31,6 +32,17 @@
 //!   Here rather than on the pump, whose foreground events can wait behind a long OCR call: a
 //!   record forgotten late could be one the user has made since, and a hook taken out late cuts
 //!   the hooks behind it off from every key typed into the module manager meanwhile.
+//! - **This process's menus** (`SetWinEventHook`, `EVENT_SYSTEM_MENUPOPUPSTART` to
+//!   `EVENT_SYSTEM_MENUPOPUPEND`, out of context, for this process only), from the start, hook or
+//!   not: the `[gui]` lines for the tray menu and any other menu of ours opening and closing, with
+//!   the pump iterations that ran inside it (`crate::modal_spans`). Here because the tray's menu
+//!   is opened by wxWidgets itself, inside its own loop, where nothing of ours is told. A menu
+//!   whose end the system does not report is closed once none of its popups is shown, at the next
+//!   popup and, once the hook's part is armed, at the next foreground event ([`settle_menus`]).
+//! - **Keys that reached the hook late**: the hook keeps a key-down that reached it 250 ms or
+//!   more after it was pressed and posts one message for the first since the last message
+//!   ([`note_late_key`]); the line is written here, at most one a minute, with a timer on this
+//!   window for the ones kept meanwhile ([`say_late_keys`]).
 //!
 //! **Why a thread of its own, and not the hook's or the pump's.** The hook's thread must do
 //! nothing but answer the hook: every keystroke on the machine waits for it. The pump stalls for
@@ -95,11 +107,12 @@ use windows_sys::Win32::UI::Input::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassNameW, GetForegroundWindow,
-    GetMessageTime, GetMessageW, GetWindowThreadProcessId, InternalGetWindowText, PostMessageW,
-    PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, DEVICE_NOTIFY_CALLBACK,
-    EVENT_SYSTEM_FOREGROUND, HWND_MESSAGE, MSG, WINEVENT_OUTOFCONTEXT, WM_APP, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_INPUT, WM_SETTINGCHANGE, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    GetMessageTime, GetMessageW, GetWindowThreadProcessId, InternalGetWindowText, IsWindowVisible,
+    KillTimer, PostMessageW, PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SetTimer,
+    DEVICE_NOTIFY_CALLBACK, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MENUPOPUPEND,
+    EVENT_SYSTEM_MENUPOPUPSTART, HWND_MESSAGE, MSG, WINEVENT_OUTOFCONTEXT, WM_APP,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_INPUT, WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE,
+    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use super::hook_watch::{self, Change, Move, Outcome, Place, Reason, Verdict, Witness};
@@ -120,6 +133,12 @@ const WM_APP_REHOOKED: u32 = WM_APP + 0x53;
 /// Posted here by [`start`] when the thread was already running for the system events: arm the
 /// hook's part now.
 const WM_APP_ARM_KEYS: u32 = WM_APP + 0x54;
+/// Posted here by the hook ([`note_late_key`]): key-downs reached it late; write the line, or keep
+/// them for the next ([`say_late_keys`]).
+const WM_APP_LATE_KEY: u32 = WM_APP + 0x56;
+/// The id of the timer on this thread's window that says the late key-downs kept since the last
+/// line, a minute after it ([`late_keys_due`]).
+const LATE_TIMER: usize = 1;
 
 /// The hook exists and its part of the watch is wanted: set by [`start`] before it posts
 /// [`WM_APP_ARM_KEYS`], read by the thread once its window exists, so whichever comes first the
@@ -148,6 +167,15 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 /// for one, and a move's reply answers a re-install whose own was overwritten (`settle_move`).
 static LOST_REPLY: AtomicU64 = AtomicU64::new(0);
 
+/// Key-downs that reached the hook late ([`note_late_key`]) since the last message, wrapping.
+static LATE_KEYS: AtomicU32 = AtomicU32::new(0);
+/// The one most late of them: how late in the high 32 bits, its virtual key in the low ones.
+static LATE_WORST: AtomicU64 = AtomicU64::new(0);
+/// The window in front at the first of them.
+static LATE_FRONT: AtomicIsize = AtomicIsize::new(0);
+/// A message for them is on its way here; cleared as it is handled.
+static LATE_POSTED: AtomicBool = AtomicBool::new(false);
+
 /// The hook was called, at `now` (`GetTickCount`). Called in the hook for every key event of every
 /// kind, before anything but the count of its entries ([`HOOK_ENTERED`]).
 pub(super) fn note_hook_call(now: u32) {
@@ -165,6 +193,84 @@ fn record_of_call(now: u32) -> u32 {
 
 fn call_of_record(record: u32) -> Option<u32> {
     (record != 0).then_some(record)
+}
+
+/// A key-down reached the hook `late` ms after it was pressed (`hook_watch::late_key_said`).
+/// Called inside the hook: kept in atomics, and for the first such key since the last message
+/// the window in front is noted and one message posted here, where the line is written or the
+/// keys kept for the next ([`say_late_keys`]). Neither `GetForegroundWindow` nor `PostMessageW`
+/// waits for anybody. A message that cannot be posted is posted at the next late key.
+pub(super) fn note_late_key(vk: u32, late: u32) {
+    LATE_KEYS.fetch_add(1, Ordering::Relaxed);
+    LATE_WORST.fetch_max((u64::from(late) << 32) | u64::from(vk), Ordering::Relaxed);
+    if LATE_POSTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    // SAFETY: a plain query.
+    LATE_FRONT.store(unsafe { GetForegroundWindow() } as isize, Ordering::Relaxed);
+    let hwnd = WATCH_HWND.load(Ordering::SeqCst);
+    // SAFETY: posting to our own message-only window.
+    let posted = hwnd != 0 && unsafe { PostMessageW(hwnd as HWND, WM_APP_LATE_KEY, 0, 0) } != 0;
+    if !posted {
+        LATE_POSTED.store(false, Ordering::Release);
+    }
+}
+
+thread_local! {
+    /// How the lines about late key-downs are spaced (`hook_watch::LateKeys`).
+    static LATE: RefCell<hook_watch::LateKeys> = RefCell::new(hook_watch::LateKeys::default());
+}
+
+/// The key-downs that reached the hook late since the last message (`hook_watch::LateBatch`): the
+/// one most late, the window in front at the first, and how many. Said now, or kept for one line a
+/// minute after the last, with a timer for the first kept ([`late_keys_due`]) — see
+/// `hook_watch::LateKeys`. Nothing when another message took them already.
+fn say_late_keys() {
+    LATE_POSTED.store(false, Ordering::Release);
+    let count = LATE_KEYS.swap(0, Ordering::AcqRel);
+    let worst = LATE_WORST.swap(0, Ordering::AcqRel);
+    if count == 0 {
+        return;
+    }
+    let front = LATE_FRONT.load(Ordering::Relaxed) as HWND;
+    let mut pid = 0u32;
+    // SAFETY: a plain query; 0 for a window that is gone.
+    unsafe { GetWindowThreadProcessId(front, &mut pid) };
+    let words = window_named(front, (pid != std::process::id()).then_some(pid));
+    let batch = hook_watch::LateBatch { count, late: (worst >> 32) as u32, vk: worst as u32, front: words };
+    // SAFETY: reads the tick clock.
+    let now = unsafe { GetTickCount() };
+    match LATE.with(|l| l.borrow_mut().came(now, batch)) {
+        hook_watch::LateSay::Now(batch) => write_late_keys(batch),
+        hook_watch::LateSay::Kept(Some(ms)) => {
+            let hwnd = WATCH_HWND.load(Ordering::SeqCst) as HWND;
+            // SAFETY: a timer on this thread's own window; its WM_TIMER comes to `watch_wndproc`.
+            // Should it fail, the keys kept are said with the next late one after the minute.
+            unsafe { SetTimer(hwnd, LATE_TIMER, ms, None) };
+        }
+        hook_watch::LateSay::Kept(None) => {}
+    }
+}
+
+/// The minute after the last line about late key-downs is over ([`LATE_TIMER`]): the ones kept
+/// since, in one line.
+fn late_keys_due() {
+    let hwnd = WATCH_HWND.load(Ordering::SeqCst) as HWND;
+    // SAFETY: this thread's own timer, on its own window.
+    unsafe { KillTimer(hwnd, LATE_TIMER) };
+    // SAFETY: reads the tick clock.
+    let now = unsafe { GetTickCount() };
+    if let Some(batch) = LATE.with(|l| l.borrow_mut().due(now)) {
+        write_late_keys(batch);
+    }
+}
+
+/// The line for late key-downs (`hook_watch::late_key_line`): the most late, and how many more.
+fn write_late_keys(b: hook_watch::LateBatch) {
+    crate::logging::line(
+        "keys",
+        &hook_watch::late_key_line(b.late, b.vk, &b.front, b.count.saturating_sub(1)),
+    );
 }
 
 /// Starts the watch for the hook installed on `hook_thread`: the thread, if the system events
@@ -290,11 +396,18 @@ struct Keys {
     /// of the hook's thread ([`follow_front`]).
     place: Place,
     /// The moves asked of the hook's thread and not answered yet, each with the window that came
-    /// to the front, for its line ([`hook_watch::window_words`]). The hook's thread answers them in
-    /// order; a few at most, unless answers went missing, and then the oldest are dropped.
-    moves: VecDeque<(Reason, String)>,
+    /// to the front and what its line says after it, for its line ([`hook_watch::window_words`],
+    /// [`hook_watch::move_after`]). The hook's thread answers them in order; a few at most, unless
+    /// answers went missing, and then the oldest are dropped.
+    moves: VecDeque<(Reason, String, String)>,
     /// Said that a move could not be posted.
     said_move_failed: bool,
+    /// The last window of another program that came to the front, with its process: the one a
+    /// move out names as in front before ours.
+    before: Option<(isize, u32)>,
+    /// When the move out was asked (`GetTickCount`), for how long ours were in front, said by the
+    /// move back.
+    out_at: Option<u32>,
 }
 
 /// The most moves kept waiting for their answer ([`Keys::moves`]).
@@ -392,6 +505,15 @@ fn run() {
     if KEYS_WANTED.load(Ordering::SeqCst) {
         arm_keys();
     }
+    if let Err(error) = register_menus() {
+        crate::logging::line(
+            "gui",
+            &format!(
+                "this application's menus are not followed (SetWinEventHook error {error}): no \
+                 line says when the tray menu or another menu of ours opens and closes"
+            ),
+        );
+    }
 
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     // SAFETY: a standard message loop on this thread's own queue.
@@ -458,6 +580,8 @@ fn arm_keys() {
             place: Place::default(),
             moves: VecDeque::new(),
             said_move_failed: false,
+            before: None,
+            out_at: None,
         });
     });
     // The hook may have been installed with one of this process's windows in front already — the
@@ -636,7 +760,8 @@ fn register_foreground() -> Result<HWINEVENTHOOK, u32> {
 }
 
 /// A window came to the front. If it is one the hook is not called for, what the hook recorded
-/// as held from key-downs alone is forgotten — see [`front_came`].
+/// as held from key-downs alone is forgotten — see [`front_came`]. A menu of ours none of whose
+/// popups is shown any more is closed ([`settle_menus`]).
 unsafe extern "system" fn foreground_changed(
     _hook: HWINEVENTHOOK,
     event: u32,
@@ -652,6 +777,7 @@ unsafe extern "system" fn foreground_changed(
     }
     // Unwinding out of a callback of the system's is an abort; see `watch_wndproc`.
     let caught = std::panic::catch_unwind(|| {
+        settle_menus();
         take_lost_reply();
         with_state(|s| {
             let State { keys, said_forgot, .. } = s;
@@ -675,6 +801,147 @@ unsafe extern "system" fn foreground_changed(
     }
 }
 
+/// This process's menus opening and closing, out of context, delivered to this thread: the
+/// popup menus of its windows, the tray's among them. Lasts as long as the process.
+fn register_menus() -> Result<HWINEVENTHOOK, u32> {
+    // SAFETY: an out-of-context hook with a callback of ours that lives for the process, for this
+    // process's events only.
+    let hook = unsafe {
+        SetWinEventHook(
+            EVENT_SYSTEM_MENUPOPUPSTART,
+            EVENT_SYSTEM_MENUPOPUPEND,
+            std::ptr::null_mut(),
+            Some(menu_changed),
+            std::process::id(),
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        )
+    };
+    if hook.is_null() {
+        // SAFETY: plain error query (SetWinEventHook documents none; 0 then).
+        Err(unsafe { GetLastError() })
+    } else {
+        Ok(hook)
+    }
+}
+
+/// The menus of ours as this thread follows them ([`menu_changed`], [`settle_menus`]).
+#[derive(Default)]
+struct Menus {
+    popups: crate::modal_spans::MenuPopups,
+    /// The menu open now, if one is.
+    open: Option<OpenMenu>,
+}
+
+/// A menu of ours that is open: its span (`crate::modal_spans`), when it opened, and whether it is
+/// the tray's.
+struct OpenMenu {
+    span: u64,
+    opened: std::time::Instant,
+    tray: bool,
+}
+
+thread_local! {
+    static MENUS: RefCell<Menus> = RefCell::new(Menus::default());
+}
+
+/// A popup menu of this process, `hwnd`, opened or closed. The first to open opens the menu's span
+/// and writes its line, the last to close closes both (`crate::modal_spans`): what ran inside it,
+/// and the window in front now. The tray's is told by the window in front as it opens: a hidden
+/// one of ours, which the tray icon puts there for its menu. A menu whose end went unheard is
+/// closed as the next opens, once none of its popups is shown any more (`MenuPopups`).
+unsafe extern "system" fn menu_changed(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    let caught = std::panic::catch_unwind(|| {
+        MENUS.with(|m| {
+            let Ok(mut m) = m.try_borrow_mut() else { return };
+            let Menus { popups, open } = &mut *m;
+            if event == EVENT_SYSTEM_MENUPOPUPSTART {
+                let (unheard, opened) = popups.popup_start(hwnd as isize, popup_shown);
+                if unheard {
+                    if let Some(menu) = open.take() {
+                        say_menu_closed(menu);
+                    }
+                }
+                if opened {
+                    let (front, pid) = front_window();
+                    let ours = pid == Some(std::process::id());
+                    // SAFETY: a plain query; it sends no message.
+                    let tray = ours && !front.is_null() && unsafe { IsWindowVisible(front) } == 0;
+                    let words = window_named(front, pid.filter(|p| *p != std::process::id()));
+                    crate::logging::line("gui", &crate::modal_spans::menu_open_line(tray, &words));
+                    let span = crate::modal_spans::open();
+                    *open = Some(OpenMenu { span, opened: std::time::Instant::now(), tray });
+                }
+            } else if event == EVENT_SYSTEM_MENUPOPUPEND && popups.popup_end(hwnd as isize) {
+                if let Some(menu) = open.take() {
+                    say_menu_closed(menu);
+                }
+            }
+        });
+    });
+    if caught.is_err() {
+        static SAID: AtomicBool = AtomicBool::new(false);
+        if !SAID.swap(true, Ordering::Relaxed) {
+            crate::logging::line("gui", "the keyboard watch panicked following a menu of ours");
+        }
+    }
+}
+
+/// A window came to the front ([`foreground_changed`]): a menu of ours none of whose popups is
+/// shown any more is closed, its end unheard or not here yet (`MenuPopups::settle`); an end that
+/// comes after it closes nothing.
+fn settle_menus() {
+    MENUS.with(|m| {
+        let Ok(mut m) = m.try_borrow_mut() else { return };
+        let Menus { popups, open } = &mut *m;
+        if popups.settle(popup_shown) {
+            if let Some(menu) = open.take() {
+                say_menu_closed(menu);
+            }
+        }
+    });
+}
+
+/// Whether popup menu window `hwnd` is still shown: false for one hidden, or gone.
+fn popup_shown(hwnd: isize) -> bool {
+    // SAFETY: a plain query, FALSE for a window that is gone; it sends no message.
+    unsafe { IsWindowVisible(hwnd as HWND) != 0 }
+}
+
+/// Closes the span of `menu`, which has closed, and writes its line: how long it was open, what
+/// ran inside it, and the window in front now.
+fn say_menu_closed(menu: OpenMenu) {
+    let OpenMenu { span, opened, tray } = menu;
+    let inside = crate::modal_spans::close(span);
+    let (front, pid) = front_window();
+    let words = window_named(front, pid.filter(|p| *p != std::process::id()));
+    let what = if tray { "the tray menu" } else { "the menu" };
+    let ms = opened.elapsed().as_millis() as u64;
+    crate::logging::line(
+        "gui",
+        &format!("{}; in front now: {words}", crate::modal_spans::closed_line(what, ms, inside)),
+    );
+}
+
+/// The window in front and its process (`None` when there is none, or it is gone).
+fn front_window() -> (HWND, Option<u32>) {
+    // SAFETY: plain queries; neither sends the window a message.
+    unsafe {
+        let front = GetForegroundWindow();
+        let mut pid = 0u32;
+        let found = !front.is_null() && GetWindowThreadProcessId(front, &mut pid) != 0;
+        (front, found.then_some(pid))
+    }
+}
+
 /// A window came to the front: one of this process's own (`ours`), or one of a process at `level`
 /// (`None`: unread, or gone). When the hook is not called for the keys going to it — the module
 /// manager or a module's dialog, NVDA's menu, an elevated program (`hook_watch::front_unseen`) —
@@ -693,6 +960,9 @@ pub(super) fn front_came(own_level: Option<u32>, ours: bool, level: Option<u32>,
 /// that look again ([`follow_front_now`]).
 fn follow_front(k: &mut Keys, hwnd: HWND, pid: u32) {
     let ours = pid == std::process::id();
+    if !ours {
+        k.before = Some((hwnd as isize, pid));
+    }
     let tid = HOOK_THREAD.load(Ordering::SeqCst);
     let mut failed = None;
     let moved = k.place.front(ours, |m| {
@@ -732,10 +1002,25 @@ fn follow_front(k: &mut Keys, hwnd: HWND, pid: u32) {
         k.witness.restart();
     }
     let window = window_named(hwnd, (!ours).then_some(pid));
+    // What the line says after the window: the other program's window that was in front before
+    // ours, or how long ours were.
+    // SAFETY: reads the tick clock.
+    let now = unsafe { GetTickCount() };
+    let after = match m {
+        Move::Out => {
+            k.out_at = Some(now);
+            let before = k.before.map(|(w, p)| window_named(w as HWND, Some(p)));
+            hook_watch::move_after(m.reason(), before.as_deref(), None)
+        }
+        Move::In => {
+            let ours_for = k.out_at.take().map(|at| now.wrapping_sub(at));
+            hook_watch::move_after(m.reason(), None, ours_for)
+        }
+    };
     if k.moves.len() == MOVES_KEPT {
         k.moves.pop_front();
     }
-    k.moves.push_back((m.reason(), window));
+    k.moves.push_back((m.reason(), window, after));
 }
 
 /// [`follow_front`] with the window in front now, for a foreground event the watch never got or a
@@ -831,6 +1116,8 @@ unsafe extern "system" fn watch_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
         }
         WM_APP_REHOOKED => on_rehooked(wparam, lparam),
         WM_APP_ARM_KEYS => arm_keys(),
+        WM_APP_LATE_KEY => say_late_keys(),
+        WM_TIMER if wparam == LATE_TIMER => late_keys_due(),
         _ => {}
     });
     if caught.is_err() {
@@ -840,7 +1127,8 @@ unsafe extern "system" fn watch_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
         }
     }
     match msg {
-        WM_APP_POWER | WM_APP_REHOOKED | WM_APP_ARM_KEYS => 0,
+        WM_APP_POWER | WM_APP_REHOOKED | WM_APP_ARM_KEYS | WM_APP_LATE_KEY => 0,
+        WM_TIMER if wparam == LATE_TIMER => 0,
         // WM_INPUT goes on to DefWindowProcW as well, which is how the system frees the input.
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
@@ -1183,20 +1471,20 @@ fn settle(reason: Reason, outcome: Outcome) {
 fn settle_move(reason: Reason, outcome: Outcome) {
     // SAFETY: reads the tick clock.
     let now = unsafe { GetTickCount() };
-    let mut window = None;
+    let mut asked = None;
     with_state(|s| {
         let Some(k) = s.keys.as_mut() else { return };
         k.pending = None;
         k.said_unanswered = false;
-        if let Some(i) = k.moves.iter().position(|(asked, _)| *asked == reason) {
-            window = k.moves.remove(i).map(|(_, w)| w);
+        if let Some(i) = k.moves.iter().position(|(asked, _, _)| *asked == reason) {
+            asked = k.moves.remove(i).map(|(_, w, after)| (w, after));
         }
         if reason == Reason::Back {
             k.witness.rehooked(false, outcome.installed(), now);
         }
     });
-    let window = window.unwrap_or_else(|| "a window no longer known".to_string());
-    crate::logging::line("keys", &hook_watch::move_line(reason, outcome, &window));
+    let (window, after) = asked.unwrap_or_else(|| ("a window no longer known".to_string(), String::new()));
+    crate::logging::line("keys", &hook_watch::move_line(reason, outcome, &window, &after));
 }
 
 /// Whether the hook could have seen a key pressed now: the keyboard is on our desktop, and the
@@ -1409,6 +1697,25 @@ mod tests {
         assert_eq!(run.entered_at_first, 101);
         assert_eq!(run.foreground, 1, "of the three missed keys, 10000, 15000 and 16000, the first");
         assert!(last.is_none(), "the count starts afresh");
+    }
+
+    /// The plumbing around `MenuPopups` and `LateKeys`, which cannot run here: the menu events
+    /// follow the popups by window, every foreground event settles a menu none of whose popups is
+    /// shown, and the timer a kept late key-down asks for comes back to say it.
+    #[test]
+    fn menus_are_settled_at_each_foreground_event_and_kept_late_keys_said_by_the_timer() {
+        const FILE: &str = include_str!("hook_watch_thread.rs");
+        let tests = FILE.find("#[cfg(test)]\nmod tests {").unwrap();
+        let src = &FILE[..tests];
+        let at = src.find("unsafe extern \"system\" fn foreground_changed(").unwrap();
+        let fg = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        assert!(fg.contains("catch_unwind(|| {\n        settle_menus();"), "{fg}");
+        assert!(src.contains("popups.popup_start(hwnd as isize, popup_shown)"));
+        assert!(src.contains("popups.popup_end(hwnd as isize)"));
+        assert!(src.contains("SetTimer(hwnd, LATE_TIMER, ms, None)"));
+        let timer = "WM_TIMER if wparam == LATE_TIMER =>";
+        assert_eq!(src.matches(timer).count(), 2, "handled, and answered 0");
+        assert!(src.contains("WM_TIMER if wparam == LATE_TIMER => late_keys_due(),"));
     }
 
     #[test]

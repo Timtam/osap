@@ -87,6 +87,38 @@ process it names no longer exists. When that process id has since been reused by
 program, the lock file is taken over after 10 seconds in which nothing answered, provided the
 process is not running this application.
 
+## What the log says about its dialogs and menus
+
+A dialog or a menu of the application runs a loop of its own, and the modules keep running
+inside it: the pump goes on from its timer there, so while a module's callback runs, the dialog
+or the menu answers nothing — neither the keyboard nor a program asking what it shows, as a
+screen reader does. The log says how much ran there, under `[gui]`:
+
+- `dialog 'Module settings' is open` as a dialog of the application opens (a module's or the
+  application's settings, a message, an install or update review), and as it closes
+  `dialog 'Module settings' closed after 12.3 s; 41 pump iteration(s) ran inside it, the
+  longest 120 ms`. With no iteration inside, the longest is left out. Both lines are written on
+  the event loop, around the dialog.
+- On Windows, `the tray menu is open (our hidden tray window took the foreground)` as the tray
+  icon's menu opens — the tray icon puts a hidden window of the application in front for its
+  menu, which is how its menu is told from the others — or `a menu of ours is open ('Automation
+  Platform — Modules (…)' in front)` for another menu of the application's, such as the window's
+  File menu; and as it closes, `the tray menu closed after 2.1 s; 3 pump iteration(s) ran inside
+  it, the longest 16 ms; in front now: 'REAPER v7.22' (reaper.exe)` (`the menu closed …` for the
+  others). The keyboard watch's thread hears the system's menu events for this process
+  (`EVENT_SYSTEM_MENUPOPUPSTART`, `EVENT_SYSTEM_MENUPOPUPEND`) and writes these lines, so the
+  menu waits for nothing of it. A menu with submenus is one menu, from its first popup to the
+  end of its last. A popup whose end the system does not report is taken as closed once it is
+  no longer shown: when the next popup opens and, once the keyboard hook has been installed, when
+  the next window comes to the front. Its menu's line is then written at that moment, and its time
+  runs to it.
+- On macOS no menu line is written: the status item's menu is not followed.
+
+What counting costs the pump: one load per iteration while no dialog or menu is open, and a lock
+per iteration while one is. One of the application's windows coming to the front and going is
+said, on Windows, by the keyboard hook's lines (see "Out of the chain in this application's own windows"
+under [host.keys](api/keys.md#host-keys-capture)).
+
 ## Installed tab
 
 Lists every loaded module with a native checkbox. Below the list: **Settings…**,
