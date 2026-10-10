@@ -112,7 +112,6 @@ pub fn cells_calls() {
     let _: fn(&region::Region) -> Result<region::ScreenRect, region::Unresolved> = region::Region::resolve;
     let _: fn(region::Client, f64, f64) -> Result<(i32, i32), region::Unresolved> = region::resolve_point;
     let _: fn(i32, i32, i32, i32) -> region::ScreenRect = region::loose_corners;
-    let _: fn(&[(i32, i32, i32, i32)]) -> Option<(i32, i32, i32, i32)> = region::bounding_box;
     let _ = region::Region::Rect(region::ScreenRect { x: 0, y: 0, w: 1, h: 1 });
     let _ = |c: region::Client, f: region::Fraction| region::Region::Window(c, f);
     let _ = region::Client { x: 0, y: 0, w: 0, h: 0 };

@@ -19,12 +19,12 @@
 //! 2. **First passes**, each in a process of its own (this executable again, `--child`): the
 //!    application's warm-up over a line of words, the one it made until 2026-10 over six bars,
 //!    one over a small field, or none, on a thread of its own, then the first real pass on another
-//!    thread, which is what the event loop's first read is in the application, and the pass after
-//!    it; the fast level's first pass with no warm-up; the first passes in a second language after
-//!    the warm-up in Vision's default; and the neural recogniser's first recognitions — after its
-//!    session alone, after its warm-up, and after its warm-up beside Vision's. One process first
-//!    that is not counted, so that none of the counted ones meets a cold file cache, and the order
-//!    turned each round.
+//!    thread, which is what the recognise thread's first read is in the application, and the pass
+//!    after it; the fast level's first pass with no warm-up; the first passes in a second language
+//!    after the warm-up in Vision's default; and the neural recogniser's first recognitions — after
+//!    its session alone, after its warm-up, and after its warm-up beside Vision's. One process
+//!    first that is not counted, so that none of the counted ones meets a cold file cache, and the
+//!    order turned each round.
 //! 3. **Probes**: each variant that calls what no Mac has run for this application (a request
 //!    revision, a compute device, the neural recogniser) runs one pass in a process of its own
 //!    first. One that dies there, or that is refused, is left out of everything below; the neural
@@ -433,7 +433,7 @@ fn machine(out: &mut Out) {
     out.say(&format!("system: macOS {}", NSProcessInfo::processInfo().operatingSystemVersionString()));
     out.say(&format!(
         "quality of service: every thread that times a pass asks for user-initiated, as the application's \
-         recognise thread does (its event loop's own reads run at user-interactive); this thread has {}",
+         recognise thread does; this thread has {}",
         qos_here()
     ));
 }
@@ -994,7 +994,9 @@ fn probed_ok(probes: &Probes, v: usize) -> Result<(), String> {
 fn read_through_pipeline(p: &Picture, s: &Strategy, shape: Shape, capture: Duration) -> (Sample, ReadNote) {
     objc2::rc::autoreleasepool(|_| {
         let f = p.fixture;
-        let ladder = Ladder { shape, ..Ladder::FULL };
+        // The ladder a read climbs on the recognise thread with nothing waiting behind it, in a
+        // language the fast model reads, without the pass made only for the counts.
+        let ladder = Ladder { fast_ok: true, preempt: None, counts: false, shape };
         let revision = s.revision_all.map(RevisionOverride::set);
         let runs = paddle_ocr::runs_started();
         let t = Instant::now();

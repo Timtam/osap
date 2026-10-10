@@ -8,10 +8,8 @@
 //! The holder below stands where the host's `Shared` stands — the service, the reads waiting on
 //! the event loop, the tasks, the timers, which VM each module runs and whether it is enabled —
 //! and each test builds module VMs over it with the host's own bindings: `host.ocr.recognize`, both
-//! forms, and `pending` (ocr/lua.rs and the shim), and `host.timer` (timers.rs). Only the blocking
-//! legacy call is the holder's: it reads its arguments as the host's does and answers at once, or
-//! raises the message that is to be raised once the blocking call is gone (`Host::raise`). The tick
-//! is `fire`: due timers, then the readings, as the loop runs them.
+//! forms, and `pending` (ocr/lua.rs and the shim), and `host.timer` (timers.rs). The tick is
+//! `fire`: due timers, then the readings, as the loop runs them.
 //!
 //! The fake recogniser reads every region as "x,y" — its corner — and can be held: a capture of
 //! a region whose x a test `hold`s waits until it lets go, a snapshot round's as well, and so does
@@ -21,7 +19,7 @@
 //! The test's own thread stands where the event loop stands, and is marked as the loop's for as
 //! long as the holder lives (`loop_guard`); every function of the fake recogniser asks the guard
 //! first, as the platforms' do. So in a debug build a test that brought a capture or a
-//! recognition onto the loop fails — only the blocking legacy call may, inside its scope.
+//! recognition onto the loop fails.
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
@@ -203,11 +201,6 @@ struct Host {
     epoch: Cell<u64>,
     /// (module, context, message) of every error reported.
     errors: RefCell<Vec<(usize, String, String)>>,
-    /// The legacy call raises its message, as it is to once the blocking call is gone, instead of
-    /// answering.
-    raise: Cell<bool>,
-    /// (module, the shim's word for where) of every legacy call.
-    legacy: RefCell<Vec<(usize, String)>>,
     /// This thread is the loop's while the holder lives.
     _loop: crate::loop_guard::TestLoop,
 }
@@ -294,8 +287,6 @@ fn holder((ocr, stop): (Service<Fake>, ShutdownHandle)) -> Rc<Host> {
         enabled: RefCell::new(Vec::new()),
         epoch: Cell::new(0),
         errors: RefCell::new(Vec::new()),
-        raise: Cell::new(false),
-        legacy: RefCell::new(Vec::new()),
         _loop: crate::loop_guard::mark_for_a_test(),
     })
 }
@@ -333,33 +324,7 @@ fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     let submit = lua
         .create_function(move |lua, (what, opts, cb): (Value, Value, Value)| reads::read(&*hh, lua, idx, what, opts, cb))
         .unwrap();
-    let hh = h.clone();
-    let legacy = lua
-        .create_function(move |lua, (what, opts, why): (Value, Value, String)| {
-            hh.legacy.borrow_mut().push((idx, why.clone()));
-            if hh.raise.get() {
-                let message = lua.create_string(task::wait_message(Case::of(&why)))?;
-                return Ok(MultiValue::from_vec(vec![Value::Boolean(false), Value::String(message)]));
-            }
-            // Its arguments read as the host's blocking call reads them: a mistake raises, reading
-            // nothing; a `key` or a `snapshot` raises where it could not wait.
-            let args = reads::parse_read(&what, &opts)?;
-            if let Some(refused) = task::blocking_refusal(&args, &why) {
-                return Ok(MultiValue::from_vec(vec![Value::Boolean(false), Value::String(lua.create_string(refused)?)]));
-            }
-            let t = task::legacy(&*hh, lua, idx, &why, || {
-                // On the loop, inside the legacy call's scope: the one place the guard lets be.
-                crate::loop_guard::off_loop("the fake legacy call");
-                let t = lua.create_table()?;
-                t.set("text", "held the loop")?;
-                t.set("status", "text")?;
-                t.set("skipped", false)?;
-                Ok(t)
-            })?;
-            Ok(MultiValue::from_vec(vec![Value::Boolean(true), Value::Table(t)]))
-        })
-        .unwrap();
-    let waits = task::waits(&lua, idx, h.clone(), legacy, submit).unwrap();
+    let waits = task::waits(&lua, idx, h.clone(), submit).unwrap();
     ocr.set("recognize", waits.get::<Function>("recognize").unwrap()).unwrap();
     host.set("ocr", ocr).unwrap();
     lua.globals().set("host", host).unwrap();
@@ -554,7 +519,7 @@ fn a_wait_inside_pcall_or_a_dependencys_function_waits() {
     settle(&h);
     assert!(yes(&lua, "return ok == true and r.text == '9011,5' and viaDep == '9012,5'"));
     assert!(yes(&lua, "return xok == true and inXpcall == '9013,5' and inPairs == '9014,5' and inLoop == '9015,5'"));
-    assert!(h.legacy.borrow().is_empty(), "nothing went the blocking way");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
 }
 
 // ── One call, two forms ──────────────────────────────────────────────────────────────────────
@@ -589,29 +554,7 @@ fn the_callback_form_waits_nowhere_and_a_list_answers_two_values_in_both_forms()
     assert!(err.contains(&format!("mod.luau:11: {}", task::NIL_CB)), "{err}");
     settle(&h);
     assert!(yes(&lua, "return cbText == '9801,5' and waitedList == '2 9802,5 9803,5' and cbList == '1 9804,5'"));
-    assert!(h.legacy.borrow().is_empty(), "nothing went the blocking way");
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
-}
-
-/// Where it cannot wait, the blocking call serves what the older call served — regions, names,
-/// `lang` — and raises, at the caller's line, the message for that place for a `key` or a
-/// `snapshot`, which it never served.
-#[test]
-fn the_blocking_call_raises_for_a_key_where_it_cannot_wait() {
-    let h = host();
-    let lua = vm(&h, 1);
-    run(
-        &lua,
-        "okKey, errKey = pcall(function()\n\
-           return host.ocr.recognize({ 9811, 5, 9841, 15 }, { key = 'k' })\n\
-         end)\n\
-         errKey = tostring(errKey)\n\
-         plain = host.ocr.recognize({ 9812, 5, 9842, 15 }, { lang = { 'de', 'en' } }).text\n",
-    );
-    let err: String = lua.globals().get("errKey").unwrap();
-    assert!(yes(&lua, "return okKey == false and plain == 'held the loop'"));
-    assert!(err.contains(&format!("mod.luau:2: {}", task::wait_message(Case::CannotWait))), "{err}");
-    assert_eq!(h.legacy.borrow().len(), 2);
 }
 
 /// In a module that reads through desktop duplication, its first read carries the comparison of
@@ -639,7 +582,7 @@ fn the_first_read_comparison_goes_with_the_read_to_the_capture_thread() {
     assert!(yes(&later, "return a == '9403,5' and b == '9404,5'"));
     assert_eq!(compared("com.dup.not yet"), ["screen-capture", "screen-capture"], "asked again until made");
     assert_eq!(capture_source::compare_state(&later), Some(Compare::Owed));
-    assert!(h.legacy.borrow().is_empty() && errors(&h).is_empty(), "{:?}", errors(&h));
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
 }
 
 /// Before the recognise thread has published its language list, `languages` answers `{}` and
@@ -749,119 +692,153 @@ fn acting_with_a_read_out_waits_for_nothing_and_is_noted_once() {
 
 // ── Where a task cannot wait ─────────────────────────────────────────────────────────────────
 
-/// The places a task cannot stop take the old blocking call: a metamethod, a sort comparator, a
-/// gsub function, a for loop's iterator, Lua the host itself calls back (an onActivate), and a
-/// coroutine the module made — and outside every task, as ever. Each says which, and its first
-/// time per module is logged.
+/// Where a handler cannot stop, `recognize` without a callback raises the message for the place at
+/// the caller's line, and reads nothing: outside every handler — the top level of a module, an
+/// included file's top level, which the host calls as a function — and inside one, in a
+/// metamethod, a sort comparator, a gsub function, a for loop's iterator, an `xpcall` error
+/// handler, `table.foreach` and `foreachi`, Lua the host calls back (an arbiter's `onActivate` or
+/// `onDeactivate`, an `onChange` from the module's own `set`), and a coroutine of the module's
+/// own. A `pcall` returns the message; the handler goes on, and its own wait still waits.
 #[test]
-fn where_a_task_cannot_wait_the_blocking_call_runs_and_says_why() {
+fn where_a_task_cannot_wait_recognize_raises_at_the_callers_line() {
     let h = host();
     let lua = vm(&h, 1);
+    // An included file, as the host runs one: a chunk of its own name, called as a function.
+    let included = lua
+        .load("return host.ocr.recognize({ region = { 9022, 5, 9052, 15 } })")
+        .set_name("=inc.luau")
+        .into_function()
+        .unwrap();
+    lua.globals().set("included", included).unwrap();
     run(
         &lua,
-        r#"
-        local R = { region = { 9021, 5, 9051, 15 } }
-        outside = host.ocr.recognize(R).text
-        task.run(function()
-          local meta = setmetatable({}, { __index = function() return host.ocr.recognize(R).text end })
-          got = { meta = meta.x }
-          table.sort({ 3, 1, 2 }, function(a, b) got.sort = host.ocr.recognize(R).text; return a < b end)
-          local _ = ("ab"):gsub(".", function(c) got.gsub = host.ocr.recognize(R).text; return c end)
-          for v in function(_, last) if last then return nil end got.iter = host.ocr.recognize(R).text; return 1 end do end
-          xpcall(error, function(e) got.handler = host.ocr.recognize(R).text; return e end, "raised")
-          table.foreach({ 1 }, function() got.foreach = host.ocr.recognize(R).text end)
-          table.foreachi({ 1 }, function() got.foreachi = host.ocr.recognize(R).text end)
-          hostCall(function() got.called = host.ocr.recognize(R).text end)
-          got.own = coroutine.wrap(function() return host.ocr.recognize(R).text end)()
-          got.waited = host.ocr.recognize(R).text
-        end)
-        "#,
+        "local R = { region = { 9021, 5, 9051, 15 } }\n\
+         okTop, top = pcall(function()\n\
+           return host.ocr.recognize(R)\n\
+         end)\n\
+         okInc, inc = pcall(hostCall, included); inc = tostring(inc)\n\
+         task.run(function()\n\
+           local function try(f, ...) local ok, e = pcall(f, ...); return { ok = ok, e = tostring(e) } end\n\
+           got = { handler = {} }\n\
+           local meta = setmetatable({}, { __index = function() return host.ocr.recognize(R) end })\n\
+           got.meta = try(function() return meta.x end)\n\
+           got.sort = try(table.sort, { 3, 1, 2 }, function(a, b) host.ocr.recognize(R); return a < b end)\n\
+           got.gsub = try(string.gsub, 'ab', '.', function(c) host.ocr.recognize(R); return c end)\n\
+           got.iter = try(function() for _ in function() return host.ocr.recognize(R) end do end end)\n\
+           xpcall(error, function()\n\
+             got.handler.ok, got.handler.e = pcall(function() return host.ocr.recognize(R) end)\n\
+           end, 'raised')\n\
+           got.foreach = try(table.foreach, { 1 }, function() host.ocr.recognize(R) end)\n\
+           got.foreachi = try(table.foreachi, { 1 }, function() host.ocr.recognize(R) end)\n\
+           got.onActivate = try(hostCall, function() host.ocr.recognize(R) end)\n\
+           got.onChange = try(hostCall, function() host.ocr.recognize(R) end)\n\
+           got.own = try(coroutine.wrap(function() return host.ocr.recognize(R) end))\n\
+           got.waited = host.ocr.recognize(R).text\n\
+         end)\n",
     );
+    let cannot = task::wait_message(Case::CannotWait);
+    let own = task::wait_message(Case::OwnCoroutine);
+    let top: String = lua.globals().get("top").unwrap();
+    assert!(yes(&lua, "return okTop == false and okInc == false"));
+    assert!(top.contains(&format!("mod.luau:3: {cannot}")), "{top}");
+    let inc: String = lua.globals().get("inc").unwrap();
+    assert!(inc.contains(&format!("inc.luau:1: {cannot}")), "{inc}");
     settle(&h);
-    assert!(yes(
-        &lua,
-        r#"return outside == "held the loop" and got.meta == "held the loop" and got.sort == "held the loop"
-          and got.gsub == "held the loop" and got.iter == "held the loop" and got.called == "held the loop"
-          and got.handler == "held the loop" and got.foreach == "held the loop" and got.foreachi == "held the loop"
-          and got.own == "held the loop" and got.waited == "9021,5""#
-    ));
-    let whys: Vec<String> = h.legacy.borrow().iter().map(|l| l.1.clone()).collect();
-    assert_eq!(whys[0], "none");
-    assert!(whys[1..whys.len() - 1].iter().all(|w| w == "cannot-wait"), "{whys:?}");
-    assert_eq!(whys.last().map(String::as_str), Some("foreign"));
-    for case in [Case::CannotWait, Case::OwnCoroutine] {
-        assert!(h.tasks.legacy_said("m1", case), "{case:?} not said");
+    assert!(yes(&lua, "return got.waited == '9021,5'"), "the handler went on, and its own wait waited");
+    let got: Table = lua.globals().get("got").unwrap();
+    for (place, line, message) in [
+        ("meta", 9, cannot),
+        ("sort", 11, cannot),
+        ("gsub", 12, cannot),
+        ("iter", 13, cannot),
+        ("handler", 15, cannot),
+        ("foreach", 17, cannot),
+        ("foreachi", 18, cannot),
+        ("onActivate", 19, cannot),
+        ("onChange", 20, cannot),
+        ("own", 21, own),
+    ] {
+        let t: Table = got.get(place).unwrap();
+        let e: String = t.get("e").unwrap();
+        assert!(!t.get::<bool>("ok").unwrap(), "{place}: it did not raise");
+        assert!(e.contains(&format!("mod.luau:{line}: {message}")), "{place}: {e}");
     }
-    // Keyed by the module's id, and news again once forgotten — as a reload, a disable or enable
-    // and a rolled-back hot-load forget it (`forget_error_repeats`).
-    assert!(!h.tasks.legacy_said("m2", Case::CannotWait));
-    h.tasks.forget_legacy_said("m1");
-    assert!(!h.tasks.legacy_said("m1", Case::CannotWait));
-    run(&lua, "host.ocr.recognize({ region = { 9022, 5, 9052, 15 } })");
-    assert!(h.tasks.legacy_said("m1", Case::CannotWait), "written again after it was forgotten");
-    // Once per module and case; every call counted for the summary at exit.
-    let summary = h.tasks.legacy_summary();
-    assert_eq!(summary.len(), 1);
-    let calls = h.legacy.borrow().len();
-    assert!(calls >= 12, "every place called it: {calls}");
-    assert!(
-        summary[0].starts_with(&format!("[m1] host.ocr.recognize held the event loop {calls} time(s), ")),
-        "{summary:?}"
-    );
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert!(!taken(9022), "nothing was photographed where it could not wait");
 }
 
-/// A blocking call that raises for a mistake in its arguments reads nothing, writes no line and is
-/// not counted, so the module's first call that answers still says how long it held the loop. The
-/// raise's traceback names the shim `host.ocr`, not a task.
+/// A call with a mistake where it cannot wait raises the place's message too: nothing reads
+/// there, so the place is the mistake to mend first. The raise's traceback names the shim
+/// `host.ocr`, not a task.
 #[test]
-fn a_blocking_call_that_raises_writes_no_line_and_the_next_one_does() {
+fn a_mistaken_call_where_it_cannot_wait_raises_the_places_message() {
     let h = host();
     let lua = vm(&h, 1);
     run(&lua, "ok, err = pcall(host.ocr.recognize, { mistake = true }); err = tostring(err)");
     assert!(yes(&lua, "return ok == false"));
     let err: String = lua.globals().get("err").unwrap();
-    assert!(err.contains("host.ocr.recognize: the region") && err.contains("host.ocr:"), "{err}");
-    assert!(!err.contains("task_shim"), "{err}");
-    assert!(!h.tasks.legacy_said("m1", Case::CannotWait), "a raise was logged as the first call");
-    run(&lua, "host.ocr.recognize({ region = { 9025, 5, 9055, 15 } })");
-    assert!(h.tasks.legacy_said("m1", Case::CannotWait), "the first call that answered was not logged");
-    let summary = h.tasks.legacy_summary();
-    assert!(summary[0].starts_with("[m1] host.ocr.recognize held the event loop 1 time(s), "), "{summary:?}");
+    assert!(err.contains(task::wait_message(Case::CannotWait)), "{err}");
+    let traced: String = lua
+        .load("return select(2, xpcall(host.ocr.recognize, debug.traceback, { 1, 2, 3, 4 }))")
+        .set_name("=mod.luau")
+        .eval()
+        .unwrap();
+    assert!(traced.contains("host.ocr:") && !traced.contains("task_shim"), "{traced}");
 }
 
-/// Once the blocking call is gone, each kind of place raises its own message, and the raise names
-/// the module's own line — played here with the switch the scripted host plays it with.
+/// The blocking calls' tally, which a call that cannot wait on the event loop goes through
+/// (`task::legacy`): its first answer per module, call and case is written with how long it held
+/// the loop — a raise writes nothing, so the first that answers still does — every call is
+/// counted per module and call for the summary at exit, a module's lines are news again once
+/// forgotten, and the scope it runs in is the loop guard's of its kind.
 #[test]
-fn where_it_cannot_wait_the_later_release_raises_naming_the_callers_line() {
+fn a_blocking_call_is_said_once_per_module_call_and_case_and_counted() {
     let h = host();
-    h.raise.set(true);
     let lua = vm(&h, 1);
+    let other = vm(&h, 2);
+    for l in [&lua, &other] {
+        let hh = h.clone();
+        let blocking = l
+            .create_function(move |lua, (call, why, fail): (String, String, bool)| {
+                let call: &'static str = if call == "pixel" { "host.screen.pixel" } else { "host.screen.save" };
+                let idx = lua.app_data_ref::<VmOwner>().map(|o| o.idx).unwrap_or(0);
+                task::legacy(&*hh, lua, idx, call, crate::loop_guard::Kind::Screen, &why, || {
+                    if fail {
+                        return Err(mlua::Error::external("a mistake in the call"));
+                    }
+                    Ok(true)
+                })
+            })
+            .unwrap();
+        l.globals().set("blocking", blocking).unwrap();
+    }
+    run(&lua, "pcall(blocking, 'pixel', 'none', true)");
+    assert!(!h.tasks.legacy_said("m1", "host.screen.pixel", Case::CannotWait), "a raise was logged as the first call");
     run(
         &lua,
-        "local R = { region = { 9031, 5, 9061, 15 } }\n\
-         ok, outside = pcall(function()\n\
-           return host.ocr.recognize({ R.region })\n\
-         end)\n\
-         task.run(function()\n\
-           local meta = setmetatable({}, { __index = function()\n\
-             return host.ocr.recognize(R)\n\
-           end })\n\
-           ok2, inMeta = pcall(function() return meta.x end)\n\
-           ok3, inOwn = pcall(coroutine.wrap(function()\n\
-             return host.ocr.recognize(R)\n\
-           end))\n\
-         end)\n",
+        "blocking('pixel', 'none', false); blocking('pixel', 'cannot-wait', false)\n\
+         blocking('pixel', 'foreign', false); blocking('save', 'none', false)",
     );
-    let get = |name: &str| lua.globals().get::<String>(name).unwrap();
-    assert!(yes(&lua, "return ok == false and ok2 == false and ok3 == false"));
-    for (name, line, message) in [
-        ("outside", 3, task::wait_message(Case::CannotWait)),
-        ("inMeta", 7, task::wait_message(Case::CannotWait)),
-        ("inOwn", 11, task::wait_message(Case::OwnCoroutine)),
+    run(&other, "blocking('pixel', 'none', false)");
+    for (id, call, case) in [
+        ("m1", "host.screen.pixel", Case::CannotWait),
+        ("m1", "host.screen.pixel", Case::OwnCoroutine),
+        ("m1", "host.screen.save", Case::CannotWait),
+        ("m2", "host.screen.pixel", Case::CannotWait),
     ] {
-        let raised = get(name);
-        assert!(raised.contains(&format!("mod.luau:{line}: {message}")), "{name}: {raised}");
+        assert!(h.tasks.legacy_said(id, call, case), "{id} {call} {case:?} not said");
     }
+    assert!(!h.tasks.legacy_said("m2", "host.screen.save", Case::CannotWait));
+    h.tasks.forget_legacy_said("m1");
+    assert!(!h.tasks.legacy_said("m1", "host.screen.pixel", Case::CannotWait));
+    assert!(h.tasks.legacy_said("m2", "host.screen.pixel", Case::CannotWait), "only m1's lines are forgotten");
+    run(&lua, "blocking('pixel', 'none', false)");
+    assert!(h.tasks.legacy_said("m1", "host.screen.pixel", Case::CannotWait), "written again after it was forgotten");
+    let summary: Vec<String> = h.tasks.legacy_summary().into_iter().map(|(scope, line)| format!("{scope}: {line}")).collect();
+    assert_eq!(summary.len(), 3, "{summary:?}");
+    assert!(summary[0].starts_with("screen: [m1] host.screen.pixel held the event loop 5 time(s), "), "{summary:?}");
+    assert!(summary[1].starts_with("screen: [m1] host.screen.save held the event loop 1 time(s), "), "{summary:?}");
+    assert!(summary[2].starts_with("screen: [m2] host.screen.pixel held the event loop 1 time(s), "), "{summary:?}");
 }
 
 // ── cancel, disable, reload ──────────────────────────────────────────────────────────────────
@@ -1420,7 +1397,7 @@ fn a_task_started_where_nothing_can_wait_waits() {
     assert!(yes(&lua, "return metaAnswered == 'x' and inMeta == nil and inSort == nil"));
     settle(&h);
     assert!(yes(&lua, "return inMeta == '9211,5' and inSort == '9212,5'"));
-    assert!(h.legacy.borrow().is_empty(), "nothing went the blocking way");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
 }
 
 /// Only the stretches on the stack count toward the sixteen: a task that waits is off it. With

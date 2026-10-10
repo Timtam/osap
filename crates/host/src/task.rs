@@ -1,6 +1,6 @@
 //! Handlers: every callback of a module runs as a coroutine of its VM — a handler — that can stop
 //! at a wait while the event loop goes on; and the wait it stops at, `host.ocr.recognize` without a
-//! callback.
+//! callback, which raises where it cannot wait.
 //!
 //! **One handler per module at a time.** Every event a module hears — a hotkey, a captured key, a
 //! controller event, a timer, a window trigger, a focus change, the answer to a read, an image
@@ -17,8 +17,8 @@
 //! **Why.** No text recognition may burden the event loop. `recognize` used to photograph and
 //! recognise on the loop and return the reading; where it waits it asks the read service instead
 //! (`ocr/lua.rs`), and only its module waits. Where it cannot wait — a place Luau cannot suspend, a
-//! function the host calls and waits for, a coroutine the module made — it is still the old
-//! blocking call.
+//! function the host calls and waits for, a coroutine the module made — it raises
+//! ([`wait_message`]); the callback form reads there.
 //!
 //! **How it waits.** A Rust function cannot yield through mlua, so the wait is a `coroutine.yield`
 //! in a small Luau shim the host builds once per VM (`task_shim.luau`), with every helper an
@@ -136,10 +136,9 @@ impl Case {
     }
 }
 
-/// What `recognize` without a callback is to raise in a place of `case`, once the blocking call is
-/// gone (step 12); a read with `key` or `snapshot`, which the blocking call never served, raises it
-/// there already. The scripted test host raises it in every such place, so a scenario that reads
-/// where it could not wait fails. docs/api/ocr.md gives both, word for word.
+/// What `recognize` without a callback raises in a place of `case`, at the caller's line. The shim
+/// raises it, in the scripted test host as in the host, so a scenario that reads where it could
+/// not wait fails. docs/api/ocr.md gives both, word for word.
 pub(crate) fn wait_message(case: Case) -> &'static str {
     match case {
         Case::CannotWait => {
@@ -158,23 +157,26 @@ pub(crate) fn wait_message(case: Case) -> &'static str {
     }
 }
 
-/// What the blocking call raises for `args` where it could not wait (`why`, the shim's word for
-/// it): the message for that place, when the read asks for what the blocking call never served —
-/// a `key` or a `snapshot`; `None` for a read it serves. The host's blocking call and the tests'
-/// holders both ask this.
-pub(crate) fn blocking_refusal(args: &crate::ocr::lua::ReadArgs, why: &str) -> Option<&'static str> {
-    (args.key.is_some() || args.snapshot.is_some()).then(|| wait_message(Case::of(why)))
+/// The library a call belongs to — `ocr` for `host.ocr.recognize`, `screen` for
+/// `host.screen.pixel` — which names its page in docs/api and the scope of its log lines.
+fn library_of(call: &str) -> &str {
+    call.strip_prefix("host.").and_then(|c| c.split('.').next()).unwrap_or(call)
 }
 
-/// The line a blocking call writes, once per module and case: where it could not wait, how long it
-/// held the event loop instead, and what to write (docs/api/ocr.md shows it, and a test holds it
-/// to that).
-pub(crate) fn legacy_line(module: &str, case: Case, ms: u128) -> String {
+/// The line a blocking call writes, once per module, call and case: where it could not wait, how
+/// long it held the event loop instead, and what to write.
+///
+/// What to write is one remedy for every place, as the shim tells only two kinds apart. Before a
+/// `host.screen` call comes here it is to depend on the place: at a module's top level, a handler
+/// such as `host.timer.after(0, …)`; in the overlay runtime's hooks, a measurement made in a
+/// handler for the hook to read; elsewhere the event's own function, or a callback (TODO.md, "The
+/// synchronous `host.screen` captures").
+pub(crate) fn legacy_line(module: &str, call: &str, case: Case, ms: u128) -> String {
     format!(
-        "[{module}] host.ocr.recognize could not wait here ({}) and held the event loop {ms} ms instead; pass a \
-         callback, host.ocr.recognize(what, opts, function(reading) … end), or call it from the event's own \
-         function; see \"Where it waits\" in docs/api/ocr.md",
-        case.words()
+        "[{module}] {call} could not wait here ({}) and held the event loop {ms} ms instead; call it from the \
+         event's own function; see \"Where it waits\" in docs/api/{}.md",
+        case.words(),
+        library_of(call)
     )
 }
 
@@ -282,15 +284,15 @@ impl Task {
     }
 }
 
-/// What the blocking `recognize` cost, per module.
+/// What the blocking calls cost, per module and call.
 #[derive(Default)]
 struct LegacyTally {
-    /// (module id, case): written once — and once more after `forget_legacy_said`, which a
+    /// (module id, call, case): written once — and once more after `forget_legacy_said`, which a
     /// reload, a disable or enable and a rolled-back hot-load call as they forget the module's
     /// error repeats.
-    said: HashSet<(String, Case)>,
-    /// module id → (calls, milliseconds held), for the summary at exit.
-    held: BTreeMap<String, (u64, u128)>,
+    said: HashSet<(String, &'static str, Case)>,
+    /// (module id, call) → (calls, milliseconds held), for the summary at exit.
+    held: BTreeMap<(String, &'static str), (u64, u128)>,
 }
 
 /// Every handler of every module, and what the blocking calls held. Main thread only.
@@ -362,15 +364,17 @@ impl Tasks {
         })
     }
 
-    /// The summary at exit: per module, how often `recognize` held the event loop where it could
-    /// not wait, and for how long in all. Nothing for a session in which it never did.
-    pub(crate) fn legacy_summary(&self) -> Vec<String> {
+    /// The summary at exit: per module and call, how often it held the event loop where it could
+    /// not wait and for how long in all, with its call's library as the line's scope. Nothing for
+    /// a session in which no call did.
+    pub(crate) fn legacy_summary(&self) -> Vec<(&'static str, String)> {
         self.legacy
             .borrow()
             .held
             .iter()
-            .map(|(id, (n, ms))| {
-                format!("[{id}] host.ocr.recognize held the event loop {n} time(s), {ms} ms in all, where it could not wait")
+            .map(|((id, call), (n, ms))| {
+                let line = format!("[{id}] {call} held the event loop {n} time(s), {ms} ms in all, where it could not wait");
+                (library_of(call), line)
             })
             .collect()
     }
@@ -397,10 +401,10 @@ impl Tasks {
         Some((t.ctx.what.to_string(), busy, t.place.clone().unwrap_or_else(|| "a place not known".to_string())))
     }
 
-    /// Whether the line for module `id` and `case` was written, for the tests.
+    /// Whether the line for module `id`, `call` and `case` was written, for the tests.
     #[cfg(test)]
-    pub(crate) fn legacy_said(&self, id: &str, case: Case) -> bool {
-        self.legacy.borrow().said.contains(&(id.to_string(), case))
+    pub(crate) fn legacy_said(&self, id: &str, call: &'static str, case: Case) -> bool {
+        self.legacy.borrow().said.contains(&(id.to_string(), call, case))
     }
 
     /// Whether the timer's line for module `id` and `place` was written, for the tests.
@@ -415,12 +419,12 @@ impl Tasks {
         self.timer_said.borrow().len()
     }
 
-    /// Lets module `id`'s lines be written again: its next blocking call of each case is
+    /// Lets module `id`'s lines be written again: its next blocking call of each call and case is
     /// news, as its next error is (`forget_error_repeats`, which calls this). Keyed by id, so a
     /// module that a rolled-back hot-load's index goes to next has lines of its own. The summary
     /// at exit keeps counting.
     pub(crate) fn forget_legacy_said(&self, id: &str) {
-        self.legacy.borrow_mut().said.retain(|(m, _)| m != id);
+        self.legacy.borrow_mut().said.retain(|(m, _, _)| m != id);
     }
 
     /// The innermost running handler of the VM `owner`.
@@ -1099,52 +1103,53 @@ fn disown<H: ReadHost>(h: &H, lua: &Lua) {
     }
 }
 
-/// A blocking call: `recognize` without a callback where it could not wait (`why`, the shim's word
-/// for it), run by `call` on the event loop. The loop guard lets it recognise there; the module's
-/// first such call of each case that answers is logged with how long it held the loop, and every
-/// call is counted for the summary at exit. A call that raises — a mistake in its arguments,
-/// mostly, which reads nothing — writes no line, so the first that answers still does.
+/// A blocking call: `call` — a host function, by the name a module writes — where it could not
+/// wait (`why`, the shim's word for it), run by `body` on the event loop inside a scope of the loop
+/// guard's `kind`: the work that guard lets be there while it lasts. The module's first such call
+/// of each call and case that answers is logged with how long it held the loop, and every call is
+/// counted for the summary at exit. A call that raises — a mistake in its arguments, mostly —
+/// writes no line, so the first that answers still does.
+///
+/// Nothing calls it yet: `host.ocr.recognize` raises where it cannot wait. The `host.screen` calls
+/// that capture are to wait in a handler and to come here where they cannot (TODO.md, "The
+/// synchronous `host.screen` captures").
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn legacy<H: ReadHost, T>(
     h: &H,
     lua: &Lua,
     scope: usize,
+    call: &'static str,
+    kind: crate::loop_guard::Kind,
     why: &str,
-    call: impl FnOnce() -> mlua::Result<T>,
+    body: impl FnOnce() -> mlua::Result<T>,
 ) -> mlua::Result<T> {
     let case = Case::of(why);
     let idx = owner(h, lua, scope).idx;
     let began = Instant::now();
     let out = {
-        let _legacy = crate::loop_guard::legacy();
-        call()
+        let _legacy = crate::loop_guard::legacy(kind);
+        body()
     };
     let ms = began.elapsed().as_millis();
     let id = h.module_id(idx);
     let first = {
         let mut tally = h.tasks().legacy.borrow_mut();
-        let held = tally.held.entry(id.clone()).or_insert((0, 0));
+        let held = tally.held.entry((id.clone(), call)).or_insert((0, 0));
         held.0 += 1;
         held.1 += ms;
-        out.is_ok() && tally.said.insert((id.clone(), case))
+        out.is_ok() && tally.said.insert((id.clone(), call, case))
     };
     if first {
-        logging::line("ocr", &legacy_line(&id, case, ms));
+        logging::line(library_of(call), &legacy_line(&id, call, case, ms));
     }
     out
 }
 
 /// `host.ocr.recognize` of VM `lua` — the table with `recognize` the shim returns — built on the
-/// first call and the same table after it. `submit` is the callback form, `submit(what, opts, cb)`;
-/// `legacy` the blocking call where it cannot wait, `legacy(what, opts, why)` returning `true` and
-/// the reading (or the list and the table by name), or `false` and the message to raise. Each opens
-/// the guard's host call itself, as the shim's `start` does here.
-pub(crate) fn waits<H: ReadHost>(
-    lua: &Lua,
-    scope: usize,
-    holder: Rc<H>,
-    legacy: Function,
-    submit: Function,
-) -> mlua::Result<Table> {
+/// first call and the same table after it. `submit` is the callback form, `submit(what, opts, cb)`,
+/// which opens the guard's host call itself, as the shim's `start` does here. Where the call
+/// without one cannot wait, the shim raises [`wait_message`] for the place.
+pub(crate) fn waits<H: ReadHost>(lua: &Lua, scope: usize, holder: Rc<H>, submit: Function) -> mlua::Result<Table> {
     if let Ok(t) = lua.named_registry_value::<Table>(WAITS_KEY) {
         return Ok(t);
     }
@@ -1170,7 +1175,6 @@ pub(crate) fn waits<H: ReadHost>(
     let t: Table = shim.call((
         start,
         where_,
-        legacy,
         disown,
         submit,
         prim.get::<Function>("yield")?,
@@ -1182,6 +1186,8 @@ pub(crate) fn waits<H: ReadHost>(
         p.wait,
         RESUMED,
         NIL_CB,
+        wait_message(Case::CannotWait),
+        wait_message(Case::OwnCoroutine),
     ))?;
     lua.set_named_registry_value(WAITS_KEY, t.clone())?;
     Ok(t)
@@ -1282,11 +1288,11 @@ impl crate::Shared {
         drop_from(self, n);
     }
 
-    /// The summary at exit: per module, what `recognize` held the event loop for where it could
-    /// not wait ([`Tasks::legacy_summary`]).
+    /// The summary at exit: per module and call, what the blocking calls held the event loop for
+    /// where they could not wait ([`Tasks::legacy_summary`]).
     pub(crate) fn log_legacy_summary(&self) {
-        for line in self.tasks.legacy_summary() {
-            logging::line("ocr", &line);
+        for (scope, line) in self.tasks.legacy_summary() {
+            logging::line(scope, &line);
         }
     }
 }
@@ -1318,45 +1324,49 @@ mod tests {
         assert_eq!(Case::of("anything else"), Case::CannotWait, "a word the shim never says");
     }
 
-    /// The blocking call's line, the summary at exit and the timer's line are the ones
-    /// docs/api/ocr.md shows, word for word.
+    /// The timer's line is the one docs/api/ocr.md shows, word for word.
     #[test]
-    fn the_lines_are_the_documented_ones() {
+    fn the_timers_line_is_the_documented_one() {
         const OCR_MD: &str = include_str!("../../../docs/api/ocr.md");
-        for case in [Case::CannotWait, Case::OwnCoroutine] {
-            let line = legacy_line("com.example.game", case, 37);
-            assert!(OCR_MD.contains(&line), "docs/api/ocr.md does not show this line word for word:\n{line}");
-        }
-        let tasks = Tasks::default();
-        tasks.legacy.borrow_mut().held.insert("com.example.game".to_string(), (12, 840));
-        let summary = tasks.legacy_summary();
-        assert_eq!(summary.len(), 1);
-        assert!(OCR_MD.contains(&summary[0]), "docs/api/ocr.md does not show this summary word for word:\n{}", summary[0]);
         let keys = ["Tab".to_string(), "Tab".to_string(), "Down".to_string()];
         let timer = timer_wait_line("com.example.game", 2140, "com.example.game/src/main.luau:88", &keys);
         assert!(OCR_MD.contains(&timer), "docs/api/ocr.md does not show this line word for word:\n{timer}");
     }
 
-    /// The blocking call's line names the module, the place it could not wait, the time it held the
-    /// loop and the callback form; the summary counts. Nothing about tasks, which no module has.
+    /// A blocking call's line names the module, the call, the place it could not wait and the time
+    /// it held the loop, in the words CI looks for (`could not wait here`), and points at its call's
+    /// own page; the summary counts per module and call, with the call's library as its scope.
+    /// Nothing about tasks, which no module has.
     #[test]
-    fn the_line_says_where_how_long_and_names_the_callback_form() {
-        let l = legacy_line("com.example.game", Case::OwnCoroutine, 37);
+    fn the_line_names_the_call_where_and_how_long() {
+        let l = legacy_line("com.example.game", "host.screen.pixel", Case::OwnCoroutine, 37);
         assert_eq!(
             l,
-            "[com.example.game] host.ocr.recognize could not wait here (a coroutine the module made) and held the \
-             event loop 37 ms instead; pass a callback, host.ocr.recognize(what, opts, function(reading) … end), or \
-             call it from the event's own function; see \"Where it waits\" in docs/api/ocr.md"
+            "[com.example.game] host.screen.pixel could not wait here (a coroutine the module made) and held the \
+             event loop 37 ms instead; call it from the event's own function; see \"Where it waits\" in \
+             docs/api/screen.md"
         );
+        assert!(legacy_line("m", "host.screen.save", Case::CannotWait, 1).contains(
+            "host.screen.save could not wait here (a place Luau cannot suspend, or a function the host calls and waits for)"
+        ));
         let summary = {
             let tasks = Tasks::default();
-            tasks.legacy.borrow_mut().held.insert("m".to_string(), (2, 50));
-            tasks.legacy_summary().remove(0)
+            tasks.legacy.borrow_mut().held.insert(("m".to_string(), "host.screen.pixel"), (2, 50));
+            tasks.legacy.borrow_mut().held.insert(("m".to_string(), "host.screen.save"), (1, 9));
+            tasks.legacy_summary()
         };
-        assert_eq!(summary, "[m] host.ocr.recognize held the event loop 2 time(s), 50 ms in all, where it could not wait");
-        for text in [&l, &summary] {
-            assert!(!text.contains("task") && !text.contains("host.ocr.read"), "{text}");
+        assert_eq!(
+            summary,
+            [
+                ("screen", "[m] host.screen.pixel held the event loop 2 time(s), 50 ms in all, where it could not wait".to_string()),
+                ("screen", "[m] host.screen.save held the event loop 1 time(s), 9 ms in all, where it could not wait".to_string()),
+            ]
+        );
+        for text in std::iter::once(&l).chain(summary.iter().map(|(_, s)| s)) {
+            assert!(!text.contains("task") && !text.contains("host.ocr"), "{text}");
         }
+        assert_eq!(library_of("host.ocr.recognize"), "ocr");
+        assert_eq!(library_of("host.screen.pixel"), "screen");
         let keys = ["Tab".to_string(), "Tab".to_string(), "Down".to_string()];
         assert_eq!(
             timer_wait_line("m", 40, "m/src/main.luau:12", &keys),

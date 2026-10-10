@@ -940,9 +940,8 @@ fn picture_of<S>(pixels: &Pixels<S>, captured_at: Instant) -> Option<Picture> {
     }
 }
 
-/// A backend answer as the pipeline takes it — a read's, and the blocking `recognize`'s
-/// (`lib.rs`, `legacy_read`).
-pub(crate) fn engine_out(answer: Result<OcrText, String>) -> EngineOut {
+/// A backend answer as the pipeline takes it.
+fn engine_out(answer: Result<OcrText, String>) -> EngineOut {
     let t = match answer {
         Err(e) => return EngineOut::Failed(e),
         Ok(t) => t,

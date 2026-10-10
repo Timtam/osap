@@ -78,26 +78,21 @@ pub(crate) mod bench;
 
 /// Which of the ladder's last rungs one recognition may climb, and the ladder's shape.
 ///
-/// The legacy call — `host.ocr.recognize` where it cannot wait — climbs all of them, as it always
-/// has. A read on the recognise thread skips the fast
-/// model for a language that model does not read, and a background read skips both rungs while
-/// an interactive one is waiting behind it — they are the rungs that cost the most on a read that
-/// will never resolve.
+/// A read on the recognise thread skips the fast model for a language that model does not read,
+/// and a background read skips both rungs while an interactive one is waiting behind it — they
+/// are the rungs that cost the most on a read that will never resolve.
 struct Ladder<'a> {
     fast_ok: bool,
     preempt: Option<&'a AtomicBool>,
-    /// Climbed on the event loop — the legacy call — rather than on the read service's recognise
-    /// thread. Only what the log says about a ladder given up depends on it.
-    on_event_loop: bool,
+    /// A read of the application's, on the recognise thread: it makes the fast pass that is only
+    /// for the neural recogniser's counts ([`Rungs::counts_fast`]) and says when it gives a ladder
+    /// up. `ocr-bench`'s reads do neither, so that a strategy's time is its ladder's alone.
+    counts: bool,
     /// Which level reads first, what the neural recogniser does, whether the rest of the ladder
     /// runs, which revisions the first passes ask for (`ocr/ladder.rs`). Every read the
     /// application makes passes the production shape ([`Ladder::shape_now`]); `ocr-bench` passes
     /// one per strategy.
     shape: Shape,
-}
-
-impl Ladder<'static> {
-    const FULL: Ladder<'static> = Ladder { fast_ok: true, preempt: None, on_event_loop: true, shape: Shape::TODAY };
 }
 
 impl Ladder<'_> {
@@ -158,49 +153,6 @@ const LADDER_BUDGET: std::time::Duration = std::time::Duration::from_millis(250)
 /// so the two platforms have to draw the line in the same place — one constant, in
 /// `ocr/policy.rs`, for both.
 use crate::ocr::policy::{SMALL_H, SMALL_W};
-
-pub fn recognize(x: i32, y: i32, w: i32, h: i32, lang: Option<&str>) -> Result<OcrText, String> {
-    // Vision produces a good deal of temporary Objective-C on every pass — an observation
-    // and a candidate string per line, an array per call — and one module asks for this
-    // sixteen times a second. The result is plain Rust data, so the pool can close over
-    // everything the recognition made rather than leaving it for whenever the run loop next
-    // drains its own.
-    objc2::rc::autoreleasepool(|_| recognize_inner(x, y, w, h, lang))
-}
-
-fn recognize_inner(
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    lang: Option<&str>,
-) -> Result<OcrText, String> {
-    let started = Instant::now();
-    // A zero-sized region is not a failure: `region::loose_corners` reads a reversed rectangle
-    // as zero wide or high, so a module with its geometry momentarily wrong gets here rather
-    // than being stopped earlier.
-    if w <= 0 || h <= 0 {
-        crate::logging::trace("macos", || {
-            format!("ocr: nothing to read, region is {w}x{h} at {x},{y}")
-        });
-        return Ok(empty());
-    }
-
-    let debug = crate::appcfg::ocr_debug();
-
-    // Everything below works in capture pixels and converts to points only at the very end,
-    // through this one factor. On a Retina display it is 2.0, and the whole reason the
-    // capture is taken at backing resolution is that halving it first would throw away the
-    // detail that makes eight-point text readable — so the division belongs on the answer,
-    // not on the input.
-    let Some((native, scale)) = super::capture::capture_backing(x, y, w, h) else {
-        report_capture_failure(x, y, w, h);
-        return Ok(empty());
-    };
-    let capture = Capture::Took(started.elapsed().as_secs_f64() * 1000.0);
-    let ladder = Ladder { shape: Ladder::shape_now(), ..Ladder::FULL };
-    recognize_captured(&native, scale, x, y, w, h, lang, started, capture, debug, &ladder)
-}
 
 /// The slack the content crop leaves round the ink, in capture pixels. A physical distance, not
 /// a pixel count: three pixels of slack round the ink at 1x is one and a half at 2x, and the
@@ -815,15 +767,15 @@ impl Rungs<'_, '_> {
     }
 
     /// Whether this read makes a pass of the fast level only for the neural recogniser's counts
-    /// (`ocr/shadow.rs`): on a Mac that does not check its fast level (`PaddleUse::Merge`), on
-    /// `host.ocr.recognize`'s recognise thread only — never on the event loop, which carries the keyboard
-    /// tap — for a language that level reads, for a region it could be checked on (one line of ink,
-    /// not too wide), and not while an interactive read waits behind this one. What an
-    /// Apple-silicon Mac's check would read, measured before it has one.
+    /// (`ocr/shadow.rs`): on a Mac that does not check its fast level (`PaddleUse::Merge`), in a
+    /// read of the application's ([`Ladder::counts`]), for a language that level reads, for a
+    /// region it could be checked on (one line of ink, not too wide), and not while an interactive
+    /// read waits behind this one. What an Apple-silicon Mac's check would read, measured before it
+    /// has one.
     fn counts_fast(&self) -> bool {
         let ladder = self.ladder;
         ladder.shape.paddle == PaddleUse::Merge
-            && !ladder.on_event_loop
+            && ladder.counts
             && ladder.fast_ok
             && !ladder.preempted()
             && paddle_pre::fits(self.plan.ink_w, self.plan.ink_h, self.plan.lines)
@@ -899,7 +851,7 @@ impl Rungs<'_, '_> {
                         )
                     });
                     second
-                } else if exhausted && !ladder.on_event_loop {
+                } else if exhausted && ladder.counts {
                     // Out of budget on `host.ocr.recognize`'s recognise thread: nothing waits on
                     // the event loop here, but every read queued behind this one does.
                     crate::logging::line(
@@ -907,21 +859,6 @@ impl Rungs<'_, '_> {
                         &format!(
                             "ocr: gave up on a {w}x{h} pt region after {} ms rather than keep the \
                              reads behind it waiting",
-                            started.elapsed().as_millis()
-                        ),
-                    );
-                    second
-                } else if exhausted {
-                    // Out of budget with nothing to show. Said out loud rather than traced,
-                    // because this is the shape of a real failure the tester met: a read
-                    // that returns nothing is also the most expensive read there is, and
-                    // this thread carries the keyboard. Four passes over a field that will
-                    // never resolve is how a keystroke goes missing.
-                    crate::logging::line(
-                        "macos",
-                        &format!(
-                            "ocr: gave up on a {w}x{h} pt region after {} ms rather than \
-                             keep the event loop waiting",
                             started.elapsed().as_millis()
                         ),
                     );
@@ -1057,91 +994,6 @@ fn with_revision<R>(r: Option<usize>, f: impl FnOnce() -> R) -> R {
     }
     let _restore = Restore(REVISION_OVERRIDE.with(|c| c.replace(Some(r))));
     f()
-}
-
-/// Several regions, one capture.
-///
-/// The promise is not speed — it is SIMULTANEITY. Two values a module has to compare with each
-/// other must come from the same instant, and reading them one after another is how a note name
-/// and its cent offset come to disagree.
-///
-/// Falls back to one capture each wherever the shortcut cannot be trusted: fewer than two
-/// regions, a degenerate one, a capture that failed, or a capture that came back a different
-/// size than asked for — which means it was clipped at a screen edge, and every offset computed
-/// from it would point somewhere else.
-pub fn recognize_regions(
-    regions: &[(i32, i32, i32, i32)],
-    lang: Option<&str>,
-) -> Vec<Result<OcrText, String>> {
-    let one_each = || -> Vec<Result<OcrText, String>> {
-        regions.iter().map(|(x, y, w, h)| recognize(*x, *y, *w, *h, lang)).collect()
-    };
-    if regions.len() < 2 || regions.iter().any(|(_, _, w, h)| *w <= 0 || *h <= 0) {
-        return one_each();
-    }
-    // No box that fits the coordinate range (two regions two billion points apart): one
-    // capture each, as for a degenerate region.
-    let Some((x0, y0, bw, bh)) = crate::region::bounding_box(regions) else {
-        return one_each();
-    };
-
-    objc2::rc::autoreleasepool(|_| {
-        let Some((big, scale)) = super::capture::capture_backing(x0, y0, bw, bh) else {
-            report_capture_failure(x0, y0, bw, bh);
-            return one_each();
-        };
-        let (gw, gh) = (CGImage::width(Some(&big)), CGImage::height(Some(&big)));
-        let (want_w, want_h) =
-            (((bw as f64) * scale).round() as usize, ((bh as f64) * scale).round() as usize);
-        if gw != want_w || gh != want_h {
-            crate::logging::trace("macos", || {
-                format!(
-                    "ocr: the {bw}x{bh} pt enclosing capture came back {gw}x{gh} px, not \
-                     {want_w}x{want_h} — reading each region on its own instead"
-                )
-            });
-            return one_each();
-        }
-
-        regions
-            .iter()
-            .map(|(x, y, w, h)| {
-                let started = Instant::now();
-                let debug = crate::appcfg::ocr_debug();
-                // A pass-through plan: crop only, no upscale and no border, so `render`'s
-                // clipping gives exactly this region's pixels out of the shared capture.
-                let cut = Plan {
-                    x0: (((x - x0) as f64) * scale).round() as usize,
-                    y0: (((y - y0) as f64) * scale).round() as usize,
-                    cw: ((*w as f64) * scale).round() as usize,
-                    ch: ((*h as f64) * scale).round() as usize,
-                    up: 1,
-                    pad: 0,
-                    ink_h: 1,
-                    ink_w: 1,
-                    lines: 0,
-                    bg: [0.0; 3],
-                    cropped: false,
-                    blank: false,
-                };
-                match render(&big, &cut) {
-                    Some((img, buf)) => {
-                        let ladder = Ladder { shape: Ladder::shape_now(), ..Ladder::FULL };
-                        let r = recognize_captured(
-                            &img, scale, *x, *y, *w, *h, lang, started, Capture::Shared, debug,
-                            &ladder,
-                        );
-                        // `buf` backs the image copy-on-write; it has to outlive every read
-                        // of it, which on a machine nobody here owns is not a thing to leave
-                        // to the optimiser.
-                        drop(buf);
-                        r
-                    }
-                    None => Err("could not cut this region out of the shared capture".to_string()),
-                }
-            })
-            .collect()
-    })
 }
 
 // ── host.ocr.recognize's two threads ───────────────────────────────────────────────────────
@@ -1309,8 +1161,7 @@ pub fn recognise_shot(
     ctx: &Recognise,
 ) -> Vec<Result<OcrText, String>> {
     crate::loop_guard::off_loop("the recognise stage of a text read");
-    let ladder =
-        Ladder { fast_ok: ctx.fast_ok, preempt: ctx.preempt, on_event_loop: false, shape: Ladder::shape_now() };
+    let ladder = Ladder { fast_ok: ctx.fast_ok, preempt: ctx.preempt, counts: true, shape: Ladder::shape_now() };
     let debug = crate::appcfg::ocr_debug();
     ctx.each(regions.iter().enumerate(), |(i, &(x, y, w, h))| {
         objc2::rc::autoreleasepool(|_| {
@@ -1337,7 +1188,9 @@ pub fn recognise_shot(
                                 &img, *scale, x, y, w, h, ctx.lang, started, Capture::Apart, debug,
                                 &ladder,
                             );
-                            // `buf` backs the image copy-on-write; see `recognize_regions`.
+                            // `buf` backs the image copy-on-write; it has to outlive every
+                            // read of it, which on a machine nobody here owns is not a thing to
+                            // leave to the optimiser.
                             drop(buf);
                             r
                         }
@@ -1406,12 +1259,13 @@ fn empty() -> OcrText {
 /// The first pass in a process costs what no later one does — the warm-up over six bars that this
 /// was until 2026-10 took 0.2–0.33 s on a Mac mini M1, 0.3–0.85 s on the CI's virtual Macs and
 /// 1.7–1.8 s on an Intel MacBook Air (2020); over a line of words it has not been timed on a Mac
-/// yet — and the legacy call, `host.ocr.recognize` where it cannot wait, runs synchronously on the pump thread, which is also the thread
-/// carrying speech, timers and the overlay's own polling. Paying it there means a frozen interface
+/// yet — and a read used to run synchronously on the pump thread, which is also the thread
+/// carrying speech, timers and the overlay's own polling. Paying it there meant a frozen interface
 /// and a late announcement at exactly the moment a user first asked to read something. `docs/
-/// macos-port.md` names this as one of the three failures the port is shaped to avoid. Whether a
-/// first pass costs that much again on every other thread is open (TODO.md); the recognise thread
-/// makes one of its own after this one (`warm_up_recognise`), and the two lines tell.
+/// macos-port.md` names this as one of the three failures the port is shaped to avoid. No read
+/// runs there any more, and whether this warm-up is still needed is open, as is whether a first
+/// pass costs that much again on every other thread (TODO.md); the recognise thread makes one of
+/// its own after this one (`warm_up_recognise`), and the two lines tell.
 ///
 /// Nothing crosses the thread boundary: every Objective-C object is made on the thread that
 /// uses it, because none of them are `Send`, and the result is thrown away. Vision's request
@@ -1970,7 +1824,7 @@ fn perform(
         )
     };
     // Synchronous: it returns when the requests have finished. No completion handler, no
-    // queue, no run loop — which is what makes it usable from the pump thread at all.
+    // queue, no run loop — which is what makes it usable from the recognise thread at all.
     let base: &VNRequest = request;
     let requests: Retained<NSArray<VNRequest>> = NSArray::from_slice(&[base]);
     if let Err(e) = handler.performRequests_error(&requests) {

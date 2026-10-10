@@ -512,23 +512,6 @@ pub(crate) fn callback_args(
     }
 }
 
-/// What the blocking `recognize` returns where it could not wait (`lib.rs`, `legacy_read`): the
-/// same values a read hands its callback — one reading, or the list and the table by name — for
-/// the `readings` of `names`' regions, a window region that had no rectangle answered with why
-/// (`unresolved`), the screen read as `picture` says: when its capture began, and the input epoch.
-pub(crate) fn blocking_values(
-    lua: &Lua,
-    readings: Vec<Reading>,
-    names: &[Option<String>],
-    unresolved: &[Option<String>],
-    list: bool,
-    picture: Picture,
-) -> mlua::Result<mlua::MultiValue> {
-    let readings = with_unresolved(readings, unresolved);
-    let seen = seen_of(Some(picture), unresolved, &readings);
-    callback_args(lua, &readings, names, list, false, &seen)
-}
-
 /// Who waits for a read: the callback of `host.ocr.recognize`, or a handler stopped in it, resumed
 /// with [`callback_args`]'s values (`list`: a list was asked for).
 pub(crate) enum Waiter {
@@ -1175,23 +1158,6 @@ impl Shared {
         let Some(o) = vm_owner(lua) else { return };
         note_acting(self, o.idx, call, self.snap_state.has_pending_for(o.idx));
     }
-
-    /// The language the blocking `recognize` hands the engine for `req`: what it resolves to in the
-    /// published list, as a read's does — `Ok(None)`, the engine's own default, only while the list
-    /// is not known yet and no tag was asked for, and the first tag as written while it is not known
-    /// and one was — or `Err` with why nothing here reads it, which every region is answered
-    /// `"failed"` with, said in the log once per request.
-    pub(crate) fn ocr_legacy_lang(&self, req: &LangReq) -> Result<Option<String>, String> {
-        let langs = known_langs(self);
-        let resolved = legacy_lang(req, langs.as_ref());
-        if let Err(why) = &resolved {
-            self.ocr.reread_languages();
-            if self.ocr_state.once(format!("legacy-lang\u{1}{req:?}")) {
-                logging::line("ocr", &format!("host.ocr.recognize: {why}"));
-            }
-        }
-        resolved
-    }
 }
 
 /// The line a module's input is noted with, once a session, when it acts while a picture it asked
@@ -1257,15 +1223,6 @@ pub(crate) fn resolve_value<H: ReadHost>(h: &H, v: &Value) -> mlua::Result<Optio
             h.ocr().reread_languages();
             Ok(None)
         }
-    }
-}
-
-/// [`Shared::ocr_legacy_lang`]'s rule, given the published list (`None` while it is not known).
-pub(crate) fn legacy_lang(req: &LangReq, langs: Option<&lang::Languages>) -> Result<Option<String>, String> {
-    match (langs, req) {
-        (Some(langs), _) => lang::resolve(req, langs).map(Some),
-        (None, LangReq::Default) => Ok(None),
-        (None, LangReq::Tags(tags)) => Ok(tags.first().cloned()),
     }
 }
 
@@ -1531,27 +1488,6 @@ mod tests {
         assert!(!newer_than(&seqs, owner, Some("menu"), 5));
         note_newest(&mut seqs, owner, None, 7, true);
         assert_eq!(seqs.len(), 1, "a read without a key is not recorded");
-    }
-
-    /// The blocking `recognize`'s language: resolved in the published list as a read's is, or
-    /// answered as unavailable; while the list is not known, the first tag as written, and the
-    /// engine's own default for none.
-    #[test]
-    fn the_blocking_calls_lang_goes_through_the_resolver() {
-        let langs = lang::Languages {
-            available: vec!["en-US".into(), "de-DE".into()],
-            fast: vec![],
-            preferred: vec!["de-DE".into()],
-        };
-        let tags = |t: &[&str]| LangReq::Tags(t.iter().map(|s| s.to_string()).collect());
-        assert_eq!(legacy_lang(&tags(&["de"]), None), Ok(Some("de".to_string())));
-        assert_eq!(legacy_lang(&tags(&["ja", "de"]), None), Ok(Some("ja".to_string())), "the first, as written");
-        assert_eq!(legacy_lang(&LangReq::Default, None), Ok(None), "the engine's own default");
-        assert_eq!(legacy_lang(&tags(&["de"]), Some(&langs)), Ok(Some("de-DE".to_string())));
-        assert_eq!(legacy_lang(&tags(&["ja", "en"]), Some(&langs)), Ok(Some("en-US".to_string())), "the first that is there");
-        assert_eq!(legacy_lang(&LangReq::Default, Some(&langs)), Ok(Some("de-DE".to_string())), "the user's language");
-        let why = legacy_lang(&tags(&["ja"]), Some(&langs)).unwrap_err();
-        assert!(why.starts_with("language: ja is not available here"), "{why}");
     }
 
     #[test]

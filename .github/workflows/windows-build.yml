@@ -236,9 +236,9 @@ jobs:
 
       # No text recognition on the event loop (crates/host/src/loop_guard.rs): a release build
       # writes this line the first time a capture for a read or a recognition runs on the loop's
-      # thread outside the one call still allowed to, the blocking `recognize`. Not
-      # informational, unlike the probe above: the line is a bug in the host whatever the runner
-      # can capture. Both runs' logs, kept by the step above; a run without one has said so there.
+      # thread, where no call may make one. Not informational, unlike the probe above: the line is
+      # a bug in the host whatever the runner can capture. Both runs' logs, kept by the step
+      # above; a run without one has said so there.
       - name: Nothing recognised text on the event loop
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -259,9 +259,10 @@ jobs:
       # The guard (crates/host/src/vm_guard.rs, stops.rs): the capture probe's callbacks are
       # short, and its reads wait in their timers' handlers, which counts on no clock — so a
       # `[guard] [<module>] stopped` line is a bug, in the host or in the probe. So is a call that
-      # could not wait and held the event loop instead (`could not wait here`, task.rs): the probe
-      # makes every call in a handler of its own. A reading the probe got "failed" is said: the
-      # runner may not have captured.
+      # could not wait and held the event loop instead (`could not wait here`, task.rs), and a
+      # `recognize` that raised, which is what it does where it cannot wait: the probe makes every
+      # call in a handler of its own, and a capture that failed is a reading, not a raise. A
+      # reading the probe got "failed" is said: the runner may not have captured.
       - name: No module was stopped, and every call waited
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -278,6 +279,11 @@ jobs:
             $held = Select-String -Path $log -Pattern 'could not wait here' | Select-Object -First 1
             if ($held) {
               Write-Host "::error::a call could not wait and held the event loop ($name run): $($held.Line)"
+              $found = $true
+            }
+            $threw = Select-String -Path $log -Pattern 'CAPTURE PROBE: (late )?recognize .*THREW' | Select-Object -First 1
+            if ($threw) {
+              Write-Host "::error::a recognize in a handler raised instead of waiting ($name run): $($threw.Line)"
               $found = $true
             }
             $failed = Select-String -Path $log -Pattern 'CAPTURE PROBE:.*answered a failed reading' | Select-Object -First 1

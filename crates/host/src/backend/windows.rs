@@ -734,9 +734,9 @@ fn ocr_capture(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> (OcrShot
 }
 
 /// The pixels for a read. Desktop duplication takes every region as a piece of one frame in one
-/// request, as the blocking read of a list does; the standard source photographs the bounding box when that
-/// is not wasteful (`ocr::plan`) and each region on its own otherwise, or when the box came back
-/// clipped at a screen edge.
+/// request; the standard source photographs the bounding box when that is not wasteful
+/// (`ocr::plan`) and each region on its own otherwise, or when the box came back clipped at a
+/// screen edge.
 fn capture_for_read(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> OcrShot {
     if let CaptureSource::Duplication { or_standard } = src {
         match duplicate(regions, Caller::Worker) {
@@ -1403,79 +1403,6 @@ impl Backend for WindowsBackend {
             display_of: |_, _| 0,
             shot_of: ocr_shot_of,
         }
-    }
-
-    fn ocr(
-        &self,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-        lang: Option<&str>,
-        src: CaptureSource,
-    ) -> Result<OcrText, String> {
-        let cap = capture_all(&[(x, y, w, h)], src, Caller::Pump)
-            .pop()
-            .unwrap_or_else(|| Err(CAPTURE_FAILED.to_string()))?;
-        recognize_image(&cap, lang)
-    }
-
-    /// Several regions, one capture. See the trait for why the recognitions stay separate.
-    fn ocr_regions(
-        &self,
-        regions: &[(i32, i32, i32, i32)],
-        lang: Option<&str>,
-        src: CaptureSource,
-    ) -> Vec<Result<OcrText, String>> {
-        // Duplication reads N small rectangles out of ONE acquired frame, one GPU sync for all
-        // of them — its cost grows with area, unlike GDI's, so the bounding box below would be
-        // the expensive way round. When it cannot answer and the module allows it, this falls
-        // through to the standard path, bounding box and all.
-        if let CaptureSource::Duplication { or_standard } = src {
-            match duplicate(regions, Caller::Pump) {
-                Ok(caps) => {
-                    return caps.into_iter().map(|c| c.and_then(|img| recognize_image(&img, lang))).collect();
-                }
-                Err(why) => {
-                    dxgi::note_fallback(why, or_standard);
-                    if !or_standard {
-                        return regions.iter().map(|_| Err(unanswered(why))).collect();
-                    }
-                }
-            }
-        }
-        let one_each = |b: &Self| -> Vec<Result<OcrText, String>> {
-            regions
-                .iter()
-                .map(|(x, y, w, h)| b.ocr(*x, *y, *w, *h, lang, CaptureSource::Standard))
-                .collect()
-        };
-        if regions.len() < 2 || regions.iter().any(|(_, _, w, h)| *w <= 0 || *h <= 0) {
-            return one_each(self);
-        }
-        // No box that fits the coordinate range (two regions two billion pixels apart): one
-        // capture each, as for a degenerate region.
-        let Some((x0, y0, bw, bh)) = crate::region::bounding_box(regions) else {
-            return one_each(self);
-        };
-        let big = match self.capture(x0, y0, bw, bh, CaptureSource::Standard) {
-            Ok(c) => c,
-            Err(_) => return one_each(self),
-        };
-        // A capture that came back a different size than asked for was CLIPPED — the region ran
-        // off a screen edge — and every offset computed below would then point somewhere else.
-        // Falling back to one capture each is slower and right, which is the correct trade for
-        // an overlay that speaks what it read.
-        if big.w as i32 != bw || big.h as i32 != bh {
-            return one_each(self);
-        }
-        regions
-            .iter()
-            .map(|(x, y, w, h)| match crop(&big, x - x0, y - y0, *w, *h) {
-                Some(sub) => recognize_image(&sub, lang),
-                None => Err("region outside the captured area".to_string()),
-            })
-            .collect()
     }
 
     fn cursor_pos(&self) -> (i32, i32) {
@@ -3958,7 +3885,7 @@ pub(super) fn bench_system_read(cap: &CapturedImage) -> Result<OcrText, String> 
 }
 
 /// Every Windows function that photographs for a read or recognises asks the loop guard first,
-/// so on the event loop's thread — outside the legacy call — a debug build panics before it does
+/// so on the event loop's thread a debug build panics before it does
 /// anything: nothing is captured and no recogniser is asked here. (The guard's rules are tested
 /// in loop_guard.rs; this holds that the guard is where it has to be.)
 #[cfg(all(test, debug_assertions))]

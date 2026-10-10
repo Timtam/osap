@@ -3,6 +3,23 @@
 Project backlog for the cross-platform automation platform.
 Architecture and feasibility foundation: [docs/architecture-feasibility-study.md](docs/architecture-feasibility-study.md).
 
+## For the first release's changelog
+
+There is no CHANGELOG file yet. What the first release has to name — API removed or changed so
+that a module written against an earlier build fails — is collected here, oldest first, and moves
+into the changelog with that release.
+
+- **`host.ocr.recognize` without a callback no longer reads where it cannot wait** (2026-10-10,
+  step 12a). At the top level of a module or of an included file, in an arbiter's `onActivate` or
+  `onDeactivate`, in an `onChange` fired by the module's own `host.settings.set`, in a
+  metamethod, a `table.sort` comparator, a `string.gsub` function, a `for` loop's iterator, an
+  `xpcall` error handler, and in a coroutine the module made, it used to photograph and recognise
+  on the event loop and hold the whole application until it had; it raises there now, at the
+  caller's line, with the message for the place (docs/api/ocr.md, "Where it waits"). Pass a
+  callback there. Gone with it: the log line `[<module>] host.ocr.recognize could not wait here
+  (…) and held the event loop <ms> ms instead; …` and its summary at exit, `[<module>]
+  host.ocr.recognize held the event loop <n> time(s), <ms> ms in all, where it could not wait`.
+
 ## Implementation
 
 - [x] **Walking Skeleton (Slice 1):** Cargo workspace (`crates/module-manifest`, `host`, `app`) + Luau embedding (mlua/luau, `error-send` feature) + `host` API (`log`/`speech`/`path`/`resource`) + module loading (`module.toml` + entry). `cargo run -p app -- examples/hello` loads the example module and speaks via tts-rs. ✓ (2026-06-21)
@@ -699,7 +716,7 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
 - [ ] **The fast against the accurate level on a Neural Engine** (the Mac mini): whether Apple
       silicon gets the Intel check too. It reads by Windows' rule over the accurate ladder now, and
       on its recognise thread makes the fast pass for the counts that answer this.
-- [ ] **The Intel check's wait, and the event loop's longest read — the maintainer's yes needed.**
+- [x] **The Intel check's wait, and the event loop's longest read — the maintainer's yes needed.**
       The check waits for the recogniser no longer than the fast pass took (`merge::check_wait`): on
       CI's Intel runner the recogniser took 4–25 ms a field and the fast pass 11–27, so it should
       mostly be in time; the Air's per-read lines say how often it was not (`for paddle's check
@@ -722,7 +739,10 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       and the recogniser disagree. If the maintainer does not take it, one condition keeps the event
       loop at its old bound: no check on it (`!ladder.on_event_loop` in `Rungs::merged`), and
       `recognize` on an Intel Mac reads at the accurate ladder's speed again. Whether the tap
-      notices is for the Air.
+      notices is for the Air. Void since step 12a (2026-10-10): no read runs on the event loop any
+      more, since `recognize` raises where it cannot wait, so the loop has no longest read to
+      keep; what a failed check costs is the recognise thread's, and the reads queued behind it
+      pay it.
 - [ ] **The enlarged rung still invents on macOS 26** (CI run 37089023246: text on the drawn level
       meter and speaker). The decision kept the accurate ladder as it was, and the recogniser
       answers only where the ladder read nothing, so an invention of that rung stands. To be looked
@@ -6877,9 +6897,9 @@ kind of place that says how long the first held the loop.
 - [ ] **Never run on a Mac** (for the next Mac session; macOS was type-checked only): the guard's
       places in `backend/macos/ocr.rs` (`capture_for_read`, `recognise_shot`, `frames_for_round`,
       `shot_of`, `warm_up_recognise`, `run_vision`) and `paddle_ocr::ask_with`, and that nothing
-      but the legacy call reaches them from the main thread — the macOS CI job's capture-probe log
-      says so first; the `inputEpoch` and `time` a Mac read carries; a wait end to end on a Mac
-      (with the handlers that wait).
+      reaches them from the main thread — since step 12a nothing may, the legacy call is gone; the
+      macOS CI job's capture-probe log says so first; the `inputEpoch` and `time` a Mac read
+      carries; a wait end to end on a Mac (with the handlers that wait).
 - [x] **Step 3, the runtime's building blocks** (runtime 0.2.0): `O:here()` and
       `O:stillHere(mark, opts)` with `focus`, `keys`, `said`, `menus` and `place = false`, the
       reasons in the words of the `[read]` lines; `O:toScreenRect(r, { whole = true })`; a control's
@@ -7351,6 +7371,32 @@ kind of place that says how long the first held the loop.
       the scripted host's scenarios pass unchanged. Nothing Mac-specific: the host side is shared,
       and on a Mac the 50 ms were often shorter than one capture (36-91 ms), so input there mostly
       went ahead already; type-checked only.
+      Step 12a, the same day: `recognize` without a callback raises where it cannot wait — outside
+      every handler, where Luau cannot stop it, in a function the host calls and waits for, in a
+      coroutine of the module's own — with the two messages docs/api/ocr.md gives, at the caller's
+      line; the shim raises them itself, in the host and in the scripted host alike, so nothing of a
+      read runs on the event loop any more. Deleted with the blocking call: `legacy_read`,
+      `blocking_values`, `blocking_refusal`, the blocking call's language rule
+      (`ocr_legacy_lang`, `legacy_lang`), `Backend::ocr` and `ocr_regions` on every platform,
+      Windows' and the Mac's synchronous recognisers (`ocr::recognize`, `recognize_regions`,
+      `Ladder::FULL`), `region::bounding_box` and the slow-read line's `captured with the call's
+      other regions`. Kept and made general, for the `host.screen` calls that are to wait
+      (wbr-final.md, W1a): the blocking calls' tally, its line and summary per module, call and
+      case (`task::legacy`, which nothing calls yet), and the loop guard's scope of a kind
+      (`loop_guard::Kind`, `Text` and `Screen`; a `Screen` scope never lets a recognition be).
+      The Mac's ladder says `counts` where it said `!on_event_loop`; ocr-bench builds its ladder
+      itself, the rungs `Ladder::FULL` had, so its `prod` measures the read thread's ladder
+      without the pass made only for the counts, as before. Tested against the real shim: every
+      place raises at the caller's line, an included file's and a `pcall`'s included, and the
+      tally; the scripted host's scenarios pass unchanged. Nothing audible changes; CI's
+      `could not wait here` checks stay, for the screen calls' line, and a `recognize` of the
+      capture probe that raised fails every job now (it only warned on Windows and the newer
+      macOS).
+- [ ] **Step 12a never ran on a Mac** (type-checked only, with the ocr-bench build): the read
+      thread's ladder with `counts` in place of `!on_event_loop` (the pass made only for the
+      counts, the `gave up … rather than keep the reads behind it waiting` line), and ocr-bench's
+      own ladder. The next ocr-bench run in CI says whether `prod`'s figures stayed where they
+      were.
 - [ ] **NVDA check of step 11.3 (session A), before it is committed** — nothing should sound
       different; what changed is that a click, a key or a focus no longer waits for a picture the
       module has out. Windows, at the reads' own speed: sforzando's "Instrument" (an `opensMenu`

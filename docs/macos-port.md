@@ -359,6 +359,6 @@ before its first job and on the hang clock of one (2026-10-01: the first read on
 cost 2.4 s on an Intel Air). One after the other, so that the first line times a first pass in
 the process and the second one on another thread. Both read a line of printed words and say in
 the log whether Vision read it. A read without a callback waits in its handler, and only its
-module waits; only where it cannot wait — a module's top level, an arbiter's callback, a
-coroutine of the module's own — does it still run on the pump thread and stall it, with a line
-in the log ([Where it waits](api/ocr.md#where-it-waits)).
+module waits; where it cannot wait — a module's top level, an arbiter's callback, a coroutine
+of the module's own — it raises, so no read runs on the pump thread any more
+([Where it waits](api/ocr.md#where-it-waits)).

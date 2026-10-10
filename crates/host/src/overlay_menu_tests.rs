@@ -58,8 +58,7 @@
 //! with a callback it is this host's `T.submit`, which keeps the read for a scenario to answer;
 //! without one, where it waits — in a handler, or a task of the tests' entry `T.task` — it asks the
 //! real read service over the fake recogniser, answered by `T.settle()`; and where it cannot wait,
-//! this host raises the message the host is to raise once the blocking call is gone, so nothing a
-//! scenario runs can hold the loop unseen.
+//! it raises the message for the place, as in the host.
 
 use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::collections::HashMap;
@@ -976,19 +975,13 @@ pub(crate) fn harness(lua: &Lua) -> Table {
         .unwrap(),
     )
     .unwrap();
-    let legacy = lua
-        .create_function(|lua, (_what, _opts, why): (Value, Value, String)| {
-            let message = task::wait_message(task::Case::of(&why));
-            Ok((false, Value::String(lua.create_string(message)?)))
-        })
-        .unwrap();
     // `T.submit` as it is when the call is made, so a scenario can stand in front of it.
     let submit: Function = lua
         .load("local T = ... return function(what, opts, cb) return T.submit(what, opts, cb) end")
         .set_name("the scripted host's callback form")
         .call(t.clone())
         .unwrap();
-    let waits = task::waits(lua, IDX, h, legacy, submit).expect("the waits build");
+    let waits = task::waits(lua, IDX, h, submit).expect("the waits build");
     let host: Table = t.get("host").unwrap();
     let ocr: Table = host.raw_get("ocr").unwrap();
     ocr.raw_set("recognize", waits.get::<Function>("recognize").unwrap()).unwrap();
@@ -1000,8 +993,8 @@ pub(crate) fn harness(lua: &Lua) -> Table {
 /// no control's hook raised (`[overlay] '…': its text raised: …`) unless the scenario is about
 /// one (`S.hooksMayRaise`), and no handler ended with an error — a key's, a timer's, the menu
 /// tick's — unless the scenario is about that (`S.tasksMayRaise`). A `recognize` without a callback
-/// in a hook that cannot wait raises there in this host, which plays the end of the blocking call,
-/// so this is where such a hook is found rather than as a value that went missing without a word.
+/// in a hook that cannot wait raises there, as in the host, so this is where such a hook is found
+/// rather than as a value that went missing without a word.
 pub(crate) fn finish(lua: &Lua) {
     let check = r#"
         local S = T.S
@@ -3232,8 +3225,8 @@ fn an_identify_that_keeps_answering_nil_is_taken_as_no_after_eight() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Handlers in the scripted host: the host's own mailbox, wait point and shim, and the end of the
-// blocking call played.
+// Handlers in the scripted host: the host's own mailbox, wait point and shim, which raises where
+// it cannot wait.
 // ---------------------------------------------------------------------------------------------
 
 /// The arbiter's onActivate is Lua the host calls back, where nothing can wait — in this host as

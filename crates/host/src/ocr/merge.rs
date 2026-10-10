@@ -49,14 +49,14 @@
 //!   (`docs/api/ocr.md`), and still does; the recogniser's answer is not used for it, as Windows
 //!   uses none for a failed read.
 //! - **How long a read waits.** Within the ladder's budget, not for as long as it takes ([`left`]):
-//!   a Mac's event loop carries the keyboard's event tap, which macOS switches off when the loop
-//!   stops answering, and that budget is what keeps the ladder from holding it. The recogniser
-//!   began when the ladder did, so it has had every pass of the ladder to answer in. One that has
-//!   not answered by then answers nothing, and the log says so. A read asked from a poll that made
-//!   way for one asked from a key press, which skips the ladder's last rungs, does not wait at all:
-//!   it takes an answer that is there already, or none.
+//!   the recognise thread reads one job at a time, and that budget is what keeps one read from
+//!   holding every read queued behind it. The recogniser began when the ladder did, so it has had
+//!   every pass of the ladder to answer in. One that has not answered by then answers nothing, and
+//!   the log says so. A read asked from a poll that made way for one asked from a key press, which
+//!   skips the ladder's last rungs, does not wait at all: it takes an answer that is there
+//!   already, or none.
 //! - **At whose priority.** At the reading thread's own quality of service (`paddle_ocr::Qos::
-//!   Reader`): the event loop's, or the recognise thread's. Windows has one priority for all.
+//!   Reader`): the recognise thread's. Windows has one priority for all.
 //! - **The log.** The read's own line (`macos/ocr.rs`, `recognize_noted`), written as Windows'
 //!   is — at line level with the switch on, at trace level otherwise — says who answered
 //!   ([`super::ladder::Path`]) and, in Windows' words, `+ waited <ms>ms for paddle (which

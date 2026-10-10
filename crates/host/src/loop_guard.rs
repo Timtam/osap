@@ -3,36 +3,58 @@
 //! The rule is the maintainer's: no text recognition may burden the event loop, which carries
 //! every hotkey, every captured key, speech, every module callback and, on a Mac, the keyboard's
 //! event tap. `host.ocr.recognize` recognises on threads of its own, with a callback or in a
-//! handler waiting for those threads (task.rs); the one way left onto the loop is `recognize`
-//! where it cannot wait, the legacy call, which blocks as it always did.
+//! handler waiting for those threads (task.rs), and raises where it cannot wait: no way onto the
+//! loop is left for it.
 //!
 //! So every function that photographs for a read or recognises asks, first thing, whether it
 //! runs on the event loop (`off_loop`): the platform's `OcrWorker` functions, Windows'
 //! `recognize_image`, the neural recogniser's `ask`, and the place a Vision request is performed
-//! on a Mac. On the loop, outside a legacy call, that is a bug in the host: a panic in a debug
-//! build, so every test that brings a recogniser onto the loop fails, and in a release build one
-//! log line — `[loop] text recognition on the event loop: …` — which CI looks for in the capture
-//! probe's log.
+//! on a Mac. On the loop, that is a bug in the host: a panic in a debug build, so every test that
+//! brings a recogniser onto the loop fails, and in a release build one log line —
+//! `[loop] text recognition on the event loop: …` — which CI looks for in the capture probe's log.
 //!
 //! The loop is a thread, marked once by `Manager::new` on the thread that goes on to run it (the
 //! window's tick and the headless loop are the same thread). A thread nobody marked — the OCR
-//! threads, `ocr-bench`, every test that did not mark itself — is never the loop. The legacy
-//! call holds `legacy()` while it runs, and only that call: the exception is scoped to the call,
-//! not to the module or the thread.
+//! threads, `ocr-bench`, every test that did not mark itself — is never the loop.
+//!
+//! A blocking call — a host call that runs on the loop where it cannot wait (`task::legacy`) —
+//! holds `legacy(kind)` while it runs, and only that call: the exception is scoped to the call and
+//! to its kind of work, not to the module or the thread. Recognition has no such call any more,
+//! and a scope of another kind never lets it be.
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// The work a guard keeps off the loop, and the work a blocking call's scope lets be there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Text recognition, and the captures made for it (`off_loop`).
+    Text,
+    /// A screen capture of a `host.screen` call. No call opens a scope of it yet: see
+    /// `task::legacy`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Screen,
+}
+
+impl Kind {
+    fn index(self) -> usize {
+        match self {
+            Kind::Text => 0,
+            Kind::Screen => 1,
+        }
+    }
+}
+
 thread_local! {
     /// Whether this thread runs the event loop.
     static LOOP: Cell<bool> = const { Cell::new(false) };
-    /// How many legacy calls are running on this thread, one inside the other at most when a
-    /// module's own coroutine read inside one: while any is, recognition here is that call's.
-    static LEGACY: Cell<u32> = const { Cell::new(0) };
+    /// How many blocking calls of each kind are running on this thread, one inside the other at
+    /// most when a module's own coroutine called inside one: while any of a kind is, that kind of
+    /// work here is that call's.
+    static LEGACY: Cell<[u32; 2]> = const { Cell::new([0; 2]) };
 }
 
-/// Recognitions on the loop outside a legacy call, this session (release builds; a debug build
-/// panics at the first).
+/// Recognitions on the loop, this session (release builds; a debug build panics at the first).
 static VIOLATIONS: AtomicU64 = AtomicU64::new(0);
 
 /// Marks the calling thread as the event loop's, for the rest of its life.
@@ -40,13 +62,19 @@ pub fn mark_loop_thread() {
     LOOP.with(|l| l.set(true));
 }
 
+/// Whether a blocking call of `kind` runs on this thread now.
+fn excused(kind: Kind) -> bool {
+    LEGACY.with(Cell::get)[kind.index()] > 0
+}
+
 /// Says that `what` — a capture for a read, a recognition — is about to run, and that it must not
-/// run on the event loop. Nothing happens anywhere else, or inside a legacy call.
+/// run on the event loop. Nothing happens anywhere else, or inside a blocking call of
+/// [`Kind::Text`], which nothing opens.
 ///
 /// On the loop: a panic in a debug build, and in a release build a log line for the first
 /// violation of the session and for every power of two after it, with the count.
 pub fn off_loop(what: &str) {
-    if !LOOP.with(Cell::get) || LEGACY.with(Cell::get) > 0 {
+    if !LOOP.with(Cell::get) || excused(Kind::Text) {
         return;
     }
     let n = VIOLATIONS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -64,22 +92,30 @@ fn violation_line(what: &str, n: u64) -> String {
     format!("text recognition on the event loop: {what} — this is a bug; please report it ({n} so far this session)")
 }
 
-/// The scope of one legacy call: `host.ocr.recognize` where it could not wait,
-/// which recognises on the loop as it always did. Ends when dropped, unwinding included.
+/// The scope of one blocking call of a kind: a host call where it could not wait, which does that
+/// kind of work on the loop. Ends when dropped, unwinding included.
 #[must_use = "the exception ends when this is dropped"]
 pub struct Legacy {
-    _private: (),
+    kind: Kind,
 }
 
-/// Opens a legacy call's scope on the calling thread (see [`Legacy`]).
-pub fn legacy() -> Legacy {
-    LEGACY.with(|l| l.set(l.get() + 1));
-    Legacy { _private: () }
+/// Opens a blocking call's scope of `kind` on the calling thread (see [`Legacy`]).
+pub fn legacy(kind: Kind) -> Legacy {
+    LEGACY.with(|l| {
+        let mut n = l.get();
+        n[kind.index()] += 1;
+        l.set(n);
+    });
+    Legacy { kind }
 }
 
 impl Drop for Legacy {
     fn drop(&mut self) {
-        LEGACY.with(|l| l.set(l.get().saturating_sub(1)));
+        LEGACY.with(|l| {
+            let mut n = l.get();
+            n[self.kind.index()] = n[self.kind.index()].saturating_sub(1);
+            l.set(n);
+        });
     }
 }
 
@@ -122,25 +158,32 @@ mod tests {
         off_loop("a test's recognition");
     }
 
-    /// On the loop, a legacy call may recognise, and only while it lasts.
+    /// A blocking call's scope lasts as long as the call, nested ones included, and covers its own
+    /// kind of work only: inside the screen calls' scopes, a recognition on the loop is still the
+    /// bug it is everywhere else on it.
     #[test]
-    fn a_legacy_call_may_recognise_on_the_loop_while_it_lasts() {
+    fn a_screen_calls_scope_lasts_while_it_runs_and_never_lets_a_recognition_be() {
         let t = std::thread::spawn(|| {
             mark_loop_thread();
+            let mut fired = Vec::new();
             {
-                let _outer = legacy();
+                let _outer = legacy(Kind::Screen);
                 {
-                    let _inner = legacy();
-                    off_loop("inside two legacy calls");
+                    let _inner = legacy(Kind::Screen);
+                    assert!(excused(Kind::Screen) && !excused(Kind::Text));
+                    fired.push(std::panic::catch_unwind(|| off_loop("inside two screen calls")).is_err());
                 }
-                off_loop("inside the outer one");
+                assert!(excused(Kind::Screen), "the outer call still runs");
             }
-            std::panic::catch_unwind(|| off_loop("after both")).is_err() || !cfg!(debug_assertions)
+            assert!(!excused(Kind::Screen), "outside every screen call");
+            fired.push(std::panic::catch_unwind(|| off_loop("after both")).is_err());
+            fired
         });
-        assert!(t.join().unwrap(), "outside every legacy call the guard fires again");
+        let fired = t.join().unwrap();
+        assert_eq!(fired, [cfg!(debug_assertions); 2], "the text guard fired inside the screen call and after it");
     }
 
-    /// A recognition on the loop outside a legacy call panics in a debug build.
+    /// A recognition on the loop panics in a debug build.
     #[test]
     #[cfg(debug_assertions)]
     #[should_panic(expected = "[loop] text recognition on the event loop: a stray recognition — this is a bug")]

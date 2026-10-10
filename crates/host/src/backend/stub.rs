@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell};
 
 use super::{
     Backend, CaptureFn, CaptureSource, CapturedImage, Captured, ControlInfo, DumpNode, HostEvents,
-    KeyboardNow, MouseButton, OcrText, OwnerKeys, Stroke, WinInfo, CAPTURE_FAILED,
+    KeyboardNow, MouseButton, OwnerKeys, Stroke, WinInfo, CAPTURE_FAILED,
 };
 
 #[derive(Default)]
@@ -128,18 +128,6 @@ impl Backend for StubBackend {
     // Nothing to keep. `pixels` is the trait's, which fails through `capture` above.
     fn frame(&self, _r: crate::ocr::types::Rect, _src: CaptureSource) -> Result<super::frame::Frame, String> {
         Err(CAPTURE_FAILED.to_string())
-    }
-
-    fn ocr(
-        &self,
-        _x: i32,
-        _y: i32,
-        _w: i32,
-        _h: i32,
-        _lang: Option<&str>,
-        _src: CaptureSource,
-    ) -> Result<OcrText, String> {
-        Err("OCR is not implemented on this platform yet".to_string())
     }
 
     fn cursor_pos(&self) -> (i32, i32) {

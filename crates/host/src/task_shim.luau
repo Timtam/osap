@@ -4,8 +4,8 @@
 -- One call, two forms. With a callback — the last argument a function, or exactly two arguments of
 -- which the second is one — it asks the read service and returns at once (`submit`); it waits
 -- nowhere and works anywhere. Without one it waits for the reading: in a handler, as a
--- `coroutine.yield` here, while the event loop goes on; where it cannot wait, it is the old
--- blocking call (`legacy`).
+-- `coroutine.yield` here, while the event loop goes on; where it cannot wait, it raises the
+-- message for that place at the caller's line.
 --
 -- A Rust function cannot yield through mlua, so the wait is this file's `yield`: the host's
 -- `start` checks and queues the read, and the handler's coroutine then stops here until the host
@@ -21,12 +21,12 @@
 --   where_()                  "handler": the innermost running handler of this VM is calling, in
 --                             its own coroutine; "foreign": one of its handlers runs, but another
 --                             coroutine is calling; "none": no handler of it runs
---   legacy(what, opts, why)   the old blocking call, for a place that cannot wait: true and the
---                             reading (or the list and the table by name), or false and the
---                             message to raise there
 --   disown()                  module code resumed the handler's coroutine: the host forgets it
-return function(start, where_, legacy, disown, submit, yield, isyieldable, rawequal, error, select, type, WAIT,
-                RESUMED, NIL_CB)
+--   CANNOT_WAIT               what a call raises where it cannot wait: outside every handler, in
+--                             a function the host calls and waits for, or one Luau cannot suspend
+--   OWN_COROUTINE             what it raises in a coroutine the module made
+return function(start, where_, disown, submit, yield, isyieldable, rawequal, error, select, type, WAIT,
+                RESUMED, NIL_CB, CANNOT_WAIT, OWN_COROUTINE)
   -- Level 1 is this function, 2 the call below, 3 whoever called host.ocr.recognize: a raise
   -- names the module's line.
   local function wait(what, opts)
@@ -37,11 +37,8 @@ return function(start, where_, legacy, disown, submit, yield, isyieldable, raweq
       -- included file's top level): Luau cannot stop the handler there.
       w = "cannot-wait"
     end
-    if w ~= "handler" then
-      local ran, a, b = legacy(what, opts, w)
-      if not ran then error(a, 3) end
-      return a, b
-    end
+    if w == "foreign" then error(OWN_COROUTINE, 3) end
+    if w ~= "handler" then error(CANNOT_WAIT, 3) end
     local nonce = {} -- a fresh table: no module code ever holds it
     start(what, opts, nonce)
     local got, a, b = yield(WAIT, nonce)

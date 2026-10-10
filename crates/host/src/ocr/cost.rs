@@ -187,12 +187,9 @@ impl Answered {
 /// Where the picture of a slow read came from, for its line.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Capture {
-    /// Taken for this read, on this thread, in this many milliseconds: `host.ocr.recognize` of
-    /// one region where it cannot wait.
+    /// Taken for this read in this many milliseconds before its recognition began: `ocr-bench`'s
+    /// reads, which are handed the time of a capture.
     Took(f64),
-    /// One capture for all the regions of the call, taken before this region's clock started:
-    /// `host.ocr.recognize` of a list where it cannot wait.
-    Shared,
     /// Taken apart from this thread before the recognition began — on the capture thread, or the
     /// pixels of a snapshot the module holds: `host.ocr.recognize` with a callback or waiting in a
     /// handler, whose `[ocr]` line gives the
@@ -300,8 +297,7 @@ pub fn pause_text(b: &Before) -> String {
 /// reads sixteen times a second would otherwise bury the log it is meant to be evidence in.
 /// `beside`: another Vision pass ran in the process at some moment of this recognition's passes.
 /// `answered`: who answered it, and what it waited for the neural recogniser. Nothing is formatted,
-/// the thread's name included, unless a line is due: this runs after every recognition, on the
-/// event loop too.
+/// the thread's name included, unless a line is due: this runs after every recognition.
 #[allow(clippy::too_many_arguments)]
 pub fn cost_line(
     ms: f64,
@@ -354,7 +350,6 @@ pub fn slow_line(
             parts.push(format!("capture {c:.0} ms"));
             counted += c;
         }
-        Capture::Shared => parts.push("captured with the call's other regions".to_string()),
         Capture::Apart => parts.push("picture taken apart".to_string()),
     }
     if passes.is_empty() {
@@ -834,9 +829,9 @@ mod tests {
              apart; tight crop 350 ms, 3 words; the rest 7 ms"
         );
         assert_eq!(
-            slow_line((40, 20), 120.0, "the event loop", Capture::Shared, &[pass(Stage::Fast, 130.0, None, false)], by(Path::Nothing)),
-            "ocr: a slow read, a 40x20 pt region on the event loop in 120 ms, answered by nobody: captured with the \
-             call's other regions; fast model 130 ms, refused; the rest 0 ms",
+            slow_line((40, 20), 120.0, "thread ocr-recognise", Capture::Apart, &[pass(Stage::Fast, 130.0, None, false)], by(Path::Nothing)),
+            "ocr: a slow read, a 40x20 pt region on thread ocr-recognise in 120 ms, answered by nobody: picture taken \
+             apart; fast model 130 ms, refused; the rest 0 ms",
             "rounding never makes the rest negative"
         );
         assert!(slow_line((40, 20), 150.0, "the event loop", Capture::Took(150.0), &[], by(Path::Nothing))

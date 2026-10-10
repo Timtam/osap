@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{
     Backend, CaptureFn, CaptureSource, CapturedImage, ControlInfo, DumpNode, HostEvents,
-    MouseButton, OcrText, WinInfo,
+    MouseButton, WinInfo,
 };
 
 /// Whether a scroll has been sent yet in this run — so the first one is always recorded and
@@ -86,10 +86,10 @@ impl MacBackend {
         perm::request_screen_recording_once();
         // Vision's first pass in a process costs what no later one does — the warm-up over bars
         // it made until 2026-10 took 0.2–0.33 s on a Mac mini M1 and 1.7–1.8 s on an Intel
-        // MacBook Air — and `ocr` runs on the thread that carries the keyboard. Warming it on a
-        // background thread now is meant to be the difference between a first read-out that is
-        // merely slow and one that stalls the pump long enough for the system to switch off the
-        // event tap; whether a first pass on the event loop costs that again is open (TODO.md).
+        // MacBook Air. It was made for the reads that ran on the thread that carries the
+        // keyboard, where a first pass could stall the pump long enough for the system to switch
+        // off the event tap; every read runs on the recognise thread now, and whether this
+        // warm-up is still needed is open (TODO.md).
         // Before the recognise thread starts: its own warm-up, once it has read the languages,
         // waits for this one to end (`ocr::warm_up_recognise`), and the two lines time a first
         // pass in the process and one on another thread apart.
@@ -261,18 +261,6 @@ impl Backend for MacBackend {
         }
     }
 
-    fn ocr(
-        &self,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-        lang: Option<&str>,
-        _src: CaptureSource,
-    ) -> Result<OcrText, String> {
-        ocr::recognize(x, y, w, h, lang)
-    }
-
     fn cursor_pos(&self) -> (i32, i32) {
         input::cursor_pos()
     }
@@ -343,15 +331,6 @@ impl Backend for MacBackend {
         }
 
         input::mouse_scroll(x, y, lines);
-    }
-
-    fn ocr_regions(
-        &self,
-        regions: &[(i32, i32, i32, i32)],
-        lang: Option<&str>,
-        _src: CaptureSource,
-    ) -> Vec<Result<OcrText, String>> {
-        ocr::recognize_regions(regions, lang)
     }
 
     fn key_post(&self, hwnd: isize, key: &str) -> Result<(), String> {

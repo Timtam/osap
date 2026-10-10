@@ -176,12 +176,7 @@ fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     let submit = lua
         .create_function(move |lua, (what, opts, cb): (Value, Value, Value)| crate::ocr::lua::read(&*hh, lua, idx, what, opts, cb))
         .unwrap();
-    let legacy = lua
-        .create_function(|lua, (_what, _opts, why): (Value, Value, String)| {
-            Ok((false, Value::String(lua.create_string(task::wait_message(task::Case::of(&why)))?)))
-        })
-        .unwrap();
-    let waits = task::waits(&lua, idx, h.clone(), legacy, submit).unwrap();
+    let waits = task::waits(&lua, idx, h.clone(), submit).unwrap();
     ocr.set("recognize", waits.get::<Function>("recognize").unwrap()).unwrap();
     host.set("ocr", ocr).unwrap();
     lua.globals().set("wait", task::test_wait(&lua, idx, h.clone()).unwrap()).unwrap();

@@ -372,7 +372,7 @@ CAPABILITIES = [
     '[Recognition language](ocr.md#recognition-language). '
     '[`host.ocr.recognize`](ocr.md#host-ocr-recognize) recognises off the event loop: given a '
     'callback it answers there, and without one it waits in its handler, holding only its own '
-    'module ([Where it waits](ocr.md#where-it-waits)).',
+    'module, and raises where it cannot wait ([Where it waits](ocr.md#where-it-waits)).',
     '- **AutoHotkey.** `ahk_class` belongs inside the `windows` block of a '
     '[matcher](window.md#matchers); `SetTimer` is '
     '[`host.timer.every`](timer.md#host-timer-every), stopped with '

@@ -823,9 +823,9 @@ jobs:
 
       # No text recognition on the event loop (crates/host/src/loop_guard.rs): a release build
       # writes this line the first time a capture for a read or a recognition runs on the loop's
-      # thread outside the one call still allowed to, the blocking `recognize`. A real run of
-      # the capture probe's reads on a Mac, the one place CI sees the macOS guard at work. After the
-      # probe whatever became of it: its log is what is read, and a probe that failed has said so.
+      # thread, where no call may make one. A real run of the capture probe's reads on a Mac, the
+      # one place CI sees the macOS guard at work. After the probe whatever became of it: its log
+      # is what is read, and a probe that failed has said so.
       - name: Nothing recognised text on the event loop
         if: ${{ !cancelled() }}
         run: |
@@ -1366,11 +1366,16 @@ jobs:
             echo "::error::text recognition ran on the event loop on the newer macOS: $(grep -m1 '\[loop\] text recognition on the event loop' automation-platform.log)"
             exit 1
           fi
-          # A call that could not wait and the guard's stop, as in the build job: both are looked
-          # for before either fails the step.
+          # A call that could not wait, a `recognize` that raised — which is what it does where it
+          # cannot wait; the build job fails on every raise of the probe's — and the guard's stop:
+          # all are looked for before any fails the step.
           found=0
           if grep -q "could not wait here" automation-platform.log; then
             echo "::error::a call could not wait and held the event loop on the newer macOS: $(grep -m1 'could not wait here' automation-platform.log)"
+            found=1
+          fi
+          if grep -q "CAPTURE PROBE: \(late \)\{0,1\}recognize .*THREW" automation-platform.log; then
+            echo "::error::a recognize in a handler raised instead of waiting on the newer macOS: $(grep -m1 'CAPTURE PROBE: .*recognize .*THREW' automation-platform.log)"
             found=1
           fi
           if grep -q "\[guard\] \[[^]]*\] stopped" automation-platform.log; then

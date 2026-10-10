@@ -633,7 +633,7 @@ pub enum OcrThread {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct Recognise<'a> {
     /// The language as the platform lists it, already resolved (`ocr::lang`). `None` is the
-    /// engine's own default, which only the legacy call uses, while the language list is not known.
+    /// engine's own default; a read always names one.
     pub lang: Option<&'a str>,
     /// Whether the fast model reads `lang` too (macOS; its last rung is skipped when not).
     pub fast_ok: bool,
@@ -1115,17 +1115,6 @@ pub trait Backend {
         frame::read_points(pts, |r| self.capture(r.x, r.y, r.w, r.h, src))
     }
 
-    /// Recognizes text in a screen region.
-    fn ocr(
-        &self,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-        lang: Option<&str>,
-        src: CaptureSource,
-    ) -> Result<OcrText, String>;
-
     /// Reads `region` through both sources — the region a module just read, or the
     /// foreground window when that region is too small to say anything — and logs whether
     /// the two pictures agree, naming the module `who`. The first-read comparison of a module
@@ -1138,36 +1127,6 @@ pub trait Backend {
     /// source and nothing to compare.
     fn compare_capture_sources(&self, _who: &str, _region: (i32, i32, i32, i32)) -> bool {
         true
-    }
-
-    /// Several regions, ONE screen touch.
-    ///
-    /// Measured on Windows: recognising a 67x13 read-out costs 4-6 ms, cropping and upscaling
-    /// it another 0.5 — while the capture underneath costs a fixed ~17 ms compositor frame
-    /// whatever its size. So two adjacent read-outs on the same row, read one after the other,
-    /// spend two thirds of their time photographing the screen twice. Melodyne's selection
-    /// watcher does exactly that eight times a second.
-    ///
-    /// The regions are NOT merged into one recognition: that was tried and it lost values. The
-    /// per-region fallback to the neural recogniser only fires for a region that came back
-    /// empty, and a merged strip is never empty, so a note name that WinRT dropped stayed
-    /// dropped while the cents beside it came through. Only the capture is shared; every region
-    /// is still recognised on its own, with its own fallback, and its word coordinates are
-    /// still relative to itself.
-    ///
-    /// The default implementation is the honest one for a backend that has not specialised it:
-    /// the same calls in the same order, one capture each. Overriding it is an optimisation,
-    /// never a change in meaning.
-    fn ocr_regions(
-        &self,
-        regions: &[(i32, i32, i32, i32)],
-        lang: Option<&str>,
-        src: CaptureSource,
-    ) -> Vec<Result<OcrText, String>> {
-        regions
-            .iter()
-            .map(|(x, y, w, h)| self.ocr(*x, *y, *w, *h, lang, src))
-            .collect()
     }
 
     /// The functions `host.ocr.recognize`'s two threads call — see [`OcrWorker`]. Taken once, when

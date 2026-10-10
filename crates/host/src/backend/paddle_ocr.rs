@@ -765,10 +765,10 @@ pub(crate) enum Qos {
     /// `ocr-bench`'s strategies and threads ask with it now.
     #[cfg_attr(windows, allow(dead_code))]
     Utility,
-    /// As urgent as the thread that asks, read from it when it asks ([`class_for`]): the event
-    /// loop's user-interactive, the recognise thread's user-initiated. What every read of the
-    /// application asks with on a Mac, since it may wait for the answer — a wait on a thread of a
-    /// lower class than its own would let any work between the two classes delay the reader.
+    /// As urgent as the thread that asks, read from it when it asks ([`class_for`]): the recognise
+    /// thread's user-initiated. What every read of the application asks with on a Mac, since it
+    /// may wait for the answer — a wait on a thread of a lower class than its own would let any
+    /// work between the two classes delay the reader.
     #[cfg_attr(windows, allow(dead_code))]
     Reader,
 }
@@ -892,8 +892,8 @@ static RECOGNISER: OnceLock<bool> = OnceLock::new();
 /// the [`JOBS`] lock, with the queue emptied — if it ever ends; [`ask_with`] reads it under the
 /// same lock, so no region is queued for a thread that has gone. A queued region holds its
 /// caller's only way to be answered: left in the queue of a thread that has gone, its caller's
-/// `wait` would never return, and a synchronous `host.ocr.recognize` waits on the event loop,
-/// which carries every captured key.
+/// `wait` would never return, and a read with it — and so the module that waits for that read,
+/// with every key it captures.
 static ALIVE: AtomicBool = AtomicBool::new(false);
 
 /// Regions the recogniser thread began, ran through the model to the end, and gave up on because
@@ -1373,8 +1373,8 @@ mod exit_safety_tests {
     }
 
     /// The recogniser thread gone: everything it left in the queue is answered with nothing, and
-    /// nothing is queued for it after — a synchronous recognition waiting on the event loop
-    /// would otherwise wait for ever, and every captured key with it.
+    /// nothing is queued for it after — a read waiting for its answer would otherwise wait for
+    /// ever, and the module waiting for that read with it.
     #[test]
     fn a_recogniser_that_has_gone_answers_its_queue_and_takes_no_more() {
         static C: InFlight = InFlight::new();
@@ -1401,7 +1401,7 @@ mod exit_safety_tests {
             assert_eq!(admit(&mut jobs.lock().unwrap(), &alive, j), Ok(()));
             waiting.push(a);
         }
-        // Waiters on other threads, as the event loop and the OCR thread would be.
+        // Waiters on other threads, as the OCR thread would be.
         let waits: Vec<_> = waiting.into_iter().map(|a| std::thread::spawn(move || a.wait())).collect();
         let orphans = orphan_all(&jobs, &alive);
         assert_eq!(orphans.len(), 3);
@@ -1501,8 +1501,8 @@ mod exit_safety_tests {
         assert!(t.elapsed() < Duration::from_secs(5));
     }
 
-    /// The class the recogniser thread asks for: the two fixed ones, and a read's own — the event
-    /// loop's user-interactive, the recognise thread's user-initiated — with an unspecified class
+    /// The class the recogniser thread asks for: the two fixed ones, and a read's own — the
+    /// recognise thread's user-initiated, or any other the header names — with an unspecified class
     /// or a value the header does not name taken as user-initiated; the reader asked only for a
     /// read's region.
     #[test]
@@ -1510,7 +1510,7 @@ mod exit_safety_tests {
         let never = || -> u32 { panic!("the reader's class was asked for a fixed one") };
         assert_eq!(class_for(Qos::Interactive, never), 0x19);
         assert_eq!(class_for(Qos::Utility, never), 0x11);
-        assert_eq!(class_for(Qos::Reader, || 0x21), 0x21, "the event loop");
+        assert_eq!(class_for(Qos::Reader, || 0x21), 0x21, "user-interactive");
         assert_eq!(class_for(Qos::Reader, || 0x19), 0x19, "the recognise thread");
         for c in [0x15, 0x11, 0x09] {
             assert_eq!(class_for(Qos::Reader, || c), c);

@@ -180,20 +180,6 @@ pub(crate) fn loose_corners(x1: i32, y1: i32, x2: i32, y2: i32) -> ScreenRect {
     ScreenRect { x: x1, y: y1, w: side(x1, x2), h: side(y1, y2) }
 }
 
-/// The rectangle `(x, y, w, h)` that encloses every one of `regions`, for reading several with
-/// one capture — or `None` when there are none, or when that rectangle does not fit the 32-bit
-/// coordinate range (two regions two billion pixels apart), which the callers answer by reading
-/// each region on its own. Worked out in 64 bits, so it cannot overflow.
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-pub(crate) fn bounding_box(regions: &[(i32, i32, i32, i32)]) -> Option<(i32, i32, i32, i32)> {
-    let x0 = regions.iter().map(|r| r.0 as i64).min()?;
-    let y0 = regions.iter().map(|r| r.1 as i64).min()?;
-    let x1 = regions.iter().map(|r| r.0 as i64 + r.2 as i64).max()?;
-    let y1 = regions.iter().map(|r| r.1 as i64 + r.3 as i64).max()?;
-    let fit = |v: i64| i32::try_from(v).ok();
-    Some((fit(x0)?, fit(y0)?, fit(x1 - x0)?, fit(y1 - y0)?))
-}
-
 /// A region as a module gives one, once `region_lua::read` has checked it: corners in screen
 /// coordinates, or fractions of a window's client area, resolved when the read is made.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -369,18 +355,5 @@ mod tests {
         assert_eq!(loose_corners(-2_000_000_000, 0, 2_000_000_000, 10).w, 0);
         assert_eq!(loose_corners(i32::MIN, i32::MIN, i32::MAX, i32::MAX), ScreenRect { x: i32::MIN, y: i32::MIN, w: 0, h: 0 });
         assert_eq!(loose_corners(0, 0, i32::MAX, 1).w, i32::MAX);
-    }
-
-    /// The box several OCR regions are read with at once: what the 32-bit arithmetic it
-    /// replaces gave whenever that did not overflow, and no box — one capture each — where it
-    /// did (a debug build panicked there, on the event loop).
-    #[test]
-    fn a_bounding_box_that_does_not_fit_is_none() {
-        assert_eq!(bounding_box(&[(10, 20, 30, 40), (100, 5, 10, 10)]), Some((10, 5, 100, 55)));
-        assert_eq!(bounding_box(&[(-50, -60, 10, 10), (0, 0, 5, 5)]), Some((-50, -60, 55, 65)));
-        assert_eq!(bounding_box(&[]), None);
-        assert_eq!(bounding_box(&[(-2_000_000_000, 0, 10, 10), (2_000_000_000, 0, 10, 10)]), None);
-        assert_eq!(bounding_box(&[(0, i32::MIN, 1, 1), (0, i32::MAX - 1, 1, 1)]), None);
-        assert_eq!(bounding_box(&[(i32::MAX - 10, 0, 10, 1), (i32::MAX - 5, 0, 5, 1)]), Some((i32::MAX - 10, 0, 10, 1)));
     }
 }

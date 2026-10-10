@@ -209,7 +209,7 @@ fn now_ms() -> i64 {
 /// A fresh VM for module `idx` — a new generation of it, enabled — with the host's
 /// `host.ocr.recognize`, timer and window bindings over `h`, the window prelude, the tests' wait
 /// point as the global `wait`, and `heard`, a list the callbacks write to. `host.log.info` writes
-/// to the global `logs`. Where `recognize` cannot wait, it raises the message it is to raise there.
+/// to the global `logs`. Where `recognize` cannot wait, it raises the message for the place.
 fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     vm_in(h, idx, Lua::new())
 }
@@ -233,13 +233,7 @@ fn vm_in(h: &Rc<Host>, idx: usize, lua: Lua) -> Lua {
     let submit = lua
         .create_function(move |lua, (what, opts, cb): (Value, Value, Value)| reads::read(&*hh, lua, idx, what, opts, cb))
         .unwrap();
-    let legacy = lua
-        .create_function(|lua, (_what, _opts, why): (Value, Value, String)| {
-            let message = lua.create_string(task::wait_message(task::Case::of(&why)))?;
-            Ok((false, Value::String(message)))
-        })
-        .unwrap();
-    let waits = task::waits(&lua, idx, h.clone(), legacy, submit).unwrap();
+    let waits = task::waits(&lua, idx, h.clone(), submit).unwrap();
     ocr.set("recognize", waits.get::<Function>("recognize").unwrap()).unwrap();
     let hh = h.clone();
     ocr.set("pending", lua.create_function(move |lua, key: Value| reads::pending(&*hh, lua, idx, key)).unwrap()).unwrap();

@@ -240,7 +240,9 @@ moment it is known, so a pass that kills the process keeps everything before it:
    time and the runtime, and `paddle | the neural recogniser is not measured in this run: …` the
    reason it is not.
 4. **The pipeline**: every picture read as `host.ocr.recognize` reads a region once its capture
-   is in hand — the content crop, the blank guard, the enlargement, the retry ladder — under each
+   is in hand — the content crop, the blank guard, the enlargement, the retry ladder, as the
+   recognise thread climbs it with nothing waiting behind the read, and without the fast pass the
+   application makes there only for the second recogniser's counts — under each
    of twelve ways of reading a small region, the *strategies*: `prod` (the application's own on
    this Mac: with the neural recogniser loaded, Windows' rule over the accurate ladder, on an Intel
    Mac with the fast level checked by it first — a line `pipeline | prod reads as the application
@@ -321,8 +323,8 @@ variant read each picture right is reported beside its speed, never folded into 
 
 The timings are the whole machine's at that moment, and those of a command-line process rather
 than the application: every thread that times a pass asks for user-initiated quality of service,
-as the application's recognise thread does (the application's event loop reads at
-user-interactive), and the run says which class each section's thread actually had; nothing
+as the application's recognise thread does, and the run says which class each section's thread
+actually had; nothing
 captures the screen. Compare a variant with `prod` from the same run; milliseconds from two
 machines say as much about the machines as about the settings.
 
