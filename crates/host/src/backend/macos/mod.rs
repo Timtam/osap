@@ -47,6 +47,9 @@ mod budget;
 mod capture;
 mod enrol;
 mod ffi;
+/// The front handed to another application's window, asked now and focused when the workspace
+/// announces the activation — see the file.
+mod front;
 mod front_memory;
 /// The handle table's bookkeeping, pure; `handles` is its instance. See the file.
 mod handle_table;
@@ -62,6 +65,9 @@ pub(crate) mod ocr;
 /// This application's own windows, answered by AppKit and never through accessibility — see the
 /// file. `pub(super)` for `start`, which `gui.rs` calls once the window system is up.
 pub(super) mod own;
+/// `automation-platform page-check`: how this application takes the front and gives it back,
+/// measured — see the file. `pub(super)` for `backend::page_check`.
+pub(super) mod page_check;
 pub(crate) mod perm;
 mod queue;
 /// Sleep and wake, the lock, the session, the displays, applications quitting — heard, queued

@@ -39,8 +39,8 @@ use objc2_app_kit::{
     NSAccessibilityMainWindowAttribute, NSAccessibilityMinimizedAttribute,
     NSAccessibilityParentAttribute, NSAccessibilityPositionAttribute, NSAccessibilityRoleAttribute,
     NSAccessibilitySizeAttribute, NSAccessibilitySubroleAttribute, NSAccessibilityTitleAttribute,
-    NSAccessibilityValueAttribute, NSAccessibilityWindowsAttribute, NSApplicationActivationOptions,
-    NSApplicationActivationPolicy, NSRunningApplication, NSWindow, NSWorkspace,
+    NSAccessibilityValueAttribute, NSAccessibilityWindowsAttribute, NSApplicationActivationPolicy,
+    NSRunningApplication, NSWindow, NSWorkspace,
 };
 use objc2_application_services::{
     AXCopyMultipleAttributeOptions, AXError, AXUIElement, AXValue, AXValueType,
@@ -2204,21 +2204,18 @@ fn remembered_info(pid: i32, named: Option<isize>) -> Option<WinInfo> {
     }
 }
 
-/// Brings a window to the front and gives it the keyboard.
+/// Brings a window to the front and gives it the keyboard: `host.window.focus`.
 ///
-/// Two calls, and both are needed. Raising a window inside an application that is not
-/// frontmost leaves it exactly where it was, behind whatever is; activating an application
-/// without raising the window brings its *other* windows forward instead. Window managers on
-/// this platform all do both, in this order.
+/// A window of this application's own is AppKit's (`own::focus`). Any other is handed the front
+/// (`front::hand_front_to`): its application, when it is not the active one already, is asked to
+/// become it now, and the window is raised and focused ([`raise_and_focus`]) when the workspace
+/// says that application has — not in the same breath as the request, when it is not in front yet.
 ///
-/// The action name is written out rather than taken from a constant: `kAXRaiseAction` is not
-/// among the bound accessibility constants, and it is a documented string. The same is true
-/// of the two menu notifications this backend already listens for.
-///
-/// Reports what happened rather than assuming. macOS can decline either half — an
-/// application that is not scriptable by us, a window that has gone away between being
-/// listed and being asked — and a caller that believes it moved the focus when it did not
-/// would tell a blind user they are somewhere they are not.
+/// Reports what happened rather than assuming: `true` when the system took the request, or, for an
+/// application in front already, when the window took the raise or the focus. macOS can decline
+/// either — an application that is not scriptable by us, a window that has gone away between being
+/// listed and being asked — and a caller that believes it moved the focus when it did not would
+/// tell a blind user they are somewhere they are not.
 pub fn focus_window(handle: isize) -> bool {
     if crate::backend::own_number(handle).is_some() {
         return super::own::focus(handle);
@@ -2227,20 +2224,25 @@ pub fn focus_window(handle: isize) -> bool {
         crate::logging::line("macos", &format!("cannot focus window {handle}: no such handle"));
         return false;
     };
+    super::front::hand_front_to(entry.pid, handle, None, super::front::HANDING).accepted()
+}
+
+/// Raises window `handle` of another application inside that application, and sets its
+/// accessibility focus flag: whether each was accepted, or `None` when there is no such handle.
+/// Made once the application is the active one (`front.rs`): raising a window inside an
+/// application that is not frontmost leaves it behind whatever is.
+///
+/// The action name is written out rather than taken from a constant: `kAXRaiseAction` is not
+/// among the bound accessibility constants, and it is a documented string. The same is true
+/// of the two menu notifications this backend already listens for.
+pub(super) fn raise_and_focus(handle: isize) -> Option<(bool, bool)> {
+    let entry = handles::get(handle)?;
     let raise = CFString::from_static_str("AXRaise");
     // SAFETY: the element is alive for the duration of the call and the action name is a
     // static string; `perform_action` is a plain cross-process call.
     let raised = unsafe { entry.element.perform_action(&raise) } == AXError::Success;
 
-    let activated = NSRunningApplication::runningApplicationWithProcessIdentifier(entry.pid)
-        .is_some_and(|app| {
-            #[allow(deprecated)]
-            let opts = NSApplicationActivationOptions::ActivateAllWindows
-                | NSApplicationActivationOptions::ActivateIgnoringOtherApps;
-            app.activateWithOptions(opts)
-        });
-
-    // A third thing, and the tester's session is why it is here. Raising the window and
+    // The focus flag as well, and the tester's session is why it is here. Raising the window and
     // activating the application both reported success every single time — the log has no
     // refusal in it — and yet Tab still went to the host's own controls. Bringing a window
     // forward is not the same as moving the KEYBOARD into it: the application's focus stays
@@ -2251,34 +2253,12 @@ pub fn focus_window(handle: isize) -> bool {
     // Asking the window to be the focused one is the polite way to say the same thing. It
     // may not be enough — whether an application moves its internal focus in response is the
     // application's business — which is why the chain depth is measured afterwards and
-    // reported either way. That number is the difference between "we asked and it worked"
-    // and "we asked and this host ignores it", and nobody here can produce it.
+    // reported either way (`front.rs`). That number is the difference between "we asked and it
+    // worked" and "we asked and this host ignores it", and nobody here can produce it.
     let focused =
         unsafe { entry.element.set_attribute_value(a_focused(), CFBoolean::new(true).as_ref()) }
             == AXError::Success;
-
-    let depth = window_focus_chain().len();
-    crate::logging::line(
-        "macos",
-        &format!(
-            "focusing window {handle} (pid {}): raise {}, activation {}, focused-attribute \
-             {} — the focus chain is now {depth} deep{}",
-            entry.pid,
-            if raised { "yes" } else { "REFUSED" },
-            if activated { "yes" } else { "REFUSED" },
-            if focused { "yes" } else { "REFUSED" },
-            // Depth only, and said as depth. The chain is read straight after an
-            // activation that is asynchronous, so it can still describe another
-            // application — the caller that needs to know checks the last link's identity
-            // against the window it asked for, and this log line is not that caller.
-            match depth {
-                0 => ", and where the keyboard is could not be read",
-                1 => ", and the focused element is a window",
-                _ => ", so the focus is on something inside whatever is in front",
-            }
-        ),
-    );
-    raised || activated
+    Some((raised, focused))
 }
 
 /// The `CGWindowID` behind a window handle, or 0 if it could not be paired.

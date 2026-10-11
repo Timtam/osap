@@ -159,7 +159,8 @@ fn on_key_change(n: &NSNotification, became: bool) {
 }
 
 /// The application object, once the window system is up and on the main thread; `None` otherwise.
-fn app() -> Option<Retained<NSApplication>> {
+/// Also what `app::activate_self` and `front.rs` ask for it.
+pub(super) fn app() -> Option<Retained<NSApplication>> {
     if !STARTED.load(Ordering::Relaxed) {
         return None;
     }
@@ -187,7 +188,7 @@ fn number_of(w: &NSWindow) -> u32 {
 }
 
 /// Whether a window of ours is a panel that takes the keyboard without activating this application.
-fn nonactivating(w: &NSWindow) -> bool {
+pub(super) fn nonactivating(w: &NSWindow) -> bool {
     w.styleMask().contains(NSWindowStyleMask::NonactivatingPanel)
 }
 

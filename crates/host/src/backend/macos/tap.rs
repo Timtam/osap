@@ -170,6 +170,18 @@ pub fn let_through() -> u32 {
     LET_THROUGH.load(Ordering::Relaxed)
 }
 
+/// How many keys this tap has seen pressed, wrapping: every `KeyDown` that is not the keyboard's
+/// auto-repeat, whatever became of it, and none that this process posted — to pass a key on, or
+/// through `host.input`. A focus waiting for another application's activation (`front.rs`) is given
+/// up when the count has moved by the time that activation comes: the user pressed a key after it
+/// was asked for, and that key went somewhere else. One relaxed add per key pressed.
+static PRESSED: AtomicU32 = AtomicU32::new(0);
+
+/// The count of keys pressed so far ([`PRESSED`]); it never moves while the tap is not installed.
+pub(super) fn pressed() -> u32 {
+    PRESSED.load(Ordering::Relaxed)
+}
+
 /// Which entries of `MODIFIERS` are physically down, one bit each.
 ///
 /// Needed because a `FlagsChanged` event does not say whether the key went down or up: it
@@ -865,6 +877,13 @@ unsafe extern "C-unwind" fn tap_callback(
     // since a capture took it, just below, and handed to the host with a key that is taken. One
     // field read, no call out.
     let repeat = CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventAutorepeat) != 0;
+    // A key pressed, counted for a hand-over of the front still waiting (`front.rs`) — not one
+    // this process posted through `host.input`, which the posting process's id in the event says
+    // (the keys it posts to pass a key on have returned above). One field read and one add.
+    let source = CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUnixProcessID);
+    if !repeat && source != i64::from(std::process::id()) {
+        PRESSED.fetch_add(1, Ordering::Relaxed);
+    }
     // A key held down since a capture took it, repeating while one of our windows has the keyboard
     // now — the capture's own callback showed a page, say: swallowed as its key-down was and its
     // key-up will be, never let through to our window as a key that does not come up, and not

@@ -1202,6 +1202,104 @@ jobs:
           if-no-files-found: warn
           overwrite: true
 
+  # How the application takes the front and gives it back, measured by the download itself on every
+  # Mac runner there is: `automation-platform page-check` (crates/host/src/backend/macos/page_check.rs,
+  # docs/building-on-macos.md) shows a plain panel the way a page will be shown, hands the front back
+  # to TextEdit both ways — (a), the way the application does it, and macOS 14's cooperative (b) —
+  # and over once more the way `host.window.focus` does, shows a panel that does not activate the
+  # application, and switches the activation policy while a panel is shown, each with what AppKit
+  # and the workspace answered and after how long. It runs the application's own code for it: what
+  # takes the front for the module manager, and what `host.window.focus` hands it over with.
+  #
+  # Why: whether `activateIgnoringOtherApps:` still takes the front on 14 and later is disputed,
+  # and which way of handing it back works decides how the application does it (TODO.md, MW5).
+  # Nobody here has a Mac; these runners are the only ones that answer between the tester's
+  # sessions. They have a window server and no VoiceOver, and creating windows needs no permission.
+  #
+  # Data, not a gate: the answers depend on the runner's desktop, so none of them fails the leg. A
+  # leg goes red only when the check did not reach its end — the executable died in it, or perl's
+  # two minutes ran out. Each leg's whole output is kept as an artifact, and its lines go to the
+  # run's summary page. For every executable, built or reused, as the newer-macos job runs: about 42
+  # seconds a leg at most, and the runners' desktops change under a reused one too.
+  page-check:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15, macos-15-intel, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      # As in the ocr-bench job: the zip kept as the file it is, and unpacked by one ditto.
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-prefix }}-macos.zip
+          path: artifact
+          skip-decompress: true
+
+      - name: Unpack it the way a tester does
+        run: |
+          zip=$(find artifact -type f | head -n1)
+          [ -n "$zip" ] || { echo "::error::the download is empty"; exit 1; }
+          mkdir -p dist
+          ditto -x -k "$zip" dist
+          if [ ! -x dist/AutomationPlatform/AutomationPlatform.app/Contents/MacOS/automation-platform ]; then
+            echo "::error::one unpacking of the download does not give the application, ready to run"
+            find dist -maxdepth 3
+            exit 1
+          fi
+
+      - name: Taking the front and giving it back, measured
+        env:
+          LEG: ${{ matrix.os }}
+        run: |
+          cd dist/AutomationPlatform
+          runner="macOS $(sw_vers -productVersion) on $(uname -m), runner image ${ImageOS:-?} ${ImageVersion:-?}"
+          echo "$runner"
+          out="page-check-$LEG.txt"
+          ended() { if [ "$1" -gt 128 ]; then echo "died of signal $(( $1 - 128 ))"; else echo "ended with status $1"; fi; }
+          # The application the front is handed back to, in front before the check starts: asked
+          # of the workspace through lsappinfo, for at most half a minute. A runner that never puts
+          # it in front is said, and the check's first line names what is in front instead.
+          open -a TextEdit
+          front=""
+          for _ in $(seq 1 30); do
+            front=$(lsappinfo info -only name "$(lsappinfo front)" 2>/dev/null || true)
+            case "$front" in *TextEdit*) break ;; esac
+            sleep 1
+          done
+          case "$front" in
+            *TextEdit*) echo "TextEdit is in front" ;;
+            *) echo "::warning::TextEdit did not come to the front on $LEG within 30 s (in front: ${front:-nothing}); the hand-backs go to whatever is" ;;
+          esac
+          status=0
+          # Bounded by perl's alarm, which outlives the exec: macOS has no `timeout`.
+          perl -e 'alarm shift; exec @ARGV' 120 \
+            ./AutomationPlatform.app/Contents/MacOS/automation-platform page-check > "$out" 2>&1 || status=$?
+          echo "CI: $runner" >> "$out"
+          cat "$out"
+          {
+            echo "### page-check on $LEG"
+            echo
+            echo '```'
+            grep '^PAGE CHECK:' "$out" || echo "(no line)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if ! grep -q '^PAGE CHECK: done' "$out"; then
+            echo "::error::page-check did not reach its end on $LEG ($(ended "$status"))"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          # As the ocr-bench job keeps its output: the file as it is, named after it.
+          path: dist/AutomationPlatform/page-check-${{ matrix.os }}.txt
+          archive: false
+          name: page-check-${{ matrix.os }}.txt
+          if-no-files-found: warn
+          overwrite: true
+
   # The artifact above, run once on the newest macOS GitHub offers. Nothing is built here: this
   # is the very file a tester downloads.
   #

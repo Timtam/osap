@@ -78,7 +78,9 @@ features = ["NSString", "NSArray", "NSValue", "NSGeometry", "NSDictionary", "NSE
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
 version = "0.3"
-features = ["NSWorkspace", "NSRunningApplication", "NSScreen", "NSApplication", "NSResponder", "NSGraphics", "NSAccessibilityProtocols", "NSAccessibilityConstants", "NSEvent", "NSWindow", "objc2-core-foundation"]
+features = ["NSWorkspace", "NSRunningApplication", "NSScreen", "NSApplication", "NSResponder", "NSGraphics", "NSAccessibilityProtocols", "NSAccessibilityConstants", "NSEvent", "NSWindow", "objc2-core-foundation",
+    # The panel `page-check` shows as a page's will be (backend/macos/page_check.rs).
+    "NSPanel"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
 version = "0.3"

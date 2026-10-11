@@ -19,8 +19,9 @@ static LAUNCH_FRONT: AtomicI32 = AtomicI32::new(0);
 /// The activation options that mean "come forward now, properly".
 ///
 /// `ActivateIgnoringOtherApps` is deprecated on macOS 14 and later, where it is simply
-/// ignored, and is what does the work on 12. Both together behave on each.
-fn activation_options() -> NSApplicationActivationOptions {
+/// ignored, and is what does the work on 12. Both together behave on each. Also the options the
+/// front is handed to another application with (`front.rs`).
+pub(super) fn activation_options() -> NSApplicationActivationOptions {
     #[allow(deprecated)]
     {
         NSApplicationActivationOptions::ActivateAllWindows
@@ -114,13 +115,32 @@ pub(crate) fn restore_frontmost_after_gui_start() {
 /// whatever is in front, which for somebody who cannot see the screen is the same as not
 /// appearing at all.
 ///
-/// **Not `NSApplication::activate()`**, which is macOS 14 and later. On the machine this is
-/// written for — 12.7.6 — that selector does not exist, and an unrecognised selector is not
-/// an error, it is a crash. `cargo check` cannot see it either: objc2 binds the whole
+/// **`activateIgnoringOtherApps:`, the call the VPS Avenger control tool makes** before it shows
+/// its panel — a tool VoiceOver users run in production with Logic, which is the evidence this
+/// rests on. It exists on every macOS this application starts on. objc2 marks it deprecated, after
+/// Apple's header, which names `activate` as its successor; it has not gone, and the reports
+/// disagree on whether it still takes the front on 14 and later, which is what `page-check`
+/// measures on every Mac runner CI has (`PAGE CHECK: activating show`).
+///
+/// **Not `NSApplication::activate()`**, which is macOS 14 and later. On the machine this was
+/// first written for — 12.7.6 — that selector does not exist, and an unrecognised selector is
+/// not an error, it is a crash. `cargo check` cannot see it either: objc2 binds the whole
 /// framework with no availability gating, so the compiler agrees with a call that will kill
-/// the process. `NSRunningApplication` has answered this since 10.6.
+/// the process. Nor `NSRunningApplication`'s `activateWithOptions` on this application, which
+/// this was until 2026-10-11: its `ActivateIgnoringOtherApps` option has no effect from 14 on, so
+/// there it was a polite request that another application in front could decline.
+///
+/// A hand-over of the front still waiting for another application's activation is given up
+/// first (`front.rs`): this application takes the front itself. Nothing is asked before the window
+/// system has started (`own::app`).
 pub(crate) fn activate_self() {
-    NSRunningApplication::currentApplication().activateWithOptions(activation_options());
+    let Some(app) = super::own::app() else {
+        crate::logging::line("macos", "this application did not ask for the front: the window system has not started");
+        return;
+    };
+    super::front::cancel("this application takes the front itself");
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
 }
 
 /// Regular means a Dock icon, a menu bar, and an entry in the application switcher.

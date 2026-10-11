@@ -7043,8 +7043,9 @@ maintainer's German test instructions are a text of their own, not in the reposi
       - **M3:** the panel hidden: are the keyboard and VoiceOver back in the plug-in?
       - **M4:** a click into the plug-in while the panel has the keyboard: does it arrive, and does
         VoiceOver come back cleanly when the panel takes the keyboard again?
-      - **M5:** `activate_self` against `NSApplication.activateIgnoringOtherApps:` on 14.5 while
-        REAPER is active — the module manager's window depends on the answer too.
+      - **M5:** `activate_self` — `NSApplication.activateIgnoringOtherApps:` since 2026-10-11, the
+        VPS Avenger control tool's call — on 14.5 while REAPER is active: does the module manager's
+        window come to the front with the keyboard? `page-check` measures the call on CI (MW5).
       - **M6:** only if M1 fails, the activating way: do REAPER's or Logic's plug-in windows hide?
       - **M7:** does Tab reach every button with the system's "Keyboard navigation" off (the Mac
         side is to set `tabFocusesLinks`)?
@@ -7077,10 +7078,54 @@ maintainer's German test instructions are a text of their own, not in the reposi
       gap is a long "not known". `host.window.focus` on a window of ours while another application is
       in front (`focusing our own window …`): on macOS 14 and later the request to become the active
       application may be refused, so the window can come in front without the keyboard — a `[keys]
-      one of our windows has the keyboard` line straight after says it took; the hand-over of the
-      front, built next, rebuilds this on the measured activation. With tracing on, a captured key
+      one of our windows has the keyboard` line straight after says it took; since 2026-10-11 it
+      asks as the VPS Avenger control tool does (MW5). With tracing on, a captured key
       held down while its callback brings a window of ours forward: its repeats swallowed (`tap:
       keycode … repeats, held since a capture took it; swallowed`), none reaching that window.
+- [ ] **MW5: the front taken and handed over on a Mac** (built 2026-10-11, `backend/macos/front.rs`;
+      `page-check` measures the mechanics on CI). This application takes the front with
+      `activateIgnoringOtherApps:`, the VPS Avenger control tool's call, which objc2 marks deprecated
+      and which the reports disagree on from macOS 14. `host.window.focus` of another application's
+      window asks for that application's activation now, with this application left as it is — a
+      deactivation hands the front to the application next in line first, whose activation would
+      give the focus up, so (a), the tool's order, deactivates only for a window of ours leaving —
+      and raises and focuses the window when the workspace announces the activation, before the
+      activation's window is read; the log's read of the focus chain comes last on that path. An
+      application in front already, with this one not the active one, has its window focused at
+      once. Only events end a focus waiting: another application's activation (`the front went to …
+      instead`), a key pressed after the call (`… but a key was pressed since`, read at the
+      activation, so only with the tap running), a new hand-over, `activate_self`, or this
+      application becoming the active one again after it had stopped being it (`… is given up`); a
+      window of ours leaving while one waits leaves it to its activation. A (b) the system refuses is
+      asked again (a) (`… REFUSED, so it is asked again`). CI's `page-check` job answers on four
+      runners, as data (`page-check-<runner>.txt`): whether `activating show` makes this application
+      active and the panel key, and how fast; whether `hand back (a)`, `hand back (b)` and `hand
+      over with nothing of ours leaving` (`host.window.focus`'s request, not deactivated) make
+      TextEdit active, every activation announced meanwhile in order, and whether the focus was made
+      or given up; whether (b)'s `activateFromApplication` is taken — its line says so when the show
+      before it left nothing to measure; what a panel that does not activate the application gets;
+      and whether a panel stays shown across the policy switch. The way is chosen from that and
+      noted here: (a) stays unless it fails on a runner where (b) works — then `front::HANDING`
+      becomes (b), which falls back to (a) below 14 by itself. CI's target is always the
+      application next in line, so it cannot show (a) for a page leaving to one that is not — the
+      user in the Finder, a page or the manager taking the front, then the front handed to REAPER:
+      the Finder's activation would come first and give the focus up (`the front went to Finder …
+      instead`); a Mac with a third application open shows it, and if it happens, (b), which names
+      its target, is the answer. Nor whether a request `host.window.focus` makes from the active
+      application without deactivating it is taken on 14 and later with REAPER, rather than TextEdit.
+      Only a Mac with REAPER and VoiceOver can show the rest: the module manager shown by its hotkey
+      while REAPER is active, on 14 and later (`[keys] one of our windows has the keyboard` straight
+      after); daw-hosts' focus key with the manager open and with REAPER already in front (`the
+      front is handed to REAPER …`, then `REAPER (pid …) is the active application … ms after it was
+      asked for … focusing window …` and `the focus chain after focusing window …`, or `the front
+      went to … instead`); where VoiceOver lands after it; and whether the overlay's foreground event
+      then names the plug-in's window or REAPER's main window first — with Logic, the plug-in window
+      may come back later. daw-hosts' key with the manager open can only answer `could not tell
+      whether the keyboard is in …`: it reads `focusChain()` straight after `host.window.focus`,
+      which on that path is before the activation the focus waits for, and while the manager has
+      the keyboard the chain reads empty. Whether daw-hosts waits for the foreground event there, as
+      window.md's macOS block advises, is daw-hosts' to decide; noted, not built (the core
+      application first).
 - [ ] **Stage 2 — the foundation**, which a native `host.gui` window needs as well: our own windows
       in `host.window` (`own` on the window tables and on `foreground()` since 4acb564, which the
       overlay runtime lets go on; window triggers not matching our own windows unless they ask; on a

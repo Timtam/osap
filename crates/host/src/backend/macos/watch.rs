@@ -41,6 +41,11 @@ use objc2_foundation::{NSNotification, NSOperationQueue, NSString};
 /// `start()` has run. The three hooks live for the process lifetime, so this is one-way.
 static STARTED: AtomicBool = AtomicBool::new(false);
 
+/// The workspace's activation notice is subscribed to: by `start()`, or before it by `front.rs`,
+/// which waits for an application it asked to become the active one ([`hook_activations`]).
+/// One-way, like the subscription.
+static HOOKED: AtomicBool = AtomicBool::new(false);
+
 /// The pid the workspace last told us is frontmost, or 0.
 ///
 /// An atomic rather than a lookup because it is the filter on the noisy notifications and
@@ -162,7 +167,7 @@ pub fn start() -> Result<(), String> {
         return Err("watch_foreground called off the main thread; no events would arrive".into());
     }
 
-    install_workspace_hook();
+    hook_activations();
 
     let front = NSWorkspace::sharedWorkspace().frontmostApplication();
     match front {
@@ -229,7 +234,22 @@ pub fn native_menu_open() -> bool {
     MENU_DEPTH.load(Ordering::Relaxed) > 0
 }
 
-/// Subscribes to the frontmost-application change.
+/// Subscribes to the frontmost-application change, once for the life of the process; main thread
+/// only. Called by `start()`, and by `front.rs` before it asks an application to become the active
+/// one — also when no module watches windows, so that the focus it waits for is made: until
+/// `start()` the notice goes to `front.rs` alone ([`on_app_activated`]).
+pub(super) fn hook_activations() {
+    if objc2::MainThreadMarker::new().is_none() {
+        crate::logging::line("macos", "the workspace's activations not subscribed to: asked off the main thread");
+        return;
+    }
+    if HOOKED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    install_workspace_hook();
+}
+
+/// Subscribes to the frontmost-application change ([`hook_activations`]).
 ///
 /// Delivered on the main queue on purpose. The queues this feeds are thread-locals of the
 /// pump thread, so a notification handled anywhere else would push into a queue that is
@@ -276,6 +296,13 @@ fn on_app_activated(notification: &NSNotification) {
     // application; there is no typed accessor to do it for us.
     let app: &NSRunningApplication =
         unsafe { &*(&*object as *const objc2::runtime::AnyObject as *const NSRunningApplication) };
+    // Subscribed for `front.rs` alone while no module watches windows: only the focus it waits for,
+    // and the log's read of where the keyboard went after it, with no window read to wait for it.
+    if !STARTED.load(Ordering::SeqCst) {
+        super::front::activated(app.processIdentifier());
+        super::front::report_chain();
+        return;
+    }
     activated(app, true);
 }
 
@@ -351,6 +378,13 @@ fn activated(app: &NSRunningApplication, announce: bool) {
         });
     }
 
+    // The window this application handed the front to, raised and focused now that its
+    // application is the active one (`front.rs`) — before the window in front is read below, so
+    // that the activation the host hears names the window that was asked for, where the
+    // application lets it be raised. Two calls into the application, and only when a focus waits
+    // for it; the read of where the keyboard went after them is for the log, and comes last.
+    super::front::activated(pid);
+
     // The window, not the application, is what the host activates on. Resolving it here
     // rather than in the callback-to-pump handoff costs one accessibility read on a path
     // that runs when the user switches applications — rare, and the alternative is the pump
@@ -410,6 +444,11 @@ fn activated(app: &NSRunningApplication, announce: bool) {
     // Ahead of the window read it simply delayed the answer the user is waiting for, on
     // exactly the path where an application slow to answer is the reported complaint.
     ensure_observer(pid, &name);
+
+    // After even that, because nothing but a log line waits for it: where the keyboard went in a
+    // window `front.rs` focused above, a system-wide read into the same busy application. Nothing
+    // at all on every other activation.
+    super::front::report_chain();
 }
 
 /// Makes sure we are listening to this application, at most once per pid.

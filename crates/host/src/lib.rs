@@ -5722,6 +5722,23 @@ pub fn ocr_bench(args: &[String]) -> i32 {
     }
 }
 
+/// `automation-platform page-check`: how this application takes the front and gives it back on a
+/// Mac, measured with windows of its own (`backend/macos/page_check.rs`) — no module, no speech,
+/// and the log is not opened. Returns the exit code: 0 when it ran to the end, 1 when it could not
+/// run, 2 for a wrong argument or on another platform, where it only says that it runs on macOS.
+pub fn page_check(args: &[String]) -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        backend::page_check(args)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = args;
+        println!("page-check measures how this application takes and gives the front on a Mac; it runs on macOS only.");
+        2
+    }
+}
+
 /// Convenience entry: load each directory as a module and run them together.
 pub fn run(dirs: &[String]) -> Result<()> {
     run_set(module_set::Sources::Folders(dirs.iter().map(PathBuf::from).collect()))
@@ -12537,7 +12554,13 @@ mod exit_release_tests {
     fn main_holds_the_guard_before_anything_else_runs() {
         let main = body(MAIN, "fn main() -> Result<()> {");
         let guard = main.find("let _ort = host::ReleaseAtExit;").expect("main no longer holds the guard");
-        for later in ["attach_parent_console();", "host::ocr_bench(", "host::run_installed()", "host::run(&args)"] {
+        for later in [
+            "attach_parent_console();",
+            "host::ocr_bench(",
+            "host::page_check(",
+            "host::run_installed()",
+            "host::run(&args)",
+        ] {
             assert!(guard < main.find(later).unwrap_or_else(|| panic!("{later}")), "the guard before {later}");
         }
     }

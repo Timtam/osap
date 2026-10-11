@@ -92,6 +92,14 @@ pub(crate) fn ocr_bench(args: &[String]) -> i32 {
     code
 }
 
+/// `automation-platform page-check`, which measures how this application takes the front and gives
+/// it back — see `macos::page_check` — and returns the exit code. For `lib.rs`, and so that
+/// `crates/macos-check` can name it.
+#[cfg(target_os = "macos")]
+pub(crate) fn page_check(args: &[String]) -> i32 {
+    macos::page_check::run(args)
+}
+
 /// `automation-platform ocr-bench --paddle` on Windows: the neural recogniser measured alone on
 /// the bench's pictures, beside what `Windows.Media.Ocr` reads and what Windows answers — see
 /// `paddle_ocr::bench`; and `--paddle-probe`, whether it loads and reads. For
@@ -374,6 +382,196 @@ pub(crate) fn own_window_owns_point(kind: OwnKind) -> Option<bool> {
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) fn cocoa_frame_top_left(x: f64, y: f64, w: f64, h: f64, primary_h: f64) -> (i32, i32, i32, i32) {
     (x.round() as i32, (primary_h - (y + h)).round() as i32, w.round() as i32, h.round() as i32)
+}
+
+/// macOS: the two ways this application hands the front to another application (`macos/front.rs`).
+/// `page-check` measures both on every Mac runner CI has; which one the application uses is
+/// `front::HANDING`.
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Handing {
+    /// (a), the VPS Avenger control tool's: our window ordered out, this application deactivated if
+    /// it is the active one, then the other application asked to become the active one. With no
+    /// window of ours leaving — `host.window.focus` — nothing is deactivated: a deactivation hands
+    /// the front to the application next in line first, which need not be the one asked for.
+    Deactivate,
+    /// (b), macOS 14's cooperative hand-over: this application, still the active one, yields its
+    /// activation to the other, which is then asked to activate from it; our window is ordered out
+    /// last. A request refused is asked again (a).
+    Yield,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl Handing {
+    /// The way, as the log and `page-check` name it.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Handing::Deactivate => "(a), the control tool's way",
+            Handing::Yield => "(b), yielded and then asked from this application",
+        }
+    }
+}
+
+/// macOS: what is known when the front is to be handed to another application, for [`hand_plan`].
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HandState {
+    /// For a window of ours giving up the keyboard (a page leaving): whether it had it — the key
+    /// window, with this application the active one unless the window is a panel that does not
+    /// activate it. `None` for `host.window.focus`, where no window of ours is leaving.
+    pub(crate) leaving_key: Option<bool>,
+    /// The application the front goes to is this one.
+    pub(crate) target_ours: bool,
+    /// The workspace names that application the active one. Its word can lag this application's
+    /// own activation, so it counts only while this application is not the active one: two
+    /// applications are never active at once ([`hand_plan`]).
+    pub(crate) target_front: bool,
+    /// This application is the active one.
+    pub(crate) ours_active: bool,
+    /// The two calls of (b) exist on this macOS (14 and later).
+    pub(crate) cooperative: bool,
+    /// A focus asked for before is still waiting for its application's activation.
+    pub(crate) pending: bool,
+}
+
+/// Why nothing is asked, for [`HandPlan::Keep`].
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeepWhy {
+    /// Our window leaving did not have the keyboard: a module moved on first, or the user went to
+    /// another application, and neither is pulled back.
+    NotKey,
+    /// Our window leaving still had the keyboard, but a focus asked for before waits for its
+    /// application's activation: a module that brought the plug-in forward first, before the
+    /// system told our window it no longer has the keyboard. That focus stands; the window it came
+    /// from does not override it.
+    Waiting,
+    /// The window to go to is this application's own.
+    Ours,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl KeepWhy {
+    /// The reason, as the log says it.
+    pub(crate) fn words(self) -> &'static str {
+        match self {
+            KeepWhy::NotKey => "our window did not have the keyboard, so the front is not ours to hand over",
+            KeepWhy::Waiting => {
+                "a focus asked for before waits for its application's activation, and the window it came \
+                 from does not override it"
+            }
+            KeepWhy::Ours => "the window to go to is this application's own",
+        }
+    }
+}
+
+/// What handing the front to another application comes to ([`hand_plan`]).
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HandPlan {
+    /// Nothing is asked; our window leaving is ordered out all the same.
+    Keep(KeepWhy),
+    /// The application is the active one already, so no activation will be announced: its window
+    /// is raised and focused now.
+    AtOnce,
+    /// Its activation is asked for, this way, and its window raised and focused when the workspace
+    /// says it has become the active application.
+    Ask(Handing),
+}
+
+/// macOS: how the front is handed over (`macos/front.rs`), `how` being the way the application uses.
+///
+/// A window of ours hands the front over only while it has the keyboard — Windows' rule for a page
+/// (`webview_win.rs`): a module that brought the plug-in forward first has already moved on, and a
+/// user who went to another application is not pulled back. On a Mac a window learns that it lost
+/// the keyboard only after the activation that took it, so a focus still waiting counts as moved
+/// on as well, and is left to its activation. `host.window.focus` has no window of ours leaving; a
+/// focus still waiting is then an older request, which the newer one replaces. An application in
+/// front already gets its window focused at once — only while this application is not the active
+/// one, since the workspace's word lags this application's own activation. (b) is asked for only
+/// where it exists and this application is the active one, which is the only application that can
+/// yield its activation; (a) otherwise.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn hand_plan(s: HandState, how: Handing) -> HandPlan {
+    if s.leaving_key == Some(false) {
+        return HandPlan::Keep(KeepWhy::NotKey);
+    }
+    if s.leaving_key.is_some() && s.pending {
+        return HandPlan::Keep(KeepWhy::Waiting);
+    }
+    if s.target_ours {
+        return HandPlan::Keep(KeepWhy::Ours);
+    }
+    if s.target_front && !s.ours_active {
+        return HandPlan::AtOnce;
+    }
+    match how {
+        Handing::Yield if s.cooperative && s.ours_active => HandPlan::Ask(Handing::Yield),
+        _ => HandPlan::Ask(Handing::Deactivate),
+    }
+}
+
+/// macOS: what the workspace naming an application the active one does to a focus that waits for
+/// another application's activation (`macos/front.rs`).
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OnActivation {
+    /// The application waited for: its window is raised and focused now.
+    Focus,
+    /// Another application came to the front instead: the focus is given up.
+    Drop,
+    /// The application waited for, but a key was pressed since the focus was asked for: the user
+    /// has moved on, and the keyboard went somewhere else meanwhile, so the focus is given up and
+    /// the application's own choice of window stands.
+    Typed,
+    /// This application's own. The workspace's notice can come after the hand-over it preceded —
+    /// a page shown and hidden within a few milliseconds — so it decides nothing. This application
+    /// taking the front anew gives the focus up itself (`app::activate_self`), and so does AppKit
+    /// telling it in-process that it became the active one again ([`on_own_edge`]).
+    Wait,
+}
+
+/// macOS: [`OnActivation`] for the workspace naming process `activated` the active application,
+/// while the focus waits for process `waiting`; `ours` is this process, and `typed_since` says
+/// whether the event tap saw a key pressed, not repeated, after the focus was asked for.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn on_activation(waiting: i32, activated: i32, ours: i32, typed_since: bool) -> OnActivation {
+    if activated == ours {
+        OnActivation::Wait
+    } else if activated != waiting {
+        OnActivation::Drop
+    } else if typed_since {
+        OnActivation::Typed
+    } else {
+        OnActivation::Focus
+    }
+}
+
+/// macOS: AppKit's in-process word on this application, for a focus waiting for another
+/// application's activation (`macos/front.rs`).
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnEdge {
+    /// This application stopped being the active one.
+    Resigned,
+    /// This application became the active one.
+    Became,
+}
+
+/// macOS: what AppKit's `edge` does to a focus waiting for another application's activation, with
+/// `resigned` saying whether this application has stopped being the active one since the focus was
+/// asked for: whether that is so now, and whether the focus is given up. Becoming the active one
+/// again after that is the user coming back to this application, and gives it up. A becoming with
+/// no stop before it gives nothing up: it was under way when the focus was asked for — this
+/// application's own activation, asked just before — and the request made after it is the newer
+/// one. AppKit posts both in-process, in the order they happened, which the workspace's notices,
+/// from another process, do not promise.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn on_own_edge(resigned: bool, edge: OwnEdge) -> (bool, bool) {
+    match edge {
+        OwnEdge::Resigned => (true, false),
+        OwnEdge::Became => (resigned, resigned),
+    }
 }
 
 /// A snapshot of a window's matchable properties (normalized across platforms).
@@ -3880,6 +4078,246 @@ mod own_window_tests {
         // `watch` resolves an activation through.
         assert!(body("fn front_is_ours(front: Option<i32>) -> bool")
             .contains("front.is_some_and(is_ours) || super::own::key_id_in_front_of(front).is_some()"));
+    }
+}
+
+/// The front on a Mac: this application taking it, and handing it to another application's window
+/// (`macos/front.rs`) — the decision, which is pure, and where the code that only a Mac runs asks
+/// and acts, held where it is written.
+#[cfg(test)]
+mod front_tests {
+    use super::*;
+
+    /// `host.window.focus` of another application's window, with this application the active one,
+    /// both ways available and no focus waiting.
+    fn focus_call() -> HandState {
+        HandState {
+            leaving_key: None,
+            target_ours: false,
+            target_front: false,
+            ours_active: true,
+            cooperative: true,
+            pending: false,
+        }
+    }
+
+    /// A window of ours hands the front over only while it has the keyboard: not even an
+    /// application in front already is focused then.
+    #[test]
+    fn a_window_of_ours_hands_the_front_over_only_while_it_has_the_keyboard() {
+        let not_key = HandState { leaving_key: Some(false), ..focus_call() };
+        for how in [Handing::Deactivate, Handing::Yield] {
+            assert_eq!(hand_plan(not_key, how), HandPlan::Keep(KeepWhy::NotKey));
+            assert_eq!(hand_plan(HandState { target_front: true, ..not_key }, how), HandPlan::Keep(KeepWhy::NotKey));
+            assert_eq!(hand_plan(HandState { ours_active: false, ..not_key }, how), HandPlan::Keep(KeepWhy::NotKey));
+            assert_eq!(hand_plan(HandState { pending: true, ..not_key }, how), HandPlan::Keep(KeepWhy::NotKey));
+        }
+        let key = HandState { leaving_key: Some(true), ..focus_call() };
+        assert_eq!(hand_plan(key, Handing::Deactivate), HandPlan::Ask(Handing::Deactivate));
+        assert_eq!(hand_plan(key, Handing::Yield), HandPlan::Ask(Handing::Yield));
+        // `host.window.focus` has no window of ours leaving, so nothing holds it back.
+        assert_eq!(hand_plan(HandState { ours_active: false, ..focus_call() }, Handing::Deactivate), HandPlan::Ask(Handing::Deactivate));
+    }
+
+    /// A module that focused the plug-in before hiding its page: the page may still read as the key
+    /// window, since a Mac tells a window it lost the keyboard after the activation that took it,
+    /// and the focus asked for first stands. A newer `host.window.focus` replaces an older one.
+    #[test]
+    fn a_focus_still_waiting_is_not_overridden_by_a_window_of_ours_leaving() {
+        for how in [Handing::Deactivate, Handing::Yield] {
+            let leaving = HandState { leaving_key: Some(true), pending: true, ..focus_call() };
+            assert_eq!(hand_plan(leaving, how), HandPlan::Keep(KeepWhy::Waiting));
+            let at_front = HandState { target_front: true, ours_active: false, ..leaving };
+            assert_eq!(hand_plan(at_front, how), HandPlan::Keep(KeepWhy::Waiting), "nor focused at once");
+            assert_eq!(hand_plan(HandState { pending: true, ..focus_call() }, how), HandPlan::Ask(how), "the newer focus asks");
+        }
+    }
+
+    /// An application in front already announces no activation, so its window is focused at once
+    /// and nothing is asked: with a panel of ours that does not activate this application leaving,
+    /// or with this application not the active one.
+    #[test]
+    fn an_application_in_front_already_is_focused_at_once() {
+        for how in [Handing::Deactivate, Handing::Yield] {
+            let inactive = HandState { target_front: true, ours_active: false, ..focus_call() };
+            assert_eq!(hand_plan(inactive, how), HandPlan::AtOnce);
+            let leaving = HandState { leaving_key: Some(true), ..inactive };
+            assert_eq!(hand_plan(leaving, how), HandPlan::AtOnce, "a panel that does not activate this application");
+        }
+    }
+
+    /// The workspace's word lags this application's own activation: while this application is the
+    /// active one, the application it still names is asked, not focused at once in the background.
+    #[test]
+    fn an_application_the_workspace_still_names_while_this_one_is_active_is_asked() {
+        let stale = HandState { target_front: true, ..focus_call() };
+        assert_eq!(hand_plan(stale, Handing::Deactivate), HandPlan::Ask(Handing::Deactivate));
+        assert_eq!(hand_plan(stale, Handing::Yield), HandPlan::Ask(Handing::Yield));
+        let leaving = HandState { leaving_key: Some(true), ..stale };
+        assert_eq!(hand_plan(leaving, Handing::Deactivate), HandPlan::Ask(Handing::Deactivate));
+    }
+
+    /// (b) only where macOS has it and this application is the active one, the only one that can
+    /// yield; (a) everywhere else.
+    #[test]
+    fn the_cooperative_way_only_where_it_exists_and_this_application_is_active() {
+        assert_eq!(hand_plan(focus_call(), Handing::Yield), HandPlan::Ask(Handing::Yield));
+        assert_eq!(hand_plan(HandState { cooperative: false, ..focus_call() }, Handing::Yield), HandPlan::Ask(Handing::Deactivate), "before macOS 14");
+        assert_eq!(hand_plan(HandState { ours_active: false, ..focus_call() }, Handing::Yield), HandPlan::Ask(Handing::Deactivate), "nothing to yield");
+        assert_eq!(hand_plan(focus_call(), Handing::Deactivate), HandPlan::Ask(Handing::Deactivate), "(a) is never turned into (b)");
+    }
+
+    /// The front is never handed to this application itself.
+    #[test]
+    fn this_application_is_not_handed_its_own_front() {
+        assert_eq!(hand_plan(HandState { target_ours: true, ..focus_call() }, Handing::Deactivate), HandPlan::Keep(KeepWhy::Ours));
+        assert_eq!(hand_plan(HandState { target_ours: true, target_front: true, ..focus_call() }, Handing::Yield), HandPlan::Keep(KeepWhy::Ours));
+    }
+
+    /// The log and `page-check` name each way and each reason apart.
+    #[test]
+    fn each_way_and_reason_has_its_own_words() {
+        assert!(Handing::Deactivate.word().starts_with("(a)"));
+        assert!(Handing::Yield.word().starts_with("(b)"));
+        assert!(KeepWhy::NotKey.words().contains("keyboard"));
+        let words = [KeepWhy::NotKey.words(), KeepWhy::Waiting.words(), KeepWhy::Ours.words()];
+        for (i, a) in words.iter().enumerate() {
+            for b in &words[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    /// The focus waits for its own application's activation; another application's gives it up,
+    /// and this application's own — which can be announced after the hand-over — decides nothing.
+    /// A key pressed since it was asked for gives it up at its application's activation: the user
+    /// moved on, and nothing is raised or focused late.
+    #[test]
+    fn the_focus_waits_for_its_application_s_activation() {
+        assert_eq!(on_activation(510, 510, 77, false), OnActivation::Focus);
+        assert_eq!(on_activation(510, 510, 77, true), OnActivation::Typed);
+        for typed in [false, true] {
+            assert_eq!(on_activation(510, 611, 77, typed), OnActivation::Drop);
+            assert_eq!(on_activation(510, 77, 77, typed), OnActivation::Wait);
+        }
+    }
+
+    /// This application becoming the active one again gives a waiting focus up only after it had
+    /// stopped being the active one since the focus was asked for: the user came back. A becoming
+    /// with no stop before it was under way at the request, which is the newer one.
+    #[test]
+    fn this_application_back_in_front_gives_the_focus_up_only_after_it_had_left() {
+        assert_eq!(on_own_edge(false, OwnEdge::Became), (false, false));
+        let (resigned, gives_up) = on_own_edge(false, OwnEdge::Resigned);
+        assert_eq!((resigned, gives_up), (true, false));
+        assert_eq!(on_own_edge(resigned, OwnEdge::Resigned), (true, false));
+        assert_eq!(on_own_edge(resigned, OwnEdge::Became), (true, true));
+    }
+
+    /// The body of the function `sig` in `src`, to its closing brace at the start of a line.
+    fn body<'a>(src: &'a str, sig: &str) -> &'a str {
+        let at = src.find(sig).unwrap_or_else(|| panic!("{sig}"));
+        let end = src[at..].find("\n}\n").unwrap();
+        &src[at..at + end]
+    }
+
+    /// The position of `what` in `f`, which has to be there.
+    fn at(f: &str, what: &str) -> usize {
+        f.find(what).unwrap_or_else(|| panic!("no `{what}`"))
+    }
+
+    /// The activation is asked for now and the window focused when the workspace announces it —
+    /// before the activation's window is read, so the host hears the window asked for, and with the
+    /// log's read of the focus chain after everything else on that path — and each way's calls come
+    /// in its order. Held where it is written: only a Mac runs it, and `page-check` on CI is its
+    /// other witness.
+    #[test]
+    fn the_front_is_asked_for_now_and_the_window_focused_on_the_event() {
+        const WATCH: &str = include_str!("macos/watch.rs");
+        const AX: &str = include_str!("macos/ax.rs");
+        const FRONT: &str = include_str!("macos/front.rs");
+        const APP: &str = include_str!("macos/app.rs");
+        const TAP: &str = include_str!("macos/tap.rs");
+
+        let activated = body(WATCH, "fn activated(app: &NSRunningApplication, announce: bool) {");
+        let focused = at(activated, "super::front::activated(pid);");
+        let read = at(activated, "super::ax::foreground_window_id()");
+        let observed = at(activated, "ensure_observer(pid, &name);");
+        let chain = at(activated, "super::front::report_chain();");
+        assert!(focused < read && read < observed && observed < chain, "focus, window read, observer, then the log's chain");
+        let notice = body(WATCH, "fn on_app_activated(notification: &NSNotification) {");
+        assert!(at(notice, "if !STARTED.load(Ordering::SeqCst) {") < at(notice, "super::front::activated(app.processIdentifier());"));
+        assert!(at(notice, "super::front::activated(app.processIdentifier());") < at(notice, "super::front::report_chain();"));
+        assert!(at(notice, "super::front::report_chain();") < at(notice, "activated(app, true);"));
+        assert!(body(WATCH, "pub fn start() -> Result<(), String> {").contains("hook_activations();"));
+
+        // `host.window.focus` hands the front over; the raise, the focus and the read of the chain
+        // are no longer made at the call.
+        let focus = body(AX, "pub fn focus_window(handle: isize) -> bool {");
+        assert!(focus.contains("super::front::hand_front_to(entry.pid, handle, None, super::front::HANDING)"));
+        for gone in ["AXRaise", "window_focus_chain()", "activateWithOptions"] {
+            assert!(!focus.contains(gone), "{gone}");
+        }
+
+        // A focus still waiting is given up only when something is asked, and the notices it waits
+        // on are subscribed to before the request.
+        let hand = body(FRONT, "pub(super) fn hand_front_to(");
+        let keep = at(hand, "HandPlan::Keep(why) => {");
+        let at_once = at(hand, "HandPlan::AtOnce => {");
+        let ask = at(hand, "HandPlan::Ask(planned) => {");
+        assert!(!hand[keep..at_once].contains("cancel("), "a plan that asks nothing keeps the focus waiting");
+        assert!(hand[at_once..ask].contains("cancel("));
+        assert!(at(&hand[at_once..ask], "focus_now(pid, window, None)") < at(&hand[at_once..ask], "report_chain();"));
+        let asking = &hand[ask..];
+        let requested = at(asking, "request(app.as_deref(), &target, planned, leaving)");
+        for before in ["cancel(", "super::watch::hook_activations();", "hook_own();", "pressed: super::tap::pressed(),"] {
+            assert!(at(asking, before) < requested, "{before}");
+        }
+        assert!(!body(FRONT, "fn focus_now(").contains("window_focus_chain()"), "the chain is read by report_chain alone");
+
+        let request = body(FRONT, "fn request(");
+        let yielded = at(request, "app.yieldActivationToApplication(target);");
+        let from = at(request, "target.activateFromApplication_options(");
+        let refused = at(request, "if taken {");
+        let out_b = at(request, "w.orderOut(None);");
+        assert!(yielded < from && from < refused && refused < out_b, "(b): yield, ask from this application, then order out if taken");
+        // (b) refused falls through to (a): our window out, this application deactivated only for a
+        // window of ours leaving, then the request.
+        let rest = &request[out_b + 1..];
+        let out_a = at(rest, "w.orderOut(None);");
+        let only_leaving = at(rest, "if leaving.is_some() {");
+        let deactivated = at(rest, "app.deactivate();");
+        let asked = at(rest, "target.activateWithOptions(");
+        assert!(out_a < only_leaving && only_leaving < deactivated && deactivated < asked);
+        assert!(!request[..out_b].contains("return (Handing::Yield, false)"), "a refused (b) is not left as it is");
+        let cooperative = body(FRONT, "fn cooperative(");
+        for asked in ["majorVersion >= 14", "respondsToSelector(sel!(yieldActivationToApplication:))", "respondsToSelector(sel!(activateFromApplication:options:))"] {
+            assert!(cooperative.contains(asked), "{asked}");
+        }
+
+        // The events that end a focus waiting, and nothing timed.
+        let on_event = body(FRONT, "pub(super) fn activated(pid: i32) {");
+        assert!(on_event.contains("on_activation(w.pid, pid, ours, pressed != w.pressed)"));
+        assert!(body(FRONT, "fn own_edge(edge: OwnEdge) {").contains("on_own_edge(w.resigned, edge)"));
+        let hook = body(FRONT, "fn hook_own() {");
+        for name in ["NSApplicationDidResignActiveNotification", "NSApplicationDidBecomeActiveNotification"] {
+            assert!(hook.contains(name), "{name}");
+        }
+        for timed in ["Duration", "sleep", "after("] {
+            assert!(!FRONT.contains(timed), "{timed}");
+        }
+        // The tap counts a key pressed — not a repeat, nor one this process posted — before anything
+        // can return it.
+        let callback = body(TAP, "unsafe extern \"C-unwind\" fn tap_callback(");
+        let counted = at(callback, "PRESSED.fetch_add(1, Ordering::Relaxed);");
+        assert!(at(callback, "let repeat = ") < counted && counted < at(callback, "swallow_held_repeat("));
+        assert!(callback[..counted].contains("EventSourceUnixProcessID"));
+
+        // This application takes the front as the tool does, and gives up a focus still waiting.
+        let take = body(APP, "pub(crate) fn activate_self() {");
+        assert!(take.contains("activateIgnoringOtherApps(true)"));
+        assert!(!take.contains("activateWithOptions"));
+        assert!(at(take, "super::front::cancel(") < at(take, "activateIgnoringOtherApps(true)"));
     }
 }
 

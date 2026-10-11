@@ -375,6 +375,43 @@ captures, for at most ten minutes, and keeps the output as
 `automation-platform-<version>-<commit>-ocr-bench-windows-paddle.txt`; a picture that must be read
 and that the recogniser reads wrong is a warning there.
 
+## Measuring how it takes and gives the front {#page-check}
+
+`page-check` measures how the application takes the front and gives it back on the Mac it runs
+on, with the calls the application itself makes (`crates/host/src/backend/macos/page_check.rs`).
+It needs another application in front when it starts — the one it hands the front back to — and
+for some seconds it shows windows of its own:
+
+```bash
+open -a TextEdit
+AutomationPlatform.app/Contents/MacOS/automation-platform page-check
+```
+
+It loads no module, speaks nothing and leaves the application's log alone; every line it prints
+starts with `PAGE CHECK:`. In turn it shows a plain panel set up as a page's will be, the way a
+page with the keyboard will be shown (`activating show`); hands the front back to the application
+that was in front as a page leaving will, first the way the application does it, (a) — deactivated,
+then asked — and then macOS 14's cooperative way, (b) — yielded, then asked from this application
+(`hand back (a)`, `hand back (b)`); hands it over once more the way `host.window.focus` does, with
+nothing of the application's leaving and nothing deactivated (`hand over with nothing of ours
+leaving`); shows a panel that does not activate the application (`non-activating panel`); and
+switches the activation policy to regular and back while a panel is shown (`policy switch`). Each
+line says what AppKit and the workspace answered and after how many milliseconds, or that a notice
+did not come within five seconds. A hand-over's line also lists every activation the workspace
+announced meanwhile, in order, and says whether the focus the hand-over waited for was made at the
+target's activation or given up because another application's came first. A hand-back is measured
+as a page's only while the panel has the keyboard, as a page hands the front back only then: after
+a show that left the panel without it, the line says what it measured instead, or that it could
+not measure anything. Exit status 0 when it ran to the end, 1 when it could not run, 2 for a wrong
+argument; on Windows it only says that it runs on macOS.
+
+**In CI**, the `page-check` job of `.github/workflows/macos-build.yml` runs it from the downloaded
+zip on all four Mac runners — `macos-14`, `macos-15`, `macos-15-intel` and `macos-26` — after
+starting TextEdit, bounded to two minutes. Its lines go to the run's summary page, and each leg's
+whole output is kept as the artifact `page-check-<runner>.txt`. What it measures depends on the
+runner's desktop, so its answers are data and never fail the leg; a leg fails only when the check
+did not reach its end.
+
 ## Checking macOS code from a Windows machine
 
 Most of this port is developed on Windows. Two things make that possible, and it is worth
