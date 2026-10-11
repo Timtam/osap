@@ -26,6 +26,8 @@ cargo run -p app -- examples/hello
 
 This loads the example module (`module.toml` → `src/main.luau`) and has it speak via the host API (tts-rs). The default module path is `examples/hello`.
 
+It needs **Rust 1.99 or newer** (`rustup update`). The workspace declares it (`rust-version` in `Cargo.toml`), so an older toolchain stops at once with a line naming the version.
+
 > **Windows build note:** wxDragon compiles wxWidgets from source on first build. Set `LIBCLANG_PATH` to your VS/LLVM `bin` (e.g. `…\VC\Tools\Llvm\x64\bin`) and have Ninja on `PATH`. The first build takes several minutes; later builds reuse the artifacts.
 
 > **Ready-made test builds:** every push to `main` that touches code runs the **Build** workflow (Actions tab), which builds Windows and macOS side by side. A run that succeeds carries both downloads, `automation-platform-<version>-<commit>-windows` and `automation-platform-<version>-<commit>-macos.zip` (a universal `.app`, Intel and Apple silicon, in one zip that Finder unpacks with a double-click). Both carry the documentation, which works offline from `docs/index.html` in the unpacked folder. The macOS one also carries ONNX Runtime and the neural recogniser's model inside the `.app`, which makes it larger — an estimated 53 to 79 MB, against about 17 MB without — and a `licences` folder beside the `.app` with the application's licence and those of ONNX Runtime (MIT, with Microsoft's third-party notices) and of the model (Apache-2.0).

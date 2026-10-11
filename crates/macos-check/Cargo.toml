@@ -22,6 +22,7 @@
 name = "macos-check"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 license = "GPL-3.0-or-later"
 publish = false
 

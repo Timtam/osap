@@ -1,3 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+
+[workspace.package]
+# The oldest Rust that builds it: the atomics' `try_update` (crates/host/src/backend/dxgi.rs) is
+# stable from 1.99, which deprecates `fetch_update` for it. An older toolchain stops at once with
+# a line naming the version, instead of an error about an unstable library feature;
+# `rustup update` brings it there.
+rust-version = "1.99"

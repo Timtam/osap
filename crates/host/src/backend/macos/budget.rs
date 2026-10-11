@@ -25,6 +25,9 @@ pub(crate) struct Budget {
 }
 
 impl Budget {
+    // Called by the walks in `ax.rs`, which exist on macOS only; borrowed elsewhere for the tests,
+    // which hand the clock in.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn new(nodes: i32, within: Duration) -> Self {
         Self::starting_at(nodes, within, Instant::now())
     }
@@ -35,6 +38,7 @@ impl Budget {
     }
 
     /// Spends one node. `false` when there is nothing left to spend.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn spend(&mut self) -> bool {
         self.spend_at(Instant::now())
     }

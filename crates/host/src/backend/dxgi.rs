@@ -575,7 +575,7 @@ impl Gate {
     /// Moves the state, except out of DISABLED or CRASHED: a request finishing late must not
     /// undo either.
     fn set_state(&self, s: u8) {
-        let _ = self.state.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+        let _ = self.state.try_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
             (cur != DISABLED && cur != CRASHED).then_some(s)
         });
     }
@@ -784,7 +784,7 @@ impl Gate {
             ),
         );
         if n >= HANGS_TO_DISABLE {
-            let was = self.state.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+            let was = self.state.try_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
                 (cur != CRASHED && cur != DISABLED).then_some(DISABLED)
             });
             if was.is_ok() {
