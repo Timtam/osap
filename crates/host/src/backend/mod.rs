@@ -431,12 +431,26 @@ pub(crate) struct HandState {
     /// own activation, so it counts only while this application is not the active one: two
     /// applications are never active at once ([`hand_plan`]).
     pub(crate) target_front: bool,
-    /// This application is the active one.
+    /// This application is the active one ([`active_for_handing`]).
     pub(crate) ours_active: bool,
     /// The two calls of (b) exist on this macOS (14 and later).
     pub(crate) cooperative: bool,
     /// A focus asked for before is still waiting for its application's activation.
     pub(crate) pending: bool,
+}
+
+/// macOS: whether this application is the active one, for handing the front over
+/// ([`HandState::ours_active`]): AppKit's word (`appkit_active`) — except while the keyboard is in a
+/// panel of ours that took it without activating this application (`lent`: a page described
+/// `activates = false`) and the workspace names another application the frontmost one
+/// (`front_ours` false). AppKit says this application is active then all the same (`page-check`'s
+/// non-activating panel, on every runner CI has), and it is not: the other application is, it
+/// announces no activation when the front goes back to it, and this one has no activation to yield
+/// or to give up. With the workspace naming this application, it is the active one in earnest —
+/// another window of its own made it so — and AppKit's word stands.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn active_for_handing(appkit_active: bool, lent: bool, front_ours: bool) -> bool {
+    appkit_active && (!lent || front_ours)
 }
 
 /// Why nothing is asked, for [`HandPlan::Keep`].
@@ -4151,6 +4165,28 @@ mod front_tests {
         }
     }
 
+    /// While a panel of ours that took the keyboard without activating this application has it,
+    /// AppKit calls this application active (page-check, every CI runner) and the workspace names
+    /// the DAW: the DAW is the active one, so the front goes back to it at once — its activation
+    /// would never be announced — whether the panel leaves or a module focuses the plug-in window
+    /// first; nor is (b) asked of an application with no activation to yield. Once the workspace
+    /// names this application, another window of ours made it active in earnest, and AppKit's word
+    /// stands; without the panel it always does.
+    #[test]
+    fn a_panel_that_does_not_activate_this_application_hands_the_front_back_at_once() {
+        assert!(!active_for_handing(true, true, false), "AppKit's word, with the keyboard only lent");
+        assert!(active_for_handing(true, true, true), "this application named the frontmost one");
+        assert!(active_for_handing(true, false, false), "no such panel: the workspace may lag");
+        assert!(!active_for_handing(false, true, false) && !active_for_handing(false, false, true));
+        for how in [Handing::Deactivate, Handing::Yield] {
+            let lent = HandState { target_front: true, ours_active: active_for_handing(true, true, false), ..focus_call() };
+            assert_eq!(hand_plan(HandState { leaving_key: Some(true), ..lent }, how), HandPlan::AtOnce, "the panel leaving");
+            assert_eq!(hand_plan(lent, how), HandPlan::AtOnce, "host.window.focus of the plug-in window");
+            let elsewhere = HandState { target_front: false, ..lent };
+            assert_eq!(hand_plan(elsewhere, how), HandPlan::Ask(Handing::Deactivate), "nothing to yield");
+        }
+    }
+
     /// The workspace's word lags this application's own activation: while this application is the
     /// active one, the application it still names is asked, not focused at once in the background.
     #[test]
@@ -4274,7 +4310,25 @@ mod front_tests {
         assert!(hand[at_once..ask].contains("cancel("));
         assert!(at(&hand[at_once..ask], "focus_now(pid, window, None)") < at(&hand[at_once..ask], "report_chain();"));
         let asking = &hand[ask..];
-        let requested = at(asking, "request(app.as_deref(), &target, planned, leaving)");
+        let requested = at(asking, "request(app.as_deref(), active, &target, planned, leaving)");
+        // Whether this application is the active one is AppKit's word, unless a panel of ours has
+        // the keyboard only lent (`own::active`, `active_for_handing`), for the plan and for the
+        // request alike.
+        let active = at(hand, "let active = super::own::active(front);");
+        assert!(active < at(hand, "ours_active: active,") && active < keep);
+        assert!(!hand.contains("isActive()"), "never AppKit's word alone");
+        // A panel that had the keyboard only lent leaving, its application in front already: where
+        // AppKit gave the keyboard to another window of ours, this application lets it go — after
+        // the order out, and with no activation asked of anybody.
+        let leaves = at(&hand[at_once..ask], "w.orderOut(None);");
+        assert!(leaves < at(&hand[at_once..ask], "keyboard_kept(app.as_deref(), w, &name);"));
+        let kept = body(FRONT, "fn keyboard_kept(");
+        let read = at(kept, "super::own::key_now(app)");
+        let let_go = at(kept, "app.deactivate();");
+        assert!(read < at(kept, "let Some(kept) = kept else { return };") && at(kept, "let Some(kept) = kept else { return };") < let_go);
+        for call in ["activateWithOptions", "activateIgnoringOtherApps", "activate_self", ".activate("] {
+            assert!(!kept.contains(call), "{call}");
+        }
         for before in ["cancel(", "super::watch::hook_activations();", "hook_own();", "pressed: super::tap::pressed(),"] {
             assert!(at(asking, before) < requested, "{before}");
         }
@@ -4290,7 +4344,7 @@ mod front_tests {
         // window of ours leaving, then the request.
         let rest = &request[out_b + 1..];
         let out_a = at(rest, "w.orderOut(None);");
-        let only_leaving = at(rest, "if leaving.is_some() {");
+        let only_leaving = at(rest, "if leaving.is_some() && active {");
         let deactivated = at(rest, "app.deactivate();");
         let asked = at(rest, "target.activateWithOptions(");
         assert!(out_a < only_leaving && only_leaving < deactivated && deactivated < asked);
@@ -4323,6 +4377,60 @@ mod front_tests {
         assert!(take.contains("activateIgnoringOtherApps(true)"));
         assert!(!take.contains("activateWithOptions"));
         assert!(at(take, "super::front::cancel(") < at(take, "activateIgnoringOtherApps(true)"));
+    }
+
+    /// A tool page described `activates = false` is a panel given the mask that says so when it is
+    /// made, the one time it can be given; it takes the keyboard with no activation asked for —
+    /// giving up what `activate_self` gives up — and is answered at the call, as nothing is on its
+    /// way. So is the page's own window focused through `host.window.focus`. Held where it is
+    /// written, as above; `page-check` counts the activations on CI.
+    #[test]
+    fn a_page_that_does_not_activate_this_application_asks_for_no_activation() {
+        const PAGE: &str = include_str!("macos/page.rs");
+        const OWN: &str = include_str!("macos/own.rs");
+        const APP: &str = include_str!("macos/app.rs");
+
+        let lent = body(APP, "pub(crate) fn keyboard_without_activating() {");
+        assert!(lent.contains("super::front::cancel(") && lent.contains("super::page::superseded();"));
+        for call in ["activateIgnoringOtherApps", "activateWithOptions", ".activate("] {
+            assert!(!lent.contains(call), "{call}");
+        }
+
+        let made = body(PAGE, "fn make_window(");
+        let panel = at(made, "if recipe.panel {");
+        let mask = at(made, "style |= NSWindowStyleMask::NonactivatingPanel;");
+        assert!(panel < at(made, "if !state.activates {") && at(made, "if !state.activates {") < mask);
+        assert!(mask < at(made, "initWithContentRect"), "given when the panel is made");
+
+        let from = at(PAGE, "fn take_front(");
+        let take = &PAGE[from..from + at(&PAGE[from..], "pub(crate) fn hide(")];
+        let choose = at(take, "if self.state.activates {");
+        let activates = at(take, "super::app::activate_self();");
+        let lends = at(take, "super::app::keyboard_without_activating();");
+        assert!(choose < activates && activates < lends && lends < at(take, "w.makeKeyAndOrderFront(None);"));
+        assert_eq!(take.matches("activate_self()").count(), 1, "only for a window that activates");
+        assert!(take.contains("if was_active || !self.state.activates {"), "declined at once: nothing is on its way");
+
+        let focus = body(OWN, "pub(super) fn focus(id: isize) -> bool {");
+        let decided = at(focus, "let lends = nonactivating(&w);");
+        assert!(decided < at(focus, "super::app::keyboard_without_activating();"));
+        assert!(decided < at(focus, "super::app::activate_self();"));
+        // Answered at the call, as nothing is on its way: the window key, or not.
+        let made = at(focus, "w.makeKeyAndOrderFront(None);");
+        let read = at(focus, "let key = w.isKeyWindow();");
+        assert!(made < at(focus, "if !lends {") && at(focus, "if !lends {") < read && focus.trim_end().ends_with("key"));
+
+        // Whether this application is the active one, for a show's answer and for a request whose
+        // page left, is the hand-over's: not AppKit's word while a panel of ours has the keyboard
+        // only lent.
+        let active = body(OWN, "pub(super) fn active(front: Option<i32>) -> bool {");
+        assert!(active.contains("active_for_handing(appkit, keyboard_lent(), front == Some(std::process::id() as i32))"));
+        assert!(take.contains("let was_active = super::own::active(super::ax::frontmost_pid());"));
+        let came_back = body(PAGE, "pub(super) fn became_active() {");
+        assert!(came_back.contains("let active = super::own::active(super::ax::frontmost_pid());"));
+        for f in [take, came_back] {
+            assert!(!f.contains("isActive()"), "never AppKit's word alone");
+        }
     }
 }
 

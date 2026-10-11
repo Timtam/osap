@@ -1753,8 +1753,8 @@ fn name_if_slow(pid: i32, started: Instant, what: &str, listed: usize) {
 }
 
 /// Which application is in front. Asked of the workspace, which is local, cheap, and still
-/// answers when the application itself has stopped talking to us.
-fn frontmost_pid() -> Option<i32> {
+/// answers when the application itself has stopped talking to us. Also what `own::active` is given.
+pub(super) fn frontmost_pid() -> Option<i32> {
     let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
     let pid = app.processIdentifier();
     (pid > 0).then_some(pid)

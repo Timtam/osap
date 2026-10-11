@@ -133,12 +133,16 @@ pub fn webview_calls() {
     let _: fn(&str) -> bool = Where::supports;
     let _: fn() -> webview::Engine = webview::Engine::here;
     let _: fn(webview::Engine) -> webview::Words = webview::Engine::words;
-    let _ = |w: webview::Words| (w.system, w.env, w.env_there, w.env_failed, w.building, w.front_taken, w.focus_taken);
+    let _ = |w: webview::Words| {
+        (w.system, w.env, w.env_there, w.env_failed, w.building, w.front_taken, w.focus_taken, w.not_activating)
+    };
     // The `window` option, and the recipe the Mac's page is built from.
     let _: fn(&str) -> Option<webview::WindowKind> = webview::WindowKind::parse;
     let _: fn(webview::WindowKind) -> &'static str = webview::WindowKind::name;
     let _: fn(webview::WindowKind) -> webview::Recipe = webview::WindowKind::recipe;
     let _: fn(webview::WindowKind, bool) -> bool = webview::WindowKind::gives_front_back;
+    // The `activates` option.
+    let _: fn(webview::WindowKind, bool) -> bool = webview::WindowKind::allows_activates;
     let _ = (webview::WindowKind::NAMES, webview::WindowKind::default());
     let _ = |r: webview::Recipe| (r.listed, r.minimise, r.maximise, r.panel);
 }
@@ -156,15 +160,16 @@ pub fn page_calls() {
     let _: fn() -> Option<String> = page::runtime_version;
     let _: fn() -> Vec<webview::PageEvent> = page::take_events;
     let _: fn(&BuildSpec, &objc2_web_kit::WKContentRuleList) -> Result<Native, String> = page::build;
-    let _ = |s: BuildSpec| (s.page, s.build, s.kind, s.title, s.scheme, s.root, s.entry_url);
+    let _ = |s: BuildSpec| (s.page, s.build, s.kind, s.activates, s.title, s.scheme, s.root, s.entry_url);
     // As `webview_lua.rs` fills one in, with the types its page entries hold.
     let _ = |page: u64,
              build: u64,
              kind: webview::WindowKind,
+             activates: bool,
              title: String,
              scheme: String,
              root: std::path::PathBuf,
-             entry_url: String| BuildSpec { page, build, kind, title, scheme, root, entry_url };
+             entry_url: String| BuildSpec { page, build, kind, activates, title, scheme, root, entry_url };
     let _ = |e: EnvNow| matches!(e, EnvNow::Ready(_, false) | EnvNow::Waiting | EnvNow::Failed(_));
     // As `webview_lua.rs`'s `build_pending` takes the rule list out and builds with it.
     let _ = |now: EnvNow, spec: &BuildSpec| -> Option<(Result<Native, String>, bool)> {

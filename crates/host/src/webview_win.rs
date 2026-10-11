@@ -539,6 +539,11 @@ pub(crate) struct BuildSpec {
     pub build: u64,
     /// A tool window or an ordinary one.
     pub kind: WindowKind,
+    /// The page option `activates`, which `webview_lua.rs` hands both platforms' windows alike. A
+    /// Mac's panel is made with it; here it changes nothing, as a window takes the keyboard and the
+    /// front together (docs/api/gui.md), so it is never read.
+    #[allow(dead_code)]
+    pub activates: bool,
     pub title: String,
     pub scheme: String,
     /// The module's folder, canonical.

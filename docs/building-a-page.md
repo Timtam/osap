@@ -637,8 +637,8 @@ Choose the tool page for a companion of the plug-in — a list of its presets, i
 **Pages on a Mac are new.** They were built on 2026-10-11 and run on CI's Macs, and nobody has tried one with VoiceOver yet: those are the Mac's page tests in TODO.md (stage 4), for the Mac tester's session. **Nothing on this page promises how a page will behave with VoiceOver.** The module and the page are written once — the description, the HTML and the script are the same on both systems — and what differs is in the reference's macOS sections:
 
 - A page runs in WebKit, the system's web engine, which comes with macOS: there is no runtime to install.
-- A tool page is a panel, an app page an ordinary window, and **either makes this application the active one while it has the keyboard**: the DAW is not the active application then, and some DAWs hide their plug-in windows while they are not ([macOS](api/gui.md#macos)).
-- A `show` with `focus` answers `true` once the front is **asked for**: the application's activation comes on the event loop after the call, and the log says what came of it. A module that needs to know follows the page's window coming to the front, or the page's script its window's `focus` event ([`page:show`, macOS](api/gui.md#macos-1)).
+- A tool page is a panel, an app page an ordinary window, and **either makes this application the active one while it has the keyboard**: the DAW is not the active application then, and some DAWs hide their plug-in windows while they are not ([macOS](api/gui.md#macos)). A tool page described with the experimental `activates = false` takes the keyboard and leaves the DAW the active application ([`host.gui.webview`](api/gui.md#host-gui-webview)).
+- A `show` with `focus` answers `true` once the front is **asked for**: the application's activation comes on the event loop after the call, and the log says what came of it. A module that needs to know follows the page's window coming to the front, or the page's script its window's `focus` event ([`page:show`, macOS](api/gui.md#macos-1)). A page described `activates = false` asks for no activation, and its answer is decided at the call.
 
 What to mind on a Mac:
 

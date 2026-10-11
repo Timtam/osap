@@ -117,6 +117,10 @@ struct Entry {
     title: String,
     /// The window it is in (`window = "tool" | "app"`), fixed when it is described.
     kind: WindowKind,
+    /// Whether that window makes the application the active one when it takes the keyboard
+    /// (`activates`, `true` unless a tool page says `false`): fixed when it is described, as a
+    /// Mac's panel is made with it.
+    activates: bool,
     /// That module's folder, canonical.
     root: PathBuf,
     scheme: String,
@@ -208,7 +212,7 @@ fn fail(text: String) -> mlua::Error {
 }
 
 const CALL: &str = "host.gui.webview";
-const OPTIONS: [&str; 6] = ["file", "title", "window", "onMessage", "onReady", "onClose"];
+const OPTIONS: [&str; 7] = ["file", "title", "window", "activates", "onMessage", "onReady", "onClose"];
 
 /// A callback option: a function, or absent where `required` is false.
 fn callback_option(t: &Table, key: &str, required: bool) -> mlua::Result<Option<Function>> {
@@ -252,11 +256,26 @@ fn window_option(t: &Table) -> mlua::Result<WindowKind> {
     }
 }
 
+/// The `activates` option: `true` when it is absent, a boolean otherwise, and `false` only for a
+/// tool page (`WindowKind::allows_activates`).
+fn activates_option(t: &Table, kind: WindowKind) -> mlua::Result<bool> {
+    let activates = crate::opt_bool(Some(t), "activates", true, CALL)?;
+    if !kind.allows_activates(activates) {
+        return Err(fail(format!(
+            "{CALL}: activates = false is for a tool page; an app page (window = \"{}\") is a window like any \
+             program's, which makes the application the active one when it takes the keyboard",
+            kind.name()
+        )));
+    }
+    Ok(activates)
+}
+
 /// What `host.gui.webview` is given, read strictly.
 struct PageOptions {
     file: String,
     title: String,
     kind: WindowKind,
+    activates: bool,
     on_message: Function,
     on_ready: Option<Function>,
     on_close: Option<Function>,
@@ -275,15 +294,18 @@ fn page_options(opts: Value) -> mlua::Result<PageOptions> {
                 other => format!("a {} key", json::luau_type(other)),
             };
             return Err(fail(format!(
-                "{CALL}: {name} is not an option; the options are file, title, window, onMessage, \
-                 onReady and onClose"
+                "{CALL}: {name} is not an option; the options are file, title, window, activates, \
+                 onMessage, onReady and onClose"
             )));
         }
     }
+    let (file, title) = (text_option(&t, "file")?, text_option(&t, "title")?);
+    let kind = window_option(&t)?;
     Ok(PageOptions {
-        file: text_option(&t, "file")?,
-        title: text_option(&t, "title")?,
-        kind: window_option(&t)?,
+        file,
+        title,
+        kind,
+        activates: activates_option(&t, kind)?,
         // `required`: an absent one has raised by now.
         on_message: callback_option(&t, "onMessage", true)?.expect("required"),
         on_ready: callback_option(&t, "onReady", false)?,
@@ -291,11 +313,11 @@ fn page_options(opts: Value) -> mlua::Result<PageOptions> {
     })
 }
 
-/// `host.gui.webview{ file, title, window?, onMessage, onReady?, onClose? }` — describes a page. Builds
-/// nothing: the first `show` does. Raises for a mistake in the options, and for a `file` that is
-/// not a file inside the module's folder, at the caller's line.
+/// `host.gui.webview{ file, title, window?, activates?, onMessage, onReady?, onClose? }` — describes
+/// a page. Builds nothing: the first `show` does. Raises for a mistake in the options, and for a
+/// `file` that is not a file inside the module's folder, at the caller's line.
 fn create(lua: &Lua, sh: &Rc<Shared>, idx: usize, opts: Value) -> mlua::Result<PageHandle> {
-    let PageOptions { file, title, kind, on_message, on_ready, on_close } = page_options(opts)?;
+    let PageOptions { file, title, kind, activates, on_message, on_ready, on_close } = page_options(opts)?;
     let module = sh.ids.borrow().get(idx).cloned().unwrap_or_default();
     let root = sh
         .roots
@@ -319,6 +341,7 @@ fn create(lua: &Lua, sh: &Rc<Shared>, idx: usize, opts: Value) -> mlua::Result<P
         module,
         title,
         kind,
+        activates,
         root,
         rel,
         on_message: lua.create_registry_value(on_message)?,
@@ -339,10 +362,13 @@ fn create(lua: &Lua, sh: &Rc<Shared>, idx: usize, opts: Value) -> mlua::Result<P
         #[cfg(any(windows, target_os = "macos"))]
         native: None,
     };
+    // The model is said only for a page that asks for the other one, so a page described as stage 1
+    // described it is said as it was.
+    let model = if entry.activates { String::new() } else { format!(", {}", words().not_activating) };
     logging::line(
         "gui",
         &format!(
-            "{}: described, from {} (origin {}), window \"{}\"",
+            "{}: described, from {} (origin {}), window \"{}\"{model}",
             entry.label(),
             entry.rel,
             webview::origin_for(&entry.scheme),
@@ -949,6 +975,7 @@ pub(crate) fn build_pending(sh: &Shared) {
                 page: id,
                 build,
                 kind: e.kind,
+                activates: e.activates,
                 title: e.title.clone(),
                 scheme: e.scheme.clone(),
                 root: e.root.clone(),
@@ -1336,6 +1363,7 @@ pub(crate) fn test_page(
         module: format!("m{owner}"),
         title: "Test page".to_string(),
         kind: WindowKind::Tool,
+        activates: true,
         root: PathBuf::new(),
         scheme: "mod-test".to_string(),
         rel: "ui/index.html".to_string(),
@@ -1405,12 +1433,13 @@ mod tests {
     }
 
     #[test]
-    fn a_page_is_described_by_its_six_options_and_nothing_else() {
+    fn a_page_is_described_by_its_seven_options_and_nothing_else() {
         let lua = Lua::new();
         let ok = page_options(opts(&lua, "return { file = 'ui/a.html', title = 'A', onMessage = function() end }")).unwrap();
         assert_eq!((ok.file.as_str(), ok.title.as_str()), ("ui/a.html", "A"));
         assert!(ok.on_ready.is_none() && ok.on_close.is_none());
         assert_eq!(ok.kind, WindowKind::Tool, "a tool window unless it says otherwise");
+        assert!(ok.activates, "one that activates the application unless it says otherwise");
         let all = page_options(opts(
             &lua,
             "return { file = 'a', title = 'A', onMessage = print, onReady = print, onClose = print }",
@@ -1426,7 +1455,7 @@ mod tests {
         assert!(err("return { file = 'a', title = 'A', onMessage = print, onReady = 1 }").contains("onReady is a function, not a number"));
         let e = err("return { file = 'a', title = 'A', onMessage = print, url = 'https://x' }");
         assert!(
-            e.contains("'url' is not an option; the options are file, title, window, onMessage, onReady and onClose"),
+            e.contains("'url' is not an option; the options are file, title, window, activates, onMessage, onReady and onClose"),
             "{e}"
         );
         assert!(err("return { 'a' }").contains("a number key is not an option"));
@@ -1453,6 +1482,33 @@ mod tests {
         assert!(e.contains(r#"window is "tool" or "app", not a boolean"#), "{e}");
         let e = kind("{ kind = 'app' }").unwrap_err();
         assert!(e.contains(r#"window is "tool" or "app", not a table"#), "{e}");
+    }
+
+    /// `activates` is a boolean, `true` when it is absent, and `false` only for a tool page: an app
+    /// page described so raises, whichever of the two options is written first, and so does a
+    /// value of another type.
+    #[test]
+    fn activates_is_true_or_false_and_false_only_for_a_tool_page() {
+        let lua = Lua::new();
+        let read = |extra: &str| {
+            page_options(opts(&lua, &format!("return {{ file = 'a', title = 'A', onMessage = print, {extra} }}")))
+                .map(|o| (o.kind, o.activates))
+                .map_err(|e| e.to_string())
+        };
+        assert_eq!(read("activates = false"), Ok((WindowKind::Tool, false)));
+        assert_eq!(read("window = 'tool', activates = false"), Ok((WindowKind::Tool, false)));
+        assert_eq!(read("activates = true"), Ok((WindowKind::Tool, true)));
+        assert_eq!(read("window = 'app', activates = true"), Ok((WindowKind::App, true)));
+        assert_eq!(read("window = 'app'"), Ok((WindowKind::App, true)));
+        for app in ["window = 'app', activates = false", "activates = false, window = 'app'"] {
+            let e = read(app).unwrap_err();
+            assert!(e.contains("host.gui.webview: activates = false is for a tool page"), "{e}");
+            assert!(e.contains(r#"an app page (window = "app")"#), "{e}");
+        }
+        let e = read("activates = 'no'").unwrap_err();
+        assert!(e.contains("host.gui.webview: activates is true or false, not a string"), "{e}");
+        let e = read("activates = 0").unwrap_err();
+        assert!(e.contains("activates is true or false, not a number"), "{e}");
     }
 
     #[test]

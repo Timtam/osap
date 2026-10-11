@@ -6,8 +6,8 @@
 //!
 //! **The tool page** is the VPS Avenger control tool's panel — a tool VoiceOver users run in
 //! production with Logic: an `NSPanel` that activates the application when it takes the keyboard
-//! (the maintainer's decision of 2026-10-11; one that does not is to be an experimental page option,
-//! `activates = false`, still to come), titled, closable, resizable, a utility window, created at
+//! (the maintainer's decision of 2026-10-11; one that does not is the experimental page option
+//! `activates = false`, below), titled, closable, resizable, a utility window, created at
 //! once (`defer: NO`, so the window server numbers it from the start), never hidden because the
 //! application is not the active one, on every Space and beside a full-screen application, out of
 //! the window cycle. It can become the key and the main window, Escape does nothing in it, and the
@@ -18,6 +18,24 @@
 //! windows when its application resigns; so a plug-in window brought forward is drawn over the
 //! page, which is the round trip docs/api/gui.md describes.
 //!
+//! **A tool page described `activates = false`** (experimental, the maintainer's decision of
+//! 2026-10-11) is the same panel made with `NSWindowStyleMaskNonactivatingPanel` — at its creation,
+//! since the mask cannot be changed on a panel that exists — so that it takes the keyboard while
+//! the DAW stays the active application: expected to keep shown the plug-in windows a DAW hides
+//! while another application is active (TODO.md, MW6), and the panel Apple's forum answer (thread
+//! 826308) names for a window over an application in full screen. It takes the keyboard with
+//! `makeKeyAndOrderFront` and the web view made the first responder, and never with an activation,
+//! which would undo what the mask is for (Electron #40307): nothing is then on its way, so the
+//! answer is decided at the call — the window key, or declined. Leaving, it gives the keyboard back
+//! to the application that stayed the active one, whose window is raised and focused at once while
+//! the workspace still names it (`front::hand_front_to`; this application deactivated should AppKit
+//! hand the keyboard to another window of ours instead). AppKit says this application is the active
+//! one while such a panel has the keyboard, though the workspace names the DAW (`page-check`'s
+//! non-activating panel, on every runner CI has), so nothing that decides by whether this
+//! application is the active one takes AppKit's word for it then (`own::active`): not the hand-over,
+//! not a show's answer, not a request whose page left. Whether VoiceOver follows the keyboard into
+//! such a panel is unknown (TODO.md, MW1b).
+//!
 //! **The app page** is an ordinary `NSWindow`: titled, closable, miniaturisable, resizable, at the
 //! normal level, in the window cycle — and never in full screen: its zoom button zooms it, as
 //! Windows' maximise box maximises, so a show with a rectangle to avoid can always put it beside
@@ -25,22 +43,24 @@
 //! `dock_while_open`), and lets it go when the last one is hidden — by its module, by the user, or
 //! because its show did not get the front — or taken down.
 //!
-//! **Taking the front** ([`Native::focus`]) is the tool's sequence — this application asked for
-//! the front (`app::activate_self`, `activateIgnoringOtherApps:`), the window made key and ordered
-//! in front regardless, the web view made the first responder — and the answer is that it was
-//! asked: an activation is asynchronous. What came of it is decided by events only and said in the
-//! log: the window becoming the key window (got); another application's activation announced first
-//! — not the one a page of ours leaving asked for just before, which was asked first and comes
-//! first — or a key the event tap saw pressed while none of our windows has the keyboard (not got —
-//! and a page the show placed over the rectangle to avoid is hidden again, Windows' rule, unless it
-//! is an app page the user has open: `webview::not_got_hides`; a `focus` places nothing, and hides
-//! nothing); the page hidden first, or a newer request for the front made (abandoned). A request
-//! this application makes while it is the active one and that leaves the window without the
-//! keyboard is declined at once. An app page the user has open goes over the rectangle to avoid
-//! only once it has the keyboard its show asked for (`webview::place_when_key`), so one that does
-//! not get it stays where the user left it, as on Windows; the place waits with the request, and
-//! goes with it. The window is ordered in front before any answer, as the tool orders it: a page
-//! that does not get the keyboard has been raised all the same, at the normal level.
+//! **Taking the front** ([`Native::focus`]) is the tool's sequence — this application asked for the
+//! front (`app::activate_self`, `activateIgnoringOtherApps:`; not for a panel that does not
+//! activate it, above), the window made key and ordered in front regardless, the web view made the
+//! first responder — and the answer is that it was asked: an activation is asynchronous. What came
+//! of it is decided by events only and said in the log: the window becoming the key window (got);
+//! another application's activation announced first — not the one a page of ours leaving asked for
+//! just before, which was asked first and comes first — or a key the event tap saw pressed while
+//! none of our windows has the keyboard (not got — and a page the show placed over the rectangle to
+//! avoid is hidden again, Windows' rule, unless it is an app page the user has open:
+//! `webview::not_got_hides`; a `focus` places nothing, and hides nothing); the page hidden first,
+//! or a newer request for the front made (abandoned). A request this application makes while it is
+//! the active one (`own::active`), or that a panel which does not activate it makes, and that
+//! leaves the window without the keyboard is declined at once: nothing is on its way that could
+//! still give it. An app page the user has open goes over the rectangle to avoid only once it has
+//! the keyboard its show asked for (`webview::place_when_key`), so one that does not get it stays
+//! where the user left it, as on Windows; the place waits with the request, and goes with it. The
+//! window is ordered in front before any answer, as the tool orders it: a page that does not get
+//! the keyboard has been raised all the same, at the normal level.
 //!
 //! **A request that outlives its page.** A page hidden before its show had an answer — or hidden
 //! again because a key went elsewhere — leaves the request for the front on its way, and it can
@@ -377,6 +397,10 @@ pub(crate) struct BuildSpec {
     pub build: u64,
     /// A tool page's panel or an app page's window.
     pub kind: WindowKind,
+    /// `false`: a tool page's panel that takes the keyboard without activating this application,
+    /// made with the style that says so. An app page activates it whatever this says, and
+    /// `webview_lua.rs` never asks otherwise (`WindowKind::allows_activates`).
+    pub activates: bool,
     pub title: String,
     pub scheme: String,
     /// The module's folder, canonical.
@@ -406,6 +430,9 @@ struct PageState {
     page: u64,
     build: u64,
     kind: WindowKind,
+    /// Whether taking the keyboard makes this application the active one: for every window but a
+    /// panel made not to ([`BuildSpec::activates`]).
+    activates: bool,
     title: String,
     refusals: Refusals,
     /// Where the page took the front from when it last took it; `None` until it first does.
@@ -853,21 +880,23 @@ pub(super) fn superseded() {
 /// whose page left before it was answered may be what made it so: with no window of ours on screen
 /// that could take the keyboard — and no app page counted as shown, which the Dock brings back —
 /// this application would be in front with nothing in it, and the front goes back to where the page
-/// would have given it, as `host.window.focus` hands it. With such a window, it stays. Either way the
-/// request is answered. One borrow when none is remembered.
+/// would have given it, as `host.window.focus` hands it. With such a window, it stays; and where
+/// this application is no longer the active one by then (`own::active`), nothing is given back.
+/// Either way the request is answered. One borrow when none is remembered.
 pub(super) fn became_active() {
     let Some(left) = UNANSWERED.with(|u| u.borrow_mut().take()) else { return };
     let Some(app) = super::own::app() else { return };
     let ms = left.since.elapsed().as_millis();
     let window_for_keys = app.windows().iter().any(|w| w.isVisible() && w.canBecomeKeyWindow());
     let app_page = APP_SHOWN.with(|s| !s.borrow().is_empty());
-    if !app.isActive() || window_for_keys || app_page {
+    let active = super::own::active(super::ax::frontmost_pid());
+    if !active || window_for_keys || app_page {
         crate::logging::line(
             "gui",
             &format!(
                 "page '{}': this application became the active one {ms} ms after the show, after the page had left; {}",
                 left.title,
-                if app.isActive() {
+                if active {
                     "a window of its own is there to be in, so it stays"
                 } else {
                     "it no longer is, so nothing is given back"
@@ -1079,6 +1108,7 @@ pub(crate) fn build(spec: &BuildSpec, rules: &WKContentRuleList) -> Result<Nativ
         page: spec.page,
         build: spec.build,
         kind: spec.kind,
+        activates: spec.activates || spec.kind == WindowKind::App,
         title: spec.title.clone(),
         refusals: refusals.clone(),
         came_from: Cell::new(None),
@@ -1242,9 +1272,13 @@ pub(crate) fn build(spec: &BuildSpec, rules: &WKContentRuleList) -> Result<Nativ
         &format!(
             "page '{}': {} (window {}), built with WebKit",
             spec.title,
-            match spec.kind {
-                WindowKind::Tool => "a tool page's panel, which makes this application the active one when it takes the keyboard",
-                WindowKind::App => "an application page's window",
+            match (spec.kind, state.activates) {
+                (WindowKind::Tool, true) => "a tool page's panel, which makes this application the active one when it takes the keyboard",
+                (WindowKind::Tool, false) => {
+                    "a tool page's panel that takes the keyboard without making this application the active one \
+                     (activates = false, experimental)"
+                }
+                (WindowKind::App, _) => "an application page's window",
             },
             state.id()
         ),
@@ -1254,7 +1288,9 @@ pub(crate) fn build(spec: &BuildSpec, rules: &WKContentRuleList) -> Result<Nativ
 
 
 /// The window a page of `kind` is in (`webview::WindowKind::recipe`), made at once so that the
-/// window server numbers it, at the page's size, hidden, carrying `state` — whose id it fills in.
+/// window server numbers it, at the page's size, hidden, carrying `state` — whose id it fills in. A
+/// panel `state` says does not activate this application is made so here, the one time the mask
+/// can be given.
 fn make_window(mtm: MainThreadMarker, kind: WindowKind, title: &str, state: &Rc<PageState>) -> Result<Retained<NSWindow>, String> {
     let recipe = kind.recipe();
     let mut style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Resizable;
@@ -1263,6 +1299,9 @@ fn make_window(mtm: MainThreadMarker, kind: WindowKind, title: &str, state: &Rc<
     }
     if recipe.panel {
         style |= NSWindowStyleMask::UtilityWindow;
+        if !state.activates {
+            style |= NSWindowStyleMask::NonactivatingPanel;
+        }
     }
     let (w, h) = webview::DEFAULT_SIZE;
     let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(f64::from(w), f64::from(h)));
@@ -1516,18 +1555,21 @@ impl Native {
     }
 
     /// The control tool's sequence for its panel: this application asked for the front
-    /// (`app::activate_self`), the window made key and ordered in front regardless, and the web view
-    /// made the first responder. At the normal level: the tool sets its panel floating first, and
-    /// here a page floats once it has the keyboard (`became_key`), so a request the system declines
-    /// without a word leaves no floating page over the plug-in window. `true` when that was asked —
-    /// what comes of it is an event (see the file) — and `false` when this application was the
-    /// active one already and the window is still not key: declined by the system. Where the front
-    /// came from is kept, to give it back; whether the page has kept the front is decided when the
-    /// window gets the keyboard ([`became_key`]). An app page comes back from the Dock and from a
-    /// hidden application first. `open`: the page was shown already ([`Asked::open`]); `over`: the
-    /// show placed it over the rectangle to avoid ([`Asked::over`]). A request of another page's
-    /// still waiting for its answer is abandoned — this one decides where the front goes — and
-    /// said.
+    /// (`app::activate_self`), the window made key and ordered in front regardless, and the web
+    /// view made the first responder. At the normal level: the tool sets its panel floating first,
+    /// and here a page floats once it has the keyboard (`became_key`), so a request the system
+    /// declines without a word leaves no floating page over the plug-in window. `true` when that
+    /// was asked — what comes of it is an event (see the file) — and `false` when this application
+    /// was the active one already (`own::active`) and the window is still not key: declined by the
+    /// system. A panel that does not activate this application asks for no activation
+    /// (`app::keyboard_without_activating`), so nothing is on its way that could still give it the
+    /// keyboard: `true` only with the window key at once, and `false`, declined, otherwise. Where
+    /// the front came from is kept, to give it back; whether the page has kept the front is decided
+    /// when the window gets the keyboard ([`became_key`]). An app page comes back from the Dock and
+    /// from a hidden application first. `open`: the page was shown already ([`Asked::open`]);
+    /// `over`: the show placed it over the rectangle to avoid ([`Asked::over`]). A request of
+    /// another page's still waiting for its answer is abandoned — this one decides where the front
+    /// goes — and said.
     fn take_front(&self, open: bool, over: bool) -> bool {
         let Some(app) = super::own::app() else { return false };
         let w = &*self.window;
@@ -1544,7 +1586,9 @@ impl Native {
         if let Some(came) = before.filter(|c| c.window != id) {
             self.state.came_from.set(Some(came));
         }
-        let was_active = app.isActive();
+        // Not AppKit's word alone: it calls this application active while a panel of ours has the
+        // keyboard only lent, and a request is then on its way all the same.
+        let was_active = super::own::active(super::ax::frontmost_pid());
         // The outcome is the workspace's to tell as well, and AppKit's for a request whose page
         // leaves first; both waited for from before the request.
         super::watch::hook_activations();
@@ -1574,7 +1618,11 @@ impl Native {
                 ),
             );
         }
-        super::app::activate_self();
+        if self.state.activates {
+            super::app::activate_self();
+        } else {
+            super::app::keyboard_without_activating();
+        }
         w.makeKeyAndOrderFront(None);
         w.orderFrontRegardless();
         if !w.makeFirstResponder(Some(&self.wk)) {
@@ -1588,14 +1636,18 @@ impl Native {
             }
             return true;
         }
-        if was_active {
+        if was_active || !self.state.activates {
             let _ = take_asked(id);
             crate::logging::line(
                 "gui",
                 &format!(
-                    "page '{}': this application is the active one and the window is not key after it was made so — \
-                     declined by the system",
-                    self.state.title
+                    "page '{}': {} and the window is not key after it was made so — declined by the system",
+                    self.state.title,
+                    if self.state.activates {
+                        "this application is the active one"
+                    } else {
+                        "a panel that takes the keyboard with no activation, so none is on its way,"
+                    }
                 ),
             );
             return false;

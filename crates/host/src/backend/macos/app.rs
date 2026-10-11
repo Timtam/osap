@@ -145,6 +145,17 @@ pub(crate) fn activate_self() {
     app.activateIgnoringOtherApps(true);
 }
 
+/// What a panel of ours that takes the keyboard without activating this application — a page
+/// described `activates = false` (`page.rs`) — asks first, where every other window of ours asks
+/// for the front ([`activate_self`]): no activation, which would undo what the panel is for, but
+/// the two things given up there are given up here too — a hand-over of the front still waiting
+/// for another application's activation, and a page's request for the front whose page left before
+/// it was answered — as the keyboard going to the panel is the newer request.
+pub(crate) fn keyboard_without_activating() {
+    super::front::cancel("a panel of ours takes the keyboard without activating this application");
+    super::page::superseded();
+}
+
 /// Regular means a Dock icon, a menu bar, and an entry in the application switcher.
 /// Accessory means none of the three.
 ///

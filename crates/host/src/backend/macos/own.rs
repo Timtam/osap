@@ -45,12 +45,12 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSWindow, NSWindowDidBecomeKeyNotification,
+    NSAccessibility, NSApplication, NSRunningApplication, NSWindow, NSWindowDidBecomeKeyNotification,
     NSWindowDidResignKeyNotification, NSWindowStyleMask,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter};
 
-use crate::backend::{cocoa_frame_top_left, own_id, own_number, Foreground, OwnKind, WinInfo};
+use crate::backend::{active_for_handing, cocoa_frame_top_left, own_id, own_number, Foreground, OwnKind, WinInfo};
 
 /// [`start`] has run, on the main thread, once the window system was up.
 static STARTED: AtomicBool = AtomicBool::new(false);
@@ -311,6 +311,34 @@ pub(super) fn has_keyboard() -> bool {
     OWN_KEY.load(Ordering::Relaxed)
 }
 
+/// Whether the window of ours with the keyboard is a panel that took it without activating this
+/// application (a page described `activates = false`): AppKit then says this application is the
+/// active one, while the workspace may name another (`front.rs`). One atomic load each.
+pub(super) fn keyboard_lent() -> bool {
+    OWN_KEY.load(Ordering::Relaxed) && KEY_NONACTIVATING.load(Ordering::Relaxed)
+}
+
+/// Whether this application is the active one, for what taking the front and handing it over do
+/// (`front.rs`, `page.rs`), `front` being the process the workspace names the frontmost one
+/// (`ax::frontmost_pid`): AppKit's word — the running application's before the window system is
+/// up, when this application has no window that could be active anyway — except while a panel of
+/// ours has the keyboard only lent ([`keyboard_lent`]) and the workspace names another
+/// application, when AppKit calls this application active all the same and it is not
+/// (`backend::active_for_handing`). Every such decision asks this, never `isActive` alone.
+pub(super) fn active(front: Option<i32>) -> bool {
+    let appkit = app().map_or_else(|| NSRunningApplication::currentApplication().isActive(), |a| a.isActive());
+    active_for_handing(appkit, keyboard_lent(), front == Some(std::process::id() as i32))
+}
+
+/// The window of ours AppKit names the key window now, read as a level at the call: `keyWindow`,
+/// or, where that names none, one of our windows that says it is key — as for a panel that takes
+/// the keyboard without activating this application, which `keyWindow` is not documented to name
+/// while another application is the active one. Read straight after a change AppKit made inside
+/// the same call (`front.rs`), and by `page-check`.
+pub(super) fn key_now(app: &NSApplication) -> Option<Retained<NSWindow>> {
+    app.keyWindow().or_else(|| app.windows().iter().find(|w| w.isKeyWindow()))
+}
+
 /// The title of our window that has the keyboard, for a log line; empty when it cannot be read
 /// without waiting.
 pub(super) fn key_title() -> String {
@@ -463,9 +491,13 @@ pub(super) fn note_page(number: u32, page: bool) {
 /// become the active one, and the window ordered in front and made key — AppKit's own calls, where
 /// another application's window is raised and focused through accessibility. `true` when the window
 /// is shown or minimised: what AppKit then does is asynchronous, and the window's becoming key is
-/// what says it happened. A hidden one — ordered out, as the manager is once it is closed, or with
-/// this application hidden — is `false`, as [`info`] leaves it out: ordering it in from here would
-/// show it behind the back of whatever hid it, which would go on believing it hidden.
+/// what says it happened. A panel that takes the keyboard without activating this application (a
+/// page described `activates = false`) is made key without that request, as its page takes the
+/// keyboard (`app::keyboard_without_activating`): nothing is then on its way, so its answer is
+/// decided at the call — `true` with the window the key window, `false` without, as its page's
+/// `focus` answers. A hidden one — ordered out, as the manager is once it is closed, or with this
+/// application hidden — is `false`, as [`info`] leaves it out: ordering it in from here would show it
+/// behind the back of whatever hid it, which would go on believing it hidden.
 pub(super) fn focus(id: isize) -> bool {
     let Some(w) = window(id) else {
         crate::logging::line("macos", &format!("cannot focus window {id}: no such window of ours"));
@@ -484,15 +516,33 @@ pub(super) fn focus(id: isize) -> bool {
     if w.isMiniaturized() {
         w.deminiaturize(None);
     }
-    super::app::activate_self();
+    let lends = nonactivating(&w);
+    if lends {
+        super::app::keyboard_without_activating();
+    } else {
+        super::app::activate_self();
+    }
     w.makeKeyAndOrderFront(None);
+    if !lends {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "focusing our own window {id} ('{}'): this application asked to become active, the window ordered in \
+                 front and made key",
+                w.title()
+            ),
+        );
+        return true;
+    }
+    let key = w.isKeyWindow();
     crate::logging::line(
         "macos",
         &format!(
-            "focusing our own window {id} ('{}'): this application asked to become active, the window \
-             ordered in front and made key",
-            w.title()
+            "focusing our own window {id} ('{}'): a panel that takes the keyboard without activating this application, \
+             so no activation asked for; the window ordered in front and made key — {}",
+            w.title(),
+            if key { "it is the key window" } else { "it is NOT the key window, so the system declined" }
         ),
     );
-    true
+    key
 }

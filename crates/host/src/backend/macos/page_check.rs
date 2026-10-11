@@ -19,20 +19,27 @@
 //! **The web view** (`web_view`, after them): the pages' rule list compiled; a tool page built from
 //! a small page the executable carries (`tools/page-check`), with no activation asked for by the
 //! build — counted in `NSApplication` itself, whose two activation calls are wrapped for the rest
-//! of this process (`count_activations`) — and loaded; the page's own script running and an
-//! inline one not; a message's round trip and twenty in order; its own file fetched and one outside
-//! blocked; a navigation away refused; `window.close()` doing nothing. Then, shown with the keyboard
-//! under a main menu with what wxWidgets' Apple menu has, whose items only count: Command-A and
-//! Command-C copying its field's text, Command-V pasting, Return on its button giving one message,
-//! Command-Q, Command-H and Option-Command-H doing nothing, and Command-W hiding it — the keys
-//! made in-process and sent through the application as the window server's would be. Last, the
-//! rule list on its own (`rule_list_alone`), since the host's policy blocks that outside fetch
-//! before a rule list is asked: a page built with one rule more, which blocks a file of its own the
-//! policy lets it fetch, must not get that file. These are `check` lines, `ok` or `FAILED`: what
-//! the host promises, whatever the desktop. Where the page does not get the keyboard on a runner the
-//! keys are not checked, and a line says so. The rest is data: the times, what the page says of its
-//! context (`isSecureContext`, the clipboard, WebRTC), the classes AppKit made the first responder,
-//! an app page's Dock claim and keys, and the folders WebKit made under `~/Library`.
+//! of this process (`count_activations`) — and loaded; the page's own script running and an inline
+//! one not; a message's round trip and twenty in order; its own file fetched and one outside
+//! blocked; a navigation away refused; `window.close()` doing nothing. Then, shown with the
+//! keyboard under a main menu with what wxWidgets' Apple menu has, whose items only count:
+//! Command-A and Command-C copying its field's text, Command-V pasting, Return on its button giving
+//! one message, Command-Q, Command-H and Option-Command-H doing nothing, and Command-W hiding it —
+//! the keys made in-process and sent through the application as the window server's would be. Then
+//! a tool page described `activates = false` (`nonactivating_page`): no activation asked for by its
+//! build or by its show with the keyboard, the show answered `true` exactly when its window is key
+//! at the call, the same keys while it has the keyboard, and, where the workspace still names the
+//! application that was in front, the front back with nothing left waiting for an activation that
+//! application never announces; then, as data, the same page beside a tool page that activates the
+//! application (`beside_a_page`). Last, the rule list on its own
+//! (`rule_list_alone`), since the host's policy blocks that outside fetch before a rule list is
+//! asked: a page built with one rule more, which blocks a file of its own the policy lets it fetch,
+//! must not get that file. These are `check` lines, `ok` or `FAILED`: what the host promises,
+//! whatever the desktop. Where the page does not get the keyboard on a runner the keys are not
+//! checked, and a line says so. The rest is data: the times, what the page says of its context
+//! (`isSecureContext`, the clipboard, WebRTC), the classes AppKit made the first responder, an app
+//! page's Dock claim and keys, where the keyboard goes with the non-activating page beside another
+//! page, and the folders WebKit made under `~/Library`.
 //!
 //! Exit status 0 when it ran to the end and no check failed, 3 when it ran to the end and a check
 //! failed, 1 when it could not run, 2 for a wrong argument. Every line starts with `PAGE CHECK:`;
@@ -86,7 +93,9 @@ panel is shown. Then builds pages with the page window host.gui.webview uses and
 host promises of them: the rule list, also on its own, the page's own script and no inline one,
 messages both ways, its own file and nothing outside, no navigation away, and the keys in a page
 with the keyboard (Command-A, C and V in a field, Return on a button, Command-Q and Command-H doing
-nothing in a tool page, Command-W hiding it); it sets the pasteboard while it does. Opens windows of its own for
+nothing in a tool page, Command-W hiding it), also in a tool page described activates = false,
+which must ask for no activation and answer its show at the call, and which it shows beside another
+tool page as well; it sets the pasteboard while it does. Opens windows of its own for
 some seconds, loads no module and writes nothing to the application's log; every line it prints
 starts with PAGE CHECK:, and a check that fails says FAILED. Exit status 0 when it ran to the end
 and no check failed, 3 when one failed, 1 when it could not run, 2 for a wrong argument.";
@@ -344,8 +353,8 @@ fn hand_back(app: &NSApplication, panel: &NSPanel, target: Option<i32>, over: Ov
     ));
 }
 
-/// A panel that does not activate this application, made key with nothing else asked — the
-/// experimental way the setting will offer — and what came of it.
+/// A panel that does not activate this application, made key with nothing else asked — the way a
+/// page described `activates = false` takes the keyboard — and what came of it.
 fn nonactivating_panel(app: &NSApplication, mtm: MainThreadMarker) {
     let panel = panel(mtm, "page-check: non-activating panel", false);
     let before = frontmost();
@@ -871,12 +880,15 @@ fn set_pasteboard(text: &str) {
 }
 
 /// Builds a page of `kind` as page `n` with the rule list, and checks that it was built without an
-/// activation being asked for; the page, if it was built. `name` is the page's in the lines.
+/// activation being asked for; the page, if it was built. `name` is the page's in the lines;
+/// `activates` the page option.
+#[allow(clippy::too_many_arguments)]
 fn build_page(
     tally: &mut Tally,
     rules: &WKContentRuleList,
     root: &Path,
     kind: WindowKind,
+    activates: bool,
     name: &str,
     n: u64,
     counting: bool,
@@ -886,6 +898,7 @@ fn build_page(
         page: n,
         build: n,
         kind,
+        activates,
         title: format!("page-check: {name} page"),
         scheme: scheme.clone(),
         root: root.to_path_buf(),
@@ -931,7 +944,8 @@ fn wait_loaded(app: &NSApplication, tally: &mut Tally, page: u64, from: usize, t
 }
 
 /// The web view's sections: the rule list, a tool page built, loaded and spoken to, its keys, an app
-/// page, and the rule list on its own. Hard checks are `check` lines; everything else is data.
+/// page, a tool page that does not activate the application, and the rule list on its own. Hard
+/// checks are `check` lines; everything else is data.
 fn web_view(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally) {
     say(&format!(
         "web view | {}",
@@ -963,7 +977,7 @@ fn web_view(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally) {
     let counting = count_activations();
     let from = inbox_mark();
     let t0 = Instant::now();
-    if let Some(tool) = build_page(tally, &rules, &root, WindowKind::Tool, "tool", 1, counting) {
+    if let Some(tool) = build_page(tally, &rules, &root, WindowKind::Tool, true, "tool", 1, counting) {
         if wait_loaded(app, tally, 1, from, t0, "tool") {
             tool_page(app, mtm, tally, &tool, from, t0);
         }
@@ -971,12 +985,13 @@ fn web_view(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally) {
     }
     let from = inbox_mark();
     let t0 = Instant::now();
-    if let Some(page) = build_page(tally, &rules, &root, WindowKind::App, "app", 2, counting) {
+    if let Some(page) = build_page(tally, &rules, &root, WindowKind::App, true, "app", 2, counting) {
         if wait_loaded(app, tally, 2, from, t0, "app") {
             app_page(app, &page);
         }
         drop(page);
     }
+    nonactivating_page(app, mtm, tally, &rules, &root, counting);
     rule_list_alone(app, mtm, tally, &root, counting);
     pump(app, Duration::from_millis(20));
     let _ = std::fs::remove_dir_all(&root);
@@ -1002,7 +1017,7 @@ fn rule_list_alone(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally
     if let Ok(list) = list {
         let from = inbox_mark();
         let t0 = Instant::now();
-        if let Some(page) = build_page(tally, &list, root, WindowKind::Tool, NAME, 3, counting) {
+        if let Some(page) = build_page(tally, &list, root, WindowKind::Tool, true, NAME, 3, counting) {
             if wait_loaded(app, tally, 3, from, t0, NAME) {
                 let own = ask(app, &page, 3, "fetch-own", "fetch-own ");
                 let blocked = ask(app, &page, 3, "fetch-rules-only", "fetch-rules-only ");
@@ -1180,7 +1195,7 @@ fn tool_page(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally, tool
         on_screen.map(|d| format!("{:.0} ms", d.as_secs_f64() * 1000.0)).unwrap_or_else(|| "no echo".to_string())
     ));
     if window.isKeyWindow() {
-        keys(app, tally, tool);
+        keys(app, tally, tool, 1, "");
     } else {
         say("web view | the keys are not checked: the page did not get the keyboard on this Mac");
     }
@@ -1192,20 +1207,21 @@ fn tool_page(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally, tool
     drop(counter);
 }
 
-/// The tool page's keys, sent while it has the keyboard: the Edit keys in its field, Return on its
+/// A tool page's keys, sent while it has the keyboard: the Edit keys in its field, Return on its
 /// button, Command-Q and the two Command-H that do nothing, and Command-W, which hides it — last.
-fn keys(app: &NSApplication, tally: &mut Tally, tool: &page::Native) {
+/// `n` is the page's number; `which` follows each check's name, to tell the pages' lines apart.
+fn keys(app: &NSApplication, tally: &mut Tally, tool: &page::Native, n: u64, which: &str) {
     let window = tool.window();
     let cmd = NSEventModifierFlags::Command;
     let focused = |what: &str| {
         let from = inbox_mark();
         let t = Instant::now();
         tell(tool, &format!("focus-{what}"));
-        wait_message(app, 1, from, t + SECTION, |m| m.starts_with("focused ")).map(|(_, m)| m)
+        wait_message(app, n, from, t + SECTION, |m| m.starts_with("focused ")).map(|(_, m)| m)
     };
     let field = focused("field");
     if field.as_deref() != Some("focused field") {
-        tally.check("the field takes the keyboard", Err(format!("{field:?}")));
+        tally.check(&format!("the field takes the keyboard{which}"), Err(format!("{field:?}")));
         return;
     }
     // Command-A, Command-C: the field's text on the pasteboard.
@@ -1224,31 +1240,31 @@ fn keys(app: &NSApplication, tally: &mut Tally, tool: &page::Native) {
         }
         pump(app, Duration::from_millis(20));
     };
-    tally.check("Command-A and Command-C copy the field's text", copied);
+    tally.check(&format!("Command-A and Command-C copy the field's text{which}"), copied);
     // Command-A, Command-V: the field's text replaced by the pasteboard's.
     set_pasteboard("pasted by page-check");
     let from = inbox_mark();
     let t = Instant::now();
     press(app, window, "a", 0, cmd);
     press(app, window, "v", 9, cmd);
-    let pasted = wait_message(app, 1, from, t + SECTION, |m| m == "value pasted by page-check");
+    let pasted = wait_message(app, n, from, t + SECTION, |m| m == "value pasted by page-check");
     tally.check(
-        "Command-V pastes",
-        pasted.map(|_| String::new()).ok_or_else(|| format!("the field said: {}", messages(1, from).join(", "))),
+        &format!("Command-V pastes{which}"),
+        pasted.map(|_| String::new()).ok_or_else(|| format!("the field said: {}", messages(n, from).join(", "))),
     );
     // Return on the button: one message.
     let button = focused("button");
     if button.as_deref() == Some("focused button") {
         let from = inbox_mark();
         press(app, window, "\r", 36, NSEventModifierFlags::empty());
-        let echoed = round_trip(app, tool, 1, 50).is_some();
-        let clicks = messages(1, from).iter().filter(|m| m.starts_with("clicked ")).count();
+        let echoed = round_trip(app, tool, n, 50).is_some();
+        let clicks = messages(n, from).iter().filter(|m| m.starts_with("clicked ")).count();
         tally.check(
-            "Return on a button gives one message",
+            &format!("Return on a button gives one message{which}"),
             if echoed && clicks == 1 { Ok(String::new()) } else { Err(format!("{clicks} message(s), echo after them {echoed}")) },
         );
     } else {
-        tally.check("the button takes the keyboard", Err(format!("{button:?}")));
+        tally.check(&format!("the button takes the keyboard{which}"), Err(format!("{button:?}")));
     }
     // Command-Q, Command-H, Option-Command-H: nothing, and none of the menu's items.
     let counts = || (MENU_QUIT.load(Ordering::Relaxed), MENU_HIDE.load(Ordering::Relaxed), MENU_HIDE_OTHERS.load(Ordering::Relaxed));
@@ -1256,12 +1272,12 @@ fn keys(app: &NSApplication, tally: &mut Tally, tool: &page::Native) {
     press(app, window, "q", 12, cmd);
     press(app, window, "h", 4, cmd);
     press(app, window, "h", 4, cmd | NSEventModifierFlags::Option);
-    let echoed = round_trip(app, tool, 1, 60).is_some();
+    let echoed = round_trip(app, tool, n, 60).is_some();
     pump(app, Duration::from_millis(20));
     let hidden = app.isHidden();
     let quit = crate::instance::take_quit_request();
     tally.check(
-        "Command-Q, Command-H and Option-Command-H do nothing in a tool page",
+        &format!("Command-Q, Command-H and Option-Command-H do nothing in a tool page{which}"),
         if echoed && counts() == before && !hidden && !quit && window.isVisible() {
             Ok(String::new())
         } else {
@@ -1281,15 +1297,246 @@ fn keys(app: &NSApplication, tally: &mut Tally, tool: &page::Native) {
     let from = inbox_mark();
     let t = Instant::now();
     press(app, window, "w", 13, cmd);
-    let closed = wait_page(app, from, t + SECTION, |e| matches!(e, PageEvent::Closed { page: 1, why: "user", .. }));
+    let closed = wait_page(app, from, t + SECTION, |e| matches!(e, PageEvent::Closed { page, why: "user", .. } if *page == n));
     tally.check(
-        "Command-W hides the tool page",
+        &format!("Command-W hides the tool page{which}"),
         if closed.is_some() && !window.isVisible() {
             Ok(String::new())
         } else {
             Err(format!("closed by the user said {}; the window shown {}", closed.is_some(), window.isVisible()))
         },
     );
+}
+
+/// A tool page described `activates = false` (experimental), built and shown with the keyboard while
+/// another application is the frontmost one. What the host promises of it whatever the desktop is a
+/// `check`: its build and its show ask for no activation — counted, as for the other pages — and,
+/// where it gets the keyboard, its keys are the tool page's; and where the workspace still names
+/// the other application when Command-W hides the page, the front goes back to it at once, with no
+/// focus left waiting for an activation that application never announces
+/// (`backend::active_for_handing`); and its show answers `true` exactly when its window is key at
+/// the call, as nothing is on its way. Where the keyboard went, what AppKit and the workspace say
+/// is active, and the page's level are data, and so is the page beside another
+/// ([`beside_a_page`]).
+fn nonactivating_page(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally, rules: &WKContentRuleList, root: &Path, counting: bool) {
+    const NAME: &str = "non-activating";
+    const N: u64 = 4;
+    let from = inbox_mark();
+    let t0 = Instant::now();
+    let Some(page) = build_page(tally, rules, root, WindowKind::Tool, false, NAME, N, counting) else { return };
+    if !wait_loaded(app, tally, N, from, t0, NAME) {
+        return;
+    }
+    let counter = install_menu(app, mtm);
+    let window = page.window();
+    let n = window.windowNumber();
+    let me = std::process::id() as i32;
+    let before = frontmost();
+    let asked = ACTIVATIONS.load(Ordering::Relaxed);
+    let seen = mark();
+    let t = Instant::now();
+    page.put(None, None);
+    let shown = page.show(true);
+    // Before the event loop runs again: nothing is on its way, so the answer is the window's state
+    // at the call (docs/api/gui.md).
+    let key_at_call = window.isKeyWindow();
+    let key = wait(app, seen, t, t + SECTION, |s| s == Seen::Key(n));
+    let activations = ACTIVATIONS.load(Ordering::Relaxed) - asked;
+    tally.check(
+        "showing the non-activating page with the keyboard asked for no activation",
+        match (counting, activations) {
+            (false, _) => Err("the activation calls could not be counted".to_string()),
+            (true, 0) => Ok("none counted".to_string()),
+            (true, k) => Err(format!("{k} asked for")),
+        },
+    );
+    let answer = if shown.is_ok() { "true" } else { "\"declined by the system\"" };
+    tally.check(
+        "the non-activating page's show answers true exactly when its window is key at the call",
+        if shown.is_ok() == key_at_call {
+            Ok(format!("answered {answer}, key {}", yes(key_at_call)))
+        } else {
+            Err(format!(
+                "answered {answer}, but the window {} the key window when the show returned",
+                if key_at_call { "was" } else { "was not" }
+            ))
+        },
+    );
+    say(&format!(
+        "web view | the non-activating page shown with the keyboard: show answered {}; the window key {}; made \
+         non-activating {}; this application active (AppKit) {}; frontmost before: {}; frontmost now: {}; its level {}",
+        if shown.is_ok() { "true" } else { "\"declined by the system\"" },
+        after(key),
+        yes(window.styleMask().contains(NSWindowStyleMask::NonactivatingPanel)),
+        yes(app.isActive()),
+        describe(before),
+        describe(frontmost()),
+        window.level()
+    ));
+    if window.isKeyWindow() {
+        // Read before the keys: Command-W, the last of them, hides the page.
+        let lent = frontmost().is_some_and(|f| f != me);
+        keys(app, tally, &page, N, " (activates = false)");
+        pump(app, Duration::from_millis(20));
+        if lent {
+            tally.check(
+                "the non-activating page hidden gives the front back at once",
+                match front::waiting_for() {
+                    None => Ok(format!("nothing waits; frontmost now: {}", describe(frontmost()))),
+                    Some(p) => Err(format!(
+                        "a focus waits for {} to become the active application, which it already is and never announces",
+                        describe(Some(p))
+                    )),
+                },
+            );
+        } else {
+            say("web view | the non-activating page's hand-back is not checked: the workspace named this application the frontmost one");
+        }
+    } else {
+        say("web view | the non-activating page's keys are not checked: the page did not get the keyboard on this Mac");
+        page.hide();
+    }
+    say(&format!(
+        "web view | the non-activating page hidden: this application active (AppKit) {}; frontmost now: {}",
+        yes(app.isActive()),
+        describe(frontmost())
+    ));
+    app.setMainMenu(None);
+    drop(counter);
+    beside_a_page(app, tally, rules, root, counting, &page);
+    drop(page);
+}
+
+/// The non-activating page beside a tool page that activates this application, the default — as
+/// data, what AppKit does there being nothing the host can promise. Hidden while the other page is
+/// shown without the keyboard: whether AppKit gives the keyboard to the other page as it leaves, so
+/// that this application is deactivated (`front::keyboard_kept`), and where the keyboard is after
+/// that. Then the other page shown with the keyboard while the non-activating one has it: whether
+/// the activation that show asks for makes the workspace name this application, though AppKit calls
+/// it active already; and the two hidden, the non-activating one first, so that the other one gives
+/// the front back to the application that was in front through it: whether its activation is asked
+/// for and announced, or a focus is left waiting for an activation that application, the active one
+/// throughout, never announces. Each part only where the non-activating page gets the keyboard with
+/// another application named the frontmost one; a line says so otherwise.
+fn beside_a_page(app: &NSApplication, tally: &mut Tally, rules: &WKContentRuleList, root: &Path, counting: bool, page: &page::Native) {
+    const NAME: &str = "second tool";
+    const N: u64 = 5;
+    let from = inbox_mark();
+    let t0 = Instant::now();
+    let Some(other) = build_page(tally, rules, root, WindowKind::Tool, true, NAME, N, counting) else { return };
+    if !wait_loaded(app, tally, N, from, t0, NAME) {
+        return;
+    }
+    let me = std::process::id() as i32;
+    let window = page.window();
+    let n = window.windowNumber();
+    let other_n = other.window().windowNumber();
+    let key = || match super::own::key_now(app).map(|w| w.windowNumber()) {
+        Some(k) if k == n => "the non-activating page",
+        Some(k) if k == other_n => "the other tool page",
+        Some(_) => "another window of ours",
+        None => "none of ours",
+    };
+    // The non-activating page shown with the keyboard: whether it has it with another application
+    // named the frontmost one.
+    let lend = || {
+        let seen = mark();
+        let t = Instant::now();
+        let _ = page.show(true);
+        let _ = wait(app, seen, t, t + SECTION, |s| s == Seen::Key(n));
+        window.isKeyWindow() && frontmost().is_some_and(|f| f != me)
+    };
+    let not_measured = |what: &str| {
+        say(&format!(
+            "web view | beside another page: {what} not measured, the non-activating page did not get the keyboard with \
+             another application the frontmost one (frontmost: {})",
+            describe(frontmost())
+        ));
+        page.hide();
+        other.hide();
+    };
+
+    let _ = other.show(false);
+    if !lend() {
+        return not_measured("the hand-back");
+    }
+    let _ = front::take_kept();
+    page.hide();
+    let straight = key();
+    let kept = front::take_kept();
+    pump(app, Duration::from_millis(20));
+    say(&format!(
+        "web view | beside another page: the non-activating page hidden with the other tool page shown without the \
+         keyboard: AppKit gave the keyboard to a window of ours as it left: {}; straight after, the key window {straight}; \
+         after the event loop ran, the key window {}; this application active (AppKit) {}; frontmost {}; a focus waits {}",
+        match kept {
+            Some(true) => "yes, so this application was deactivated",
+            Some(false) => "no",
+            None => "not asked, the front was not handed back at once",
+        },
+        key(),
+        yes(app.isActive()),
+        describe(frontmost()),
+        front::waiting_for().map_or_else(|| "for nothing".to_string(), |p| format!("for {}", describe(Some(p))))
+    ));
+
+    if !lend() {
+        return not_measured("the default page shown over it");
+    }
+    let lent_to = frontmost();
+    let asked = ACTIVATIONS.load(Ordering::Relaxed);
+    let seen = mark();
+    let t = Instant::now();
+    let answered = other.show(true);
+    let at_call = other.window().isKeyWindow();
+    let got = wait(app, seen, t, t + SECTION, |s| s == Seen::Key(other_n));
+    let named = wait(app, seen, t, t + SECTION, |s| s == Seen::Front(me));
+    say(&format!(
+        "web view | beside another page: the other tool page shown with the keyboard while the non-activating page has \
+         it, {} the frontmost one: show answered {}; key at the call {}; the window key {}; activations asked for {}; \
+         this application active (AppKit) {}; the workspace named this application {}; frontmost now: {}",
+        describe(lent_to),
+        if answered.is_ok() { "true" } else { "\"declined by the system\"" },
+        yes(at_call),
+        after(got),
+        if counting { (ACTIVATIONS.load(Ordering::Relaxed) - asked).to_string() } else { "not counted".to_string() },
+        yes(app.isActive()),
+        after(named),
+        describe(frontmost())
+    ));
+
+    page.hide();
+    let before = frontmost();
+    let _ = front::take_ended();
+    let seen = mark();
+    let t = Instant::now();
+    other.hide();
+    let waited = front::waiting_for();
+    let came = waited.and_then(|p| wait(app, seen, t, t + SECTION, |s| s == Seen::Front(p)));
+    pump(app, Duration::from_millis(20));
+    let ended = match (front::take_ended(), front::waiting_for()) {
+        (Some(Ended::Made), _) => "made at its activation".to_string(),
+        (Some(Ended::WentTo(p)), _) => format!("given up, {} became the active one first", describe(Some(p))),
+        (Some(Ended::Typed), _) => "given up, a key was pressed".to_string(),
+        (Some(Ended::GivenUp), _) => "given up before an activation came".to_string(),
+        (None, Some(p)) => format!("STILL WAITING for {}", describe(Some(p))),
+        (None, None) => "none, nothing waited".to_string(),
+    };
+    say(&format!(
+        "web view | beside another page: the non-activating page hidden, then the other one, which had the keyboard, \
+         with {} the frontmost one: {}; the focus: {ended}; the key window {}; this application active (AppKit) {}; \
+         frontmost now: {}",
+        describe(before),
+        match waited {
+            Some(p) => format!("the activation of {} asked for, announced {}", describe(Some(p)), after(came)),
+            None => "no activation waited for".to_string(),
+        },
+        key(),
+        yes(app.isActive()),
+        describe(frontmost())
+    ));
+    // What is left waiting is the check's, not the rule list's that follows.
+    front::cancel("page-check moves on");
 }
 
 /// The app page, as data: the Dock claim, the keyboard, Command-M and Command-Q, and the claim let go.

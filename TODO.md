@@ -7038,9 +7038,8 @@ maintainer's German test instructions are a text of their own, not in the reposi
       2026-10-11; 0.57.0 activates the application on every web view it creates), on the Air
       (12.7.6) and the mini (14.5), with REAPER and a small page. The answers go here, not into the
       reference:
-      - **M1 (decides the Mac design):** a panel that does not activate the application, given the
-        keyboard by a key: does VoiceOver speak the focused button, does REAPER stay the active
-        application (log), does VO-M still open REAPER's menu bar?
+      - **M1:** now MW1b (stage 4's questions, below): the panel that does not activate the
+        application is the experimental page option `activates = false` since 2026-10-11.
       - **M2:** the panel shown without the keyboard: does VoiceOver stay quiet in REAPER?
       - **M3:** the panel hidden: are the keyboard and VoiceOver back in the plug-in?
       - **M4:** a click into the plug-in while the panel has the keyboard: does it arrive, and does
@@ -7180,8 +7179,8 @@ maintainer's German test instructions are a text of their own, not in the reposi
       first build of a session logs WebKit's version, and only the log's words for the engine
       differ (`webview::Engine::words`, Windows' held to stage 1's). gui.md's macOS blocks say what
       it does. A tool page is the VPS Avenger control tool's activating panel
-      (the maintainer's decision of 2026-10-11; the non-activating one is to be an experimental
-      page option, `activates = false`, still to come) whose level follows the keyboard: floating
+      (the maintainer's decision of 2026-10-11; the non-activating one is the experimental page
+      option `activates = false`, the next item) whose level follows the keyboard: floating
       while it is the key window, normal otherwise, also while a show waits for the keyboard. An
       app page is an ordinary window that claims the Dock while shown. Command-W, the Edit keys and,
       in a tool page, Command-Q and Command-H doing nothing are the host's (`webview::mac_key_of`,
@@ -7201,7 +7200,36 @@ maintainer's German test instructions are a text of their own, not in the reposi
       the keyboard is hidden again, an app page that was not open as well as a tool page, and an
       app page hidden so lets the Dock claim go; a `focus` places nothing and hides nothing. An app
       page has kept the front only once its window got the keyboard its request asked for, and it
-      never goes full screen (its zoom button zooms it). What CI cannot show is the next item.
+      never goes full screen (its zoom button zooms it). What CI cannot show is in the item after
+      the next.
+- [x] **The non-activating page, `activates = false`** (experimental; built 2026-10-11, the
+      maintainer's decision of that day: a page option the module chooses, not an Application
+      setting). `host.gui.webview`'s `activates` — `true` by default, `false` for a tool page only
+      (`webview::WindowKind::allows_activates`; an app page described so raises) — is read when the
+      page is described and handed to the page window with the rest (`BuildSpec::activates`); on
+      Windows it changes nothing, and the log's line for the description says so. On a Mac the
+      panel is made with `NSWindowStyleMaskNonactivatingPanel`, takes the keyboard with
+      `makeKeyAndOrderFront` and the web view made the first responder and never with an
+      activation (`app::keyboard_without_activating`, which gives up what `activate_self` gives
+      up), and its show is answered at the call: the window key, or declined. AppKit calls this
+      application active while such a panel has the keyboard, though the workspace names the
+      application it took the keyboard from (`page-check`'s non-activating panel, every CI runner,
+      2026-10-11), so whether this application is the active one goes by `own::active`
+      (`backend::active_for_handing`) wherever it decides something — the hand-over, a show's
+      answer, a request whose page left: the page leaving, or `host.window.focus` while it has the
+      keyboard, raises and focuses the window at once with nothing asked while the workspace still
+      names that application — it never stopped being the active one, and would announce no
+      activation to wait for — and should AppKit give the keyboard to another window of ours as
+      the page leaves, this application is deactivated (`front::keyboard_kept`), which asks nothing
+      of the other. `host.window.focus` of the page's own window takes the keyboard without an
+      activation too, and is answered at the call. `page-check` builds one, and checks that neither
+      its build nor its show with the keyboard asks for an activation, that the show is answered
+      `true` exactly when the window is key at the call, its keys where it gets the keyboard, and
+      that hidden it leaves nothing waiting for an activation; beside a second tool page it
+      reports, as data, where the keyboard goes when it leaves with that page shown, and what
+      that page shown with the keyboard over it, and then hidden, does to the front. gui.md's
+      option and its Windows and macOS blocks say what it does; what only a Mac shows is MW1b,
+      and MW6 and MW18 in this model.
 - [ ] **Stage 4's questions only a Mac answers** (the page window above, which `host.gui.webview`
       shows its pages in since 2026-10-11):
       - **MW14:** where VoiceOver lands when a page takes the keyboard again — a show, and after a
@@ -7221,12 +7249,33 @@ maintainer's German test instructions are a text of their own, not in the reposi
       - **MW6** (the VPS Avenger module's developer: sighted, Logic; M6 and M12 above): whether
         Logic's plug-in window hides while a tool page, or an app page, has the keyboard — which
         makes this application the active one, the panel activating by default. The most important
-        answer for that default; gui.md's macOS block says it is unmeasured. Again with
-        `activates = false` once that page option is built.
-      - **MW18** (the developer, Logic in full screen): a tool page and an app page shown over it —
-        does the page appear in Logic's Space, does the Space switch, does Logic stay in full screen?
+        answer for that default; gui.md's macOS block says it is unmeasured. Again with a tool page
+        described `activates = false` (since 2026-10-11), which leaves Logic the active
+        application: whether its plug-in window then stays shown, and can be read and clicked while
+        the page has the keyboard.
+      - **MW18** (the developer, Logic in full screen): a tool page — the default, and one described
+        `activates = false` — and an app page shown over it: does the page appear in Logic's Space,
+        does the Space switch, does Logic stay in full screen?
         Apple's forum answer (thread 826308) says a window that activates its application can take
         a full-screen application out of its Space. gui.md's macOS block says it is unmeasured.
+      - **MW1b** (the tester, VoiceOver, with REAPER; after the default panel's MW1a): a tool page
+        described `activates = false` (`… a tool page's panel that takes the keyboard without making
+        this application the active one` when it is built), shown by a key while REAPER is in front.
+        Does VoiceOver follow the keyboard into the panel and speak the focused element, and what
+        does it say on the way in? Does REAPER stay the active application — no `[keys] the
+        workspace named this application the frontmost one` line, and VO-M still opens REAPER's menu
+        bar? Hidden: are the keyboard and VoiceOver back on the plug-in window (`… is the active
+        application already: focusing window …`)? The round trip: `host.window.focus` of the plug-in
+        window while the page has the keyboard raises and focuses it at once, with nothing asked —
+        does the keyboard leave the panel then, so that the panel drops to the normal level under
+        the plug-in window (`[keys] none of our windows has the keyboard any more` straight after),
+        and does the click land in the plug-in? If the panel keeps the keyboard, it stays floating
+        over the plug-in window, and the round trip needs another way. With another window of
+        ours shown that can take the keyboard — a second page shown without it, the module
+        manager open — hidden: is the keyboard back on the plug-in window, or still in ours
+        (`[keys] … has the keyboard`), and does the log say `AppKit gave the keyboard to our window
+        … this application deactivated`? With MW6 and MW18, this decides whether this panel
+        becomes the default.
       - **MW1a and MW5:** the show's answer on a real Mac (`got the keyboard, … ms after the show
         asked for the front`, `the front went to … instead`, `a key went to …`), a page the show
         placed over the rectangle to avoid — a tool page, or an app page that was not open —

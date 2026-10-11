@@ -429,6 +429,14 @@ Each of these is a line `check …: ok` or `check …: FAILED` with what was see
   Return on its button gives one message, Command-Q, Command-H and Option-Command-H do nothing, and
   Command-W hides the page. Where the page does not get the keyboard on a Mac, the keys are not
   checked, and a line says so. These keys set the pasteboard;
+- a tool page described `activates = false` — the experimental panel that takes the keyboard
+  without activating the application — built and loaded with no activation asked for, and shown
+  with the keyboard with none asked for either, its show answered `true` exactly when its window
+  is the key window as the show returns; where it gets the keyboard, the same keys; where the
+  workspace still names the application that was in front when Command-W hides the page, the
+  front given back at once, with nothing left waiting for an activation that application never
+  announces; and a second tool page, one that activates the application, built and loaded with no
+  activation asked for;
 - last, the rule list on its own, since the host's policy blocks the fetch of `https://example.com`
   above before any rule list is asked: a page built with the pages' rule list and one rule more,
   which blocks a file of the page's own that the policy lets it fetch, does not get that file, and
@@ -437,9 +445,17 @@ Each of these is a line `check …: ok` or `check …: FAILED` with what was see
 The rest is data: WebKit's version, the build's and the load's times, the round trip with the page
 off screen and on it, what the page says of itself (`isSecureContext`, `navigator.clipboard`,
 `RTCPeerConnection`), the classes AppKit made the first responder while it was shown, an
-application page's Dock claim, Command-M and Command-Q, and whether WebKit's folders under
-`~/Library` exist before and after. The last line says how many checks failed. Exit status 0 when
-it ran to the end and no check failed, 3 when it ran to the end and a check failed.
+application page's Dock claim, Command-M and Command-Q, where the keyboard went with the
+non-activating page and which application AppKit and the workspace then call the active one, the
+non-activating page beside the second tool page (`beside another page`: hidden while that one is
+shown without the keyboard — whether AppKit gave the keyboard to it, so that the application was
+deactivated, and where the keyboard is after that; then that one shown with the keyboard while the
+non-activating page has it — whether the workspace then names the application — and both hidden,
+whether the front goes back to the application that was in front or a focus is left waiting for an
+activation it never announces), and whether WebKit's folders under `~/Library` exist before and
+after. The last line says how many
+checks failed. Exit status 0 when it ran to the end and no check failed, 3 when it ran to the end
+and a check failed.
 
 **In CI**, the `page-check` job of `.github/workflows/macos-build.yml` runs it from the downloaded
 zip on all four Mac runners — `macos-14`, `macos-15`, `macos-15-intel` and `macos-26` — after

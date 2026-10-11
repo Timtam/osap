@@ -798,6 +798,17 @@ impl WindowKind {
             WindowKind::App => kept,
         }
     }
+
+    /// Whether a page of this kind can be described with `host.gui.webview`'s option `activates`
+    /// (experimental; the maintainer's decision of 2026-10-11): a tool page either way — `false`
+    /// asks a Mac for a panel that takes the keyboard without making the application the active
+    /// one, so the DAW stays the active application, and changes nothing on Windows — and an app
+    /// page only as `true`, its default: a window like any program's activates its application
+    /// when it takes the keyboard, and one that did not would be in Command-Tab and the Dock under
+    /// an application that never comes to the front.
+    pub fn allows_activates(self, activates: bool) -> bool {
+        activates || self == WindowKind::Tool
+    }
 }
 
 /// What a page's window is, on both platforms: one decision, which `webview_win.rs` builds on
@@ -819,8 +830,8 @@ pub struct Recipe {
     /// macOS: an `NSPanel` — a utility panel in no window list, floating while it has the keyboard
     /// and at the normal level otherwise — rather than an ordinary `NSWindow`. Either activates
     /// the application when it takes the keyboard (the maintainer's decision of 2026-10-11, the
-    /// VPS Avenger control tool's way); a panel that does not is to be an experimental page option,
-    /// `activates = false`, still to come (TODO.md, stage 4).
+    /// VPS Avenger control tool's way); a panel that does not is the experimental page option
+    /// `activates = false` ([`WindowKind::allows_activates`]), which the panel is made with.
     pub panel: bool,
 }
 
@@ -899,6 +910,8 @@ impl Engine {
                 building: "building in WebView2's environment — no module callback runs until WebView2 has made the page",
                 front_taken: "shown and brought to the front (accepted)",
                 focus_taken: "accepted",
+                not_activating: "activates = false, which changes nothing on Windows: a window there takes the \
+                                 keyboard and the front together",
             },
             #[cfg(any(test, target_os = "macos"))]
             Engine::WebKit => Words {
@@ -909,6 +922,8 @@ impl Engine {
                 building: "building with WebKit — no module callback runs until the web view is made",
                 front_taken: "shown, and the front asked for (the page's own lines say whether it came)",
                 focus_taken: "asked for (the page's own lines say whether the front came)",
+                not_activating: "activates = false: a panel that takes the keyboard without making this application \
+                                 the active one (experimental)",
             },
         }
     }
@@ -934,6 +949,8 @@ pub struct Words {
     pub front_taken: &'static str,
     /// A `focus` that the system did not decline.
     pub focus_taken: &'static str,
+    /// A page described with `activates = false`, said when it is described: what that is here.
+    pub not_activating: &'static str,
 }
 
 /// The script the host puts into every page before the page's own: `platform.post(value)` to
@@ -1357,14 +1374,18 @@ mod tests {
         assert_eq!(w.building, "building in WebView2's environment — no module callback runs until WebView2 has made the page");
         assert_eq!(w.front_taken, "shown and brought to the front (accepted)");
         assert_eq!(w.focus_taken, "accepted");
+        // Said only for a page described `activates = false`, which stage 1 had not: no line of
+        // its changes. On Windows it says the option does nothing there.
+        assert!(w.not_activating.starts_with("activates = false") && w.not_activating.contains("nothing on Windows"));
         let k = Engine::WebKit.words();
-        let all = [k.system, k.env, k.env_there, k.env_failed, k.building, k.front_taken, k.focus_taken];
+        let all = [k.system, k.env, k.env_there, k.env_failed, k.building, k.front_taken, k.focus_taken, k.not_activating];
         for word in all {
             assert!(!word.contains("WebView2") && !word.contains("Windows"), "{word}");
         }
         assert_eq!(k.system, "macOS");
         assert!(k.front_taken.contains("asked for") && k.focus_taken.contains("asked for"));
         assert!(!k.front_taken.contains("accepted"), "{}", k.front_taken);
+        assert!(k.not_activating.starts_with("activates = false") && k.not_activating.contains("experimental"));
         assert_eq!(Engine::here(), if cfg!(target_os = "macos") { Engine::WebKit } else { Engine::WebView2 });
     }
 
@@ -1909,9 +1930,8 @@ mod tests {
         }
     }
 
-    /// The tool page of stage 1 is unchanged: no window list, no minimise or maximise box, a
-    /// panel that does not activate the application on a Mac. The app page is the other way
-    /// round in every point.
+    /// The tool page of stage 1 is unchanged: no window list, no minimise or maximise box, and a
+    /// panel on a Mac. The app page is the other way round in every point.
     #[test]
     fn a_tool_page_is_in_no_window_list_and_an_app_page_is_a_window_like_any() {
         let tool = WindowKind::Tool.recipe();
@@ -1928,6 +1948,16 @@ mod tests {
         assert!(WindowKind::Tool.gives_front_back(false));
         assert!(WindowKind::App.gives_front_back(true));
         assert!(!WindowKind::App.gives_front_back(false));
+    }
+
+    /// `activates = false` is a tool page's option alone: an app page is a window like any
+    /// program's, which activates its application; `true`, the default, suits both.
+    #[test]
+    fn only_a_tool_page_can_be_one_that_does_not_activate_the_application() {
+        assert!(WindowKind::Tool.allows_activates(true));
+        assert!(WindowKind::Tool.allows_activates(false));
+        assert!(WindowKind::App.allows_activates(true));
+        assert!(!WindowKind::App.allows_activates(false));
     }
 
     /// On a Mac an app page the user has open goes over `avoid` only once it has the keyboard, as

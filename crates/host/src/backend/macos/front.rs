@@ -28,6 +28,14 @@
 //! application is not left the active one with no window of its own in front. [`HANDING`] says
 //! which the application uses; `page-check` measures both against TextEdit.
 //!
+//! **An application that is the active one already** announces no activation, so its window is
+//! raised and focused at once, with nothing asked. That is also the case while a panel of ours has
+//! the keyboard without having activated this application (a page described `activates = false`):
+//! the application it took the keyboard from never stopped being the active one, though AppKit says
+//! this one is (`own::active`, `backend::active_for_handing`). Should AppKit hand the keyboard to
+//! another window of ours as such a panel leaves, this application is deactivated, which asks
+//! nothing of the other ([`keyboard_kept`]).
+//!
 //! **The window it came from, and only while ours had the keyboard.** The front goes to the window
 //! and the application the caller names — the tool activates the first DAW of a fixed list (the
 //! second departure) — and a window of ours hands it over only while it has the keyboard, Windows'
@@ -54,7 +62,7 @@ use objc2::runtime::NSObjectProtocol;
 use objc2::sel;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSApplicationDidBecomeActiveNotification,
-    NSApplicationDidResignActiveNotification, NSRunningApplication, NSWindow, NSWorkspace,
+    NSApplicationDidResignActiveNotification, NSRunningApplication, NSWindow,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSProcessInfo};
 
@@ -101,6 +109,9 @@ thread_local! {
     static PENDING: RefCell<Option<Pending>> = const { RefCell::new(None) };
     /// How the last one ended ([`take_ended`]).
     static ENDED: Cell<Option<Ended>> = const { Cell::new(None) };
+    /// Whether AppKit gave the keyboard to another window of ours as the last panel that had it only
+    /// lent left, so that this application was deactivated ([`keyboard_kept`], [`take_kept`]).
+    static KEPT: Cell<Option<bool>> = const { Cell::new(None) };
     /// A window focused whose focus chain the log is still owed ([`report_chain`]): its process
     /// and its handle.
     static CHAIN_OWED: Cell<Option<(i32, isize)>> = const { Cell::new(None) };
@@ -156,10 +167,10 @@ pub(super) fn hand_front_to(pid: i32, window: isize, leaving: Option<&NSWindow>,
         return Handed::Kept("no such application");
     };
     let app = super::own::app();
-    // AppKit's own word inside this process once the window system is up; the running
-    // application's before it, when this application has no window that could be active anyway.
-    let active = app.as_deref().map_or_else(|| NSRunningApplication::currentApplication().isActive(), |a| a.isActive());
-    let front = NSWorkspace::sharedWorkspace().frontmostApplication().map(|a| a.processIdentifier());
+    let front = super::ax::frontmost_pid();
+    // AppKit's word, but not while a panel of ours has the keyboard only lent and the workspace
+    // names another application (`own::active`).
+    let active = super::own::active(front);
     let state = HandState {
         leaving_key: leaving.map(|w| w.isKeyWindow() && (super::own::nonactivating(w) || active)),
         target_ours: pid == std::process::id() as i32,
@@ -181,6 +192,7 @@ pub(super) fn hand_front_to(pid: i32, window: isize, leaving: Option<&NSWindow>,
             super::page::superseded();
             if let Some(w) = leaving {
                 w.orderOut(None);
+                keyboard_kept(app.as_deref(), w, &name);
             }
             let ok = focus_now(pid, window, None);
             // Nobody waits on an activation's path here: the read is made at the call.
@@ -207,7 +219,7 @@ pub(super) fn hand_front_to(pid: i32, window: isize, leaving: Option<&NSWindow>,
             });
             // What (a) does with a window of ours leaving, also after (b) was refused.
             let deactivates = leaving.is_some() && active;
-            let (how, taken) = request(app.as_deref(), &target, planned, leaving);
+            let (how, taken) = request(app.as_deref(), active, &target, planned, leaving);
             PENDING.with(|p| {
                 let mut p = p.borrow_mut();
                 match p.as_mut() {
@@ -240,10 +252,39 @@ pub(super) fn hand_front_to(pid: i32, window: isize, leaving: Option<&NSWindow>,
     }
 }
 
+/// A window of ours that had the keyboard, `left`, has been ordered out, with the application the
+/// front goes to (`name`) the active one already ([`HandPlan::AtOnce`]): a panel that had the
+/// keyboard only lent, a page described `activates = false`. AppKit calls this application the
+/// active one while such a panel has the keyboard, and may then hand the keyboard to another window
+/// of ours that can take it — a page shown without the keyboard, the module manager — which would
+/// keep it in this application with the other one in front. So where a window of ours is the key
+/// window straight after the order out, this application is deactivated: that asks no application
+/// to activate, and the one in front is already. Read at the call, as AppKit's word on its key
+/// window; whether AppKit chooses another window then or only later, and where the keyboard goes
+/// after the deactivation, is what `page-check` shows (TODO.md, MW1b).
+fn keyboard_kept(app: Option<&NSApplication>, left: &NSWindow, name: &str) {
+    let Some(app) = app else { return };
+    let kept = super::own::key_now(app);
+    KEPT.with(|k| k.set(Some(kept.is_some())));
+    let Some(kept) = kept else { return };
+    app.deactivate();
+    crate::logging::line(
+        "macos",
+        &format!(
+            "AppKit gave the keyboard to our window '{}' as '{}', which had it without activating this application, \
+             left, with {name} the active application already: this application deactivated, so that it does not keep \
+             the keyboard",
+            kept.title(),
+            left.title()
+        ),
+    );
+}
+
 /// Asks for `target`'s activation the way `how` says, with `leaving` ordered out where that way
 /// puts it: the way that was asked in the end, and whether the system took the request. (b) is
 /// planned only where both of its calls exist and this application is the active one
-/// (`backend::hand_plan`), which needs the application object; without it, (a).
+/// (`backend::hand_plan`), which needs the application object; without it, (a). `active`: this
+/// application is the active one, as `own::active` has it.
 ///
 /// (a), the tool's order: our window out, this application deactivated, then the request, with the
 /// options the rest of the backend activates with. On 14 and later, where the request's option to
@@ -258,7 +299,13 @@ pub(super) fn hand_front_to(pid: i32, window: isize, leaving: Option<&NSWindow>,
 /// refused is asked again (a): our window ordered out after a refusal would leave this application
 /// the active one with nothing of its own in front, where VoiceOver users are left in no
 /// application at all (`app.rs`).
-fn request(app: Option<&NSApplication>, target: &NSRunningApplication, how: Handing, leaving: Option<&NSWindow>) -> (Handing, bool) {
+fn request(
+    app: Option<&NSApplication>,
+    active: bool,
+    target: &NSRunningApplication,
+    how: Handing,
+    leaving: Option<&NSWindow>,
+) -> (Handing, bool) {
     if let (Handing::Yield, Some(app)) = (how, app) {
         app.yieldActivationToApplication(target);
         let taken = target.activateFromApplication_options(
@@ -284,8 +331,8 @@ fn request(app: Option<&NSApplication>, target: &NSRunningApplication, how: Hand
     if let Some(w) = leaving {
         w.orderOut(None);
     }
-    if leaving.is_some() {
-        if let Some(app) = app.filter(|a| a.isActive()) {
+    if leaving.is_some() && active {
+        if let Some(app) = app {
             app.deactivate();
         }
     }
@@ -438,6 +485,13 @@ pub(super) fn waiting_for() -> Option<i32> {
 /// How the last focus that waited ended, once; `page-check` reads it after each hand-over.
 pub(super) fn take_ended() -> Option<Ended> {
     ENDED.with(Cell::take)
+}
+
+/// Whether AppKit gave the keyboard to another window of ours as the last panel that had it only
+/// lent left, once — `None` when no such panel has left since the last read ([`keyboard_kept`]);
+/// `page-check` reads it after hiding one.
+pub(super) fn take_kept() -> Option<bool> {
+    KEPT.with(Cell::take)
 }
 
 /// Raises and focuses window `window` of process `pid`, its application the active one: at once
