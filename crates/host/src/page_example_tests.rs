@@ -11,14 +11,16 @@
 //! loads after the user went elsewhere is not shown over them; and a button's round trip clicks
 //! only once Notepad's foreground event has come, at the point worked out from its client area,
 //! after asking whether anything else is drawn there, reads the line there with a callback, and
-//! brings the page back in the reading's answer, its status posted after the show. A press while
-//! a round trip is under way, or a message of any button while the page is not in front, starts
-//! nothing; a declined focus or a covered point clicks nothing; another window coming forward at
-//! any step of the trip — its event before Notepad's, Notepad's event late, or the window in front
-//! changed by the time the line is read — gives the trip up, said without interrupting, and the
-//! page is not brought back over it; a page Windows does not bring back is said through the
-//! host's speech, a declined one in words of its own; the key pressed during the read gives the
-//! round trip up; and a prepare that failed is not tried again when Notepad comes forward.
+//! brings the page back in the reading's answer, the result posted to it as a `result` just
+//! before the show, while Notepad has the keyboard — the page puts the keyboard focus on it
+//! (`ui/page.js`, which no test here runs). A press while a round trip is under way, or a message
+//! of any button while the page is not in front, starts nothing; a declined focus or a covered
+//! point clicks nothing; another window coming forward at any step of the trip — its event before
+//! Notepad's, Notepad's event late, or the window in front changed by the time the line is read —
+//! gives the trip up, said without interrupting, and the page is not brought back over it; a page
+//! Windows does not bring back is said through the host's speech with the result, a declined one
+//! in words of its own, and logged; the key pressed during the read gives the round trip up; and
+//! a prepare that failed is not tried again when Notepad comes forward.
 //!
 //! **Every event through the real mailbox**: the key, the page's message, its `onReady` and
 //! `onClose`, a window coming forward and the reading's answer each run as a handler of the
@@ -191,12 +193,14 @@ function T.answer(rows, failed)
     error = failed })
 end
 
--- What was said last, and whether it interrupted; the page's status as it was last posted.
+-- What was said last, and whether it interrupted; the page's status line as it was last posted
+-- — a status or a round trip's result — and the kind of that post.
 function T.last() return S.speech[#S.speech] and S.speech[#S.speech].text or "" end
 function T.lastInterrupts() return S.speech[#S.speech] and S.speech[#S.speech].interrupt end
 function T.status()
   for i = #S.pg.posts, 1, -1 do
-    if S.pg.posts[i].kind == "status" then return S.pg.posts[i].text end
+    local k = S.pg.posts[i].kind
+    if k == "status" or k == "result" then return S.pg.posts[i].text, k end
   end
   return nil
 end
@@ -373,9 +377,10 @@ fn a_page_that_loads_after_the_user_went_elsewhere_is_not_shown() {
 /// it is there; on its foreground event, the point is asked about and clicked — the middle of its
 /// client area, from the area's top left — and the line there read with a callback, in whole
 /// corners inside the client area; the page comes back only in the reading's answer, beside
-/// Notepad and with the keyboard, and its status is posted after the show, naming the row
-/// nearest the click. A second press while the round trip is under way asks nothing. The other
-/// button clicks lower left, and a line with nothing on it is said so.
+/// Notepad and with the keyboard, the result posted as a `result` just before the show, while
+/// Notepad is still in front, naming the row nearest the click, and nothing said by the host's
+/// speech. A second press while the round trip is under way asks nothing, said in a status. The
+/// other button clicks lower left, and a line with nothing on it is said so.
 #[test]
 fn a_button_clicks_once_notepad_is_in_front_and_the_page_comes_back_with_the_line() {
     run(r##"
@@ -399,11 +404,13 @@ fn a_button_clicks_once_notepad_is_in_front_and_the_page_comes_back_with_the_lin
         local r = S.reads[1].region
         T.ok(r[1] == 108 and r[2] == 387 and r[3] == 892 and r[4] == 435, "the line around the click: " .. T.region(r))
         T.ok(#S.pg.shows == shows, "the page waits for the reading")
+        local said = #S.speech
         T.answer({ { "first line", 380 }, { "second line", 403 } })
+        T.ok(#S.speech == said, "the result is the page's to say, not the host's speech")
         T.ok(#S.pg.shows == shows + 1 and S.front == T.PAGE, "the page back in the reading's answer")
         local back = S.pg.shows[#S.pg.shows]
         T.ok(back.focus == true and back.avoid.x == 100 and back.avoid.w == 800, "beside Notepad, with the keyboard")
-        T.ok(T.since(from) == "focus 300,post status,ownsPoint,click,read,show,post status", T.since(from))
+        T.ok(T.since(from) == "focus 300,post status,ownsPoint,click,read,post result,show", T.since(from))
         T.ok(T.status() == "Clicked the middle. The line there: second line", T.status())
         -- The other button: lower left, a line with nothing on it.
         T.msg({ action = "lower" })
@@ -411,7 +418,8 @@ fn a_button_clicks_once_notepad_is_in_front_and_the_page_comes_back_with_the_lin
         T.ok(#S.clicks == 2 and S.clicks[2][1] == 108 + 196 and S.clicks[2][2] == 131 + 420,
           "a quarter across, three quarters down: " .. S.clicks[2][1] .. "," .. S.clicks[2][2])
         T.answer({})
-        T.ok(S.front == T.PAGE and T.status() == "Clicked lower left. Nothing is written there.", T.status())
+        local text, kind = T.status()
+        T.ok(S.front == T.PAGE and text == "Clicked lower left. Nothing is written there." and kind == "result", text)
         -- A read that failed is said with its reason.
         T.msg({ action = "middle" })
         T.arrive(T.NOTEPAD)
@@ -421,8 +429,8 @@ fn a_button_clicks_once_notepad_is_in_front_and_the_page_comes_back_with_the_lin
 }
 
 /// Nothing is clicked when something else is drawn at the point — the page comes back all the
-/// same — when Notepad would not come to the front, or when another window comes forward first;
-/// each is said, and the next press is a round trip of its own.
+/// same, on that result, posted first — when Notepad would not come to the front, or when another
+/// window comes forward first; each is said, and the next press is a round trip of its own.
 #[test]
 fn a_covered_point_a_declined_focus_or_another_window_clicks_nothing() {
     run(r##"
@@ -432,7 +440,9 @@ fn a_covered_point_a_declined_focus_or_another_window_clicks_nothing() {
         -- Covered.
         S.owns = false
         T.msg({ action = "middle" })
+        local from = #S.order
         T.arrive(T.NOTEPAD)
+        T.ok(T.since(from) == "ownsPoint,post result,show", "the result first, then the page: " .. T.since(from))
         T.ok(#S.clicks == 0 and #S.reads == 0, "nothing clicked through a window drawn over it, nothing read")
         T.ok(S.front == T.PAGE and T.status() == "Something covers Notepad there; nothing was clicked.", T.status())
         S.owns = true
@@ -441,7 +451,8 @@ fn a_covered_point_a_declined_focus_or_another_window_clicks_nothing() {
         local focuses = #S.focusCalls
         T.msg({ action = "middle" })
         T.ok(#S.focusCalls == focuses + 1, "asked")
-        T.ok(T.status() == "Notepad would not come to the front; nothing was clicked.", T.status())
+        local text, kind = T.status()
+        T.ok(text == "Notepad would not come to the front; nothing was clicked." and kind == "status", text)
         S.focusAnswer = true
         T.msg({ action = "middle" })
         T.ok(#S.focusCalls == focuses + 2, "the next press asks again: nothing was left under way")
@@ -458,8 +469,9 @@ fn a_covered_point_a_declined_focus_or_another_window_clicks_nothing() {
 /// A press that reaches the module while the page is not in front — it waited while the user went
 /// elsewhere — is not acted on, whichever button sent it; a problem the page reports is logged all
 /// the same. A page Windows does not bring back after the click is said through the host's
-/// speech, with the status. The key pressed while the line is being read gives the round trip
-/// up: its reading changes nothing.
+/// speech, with the result, and logged; the page has the result as well, for when it comes. The
+/// key pressed while the line is being read gives the round trip up: its reading changes
+/// nothing.
 #[test]
 fn a_press_away_from_the_page_a_page_not_brought_back_and_a_trip_given_up() {
     run(r##"
@@ -482,8 +494,20 @@ fn a_press_away_from_the_page_a_page_not_brought_back_and_a_trip_given_up() {
         T.arrive(T.NOTEPAD)
         S.pg.answers = { { false, "declined by the system" } }
         T.answer({ { "hello", 403 } })
-        T.ok(T.last() == "Windows did not bring the page to the front; if it does not come by itself, the key brings it. Clicked the middle. The line there: hello", T.last())
         T.ok(T.status() == "Clicked the middle. The line there: hello", T.status())
+        T.ok(S.logs[#S.logs] == "Page demo: the page did not come back (declined by the system); the result waits on it: Clicked the middle. The line there: hello", S.logs[#S.logs])
+        T.ok(T.last() == "Windows did not bring the page to the front; if it does not come by itself, the key brings it. Clicked the middle. The line there: hello", T.last())
+        T.ok(T.lastInterrupts() == true, "said at once: the user is in Notepad")
+        -- Any other reason is said as the page not coming; the result is on the page as well.
+        T.arrive(T.NOTEPAD)
+        T.key()
+        T.ok(S.front == T.PAGE, "the page again")
+        T.msg({ action = "middle" })
+        T.arrive(T.NOTEPAD)
+        S.pg.answers = { { false, "could not be built" } }
+        T.answer({ { "hello again", 403 } })
+        T.ok(T.status() == "Clicked the middle. The line there: hello again", T.status())
+        T.ok(T.last() == "The page did not come to the front: could not be built. Clicked the middle. The line there: hello again", T.last())
         -- Given up: the key pressed in Notepad while the line is read shows the page; the
         -- reading's answer comes to nothing.
         T.key()

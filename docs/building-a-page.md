@@ -28,7 +28,7 @@ Pages run on **Windows** today. On a Mac a module that describes a page loads, t
 | **`avoid`** | The rectangle a `show` must not cover: the target window's bounds. |
 | **Message** | A JSON value. The page sends one with `platform.post`, and it arrives at `onMessage`; the module sends one with `page:post`, and it arrives at `platform.onmessage`. |
 | **Round trip** | An action in the target window while the page is in front: the target window forward, the action, the page forward again. |
-| **Live region** | An element whose text the screen reader says by itself when it changes: the page's status line. |
+| **Live region** | An element whose text the screen reader says by itself when it changes, while its page is in front: the page's status line. |
 
 ---
 
@@ -202,8 +202,8 @@ A page exists because a screen reader reads a web page well. Keep it that way:
 - **Real elements.** A `<button>` for every action, a `<label>` for every field, headings (`h1`–`h6`) and a `<main>` landmark for the structure, lists and tables for what is a list or a table. With NVDA in Chromium these are known to work; so is `aria-live="polite"` on an element whose text changes ([what works](api/gui.md#the-page-s-side)).
 - **Actions on `click`, nothing else.** In NVDA's browse mode most keys never reach the page — letters, arrows, Home and End belong to NVDA's own navigation — and Enter or Space on a button arrive as a click, with no key event. So every action is a button, a link or a form field handled on `click`, as `page.js` does with one listener for the whole document.
 - **No keys of the page's own.** No "N for next", no `role="application"` (it would give the page every key and take browse mode away, which is the reason for a page at all), and nothing that catches Tab or Escape: the user must be able to leave every element the way they came. The key that opens the page and leaves it is your module's hotkey ([Step 6](#step-6)).
-- **Leave the focus alone.** The host puts the keyboard into the document as the page comes forward — on the element that had the focus last time, or the document itself the first time. Do not move the focus from a script when a message arrives; and keep a button enabled even when its action cannot run now — a button disabled under the keyboard takes the focus away with it. The example answers such a press in its status instead.
-- **Results in a live region, there from the start, posted after the show.** Put the live region in the HTML, as the example's status line is, and change only its text: a screen reader announces changes to a live region it already knows, so one a script inserts with its text already in it is, as a rule, not announced. A live region speaks only while its page is in front, so a status the module posts while the page is behind the target window is not said: post it after the `show` that brings the page back ([Step 5](#step-5)). Two things are not measured yet (TODO.md): whether NVDA then says it after its own announcement of the page, or cuts it off; and whether it says a status that is the same text as the one before — two presses of the same button can give the same status.
+- **Leave the focus alone, but for a round trip's result.** The host puts the keyboard into the document as the page comes forward — on the element that had the focus last time, or the document itself the first time. Do not move the focus from a script while the user is in the page — what the page is told then goes into its live region — and keep a button enabled even when its action cannot run now: a button disabled under the keyboard takes the focus away with it. The example answers such a press in its status instead. The one move it makes is onto a round trip's result, told while the page is away (next point).
+- **Results in a live region, there from the start; a round trip's result where the focus lands.** Put the live region in the HTML, as the example's status line is, and change only its text: a screen reader announces changes to a live region it already knows, so one a script inserts with its text already in it is, as a rule, not announced. A live region speaks only while its page is in front, and **a page that comes to the front is announced** — its title, then the element that has the focus — and that announcement cuts off a sentence said just before it: in the example's first run with NVDA (2026-10-11), a click's result posted to the status line right after the `show` that brought the page back was not heard. So a round trip's result is not a change of the live region as the page comes back: the module posts it just before the `show`, while the target window still has the keyboard, and the page puts it into the status line and the keyboard focus on it ([Step 5](#step-5)). The page comes back on the result, and the result is in the announcement of the page rather than before it. Not heard yet (TODO.md): whether NVDA says the result as the page comes back, and once; and whether it says a status that the page is told while it is in front with the same text as the one before — two presses of a button whose action cannot run now give the same status.
 - **Do not talk over the screen reader when the user moves.** When the user has just gone to another window, the screen reader is saying where they landed; what the module has to say about it goes with `interrupt = false`, queued behind what is being said rather than cutting it off ([`host.speech.output`](api/speech.md#host-speech-output)). The example does so when a round trip is given up ([Step 5](#step-5)).
 
 You can open `ui/index.html` in any browser to look at it and walk through it with a screen reader. The host's part is missing there — `window.platform` is `undefined`, which is why `page.js` checks for it — and so is its content policy: an inline script runs in a browser and **not** in the host ([Step 9](#step-9)). And the engine is the browser's, not WebView2.
@@ -328,7 +328,7 @@ Now the buttons. A click into Notepad is not made while the page is in front: th
 4. **Ask what is drawn there** — [`host.window.ownsPoint`](api/window.md#host-window-ownspoint). `false` means another window covers the point (a notification, a tooltip, the page itself): click nothing. `nil` means the platform cannot say, and is read as permission.
 5. **Click** — [`host.input.click(x, y)`](api/input.md#host-input-click).
 6. **Read, with a callback** — [`host.ocr.recognize(region, cb)`](api/ocr.md#host-ocr-recognize). The picture is taken at the call, after the click; the corners are whole numbers. The callback form never holds your module.
-7. **Bring the page back in the read's answer** — if the target window is still in front — beside the window and with the keyboard, then post the result to its live region, after the `show`, so that it can be said.
+7. **Bring the page back in the read's answer** — if the target window is still in front — beside the window and with the keyboard, the result posted to the page just **before** the `show`, while the target window still has the keyboard: the page puts the keyboard focus on it, so that the page comes back on the result ([Step 3](#step-3)).
 
 At any step, **another window coming to the front means the user went elsewhere**: give the trip up, click nothing more, and do not bring the page back over them.
 
@@ -387,7 +387,7 @@ local function lineWords(r, y)
 end
 ```
 
-The trip's two ends. `giveUp` is for another window, said with `interrupt = false` ([Step 3](#step-3)); `comeBack` brings the page back and posts the result after the `show`; `arrived` is Notepad in front — checked once more, since its event may have waited — the click, and the read whose answer brings the page back:
+The trip's two ends. `giveUp` is for another window, said with `interrupt = false` ([Step 3](#step-3)); `comeBack` posts the result and then brings the page back, and when the page does not come, says so with the result, and logs it; `arrived` is Notepad in front — checked once more, since its event may have waited — the click, and the read whose answer brings the page back:
 
 ```luau
 local function giveUp()
@@ -402,9 +402,10 @@ end
 
 local function comeBack(w, text)
   trip = nil
+  page:post({ kind = "result", text = text })
   local ok, why = page:show({ focus = true, avoid = w.bounds })
-  status(text)
   if not ok then
+    host.log.info("Page demo: the page did not come back (" .. why .. "); the result waits on it: " .. text)
     host.speech.output(notShown(why) .. " " .. text, { interrupt = true })
   end
 end
@@ -486,12 +487,39 @@ host.window.onTrigger({}, { initial = true }, function(w)
 end)
 ```
 
+The page's side of the result. The status line in `index.html` gets `tabindex="-1"`, which lets a script focus it and keeps it out of Tab's way:
+
+```html
+<p id="status" aria-live="polite" tabindex="-1">Nothing clicked yet.</p>
+```
+
+and `platform.onmessage` in `page.js` a branch for the result — the status line's text, and the keyboard focus on it — in place of Step 2's:
+
+```js
+window.platform.onmessage = (message) => {
+  if (!message || typeof message !== "object") return;
+  if (message.kind === "status") {
+    status.textContent = String(message.text);
+  } else if (message.kind === "result") {
+    status.textContent = String(message.text);
+    status.focus();
+  } else if (message.kind === "target") {
+    target.textContent = String(message.title);
+  }
+};
+```
+
+- **The page comes back on the result.** `show` puts the keyboard on the element that had the focus last ([`page:show`](api/gui.md#page-show)) — the status line, which the script focused while the page was away: a screen reader announces a page coming to the front with the element that has the focus, so the result is in that announcement, not before it. The page's window can get its `focus` event more than once as it comes back ([Windows](api/gui.md#windows-1)); the focus in the document stays on the result through them.
+- **A status goes to the live region.** While the page is in front, a status — "The last click is still under way." — changes the live region and leaves the focus where it is.
+- **The focus is on the result afterwards.** Shift+Tab goes back to the buttons, and in browse mode the arrows go on from it as from any line.
+- **Nothing is timed.** The result waits, focused, however long the page takes to come: by itself after a declined `show`, or with the key. A newer result replaces one that waits.
+
 What to know about the trip:
 
-- **Windows decides whether the page may come back.** It lets a program bring its own window to the front only under conditions, and may refuse even then. Refused, `show` answers `false, "declined by the system"`: the page is shown and raised, without the keyboard — or hidden again, where it would have been over the window — and its live region says nothing, so the module says the result with [`host.speech`](api/speech.md), after `notShown`'s sentence. Windows has been seen to bring a declined page to the front all the same a moment later, so the answer does not say where the keyboard ends up ([Windows](api/gui.md#windows-1)).
+- **Windows decides whether the page may come back.** It lets a program bring its own window to the front only under conditions, and may refuse even then. Refused, `show` answers `false, "declined by the system"`: the page is shown and raised, without the keyboard — or hidden again, where it would have been over the window — so the module says the result with [`host.speech`](api/speech.md), after `notShown`'s sentence, and writes it to the log. The page has it as well, focused: Windows has been seen to bring a declined page to the front all the same a moment later ([Windows](api/gui.md#windows-1)), and the page then comes back on it, as it does when the user brings it with the key.
 - **The page comes back after the read, not with the click.** The read's answer is the event that ends the trip, and the click has been made before its picture was taken. A value the click itself changes — a preset name after "next" — is drawn when the window gets round to it: wait for the change with [`host.screen.snapshotAsync`'s change wait](api/screen.md#waiting-for-the-picture-to-change) and read that snapshot.
 - **A click from a hotkey carries the hotkey's modifiers.** On Windows a synthesised click inherits whatever the user is still holding. The example clicks from a page message, where nothing is held; a module that starts a trip from its own key waits for [`host.keys.modifiersDown()`](api/keys.md#host-keys-modifiersdown) to answer `false` first (and declares `keys` for it).
-- **The trip is heard.** The module says nothing on a trip that goes well, but the screen reader follows the keyboard: as Notepad comes forward it says what it says for any window coming to the front — Notepad's title, its text field, the line at the caret — and as the page comes back, the page's title and its focused button again; then, perhaps, the status ([Step 3](#step-3)). With the HTML probe in REAPER, NVDA was heard announcing the focus leaving the page and coming back, and the page's focused element again; this example has not run with NVDA yet (TODO.md). Acting in a plug-in without bringing its window to the front is being researched (TODO.md, "W3: acting in the plug-in without the round trip"); the round trip is the way that works everywhere.
+- **The trip is heard.** The module says nothing on a trip that goes well, but the screen reader follows the keyboard: as Notepad comes forward it says what it says for any window coming to the front — Notepad's title, its text field, the line at the caret — and as the page comes back, the page's title and the element with the focus: the result ([Step 3](#step-3)). In the example's first run with NVDA, the click came through, Notepad came forward and the page came back, and a result posted to the status line right after the `show` was not heard: the announcement of the page cut it off. Whether the result is heard now that the page comes back on it is what the next run listens for (TODO.md). With the HTML probe in REAPER, NVDA was heard announcing the focus leaving the page and coming back, and the page's focused element again. Acting in a plug-in without bringing its window to the front is being researched (TODO.md, "W3: acting in the plug-in without the round trip"); the round trip is the way that works everywhere.
 - **The mouse pointer stays where it clicked.** [`host.input.click`](api/input.md#host-input-click) moves the pointer to the point and leaves it there, in Notepad's text. Whether a screen reader that follows the mouse — NVDA does by default — reads what is under it during the trip is not measured.
 - **An answer can come too late.** Text read off the screen comes back later, and the user may have moved on by then. The example gives the trip up when another window's foreground event comes, compares `trip` with the one the read was asked for, and asks `inFront` once more before it brings the page back; the key and a closed page give the trip up too.
 
@@ -667,7 +695,7 @@ end
 
 **An error in your callback** is logged and shown once in a dialog, naming the `page message`, `page ready` or `page close` callback; one that runs past the [time limits](module-runtime-and-lifecycle.md#limits) stops the module, as any callback does.
 
-**The round trip stops halfway.** The example says each place it can stop: Notepad would not come to the front (`host.window.focus` answered `false`), another window came to the front before the click or while the line was read, something covers the point, or the page was not brought back — with Windows' reason.
+**The round trip stops halfway.** The example says each place it can stop: Notepad would not come to the front (`host.window.focus` answered `false`), another window came to the front before the click or while the line was read, something covers the point, or the page was not brought back — with Windows' reason and the result, which is in the log as well (`Page demo: the page did not come back …`).
 
 ---
 
@@ -676,8 +704,8 @@ end
 - Describe the page once, at load; keep the object. Show it from `onReady` when a `show` answered `"not ready yet"` — and only if the user is still where they asked for it.
 - Prepare it when its window first comes to the front, not on the key the user waits on — and not again from there after a prepare failed.
 - Every action a real button, handled on `click`; text into the page with `textContent`; scripts in files of the module's own, never inline.
-- Results in a live region that is in the HTML from the start, posted after the `show` that brings the page to the front.
-- No keys of the page's own, no `role="application"`, nothing that catches Tab or Escape, no focus moved by a script.
+- Results in a live region that is in the HTML from the start, for what the page is told while it is in front; a round trip's result posted just before the `show` that brings the page back, with the keyboard focus put on it, and said with `host.speech` only when the page does not come.
+- No keys of the page's own, no `role="application"`, nothing that catches Tab or Escape, no focus moved by a script but onto a round trip's result.
 - `avoid = w.bounds` on every `show` beside a window.
 - Every action in the window is a round trip: the window forward first, the act on its foreground event once it is still in front, the point from its origin, `ownsPoint` before the click, a read with a callback, the page back in its answer.
 - One round trip at a time; a message that reaches the module while the page is not in front is not acted on, whichever button sent it; another window coming to the front at any step gives the trip up, and the page is not brought back over it.

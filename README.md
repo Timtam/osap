@@ -42,7 +42,7 @@ Try the global-hotkey demo: `cargo run -p app -- examples/hotkey`, then press **
 
 Try a self-voicing **overlay**: `cargo run -p app -- examples/overlay-attach` — it activates while a **Notepad** window is focused. Navigate its controls with **Tab / Shift+Tab** and activate the focused one with **Enter** or **Space** (the per-control hotkeys **Ctrl+Alt+1/3** also work while it is active).
 
-Try an HTML **page** (Windows): `cargo run -p app -- examples/page`, then press **Ctrl+Shift+Win+Alt+F10** in a **Notepad** window — a page comes up beside it whose buttons click into Notepad's text and read the line there, and the same key in the page goes back. [docs/building-a-page.md](docs/building-a-page.md) builds it step by step.
+Try an HTML **page** (Windows): `cargo run -p app -- examples/page`, then press **Ctrl+Shift+Win+Alt+F12** in a **Notepad** window — a page comes up beside it whose buttons click into Notepad's text and read the line there, and the same key in the page goes back. [docs/building-a-page.md](docs/building-a-page.md) builds it step by step.
 
 Load **several modules at once** (they share one process, TTS, and event loop): `cargo run -p app -- examples/hotkey examples/window-trigger`.
 

@@ -8,7 +8,8 @@
 -- Every click is a round trip, as every action in another window is while the page has the
 -- front: Notepad is asked to the front first, clicked once it is there — on its foreground
 -- event, never after a time — the line is read, and the page is brought back with what was
--- read. Any other window coming to the front on the way gives the trip up.
+-- read, the keyboard focus on it. Any other window coming to the front on the way gives the
+-- trip up.
 
 local KEY = "Ctrl+Shift+Win+Alt+F12"
 local NOTEPAD = { app = { name = "notepad" } }
@@ -159,14 +160,19 @@ local function giveUp()
   end
 end
 
--- The end of a round trip: the page back beside `w`, with the keyboard, and then `text` in its
--- status — after the show, since a live region speaks only while its page is in front. Windows
--- may refuse the page the front; then the host's own speech says so, and what happened.
+-- The end of a round trip: `text` to the page as the trip's result, then the page back beside
+-- `w`, with the keyboard. Posted first, while Notepad has the keyboard: the page puts it into its
+-- status line and the keyboard focus on it (ui/page.js), so that the page comes back on the
+-- result — a page coming to the front is announced, and the announcement cuts off a sentence
+-- said just before it. Windows may refuse the page the front; then the host's own speech says
+-- so, and the result, which goes to the log as well. The page keeps it, focused, for when it
+-- comes by itself or by the key.
 local function comeBack(w, text)
   trip = nil
+  page:post({ kind = "result", text = text })
   local ok, why = page:show({ focus = true, avoid = w.bounds })
-  status(text)
   if not ok then
+    host.log.info("Page demo: the page did not come back (" .. why .. "); the result waits on it: " .. text)
     host.speech.output(notShown(why) .. " " .. text, { interrupt = true })
   end
 end
