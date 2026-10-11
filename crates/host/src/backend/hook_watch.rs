@@ -95,18 +95,25 @@
 //! reader, whose hook reads out the keys typed into the module manager. Started after the
 //! application, its hook ahead of ours, it read them; with only the application started again,
 //! ours ahead, it read none there, and every key in other programs' windows. So the watch has the
-//! hook taken out of the chain when one of this process's windows comes to the front — it does
-//! nothing there anyway — and installed again when a window of another program does, first in
-//! the chain as at start. Raw input stays registered: it was registered in both runs, and the
-//! screen reader read the keys in the first, so it cuts nobody's hook off. While the hook is out
-//! the witness counts no key, and a re-install for a resume or an unlock waits for the next window
-//! of another program, where the hook is installed afresh anyway. A foreground event the watch
-//! never gets would leave the hook out in front of another program, with nothing to count that
-//! could bring it back, so the window in front is looked at again at every physical key-down while
-//! the hook is out, at one that went to this process while it is in, and at a resume or an unlock
-//! while it is out ([`Place::looks_at_key`], [`Place::looks_at_change`]). The captured set and the
-//! granted hotkeys stay as they are; what the hook recorded as held is forgotten as it goes out,
-//! since it sees no key-up until it is back.
+//! hook taken out of the chain while one of this process's windows is in front — it does nothing
+//! there anyway — and installed again while a window of another program is, first in the chain as
+//! at start. Raw input stays registered: it was registered in both runs, and the screen reader
+//! read the keys in the first, so it cuts nobody's hook off. While the hook is out the witness
+//! counts no key, and a re-install for a resume or an unlock waits for the next window of another
+//! program, where the hook is installed afresh anyway.
+//!
+//! Where the hook belongs is decided by the window in front now, never by the window a foreground
+//! event names, and compared with where the hook's thread says the hook is, one move at a time
+//! ([`Place`]). On 2026-10-11 the events and the window in front parted around a page of ours
+//! whose show Windows had declined: an event named the page while another program's window kept
+//! the front, and when F7 brought the page to the front no event came, so the hook stayed in the
+//! chain there — and a screen reader behind it missed the key-ups of that very combination, and
+//! was disturbed from then on. So the watch looks at the window in front at every foreground and
+//! focus event, at every answer of the hook's thread, at every key raw input reports from the side
+//! the hook does not belong to — key-ups included — and at a resume or an unlock while the hook is
+//! out ([`Place::looks_at_key`], [`Place::looks_at_change`]). The captured set and the granted
+//! hotkeys stay as they are; what the hook recorded as held is forgotten as it goes out, since it
+//! sees no key-up until it is back.
 //!
 //! Everything here is integers and decisions: no OS call, so the tests run wherever Windows
 //! builds.
@@ -521,21 +528,87 @@ fn old_words(old: Old) -> String {
     }
 }
 
-/// Whether the hook is meant to be in the chain of low-level keyboard hooks, or out of it while
-/// one of this process's own windows is in front — what the watch has asked the hook's thread
-/// for. See the top of this file for why; the hook's thread does the moves in the order they were
-/// asked, so the last one asked is where the hook ends up.
+/// Where the hook's thread left the hook: how many of the watch's requests it has handled — moves
+/// and re-installs alike, in the order they were posted, counted with wrapping — and whether a
+/// hook of ours is in the chain after them. The hook's thread writes it at its first install
+/// ([`HookAt::START`]) and after every request, before it answers; the watch reads it before it
+/// asks for a move ([`Place::converge`]). So where the hook is never depends on an answer that
+/// arrived: a reply lost to a full queue costs its line, nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HookAt {
+    pub(crate) handled: u32,
+    pub(crate) in_chain: bool,
+}
+
+impl HookAt {
+    /// The hook as its thread installs it at start, before any request.
+    pub(crate) const START: HookAt = HookAt { handled: 0, in_chain: true };
+
+    /// Packed into one word for an atomic: the count above, the hook's place in the lowest bit.
+    pub(crate) const fn encode(self) -> u64 {
+        ((self.handled as u64) << 1) | self.in_chain as u64
+    }
+
+    pub(crate) fn decode(w: u64) -> HookAt {
+        HookAt { handled: (w >> 1) as u32, in_chain: w & 1 == 1 }
+    }
+
+    /// After one more request, which left a hook of ours in the chain or not (`in_chain`).
+    pub(crate) fn after(self, in_chain: bool) -> HookAt {
+        HookAt { handled: self.handled.wrapping_add(1), in_chain }
+    }
+}
+
+/// Whether the window in front belongs to this process (`own`) as far as the hook goes: the
+/// window's own process (`window`) is this one, or the process of its root owner (`root_owner`,
+/// `GetAncestor` with `GA_ROOTOWNER`: the top of its chain of parents and owners) is. A page's
+/// WebView2 content is drawn by `msedgewebview2.exe` in a child window of the page's frame, and a
+/// popup of it — a select list's — is a window of that process owned by the frame: both are this
+/// application's as the keys go. `None` is a process that could not be read, a window gone.
+pub(crate) fn front_is_ours(own: u32, window: Option<u32>, root_owner: Option<u32>) -> bool {
+    window == Some(own) || root_owner == Some(own)
+}
+
+/// Where the hook belongs and what the watch has asked of the hook's thread to get it there: out
+/// of the chain of low-level keyboard hooks while one of this process's own windows is in front,
+/// in it otherwise. See the top of this file for why.
+///
+/// **Level, not edges.** The watch does not move the hook by the window a foreground event names:
+/// around a show Windows declined, one named a page of ours that did not keep the front, and when
+/// that page did come to the front a few seconds later, no foreground event reached the watch at
+/// all (2026-10-11, TODO.md). It compares where the hook belongs — by the window in front now,
+/// `GetForegroundWindow` — with where the hook's thread says the hook is ([`HookAt`]), and asks
+/// for the move that brings the two together ([`Place::converge`]), at every foreground and focus
+/// event, every answer of the hook's thread, and every key raw input reports from the other side
+/// ([`Place::looks_at_key`]). One move at a time: while a request is on its way no move is
+/// asked, and its answer looks again, so a switch made meanwhile is caught there and no stale move
+/// is queued behind it. A re-install the witness or a resume asks for may be posted beside a move
+/// on its way; the look waits for the answers to all of them. No clock decides anything.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Place {
+    /// One of this process's own windows was in front the last time the watch looked: the hook
+    /// belongs out of the chain.
     out: bool,
+    /// The requests posted to the hook's thread, moves and re-installs alike, counted with
+    /// wrapping: one is on its way while [`HookAt::handled`] has not reached this.
+    posted: u32,
+    /// The last request posted, as the move it is: a re-install puts the hook in the chain as
+    /// [`Move::In`] does. Once it is handled and the hook is still not where it would have put
+    /// it, the hook's thread could not make it, and it is not asked for again — at every key, at
+    /// every focus change — until the window in front changes sides or a window comes to the front
+    /// ([`Place::foreground_event`]).
+    last: Option<Move>,
+    /// The last look found nothing to do: the hook is where it belongs, or where a move that could
+    /// not be made left it. Until then every key looks ([`Place::looks_at_key`]).
+    settled: bool,
 }
 
 /// What the watch asks the hook's thread for as a window comes to the front.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Move {
-    /// Take the hook out of the chain: one of this process's own windows came to the front.
+    /// Take the hook out of the chain: one of this process's own windows is in front.
     Out,
-    /// Install it again, first in the chain: a window of another program came to the front.
+    /// Install it again, first in the chain: a window of another program is in front.
     In,
 }
 
@@ -550,38 +623,79 @@ impl Move {
 }
 
 impl Place {
-    /// A window came to the front: one of this process's own (`ours`), or another program's. The
-    /// move that takes, if any — out at the first of this process's windows, in at the first
-    /// window of another program after them — is handed to `post`, which asks the hook's thread
-    /// and says whether it could; the place changes only then, so a move that could not be asked
-    /// for is asked for again at the next window that comes to the front. Windows of this process
-    /// one after another (the module manager, then a module's dialog), or of other programs one
-    /// after another, move nothing.
-    pub(crate) fn front(&mut self, ours: bool, post: impl FnOnce(Move) -> bool) -> Option<Move> {
-        let wanted = match (ours, self.out) {
-            (true, false) => Move::Out,
-            (false, true) => Move::In,
-            _ => return None,
+    /// The window in front now is one of this process's own (`ours`, [`front_is_ours`]) or another
+    /// program's, and the hook's thread left the hook as `at` says: the move that brings the hook
+    /// where it belongs, if one is needed, is handed to `post`, which asks the hook's thread and
+    /// says whether it could. Nothing while a request is on its way — its answer looks again — and
+    /// nothing for a move the hook's thread has just failed to make (see `last`) until the
+    /// window in front changes sides or a window comes to the front. A move that could not be
+    /// posted is asked for again at the next look. Windows of this process one after another, or
+    /// of other programs one after another, move nothing: the hook is where they want it already.
+    pub(crate) fn converge(&mut self, ours: bool, at: HookAt, post: impl FnOnce(Move) -> bool) -> Option<Move> {
+        if ours != self.out {
+            self.out = ours;
+            self.last = None;
+        }
+        self.settled = false;
+        if at.handled != self.posted {
+            return None;
+        }
+        let wanted = match (ours, at.in_chain) {
+            (true, true) => Move::Out,
+            (false, false) => Move::In,
+            _ => {
+                self.settled = true;
+                return None;
+            }
         };
+        if self.last == Some(wanted) {
+            self.settled = true;
+            return None;
+        }
         if !post(wanted) {
             return None;
         }
-        self.out = wanted == Move::Out;
+        self.posted = self.posted.wrapping_add(1);
+        self.last = Some(wanted);
         Some(wanted)
     }
 
-    /// Whether the hook is out of the chain, or asked out.
+    /// A re-install was posted to the hook's thread: counted with the moves, since that thread
+    /// handles them all in order. It puts the hook in the chain as a move back does, so one that
+    /// fails is not followed at its answer by a move back that would fail the same way: the
+    /// witness, whose bar the failure raised, asks again after the key-downs the hook misses, and
+    /// the next window that comes to the front does. Posted only while the hook belongs in the
+    /// chain: the witness judges no key while it belongs out, and a resume or an unlock then asks
+    /// for none ([`Place::key_down`], [`Place::change`]).
+    pub(crate) fn posted(&mut self) {
+        self.posted = self.posted.wrapping_add(1);
+        self.last = Some(Move::In);
+    }
+
+    /// A window came to the front (`EVENT_SYSTEM_FOREGROUND`), whichever it is: a move the hook's
+    /// thread could not make is asked for again at the look that follows. So a hook that could not
+    /// be put back is tried again at the next window of another program the user goes to, and not
+    /// only once the witness has counted the key-downs it misses there. A focus change or a key
+    /// does not ask again: they come many to a window.
+    pub(crate) fn foreground_event(&mut self) {
+        self.last = None;
+    }
+
+    /// Whether one of this process's own windows was in front at the last look: the hook belongs
+    /// out of the chain.
     #[cfg(test)]
     fn is_out(self) -> bool {
         self.out
     }
 
-    /// A physical key-down for the witness ([`Witness::key_down`]), judged only while the hook is
-    /// meant to be in the chain. While it is out no key is the hook's to have seen, so none is
-    /// counted, none moves the witness's reference, and nothing is asked about it: `None`. Raw
-    /// input still reports them — keys going to other programs too, in the moment before the
-    /// window in front is another program's; once it is, the key makes the watch put the hook back
-    /// first ([`Place::looks_at_key`]) and is the first of the fresh count.
+    /// A physical key-down for the witness ([`Witness::key_down`]), judged only while the hook
+    /// belongs in the chain. While one of this process's windows is in front no key is the hook's
+    /// to have seen, so none is counted, none moves the witness's reference, and nothing is asked
+    /// about it: `None`. Raw input still reports them — keys going to other programs too, in the
+    /// moment before the window in front is another program's; once it is, the key makes the watch
+    /// put the hook back first ([`Place::looks_at_key`]) and is the first of the fresh count. A hook
+    /// that belongs in the chain and could not be put back is judged as a removed one is: the
+    /// witness installs it again after the key-downs it misses.
     pub(crate) fn key_down(
         self,
         witness: &mut Witness,
@@ -593,9 +707,9 @@ impl Place {
     }
 
     /// What a session change or a suspend/resume ([`on_session_change`], [`on_power`]) asks of the
-    /// hook here. While it is out, a re-install becomes a fresh count only: installing the hook
-    /// now would put it back in the chain in front of one of this process's own windows, and it is
-    /// installed afresh, first in the chain, as soon as a window of another program comes to the
+    /// hook here. While it belongs out, a re-install becomes a fresh count only: installing the
+    /// hook now would put it back in the chain in front of one of this process's own windows, and
+    /// it is installed afresh, first in the chain, as soon as a window of another program is in
     /// front.
     pub(crate) fn change(self, change: Change) -> Change {
         match change {
@@ -604,21 +718,26 @@ impl Place {
         }
     }
 
-    /// Whether a physical key-down makes the watch look at the window in front again
-    /// ([`Place::front`] with it), for a foreground event it never got or a move it could not ask
-    /// for: every key-down while the hook is out, and while it is in, one that raw input reports as
-    /// gone to this process (`to_this_process`, `RIM_INPUT`). Nothing else brings the hook back if
-    /// the event for another program's window is lost, and captures would stay dead in front of
-    /// it until the next switch. A place that agrees with the window in front moves nothing, so
-    /// looking again costs two queries and asks the hook's thread for nothing.
+    /// Whether a physical key event — a key-down or a key-up ([`physical_key`]) — makes the watch
+    /// look at the window in front again ([`Place::converge`]). Raw input says with each key which
+    /// side had the front when it was pressed or let go: this process (`to_this_process`,
+    /// `RIM_INPUT`) or another. A key from the side the hook does not belong to means the window
+    /// in front changed without the watch looking — a foreground event Windows did not send, or
+    /// one the watch never got — and is looked at; so is every key while the last look left
+    /// something to do (a request on its way, a move that could not be posted). The key-ups count:
+    /// the keys of the combination that brings one of this process's windows to the front go up
+    /// there, and a screen reader whose hook is behind ours misses each of them until the hook is
+    /// out. Looking costs a few queries, and asks the hook's thread for nothing when the hook is
+    /// where it belongs.
     pub(crate) fn looks_at_key(self, to_this_process: bool) -> bool {
-        self.out || to_this_process
+        to_this_process != self.out || !self.settled
     }
 
     /// Whether a session change or a suspend/resume makes the watch look at the window in front
     /// again: one that asks for a re-install ([`Change::Rehook`]: a resume, an unlock, a connect)
-    /// while the hook is out. The keyboard comes back then from where no foreground event reaches
-    /// the watch, and a window of another program may be in front by now.
+    /// while the hook belongs out. The keyboard comes back then from where no foreground event
+    /// reaches the watch, and a window of another program may be in front by now. While it belongs
+    /// in, the re-install is asked for, and its answer looks.
     pub(crate) fn looks_at_change(self, change: Change) -> bool {
         self.out && matches!(change, Change::Rehook(_))
     }
@@ -670,9 +789,8 @@ pub(crate) fn move_line(reason: Reason, outcome: Outcome, window: &str, after: &
         ),
         (Reason::Out, Outcome::TakenOut { old: Old::Failed(e) }) => format!(
             "the keyboard hook could not be taken out while one of our windows is in front \
-             ({window}){after}: UnhookWindowsHookEx error {e}, so it stays in the chain; it is \
-             installed again, first in the chain, when a window of another program comes to the \
-             front"
+             ({window}){after}: UnhookWindowsHookEx error {e}, so it stays in the chain while our \
+             windows are in front; it is asked out again at the next window that comes to the front"
         ),
         (Reason::Back, Outcome::Installed { old: Old::WasOut | Old::Removed }) => {
             format!("the keyboard hook is back, first in the chain ({window} in front){after}")
@@ -685,7 +803,7 @@ pub(crate) fn move_line(reason: Reason, outcome: Outcome, window: &str, after: &
             "the keyboard hook could not be put back ({window} in front){after}: SetWindowsHookExW \
              error {error}. Captured keys and the hotkeys the hook matches do not work until it is \
              (RegisterHotKey still delivers hotkeys); tried again when it misses key-downs, and \
-             when a window of another program next comes to the front after one of ours"
+             at the next window that comes to the front"
         ),
         (Reason::Back, Outcome::Reverted { error }) => format!(
             "the keyboard hook stays where it was ({window} in front){after}: it could not be taken \
@@ -859,7 +977,15 @@ const NO_KEY: u16 = 0xFF;
 /// from a device (injected input carries no device handle), a make rather than a break, and a
 /// real key rather than half of an escape sequence.
 pub(crate) fn physical_down(has_device: bool, flags: u16, vkey: u16, make_code: u16) -> bool {
-    has_device && flags & RI_KEY_BREAK == 0 && vkey != NO_KEY && vkey != 0 && make_code != NO_KEY
+    physical_key(has_device, vkey, make_code) && flags & RI_KEY_BREAK == 0
+}
+
+/// Whether a raw keyboard report is a physical key event, a key-down or a key-up: from a device,
+/// and a real key rather than half of an escape sequence. What makes the watch look at the window
+/// in front ([`Place::looks_at_key`]); only the key-downs among them are counted
+/// ([`physical_down`]).
+pub(crate) fn physical_key(has_device: bool, vkey: u16, make_code: u16) -> bool {
+    has_device && vkey != NO_KEY && vkey != 0 && make_code != NO_KEY
 }
 
 /// Whether the hook of a process at integrity level `own` is called for input going to a
@@ -1621,37 +1747,316 @@ mod tests {
         assert_eq!(c.swap_from(now, &mut Vec::new()).1, Outcome::Installed { old: Old::WasOut });
     }
 
+    /// What the watch posts to the hook's thread.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Request {
+        Move(Move),
+        Reinstall,
+    }
+
+    /// The hook's thread as the watch sees it, for the tests of [`Place`]: the requests posted to
+    /// it, handled one at a time in order when a test says so, and where each left the hook — as
+    /// [`take_out`] and [`swap`] leave it, the system calls refusing when a test says so.
+    struct HookThread {
+        at: HookAt,
+        queue: std::collections::VecDeque<Request>,
+        /// The most requests that were ever waiting at once.
+        most_waiting: usize,
+        /// `SetWindowsHookExW` refuses.
+        set_fails: bool,
+        /// `UnhookWindowsHookEx` refuses.
+        unhook_fails: bool,
+    }
+
+    impl HookThread {
+        fn new() -> HookThread {
+            HookThread {
+                at: HookAt::START,
+                queue: Default::default(),
+                most_waiting: 0,
+                set_fails: false,
+                unhook_fails: false,
+            }
+        }
+
+        /// A window came to the front — one of this process's (`ours`) or not — and the watch
+        /// looks, as at a foreground event.
+        fn foreground(&mut self, place: &mut Place, ours: bool) -> Option<Move> {
+            place.foreground_event();
+            self.look(place, ours)
+        }
+
+        /// The watch looks at the window in front — one of this process's (`ours`) or not — and
+        /// posts what it asks for: as at a focus change or a key.
+        fn look(&mut self, place: &mut Place, ours: bool) -> Option<Move> {
+            let queue = &mut self.queue;
+            let m = place.converge(ours, self.at, |m| {
+                queue.push_back(Request::Move(m));
+                true
+            });
+            self.most_waiting = self.most_waiting.max(self.queue.len());
+            m
+        }
+
+        /// The witness asks for a re-install.
+        fn reinstall(&mut self, place: &mut Place) {
+            place.posted();
+            self.queue.push_back(Request::Reinstall);
+            self.most_waiting = self.most_waiting.max(self.queue.len());
+        }
+
+        /// The hook's thread handles the oldest request and answers, and the watch looks again at
+        /// the answer, with the window in front then (`ours`).
+        fn answer(&mut self, place: &mut Place, ours: bool) -> Option<Move> {
+            let r = self.queue.pop_front().expect("a request to handle");
+            let in_chain = match r {
+                // Taken out, unless it refuses; then it stays where it was.
+                Request::Move(Move::Out) => self.unhook_fails && self.at.in_chain,
+                // A new one in, unless that is refused; then the old one stays where it was.
+                Request::Move(Move::In) | Request::Reinstall => !self.set_fails || self.at.in_chain,
+            };
+            self.at = self.at.after(in_chain);
+            self.look(place, ours)
+        }
+    }
+
     /// The module manager, a module's dialog over it, the manager again: out once. Another
-    /// program's window, then another: in once. A move that could not be asked for leaves the
-    /// place as it was, and is asked for at the next window.
+    /// program's window, then another: in once. Each answer looks again and finds the hook where
+    /// it belongs.
     #[test]
     fn out_at_the_first_of_our_windows_and_in_once_at_another_program_s() {
-        let mut place = Place::default();
-        let mut asked = Vec::new();
-        let mut front = |place: &mut Place, ours: bool, posted: bool| {
-            place.front(ours, |m| {
-                asked.push(m);
-                posted
-            })
-        };
-        assert_eq!(front(&mut place, false, true), None, "another program's: the hook stays in");
-        assert_eq!(front(&mut place, true, true), Some(Move::Out));
-        assert!(place.is_out());
-        assert_eq!(front(&mut place, true, true), None, "a module's dialog");
-        assert_eq!(front(&mut place, true, true), None, "the module manager again");
-        assert_eq!(front(&mut place, false, true), Some(Move::In));
-        assert!(!place.is_out());
-        assert_eq!(front(&mut place, false, true), None, "another program's window after it");
-        // Not posted: nothing changes, and the next window asks again.
-        assert_eq!(front(&mut place, true, false), None);
-        assert!(!place.is_out());
-        assert_eq!(front(&mut place, true, true), Some(Move::Out));
-        assert_eq!(front(&mut place, false, false), None);
-        assert!(place.is_out());
-        assert_eq!(front(&mut place, false, true), Some(Move::In));
-        assert_eq!(asked, [Move::Out, Move::In, Move::Out, Move::Out, Move::In, Move::In]);
+        let mut t = HookThread::new();
+        let mut p = Place::default();
+        assert_eq!(t.look(&mut p, false), None, "another program's: the hook stays in");
+        assert_eq!(t.look(&mut p, true), Some(Move::Out));
+        assert!(p.is_out());
+        assert_eq!(t.answer(&mut p, true), None);
+        assert!(!t.at.in_chain);
+        assert_eq!(t.look(&mut p, true), None, "a module's dialog");
+        assert_eq!(t.look(&mut p, true), None, "the module manager again");
+        assert_eq!(t.look(&mut p, false), Some(Move::In));
+        assert!(!p.is_out());
+        assert_eq!(t.answer(&mut p, false), None);
+        assert!(t.at.in_chain);
+        assert_eq!(t.look(&mut p, false), None, "another program's window after it");
         assert_eq!(Move::Out.reason(), Reason::Out);
         assert_eq!(Move::In.reason(), Reason::Back);
+    }
+
+    /// The session of 2026-10-11 (the HTML probe, REAPER's FX window): the hook was out while the
+    /// page was taken to be in front, and the first key of Ctrl+Alt+Shift+Win+F7, pressed in
+    /// REAPER's FX window, brought it back. F7 then brought the page to the front. With the move
+    /// back still on its way nothing more is asked, and its answer looks again: out, with the page
+    /// in front. One request waits at a time.
+    #[test]
+    fn back_in_on_its_way_then_one_of_our_windows_ends_out() {
+        let mut t = HookThread::new();
+        let mut p = Place::default();
+        assert_eq!(t.look(&mut p, true), Some(Move::Out));
+        assert_eq!(t.answer(&mut p, true), None);
+        // The FX window in front at the first key: back in.
+        assert_eq!(t.look(&mut p, false), Some(Move::In));
+        // The page comes to the front before the hook's thread has answered.
+        assert_eq!(t.look(&mut p, true), None, "nothing more while the move back is on its way");
+        assert_eq!(t.answer(&mut p, true), Some(Move::Out), "its answer looks again");
+        assert_eq!(t.answer(&mut p, true), None);
+        assert!(!t.at.in_chain, "out, with the page in front");
+        assert_eq!(t.most_waiting, 1);
+    }
+
+    /// The same session, as it went: the move back answered while the FX window was still in
+    /// front, then the page in front with no foreground event at all. The keys of the combination
+    /// go up in the page, and raw input reports each of them from this process's side: the first
+    /// key-up looks, and the hook goes out — before the modifiers' key-ups, which a screen reader
+    /// whose hook is behind ours would otherwise miss and go on taking as held.
+    #[test]
+    fn our_window_in_front_with_no_foreground_event_is_found_at_the_first_key_up_there() {
+        let mut t = HookThread::new();
+        let mut p = Place::default();
+        t.look(&mut p, true);
+        t.answer(&mut p, true);
+        assert_eq!(t.look(&mut p, false), Some(Move::In));
+        assert_eq!(t.answer(&mut p, false), None, "the FX window still in front");
+        assert!(t.at.in_chain);
+        // F7 goes up, then Shift, Win, Ctrl, Alt: key-ups (RI_KEY_BREAK), from a keyboard.
+        assert!(physical_key(true, 0x76, 0x41), "F7's key-up is a physical key event");
+        assert!(!physical_down(true, 1, 0x76, 0x41), "but not a key-down");
+        assert!(!p.looks_at_key(false), "a key from the FX window's side: nothing to look at");
+        assert!(p.looks_at_key(true), "a key from this process's side: looked at");
+        assert_eq!(t.look(&mut p, true), Some(Move::Out));
+        assert!(p.looks_at_key(true), "every key looks while the move is on its way");
+        assert_eq!(t.answer(&mut p, true), None);
+        assert!(!t.at.in_chain);
+        assert!(!p.looks_at_key(true), "out: the keys in the page look no more");
+    }
+
+    /// The other way round: the move out on its way, and a window of another program in front
+    /// before it is answered. The answer looks again: back in.
+    #[test]
+    fn out_on_its_way_then_another_program_s_window_ends_in() {
+        let mut t = HookThread::new();
+        let mut p = Place::default();
+        assert_eq!(t.look(&mut p, true), Some(Move::Out));
+        assert_eq!(t.look(&mut p, false), None, "nothing more while the move out is on its way");
+        assert_eq!(t.answer(&mut p, false), Some(Move::In));
+        assert_eq!(t.answer(&mut p, false), None);
+        assert!(t.at.in_chain);
+        assert_eq!(t.most_waiting, 1);
+    }
+
+    /// Every order of up to eight steps — a window of ours in front, another program's, the hook's
+    /// thread answering — ends with the hook where the last window in front wants it once the
+    /// answers are in, and never with more than one request waiting.
+    #[test]
+    fn rapid_alternation_ends_where_the_last_window_in_front_wants_the_hook() {
+        for n in 0..=8u32 {
+            for code in 0..3u32.pow(n) {
+                let mut t = HookThread::new();
+                let mut p = Place::default();
+                // The look as the watch is armed, another program's window in front.
+                assert_eq!(t.look(&mut p, false), None);
+                let mut ours = false;
+                let mut c = code;
+                for _ in 0..n {
+                    match c % 3 {
+                        0 | 1 => {
+                            ours = c % 3 == 0;
+                            t.look(&mut p, ours);
+                        }
+                        _ => {
+                            if !t.queue.is_empty() {
+                                t.answer(&mut p, ours);
+                            }
+                        }
+                    }
+                    c /= 3;
+                }
+                while !t.queue.is_empty() {
+                    t.answer(&mut p, ours);
+                }
+                assert_eq!(t.at.in_chain, !ours, "steps {code} of {n}");
+                assert!(t.most_waiting <= 1, "steps {code} of {n}: {} waiting", t.most_waiting);
+                assert!(!p.looks_at_key(ours), "steps {code} of {n}: settled");
+            }
+        }
+    }
+
+    /// A move the hook's thread could not make is not asked for again at every focus change or key
+    /// — nor does every key look — until the window in front changes sides (or a window comes to
+    /// the front: the next test). `UnhookWindowsHookEx` refusing leaves the hook in the chain while
+    /// our windows are in front; `SetWindowsHookExW` refusing leaves it out in front of another
+    /// program, where the witness counts the keys it misses and its re-install puts it back.
+    #[test]
+    fn a_move_that_could_not_be_made_is_asked_for_again_only_once_the_window_changes_sides() {
+        let mut t = HookThread::new();
+        let mut p = Place::default();
+        t.unhook_fails = true;
+        assert_eq!(t.look(&mut p, true), Some(Move::Out));
+        assert_eq!(t.answer(&mut p, true), None, "not again at its own answer");
+        assert!(t.at.in_chain);
+        assert_eq!(t.look(&mut p, true), None, "nor at the next look");
+        assert!(!p.looks_at_key(true), "nor does a key in our window look");
+        assert_eq!(t.look(&mut p, false), None, "another program's: the hook is where it belongs");
+        t.unhook_fails = false;
+        assert_eq!(t.look(&mut p, true), Some(Move::Out), "our window again: asked again");
+        t.answer(&mut p, true);
+        assert!(!t.at.in_chain);
+        // The way back refused.
+        t.set_fails = true;
+        assert_eq!(t.look(&mut p, false), Some(Move::In));
+        assert_eq!(t.answer(&mut p, false), None);
+        assert!(!t.at.in_chain);
+        assert_eq!(t.look(&mut p, false), None);
+        assert!(!p.looks_at_key(false));
+        let mut w = Witness::default();
+        let judged: Vec<_> = (0..=MISSES_TO_REHOOK)
+            .map(|i| p.key_down(&mut w, 20_000 + i * 1_500, Some(1_000), || true))
+            .collect();
+        assert_eq!(judged.last(), Some(&Some(Verdict::Rehook { downs: MISSES_TO_REHOOK })), "{judged:?}");
+        t.set_fails = false;
+        t.reinstall(&mut p);
+        assert_eq!(t.look(&mut p, false), None, "the re-install is on its way");
+        assert_eq!(t.answer(&mut p, false), None);
+        assert!(t.at.in_chain, "back in");
+    }
+
+    /// The hook could not be put back in front of REAPER, and the user goes to another program's
+    /// window: that window coming to the front asks again, and the hook is back — not only once
+    /// the witness has counted the key-downs it misses there. A focus change or a key in REAPER
+    /// asks nothing. A hook that could not be taken out is asked out again at the next window that
+    /// comes to the front the same way: a module's dialog over the module manager.
+    #[test]
+    fn a_move_that_could_not_be_made_is_asked_for_again_when_a_window_comes_to_the_front() {
+        let mut t = HookThread::new();
+        let mut p = Place::default();
+        assert_eq!(t.foreground(&mut p, true), Some(Move::Out));
+        t.answer(&mut p, true);
+        t.set_fails = true;
+        assert_eq!(t.foreground(&mut p, false), Some(Move::In), "REAPER");
+        assert_eq!(t.answer(&mut p, false), None);
+        assert!(!t.at.in_chain);
+        assert_eq!(t.look(&mut p, false), None, "a focus change in REAPER");
+        assert!(!p.looks_at_key(false), "nor does a key there look");
+        t.set_fails = false;
+        assert_eq!(t.foreground(&mut p, false), Some(Move::In), "another program's window");
+        assert_eq!(t.answer(&mut p, false), None);
+        assert!(t.at.in_chain);
+        assert_eq!(t.foreground(&mut p, false), None, "in already: nothing to ask");
+        t.unhook_fails = true;
+        assert_eq!(t.foreground(&mut p, true), Some(Move::Out), "the module manager");
+        assert_eq!(t.answer(&mut p, true), None);
+        assert!(t.at.in_chain);
+        t.unhook_fails = false;
+        assert_eq!(t.look(&mut p, true), None, "a focus change in the module manager");
+        assert_eq!(t.foreground(&mut p, true), Some(Move::Out), "a module's dialog over it");
+        assert_eq!(t.answer(&mut p, true), None);
+        assert!(!t.at.in_chain);
+        assert_eq!(t.most_waiting, 1);
+    }
+
+    /// The hook could not be put back, and the re-install the witness asks for after the key-downs
+    /// it misses is refused as well: its answer asks for no move back, which would be refused the
+    /// same way and raise the witness's bar a second time. One attempt a round. A re-install that
+    /// puts it back moves nothing after it, and one answered with one of our windows in front by
+    /// then is followed by the move out.
+    #[test]
+    fn a_refused_reinstall_is_not_followed_by_a_move_back() {
+        let mut t = HookThread::new();
+        let mut p = Place::default();
+        t.foreground(&mut p, true);
+        t.answer(&mut p, true);
+        t.set_fails = true;
+        assert_eq!(t.foreground(&mut p, false), Some(Move::In));
+        assert_eq!(t.answer(&mut p, false), None);
+        t.reinstall(&mut p);
+        assert_eq!(t.answer(&mut p, false), None, "no move back after the refused re-install");
+        assert!(t.queue.is_empty());
+        assert!(!t.at.in_chain);
+        assert!(!p.looks_at_key(false), "settled: the keys go to the witness only");
+        t.set_fails = false;
+        t.reinstall(&mut p);
+        assert_eq!(t.answer(&mut p, false), None);
+        assert!(t.at.in_chain);
+        t.reinstall(&mut p);
+        assert_eq!(t.foreground(&mut p, true), None, "the re-install is on its way");
+        assert_eq!(t.answer(&mut p, true), Some(Move::Out));
+        assert_eq!(t.answer(&mut p, true), None);
+        assert!(!t.at.in_chain);
+    }
+
+    /// A move that could not be posted is asked for at the next look, and until then every key
+    /// looks — whichever side it comes from.
+    #[test]
+    fn a_move_that_could_not_be_posted_is_asked_for_at_the_next_key() {
+        let mut p = Place::default();
+        assert_eq!(p.converge(true, HookAt::START, |_| false), None);
+        assert!(p.is_out());
+        assert!(p.looks_at_key(true), "a key in our window, the move still owed");
+        assert!(p.looks_at_key(false));
+        assert_eq!(p.converge(true, HookAt::START, |_| true), Some(Move::Out));
+        assert_eq!(p.converge(true, HookAt::START.after(false), |_| panic!("out already")), None);
+        assert!(!p.looks_at_key(true));
+        assert!(p.looks_at_key(false), "a key from another program's side");
     }
 
     /// The span with the hook out: raw input goes on reporting keys — to this application's
@@ -1665,8 +2070,10 @@ mod tests {
     fn while_the_hook_is_out_no_key_is_counted_and_nothing_installs_it_again() {
         let mut w = Witness::default();
         let (_, last) = run(&mut w, 10_000, 300, 5, true, None);
+        let mut t = HookThread::new();
         let mut place = Place::default();
-        assert_eq!(place.front(true, |_| true), Some(Move::Out));
+        assert_eq!(t.look(&mut place, true), Some(Move::Out));
+        t.answer(&mut place, true);
         for i in 0..60 {
             let judged = place.key_down(&mut w, 20_000 + i * 1_500, last, || {
                 panic!("asked about a key while the hook is out")
@@ -1680,7 +2087,7 @@ mod tests {
         assert_eq!(place.change(on_session_change(7)), Change::Restart);
         assert_eq!(place.change(Change::Nothing), Change::Nothing);
         // Back in: the watch starts the count afresh, the hook is called again.
-        assert_eq!(place.front(false, |_| true), Some(Move::In));
+        assert_eq!(t.look(&mut place, false), Some(Move::In));
         w.restart();
         assert_eq!(place.change(on_session_change(8)), Change::Rehook(Reason::Unlocked), "in the chain again");
         assert_eq!(place.key_down(&mut w, 200_000, Some(200_001), || panic!("not asked")), Some(Verdict::First));
@@ -1693,31 +2100,29 @@ mod tests {
         assert_eq!(v.last(), Some(&Some(Verdict::Rehook { downs: MISSES_TO_REHOOK })), "{v:?}");
     }
 
-    /// The foreground event for another program's window never comes, or the move back could not
-    /// be asked for: the next key-down looks at the window in front and brings the hook back, and
-    /// so does a resume, an unlock or a connect while it is out. While the hook is in, only a key
-    /// that went to this process looks — the event for one of its windows lost — and a key where
-    /// the place already agrees with the window in front moves nothing.
+    /// A switch the watch never hears of is found at the next key raw input reports from the
+    /// other side: while the hook is out, a key gone to another program's window; while it is in,
+    /// a key gone to one of this process's windows. A key from the side the hook is on looks at
+    /// nothing. A resume, an unlock or a connect while the hook is out looks as well.
     #[test]
-    fn a_foreground_event_never_heard_is_made_up_at_the_next_key_and_at_an_unlock() {
+    fn a_switch_never_heard_of_is_found_at_the_next_key_from_the_other_side_and_at_an_unlock() {
+        let mut t = HookThread::new();
         let mut place = Place::default();
+        assert_eq!(t.look(&mut place, false), None);
         assert!(!place.looks_at_key(false), "in, a key to another program: nothing to look at");
         assert!(place.looks_at_key(true), "in, a key to one of our windows");
-        assert_eq!(place.front(true, |_| true), Some(Move::Out));
-        assert!(place.looks_at_key(true), "out: every key looks");
-        assert_eq!(place.front(true, |_| panic!("asked for a move it is in already")), None);
+        assert_eq!(t.look(&mut place, true), Some(Move::Out));
+        t.answer(&mut place, true);
+        assert!(!place.looks_at_key(true), "out, a key to one of our windows: nothing to look at");
+        assert_eq!(t.look(&mut place, true), None);
         // The switch to another program unheard: its first key brings the hook back.
         assert!(place.looks_at_key(false));
-        assert_eq!(place.front(false, |_| true), Some(Move::In));
+        assert_eq!(t.look(&mut place, false), Some(Move::In));
+        t.answer(&mut place, false);
         assert!(!place.looks_at_key(false));
-        // A move back that could not be asked for is asked for again at the next key.
-        assert_eq!(place.front(true, |_| true), Some(Move::Out));
-        assert_eq!(place.front(false, |_| false), None);
-        assert!(place.looks_at_key(false), "still out");
-        assert_eq!(place.front(false, |_| true), Some(Move::In));
         // The keyboard back from a lock or a sleep while the hook is out: looked at. On the way
         // there, or with the hook in (which a re-install of its own answers), not.
-        assert_eq!(place.front(true, |_| true), Some(Move::Out));
+        assert_eq!(t.look(&mut place, true), Some(Move::Out));
         for change in [on_session_change(8), on_session_change(1), on_session_change(3), on_power(0x12)] {
             assert!(place.looks_at_change(change), "{change:?} while out");
         }
@@ -1725,8 +2130,39 @@ mod tests {
             assert!(!place.looks_at_change(change), "{change:?} while out");
         }
         assert!(!place.looks_at_change(Change::Nothing));
-        assert_eq!(place.front(false, |_| true), Some(Move::In));
+        t.answer(&mut place, true);
+        assert_eq!(t.look(&mut place, false), Some(Move::In));
         assert!(!place.looks_at_change(on_session_change(8)), "in: a re-install of its own");
+    }
+
+    /// Where the hook's thread left the hook survives the trip through the atomic, the count
+    /// wrapping as the watch's count of posted requests does.
+    #[test]
+    fn where_the_hook_is_survives_the_atomic_and_the_counts_wrap_together() {
+        for at in [HookAt::START, HookAt { handled: 7, in_chain: false }, HookAt { handled: u32::MAX, in_chain: true }] {
+            assert_eq!(HookAt::decode(at.encode()), at);
+        }
+        assert_eq!(HookAt { handled: u32::MAX, in_chain: true }.after(false), HookAt { handled: 0, in_chain: false });
+        let mut p = Place { posted: u32::MAX, ..Place::default() };
+        let at = HookAt { handled: u32::MAX, in_chain: true };
+        assert_eq!(p.converge(true, at, |_| true), Some(Move::Out));
+        assert_eq!(p.posted, 0);
+        assert_eq!(p.converge(true, at, |_| panic!("on its way")), None);
+        assert_eq!(p.converge(true, at.after(false), |_| panic!("out already")), None);
+    }
+
+    /// A page's WebView2 content is drawn by another process in a child window of the page's
+    /// frame, and its popups are that process's windows owned by the frame: the window in front
+    /// is this application's when it is, or when its root owner is.
+    #[test]
+    fn the_window_in_front_is_ours_when_it_or_its_root_owner_is() {
+        const OWN: u32 = 1234;
+        assert!(front_is_ours(OWN, Some(OWN), Some(OWN)), "the page's frame, the module manager");
+        assert!(front_is_ours(OWN, Some(OWN), None), "its root owner unread");
+        assert!(front_is_ours(OWN, Some(5678), Some(OWN)), "a WebView2 window owned by a page of ours");
+        assert!(!front_is_ours(OWN, Some(5678), Some(5678)), "REAPER's FX window");
+        assert!(!front_is_ours(OWN, Some(5678), Some(9)), "another program's window owned by a third");
+        assert!(!front_is_ours(OWN, None, None), "gone");
     }
 
     #[test]

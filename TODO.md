@@ -7953,7 +7953,7 @@ time limit; a module past either is stopped until the next start.
       **Fix in place (2026-10-10), not yet confirmed live:** the keyboard hook is taken out of the
       chain while a window of this application is in front, and installed again, first in the
       chain, when a window of another program comes to the front (hook_watch::Place,
-      hook_watch_thread::follow_front; docs/api/keys.md, "Out of the chain in this application's
+      hook_watch_thread::converge; docs/api/keys.md, "Out of the chain in this application's
       own windows"). A foreground event the watch never hears is made up for at the next key-down
       raw input reports. While the hook is out the watch counts no key, and a resume or unlock
       only looks at the window in front; captures and hotkeys carry over, held records are
@@ -7974,6 +7974,32 @@ time limit; a module past either is stopped until the next start.
       its binary holds none of the fix's lines ("is out while one of our windows" is not in it),
       so it ran without the fix, and the result is the one the cause above predicts. The live
       check below is still to be made with a build that has the fix.
+      **Live, 2026-10-11 (the HTML probe build, e760b2d):** the first automatic show of the page
+      beside ReaEQ was declined by Windows; F7 then brought the page to the front, and from there
+      on NVDA was disturbed again, so the tests stopped. Log: at 1791674778 a foreground event
+      named the page and the hook went out, while the show line said Windows declined and another
+      window (process 17112) stayed in front; nothing moved for 12.6 s, until the first key of
+      Ctrl+Alt+Shift+Win+F7 found REAPER's FX window in front and the hook came back (1791674791).
+      F7 brought the page to the front (accepted) — and no foreground event reached the watch: the
+      hook stayed in the chain with our page in front until a Ctrl key-down two seconds later
+      (1791674793). The key-ups of F7, Shift, Win, Ctrl and Alt went up in the page in between, so
+      NVDA, its hook behind ours, never saw them, and was disturbed from then on (most likely
+      by modifiers it took as held).
+      The move logic was not losing a move on the way (the place changed as a move was asked, and
+      the hook's thread makes them in order); it trusted the window an event names, and looked
+      again only at a key-DOWN.
+      **Fix (2026-10-11), live check open:** level instead of edges (hook_watch::Place::converge):
+      where the hook belongs is decided by GetForegroundWindow at the moment the watch looks — a
+      window counts as ours when it or its root owner is (a WebView2 popup) — and compared with
+      where the hook's thread says the hook is (HookAt, an atomic written before each answer), one
+      move at a time, looked at again once every request posted is answered. The watch looks at
+      every foreground event, every focus event (EVENT_OBJECT_FOCUS, new), every answer, every key
+      raw input reports from the other side, key-ups included, and every key while a move is owed.
+      A move the hook's thread could not make is asked again once the window in front changes
+      sides or a window comes to the front, not at a focus event or a key; a re-install counts as a
+      move back, so a refused one is not followed by a second attempt at its answer. To see
+      live: with the probe, a declined show and then F7 — one "out" line within milliseconds of
+      the page coming to the front, and NVDA reading normally in the page afterwards.
       **Open:**
       - The maintainer's live check, with NVDA started BEFORE the application (the order that
         failed): in the module manager and a module's Settings dialog, arrows read the character,

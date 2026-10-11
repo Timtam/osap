@@ -18,20 +18,21 @@
 //! - **Suspend and resume** (`RegisterSuspendResumeNotification` with a callback: a
 //!   message-only window "does not receive broadcast messages", which is how `WM_POWERBROADCAST`
 //!   reaches ordinary windows, and the callback needs no window at all).
-//! - **The window in front** (`SetWinEventHook`, `EVENT_SYSTEM_FOREGROUND`, out of context, so
-//!   delivered here). Not for the hook's survival: for what it recorded as held, and for where
-//!   it is. When a window the hook is not called for comes to the front — one above this
-//!   process's integrity level, or one of this process's own ([`front_came`]) — and at every
-//!   session change and suspend above, a key it saw go down can go up unseen, and the backend
-//!   forgets what it recorded from key-downs alone
-//!   ([`super::windows::forget_keys_held_out_of_sight`]). When one of this process's own windows
-//!   comes to the front, the hook's thread is asked to take the hook out of the chain, and when a
-//!   window of another program comes to the front after it, to install it again, first in the
-//!   chain ([`follow_front`], `hook_watch::Place` for why); an event never heard is made up for
-//!   at the next key-down raw input reports, and at a resume or an unlock ([`follow_front_now`]).
-//!   Here rather than on the pump, whose foreground events can wait behind a long OCR call: a
-//!   record forgotten late could be one the user has made since, and a hook taken out late cuts
-//!   the hooks behind it off from every key typed into the module manager meanwhile.
+//! - **The window in front** (`SetWinEventHook`, `EVENT_SYSTEM_FOREGROUND` and
+//!   `EVENT_OBJECT_FOCUS`, out of context, so delivered here). Not for the hook's survival: for
+//!   what it recorded as held, and for where it is. When a window the hook is not called for comes
+//!   to the front — one above this process's integrity level, or one of this process's own
+//!   ([`front_came`]) — and at every session change and suspend above, a key it saw go down can go
+//!   up unseen, and the backend forgets what it recorded from key-downs alone
+//!   ([`super::windows::forget_keys_held_out_of_sight`]). While one of this process's own windows
+//!   is in front the hook's thread is asked to take the hook out of the chain, and while a window
+//!   of another program is, to install it again, first in the chain ([`converge`],
+//!   `hook_watch::Place` for why). Decided by the window in front now, not by the window an event
+//!   names, at every foreground and focus event, at every answer of the hook's thread, at a key raw
+//!   input reports from the other side, and at a resume or an unlock. Here rather than on the
+//!   pump, whose events can wait behind a long OCR call: a record forgotten late could be one the
+//!   user has made since, and a hook taken out late cuts the hooks behind it off from every key
+//!   typed into the module manager meanwhile.
 //! - **This process's menus** (`SetWinEventHook`, `EVENT_SYSTEM_MENUPOPUPSTART` to
 //!   `EVENT_SYSTEM_MENUPOPUPEND`, out of context, for this process only), from the start, hook or
 //!   not: the `[gui]` lines for the tray menu and any other menu of ours opening and closing, with
@@ -106,16 +107,17 @@ use windows_sys::Win32::UI::Input::{
     RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEKEYBOARD,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassNameW, GetForegroundWindow,
-    GetMessageTime, GetMessageW, GetWindowThreadProcessId, InternalGetWindowText, IsWindowVisible,
-    KillTimer, PostMessageW, PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SetTimer,
-    DEVICE_NOTIFY_CALLBACK, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MENUPOPUPEND,
-    EVENT_SYSTEM_MENUPOPUPSTART, HWND_MESSAGE, MSG, WINEVENT_OUTOFCONTEXT, WM_APP,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_INPUT, WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE,
-    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor, GetClassNameW,
+    GetForegroundWindow, GetMessageTime, GetMessageW, GetWindowThreadProcessId,
+    InternalGetWindowText, IsWindowVisible, KillTimer, PostMessageW, PostThreadMessageW,
+    RegisterClassW, RegisterWindowMessageW, SetTimer, DEVICE_NOTIFY_CALLBACK, EVENT_OBJECT_FOCUS,
+    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MENUPOPUPEND, EVENT_SYSTEM_MENUPOPUPSTART, GA_ROOTOWNER,
+    HWND_MESSAGE, MSG, WINEVENT_OUTOFCONTEXT, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_INPUT,
+    WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
-use super::hook_watch::{self, Change, Move, Outcome, Place, Reason, Verdict, Witness};
+use super::hook_watch::{self, Change, HookAt, Move, Outcome, Place, Reason, Verdict, Witness};
 use crate::system_events::{self, SystemEvent};
 
 /// Posted to the hook's thread (a thread message, no window): install the hook again. `WPARAM`
@@ -166,6 +168,12 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 /// rather than never: the watch asks for no second re-install for a session change while it waits
 /// for one, and a move's reply answers a re-install whose own was overwritten (`settle_move`).
 static LOST_REPLY: AtomicU64 = AtomicU64::new(0);
+/// Where the hook's thread left the hook (`hook_watch::HookAt`, encoded): how many of the watch's
+/// requests it has handled, and whether a hook of ours is in the chain after them. Written only by
+/// the hook's thread ([`report`]), before each answer; read here before a move is asked
+/// ([`converge`]). It starts as the hook's thread starts, with its first hook installed: the
+/// hook's part of the watch is armed only once that hook is in.
+static HOOK_AT: AtomicU64 = AtomicU64::new(HookAt::START.encode());
 
 /// Key-downs that reached the hook late ([`note_late_key`]) since the last message, wrapping.
 static LATE_KEYS: AtomicU32 = AtomicU32::new(0);
@@ -335,10 +343,15 @@ fn spawn() {
 }
 
 /// The hook's thread reports a re-install, or a move out of the chain or back into it, asked with
-/// `reason` (as it came, encoded). Posts it here and returns: no log line is written on the hook's
-/// thread. A reply that cannot be posted — the watch's queue full, after the watch was held up —
-/// is left in [`LOST_REPLY`] for the watch to pick up.
-pub(super) fn report(reason: usize, outcome: Outcome) {
+/// `reason` (as it came, encoded), after which a hook of ours is in the chain or not (`in_chain`).
+/// Where the hook is goes into [`HOOK_AT`] first, one more request handled; then the reply is
+/// posted here and the call returns: no log line is written on the hook's thread. A reply that
+/// cannot be posted — the watch's queue full, after the watch was held up — is left in
+/// [`LOST_REPLY`] for the watch to pick up; where the hook is does not depend on it.
+pub(super) fn report(reason: usize, outcome: Outcome, in_chain: bool) {
+    // The hook's thread is the only writer, so a load and a store make no lost update.
+    let at = HookAt::decode(HOOK_AT.load(Ordering::SeqCst)).after(in_chain);
+    HOOK_AT.store(at.encode(), Ordering::SeqCst);
     let hwnd = WATCH_HWND.load(Ordering::SeqCst);
     // SAFETY: posting to our own message-only window.
     let posted =
@@ -392,17 +405,17 @@ struct Keys {
     said_unanswered: bool,
     /// Said that a request could not be posted.
     said_post_failed: bool,
-    /// Whether the hook is in the chain or out of it for one of this process's windows, as asked
-    /// of the hook's thread ([`follow_front`]).
+    /// Where the hook belongs — in the chain, or out of it while one of this process's windows is
+    /// in front — and what has been asked of the hook's thread to get it there ([`converge`]).
     place: Place,
-    /// The moves asked of the hook's thread and not answered yet, each with the window that came
-    /// to the front and what its line says after it, for its line ([`hook_watch::window_words`],
-    /// [`hook_watch::move_after`]). The hook's thread answers them in order; a few at most, unless
-    /// answers went missing, and then the oldest are dropped.
+    /// The moves asked of the hook's thread and not answered yet, each with the window that was in
+    /// front and what its line says after it, for its line ([`hook_watch::window_words`],
+    /// [`hook_watch::move_after`]). One move at a time is asked; more wait here only while answers
+    /// went missing, and then the oldest are dropped.
     moves: VecDeque<(Reason, String, String)>,
     /// Said that a move could not be posted.
     said_move_failed: bool,
-    /// The last window of another program that came to the front, with its process: the one a
+    /// The last window of another program the watch saw in front, with its process: the one a
     /// move out names as in front before ours.
     before: Option<(isize, u32)>,
     /// When the move out was asked (`GetTickCount`), for how long ours were in front, said by the
@@ -524,8 +537,9 @@ fn run() {
     }
 }
 
-/// Arms the hook's part of the watch: raw input from the keyboard, the foreground events, and
-/// what the witness needs to know about this process. Once: a second call does nothing.
+/// Arms the hook's part of the watch: raw input from the keyboard, the foreground and focus
+/// events, and what the witness needs to know about this process. Once: a second call does
+/// nothing.
 fn arm_keys() {
     let armed = STATE.with(|s| s.borrow().as_ref().is_some_and(|s| s.keys.is_some()));
     if armed {
@@ -534,6 +548,7 @@ fn arm_keys() {
     let hwnd = WATCH_HWND.load(Ordering::SeqCst) as HWND;
     let raw = register_raw_input(hwnd);
     let foreground = register_foreground().map(|_| ());
+    let focus = register_focus().map(|_| ());
     // SAFETY: the pseudo-handle of this process, and this thread's own desktop; neither is
     // closed (neither needs to be).
     let (own_level, desktop) = unsafe {
@@ -554,14 +569,15 @@ fn arm_keys() {
                 "keyboard watch: raw input from the keyboard is compared with the hook's calls, \
                  and the hook is installed again after it misses {} key-downs in a row, and after \
                  a resume or an unlock. Raw input {}; session notifications {}{}; suspend/resume \
-                 notifications {}; foreground events {}; this process's integrity level {}; \
-                 desktop {}",
+                 notifications {}; foreground events {}; focus events {}; this process's \
+                 integrity level {}; desktop {}",
                 hook_watch::MISSES_TO_REHOOK,
                 said(&raw),
                 said(&session),
                 if session.is_err() { " — tried again at the 1st, 2nd, 4th, 8th … key-down" } else { "" },
                 said(&s.power),
                 said(&foreground),
+                said(&focus),
                 own_level.map_or("unknown — no key is counted".to_string(), |l| format!("{l:#06x}")),
                 desktop
                     .as_ref()
@@ -589,7 +605,7 @@ fn arm_keys() {
     // tell only of the next window.
     with_state(|s| {
         if let Some(k) = s.keys.as_mut() {
-            follow_front_now(k);
+            converge(k);
         }
     });
 }
@@ -759,9 +775,39 @@ fn register_foreground() -> Result<HWINEVENTHOOK, u32> {
     }
 }
 
+/// The keyboard focus, as it moves: out of context, delivered here from every process on this
+/// desktop, as the foreground events are. Not for the control that has it: a focus change is one
+/// more moment to look at the window in front ([`converge`]). On 2026-10-11 a page of ours came
+/// to the front with no foreground event reaching the watch, while the page itself saw the focus
+/// arrive in its document. Lasts as long as the process.
+fn register_focus() -> Result<HWINEVENTHOOK, u32> {
+    // SAFETY: an out-of-context hook with a callback of ours that lives for the process.
+    let hook = unsafe {
+        SetWinEventHook(
+            EVENT_OBJECT_FOCUS,
+            EVENT_OBJECT_FOCUS,
+            std::ptr::null_mut(),
+            Some(focus_changed),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        )
+    };
+    if hook.is_null() {
+        // SAFETY: plain error query (SetWinEventHook documents none; 0 then).
+        Err(unsafe { GetLastError() })
+    } else {
+        Ok(hook)
+    }
+}
+
 /// A window came to the front. If it is one the hook is not called for, what the hook recorded
 /// as held from key-downs alone is forgotten — see [`front_came`]. A menu of ours none of whose
-/// popups is shown any more is closed ([`settle_menus`]).
+/// popups is shown any more is closed ([`settle_menus`]). The hook is brought to where the window
+/// in front now wants it ([`converge`]): the window in front now, not the window the event names,
+/// which on 2026-10-11 named a page of ours that did not keep the front (`hook_watch::Place`). A
+/// move the hook's thread could not make is asked for again here
+/// (`hook_watch::Place::foreground_event`).
 unsafe extern "system" fn foreground_changed(
     _hook: HWINEVENTHOOK,
     event: u32,
@@ -771,10 +817,11 @@ unsafe extern "system" fn foreground_changed(
     _thread: u32,
     _time: u32,
 ) {
-    // OBJID_WINDOW, CHILDID_SELF: the top-level window itself.
-    if event != EVENT_SYSTEM_FOREGROUND || id_object != 0 || id_child != 0 || hwnd.is_null() {
+    if event != EVENT_SYSTEM_FOREGROUND {
         return;
     }
+    // OBJID_WINDOW, CHILDID_SELF: the top-level window itself, the one whose keys may go by unseen.
+    let window = id_object == 0 && id_child == 0 && !hwnd.is_null();
     // Unwinding out of a callback of the system's is an abort; see `watch_wndproc`.
     let caught = std::panic::catch_unwind(|| {
         settle_menus();
@@ -782,21 +829,53 @@ unsafe extern "system" fn foreground_changed(
         with_state(|s| {
             let State { keys, said_forgot, .. } = s;
             let Some(k) = keys.as_mut() else { return };
-            // A window gone by now has no process: its level counts as unread, and it moves the
-            // hook nowhere — the window in front after it has an event of its own.
-            let process = process_of_window(&mut k.look, hwnd as isize);
-            let (ours, level) =
-                process.map_or((false, None), |(pid, level)| (pid == std::process::id(), level));
-            front_came(k.look.own_level, ours, level, said_forgot);
-            if let Some((pid, _)) = process {
-                follow_front(k, hwnd, pid);
+            if window {
+                // A window gone by now has no process: its level counts as unread.
+                let process = process_of_window(&mut k.look, hwnd as isize);
+                let ours = process.is_some_and(|(pid, _)| is_ours(hwnd, pid));
+                front_came(k.look.own_level, ours, process.and_then(|(_, level)| level), said_forgot);
             }
+            k.place.foreground_event();
+            converge(k);
         });
     });
     if caught.is_err() {
         static SAID: AtomicBool = AtomicBool::new(false);
         if !SAID.swap(true, Ordering::Relaxed) {
             crate::logging::line("keys", "the keyboard watch panicked handling a foreground change");
+        }
+    }
+}
+
+/// The focus moved, in any window of any process: the hook is brought to where the window in
+/// front now wants it ([`converge`]). A few queries when it is there already, which is nearly
+/// always. A move the hook's thread could not make is not asked for again here, as it is at a
+/// foreground event: the focus moves many times in one window.
+unsafe extern "system" fn focus_changed(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    _hwnd: HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if event != EVENT_OBJECT_FOCUS {
+        return;
+    }
+    // Unwinding out of a callback of the system's is an abort; see `watch_wndproc`.
+    let caught = std::panic::catch_unwind(|| {
+        take_lost_reply();
+        with_state(|s| {
+            if let Some(k) = s.keys.as_mut() {
+                converge(k);
+            }
+        });
+    });
+    if caught.is_err() {
+        static SAID: AtomicBool = AtomicBool::new(false);
+        if !SAID.swap(true, Ordering::Relaxed) {
+            crate::logging::line("keys", "the keyboard watch panicked handling a focus change");
         }
     }
 }
@@ -952,20 +1031,25 @@ pub(super) fn front_came(own_level: Option<u32>, ours: bool, level: Option<u32>,
     }
 }
 
-/// Window `hwnd` of process `pid` came to the front: the hook goes out of the chain at the first of
-/// this process's own windows, and back in at the first window of another program after them
-/// (`hook_watch::Place`). The hook's thread is asked and answers here ([`settle_move`]); the line
-/// is written then. Coming back, the witness starts its count afresh, as for any re-install. Called
-/// at each foreground event, and with the window in front at the key-downs and session changes
-/// that look again ([`follow_front_now`]).
-fn follow_front(k: &mut Keys, hwnd: HWND, pid: u32) {
-    let ours = pid == std::process::id();
+/// Brings the hook to where the window in front now wants it (`hook_watch::Place::converge`): out
+/// of the chain while one of this application's own windows is in front ([`is_ours`]), in it
+/// otherwise, with one request to the hook's thread at a time, compared with where that thread
+/// says the hook is ([`HOOK_AT`]). The hook's thread answers here ([`settle_move`]), where the line
+/// is written and this looks again. Coming back, the witness starts its count afresh, as for any
+/// re-install. Called at every foreground and focus event, at every answer of the hook's thread,
+/// at a key raw input reports from the other side (`hook_watch::Place::looks_at_key`), at a resume
+/// or an unlock while the hook is out, and once as the watch is armed. Nothing when no window is
+/// in front, or it is gone by now: the next of those looks again.
+fn converge(k: &mut Keys) {
+    let Some((hwnd, pid, ours)) = front_now() else { return };
+    let own = std::process::id();
     if !ours {
         k.before = Some((hwnd as isize, pid));
     }
+    let at = HookAt::decode(HOOK_AT.load(Ordering::SeqCst));
     let tid = HOOK_THREAD.load(Ordering::SeqCst);
     let mut failed = None;
-    let moved = k.place.front(ours, |m| {
+    let moved = k.place.converge(ours, at, |m| {
         let msg = match m {
             Move::Out => WM_APP_UNHOOK,
             Move::In => WM_APP_REHOOK,
@@ -985,14 +1069,12 @@ fn follow_front(k: &mut Keys, hwnd: HWND, pid: u32) {
                 "keys",
                 &format!(
                     "could not ask the keyboard hook's thread to {} (PostThreadMessageW error \
-                     {error}); asked again at the next {} and the next window that comes to the \
-                     front",
+                     {error}); asked again at the next key and the next window or focus change",
                     if ours {
                         "take the hook out of the chain while one of our windows is in front"
                     } else {
                         "put the hook back in the chain"
                     },
-                    if ours { "key typed into one of our windows" } else { "key-down" },
                 ),
             );
         }
@@ -1001,7 +1083,7 @@ fn follow_front(k: &mut Keys, hwnd: HWND, pid: u32) {
     if m == Move::In {
         k.witness.restart();
     }
-    let window = window_named(hwnd, (!ours).then_some(pid));
+    let window = window_named(hwnd, (pid != own).then_some(pid));
     // What the line says after the window: the other program's window that was in front before
     // ours, or how long ours were.
     // SAFETY: reads the tick clock.
@@ -1023,20 +1105,30 @@ fn follow_front(k: &mut Keys, hwnd: HWND, pid: u32) {
     k.moves.push_back((m.reason(), window, after));
 }
 
-/// [`follow_front`] with the window in front now, for a foreground event the watch never got or a
-/// move it could not ask for (`hook_watch::Place::looks_at_key`), and once as the watch is armed.
-/// Nothing when no window is in front, or it is gone by now: its successor's event, or the next
-/// key-down, looks again.
-fn follow_front_now(k: &mut Keys) {
-    // SAFETY: plain queries; neither sends the window a message.
-    let front = unsafe {
-        let front = GetForegroundWindow();
-        let mut pid = 0u32;
-        (!front.is_null() && GetWindowThreadProcessId(front, &mut pid) != 0).then_some((front, pid))
-    };
-    if let Some((front, pid)) = front {
-        follow_front(k, front, pid);
+/// The window in front now, its process, and whether it is this application's ([`is_ours`]):
+/// `None` when no window is in front, or it is gone by now.
+fn front_now() -> Option<(HWND, u32, bool)> {
+    let (front, pid) = front_window();
+    let pid = pid?;
+    Some((front, pid, is_ours(front, pid)))
+}
+
+/// Whether window `hwnd`, of process `pid`, is this application's as the keys go
+/// (`hook_watch::front_is_ours`): its process is this one, or its root owner's is — a page's
+/// WebView2 popup, a window of `msedgewebview2.exe` owned by the page's frame. Plain queries,
+/// neither of which sends the window a message; a window gone answers no root owner.
+fn is_ours(hwnd: HWND, pid: u32) -> bool {
+    let own = std::process::id();
+    if pid == own {
+        return true;
     }
+    // SAFETY: plain queries on any handle.
+    let root_owner = unsafe {
+        let root = GetAncestor(hwnd, GA_ROOTOWNER);
+        let mut root_pid = 0u32;
+        (!root.is_null() && GetWindowThreadProcessId(root, &mut root_pid) != 0).then_some(root_pid)
+    };
+    hook_watch::front_is_ours(own, Some(pid), root_owner)
 }
 
 /// The window that came to the front, as the move lines name it (`hook_watch::window_words`), with
@@ -1210,7 +1302,9 @@ fn take_lost_reply() {
 /// One `WM_INPUT`: `wparam` says whether this process had the foreground when the input came
 /// (`GET_RAWINPUT_CODE_WPARAM` is `RIM_INPUT`). Such a key went to one of this process's windows,
 /// which Windows does not call the hook for, so it is not counted (`hook_watch::counts`); the
-/// re-install line says how many of a run's keys were.
+/// re-install line says how many of a run's keys were. Every physical key event, a key-up as much
+/// as a key-down, may make the watch look at the window in front first
+/// (`hook_watch::Place::looks_at_key`); only the key-downs are judged.
 fn on_raw_input(wparam: WPARAM, handle: HRAWINPUT) {
     // SAFETY: a RAWINPUT buffer on the stack, its size passed in and out; a keyboard report
     // fits (the union's largest member is the mouse's). Anything that does not fit is refused
@@ -1232,16 +1326,18 @@ fn on_raw_input(wparam: WPARAM, handle: HRAWINPUT) {
     }
     // SAFETY: the header says this is a keyboard report.
     let kb = unsafe { raw.data.keyboard };
-    if !hook_watch::physical_down(!raw.header.hDevice.is_null(), kb.Flags, kb.VKey, kb.MakeCode) {
+    let device = !raw.header.hDevice.is_null();
+    if !hook_watch::physical_key(device, kb.VKey, kb.MakeCode) {
         return;
     }
+    let down = hook_watch::physical_down(device, kb.Flags, kb.VKey, kb.MakeCode);
     // The input's own timestamp, on the tick clock the hook's calls are stamped with — see
     // `hook_watch::event_time` for when it is not believed.
     // SAFETY: plain queries: the message being dispatched, and the tick clock.
     let time = unsafe { hook_watch::event_time(GetMessageTime() as u32, GetTickCount()) };
     take_lost_reply();
     with_state(|s| {
-        if s.session_refused.is_some() {
+        if down && s.session_refused.is_some() {
             s.keys_since_refusal += 1;
             if hook_watch::retry_at(s.keys_since_refusal) {
                 retry_session(s);
@@ -1249,13 +1345,17 @@ fn on_raw_input(wparam: WPARAM, handle: HRAWINPUT) {
         }
         let Some(k) = s.keys.as_mut() else { return };
         let ours = hook_watch::to_this_process(wparam);
-        // A foreground event never heard, or a move that could not be asked for, is made up for
-        // here: the window in front decides where the hook belongs before the key is judged.
+        // A switch the watch never heard of, or a move it could not ask for, is made up for here:
+        // the window in front decides where the hook belongs before the key is judged.
         if k.place.looks_at_key(ours) {
-            follow_front_now(k);
+            converge(k);
+        }
+        if !down {
+            return;
         }
         let look = &mut k.look;
-        // Not judged at all while the hook is out of the chain for one of this process's windows.
+        // Not judged at all while the hook belongs out of the chain for one of this process's
+        // windows.
         let Some(verdict) = k.place.key_down(&mut k.witness, time, last_hook_call(), || {
             hook_watch::counts(ours, || hook_can_see_now(look))
         }) else {
@@ -1357,7 +1457,7 @@ fn on_change(change: Change, what: &str) {
         // The keyboard is back while the hook is out, and the window in front may be another
         // program's by now, its foreground event never heard here: the hook goes back in for it.
         if looks {
-            follow_front_now(k);
+            converge(k);
         }
     });
 }
@@ -1396,6 +1496,7 @@ fn request(s: &mut Keys, reason: Reason) {
             s.said_unanswered = false;
         }
         s.pending = Some(reason);
+        s.place.posted();
     } else if !s.said_post_failed {
         s.said_post_failed = true;
         // SAFETY: plain error query.
@@ -1425,7 +1526,8 @@ fn on_rehooked(wparam: WPARAM, lparam: LPARAM) {
 }
 
 /// A re-install's reply: the request is answered, the witness learns the outcome, and the line
-/// is written. A move's goes to [`settle_move`].
+/// is written; then the watch looks at the window in front again ([`converge`]), which may want
+/// the hook elsewhere by now. A move's goes to [`settle_move`].
 fn settle(reason: Reason, outcome: Outcome) {
     if matches!(reason, Reason::Out | Reason::Back) {
         settle_move(reason, outcome);
@@ -1456,11 +1558,18 @@ fn settle(reason: Reason, outcome: Outcome) {
         ));
     }
     crate::logging::line("keys", &text);
+    with_state(|s| {
+        if let Some(k) = s.keys.as_mut() {
+            converge(k);
+        }
+    });
 }
 
-/// A move's reply ([`follow_front`]): the line is written, naming the window the move was asked
-/// for. Back in the chain, the witness starts its count afresh, and a hook that could not be put
-/// back raises the bar as a failed re-install for a resume does (`Witness::rehooked`).
+/// A move's reply ([`converge`]): the line is written, naming the window the move was asked
+/// for, and the watch looks at the window in front again, which may have changed sides while the
+/// move was on its way. Back in the chain, the witness starts its count afresh, and a hook that
+/// could not be put back raises the bar as a failed re-install for a resume does
+/// (`Witness::rehooked`).
 ///
 /// A re-install still marked pending is answered with it. The hook's thread takes the requests in
 /// order, so one asked before the move has been answered by now, and if its reply is still not
@@ -1485,6 +1594,11 @@ fn settle_move(reason: Reason, outcome: Outcome) {
     });
     let (window, after) = asked.unwrap_or_else(|| ("a window no longer known".to_string(), String::new()));
     crate::logging::line("keys", &hook_watch::move_line(reason, outcome, &window, &after));
+    with_state(|s| {
+        if let Some(k) = s.keys.as_mut() {
+            converge(k);
+        }
+    });
 }
 
 /// Whether the hook could have seen a key pressed now: the keyboard is on our desktop, and the
@@ -1716,6 +1830,46 @@ mod tests {
         let timer = "WM_TIMER if wparam == LATE_TIMER =>";
         assert_eq!(src.matches(timer).count(), 2, "handled, and answered 0");
         assert!(src.contains("WM_TIMER if wparam == LATE_TIMER => late_keys_due(),"));
+    }
+
+    /// The plumbing around `hook_watch::Place`, which cannot run here: the foreground and focus
+    /// events, every answer of the hook's thread and every physical key, its key-up included, look
+    /// at the window in front now (`converge`, by `GetForegroundWindow`), never at the window an
+    /// event names; and the hook's thread says where the hook is before it answers, so a lost
+    /// answer leaves the watch nothing to wait for.
+    #[test]
+    fn every_look_is_at_the_window_in_front_now() {
+        const FILE: &str = include_str!("hook_watch_thread.rs");
+        let src = &FILE[..FILE.find("#[cfg(test)]\nmod tests {").unwrap()];
+        let body = |name: &str| {
+            let at = src.find(name).unwrap_or_else(|| panic!("{name}"));
+            &src[at..at + src[at..].find("\n}\n").unwrap()]
+        };
+        assert!(body("fn converge(k: &mut Keys)").contains("let Some((hwnd, pid, ours)) = front_now() else"));
+        assert!(body("fn front_now()").contains("let (front, pid) = front_window();"));
+        assert!(body("fn front_window()").contains("GetForegroundWindow()"));
+        for f in [
+            "unsafe extern \"system\" fn foreground_changed(",
+            "unsafe extern \"system\" fn focus_changed(",
+            "fn settle(",
+            "fn settle_move(",
+            "fn on_raw_input(",
+            "fn arm_keys(",
+        ] {
+            assert!(body(f).contains("converge(k);"), "{f} looks");
+        }
+        assert!(src.contains("let focus = register_focus().map(|_| ());"), "the focus events are armed");
+        let fg = body("unsafe extern \"system\" fn foreground_changed(");
+        assert!(
+            fg.find("k.place.foreground_event();").unwrap() < fg.find("converge(k);").unwrap(),
+            "a window coming to the front asks again for a move that could not be made"
+        );
+        assert_eq!(src.matches("place.foreground_event()").count(), 1, "only there");
+        let raw = body("fn on_raw_input(");
+        assert!(raw.find("hook_watch::physical_key(").unwrap() < raw.find("converge(k);").unwrap());
+        assert!(raw.find("converge(k);").unwrap() < raw.find("if !down {").unwrap(), "a key-up looks too");
+        let report = body("pub(super) fn report(");
+        assert!(report.find("HOOK_AT.store(").unwrap() < report.find("PostMessageW(").unwrap());
     }
 
     #[test]

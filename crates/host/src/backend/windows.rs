@@ -2389,13 +2389,14 @@ fn popup_menu_open() -> bool {
 ///
 /// **Out of the chain while one of this application's windows is in front.** Windows calls
 /// neither the hook nor the hooks behind it for keys going to this process's windows
-/// (`hook_watch::Place`), so the watch posts `hook_watch_thread::WM_APP_UNHOOK` when one of them
-/// comes to the front, and [`take_out`] takes the hook out; when a window of another program comes
-/// to the front, `WM_APP_REHOOK` again, and [`reinstall`] installs it, first in the chain.
+/// (`hook_watch::Place`), so the watch posts `hook_watch_thread::WM_APP_UNHOOK` while one of them
+/// is in front, and [`take_out`] takes the hook out; while a window of another program is,
+/// `WM_APP_REHOOK` again, and [`reinstall`] installs it, first in the chain.
 ///
 /// Those two are the only messages ever posted to this thread, and the one other thing it does, a
 /// few times in a session at most, or once per switch between this application's windows and
-/// another program's. The answer goes back to the watch, which writes the log line: no file is
+/// another program's. After each, where the hook is goes into an atomic the watch reads before it
+/// asks for a move, and the answer goes back to the watch, which writes the log line: no file is
 /// written on this thread.
 ///
 /// It never ends, and never needs to: Windows removes the hook with the process. It answers
@@ -2480,7 +2481,7 @@ unsafe fn reinstall(hmod: HMODULE, reason: usize) {
     });
     HOOK.with(|h| h.set(now.unwrap_or(std::ptr::null_mut())));
     forget_after(outcome);
-    hook_watch_thread::report(reason, outcome);
+    hook_watch_thread::report(reason, outcome, now.is_some());
 }
 
 /// Takes the hook out of the chain, on the hook's thread, while one of this application's windows
@@ -2506,7 +2507,7 @@ unsafe fn take_out(reason: usize) {
     });
     HOOK.with(|h| h.set(now.unwrap_or(std::ptr::null_mut())));
     forget_after(outcome);
-    hook_watch_thread::report(reason, outcome);
+    hook_watch_thread::report(reason, outcome, now.is_some());
 }
 
 /// (The hook's thread.) What the hook forgets once its thread has swapped it or taken it out:
