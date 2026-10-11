@@ -547,6 +547,10 @@ fn arm_keys() {
     }
     let hwnd = WATCH_HWND.load(Ordering::SeqCst) as HWND;
     let raw = register_raw_input(hwnd);
+    if raw.is_ok() {
+        // Every physical key-up reaches the hotkeys' record from now on (`on_raw_input`).
+        super::windows::key_ups_reported_from_now();
+    }
     let foreground = register_foreground().map(|_| ());
     let focus = register_focus().map(|_| ());
     // SAFETY: the pseudo-handle of this process, and this thread's own desktop; neither is
@@ -1304,7 +1308,8 @@ fn take_lost_reply() {
 /// which Windows does not call the hook for, so it is not counted (`hook_watch::counts`); the
 /// re-install line says how many of a run's keys were. Every physical key event, a key-up as much
 /// as a key-down, may make the watch look at the window in front first
-/// (`hook_watch::Place::looks_at_key`); only the key-downs are judged.
+/// (`hook_watch::Place::looks_at_key`); only the key-downs are judged. Every physical key-up is
+/// handed to the hotkeys' record of held keys (`super::windows::key_up_reported`).
 fn on_raw_input(wparam: WPARAM, handle: HRAWINPUT) {
     // SAFETY: a RAWINPUT buffer on the stack, its size passed in and out; a keyboard report
     // fits (the union's largest member is the mouse's). Anything that does not fit is refused
@@ -1335,6 +1340,13 @@ fn on_raw_input(wparam: WPARAM, handle: HRAWINPUT) {
     // `hook_watch::event_time` for when it is not believed.
     // SAFETY: plain queries: the message being dispatched, and the tick clock.
     let time = unsafe { hook_watch::event_time(GetMessageTime() as u32, GetTickCount()) };
+    if !down {
+        // It ends the press the hotkeys' record holds for its key, the hook called for it or
+        // not: it is not, for a key going to one of this process's windows or while it is out
+        // of the chain, and this is then the only report of it. Before the watch's own state is
+        // asked for, which this needs none of.
+        super::windows::key_up_reported(u32::from(kb.VKey), time);
+    }
     take_lost_reply();
     with_state(|s| {
         if down && s.session_refused.is_some() {
@@ -1867,9 +1879,36 @@ mod tests {
         assert_eq!(src.matches("place.foreground_event()").count(), 1, "only there");
         let raw = body("fn on_raw_input(");
         assert!(raw.find("hook_watch::physical_key(").unwrap() < raw.find("converge(k);").unwrap());
-        assert!(raw.find("converge(k);").unwrap() < raw.find("if !down {").unwrap(), "a key-up looks too");
+        let judged = raw.find("if !down {\n            return;\n        }").unwrap();
+        assert!(raw.find("converge(k);").unwrap() < judged, "a key-up looks too");
         let report = body("pub(super) fn report(");
         assert!(report.find("HOOK_AT.store(").unwrap() < report.find("PostMessageW(").unwrap());
+    }
+
+    /// Every physical key-up raw input reports reaches the hotkeys' record of held keys, which the
+    /// test cannot drive here: the only report of a key-up the hook was not called for, in one of
+    /// this process's windows or while the hook is out of the chain. Before the watch's state is
+    /// borrowed, which can refuse (`with_state`) and which the key-up needs none of; and the
+    /// record's judging of `RegisterHotKey` presses waits for the raw input registration.
+    #[test]
+    fn every_physical_key_up_reaches_the_hotkeys_record() {
+        const FILE: &str = include_str!("hook_watch_thread.rs");
+        let src = &FILE[..FILE.find("#[cfg(test)]\nmod tests {").unwrap()];
+        let at = src.find("fn on_raw_input(").unwrap();
+        let raw = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        let up = raw.find("if !down {").unwrap();
+        let handed = raw.find("super::windows::key_up_reported(u32::from(kb.VKey), time);").unwrap();
+        assert!(raw.find("hook_watch::physical_key(").unwrap() < up, "physical keys only");
+        assert!(up < handed && handed < up + raw[up..].find("\n    }\n").unwrap(), "each key-up");
+        assert!(handed < raw.find("with_state(|s| {").unwrap(), "whatever the watch's state");
+        let at = src.find("fn arm_keys(").unwrap();
+        let arm = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        let registered = arm.find("let raw = register_raw_input(hwnd);").unwrap();
+        let from_now = arm.find("if raw.is_ok() {").unwrap();
+        assert!(registered < from_now);
+        assert!(arm[from_now..].starts_with(
+            "if raw.is_ok() {\n        // Every physical key-up reaches the hotkeys' record from now on (`on_raw_input`).\n        super::windows::key_ups_reported_from_now();"
+        ));
     }
 
     #[test]

@@ -122,7 +122,10 @@ struct KeyState {
 /// its key's bit; another key going down does not. Forgotten with the rest of what the hook
 /// recorded as held when the keyboard goes where the hook is not called
 /// ([`forget_keys_held_out_of_sight`]), so that a key-up the hook missed does not make the next
-/// deliberate press read as a repeat.
+/// deliberate press read as a repeat; and a key the system holds down as a hook of ours goes into
+/// the chain is marked held ([`seed_held_keys`]), so that its auto-repeat does not read as a press
+/// — nor does a taken key-down, on time, of a key the system holds down already
+/// (`hotkey_hook::held_before`).
 struct HeldBits([AtomicU64; 4]);
 
 impl HeldBits {
@@ -140,6 +143,13 @@ impl HeldBits {
     fn taken_down(&self, vk: u32) -> bool {
         let (word, bit) = Self::at(vk);
         self.0[word].fetch_or(bit, Ordering::Relaxed) & bit != 0
+    }
+
+    /// Marks `vk` held without a key-down: one the system holds down as a hook of ours goes into
+    /// the chain ([`seed_held_keys`]).
+    fn hold(&self, vk: u32) {
+        let (word, bit) = Self::at(vk);
+        self.0[word].fetch_or(bit, Ordering::Relaxed);
     }
 
     /// A key-up of `vk`, whatever happened to it.
@@ -234,6 +244,21 @@ thread_local! {
 /// mine" as cheaply as a flag would, and the flag only spares every keystroke the lock while
 /// no module has registered anything.
 static HOOK_HOTKEYS_PRESENT: AtomicBool = AtomicBool::new(false);
+
+/// The keyboard watch has raw input from the keyboard, and so hands every physical key-up to the
+/// hotkeys' record of held keys ([`key_up_reported`]), the ones the hook is not called for among
+/// them. Set once, when the watch's registration is accepted, and never cleared: the registration
+/// lasts as long as the process. Until then, a `RegisterHotKey` press is not judged to be the
+/// system's first repeat of a press the hook kept (`hotkey_hook::Table::os_repeats`): without the
+/// key-ups the hook does not see, a key let go of in one of this application's windows would still
+/// read as held, and its next press within the auto-repeat threshold would be dropped.
+static KEY_UPS_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// (The keyboard watch's thread.) Its raw input from the keyboard was registered: from now on it
+/// reports every physical key-up ([`KEY_UPS_REPORTED`]).
+pub(super) fn key_ups_reported_from_now() {
+    KEY_UPS_REPORTED.store(true, Ordering::Relaxed);
+}
 
 /// The auto-repeat threshold last put in force, for saying so when the keyboard settings
 /// change it — see `repeat_threshold_now`.
@@ -2453,7 +2478,8 @@ fn popup_menu_open() -> bool {
 /// few times in a session at most, or once per switch between this application's windows and
 /// another program's. After each, where the hook is goes into an atomic the watch reads before it
 /// asks for a move, and the answer goes back to the watch, which writes the log line: no file is
-/// written on this thread.
+/// written on this thread. Every time a hook goes in, at start as well, the keys the system holds
+/// down then are recorded as held before any key reaches it ([`seed_held_keys`]).
 ///
 /// It never ends, and never needs to: Windows removes the hook with the process. It answers
 /// `ready` with its thread id, for the watch to post to.
@@ -2468,6 +2494,7 @@ fn keyboard_hook_thread(ready: std::sync::mpsc::SyncSender<Result<u32, String>>)
             return;
         }
         HOOK.with(|h| h.set(hook));
+        seed_held_keys();
         let _ = ready.send(Ok(GetCurrentThreadId()));
         drop(ready);
         // GetMessageW is where Windows delivers the hook's calls, as sent messages, and it
@@ -2518,6 +2545,11 @@ thread_local! {
 ///
 /// **Back from out of the chain** ([`take_out`]) there is no old hook: the new one simply goes in,
 /// first in the chain, and nothing is forgotten — that was done as it went out.
+///
+/// **What is held now.** Whenever the new hook is in, the keys the system holds down at that
+/// moment are recorded as held ([`seed_held_keys`]), before this thread handles another message
+/// and so before any key reaches the new hook: their key-downs went by while no hook of ours was
+/// called, and their auto-repeat is no new press.
 unsafe fn reinstall(hmod: HMODULE, reason: usize) {
     let current = HOOK.with(|h| h.get());
     let (now, outcome) = STALE_HOOKS.with(|stale| {
@@ -2537,6 +2569,9 @@ unsafe fn reinstall(hmod: HMODULE, reason: usize) {
     });
     HOOK.with(|h| h.set(now.unwrap_or(std::ptr::null_mut())));
     forget_after(outcome);
+    if outcome.installed() {
+        seed_held_keys();
+    }
     hook_watch_thread::report(reason, outcome, now.is_some());
 }
 
@@ -2549,7 +2584,8 @@ unsafe fn reinstall(hmod: HMODULE, reason: usize) {
 /// **What carries over** is what a re-install carries over: the captured set, the granted hotkeys,
 /// the modules' scopes and menu flags stay as they are, for the hook that comes back. What the
 /// hook recorded of keys going by is forgotten ([`forget_seen_keys`]), since it sees no key-up
-/// until it is back; the keys owed a key-up for a screen reader stay owed.
+/// until it is back; the keys owed a key-up for a screen reader stay owed. The hook that comes
+/// back records the keys held then ([`reinstall`]).
 unsafe fn take_out(reason: usize) {
     let current = HOOK.with(|h| h.get());
     let (now, outcome) = STALE_HOOKS.with(|stale| {
@@ -2587,15 +2623,94 @@ fn forget_after(outcome: hook_watch::Outcome) {
 ///   time asks the system and brings the record in line anyway).
 ///
 /// Everything else carries over as it is. The captured set, the granted hotkeys, and the modules'
-/// scopes and menu flags are the application's. The hotkeys' record of held keys already treats a
-/// press remembered for longer than the auto-repeat threshold as released (see
-/// `hotkey_hook::REPEAT_MS`), so a lost key-up costs nothing there, and forgetting it would
-/// make the repeat of a hotkey held across the swap fire it a second time. The keys owed their
-/// key-up for a screen reader (`SCREEN_READER_PASSED`) stay owed: letting a stray key-up
-/// through is harmless, swallowing an owed one leaves the application holding a key.
+/// scopes and menu flags are the application's. The hotkeys' record of held keys stays: a
+/// hotkey the hook dispatched kept its key-down from the system, which therefore cannot say later
+/// that the key is held, and forgetting the record would make the repeat of a hotkey held across
+/// the swap fire it a second time. A key-up the hook misses meanwhile ends the record all the same
+/// when raw input reports it ([`key_up_reported`]), and a press remembered for longer than the
+/// auto-repeat threshold counts as released anyway (see `hotkey_hook::REPEAT_MS`). The keys owed
+/// their key-up for a screen reader (`SCREEN_READER_PASSED`) stay owed: letting a stray key-up
+/// through is harmless, swallowing an owed one leaves the application holding a key. What the
+/// system holds down as a hook goes in again is recorded afresh ([`seed_held_keys`]).
 fn forget_seen_keys() {
     forget_keys_held_out_of_sight();
     HOOK_MODS.with(|m| m.set(Mods::default()));
+}
+
+/// (The hook's thread, as a hook of ours goes into the chain: at start, and after every re-install
+/// that put one in.) Records the keys the system holds down now as held, so that a key whose
+/// key-down went by while no hook of ours was called — out of the chain while one of this
+/// application's windows was in front, removed by Windows, not installed yet — is not taken for
+/// a new press when its auto-repeat reaches the hook, and its key-up ends it. A call on time asks
+/// the system about its own key as well (`hotkey_hook::held_before`), which also covers a hook
+/// that stayed in the chain while an elevated window or the secure desktop was in front; this is
+/// the record for a call that comes late, which cannot ask, and for the modifiers. Seen live on
+/// 2026-10-11: Ctrl+Alt+Shift+Win+F7 pressed in the HTML probe's page reached the application
+/// through `RegisterHotKey`, its callback hid the page, the hook came back into the chain while F7
+/// was still held, and F7's next repeat fired the hotkey again — the page came straight back.
+///
+/// Asked of the system (`GetAsyncKeyState`, which knows every key-down that reached it), each key
+/// once:
+///
+/// - the **modifiers**, side by side, are taken as the system has them: the record a late call is
+///   judged by, and the one that tells a held modifier's repeat from a press, which arms a
+///   modifier tap (`hotkey_hook::Mods`). The hook never keeps a modifier's key-down from the
+///   system, so the system's answer is the whole of it, and replaces the record;
+/// - **every other key** the system holds down, but the mouse buttons (`hotkey_hook::seeds`), is
+///   added to what the captured keys ([`CAPTURED_HELD`]) and the hotkeys
+///   (`hotkey_hook::Table::seed_held`) record as held: a taken key-down of one is its auto-repeat,
+///   and a hotkey's key repeating is let through to `RegisterHotKey`, whose `MOD_NOREPEAT` knows
+///   the key is down, and never fires here. Every key, not only those captured or filed now: an
+///   overlay gives its keys back and takes them again on every focus move, which is the moment the
+///   hook comes back too. Only added to, never cleared: a key-down the hook swallowed never reached
+///   the system, so a key the system holds up may still be held, and that record ends at its
+///   key-up as before.
+///
+/// A screen reader's modifier needs nothing: its every key-down, repeats included, sets its record
+/// again, and the system is asked about it at every key as well. 256 calls, once per switch, and
+/// before this thread handles another message: no key waits for a hook that does not know yet
+/// what is held.
+fn seed_held_keys() {
+    // SAFETY: reads the tick clock, and the system's state of one key at a time.
+    let now = unsafe { GetTickCount() };
+    seed_held_keys_with(now, |vk| unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 });
+}
+
+/// [`seed_held_keys`] with the system's answer passed in: `down` says whether a virtual key is
+/// held down now, asked once for each, and `now` is the tick the records start from.
+fn seed_held_keys_with(now: u32, down: impl Fn(u32) -> bool) {
+    let mut asked = [false; 256];
+    for (vk, held) in asked.iter_mut().enumerate() {
+        *held = down(vk as u32);
+    }
+    let held = |vk: u32| asked.get(vk as usize).copied().unwrap_or(false);
+    HOOK_MODS.with(|m| m.set(Mods::held_now(held)));
+    for vk in (0..256).filter(|&vk| hotkey_hook::seeds(vk) && held(vk)) {
+        CAPTURED_HELD.hold(vk);
+    }
+    if HOOK_HOTKEYS_PRESENT.load(Ordering::Relaxed) {
+        if let Some(t) = locked(&HOOK_HOTKEYS).as_mut() {
+            t.seed_held(now, held);
+        }
+    }
+}
+
+/// (The keyboard watch's thread.) A physical key-up raw input reported, of virtual key `vk`,
+/// stamped `time`: it ends the press the hotkeys' record holds for that key when the press went
+/// down no later than that (`hotkey_hook::Table::up_reported`). The hook is not called for a key
+/// going to one of this application's windows, nor while it is out of the chain, and a press it
+/// swallowed and whose key went up there would otherwise stay held until the auto-repeat
+/// threshold — the next press of that key in another program's window swallowed as its repeat,
+/// with no callback — and a press `RegisterHotKey` delivers meanwhile would be taken for its
+/// repeat. Reported for every key-up, the ones the hook saw too: the press's time keeps a report
+/// that comes late from ending a later press. One lock the hook takes for every key as well, held
+/// for one array access; nothing while no hotkey was ever granted.
+pub(super) fn key_up_reported(vk: u32, time: u32) {
+    if HOOK_HOTKEYS_PRESENT.load(Ordering::Relaxed) {
+        if let Some(t) = locked(&HOOK_HOTKEYS).as_mut() {
+            t.up_reported(vk, time);
+        }
+    }
 }
 
 /// The keyboard went where the hook is not called — a window of a higher integrity level or one
@@ -2691,7 +2806,10 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             // stall, with Alt held by the time the hook got to it, would read as Alt+V. A late
             // call is judged by the modifiers this hook saw go by before its key.
             let down = |k: u16| (GetAsyncKeyState(k as i32) as u16 & 0x8000) != 0;
-            let mask = HOOK_MODS.with(|m| {
+            // And whether the record already had this key down, when it is a modifier: then this
+            // key-down is its auto-repeat, which never arms a modifier tap below — a modifier held
+            // as the hook came into the chain included (`seed_held_keys`).
+            let (mask, modifier_was_held) = HOOK_MODS.with(|m| {
                 let mut mods = m.get();
                 let mask = hotkey_hook::event_mask(&mut mods, late, || {
                     let mut mask: u8 = 0;
@@ -2709,9 +2827,10 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                     }
                     mask
                 });
+                let was_held = mods.holds(vk);
                 mods.on_key(vk, is_down);
                 m.set(mods);
-                mask
+                (mask, was_held)
             });
             // A MODIFIER TAP: pressed and released with nothing in between.
             //
@@ -2753,15 +2872,19 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 // Arm only FROM REST, and only for this key.
                 //
                 // Auto-repeat while held must not re-arm, or a long hold followed by a release
-                // would read as a tap. And a second, different modifier pressed on top means
-                // the user is building a combination — Alt held, then Ctrl — so the arm is
-                // dropped rather than handed over. Without that, releasing Alt while Ctrl was
-                // still down fired a tap the user never made.
-                let armed = TAP_ARMED.load(Ordering::Relaxed);
-                if armed == 0 {
-                    TAP_ARMED.store(vk as i32, Ordering::Relaxed);
-                } else if armed != vk as i32 {
-                    TAP_ARMED.store(0, Ordering::Relaxed);
+                // would read as a tap: a key-down of a modifier the hook's record has down is its
+                // repeat, and changes nothing here — also when the modifier went down before the
+                // hook was there to see it, out of the chain or not installed yet. And a second,
+                // different modifier pressed on top means the user is building a combination —
+                // Alt held, then Ctrl — so the arm is dropped rather than handed over. Without
+                // that, releasing Alt while Ctrl was still down fired a tap the user never made.
+                if !modifier_was_held {
+                    let armed = TAP_ARMED.load(Ordering::Relaxed);
+                    if armed == 0 {
+                        TAP_ARMED.store(vk as i32, Ordering::Relaxed);
+                    } else if armed != vk as i32 {
+                        TAP_ARMED.store(0, Ordering::Relaxed);
+                    }
                 }
             } else if let Some(generic) = generic {
                 let armed = TAP_ARMED.swap(0, Ordering::Relaxed);
@@ -2825,7 +2948,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 generic.is_none() && HOOK_HOTKEYS_PRESENT.load(Ordering::Relaxed);
             if hotkeys_filed && is_up {
                 if let Some(t) = locked(&HOOK_HOTKEYS).as_mut() {
-                    t.on_up(vk);
+                    t.on_up(vk, kb.time);
                 }
             }
             // Match only the exact combo, so "Tab" (mask 0) leaves Alt+Tab alone.
@@ -2878,7 +3001,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                         });
                     }
                     if hotkeys_filed && is_down {
-                        note_captured_down(kb, vk, mask, late, true);
+                        note_captured_down(kb, vk, mask, late, true, false);
                     }
                     count_let_through(is_down, generic, vk);
                     return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
@@ -2925,14 +3048,19 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 };
                 if let Some(Capture::Take { owner }) = decided {
                     if is_down {
-                        let repeat = CAPTURED_HELD.taken_down(vk);
+                        // A key the system holds down already went down where no hook of ours
+                        // was called for it — an elevated window, one of this application's own,
+                        // the secure desktop in front — and this is its auto-repeat, as much as
+                        // one whose key-down a capture took (`hotkey_hook::held_before`).
+                        let system_held = hotkey_hook::held_before(late, || down(vk as u16));
+                        let repeat = CAPTURED_HELD.taken_down(vk) || system_held;
                         // The press as it was: the window, the count of keys let through so far,
                         // and the key it was pressed on — the keypad's Enter is VK_RETURN too.
                         let pressed = Pressed { front: foreground, seq: LET_THROUGH.load(Ordering::Relaxed), phys: physical_key(kb), queued: Some(Instant::now()) };
                         locked(&KEY_QUEUE).push(Taken { vk, mask, owner, repeat, pressed });
                         wake_pump();
                         if hotkeys_filed {
-                            note_captured_down(kb, vk, mask, late, false);
+                            note_captured_down(kb, vk, mask, late, false, !system_held);
                         }
                     }
                     // Suppress the matched combination — the key-up only when its key-down was
@@ -3145,12 +3273,15 @@ fn physical_key(kb: &KBDLLHOOKSTRUCT) -> Option<u16> {
 /// A key-down the captured keys' branch took, or let through for a screen reader, entered in
 /// the hotkeys' record of held keys (`Table::note_down`) before that branch returns. When it
 /// was let through (`passed`) and the combination is also a granted hotkey, `RegisterHotKey`
-/// may deliver it next, and the pump is told to expect that rather than to explain it.
-fn note_captured_down(kb: &KBDLLHOOKSTRUCT, vk: u32, mask: u8, late: u32, passed: bool) {
+/// may deliver it next, and the pump is told to expect that rather than to explain it. `kept`
+/// when the system never saw the key go down: a capture took it, and the system did not hold the
+/// key down already — its repeats are then swallowed should they reach the hotkeys, and the
+/// system's first repeat is no new press (`Table::os_repeats`).
+fn note_captured_down(kb: &KBDLLHOOKSTRUCT, vk: u32, mask: u8, late: u32, passed: bool, kept: bool) {
     let expected = {
         let mut t = locked(&HOOK_HOTKEYS);
         let Some(t) = t.as_mut() else { return };
-        t.note_down(vk, kb.time);
+        t.note_down(vk, kb.time, kept);
         if passed {
             t.lookup(vk, mask)
         } else {
@@ -3204,10 +3335,28 @@ unsafe fn hook_hotkey(kb: &KBDLLHOOKSTRUCT, vk: u32, mask: u8, late: u32) -> boo
             || held(0x60)
             || held(0x14);
         match down {
-            // Its repeats are let through too, below: the registered path is handling it.
-            Down::Fire(id) if screen_reader_held => Act::Pass(id),
+            // Its repeats are let through too: the registered path is handling it, and its
+            // key-down reached the system, so it is no press the hook kept from it.
+            Down::Fire(id) if screen_reader_held => {
+                t.passed_on(vk);
+                Act::Pass(id)
+            }
+            // The system holds the key down already: its key-down went to the system while no
+            // hook of ours was called for it — `RegisterHotKey` delivered that press, in front of
+            // one of this application's windows, an elevated window or after Windows removed the
+            // hook — and this is its auto-repeat, not a press (`hotkey_hook::held_before`). Let
+            // through as the repeats of a press the registered path handled; `MOD_NOREPEAT` knows
+            // the key is down and fires nothing. Seen live on 2026-10-11: the page's key pressed
+            // in the page, its callback hid the page, and the key's repeat fired it again here.
+            Down::Fire(id) if hotkey_hook::held_before(late, || held(vk as i32)) => {
+                t.passed_on(vk);
+                Act::Pass(id)
+            }
             Down::Repeat if screen_reader_held => Act::Nothing,
-            Down::Fire(id) => Act::Fire(id),
+            Down::Fire(id) => {
+                t.dispatched(vk, late);
+                Act::Fire(id)
+            }
             Down::Repeat => Act::Repeat,
             // The key was down before the combination was complete: not a press here, and
             // RegisterHotKey may still answer for it.
@@ -3287,6 +3436,32 @@ fn settle_hotkey(id: i32, route: Route) -> bool {
                              had already dispatched — the hook ran {late} ms late (its thread was \
                              not scheduled in time), so Windows had passed the key on without \
                              waiting; not dispatched a second time"
+                        ),
+                    );
+                    false
+                }
+                // The system's first auto-repeat of a press the hook kept from it — dispatched, or
+                // taken by a capture of the same combination — the key still held while the hook
+                // is not called: a new press to the system, not to the user
+                // (`hotkey_hook::Table::os_repeats`). Judged only while raw input reports the
+                // key-ups the hook does not see (`KEY_UPS_REPORTED`). Its entry is taken back
+                // out of the pairing, which it is no press for. Said every time: it happens once
+                // per hold at most — when a hotkey's callback brings one of this application's
+                // windows to the front while its key is down, say.
+                OsPress::Deliver { expected: false }
+                    if KEY_UPS_REPORTED.load(Ordering::Relaxed)
+                        && locked(&HOOK_HOTKEYS).as_mut().is_some_and(|t| t.os_repeats(id, time)) =>
+                {
+                    d.withdraw_os(id, time);
+                    crate::logging::line(
+                        "keys",
+                        &format!(
+                            "hotkey id {id}: RegisterHotKey delivered the keyboard's auto-repeat of \
+                             a press the keyboard hook had kept from the system, its key still held \
+                             — the system never saw that key go down, so its first repeat was a new \
+                             press to it (the hook was not called for it: out of the chain while one \
+                             of our windows is in front, an elevated window in front, or removed by \
+                             Windows); not dispatched a second time"
                         ),
                     );
                     false
@@ -4238,6 +4413,122 @@ mod hook_carry_over_tests {
         SCREEN_READER_PASSED.with(|s| s.borrow_mut().clear());
     }
 
+    /// The log of 2026-10-11, as the hook's thread and the keyboard watch see it. In the plug-in,
+    /// Ctrl+Alt+Shift+Win+F7 fired through the hook, which kept F7's key-down from the system; the
+    /// page came to the front and the hook went out of the chain; F7 went up in the page, which
+    /// raw input reported. 17.9 s later F7 was pressed in the page, and RegisterHotKey delivered it;
+    /// its callback hid the page, and the hook came back into the chain with the modifiers, F7 and
+    /// a captured Tab still held. F7's auto-repeat must not fire the hotkey again, Tab's is a
+    /// repeat, and the modifiers are recorded side by side, which tells a held one's repeat from a
+    /// press; after F7's key-up the next press fires. `seed_held_keys_with` is handed the keys held
+    /// in place of `GetAsyncKeyState`.
+    #[test]
+    fn the_hook_back_in_the_chain_takes_the_keys_held_then_as_held() {
+        use crate::backend::{MASK_CTRL, MASK_SHIFT, MASK_TAP, MASK_WIN};
+        const F7: u32 = 0x76;
+        let _turn = locked(&RECORDS);
+        let all_four = MASK_CTRL | MASK_ALT | MASK_SHIFT | MASK_WIN;
+        let present = HOOK_HOTKEYS_PRESENT.swap(true, Ordering::Relaxed);
+        locked(&KEY_STATE).set =
+            vec![Captured { vk: 0x09, mask: 0, owner: 1 }, Captured { vk: 0x12, mask: MASK_TAP, owner: 1 }];
+        {
+            let mut t = locked(&HOOK_HOTKEYS);
+            // MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN.
+            assert!(hotkey_hook::file_if_granted(&mut t, true, 7, F7, 0xF));
+            assert_eq!(t.as_mut().unwrap().on_down(F7, all_four, 30_000), Down::Fire(7));
+        }
+        let mut stale = Vec::new();
+        let (now, outcome) = hook_watch::take_out(Some(1u32), &mut stale, |_| Ok(()));
+        forget_after(outcome);
+        key_up_reported(F7, 30_150);
+        assert!(!locked(&HOOK_HOTKEYS).as_mut().unwrap().os_repeats(7, 47_900), "a press of its own");
+
+        let (_, outcome) = hook_watch::swap(now, &mut stale, || Ok(2u32), |_| panic!("nothing to take out"));
+        forget_after(outcome);
+        // Held: the left Ctrl, Alt, Shift and Windows keys (the system says the generic ones are
+        // down too), F7, Tab, and V, which no capture and no hotkey has yet.
+        let held = [0xA2, 0xA4, 0xA0, 0x5B, 0x11, 0x12, 0x10, F7, 0x09, 0x56];
+        let asked = std::cell::Cell::new(0);
+        seed_held_keys_with(48_000, |vk| {
+            asked.set(asked.get() + 1);
+            held.contains(&vk)
+        });
+        assert_eq!(asked.get(), 256, "each key asked once");
+
+        {
+            let mut t = locked(&HOOK_HOTKEYS);
+            // Alt+V, granted a moment after the seed: an overlay files its keys on the focus move
+            // that brought the hook back.
+            assert!(hotkey_hook::file_if_granted(&mut t, true, 8, 0x56, 0x1));
+            let t = t.as_mut().unwrap();
+            // A repeat the keyboard sent just before the hook was back, and the ones after.
+            assert_eq!(t.on_down(F7, all_four, 47_990), Down::Pass(7));
+            assert_eq!(t.on_down(F7, all_four, 48_400), Down::Pass(7));
+            t.on_up(F7, 48_500);
+            assert_eq!(t.on_down(F7, all_four, 48_900), Down::Fire(7));
+            assert_eq!(t.on_down(0x56, MASK_ALT, 48_100), Down::Pass(8), "V's repeat");
+        }
+        assert!(CAPTURED_HELD.taken_down(0x09), "Tab's next taken key-down is a repeat");
+        assert!(CAPTURED_HELD.is_held(0x56), "every key held, captured now or not");
+        assert!(!CAPTURED_HELD.is_held(0x12) && !CAPTURED_HELD.is_held(0xA4), "a modifier is no key held there");
+        assert!(!KEPT_BACK.is_held(F7) && !KEPT_BACK.is_held(0x09), "their key-downs reached the system");
+        let mods = HOOK_MODS.with(|m| m.get());
+        assert_eq!(mods.mask(), all_four);
+        assert!(mods.holds(0xA4) && !mods.holds(0xA5), "by side");
+
+        locked(&KEY_STATE).set.clear();
+        CAPTURED_HELD.clear();
+        *locked(&HOOK_HOTKEYS) = None;
+        HOOK_MODS.with(|m| m.set(Mods::default()));
+        HOOK_HOTKEYS_PRESENT.store(present, Ordering::Relaxed);
+    }
+
+    /// The pump's side of the system's first repeat (`settle_hotkey`). Without raw input's key-ups
+    /// no `WM_HOTKEY` is judged to be one, and a press is delivered as before. With them, the
+    /// review's case of 2026-10-11: the hook dispatched F7 and kept its key-down from the system,
+    /// then ran late — F7's key-up and a new press still to handle, raw input's report of the
+    /// key-up not there yet — and the new press's `WM_HOTKEY` reached the pump first. It is taken
+    /// for the first press's repeat and dropped; the hook's own report of the new press, when it
+    /// comes, is delivered, not paired with the one dropped.
+    #[test]
+    fn a_press_dropped_as_a_repeat_leaves_the_late_hooks_report_of_it_alone() {
+        use crate::backend::{MASK_CTRL, MASK_SHIFT, MASK_WIN};
+        const F7: u32 = 0x76;
+        let _turn = locked(&RECORDS);
+        let all_four = MASK_CTRL | MASK_ALT | MASK_SHIFT | MASK_WIN;
+        let reported = KEY_UPS_REPORTED.swap(false, Ordering::Relaxed);
+        let fired = |time: u32, late: u32| {
+            let mut t = locked(&HOOK_HOTKEYS);
+            let t = t.as_mut().unwrap();
+            assert_eq!(t.on_down(F7, all_four, time), Down::Fire(7));
+            t.dispatched(F7, late);
+        };
+        assert!(hotkey_hook::file_if_granted(&mut locked(&HOOK_HOTKEYS), true, 7, F7, 0xF));
+
+        fired(10_000, 0);
+        assert!(settle_hotkey(7, Route::Hook { time: 10_000, late: 0 }), "the press");
+        assert!(settle_hotkey(7, Route::Os { time: 10_500 }), "not judged without raw input");
+        locked(&HOOK_HOTKEYS).as_mut().unwrap().on_up(F7, 10_600);
+
+        KEY_UPS_REPORTED.store(true, Ordering::Relaxed);
+        fired(20_000, 0);
+        assert!(settle_hotkey(7, Route::Hook { time: 20_000, late: 0 }), "the press");
+        assert!(!settle_hotkey(7, Route::Os { time: 20_400 }), "taken for its repeat");
+        {
+            let mut t = locked(&HOOK_HOTKEYS);
+            t.as_mut().unwrap().on_up(F7, 20_300);
+        }
+        fired(20_400, 650);
+        assert!(settle_hotkey(7, Route::Hook { time: 20_400, late: 650 }), "the new press, once");
+        // Its entry left in the pairing, the hook's report was dropped as its second delivery.
+        let mut d = hotkey_hook::Dedupe::default();
+        assert_eq!(d.os_press(7, 20_400), OsPress::Deliver { expected: false });
+        assert!(!d.hook_press(7, 20_400, 650));
+
+        *locked(&HOOK_HOTKEYS) = None;
+        KEY_UPS_REPORTED.store(reported, Ordering::Relaxed);
+    }
+
     /// What the watch does as a window comes to the front (`hook_watch_thread::front_came`): one of
     /// this application's own — the module manager, where Windows does not call the hook — forgets
     /// what the hook recorded as held, as NVDA's menu does, whatever the levels say; another
@@ -4434,7 +4725,7 @@ mod hook_carry_over_tests {
             .find("if hook_watch::late_key_said(is_down, late) {\n                hook_watch_thread::note_late_key(vk, late);")
             .expect("the hook keeps late key-downs for the watch");
         assert!(late < kept);
-        assert!(kept < hook.find("let mask = HOOK_MODS.with(").unwrap());
+        assert!(kept < hook.find("let (mask, modifier_was_held) = HOOK_MODS.with(").unwrap());
     }
 
     /// The key that masks a swallowed hotkey's modifiers is 0xFF, the code no keyboard layout

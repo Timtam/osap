@@ -80,7 +80,13 @@
 //! stray key-up is harmless, a swallowed owed one leaves a key held. Independently of any
 //! re-install, the watch has the backend forget the first two whenever the keyboard goes where
 //! the hook cannot follow — a window of a higher integrity level or one of this process's own in
-//! front, a locked or disconnected session, a suspend ([`front_unseen`]).
+//! front, a locked or disconnected session, a suspend ([`front_unseen`]). And whenever a hook goes
+//! in, the keys the system holds down then are recorded as held, before any key reaches it
+//! (the backend's `seed_held_keys`): their key-downs went by while no hook of ours was called, and
+//! their auto-repeat is no new press — as is a key-down the hook is called for on time of a key the
+//! system holds down already, wherever it went down (`hotkey_hook::held_before`), the hook having
+//! stayed in the chain or not. The witness's raw input hands every key-up to the hotkeys' record as
+//! well, the only report of one the hook was not called for.
 //!
 //! **The chain.** Windows calls low-level keyboard hooks newest first, so a hook installed again
 //! is first again: ahead of every hook installed since the application started — a screen
@@ -113,7 +119,10 @@
 //! the hook does not belong to — key-ups included — and at a resume or an unlock while the hook is
 //! out ([`Place::looks_at_key`], [`Place::looks_at_change`]). The captured set and the granted
 //! hotkeys stay as they are; what the hook recorded as held is forgotten as it goes out, since it
-//! sees no key-up until it is back.
+//! sees no key-up until it is back, and what the system holds down as it comes back is recorded
+//! as held. On 2026-10-11 a hotkey pressed in a page of ours went to `RegisterHotKey`, its callback
+//! hid the page, and the hook came back while the key was still down: it took the key's
+//! auto-repeat for a new press, and the page came straight back.
 //!
 //! Everything here is integers and decisions: no OS call, so the tests run wherever Windows
 //! builds.

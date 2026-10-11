@@ -8498,17 +8498,43 @@ time limit; a module past either is stopped until the next start.
       - Captured keys right after switching back from the manager to a plug-in (Alt+Tab, then Tab
         at once): the hook comes back when the watch hears of the foreground change, so check that
         the first Tab reaches the overlay.
-      - A hotkey whose callback brings one of our windows forward (the HTML probe's F7, review of
-        2026-10-11): the hook swallowed its key-down and recorded it as held, then left the chain
-        before its key-up. (a) Back in another program's window, a press of the same key within the
-        auto-repeat threshold (1.2 s at least) of that key-down is taken for its auto-repeat and
-        swallowed with no callback: `forget_seen_keys` leaves the hotkeys' record alone on purpose,
-        for a hotkey held across a swap. (b) Held past the keyboard's repeat delay, its first repeat
-        reaches `RegisterHotKey` as a new press — the swallowed key-down never reached the system's
-        key state — and the callback runs a second time, in our window (the probe: the page comes
-        and goes straight back). Unverified. A way: while the hook is out, the watch hands raw
-        input's key-ups of the hotkeys' keys to their record, and a `RegisterHotKey` press of a key
-        the hook swallowed and that has not gone up since is dropped as its repeat.
+      - Done 2026-10-11, live check open: keys held while the hook was not called. Seen live on
+        2026-10-11 (the HTML probe, revision 5, from 1791738979 in the log): Ctrl+Alt+Shift+Win+F7
+        pressed in the page reached `RegisterHotKey` with the hook out of the chain, its callback
+        hid the page, the hook came back while F7 was still held and took F7's auto-repeat for a new
+        press, so the page came straight back; at times F7 had to be pressed three times. The
+        review's two cases of the same day are the other side of the gap: a hotkey whose callback
+        brings one of our windows forward, its key-down swallowed and recorded as held, the hook out
+        of the chain before its key-up. (a) Back in another program's window, a press of the same
+        key within the auto-repeat threshold was taken for its repeat and swallowed with no
+        callback. (b) Held past the keyboard's repeat delay, its first repeat reached
+        `RegisterHotKey` as a new press and the callback ran a second time, in our window. Now: a
+        key-down the hook is called for on time, of a key the system holds down already
+        (`GetAsyncKeyState`, `hotkey_hook::held_before`), is its repeat — a hotkey's is let through
+        to `RegisterHotKey`, whose `MOD_NOREPEAT` fires nothing, a captured key's is taken as a
+        repeat — which also covers a hook that stayed in the chain while an elevated window or the
+        secure desktop was in front, and a combination filed after the hook came back; whenever a
+        hook goes into the chain (back from out of it, a re-install, at start) the keys the system
+        holds down then are recorded as held before any key reaches it, for the calls that come
+        late: every key but the mouse buttons, the modifiers side by side and as the system has them
+        (windows.rs `seed_held_keys`, `hotkey_hook::Table::seed_held`, `Mods::held_now`), so a held
+        modifier's repeat arms no tap; the keyboard watch hands every physical key-up raw input
+        reports to the hotkeys' record (`key_up_reported`, `Table::up_reported`), which settles (a);
+        and a `RegisterHotKey` press within the threshold of a press the hook kept from the system —
+        dispatched, or taken by a capture of the same combination — its key still held then, is
+        dropped as that repeat, with a `[keys]` line, and taken back out of the pairing with a late
+        hook's press (`Table::os_repeats`, `Dedupe::withdraw_os`), which settles (b); the window in
+        which a `WM_HOTKEY` is the press's own late delivery is the press's alone, not a repeat's.
+        (b) is judged only while raw input is registered, since it needs the key-ups the hook does
+        not see; a key-up raw input has not handed on by the time the next press of that key reaches
+        the main thread leaves the key held, and that press is dropped with the same line (a watch
+        thread running that far behind, or a key let go of in an elevated window, should raw input
+        not be told of it there). macOS has no such gap: every key-down carries the system's
+        auto-repeat flag, and hotkeys are Carbon's. Docs: keys.md "Keys held as the hook comes
+        back", hotkey.md. To see live with the probe: F7 pressed in the page and held, the page
+        hides and stays hidden; F7 in the plug-in, released in the page, Alt+Tab back and F7 again
+        at once: the page comes; F7 held down in the plug-in: the page comes once, with a
+        `RegisterHotKey delivered the keyboard's auto-repeat` line.
       - The transient cause stays open: our UIA calls into a stalled REAPER, made on the event
         loop, prolong NVDA's freeze recoveries (and a timeout is cached as "not a Kontakt").
       - Done 2026-10-10: the image worker and the matching pool (rayon's global pool, built at
