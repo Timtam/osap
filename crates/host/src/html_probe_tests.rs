@@ -16,7 +16,13 @@
 //! the page loses the front again; a page shown over the plug-in window is said once; the page is
 //! prepared when a plug-in window first comes forward, and said when it is ready; the first report
 //! says the probe's revision; and the automatic show comes for an arrival, never for a return.
-//! Revised after the maintainer's first NVDA run (2026-09-28) and its review.
+//! Revised after the maintainer's first NVDA run (2026-09-28) and its review. Revision 4
+//! (2026-10-11): the same page in an application window too, for W6 again — built at the first
+//! switch to it, not with the tool page; the page's switch button shows the other beside the
+//! plug-in window first and hides the one after, so the front never passes through the plug-in
+//! window, and keeps the one when the other is not shown; the keys work on the one shown last; the
+//! way back leaves the application window open, and gives up a switch still waiting for its build;
+//! and the automatic show never brings the application window.
 //!
 //! **Every event through the real mailbox**, as the host delivers it under way B: a key of the
 //! probe's, a page's message, its `onReady` and `onClose`, a window and a focus event, the
@@ -45,8 +51,10 @@ local function ran(kind, f, ...)
   assert(got == "Ran", kind .. ": " .. got)
 end
 
--- The page's own window: a window of this application.
+-- The page's own window: a window of this application. And the same page's application window.
 T.PAGE = { id = 4000, title = "HTML probe", class = "wxWindowNR", app = { pid = 9, exe = "automation-platform.exe" },
+  bounds = { x = 1000, y = 0, w = 520, h = 640 }, client = { x = 1008, y = 30, w = 504, h = 602 } }
+T.APP_PAGE = { id = 4001, title = "HTML probe window", class = "wxWindowNR", app = { pid = 9, exe = "automation-platform.exe" },
   bounds = { x = 1000, y = 0, w = 520, h = 640 }, client = { x = 1008, y = 30, w = 504, h = 602 } }
 
 -- host.settings: defined with a default, read, and changed by the scenario (T.set).
@@ -108,47 +116,62 @@ do
   end)
 end
 
--- host.gui.webview: the page. `show` answers S.pg.answers in turn ({ true } when they run out);
--- accepted with focus, the page is in front. Declined, it is shown and the window in front stays.
--- `prepare` answers true once the page is ready (T.ready), "not ready yet" before.
-S.pg = { shows = {}, hides = 0, posts = {}, answers = {}, shown = false, prepares = 0, ready = false }
+-- host.gui.webview: the pages — the tool page (S.pg, S.page, S.pageOpts) and the application
+-- window (`window = "app"`: S.apg, S.appPage, S.appOpts), each described once. `show` answers the
+-- page's `answers` in turn ({ true } when they run out); accepted with focus, the page is in front.
+-- Declined, it is shown and the window in front stays. `prepare` answers true once the page is
+-- ready (T.ready, T.appReady), "not ready yet" before. S.order names the application window's
+-- shows and hides "show app" and "hide app".
+local function pageState()
+  return { shows = {}, hides = 0, posts = {}, answers = {}, shown = false, prepares = 0, ready = false }
+end
+S.pg, S.apg = pageState(), pageState()
 rawset(T.host, "gui", T.strict("host.gui", {
   webview = function(opts)
-    assert(S.page == nil, "one page, described once")
-    S.pageOpts = opts
+    local isApp = opts.window == "app"
+    assert(opts.window == nil or isApp, "the tool page by default, or an application window: " .. tostring(opts.window))
+    local st, win, tag, described = S.pg, T.PAGE, "", S.page
+    if isApp then
+      st, win, tag, described = S.apg, T.APP_PAGE, " app", S.appPage
+    end
+    assert(described == nil, "each page described once")
     local p = {}
     function p.show(self, o)
       assert(self == p, "page:show is a method")
-      S.pg.shows[#S.pg.shows + 1] = { focus = o and o.focus, avoid = o and o.avoid, at = S.now }
-      S.order[#S.order + 1] = "show"
-      local a = table.remove(S.pg.answers, 1) or { true }
+      st.shows[#st.shows + 1] = { focus = o and o.focus, avoid = o and o.avoid, at = S.now }
+      S.order[#S.order + 1] = "show" .. tag
+      local a = table.remove(st.answers, 1) or { true }
       if a[1] or a[2] == "declined by the system" then
-        S.pg.shown = true
-        p.window = T.PAGE.id
+        st.shown = true
+        p.window = win.id
       end
       if a[1] and not (o and o.focus == false) then
-        S.front, S.chain = T.PAGE, { T.PAGE }
+        S.front, S.chain = win, { win }
         S.epoch += 1
       end
       return a[1], a[2]
     end
     function p.hide(self)
       assert(self == p, "page:hide is a method")
-      S.pg.hides += 1
-      S.pg.shown = false
-      S.order[#S.order + 1] = "hide"
+      st.hides += 1
+      st.shown = false
+      S.order[#S.order + 1] = "hide" .. tag
     end
-    function p.post(self, v) S.pg.posts[#S.pg.posts + 1] = v end
+    function p.post(self, v) st.posts[#st.posts + 1] = v end
     function p.prepare(self)
       assert(self == p, "page:prepare is a method")
-      S.pg.prepares += 1
-      if S.pg.ready then return true end
+      st.prepares += 1
+      if st.ready then return true end
       return false, "not ready yet"
     end
-    function p.isShown(self) return S.pg.shown end
-    function p.focus(self) return S.pg.shown end
-    function p.close(self) S.pg.shown = false; p.window = nil end
-    S.page = p
+    function p.isShown(self) return st.shown end
+    function p.focus(self) return st.shown end
+    function p.close(self) st.shown = false; p.window = nil end
+    if isApp then
+      S.appPage, S.appOpts = p, opts
+    else
+      S.page, S.pageOpts = p, opts
+    end
     return p
   end,
 }))
@@ -173,23 +196,34 @@ function T.key(spec)
   ran("hotkey", fn)
 end
 -- The page sends `m`; the page is ready; the page's window goes ("user" or "failed"): each the
--- page's event, through the module's mailbox, as the host hands it on.
+-- page's event, through the module's mailbox, as the host hands it on. The `app` ones are the
+-- application window's.
 function T.msg(m) ran("page message", S.pageOpts.onMessage, m) end
+function T.appMsg(m) ran("page message", S.appOpts.onMessage, m) end
 function T.ready()
   S.pg.ready = true
   ran("page ready", S.pageOpts.onReady)
 end
-function T.closed(why) ran("page close", S.pageOpts.onClose, why) end
--- A button of the page activated: `released` whether a key or a pointer went up in the page since
--- the button before, as the page reports it (true unless said otherwise).
-S.counts, S.previous = {}, nil
-function T.press(action, released, detail)
-  S.counts[action] = (S.counts[action] or 0) + 1
-  local m = { kind = "action", action = action, count = S.counts[action], detail = detail or 1,
-    previous = S.previous, released = released ~= false, releases = released ~= false and { "mouseup" } or {} }
-  S.previous = action
-  T.msg(m)
+function T.appReady()
+  S.apg.ready = true
+  ran("page ready", S.appOpts.onReady)
 end
+function T.closed(why) ran("page close", S.pageOpts.onClose, why) end
+function T.appClosed(why) ran("page close", S.appOpts.onClose, why) end
+-- A button of the page activated: `released` whether a key or a pointer went up in the page since
+-- the button before, as the page reports it (true unless said otherwise). Each page counts its own
+-- presses, as page.js does.
+local presses = { tool = { counts = {}, previous = nil }, app = { counts = {}, previous = nil } }
+local function pressIn(which, send, action, released, detail)
+  local c = presses[which]
+  c.counts[action] = (c.counts[action] or 0) + 1
+  local m = { kind = "action", action = action, count = c.counts[action], detail = detail or 1,
+    previous = c.previous, released = released ~= false, releases = released ~= false and { "mouseup" } or {} }
+  c.previous = action
+  send(m)
+end
+function T.press(action, released, detail) pressIn("tool", T.msg, action, released, detail) end
+function T.appPress(action, released, detail) pressIn("app", T.appMsg, action, released, detail) end
 
 -- What was said last, and everything said.
 function T.last() return S.speech[#S.speech] and S.speech[#S.speech].text or "" end
@@ -248,9 +282,16 @@ fn the_probe_loads_with_its_keys_its_setting_and_its_page() {
         T.ok(auto and auto.default == false, "the automatic show is a setting, off by default")
         T.ok(T.has(auto.label, "test W2 c"), auto.label)
         T.ok(S.pageOpts.file == "ui/index.html" and S.pageOpts.title == "HTML probe", "the page")
+        T.ok(S.pageOpts.window == nil, "a tool page, by default")
+        T.ok(S.appOpts.file == "ui/index.html" and S.appOpts.title == "HTML probe window" and S.appOpts.window == "app",
+          "the same page in an application window")
         T.ok(#S.fgCbs == 1 and #S.focusCbs == 1, "one window trigger and one focus callback")
-        T.ok(#S.pg.shows == 0, "nothing is shown at load")
-        T.ok(T.count("[html-probe] revision 3 ready") == 1, "the revision, in the log at load")
+        T.ok(#S.pg.shows == 0 and #S.apg.shows == 0, "nothing is shown at load")
+        T.ok(T.count("[html-probe] revision 4 ready") == 1, "the revision, in the log at load")
+        T.ok(T.count("the page's button 'Show as an application window' shows it in a window of its own") == 1,
+          "the start line says how to get the application window")
+        local said = T.report()
+        T.ok(T.has(said, "HTML probe revision 4. The page's button Show as an application window"), said)
     "##);
 }
 
@@ -588,8 +629,10 @@ fn a_page_over_the_plugin_window_is_said_once_for_a_run_of_such_shows() {
     "##);
 }
 
-/// The page is built, hidden, when a plug-in window first comes to the front — and not again once
-/// it is ready; after a failure, the next plug-in window prepares it again. Other windows do not.
+/// The tool page is built, hidden, when a plug-in window first comes to the front — and not again
+/// once it is ready; after a failure, the next plug-in window prepares it again. Other windows do
+/// not. The application window is not built with it: only W6 again needs it, and its build would
+/// hold the event loop in every run (W8).
 #[test]
 fn the_page_is_prepared_when_a_plugin_window_first_comes_forward() {
     run(r##"
@@ -615,6 +658,7 @@ fn the_page_is_prepared_when_a_plugin_window_first_comes_forward() {
         T.arrive(T.MAIN)
         T.arrive(T.FX)
         T.ok(S.pg.prepares == 3, "again after the page failed")
+        T.ok(S.apg.prepares == 0 and #S.apg.shows == 0, "the application window waits for the first switch to it")
     "##);
 }
 
@@ -689,5 +733,147 @@ fn the_automatic_show_comes_for_an_arrival_never_for_a_return() {
         T.arrive(T.FX)
         T.ok(#S.pg.shows == 2, "off again")
         T.ok(T.count("automatic show is now off") == 1, "the change is logged")
+    "##);
+}
+
+/// W6 again (revision 4): the page's "Show as an application window" shows the same page in its
+/// application window beside the plug-in window, with the keyboard — built first if it is not yet,
+/// the tool page staying until then — and only then hides the tool page, so the front goes from
+/// page to page and never through the plug-in window; the keys then work on it. Its way back to
+/// the plug-in leaves it open, F7 from the plug-in window brings it back beside it, and its own
+/// switch button goes back to the tool page the same way. Each page, once loaded, is told which
+/// window it is in, for its switch button's label; each counts its own presses, so presses of one
+/// button in both pages are no W5 result.
+#[test]
+fn the_switch_shows_the_page_in_an_application_window_and_back() {
+    run(r##"
+        local S = T.S
+        T.probe()
+        T.shown()
+        T.msg({ kind = "loaded" })
+        local told = S.pg.posts[#S.pg.posts]
+        T.ok(told.kind == "window" and told.window == "tool", "the tool page is told it is one")
+        -- The switch, the application window not built yet: asked beside the FX window, with the
+        -- keyboard; the tool page stays in front while it is built, and goes once it is shown.
+        S.apg.answers = { { false, "not ready yet" } }
+        local from = #S.order
+        S.now += 10
+        T.press("switch")
+        T.ok(S.order[from + 1] == "show app" and S.order[from + 2] == nil, "the tool page stays: " .. table.concat(S.order, ","))
+        T.ok(S.pg.shown and S.front == T.PAGE, "in front while the other is built")
+        T.ok(T.last() == "Building the page.", T.last())
+        local asked = S.apg.shows[1]
+        T.ok(asked.focus == true and asked.avoid.x == 0 and asked.avoid.w == 1000, "beside the FX window, with the keyboard")
+        S.now += 200
+        T.appReady()
+        T.ok(#S.apg.shows == 2 and S.front == T.APP_PAGE, "shown once it is ready")
+        T.ok(S.order[from + 2] == "show app" and S.order[from + 3] == "hide", "then the tool page hidden: " .. table.concat(S.order, ","))
+        T.ok(not S.pg.shown, "the tool page is gone")
+        T.appMsg({ kind = "loaded" })
+        told = S.apg.posts[#S.apg.posts]
+        T.ok(told.kind == "window" and told.window == "app", "the application window is told it is one")
+        local said = T.report()
+        T.ok(T.has(said, "switch to the application window (after the build): accepted, 200 ms after the page's button; in front: the page"), said)
+        T.ok(T.has(said, "window switch 1"), said)
+        -- Its way back: the plug-in window forward, the application window left open.
+        local hides = S.apg.hides
+        T.appPress("back")
+        T.ok(S.apg.hides == hides and S.apg.shown, "left open")
+        T.ok(S.focusCalls[#S.focusCalls] == T.FX.id, "the FX window asked forward")
+        said = T.report()
+        T.ok(T.has(said, "the page's button: back to the plug-in accepted; the application window stays open"), said)
+        -- F7 from the FX window: the application window beside it again; pressed in it, back.
+        S.front = T.FX
+        T.turn()
+        T.key(T.F7)
+        T.ok(#S.apg.shows == 3 and S.front == T.APP_PAGE and #S.pg.shows == 2, "F7 shows the page in use")
+        T.key(T.F7)
+        T.ok(S.apg.hides == hides, "still open")
+        said = T.report()
+        T.ok(T.has(said, "F7 (keyboard hook): accepted, 0 ms after the key's callback; in front: the page"), said)
+        T.ok(T.has(said, "F7, pressed in the page: back to the plug-in accepted; the application window stays open"), said)
+        -- The same button pressed in both pages is no press arriving twice.
+        T.appPress("announce")
+        T.press("announce")
+        said = T.report()
+        T.ok(not T.has(said, "W5"), said)
+        T.ok(S.apg.posts[#S.apg.posts].kind == "live", "the live region of the page pressed in")
+        -- Its own switch goes back to the tool page, the same way round.
+        from = #S.order
+        T.appPress("switch")
+        T.ok(S.order[from + 1] == "show" and S.order[from + 2] == "hide app", table.concat(S.order, ","))
+        T.ok(S.front == T.PAGE, "the tool page in front")
+        T.appClosed("user")
+        said = T.report()
+        T.ok(T.has(said, "switch to the tool page: accepted"), said)
+        T.ok(T.has(said, "the application window was closed: user"), said)
+    "##);
+}
+
+/// The automatic show (W2 c) never brings the application window: it is reached as any program's
+/// window is, and coming by itself it would take the keyboard from the plug-in at every return from
+/// another desktop or program, and leave where the user put it. A return from it is no arrival
+/// either. Switched back to the tool page, an arrival shows that again.
+#[test]
+fn the_automatic_show_never_brings_the_application_window() {
+    run(r##"
+        local S = T.S
+        T.probe()
+        T.set("autoShow", true)
+        T.shown()
+        S.apg.ready = true
+        T.press("switch")
+        T.ok(S.front == T.APP_PAGE, "the application window in front")
+        local shows, toolShows = #S.apg.shows, #S.pg.shows
+        T.arrive(T.APP_PAGE)
+        T.arrive(T.FX)
+        T.arrive(T.OTHER)
+        T.arrive(T.FX)
+        T.ok(#S.apg.shows == shows and #S.pg.shows == toolShows, "neither page, for a return or an arrival")
+        T.ok(T.count("automatic show: none — the application window is the page in use") == 1, "the arrival is logged")
+        T.key(T.F7)
+        T.ok(#S.apg.shows == shows + 1 and S.front == T.APP_PAGE, "F7 brings it")
+        T.appPress("switch")
+        T.ok(S.front == T.PAGE and not S.apg.shown, "back to the tool page")
+        T.arrive(T.OTHER)
+        T.arrive(T.FX)
+        T.ok(#S.pg.shows == toolShows + 2 and #S.apg.shows == shows + 1, "an arrival shows the tool page again")
+    "##);
+}
+
+/// A switch the system declines leaves the page in use where it was, in front, and takes the
+/// other away again — unless that one was open before; a way back to the plug-in while the other
+/// is still being built gives the switch up, so it does not come once it is ready.
+#[test]
+fn a_switch_not_shown_keeps_the_page_in_use_and_a_way_back_gives_one_up() {
+    run(r##"
+        local S = T.S
+        T.probe()
+        T.shown()
+        S.apg.ready = true
+        S.apg.answers = { { false, "declined by the system" } }
+        local hides = S.pg.hides
+        T.press("switch")
+        T.ok(S.pg.shown and S.pg.hides == hides and S.front == T.PAGE, "the tool page stays, in front")
+        T.ok(not S.apg.shown and S.apg.hides == 1, "the other goes again")
+        T.ok(T.last() == "Page not shown: declined by the system", T.last())
+        local said = T.report()
+        T.ok(T.has(said, "switch to the application window: not shown, declined by the system, 0 ms after the page's button; in front: the page"), said)
+        -- F7 still works on the tool page.
+        T.key(T.F7)
+        T.ok(not S.pg.shown and S.focusCalls[#S.focusCalls] == T.FX.id, "back to the plug-in from the tool page")
+        -- Not built yet, and the way back pressed before it is: it never comes.
+        S.front = T.FX
+        T.turn()
+        T.key(T.F7)
+        S.apg.ready = false
+        S.apg.answers = { { false, "not ready yet" } }
+        T.press("switch")
+        T.press("back")
+        local shows = #S.apg.shows
+        T.appReady()
+        T.ok(#S.apg.shows == shows and not S.apg.shown, "given up")
+        said = T.report()
+        T.ok(T.has(said, "the application window is ready: prepared, not shown"), said)
     "##);
 }

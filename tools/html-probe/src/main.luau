@@ -16,11 +16,23 @@
 --   Ctrl+Shift+Win+Alt+F8  the same, registered with { foreground = true }: Windows delivers it
 --                          as WM_HOTKEY (W2 b).
 --   Ctrl+Shift+Win+Alt+F9  says what happened since it was last pressed, and counts anew.
--- And one setting, off by default: the page comes up by itself when a plug-in window comes to
--- the front from another window (W2 c).
+-- And one setting, off by default: the tool page comes up by itself when a plug-in window comes
+-- to the front from another window (W2 c) — never the application window, which is reached as any
+-- program's window is.
 --
--- The page is prepared — built, hidden — the first time a plug-in window comes to the front, so
--- WebView2's cold start (W8) is over before the first key; `page:prepare()` again after a close.
+-- Two pages from the same files: the tool page of W1–W9, in no list of windows, and the same page
+-- in an application window (`window = "app"`), in Alt+Tab and on the taskbar, for W6 again — the
+-- maintainer's decision of 2026-10-11 that a module may have a real window. The page's button
+-- "Show as an application window" shows the other beside the plug-in window and then hides the
+-- tool page, so the front goes from page to page and never through the plug-in window; there,
+-- "Show as a tool window" goes back the same way. The keys work on the one shown last. "Back to
+-- the plug-in" hides the tool page and leaves the application window open behind the plug-in
+-- window, as any program's window stays: Alt+Tab, or F7, brings it back.
+--
+-- The tool page is prepared — built, hidden — the first time a plug-in window comes to the
+-- front, so WebView2's cold start (W8) is over before the first key; `page:prepare()` again after
+-- a close. The application window is built at the first switch to it, so a run that does not
+-- need it does not wait for its build too.
 --
 -- Every time is measured from the callback that started it — a key's callback runs at the host's
 -- first tick after the press, up to about 15 ms later — and ends at the tick that hands on what
@@ -34,8 +46,9 @@ local daw = host.require("com.platform.daw-hosts")
 -- (2026-09-28) and its review. 3: the same probe on the host whose handlers wait and whose
 -- keyboard hook leaves the chain while a window of this application, the page's included, is in
 -- front, and whose page gives the front back to the window it came from as it goes; the way back
--- keeps the page when Windows declines (2026-10-11).
-local REVISION = 3
+-- keeps the page when Windows declines (2026-10-11). 4: the page in an application window as well,
+-- for W6 again (2026-10-11).
+local REVISION = 4
 
 local KEY_SHOW = "Ctrl+Shift+Win+Alt+F7"
 local KEY_SHOW_FG = "Ctrl+Shift+Win+Alt+F8"
@@ -43,7 +56,7 @@ local KEY_REPORT = "Ctrl+Shift+Win+Alt+F9"
 
 local AUTO = "autoShow"
 host.settings.define(AUTO, false, {
-  label = "Show the page by itself when a plug-in window comes to the front from another window (test W2 c)",
+  label = "Show the tool page by itself when a plug-in window comes to the front from another window (test W2 c)",
 })
 
 local function log(fmt, ...)
@@ -68,7 +81,7 @@ local MAX_RESULTS = 8
 local MAX_KEYS = 10
 local since
 local function fresh()
-  since = { results = {}, buttons = { ["click-plugin"] = 0, back = 0, announce = 0 }, keys = {}, keyCount = 0 }
+  since = { results = {}, buttons = { ["click-plugin"] = 0, back = 0, switch = 0, announce = 0 }, keys = {}, keyCount = 0 }
 end
 -- Whether a report has been said in this run: the first one starts with the revision.
 local reported = false
@@ -86,7 +99,21 @@ end
 
 -- ── The page ───────────────────────────────────────────────────────────────────
 
-local page -- set below; its callbacks close over it
+-- Each page's buttons, counted over the whole session as their messages arrive, beside the page's
+-- own count of its clicks: a press that arrived twice leaves the two apart (W5). Per page, as the
+-- page counts its own.
+local function buttonCounts()
+  return { ["click-plugin"] = 0, back = 0, switch = 0, announce = 0 }
+end
+
+-- The two pages, each with its kind, its words for the results, whether it is built and loaded —
+-- until then a plug-in window coming to the front prepares it — and its buttons' counts.
+-- Described below; their callbacks close over them.
+local tool = { kind = "tool", words = "tool page", ready = false, actions = buttonCounts(), gaps = buttonCounts() }
+local app = { kind = "app", words = "application window", ready = false, actions = buttonCounts(), gaps = buttonCounts() }
+local both = { tool, app }
+-- The page the keys and buttons work on: the one shown last.
+local cur = tool
 
 -- The plug-in window the page was last shown beside, as a window table.
 local plugin = nil
@@ -96,18 +123,11 @@ local pending = nil
 local measuring = nil
 -- The last press of one of the probe's keys or buttons, for how long after it each thing happened.
 local pressedAt = host.now()
--- The page's buttons, counted over the whole session as their messages arrive, beside the page's
--- own count of its clicks: a press that arrived twice leaves the two apart (W5).
-local actions = { ["click-plugin"] = 0, back = 0, announce = 0 }
-local gaps = { ["click-plugin"] = 0, back = 0, announce = 0 }
 -- W3's round trip while it is under way: "forward" (the plug-in window asked to the front),
 -- "click" (clicked, its picture asked for), "watch" (the page back in front, watched for losing
 -- it again). nil when none is. A second "Click into the plug-in" while one is under way is not a
 -- second round trip (see onMessage).
 local w3 = nil
--- Whether the page is built and loaded: until then a plug-in window coming to the front prepares
--- it.
-local ready = false
 -- Whether "the page covers part of the plug-in window" has been said, for the shows that answer
 -- so in a row.
 local overSaid = false
@@ -157,8 +177,10 @@ local function frontWords()
   if not f then
     return "nothing"
   end
-  if page and page.window and f.id == page.window then
-    return "the page"
+  for _, rec in ipairs(both) do
+    if rec.page and rec.page.window and f.id == rec.page.window then
+      return rec == cur and "the page" or ("the " .. rec.words)
+    end
   end
   if plugin and f.id == plugin.id then
     return "the plug-in window"
@@ -186,36 +208,53 @@ local function overWords(note)
   return " (over part of the plug-in window: no room beside it)"
 end
 
--- Shows the page beside `p`. `via` names the way it was asked for; `t0` is when, and `after`
--- what happened at `t0`, for the result.
-local function showBeside(p, via, t0, after)
-  local ok, why = page:show({ focus = true, avoid = p.bounds })
+-- Shows page `rec` beside `p`, and makes it the page in use. `via` names the way it was asked
+-- for; `t0` is when, and `after` what happened at `t0`, for the result. `replaces`: the page it is
+-- shown in place of (the switch), hidden only once this one is shown — out of the front by then,
+-- it hands nothing on — and kept, the page in use still, when this one is not shown. A show that
+-- succeeds ends one still waiting for its build.
+local function showBeside(rec, p, via, t0, after, replaces)
+  local wasShown = rec.page:isShown()
+  local ok, why = rec.page:show({ focus = true, avoid = p.bounds })
   local ms = host.now() - t0
-  local front = frontWords()
   if ok then
+    pending = nil
+    cur = rec
+    if replaces and replaces ~= rec and replaces.page:isShown() then
+      replaces.page:hide()
+    end
     measuring = { via = via, t0 = t0, after = after }
     local over = overWords(why)
+    local front = frontWords()
     if front == "the page" then
       result("%s: accepted, %d ms after %s; in front: the page%s", via, ms, after, over)
     else
       result("%s: ACCEPTED BUT NOT IN FRONT, %d ms after %s; in front: %s%s", via, ms, after, front, over)
     end
   elseif why == "not ready yet" then
-    pending = { via = via, t0 = t0, after = after, plugin = p }
+    pending = { via = via, t0 = t0, after = after, plugin = p, rec = rec, replaces = replaces }
     log("%s: the page is being built; it is shown when it is ready", via)
     say("Building the page.")
   else
-    result("%s: not shown, %s, %d ms after %s; in front: %s", via, tostring(why), ms, after, front)
+    -- A switch declined: the other page is on screen without the keyboard, beside the one in
+    -- use, and goes again unless it was open before.
+    if replaces and replaces ~= rec and not wasShown and rec.page:isShown() then
+      rec.page:hide()
+    end
+    result("%s: not shown, %s, %d ms after %s; in front: %s", via, tostring(why), ms, after, frontWords())
     say("Page not shown: " .. tostring(why))
   end
 end
 
 -- W7: back to the plug-in — its window to the front first, while the page still is, then the
--- page out of sight. Where the keyboard lands is looked at once the window is in front. Declined,
--- the page stays where it is, in front, rather than leave the keyboard to whichever window
--- Windows picks: F7 and Alt+F4 still work there.
+-- tool page out of sight; the application window stays open behind it, as any program's window
+-- does. Where the keyboard lands is looked at once the window is in front. Declined, the page
+-- stays where it is, in front, rather than leave the keyboard to whichever window Windows picks:
+-- F7 and Alt+F4 still work there. A switch still waiting for its build is given up: the way back
+-- is the newer wish.
 local function backToPlugin(via)
   w3 = nil
+  pending = nil
   local p = refreshed(plugin)
   if not p then
     say("No plug-in window remembered.")
@@ -230,8 +269,12 @@ local function backToPlugin(via)
     say("Could not switch to the plug-in.")
     return
   end
-  page:hide()
   landing = { via = via, id = p.id, t0 = t0 }
+  if cur == app then
+    result("%s: back to the plug-in accepted; the application window stays open; in front now: %s", via, frontWords())
+    return
+  end
+  cur.page:hide()
   result("%s: back to the plug-in accepted; in front right after hiding the page: %s", via, frontWords())
 end
 
@@ -397,7 +440,7 @@ local function w3Arrived(w)
         before.x, before.y, before.w, before.h, now.x, now.y, now.w, now.h
       )
     end
-    local ok, note = page:show({ focus = true, avoid = now })
+    local ok, note = cur.page:show({ focus = true, avoid = now })
     local front = frontWords()
     if ok then
       w3.stage = "watch"
@@ -414,12 +457,33 @@ local function w3Arrived(w)
   end)
 end
 
--- W9: the live region and the host's speech at the same moment.
-local function announce()
-  local n = actions.announce
-  page:post({ kind = "live", text = string.format("Live region update %d.", n) })
+-- W9: the live region of page `rec` and the host's speech at the same moment.
+local function announce(rec)
+  local n = rec.actions.announce
+  rec.page:post({ kind = "live", text = string.format("Live region update %d.", n) })
   host.speech.output(string.format("Host speech %d.", n), { interrupt = true })
   log("W9: live region update %d posted and host speech %d said in the same callback", n, n)
+end
+
+-- W6 again: the other page in place of this one, beside the plug-in window — shown first, while
+-- this application has the front, and this one hidden after, so the front goes from page to page
+-- and NVDA never hears the plug-in window between the two (W3's round trip). The host gives the
+-- other page's front back to where this one came from, the plug-in window. Not built yet, the
+-- other is shown once it is ready, and this one stays until then.
+local function switchWindow()
+  local p = refreshed(plugin)
+  if not p then
+    say("No plug-in window remembered.")
+    log("the page's button: switch, but no plug-in window is remembered")
+    return
+  end
+  local t0 = host.now()
+  pressedAt = t0
+  w3 = nil
+  landing = nil
+  local to = cur == tool and app or tool
+  log("the page's button: the %s in place of the other", to.words)
+  showBeside(to, p, "switch to the " .. to.words, t0, "the page's button", cur)
 end
 
 -- A key as the page named it, in words: the space bar is " " there.
@@ -430,7 +494,8 @@ local function keyName(key)
   return tostring(key)
 end
 
-local function onMessage(m)
+-- What page `rec` sent.
+local function onMessage(rec, m)
   if type(m) ~= "table" then
     log("page sent %s", tostring(m))
     return
@@ -468,6 +533,7 @@ local function onMessage(m)
       end
     end
   elseif kind == "action" then
+    local actions, gaps = rec.actions, rec.gaps
     if actions[m.action] == nil then
       log("page: an unknown button '%s'", tostring(m.action))
       return
@@ -509,9 +575,13 @@ local function onMessage(m)
     elseif m.action == "back" then
       backToPlugin("the page's button")
     elseif m.action == "announce" then
-      announce()
+      announce(rec)
+    elseif m.action == "switch" then
+      switchWindow()
     end
   elseif kind == "loaded" then
+    -- Which page it is, for the label of its switch button.
+    rec.page:post({ kind = "window", window = rec.kind })
     log(
       "page: document loaded, has the focus: %s; code built from a string %s; RTCPeerConnection is %s; "
         .. "navigator.clipboard.writeText is %s",
@@ -526,30 +596,51 @@ local function onMessage(m)
   end
 end
 
-page = host.gui.webview({
-  file = "ui/index.html",
-  title = "HTML probe",
-  onMessage = onMessage,
-  onReady = function()
-    ready = true
-    log("the page is ready, %d ms after the last press", host.now() - pressedAt)
-    if pending then
-      local p = pending
-      pending = nil
-      showBeside(refreshed(p.plugin) or p.plugin, p.via .. " (after the build)", p.t0, p.after)
-    else
-      -- Prepared, and nobody waiting for it: said, so F7 need not be guessed at.
-      result("the page is ready: prepared, not shown")
-      mention("HTML probe ready.")
-    end
-  end,
-  onClose = function(why)
-    if why == "failed" then
-      ready = false
-    end
+-- Page `rec` is ready: shown, if a show waited for it; said otherwise, for the tool page, so F7
+-- need not be guessed at.
+local function onReady(rec)
+  rec.ready = true
+  log("the %s is ready, %d ms after the last press", rec.words, host.now() - pressedAt)
+  if pending and pending.rec == rec then
+    local p = pending
+    pending = nil
+    showBeside(rec, refreshed(p.plugin) or p.plugin, p.via .. " (after the build)", p.t0, p.after, p.replaces)
+  elseif rec == tool then
+    result("the page is ready: prepared, not shown")
+    mention("HTML probe ready.")
+  else
+    result("the %s is ready: prepared, not shown", rec.words)
+  end
+end
+
+local function onClose(rec, why)
+  if why == "failed" then
+    rec.ready = false
+  end
+  if rec == tool then
     result("the page was closed: %s", tostring(why))
-  end,
-})
+  else
+    result("the %s was closed: %s", rec.words, tostring(why))
+  end
+end
+
+for _, rec in ipairs(both) do
+  rec.page = host.gui.webview({
+    file = "ui/index.html",
+    title = rec == tool and "HTML probe" or "HTML probe window",
+    -- The tool page by default, as any module's page is that does not say.
+    window = rec == app and "app" or nil,
+    onMessage = function(m)
+      onMessage(rec, m)
+    end,
+    onReady = function()
+      onReady(rec)
+    end,
+    onClose = function(why)
+      onClose(rec, why)
+    end,
+  })
+end
 
 -- ── The keys ──────────────────────────────────────────────────────────────────
 
@@ -562,7 +653,7 @@ local function onShowKey(key, how)
   pressedAt = t0
   w3 = nil
   local f = host.window.foreground()
-  if f and page.window and f.id == page.window and page:isShown() then
+  if f and cur.page.window and f.id == cur.page.window and cur.page:isShown() then
     backToPlugin(key .. ", pressed in the page")
     return
   end
@@ -586,7 +677,7 @@ local function onShowKey(key, how)
     "%s pressed; in front: %s; the plug-in window '%s' at %d,%d %dx%d",
     via, frontWords(), plugin.title or "", plugin.bounds.x, plugin.bounds.y, plugin.bounds.w, plugin.bounds.h
   )
-  showBeside(plugin, via, t0, "the key's callback")
+  showBeside(cur, plugin, via, t0, "the key's callback")
 end
 
 host.hotkey.register(KEY_SHOW, function()
@@ -600,9 +691,12 @@ host.hotkey.register(KEY_REPORT, function()
   local parts = {}
   if not reported then
     reported = true
-    parts[1] = string.format("HTML probe revision %d.", REVISION)
+    parts[1] = string.format(
+      "HTML probe revision %d. The page's button Show as an application window puts it in a window of its own.",
+      REVISION
+    )
   end
-  if not ready then
+  if not cur.ready then
     parts[#parts + 1] = "The page is not ready yet."
   end
   for _, line in ipairs(since.results) do
@@ -616,8 +710,8 @@ host.hotkey.register(KEY_REPORT, function()
   end
   local b = since.buttons
   parts[#parts + 1] = string.format(
-    "Since the last report: buttons: click into the plug-in %d, back %d, announce %d. Key presses the page saw: %d%s.",
-    b["click-plugin"], b.back, b.announce,
+    "Since the last report: buttons: click into the plug-in %d, back %d, window switch %d, announce %d. Key presses the page saw: %d%s.",
+    b["click-plugin"], b.back, b.switch, b.announce,
     since.keyCount,
     #since.keys > 0 and (": " .. table.concat(since.keys, ", ")) or ""
   )
@@ -650,10 +744,11 @@ host.window.onTrigger({}, function(w)
   if not isPluginWindow(w) then
     return
   end
-  -- The first plug-in window of the session, or the first since the page failed: the page is
-  -- built now, hidden, so that WebView2's cold start is over before the first key.
-  if not ready then
-    local ok, why = page:prepare()
+  -- The first plug-in window of the session, or the first since the tool page failed: it is built
+  -- now, hidden, so that WebView2's cold start is over before the first key. Not the application
+  -- window, which only W6 again needs: its build would hold the event loop in every run (W8).
+  if not tool.ready then
+    local ok, why = tool.page:prepare()
     if not ok and why ~= "not ready yet" then
       log("the page could not be prepared: %s", tostring(why))
     end
@@ -661,12 +756,24 @@ host.window.onTrigger({}, function(w)
   if not host.settings.get(AUTO) then
     return
   end
-  if previous == w.id or (page.window ~= nil and previous == page.window) then
+  if previous == w.id then
+    return
+  end
+  for _, rec in ipairs(both) do
+    if rec.page.window ~= nil and previous == rec.page.window then
+      return
+    end
+  end
+  -- The application window is reached as any program's window is: by itself it would come at
+  -- every return to the plug-in window from another desktop or program, take the keyboard from
+  -- the plug-in, and leave the place and size the user gave it for the one beside the plug-in.
+  if cur == app then
+    log("automatic show: none — the application window is the page in use, and it comes only when asked for")
     return
   end
   plugin = w
   pressedAt = host.now()
-  showBeside(w, "automatic show", pressedAt, "the plug-in window came forward")
+  showBeside(cur, w, "automatic show", pressedAt, "the plug-in window came forward")
 end)
 
 -- The keyboard moving inside a window: W7's landing, when the window's foreground event came
@@ -683,7 +790,9 @@ host.settings.onChange(AUTO, function(v)
 end)
 
 log(
-  "revision %d ready — %s shows the page (keyboard hook), %s shows it (WM_HOTKEY), %s says what happened; automatic show is %s",
+  "revision %d ready — %s shows the page (keyboard hook), %s shows it (WM_HOTKEY), %s says what happened; "
+    .. "the page's button 'Show as an application window' shows it in a window of its own, in Alt+Tab and on the "
+    .. "taskbar (W6 again), and 'Show as a tool window' there goes back; automatic show is %s",
   REVISION,
   host.keys.describe(KEY_SHOW, { style = "short" }),
   host.keys.describe(KEY_SHOW_FG, { style = "short" }),

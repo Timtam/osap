@@ -93,11 +93,16 @@ document.getElementById("choice").addEventListener("change", (event) => {
 
 const live = document.getElementById("live");
 const heading = document.getElementById("heading");
+const switchButton = document.getElementById("switch");
 if (window.platform) {
   window.platform.onmessage = (message) => {
     if (!message || typeof message !== "object") return;
     if (message.kind === "live") live.textContent = String(message.text);
     else if (message.kind === "heading") heading.textContent = String(message.text);
+    // Which window this page is in, said once it has loaded: its switch button names the other.
+    else if (message.kind === "window") {
+      switchButton.textContent = message.window === "app" ? "Show as a tool window" : "Show as an application window";
+    }
   };
 } else {
   // Without the host's script nothing reaches the module: said where NVDA reads it and a
