@@ -67,14 +67,20 @@ same-file = "1.0.6"
 # platform's engine offers, with CLDR's likely subtags so "de" finds "de-DE" and "zh-TW" finds
 # "zh-Hant". Borrowed by crates/macos-check through that file, so it is declared there too.
 fluent-langneg = { version = "0.14.2", features = ["cldr"] }
+# `host.gui.webview` (webview.rs): the Content-Type a page's file is served with, from its
+# extension. WebView2 refuses a module script served with a type that is not JavaScript's. Pure,
+# so crates/macos-check borrows webview.rs and declares it too.
+mime_guess = "2.0.5"
+# The origin of a module's pages (webview.rs, `scheme_for`): 64 bits of SHA-256 of the module's
+# id, so no id can be chosen to share another module's origin. Also what the `host.screen.cells`
+# golden test (cells_golden_tests.rs) checks its frame with. Was a dev-dependency; already in the
+# lock file.
+sha2 = "0.11"
 
 [dev-dependencies]
 # Archives for the install tests (registry.rs), written in the test rather than checked in.
 # Unpacking itself is module_manifest::unpack_zip; the features match that crate's.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-# The `host.screen.cells` golden test (cells_golden_tests.rs) checks the frame it reads is the
-# one the reference vectors were computed from. Already in the lock file.
-sha2 = "0.11"
 
 [target."cfg(windows)".dependencies]
 # Speech through the screen reader, compiled from source and linked statically — see
@@ -111,7 +117,23 @@ windows-sys = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse
     "Win32_System_SystemInformation",
     # The keyboard hook's watch (backend/hook_watch_thread.rs): suspend/resume notifications, and
     # which desktop has the keyboard (the lock screen and a UAC prompt's secure desktop).
-    "Win32_System_Power", "Win32_System_StationsAndDesktops"] }
+    "Win32_System_Power", "Win32_System_StationsAndDesktops",
+    # What a page's WebView2 processes hold in memory, for the `[gui]` line (webview_win.rs).
+    "Win32_System_ProcessStatus",
+    # The WebView2 environment the host creates itself, without waiting, in the user's display
+    # language as wry sets it (`GetUserDefaultUILanguage`, `LCIDToLocaleName`; webview_win.rs).
+    "Win32_Globalization"] }
+# `host.gui.webview` on Windows (webview_win.rs): WebView2 in a wx tool window of our own,
+# through the Tauri team's wry — the data folder beside the executable, a scheme served from the
+# module's folder with real response headers, asynchronous messages both ways. Default features
+# off: they are WebKitGTK's, for Linux. Its `windows` is 0.62 where ours is 0.58, so a second
+# `windows` is built; nothing of it reaches the macOS build (this table is Windows-only).
+wry = { version = "0.57.0", default-features = false }
+# What wry does not offer, on the same COM objects it hands out: host-to-page messages as JSON
+# (`PostWebMessageAsJson`, no script built from strings), whether the runtime is installed, a
+# page's processes failing, and its process list. The versions wry itself uses.
+webview2-com = "0.39.1"
+windows-core = "0.62"
 # The pipe's security descriptor is written as SDDL, and interprocess takes it as widestring's
 # `U16CStr` (instance.rs). Already in the lock through interprocess.
 widestring = "1"

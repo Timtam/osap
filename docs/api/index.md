@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 167 entries.
+Every call the platform offers a module, in one place. 178 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -20,7 +20,7 @@ Each page says which name to put in its manifest:
 require = ["window", "screen", "speech"]
 ```
 
-**These are all the names:** `window`, `screen`, `ocr`, `element`, `input`, `keys`, `hotkey`, `gamepad`, `speech`, `sound`, `timer`, `settings` (which also covers `host.config`), `log`, `path`, `resource` and `arbiter` — one per namespace, spelt as the namespace. There are no finer-grained names: `"window.read"` or `"screen.imagesearch"` unlock nothing. **Names are not checked** when the module loads, so a misspelt or invented one loads without a word, and the first use of the namespace it was meant for raises. `path`, `resource` and `log` are gated like the rest: a module that only reads its own data files still declares `path` and `resource`, and `log` if it logs.
+**These are all the names:** `window`, `screen`, `ocr`, `element`, `input`, `keys`, `hotkey`, `gamepad`, `speech`, `sound`, `timer`, `settings` (which also covers `host.config`), `log`, `path`, `resource`, `arbiter` and `gui` (experimental) — one per namespace, spelt as the namespace. There are no finer-grained names: `"window.read"` or `"screen.imagesearch"` unlock nothing. **Names are not checked** when the module loads, so a misspelt or invented one loads without a word, and the first use of the namespace it was meant for raises. `path`, `resource` and `log` are gated like the rest: a module that only reads its own data files still declares `path` and `resource`, and `log` if it logs.
 
 **It is enforced.** A namespace you have not declared is not on your `host` table, and reaching for it raises an error naming your module and the capability it needs rather than evaluating to `nil` three frames from anything that could explain it. Declaring more than you use is legal and harmless; declaring less is a failure at the moment you first need it.
 
@@ -226,7 +226,7 @@ Claiming a combination system-wide.
 
 | | |
 |---|---|
-| [`host.hotkey.register(spec, callback)`](hotkey#host-hotkey-register) | Registers a **global** OS hotkey (active regardless of foreground window) for the key spec and returns an integer `id`. |
+| [`host.hotkey.register(spec, callback, opts?)`](hotkey#host-hotkey-register) | Registers a **global** OS hotkey (active regardless of foreground window) for the key spec and returns an integer `id`. |
 | [`host.hotkey.unregister(id)`](hotkey#host-hotkey-unregister) | Releases the OS hotkey and forgets the callback for the `id` returned by `register`. |
 
 ## host.gamepad
@@ -255,6 +255,22 @@ Watching game controllers — presses, button combinations, sticks, pads coming 
 | | |
 |---|---|
 | [`host.sound.play(path)`](sound#host-sound-play) | Plays an audio file from the module's package directory, fire-and-forget. |
+
+## host.gui
+
+An HTML page of the module's own, in a window beside the plug-in. Experimental: Windows only, and the API may change after the Windows probe.
+
+| | |
+|---|---|
+| [`host.gui.webview(opts)`](gui#host-gui-webview) | Describes a page and returns the object every call below is a method of. |
+| [`page.window`](gui#page-window) | The window's id from the first time it was shown until it is closed |
+| [`page:close()`](gui#page-close) | Takes the window and its web view down, and drops the messages waiting for it. |
+| [`page:focus()`](gui#page-focus) | Brings the shown page to the front and the keyboard into its document, as `show` does with `focus`, and says whether Windows accepted. |
+| [`page:hide()`](gui#page-hide) | Hides the window. |
+| [`page:isShown()`](gui#page-isshown) | Whether the window is on screen, asked of the window system rather than remembered: `false` after the user closed it too. |
+| [`page:post(value)`](gui#page-post) | Sends the page a value. |
+| [`page:prepare()`](gui#page-prepare) | Builds the page without showing it, so that the first `show` does not wait for WebView2's cold start |
+| [`page:show(opts)`](gui#page-show) | Shows the page, raised above the ordinary windows without taking the front, and with `focus` (the default) brings it to the… |
 
 ## host.timer
 
@@ -389,6 +405,8 @@ The shapes and grammars the calls above are written in.
 | [`Recognition language`](ocr#recognition-language) | What `lang` means, and what leaving it out means. |
 | [`Region form`](screen#region-form) | A region is a rectangle on screen, written in one of two forms: by its **corners**, or as **fractions of a window's client area**. |
 | [`Table shapes`](window#table-shapes) | Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, `host.window.findAll()`, and passed to trigger/test callbacks. |
+| [`The page's side — platform.post and platform.onmessage`](gui#the-page-s-side) | The host puts a small script into every page before the page's own, and it gives the page one object, `platform` |
+| [`What a page is served, and what it may not do`](gui#what-a-page-is-served-and-what-it-may-not-do) | **Its own folder, and nothing else.** A page is served from a scheme of its module's own (`mod-<module id>-<hash>`, the hash… |
 | [`Where a hook runs`](overlay#where-a-hook-runs) | Every callback of a module runs as a handler of the host, one at a time per module, and the runtime calls an overlay's hooks inside them. |
 | [`Which picture a read sees`](screen#which-picture-a-read-sees) | Every call on this page, and `host.ocr.recognize`, reads the screen one way for the whole module, chosen in its manifest rather than per call. |
 | [`ocrLabel — reading a control's name off the screen`](overlay#ocrlabel) | Any hotspot or hotspot-toggle may carry `ocrLabel = {x1, y1, x2, y2}` (origin-relative) |

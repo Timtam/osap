@@ -198,7 +198,8 @@ pub(crate) fn timer_wait_line(module: &str, ms: u128, place: &str, keys: &[Strin
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Ctx {
     /// "hotkey", "key", "gamepad", "window trigger", "focus change", "timer", "ocr.recognize", an
-    /// image search's binding, "screen.snapshotAsync", "settings onChange (<key>)".
+    /// image search's binding, "screen.snapshotAsync", "settings onChange (<key>)", "page message",
+    /// "page ready", "page close".
     pub what: Cow<'static, str>,
     pub report: usize,
 }

@@ -63,6 +63,7 @@ A module can be loaded either as an unpacked directory (dev) or as a **`.zip` pa
 - `examples/` — the API demos, one per capability: `hello` (speak once), `hotkey`, `window`, `window-trigger`, `screen`, `ocr`, `input`, `sound`, `keys`, `settings`, `overlay-attach` (a context-bound overlay over Notepad). Kept out of `modules/` so that running everything in `modules/` means running the real thing.
 - `tools/avenger-presets` — the converter that writes `modules/vps-avenger-presets` from the avenger_control project's exports, keeping the catalog and dropping, unread, every list of what individual people own (its README).
 - `tools/inspect` — OCR window-inspector dev tool: **Ctrl+Alt+I** logs every recognized word with client-relative coordinates. Largely superseded for overlay work by the built-in calibrator ("Calibration keys and pictures in overlays" in the overlay runtime's Settings…, in the module manager's Installed list).
+- `tools/html-probe` — the Windows probe of the experimental `host.gui.webview`: an HTML page beside the plug-in window in front, on **Ctrl+Shift+Win+Alt+F7** (and F8, the same key left to Windows' own hotkey delivery), reporting every key, focus change and button press to the log for the NVDA tests W1–W9 in TODO.md; **F9** with the same modifiers says what happened since it was last pressed.
 - `docs/` — design documents (see below).
 - `TODO.md` — backlog & implementation slices.
 

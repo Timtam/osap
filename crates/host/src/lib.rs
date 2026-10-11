@@ -37,6 +37,10 @@ mod overlay_menu_item_tests;
 /// scale, its clicks, its menus and its warning box.
 #[cfg(test)]
 mod overlay_avenger_tests;
+/// The HTML page probe (tools/html-probe) against the same scripted host, with a scripted page:
+/// its keys, its report, W3's round trip, W7's landing and the automatic show.
+#[cfg(test)]
+mod html_probe_tests;
 /// The overlay runtime's marks (O:here, O:stillHere), O:toScreenRect's `whole`, and a control's
 /// hook that raises, against the same scripted host.
 #[cfg(test)]
@@ -133,6 +137,14 @@ mod template;
 mod timers;
 /// `host.gamepad`: listeners, dispatch rules and bindings — see the file.
 mod gamepad_api;
+/// `host.gui.webview` (experimental): the rules, pure — which answer `show` gives, which file is
+/// served with which headers, where the window goes — see the file.
+mod webview;
+/// `host.gui.webview`'s Luau side: the page object, the table of pages, the drain.
+mod webview_lua;
+/// `host.gui.webview` on Windows: WebView2 through wry, in a wx tool window.
+#[cfg(windows)]
+mod webview_win;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -175,6 +187,39 @@ struct HotkeyReg {
     /// time that set changes, the way `refresh_captured` already derives the captured-key
     /// set. Liveness that is stored goes stale; liveness that is derived cannot.
     live: bool,
+    /// Registered with `{ foreground = true }`: left to the operating system's own hotkey
+    /// delivery rather than matched in the keyboard hook — see `hotkey_foreground`.
+    foreground: bool,
+}
+
+/// `host.hotkey.register`'s options: `{ foreground = true }` or nothing. Experimental, for the
+/// HTML probe's test W2(b) (tools/html-probe).
+///
+/// On Windows a hotkey is matched in the host's own keyboard hook as well (hotkey_hook.rs), and
+/// the hook swallows the press, so Windows never turns it into a `WM_HOTKEY`. But `WM_HOTKEY`
+/// is what gives a process the right to bring its own window to the front ("the calling process
+/// received the last input event"); whether the hook's press gives it too, nothing primary says.
+/// A `foreground` hotkey is therefore claimed with `RegisterHotKey` alone and not filed for the
+/// hook. Its price is the protection the hook gives: a program that switches `WM_HOTKEY` off
+/// while it is in front (`RIDEV_NOHOTKEYS`, as WinUAE does) silences that one key. On macOS it
+/// changes nothing — a Carbon hotkey is the system's own delivery already.
+fn hotkey_foreground(opts: Option<&Table>) -> mlua::Result<bool> {
+    const CALL: &str = "host.hotkey.register";
+    if let Some(t) = opts {
+        for pair in t.clone().pairs::<mlua::Value, mlua::Value>() {
+            let (k, _) = pair?;
+            if !matches!(&k, mlua::Value::String(s) if s.to_str().is_ok_and(|s| &*s == "foreground")) {
+                let name = match &k {
+                    mlua::Value::String(s) => format!("'{}'", s.to_string_lossy()),
+                    other => format!("a {} key", json::luau_type(other)),
+                };
+                return Err(mlua::Error::external(format!(
+                    "{CALL}: {name} is not an option; the only one is foreground"
+                )));
+            }
+        }
+    }
+    opt_bool(opts, "foreground", false, CALL)
 }
 
 /// One overlay's claim on an arbiter slot: which module/VM owns it, how specific
@@ -411,6 +456,8 @@ struct Shared {
     /// nothing to show anything in. Returns false where the platform has no notifications at
     /// all, which is macOS: `show_balloon` is Windows-only and answers false everywhere else.
     notify: RefCell<Option<Box<dyn Fn(&str, &str) -> bool>>>,
+    /// `host.gui.webview`'s pages, every module's — see webview_lua.rs.
+    pages: webview_lua::Pages,
 }
 
 /// Max distinct template PNGs kept decoded in the cache before least-recently-used
@@ -1233,7 +1280,7 @@ impl Shared {
                     release.push(*id);
                 }
                 if !reg.live && should {
-                    claim.push((*id, reg.spec.clone(), reg.module_idx));
+                    claim.push((*id, reg.spec.clone(), reg.module_idx, reg.foreground));
                 }
                 // An enabled module whose combination belongs to somebody else.
                 //
@@ -1261,8 +1308,13 @@ impl Shared {
                 reg.live = false;
             }
         }
-        for (id, spec, idx) in claim {
-            match self.backend.register_hotkey(id, &spec) {
+        for (id, spec, idx, foreground) in claim {
+            let claimed = if foreground {
+                self.backend.register_foreground_hotkey(id, &spec)
+            } else {
+                self.backend.register_hotkey(id, &spec)
+            };
+            match claimed {
                 Ok(()) => {
                     if let Some(reg) = self.hotkeys.borrow_mut().get_mut(&id) {
                         reg.live = true;
@@ -1273,7 +1325,12 @@ impl Shared {
                         Some(n) => format!(" (the OS had refused it {n} time(s) before)"),
                         None => String::new(),
                     };
-                    logging::line("keys", &format!("hotkey '{spec}' is now held by [{me}]{before}"));
+                    let how = if foreground && cfg!(windows) {
+                        " — foreground: delivered by Windows as WM_HOTKEY, not matched in the keyboard hook"
+                    } else {
+                        ""
+                    };
+                    logging::line("keys", &format!("hotkey '{spec}' is now held by [{me}]{before}{how}"));
                 }
                 // Held by another application rather than by us. Left not-live, so a later
                 // refresh tries again — which is the one thing a restart used to be for. Said
@@ -1444,6 +1501,11 @@ impl Shared {
         mailbox::drop_owner(self, idx, mailbox::Why::Reloaded);
         self.task_drop_owner(idx);
         self.forget_key_owner(idx);
+        // Its pages go with the VM their callbacks live in; the fresh VM describes its own. Only
+        // here, after the onDeactivate: its pages are still there for it — a `page:hide()` or
+        // `page:post` in a teardown works — and one it describes and shows there goes too, rather
+        // than being built for a VM nobody can reach any more.
+        webview_lua::drop_pages(self, |i| i == idx);
         // A mouse button the old VM held down: the new one does not know it holds it.
         self.release_held_buttons(idx, "it was reloaded");
         let id = self.ids.borrow().get(idx).cloned();
@@ -1544,6 +1606,8 @@ impl Shared {
             // handler, which never goes on — not even after a quick enable.
             dropped = mailbox::drop_owner(self, idx, mailbox::Why::Disabled);
             self.task_drop_owner(idx);
+            // Its pages go out of sight: nothing would answer them now.
+            webview_lua::hide_pages_of(self, idx);
             // And its key scope and menu flag, which used to stay set — one switch for the
             // whole application then, left wherever the module last put it.
             self.forget_key_owner(idx);
@@ -1695,6 +1759,7 @@ impl Shared {
         mailbox::drop_from(self, n);
         self.task_drop_from(n);
         self.drop_pad_listeners(|idx| idx >= n);
+        webview_lua::drop_pages(self, |idx| idx >= n);
         {
             // Drop arbiter claims owned by the rolled-back modules; clear a now-
             // dangling active winner and re-elect that slot, so a surviving lower-
@@ -2376,7 +2441,10 @@ fn build_dep_host(
     let dep_full = install_host_api(lua, shared, dep_idx)?;
     let dep_caps = shared.caps.borrow().get(dep_idx).cloned().unwrap_or_default();
     let host = lua.create_table()?;
-    for key in ["path", "resource", "settings", "config", "screen", "sound"] {
+    // `gui` among them: a page's file is found in the folder of the module whose code names it,
+    // like every relative path. Who OWNS the page is still this VM's module (webview_lua.rs asks
+    // the VM, not the index these bindings were made with).
+    for key in ["path", "resource", "settings", "config", "screen", "sound", "gui"] {
         // Identity facilities the dependency did not ask for are left off, so the refusal
         // below answers for them like any other.
         if capability_for(key).is_none_or(|cap| dep_caps.contains(cap)) {
@@ -2569,6 +2637,7 @@ mod hotkey_conflict_tests {
             spec: "Alt+V".to_string(),
             binding,
             live,
+            foreground: false,
         };
         const V: (u32, u8) = (0x56, 0b010);
         const W1: isize = 0x111;
@@ -2597,6 +2666,43 @@ mod hotkey_conflict_tests {
         regs.insert(5, reg(1, Some(V), false));
         regs.insert(14, reg(2, Some(V), true));
         assert_eq!(hotkey_target(&regs, on, 0, 1, 5, Some(V), None), Target::Gone(Gone::TakenOver));
+    }
+
+    /// A `{ foreground = true }` hotkey — claimed with `RegisterHotKey` alone and delivered by
+    /// Windows as `WM_HOTKEY` — is a registration like any other once its press has arrived: its
+    /// own while it holds the combination; the module's new registration of the combination,
+    /// foreground or not, only while the module's key scope is everywhere or the window the press
+    /// came in; never another module's. (That its press arrives through `on_hotkey` and the
+    /// module's mailbox is `a_foreground_hotkey_arrives_as_every_hotkey_does`.)
+    #[test]
+    fn a_foreground_hotkey_is_targeted_as_any_other() {
+        use captures::{Gone, Target};
+        let lua = Lua::new();
+        let reg = |module_idx: usize, live: bool, foreground: bool| HotkeyReg {
+            module_idx,
+            lua: lua.clone(),
+            cb: lua.create_registry_value(lua.create_function(|_, ()| Ok(())).unwrap()).unwrap(),
+            spec: "Ctrl+Alt+Shift+Win+F8".to_string(),
+            binding: Some(F8),
+            live,
+            foreground,
+        };
+        const F8: (u32, u8) = (0x77, 0b1111);
+        const W1: isize = 0x111;
+        let on = |_: usize| true;
+        let mut regs: HashMap<i32, HotkeyReg> = HashMap::new();
+        regs.insert(5, reg(1, true, true));
+        assert_eq!(hotkey_target(&regs, on, W1, 1, 5, Some(F8), None), Target::Same(5), "the scope does not hold its own back");
+        assert_eq!(hotkey_target(&regs, |_| false, 0, 1, 5, Some(F8), None), Target::Gone(Gone::Disabled));
+        // Made again while the press waited, as a hook hotkey this time: the module's own, in scope.
+        regs.remove(&5);
+        regs.insert(9, reg(1, true, false));
+        assert_eq!(hotkey_target(&regs, on, W1, 1, 5, Some(F8), Some(W1)), Target::Moved(9));
+        assert_eq!(hotkey_target(&regs, on, W1, 1, 5, Some(F8), Some(0x222)), Target::Gone(Gone::ScopeMoved));
+        // Another module's foreground registration of it: never.
+        regs.clear();
+        regs.insert(12, reg(2, true, true));
+        assert_eq!(hotkey_target(&regs, on, 0, 1, 5, Some(F8), None), Target::Gone(Gone::TakenOver));
     }
 
     /// Ctrl+Alt+H, wanted by two modules.
@@ -3058,6 +3164,33 @@ mod capability_gate_tests {
         let err = lua.load("return host.speech").eval::<mlua::Value>().unwrap_err().to_string();
         assert!(err.contains("com.example.quiet"), "{err}");
         assert!(err.contains("speech"), "{err}");
+    }
+
+    /// `host.gui` is a capability of its own, `gui`: a page is a window that can take the
+    /// keyboard from the application in front, which is what an install review has to say. And a
+    /// code dependency's page is found in its own folder, like every path it names.
+    #[test]
+    fn a_page_needs_the_gui_capability() {
+        let lua = Lua::new();
+        let full = lua.create_table().unwrap();
+        let gui = lua.create_table().unwrap();
+        gui.set("webview", "the call").unwrap();
+        full.set("gui", gui).unwrap();
+        let without: HashSet<String> = ["log", "window"].iter().map(|s| (*s).to_string()).collect();
+        let view = gated_view(&lua, &full, &without, "com.example.page").unwrap();
+        lua.globals().set("host", view).unwrap();
+        let err = lua.load("return host.gui.webview").eval::<mlua::Value>().unwrap_err().to_string();
+        assert!(err.contains("com.example.page") && err.contains("add \"gui\" to [capabilities]"), "{err}");
+        let with: HashSet<String> = ["gui"].iter().map(|s| (*s).to_string()).collect();
+        let view = gated_view(&lua, &full, &with, "com.example.page").unwrap();
+        lua.globals().set("host", view).unwrap();
+        assert_eq!(lua.load("return host.gui.webview").eval::<String>().unwrap(), "the call");
+        assert!(crate::registry::describe_capability("gui").ends_with("(gui)"));
+        const LIB: &str = include_str!("lib.rs");
+        assert!(
+            super::ocr_wiring_tests::body(LIB, "fn build_dep_host(").contains(r#""sound", "gui"]"#),
+            "gui is no longer one of a dependency's identity facilities"
+        );
     }
 
     /// A module that declares everything gets the table itself, with no view in the way.
@@ -4790,6 +4923,7 @@ impl Manager {
             recheck_requested: Cell::new(false),
             initial_pending: RefCell::new(Vec::new()),
             notify: RefCell::new(None),
+            pages: webview_lua::Pages::default(),
         });
         // Claimed before the first module is loaded, so it is the one id no module can be
         // given (see the field). Registering with the OS happens later, in `run`, on the
@@ -5130,6 +5264,11 @@ impl Manager {
                         let t = std::time::Instant::now();
                         let queued = shared.run_queued_events();
                         let queued_ms = t.elapsed().as_millis();
+                        // What the pages' windows sent: a page's messages, its "loaded", its
+                        // close box — queued by the web view's callbacks, handed to Luau here.
+                        let t = std::time::Instant::now();
+                        webview_lua::fire_events(&shared);
+                        let pages_ms = t.elapsed().as_millis();
                         // `onTrigger { initial = true }`: the window already in front, for
                         // the triggers that asked since the last tick (at load, on enable, or
                         // from a timer earlier in this very tick). Inside the measured
@@ -5175,8 +5314,8 @@ impl Manager {
                                      timers {timers_ms}, image results {images_ms}, text \
                                      recognition results {ocr_ms} ({} callback(s)), snapshot results \
                                      {snapshots_ms}, queued module events {queued_ms} ({} event(s), {} \
-                                     waiting), initial window report {initial_ms}, stopped modules \
-                                     {stops_ms}) — {hazard}",
+                                     waiting), initial window report {initial_ms}, page \
+                                     events {pages_ms}, stopped modules {stops_ms}) — {hazard}",
                                     ocr_n.callbacks,
                                     queued.events,
                                     queued.parked
@@ -5196,12 +5335,15 @@ impl Manager {
                         // here rather than at the call site, because the answer arrives from
                         // another thread a moment after the line was handed over.
                         shared.speech.pump();
+                        // The module list is not borrowed past this point: the reload below
+                        // replaces entries in it, and a page's build dispatches window
+                        // messages, which a click in the module window can turn into a reload.
+                        // (The dispatcher's borrow of it ended with its last use above.)
+                        drop(mods);
                         // The reload key only ASKED (see Shared::reload_all). Answering it
                         // means replacing entries in the very list the dispatch above holds
                         // borrowed, so it happens here, once that borrow is gone.
                         if shared.reload_all.replace(false) {
-                            drop(dispatcher);
-                            drop(mods);
                             // The report, and nothing before it. There used to be a
                             // "Reloading modules" first, because rebuilding every VM takes
                             // long enough that silence would read as "the key did nothing" —
@@ -5213,6 +5355,10 @@ impl Manager {
                             let (done, failed) = reload_everything(&shared, &modules);
                             shared.announce(&reload_report_text(&done, &failed, shared.stops.count()));
                         }
+                        // The pages a `show` asked for, built last and outside Luau: WebView2's
+                        // start pumps window messages while it runs, and this tick's
+                        // re-entrancy guard keeps the nested ticks from running modules.
+                        webview_lua::build_pending(&shared);
                     },
                     move || errors_shared.drain_errors(),
                     // Rows a stop turned off, or that were turned on again after one.
@@ -5773,6 +5919,9 @@ impl HostEvents for Dispatcher<'_> {
         self.shared.fire_ocr_results();
         self.shared.fire_snapshot_results();
         self.shared.run_queued_events();
+        // Nothing to hand on headless — no page is ever built there — but the same order as
+        // the GUI tick, so a page that could be built one day is not a second code path.
+        webview_lua::fire_events(self.shared);
         self.dispatch_initial();
         self.shared.settle_stops();
         if self.shared.recheck_requested.replace(false) {
@@ -6181,6 +6330,7 @@ impl mailbox::MailHost for Shared {
             Event::Image { p, outcome, ended } => self.open_image(*p, outcome, ended),
             Event::Snapshot { p, answer } => self.open_snapshot(*p, answer),
             Event::Setting { setting_of, reg, key, new, old } => self.open_setting(setting_of, reg, &key, &new, old.as_ref()),
+            Event::Page { page, build, call } => webview_lua::open_event(&self.pages, idx, lua, page, build, call),
             #[cfg(test)]
             Event::Call { f, args, what, .. } => mailbox::open_call(idx, f, args, what),
         }
@@ -6226,6 +6376,7 @@ const GATED: &[(&str, &str)] = &[
     ("path", "path"),
     ("resource", "resource"),
     ("arbiter", "arbiter"),
+    ("gui", "gui"),
 ];
 
 /// The capability a `host.<key>` access needs, or `None` when it needs none.
@@ -6681,8 +6832,10 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     hk.set(
         "register",
-        lua.create_function(move |lua, (spec, cb): (String, Function)| {
+        lua.create_function(move |lua, (spec, cb, opts): (String, Function, Option<Table>)| {
             host_call!("host.hotkey.register");
+            // `{ foreground = true }`, experimental: see `hotkey_foreground`.
+            let foreground = hotkey_foreground(opts.as_ref())?;
             // What the operating system can never hold is refused here and now, loudly, rather
             // than recorded as a claim: a tap, a key the platform has no code for, and a
             // combination the system keeps for itself. Command+Q on a Mac would REGISTER, and
@@ -6714,7 +6867,12 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             // the OS is the only authority and its error is the useful one. Matches
             // host.keys.capture.
             if binding.is_none() {
-                if let Err(e) = sh.backend.register_hotkey(id, &spec) {
+                let claimed = if foreground {
+                    sh.backend.register_foreground_hotkey(id, &spec)
+                } else {
+                    sh.backend.register_hotkey(id, &spec)
+                };
+                if let Err(e) = claimed {
                     return Err(mlua::Error::external(e));
                 }
             }
@@ -6735,6 +6893,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                     binding,
                     // Set by the refresh below; for an unparseable spec, by the OS call above.
                     live: binding.is_none(),
+                    foreground,
                 },
             );
             // Which also reports the clash, so a module that lost the contest is told once
@@ -6859,6 +7018,10 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
 
     // host.gamepad — game controllers, observed only. Its own file, gamepad_api.rs.
     gamepad_api::install(lua, &host, shared, idx)?;
+
+    // host.gui.webview — an HTML page of the module's own, in a window beside the plug-in.
+    // Experimental. Its own file, webview_lua.rs.
+    webview_lua::install(lua, &host, shared, idx)?;
 
     // host.now() -> milliseconds since the app started. A CLOCK, not a date: the only
     // thing modules need it for is measuring their own hot paths, and "how long did that
@@ -8848,6 +9011,41 @@ mod source_and_option_tests {
         }
     }
 
+    /// `host.hotkey.register`'s third argument: nothing, or `{ foreground = true | false }`, and
+    /// nothing else — a misspelt option must not register an ordinary hotkey without a word.
+    #[test]
+    fn a_hotkey_is_left_to_the_system_only_when_asked() {
+        let lua = Lua::new();
+        let ask = |src: &str| -> mlua::Result<bool> {
+            let t: Option<Table> = lua.load(src).eval().unwrap();
+            hotkey_foreground(t.as_ref())
+        };
+        assert!(!ask("return nil").unwrap());
+        assert!(!ask("return {}").unwrap());
+        assert!(!ask("return { foreground = false }").unwrap());
+        assert!(ask("return { foreground = true }").unwrap());
+        let e = ask("return { foreground = 1 }").unwrap_err().to_string();
+        assert!(e.contains("host.hotkey.register: foreground is true or false, not a number"), "{e}");
+        let e = ask("return { forground = true }").unwrap_err().to_string();
+        assert!(e.contains("'forground' is not an option; the only one is foreground"), "{e}");
+        let e = ask("return { true }").unwrap_err().to_string();
+        assert!(e.contains("a number key is not an option"), "{e}");
+    }
+
+    /// And the binding hands the option to the claim it keeps, so a refresh claims it the same
+    /// way the first registration did.
+    #[test]
+    fn the_foreground_option_reaches_every_claim() {
+        use super::ocr_wiring_tests::body;
+        const LIB: &str = include_str!("lib.rs");
+        let register = body(LIB, "fn install_host_api(");
+        assert!(register.contains("let foreground = hotkey_foreground(opts.as_ref())?;"));
+        assert!(register.contains("sh.backend.register_foreground_hotkey(id, &spec)"));
+        assert!(register.contains("                    foreground,\n"), "HotkeyReg does not keep it");
+        let refresh = body(LIB, "fn refresh_hotkeys(&self)");
+        assert!(refresh.contains("self.backend.register_foreground_hotkey(id, &spec)"));
+    }
+
     /// The same reader for `host.keys.check`'s `layout`.
     #[test]
     fn a_boolean_option_is_strict() {
@@ -10183,6 +10381,7 @@ mod ocr_wiring_tests {
     const OCR_LUA: &str = include_str!("ocr/lua.rs");
     const MAILBOX: &str = include_str!("mailbox.rs");
     const TIMERS: &str = include_str!("timers.rs");
+    const WEBVIEW_LUA: &str = include_str!("webview_lua.rs");
 
     /// The text of the item that starts with `sig`, up to its closing brace at its own
     /// indentation.
@@ -10261,6 +10460,37 @@ mod ocr_wiring_tests {
         assert!(body(LIB, "fn purge_module(").contains("self.snap_drop_owner(idx);"));
         assert!(body(LIB, "fn rollback_to(").contains("self.snap_drop_from(n);"));
         assert!(body(LIB, "pub fn run(&mut self)").contains("self.shared.snap_state.has_pending()"));
+    }
+
+    /// A page's events reach Luau on both ticks, and its builds happen on the GUI tick after the
+    /// module list is let go — never inside a module's callback. A module's pages are hidden when
+    /// it is disabled — unticked, or stopped by the guard, whose second step is the same disable —
+    /// and go with its VM when it is reloaded, built afresh after a stop, or rolled back.
+    #[test]
+    fn pages_are_built_after_the_tick_and_go_with_their_module() {
+        let run = body(LIB, "pub fn run(&mut self)");
+        assert!(run.contains("webview_lua::fire_events(&shared);"), "the GUI tick does not hand page events on");
+        let build = run.find("webview_lua::build_pending(&shared);").expect("the GUI tick builds no page");
+        let released = run.find("drop(mods);").expect("the module list is not let go");
+        assert!(released < build, "a page is built while the module list is borrowed");
+        assert!(!run[build..].contains("dispatcher."), "a module callback runs after the build");
+        assert!(body(LIB, "fn on_tick(&mut self)").contains("webview_lua::fire_events(self.shared);"));
+        // The disable's own step, which the checkbox (`apply_enabled`) and a stop's second step
+        // (`stops::settle`, through `after_disable`) both take: after the re-election, so a page an
+        // `onDeactivate` it ran showed is hidden too.
+        let toggle = body(LIB, "fn after_toggle(");
+        let off = toggle.find("if !enabled {").expect("the disable's branch");
+        let hide = toggle.find("webview_lua::hide_pages_of(self, idx);").expect("a disabled module's pages stay up");
+        assert!(off < hide && hide < toggle.find("if enabled {").expect("the enable's branch"), "hidden only on a disable");
+        assert!(toggle.find("self.arbiter_resolve(&slot);").expect("the re-election") < hide);
+        assert!(body(LIB, "fn apply_enabled(").contains("self.after_toggle(idx, enabled);"));
+        assert!(body(LIB, "fn after_disable(&self, idx: usize)").contains("self.after_toggle(idx, false)"), "a stopped module's pages stay up");
+        // After the purge's onDeactivate, which may still use its pages or describe a new one.
+        let purge = body(LIB, "fn purge_module(");
+        let deactivate = purge.find("\"arbiter onDeactivate\"").expect("the purge runs no onDeactivate");
+        let dropped = purge.find("webview_lua::drop_pages(self, |i| i == idx);").expect("a reloaded module's pages stay");
+        assert!(deactivate < dropped, "the pages go before the onDeactivate that may use them");
+        assert!(body(LIB, "fn rollback_to(").contains("webview_lua::drop_pages(self, |idx| idx >= n);"));
     }
 
     /// A snapshot's callback runs in the lane of the dispatch that asked for it, as a text read's
@@ -10813,8 +11043,8 @@ mod ocr_wiring_tests {
     /// arbiter's `onActivate` and `onDeactivate` (the purge's, the unregistering's and the
     /// re-election's) and a module's own `onChange` from its own `set` — wherever the call is
     /// written: every source file of the crate is searched, its test code left out. So a new
-    /// event site that calls a callback itself — the HTML probe's page callbacks, merged without
-    /// the mailbox — fails here, rather than run a callback inside another module's handler.
+    /// event site that calls a callback itself fails here, rather than run a callback inside
+    /// another module's handler.
     #[test]
     fn a_modules_callback_is_called_outside_its_mailbox_only_at_the_synchronous_places() {
         let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
@@ -10853,6 +11083,57 @@ mod ocr_wiring_tests {
             ],
             "a module's callback called outside its mailbox"
         );
+    }
+
+    /// A `{ foreground = true }` hotkey's press, which Windows delivers as `WM_HOTKEY` to the
+    /// hotkey window, goes the way every hotkey's goes: queued as a press the system delivered,
+    /// paired with any the hook saw, then — dropped by its stamp when it was made during a stall
+    /// that ended in a stop, as every press the system delivered is — `on_hotkey`: its arrival
+    /// line, the reload key, the interactive lane, and the module's mailbox. Nothing on that way
+    /// asks whether it is a foreground one, so nothing can take it around the mailbox, or around
+    /// the stop's drop.
+    #[test]
+    fn a_foreground_hotkey_arrives_as_every_hotkey_does() {
+        const WINDOWS: &str = include_str!("backend/windows.rs");
+        assert!(body(WINDOWS, "unsafe extern \"system\" fn hotkey_wndproc(")
+            .contains("locked(&HOTKEY_QUEUE).push((wparam as i32, Route::Os { time }, LET_THROUGH.load(Ordering::Relaxed)));"));
+        let pump = body(WINDOWS, "fn pump_pending(&self, events: &mut dyn HostEvents)");
+        let each = &pump[pump.find("for (id, route, seq) in hotkeys {").unwrap_or_else(|| panic!("no loop over the hotkeys: {pump}"))..];
+        let each = &each[..each.find("\n        }\n").expect("the end of the loop over the hotkeys")];
+        let (stamp, settled, on_hotkey) = (
+            each.find("matches!(route, Route::Os { time } if super::tick_not_after(time, drop_until as u32))").expect("the stall's drop"),
+            each.find("if settle_hotkey(id, route) {").expect("the pairing"),
+            each.find("events.on_hotkey(id, seq);").expect("not handed on"),
+        );
+        assert!(stamp < settled && settled < on_hotkey, "{each}");
+        assert!(each[settled..on_hotkey].contains("if stalled {\n                    late.push(id);\n                } else {"), "{each}");
+        assert!(!each.to_lowercase().contains("foreground"), "the pump treats a foreground hotkey apart: {each}");
+        assert!(!body(LIB, "fn on_stall_hotkeys_dropped(").contains("foreground"));
+        let on = body(LIB, "fn on_hotkey(&mut self");
+        assert!(!on.contains("foreground"), "on_hotkey treats a foreground hotkey apart: {on}");
+        assert!(on.contains("mailbox::deliver(self.shared, owner, &lua, Event::Hotkey { id, owner, front, seq, binding, spec });"));
+        for sig in ["fn open_hotkey(", "pub(crate) fn open_hotkey_in<"] {
+            let open = body(LIB, sig);
+            assert!(!open.contains("foreground"), "{sig} treats a foreground hotkey apart: {open}");
+        }
+    }
+
+    /// A page's events reach its module as every other event does: both ticks' `fire_events`
+    /// hands what the windows sent to `hand_on` — the drain whose rules mailbox_tests.rs runs
+    /// against the real mailbox — which delivers each callback through the module's mailbox in its
+    /// lane, and the host opens them with the same `open_event` those tests open them with.
+    #[test]
+    fn a_pages_events_go_through_its_modules_mailbox() {
+        assert!(body(WEBVIEW_LUA, "pub(crate) fn fire_events(").contains("hand_on(sh, events);"));
+        let deliver = body(WEBVIEW_LUA, "fn deliver<H: PageHost>(");
+        let lane = deliver.find("let _prio = enter_priority(lane);").expect("no lane");
+        assert!(lane < deliver.find("mailbox::deliver(h, owner, lua, Event::Page { page, build, call });").expect("not through the mailbox"));
+        let hand_on = body(WEBVIEW_LUA, "pub(crate) fn hand_on<H: PageHost>(");
+        for f in ["loaded(h, page, build)", "load_failed(h, page, build, &why)", "message(h, page, build, text)", "closed(h, page, build, why)"] {
+            assert!(hand_on.contains(f), "{f}");
+        }
+        let open = body(LIB, "fn open(&self, idx: usize, lua: &Lua, ev: Event) -> Opened");
+        assert!(open.contains("Event::Page { page, build, call } => webview_lua::open_event(&self.pages, idx, lua, page, build, call),"));
     }
 
     /// Every source file of the crate but `vm_guard.rs`, its test code left out: (name, text,
@@ -10940,9 +11221,9 @@ mod ocr_wiring_tests {
     }
 
     /// A stop is marked when the callback that began it ends (the exit hook, set once), and settled
-    /// by both ticks after the report of the window in front; the settings file keeps a stopped
-    /// module on; turning it on clears its stop and its VM; a rollback forgets the stops of what it
-    /// rolls back.
+    /// by both ticks after the report of the window in front, and again after a recheck round; the
+    /// settings file keeps a stopped module on; turning it on clears its stop and its VM; a rollback
+    /// forgets the stops of what it rolls back.
     #[test]
     fn the_stop_is_wired_where_disabling_is() {
         assert!(body(LIB, "pub fn new() -> Result<Self>").contains("stops::mark(&*sh, trips);"));
@@ -10959,9 +11240,18 @@ mod ocr_wiring_tests {
             assert!(tick[at..].trim_start_matches(round).trim_start().starts_with(settle), "a stop in the recheck round waits a tick: {round}");
         };
         after_recheck(headless, concat!("self.on_focus", "_change();"), concat!("self.shared.settle", "_stops();"));
-        after_recheck(body(LIB, "pub fn run(&mut self)"), concat!("dispatcher.on_focus", "_change();"), concat!("shared.settle", "_stops();"));
         assert_eq!(LIB.matches(concat!("shared.settle", "_stops();")).count(), 4, "each tick, and each tick's recheck round");
-        assert!(LIB.contains(concat!("stopped modules \\", "\n")) && LIB.contains(concat!("{stops_", "ms}) — {hazard}")));
+        // The GUI tick settles them after the page events and the report of the window in front,
+        // and its overrun line names their share last.
+        let run = body(LIB, "pub fn run(&mut self)");
+        let (pages, initial, settle) = (
+            run.find(concat!("webview_lua::fire", "_events(&shared);")).expect("the page events"),
+            run.find(concat!("dispatcher.dispatch", "_initial();")).expect("the report of the window in front"),
+            run.find(concat!("shared.settle", "_stops();")).expect("the GUI tick settles no stop"),
+        );
+        assert!(pages < settle && initial < settle);
+        after_recheck(run, concat!("dispatcher.on_focus", "_change();"), concat!("shared.settle", "_stops();"));
+        assert!(LIB.contains(concat!(", stopped modules {stops_", "ms}) — {hazard}")), "the overrun line does not name the stops' share");
         assert!(body(LIB, "fn sync_enabled_into_store(").contains("stops::stored_enabled("));
         let enable = body(LIB, "fn apply_enabled(");
         assert!(enable.contains("self.stops.clear(idx)") && enable.contains("vm_guard::clear_module(&self.guard, idx);"));
@@ -11141,6 +11431,9 @@ mod ocr_wiring_tests {
         }
         for name in ["host.screen.snapshot", "host.screen.pixels", "host.screen.snapshotAsync", "snapshot:crop", "snapshot:release"] {
             assert!(SNAP.contains(&format!("host_call!(\"{name}\")")), "{name}");
+        }
+        for name in ["host.gui.webview", "page:show", "page:prepare", "page:focus", "page:hide", "page:post", "page:isShown", "page:close"] {
+            assert!(WEBVIEW_LUA.contains(&format!("host_call!(\"{name}\")")), "{name}");
         }
         // And every closure in the crate, wherever it is written.
         let exempt = [

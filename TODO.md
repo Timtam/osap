@@ -6547,6 +6547,281 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       envelopes, zones). And a standalone Avenger, if there is one and it is wanted: an `O.window`
       binding beside the embedded one, as sforzando has.
 
+## HTML pages, stage 1: `host.gui.webview` and the Windows probe (2026-09-28)
+
+The maintainer's decision of 2026-09-28: an HTML page is a core capability of the platform — a
+general host primitive, and each module decides what to do with it (VPS Avenger will try a page
+beside its Tab ring). The page is small and visible, beside the plug-in window and never over it,
+never invisible. What was built for the Windows probe, and what only a live test answers; the
+maintainer's German test instructions are a text of their own, not in the repository.
+
+- [x] **Stage 1, built — nothing of it has opened a window yet.** `host.gui.webview{ file, title,
+      onMessage, onReady?, onClose? }` with `show{ focus, avoid }`, `focus`, `hide`, `post`,
+      `isShown`, `close` and `window` (docs/api/gui.md, marked experimental): WebView2 through wry
+      0.57 in a wx tool window (`webview_win.rs`), the rules pure and tested (`webview.rs`: the
+      answers of `show`, the file a request is served, the policy header, the placement), the
+      Luau side and its drain (`webview_lua.rs`); the capability `gui` in the gate and the install
+      review; the hotkey option `{ foreground = true }` (docs/api/hotkey.md); the probe
+      `tools/html-probe`, its decisions pinned against the scripted host (html_probe_tests.rs).
+      After the review of 2026-09-28: a page is ready only on a document of its own that loaded
+      (not again on a refused link); a page closed from its own `onReady` or `onClose` is taken
+      down; a shown page is raised above the ordinary windows; every request outside the page's
+      origin is answered 403; the origin's hash is SHA-256; the `WEBVIEW2_*` lines are whole and
+      name the dangerous switches.
+- [x] **After the maintainer's first NVDA run (2026-09-28)** — his keyboard and NVDA were left
+      broken in the page, the first show took over ten seconds, and a double click on the FX
+      window's title bar maximised it and left the page unreachable ("no room"). Fixed, and
+      revised after two reviews the same day; not yet run:
+      - **The keyboard and a page** — gone again when the probe was brought onto 8480ad4
+        (2026-10-11): what the probe did about the keys going to a window of the application's own
+        — the watch not counting them, its lines for the hook stopping and starting to be called
+        there, a re-install waiting while a modifier or a screen reader's key is held
+        (`hook_watch::Gate`, `Outcome::Held`), the page's window keeping the keyboard until the
+        keys of the chord that opened it were up (`webview::Handover`) and the `RegisterHotKey`
+        line naming the window in front. The keyboard hook now leaves the chain while a window of
+        the application's own is in front, a page included, and comes back first in the chain
+        after it (351e4f0; docs/api/keys.md, "Out of the chain in this application's own
+        windows"), which is what kept NVDA's hook from the page's keys (below).
+      - **The first build**: WebView2's environment is created by the host without waiting
+        (`CreateCoreWebView2EnvironmentWithOptions`, handed to wry with `with_environment`), shared
+        by every page, and let go of when its browser process ends — the last page closed, or a
+        crash (`BrowserProcessExited`) — so the next build makes a new one, again without waiting;
+        a build that fails in an environment a page was built in before is tried once more in a new
+        one; a failed answer fails every build that waited for it and is dropped when none did.
+        Only the page's controller is still waited for. `page:prepare()` builds a page hidden; the
+        probe prepares it when a plug-in window first comes to the front.
+      - **Placement**: with no room beside the plug-in window, and none for a smaller page on
+        another monitor, a `show` with `focus` puts the page over part of it — at its smallest, in
+        the corner of the monitor where it covers the least — and answers `true, "over the
+        rectangle to avoid"`; declined, it is hidden again, and a `show` without `focus` answers
+        `"no room beside the rectangle to avoid"` and leaves it hidden.
+      - **The probe** (revision 2; revision 3 on 8480ad4, the same probe on the host with handlers
+        that wait and the hook out of the chain in front of the page): W3 clicks the FX window's own
+        background, clear of every control by 8 pixels and 16 pixels away from the last W3 click, or
+        nothing, and says whether the FX window kept its place and size; a window covering the spot
+        costs the click, not the way back; a second "Click into the plug-in" while a round trip is
+        under way starts nothing (W5), one after the page is back is a round trip of its own; a
+        second activation of a button with nothing released in the page since is a hint in the log;
+        a blur with the page still in front is not "lost the front"; a page over the plug-in window
+        is said once, without cutting NVDA off; "HTML probe ready." once prepared; the first report
+        says the revision.
+      - **Leaving the front** (review of 2026-10-11): a page hidden or taken down while it is in
+        front — its close box, Alt+F4, `hide`, `close`, its module disabled or reloaded — gives the
+        front back to the window that had it when the page last took it, if that window is still
+        shown (`webview_win::give_front_back`); the page has no owner, and Windows would otherwise
+        give it to the window next in its order. The probe's way back keeps the page in front when
+        Windows declines to bring the plug-in window forward. A reloaded module's pages go after
+        its onDeactivate, which may still use them.
+- [x] **Low-level keyboard hooks are not called for keys going into a page — sometimes.**
+      Answered on 2026-10-10 with the module manager: the second explanation below, the order of
+      the hooks, for every window of the application's own — with our hook first in the chain,
+      Windows calls neither ours nor the hooks behind it for keys going to our windows. The fix,
+      the hook out of the chain while one of them is in front, is the URGENT entry under "The
+      application's own keys"; W1 and W4 hear whether it holds for a page. What was known before:
+      On 2026-09-28, from the page's first show until NVDA was restarted, our `WH_KEYBOARD_LL` hook
+      was not called for the keys going into the WebView2 page (the watch's bar rose 3 → 6 → 12 →
+      24 without one call in between, five fresh hooks at the head of the chain were never called,
+      each re-install found the old hook still installed, and the hook's thread answered every
+      request at once), and going by the page's own key log NVDA's was not either (Caps Lock and
+      Space reached the page, arrows in browse mode did). In the same minutes ours was called for
+      the keys going to REAPER that the log shows (F6 three times; the bar back to 3 before the
+      next miss). After NVDA's restart both were called for the page's keys (F7 matched by the
+      hook inside the page, Shift+Tab seven times without a miss). Ruled out: our bookkeeping (the
+      hook stamps its call first thing, for every key), injected keys (not counted, and they call
+      the hook), a timeout removing our hook, a raw-input or hook registration inside our process
+      (wry and webview2-com call neither; WebView2's in-process DLL imports neither). Not
+      documented by Microsoft; others report the same with a web view of the hook owner's own in
+      front (tauri #13919; a write-up of a push-to-talk tool, 2026-08, where a second, diagnostic
+      hook made both hooks work, and taking it out silenced the first again). Chromium's browser
+      process (msedge.dll) imports `SetWindowsHookExW`, `AttachThreadInput` and
+      `RegisterRawInputDevices`. Two explanations fit the log; only the second says why NVDA's
+      restart ended it for our hook too:
+      - **a state** Windows was in for keys into that window, begun around the first build (which
+        held the event loop for 4.4 s) and ended by NVDA's restart;
+      - **the order of the hooks**: no hook is called for a key going into the page while the
+        first hook in the chain belongs to the process in front — ours, whose window holds the
+        page's cross-process child; ours was first, the application having started after NVDA, and
+        NVDA's restart put NVDA's first, which calls ours through `CallNextHookEx`. Then every
+        re-install of ours — the watch's, and the unconditional ones after an unlock, a resume or a
+        connect — puts ours first again and brings it back.
+- [ ] **The Windows probe, W1–W9** — the maintainer, with NVDA, on ReaEQ in REAPER (no overlay):
+      the probe build started with `tools\html-probe`, then the log. Each answer goes here. The
+      report key (F9) says what happened since it was last pressed and counts anew; every time is
+      measured from the callback that started it, to about 15 to 30 ms.
+      - **W1 — does NVDA find its way in?** F7 (Ctrl+Shift+Win+Alt+F7) over the FX window: title and
+        heading spoken — once, or twice (the host and wry each move the keyboard into the page)? H
+        to the next heading (browse mode)? B and Tab through the page? "Say all" by itself? Log:
+        `[gui] … shown and brought to the front (accepted) …; in front now: this page; on top at its
+        centre: yes`, and `RESULT F7 (keyboard hook): the page has the focus N ms after the key's
+        callback` — passed under about half a second, counted from the key's callback to the page's
+        focus; and `[keys] the keyboard hook is out while one of our windows is in front ('HTML
+        probe')` as it comes forward. The page is prepared when a plug-in window first comes
+        forward; a press before it is ready only asks for it, and the press after it is the first
+        measurement; the probe says "HTML probe ready." once it is prepared. NVDA's version: before
+        2026.1 NVDA did not enter a new wx web view until the focus was set into it again; the host
+        sets it on every show — enough?
+      - **W2 — which way of pressing gives the front?** (a) F7, matched in the keyboard hook;
+        (b) F8, `{ foreground = true }`, WM_HOTKEY; (c) the probe's setting "Show the page by
+        itself …" on, the FX window coming forward after Alt+Tab from another program, after
+        OSARA's F6 from REAPER's main window, after a click with NVDA's mouse keys. For each,
+        `RESULT …: accepted`, `ACCEPTED BUT NOT IN FRONT` or `not shown, declined by the system`.
+        (a) declined and (b) accepted: `foreground = true` stays and a page key uses it. (a)
+        accepted: the option goes. (c) decides whether "show on arrival" ever becomes a setting of
+        a module.
+      - **W3 — into the plug-in and back, as stage 2's `o:inPlugin` would do it.** The page's
+        "Click into the plug-in": the FX window asked forward; on its foreground event one click on
+        its own background, clear of every control in it by 8 pixels and 16 pixels from the last
+        W3 click along one axis — or none, where it has no such spot (`… so nothing is clicked`),
+        which leaves the change of windows alone; the page asked back in the answer of a picture
+        taken after the click. What NVDA says, in which order; `RESULT W3: the page came back,
+        accepted …; the plug-in window kept its place and size` (or `CHANGED from … to …`: the
+        question the maximised window of 2026-09-28 asks); and whether REAPER's handling of the
+        click took the front again (`RESULT W3: the page lost the front again N ms after it came
+        back`, only with another window in front). Where the click landed is in the log
+        (`clicked at x,y (its own background, N px …)`); that a click on a dialog's own background
+        is a click on nothing is the assumption this checks. F9's `W3 is still waiting …`: F7
+        ends it. Not measured: whether a click into the plug-in's own content leaves the page in
+        front — ReaEQ has no spot a click is harmless on; that needs an overlay's plug-in
+        (stage 2).
+      - **W4 — which keys reach the page?** Enter, Space, a letter, Page Down and Escape, in browse
+        mode (on "Announce …") and in focus mode (the search field): the `W4 key:` lines, and the
+        report's key presses (key downs; the report chord's own modifiers are not counted). And
+        whether NVDA's own keys (browse mode, NVDA+Space, the characters read on the arrows in the
+        search field) work in the page from the first show on, with NVDA started before the
+        application — the order that broke them on 2026-09-28; in the log one `[keys] the keyboard
+        hook is out …` line as the page comes forward, one `… is back, first in the chain …` as a
+        window of another program does, and none in between. Unmeasured, and needed only when the
+        watch missed the page's foreground event: whether raw input reports the page's keys as
+        gone to this application (`RIM_INPUT`) — its keyboard is in a child window of WebView2's
+        process. A `[keys] the keyboard hook was installed again …` line naming the page as the
+        window in front (`this application: yes`) would say it does not.
+      - **W5 — does one Enter fire twice?** Enter twenty times on "Announce …" after a report: the
+        next report's "announce 20", and no `W5: the page counted …` result — the counts are the
+        answer. The log's `W5 hint:` lines (a button activated again with no key-up or pointer
+        release in the page since) are a hint, not a verdict: on 2026-09-28 NVDA's activation of
+        "Click into the plug-in" and then the Enter itself, once the page was back, looked so; but
+        an Enter that activates on its key-down and takes the page away sends its key-up to the
+        window in front then, and NVDA's own activation releases a pointer each time (Blink's
+        `DispatchSimulatedClick`), doubled or not. The `released in the page since the last
+        button:` part of each button's line shows what came.
+      - **W6 — in a window list?** With the page open: Alt+Tab, Windows+T, and JAWS's window list
+        (Insert+F10) if JAWS is there. It must be in none.
+      - **W7 — back into the plug-in.** F7 pressed in the page, and the page's "Back to the
+        plug-in": `RESULT … back to the plug-in accepted`, then `RESULT W7: … the keyboard landed
+        on …` — the FX window itself, REAPER's FX list (`SysListView32`) or the plug-in's control.
+        With a floating FX window; a docked one is stage 2's (the probe finds no plug-in window in
+        front there, and daw-hosts knows none).
+      - **W8 — what it costs.** The first build in its parts: `the WebView2 environment is being
+        created` … `is ready, N ms after it was asked for (M ms of that in the call that asked …)`
+        (the call the event loop waits for, and the rest, which it does not), then `building in
+        WebView2's environment` … `built in N ms` (the page's controller, which it waits for; the
+        renderer and GPU processes start there, so which part holds most of a cold start is this
+        test's answer — 4.4 s of build and 8.4 s to ready on 2026-09-28, both parts together, in a
+        debug build), then `ready, N ms after the show or prepare that asked for it`; the
+        `WebView2 process(es) … working set … private …` lines; a second show after hiding.
+      - **W9 — two voices at once.** "Announce …": the live region and the host's speech in the
+        same callback. Who interrupts whom?
+      - **Also in the log, with nothing to do:** whether WebView2 enforces the policy header —
+        `page: the policy refused …` for the page's own test, `code built from a string refused`,
+        `a fetch of its own page.css — answered 200`, `a fetch of https://example.invalid/ —
+        refused`; whether `RTCPeerConnection` and `navigator.clipboard.writeText` are there; and
+        that a refused link logs no second `ready`.
+      - **Also, two steps with the page open:** Alt+F4 in the page — hidden (`RESULT the page was
+        closed: user`) or not, and whether the keyboard is back in the FX window it came from
+        (`[gui] page 'HTML probe': leaves the front; given back to window …`); and the select list ("Choice": Alt+Down, arrows, Enter) — does NVDA
+        read the options, does a `page: select` line come, and where does its popup open once the
+        window was moved?
+- [ ] **What the probe does not look at, and the reference promises nothing about yet.** Whether
+      Chromium delays a posted message or a live region while the window is hidden or covered;
+      JAWS at all (an Edge update once made web views silent to it).
+- [ ] **A page is not kept off the internet yet** (review of 2026-09-28). The policy header covers
+      `fetch`, XHR, WebSockets and beacons, and the host answers every other request 403; not
+      covered are WebRTC (a TURN server's user name carries data out) and the browser's look-ahead
+      (`dns-prefetch`, `preconnect`). The install review says so until they are. Not in stage 1:
+      a mistake there is a page that never loads, which would cost the maintainer's whole session.
+      The way to close them, to be measured with a page that must still load, is WebView2's
+      browser arguments, keeping wry's own `--disable-features=…`, which ours would replace:
+      - `--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE *.localhost"`;
+      - `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`;
+      - `--proxy-server` pointed at a closed loopback port.
+- [ ] **Stage 3 choices the review left open:** `require-trusted-types-for 'script'` in the policy
+      (Chromium would then refuse `innerHTML` with a string, which the reference only asks for); a
+      WebView2 profile of each module's own besides its origin; whether a set `WEBVIEW2_*`
+      variable makes pages refuse to open (today: logged, and nothing more — the maintainer's
+      call).
+- [ ] **Upstream: wry's `Wry::ExecMsg`.** wry calls whatever a posted message of that registered
+      name points at (webview2/mod.rs, `main_thread_dispatcher_proc`), so any process on the same
+      desktop can make ours call through a pointer of its choosing while a page exists. Report it
+      (a message that only signals, the closures kept in wry's own queue), and look for the fix
+      before the capability is general.
+- [ ] **A build that never ends.** wry waits for the page's controller in a message loop of its own;
+      should WebView2 never answer, that wait never ends and every key of the application is dead —
+      never seen. The log's last line is then `[gui] … building in WebView2's environment`. The
+      environment is no longer waited for (2026-09-28) — should it never answer, every `show` and
+      `prepare` of a page waiting for it answers `"not ready yet"`, with one `waits for WebView2's
+      environment` line for each build, and the application's keys go on working; taking out the
+      controller's wait too needs a controller the host makes itself, which wry 0.57 cannot be
+      handed. (A Quit from the tray during a build is not lost: wx only sets a flag, and the loop
+      ends once the build has returned.)
+- [ ] **The event loop's COM apartment.** WebView2 needs a single-threaded one, which wxWidgets
+      gives the loop when it starts — unless the multithreaded one was entered on that thread
+      first: UI Automation's `automation()` (uia.rs) enters it, so a module asking `host.element`
+      at load, before the window system starts, would leave the loop there. The first build logs
+      `the event loop's COM apartment is …`, and in the multithreaded one the build fails with that
+      reason instead of an error of WebView2's. Never measured; the probe's log answers it for its
+      own set of modules only. Later hardening: the main thread enters the single-threaded one at
+      start, so the bad case cannot happen.
+- [ ] **The macOS tests, M1–M9** — once a wry release carries #1866 (merged 2026-09-27, in no
+      release yet; 0.57.0 activates the application on every web view it creates), on the Air
+      (12.7.6) and the mini (14.5), with REAPER and a small page. The answers go here, not into the
+      reference:
+      - **M1 (decides the Mac design):** a panel that does not activate the application, given the
+        keyboard by a key: does VoiceOver speak the focused button, does REAPER stay the active
+        application (log), does VO-M still open REAPER's menu bar?
+      - **M2:** the panel shown without the keyboard: does VoiceOver stay quiet in REAPER?
+      - **M3:** the panel hidden: are the keyboard and VoiceOver back in the plug-in?
+      - **M4:** a click into the plug-in while the panel has the keyboard: does it arrive, and does
+        VoiceOver come back cleanly when the panel takes the keyboard again?
+      - **M5:** `activate_self` against `NSApplication.activateIgnoringOtherApps:` on 14.5 while
+        REAPER is active — the module manager's window depends on the answer too.
+      - **M6:** only if M1 fails, the activating way: do REAPER's or Logic's plug-in windows hide?
+      - **M7:** does Tab reach every button with the system's "Keyboard navigation" off (the Mac
+        side is to set `tabFocusesLinks`)?
+      - **M8:** VoiceOver's window chooser (VO-F2 twice): is the panel listed, and under which
+        application?
+      - **M9:** how long from a key press to VoiceOver speaking, after the panel was hidden for
+        minutes?
+- [ ] **Stage 2 — the foundation**, which a native `host.gui` window needs as well: our own windows
+      in `host.window` (`own` on the window tables and on `foreground()` since 4acb564, which the
+      overlay runtime lets go on; window triggers not matching our own windows unless they ask; on a
+      Mac answered from the host's own table, never an accessibility query into itself); the key
+      rules (the key scope is never pinned to one of our own windows; "our own window has the
+      keyboard" closes the key gate on both platforms); the overlay holding its place while its page
+      is in front — its origin, its context, the embedded binding's stay (no `identify` per round
+      trip) and the nested overlays (Kontakt in Komplete Kontrol) — with every hotkey but the page
+      key released; `o:page{ page, key, open }` and `o:inPlugin(fn, after)` with a fixed end on the
+      foreground event (the context does not match: refused, said, the page back), wrapping screen
+      reads as well as clicks while the page is over the plug-in window (a read of the plug-in's
+      rectangle reads the page) — a round trip per read, or the page hidden for reads: the
+      maintainer's call; "back to the plug-in" as daw-hosts' focus key made a building block, once
+      its quarter-second re-read is an event, and a docked plug-in's way back (W7); tests in the
+      scripted style of overlay_menu_tests.rs.
+- [ ] **Stage 3 — the real `host.gui.webview`**: `prepare()` called on an overlay's first
+      activation (the call and the asynchronous environment are there since 2026-09-28), a build
+      that does not wait at all (above), the page kept off the internet (above), the placement
+      tried on real layouts (a maximised DAW, a small screen, a pinned FX window — REAPER's pin
+      makes it topmost, and maximised it covers a page over it entirely: `on top at its centre:
+      NO`; the page placed for the display scaling of the monitor it goes to, not only of the one
+      `avoid` is on), the answers of W1–W9 in the
+      reference, and pages' settings in the Application settings tab.
+- [ ] **Stage 4 — the Mac**, on the way M1 decides: a panel the host creates itself (objc2-app-kit,
+      in `backend/macos`, so check-macos sees it) holding wry's WKWebView, with the panel settings
+      of the recommendation (floating level, `hidesOnDeactivate = NO`, all Spaces and beside a
+      full-screen DAW, out of the window cycle) and no Dock claim.
+- [ ] **Stage 5 — Avenger's first page**, after the maintainer's decisions: what a page is for, the
+      native search field of Avenger's stage 4 or a page, whether two window changes per action are
+      acceptable. The Tab ring stays.
+
 ## VoiceOver's AppleScript box, caught (2026-10-01)
 
 The Mac session of 2026-10-01 (an Intel MacBook Air, macOS 15.8, Retina 2x, VoiceOver running):
@@ -7649,16 +7924,32 @@ kind of place that says how long the first held the loop.
       keys.md, overlay.md's "Where a hook runs" (the `menuItem` and `onDone` row, the arbiter's
       call, `recognize` without "without a callback"), settings.md, timer.md, module-manager.md,
       building-an-overlay.md's anchors.
-- [ ] **The HTML probe's page callbacks, when it is merged** (found reviewing B1a): its
-      `onReady`, `onMessage` and `onClose` (webview_lua.rs) call the module's callback themselves.
-      Through the mailbox, as `Event::Page` — `onMessage` an input — with `open` checking the
-      module and the page's build. The source test in lib.rs that looks for a module's callback
-      called outside its mailbox (`…_only_at_the_synchronous_places`) fails until they are. With
-      it, docs/api/gui.md: its link to `#host-ocr-read` goes to `#host-ocr-recognize`, and the rules
-      for a busy module (b1b-plan.md, section 4) — a page's events wait while a handler of its
-      module waits for a reading, and run in order after it; a read in `onMessage` makes a waiting
-      poll read of the same module an interactive one. And the lane of a page message after the
-      user's activation, still open, can be heard then.
+- [x] **The HTML probe's page callbacks, through the mailbox** (found reviewing B1a; built
+      with the probe's merge onto way B, pb-built.md): a page's `onMessage`, `onReady` and
+      `onClose` are `Event::Page` events of the module that owns the page (webview_lua.rs,
+      `hand_on`): the host's part at once — the page's life, its window, the posts that waited,
+      the log — the callback through the module's mailbox, opened when it runs
+      (`open_event`: looked up then, a message decoded then). A message is an input, against a
+      limit of 256 of the pages' own, apart from the keys' (`mailbox::Budget`, its own `[gui]`
+      line); `onReady` and `onClose` never drop, and an `onReady` right behind one of its build
+      folds into it. An event runs for the page and the build it came from: nothing of a build
+      the module closed since (`closed_upto`, the newest build when it closed), everything a
+      failed build sent before its failure and then its close, for any number of failures.
+      Lanes: a message (whoever sent it) and a close by the user interactive, `onReady` the
+      lane of the `show` or `prepare` that started the build — interactive if one made in that
+      lane asked while it was being built — a failure's close background. Tested against the
+      real mailbox (mailbox_tests.rs); the probe's scenarios run every event through it too
+      (`T.call`, each checked to have run at once, `finish`), which the three W3 scenarios had
+      lost: they loaded the harness without its Rust half, and stopped at `T.runDue`. A
+      `{ foreground = true }` hotkey's press goes through `on_hotkey` and the mailbox as every
+      hotkey's (a source test, and `hotkey_target` run with one). Docs: gui.md, hotkey.md,
+      ocr.md's order and priority, module-runtime-and-lifecycle.md. Reviewed (pb-review.md),
+      fixed as pb-final.md says. Brought onto 8480ad4 (2026-10-11), where handlers wait: a page's
+      events wait in the mailbox while a handler of its module waits for a reading and run in
+      order after it, a page's message raises a waiting poll's read as a key does, and the line
+      for inputs dropped at the limit is said at the first and then every 10 s for the pages'
+      messages as for the keys, each on its own; gui.md's paragraph on a page's events was read
+      again for it, and its link to `host.ocr.read` goes to `host.ocr.recognize`.
 
 Follow-ups this work found and did not take on:
 
@@ -7667,6 +7958,12 @@ Follow-ups this work found and did not take on:
       `open_pad_in`, `open_hotkey_in`, `open_image_in` and `discard_image_in`, `open_snapshot_in`,
       beside the setting's `open_on_change` — with a busy-module test per arm (mailbox_tests.rs,
       key_scope_tests.rs).
+- [ ] **A page's message is interactive whoever sent it** (found reviewing the probe's merge):
+      the host cannot tell a person's click in the page from the page's own script, so a
+      `setInterval` post's `onMessage` asks its reads in the interactive lane, and raises a
+      parked poll's read of its module as a key does. Consider taking the lane from the
+      page's transient user activation (`navigator.userActivation.isActive`), which the shim
+      that gives `platform.post` could attach to the message before the page's script runs.
 - [ ] **A module disabled at load evaluates its overlays only at the next window or focus event
       after it is enabled** (found reviewing B3): the first evaluation of a binding is a one-shot
       `host.timer.after(0)`, which a disabled module does not get. Not heard: a module is enabled
@@ -7881,7 +8178,9 @@ time limit; a module past either is stopped until the next start.
       `Taken` and the slice's start in tick terms.
 - [ ] **A memory error while `open` builds a handler's arguments** is reported as an error, not
       a stop; the module is stopped at its next event. Only a module that keeps its VM full and
-      catches the error meets it (G1 open point).
+      catches the error meets it (G1 open point). A page's message, decoded in
+      `webview_lua::open_event` (up to 1 MiB of JSON, the largest of these arguments), is dropped
+      instead, with a `[gui]` line that says its VM had no memory left to decode it.
 - [ ] **mlua's nil error for a memory error**: Luau calls a protected call's error handler for a
       memory error too, and mlua's then returns nothing, so the error reaching the host is at times
       `RuntimeError("<nil>")` (seen through a Rust callback, in five runs of six of the pin test on
@@ -8008,6 +8307,17 @@ time limit; a module past either is stopped until the next start.
       - Captured keys right after switching back from the manager to a plug-in (Alt+Tab, then Tab
         at once): the hook comes back when the watch hears of the foreground change, so check that
         the first Tab reaches the overlay.
+      - A hotkey whose callback brings one of our windows forward (the HTML probe's F7, review of
+        2026-10-11): the hook swallowed its key-down and recorded it as held, then left the chain
+        before its key-up. (a) Back in another program's window, a press of the same key within the
+        auto-repeat threshold (1.2 s at least) of that key-down is taken for its auto-repeat and
+        swallowed with no callback: `forget_seen_keys` leaves the hotkeys' record alone on purpose,
+        for a hotkey held across a swap. (b) Held past the keyboard's repeat delay, its first repeat
+        reaches `RegisterHotKey` as a new press — the swallowed key-down never reached the system's
+        key state — and the callback runs a second time, in our window (the probe: the page comes
+        and goes straight back). Unverified. A way: while the hook is out, the watch hands raw
+        input's key-ups of the hotkeys' keys to their record, and a `RegisterHotKey` press of a key
+        the hook swallowed and that has not gone up since is dropped as its repeat.
       - The transient cause stays open: our UIA calls into a stalled REAPER, made on the event
         loop, prolong NVDA's freeze recoveries (and a timeout is cached as "not a Kontakt").
       - Done 2026-10-10: the image worker and the matching pool (rayon's global pool, built at

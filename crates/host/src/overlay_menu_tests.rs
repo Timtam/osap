@@ -910,14 +910,34 @@ impl MailHost for Scripted {
     }
 }
 
+/// What `T.call` and `T.later` take as an event's kind: whether it is an input — counted against
+/// the mailbox's limit — and the name the host reports its handler's errors under.
+fn event_kind(kind: &str) -> mlua::Result<(bool, &'static str)> {
+    Ok(match kind {
+        "key" => (true, "key"),
+        "hotkey" => (true, "hotkey"),
+        "timer" => (false, "timer"),
+        "window" => (false, "window trigger"),
+        "focus" => (false, "focus change"),
+        "answer" => (false, "ocr.recognize"),
+        "setting" => (false, "settings onChange"),
+        "page message" => (true, "page message"),
+        "page ready" => (false, "page ready"),
+        "page close" => (false, "page close"),
+        other => return Err(mlua::Error::external(format!("T.call: no event of kind '{other}'"))),
+    })
+}
+
 /// The scripted host and its helpers, as the table `T`, with what only Rust can give it:
 /// `T.hostCall(f, …)`, a plain `Function::call` as the host makes when it calls Lua back — an
 /// arbiter's onActivate and onDeactivate, an onChange, an included file's top level, none of
 /// which can wait; `T.call(kind, f, …)`, an event of the scenario's module through the real
-/// mailbox, run as a handler — "key", "hotkey", "timer", "window", "focus", "answer" or
-/// "setting" — which says what became of it (`Ran`, `Parked`, `Queued`, `Dropped`); `T.queued()`,
-/// the tick's queued phase; the tests' wait point `T.waitPoint(name)`, `T.release(name, value)`
-/// and `T.waiting(name)`; the tests' entry `T.task` and `T.settle()`, which hands the reads its
+/// mailbox, run as a handler — "key", "hotkey", "timer", "window", "focus", "answer", "setting",
+/// "page message", "page ready" or "page close" — which says what became of it (`Ran`, `Parked`,
+/// `Queued`, `Dropped`); `T.later(kind, f, …)`, the same through the mailbox always, as the host
+/// delivers a setting changed in the dialog, to run in the next queued phase; `T.queued()`, the
+/// tick's queued phase; the tests' wait point `T.waitPoint(name)`, `T.release(name, value)` and
+/// `T.waiting(name)`; the tests' entry `T.task` and `T.settle()`, which hands the reads its
 /// handlers and tasks wait for their readings; and `host.ocr.recognize`, the host's own, with
 /// `T.submit` as its callback form, raising where it cannot wait.
 pub(crate) fn harness(lua: &Lua) -> Table {
@@ -944,20 +964,19 @@ pub(crate) fn harness(lua: &Lua) -> Table {
     let hh = h.clone();
     let call = lua
         .create_function(move |lua, (kind, f, args): (String, Function, MultiValue)| {
-            let (input, what) = match kind.as_str() {
-                "key" => (true, "key"),
-                "hotkey" => (true, "hotkey"),
-                "timer" => (false, "timer"),
-                "window" => (false, "window trigger"),
-                "focus" => (false, "focus change"),
-                "answer" => (false, "ocr.recognize"),
-                "setting" => (false, "settings onChange"),
-                other => return Err(mlua::Error::external(format!("T.call: no event of kind '{other}'"))),
-            };
+            let (input, what) = event_kind(&kind)?;
             Ok(format!("{:?}", mailbox::deliver(&*hh, IDX, lua, Event::Call { f, args, input, what })))
         })
         .unwrap();
     t.set("call", call).unwrap();
+    let hh = h.clone();
+    let later = lua
+        .create_function(move |lua, (kind, f, args): (String, Function, MultiValue)| {
+            let (input, what) = event_kind(&kind)?;
+            Ok(format!("{:?}", mailbox::deliver_later(&*hh, IDX, lua, Event::Call { f, args, input, what })))
+        })
+        .unwrap();
+    t.set("later", later).unwrap();
     let hh = h.clone();
     t.set("queued", lua.create_function(move |_, ()| Ok(mailbox::run_queued(&*hh).events)).unwrap()).unwrap();
     t.set("waitPoint", task::test_wait(lua, IDX, h.clone()).unwrap()).unwrap();

@@ -53,14 +53,16 @@ fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Held captures and recognitions, by x, and the condition their release is told on.
+/// Held captures and recognitions, by x, and the condition their release is told on. The
+/// mailbox tests hold a capture too (`hold`, `release`), for a page's message queued behind a
+/// poll's read before its picture is taken.
 static HELD: Mutex<(Vec<i32>, Vec<i32>)> = Mutex::new((Vec::new(), Vec::new()));
 static HELD_CV: Condvar = Condvar::new();
 /// Every x the fake photographed, and every x it has begun to recognise.
 static TAKEN: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 static RECOGNISING: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
-fn hold(x: i32) {
+pub(crate) fn hold(x: i32) {
     locked(&HELD).0.push(x);
 }
 
@@ -68,7 +70,7 @@ fn hold_recognition(x: i32) {
     locked(&HELD).1.push(x);
 }
 
-fn release(x: i32) {
+pub(crate) fn release(x: i32) {
     let mut h = locked(&HELD);
     h.0.retain(|&v| v != x);
     h.1.retain(|&v| v != x);

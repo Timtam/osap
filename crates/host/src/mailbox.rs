@@ -3,13 +3,14 @@
 //!
 //! **Every event of a module comes through here** — a hotkey, a captured key, a controller event,
 //! a timer, a window trigger's activation, the report of the window already in front, a focus
-//! change, the answer to a read, an image search or a snapshot, a setting's `onChange` — and runs
-//! as a handler of its VM. A module that has no handler and nothing queued is free, and its event
-//! runs at once, as a callback always did. A module is busy while its handler waits, while its
-//! mailbox is not empty, or while any module's handler is on the host's stack: no handler starts
-//! inside another. A busy module's event waits here. A module the host's guard stopped
-//! (`stops.rs`) is busy until it is turned on again: of its events only a setting's `onChange`
-//! reaches its mailbox then — the others are dropped, as for any disabled module — and waits.
+//! change, the answer to a read, an image search or a snapshot, a setting's `onChange`, a page's
+//! message, `onReady` and `onClose` (`webview_lua.rs`) — and runs as a handler of its VM. A module
+//! that has no handler and nothing queued is free, and its event runs at once, as a callback always
+//! did. A module is busy while its handler waits, while its mailbox is not empty, or while any
+//! module's handler is on the host's stack: no handler starts inside another. A busy module's
+//! event waits here. A module the host's guard stopped (`stops.rs`) is busy until it is turned on
+//! again: of its events only a setting's `onChange` reaches its mailbox then — the others are
+//! dropped, as for any disabled module — and waits.
 //!
 //! **A handler waits** in `host.ocr.recognize` without a callback (`task.rs`): its module is busy
 //! until the reading comes, and its events wait here meanwhile. A setting changed in the dialog,
@@ -22,12 +23,19 @@
 //! - A held key's repeats are folded into one while the last of that key queued is a repeat: a hold
 //!   keeps one step. Two deliberate presses never fold, and a second hold after a press of the key
 //!   keeps a step of its own.
-//! - Inputs — keys, hotkeys, controller buttons pressed — are dropped above [`INPUT_LIMIT`] queued,
-//!   and the log says so at the first, then at most every [`LIMIT_QUIET`] with how many since, and
-//!   the rest once the module is free. Answers, timers, window events, settings and a controller
-//!   button's release are never dropped: a listener that heard a press always hears its release.
-//! - A module busy for [`LONG_WAIT`] in one handler with inputs waiting behind it is said once per
-//!   handler: what it waits in, where, and how many inputs wait.
+//! - A page's `onReady` is folded into the one queued last for the same page and build: each says
+//!   that a document of that build loaded, and a page that reloads itself in a loop while its
+//!   module waits leaves one, not one per load.
+//! - Inputs are dropped above [`INPUT_LIMIT`] queued — what a person pressed (keys, hotkeys,
+//!   controller buttons) and a page's messages, each against a limit of its own ([`Budget`]): a
+//!   page's script can post in a loop, and its messages must not take the place of the person's
+//!   keys. The log says so at the first, then at most every [`LIMIT_QUIET`] with how many since,
+//!   and the rest once the module is free — the person's under `[keys]`, a page's under `[gui]`.
+//!   Answers, timers, window events, settings, a controller button's release and a page's
+//!   `onReady` and `onClose` are never dropped: a listener that heard a press always hears its
+//!   release, and a module always hears its page's life.
+//! - A module busy for [`LONG_WAIT`] in one handler with what a person pressed waiting behind it
+//!   is said once per handler: what it waits in, where, and how many of those wait.
 //! - A queued `every` timer is not queued at all: it is skipped and comes round again.
 //! - An event somebody waits on — one that came in the interactive lane — makes the read the
 //!   module's handler parked in the background lane waits for an interactive one, and every read
@@ -36,11 +44,13 @@
 //!
 //! **Delivered to what it was for.** An event carries its registration — the capture's token, the
 //! hotkey's id, the listener's token, the timer's token, the read's ticket, the setting's
-//! registration — and is delivered to that, as it is when it runs; a key or a hotkey whose
-//! registration was made again meanwhile goes to the module's new registration of the same key,
-//! never to another module's. One whose registration the module let go of goes where it would
-//! have gone had the module never captured it: to the next module that captures it in the window
-//! it was pressed in, through that module's mailbox, or to the program in front (`captures.rs`).
+//! registration, the page and its build — and is delivered to that, as it is when it runs; a key
+//! or a hotkey whose registration was made again meanwhile goes to the module's new registration
+//! of the same key, never to another module's. One whose registration the module let go of goes
+//! where it would have gone had the module never captured it: to the next module that captures it
+//! in the window it was pressed in, through that module's mailbox, or to the program in front
+//! (`captures.rs`). A page's event whose page the module closed meanwhile is not run, while one of
+//! a build a failure ended is (`webview_lua::open_event`).
 //!
 //! **A wait point is answered only by a host thread or by state the host keeps**, never by an
 //! event delivered to the waiting module, which waits here behind it (`task.rs`).
@@ -64,9 +74,20 @@ use crate::ocr::sched::Owner;
 use crate::ocr::types::{current_priority, enter_priority, Priority};
 use crate::snapshot::{Answer, PendingSnap};
 use crate::task::{self, Ctx, Ran};
+use crate::webview_lua::PageCall;
 
-/// How many inputs may wait in one module's mailbox; the next one is dropped.
+/// How many inputs of one [`Budget`] may wait in one module's mailbox; the next one is dropped.
 pub(crate) const INPUT_LIMIT: usize = 256;
+
+/// Which of a mailbox's two limits of [`INPUT_LIMIT`] an input counts against: what a person
+/// pressed — a key, a hotkey, a controller button — or what one of the module's pages sent. Apart,
+/// so that a page whose script posts in a loop while its module waits drops its own messages,
+/// never the person's keys, and the log says which were dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Budget {
+    Pressed = 0,
+    Page = 1,
+}
 
 /// How often the line for inputs dropped at [`INPUT_LIMIT`] is said at most while the module stays
 /// busy: the first at once, then the count since.
@@ -130,25 +151,35 @@ pub(crate) enum Event {
     Snapshot { p: Box<PendingSnap>, answer: Answer },
     /// Registration `reg` of an `onChange` for module `setting_of`'s setting `key`.
     Setting { setting_of: usize, reg: u64, key: String, new: crate::settings::Value, old: Option<crate::settings::Value> },
-    /// The tests' own event: `f(args)`, an input or not, reported as `what`.
+    /// What page `page`'s build `build` sent: a message, its `onReady` or its `onClose`
+    /// (`webview_lua::open_event`).
+    Page { page: u64, build: u64, call: PageCall },
+    /// The tests' own event: `f(args)`, an input or not, reported as `what` — an input against
+    /// the pages' limit when `what` is `"page message"`, as a page's message is.
     #[cfg(test)]
     Call { f: Function, args: MultiValue, input: bool, what: &'static str },
 }
 
 impl Event {
-    /// Counted against [`INPUT_LIMIT`] and dropped above it: what a person pressed.
-    fn is_input(&self) -> bool {
+    /// The limit it counts against, and is dropped above ([`INPUT_LIMIT`]); `None` for what is
+    /// never dropped. What a person pressed; and what a page sent — a person's key or click in it,
+    /// or its own script, which can post in a loop.
+    fn budget(&self) -> Option<Budget> {
         match self {
-            Event::Hotkey { .. } | Event::Key { .. } => true,
-            Event::Pad { kind, .. } => *kind == PadKind::Button,
+            Event::Hotkey { .. } | Event::Key { .. } => Some(Budget::Pressed),
+            Event::Pad { kind, .. } => (*kind == PadKind::Button).then_some(Budget::Pressed),
+            Event::Page { call, .. } => matches!(call, PageCall::Message(_)).then_some(Budget::Page),
             #[cfg(test)]
-            Event::Call { input, .. } => *input,
-            _ => false,
+            Event::Call { input, what, .. } => {
+                input.then_some(if *what == "page message" { Budget::Page } else { Budget::Pressed })
+            }
+            _ => None,
         }
     }
 
-    /// An input's name, as the log says it: a key's or a hotkey's combination ("Tab", "Alt+V"), a
-    /// controller button's ("controller south"); `None` for what is no input.
+    /// The name of what a person pressed, as the log says it: a key's or a hotkey's combination
+    /// ("Tab", "Alt+V"), a controller button's ("controller south"); `None` for anything else, a
+    /// page's message included.
     pub(crate) fn input_name(&self) -> Option<String> {
         match self {
             Event::Hotkey { spec, .. } => Some(spec.clone()),
@@ -183,7 +214,7 @@ pub(crate) enum Why {
     Reloaded,
     /// A hot-load was rolled back.
     RolledBack,
-    /// [`INPUT_LIMIT`] inputs were already waiting.
+    /// [`INPUT_LIMIT`] inputs of its [`Budget`] were already waiting.
     Limit,
     /// Its VM is not the one that runs at its module's index any more.
     Gone,
@@ -201,13 +232,13 @@ struct Mailbox {
     lua: Lua,
     gen: u64,
     queue: VecDeque<Queued>,
-    /// Queued inputs, against [`INPUT_LIMIT`].
-    inputs: usize,
+    /// Queued inputs, against [`INPUT_LIMIT`], by [`Budget`].
+    inputs: [usize; 2],
     /// Inputs dropped at the limit since the last line about them, and what the module waited for,
-    /// and for how long, when the first of them was; and when that line was said.
-    over: u32,
-    over_why: Option<(String, u128)>,
-    over_said: Option<Instant>,
+    /// and for how long, when the first of them was; and when that line was said — by [`Budget`].
+    over: [u32; 2],
+    over_why: [Option<(String, u128)>; 2],
+    over_said: [Option<Instant>; 2],
 }
 
 /// Every module's mailbox. Main thread only, like the rest of `Shared`.
@@ -374,10 +405,10 @@ fn enqueue<H: MailHost>(h: &H, owner: Owner, lua: &Lua, mut ev: Event) -> Delive
             lua: lua.clone(),
             gen: owner.gen,
             queue: VecDeque::new(),
-            inputs: 0,
-            over: 0,
-            over_why: None,
-            over_said: None,
+            inputs: [0; 2],
+            over: [0; 2],
+            over_why: [None, None],
+            over_said: [None, None],
         };
         let b = boxes.entry(owner.idx).or_insert_with(fresh);
         // A VM that went without its mailbox going with it: what it held is let go.
@@ -387,14 +418,15 @@ fn enqueue<H: MailHost>(h: &H, owner: Owner, lua: &Lua, mut ev: Event) -> Delive
             discard_all(h, owner.idx, stale, Why::Gone);
             return Delivered::Dropped;
         }
-        if ev.is_input() && b.inputs >= INPUT_LIMIT {
-            let said = note_over(b, Instant::now(), || {
+        let budget = ev.budget();
+        if let Some(k) = budget.filter(|k| b.inputs[*k as usize] >= INPUT_LIMIT) {
+            let said = note_over(b, k, Instant::now(), || {
                 h.tasks().parked_of(owner.idx).unwrap_or_else(|| ("its earlier events".to_string(), 0))
             });
-            (stale, Some((ev, said)))
+            (stale, Some((ev, k, said)))
         } else {
-            if ev.is_input() {
-                b.inputs += 1;
+            if let Some(k) = budget {
+                b.inputs[k as usize] += 1;
                 // Named for the timer's line, should the module's handler be a poll's waiting
                 // for a read (`task::timer_wait_line`).
                 if let Some(name) = ev.input_name() {
@@ -409,9 +441,9 @@ fn enqueue<H: MailHost>(h: &H, owner: Owner, lua: &Lua, mut ev: Event) -> Delive
         }
     };
     discard_all(h, owner.idx, stale, Why::Gone);
-    if let Some((ev, said)) = over {
+    if let Some((ev, k, said)) = over {
         if let Some((n, (what, ms))) = said {
-            logging::line("keys", &limit_line(&h.module_id(owner.idx), n, &what, ms));
+            say_limit(&h.module_id(owner.idx), k, n, &what, ms);
         }
         h.discard(owner.idx, ev, Why::Limit);
         return Delivered::Dropped;
@@ -419,30 +451,46 @@ fn enqueue<H: MailHost>(h: &H, owner: Owner, lua: &Lua, mut ev: Event) -> Delive
     Delivered::Queued
 }
 
-/// An input dropped at the limit, counted in `b`: the line to say now — how many since the last,
-/// and what the module waited for when the first of them was — at the first, and then once
-/// [`LIMIT_QUIET`] has passed since the last; the rest is said when the module is free
-/// (`settle_box`). `why` is asked only for the first of a line.
-fn note_over(b: &mut Mailbox, now: Instant, why: impl FnOnce() -> (String, u128)) -> Option<(u32, (String, u128))> {
-    b.over += 1;
-    if b.over_why.is_none() {
-        b.over_why = Some(why());
+/// An input of budget `k` dropped at the limit, counted in `b`: the line to say now — how many
+/// since the last, and what the module waited for when the first of them was — at the first, and
+/// then once [`LIMIT_QUIET`] has passed since the last; the rest is said when the module is free
+/// (`settle_box`). `why` is asked only for the first of a line. Each budget counts and says its
+/// own.
+fn note_over(b: &mut Mailbox, k: Budget, now: Instant, why: impl FnOnce() -> (String, u128)) -> Option<(u32, (String, u128))> {
+    let k = k as usize;
+    b.over[k] += 1;
+    if b.over_why[k].is_none() {
+        b.over_why[k] = Some(why());
     }
-    if b.over_said.is_some_and(|at| now.saturating_duration_since(at) < LIMIT_QUIET) {
+    if b.over_said[k].is_some_and(|at| now.saturating_duration_since(at) < LIMIT_QUIET) {
         return None;
     }
-    b.over_said = Some(now);
-    let n = std::mem::take(&mut b.over);
-    b.over_why.take().map(|w| (n, w))
+    b.over_said[k] = Some(now);
+    let n = std::mem::take(&mut b.over[k]);
+    b.over_why[k].take().map(|w| (n, w))
+}
+
+/// Says `n` inputs of budget `k` dropped at the limit: what a person pressed under `[keys]`, a
+/// page's messages under `[gui]`.
+fn say_limit(module: &str, k: Budget, n: u32, what: &str, ms: u128) {
+    match k {
+        Budget::Pressed => logging::line("keys", &limit_line(module, n, what, ms)),
+        Budget::Page => logging::line("gui", &page_limit_line(module, n, what, ms)),
+    }
 }
 
 /// Folds `ev` into what is queued, if it folds: a focus change after a focus change queued last;
 /// an axis after the same listener's same axis queued last, whose value it replaces; a held key's
 /// repeat while the last of the same key queued is a repeat too — of this hold: a press of the key
-/// queued after a repeat starts another hold, whose repeats keep one step of their own.
+/// queued after a repeat starts another hold, whose repeats keep one step of their own; a page's
+/// `onReady` after the same page's and build's queued last.
 fn fold(queue: &mut VecDeque<Queued>, ev: &mut Event) -> bool {
     match ev {
         Event::Focus => matches!(queue.back(), Some(Queued { ev: Event::Focus, .. })),
+        Event::Page { page, build, call: PageCall::Ready } => matches!(
+            queue.back(),
+            Some(Queued { ev: Event::Page { page: p, build: b, call: PageCall::Ready }, .. }) if p == page && b == build
+        ),
         Event::Pad { token, kind: PadKind::Axis(axis), event, delivery } => {
             match queue.back_mut() {
                 Some(Queued { ev: Event::Pad { token: t, kind: PadKind::Axis(a), event: e, delivery: d }, .. })
@@ -494,11 +542,13 @@ pub(crate) struct Phase {
 }
 
 /// The line for a module whose one handler has kept it busy for [`LONG_WAIT`] or longer at `now`,
-/// with inputs waiting behind it, once per handler: what it waits in, for how long, where, and how
-/// many inputs wait. The lines said; asked by every queued phase.
+/// with what a person pressed waiting behind it, once per handler: what it waits in, for how long,
+/// where, and how many of those wait — not a page's messages, which its own script can post. The
+/// lines said; asked by every queued phase.
 pub(crate) fn say_long_waits<H: MailHost>(h: &H, now: Instant) -> Vec<String> {
+    let pressed = |b: &Mailbox| b.inputs[Budget::Pressed as usize];
     let waiting: Vec<(usize, usize)> =
-        h.mail().boxes.borrow().iter().filter(|(_, b)| b.inputs > 0).map(|(idx, b)| (*idx, b.inputs)).collect();
+        h.mail().boxes.borrow().iter().filter(|(_, b)| pressed(b) > 0).map(|(idx, b)| (*idx, pressed(b))).collect();
     let mut said = Vec::new();
     for (idx, inputs) in waiting {
         if let Some((what, busy, place)) = h.tasks().long_wait(idx, now, LONG_WAIT) {
@@ -563,8 +613,8 @@ pub(crate) fn run_queued<H: MailHost>(h: &H) -> Phase {
                     break;
                 }
                 let Some(q) = b.queue.pop_front() else { break };
-                if q.ev.is_input() {
-                    b.inputs = b.inputs.saturating_sub(1);
+                if let Some(k) = q.ev.budget() {
+                    b.inputs[k as usize] = b.inputs[k as usize].saturating_sub(1);
                 }
                 (q, b.lua.clone(), b.gen)
             };
@@ -597,8 +647,9 @@ pub(crate) fn run_queued<H: MailHost>(h: &H) -> Phase {
     phase
 }
 
-/// A mailbox that emptied goes, with the VM it held; the inputs it dropped at the limit since its
-/// last line about them are said now.
+/// A mailbox that emptied goes, with the VM it held; the inputs it dropped at the limits since its
+/// last lines about them are said now: what a person pressed under `[keys]`, a page's messages
+/// under `[gui]`.
 fn settle_box<H: MailHost>(h: &H, idx: usize) {
     let gone = {
         let mut boxes = h.mail().boxes.borrow_mut();
@@ -607,9 +658,11 @@ fn settle_box<H: MailHost>(h: &H, idx: usize) {
             _ => None,
         }
     };
-    if let Some(Mailbox { over, over_why: Some((what, ms)), .. }) = gone {
-        if over > 0 {
-            logging::line("keys", &limit_line(&h.module_id(idx), over, &what, ms));
+    let Some(Mailbox { over, over_why, .. }) = gone else { return };
+    for (k, why) in [Budget::Pressed, Budget::Page].into_iter().zip(over_why) {
+        let (n, Some((what, ms))) = (over[k as usize], why) else { continue };
+        if n > 0 {
+            say_limit(&h.module_id(idx), k, n, &what, ms);
         }
     }
 }
@@ -626,10 +679,18 @@ pub(crate) fn budget_line(events: u32, unsaid: u32) -> String {
     )
 }
 
-/// The line for inputs a busy module's mailbox dropped at the limit.
+/// The line for keys, hotkeys and controller buttons a busy module's mailbox dropped at the limit.
 pub(crate) fn limit_line(module: &str, n: u32, what: &str, ms: u128) -> String {
     format!(
         "[{module}] {n} key(s) or button(s) pressed while it was busy were dropped: {INPUT_LIMIT} were already \
+         waiting (the module waited for {what}, {ms} ms by the first of them)"
+    )
+}
+
+/// The line for its pages' messages a busy module's mailbox dropped at their limit.
+pub(crate) fn page_limit_line(module: &str, n: u32, what: &str, ms: u128) -> String {
+    format!(
+        "[{module}] {n} page message(s) that came while it was busy were dropped: {INPUT_LIMIT} were already \
          waiting (the module waited for {what}, {ms} ms by the first of them)"
     )
 }
@@ -647,7 +708,7 @@ pub(crate) fn drop_owner<H: MailHost>(h: &H, idx: usize, why: Why) -> Vec<String
                 let (keep, take): (VecDeque<Queued>, VecDeque<Queued>) =
                     b.queue.drain(..).partition(|q| matches!(q.ev, Event::Setting { .. }));
                 b.queue = keep;
-                b.inputs = 0;
+                b.inputs = [0; 2];
                 if b.queue.is_empty() {
                     boxes.remove(&idx);
                 }
@@ -707,18 +768,22 @@ mod tests {
             lua: Lua::new(),
             gen: 1,
             queue: VecDeque::new(),
-            inputs: INPUT_LIMIT,
-            over: 0,
-            over_why: None,
-            over_said: None,
+            inputs: [INPUT_LIMIT; 2],
+            over: [0; 2],
+            over_why: [None, None],
+            over_said: [None, None],
         };
         let t0 = Instant::now();
         let why = || ("timer".to_string(), 2300);
-        assert_eq!(note_over(&mut b, t0, why), Some((1, why())), "the first at once");
-        assert_eq!(note_over(&mut b, t0 + Duration::from_secs(3), why), None);
-        assert_eq!(note_over(&mut b, t0 + Duration::from_secs(9), why), None);
-        assert_eq!(note_over(&mut b, t0 + LIMIT_QUIET, why), Some((3, why())), "then how many since");
-        assert_eq!(note_over(&mut b, t0 + Duration::from_secs(11), why), None);
-        assert_eq!((b.over, b.over_why.is_some()), (1, true), "the rest is said once the module is free");
+        let pressed = Budget::Pressed;
+        assert_eq!(note_over(&mut b, pressed, t0, why), Some((1, why())), "the first at once");
+        assert_eq!(note_over(&mut b, pressed, t0 + Duration::from_secs(3), why), None);
+        assert_eq!(note_over(&mut b, pressed, t0 + Duration::from_secs(9), why), None);
+        // A page's messages are counted and said apart: the person's quiet time is not theirs.
+        assert_eq!(note_over(&mut b, Budget::Page, t0 + Duration::from_secs(9), why), Some((1, why())), "a page's first at once");
+        assert_eq!(note_over(&mut b, pressed, t0 + LIMIT_QUIET, why), Some((3, why())), "then how many since");
+        assert_eq!(note_over(&mut b, pressed, t0 + Duration::from_secs(11), why), None);
+        assert_eq!((b.over[0], b.over_why[0].is_some()), (1, true), "the rest is said once the module is free");
+        assert_eq!((b.over[1], b.over_why[1].is_some()), (0, false), "the page's line said all it had");
     }
 }

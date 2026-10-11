@@ -1562,6 +1562,20 @@ impl Backend for WindowsBackend {
         Ok(())
     }
 
+    /// `RegisterHotKey` and nothing more: not filed for the keyboard hook, so the hook lets the
+    /// press through and Windows turns it into a `WM_HOTKEY`. A combination refused here belongs
+    /// to another program, as with `register_hotkey`.
+    fn register_foreground_hotkey(&self, id: i32, spec: &str) -> Result<(), String> {
+        let (mods, vk) = parse_spec(spec)?;
+        let hwnd = hotkey_window();
+        if unsafe { RegisterHotKey(hwnd, id, mods | MOD_NOREPEAT, vk) } == 0 {
+            return Err(format!(
+                "RegisterHotKey failed for '{spec}' (already in use by another app?)"
+            ));
+        }
+        Ok(())
+    }
+
     fn unregister_hotkey(&self, id: i32) {
         let hwnd = HOTKEY_HWND.load(Ordering::Relaxed) as HWND;
         unsafe {

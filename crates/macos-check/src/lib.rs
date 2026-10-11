@@ -71,6 +71,58 @@ pub mod cells;
 #[path = "../../host/src/profile.rs"]
 pub mod profile;
 
+/// `host.gui.webview`'s rules: which answer `show` gives — on a Mac, for now, "not supported on
+/// this platform yet" — which file a page's request is served and with which headers, where its
+/// window goes. Pure, with no window in it, so this checks that it is true for macOS as well, and
+/// `--tests` builds its tests here. The window itself (webview_win.rs) is Windows-only, and wry,
+/// which it is built on, is a Windows-only dependency of `host`: nothing of it reaches this build.
+#[path = "../../host/src/webview.rs"]
+pub mod webview;
+
+/// Names what `webview_lua.rs` calls in `webview.rs`, for the reason `cells_calls` exists: that
+/// file is not borrowed (it needs Luau), and a signature it no longer matches would otherwise
+/// reach the macOS CI job first.
+#[allow(clippy::type_complexity)]
+pub fn webview_calls() {
+    use std::path::{Path, PathBuf};
+    use webview::{Lifecycle, Refusal, ShowStep, Where};
+    let _: fn(bool) -> Where = Where::here;
+    let _: fn(Where) -> bool = Where::can_show;
+    let _: fn(&mut Lifecycle, Where, fn() -> bool) -> ShowStep = |l, at, rt| l.on_show(at, rt);
+    let _: fn(&mut Lifecycle, bool) = Lifecycle::built;
+    let _: fn(&mut Lifecycle) -> Option<Vec<String>> = Lifecycle::loaded;
+    let _: fn(&mut Lifecycle) -> bool = Lifecycle::load_failed;
+    let _: fn(&mut Lifecycle, String) -> Option<String> = Lifecycle::post;
+    let _: fn(&mut Lifecycle) = Lifecycle::closed;
+    let _: fn(&mut Lifecycle) -> usize = Lifecycle::take_dropped;
+    let _: fn(&Lifecycle) -> webview::Phase = Lifecycle::phase;
+    let _: fn(Refusal) -> &'static str = Refusal::reason;
+    let _: fn(&str) -> String = webview::scheme_for;
+    let _: fn(&str) -> String = webview::origin_for;
+    let _: fn(&str, &str) -> String = webview::entry_url;
+    let _: fn(&Path, &str) -> Option<PathBuf> = webview::resolve_file;
+    let _: fn(&Path, &Path) -> Option<String> = webview::url_path;
+    let _: fn(&Path, &str, &str, &str) -> webview::Served = webview::serve;
+    let _: fn(&str, &str) -> bool = webview::own_origin;
+    let _ = |v: Vec<(String, String)>| -> Vec<String> { webview::webview2_overrides(v) };
+    let _ = (webview::PLATFORM_SHIM, webview::CSP, webview::DATA_FOLDER, webview::DEFAULT_SIZE);
+    let _ = (webview::MAX_MESSAGE_BYTES, webview::MAX_QUEUED_POSTS);
+    let _ = webview::PageEvent::Loaded { page: 0, build: 0 };
+    let _ = webview::PageEvent::LoadFailed { page: 0, build: 0, why: String::new() };
+    let _ = |e: webview::PageEvent| matches!(e, webview::PageEvent::Message { .. } | webview::PageEvent::Closed { .. });
+    let _: fn((i32, i32), (i32, i32), webview::Rect, &[webview::Rect]) -> Option<webview::Placement> = webview::place;
+    let _: fn((i32, i32), (i32, i32), webview::Rect, &[webview::Rect]) -> Option<webview::Rect> = webview::beside_only;
+    let _: fn(&webview::Placement) -> webview::Rect = webview::Placement::rect;
+    let _ = |p: webview::Placement| matches!(p, webview::Placement::Beside(_) | webview::Placement::Over { .. });
+    let _ = (webview::OVER, webview::Refusal::NoRoom);
+    let _: fn(bool, bool) -> Option<webview::Refusal> = webview::over_refused;
+    let _: fn((i32, i32), &webview::Rect) -> webview::Rect = webview::centred;
+    let _: fn(&webview::Rect, &webview::Rect) -> bool = webview::Rect::intersects;
+    let _: fn() -> Vec<(&'static str, String)> = webview::base_headers;
+    let _ = (webview::MIN_SIZE, webview::MAX_FILE_BYTES);
+    let _ = (Refusal::Unsupported, Refusal::Headless);
+}
+
 /// Names what `lib.rs` calls in `system_events.rs`, and the speech path's own hook, for the
 /// reason `cells_calls` exists. (The macOS backend's `system.rs` calls `push` and `take`, and
 /// is compiled here with the backend.)

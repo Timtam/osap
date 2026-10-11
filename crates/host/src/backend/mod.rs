@@ -1183,6 +1183,15 @@ pub trait Backend {
 
     /// Registers a global hotkey identified by `id` from a spec like "Ctrl+Alt+H".
     fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String>;
+    /// Registers a hotkey whose press the operating system delivers itself — `host.hotkey.register`
+    /// with `{ foreground = true }` (experimental). On Windows that is `RegisterHotKey` without
+    /// the keyboard hook's matching, so a press arrives as `WM_HOTKEY`, which is what gives this
+    /// process the right to bring a window of its own forward; see `hotkey_foreground` in lib.rs
+    /// for the price. Everywhere else a hotkey is the system's own delivery already, so the
+    /// default is the ordinary registration.
+    fn register_foreground_hotkey(&self, id: i32, spec: &str) -> Result<(), String> {
+        self.register_hotkey(id, spec)
+    }
     /// Unregisters a previously registered hotkey by id.
     fn unregister_hotkey(&self, id: i32);
 

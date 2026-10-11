@@ -224,6 +224,13 @@ function T.region(r) return table.concat({ r[1], r[2], r[3], r[4] }, ",") end
 /// A fresh VM with the scripted host, the runtime, the prelude's matcher and the helpers above;
 /// the host plays `os`.
 fn run_on(os: &str, scenario: &str) {
+    run_with_helpers(os, &[], scenario)
+}
+
+/// `run_on`, with `helpers` — `(name, chunk)` — run after the ones above, each as a chunk of its
+/// own: the probe's (`html_probe_tests.rs`). Every event a scenario plays goes through the real
+/// mailbox (`T.call`), and the scenario ends on the harness's own checks (`finish`).
+pub(crate) fn run_with_helpers(os: &str, helpers: &[(&str, &str)], scenario: &str) {
     let lua = Lua::new();
     let t: Table = harness(&lua);
     let host: Table = t.get("host").unwrap();
@@ -256,8 +263,10 @@ fn run_on(os: &str, scenario: &str) {
         .unwrap();
     t.set("source", source).unwrap();
     lua.globals().set("T", t).unwrap();
-    if let Err(e) = lua.load(HP).set_name("host-panel helpers").exec() {
-        panic!("{e}");
+    for (name, chunk) in [("host-panel helpers", HP)].into_iter().chain(helpers.iter().copied()) {
+        if let Err(e) = lua.load(chunk).set_name(name).exec() {
+            panic!("{e}");
+        }
     }
     if let Err(e) = lua.load(scenario).set_name("scenario").exec() {
         panic!("{e}");

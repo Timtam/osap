@@ -552,7 +552,7 @@ fn a_busy_module_s_hotkey_goes_to_its_new_registration_and_never_to_another_modu
     let register = |id: i32, lua: &Lua, owner: usize, word: &str| {
         let f: Function = lua.load(format!("return function() heard[#heard + 1] = '{word}' end")).eval().unwrap();
         let cb = lua.create_registry_value(f).unwrap();
-        let reg = crate::HotkeyReg { module_idx: owner, lua: lua.clone(), cb, spec: "Alt+V".into(), binding, live: true };
+        let reg = crate::HotkeyReg { module_idx: owner, lua: lua.clone(), cb, spec: "Alt+V".into(), binding, live: true, foreground: false };
         h.hotkeys.borrow_mut().insert(id, reg);
     };
     let press = |id: i32| Event::Hotkey { id, owner: 1, front: Some(W1), seq: 0, binding, spec: "Alt+V".into() };
@@ -747,7 +747,7 @@ fn a_hotkey_its_busy_module_released_goes_to_the_program_in_front() {
     let register = |id: i32, binding: Option<(u32, u8)>| {
         let f: Function = a.load("return function() heard[#heard + 1] = 'hotkey' end").eval().unwrap();
         let cb = a.create_registry_value(f).unwrap();
-        let reg = crate::HotkeyReg { module_idx: 1, lua: a.clone(), cb, spec: "Alt+V".into(), binding, live: true };
+        let reg = crate::HotkeyReg { module_idx: 1, lua: a.clone(), cb, spec: "Alt+V".into(), binding, live: true, foreground: false };
         h.hotkeys.borrow_mut().insert(id, reg);
     };
     let press = |id: i32, binding| Event::Hotkey { id, owner: 1, front: Some(W1), seq: h.backend.let_through(), binding, spec: "Alt+V".into() };
@@ -868,7 +868,7 @@ fn a_key_typed_after_it_reached_the_program_first_and_it_is_not_passed_on() {
     let round = |id: i32, typed: bool| {
         let f: Function = a.load("return function() heard[#heard + 1] = 'hotkey' end").eval().unwrap();
         let cb = a.create_registry_value(f).unwrap();
-        let reg = crate::HotkeyReg { module_idx: 1, lua: a.clone(), cb, spec: "Alt+V".into(), binding: alt_v, live: true };
+        let reg = crate::HotkeyReg { module_idx: 1, lua: a.clone(), cb, spec: "Alt+V".into(), binding: alt_v, live: true, foreground: false };
         h.hotkeys.borrow_mut().insert(id, reg);
         assert_eq!(event(&h, &a, 1, r#"wait("w")"#), Delivered::Parked);
         let press = Event::Hotkey { id, owner: 1, front: Some(W1), seq: h.backend.let_through(), binding: alt_v, spec: "Alt+V".into() };
@@ -909,7 +909,7 @@ fn a_key_is_not_passed_on_to_a_screen_reader_or_a_hotkey_and_goes_on_its_own_key
     // B's hotkey holds Ctrl+V at the system: A's Ctrl+V is not sent, whatever else allows it.
     let f: Function = b.load("return function() end").eval().unwrap();
     let cb = b.create_registry_value(f).unwrap();
-    let reg = crate::HotkeyReg { module_idx: 2, lua: b.clone(), cb, spec: "Ctrl+V".into(), binding: Some((ctrl_v, ctrl)), live: true };
+    let reg = crate::HotkeyReg { module_idx: 2, lua: b.clone(), cb, spec: "Ctrl+V".into(), binding: Some((ctrl_v, ctrl)), live: true, foreground: false };
     h.hotkeys.borrow_mut().insert(9, reg);
     assert_eq!(captures::pass_on(&*h, ctrl_v, ctrl, at(&h, W1)), PassedOn::NotSent(NotPassed::HotkeyHolds));
     h.enabled.borrow_mut()[2] = false;
@@ -1034,7 +1034,7 @@ fn a_key_a_busy_module_let_go_of_goes_to_the_next_module_in_its_window_first() {
     let alt_v = backend::parse_key_spec("Alt+V").ok();
     let f: Function = a.load("return function() heard[#heard + 1] = 'A hotkey' end").eval().unwrap();
     let cb = a.create_registry_value(f).unwrap();
-    let reg = crate::HotkeyReg { module_idx: 1, lua: a.clone(), cb, spec: "Alt+V".into(), binding: alt_v, live: true };
+    let reg = crate::HotkeyReg { module_idx: 1, lua: a.clone(), cb, spec: "Alt+V".into(), binding: alt_v, live: true, foreground: false };
     h.hotkeys.borrow_mut().insert(5, reg);
     assert_eq!(event(&h, &a, 1, r#"wait("w")"#), Delivered::Parked);
     let hotkey = Event::Hotkey { id: 5, owner: 1, front: Some(W1), seq: h.backend.let_through(), binding: alt_v, spec: "Alt+V".into() };

@@ -91,7 +91,7 @@ These three become parts of file paths — the id and the version name the folde
 
 ### `[capabilities]` {#capabilities}
 
-`require` lists the host namespaces the module's code may use, by the namespace's own name: `window`, `screen`, `ocr`, `element`, `input`, `keys`, `hotkey`, `gamepad`, `speech`, `sound`, `timer`, `settings`, `log`, `path`, `resource`, `arbiter`. The full rules are [in the API reference](api/index.md#capabilities); in short:
+`require` lists the host namespaces the module's code may use, by the namespace's own name: `window`, `screen`, `ocr`, `element`, `input`, `keys`, `hotkey`, `gamepad`, `speech`, `sound`, `timer`, `settings`, `log`, `path`, `resource`, `arbiter`, and `gui` (an HTML page of the module's own, experimental — [host.gui](api/gui.md)). The full rules are [in the API reference](api/index.md#capabilities); in short:
 
 - There are no finer-grained names. `"window.read"` or `"screen.imagesearch"` unlock nothing.
 - **Names are not checked.** A misspelt or invented one loads without a word, and the first use of the namespace it was meant for raises (`module 'com.example.my-game' used host.screen without declaring it — add "screen" …`).

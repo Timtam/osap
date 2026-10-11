@@ -128,9 +128,10 @@ Lists every loaded module with a native checkbox. Below the list: **Settings…*
 
 Unchecking a module disables it **at runtime** — its hotkeys are released at the
 OS, its captured keys stop being suppressed, its overlays deactivate (an active
-overlay's `onDeactivate` runs once, so it can tear down), and its callbacks
-(triggers, timers, keys, controller events) are not called any more — except
-`host.settings.onChange`, which still fires when a setting changes. Re-checking
+overlay's `onDeactivate` runs once, so it can tear down), its
+[pages](api/gui.md#host-gui-webview) are hidden, and its callbacks (triggers,
+timers, keys, controller events, its pages' callbacks) are not called any more —
+except `host.settings.onChange`, which still fires when a setting changes. Re-checking
 delivers them again. Disabling does not unload the module: its VM and
 everything it registered stay, and its entry file does not run again when it is
 re-enabled (see [the lifecycle](module-runtime-and-lifecycle.md#lifecycle--states)).
@@ -228,8 +229,8 @@ row whose module this platform will not run, Details… says that instead.
 
 Rebuilds the selected module's VM **in place** from its source directory — edit a
 module's code and reload it in the running app, no restart, without disturbing the
-modules that do not depend on it. Its state starts afresh: the new VM runs the entry
-file again. Useful while **developing** a module.
+modules that do not depend on it. Its state starts afresh: its pages are closed, and
+the new VM runs the entry file again. Useful while **developing** a module.
 
 Only a module that is already loaded can be reloaded: Reload never looks for new folders
 under `modules/`. A module folder copied in by hand is loaded at the next start after

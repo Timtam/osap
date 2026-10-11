@@ -1,0 +1,17 @@
+id = "com.tool.html-probe"
+name = "HTML page probe"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+# The page is Windows-only in this stage (host.gui.webview answers "not supported on this
+# platform yet" on a Mac), and so are the questions this probe asks: W1–W9 in TODO.md.
+supported_os = ["windows"]
+# The plug-in windows it shows its page beside are the ones daw-hosts knows, in every DAW there.
+dependencies = ["com.platform.daw-hosts"]
+
+[capabilities]
+# `gui` for the page. `input` for ONE click, the round trip of test W3: onto the plug-in window's
+# own background, clear of every control in it — never its title bar, where two clicks maximise
+# the window — and none at all where it has no such spot; `screen` for the picture of the plug-in
+# taken after that click, whose answer brings the page back, as an overlay reads after its own
+# click. `settings` for the switch that shows the page by itself (test W2 c), off by default.
+require = ["gui", "window", "hotkey", "speech", "log", "input", "screen", "settings"]

@@ -1076,6 +1076,15 @@ pub fn describe_capability(name: &str) -> String {
         "path" => "turn file names into full paths",
         "resource" => "read files: its own, and any other file your account can read",
         "arbiter" => "compete with other overlays for the same window",
+        // `host.gui.webview`: a page of the module's own files, in a window that can take the
+        // keyboard from the application in front — which is what the person deciding should
+        // know. And, since it is the first capability that could: its page is not kept off the
+        // internet entirely yet (WebRTC and the browser's look-ahead; docs/api/gui.md, TODO.md).
+        "gui" => {
+            "show windows of its own — an HTML page from its own folder — and bring them to the \
+             front, taking the keyboard from the application you are in; this experimental \
+             version does not yet keep that page off the internet entirely"
+        }
         other => {
             return format!(
                 "\u{201c}{}\u{201d} \u{2014} a name this version of the application does not \

@@ -49,6 +49,13 @@ hex = "0.4.3"
 # ocr/lang.rs is borrowed: which recognition language a read gets. The same version and feature as
 # host's [dependencies].
 fluent-langneg = { version = "0.14.2", features = ["cldr"] }
+# webview.rs is borrowed: `host.gui.webview`'s rules, and the answer a Mac gives today. It encodes
+# and decodes URL paths, types a page's files and hashes a module's id into its origin; all three
+# are in host's [dependencies] (percent-encoding at the version ureq brings, mime_guess and sha2
+# for webview.rs), so they are repeated here.
+percent-encoding = "2.3"
+mime_guess = "2.0.5"
+sha2 = "0.11"
 # ocr/bench.rs reads the manifest of the pictures `--pictures` names, and ocr/paddle_pre.rs crops
 # and resizes for the neural recogniser. Both in host's [dependencies], at these versions.
 toml = "1.1.2"

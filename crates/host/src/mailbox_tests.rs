@@ -3,10 +3,11 @@
 //! folds and drops while a module is busy (`mailbox.rs`).
 //!
 //! The holder below stands where the host's `Shared` stands for the events it carries: the answers
-//! to reads, timers, window events through the real window prelude, settings, controller events
-//! and the tests' own (`Event::Call`). Which callback an event of each kind runs is its site's own
-//! helper — `ocr::lua::open_read`, the timers', the prelude's calls — so the rules met here are the
-//! host's.
+//! to reads, timers, window events through the real window prelude, settings, controller events,
+//! a page's events through the host's own drain (`webview_lua::hand_on`) and the tests' own
+//! (`Event::Call`). Which callback an event of each kind runs is its site's own helper —
+//! `ocr::lua::open_read`, the timers', the prelude's calls, `webview_lua::open_event` — so the
+//! rules met here are the host's.
 //!
 //! **Busy** is a module whose handler waits: at a read, `host.ocr.recognize` without a callback,
 //! or at the tests' own wait point (`task::test_wait`), answered by `task::test_release` — a wait
@@ -27,9 +28,12 @@ use crate::image_search::VmOwner;
 use crate::mailbox::{self, Delivered, Event, MailHost, Mailboxes, Opened, PadKind, Phase, Why};
 use crate::ocr::lua::{self as reads, OcrState, ReadHost};
 use crate::ocr::service::{Service, ShutdownHandle};
+use crate::ocr::types::{current_priority, enter_priority, Priority};
 use crate::task::{self, Ctx, Tasks};
 use crate::task_tests::{worker, Fake};
 use crate::timers::{self, Timers};
+use crate::webview::{PageEvent, Refusal, ShowStep};
+use crate::webview_lua;
 
 /// What the host keeps for these events, without the speech engines.
 struct Host {
@@ -57,6 +61,9 @@ struct Host {
     /// host's own `open_snapshot_in`).
     snaps: crate::snapshot::SnapState,
     snap_bytes: Rc<Cell<usize>>,
+    /// The pages, as the host keeps them (`Event::Page`, handed on by the host's own
+    /// `webview_lua::hand_on` and opened by its `open_event`).
+    pages: webview_lua::Pages,
     /// Every event that was discarded, and why.
     discarded: RefCell<Vec<(usize, &'static str, Why)>>,
     /// The modules the host's guard stopped (`stops.rs`), as the host's `Stops` answers.
@@ -112,6 +119,7 @@ fn kind_of(ev: &Event) -> &'static str {
         Event::Image { .. } => "image",
         Event::Snapshot { .. } => "snapshot",
         Event::Setting { .. } => "setting",
+        Event::Page { .. } => "page",
         Event::Call { .. } => "call",
     }
 }
@@ -158,6 +166,7 @@ impl MailHost for Host {
             Event::Snapshot { p, answer } => crate::snapshot::open_snapshot_in(&self.snaps, *p, answer, &self.snap_bytes, &|i, w, m| {
                 self.report_error(i, w, m)
             }),
+            Event::Page { page, build, call } => webview_lua::open_event(&self.pages, idx, lua, page, build, call),
             Event::Call { f, args, what, .. } => mailbox::open_call(idx, f, args, what),
             _ => Opened::Gone,
         }
@@ -171,6 +180,12 @@ impl MailHost for Host {
             Event::Snapshot { p, .. } => crate::snapshot::drop_answer(&self.snaps, *p),
             _ => {}
         }
+    }
+}
+
+impl webview_lua::PageHost for Host {
+    fn pages(&self) -> &webview_lua::Pages {
+        &self.pages
     }
 }
 
@@ -192,6 +207,7 @@ fn host() -> Rc<Host> {
         images: RefCell::new(HashMap::new()),
         snaps: crate::snapshot::SnapState::default(),
         snap_bytes: Rc::new(Cell::new(0)),
+        pages: webview_lua::Pages::default(),
         discarded: RefCell::new(Vec::new()),
         stopped: RefCell::new(BTreeSet::new()),
         _loop: crate::loop_guard::mark_for_a_test(),
@@ -563,8 +579,8 @@ fn focus_and_axes_fold_into_the_last_one_only() {
 
 /// Every kind of event a module hears runs as a handler that waits at `host.ocr.recognize` without
 /// a callback — a timer, a window trigger, a focus change, a setting's `onChange`, a controller
-/// press, the answers of an image search, of a snapshot and of a read with a callback — and goes on
-/// with the reading once it comes. One module each, so each waits on its own and none holds another.
+/// press, the answers of an image search, of a snapshot and of a read with a callback, a page's
+/// message — and goes on with the reading once it comes. One module each, so each waits on its own and none holds another.
 #[test]
 fn every_kind_of_handler_waits_at_a_read() {
     let h = host();
@@ -633,6 +649,11 @@ fn every_kind_of_handler_waits_at_a_read() {
     assert_eq!(mailbox::deliver(&*h, 7, &a, ev), Delivered::Parked);
     modules.push((a, "snapshot 9867,5"));
     modules.push((answer, "answer 9869,5"));
+    // A page's message: module 9, after the answer's 8.
+    let a = vm(&h, 9);
+    let (p, b) = webview_lua::test_page(&h.pages, &a, 9, (f(&a, read("page", 9870)), None, None), Priority::Interactive);
+    webview_lua::hand_on(&*h, vec![posted(p, b, 1)]);
+    modules.push((a, "page 9870,5"));
 
     for (i, (lua, _)) in modules.iter().enumerate() {
         assert!(h.tasks.handler_of(i + 1).is_some(), "module {} waits", i + 1);
@@ -1428,6 +1449,376 @@ fn the_budget_line_is_said_once_every_ten_seconds_with_a_count() {
          order; it ended 2 more such phase(s) since the last of these lines. Said at most once every 10 s"
     );
     assert!(!mailbox::budget_line(3, 0).contains("more such"));
+}
+
+// ── A page's events ──────────────────────────────────────────────────────────────────────────
+
+/// A page of module `idx`'s VM `lua`, its build under way as a `show` or `prepare` in `lane`
+/// started it, whose three callbacks write to `heard` what they were called with, the lane they
+/// ran in, and — should it ever be so — that they did not run as a handler.
+fn page(h: &Host, lua: &Lua, idx: usize, lane: Priority) -> (u64, u64) {
+    let now = lua.create_function(|_, ()| Ok(format!("{:?}", current_priority()))).unwrap();
+    lua.globals().set("lane", now).unwrap();
+    let f = |code: &str| -> Function { lua.load(code).set_name("=mod.luau").eval().unwrap() };
+    let as_handler = "(coroutine.running() and '' or ' NOT AS A HANDLER')";
+    let callbacks = (
+        f(&format!(
+            "return function(v) heard[#heard + 1] = 'message ' .. tostring(type(v) == 'table' and v.n or v) .. ' ' .. lane() .. {as_handler} end"
+        )),
+        Some(f(&format!("return function() heard[#heard + 1] = 'ready ' .. lane() .. {as_handler} end"))),
+        Some(f(&format!("return function(why) heard[#heard + 1] = 'close ' .. why .. ' ' .. lane() .. {as_handler} end"))),
+    );
+    webview_lua::test_page(&h.pages, lua, idx, callbacks, lane)
+}
+
+/// What a page's script posts: `{ n = n }`, as JSON.
+fn posted(page: u64, build: u64, n: usize) -> PageEvent {
+    PageEvent::Message { page, build, text: format!("{{\"n\":{n}}}") }
+}
+
+/// A page's message, its `onReady` and its `onClose` are events of the module that owns the page:
+/// for a free module each runs at once, as a handler, decoded; a message and a close by the user in
+/// the interactive lane, as a key — somebody acted in the page — `onReady` in the lane of the
+/// `show` or `prepare` that started the build, and a failure's close in the background lane.
+#[test]
+fn a_pages_events_run_as_handlers_of_its_module_in_their_lanes() {
+    let h = host();
+    let a = vm(&h, 1);
+    let (p, b) = page(&h, &a, 1, Priority::Background);
+    webview_lua::hand_on(
+        &*h,
+        vec![posted(p, b, 1), PageEvent::Loaded { page: p, build: b }, PageEvent::Closed { page: p, build: b, why: "user" }],
+    );
+    assert_eq!(heard(&a), "message 1 Interactive | ready Background | close user Interactive", "prepared in the background");
+    assert!(h.mail.is_empty() && h.tasks.handler_of(1).is_none());
+    run(&a, "heard = {}");
+    let (q, c) = page(&h, &a, 1, Priority::Interactive);
+    webview_lua::hand_on(&*h, vec![PageEvent::Loaded { page: q, build: c }, PageEvent::Closed { page: q, build: c, why: "failed" }]);
+    assert_eq!(heard(&a), "ready Interactive | close failed Background", "shown by a key; nobody asked for the failure");
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// While the module is busy, its page's events wait in its mailbox behind what came before them,
+/// and run in the order everything came, once it is free.
+#[test]
+fn a_busy_modules_page_events_wait_in_order_with_its_other_events() {
+    let h = host();
+    let a = vm(&h, 1);
+    let (p, b) = page(&h, &a, 1, Priority::Interactive);
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    say(&h, &a, 1, "key before", true);
+    webview_lua::hand_on(
+        &*h,
+        vec![
+            posted(p, b, 1),
+            PageEvent::Loaded { page: p, build: b },
+            posted(p, b, 2),
+            PageEvent::Closed { page: p, build: b, why: "user" },
+        ],
+    );
+    say(&h, &a, 1, "key after", true);
+    assert_eq!(h.mail.len(1), 6);
+    assert_eq!(heard(&a), "", "nothing ran while it waited");
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    drain(&h, 10);
+    assert_eq!(
+        heard(&a),
+        "key before | message 1 Interactive | ready Interactive | message 2 Interactive | close user Interactive | key after"
+    );
+}
+
+/// A page's message — something a person may have done in the page — makes the read a poll's
+/// handler of its module waits for an interactive one, as a key does, and runs after it. An
+/// `onReady` of a build a poll's `prepare` started raises nothing.
+#[test]
+fn a_pages_message_raises_the_read_a_polls_handler_waits_for() {
+    let h = host();
+    let a = vm(&h, 1);
+    let (p, b) = page(&h, &a, 1, Priority::Background);
+    run(&a, "function poll(x) heard[#heard + 1] = 'poll ' .. host.ocr.recognize({ region = { x, 79, x + 30, 89 } }).text end");
+    let poll = |x: i32| -> Delivered {
+        let f: Function = a.globals().get("poll").unwrap();
+        mailbox::deliver(&*h, 1, &a, Event::Call { f, args: MultiValue::from_vec(vec![Value::Integer(x.into())]), input: false, what: "timer" })
+    };
+    // Its picture is not taken before the message has queued.
+    crate::task_tests::hold(9874);
+    assert_eq!(poll(9874), Delivered::Parked);
+    webview_lua::hand_on(&*h, vec![posted(p, b, 1)]);
+    crate::task_tests::release(9874);
+    fire_until(&h, || h.tasks.handler_of(1).is_none());
+    drain(&h, 10);
+    assert_eq!(heard(&a), "poll preempt=false | message 1 Interactive");
+    run(&a, "heard = {}");
+    crate::task_tests::hold(9875);
+    assert_eq!(poll(9875), Delivered::Parked);
+    webview_lua::hand_on(&*h, vec![PageEvent::Loaded { page: p, build: b }]);
+    crate::task_tests::release(9875);
+    fire_until(&h, || h.tasks.handler_of(1).is_none());
+    drain(&h, 10);
+    assert_eq!(heard(&a), "poll preempt=true | ready Background", "a poll's prepare: nobody waits on it");
+    assert_eq!(current_priority(), Priority::Background);
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// A page's messages are inputs: past the limit a busy module's mailbox drops them — a page's
+/// script can post in a loop — against a limit of their own, so the person's keys still wait as
+/// many as ever, and their own limit drops them as before. Its `onReady` and `onClose` are never
+/// dropped: the module always hears its page's life.
+#[test]
+fn a_pages_messages_count_against_a_limit_of_their_own_and_its_life_never_does() {
+    let h = host();
+    let a = vm(&h, 1);
+    let (p, b) = page(&h, &a, 1, Priority::Background);
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    let n = mailbox::INPUT_LIMIT;
+    webview_lua::hand_on(&*h, (1..=n + 2).map(|m| posted(p, b, m)).collect());
+    assert_eq!(h.mail.len(1), n, "two messages over the limit dropped");
+    for k in 1..=n {
+        assert_eq!(say(&h, &a, 1, "key", true), Delivered::Queued, "key {k}: the page's messages took none of the keys' places");
+    }
+    assert_eq!(say(&h, &a, 1, "key", true), Delivered::Dropped, "the keys' own limit");
+    webview_lua::hand_on(&*h, vec![PageEvent::Loaded { page: p, build: b }, PageEvent::Closed { page: p, build: b, why: "failed" }]);
+    assert_eq!(h.mail.len(1), 2 * n + 2, "the ready and the close kept");
+    assert_eq!(h.discarded.borrow().as_slice(), &[(1, "page", Why::Limit), (1, "page", Why::Limit), (1, "call", Why::Limit)]);
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    drain(&h, 100);
+    assert!(yes(
+        &a,
+        &format!(
+            "return #heard == {} and heard[{n}] == 'message {n} Interactive' and heard[{}] == 'key' \
+             and heard[{}] == 'key' and heard[{}] == 'ready Background' and heard[{}] == 'close failed Background'",
+            2 * n + 2,
+            n + 1,
+            2 * n,
+            2 * n + 1,
+            2 * n + 2
+        )
+    ));
+    assert_eq!(
+        mailbox::page_limit_line("m1", 2, "timer", 2300),
+        "[m1] 2 page message(s) that came while it was busy were dropped: 256 were already waiting (the module \
+         waited for timer, 2300 ms by the first of them)"
+    );
+}
+
+/// A page's `onReady` queued right after one of the same page and build is folded into it: each
+/// says that a document of that build loaded, and a page that reloads itself in a loop while its
+/// module waits leaves one. Another page's in between, or a message, keeps the next one apart.
+#[test]
+fn a_pages_ready_folds_into_its_own_queued_last() {
+    let h = host();
+    let a = vm(&h, 1);
+    let (p, b) = page(&h, &a, 1, Priority::Interactive);
+    let (q, c) = page(&h, &a, 1, Priority::Background);
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    let ready = |page, build| PageEvent::Loaded { page, build };
+    webview_lua::hand_on(&*h, vec![ready(p, b), ready(p, b), ready(p, b)]);
+    assert_eq!(h.mail.len(1), 1, "three loads of one build, one onReady");
+    webview_lua::hand_on(&*h, vec![ready(q, c), ready(p, b), posted(p, b, 1), ready(p, b)]);
+    assert_eq!(h.mail.len(1), 5, "another page's between, a message before");
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    drain(&h, 10);
+    assert_eq!(
+        heard(&a),
+        "ready Interactive | ready Background | ready Background | message 1 Interactive | ready Background"
+    );
+}
+
+/// A `show` or `prepare` made in the interactive lane while the page's build is under way raises
+/// the lane its `onReady` runs in — a key that asked for a page a poll began building waits for it
+/// as a key — and one in the background lane lowers nothing; a load the page made by itself runs in
+/// the background lane.
+#[test]
+fn a_key_that_asks_for_a_page_being_built_hears_its_ready_as_a_key() {
+    let h = host();
+    let a = vm(&h, 1);
+    let (p, b) = page(&h, &a, 1, Priority::Background);
+    let asks = |lane| {
+        let _lane = enter_priority(lane);
+        webview_lua::test_show(&h.pages, p)
+    };
+    assert_eq!(asks(Priority::Background), ShowStep::Refuse(Refusal::NotReady));
+    webview_lua::hand_on(&*h, vec![PageEvent::Loaded { page: p, build: b }]);
+    webview_lua::close(&h.pages, p);
+    let b2 = webview_lua::test_rebuild(&h.pages, p, Priority::Background);
+    assert_eq!(asks(Priority::Interactive), ShowStep::Refuse(Refusal::NotReady));
+    assert_eq!(asks(Priority::Background), ShowStep::Refuse(Refusal::NotReady));
+    webview_lua::hand_on(&*h, vec![PageEvent::Loaded { page: p, build: b2 }]);
+    assert_eq!(asks(Priority::Interactive), ShowStep::Show);
+    webview_lua::hand_on(&*h, vec![PageEvent::Loaded { page: p, build: b2 }]);
+    assert_eq!(heard(&a), "ready Background | ready Interactive | ready Background");
+}
+
+/// An event goes to the page and the build it came from, as it runs: a page the module closed
+/// while the event waited hears nothing of what the old one sent, and neither does the build after
+/// it. A build a failure ended is the exception: what it sent before the failure, and its close,
+/// run in order — after the module built the page again, if it did, and for every build that
+/// failed while the module waited — and what it "sends" after the failure is not taken at all.
+/// Unless the module closed the page after the failure: then nothing of it runs.
+#[test]
+fn a_page_event_runs_for_the_build_it_came_from() {
+    let h = host();
+    let a = vm(&h, 1);
+    let (p, b) = page(&h, &a, 1, Priority::Interactive);
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    webview_lua::hand_on(&*h, vec![posted(p, b, 1)]);
+    // What the module's handler did as it went on: `page:close()`.
+    webview_lua::close(&h.pages, p);
+    webview_lua::hand_on(&*h, vec![posted(p, b, 2)]);
+    assert_eq!(h.mail.len(1), 1, "a message of a closed build is not taken");
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    drain(&h, 10);
+    assert_eq!(heard(&a), "", "a page the module closed hears nothing of what the old one sent");
+
+    let b2 = webview_lua::test_rebuild(&h.pages, p, Priority::Interactive);
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    webview_lua::hand_on(
+        &*h,
+        vec![posted(p, b2, 3), PageEvent::Closed { page: p, build: b2, why: "failed" }, posted(p, b2, 4)],
+    );
+    // The module shows it again before it hears of the failure: a build of its own.
+    let b3 = webview_lua::test_rebuild(&h.pages, p, Priority::Interactive);
+    webview_lua::hand_on(&*h, vec![posted(p, b3, 5)]);
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    drain(&h, 10);
+    assert_eq!(heard(&a), "message 3 Interactive | close failed Background | message 5 Interactive");
+
+    // Two failures while it waits: both builds are heard to the end, in order.
+    run(&a, "heard = {}");
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    webview_lua::hand_on(&*h, vec![posted(p, b3, 6), PageEvent::Closed { page: p, build: b3, why: "failed" }]);
+    let b4 = webview_lua::test_rebuild(&h.pages, p, Priority::Interactive);
+    webview_lua::hand_on(&*h, vec![posted(p, b4, 7), PageEvent::Closed { page: p, build: b4, why: "failed" }]);
+    let b5 = webview_lua::test_rebuild(&h.pages, p, Priority::Interactive);
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    drain(&h, 10);
+    assert_eq!(
+        heard(&a),
+        "message 6 Interactive | close failed Background | message 7 Interactive | close failed Background"
+    );
+
+    // A failure, then the module's own `page:close()` before it heard of it: nothing of that
+    // build runs — the module is done with the page.
+    run(&a, "heard = {}");
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    webview_lua::hand_on(&*h, vec![posted(p, b5, 8), PageEvent::Closed { page: p, build: b5, why: "failed" }]);
+    webview_lua::close(&h.pages, p);
+    assert_eq!(h.mail.len(1), 2, "both arrived before the close");
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    drain(&h, 10);
+    assert_eq!(heard(&a), "", "a failed build the module closed since is not heard");
+}
+
+/// A page's events go with its module as every event does: dropped while it is disabled — those
+/// that waited, and those that came meanwhile — and dropped for the VM a reload replaced.
+#[test]
+fn a_pages_events_go_with_its_module() {
+    let h = host();
+    let a = vm(&h, 1);
+    let (p, b) = page(&h, &a, 1, Priority::Interactive);
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    webview_lua::hand_on(&*h, vec![posted(p, b, 1), PageEvent::Loaded { page: p, build: b }]);
+    // The disable, as `apply_enabled(false)` makes it.
+    h.enabled.borrow_mut()[1] = false;
+    mailbox::drop_owner(&*h, 1, Why::Disabled);
+    task::drop_owner(&*h, 1);
+    assert!(h.mail.is_empty());
+    webview_lua::hand_on(&*h, vec![posted(p, b, 2)]);
+    h.enabled.borrow_mut()[1] = true;
+    drain(&h, 10);
+    assert_eq!(heard(&a), "");
+    assert_eq!(h.discarded.borrow().iter().filter(|d| d.1 == "page" && d.2 == Why::Disabled).count(), 3);
+    // A reload: what waited goes, and the old VM's page reaches nothing.
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    webview_lua::hand_on(&*h, vec![posted(p, b, 3)]);
+    mailbox::drop_owner(&*h, 1, Why::Reloaded);
+    task::drop_owner(&*h, 1);
+    let _new = vm(&h, 1);
+    webview_lua::hand_on(&*h, vec![posted(p, b, 4)]);
+    drain(&h, 10);
+    assert_eq!(heard(&a), "");
+    let page_why: Vec<Why> = h.discarded.borrow().iter().filter(|d| d.1 == "page").map(|d| d.2).collect();
+    assert!(page_why.contains(&Why::Reloaded) && page_why.contains(&Why::Gone), "{page_why:?}");
+}
+
+/// A callback that raises is reported under its name, with its module, as every handler's error
+/// is; a message that is not JSON is dropped and calls nothing; and a page without `onReady` or
+/// `onClose` puts nothing in a busy module's mailbox for them.
+#[test]
+fn a_pages_callback_error_is_reported_under_its_name() {
+    let h = host();
+    let a = vm(&h, 1);
+    let raises: Function = a.load("return function() error('boom') end").eval().unwrap();
+    let (p, b) = webview_lua::test_page(&h.pages, &a, 1, (raises, None, None), Priority::Interactive);
+    webview_lua::hand_on(&*h, vec![posted(p, b, 1)]);
+    let errors = h.errors.borrow().clone();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!((errors[0].0, errors[0].1.as_str()), (1, "page message"));
+    assert!(errors[0].2.contains("boom"), "{errors:?}");
+    webview_lua::hand_on(&*h, vec![PageEvent::Message { page: p, build: b, text: "{not json".into() }]);
+    assert_eq!(h.errors.borrow().len(), 1, "not JSON: dropped, nothing called");
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    webview_lua::hand_on(&*h, vec![PageEvent::Loaded { page: p, build: b }, PageEvent::Closed { page: p, build: b, why: "user" }]);
+    assert_eq!(h.mail.len(1), 0, "no callback, no event");
+    assert!(task::test_release(&*h, "w", Value::Nil));
+}
+
+/// A page's callback is held by the host's guard as every callback is: its stretch is an entry,
+/// so an `onMessage` that runs its VM out of memory, and does not catch it, stops the VM, under its
+/// own name and not as the module's error; what the page sends after it does not run. Once the host
+/// has turned the stopped module off, and dropped what waited — a stop's two steps, which disable it
+/// as the checkbox does, simulated here as `a_pages_events_go_with_its_module` simulates the
+/// checkbox; that the second step reaches `hide_pages_of` is pinned on the host's source
+/// (`ocr_wiring_tests::pages_are_built_after_the_tick_and_go_with_their_module`) — what its page
+/// sends is dropped, as for any module that is off.
+#[test]
+fn a_pages_callback_is_held_by_the_guard_as_every_callback_is() {
+    let h = host();
+    let guard = crate::vm_guard::Guard::new();
+    let lua = crate::vm_guard::new_vm(&guard);
+    crate::vm_guard::describe_for_test(&lua, 1, "m1", &[("m1", 8)]);
+    crate::vm_guard::loaded(&lua);
+    let a = vm_in(&h, 1, lua);
+    let got: Rc<RefCell<Vec<crate::vm_guard::Trip>>> = Rc::new(RefCell::new(Vec::new()));
+    let g = got.clone();
+    crate::vm_guard::set_exit_hook(Rc::new(move |t| g.borrow_mut().extend(t)));
+    let on_message: Function = a
+        .load(
+            "return function(v) \
+               if v.n == 1 then local t = {} while true do t[#t + 1] = string.rep('x', 1048000) .. #t end end \
+               heard[#heard + 1] = 'message ' .. v.n \
+             end",
+        )
+        .set_name("=mod.luau")
+        .eval()
+        .unwrap();
+    let (p, b) = webview_lua::test_page(&h.pages, &a, 1, (on_message, None, None), Priority::Interactive);
+    webview_lua::hand_on(&*h, vec![posted(p, b, 1)]);
+    assert!(h.errors.borrow().is_empty(), "not the module's error: {:?}", h.errors.borrow());
+    assert_eq!(got.borrow().len(), 1, "handed over when the handler's stretch ended");
+    assert_eq!((got.borrow()[0].what.as_str(), got.borrow()[0].kind), ("page message", crate::vm_guard::EntryKind::Handler));
+    assert!(crate::vm_guard::stopped(&a));
+    a.gc_collect().unwrap();
+    // Its VM is stopped: the next message waits rather than run (this holder keeps the module on
+    // until the host's first step turns it off), and the queued phase passes it by.
+    webview_lua::hand_on(&*h, vec![posted(p, b, 2)]);
+    assert_eq!(h.mail.len(1), 1);
+    assert_eq!(mailbox::run_queued(&*h), Phase::default());
+    // Read from Rust: a stopped VM raises at the first safepoint of anything run in it.
+    assert_eq!(a.globals().raw_get::<mlua::Table>("heard").unwrap().raw_len(), 0, "the stopped VM ran nothing");
+    // The stop's two steps, as they leave the mailbox (simulated, not run): off, with its record
+    // (`stops::mark`); then the rest of the disable (`stops::settle` → `after_toggle(false)`),
+    // which drops what waited.
+    h.enabled.borrow_mut()[1] = false;
+    h.stopped.borrow_mut().insert(1);
+    mailbox::drop_owner(&*h, 1, Why::Disabled);
+    task::drop_owner(&*h, 1);
+    webview_lua::hand_on(&*h, vec![posted(p, b, 3)]);
+    assert!(h.mail.is_empty(), "nothing of its page waits for it");
+    assert_eq!(h.discarded.borrow().as_slice(), &[(1, "page", Why::Disabled), (1, "page", Why::Disabled)]);
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+    assert_eq!(got.borrow().len(), 1, "one stop");
+    crate::vm_guard::clear_exit_hook();
 }
 
 // ── The cost ─────────────────────────────────────────────────────────────────────────────────

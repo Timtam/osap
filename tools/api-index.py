@@ -33,8 +33,8 @@ INDEX = os.path.join(API, 'index.md')
 # them in, and it puts the two things every module touches first.
 NS_ORDER = [
     'Overlay', 'host.window', 'host.screen', 'host.ocr', 'host.element', 'host.input',
-    'host.keys', 'host.hotkey', 'host.gamepad', 'host.speech', 'host.sound', 'host.timer',
-    'host.settings',
+    'host.keys', 'host.hotkey', 'host.gamepad', 'host.speech', 'host.sound', 'host.gui',
+    'host.timer', 'host.settings',
     'host.config', 'host.os', 'host.log', 'host.path', 'host.resource', 'host.json',
     'host.require',
     'host.tryRequire', 'host.include', 'host.epoch', 'host.now', 'host.inputEpoch',
@@ -59,6 +59,8 @@ NS_BLURB = {
                     'coming and going. Observed only, never taken from the game, and not '
                     'filtered by the window in front.',
     'host.arbiter': 'Deciding which of several overlays owns a contested slot.',
+    'host.gui': 'An HTML page of the module\'s own, in a window beside the plug-in. Experimental: '
+                'Windows only, and the API may change after the Windows probe.',
     'host.timer': 'Waiting without blocking, and knowing when a cached reading went stale.',
     'host.settings': 'Typed, per-module settings, edited by the user in the module manager.',
     'host.log': 'Writing to the log file beside the application.',
@@ -108,6 +110,9 @@ def namespace(heading):
         return m.group(1)
     if h.startswith('O:') or h.startswith('O.') or h.startswith('Bindings'):
         return 'Overlay'
+    # The methods of the object `host.gui.webview` returns belong with it.
+    if h.startswith('page:') or h.startswith('page.'):
+        return 'host.gui'
     return 'Concepts'
 
 
@@ -239,8 +244,8 @@ CAPABILITIES = [
     '',
     '**These are all the names:** `window`, `screen`, `ocr`, `element`, `input`, `keys`, '
     '`hotkey`, `gamepad`, `speech`, `sound`, `timer`, `settings` (which also covers '
-    '`host.config`), `log`, `path`, `resource` and `arbiter` — one per namespace, spelt as the '
-    'namespace. There are no finer-grained names: `"window.read"` or `"screen.imagesearch"` '
+    '`host.config`), `log`, `path`, `resource`, `arbiter` and `gui` (experimental) — one per '
+    'namespace, spelt as the namespace. There are no finer-grained names: `"window.read"` or `"screen.imagesearch"` '
     'unlock nothing. **Names are not checked** when the module loads, so a misspelt or invented '
     'one loads without a word, and the first use of the namespace it was meant for raises. '
     '`path`, `resource` and `log` are gated like the rest: a module that only reads its own '
@@ -494,6 +499,7 @@ def without_test_modules(src):
 BINDING_SOURCES = [
     os.path.join('crates', 'host', 'src', 'lib.rs'),
     os.path.join('crates', 'host', 'src', 'gamepad_api.rs'),
+    os.path.join('crates', 'host', 'src', 'webview_lua.rs'),
 ]
 
 
