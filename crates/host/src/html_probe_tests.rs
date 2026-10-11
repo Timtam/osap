@@ -22,7 +22,26 @@
 //! plug-in window first and hides the one after, so the front never passes through the plug-in
 //! window, and keeps the one when the other is not shown; the keys work on the one shown last; the
 //! way back leaves the application window open, and gives up a switch still waiting for its build;
-//! and the automatic show never brings the application window.
+//! and the automatic show never brings the application window. Revision 6 (2026-10-12): the probe
+//! on a Mac, for the tester's VoiceOver session (MW1–MW19 in TODO.md) — its keys Command-Shift
+//! chords off VoiceOver's Control-Option and off the window probe's F9 and F10; F8 the same page
+//! described `activates = false` (MW1b), the other pages left as they are; a captured key that
+//! shows the page F7 shows without the keyboard and then updates its live region (MW2, MW16), and
+//! says so if it ever fires in a window of the application's own; W3's click on the plug-in
+//! window's title bar, away from the last one; the page's modifiers in a Mac's words; a show's
+//! `true` said as the front asked for, the page's focus line its answer; W3 going on when a focus
+//! event finds the plug-in window with the keyboard, for the plug-in window that comes with no
+//! activation; the window server asked where the page covers the plug-in window (MW4); and the
+//! automatic show never bringing the page without activation — and on Windows everything as it
+//! was, but for W3 going on on such a focus event there too. Revision 5 (2026-10-11, on another
+//! line of work): W10 on Windows — F10 remembers the pointer's point in the plug-in window; the
+//! page reads the plug-in's elements and tries a way of acting in it, once or in a series, each
+//! attempt step by step on the answer of the one before and said without cutting NVDA off; the
+//! round trip clicks on the plug-in window's arrival and brings the page back after the change
+//! wait; a show key gives a run up. Revision 7 (2026-10-12): the two together — W10 on Windows
+//! as revision 5 had it, but for its dump and an element's state, asked with a callback now, and
+//! on a Mac no W10 key, the pages told that W10 is not offered there, and a W10 request that came
+//! all the same logged, not run.
 //!
 //! **Every event through the real mailbox**, as the host delivers it under way B: a key of the
 //! probe's, a page's message, its `onReady` and `onClose`, a window and a focus event, the
@@ -52,11 +71,15 @@ local function ran(kind, f, ...)
   assert(got == "Ran", kind .. ": " .. got)
 end
 
--- The page's own window: a window of this application. And the same page's application window.
+-- The page's own window: a window of this application. And the same page's application window,
+-- and on a Mac the page without activation's.
 T.PAGE = { id = 4000, title = "HTML probe", class = "wxWindowNR", app = { pid = 9, exe = "automation-platform.exe" },
-  bounds = { x = 1000, y = 0, w = 520, h = 640 }, client = { x = 1008, y = 30, w = 504, h = 602 } }
+  bounds = { x = 1000, y = 0, w = 520, h = 640 }, client = { x = 1008, y = 30, w = 504, h = 602 }, own = true }
 T.APP_PAGE = { id = 4001, title = "HTML probe window", class = "wxWindowNR", app = { pid = 9, exe = "automation-platform.exe" },
-  bounds = { x = 1000, y = 0, w = 520, h = 640 }, client = { x = 1008, y = 30, w = 504, h = 602 } }
+  bounds = { x = 1000, y = 0, w = 520, h = 640 }, client = { x = 1008, y = 30, w = 504, h = 602 }, own = true }
+T.NA_PAGE = { id = 4002, title = "HTML probe without activation", class = "AXWindow/AXFloatingWindow/",
+  app = { pid = 9, exe = "automation-platform" }, bounds = { x = 1000, y = 38, w = 520, h = 640 },
+  client = { x = 1000, y = 60, w = 520, h = 618 }, own = true }
 
 -- host.settings: defined with a default, read, and changed by the scenario (T.set).
 S.defined, S.settings, S.settingCbs = {}, {}, {}
@@ -117,23 +140,32 @@ do
   end)
 end
 
--- host.gui.webview: the pages — the tool page (S.pg, S.page, S.pageOpts) and the application
--- window (`window = "app"`: S.apg, S.appPage, S.appOpts), each described once. `show` answers the
--- page's `answers` in turn ({ true } when they run out); accepted with focus, the page is in front.
--- Declined, it is shown and the window in front stays. `prepare` answers true once the page is
--- ready (T.ready, T.appReady), "not ready yet" before. S.order names the application window's
--- shows and hides "show app" and "hide app".
+-- host.gui.webview: the pages — the tool page (S.pg, S.page, S.pageOpts), the application window
+-- (`window = "app"`: S.apg, S.appPage, S.appOpts) and the tool page described `activates = false`
+-- (S.npg, S.naPage, S.naOpts), each described once. `show` answers the page's `answers` in turn
+-- ({ true } when they run out); accepted with focus, the page is in front — on a Mac (T.mac) only
+-- once AppKit makes its window the key window (T.keyed), as this application's activation comes on
+-- the event loop after the call, unless the application is the active one already (one of its
+-- windows in front, but for the page without activation, which has the keyboard only lent) or the
+-- page is the one without activation, whose window is the key window at the call. Declined, it is
+-- shown and the window in front stays. `prepare` answers true once the page is ready (T.ready,
+-- T.appReady, T.naReady), "not ready yet" before. S.order names the application window's shows
+-- and hides "show app" and "hide app", the page without activation's "show na" and "hide na".
 local function pageState()
   return { shows = {}, hides = 0, posts = {}, answers = {}, shown = false, prepares = 0, ready = false }
 end
-S.pg, S.apg = pageState(), pageState()
+S.pg, S.apg, S.npg = pageState(), pageState(), pageState()
 rawset(T.host, "gui", T.strict("host.gui", {
   webview = function(opts)
     local isApp = opts.window == "app"
+    local isNa = opts.activates == false
     assert(opts.window == nil or isApp, "the tool page by default, or an application window: " .. tostring(opts.window))
+    assert(opts.activates == nil or (isNa and not isApp), "activates = false, for a tool page, or nothing: " .. tostring(opts.activates))
     local st, win, tag, described = S.pg, T.PAGE, "", S.page
     if isApp then
       st, win, tag, described = S.apg, T.APP_PAGE, " app", S.appPage
+    elseif isNa then
+      st, win, tag, described = S.npg, T.NA_PAGE, " na", S.naPage
     end
     assert(described == nil, "each page described once")
     local p = {}
@@ -147,8 +179,12 @@ rawset(T.host, "gui", T.strict("host.gui", {
         p.window = win.id
       end
       if a[1] and not (o and o.focus == false) then
-        S.front, S.chain = win, { win }
-        S.epoch += 1
+        if S.asks and not isNa and not (S.front and S.front.own and S.front ~= T.NA_PAGE) then
+          S.asked = win
+        else
+          S.front, S.chain = win, { win }
+          S.epoch += 1
+        end
       end
       return a[1], a[2]
     end
@@ -170,6 +206,8 @@ rawset(T.host, "gui", T.strict("host.gui", {
     function p.close(self) st.shown = false; p.window = nil end
     if isApp then
       S.appPage, S.appOpts = p, opts
+    elseif isNa then
+      S.naPage, S.naOpts = p, opts
     else
       S.page, S.pageOpts = p, opts
     end
@@ -187,11 +225,17 @@ function T.probe()
     return register(spec, fn)
   end)
   -- W10's reads of the plug-in: the pointer (T.cursor, default inside the FX client), and the
-  -- plug-in's elements (S.dump, a list of { name, ctype, bounds } as host.element.dump gives).
+  -- plug-in's elements (S.dump, a list of { name, ctype, bounds } as host.element.dump gives),
+  -- asked with a callback — never waited for — and answered by T.dumped.
   S.cursor = S.cursor or { x = 120, y = 90 }
   rawset(T.host.input, "cursorPos", function() return S.cursor end)
   S.dump = S.dump or {}
-  rawset(T.host.element, "dump", function(id) S.dumpedId = id; return S.dump end)
+  S.dumpCbs = {}
+  rawset(T.host.element, "dump", function(id, cb)
+    assert(type(cb) == "function", "the probe asks for the plug-in's elements with a callback")
+    S.dumpedId = id
+    S.dumpCbs[#S.dumpCbs + 1] = cb
+  end)
   -- W10's acting, recorded: a click with options or a callback in S.acts, its callback answered
   -- on a later tick through the module's mailbox (T.acted), as the host answers it; a plain click
   -- — W3's, the round trip's — in S.clicks as ever; the pointer put somewhere in S.moves.
@@ -224,6 +268,13 @@ function T.acted(made, why)
   local cbs = S.actedCbs
   S.actedCbs = {}
   for _, cb in ipairs(cbs) do ran("acted", cb, made, why) end
+end
+-- W10: every dump waiting answered with S.dump (and `why`, for one that is not all of the tree),
+-- each through the module's mailbox, as the host answers one on a later turn.
+function T.dumped(why)
+  local cbs = S.dumpCbs
+  S.dumpCbs = {}
+  for _, cb in ipairs(cbs) do ran("dumped", cb, S.dump, why) end
 end
 -- The oldest read with a callback not answered yet, answered with `text` ("" reads nothing).
 function T.readNext(text)
@@ -268,12 +319,17 @@ function T.appReady()
   S.apg.ready = true
   ran("page ready", S.appOpts.onReady)
 end
+function T.naMsg(m) ran("page message", S.naOpts.onMessage, m) end
+function T.naReady()
+  S.npg.ready = true
+  ran("page ready", S.naOpts.onReady)
+end
 function T.closed(why) ran("page close", S.pageOpts.onClose, why) end
 function T.appClosed(why) ran("page close", S.appOpts.onClose, why) end
 -- A button of the page activated: `released` whether a key or a pointer went up in the page since
 -- the button before, as the page reports it (true unless said otherwise). Each page counts its own
 -- presses, as page.js does.
-local presses = { tool = { counts = {}, previous = nil }, app = { counts = {}, previous = nil } }
+local presses = { tool = { counts = {}, previous = nil }, app = { counts = {}, previous = nil }, na = { counts = {}, previous = nil } }
 local function pressIn(which, send, action, released, detail)
   local c = presses[which]
   c.counts[action] = (c.counts[action] or 0) + 1
@@ -284,6 +340,7 @@ local function pressIn(which, send, action, released, detail)
 end
 function T.press(action, released, detail) pressIn("tool", T.msg, action, released, detail) end
 function T.appPress(action, released, detail) pressIn("app", T.appMsg, action, released, detail) end
+function T.naPress(action, released, detail) pressIn("na", T.naMsg, action, released, detail) end
 
 -- What was said last, and everything said.
 function T.last() return S.speech[#S.speech] and S.speech[#S.speech].text or "" end
@@ -318,6 +375,48 @@ function T.shown()
   T.ok(S.front == T.PAGE, "the page is in front")
   T.report()
 end
+
+-- On a Mac: the probe's keys there, by their Windows names — F9's role is Command-Shift-F11, the
+-- window probe holding Command-Shift-F9 — REAPER's floating plug-in window (T.FLOAT) in front, and
+-- a show with focus that asks for the front (S.asks).
+function T.mac()
+  T.F7, T.F8, T.F9, T.F12 = "Cmd+Shift+F7", "Cmd+Shift+F8", "Cmd+Shift+F11", "Cmd+Shift+F12"
+  S.listed = T.LISTED_MAC
+  S.front = T.FLOAT
+  S.asks = true
+end
+-- On a Mac, the page whose show asked for the front gets it: this application's activation names
+-- the page's window in front, and the page's document has the focus — each an event of the
+-- module's.
+function T.keyed(win)
+  assert(S.asked == win, "the show asked for the front for " .. tostring(win and win.title) .. ", not "
+    .. tostring(S.asked and S.asked.title))
+  S.asked = nil
+  T.arrive(win)
+  local opts = win == T.APP_PAGE and S.appOpts or win == T.NA_PAGE and S.naOpts or S.pageOpts
+  ran("page message", opts.onMessage, { kind = "focus", target = "the document" })
+end
+-- The captured key pressed: its callback run as a handler of the module, as a captured key is.
+function T.captured(spec)
+  local fn = S.captured[spec]
+  assert(fn ~= nil, "no capture " .. spec)
+  S.epoch += 1
+  ran("key", fn, { shift = true, ctrl = true, alt = false, win = false })
+end
+-- On a Mac, the tool page shown beside REAPER's floating plug-in window and in front, from F7, its
+-- build over and its window made the key window.
+function T.shownMac()
+  S.front = T.FLOAT
+  T.turn()
+  S.pg.answers = { { false, "not ready yet" } }
+  T.key(T.F7)
+  S.now += 300
+  T.ready()
+  T.ok(S.front == T.FLOAT, "the front asked for")
+  T.keyed(T.PAGE)
+  T.ok(S.front == T.PAGE, "the page is in front")
+  T.report()
+end
 "##;
 
 /// A fresh VM with the scripted host — its events through the real mailbox — the runtime, the
@@ -325,6 +424,11 @@ end
 /// the harness's checks.
 fn run(scenario: &str) {
     run_with_helpers("windows", &[("probe helpers", PR)], scenario)
+}
+
+/// `run`, with the host playing macOS.
+fn run_mac(scenario: &str) {
+    run_with_helpers("macos", &[("probe helpers", PR)], scenario)
 }
 
 /// What the probe declares at load: its three keys, the second left to Windows' own delivery
@@ -347,11 +451,17 @@ fn the_probe_loads_with_its_keys_its_setting_and_its_page() {
           "the same page in an application window")
         T.ok(#S.fgCbs == 1 and #S.focusCbs == 1, "one window trigger and one focus callback")
         T.ok(#S.pg.shows == 0 and #S.apg.shows == 0, "nothing is shown at load")
-        T.ok(T.count("[html-probe] revision 5 ready") == 1, "the revision, in the log at load")
+        T.ok(T.count("[html-probe] revision 7 ready — Ctrl+Shift+Win+Alt+F7 shows the page (keyboard hook), "
+          .. "Ctrl+Shift+Win+Alt+F8 shows it (WM_HOTKEY), Ctrl+Shift+Win+Alt+F9 says what happened, "
+          .. "Ctrl+Shift+Win+Alt+F10 remembers the pointer's point in the plug-in for W10; ") == 1,
+          "the revision, in the log at load, with Windows' keys")
+        T.ok(T.count("in Alt+Tab and on the taskbar (W6 again)") == 1 and T.count("captured") == 0, "Windows' words")
+        T.ok(S.naPage == nil and next(S.captured) == nil, "no page without activation and no captured key on Windows")
         T.ok(T.count("the page's button 'Show as an application window' shows it in a window of its own") == 1,
           "the start line says how to get the application window")
         local said = T.report()
-        T.ok(T.has(said, "HTML probe revision 5. The page's button Show as an application window"), said)
+        T.ok(T.has(said, "HTML probe revision 7. The page's button Show as an application window puts it in a window of its own."), said)
+        T.ok(not T.has(said, "without activation"), said)
     "##);
 }
 
@@ -573,6 +683,7 @@ fn w3_clicks_the_plugin_windows_own_background_once_it_is_in_front_and_never_twi
         T.ok(#S.pg.shows == shown + 1 and S.front == T.PAGE, "the page back, not left behind")
         said = T.report()
         T.ok(T.has(said, "W3: the page came back (no click), accepted"), said)
+        T.ok(T.count("MW4") == 0, "no level asked after on Windows")
     "##);
 }
 
@@ -812,7 +923,8 @@ fn the_switch_shows_the_page_in_an_application_window_and_back() {
         T.shown()
         T.msg({ kind = "loaded" })
         local told = S.pg.posts[#S.pg.posts]
-        T.ok(told.kind == "window" and told.window == "tool", "the tool page is told it is one")
+        T.ok(told.kind == "window" and told.window == "tool" and told.w10 == true,
+          "the tool page is told it is one, and that W10 is offered")
         -- The switch, the application window not built yet: asked beside the FX window, with the
         -- keyboard; the tool page stays in front while it is built, and goes once it is shown.
         S.apg.answers = { { false, "not ready yet" } }
@@ -831,7 +943,8 @@ fn the_switch_shows_the_page_in_an_application_window_and_back() {
         T.ok(not S.pg.shown, "the tool page is gone")
         T.appMsg({ kind = "loaded" })
         told = S.apg.posts[#S.apg.posts]
-        T.ok(told.kind == "window" and told.window == "app", "the application window is told it is one")
+        T.ok(told.kind == "window" and told.window == "app" and told.w10 == true,
+          "the application window is told it is one, and that W10 is offered")
         local said = T.report()
         T.ok(T.has(said, "switch to the application window (after the build): accepted, 200 ms after the page's button; in front: the page"), said)
         T.ok(T.has(said, "window switch 1"), said)
@@ -960,10 +1073,11 @@ fn f10_remembers_the_pointer_point_in_the_plugin_window() {
     "##);
 }
 
-/// W10, the elements: "Read the plug-in's elements" dumps the plug-in window, keeps the named ones
-/// with a rectangle inside its client area (at most 60), and posts them to the page that asked —
-/// the remembered point first — each by name and type, those that share both marked, since a press
-/// acts on the first of them; how many share is in the log. Without a plug-in window it says so.
+/// W10, the elements: "Read the plug-in's elements" dumps the plug-in window with a callback,
+/// keeps the named ones with a rectangle inside its client area (at most 60), and posts them to
+/// the page that asked once the dump has answered — the remembered point first — each by name and
+/// type, those that share both marked, since a press acts on the first of them; how many share is
+/// in the log, and so is a dump that is not all of the tree. Without a plug-in window it says so.
 #[test]
 fn reading_the_elements_posts_the_named_ones_inside_the_client_area() {
     run(r##"
@@ -985,9 +1099,14 @@ fn reading_the_elements_posts_the_named_ones_inside_the_client_area() {
           { name = "Preset", ctype = 50020, bounds = { x = 500, y = 100, w = 40, h = 20 } },
         }
         local posts = S.pg.posts
+        local before = #posts
         T.msg({ kind = "w10", ["do"] = "read" })
-        local last = posts[#posts]
         T.ok(S.dumpedId == T.FX.id, "the remembered plug-in window was dumped")
+        T.ok(#posts == before and T.count("named element(s)") == 0, "nothing posted before the dump has answered")
+        T.dumped("the program did not answer within 1000 ms")
+        local last = posts[#posts]
+        T.ok(T.count("W10: the plug-in's elements are not all of its tree: the program did not answer within 1000 ms") == 1,
+          T.dump())
         T.ok(last.kind == "w10elements" and #last.elements == 4, "the named elements inside the client area")
         T.ok(last.elements[1].value == "el:1" and last.elements[1].label == "Bypass (type 50000)", last.elements[1].label)
         T.ok(last.elements[2].label == "Preset (type 50000), one of 2 alike: a press acts on the first of them", last.elements[2].label)
@@ -1064,6 +1183,48 @@ fn a_posted_attempt_goes_step_by_step_and_says_what_happened() {
     "##);
 }
 
+/// W10, an element's state: asked with a callback — the event loop never waits for the plug-in —
+/// of the plug-in window with its title as the container, first, before the read; and again once
+/// the change wait has answered, before the read after; each step only on the answer of the one
+/// before, and the two states in the result.
+#[test]
+fn an_elements_state_is_asked_with_a_callback_before_and_after() {
+    run(r##"
+        local S = T.S
+        T.probe()
+        T.shown()
+        T.key(T.F10)
+        S.dump = { { name = "Bypass", ctype = 50002, bounds = { x = 100, y = 100, w = 40, h = 20 } } }
+        T.msg({ kind = "w10", ["do"] = "read" })
+        T.dumped()
+        local probes = {}
+        rawset(T.host.element, "stateProbe", function(id, container, name, ctype, cb)
+          assert(type(cb) == "function", "the state is asked with a callback")
+          probes[#probes + 1] = { id = id, container = container, name = name, ctype = ctype, cb = cb }
+        end)
+        local function answer(i, st)
+          local got = T.call("probed", probes[i].cb, st)
+          T.ok(got == "Ran", "the state's answer: " .. got)
+        end
+        T.msg({ kind = "w10", ["do"] = "try", way = "watch", target = "el:1", ["repeat"] = "1" })
+        local p = probes[1]
+        T.ok(#probes == 1 and p.id == T.FX.id and p.container == T.FX.title and p.name == "Bypass" and p.ctype == 50002,
+          "the state asked first, of the plug-in window by its title")
+        T.ok(#S.reads == 0, "nothing read before the state has answered")
+        answer(1, { toggle = 0 })
+        T.readNext("Basic Saw")
+        T.picture()
+        T.picture({ waited = 200, frames = 5, changed = true, settled = true })
+        T.ok(#probes == 2 and #S.reads == 1, "the state after asked once the wait answered, before the read after")
+        answer(2, { toggle = 1 })
+        T.ok(#S.reads == 2 and S.reads[2].key == "w10after", "the read after, once the state has answered")
+        T.readNext("Bright Lead")
+        T.ok(T.count('RESULT W10 watch on "Bypass" (1/1): made; front: the page throughout; picture: changed, settled 200 ms '
+          .. 'after the wait began (the last 150 ms of them still); text: "Basic Saw" to "Bright Lead"; state: off to on') == 1,
+          T.dump())
+    "##);
+}
+
 /// W10, a series: ten posted clicks, each attempt only once the one before has been answered, the
 /// pointer on the target before each; the attempts in the log, and one summary at the end — a
 /// result, said once. The run is over then: the next "Try it" is not ignored.
@@ -1132,5 +1293,413 @@ fn the_round_trip_clicks_on_the_plugins_arrival_and_brings_the_page_back_after_t
         local clicks = #S.clicks
         T.arrive(T.FX)
         T.ok(#S.clicks == clicks, "nothing clicked for a run given up")
+    "##);
+}
+
+/// On a Mac (revision 6, and 7): the keys are Command-Shift chords — nothing on VoiceOver's
+/// Control-Option, and not the window probe's Command-Shift-F9 or F10, which ship in the Mac's
+/// download — F8 is registered without `foreground` and shows the page described
+/// `activates = false`, and the one captured key, Command-Shift-F12, is a capture, not a hotkey.
+/// The tool page and the application window are described as on Windows; the log at load and the
+/// first report say the keys in the Mac's words. W10 is Windows' alone: no key of its own, nothing
+/// of it at load, each page told as it loads that W10 is not offered — so its part stays hidden —
+/// and a W10 request that came all the same logged, not run.
+#[test]
+fn on_a_mac_the_probe_takes_command_shift_keys_a_captured_key_and_a_page_without_activation() {
+    run_mac(r##"
+        local S = T.S
+        T.mac()
+        T.probe()
+        T.ok(S.hotkeyFns[T.F7] and S.hotkeyFns[T.F8] and S.hotkeyFns[T.F9], "the three hotkeys, Command-Shift")
+        T.ok(S.hotkeyFns["Cmd+Shift+F9"] == nil and S.hotkeyFns["Ctrl+Shift+Win+Alt+F7"] == nil,
+          "neither the window probe's key nor VoiceOver's Control-Option")
+        T.ok(S.hotkeyOpts[T.F7] == false and S.hotkeyOpts[T.F8] == false and S.hotkeyOpts[T.F9] == false,
+          "no foreground option: every hotkey on a Mac is the system's own delivery")
+        T.ok(S.captured[T.F12] ~= nil and S.hotkeyFns[T.F12] == nil, "F12 is captured, not registered")
+        T.ok(S.hotkeyFns["Cmd+Shift+F10"] == nil and S.hotkeyFns[T.F10] == nil, "no W10 key on a Mac")
+        T.ok(S.pageOpts.title == "HTML probe" and S.pageOpts.activates == nil and S.pageOpts.window == nil, "the tool page")
+        T.ok(S.appOpts.window == "app" and S.appOpts.activates == nil, "the application window")
+        T.ok(S.naOpts.file == "ui/index.html" and S.naOpts.title == "HTML probe without activation"
+          and S.naOpts.window == nil and S.naOpts.activates == false, "the page without activation")
+        T.ok(#S.npg.shows == 0 and S.npg.prepares == 0, "not built at load")
+        T.ok(T.count("[html-probe] revision 7 ready — Cmd+Shift+F7 shows the page (hotkey), Cmd+Shift+F8 shows it "
+          .. "without activation (activates = false, MW1b), Cmd+Shift+F11 says what happened; ") == 1, T.dump())
+        T.ok(T.count("for W10") == 0 and T.count("F10") == 0, "nothing of W10 at load")
+        T.ok(T.count("in Command-Tab and the Dock (MW10, MW11)") == 1, "the application window, in a Mac's words")
+        T.ok(T.count("automatic show is off; Cmd+Shift+F12, captured, shows it without the keyboard (MW2) and then "
+          .. "updates its live region (MW16)") == 1, T.dump())
+        local said = T.report()
+        T.ok(T.has(said, "HTML probe revision 7. The page's button Show as an application window puts it in a window "
+          .. "of its own. Cmd+Shift+F8 shows it without activation, and Cmd+Shift+F12 shows it without the keyboard."), said)
+        -- Each page, loaded, is told that W10 is not offered here.
+        T.msg({ kind = "loaded" })
+        local told = S.pg.posts[#S.pg.posts]
+        T.ok(told.kind == "window" and told.window == "tool" and told.w10 == false, "the tool page keeps W10's part hidden")
+        T.naMsg({ kind = "loaded" })
+        told = S.npg.posts[#S.npg.posts]
+        T.ok(told.kind == "window" and told.window == "tool" and told.w10 == false, "so does the page without activation")
+        -- A W10 request all the same: logged, nothing read, tried or said.
+        local spoken = #S.speech
+        T.msg({ kind = "w10", ["do"] = "read" })
+        T.msg({ kind = "w10", ["do"] = "try", way = "post", target = "point", ["repeat"] = "1" })
+        T.ok(T.count("a W10 request 'read', and W10 is not offered on this platform") == 1
+          and T.count("a W10 request 'try', and W10 is not offered on this platform") == 1, T.dump())
+        T.ok(S.dumpedId == nil and #S.acts == 0 and #S.moves == 0 and #S.reads == 0 and #S.speech == spoken,
+          "nothing read, tried or said")
+    "##);
+}
+
+/// MW1b on a Mac: F8 pressed in a page goes back, as F7 does; from the plug-in window it shows the
+/// page without activation — built at its first press, shown once ready — and F7 pressed in that
+/// one goes back too, while F7 from the plug-in window still shows the tool page, and so does the
+/// captured key, without the keyboard, whichever page was used last. A key leaves the other pages
+/// as they are: the page without activation takes the keyboard with the tool page shown beside the
+/// plug-in window without it, and leaving, it leaves that one shown — MW1b's window of the
+/// application's own that AppKit may give the keyboard to. The page without activation's switch
+/// button goes to the application window, which stays open when F8 is pressed later.
+#[test]
+fn on_a_mac_f8_shows_the_page_without_activation_and_leaves_the_others_as_they_are() {
+    run_mac(r##"
+        local S = T.S
+        T.mac()
+        T.probe()
+        T.shownMac()
+        local asked = S.pg.shows[2]
+        T.ok(asked.focus == true and asked.avoid.x == T.FLOAT.bounds.x and asked.avoid.w == T.FLOAT.bounds.w,
+          "beside REAPER's floating window")
+        local from = #S.order
+        T.key(T.F8)
+        T.ok(S.order[from + 1] == "focus 11" and S.order[from + 2] == "hide", "pressed in the page, back: " .. table.concat(S.order, ","))
+        T.ok(#S.npg.shows == 0, "and nothing shown")
+        local said = T.report()
+        T.ok(T.has(said, "F8, pressed in the page: back to the plug-in accepted"), said)
+        -- From the plug-in window: built first, then shown with the keyboard; the tool page is not asked.
+        S.front = T.FLOAT
+        T.turn()
+        S.npg.answers = { { false, "not ready yet" } }
+        T.key(T.F8)
+        T.ok(#S.npg.shows == 1 and S.npg.shows[1].focus == true and S.npg.shows[1].avoid.x == T.FLOAT.bounds.x, "asked beside it")
+        T.ok(T.last() == "Building the page.", T.last())
+        S.now += 50
+        T.naReady()
+        T.ok(#S.npg.shows == 2 and S.front == T.NA_PAGE and #S.pg.shows == 2, "shown once ready")
+        said = T.report()
+        T.ok(T.has(said, "F8 (page without activation) (after the build): accepted, 50 ms after the key's callback; in front: the page"), said)
+        -- F7 pressed in it goes back; F7 from the plug-in window shows the tool page.
+        T.key(T.F7)
+        T.ok(not S.npg.shown and S.focusCalls[#S.focusCalls] == T.FLOAT.id, "back to the plug-in")
+        S.front = T.FLOAT
+        T.turn()
+        T.key(T.F7)
+        T.ok(#S.pg.shows == 3 and #S.npg.shows == 2 and S.front == T.FLOAT, "F7 asks for the front for the tool page")
+        S.now += 40
+        T.keyed(T.PAGE)
+        T.ok(S.front == T.PAGE, "F7 shows the tool page")
+        said = T.report()
+        T.ok(T.has(said, "F7, pressed in the page: back to the plug-in accepted"), said)
+        T.ok(T.has(said, "F7 (hotkey): the front asked for, 0 ms after the key's callback; in front so far: the plug-in window F7"), said)
+        T.ok(T.has(said, "F7 (hotkey): the page has the focus 40 ms after the key's callback"), said)
+        T.ok(not T.has(said, "ACCEPTED BUT NOT IN FRONT"), said)
+        -- A key leaves the other pages as they are: the tool page shown without the keyboard, then
+        -- F8 — the page without activation with the keyboard, beside it — and leaving, that one
+        -- leaves the tool page shown.
+        T.key(T.F7)
+        S.front = T.FLOAT
+        T.turn()
+        T.captured(T.F12)
+        T.ok(S.pg.shown and S.pg.shows[#S.pg.shows].focus == false and S.front == T.FLOAT, "the tool page, without the keyboard")
+        from = #S.order
+        T.key(T.F8)
+        T.ok(S.order[from + 1] == "show na" and S.order[from + 2] == nil, table.concat(S.order, ","))
+        T.ok(S.front == T.NA_PAGE and S.pg.shown, "beside the tool page shown without the keyboard")
+        from = #S.order
+        T.key(T.F8)
+        T.ok(S.order[from + 1] == "focus 11" and S.order[from + 2] == "hide na" and S.order[from + 3] == nil, table.concat(S.order, ","))
+        T.ok(S.pg.shown and not S.npg.shown, "the tool page still shown")
+        -- The page without activation used last: the captured key is still the tool page's, and
+        -- updates its live region.
+        S.front = T.FLOAT
+        T.turn()
+        local naShows = #S.npg.shows
+        T.captured(T.F12)
+        T.ok(S.pg.posts[#S.pg.posts].kind == "live" and #S.npg.shows == naShows, "the tool page's live region, not the other page shown")
+        -- Its switch button: the application window, then it goes.
+        S.front = T.FLOAT
+        T.turn()
+        T.key(T.F8)
+        from = #S.order
+        T.naMsg({ kind = "action", action = "switch", count = 1, detail = 1, released = true, releases = { "mouseup" } })
+        T.ok(S.order[from + 1] == "show app" and S.order[from + 2] == "hide na", table.concat(S.order, ","))
+        T.keyed(T.APP_PAGE)
+        said = T.report()
+        T.ok(T.has(said, "switch to the application window: the front asked for, 0 ms after the page's button; in front so far: "
+          .. "the page without activation"), said)
+        -- F8 from the plug-in window with the application window in use: it stays open.
+        T.appPress("back")
+        S.front = T.FLOAT
+        T.turn()
+        local appHides = S.apg.hides
+        T.key(T.F8)
+        T.ok(S.front == T.NA_PAGE and S.apg.hides == appHides and S.apg.shown, "the application window stays open")
+    "##);
+}
+
+/// W3 on a Mac (MW4): the click goes onto the plug-in window's title bar — half way down it, across
+/// its middle — and not into its content, which `controls()` cannot tell apart from its buttons
+/// there; a second round trip clicks twice APART further along it, so two are never a double
+/// click, and a third comes back to the middle. Logic's plug-in window, whose content begins at its
+/// frame, has no title bar to click: nothing is clicked, and the page comes back all the same.
+#[test]
+fn w3_on_a_mac_clicks_the_plugin_windows_title_bar_away_from_the_last_click() {
+    run_mac(r##"
+        local S = T.S
+        T.mac()
+        T.probe()
+        T.shownMac()
+        S.controls = { { id = 30, class = "AXGroup//", bounds = T.FLOAT.client, client = T.FLOAT.client } }
+        T.press("click-plugin")
+        T.ok(S.focusCalls[#S.focusCalls] == T.FLOAT.id and #S.clicks == 0, "asked forward, nothing clicked yet")
+        T.arrive(T.FLOAT)
+        T.ok(#S.clicks == 1 and S.clicks[1][1] == 550 and S.clicks[1][2] == 49,
+          "the title bar's middle: " .. S.clicks[1][1] .. "," .. S.clicks[1][2])
+        T.ok(S.clicks[1][2] < T.FLOAT.client.y, "above the window's content")
+        T.ok(T.count("clicked at 550,49 (its title bar)") == 1, T.dump())
+        T.ok(S.ownsAsked[#S.ownsAsked][1] == T.FLOAT.id, "asked whether anything covers it first")
+        T.runDue()
+        T.ok(S.front == T.FLOAT and S.pg.shows[#S.pg.shows].focus == true, "the page asked back in the picture's answer")
+        T.keyed(T.PAGE)
+        T.press("click-plugin")
+        T.arrive(T.FLOAT)
+        T.ok(S.clicks[2][1] == 582 and S.clicks[2][2] == 49, "further along: " .. S.clicks[2][1] .. "," .. S.clicks[2][2])
+        T.runDue()
+        T.keyed(T.PAGE)
+        T.press("click-plugin")
+        T.arrive(T.FLOAT)
+        T.ok(S.clicks[3][1] == 550, "the middle again: " .. S.clicks[3][1])
+        T.runDue()
+        T.keyed(T.PAGE)
+        local said = T.report()
+        T.ok(T.has(said, "W3: the page asked back, 0 ms after the press; in front so far: the plug-in window; the plug-in "
+          .. "window kept its place and size."), said)
+        T.ok(T.has(said, "W3 back: the page has the focus 0 ms after the page was asked back"), said)
+        T.ok(not T.has(said, "came back") and not T.has(said, "MW4:"), said)
+        T.ok(T.count("MW4: the tool page's place is not known, so whether its level follows the keyboard is not seen") == 3, T.dump())
+        -- Logic's plug-in window: no title bar of its own in the host's geometry, so no click.
+        T.key(T.F7)
+        S.front = T.LOGIC
+        T.turn()
+        T.key(T.F7)
+        T.keyed(T.PAGE)
+        T.ok(S.front == T.PAGE and S.pg.shows[#S.pg.shows].avoid.x == T.LOGIC.bounds.x, "beside Logic's window")
+        T.press("click-plugin")
+        T.arrive(T.LOGIC)
+        T.ok(#S.clicks == 3, "nothing clicked")
+        T.ok(T.count("it has no title bar of its own to click, so nothing is clicked") == 1, T.dump())
+        T.runDue()
+        said = T.report()
+        T.ok(T.has(said, "W3: the page asked back (no click), 0 ms after the press; in front so far: the plug-in window"), said)
+    "##);
+}
+
+/// W3 on a Mac, told by a focus event alone. Only an application's activation is a foreground event
+/// there, so the plug-in window focused in the application that is the active one already — REAPER,
+/// the page described `activates = false` having had the keyboard only lent — comes with no
+/// activation at all, and the plug-in window focused after its application's activation named
+/// another of its windows first comes with a focus event after it. W3 goes on when a focus event
+/// finds the plug-in window with the keyboard, once, and not before: a focus event with the page
+/// still in front, or the activation naming REAPER's main window, leaves it waiting, and the report
+/// says so.
+#[test]
+fn w3_on_a_mac_goes_on_when_a_focus_event_finds_the_plugin_window_with_the_keyboard() {
+    run_mac(r##"
+        local S = T.S
+        T.mac()
+        T.probe()
+        local MAIN = { id = 14, title = "REAPER v7.27 - Untitled", class = "AXWindow/AXStandardWindow/", app = T.MAC_REAPER,
+          bounds = { x = 0, y = 38, w = 1440, h = 862 }, client = { x = 0, y = 60, w = 1440, h = 840 } }
+        -- The page without activation, the key window at the call.
+        S.front = T.FLOAT
+        T.turn()
+        T.key(T.F8)
+        T.ok(S.front == T.NA_PAGE, "the page without activation, in front at the call")
+        T.naMsg({ kind = "focus", target = "the document" })
+        T.report()
+        T.naPress("click-plugin")
+        T.ok(S.focusCalls[#S.focusCalls] == T.FLOAT.id and #S.clicks == 0, "the plug-in window asked forward")
+        T.focusMoves({ T.NA_PAGE })
+        T.ok(#S.clicks == 0, "nothing while the page has the keyboard")
+        local said = T.report()
+        T.ok(T.has(said, "W3 is still waiting for the plug-in window to come to the front."), said)
+        -- REAPER the active application all along: no activation, the keyboard in the plug-in window.
+        S.front = T.FLOAT
+        T.focusMoves({ T.FLOAT })
+        T.ok(#S.clicks == 1 and S.clicks[1][1] == 550 and S.clicks[1][2] == 49, "the title bar, on the focus event")
+        T.ok(T.count("W3: the plug-in window has the keyboard, told by a focus event") == 1, T.dump())
+        T.focusMoves({ T.FLOAT })
+        T.ok(#S.clicks == 1 and #S.asyncs == 1, "once")
+        T.runDue()
+        T.ok(S.front == T.NA_PAGE, "the page without activation back, in front at the call")
+        said = T.report()
+        T.ok(T.has(said, "W3: the page came back, accepted") and T.has(said, "in front: the page;"), said)
+        -- The tool page, the activating panel: REAPER's activation names its main window first, and
+        -- the plug-in window has the keyboard with the focus event after it.
+        T.key(T.F7)
+        S.front = T.FLOAT
+        T.turn()
+        T.key(T.F7)
+        T.keyed(T.PAGE)
+        T.report()
+        T.press("click-plugin")
+        T.arrive(MAIN)
+        T.ok(#S.clicks == 1, "not on REAPER's main window")
+        S.front = T.FLOAT
+        T.focusMoves({ T.FLOAT })
+        T.ok(#S.clicks == 2 and S.clicks[2][1] == 582, "the title bar, away from the last click: " .. S.clicks[2][1])
+        T.runDue()
+        T.keyed(T.PAGE)
+        said = T.report()
+        T.ok(T.has(said, "W3: the page asked back, ") and T.has(said, "W3 back: the page has the focus"), said)
+    "##);
+}
+
+/// MW4 on a Mac: whether the page's level follows the keyboard is seen only where the page is over
+/// part of the plug-in window. Once the plug-in window is in front, the window server is asked at
+/// the middle of the part the page covers — before the click on the title bar, which goes on as
+/// ever — and the answer is a result: the page still drawn over the plug-in window there, or the
+/// plug-in window drawn over it. Beside the plug-in window the level is not seen, and only the log
+/// says so. On Windows nothing of this is asked.
+#[test]
+fn mw4_on_a_mac_asks_the_window_server_where_the_page_covers_the_plugin_window() {
+    run_mac(r##"
+        local S = T.S
+        T.mac()
+        T.probe()
+        -- The page put over part of REAPER's plug-in window, at its bottom right, for want of room.
+        local OVER = { id = T.PAGE.id, title = "HTML probe", class = "AXWindow/AXFloatingWindow/", app = T.PAGE.app, own = true,
+          bounds = { x = 680, y = 378, w = 320, h = 360 }, client = { x = 680, y = 400, w = 320, h = 338 } }
+        S.listed = { T.FLOAT, T.CHAIN, T.LOGIC, OVER }
+        S.front = T.FLOAT
+        T.turn()
+        S.pg.answers = { { true, "over the rectangle to avoid" } }
+        T.key(T.F7)
+        T.keyed(T.PAGE)
+        T.report()
+        -- The window server: where the page is, the page, while it floats.
+        local floating = true
+        rawset(T.host.window, "ownsPoint", function(id, x, y)
+          S.ownsAsked[#S.ownsAsked + 1] = { id, x, y }
+          local b = OVER.bounds
+          return not (floating and x >= b.x and x < b.x + b.w and y >= b.y and y < b.y + b.h)
+        end)
+        T.press("click-plugin")
+        T.arrive(T.FLOAT)
+        local level, bar = S.ownsAsked[#S.ownsAsked - 1], S.ownsAsked[#S.ownsAsked]
+        T.ok(level[1] == T.FLOAT.id and level[2] == 840 and level[3] == 558, "the middle of the part the page covers, first")
+        T.ok(bar[2] == 550 and bar[3] == 49 and #S.clicks == 1, "then the title bar, clicked as ever")
+        T.runDue()
+        T.keyed(T.PAGE)
+        local said = T.report()
+        T.ok(T.has(said, "MW4: the plug-in window is in front, and something is STILL DRAWN OVER it at 840,558, where the tool "
+          .. "page covers it W3:"), said)
+        floating = false
+        T.press("click-plugin")
+        T.arrive(T.FLOAT)
+        T.runDue()
+        T.keyed(T.PAGE)
+        said = T.report()
+        T.ok(T.has(said, "MW4: the plug-in window is in front, and drawn over the tool page where that covers it, at 840,558 W3:"), said)
+        -- Beside it: not seen, in the log only.
+        OVER.bounds = { x = 1000, y = 38, w = 520, h = 640 }
+        local asked = #S.ownsAsked
+        T.press("click-plugin")
+        T.arrive(T.FLOAT)
+        T.ok(#S.ownsAsked == asked + 1, "the title bar alone")
+        T.runDue()
+        T.keyed(T.PAGE)
+        said = T.report()
+        T.ok(not T.has(said, "MW4"), said)
+        T.ok(T.count("MW4: the tool page is beside the plug-in window, so whether its level follows the keyboard is not seen") == 1, T.dump())
+    "##);
+}
+
+/// The automatic show (W2 c) on a Mac shows the page F7 shows, never the page without activation,
+/// which only F8 shows: with that page the one used last, the plug-in window arriving from another
+/// application's window brings the tool page.
+#[test]
+fn on_a_mac_the_automatic_show_never_brings_the_page_without_activation() {
+    run_mac(r##"
+        local S = T.S
+        T.mac()
+        T.probe()
+        local FINDER = { id = 31, title = "Documents", class = "AXWindow/AXStandardWindow/",
+          app = { pid = 7000, exe = "Finder", name = "Finder", bundleId = "com.apple.finder" },
+          bounds = { x = 0, y = 38, w = 800, h = 500 }, client = { x = 0, y = 60, w = 800, h = 478 } }
+        T.set("autoShow", true)
+        S.front = T.FLOAT
+        T.turn()
+        T.key(T.F8)
+        T.ok(S.front == T.NA_PAGE and #S.npg.shows == 1, "the page without activation, by F8")
+        T.key(T.F8)
+        T.ok(not S.npg.shown, "and back")
+        local shows = #S.pg.shows
+        T.arrive(FINDER)
+        T.arrive(T.FLOAT)
+        T.ok(#S.npg.shows == 1 and #S.pg.shows == shows + 1 and S.pg.shows[#S.pg.shows].focus == true, "the tool page")
+        T.keyed(T.PAGE)
+        local said = T.report()
+        T.ok(T.has(said, "automatic show: the front asked for"), said)
+    "##);
+}
+
+/// MW2 and MW16 on a Mac: the captured key from the plug-in window shows the page in use beside it
+/// without the keyboard, saying nothing; pressed again while it is shown so, it updates the page's
+/// live region, again saying nothing over it. Before the page is built, it builds it and says so.
+/// Should it ever fire while a window of this application has the keyboard — where no capture
+/// applies — that is a result, and nothing else happens. And the page's modifiers are said in the
+/// Mac's words, in Apple's order.
+#[test]
+fn on_a_mac_the_captured_key_shows_the_page_without_the_keyboard_then_updates_its_live_region() {
+    run_mac(r##"
+        local S = T.S
+        T.mac()
+        T.probe()
+        T.arrive(T.FLOAT)
+        T.ok(S.pg.prepares == 1, "prepared when the plug-in window first came forward")
+        S.pg.answers = { { false, "not ready yet" } }
+        T.captured(T.F12)
+        T.ok(T.last() == "Building the page. Press the key again once it is ready.", T.last())
+        T.ready()
+        T.ok(not S.pg.shown, "not shown by itself")
+        local spoken = #S.speech
+        T.captured(T.F12)
+        local asked = S.pg.shows[#S.pg.shows]
+        T.ok(asked.focus == false and asked.avoid.x == T.FLOAT.bounds.x, "beside the plug-in window, without the keyboard")
+        T.ok(S.pg.shown and S.front == T.FLOAT, "the plug-in window keeps the keyboard")
+        T.ok(#S.speech == spoken, "nothing said")
+        local said = T.report()
+        T.ok(T.has(said, "F12 (captured, without the keyboard): the tool page shown, 0 ms after the key's callback; in front: the plug-in window"), said)
+        spoken = #S.speech
+        local shows = #S.pg.shows
+        T.captured(T.F12)
+        local live = S.pg.posts[#S.pg.posts]
+        T.ok(live.kind == "live" and live.text == "Live region update 1, while the page does not have the keyboard.", tostring(live.text))
+        T.ok(#S.speech == spoken and #S.pg.shows == shows, "nothing said over it, and not shown again")
+        said = T.report()
+        T.ok(T.has(said, "MW16: live region update 1 posted to the tool page, which does not have the keyboard; in front: the plug-in window"), said)
+        -- In the page: no capture applies there; should this one fire, it is said and nothing happens.
+        T.key(T.F7)
+        T.keyed(T.PAGE)
+        T.ok(S.front == T.PAGE, "the page with the keyboard")
+        local posts, hides = #S.pg.posts, S.pg.hides
+        T.captured(T.F12)
+        T.ok(T.last() == "The captured key fired in a window of this application.", T.last())
+        T.ok(#S.pg.posts == posts and S.pg.hides == hides and S.front == T.PAGE, "nothing else")
+        said = T.report()
+        T.ok(T.has(said, "MW16: the captured key FIRED while a window of this application had the keyboard; in front: the page"), said)
+        -- What the page gets instead: its key, in the Mac's words.
+        T.msg({ kind = "key", type = "keydown", key = "F12", code = "F12", ctrl = true, alt = true, shift = true, meta = true, target = "the document" })
+        T.ok(T.count("W4 key: keydown Control+Option+Shift+Cmd+F12 (code F12) on the document") == 1, T.dump())
+        said = T.report()
+        T.ok(T.has(said, "Key presses the page saw: 1: Control+Option+Shift+Cmd+F12."), said)
     "##);
 }

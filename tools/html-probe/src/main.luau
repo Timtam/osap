@@ -1,13 +1,14 @@
--- HTML page probe (dev tool, Windows): the maintainer's NVDA test of `host.gui.webview`, stage 1
--- of the HTML plan of 2026-09-28. It answers the questions W1–W9 in TODO.md — whether NVDA finds
--- its way into a page shown beside a plug-in window, which way of pressing a key gives the page
--- the front, what a click into the plug-in and back costs, which keys reach the page — for a
--- person who cannot see the screen: everything it observes goes into the log, and one key says
--- what happened since it was last pressed.
+-- HTML page probe (dev tool, Windows and macOS): the maintainer's NVDA test of `host.gui.webview`,
+-- stage 1 of the HTML plan of 2026-09-28, and the Mac tester's VoiceOver test of the same pages on
+-- a Mac (stage 4). It answers the questions W1–W10 and MW1–MW19 in TODO.md — whether the screen
+-- reader finds its way into a page shown beside a plug-in window, which way of pressing a key
+-- gives the page the front, what a click into the plug-in and back costs, which keys reach the
+-- page — for a person who cannot see the screen: everything it observes goes into the log, and
+-- one key says what happened since it was last pressed.
 --
 -- It binds nothing to a plug-in and adds no overlay. Test it on a plug-in without one (ReaEQ in
--- REAPER). Its keys, all free on Windows with NVDA — the four-modifier chord the platform's own
--- reload (F5) and plug-in focus key (F6) use, one function key further along each:
+-- REAPER). Its keys on Windows, all free there with NVDA — the four-modifier chord the platform's
+-- own reload (F5) and plug-in focus key (F6) use, one function key further along each:
 --   Ctrl+Shift+Win+Alt+F7  the page beside the plug-in window in front, the way every hotkey
 --                          arrives: matched in the keyboard hook (W2 a). Pressed while the page
 --                          is in front, it goes back to the plug-in (W7) — there it arrives
@@ -19,19 +20,40 @@
 --   Ctrl+Shift+Win+Alt+F10 remembers the mouse pointer's point in the plug-in window as a target
 --                          for W10 (below) — put the pointer on the control first, with NVDA's
 --                          "move mouse to navigator object" or a module's overlay.
+-- On a Mac the four-modifier chord holds Control and Option together, VoiceOver's own modifier,
+-- which takes it before any application sees it (the third Mac session); so the Mac's keys are
+-- Command-Shift chords, as the platform's own are there (Command-Shift-F5 and F6), clear of the
+-- window probe's F9 and F10, which ship in the Mac's download:
+--   Command-Shift-F7   the page beside the plug-in window in front, with the keyboard (MW1a);
+--                      pressed in a page, back to the plug-in (MW3). Every hotkey on a Mac is the
+--                      system's own delivery, so `{ foreground = true }`, and W2 with it, asks
+--                      nothing there.
+--   Command-Shift-F8   the same page described `activates = false` (MW1b) instead: a panel that
+--                      takes the keyboard while the DAW stays the active application. Pressed in a
+--                      page, back to the plug-in.
+--   Command-Shift-F11  says what happened since it was last pressed, and counts anew.
+--   Command-Shift-F12  a captured key, not a hotkey: the page F7 shows, beside the plug-in window
+--                      without the keyboard (MW2), and pressed again while it is shown so, its live
+--                      region updated (MW16). Pressed in a page it must not fire — no capture
+--                      applies while a window of this application has the keyboard (MW16) — and
+--                      the page gets it as a key instead.
 -- And one setting, off by default: the tool page comes up by itself when a plug-in window comes
 -- to the front from another window (W2 c) — never the application window, which is reached as any
 -- program's window is.
 --
--- W10 (clicking without the round trip, from the page): the page's "Read the plug-in's elements"
--- lists what UIA has of the plug-in; then a way — nothing (only watch), the round trip, a posted
--- click, a posted click with the pointer left where it is, the no-activate style, an accessibility
--- press — and 1, 10 or 20 times; "Try it". Each attempt puts the pointer on the target first for
--- the ways that move it, reads the plug-in near the target before and after, takes a baseline
--- picture, acts, waits for the picture to change, and says what happened without cutting NVDA
--- off: whether another window came forward, whether the pixels at the target changed, the text
--- before and after, and the element's state where it is readable. The round trip goes as W3's,
--- each step on the event that ends the one before. F7 or F8 gives a run up.
+-- W10, on Windows (clicking without the round trip, from the page): the page's "Read the
+-- plug-in's elements" lists what UIA has of the plug-in; then a way — nothing (only watch), the
+-- round trip, a posted click, a posted click with the pointer left where it is, the no-activate
+-- style, an accessibility press — and 1, 10 or 20 times; "Try it". Each attempt puts the pointer
+-- on the target first for the ways that move it, reads the plug-in near the target before and
+-- after, takes a baseline picture, acts, waits for the picture to change, and says what happened
+-- without cutting NVDA off: whether another window came forward, whether the pixels at the
+-- target changed, the text before and after, and the element's state where it is readable. The
+-- round trip goes as W3's, each step on the event that ends the one before. F7 or F8 gives a run
+-- up. Not on a Mac, where its ways of acting without the round trip answer "not supported on
+-- this platform yet" and the window probe holds Command-Shift-F10: there F10 is not registered,
+-- and the page, whose W10 part is hidden until it is told as it loads that W10 is offered, keeps
+-- it hidden, so the Mac's page is revision 6's.
 --
 -- Two pages from the same files: the tool page of W1–W9, in no list of windows, and the same page
 -- in an application window (`window = "app"`), in Alt+Tab and on the taskbar, for W6 again — the
@@ -42,10 +64,17 @@
 -- the plug-in" hides the tool page and leaves the application window open behind the plug-in
 -- window, as any program's window stays: Alt+Tab, or F7, brings it back.
 --
+-- On a Mac a third page from the same files: the tool page described `activates = false`
+-- (experimental), titled "HTML probe without activation", which only Command-Shift-F8 shows. A
+-- key shows its page and leaves the others as they are, so this one can take the keyboard with
+-- the tool page shown beside the plug-in window without it (Command-Shift-F12) — a window of the
+-- application's own that AppKit may give the keyboard to as this one leaves (MW1b).
+--
 -- The tool page is prepared — built, hidden — the first time a plug-in window comes to the
 -- front, so WebView2's cold start (W8) is over before the first key; `page:prepare()` again after
--- a close. The application window is built at the first switch to it, so a run that does not
--- need it does not wait for its build too.
+-- a close. The application window is built at the first switch to it, and the page without
+-- activation at its first key, so a run that does not need them does not wait for their builds
+-- too.
 --
 -- Every time is measured from the callback that started it — a key's callback runs at the host's
 -- first tick after the press, up to about 15 ms later — and ends at the tick that hands on what
@@ -62,13 +91,43 @@ local daw = host.require("com.platform.daw-hosts")
 -- keeps the page when Windows declines (2026-10-11). 4: the page in an application window as well,
 -- for W6 again (2026-10-11). 5: W10, the ways of acting in the plug-in without the round trip
 -- (host.input.click's via = "post"/"noactivate" and host.element.press), measured from the page
--- (2026-10-11).
-local REVISION = 5
+-- (2026-10-11). 6: the probe on a Mac, for MW1–MW19 (2026-10-12), made the same day on another
+-- line of work. 7: the two together, where those lines met (2026-10-12): W10 on Windows, the
+-- Mac's keys and its page without activation on a Mac.
+local REVISION = 7
 
-local KEY_SHOW = "Ctrl+Shift+Win+Alt+F7"
-local KEY_SHOW_FG = "Ctrl+Shift+Win+Alt+F8"
-local KEY_REPORT = "Ctrl+Shift+Win+Alt+F9"
-local KEY_TARGET = "Ctrl+Shift+Win+Alt+F10"
+-- The keys, each platform's (above). F8 is Windows' own delivery there (W2 b) and the page
+-- without activation on a Mac (MW1b). W10's target key is Windows' alone, as W10 is (above), and
+-- the captured key a Mac's alone.
+local KEY_SHOW = host.os.pick({ windows = "Ctrl+Shift+Win+Alt+F7", macos = "Cmd+Shift+F7" })
+local KEY_SHOW_FG = host.os.pick({ windows = "Ctrl+Shift+Win+Alt+F8", macos = "Cmd+Shift+F8" })
+local KEY_REPORT = host.os.pick({ windows = "Ctrl+Shift+Win+Alt+F9", macos = "Cmd+Shift+F11" })
+local KEY_TARGET = host.os.pick({ windows = "Ctrl+Shift+Win+Alt+F10" })
+local KEY_UNFOCUSED = host.os.pick({ macos = "Cmd+Shift+F12" })
+
+-- How a show key's press arrives, in the results' words: on Windows F7's is matched in the
+-- keyboard hook and F8's left to Windows (W2); on a Mac every hotkey is the system's own, and F8
+-- names the page it shows.
+local HOW = host.os.pick({
+  windows = { F7 = "keyboard hook", F8 = "WM_HOTKEY" },
+  macos = { F7 = "hotkey", F8 = "page without activation" },
+})
+
+-- The modifiers the page reports of a key, in this platform's words for the W4 lines: the DOM's
+-- `ctrlKey`, `altKey`, `shiftKey` and `metaKey` are the keys so labelled, which on a Mac are
+-- Control, Option, Shift and Command — in the order Apple prints them.
+local MOD_WORDS = host.os.pick({
+  windows = { ctrl = "Ctrl+", alt = "Alt+", shift = "Shift+", meta = "Win+" },
+  macos = { ctrl = "Control+", alt = "Option+", shift = "Shift+", meta = "Cmd+" },
+})
+
+-- What a show's `true` says. On Windows the page is in front when the call returns, so one that
+-- is not is a result. On a Mac it says that the front was asked for: this application's activation
+-- comes on the event loop after the callback, and so does AppKit making the page's window the key
+-- window — unless this application is the active one already, or the page is the one described
+-- `activates = false`. There a page not yet in front is the expected answer, and the page's own
+-- focus line (`… the page has the focus N ms after …`) says whether it came (MW1a).
+local SHOW_ASKS = host.os.pick({ windows = false, macos = true })
 
 local AUTO = "autoShow"
 host.settings.define(AUTO, false, {
@@ -122,14 +181,24 @@ local function buttonCounts()
   return { ["click-plugin"] = 0, back = 0, switch = 0, announce = 0 }
 end
 
--- The two pages, each with its kind, its words for the results, whether it is built and loaded —
--- until then a plug-in window coming to the front prepares it — and its buttons' counts.
--- Described below; their callbacks close over them.
-local tool = { kind = "tool", words = "tool page", ready = false, actions = buttonCounts(), gaps = buttonCounts() }
-local app = { kind = "app", words = "application window", ready = false, actions = buttonCounts(), gaps = buttonCounts() }
-local both = { tool, app }
+-- The pages, each with its kind, its title, its words for the results, whether it is built and
+-- loaded — until then a plug-in window coming to the front prepares the tool page — and its
+-- buttons' counts. Described below; their callbacks close over them.
+local tool = { kind = "tool", title = "HTML probe", words = "tool page", ready = false, actions = buttonCounts(), gaps = buttonCounts() }
+local app = { kind = "app", title = "HTML probe window", words = "application window", ready = false, actions = buttonCounts(), gaps = buttonCounts() }
+-- On a Mac, the tool page described `activates = false` (MW1b); none on Windows, where the
+-- option changes nothing.
+local noActivation = host.os.pick({
+  macos = { kind = "tool", title = "HTML probe without activation", words = "page without activation", activates = false,
+    ready = false, actions = buttonCounts(), gaps = buttonCounts() },
+})
+local pages = { tool, app, noActivation }
 -- The page the keys and buttons work on: the one shown last.
 local cur = tool
+-- The page F7 shows, and the captured key: the tool page, or the application window once a switch
+-- has made it the page in use — never the page without activation, which only F8 shows on a Mac.
+-- The automatic show (W2 c) shows it while it is the tool page.
+local keyed = tool
 
 -- The plug-in window the page was last shown beside, as a window table.
 local plugin = nil
@@ -161,9 +230,10 @@ local w10 = { target = nil, elements = {}, run = nil }
 
 -- Keys that are only modifiers: logged, not counted — pressed in the page, they are the report
 -- key's own, whose F9 RegisterHotKey takes there (the keyboard hook is out of the chain while the
--- page is in front). Nor the key the hook presses to mask a chord it swallowed, which has no
--- virtual key of its own (`Unidentified` to the page): it reaches the page only when the hook
--- swallowed a chord in the moment it was going out.
+-- page is in front), and on a Mac whose F11 the system's hotkey delivery takes. Nor the key the
+-- hook presses to mask a chord it swallowed, which has no virtual key of its own (`Unidentified`
+-- to the page): it reaches the page only when the hook swallowed a chord in the moment it was
+-- going out.
 local NOT_COUNTED = { Control = true, Shift = true, Alt = true, Meta = true, OS = true, AltGraph = true, Unidentified = true }
 
 -- Whether `w` is a plug-in window of a DAW daw-hosts knows: an entry's matcher takes it, and the
@@ -199,7 +269,7 @@ local function frontWords()
   if not f then
     return "nothing"
   end
-  for _, rec in ipairs(both) do
+  for _, rec in ipairs(pages) do
     if rec.page and rec.page.window and f.id == rec.page.window then
       return rec == cur and "the page" or ("the " .. rec.words)
     end
@@ -224,7 +294,7 @@ local function overWords(note)
   end
   if not overSaid then
     overSaid = true
-    -- Not over NVDA saying the page, which comes to the front with this show.
+    -- Not over the screen reader saying the page, which comes to the front with this show.
     mention("The page covers part of the plug-in window: there is no room beside it.")
   end
   return " (over part of the plug-in window: no room beside it)"
@@ -242,6 +312,9 @@ local function showBeside(rec, p, via, t0, after, replaces)
   if ok then
     pending = nil
     cur = rec
+    if rec ~= noActivation then
+      keyed = rec
+    end
     if replaces and replaces ~= rec and replaces.page:isShown() then
       replaces.page:hide()
     end
@@ -250,6 +323,8 @@ local function showBeside(rec, p, via, t0, after, replaces)
     local front = frontWords()
     if front == "the page" then
       result("%s: accepted, %d ms after %s; in front: the page%s", via, ms, after, over)
+    elseif SHOW_ASKS then
+      result("%s: the front asked for, %d ms after %s; in front so far: %s%s", via, ms, after, front, over)
     else
       result("%s: ACCEPTED BUT NOT IN FRONT, %d ms after %s; in front: %s%s", via, ms, after, front, over)
     end
@@ -343,8 +418,9 @@ local function checkLanding()
   log("W7: the focus chain, innermost first: %s", table.concat(classes, " < "))
 end
 
--- W3's click: a point of the plug-in window's own background — inside its client area, and at
--- least CLEAR pixels from its edges and from every control in it — or nil when there is none.
+-- W3's click on Windows: a point of the plug-in window's own background — inside its client area,
+-- and at least CLEAR pixels from its edges and from every control in it — with the words for the
+-- log line, or nil and the words for why there is none.
 -- Never the title bar: two clicks there are a double click, which maximised the maintainer's FX
 -- window on 2026-09-28 and left the page no room. Assumed, and checked by the result line (the
 -- window's place and size before and after): a click on a dialog's own background reaches the
@@ -357,10 +433,13 @@ end
 -- to take a few milliseconds.
 local CLEAR = 8
 local APART = 16
+local function noBackground()
+  return nil, "it has no spot of its own background clear of its controls" .. (lastClick and " and away from the last click" or "")
+end
 local function backgroundPoint(w)
   local c = w.client
   if not c or c.w < 2 * CLEAR or c.h < 2 * CLEAR then
-    return nil
+    return noBackground()
   end
   local controls = host.window.controls(w)
   local step = math.max(16, math.min(c.w, c.h) // 32)
@@ -386,17 +465,94 @@ local function backgroundPoint(w)
       end
     end
   end
-  return best, bestRoom
+  if not best then
+    return noBackground()
+  end
+  return best, string.format("its own background, %d px from its nearest control or edge", bestRoom)
 end
+
+-- W3's click on a Mac (MW4): a point of the plug-in window's title bar — half way down it, across
+-- its middle, clear of the window's three buttons on its left — with the words for the log line,
+-- or nil where the window has no title bar, its content beginning at its frame (Logic's plug-in
+-- windows, as the host reports them). Not the window's own background, as on Windows:
+-- `controls()` lists containers only on a Mac, never a button, a slider or a field, so the
+-- background cannot be told from the controls on it, and a click there could turn a knob or open
+-- a menu. One click on a title bar brings its window forward, which it is already, and does
+-- nothing else. Never where the last W3 click was: two round trips close together would be a
+-- double click, which zooms a window there, so a click within APART of the last one along the
+-- bar goes twice that further along it, or back.
+local BAR_BUTTONS = 80
+local BAR_LEAST = 16
+local function titleBarPoint(w)
+  local b, c = w.bounds, w.client
+  local bar = (b and c) and (c.y - b.y) or 0
+  if bar < BAR_LEAST or b.w < BAR_BUTTONS + CLEAR + 4 * APART then
+    return nil, "it has no title bar of its own to click"
+  end
+  local lo, hi = b.x + BAR_BUTTONS, b.x + b.w - 1 - CLEAR
+  local x = math.clamp(b.x + b.w // 2, lo, hi)
+  if lastClick and math.abs(x - lastClick.x) < APART then
+    x = if x + 2 * APART <= hi then x + 2 * APART else x - 2 * APART
+  end
+  return { x = x, y = b.y + bar // 2 }, "its title bar"
+end
+
+-- The click of the round trip, each platform's (above).
+local clickSpot = host.os.pick({ windows = backgroundPoint, macos = titleBarPoint })
+
+-- MW4, a Mac's: whether the page's level follows the keyboard — floating while the page has it,
+-- the normal level otherwise — so that the plug-in window, once it has the keyboard, is drawn over
+-- a page that covers part of it. Beside the plug-in window, where a show with `avoid` puts the page
+-- whenever there is room, the level changes nothing a click or a read of the plug-in window meets,
+-- and it is not seen here: the log says so. Over part of it — a window with no room beside it —
+-- the window server is asked at the middle of the part the page covers, once the plug-in window is
+-- in front: `false` is the page, or something else, still drawn over it there (the host's log
+-- names that window's application and level). The page's place is its window table, listed among
+-- this application's windows; this application's process is the one the window in front belongs
+-- to when the page's "Click into the plug-in" arrives (`ownPid`).
+local ownPid = nil
+local function levelSeen(w)
+  local id, pg = cur.page.window, nil
+  if ownPid and id then
+    for _, x in ipairs(host.window.list({ pids = { ownPid } })) do
+      if x.id == id then
+        pg = x
+        break
+      end
+    end
+  end
+  if not pg then
+    log("MW4: the %s's place is not known, so whether its level follows the keyboard is not seen", cur.words)
+    return
+  end
+  local a, b = pg.bounds, w.bounds
+  local x1, y1 = math.max(a.x, b.x), math.max(a.y, b.y)
+  local x2, y2 = math.min(a.x + a.w, b.x + b.w), math.min(a.y + a.h, b.y + b.h)
+  if x1 >= x2 or y1 >= y2 then
+    log("MW4: the %s is beside the plug-in window, so whether its level follows the keyboard is not seen", cur.words)
+    return
+  end
+  local x, y = (x1 + x2) // 2, (y1 + y2) // 2
+  local owns = host.window.ownsPoint(w.id, x, y)
+  if owns == false then
+    result("MW4: the plug-in window is in front, and something is STILL DRAWN OVER it at %d,%d, where the %s covers it", x, y, cur.words)
+  elseif owns then
+    result("MW4: the plug-in window is in front, and drawn over the %s where that covers it, at %d,%d", cur.words, x, y)
+  else
+    log("MW4: the window server could not say which window is drawn at %d,%d, where the %s covers the plug-in window", x, y, cur.words)
+  end
+end
+local seeLevel = host.os.pick({ macos = levelSeen })
 
 -- W3: into the plug-in and back, as an overlay's action on a page would be — and every step on
 -- the event that says the one before is done. The plug-in window is asked to the front — in front
 -- of the page, which may be over part of it (no room beside a maximised window); when it is there
--- (its foreground event, below), one click goes onto its own background (above), or none where it
--- has no such spot — then the round trip is the change of windows alone — and a picture of the
--- plug-in is asked for, off the event loop, as an overlay reads after its click; in that
--- picture's answer, once the click has gone through Windows, the page is asked back. Then whether
--- it keeps the front: a blur of the page's with another window in front says when it does not.
+-- (its foreground event, or a focus event that finds it with the keyboard: below), one click goes
+-- onto its own background — on a Mac its title bar (above) — or none where it has no such spot —
+-- then the round trip is the change of windows alone — and a picture of the plug-in is asked for,
+-- off the event loop, as an overlay reads after its click; in that picture's answer, once the
+-- click has gone through the system, the page is asked back. Then whether it keeps the front: a
+-- blur of the page's with another window in front says when it does not.
 local function clickIntoPlugin()
   local p = refreshed(plugin)
   if not p then
@@ -407,6 +563,13 @@ local function clickIntoPlugin()
   pressedAt = t0
   landing = nil
   w3 = { stage = "forward", t0 = t0, plugin = p }
+  if seeLevel then
+    -- The page pressed in has the keyboard: the window in front is this application's.
+    local f = host.window.foreground()
+    if f and f.own then
+      ownPid = f.pid
+    end
+  end
   local accepted = host.window.focus(p.id)
   log("W3: the plug-in window asked to the front: %s; in front right after asking: %s", accepted and "accepted" or "DECLINED", frontWords())
   if not accepted then
@@ -420,9 +583,12 @@ end
 -- back.
 local function w3Arrived(w)
   w3.stage = "click"
-  local spot, room = backgroundPoint(w)
+  if seeLevel then
+    seeLevel(w)
+  end
+  local spot, where = clickSpot(w)
   if not spot then
-    log("W3: the plug-in window came to the front %d ms after the press; it has no spot of its own background clear of its controls%s, so nothing is clicked — the round trip is the change of windows alone", host.now() - w3.t0, lastClick and " and away from the last click" or "")
+    log("W3: the plug-in window came to the front %d ms after the press; %s, so nothing is clicked — the round trip is the change of windows alone", host.now() - w3.t0, where)
   elseif host.window.ownsPoint(w.id, spot.x, spot.y) == false then
     -- Nothing clicked through another window; the round trip goes on without the click, so the
     -- page still comes back.
@@ -432,10 +598,7 @@ local function w3Arrived(w)
   else
     host.input.click(spot.x, spot.y)
     lastClick = spot
-    log(
-      "W3: the plug-in window came to the front %d ms after the press; clicked at %d,%d (its own background, %d px from its nearest control or edge)",
-      host.now() - w3.t0, spot.x, spot.y, room
-    )
+    log("W3: the plug-in window came to the front %d ms after the press; clicked at %d,%d (%s)", host.now() - w3.t0, spot.x, spot.y, where)
   end
   w3.clicked = spot ~= nil
   local c = w.client
@@ -468,10 +631,18 @@ local function w3Arrived(w)
       w3.stage = "watch"
       w3.backAt = host.now()
       measuring = { via = "W3 back", t0 = t, after = "the page was asked back" }
-      result(
-        "W3: the page came back%s, accepted, %d ms after the press; in front: %s%s; %s. It has kept the front so far.",
-        w3.clicked and "" or " (no click)", host.now() - w3.t0, front, overWords(note), kept
-      )
+      if SHOW_ASKS and front ~= "the page" then
+        -- On a Mac the front only asked for (SHOW_ASKS): the page's focus line follows.
+        result(
+          "W3: the page asked back%s, %d ms after the press; in front so far: %s%s; %s.",
+          w3.clicked and "" or " (no click)", host.now() - w3.t0, front, overWords(note), kept
+        )
+      else
+        result(
+          "W3: the page came back%s, accepted, %d ms after the press; in front: %s%s; %s. It has kept the front so far.",
+          w3.clicked and "" or " (no click)", host.now() - w3.t0, front, overWords(note), kept
+        )
+      end
     else
       result("W3: the page did not come back: %s, %d ms after the press; in front: %s; %s", tostring(note), host.now() - w3.t0, front, kept)
       w3 = nil
@@ -497,24 +668,26 @@ local function short(s)
   return s
 end
 
--- What an element says about its own state, where it is readable — the plug-in window's title is
--- tried as the container (its UIA root carries it), so a Window/Pane named for it is the subtree
--- searched; "—" when nothing answers.
-local function stateWords(p, el)
+-- What an element says about its own state, where it is readable, handed to `done` — the plug-in
+-- window's title is tried as the container (its UIA root carries it), so a Window/Pane named for
+-- it is the subtree searched; "—" when nothing answers. Asked with a callback, so the event loop
+-- never waits for the plug-in's answer; at once for the point, which has no element to ask about.
+local function stateWords(p, el, done)
   if not el then
-    return "—"
+    done("—")
+    return
   end
-  local st = host.element.stateProbe(p.id, p.title or "", el.name, el.ctype)
-  if not st then
-    return "—"
-  end
-  if st.toggle ~= nil then
-    return st.toggle == 1 and "on" or "off"
-  end
-  if st.checked then
-    return "checked"
-  end
-  return string.format("state 0x%x", st.legacyState)
+  host.element.stateProbe(p.id, p.title or "", el.name, el.ctype, function(st)
+    if not st then
+      done("—")
+    elseif st.toggle ~= nil then
+      done(st.toggle == 1 and "on" or "off")
+    elseif st.checked then
+      done("checked")
+    else
+      done(string.format("state 0x%x", st.legacyState))
+    end
+  end)
 end
 
 -- A box of about ±64 px around the target, inside the plug-in window's client area: what the
@@ -623,9 +796,9 @@ local function w10Act(run, x, y, el, p, done)
 end
 
 -- One attempt, every step on the event that ends the one before (no timer): the pointer to the
--- target for the ways that move it, the before read, a baseline picture, the act, a wait for the
--- picture to change, the page back for the round trip, the after read — then the result, and the
--- next repetition if any. Nothing here interrupts what the screen reader is saying. A run given up
+-- target for the ways that move it, the element's state, the before read, a baseline picture, the
+-- act, a wait for the picture to change, the page back for the round trip, the state and the read
+-- after — then the result, and the next repetition if any. Nothing here interrupts what the screen reader is saying. A run given up
 -- meanwhile (F7, F8) leaves its answers to an attempt nobody waits for: each step asks first
 -- whether its run is still the one under way.
 local function w10Attempt()
@@ -650,108 +823,120 @@ local function w10Attempt()
     host.input.move(x, y)
   end
   local region = w10Region(x, y, p)
-  local beforeState = stateWords(p, el)
-  host.ocr.recognize(region, { key = "w10" }, function(rBefore)
+  stateWords(p, el, function(beforeState)
     if not live() then
       return
     end
-    local beforeText = readingText(rBefore)
-    host.screen.snapshot({ region = region, key = "w10" }, function(base)
+    host.ocr.recognize(region, { key = "w10" }, function(rBefore)
       if not live() then
-        if base then
-          base:release()
-        end
         return
       end
-      -- Kept on the run as well, for a round trip given up while it waits for the plug-in window:
-      -- nothing else lets go of it then (onShowKey).
-      run.base = base
-      local frontBefore = frontWords()
-      local change = { timeout = 1500, settle = SETTLE_MS }
-      if base then
-        change.from = base
-      end
-      w10Act(run, x, y, el, p, function(made, why)
+      local beforeText = readingText(rBefore)
+      host.screen.snapshot({ region = region, key = "w10" }, function(base)
         if not live() then
           if base then
             base:release()
           end
           return
         end
-        host.screen.snapshot({ region = region, key = "w10", change = change }, function(snap, _why, info)
-          if base then
-            base:release()
-          end
+        -- Kept on the run as well, for a round trip given up while it waits for the plug-in window:
+        -- nothing else lets go of it then (onShowKey).
+        run.base = base
+        local frontBefore = frontWords()
+        local change = { timeout = 1500, settle = SETTLE_MS }
+        if base then
+          change.from = base
+        end
+        w10Act(run, x, y, el, p, function(made, why)
           if not live() then
-            if snap then
-              snap:release()
+            if base then
+              base:release()
             end
             return
           end
-          -- The round trip's last step: the page back, once the click has shown in the picture or
-          -- the wait gave up. A page that does not come back ends the run after this attempt.
-          if run.way == "round" then
-            local ok, note = cur.page:show({ focus = true, avoid = (refreshed(p) or p).bounds })
-            if not ok then
-              run.stop = "the page did not come back: " .. tostring(note)
+          host.screen.snapshot({ region = region, key = "w10", change = change }, function(snap, _why, info)
+            if base then
+              base:release()
             end
-          end
-          local frontAfter = frontWords()
-          local afterState = stateWords(refreshed(p) or p, el)
-          local record = function(afterText)
             if not live() then
+              if snap then
+                snap:release()
+              end
               return
             end
-            run.n += 1
-            if made then run.stats.made += 1 end
-            local picChanged = info ~= nil and info.changed == true
-            if picChanged then run.stats.pic += 1 end
-            local textChanged = beforeText ~= afterText
-            if textChanged then run.stats.text += 1 end
-            local kept = not run.otherFront and frontBefore == "the page" and frontAfter == "the page"
-            if kept then run.stats.front += 1 end
-            local line = string.format(
-              "W10 %s on %s (%d/%d): %s; front: %s; picture: %s; text: %s; state: %s",
-              run.way, run.label, run.n, run.reps,
-              made and "made" or ("NOT made (" .. tostring(why) .. ")"),
-              kept and "the page throughout" or ("changed — now " .. frontAfter),
-              pictureWords(info),
-              textChanged and string.format("%q to %q", short(beforeText), short(afterText)) or "unchanged",
-              beforeState == afterState and beforeState or (beforeState .. " to " .. afterState)
-            )
-            if run.reps == 1 then
-              result("%s", line)
-            else
-              log("%s", line)
+            -- The round trip's last step: the page back, once the click has shown in the picture or
+            -- the wait gave up. A page that does not come back ends the run after this attempt.
+            if run.way == "round" then
+              local ok, note = cur.page:show({ focus = true, avoid = (refreshed(p) or p).bounds })
+              if not ok then
+                run.stop = "the page did not come back: " .. tostring(note)
+              end
             end
-            if run.n < run.reps and not run.stop then
-              w10Attempt()
-              return
-            end
-            w10.run = nil
-            if run.reps > 1 then
-              local summary = string.format(
-                "W10 %s on %s x%d: made %d, picture changed %d, text changed %d, front kept %d",
-                run.way, run.label, run.n, run.stats.made, run.stats.pic, run.stats.text, run.stats.front
+            local frontAfter = frontWords()
+            local record = function(afterState, afterText)
+              if not live() then
+                return
+              end
+              run.n += 1
+              if made then run.stats.made += 1 end
+              local picChanged = info ~= nil and info.changed == true
+              if picChanged then run.stats.pic += 1 end
+              local textChanged = beforeText ~= afterText
+              if textChanged then run.stats.text += 1 end
+              local kept = not run.otherFront and frontBefore == "the page" and frontAfter == "the page"
+              if kept then run.stats.front += 1 end
+              local line = string.format(
+                "W10 %s on %s (%d/%d): %s; front: %s; picture: %s; text: %s; state: %s",
+                run.way, run.label, run.n, run.reps,
+                made and "made" or ("NOT made (" .. tostring(why) .. ")"),
+                kept and "the page throughout" or ("changed — now " .. frontAfter),
+                pictureWords(info),
+                textChanged and string.format("%q to %q", short(beforeText), short(afterText)) or "unchanged",
+                beforeState == afterState and beforeState or (beforeState .. " to " .. afterState)
               )
-              result("%s", summary)
-              mention(summary)
-            else
-              mention(line)
+              if run.reps == 1 then
+                result("%s", line)
+              else
+                log("%s", line)
+              end
+              if run.n < run.reps and not run.stop then
+                w10Attempt()
+                return
+              end
+              w10.run = nil
+              if run.reps > 1 then
+                local summary = string.format(
+                  "W10 %s on %s x%d: made %d, picture changed %d, text changed %d, front kept %d",
+                  run.way, run.label, run.n, run.stats.made, run.stats.pic, run.stats.text, run.stats.front
+                )
+                result("%s", summary)
+                mention(summary)
+              else
+                mention(line)
+              end
+              if run.stop then
+                result("W10: %s", run.stop)
+                mention(run.stop)
+              end
             end
-            if run.stop then
-              result("W10: %s", run.stop)
-              mention(run.stop)
-            end
-          end
-          if snap then
-            host.ocr.recognize(region, { snapshot = snap, key = "w10after" }, function(rAfter)
-              snap:release()
-              record(readingText(rAfter))
+            -- The state after, then the read after: the result once both have answered.
+            stateWords(refreshed(p) or p, el, function(afterState)
+              if not live() then
+                if snap then
+                  snap:release()
+                end
+                return
+              end
+              if snap then
+                host.ocr.recognize(region, { snapshot = snap, key = "w10after" }, function(rAfter)
+                  snap:release()
+                  record(afterState, readingText(rAfter))
+                end)
+              else
+                record(afterState, "")
+              end
             end)
-          else
-            record("")
-          end
+          end)
         end)
       end)
     end)
@@ -784,18 +969,13 @@ local function rememberTarget()
   say(string.format("Target remembered: %d, %d in the plug-in window.", w10.target.dx, w10.target.dy))
 end
 
--- The page's "Read the plug-in's elements": the plug-in's named UIA elements with a rectangle
--- inside its client area (at most 60), each as an offset so a moved window is followed, posted to
--- the page `rec` that asked for its Target select.
-local function readElements(rec)
-  local p = refreshed(plugin)
-  if not p then
-    say("No plug-in window remembered. Press F10 with the pointer on the control first.")
-    return
-  end
+-- The named UIA elements of plug-in window `p` in its dump `nodes` with a rectangle inside its
+-- client area (at most 60), each as an offset so a moved window is followed, posted to the page
+-- `rec` that asked for its Target select.
+local function listElements(rec, p, nodes)
   local c = p.client
   local out = {}
-  for _, e in ipairs(host.element.dump(p.id)) do
+  for _, e in ipairs(nodes) do
     local b = e.bounds
     if e.name ~= "" and b and b.w > 0 and b.h > 0
       and b.x >= c.x - 1 and b.y >= c.y - 1
@@ -836,6 +1016,23 @@ local function readElements(rec)
     #out, shared
   )
   mention(string.format("%d elements read.", #out))
+end
+
+-- The page's "Read the plug-in's elements": the remembered plug-in window's dump, listed for the
+-- page `rec` (listElements). Asked with a callback, so the event loop never waits for the plug-in's
+-- answer; a dump that is not all of the tree says why in the log.
+local function readElements(rec)
+  local p = refreshed(plugin)
+  if not p then
+    say("No plug-in window remembered. Press F10 with the pointer on the control first.")
+    return
+  end
+  host.element.dump(p.id, function(nodes, why)
+    if why then
+      log("W10: the plug-in's elements are not all of its tree: %s", tostring(why))
+    end
+    listElements(rec, p, nodes)
+  end)
 end
 
 -- The page's "Try it": the chosen way on the chosen target, the chosen number of times — one run
@@ -890,7 +1087,8 @@ local function switchWindow()
   pressedAt = t0
   w3 = nil
   landing = nil
-  local to = cur == tool and app or tool
+  -- From either tool page to the application window, whose label the button has there.
+  local to = cur == app and tool or app
   log("the page's button: the %s in place of the other", to.words)
   showBeside(to, p, "switch to the " .. to.words, t0, "the page's button", cur)
 end
@@ -929,7 +1127,8 @@ local function onMessage(rec, m)
   elseif kind == "focusin" then
     log("page: focus moved to %s", tostring(m.target))
   elseif kind == "key" then
-    local mods = (m.ctrl and "Ctrl+" or "") .. (m.alt and "Alt+" or "") .. (m.shift and "Shift+" or "") .. (m.meta and "Win+" or "")
+    local w = MOD_WORDS
+    local mods = (m.ctrl and w.ctrl or "") .. (m.alt and w.alt or "") .. (m.shift and w.shift or "") .. (m.meta and w.meta or "")
     log(
       "W4 key: %s %s%s (code %s)%s on %s",
       tostring(m.type), mods, keyName(m.key), tostring(m.code), m["repeat"] and ", repeating" or "", tostring(m.target)
@@ -989,8 +1188,12 @@ local function onMessage(rec, m)
       switchWindow()
     end
   elseif kind == "w10" then
-    -- `do` and `repeat` are keywords, so the page's fields are read by name.
-    if m["do"] == "read" then
+    -- `do` and `repeat` are keywords, so the page's fields are read by name. Windows' alone: on a
+    -- Mac the page keeps its W10 part hidden ("loaded", below), and a request that came all the
+    -- same is logged, not run.
+    if not KEY_TARGET then
+      log("page: a W10 request '%s', and W10 is not offered on this platform", tostring(m["do"]))
+    elseif m["do"] == "read" then
       readElements(rec)
     elseif m["do"] == "try" then
       tryW10(m)
@@ -998,8 +1201,9 @@ local function onMessage(rec, m)
       log("page: an unknown W10 request '%s'", tostring(m["do"]))
     end
   elseif kind == "loaded" then
-    -- Which page it is, for the label of its switch button.
-    rec.page:post({ kind = "window", window = rec.kind })
+    -- Which page it is, for the label of its switch button, and whether W10 is offered here: the
+    -- page's W10 part is hidden until this says it is, so on a Mac it stays hidden.
+    rec.page:post({ kind = "window", window = rec.kind, w10 = KEY_TARGET ~= nil })
     log(
       "page: document loaded, has the focus: %s; code built from a string %s; RTCPeerConnection is %s; "
         .. "navigator.clipboard.writeText is %s",
@@ -1042,12 +1246,14 @@ local function onClose(rec, why)
   end
 end
 
-for _, rec in ipairs(both) do
+for _, rec in ipairs(pages) do
   rec.page = host.gui.webview({
     file = "ui/index.html",
-    title = rec == tool and "HTML probe" or "HTML probe window",
+    title = rec.title,
     -- The tool page by default, as any module's page is that does not say.
     window = rec == app and "app" or nil,
+    -- Said only for the page without activation; every other page is described as before.
+    activates = rec.activates,
     onMessage = function(m)
       onMessage(rec, m)
     end,
@@ -1062,11 +1268,37 @@ end
 
 -- ── The keys ──────────────────────────────────────────────────────────────────
 
+-- The plug-in window a page goes beside: the one in front, or the one remembered — remembered as
+-- it is now. nil, and said, when there is none. `via` names the key, for the log.
+local function pluginFor(via)
+  local a = host.window.active()
+  if isPluginWindow(a) then
+    plugin = a
+  else
+    plugin = refreshed(plugin)
+    if plugin then
+      log("%s: the window in front is not a plug-in window; the page goes beside the one remembered", via)
+    end
+  end
+  if not plugin then
+    log("%s: no plug-in window in front and none remembered; in front: %s", via, frontWords())
+    say("No plug-in window is in front.")
+    return nil
+  end
+  log(
+    "%s pressed; in front: %s; the plug-in window '%s' at %d,%d %dx%d",
+    via, frontWords(), plugin.title or "", plugin.bounds.x, plugin.bounds.y, plugin.bounds.w, plugin.bounds.h
+  )
+  return plugin
+end
+
 -- The two show keys: the page beside the plug-in window in front, or — pressed in the page —
 -- back to the plug-in. `key` names the key, `how` the way its press arrives outside the page; in
--- the page both arrive through RegisterHotKey, the keyboard hook being out of the chain there. A
--- press ends a W3 round trip still being watched.
-local function onShowKey(key, how)
+-- the page both arrive through RegisterHotKey on Windows, the keyboard hook being out of the chain
+-- there. `which` is the page the key shows — F7's is the page F7 shows (`keyed`) — and the other
+-- pages are left as they are. A press ends a W3 round trip still being watched, and gives up a
+-- W10 run under way.
+local function onShowKey(key, how, which)
   local t0 = host.now()
   pressedAt = t0
   w3 = nil
@@ -1086,33 +1318,77 @@ local function onShowKey(key, how)
   end
   local via = string.format("%s (%s)", key, how)
   landing = nil
-  local a = host.window.active()
-  if isPluginWindow(a) then
-    plugin = a
-  else
-    plugin = refreshed(plugin)
-    if plugin then
-      log("%s: the window in front is not a plug-in window; the page goes beside the one remembered", via)
-    end
-  end
-  if not plugin then
-    log("%s: no plug-in window in front and none remembered; in front: %s", via, frontWords())
-    say("No plug-in window is in front.")
+  if not pluginFor(via) then
     return
   end
-  log(
-    "%s pressed; in front: %s; the plug-in window '%s' at %d,%d %dx%d",
-    via, frontWords(), plugin.title or "", plugin.bounds.x, plugin.bounds.y, plugin.bounds.w, plugin.bounds.h
-  )
-  showBeside(cur, plugin, via, t0, "the key's callback")
+  showBeside(which or keyed, plugin, via, t0, "the key's callback")
 end
 
 host.hotkey.register(KEY_SHOW, function()
-  onShowKey("F7", "keyboard hook")
+  onShowKey("F7", HOW.F7)
 end)
-host.hotkey.register(KEY_SHOW_FG, function()
-  onShowKey("F8", "WM_HOTKEY")
-end, { foreground = true })
+if noActivation then
+  host.hotkey.register(KEY_SHOW_FG, function()
+    onShowKey("F8", HOW.F8, noActivation)
+  end)
+else
+  host.hotkey.register(KEY_SHOW_FG, function()
+    onShowKey("F8", HOW.F8)
+  end, { foreground = true })
+end
+
+-- MW2 and MW16, a Mac's: the captured key. From the plug-in window it shows the page F7 shows
+-- beside it without the keyboard — raised above the ordinary windows, the plug-in window keeping
+-- the keyboard, where a screen reader that says nothing is the answer (MW2) — and pressed again
+-- while the page is shown so, it updates the page's live region, which the screen reader reads or
+-- does not while the page is not the key window (MW16): nothing is said with it, so what is heard
+-- is the page's. No capture applies while a window of this application has the keyboard, so
+-- pressed in a page it goes to the page as a key (its W4 line) and this never runs; if it does,
+-- that is a result, and nothing else happens.
+local liveWhileOut = 0
+local function onUnfocusedKey()
+  local t0 = host.now()
+  pressedAt = t0
+  local f = host.window.foreground()
+  if f and f.own then
+    result("MW16: the captured key FIRED while a window of this application had the keyboard; in front: %s", frontWords())
+    say("The captured key fired in a window of this application.")
+    return
+  end
+  w3 = nil
+  landing = nil
+  local rec = keyed
+  local via = "F12 (captured, without the keyboard)"
+  if rec.page:isShown() then
+    liveWhileOut += 1
+    rec.page:post({ kind = "live", text = string.format("Live region update %d, while the page does not have the keyboard.", liveWhileOut) })
+    result("MW16: live region update %d posted to the %s, which does not have the keyboard; in front: %s", liveWhileOut, rec.words, frontWords())
+    return
+  end
+  if not pluginFor(via) then
+    return
+  end
+  local ok, why = rec.page:show({ focus = false, avoid = plugin.bounds })
+  local ms = host.now() - t0
+  if ok then
+    result("%s: the %s shown, %d ms after the key's callback; in front: %s", via, rec.words, ms, frontWords())
+  elseif why == "not ready yet" then
+    log("%s: the %s is being built; it is not shown by itself when it is ready", via, rec.words)
+    say("Building the page. Press the key again once it is ready.")
+  else
+    result("%s: the %s not shown, %s, %d ms after the key's callback; in front: %s", via, rec.words, tostring(why), ms, frontWords())
+    say("Page not shown: " .. tostring(why))
+  end
+end
+
+if KEY_UNFOCUSED then
+  -- A capture raises on a Mac while the event tap cannot be made (no Accessibility grant): said,
+  -- and the rest of the probe goes on.
+  local ok, err = pcall(host.keys.capture, KEY_UNFOCUSED, onUnfocusedKey)
+  if not ok then
+    log("%s could not be captured: %s", host.keys.describe(KEY_UNFOCUSED, { style = "short" }), tostring(err))
+  end
+end
 
 host.hotkey.register(KEY_REPORT, function()
   local parts = {}
@@ -1122,6 +1398,12 @@ host.hotkey.register(KEY_REPORT, function()
       "HTML probe revision %d. The page's button Show as an application window puts it in a window of its own.",
       REVISION
     )
+    if noActivation then
+      parts[1] ..= string.format(
+        " %s shows it without activation, and %s shows it without the keyboard.",
+        host.keys.describe(KEY_SHOW_FG), host.keys.describe(KEY_UNFOCUSED)
+      )
+    end
   end
   if not cur.ready then
     parts[#parts + 1] = "The page is not ready yet."
@@ -1155,9 +1437,11 @@ host.hotkey.register(KEY_REPORT, function()
   landing = nil
 end)
 
-host.hotkey.register(KEY_TARGET, function()
-  rememberTarget()
-end)
+if KEY_TARGET then
+  host.hotkey.register(KEY_TARGET, function()
+    rememberTarget()
+  end)
+end
 
 -- ── The windows: W2 c, W3, W7 ─────────────────────────────────────────────────
 
@@ -1178,7 +1462,7 @@ host.window.onTrigger({}, function(w)
   -- one of our pages (the plug-in a round trip brings forward among them).
   if w10.run then
     local ours = false
-    for _, rec in ipairs(both) do
+    for _, rec in ipairs(pages) do
       if rec.page and rec.page.window and w.id == rec.page.window then
         ours = true
       end
@@ -1220,7 +1504,7 @@ host.window.onTrigger({}, function(w)
   if previous == w.id then
     return
   end
-  for _, rec in ipairs(both) do
+  for _, rec in ipairs(pages) do
     if rec.page.window ~= nil and previous == rec.page.window then
       return
     end
@@ -1228,18 +1512,36 @@ host.window.onTrigger({}, function(w)
   -- The application window is reached as any program's window is: by itself it would come at
   -- every return to the plug-in window from another desktop or program, take the keyboard from
   -- the plug-in, and leave the place and size the user gave it for the one beside the plug-in.
-  if cur == app then
-    log("automatic show: none — the application window is the page in use, and it comes only when asked for")
+  -- The page F7 shows, so never the page without activation, which only F8 shows on a Mac.
+  if keyed == app then
+    log(
+      "automatic show: none — the application window is the %s, and it comes only when asked for",
+      keyed == cur and "page in use" or "page F7 shows"
+    )
     return
   end
   plugin = w
   pressedAt = host.now()
-  showBeside(cur, w, "automatic show", pressedAt, "the plug-in window came forward")
+  showBeside(keyed, w, "automatic show", pressedAt, "the plug-in window came forward")
 end)
 
 -- The keyboard moving inside a window: W7's landing, when the window's foreground event came
 -- before its control had the keyboard. The first focus event after an answer ends the watch.
+-- And W3's plug-in window come to the front with no foreground event to say so: on a Mac only an
+-- application's activation is one, so a window of the application that is the active one already
+-- — REAPER's, the page described `activates = false` having had the keyboard only lent — is told
+-- by a focus event alone, as is the plug-in window focused after its application's activation
+-- named another of its windows first. W3 goes on once the plug-in window has the keyboard.
 host.window.onFocus(function()
+  if w3 and w3.stage == "forward" then
+    local f = host.window.foreground()
+    if f and f.id == w3.plugin.id then
+      local a = host.window.active()
+      log("W3: the plug-in window has the keyboard, told by a focus event, %d ms after the press", host.now() - w3.t0)
+      w3Arrived(a and a.id == f.id and a or refreshed(w3.plugin) or w3.plugin)
+      return
+    end
+  end
   checkLanding()
   if landing and landing.last then
     landing = nil
@@ -1250,15 +1552,27 @@ host.settings.onChange(AUTO, function(v)
   log("automatic show is now %s", v and "on" or "off")
 end)
 
+-- What the keys and the switch do here, in this platform's words.
+local START = host.os.pick({
+  windows = { f8 = "it (WM_HOTKEY)", lists = "in Alt+Tab and on the taskbar (W6 again)", captured = "" },
+  macos = {
+    f8 = "it without activation (activates = false, MW1b)",
+    lists = "in Command-Tab and the Dock (MW10, MW11)",
+    captured = "; %s, captured, shows it without the keyboard (MW2) and then updates its live region (MW16)",
+  },
+})
 log(
-  "revision %d ready — %s shows the page (keyboard hook), %s shows it (WM_HOTKEY), %s says what happened, "
-    .. "%s remembers the pointer's point in the plug-in for W10; "
-    .. "the page's button 'Show as an application window' shows it in a window of its own, in Alt+Tab and on the "
-    .. "taskbar (W6 again), and 'Show as a tool window' there goes back; automatic show is %s",
+  "revision %d ready — %s shows the page (%s), %s shows %s, %s says what happened%s; "
+    .. "the page's button 'Show as an application window' shows it in a window of its own, %s, "
+    .. "and 'Show as a tool window' there goes back; automatic show is %s%s",
   REVISION,
   host.keys.describe(KEY_SHOW, { style = "short" }),
+  HOW.F7,
   host.keys.describe(KEY_SHOW_FG, { style = "short" }),
+  START.f8,
   host.keys.describe(KEY_REPORT, { style = "short" }),
-  host.keys.describe(KEY_TARGET, { style = "short" }),
-  host.settings.get(AUTO) and "on" or "off"
+  KEY_TARGET and string.format(", %s remembers the pointer's point in the plug-in for W10", host.keys.describe(KEY_TARGET, { style = "short" })) or "",
+  START.lists,
+  host.settings.get(AUTO) and "on" or "off",
+  KEY_UNFOCUSED and string.format(START.captured, host.keys.describe(KEY_UNFOCUSED, { style = "short" })) or ""
 )

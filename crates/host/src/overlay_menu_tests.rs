@@ -1007,6 +1007,8 @@ fn event_kind(kind: &str) -> mlua::Result<(bool, &'static str)> {
         "focus" => (false, "focus change"),
         "answer" => (false, "ocr.recognize"),
         "acted" => (false, "input.click"),
+        "dumped" => (false, "element.dump"),
+        "probed" => (false, "element.stateProbe"),
         "setting" => (false, "settings onChange"),
         "page message" => (true, "page message"),
         "page ready" => (false, "page ready"),

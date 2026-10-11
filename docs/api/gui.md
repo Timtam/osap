@@ -5,7 +5,7 @@ toc_max_heading_level: 2
 ---
 
 :::caution Experimental
-`host.gui.webview` is stage 1 of the plan of 2026-09-28: enough for the Windows probe, `tools/html-probe`, with which the maintainer answers the questions W1–W9 in TODO.md with NVDA. On macOS it is newer still: built on 2026-10-11, checked on CI's Macs, and not yet tried with VoiceOver (TODO.md, stage 4). **The API may change after the probes.**
+`host.gui.webview` is stage 1 of the plan of 2026-09-28: enough for the probe, `tools/html-probe`, with which the maintainer answers the questions W1–W10 in TODO.md with NVDA on Windows. On macOS it is newer still: built on 2026-10-11, checked on CI's Macs, and not yet tried with VoiceOver; there the same probe is the instrument of the tester's part of the Mac's questions, MW1–MW20 (TODO.md, stage 4). **The API may change after the probes.**
 :::
 
 A module can show an **HTML page from its own folder in a window of the application's own**, and exchange JSON messages with it. A screen reader reads the page as it reads a web page: headings, lists, buttons, fields and live regions, in NVDA's browse and focus modes — which is the reason to want it. A page is for things a Tab ring does badly: a lot to read, a list to browse, a menu a plug-in draws in a way no screen reader reaches.

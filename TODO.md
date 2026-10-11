@@ -6879,7 +6879,7 @@ maintainer's German test instructions are a text of their own, not in the reposi
       not after a test on windows of our own as the research had it. The research notes
       (`click-noact-plan.md`, `…-windows.md`, `…-frameworks.md`) are the session's, not in the
       repository.
-- [ ] **Run W10 live** (revision 5) — the maintainer, with NVDA, in REAPER; the probe build
+- [ ] **Run W10 live** (revision 7) — the maintainer, with NVDA, in REAPER; the probe build
       started with `tools\html-probe`, then the log. For each control: put the pointer on it (NVDA's
       "move mouse to navigator object", or a module's overlay whose click leaves the pointer there),
       press Ctrl+Shift+Win+Alt+F10 ("Target remembered: X, Y …"), then on the page "Read the
@@ -6889,6 +6889,10 @@ maintainer's German test instructions are a text of their own, not in the reposi
       a series — go into the log. What to listen for, above the measurements: does NVDA stay in the
       page (the quiet ways), or does it announce the focus leaving and coming back (the round trip)?
       The guide for the session (not in the repository): the scratchpad's `html-probe-tests-r5.md`.
+      W10 came with revision 5; revision 7 (2026-10-12) has it beside the Mac's 6, and asks the
+      plug-in's elements and an element's state with a callback (the state before the reads and
+      again after the change wait); a dump that is not all of the tree is a log line of its own:
+      `W10: the plug-in's elements are not all of its tree: …`.
       - **ReaEQ (REAPER's own, Win32/WDL):** a checkbox. "Nothing — only watch" first (does it
         change by itself?), then the round trip (the reference NVDA chatter), Posted click, Posted
         click pointer stays, The no-activate style, Accessibility press — each twice, so the
@@ -7032,29 +7036,6 @@ maintainer's German test instructions are a text of their own, not in the reposi
       reason instead of an error of WebView2's. Never measured; the probe's log answers it for its
       own set of modules only. Later hardening: the main thread enters the single-threaded one at
       start, so the bad case cannot happen.
-- [ ] **The macOS tests, M1–M9** — `host.gui.webview` shows its pages in the Mac's page window
-      since 2026-10-11 (stage 4, below; wry's fix, #1866, merged
-      2026-09-27 and in no release yet, is in the Mac build from wry's repository since
-      2026-10-11; 0.57.0 activates the application on every web view it creates), on the Air
-      (12.7.6) and the mini (14.5), with REAPER and a small page. The answers go here, not into the
-      reference:
-      - **M1:** now MW1b (stage 4's questions, below): the panel that does not activate the
-        application is the experimental page option `activates = false` since 2026-10-11.
-      - **M2:** the panel shown without the keyboard: does VoiceOver stay quiet in REAPER?
-      - **M3:** the panel hidden: are the keyboard and VoiceOver back in the plug-in?
-      - **M4:** a click into the plug-in while the panel has the keyboard: does it arrive, and does
-        VoiceOver come back cleanly when the panel takes the keyboard again?
-      - **M5:** `activate_self` — `NSApplication.activateIgnoringOtherApps:` since 2026-10-11, the
-        VPS Avenger control tool's call — on 14.5 while REAPER is active: does the module manager's
-        window come to the front with the keyboard? `page-check` measures the call on CI (MW5).
-      - **M6:** now MW6 (stage 4's questions, below): the activating panel is the default since
-        2026-10-11, so whether REAPER's or Logic's plug-in windows hide is asked there.
-      - **M7:** does Tab reach every button with the system's "Keyboard navigation" off (the Mac
-        side is to set `tabFocusesLinks`)?
-      - **M8:** VoiceOver's window chooser (VO-F2 twice): is the panel listed, and under which
-        application?
-      - **M9:** how long from a key press to VoiceOver speaking, after the panel was hidden for
-        minutes?
 - [ ] **MW17 (log only): this application's own windows on a Mac, answered by AppKit** (built
       2026-10-11, `backend/macos/own.rs`). `host.window` answers every window of ours from AppKit —
       its id 2^40 plus the window number — and the accessibility backend asks this process nothing:
@@ -7164,14 +7145,8 @@ maintainer's German test instructions are a text of their own, not in the reposi
       by the host's way out (`instance::request_quit`, ended at the window's next tick).
       `setActivationPolicy` may switch between regular and accessory at any time since macOS 10.9
       (Apple's reference); Command-Tab and the Dock list applications, never windows, so the Dock
-      icon is the only way into Command-Tab. Only a Mac can answer: (M10) whether the application,
-      made regular while an app page is shown, is in Command-Tab at once, whether its Dock icon goes
-      when it is made accessory again, and whether its menu bar answers (the reported side effect
-      the setting exists for); (M11) whether VoiceOver follows the keyboard into the app page as
-      into any application's window, and where Command-Tab back to the DAW lands; (M12) whether
-      REAPER's or Logic's floating plug-in windows hide while an app page has this application
-      active (M6's question, for this window); (M13) whether VoiceOver's window chooser lists it,
-      and under which name.
+      icon is the only way into Command-Tab. What only a Mac answers is MW10–MW13 in the Mac's
+      page tests below.
 - [x] **Stage 4 — the Mac**: built (2026-10-11). `host.gui.webview` shows its pages on a Mac in the
       page window (`backend/macos/page.rs`, the interface of `webview_win.rs`): `webview_lua.rs`
       takes it as it takes `webview_win.rs`, through one name for both (`native_page`, held to it
@@ -7230,67 +7205,147 @@ maintainer's German test instructions are a text of their own, not in the reposi
       that page shown with the keyboard over it, and then hidden, does to the front. gui.md's
       option and its Windows and macOS blocks say what it does; what only a Mac shows is MW1b,
       and MW6 and MW18 in this model.
-- [ ] **Stage 4's questions only a Mac answers** (the page window above, which `host.gui.webview`
-      shows its pages in since 2026-10-11):
-      - **MW14:** where VoiceOver lands when a page takes the keyboard again — a show, and after a
-        round trip to the plug-in. The log says what the page did (`the keyboard in the page is …`,
-        `its platform object says: the keyboard went to nothing …`) and which classes AppKit made
-        the first responder (`AppKit's first responder is now a …`); the guard only puts the
-        keyboard back from nothing, never from another element.
-      - **MW15:** one Return or Space on a button gives one message (`page-check` counts Return
-        without VoiceOver), and no system beep for a key the page leaves unhandled.
-      - **MW16:** with VoiceOver: Escape does nothing, Command-W hides, Command-C and Command-V in a
-        field are spoken; a captured overlay key does not fire while a page has the keyboard and a
-        hotkey does; Command-Q and Command-H do nothing in a tool page under the real wxWidgets menu
-        (`page-check` emulates it); and whether a live region updated while the page is not key is
-        spoken.
-      - **MW9:** on 12 and 13, where WebKit has no switch against throttling a page whose window
-        is not shown: how long a page hidden for minutes takes to answer its first message.
-      - **MW6** (the VPS Avenger module's developer: sighted, Logic; M6 and M12 above): whether
-        Logic's plug-in window hides while a tool page, or an app page, has the keyboard — which
-        makes this application the active one, the panel activating by default. The most important
-        answer for that default; gui.md's macOS block says it is unmeasured. Again with a tool page
-        described `activates = false` (since 2026-10-11), which leaves Logic the active
-        application: whether its plug-in window then stays shown, and can be read and clicked while
-        the page has the keyboard.
-      - **MW18** (the developer, Logic in full screen): a tool page — the default, and one described
-        `activates = false` — and an app page shown over it: does the page appear in Logic's Space,
-        does the Space switch, does Logic stay in full screen?
-        Apple's forum answer (thread 826308) says a window that activates its application can take
-        a full-screen application out of its Space. gui.md's macOS block says it is unmeasured.
-      - **MW1b** (the tester, VoiceOver, with REAPER; after the default panel's MW1a): a tool page
-        described `activates = false` (`… a tool page's panel that takes the keyboard without making
-        this application the active one` when it is built), shown by a key while REAPER is in front.
-        Does VoiceOver follow the keyboard into the panel and speak the focused element, and what
-        does it say on the way in? Does REAPER stay the active application — no `[keys] the
-        workspace named this application the frontmost one` line, and VO-M still opens REAPER's menu
-        bar? Hidden: are the keyboard and VoiceOver back on the plug-in window (`… is the active
-        application already: focusing window …`)? The round trip: `host.window.focus` of the plug-in
-        window while the page has the keyboard raises and focuses it at once, with nothing asked —
-        does the keyboard leave the panel then, so that the panel drops to the normal level under
-        the plug-in window (`[keys] none of our windows has the keyboard any more` straight after),
-        and does the click land in the plug-in? If the panel keeps the keyboard, it stays floating
-        over the plug-in window, and the round trip needs another way. With another window of
-        ours shown that can take the keyboard — a second page shown without it, the module
-        manager open — hidden: is the keyboard back on the plug-in window, or still in ours
-        (`[keys] … has the keyboard`), and does the log say `AppKit gave the keyboard to our window
-        … this application deactivated`? With MW6 and MW18, this decides whether this panel
-        becomes the default.
-      - **MW1a and MW5:** the show's answer on a real Mac (`got the keyboard, … ms after the show
-        asked for the front`, `the front went to … instead`, `a key went to …`), a page the show
-        placed over the rectangle to avoid — a tool page, or an app page that was not open —
-        hidden again when it did not get the keyboard (an app page with `the last application page
-        is hidden` after it), and the front given back when a page left before its show had an
-        answer (`this application became the active one … after the page had left`).
-      - **Below 14:** every CI runner is macOS 14 or later, so on 12 and 13 nothing of the page
-        window has run yet: the rule list, the host's policy over the application's scheme,
-        `callAsyncJavaScript`, the keys. `page-check` from the download on the 12.7.6 Mac, before
-        a module shows a page there (docs/building-on-macos.md).
-      - **MW19** (the developer, sighted): the placement on Retina and on two displays, `avoid` from
-        a window table's `bounds`; and an app page the user has open, shown with `avoid` where there
-        is no room beside it: `goes over the rectangle to avoid once it has the keyboard …`, then
-        `in front, so it goes over the rectangle to avoid now`; or, when the front went elsewhere,
-        `… stays where it was, not over the rectangle to avoid` — raised, not moved.
+- [ ] **The Mac's page tests, MW1–MW20** (the plan of 2026-10-11; numbered MW because the DXGI
+      section has M1–M19 of its own, and in place of the M1–M13 asked of the Mac's page before):
+      what only a Mac answers of the page window above, which `host.gui.webview` shows its pages
+      in since 2026-10-11. Who answers what, in this order: the tester with VoiceOver, at most about
+      40 minutes on one Mac; the VPS Avenger module's developer, sighted, with Logic; CI; the log.
+      The tester's briefing is a text of its own, not in the repository, and names the stop point:
+      wherever the time ends. The answers go here, not into the reference.
+      The probe on a Mac (`tools/html-probe`, revision 7, 2026-10-12: revision 6 with Windows' W10
+      beside it, which a Mac neither registers a key for nor shows) is the tester's instrument:
+      Command-Shift-F7 the page beside the plug-in window in front, with the keyboard, and pressed
+      in a page back to the plug-in; Command-Shift-F8 the same page described `activates = false`
+      (`HTML probe without activation`), the other pages left as they are; Command-Shift-F11 the
+      report (its F9 on Windows; the window probe holds Command-Shift-F9 on a Mac, and F10); and
+      Command-Shift-F12, a captured key, not a hotkey: the page F7 shows, without the keyboard, and
+      pressed again while it is shown so, its live region updated. On a MacBook each with fn. Its
+      round trip (W3) clicks the plug-in window's title bar on a Mac — half way down, across its
+      middle, away from the last click — and not its content: `controls()` lists containers only
+      there, so the window's own background cannot be told from its buttons. The host's lines for
+      a page on a Mac are `[gui]`'s: `… the front asked for — whether it comes is said when …`, then
+      `got the keyboard, N ms after the show asked for the front`, or `…, N ms after the show asked
+      for the front — the page did not get the keyboard`; the model at its build (`… built with
+      WebKit`); `AppKit's first responder is now a …`; `the keyboard in the page is …` and `its
+      platform object says: the keyboard went to nothing …` (the guard); and `[keys] one of our
+      windows has the keyboard ('…')` and `none of our windows has the keyboard any more`.
+      - **The tester's session** (REAPER with ReaEQ floating, no overlay; the probe's results said
+        by its report key, the host's lines in the log):
+        - **MW1a:** the default tool page — the activating panel — shown by Command-Shift-F7 over
+          ReaEQ's window. Does VoiceOver speak the focused element, and what does it say on the way
+          in? The probe's `F7 (hotkey): the front asked for …; in front so far: the plug-in window`
+          — a show's `true` on a Mac, with this application's activation still to come — and then
+          `F7 (hotkey): the page has the focus N ms after the key's callback`, its answer: without
+          that line the page did not get the keyboard. With MW5 (the item above), the show's answer
+          on a real Mac: `got the keyboard, N ms after the show asked for the front`, or `the front
+          went to … instead` or `a key went to …`; a page the show placed over the rectangle to
+          avoid — a tool page, or an application page that was not open — hidden again when it did
+          not get the keyboard (an application page with `the last application page is hidden`
+          after it); and the front given back when a page left before its show had an answer (`this
+          application became the active one … after the page had left`).
+        - **MW3:** the page hidden — Command-Shift-F7 in it, or its "Back to the plug-in": are the
+          keyboard and VoiceOver back on ReaEQ's window, and which window does VoiceOver name? The
+          host's `… it took the front from window … of pid …, which gets it back …`, then `REAPER
+          (pid …) is the active application … focusing window …`; the probe's `W7: … the keyboard
+          landed on …`.
+        - **MW4:** the round trip, the page's "Click into the plug-in": ReaEQ's window forward, one
+          click on its title bar, the page back. Does the click land there and leave the window as
+          it was (`W3: the page asked back …; the plug-in window kept its place and size`, then `W3
+          back: the page has the focus …`, and no `something else is drawn over the plug-in
+          window`), and does VoiceOver come back to the element the page had (MW14)? Whether the
+          page's level follows the keyboard — the page dropping under ReaEQ's window as that takes
+          the keyboard — the click does not show: the page goes beside ReaEQ's window, where its
+          level changes nothing a click or a read meets (the log's `MW4: the tool page is beside
+          the plug-in window …`). Only a page over part of the plug-in window — a window with no
+          room beside it, the probe's `over part of the plug-in window` — shows it: once the plug-in
+          window is in front, the probe asks the window server at the middle of the part the page
+          covers (`MW4: the plug-in window is in front, and drawn over the tool page …`, or `…
+          something is STILL DRAWN OVER it …`). With ReaEQ's window as REAPER opens it that does not
+          happen; MW19's sighted run can make it happen.
+        - **MW1b**, and MW3 with it: a tool page described `activates = false` (`… a tool page's
+          panel that takes the keyboard without making this application the active one` when it is
+          built), shown by Command-Shift-F8 while REAPER is in front. Does VoiceOver follow the
+          keyboard into the panel and speak the focused element, and what does it say on the way
+          in? Does REAPER stay the active application — no `[keys] the workspace named this
+          application the frontmost one` line, and VO-M still opens REAPER's menu bar? Hidden: are
+          the keyboard and VoiceOver back on the plug-in window (`… is the active application
+          already: focusing window …`)? The round trip: `host.window.focus` of the plug-in window
+          while the page has the keyboard raises and focuses it at once, with nothing asked — does
+          the keyboard leave the panel then, so that the panel drops to the normal level under the
+          plug-in window (`[keys] none of our windows has the keyboard any more` straight after),
+          and does the click land in the plug-in? No activation says so then, only a focus event
+          (the probe's `W3: the plug-in window has the keyboard, told by a focus event`); without
+          one, the report's `W3 is still waiting …`. If the panel keeps the keyboard, it stays
+          floating over the plug-in window, and the round trip needs another way. With another
+          window of ours shown that can take the keyboard — the tool page shown without it
+          (Command-Shift-F12), the module manager open — hidden: is the keyboard back on the plug-in
+          window, or still in ours (`[keys] … has the keyboard`), and does the log say `AppKit gave
+          the keyboard to our window … this application deactivated`? With MW6 and MW18, this
+          decides whether this panel becomes the default.
+        - **MW14:** where VoiceOver lands when a page takes the keyboard again — a show, and after a
+          round trip to the plug-in. The log says what the page did (`the keyboard in the page is
+          …`, `its platform object says: the keyboard went to nothing …`) and which classes AppKit
+          made the first responder (`AppKit's first responder is now a …`); the guard only puts the
+          keyboard back from nothing, never from another element.
+        - **MW16:** Escape does nothing; Command-W hides (the probe's `the page was closed: user`);
+          Command-C and Command-V in the page's Search field are spoken. Command-Shift-F12 pressed
+          in a page goes to the page as a key (its `W4 key: keydown Shift+Cmd+F12` line, and the
+          report's key presses) and not to the probe, which would say `MW16: the captured key FIRED
+          …`; Command-Shift-F7 there still goes back — a captured key does not fire while a page
+          has the keyboard, and a hotkey does. Command-Q, Command-H and Option-Command-H do nothing
+          in a tool page under the real wxWidgets menu (`page-check` emulates it): this application
+          stays, the page stays, and REAPER is not hidden. And a live region updated while the page
+          is not the key window — Command-Shift-F12 again while the page is shown without the
+          keyboard, `MW16: live region update N posted …`, nothing said by the probe with it: spoken
+          or not?
+        - **MW2:** the page shown without the keyboard — Command-Shift-F12 over ReaEQ's window
+          (`F12 (captured, without the keyboard): the tool page shown …; in front: the plug-in
+          window`): does VoiceOver stay quiet in REAPER?
+      - **On the 12.7.6 Mac, if it is there:** MW1a, MW3, and **MW9**: on 12 and 13, where WebKit
+        has no switch against throttling a page whose window is not shown, how long a page hidden
+        for minutes takes to answer its first message — the first VoiceOver read after it.
+        **Below 14** generally: every CI runner is macOS 14 or later, so on 12 and 13 nothing of
+        the page window has run yet: the rule list, the host's policy over the application's
+        scheme, `callAsyncJavaScript`, the keys. `page-check` from the download on the 12.7.6 Mac,
+        before a module shows a page there (docs/building-on-macos.md).
+      - **Later sessions:** **MW5** (the item above), shows from a hotkey and automatic shows on 14
+        and later; **MW8** and **MW13**, VoiceOver's window chooser (VO-F2 twice): is the tool page
+        listed, and under which application, and the application page, under which name;
+        **MW11**, whether VoiceOver follows the keyboard into an application page as into any
+        application's window, and where Command-Tab back to the DAW lands; **MW15**, one Return or
+        Space on a button gives one message (`page-check` counts Return without VoiceOver; the
+        probe's `W5:` results), and no system beep for a key the page leaves unhandled.
+      - **The VPS Avenger module's developer** (sighted, Logic, asynchronous; their own Mac's
+        `page-check` run and the probe's log, sent as data):
+        - **MW6** and **MW12:** whether Logic's plug-in window hides while a tool page, or an
+          application page, has the keyboard — which makes this application the active one, the
+          panel activating by default. The most important answer for that default; gui.md's macOS
+          block says it is unmeasured. Again with a tool page described `activates = false`, which
+          leaves Logic the active application: whether its plug-in window then stays shown, and can
+          be read and clicked while the page has the keyboard.
+        - **MW18** (Logic in full screen): a tool page — the default, and one described `activates
+          = false` — and an application page shown over it: does the page appear in Logic's Space,
+          does the Space switch, does Logic stay in full screen? Apple's forum answer (thread
+          826308) says a window that activates its application can take a full-screen application
+          out of its Space. gui.md's macOS block says it is unmeasured.
+        - **MW10:** an application page: is the application, made regular while it is shown, in
+          Command-Tab at once, does its Dock icon go when it is made an accessory again, and does
+          its menu bar answer (the reported side effect the setting `dock_while_open` exists for)?
+        - **MW19:** the placement on Retina and on two displays, `avoid` from a window table's
+          `bounds`; and an application page the user has open, shown with `avoid` where there is no
+          room beside it: `goes over the rectangle to avoid once it has the keyboard …`, then `in
+          front, so it goes over the rectangle to avoid now`; or, when the front went elsewhere, `…
+          stays where it was, not over the rectangle to avoid` — raised, not moved. And MW4's level:
+          the probe's tool page over part of a plug-in window with no room beside it, and its
+          "Click into the plug-in" (`MW4: the plug-in window is in front, and drawn over the tool
+          page …`, or `… STILL DRAWN OVER it …`).
+        - **MW7:** does Tab reach every button of a page with the system's "Keyboard navigation"
+          off (wry sets WebKit's `tabFocusesLinks`)?
+      - **CI** (`page-check`, no Mac session; docs/building-on-macos.md): the activation mechanics
+        and both ways of handing the front back, the keys, message counts and order, the policy and
+        the rule list, the Library folders, the policy switch, timings; a page's clipboard, the
+        next item.
+      - **Log only: MW17** (the item above).
       - **MW20** (new with stage 4, after the plan's MW1–MW19; any Mac session with a page that has
         a file field): wry opens the system's open panel with `runModal`, on the event loop.
         Whether the ticks — module callbacks, the keys' — run while it is open, and what the log
@@ -9003,8 +9058,8 @@ Follow-ups this work found and did not take on:
       - sforzando: its stored `identify` (`find` of `PlogueXMLGUI`).
       - ON:EAR: `locate` and `rawDump`.
       - daw-hosts: F6's `focusWithin` (on Windows it answers `nil` at once).
-      - The tools (probe, inspect, html-probe): `rawDump`, `dump`, `stateProbe` and `locate`, on
-        their own keys and pages.
+      - The tools (probe, inspect): `rawDump`, `dump` and `locate`, on their own keys. (The HTML
+        probe's W10 asks its `dump` and `stateProbe` with a callback since revision 7.)
       The next step is recognize's (2da1d39): without a callback a call waits in a handler, its
       module alone, and raises where it cannot wait.
 - [ ] **macOS has no accessibility thread yet:** every `host.element` question is asked on the
