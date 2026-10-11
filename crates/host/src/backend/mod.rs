@@ -59,6 +59,10 @@ mod macos;
 pub(crate) use macos::app::{
     activate_self, note_frontmost_before_gui, restore_frontmost_after_gui_start, set_regular,
 };
+/// Following this application's own windows once the window system is up — see `macos::own`.
+/// Re-exported for the same reason: `gui.rs` calls it as wxWidgets hands over.
+#[cfg(target_os = "macos")]
+pub(crate) use macos::own::start as start_own_windows;
 /// Asking the user to allow Apple Events to VoiceOver — see `macos::perm`. Re-exported for
 /// the same reason as the app calls above: `gui.rs` reaches it without a macOS-only `use`,
 /// and the path resolves identically in `crates/macos-check`, which borrows this file.
@@ -311,6 +315,65 @@ pub struct Foreground {
     pub pid: u32,
     /// Whether the window is on screen, as far as the platform says: see `foreground_window`.
     pub shown: bool,
+}
+
+/// macOS: where the ids of this application's own windows start.
+///
+/// A window of another application gets its id from the accessibility handle table, a counter
+/// that starts at 1 and never comes near this. A window of this application's own is answered by
+/// AppKit instead (`macos/own.rs`), never by an accessibility query into this process, and its id
+/// is this plus the window server's number for it — the number `windowNumber` gives in the process
+/// and `CGWindowID` gives outside it. So the two id spaces cannot meet, an own id says by itself
+/// which window it is, and it is the same window for as long as that window lives. 2⁴⁰ plus a
+/// 32-bit number is far inside the 2⁵³ a Luau number holds exactly.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const OWN_BASE: isize = 1 << 40;
+
+/// The id of this application's own window with the window server's number `number`. `None` for
+/// a number no window has: 0 or less (a window not yet ordered in has none) or past 32 bits.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn own_id(number: i64) -> Option<isize> {
+    let n = u32::try_from(number).ok().filter(|&n| n != 0)?;
+    Some(OWN_BASE + n as isize)
+}
+
+/// The window server's number behind an own id ([`own_id`]); `None` for any other id.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn own_number(id: isize) -> Option<u32> {
+    u32::try_from(id.checked_sub(OWN_BASE)?).ok().filter(|&n| n != 0)
+}
+
+/// What one of this application's own windows is, where that changes an answer.
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnKind {
+    /// A page's window (`host.gui.webview`): a window of this application placed over another
+    /// application's on purpose.
+    Page,
+    /// Any other: the module manager, a dialog, the announcement window.
+    Other,
+}
+
+/// macOS: what `host.window.ownsPoint` answers when the window drawn at the point is one of this
+/// application's own, of kind `kind`. A page is drawn over the plug-in window and would take the
+/// click, so `false`, as for another application's window (docs/api/gui.md, "A page over the
+/// plug-in window"). Any other window of ours answers `None`, as it did before there were pages:
+/// the announcement window sits over the plug-in, and a press must not be refused on its account.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn own_window_owns_point(kind: OwnKind) -> Option<bool> {
+    match kind {
+        OwnKind::Page => Some(false),
+        OwnKind::Other => None,
+    }
+}
+
+/// macOS: an AppKit frame — origin at the bottom-left of the primary display, y upwards — as the
+/// whole points every coordinate crossing the [`Backend`] boundary is in: origin at the top-left
+/// of that display, y downwards. `primary_h` is the primary display's height in points. Rounded
+/// as accessibility rectangles are.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn cocoa_frame_top_left(x: f64, y: f64, w: f64, h: f64, primary_h: f64) -> (i32, i32, i32, i32) {
+    (x.round() as i32, (primary_h - (y + h)).round() as i32, w.round() as i32, h.round() as i32)
 }
 
 /// A snapshot of a window's matchable properties (normalized across platforms).
@@ -1708,6 +1771,9 @@ pub enum PassWhy {
     /// A module whose flag counts for the window in front says a menu is open
     /// ([`menu_flag_owners`]).
     MenuFlag,
+    /// One of this application's own windows has the keyboard, and no capture applies there: the
+    /// Mac tap's rule. The Windows hook never says it — it is out of the chain then.
+    OwnWindow,
 }
 
 /// What the hook or the tap does with a captured key-down ([`capture_decision`]).
@@ -1754,6 +1820,12 @@ pub fn menu_flag_owners<'a>(
 /// Whether a key-down of `(vk, mask)` is taken, and for which module — one decision for the
 /// Windows hook and the Mac tap. `None`: no module captures the combination.
 ///
+/// - **This application's own window lets it through**, before a menu is asked: while one of its
+///   windows has the keyboard (`own_has_keyboard`), no capture applies, and a captured
+///   combination goes to that window — `owner` is the module that would have taken it, if any,
+///   which is all the scopes are walked for then. The Mac tap's rule, the counterpart of the
+///   Windows hook being out of the chain then; the hook passes `false`, as it is never called for
+///   those keys.
 /// - **The earliest capture in scope takes it**: of the captures of the combination, in
 ///   registration order, the first whose module is scoped to `front` or to everywhere. A
 ///   capture scoped to another window does not take it, however early; with none in scope the
@@ -1778,6 +1850,7 @@ pub fn capture_decision(
     vk: u32,
     mask: u8,
     front: isize,
+    own_has_keyboard: bool,
     native_menu: impl FnOnce() -> bool,
 ) -> Option<Capture> {
     let mut any = false;
@@ -1792,6 +1865,9 @@ pub fn capture_decision(
     if !any {
         return None;
     }
+    if own_has_keyboard {
+        return Some(Capture::Pass { why: PassWhy::OwnWindow, owner: taker });
+    }
     let Some(owner) = taker else {
         return Some(Capture::Pass { why: PassWhy::OutOfScope, owner: None });
     };
@@ -1802,6 +1878,22 @@ pub fn capture_decision(
         return Some(Capture::Pass { why: PassWhy::MenuFlag, owner: Some(owner) });
     }
     Some(Capture::Take { owner })
+}
+
+/// macOS: whether the tap swallows a key-down before it is decided: the keyboard's auto-repeat
+/// (`repeat`) of a key whose key-down the tap swallowed for a capture and whose key-up has not come
+/// yet (`down_swallowed`), while one of this application's own windows has the keyboard
+/// (`own_has_keyboard`) — a page the capture's own callback showed, say. It is the same press: its
+/// start was taken, and its key-up is swallowed wherever it lands, so a repeat let through would be
+/// a key held in our window that never comes up — a `keydown` with `repeat` set and no `keyup`, and
+/// a held Return pressing the focused button again at every repeat. Not handed to the module
+/// either: no capture applies in our window. Anything else is decided as ever
+/// ([`capture_decision`]): a key pressed in our window goes on to it, repeats and all, and anywhere
+/// else a held key's repeats are decided as any key-down. The Windows hook is out of the chain
+/// while one of this application's windows is in front, so it never asks.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn swallow_held_repeat(repeat: bool, down_swallowed: bool, own_has_keyboard: bool) -> bool {
+    repeat && down_swallowed && own_has_keyboard
 }
 
 /// A captured key-down the hook or the tap took, as it queues it for the pump: the combination,
@@ -3494,22 +3586,22 @@ mod capture_decision_tests {
         // last, never scoped.
         let set = [cap(1, TAB, 0), cap(2, TAB, 0), cap(3, TAB, 0), cap(1, SPACE, 0)];
         let owners = [own(1, W1, false), own(2, W2, false)];
-        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, no_menu), take(1));
-        assert_eq!(capture_decision(&set, &owners, TAB, 0, W2, no_menu), take(2), "1's is earlier, but scoped to W1");
-        assert_eq!(capture_decision(&set, &owners, TAB, 0, 0x3003, no_menu), take(3), "everywhere");
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, false, no_menu), take(1));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W2, false, no_menu), take(2), "1's is earlier, but scoped to W1");
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, 0x3003, false, no_menu), take(3), "everywhere");
         assert_eq!(
-            capture_decision(&set, &owners, SPACE, 0, W2, no_menu),
+            capture_decision(&set, &owners, SPACE, 0, W2, false, no_menu),
             pass(PassWhy::OutOfScope, None),
             "only module 1 captures Space, scoped to W1: to the application"
         );
-        assert_eq!(capture_decision(&set, &owners, SPACE, 0, W1, no_menu), take(1));
-        assert_eq!(capture_decision(&set, &owners, 0x0D, 0, W1, no_menu), None, "nobody captures Return");
-        assert_eq!(capture_decision(&set, &owners, TAB, MASK_SHIFT, W1, no_menu), None, "Shift+Tab is not Tab");
-        assert_eq!(capture_decision(&set, &owners, TAB, MASK_ALT, W1, no_menu), None, "nor is Alt+Tab");
+        assert_eq!(capture_decision(&set, &owners, SPACE, 0, W1, false, no_menu), take(1));
+        assert_eq!(capture_decision(&set, &owners, 0x0D, 0, W1, false, no_menu), None, "nobody captures Return");
+        assert_eq!(capture_decision(&set, &owners, TAB, MASK_SHIFT, W1, false, no_menu), None, "Shift+Tab is not Tab");
+        assert_eq!(capture_decision(&set, &owners, TAB, MASK_ALT, W1, false, no_menu), None, "nor is Alt+Tab");
         // A module without an entry is everywhere; an entry with scope 0 is too.
         let owners = [own(1, 0, false)];
-        assert_eq!(capture_decision(&set, &owners, TAB, 0, W2, no_menu), take(1));
-        assert_eq!(capture_decision(&set, &[], TAB, 0, W2, no_menu), take(1));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W2, false, no_menu), take(1));
+        assert_eq!(capture_decision(&set, &[], TAB, 0, W2, false, no_menu), take(1));
     }
 
     /// Two modules in one window share its scope: the earlier registration takes the key.
@@ -3517,7 +3609,7 @@ mod capture_decision_tests {
     fn in_one_window_the_earlier_registration_wins() {
         let set = [cap(2, TAB, 0), cap(1, TAB, 0)];
         let owners = [own(1, W1, false), own(2, W1, false)];
-        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, no_menu), take(2));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, false, no_menu), take(2));
     }
 
     /// A menu the system drew lets a key in scope through, and is asked only once a capture is
@@ -3526,15 +3618,15 @@ mod capture_decision_tests {
     fn a_native_menu_lets_the_key_through_and_is_asked_only_in_scope() {
         let set = [cap(1, TAB, 0)];
         let owners = [own(1, W1, false)];
-        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, || true), pass(PassWhy::MenuMode, Some(1)));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, false, || true), pass(PassWhy::MenuMode, Some(1)));
         let asked = std::cell::Cell::new(false);
-        let d = capture_decision(&set, &owners, TAB, 0, W2, || {
+        let d = capture_decision(&set, &owners, TAB, 0, W2, false, || {
             asked.set(true);
             true
         });
         assert_eq!(d, pass(PassWhy::OutOfScope, None));
         assert!(!asked.get(), "out of scope: not asked");
-        let d = capture_decision(&set, &owners, SPACE, 0, W1, || {
+        let d = capture_decision(&set, &owners, SPACE, 0, W1, false, || {
             asked.set(true);
             true
         });
@@ -3551,17 +3643,17 @@ mod capture_decision_tests {
         let set = [cap(1, TAB, 0), cap(2, TAB, 0), cap(2, SPACE, 0)];
         // Module 2's flag, scoped to W2: module 2's keys there, and module 1's in W2 too.
         let owners = [own(1, 0, false), own(2, W2, true)];
-        assert_eq!(capture_decision(&set, &owners, TAB, 0, W2, no_menu), pass(PassWhy::MenuFlag, Some(1)));
-        assert_eq!(capture_decision(&set, &owners, SPACE, 0, W2, no_menu), pass(PassWhy::MenuFlag, Some(2)));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W2, false, no_menu), pass(PassWhy::MenuFlag, Some(1)));
+        assert_eq!(capture_decision(&set, &owners, SPACE, 0, W2, false, no_menu), pass(PassWhy::MenuFlag, Some(2)));
         // Not in W1: module 2's flag is not W1's.
-        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, no_menu), take(1));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, false, no_menu), take(1));
         // A module with no scope says it for every window.
         let owners = [own(1, W1, false), own(2, 0, true)];
-        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, no_menu), pass(PassWhy::MenuFlag, Some(1)));
-        assert_eq!(capture_decision(&set, &owners, TAB, 0, 0x3003, no_menu), pass(PassWhy::MenuFlag, Some(2)));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, false, no_menu), pass(PassWhy::MenuFlag, Some(1)));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, 0x3003, false, no_menu), pass(PassWhy::MenuFlag, Some(2)));
         // A flag whose module holds no capture counts nowhere.
         let owners = [own(1, 0, false), own(3, 0, true)];
-        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, no_menu), take(1));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, false, no_menu), take(1));
         assert_eq!(menu_flag_owners(&set, &owners, W1).count(), 0);
         // Whose flags count, for the record of keys let through for a menu.
         let owners = [own(1, W1, true), own(2, 0, true), own(4, W1, true)];
@@ -3569,7 +3661,91 @@ mod capture_decision_tests {
         assert_eq!(menu_flag_owners(&set, &owners, W2).collect::<Vec<_>>(), vec![2]);
         // A flag never takes a key: with nothing in scope the reason is the scope.
         let owners = [own(1, W1, true), own(2, W1, false)];
-        assert_eq!(capture_decision(&set, &owners, TAB, 0, W2, no_menu), pass(PassWhy::OutOfScope, None));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W2, false, no_menu), pass(PassWhy::OutOfScope, None));
+    }
+
+    /// One of this application's own windows has the keyboard: every captured combination goes
+    /// to it, naming the module that would have taken it, before the scope's menu, a menu flag or
+    /// the native menu is looked at — the native menu not even asked; a modifier tap with them; a
+    /// combination nobody captures is still nobody's.
+    #[test]
+    fn our_own_window_with_the_keyboard_lets_every_capture_through() {
+        let set = [cap(1, TAB, 0), cap(2, SPACE, 0), cap(1, 0x12, MASK_TAP)];
+        let owners = [own(1, 0, false), own(2, W2, true)];
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, true, no_menu), pass(PassWhy::OwnWindow, Some(1)));
+        assert_eq!(
+            capture_decision(&set, &owners, SPACE, 0, W1, true, no_menu),
+            pass(PassWhy::OwnWindow, None),
+            "2 is scoped to W2: nobody would have taken it"
+        );
+        assert_eq!(
+            capture_decision(&set, &owners, SPACE, 0, W2, true, no_menu),
+            pass(PassWhy::OwnWindow, Some(2)),
+            "ahead of 2's own menu flag"
+        );
+        assert_eq!(capture_decision(&set, &owners, 0x12, MASK_TAP, W1, true, no_menu), pass(PassWhy::OwnWindow, Some(1)));
+        assert_eq!(capture_decision(&set, &owners, 0x0D, 0, W1, true, no_menu), None, "nobody captures Return");
+        let asked = std::cell::Cell::new(false);
+        let d = capture_decision(&set, &owners, TAB, 0, W1, true, || {
+            asked.set(true);
+            true
+        });
+        assert_eq!(d, pass(PassWhy::OwnWindow, Some(1)));
+        assert!(!asked.get(), "the native menu is not asked");
+        // Without it, the same keys as ever.
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, false, no_menu), take(1));
+        assert_eq!(capture_decision(&set, &owners, SPACE, 0, W2, false, no_menu), pass(PassWhy::MenuFlag, Some(2)));
+    }
+
+    /// The Mac tap asks whether one of our windows has the keyboard for key-downs only — at its
+    /// decision, and just before it for the repeat of a key it swallowed — so what it records for
+    /// every event goes on being recorded: a modifier's change (`MOD_DOWN`), the up of a down it
+    /// swallowed (`take_suppressed`) and how late a key came all come first. Held where it is
+    /// written, since no test here runs the tap.
+    #[test]
+    fn the_mac_tap_asks_for_our_own_windows_only_where_it_decides() {
+        const TAP: &str = include_str!("macos/tap.rs");
+        let body = |sig: &str| {
+            let at = TAP.find(sig).unwrap_or_else(|| panic!("{sig}"));
+            let end = TAP[at..].find("\n}\n").unwrap();
+            &TAP[at..at + end]
+        };
+        assert_eq!(TAP.matches("own::has_keyboard()").count(), 2, "two places ask");
+        let decide = body("fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool)");
+        let asked = decide.find("let own = super::own::has_keyboard();").expect("decide asks");
+        let decided = decide
+            .find("capture_decision(&state.set, &state.owners, vk, mask, front, own, watch::native_menu_open)")
+            .expect("and hands the answer to the decision");
+        assert!(asked < decided);
+        assert!(decide.contains("if menu_keys && !own {"), "nothing is filed for a menu then");
+        let cb = body("unsafe extern \"C-unwind\" fn tap_callback(");
+        let at = cb.find("decide(vk, mask, front, true)").unwrap();
+        let held = cb
+            .find("if crate::backend::swallow_held_repeat(repeat, held_back(keycode), super::own::has_keyboard()) {")
+            .expect("the repeat of a swallowed key is asked about");
+        assert!(held < at, "before the decision, which would let it through");
+        for first in ["modifier_changed(keycode, flags)", "take_suppressed(keycode)", "note_lateness(ev, keycode)", "TAP_ARMED.store(0, Ordering::Relaxed);"] {
+            let f = cb.find(first).unwrap_or_else(|| panic!("{first}"));
+            assert!(f < held, "{first} comes after where our window is asked");
+        }
+        assert!(cb[held..at].contains("return std::ptr::null_mut();"), "swallowed, not let through");
+        assert!(!cb[held..at].contains("queue::push_key"), "nor handed to the module");
+        let modifier = body("fn modifier_changed(keycode: u16, flags: CGEventFlags)");
+        let recorded = modifier.find("MOD_DOWN.fetch_or(bit, Ordering::Relaxed);").unwrap();
+        assert!(recorded < modifier.find("decide(modifier.vk, MASK_TAP, front, false)").unwrap(), "a tap is decided after it is recorded");
+        assert!(body("fn pass_words(why: PassWhy)").contains("PassWhy::OwnWindow =>"));
+    }
+
+    /// A key held since a capture took it does not repeat into our own window, which would never
+    /// see it come up; every other repeat, and every key pressed there, is decided as ever.
+    #[test]
+    fn a_held_captured_key_does_not_repeat_into_our_own_window() {
+        assert!(swallow_held_repeat(true, true, true));
+        assert!(!swallow_held_repeat(false, true, true), "a press of its own is decided");
+        assert!(!swallow_held_repeat(true, false, true), "a key held in our window repeats there");
+        assert!(!swallow_held_repeat(true, true, false), "anywhere else a repeat is decided as ever");
+        assert!(!swallow_held_repeat(false, false, true));
+        assert!(!swallow_held_repeat(false, false, false));
     }
 
     /// The modifier tap is decided as any key: its own mask, the same scopes and menus.
@@ -3577,11 +3753,11 @@ mod capture_decision_tests {
     fn a_modifier_tap_is_decided_as_any_key() {
         let set = [cap(1, 0x12, MASK_TAP), cap(2, 0x12, 0)];
         let owners = [own(1, W1, false)];
-        assert_eq!(capture_decision(&set, &owners, 0x12, MASK_TAP, W1, no_menu), take(1));
-        assert_eq!(capture_decision(&set, &owners, 0x12, MASK_TAP, W2, no_menu), pass(PassWhy::OutOfScope, None));
-        assert_eq!(capture_decision(&set, &owners, 0x12, MASK_TAP, W1, || true), pass(PassWhy::MenuMode, Some(1)));
+        assert_eq!(capture_decision(&set, &owners, 0x12, MASK_TAP, W1, false, no_menu), take(1));
+        assert_eq!(capture_decision(&set, &owners, 0x12, MASK_TAP, W2, false, no_menu), pass(PassWhy::OutOfScope, None));
+        assert_eq!(capture_decision(&set, &owners, 0x12, MASK_TAP, W1, false, || true), pass(PassWhy::MenuMode, Some(1)));
         let owners = [own(1, W1, true)];
-        assert_eq!(capture_decision(&set, &owners, 0x12, MASK_TAP, W1, no_menu), pass(PassWhy::MenuFlag, Some(1)));
+        assert_eq!(capture_decision(&set, &owners, 0x12, MASK_TAP, W1, false, no_menu), pass(PassWhy::MenuFlag, Some(1)));
         assert_eq!(scope_of(&owners, 1), W1);
         assert_eq!(scope_of(&owners, 2), 0);
     }
@@ -3614,6 +3790,96 @@ mod capture_decision_tests {
         assert_eq!(key_scope_window(Some(0), W2), (W2, ScopeFrom::TapFront), "it answered with no window");
         assert_eq!(key_scope_window(None, 0), (0, ScopeFrom::Nowhere));
         assert_eq!(key_scope_window(Some(0), 0), (0, ScopeFrom::Nowhere));
+    }
+}
+
+/// This application's own windows on a Mac: their ids, what `ownsPoint` answers over them, their
+/// frames, and that the accessibility backend never asks this process about them.
+#[cfg(test)]
+mod own_window_tests {
+    use super::*;
+
+    /// An own id is the window number above every handle the accessibility table hands out, and
+    /// gives the number back; nothing else is one.
+    #[test]
+    fn an_own_id_is_the_window_number_above_every_handle() {
+        assert_eq!(own_id(1), Some(OWN_BASE + 1));
+        assert_eq!(own_id(0x1234), Some(OWN_BASE + 0x1234));
+        assert_eq!(own_id(0), None, "a window never ordered in has no number");
+        assert_eq!(own_id(-1), None);
+        assert_eq!(own_id(i64::from(u32::MAX) + 1), None, "past what a window number holds");
+        for n in [1u32, 77, 0x1234, u32::MAX] {
+            assert_eq!(own_number(own_id(i64::from(n)).unwrap()), Some(n), "{n}");
+        }
+        for id in [0, 1, 4096, 1 << 39, OWN_BASE, OWN_BASE + u32::MAX as isize + 1, -1, -(OWN_BASE + 1), isize::MAX, isize::MIN] {
+            assert_eq!(own_number(id), None, "{id:#x}");
+        }
+        // A Luau number holds the largest exactly.
+        let top = own_id(i64::from(u32::MAX)).unwrap();
+        assert_eq!(top as f64 as isize, top);
+    }
+
+    /// Only a page of ours refuses a point; another window of ours cannot say.
+    #[test]
+    fn only_a_page_of_ours_refuses_a_point() {
+        assert_eq!(own_window_owns_point(OwnKind::Page), Some(false));
+        assert_eq!(own_window_owns_point(OwnKind::Other), None);
+    }
+
+    /// An AppKit frame is flipped against the primary display's height, and rounded.
+    #[test]
+    fn an_appkit_frame_is_flipped_to_the_top_left() {
+        // A 520×640 window whose bottom edge is 100 points above the bottom of a 900-point display.
+        assert_eq!(cocoa_frame_top_left(40.0, 100.0, 520.0, 640.0, 900.0), (40, 160, 520, 640));
+        // On a display above the primary one: above its top edge.
+        assert_eq!(cocoa_frame_top_left(-200.0, 1000.0, 100.0, 50.0, 900.0), (-200, -150, 100, 50));
+        assert_eq!(cocoa_frame_top_left(10.4, 0.0, 99.6, 20.5, 900.5), (10, 880, 100, 21));
+    }
+
+    /// Every entry point of the accessibility backend that could reach this process answers from
+    /// AppKit first (`own.rs`), or answers "not known", before its first question through
+    /// accessibility. Held where it is written: only a Mac runs it, and its log (MW17 in TODO.md)
+    /// is the only other witness.
+    #[test]
+    fn our_own_windows_are_never_asked_through_accessibility() {
+        const AX: &str = include_str!("macos/ax.rs");
+        let body = |sig: &str| {
+            let at = AX.find(sig).unwrap_or_else(|| panic!("{sig}"));
+            let end = AX[at..].find("\n}\n").unwrap();
+            &AX[at..at + end]
+        };
+        for (sig, ours, first_asked) in [
+            ("pub fn foreground_window_id() -> Option<isize>", "if let Some(id) = super::own::key_id_in_front_of(front) {", "front_window_of(pid)"),
+            ("pub fn foreground_window_id() -> Option<isize>", "if is_ours(pid) {\n        return Some(super::own::front_id());", "front_window_of(pid)"),
+            ("pub fn foreground_window() -> Option<crate::backend::Foreground>", "if let Some(f) = super::own::foreground(front) {", "app_element(pid)"),
+            ("pub fn foreground_window() -> Option<crate::backend::Foreground>", "if is_ours(pid) {", "app_element(pid)"),
+            ("pub fn active_window() -> Option<WinInfo>", "if front_is_ours(front) {", "front_window_of(pid)"),
+            ("pub fn window_info(handle: isize, require_title: bool)", "return super::own::info(handle, require_title);", "handles::get(handle)"),
+            ("pub fn focus_window(handle: isize) -> bool", "return super::own::focus(handle);", "handles::get(handle)"),
+            ("pub(super) fn window_id(handle: isize) -> u32", "if let Some(n) = crate::backend::own_number(handle) {", "handles::get(handle)"),
+            ("pub(super) fn frontmost_window_element()", "if is_ours(pid) {", "front_window_of(pid)"),
+            ("pub fn window_focus_chain() -> Vec<ControlInfo>", "if keyboard_is_ours(front) {", "system_wide()"),
+            ("pub fn focus_step(hwnd: isize, direction: i32)", "if keyboard_is_ours(frontmost_pid()) {", "walk("),
+            ("pub fn focus_within(hwnd: isize, x: i32, y: i32, w: i32, h: i32)", "if keyboard_is_ours(frontmost_pid()) {", "walk("),
+            ("fn enumerate_windows_in(pids: &[u32], timeout: f32, what: &str)", "out.extend(super::own::windows_info());", "app_element(pid)"),
+            ("fn number_owns_point(ours: u32, x: i32, y: i32, what: &str)", "super::own::kind_of(hit as u32)", "window_owner(hit as u32)"),
+        ] {
+            let f = body(sig);
+            let at = f.find(ours).unwrap_or_else(|| panic!("{sig}: no `{ours}`"));
+            let asked = f.find(first_asked).unwrap_or_else(|| panic!("{sig}: no `{first_asked}`"));
+            assert!(at < asked, "{sig}: `{first_asked}` comes before `{ours}`");
+        }
+        assert!(body("fn is_ours(pid: i32) -> bool").contains("pid == std::process::id() as i32"));
+        // The reads of where the keyboard is go by AppKit's word inside this process as well as by
+        // the workspace's, so neither one's lag lets a read reach this process: our window key
+        // before the workspace names us would otherwise be asked through the system-wide element.
+        let reads = body("fn keyboard_is_ours(front: Option<i32>) -> bool");
+        assert!(reads.contains("front.is_some_and(is_ours) || super::own::has_keyboard()"));
+        assert!(!reads.contains("key_id_in_front_of"), "not tied to the workspace");
+        // The answers naming the window in front follow the application the workspace names, which
+        // `watch` resolves an activation through.
+        assert!(body("fn front_is_ours(front: Option<i32>) -> bool")
+            .contains("front.is_some_and(is_ours) || super::own::key_id_in_front_of(front).is_some()"));
     }
 }
 

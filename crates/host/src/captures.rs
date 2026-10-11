@@ -826,7 +826,7 @@ mod tests {
                 let let_go: Vec<usize> = (1..=4).filter(|i| gone & (1 << (i - 1)) != 0).collect();
                 let kept: Vec<Captured> = set.iter().copied().filter(|c| !let_go.contains(&(c.owner as usize))).collect();
                 for (vk, mask) in [(0x09, 0), (0x20, 0), (0x09, backend::MASK_SHIFT)] {
-                    let hook = match backend::capture_decision(&kept, &owners, vk, mask, front, || false) {
+                    let hook = match backend::capture_decision(&kept, &owners, vk, mask, front, false, || false) {
                         Some(backend::Capture::Take { owner }) => Some(owner as usize),
                         _ => None,
                     };

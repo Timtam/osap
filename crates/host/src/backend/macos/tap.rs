@@ -861,6 +861,20 @@ unsafe extern "C-unwind" fn tap_callback(
     // between" is the whole definition, and this is the "in between".
     TAP_ARMED.store(0, Ordering::Relaxed);
 
+    // The system's own word for the keyboard's auto-repeat of a key held down: asked of a key held
+    // since a capture took it, just below, and handed to the host with a key that is taken. One
+    // field read, no call out.
+    let repeat = CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventAutorepeat) != 0;
+    // A key held down since a capture took it, repeating while one of our windows has the keyboard
+    // now — the capture's own callback showed a page, say: swallowed as its key-down was and its
+    // key-up will be, never let through to our window as a key that does not come up, and not
+    // handed to the module either (`swallow_held_repeat`). After everything above is recorded, as
+    // the decision below is.
+    if crate::backend::swallow_held_repeat(repeat, held_back(keycode), super::own::has_keyboard()) {
+        logging::trace("macos", || format!("tap: keycode {keycode} repeats, held since a capture took it; swallowed"));
+        return std::ptr::null_mut();
+    }
+
     // The modifiers first: with Command held a letter is named by the layout's Command table.
     let mask = mask_of(flags);
     let Some(vk) = keys::keycode_to_vk_for(keycode, mask) else {
@@ -894,16 +908,14 @@ unsafe extern "C-unwind" fn tap_callback(
             // Rate-limited on the reason rather than on the key, because a reason that holds
             // holds for as long as a menu is open or a window is not frontmost, and one line per
             // keystroke would bury the log it is meant to explain.
-            report_gate_pass(vk, mask, pass_words(why));
+            report_gate_pass(vk, mask, why);
             return through();
         }
         Some(Capture::Take { owner }) => owner,
     };
-    // Read only for a key that is taken: the system's own word for the keyboard's auto-repeat
-    // of a key held down, handed to the host with the key. One field read, no call out. With it
-    // the press as it was: the window, the count of keys let through so far, and the keycode
-    // itself — the keypad's Enter is not Return, though both are VK_RETURN to the host.
-    let repeat = CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventAutorepeat) != 0;
+    // With the key, whether it repeats (read above) and the press as it was: the window, the count
+    // of keys let through so far, and the keycode itself — the keypad's Enter is not Return,
+    // though both are VK_RETURN to the host.
     let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: Some(keycode), queued: Some(Instant::now()) };
     queue::push_key(Taken { vk, mask, owner, repeat, pressed });
     note_suppressed(keycode);
@@ -1019,6 +1031,15 @@ fn modifier_changed(keycode: u16, flags: CGEventFlags) {
 /// busy redrawing, and the keystroke that paid for it is the one the user is pressing. The native
 /// menu's answer is a counter `watch` keeps, read only once a capture is in scope.
 ///
+/// **This application's own window.** While one of its windows has the keyboard
+/// ([`super::own::has_keyboard`], one atomic load), every captured combination is let through to
+/// it, a modifier tap included, and nothing is filed for a menu: the key went to our window, not to
+/// a menu in front. Asked at this decision, and before it only for a key-down that repeats a key
+/// the tap swallowed (`crate::backend::swallow_held_repeat`) — both after everything the callback
+/// records for every event: a modifier's change, the up of a down it swallowed, how late the key
+/// came. So what it holds stays true while our window has the keys, for the moment another
+/// application's window has them again.
+///
 /// `None`: the pump was replacing the table when the key arrived, and the key goes to the
 /// application. It cannot happen while both live on this thread, and it is a key silently not
 /// captured if it ever does, so it is said.
@@ -1037,8 +1058,9 @@ fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool) -> Option<Option<Cap
             return None;
         }
     };
-    let decided = capture_decision(&state.set, &state.owners, vk, mask, front, watch::native_menu_open);
-    if menu_keys {
+    let own = super::own::has_keyboard();
+    let decided = capture_decision(&state.set, &state.owners, vk, mask, front, own, watch::native_menu_open);
+    if menu_keys && !own {
         let mut noted = false;
         if is_menu_key(vk) && mask == 0 && state.owners.iter().any(|e| e.menu) {
             for owner in menu_flag_owners(&state.set, &state.owners, front) {
@@ -1066,6 +1088,7 @@ fn pass_words(why: PassWhy) -> &'static str {
         PassWhy::OutOfScope => "no module that claimed it is scoped to the window in front",
         PassWhy::MenuMode => "a native menu is open",
         PassWhy::MenuFlag => "a module scoped to the window in front says a plugin menu is open",
+        PassWhy::OwnWindow => "one of our windows has the keyboard",
     }
 }
 
@@ -1109,10 +1132,13 @@ pub fn take_menu_pass_through(owner: u32) -> Vec<(u32, u8)> {
 }
 
 /// One line per reason, at most every few seconds. See the call site for why it exists.
-fn report_gate_pass(vk: u32, mask: u8, why: &'static str) {
+///
+/// A key let through to one of our own windows is the counterpart of the Windows hook being out
+/// of the chain there, and is said in its words, under `keys`, with the window's title.
+fn report_gate_pass(vk: u32, mask: u8, why: PassWhy) {
     const QUIET: std::time::Duration = std::time::Duration::from_secs(3);
     thread_local! {
-        static LAST: std::cell::RefCell<Option<(&'static str, Instant)>> =
+        static LAST: std::cell::RefCell<Option<(PassWhy, Instant)>> =
             const { std::cell::RefCell::new(None) };
     }
     let say = LAST.with(|last| {
@@ -1125,15 +1151,28 @@ fn report_gate_pass(vk: u32, mask: u8, why: &'static str) {
             }
         }
     });
-    if say {
+    if !say {
+        return;
+    }
+    if why == PassWhy::OwnWindow {
         logging::line(
-            "macos",
+            "keys",
             &format!(
-                "a key the overlay had claimed reached the application instead: vk {vk:#04x} \
-                 mask {mask}, because {why}"
+                "the tap lets keys through while one of our windows has the keyboard ('{}'): a \
+                 captured key, vk {vk:#04x} mask {mask}, went to it",
+                super::own::key_title()
             ),
         );
+        return;
     }
+    logging::line(
+        "macos",
+        &format!(
+            "a key the overlay had claimed reached the application instead: vk {vk:#04x} \
+             mask {mask}, because {}",
+            pass_words(why)
+        ),
+    );
 }
 
 /// Told to us by [`super::watch`] whenever the frontmost window can have changed.

@@ -117,7 +117,8 @@ screen reader does. The log says how much ran there, under `[gui]`:
 What counting costs the pump: one load per iteration while no dialog or menu is open, and a lock
 per iteration while one is. One of the application's windows coming to the front and going is
 said, on Windows, by the keyboard hook's lines (see "Out of the chain in this application's own windows"
-under [host.keys](api/keys.md#host-keys-capture)).
+under [host.keys](api/keys.md#host-keys-capture)), and on macOS by the event tap's (see "Keys in this
+application's own windows" there).
 
 ## Installed tab
 

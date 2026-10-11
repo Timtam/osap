@@ -713,6 +713,10 @@ pub fn run_gui(
         // backend::macos::app for why it cannot simply be prevented.
         #[cfg(target_os = "macos")]
         crate::backend::restore_frontmost_after_gui_start();
+        // From here AppKit's application object is wxWidgets' own, and this application's windows
+        // are answered from it — never through accessibility (backend::macos::own).
+        #[cfg(target_os = "macos")]
+        crate::backend::start_own_windows();
         // The window is a background manager: hiding/closing it must not quit the
         // app — only the tray "Quit" does.
         app.set_exit_on_frame_delete(false);

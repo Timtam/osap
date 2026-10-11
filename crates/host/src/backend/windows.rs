@@ -2266,8 +2266,8 @@ fn note_menu_pass(owner: u32, vk: u32, mask: u8) {
 }
 
 /// Why the hook let a captured key-down through to the application instead of taking it. The
-/// three that [`super::capture_decision`] decides, and the hook's own screen-reader rule; each is
-/// an index into [`PASS_SAID_FOR`].
+/// three that [`super::capture_decision`] decides for the hook, and the hook's own screen-reader
+/// rule; each is an index into [`PASS_SAID_FOR`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PassWhy {
     /// The hook's own record says a screen reader's modifier is held.
@@ -2283,12 +2283,16 @@ enum PassWhy {
     MenuFlag = 4,
 }
 
-impl From<super::PassWhy> for PassWhy {
-    fn from(why: super::PassWhy) -> PassWhy {
+impl PassWhy {
+    /// The hook's reason for what [`super::capture_decision`] decided. `None` for
+    /// [`super::PassWhy::OwnWindow`], which the hook never hears: it tells the decision that none
+    /// of this application's windows has the keyboard, since it is out of the chain while one has.
+    fn of(why: super::PassWhy) -> Option<PassWhy> {
         match why {
-            super::PassWhy::OutOfScope => PassWhy::OutOfScope,
-            super::PassWhy::MenuMode => PassWhy::MenuMode,
-            super::PassWhy::MenuFlag => PassWhy::MenuFlag,
+            super::PassWhy::OutOfScope => Some(PassWhy::OutOfScope),
+            super::PassWhy::MenuMode => Some(PassWhy::MenuMode),
+            super::PassWhy::MenuFlag => Some(PassWhy::MenuFlag),
+            super::PassWhy::OwnWindow => None,
         }
     }
 }
@@ -2870,7 +2874,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                         let st = locked(&KEY_STATE);
                         if st.set.iter().any(|c| c.vk == generic && c.mask == tap) {
                             let front = GetForegroundWindow() as isize;
-                            match capture_decision(&st.set, &st.owners, generic, tap, front, popup_menu_open) {
+                            match capture_decision(&st.set, &st.owners, generic, tap, front, false, popup_menu_open) {
                                 Some(Capture::Take { owner }) => Some((owner, front)),
                                 _ => None,
                             }
@@ -2990,7 +2994,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 let foreground = GetForegroundWindow() as isize;
                 let decided = {
                     let st = locked(&KEY_STATE);
-                    let d = capture_decision(&st.set, &st.owners, vk, mask, foreground, popup_menu_open);
+                    let d = capture_decision(&st.set, &st.owners, vk, mask, foreground, false, popup_menu_open);
                     if let (true, Some(Capture::Pass { why, owner })) = (is_down, d) {
                         let first = st.set.iter().find(|c| c.vk == vk && c.mask == mask);
                         let scope = first.map_or(0, |c| scope_of(&st.owners, c.owner));
@@ -3012,11 +3016,13 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                                         note_menu_pass(o, vk, mask);
                                     }
                                 }
-                                super::PassWhy::OutOfScope => {}
+                                super::PassWhy::OutOfScope | super::PassWhy::OwnWindow => {}
                             }
                         }
                         drop(st);
-                        note_capture_pass(PassNote { vk, mask, why: why.into(), foreground, scope, reader_ms: 0 });
+                        if let Some(why) = PassWhy::of(why) {
+                            note_capture_pass(PassNote { vk, mask, why, foreground, scope, reader_ms: 0 });
+                        }
                     }
                     d
                 };
@@ -4644,10 +4650,12 @@ mod hook_carry_over_tests {
         let l = capture_pass_line(&note(PassWhy::MenuFlag, 0));
         assert!(l.contains("host.keys.menuOpen") && l.contains("a module scoped to the window in front"), "{l}");
         assert!(capture_pass_line(&note(PassWhy::ReaderDown, 0)).contains("as far as the system"));
-        // The three the shared decision names are the hook's own three.
-        assert_eq!(PassWhy::from(crate::backend::PassWhy::OutOfScope), PassWhy::OutOfScope);
-        assert_eq!(PassWhy::from(crate::backend::PassWhy::MenuMode), PassWhy::MenuMode);
-        assert_eq!(PassWhy::from(crate::backend::PassWhy::MenuFlag), PassWhy::MenuFlag);
+        // The three the shared decision names for the hook are the hook's own three; the fourth,
+        // the Mac tap's, the hook never hears.
+        assert_eq!(PassWhy::of(crate::backend::PassWhy::OutOfScope), Some(PassWhy::OutOfScope));
+        assert_eq!(PassWhy::of(crate::backend::PassWhy::MenuMode), Some(PassWhy::MenuMode));
+        assert_eq!(PassWhy::of(crate::backend::PassWhy::MenuFlag), Some(PassWhy::MenuFlag));
+        assert_eq!(PassWhy::of(crate::backend::PassWhy::OwnWindow), None);
     }
 
     /// The repeat bit: down, down is a repeat; the key's up clears it; another key's up does

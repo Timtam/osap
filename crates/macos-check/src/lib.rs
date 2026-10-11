@@ -337,6 +337,12 @@ pub fn ocr_lifecycle_calls() -> (fn() -> Option<std::thread::JoinHandle<()>>, fn
     )
 }
 
+/// Following this application's own windows, which `gui.rs` starts once the window system is up.
+/// Named for the reason `app_calls` names its calls.
+pub fn own_window_calls() -> fn() {
+    backend::start_own_windows
+}
+
 pub fn app_calls() -> (fn(), fn(bool, &str) -> bool, fn(), fn(), fn()) {
     (
         backend::activate_self,

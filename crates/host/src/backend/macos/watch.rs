@@ -340,6 +340,8 @@ fn activated(app: &NSRunningApplication, announce: bool) {
     let pid = app.processIdentifier();
     let name = app_name(app);
     FRONT_PID.store(pid, Ordering::Relaxed);
+    // Set against AppKit's word on this application's own key window, for the log (`own.rs`).
+    super::own::note_front(pid);
 
     // Whatever menu we believed was open belonged to the application we just left. Anything
     // else risks carrying a stuck flag into an application that never opened a menu at all.
@@ -355,7 +357,8 @@ fn activated(app: &NSRunningApplication, announce: bool) {
     // asking a question whose answer has already moved on. It is still a call into another
     // process, though, so it is timed: an application that answers slowly here is the shape
     // of the problem that ends with keystrokes going missing, and a log nobody can reproduce
-    // from is the only diagnosis anyone will get.
+    // from is the only diagnosis anyone will get. For this application itself it is no call at
+    // all: its window is AppKit's answer (`own.rs`), noted for the tap and pushed like any other.
     let started = Instant::now();
     // `None` means the application did not answer. Zero is what the rest of this path is
     // written around — the drain resolves it, fails to match and arms the delayed re-check

@@ -7052,6 +7052,35 @@ maintainer's German test instructions are a text of their own, not in the reposi
         application?
       - **M9:** how long from a key press to VoiceOver speaking, after the panel was hidden for
         minutes?
+- [ ] **MW17 (log only): this application's own windows on a Mac, answered by AppKit** (built
+      2026-10-11, `backend/macos/own.rs`). `host.window` answers every window of ours from AppKit —
+      its id 2^40 plus the window number — and the accessibility backend asks this process nothing:
+      `foreground`, `active`, `list`, `focus`, `ownsPoint`, and the focus chain, `focusStep` and
+      `focusWithin`, which answer empty or `nil` while the keyboard is in this application. The
+      event tap lets every capture through while one of our windows has the keyboard. Only a Mac's
+      log can show that it holds, from any session with the module manager opened and closed a few
+      times (a page's as well, once there is one): no `pid <ours> answered the frontmost-window
+      question`, no `accessibility could not complete` while ours is in front, no `not asking …
+      (pid <ours>)` — no quarantine of our own pid; `[keys] one of our windows has the keyboard
+      ('Automation Platform — Modules …')` as the manager takes the keyboard and `none of our
+      windows has the keyboard any more, after … s` as it goes, neither with `(read at the tick: no
+      notification said so)` — with it, AppKit's key notifications did not come; an overlay's
+      captured key pressed in the manager reaching the manager (`the tap lets keys through …`)
+      while a hotkey still fires; and `host.window.active()` asked in the manager answering
+      `own = true` with the manager's frame and title, its `class` what the window reports in-process
+      (`AXWindow/AXStandardWindow/` expected). Which of AppKit and the workspace tells of a switch
+      first has never been seen: `[keys] the workspace named this application the frontmost one … ms
+      after one of our windows took the keyboard` (or the other way round) as the manager opens, and
+      `… another application … our windows let the keyboard go` on the switch back to the DAW — the
+      order and the gap, from several of each. In between, the focus chain, `focusStep` and
+      `focusWithin` answer "not known" and `foreground()`/`active()` follow the workspace, so a long
+      gap is a long "not known". `host.window.focus` on a window of ours while another application is
+      in front (`focusing our own window …`): on macOS 14 and later the request to become the active
+      application may be refused, so the window can come in front without the keyboard — a `[keys]
+      one of our windows has the keyboard` line straight after says it took; the hand-over of the
+      front, built next, rebuilds this on the measured activation. With tracing on, a captured key
+      held down while its callback brings a window of ours forward: its repeats swallowed (`tap:
+      keycode … repeats, held since a capture took it; swallowed`), none reaching that window.
 - [ ] **Stage 2 — the foundation**, which a native `host.gui` window needs as well: our own windows
       in `host.window` (`own` on the window tables and on `foreground()` since 4acb564, which the
       overlay runtime lets go on; window triggers not matching our own windows unless they ask; on a

@@ -1103,7 +1103,7 @@ fn role_matches(snap: &Snap, roles: &[&str]) -> bool {
 /// can differ from the product's name and from what the same product's executable is called
 /// on Windows. Cached for the same reason `exe_for_pid` is — both are read on every
 /// activation, and a process lookup is not free.
-fn bundle_id_for_pid(pid: i32) -> String {
+pub(super) fn bundle_id_for_pid(pid: i32) -> String {
     if pid == 0 {
         return String::new();
     }
@@ -1120,7 +1120,7 @@ fn bundle_id_for_pid(pid: i32) -> String {
     id
 }
 
-fn exe_for_pid(pid: i32) -> String {
+pub(super) fn exe_for_pid(pid: i32) -> String {
     if pid == 0 {
         return String::new();
     }
@@ -1379,12 +1379,14 @@ fn win_info(el: CFRetained<AXUIElement>, require_title: bool) -> Option<WinInfo>
 ///
 /// Three answers, and the third is the one that matters. Ours: `Some(true)`. Somebody
 /// else's — named in the log with its owner, so a refused press can be explained —
-/// `Some(false)`. And `None` wherever the question could not be put: no pairing between
-/// the accessibility window and a `CGWindowID` (see `window_id`), no window at the point,
-/// a window of VoiceOver's own that it did not mark click-through, or one of this
-/// application's (the announcement window sits over the plugin). A wrong "no" costs the
-/// user a press that would have worked, which is exactly what every click did before this
-/// existed; a wrong "yes" is the state before it.
+/// `Some(false)`, and so is a page of this application's, which sits over the plug-in window
+/// on purpose and would take the click. And `None` wherever the question could not be put: no
+/// pairing between the accessibility window and a `CGWindowID` (see `window_id`), no window at
+/// the point, a window of VoiceOver's own that it did not mark click-through, or any other
+/// window of this application's (the announcement window sits over the plugin). Which window
+/// of ours is a page is AppKit's answer (`own::kind_of`), with no window list asked. A wrong
+/// "no" costs the user a press that would have worked, which is exactly what every click did
+/// before this existed; a wrong "yes" is the state before it.
 ///
 /// Main thread only, which the pump is; anywhere else it answers `None` rather than
 /// touching AppKit from the wrong thread.
@@ -1421,12 +1423,25 @@ fn number_owns_point(ours: u32, x: i32, y: i32, what: &str) -> Option<bool> {
     if hit as u32 == ours {
         return Some(true);
     }
-    let Some((pid, layer)) = window_owner(hit as u32) else {
-        return None;
+    // One of this application's own windows: AppKit says so, without the window list. A page of
+    // ours over the point would take the click, so `false`; any other window of ours, `None`
+    // (`backend::own_window_owns_point`).
+    let (whose, lands) = match super::own::kind_of(hit as u32) {
+        Some(kind) => {
+            let answer = crate::backend::own_window_owns_point(kind);
+            if answer != Some(false) {
+                return answer;
+            }
+            ("a page of this application".to_string(), "that page")
+        }
+        None => {
+            let (pid, layer) = window_owner(hit as u32)?;
+            if is_ours(pid) || is_voiceover(pid) {
+                return None;
+            }
+            (format!("{} (pid {pid}, layer {layer})", exe_for_pid(pid)), "that application")
+        }
     };
-    if pid == std::process::id() as i32 || is_voiceover(pid) {
-        return None;
-    }
     // One line per couple of seconds: a hotspot asks before every click, and a window
     // that stays in the way stays in the way for every one of them.
     thread_local! {
@@ -1438,9 +1453,8 @@ fn number_owns_point(ours: u32, x: i32, y: i32, what: &str) -> Option<bool> {
         crate::logging::line(
             "macos",
             &format!(
-                "the point {x},{y} is under window {hit} of {} (pid {pid}, layer {layer}), not \
-                 under {what} — a click there would land in that application",
-                exe_for_pid(pid)
+                "the point {x},{y} is under window {hit} of {whose}, not under {what} — a click \
+                 there would land in {lands}"
             ),
         );
     }
@@ -1599,6 +1613,11 @@ fn enumerate_windows_in(pids: &[u32], timeout: f32, what: &str) -> Vec<WinInfo> 
     let mut asked = 0usize;
     for &pid in pids.iter().take(256) {
         let pid = pid as i32;
+        // This application's own windows, from AppKit (`own.rs`): never asked through accessibility.
+        if is_ours(pid) {
+            out.extend(super::own::windows_info());
+            continue;
+        }
         // The penalty box applies here too. The read below already RECORDS a timeout
         // (`attribute` marks the application busy on CannotComplete); this loop simply never
         // looked before asking, while `frontmost_window_element` has since the quarantine
@@ -1741,6 +1760,37 @@ fn frontmost_pid() -> Option<i32> {
     (pid > 0).then_some(pid)
 }
 
+/// Whether process `pid` is this application. Its windows are AppKit's to answer (`own.rs`), and
+/// nothing in this file asks it anything through accessibility.
+fn is_ours(pid: i32) -> bool {
+    pid == std::process::id() as i32
+}
+
+/// Whether the keyboard can be in this application: it is the frontmost application (`front`), or
+/// one of its windows has the keyboard by AppKit's account inside this process
+/// (`own::has_keyboard`), whatever the workspace names. A system-wide read of the focused element
+/// is then answered by this process — the main thread asking the main thread — so the reads of
+/// where the keyboard is answer "not known" instead, without asking.
+///
+/// Either half alone leaves a moment open: the workspace names an application frontmost apart
+/// from AppKit telling this process that one of its windows took or lost the keyboard, and which
+/// comes first is not known (MW17 in TODO.md). Both together never ask this process; what they
+/// cost is a "not known" while the keyboard is on its way to or from another application.
+fn keyboard_is_ours(front: Option<i32>) -> bool {
+    front.is_some_and(is_ours) || super::own::has_keyboard()
+}
+
+/// Whether the window in front is this application's, for the answers that name that window
+/// (`active_window`, and `foreground_window` and `foreground_window_id` through
+/// `own::key_id_in_front_of`): this application is the frontmost one, or one of its windows has
+/// the keyboard in a way that counts for the application the workspace names. Not
+/// [`keyboard_is_ours`]: these answer for the application the workspace's activation named — `watch`
+/// resolves that activation's window through `foreground_window_id` — so they follow the
+/// workspace, and nothing they ask goes to this process either way.
+fn front_is_ours(front: Option<i32>) -> bool {
+    front.is_some_and(is_ours) || super::own::key_id_in_front_of(front).is_some()
+}
+
 /// The answer to "which window is in front", and how much it is worth.
 enum Front {
     /// The application answered. This element is live and may be asked further questions.
@@ -1841,6 +1891,10 @@ fn window_after_fallbacks(app_el: &AXUIElement, pid: i32) -> Option<CFRetained<A
 /// remembered element would move the timeouts one line down rather than remove them.
 pub(super) fn frontmost_window_element() -> Option<(CFRetained<AXUIElement>, i32)> {
     let pid = frontmost_pid()?;
+    // Never an element of this application's own: its windows are AppKit's to answer.
+    if is_ours(pid) {
+        return None;
+    }
     match front_window_of(pid) {
         Front::Fresh(el) => Some((el, pid)),
         Front::Silent | Front::NoWindow => None,
@@ -1848,10 +1902,25 @@ pub(super) fn frontmost_window_element() -> Option<(CFRetained<AXUIElement>, i32
 }
 
 /// The frontmost window. A title is NOT required — an untitled dialog is exactly the case
-/// this has to answer for.
+/// this has to answer for. While the window in front is this application's, its own key or main
+/// window, from AppKit (`own.rs`).
 pub fn active_window() -> Option<WinInfo> {
     let t = Instant::now();
-    let pid = frontmost_pid()?;
+    let front = frontmost_pid();
+    // This application's own window, from AppKit (`own.rs`): its key window, else its main window —
+    // also while another application is the active one and a panel of ours that does not activate
+    // this application has the keyboard. Not told to the key tap, unlike another application's
+    // below: `watch` tells it when this application comes to the front, and while one of our
+    // windows has the keyboard every capture is let through whatever window the tap holds.
+    if front_is_ours(front) {
+        let info = super::own::active_info();
+        crate::logging::trace("macos", || match &info {
+            Some(w) => format!("active_window: id {} '{}', one of our own, from AppKit", w.hwnd, w.title),
+            None => "active_window: none of our own windows is shown in front".to_string(),
+        });
+        return info;
+    }
+    let pid = front?;
     // Whether the answer came from the application or out of memory. Carried into the trace
     // because a remembered answer is fast, and a fast line that does not say so reads as a
     // healthy application — which is the opposite of what it means.
@@ -1929,6 +1998,9 @@ pub fn active_window() -> Option<WinInfo> {
 
 /// One window by handle. `require_title` is the enumerate-versus-active distinction above.
 pub fn window_info(handle: isize, require_title: bool) -> Option<WinInfo> {
+    if crate::backend::own_number(handle).is_some() {
+        return super::own::info(handle, require_title);
+    }
     let entry = handles::get(handle)?;
     win_info(entry.element, require_title)
 }
@@ -1950,9 +2022,19 @@ pub fn window_info(handle: isize, require_title: bool) -> Option<WinInfo> {
 /// rather than observed: the log line that would show it ("a key the overlay had claimed
 /// reached the application instead") has not been seen in a tester's log.
 pub fn foreground_window_id() -> Option<isize> {
-    let Some(pid) = frontmost_pid() else {
+    // This application's own, from AppKit: the window of ours with the keyboard, as it counts for
+    // the application the workspace names (`own::key_id_in_front_of`) — or, with this application
+    // in front, its main window or none. "None" is an answer here, not a silence: it is our own.
+    let front = frontmost_pid();
+    if let Some(id) = super::own::key_id_in_front_of(front) {
+        return Some(id);
+    }
+    let Some(pid) = front else {
         return Some(0);
     };
+    if is_ours(pid) {
+        return Some(super::own::front_id());
+    }
     match front_window_of(pid) {
         Front::Fresh(el) => {
             let handle = handles::intern(el, pid, 0);
@@ -2011,9 +2093,32 @@ pub fn foreground_window_id() -> Option<isize> {
 /// `shown` is the window's `AXMinimized` read as "not minimised" — minimised is this
 /// platform's "not visible", as in `win_info`. The window server is not asked whether the
 /// window is drawn; whether a focused window can be ordered out is not known (TODO.md).
+///
+/// A window of this application's own with the keyboard is AppKit's answer (`own.rs`), as it
+/// counts for the application the workspace names (`own::key_id_in_front_of`); this application in
+/// front with none of its windows holding the keyboard is `None`, since no window gets the keys
+/// then.
 pub fn foreground_window() -> Option<crate::backend::Foreground> {
     let t = Instant::now();
-    let pid = frontmost_pid()?;
+    // A window of ours with the keyboard, from AppKit (`own.rs`), as it counts for the application
+    // the workspace names.
+    let front = frontmost_pid();
+    if let Some(f) = super::own::foreground(front) {
+        crate::logging::trace("macos", || {
+            format!("foreground_window: id {} (ours) shown {}, from AppKit", f.id, f.shown)
+        });
+        return Some(f);
+    }
+    let pid = front?;
+    if is_ours(pid) {
+        // This application in front with none of its windows holding the keyboard: no window gets
+        // the keys.
+        crate::logging::trace("macos", || {
+            "foreground_window: this application is in front, and none of its windows has the keyboard"
+                .to_string()
+        });
+        return None;
+    }
     if skip_busy(pid, "foreground_window") {
         return None;
     }
@@ -2115,6 +2220,9 @@ fn remembered_info(pid: i32, named: Option<isize>) -> Option<WinInfo> {
 /// listed and being asked — and a caller that believes it moved the focus when it did not
 /// would tell a blind user they are somewhere they are not.
 pub fn focus_window(handle: isize) -> bool {
+    if crate::backend::own_number(handle).is_some() {
+        return super::own::focus(handle);
+    }
     let Some(entry) = handles::get(handle) else {
         crate::logging::line("macos", &format!("cannot focus window {handle}: no such handle"));
         return false;
@@ -2183,6 +2291,10 @@ pub fn focus_window(handle: isize) -> bool {
 /// by owning process and by frame — and it is resolved lazily and remembered, because the
 /// window list is a whole-system query and no caller wants to pay for it on a focus change.
 pub(super) fn window_id(handle: isize) -> u32 {
+    // An own window's id carries its number.
+    if let Some(n) = crate::backend::own_number(handle) {
+        return n;
+    }
     let Some(entry) = handles::get(handle) else {
         return 0;
     };
@@ -2472,6 +2584,14 @@ pub fn window_focus_chain() -> Vec<ControlInfo> {
     // the application the system-wide read would have been waiting on. Empty is the honest
     // answer meanwhile: every caller reads an empty chain as "not known".
     let front = frontmost_pid();
+    // The keyboard in this application: the read below would be answered by this process itself.
+    // Not known, so empty — what every caller reads an empty chain as.
+    if keyboard_is_ours(front) {
+        crate::logging::trace("macos", || {
+            "focus chain: the keyboard is in this application; answering empty, as not known".to_string()
+        });
+        return Vec::new();
+    }
     if let Some(p) = front {
         if skip_busy(p, "focus_chain") {
             return Vec::new();
@@ -3165,6 +3285,18 @@ pub fn class_nav_point(
 /// viewport cut is needed waits for the live check in TODO.md.
 pub fn focus_step(hwnd: isize, direction: i32) -> Option<crate::backend::FocusStep> {
     let root = root_of(hwnd, "focus_step")?;
+    // Where the keyboard is, and where it landed, are system-wide reads: with the keyboard in this
+    // application they would be answered by this process itself, so nothing is moved.
+    if keyboard_is_ours(frontmost_pid()) {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "focus_step({hwnd}): the keyboard is in this application, where it cannot be read \
+                 without asking this application itself; nothing was moved"
+            ),
+        );
+        return None;
+    }
     let t = Instant::now();
     // The whole window — see point 1 above for why not its first child on this platform.
     let scope = root.clone();
@@ -3296,6 +3428,17 @@ pub fn focus_step(hwnd: isize, direction: i32) -> Option<crate::backend::FocusSt
 /// assumed) wins, so a text field near the top of a panel is what usually gets it.
 pub fn focus_within(hwnd: isize, x: i32, y: i32, w: i32, h: i32) -> Option<(String, i32)> {
     let root = root_of(hwnd, "focus_within")?;
+    // As in `focus_step`: whether an element took the keyboard is a system-wide read.
+    if keyboard_is_ours(frontmost_pid()) {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "focus_within({hwnd}): the keyboard is in this application, where it cannot be read \
+                 without asking this application itself; nothing was moved"
+            ),
+        );
+        return None;
+    }
     let t = Instant::now();
     let inside = |r: &CGRect| {
         let cx = r.origin.x + r.size.width / 2.0;

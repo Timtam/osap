@@ -59,6 +59,9 @@ mod layout;
 /// `pub(crate)` for its [`ocr::Shot`], which the backend names as the platform's
 /// `OcrShot`.
 pub(crate) mod ocr;
+/// This application's own windows, answered by AppKit and never through accessibility — see the
+/// file. `pub(super)` for `start`, which `gui.rs` calls once the window system is up.
+pub(super) mod own;
 pub(crate) mod perm;
 mod queue;
 /// Sleep and wake, the lock, the session, the displays, applications quitting — heard, queued
@@ -463,6 +466,10 @@ impl Backend for MacBackend {
         // Screen Recording's automatic request, if it is still to be made: one atomic load
         // otherwise, and one look at Accessibility a second while it waits for that grant.
         perm::pump();
+        // Which of this application's windows has the keyboard, read as a level: an edge its
+        // notifications missed is corrected here, and a change is a focus change for the drain
+        // below. A few messages inside this process; nothing before the window system is up.
+        own::refresh();
         // A sleep, a lock, a display change (`system.rs`) are the first thing `queue::drain`
         // delivers: before the window events, as on Windows.
         queue::drain(events);

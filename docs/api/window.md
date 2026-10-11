@@ -82,6 +82,8 @@ Note: a control table has no `title` / `app` fields — only `id`, `class`, `bou
 
 `id` is a small interned counter, meaningful only to this platform and **never reused** — nothing outside it accepts one, and a handle whose process has exited stays permanently unmatched rather than silently matching something else. The host forgets the handles of an application when the workspace reports that it quit. It also sweeps its table of handles: first when the table reaches 4,096 entries, after that each time it reaches twice what the last sweep kept (and never below 4,096). A sweep runs on the event loop after that turn's events have been delivered, never inside a call, and drops the handles of processes that have exited and of windows that no longer exist, with every control inside them: a window paired with a window-server window number that the window server still lists is kept without asking anybody, and any other window is asked of its application — at most 256 windows and 150 ms a sweep, though one application that stops answering can hold one question for its one-second accessibility timeout. A forgotten handle is unmatched too — [`controls`](#host-window-controls), for one, answers it with nothing. The window table's executable name and bundle id of an application are forgotten when the workspace reports it quit, so a later process given the same process id is then described as itself. `client` is derived rather than read: a titled window's content rect is worked out from its own geometry, so on a borderless plug-in window it equals the frame.
 
+**This application's own windows** — the module manager, a dialog, a [page](./gui.md#host-gui-webview) — are described by AppKit, never by an accessibility question to this application, which would be the event loop asking itself. Their `id` is 2⁴⁰ (1099511627776) plus the window server's number for the window — the `id` [`windowsOf`](#host-window-windowsof) lists it under — so it never meets the counter above and stays the same for the life of the window. `class` is the window's own accessibility role, subrole and identifier, read inside the application (`"AXWindow/AXStandardWindow/"`); `bounds` and `client` are AppKit's frame and content rectangle, flipped to the top-left of the primary display, so `client` is exact here; `app` is this application. A hidden or minimised one is left out, as any other is. [`controls`](#host-window-controls) and `host.element` find nothing inside one.
+
 ## Matchers {#matchers}
 
 A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTrigger`, and to the overlay's bindings. It is a plain Luau table — there is no constructor for it — and these are **all the keys that are read** (all optional; all must match):
@@ -205,6 +207,11 @@ if w then host.log.info("front: " .. w.title) end
 
 ### macOS
 
+**This application's own window** is AppKit's answer: while this application is the frontmost one,
+or a panel of it has the keyboard without activating it (see [`foreground()`](#host-window-foreground)),
+the answer is its key window, else its main window, and `nil` when that is hidden or minimised.
+Never from memory, and nothing is asked of this application through accessibility.
+
 **An answer can be up to five seconds old.** Every reading here is a synchronous call into
 another application, and a plugin that is mid-repaint does not answer one. When that happens
 the application is left alone for five seconds, and during those five seconds this returns
@@ -311,6 +318,20 @@ is named once that turn has been taken. A panel that takes the keys without acti
 application — Spotlight, a launcher, a password manager's quick-access window — is not named: the
 frontmost application, and so this answer, stays the one before it.
 
+**This application's own window** is the exception, and is AppKit's answer: while one of its windows
+has the keyboard, that window — its `id` as a [window table](#window-table) gives it, `own = true`,
+`shown` unless it is hidden or minimised. That holds while the workspace names this application the
+frontmost one, and while it names another only for a panel of this application's that takes the
+keyboard without activating it: any other window of this application's with the keyboard then is
+not the answer, and the application the workspace names is asked, as it is when that application's
+activation is reported. The workspace and AppKit tell the application of one switch separately, and
+which comes first is not known; each is a focus change, so the answer is asked again once both have
+come. With this application the frontmost one and none of its windows holding the keyboard, `nil`:
+no window gets the keys then. Which of its windows has the keyboard is followed from AppKit's
+notifications and read again at every turn of the event loop (see "Keys in this application's own
+windows" under [`host.keys.capture`](./keys.md#host-keys-capture)); nothing is asked of this
+application through accessibility.
+
 **Never from memory.** While the frontmost application is in the five-second not-answering
 quarantine described under [`active()`](#host-window-active), it is not asked, and the answer is
 `nil` — not the window `active()` serves from memory then. A read that times out puts the
@@ -385,6 +406,8 @@ Three separate things are attempted — raising the window, activating its appli
 
 Minimised windows are additionally dropped from `list()` and `find()` here, so one cannot normally be reached to pass in.
 
+A window of this application's own is focused with AppKit's calls instead: brought back if minimised, the application asked to become the active one, and the window ordered in front and made key. `true` whenever the window is shown or minimised; the change is asynchronous, and the window becoming key is what says it happened. A hidden one — the module manager once it is closed, a page hidden, or any window of the application while the application is hidden — answers `false`, with a line in the log, as the window tables leave it out: only what hid it shows it again.
+
 ## host.window.controls(win?) {#host-window-controls}
 
 **Signature:** `host.window.controls(win: Window?) -> { Control }`
@@ -409,6 +432,8 @@ Every **visible child window**, from `EnumChildWindows`, with no node or depth c
 
 So a module that identifies a plug-in by scanning `controls()` for a *leaf* control class finds it on Windows and comes back empty-handed here. Identify by container, or by `host.element.*`.
 
+Empty for a window of this application's own: nothing inside it is read.
+
 ## host.window.focusChain() {#host-window-focuschain}
 
 **Signature:** `host.window.focusChain() -> { Control }`
@@ -428,7 +453,7 @@ The chain's links are **windows**: it walks from the focused `HWND` up through i
 
 The links are **accessibility elements**. Both platforms start at whatever has focus, but the units differ, so the same self-drawn plug-in can be many links deep here and one link there. A gate written as "the chain is at most one deep, therefore we are in the plug-in" is reading a granularity, not a fact about the plug-in — check what the chain actually contains rather than how long it is.
 
-**An empty chain means the focus could not be read**, and is never "the keyboard is in the window". Several states produce it: the application did not answer within the accessibility timeout, it is in the short quarantine that follows such a timeout, there is no frontmost application, or the Accessibility permission is not granted at all — in which case every chain is empty for the whole session. When the read succeeds and nothing inside the window reports focus (a plug-in view that is not accessible is exactly that), the window alone is returned, and that one-link chain is the honest answer. Until 2026-09-03 a failed read took the same fallback and came out identical to it.
+**An empty chain means the focus could not be read**, and is never "the keyboard is in the window". Several states produce it: the application did not answer within the accessibility timeout, it is in the short quarantine that follows such a timeout, there is no frontmost application, the keyboard is in this application — one of its windows has it, or it is the frontmost application, and the read would be answered by this application itself, so it is not made — or the Accessibility permission is not granted at all — in which case every chain is empty for the whole session. When the read succeeds and nothing inside the window reports focus (a plug-in view that is not accessible is exactly that), the window alone is returned, and that one-link chain is the honest answer. Until 2026-09-03 a failed read took the same fallback and came out identical to it.
 
 Depth is still not a fact about the plug-in. A one-link chain says the focus is the window; whether that means "the user is in the plug-in" depends on whether the plug-in exposes anything, which differs per plug-in and per platform.
 
@@ -454,7 +479,7 @@ Implemented with `WindowFromPoint` + `GetAncestor(GA_ROOT)` on both sides. `Wind
 
 `NSWindow.windowNumberAtPoint:belowWindowWithWindowNumber:` — the window server's own hit-test, which names the frontmost window that would receive a mouse-down at the point across every application and skips windows that let clicks through. That is the question a click asks, and the reason the cheap route was not taken: `CGWindowListCopyWindowInfo` answers what is *drawn* there, and a screen reader's cursor ring is drawn over the very control being operated while letting clicks pass, so the drawn-there answer would have refused essentially every press on the machines this exists for.
 
-The window is paired with its `CGWindowID` by owner and frame (`window_id`), once per window. Three answers: the pair matches, `true`; the point belongs to another window — another application's, or another of the same application's, such as a popup of a DAW over its own plug-in window — `false`, with a log line naming that window's application and its window level, so a refused press can be explained; and `nil` wherever the question could not be put — no pairing yet, no window at the point, a window of VoiceOver's own that it did not mark click-through, or one of this application's (the announcement window sits over the plugin). With `listed`, `id` is the `CGWindowID` itself, which is the numbering `windowsOf` lists in and the hit test answers in: no pairing is needed, and the other answers are the same. Main thread only, which the pump is. Unverified on hardware as of 2026-09-10 without `listed`, and not run at all with it: the probe records which answer it got.
+The window is paired with its `CGWindowID` by owner and frame (`window_id`), once per window. Three answers: the pair matches, `true`; the point belongs to another window — another application's, or another of the same application's, such as a popup of a DAW over its own plug-in window — `false`, with a log line naming that window's application and its window level, so a refused press can be explained; and `nil` wherever the question could not be put — no pairing yet, no window at the point, a window of VoiceOver's own that it did not mark click-through, or any window of this application's but a [page](./gui.md#host-gui-webview) (the announcement window sits over the plugin). A page's window at the point answers `false`, as another application's does: it would take the click. Which window of this application is at the point is AppKit's answer, with no window list read. With `listed`, `id` is the `CGWindowID` itself, which is the numbering `windowsOf` lists in and the hit test answers in: no pairing is needed, and the other answers are the same. Main thread only, which the pump is. Unverified on hardware as of 2026-09-10 without `listed`, and not run at all with it: the probe records which answer it got.
 
 `Overlay:addHotspotButton` and `addHotspotToggle` already ask this before every click; a module only needs it directly when it clicks a coordinate itself.
 

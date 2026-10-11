@@ -228,7 +228,7 @@ fn heard(lua: &Lua) -> String {
 fn press(h: &Host, spec: &str, front: isize) -> Option<Capture> {
     let (vk, mask) = backend::parse_key_spec(spec).unwrap();
     let (set, owners) = h.backend.keys();
-    backend::capture_decision(&set, &owners, vk, mask, front, || false)
+    backend::capture_decision(&set, &owners, vk, mask, front, false, || false)
 }
 
 /// A key-down the hook takes in window `front` now: with the count of keys let through so far, as
