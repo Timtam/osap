@@ -4,8 +4,8 @@ version = "0.1.0"
 engine_api = ">=0.1, <0.2"
 entry = "src/main.luau"
 license = "MIT"
-# A page is shown on Windows only for now: on a Mac every show answers "not supported on this
-# platform yet" (docs/api/gui.md). And the window it clicks in is Notepad's.
+# The window it clicks in is Notepad's, which only Windows has. The page itself would run on a
+# Mac as well (docs/api/gui.md).
 supported_os = ["windows"]
 
 [capabilities]

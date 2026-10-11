@@ -66,8 +66,8 @@ pub(crate) mod ocr;
 /// file. `pub(super)` for `start`, which `gui.rs` calls once the window system is up.
 pub(super) mod own;
 /// `host.gui.webview`'s window on a Mac: a tool page's panel and an app page's window, WKWebView in
-/// them through wry — see the file. `pub(crate)` for `backend::page`, which `webview_lua.rs` is to
-/// use as it uses `webview_win.rs` (stage 4, TODO.md).
+/// them through wry — see the file. `pub(crate)` for `backend::page`, which `webview_lua.rs` uses
+/// as it uses `webview_win.rs`.
 pub(crate) mod page;
 /// `automation-platform page-check`: how this application takes the front and gives it back, and
 /// how the page window behaves, measured — see the file. `pub(super)` for `backend::page_check`.

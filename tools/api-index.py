@@ -60,7 +60,7 @@ NS_BLURB = {
                     'filtered by the window in front.',
     'host.arbiter': 'Deciding which of several overlays owns a contested slot.',
     'host.gui': 'An HTML page of the module\'s own, in a window beside the plug-in. Experimental: '
-                'Windows only, and the API may change after the Windows probe.',
+                'the API may change after the Windows probe and the Mac\'s first VoiceOver tests.',
     'host.timer': 'Waiting without blocking, and knowing when a cached reading went stale.',
     'host.settings': 'Typed, per-module settings, edited by the user in the module manager.',
     'host.log': 'Writing to the log file beside the application.',

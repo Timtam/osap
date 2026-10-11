@@ -256,18 +256,18 @@ Watching game controllers — presses, button combinations, sticks, pads coming 
 
 ## host.gui
 
-An HTML page of the module's own, in a window beside the plug-in. Experimental: Windows only, and the API may change after the Windows probe.
+An HTML page of the module's own, in a window beside the plug-in. Experimental: the API may change after the Windows probe and the Mac's first VoiceOver tests.
 
 | | |
 |---|---|
 | [`host.gui.webview(opts)`](gui#host-gui-webview) | Describes a page and returns the object every call below is a method of. |
 | [`page.window`](gui#page-window) | The window's id from the first time it was shown until it is closed |
 | [`page:close()`](gui#page-close) | Takes the window and its web view down, and drops the messages waiting for it. |
-| [`page:focus()`](gui#page-focus) | Brings the shown page to the front and the keyboard into its document, as `show` does with `focus`, and says whether Windows accepted. |
+| [`page:focus()`](gui#page-focus) | Brings the shown page to the front and the keyboard into its document, as `show` does with `focus`, and says whether the system accepted |
 | [`page:hide()`](gui#page-hide) | Hides the window. |
 | [`page:isShown()`](gui#page-isshown) | Whether the window is on screen, asked of the window system rather than remembered: `false` after the user closed it too. |
 | [`page:post(value)`](gui#page-post) | Sends the page a value. |
-| [`page:prepare()`](gui#page-prepare) | Builds the page without showing it, so that the first `show` does not wait for WebView2's cold start |
+| [`page:prepare()`](gui#page-prepare) | Builds the page without showing it, so that the first `show` does not wait for the engine's cold start |
 | [`page:show(opts)`](gui#page-show) | Shows the page, raised above the ordinary windows without taking the front, and with `focus` (the default) brings it to the… |
 
 ## host.timer

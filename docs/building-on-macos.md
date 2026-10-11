@@ -382,7 +382,7 @@ and that the recogniser reads wrong is a warning there.
 
 `page-check` measures how the application takes the front and gives it back on the Mac it runs
 on, with the calls the application itself makes, and then builds pages with the Mac's page window
-— the window `host.gui.webview` is to show its pages in there — and checks what the host promises
+— the window `host.gui.webview` shows its pages in there — and checks what the host promises
 of them (`crates/host/src/backend/macos/page_check.rs`). It needs another application in front
 when it starts — the one it hands the front back to — and for some seconds it shows windows of its
 own:
@@ -393,9 +393,9 @@ AutomationPlatform.app/Contents/MacOS/automation-platform page-check
 ```
 
 It loads no module, speaks nothing and leaves the application's log alone; every line it prints
-starts with `PAGE CHECK:`. In turn it shows a plain panel set up as a page's will be, the way a
-page with the keyboard will be shown (`activating show`); hands the front back to the application
-that was in front as a page leaving will, first the way the application does it, (a) — deactivated,
+starts with `PAGE CHECK:`. In turn it shows a plain panel set up as a page's is, the way a page
+with the keyboard is shown (`activating show`); hands the front back to the application that was in
+front as a page leaving does, first the way the application does it, (a) — deactivated,
 then asked — and then macOS 14's cooperative way, (b) — yielded, then asked from this application
 (`hand back (a)`, `hand back (b)`); hands it over once more the way `host.window.focus` does, with
 nothing of the application's leaving and nothing deactivated (`hand over with nothing of ours

@@ -48,7 +48,7 @@ pub mod instance;
 
 /// Who wants this application to have a Dock icon: the claims of its windows, counted by owner.
 /// The module manager's window and the error window claim it from `gui.rs`, which this crate cannot
-/// borrow, and the Mac's app page will from the backend (stage 4, TODO.md), so it has to exist at
+/// borrow, and the Mac's app page from the backend (`backend/macos/page.rs`), so it has to exist at
 /// `crate::dock` here as it does in `host`. Its macOS half — the setting it asks and the backend's
 /// policy call — has no other way to meet a compiler before it meets a Mac.
 #[path = "../../host/src/dock.rs"]
@@ -79,11 +79,11 @@ pub mod cells;
 #[path = "../../host/src/profile.rs"]
 pub mod profile;
 
-/// `host.gui.webview`'s rules: which answer `show` gives — on a Mac, for now, "not supported on
-/// this platform yet" — which file a page's request is served and with which headers, where its
-/// window goes, what a key does in a Mac's page. Pure, with no window in it, so this checks that it
-/// is true for macOS as well, and `--tests` builds its tests here. Windows' window (webview_win.rs)
-/// is not borrowed; the Mac's (backend/macos/page.rs) is compiled here with the backend, wry with it.
+/// `host.gui.webview`'s rules: which answer `show` gives, which file a page's request is served and
+/// with which headers, where its window goes, what a key does in a Mac's page, the log's words for
+/// each engine. Pure, with no window in it, so this checks that it is true for macOS as well, and
+/// `--tests` builds its tests here. Windows' window (webview_win.rs) is not borrowed; the Mac's
+/// (backend/macos/page.rs) is compiled here with the backend, wry with it.
 #[path = "../../host/src/webview.rs"]
 pub mod webview;
 
@@ -130,7 +130,11 @@ pub fn webview_calls() {
     let _: fn() -> Vec<(&'static str, String)> = webview::base_headers;
     let _ = (webview::MIN_SIZE, webview::MAX_FILE_BYTES);
     let _ = (Refusal::Unsupported, Refusal::Headless);
-    // The `window` option, and the recipe the Mac's page will be built from (stage 4, TODO.md).
+    let _: fn(&str) -> bool = Where::supports;
+    let _: fn() -> webview::Engine = webview::Engine::here;
+    let _: fn(webview::Engine) -> webview::Words = webview::Engine::words;
+    let _ = |w: webview::Words| (w.system, w.env, w.env_there, w.env_failed, w.building, w.front_taken, w.focus_taken);
+    // The `window` option, and the recipe the Mac's page is built from.
     let _: fn(&str) -> Option<webview::WindowKind> = webview::WindowKind::parse;
     let _: fn(webview::WindowKind) -> &'static str = webview::WindowKind::name;
     let _: fn(webview::WindowKind) -> webview::Recipe = webview::WindowKind::recipe;
@@ -139,10 +143,11 @@ pub fn webview_calls() {
     let _ = |r: webview::Recipe| (r.listed, r.minimise, r.maximise, r.panel);
 }
 
-/// Names the Mac's page window (`backend/macos/page.rs`) as `webview_lua.rs` is to call it — the
-/// interface `webview_win.rs` has on Windows, which `webview_lua.rs` calls today — for the reason
-/// `webview_calls` exists: a signature that drifts from it fails here, from Windows, before the two
-/// are joined (stage 4, TODO.md). `page-check` builds pages with it meanwhile.
+/// Names the Mac's page window (`backend/macos/page.rs`) as `webview_lua.rs` calls it, through the
+/// one name it gives both platforms' windows (`native_page`) — the interface `webview_win.rs` has on
+/// Windows — for the reason `webview_calls` exists: `webview_lua.rs` is not borrowed (it needs
+/// Luau), so a signature that drifts from the Windows one would otherwise fail first on a Mac. The
+/// one call it makes for the Mac alone, `runtime_version`, is named as well.
 #[allow(clippy::type_complexity)]
 pub fn page_calls() {
     use backend::page::{self, BuildSpec, EnvNow, Native};
@@ -152,7 +157,22 @@ pub fn page_calls() {
     let _: fn() -> Vec<webview::PageEvent> = page::take_events;
     let _: fn(&BuildSpec, &objc2_web_kit::WKContentRuleList) -> Result<Native, String> = page::build;
     let _ = |s: BuildSpec| (s.page, s.build, s.kind, s.title, s.scheme, s.root, s.entry_url);
+    // As `webview_lua.rs` fills one in, with the types its page entries hold.
+    let _ = |page: u64,
+             build: u64,
+             kind: webview::WindowKind,
+             title: String,
+             scheme: String,
+             root: std::path::PathBuf,
+             entry_url: String| BuildSpec { page, build, kind, title, scheme, root, entry_url };
     let _ = |e: EnvNow| matches!(e, EnvNow::Ready(_, false) | EnvNow::Waiting | EnvNow::Failed(_));
+    // As `webview_lua.rs`'s `build_pending` takes the rule list out and builds with it.
+    let _ = |now: EnvNow, spec: &BuildSpec| -> Option<(Result<Native, String>, bool)> {
+        match now {
+            EnvNow::Ready(env, reused) => Some((page::build(spec, &env), reused)),
+            EnvNow::Waiting | EnvNow::Failed(_) => None,
+        }
+    };
     let _: fn(&Native, Option<webview::Rect>) -> Option<webview::Placement> = Native::plan;
     let _: fn(&Native, Option<webview::Rect>, Option<webview::Placement>) = Native::put;
     let _: fn(&Native, bool) -> Result<(), webview::Refusal> = Native::show;

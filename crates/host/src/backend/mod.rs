@@ -64,10 +64,9 @@ pub(crate) use macos::app::{
 #[cfg(target_os = "macos")]
 pub(crate) use macos::own::start as start_own_windows;
 /// `host.gui.webview`'s window on a Mac — see `macos::page` — with the interface `webview_win.rs`
-/// has, which `webview_lua.rs` is to use as it uses that one (stage 4, TODO.md); `crates/macos-check`
-/// names it meanwhile, and `page-check` builds pages with it.
+/// has, which `webview_lua.rs` uses as it uses that one; `crates/macos-check` names it, so the two
+/// cannot drift apart unseen on Windows, and `page-check` builds pages with it too.
 #[cfg(target_os = "macos")]
-#[allow(unused_imports)]
 pub(crate) use macos::page;
 /// Asking the user to allow Apple Events to VoiceOver — see `macos::perm`. Re-exported for
 /// the same reason as the app calls above: `gui.rs` reaches it without a macOS-only `use`,

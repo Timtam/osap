@@ -7032,8 +7032,8 @@ maintainer's German test instructions are a text of their own, not in the reposi
       reason instead of an error of WebView2's. Never measured; the probe's log answers it for its
       own set of modules only. Later hardening: the main thread enters the single-threaded one at
       start, so the bad case cannot happen.
-- [ ] **The macOS tests, M1–M9** — once `host.gui.webview` shows its pages in the Mac's page
-      window, built since 2026-10-11 (stage 4, below; wry's fix, #1866, merged
+- [ ] **The macOS tests, M1–M9** — `host.gui.webview` shows its pages in the Mac's page window
+      since 2026-10-11 (stage 4, below; wry's fix, #1866, merged
       2026-09-27 and in no release yet, is in the Mac build from wry's repository since
       2026-10-11; 0.57.0 activates the application on every web view it creates), on the Air
       (12.7.6) and the mini (14.5), with REAPER and a small page. The answers go here, not into the
@@ -7048,7 +7048,8 @@ maintainer's German test instructions are a text of their own, not in the reposi
       - **M5:** `activate_self` — `NSApplication.activateIgnoringOtherApps:` since 2026-10-11, the
         VPS Avenger control tool's call — on 14.5 while REAPER is active: does the module manager's
         window come to the front with the keyboard? `page-check` measures the call on CI (MW5).
-      - **M6:** only if M1 fails, the activating way: do REAPER's or Logic's plug-in windows hide?
+      - **M6:** now MW6 (stage 4's questions, below): the activating panel is the default since
+        2026-10-11, so whether REAPER's or Logic's plug-in windows hide is asked there.
       - **M7:** does Tab reach every button with the system's "Keyboard navigation" off (the Mac
         side is to set `tabFocusesLinks`)?
       - **M8:** VoiceOver's window chooser (VO-F2 twice): is the panel listed, and under which
@@ -7172,10 +7173,13 @@ maintainer's German test instructions are a text of their own, not in the reposi
       REAPER's or Logic's floating plug-in windows hide while an app page has this application
       active (M6's question, for this window); (M13) whether VoiceOver's window chooser lists it,
       and under which name.
-- [ ] **Stage 4 — the Mac**: the page window is built (2026-10-11, `backend/macos/page.rs`, the
-      interface of `webview_win.rs`), and `host.gui.webview` does not use it yet — `Where::here`
-      still answers "not supported on this platform yet" there; next, `webview_lua.rs` takes it as
-      it takes `webview_win.rs`. A tool page is the VPS Avenger control tool's activating panel
+- [x] **Stage 4 — the Mac**: built (2026-10-11). `host.gui.webview` shows its pages on a Mac in the
+      page window (`backend/macos/page.rs`, the interface of `webview_win.rs`): `webview_lua.rs`
+      takes it as it takes `webview_win.rs`, through one name for both (`native_page`, held to it
+      by a test and by macos-check's `page_calls`), `Where::here` answers that macOS has pages, the
+      first build of a session logs WebKit's version, and only the log's words for the engine
+      differ (`webview::Engine::words`, Windows' held to stage 1's). gui.md's macOS blocks say what
+      it does. A tool page is the VPS Avenger control tool's activating panel
       (the maintainer's decision of 2026-10-11; the non-activating one is to be an experimental
       page option, `activates = false`, still to come) whose level follows the keyboard: floating
       while it is the key window, normal otherwise, also while a show waits for the keyboard. An
@@ -7189,8 +7193,17 @@ maintainer's German test instructions are a text of their own, not in the reposi
       kept in `WebKitRules` beside the application, and `page-check` checks on its own that WebKit
       applies one to the loads of a page the application serves, since the host's policy blocks
       what it covers first; the data store keeps nothing. CI's `page-check` builds pages with it on
-      four runners and fails a leg on a broken promise (docs/building-on-macos.md); what it cannot
-      show:
+      four runners and fails a leg on a broken promise (docs/building-on-macos.md). An app page the
+      user has open goes over the rectangle to avoid only once it has the keyboard
+      (`webview::place_when_key`), as on Windows, where the answer to the request for the front
+      comes before the page is put — the place kept with the request, so it goes with it when the
+      request is not got or a newer one is made; a page the show placed over it that does not get
+      the keyboard is hidden again, an app page that was not open as well as a tool page, and an
+      app page hidden so lets the Dock claim go; a `focus` places nothing and hides nothing. An app
+      page has kept the front only once its window got the keyboard its request asked for, and it
+      never goes full screen (its zoom button zooms it). What CI cannot show is the next item.
+- [ ] **Stage 4's questions only a Mac answers** (the page window above, which `host.gui.webview`
+      shows its pages in since 2026-10-11):
       - **MW14:** where VoiceOver lands when a page takes the keyboard again — a show, and after a
         round trip to the plug-in. The log says what the page did (`the keyboard in the page is …`,
         `its platform object says: the keyboard went to nothing …`) and which classes AppKit made
@@ -7205,15 +7218,38 @@ maintainer's German test instructions are a text of their own, not in the reposi
         spoken.
       - **MW9:** on 12 and 13, where WebKit has no switch against throttling a page whose window
         is not shown: how long a page hidden for minutes takes to answer its first message.
-      - The show's answer on a real Mac (`got the keyboard, … ms after the show asked for the
-        front`, `the front went to … instead`, `a key went to …`), a tool page placed over the
-        rectangle to avoid hidden again when it did not get the keyboard, and the front given back
-        when a page left before its show had an answer (`this application became the active one …
-        after the page had left`).
+      - **MW6** (the VPS Avenger module's developer: sighted, Logic; M6 and M12 above): whether
+        Logic's plug-in window hides while a tool page, or an app page, has the keyboard — which
+        makes this application the active one, the panel activating by default. The most important
+        answer for that default; gui.md's macOS block says it is unmeasured. Again with
+        `activates = false` once that page option is built.
+      - **MW18** (the developer, Logic in full screen): a tool page and an app page shown over it —
+        does the page appear in Logic's Space, does the Space switch, does Logic stay in full screen?
+        Apple's forum answer (thread 826308) says a window that activates its application can take
+        a full-screen application out of its Space. gui.md's macOS block says it is unmeasured.
+      - **MW1a and MW5:** the show's answer on a real Mac (`got the keyboard, … ms after the show
+        asked for the front`, `the front went to … instead`, `a key went to …`), a page the show
+        placed over the rectangle to avoid — a tool page, or an app page that was not open —
+        hidden again when it did not get the keyboard (an app page with `the last application page
+        is hidden` after it), and the front given back when a page left before its show had an
+        answer (`this application became the active one … after the page had left`).
       - **Below 14:** every CI runner is macOS 14 or later, so on 12 and 13 nothing of the page
         window has run yet: the rule list, the host's policy over the application's scheme,
         `callAsyncJavaScript`, the keys. `page-check` from the download on the 12.7.6 Mac, before
         a module shows a page there (docs/building-on-macos.md).
+      - **MW19** (the developer, sighted): the placement on Retina and on two displays, `avoid` from
+        a window table's `bounds`; and an app page the user has open, shown with `avoid` where there
+        is no room beside it: `goes over the rectangle to avoid once it has the keyboard …`, then
+        `in front, so it goes over the rectangle to avoid now`; or, when the front went elsewhere,
+        `… stays where it was, not over the rectangle to avoid` — raised, not moved.
+      - **MW20** (new with stage 4, after the plan's MW1–MW19; any Mac session with a page that has
+        a file field): wry opens the system's open panel with `runModal`, on the event loop.
+        Whether the ticks — module callbacks, the keys' — run while it is open, and what the log
+        says meanwhile; gui.md's macOS block says it is unmeasured.
+- [ ] **A page's clipboard on a Mac, in gui.md** — CI's, no Mac session needed: what `page-check`'s
+      data lines say of a page's clipboard (`navigator.clipboard`), `isSecureContext` and WebRTC,
+      read from CI's artifacts and written into gui.md's macOS block of what a page is served,
+      which says until then that it is not written down yet.
 - [ ] **wry 0.57.1 on both platforms, the day it is on crates.io** (its release, #1852, was still
       open on 2026-10-11). Until then the Mac builds wry from its repository at 66cdfa1, the merge
       of #1866, under the name `wry-mac` in both macOS tables (crates/host and crates/macos-check),

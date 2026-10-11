@@ -9,8 +9,8 @@ A **page** is an HTML page from your module's own folder, shown in a window of t
 
 This page builds one up from the smallest case to a page whose buttons click in another window, introducing each idea where it is needed. The finished module is `examples/page` in the repository: a page beside Notepad with two buttons that click into Notepad's text — which only moves the caret — and read the line there, and one that goes back to Notepad. For exact signatures, see the [host.gui reference](api/gui.md).
 
-:::caution Windows only, for now
-Pages run on **Windows** today. On a Mac a module that describes a page loads, the description is checked exactly as on Windows, and every `show` answers `false, "not supported on this platform yet"`; the Mac's pages are being built ([Step 8](#step-8)). `host.gui.webview` is experimental, and the API may change after the Windows probe.
+:::caution Experimental, and newer still on a Mac
+Pages run on **Windows**, where the maintainer has tried them with NVDA, and on **macOS**, where they were built on 2026-10-11, run on CI's Macs, and have not been tried with VoiceOver yet ([Step 8](#step-8)). `host.gui.webview` is experimental, and the API may change after the probes.
 :::
 
 **A page or an overlay?** An [overlay](building-an-overlay.md) lays a Tab ring over the plug-in itself, and the user never leaves the plug-in's window. A page is a window of its own: while it is in front, it has the keyboard and the plug-in does not — the DAW's keys do not reach the plug-in, and an overlay on the plug-in window is not active then. A page is for what a Tab ring does badly: a lot to read, a list to browse, a menu the plug-in draws where no screen reader reaches it.
@@ -44,7 +44,7 @@ my-page/
   ui/page.css
 ```
 
-The manifest names the module and lists what its own code calls: `gui` for the page, `hotkey` for the key that shows it, `speech` for saying why it did not come. A page is Windows-only today, and so is the window this example clicks in, so it says so (see [`supported_os`](module-package-format.md#supported_os-and-why-omitting-it-is-the-safe-default)):
+The manifest names the module and lists what its own code calls: `gui` for the page, `hotkey` for the key that shows it, `speech` for saying why it did not come. The window this example clicks in is Notepad's, which only Windows has, so it says so (see [`supported_os`](module-package-format.md#supported_os-and-why-omitting-it-is-the-safe-default)); a module whose page is for a Mac too leaves it out ([Step 8](#step-8)):
 
 ```toml
 # module.toml
@@ -281,7 +281,7 @@ end)
 
 **Where it goes.** The page is 520 by 640 at 100 % display scaling. With `avoid`, it goes to the right of the rectangle, then the left, then below, then above, on the monitor the rectangle is mostly on — then to another monitor with room, then smaller, down to 320 by 360. Where there is no room anywhere — a maximised Notepad, a full-screen plug-in — a `show` with `focus` puts the page **over part of** the rectangle, in the corner where it covers the least, and answers `true, "over the rectangle to avoid"`: a page that cannot be shown cannot be reached. From then on, every click into the window and every read of it has to bring the window in front of the page first, which is what [Step 5](#step-5) does anyway. The full rules are under [`page:show`](api/gui.md#page-show).
 
-**The answers.** `show` answers `true`, or `false` and a reason, and the module says the reason: `"headless"` (no window system), `"not supported on this platform yet"` (macOS), `"WebView2 runtime not installed"`, `"not ready yet"`, `"could not be built"` (the log says why), `"no room beside the rectangle to avoid"` (only without `focus`), and `"declined by the system"` — Windows refused to bring the page to the front, and it is shown and raised without the keyboard, or hidden again where it would be over the rectangle. That last one is not "the page is not there": Windows has been seen to bring a declined page to the front all the same a moment later ([Windows](api/gui.md#windows-1)). So `notShown` says it in words of its own — Windows kept the keyboard where it was, the page may still come, and the key brings it — and every other reason as the page not coming.
+**The answers.** `show` answers `true`, or `false` and a reason, and the module says the reason: `"headless"` (no window system), `"WebView2 runtime not installed"`, `"not ready yet"`, `"could not be built"` (the log says why), `"no room beside the rectangle to avoid"` (only without `focus`), and `"declined by the system"` — Windows refused to bring the page to the front, and it is shown and raised without the keyboard, or hidden again where it would be over the rectangle. That last one is not "the page is not there": Windows has been seen to bring a declined page to the front all the same a moment later ([Windows](api/gui.md#windows-1)). So `notShown` says it in words of its own — Windows kept the keyboard where it was, the page may still come, and the key brings it — and every other reason as the page not coming.
 
 **A page that loads late is not pushed at the user.** The first build takes seconds, and the user may have gone elsewhere meanwhile. So `onReady` shows the page only if it was asked for and its window is still the one in front. This replaces Step 1's `onPageReady`:
 
@@ -628,26 +628,23 @@ local browser = host.gui.webview({
 | `hide` while in front | gives the front back to the window it came from | the same, but only if it has kept the front since it last took it |
 | A `show` that cannot be beside `avoid` without the keyboard | hidden | not shown; one the user has open stays as and where it is |
 
-Choose the tool page for a companion of the plug-in — a list of its presets, its menu read aloud — and the app page for an interface of its own that the user comes back to by Alt+Tab: a preset browser, a settings page, a whole user interface in HTML. The kind is fixed for the page object's life; a module that wants both describes two pages, and can show one in place of the other — the new one first, then the old one hidden — so that the front goes from page to page without passing through the plug-in window ([`page:hide`](api/gui.md#page-hide)). On a Mac each kind already has its decided shape for when pages are built there ([macOS](api/gui.md#macos)).
+Choose the tool page for a companion of the plug-in — a list of its presets, its menu read aloud — and the app page for an interface of its own that the user comes back to by Alt+Tab: a preset browser, a settings page, a whole user interface in HTML. The kind is fixed for the page object's life; a module that wants both describes two pages, and can show one in place of the other — the new one first, then the old one hidden — so that the front goes from page to page without passing through the plug-in window ([`page:hide`](api/gui.md#page-hide)). On a Mac a tool page is a panel and an app page an ordinary window, with the application in Command-Tab and the Dock while one is shown ([macOS](api/gui.md#macos)).
 
 ---
 
 ## Step 8 — on macOS {#step-8}
 
-**Pages are not built for macOS yet.** On a Mac, today:
+**Pages on a Mac are new.** They were built on 2026-10-11 and run on CI's Macs, and nobody has tried one with VoiceOver yet: those are the Mac's page tests in TODO.md (stage 4), for the Mac tester's session. **Nothing on this page promises how a page will behave with VoiceOver.** The module and the page are written once — the description, the HTML and the script are the same on both systems — and what differs is in the reference's macOS sections:
 
-- `host.gui.webview` describes a page and checks every option exactly as on Windows, so a mistake in the description raises on a Mac too;
-- every `show` and `prepare` answers `false, "not supported on this platform yet"`, `page:focus()` and `page:isShown()` answer `false`, `page.window` is `nil`, and `page:post` drops what it is given;
-- no `onReady`, `onMessage` or `onClose` ever comes.
+- A page runs in WebKit, the system's web engine, which comes with macOS: there is no runtime to install.
+- A tool page is a panel, an app page an ordinary window, and **either makes this application the active one while it has the keyboard**: the DAW is not the active application then, and some DAWs hide their plug-in windows while they are not ([macOS](api/gui.md#macos)).
+- A `show` with `focus` answers `true` once the front is **asked for**: the application's activation comes on the event loop after the call, and the log says what came of it. A module that needs to know follows the page's window coming to the front, or the page's script its window's `focus` event ([`page:show`, macOS](api/gui.md#macos-1)).
 
-The web view library the host uses activates the application every time it creates a web view on a Mac, which would take the front from the DAW at the wrong moment; its fix is not released yet. What each kind of page is to be on a Mac is decided — a tool page a panel that takes the keyboard without making the application the active one, an app page an ordinary window that does — but nothing about how VoiceOver will follow either is measured: those are the questions M1–M9 in TODO.md. **Nothing on this page promises how a page will behave on a Mac.**
+What to mind on a Mac:
 
-What you can do on a Mac now:
-
-- **Write the module and the page.** Everything above is written once. The description is the same on both systems, the page's HTML and script are the same, and a module that answers `show`'s reasons — as the example does — says "not supported on this platform yet" on a Mac instead of failing.
-- **Mind the module's own `supported_os`.** The example says `["windows"]`, so a Mac does not load it at all (the log says why); leave it out, or name both systems, for a module whose page should simply wait for the Mac's pages.
+- **Mind the module's own `supported_os`.** The example says `["windows"]`, since Notepad is Windows' own, so a Mac does not load it at all (the log says why); leave it out, or name both systems, for a module whose page is for a Mac too.
 - **Pick a key a Mac can press.** A key spec's `Ctrl` is Command on a Mac and `Win` is Control, so the four modifiers hold Control and Option there — VoiceOver's layer. Choose another chord on a Mac with [`host.os.pick`](api/os.md#host-os-pick), as the application does for its own keys: `host.os.pick({ windows = "Ctrl+Shift+Win+Alt+F12", macos = "Cmd+Shift+F12" })` — and check it with [`host.keys.check`](api/keys.md#host-keys-check). An F-key on a Mac needs "Use F1, F2, etc. as standard function keys" turned on, or `fn` held down.
-- **Look at the page in a browser.** Open `ui/index.html` in Safari to work on its structure with VoiceOver ([Step 3](#step-3)). It is a check of your HTML, not of the platform: WebKit with VoiceOver is not Chromium with NVDA, and which elements work there in a page is unverified.
+- **Look at the page in a browser.** Open `ui/index.html` in Safari to work on its structure with VoiceOver ([Step 3](#step-3)). It is a check of your HTML, not of the application's page window: WebKit with VoiceOver is not Chromium with NVDA, and which elements work there in a page is unverified.
 - **Coordinates are points on a Mac**, and the round trip's calls — `host.window.focus`, `ownsPoint`, `host.input.click`, `host.ocr.recognize` — exist there as they do on Windows, each with its own platform section in the reference.
 
 ---
@@ -712,4 +709,4 @@ end
 - Back to the window: the window forward first, the page hidden after.
 - Say every `false` that `show` and `host.window.focus` answer; the user cannot see that the page did not come. A declined `show` is Windows keeping the keyboard, not a page that is not there.
 - When the user has just moved, speak with `interrupt = false`, behind the screen reader.
-- Windows only today. Write the page once, and pick a Mac key with `host.os.pick` for the day the Mac's pages arrive.
+- On a Mac a page is new and untried with VoiceOver: write it once, pick a Mac key with `host.os.pick`, and take a show's `true` there for the front asked for.

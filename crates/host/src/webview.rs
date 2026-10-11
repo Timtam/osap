@@ -3,17 +3,16 @@
 //! which headers, which navigations and messages are let through, which window a page is in and
 //! where it goes, which window the front goes back to, what a key equivalent does in a Mac's page,
 //! and the page's own `platform` object. The window itself is `webview_win.rs` on Windows and
-//! `backend/macos/page.rs` on a Mac (built, and not yet what `host.gui.webview` shows there: stage
-//! 4, TODO.md); the Luau side is `webview_lua.rs`.
+//! `backend/macos/page.rs` on a Mac (stage 4, TODO.md); the Luau side is `webview_lua.rs`, the
+//! same on both.
 //!
 //! **Experimental.** Stage 1 of the plan the maintainer decided on 2026-09-28: a page a module
 //! shows beside a plug-in window, for the Windows probe (`tools/html-probe`) to measure with NVDA.
-//! The API may change after the probe.
+//! The API may change after the probe, and after the Mac's has met VoiceOver.
 //!
 //! Pure on purpose: everything here decides something, and a decision about a browser window is
-//! only testable if nothing opens one. `crates/macos-check` borrows the file, so the answer a Mac
-//! gives today — "not supported on this platform yet" — is compiled for the Mac as well, and so
-//! are the rules the Mac's page window is built on.
+//! only testable if nothing opens one. `crates/macos-check` borrows the file, so the answers a Mac
+//! gives are compiled for the Mac as well, and so are the rules the Mac's page window is built on.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -26,19 +25,19 @@ use std::path::{Path, PathBuf};
 pub enum Refusal {
     /// A headless run has no window system to show anything in.
     Headless,
-    /// A platform the host cannot show a page on yet: macOS until its page window is built
-    /// (stage 4, TODO.md; wry's fix for the activation on every web view, #1866, is taken from
-    /// its repository until a release carries it), and any platform with no web view at all.
+    /// A platform with no page window: neither Windows nor macOS ([`Where::supports`]). The
+    /// application runs on no other, so no module meets it today.
     Unsupported,
     /// The page is being built, or has not finished loading. `onReady` says when it has.
     NotReady,
     /// Windows without the WebView2 runtime. Asked at every `show` that would start a build, so
-    /// installing the runtime needs no restart.
+    /// installing the runtime needs no restart. Never on a Mac, whose WebKit is the system's.
     RuntimeMissing,
     /// The last build failed; the log says why. Said once, and the next `show` tries again.
     BuildFailed,
-    /// The page is on screen, and Windows refused to bring it to the front — or, where it would
-    /// have been over `avoid` ([`over_refused`]), it is hidden again.
+    /// The page is on screen, and the system refused to bring it to the front — or, where it would
+    /// have been over `avoid` ([`over_refused`]), it is hidden again. On a Mac only an answer the
+    /// system gives at once (backend/macos/page.rs): one that comes later is in the log.
     Declined,
     /// A show without `focus` found no room beside `avoid`: the page would have gone over it
     /// without the keyboard ([`over_refused`]). A show with `focus` goes over it instead.
@@ -118,7 +117,13 @@ pub struct Where {
 impl Where {
     /// This run: headless or not, and whether this platform can show a page at all.
     pub fn here(headless: bool) -> Self {
-        Where { headless, supported: cfg!(windows) }
+        Where { headless, supported: Where::supports(std::env::consts::OS) }
+    }
+
+    /// Whether the platform Rust names `os` (`std::env::consts::OS`) has a page window: Windows
+    /// (`webview_win.rs`) and macOS (`backend/macos/page.rs`), and nothing else.
+    pub fn supports(os: &str) -> bool {
+        matches!(os, "windows" | "macos")
     }
 
     /// Whether a page can ever be ready here. A message posted where it cannot is dropped, not
@@ -568,7 +573,8 @@ pub fn webview2_overrides(vars: impl IntoIterator<Item = (String, String)>) -> V
     lines
 }
 
-/// A rectangle in screen coordinates — physical pixels on Windows, as `host.window` gives them.
+/// A rectangle in screen coordinates, as `host.window` gives them: physical pixels on Windows, and
+/// points from the top left of the primary display on a Mac.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
@@ -795,7 +801,7 @@ impl WindowKind {
 }
 
 /// What a page's window is, on both platforms: one decision, which `webview_win.rs` builds on
-/// Windows and the Mac's page will build on (stage 4, TODO.md), so the two cannot drift apart.
+/// Windows and `backend/macos/page.rs` on a Mac, so the two cannot drift apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Recipe {
     /// In the system's lists of windows. Windows: an Alt+Tab entry with the page's title, and a
@@ -807,7 +813,8 @@ pub struct Recipe {
     pub listed: bool,
     /// A minimise box (Windows), a miniaturise button (macOS).
     pub minimise: bool,
-    /// A maximise box (Windows). A Mac's titled, resizable window has its zoom button either way.
+    /// A maximise box (Windows). A Mac's titled, resizable window has its zoom button either way;
+    /// an app page's zooms it and never takes it into full screen (backend/macos/page.rs).
     pub maximise: bool,
     /// macOS: an `NSPanel` — a utility panel in no window list, floating while it has the keyboard
     /// and at the normal level otherwise — rather than an ordinary `NSWindow`. Either activates
@@ -815,6 +822,30 @@ pub struct Recipe {
     /// VPS Avenger control tool's way); a panel that does not is to be an experimental page option,
     /// `activates = false`, still to come (TODO.md, stage 4).
     pub panel: bool,
+}
+
+/// Whether a Mac's page waits for the keyboard before it goes where [`place`] put it. An app page
+/// the user has open goes over `avoid` only once it is in front, so that one the system does not
+/// bring there stays where the user left it (docs/api/gui.md); on Windows the answer to the request
+/// for the front comes first, and the page is put there after it. On a Mac the answer comes later
+/// (backend/macos/page.rs), so the page can be put while its request has no answer yet
+/// (`front_asked`): a place over `avoid` then waits for the window to get the keyboard, kept with
+/// the request and forgotten with it — not got, or a newer request made first. Anything else — a
+/// tool page, a place beside `avoid`, a page whose request was answered — goes at once.
+#[cfg(any(test, target_os = "macos"))]
+pub fn place_when_key(kind: WindowKind, plan: &Placement, front_asked: bool) -> bool {
+    kind == WindowKind::App && front_asked && matches!(plan, Placement::Over { .. })
+}
+
+/// Whether a Mac's page whose show did not get the front is hidden again: Windows' rule for a show
+/// declined over `avoid` ([`over_refused`]), decided when the event says so (backend/macos/page.rs).
+/// `over`: the show placed it over `avoid` — never a `focus`, which places nothing, so that a page
+/// an earlier show left there is not hidden for it, as on Windows; `open`: it was shown before the
+/// show. A tool page over `avoid` is hidden, and so is an app page the show brought there; an app
+/// page the user has open is the user's window and stays.
+#[cfg(any(test, target_os = "macos"))]
+pub fn not_got_hides(kind: WindowKind, over: bool, open: bool) -> bool {
+    over && (kind == WindowKind::Tool || !open)
 }
 
 /// A page's size: on Windows at 96 dots per inch, scaled by the monitor's; on a Mac in points,
@@ -825,7 +856,8 @@ pub const DEFAULT_SIZE: (i32, i32) = (520, 640);
 /// [`DEFAULT_SIZE`].
 pub const MIN_SIZE: (i32, i32) = (320, 360);
 
-/// The engine a page runs in, for the parts of its [`platform_shim`] that differ.
+/// The engine a page runs in, for the parts of its [`platform_shim`] that differ, and for the words
+/// the log says a page's life in ([`Engine::words`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
     /// WebView2, on Windows (`webview_win.rs`): the host's messages arrive as `chrome.webview`'s
@@ -838,6 +870,70 @@ pub enum Engine {
     /// (and in the tests).
     #[cfg(any(test, target_os = "macos"))]
     WebKit,
+}
+
+impl Engine {
+    /// This platform's: WebKit on a Mac.
+    #[cfg(target_os = "macos")]
+    pub fn here() -> Engine {
+        Engine::WebKit
+    }
+
+    /// This platform's: WebView2 everywhere but a Mac — on Windows, and where no page is built at
+    /// all and nothing asks.
+    #[cfg(not(target_os = "macos"))]
+    pub fn here() -> Engine {
+        Engine::WebView2
+    }
+
+    /// The words `webview_lua.rs` says a page's life in, for this engine. Windows' are the lines
+    /// stage 1 wrote, word for word (a test holds them to that), so the Windows probe's log reads
+    /// as it did.
+    pub fn words(self) -> Words {
+        match self {
+            Engine::WebView2 => Words {
+                system: "Windows",
+                env: "WebView2's environment",
+                env_there: "WebView2's environment is there",
+                env_failed: "WebView2's environment could not be created",
+                building: "building in WebView2's environment — no module callback runs until WebView2 has made the page",
+                front_taken: "shown and brought to the front (accepted)",
+                focus_taken: "accepted",
+            },
+            #[cfg(any(test, target_os = "macos"))]
+            Engine::WebKit => Words {
+                system: "macOS",
+                env: "the pages' rule list",
+                env_there: "the pages' rule list is compiled",
+                env_failed: "the pages' rule list could not be compiled",
+                building: "building with WebKit — no module callback runs until the web view is made",
+                front_taken: "shown, and the front asked for (the page's own lines say whether it came)",
+                focus_taken: "asked for (the page's own lines say whether the front came)",
+            },
+        }
+    }
+}
+
+/// What the log calls the parts of a page's life that differ between the engines ([`Engine::words`]).
+/// On a Mac the part of a first build that is not waited for is the content rule list, where
+/// Windows has WebView2's environment, and taking the front is asked for, not answered at once:
+/// whether it came is an event, said by the page window itself (backend/macos/page.rs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Words {
+    /// The system that decides whether a page comes to the front: `"Windows"`, `"macOS"`.
+    pub system: &'static str,
+    /// What a first build asks for and does not wait for.
+    pub env: &'static str,
+    /// That, once it is there: what a build queued by `show` or `prepare` waits for.
+    pub env_there: &'static str,
+    /// That, when it failed.
+    pub env_failed: &'static str,
+    /// The line before the part of a build the event loop waits for.
+    pub building: &'static str,
+    /// A `show` with `focus` that the system did not decline.
+    pub front_taken: &'static str,
+    /// A `focus` that the system did not decline.
+    pub focus_taken: &'static str,
 }
 
 /// The script the host puts into every page before the page's own: `platform.post(value)` to
@@ -1235,10 +1331,41 @@ mod tests {
         assert_eq!(l.phase(), Phase::Idle, "nothing was started");
     }
 
+    /// Windows and macOS have a page window, and nothing else does: the platform Rust names, as
+    /// `here` asks it.
     #[test]
-    fn this_platform_is_supported_on_windows_only() {
-        assert_eq!(Where::here(false).supported, cfg!(windows));
+    fn pages_are_shown_on_windows_and_macos() {
+        assert!(Where::supports("windows"));
+        assert!(Where::supports("macos"), "the Mac's page window is what host.gui.webview shows there");
+        for other in ["linux", "freebsd", "ios", "Macos", ""] {
+            assert!(!Where::supports(other), "{other}");
+        }
+        assert_eq!(Where::here(false).supported, cfg!(any(windows, target_os = "macos")));
         assert!(!Where::here(true).can_show());
+    }
+
+    /// Windows' words are stage 1's, word for word, so the probe's log reads as it did; WebKit's
+    /// name neither WebView2 nor Windows, and say that taking the front is only asked for — a Mac's
+    /// page has its answer later (backend/macos/page.rs).
+    #[test]
+    fn each_engine_says_a_page_s_life_in_its_own_words() {
+        let w = Engine::WebView2.words();
+        assert_eq!(w.system, "Windows");
+        assert_eq!(w.env, "WebView2's environment");
+        assert_eq!(w.env_there, "WebView2's environment is there");
+        assert_eq!(w.env_failed, "WebView2's environment could not be created");
+        assert_eq!(w.building, "building in WebView2's environment — no module callback runs until WebView2 has made the page");
+        assert_eq!(w.front_taken, "shown and brought to the front (accepted)");
+        assert_eq!(w.focus_taken, "accepted");
+        let k = Engine::WebKit.words();
+        let all = [k.system, k.env, k.env_there, k.env_failed, k.building, k.front_taken, k.focus_taken];
+        for word in all {
+            assert!(!word.contains("WebView2") && !word.contains("Windows"), "{word}");
+        }
+        assert_eq!(k.system, "macOS");
+        assert!(k.front_taken.contains("asked for") && k.focus_taken.contains("asked for"));
+        assert!(!k.front_taken.contains("accepted"), "{}", k.front_taken);
+        assert_eq!(Engine::here(), if cfg!(target_os = "macos") { Engine::WebKit } else { Engine::WebView2 });
     }
 
     #[test]
@@ -1801,6 +1928,36 @@ mod tests {
         assert!(WindowKind::Tool.gives_front_back(false));
         assert!(WindowKind::App.gives_front_back(true));
         assert!(!WindowKind::App.gives_front_back(false));
+    }
+
+    /// On a Mac an app page the user has open goes over `avoid` only once it has the keyboard, as
+    /// on Windows, though the request for the front is answered after the page was put: only that
+    /// place waits. A tool page, a place beside `avoid` and a request answered at once go now.
+    #[test]
+    fn a_macs_open_app_page_goes_over_the_plugin_only_once_it_has_the_keyboard() {
+        let r = Rect { x: 0, y: 0, w: 320, h: 360 };
+        let over = Placement::Over { rect: r, covered: 1 };
+        let beside = Placement::Beside(r);
+        assert!(place_when_key(WindowKind::App, &over, true));
+        assert!(!place_when_key(WindowKind::App, &over, false), "answered already: in front, put now");
+        assert!(!place_when_key(WindowKind::App, &beside, true), "beside covers nothing: put now");
+        assert!(!place_when_key(WindowKind::Tool, &over, true), "a tool page is put before it is shown");
+    }
+
+    /// A Mac's show that did not get the front hides a page it placed over `avoid` again, as a
+    /// declined one is on Windows — a tool page, open or not, and an app page that was not open —
+    /// and leaves an app page the user has open, and any page beside `avoid`, as it is.
+    #[test]
+    fn a_macs_page_over_the_plugin_without_the_keyboard_is_hidden_unless_the_user_has_it_open() {
+        assert!(not_got_hides(WindowKind::Tool, true, false));
+        assert!(not_got_hides(WindowKind::Tool, true, true));
+        assert!(not_got_hides(WindowKind::App, true, false));
+        assert!(!not_got_hides(WindowKind::App, true, true), "the user's window");
+        for kind in [WindowKind::Tool, WindowKind::App] {
+            for open in [false, true] {
+                assert!(!not_got_hides(kind, false, open), "beside covers nothing");
+            }
+        }
     }
 
     /// The script WebView2's pages got from stage 1 until the shim was built from parts, as it

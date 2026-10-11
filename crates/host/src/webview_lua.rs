@@ -1,9 +1,12 @@
 //! `host.gui.webview` — the Luau side: the page object a module holds, the host's table of every
 //! page, and the drain that hands a page's events to its module. The rules are `webview.rs`; the
-//! window on Windows is `webview_win.rs`.
+//! window is `webview_win.rs` on Windows and `backend/macos/page.rs` on a Mac, which have one
+//! interface, so everything here is the same on both (`native_page`): only the log's words for
+//! the engine differ (`webview::Engine::words`), and whether the engine is there at all.
 //!
 //! **Experimental** (stage 1 of the plan of 2026-09-28): the API may change after the Windows
-//! probe, `tools/html-probe`, has been run with NVDA.
+//! probe, `tools/html-probe`, has been run with NVDA, and after the Mac's page has met VoiceOver
+//! (stage 4, TODO.md).
 //!
 //! **Who owns a page.** The module whose code created it names its file — the file is found in
 //! that module's folder and the page is served under that module's origin, as every relative path
@@ -14,10 +17,10 @@
 //! as a reload does, which closes its pages.
 //!
 //! **Nothing here waits.** A build is queued by `show` or `prepare` and done at the end of a tick
-//! ([`build_pending`]) — the first one once WebView2's environment has answered, which the event
-//! loop does not wait for; what the window sends is queued by its callbacks and handed on by
-//! [`fire_events`], on the next tick. So a callback of the web view's never runs Luau, and Luau
-//! never waits for the web view.
+//! ([`build_pending`]) — the first one once WebView2's environment has answered, or on a Mac once
+//! WebKit has compiled the pages' rule list, which the event loop does not wait for; what the
+//! window sends is queued by its callbacks and handed on by [`fire_events`], on the next tick. So
+//! a callback of the web view's never runs Luau, and Luau never waits for the web view.
 //!
 //! **A page's callbacks are its module's events** (`mailbox.rs`), as a key's or a timer's are:
 //! [`hand_on`] does the host's part of each event at once — the window, the page's life, the
@@ -43,6 +46,15 @@ use crate::task::Ctx;
 use crate::vm_guard::host_call;
 use crate::webview::{self, Lifecycle, PageEvent, Phase, Rect, Refusal, ShowStep, Where, WindowKind};
 use crate::{appcfg, json, logging, Shared};
+
+// The platform's page window under one name: WebView2's on Windows, WebKit's on a Mac. The two
+// have one interface, and `crates/macos-check` holds the Mac's to it from Windows (`page_calls`).
+// Elsewhere there is none: `Where::here` answers that no page can be shown there, and nothing
+// below that needs a window is built.
+#[cfg(windows)]
+use crate::webview_win as native_page;
+#[cfg(target_os = "macos")]
+use crate::backend::page as native_page;
 
 /// What a page's event calls, carried in its module's mailbox (`Event::Page`) and opened when it
 /// runs ([`open_event`]).
@@ -89,8 +101,9 @@ pub(crate) struct Pages {
     entries: RefCell<HashMap<u64, Entry>>,
     /// Pages whose `show` asked for a build, built at the end of the tick.
     builds: RefCell<Vec<u64>>,
-    /// Pages whose WebView2 memory is to be logged at the end of the tick — once ready, and after
-    /// the first show of each build — so the query is outside the `show` a module times.
+    /// Pages whose memory is to be logged at the end of the tick — once ready, and after the first
+    /// show of each build — so the query is outside the `show` a module times. WebView2's processes
+    /// on Windows; a Mac says once that it does not measure WebKit's.
     memory_due: RefCell<Vec<u64>>,
 }
 
@@ -132,20 +145,22 @@ struct Entry {
     /// the call that asked for it, as a read's does — the interactive one when any `show` or
     /// `prepare` made while the build was under way was interactive ([`note_asked`]).
     asked: Option<(Instant, Priority)>,
-    /// Whether the current build's wait for WebView2's environment has been said.
+    /// Whether the current build's wait for WebView2's environment — on a Mac, the pages' rule
+    /// list — has been said.
     env_said: bool,
     /// Whether the page's last show put it over the rectangle to avoid: the explanation is said
     /// once for a run of such shows, and again after one that found room beside it.
     over_said: bool,
     /// Whether the current build has been shown yet: its first show logs the memory.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     shown_this_build: bool,
     /// Whether the current build already failed once in an environment kept from before, and is
-    /// being tried again in a new one: a second failure is the page's.
-    #[cfg(windows)]
+    /// being tried again in a new one: a second failure is the page's. Windows' only: a Mac's rule
+    /// list is never one to try again in a new one.
+    #[cfg(any(windows, target_os = "macos"))]
     retried: bool,
-    #[cfg(windows)]
-    native: Option<Rc<crate::webview_win::Native>>,
+    #[cfg(any(windows, target_os = "macos"))]
+    native: Option<Rc<native_page::Native>>,
 }
 
 impl Entry {
@@ -157,16 +172,16 @@ impl Entry {
 /// The platform's window of an entry, cloned out so no borrow of the table is held while the
 /// window system is called (it dispatches messages, and a message can reach code that asks the
 /// table again).
-#[cfg(windows)]
-type NativeRef = Option<Rc<crate::webview_win::Native>>;
-#[cfg(not(windows))]
+#[cfg(any(windows, target_os = "macos"))]
+type NativeRef = Option<Rc<native_page::Native>>;
+#[cfg(not(any(windows, target_os = "macos")))]
 type NativeRef = Option<std::convert::Infallible>;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn native_of(e: &Entry) -> NativeRef {
     e.native.clone()
 }
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn native_of(_: &Entry) -> NativeRef {
     None
 }
@@ -317,11 +332,11 @@ fn create(lua: &Lua, sh: &Rc<Shared>, idx: usize, opts: Value) -> mlua::Result<P
         asked: None,
         env_said: false,
         over_said: false,
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         shown_this_build: false,
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         retried: false,
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         native: None,
     };
     logging::line(
@@ -426,14 +441,15 @@ fn show_options(opts: Value) -> mlua::Result<(bool, Option<Rect>)> {
     Ok((focus, avoid))
 }
 
-/// Whether the platform's web engine is installed — WebView2's runtime here. Said in the log the
-/// first time it is asked, with its version.
+/// Whether the platform's web engine is installed — WebView2's runtime on Windows, asked each time;
+/// a Mac's WebKit is part of the system and always there. Said in the log the first time it is
+/// asked, with its version.
 fn runtime_present() -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SAID: AtomicBool = AtomicBool::new(false);
     #[cfg(windows)]
     {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        static SAID: AtomicBool = AtomicBool::new(false);
-        let version = crate::webview_win::runtime_version();
+        let version = native_page::runtime_version();
         if !SAID.swap(true, Ordering::Relaxed) {
             logging::line(
                 "gui",
@@ -445,8 +461,29 @@ fn runtime_present() -> bool {
         }
         version.is_some()
     }
-    #[cfg(not(windows))]
-    false
+    #[cfg(target_os = "macos")]
+    {
+        if !SAID.swap(true, Ordering::Relaxed) {
+            logging::line(
+                "gui",
+                &match native_page::runtime_version() {
+                    Some(v) => format!("pages run in the system's web engine, {v}"),
+                    None => "pages run in the system's web engine, WebKit, whose version could not be read".to_string(),
+                },
+            );
+        }
+        true
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (&SAID, Ordering::Relaxed);
+        false
+    }
+}
+
+/// The log's words for this platform's engine.
+fn words() -> webview::Words {
+    webview::Engine::here().words()
 }
 
 fn gone() -> mlua::Error {
@@ -491,9 +528,9 @@ fn show(sh: &Rc<Shared>, id: u64, opts: Value) -> mlua::Result<(bool, Option<&'s
             logging::line(
                 "gui",
                 &format!(
-                    "{label}: show answered false, \"{}\" — it is built at the end of this tick, once \
-                     WebView2's environment is there",
-                    Refusal::NotReady.reason()
+                    "{label}: show answered false, \"{}\" — it is built at the end of this tick, once {}",
+                    Refusal::NotReady.reason(),
+                    words().env_there
                 ),
             );
             Ok((false, Some(Refusal::NotReady.reason())))
@@ -525,7 +562,7 @@ fn prepare(sh: &Rc<Shared>, id: u64) -> mlua::Result<(bool, Option<&'static str>
             sh.pages.builds.borrow_mut().push(id);
             logging::line(
                 "gui",
-                &format!("{label}: prepared — it is built, hidden, at the end of this tick, once WebView2's environment is there"),
+                &format!("{label}: prepared — it is built, hidden, at the end of this tick, once {}", words().env_there),
             );
             Ok((false, Some(Refusal::NotReady.reason())))
         }
@@ -533,7 +570,7 @@ fn prepare(sh: &Rc<Shared>, id: u64) -> mlua::Result<(bool, Option<&'static str>
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<Rect>) -> mlua::Result<(bool, Option<&'static str>)> {
     let found = sh.pages.entries.borrow().get(&id).map(|e| (native_of(e), e.kind));
     let Some((Some(native), kind)) = found else {
@@ -575,7 +612,10 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
     }
     let shown = if open_app {
         // In front first, where the user left it — not raised before that, so a decline leaves it
-        // as it was — and only then over `avoid`. `focus` restores a minimised one.
+        // as it was — and only then over `avoid`. `focus` restores a minimised one. On a Mac the
+        // front is only asked for here, and the window goes over `avoid` when it gets the keyboard
+        // (`backend/macos/page.rs`): one that does not get it stays where it was — raised, though,
+        // as AppKit orders it in front with the request.
         if native.focus() {
             native.put(avoid, plan);
             Ok(())
@@ -609,6 +649,7 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
     };
     let ms = started.elapsed().as_millis();
     let front = sh.backend.foreground_window();
+    let system = words().system;
     let place = match (avoid, over) {
         (Some(a), Some(_)) if open_app && shown.is_err() => {
             format!(", left where it was (no room beside {},{} {}x{})", a.x, a.y, a.w, a.h)
@@ -632,18 +673,18 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
         &format!(
             "{label}: {} in {ms} ms{place}; in front now: {}; on top at its centre: {}",
             match (&shown, focus, unshown) {
-                (Ok(()), true, _) => "shown and brought to the front (accepted)",
-                (Ok(()), false, _) => "shown without taking the front",
-                (Err(_), _, false) if open_app => {
-                    "Windows DECLINED to bring it to the front — an application window the user has \
+                (Ok(()), true, _) => words().front_taken.to_string(),
+                (Ok(()), false, _) => "shown without taking the front".to_string(),
+                (Err(_), _, false) if open_app => format!(
+                    "{system} DECLINED to bring it to the front — an application window the user has \
                      open, so it stays where it was, neither moved over the rectangle to avoid nor \
                      hidden (restored, if it was minimised)"
-                }
-                (Err(_), _, false) => "shown, and Windows DECLINED to bring it to the front",
-                (Err(_), _, true) => {
-                    "shown, and Windows DECLINED to bring it to the front — over the rectangle to avoid \
+                ),
+                (Err(_), _, false) => format!("shown, and {system} DECLINED to bring it to the front"),
+                (Err(_), _, true) => format!(
+                    "shown, and {system} DECLINED to bring it to the front — over the rectangle to avoid \
                      and not in front, so hidden again"
-                }
+                ),
             },
             front_words(sh, native.hwnd(), front),
             if native.on_top_at_centre() { "yes" } else { "NO, something covers it" },
@@ -672,14 +713,14 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
     })
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn show_built(_: &Rc<Shared>, _: u64, _: &str, _: bool, _: Option<Rect>) -> mlua::Result<(bool, Option<&'static str>)> {
     // `on_show` never answers `Show` where no page can be built.
     Ok((false, Some(Refusal::Unsupported.reason())))
 }
 
 /// The foreground window, for a log line: the page itself, or another window by its id.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn front_words(_sh: &Shared, page: isize, front: Option<crate::backend::Foreground>) -> String {
     match front {
         Some(f) if f.id == page => "this page".to_string(),
@@ -694,7 +735,7 @@ fn focus(sh: &Rc<Shared>, id: u64) -> bool {
         Some(e) => (native_of(e), e.label()),
         None => return false,
     };
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         let Some(native) = native else {
             logging::line("gui", &format!("{label}: focus answered false — the page is not built"));
@@ -706,13 +747,19 @@ fn focus(sh: &Rc<Shared>, id: u64) -> bool {
             "gui",
             &format!(
                 "{label}: focus {}; in front now: {}",
-                if accepted { "accepted" } else if native.is_shown() { "DECLINED" } else { "refused — the page is hidden" },
+                if accepted {
+                    words().focus_taken
+                } else if native.is_shown() {
+                    "DECLINED"
+                } else {
+                    "refused — the page is hidden"
+                },
                 front_words(sh, native.hwnd(), front)
             ),
         );
         accepted
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = (native, label);
         false
@@ -725,21 +772,21 @@ fn hide(sh: &Rc<Shared>, id: u64) {
         Some(e) => (native_of(e), e.label()),
         None => return,
     };
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     if let Some(native) = native {
         native.hide();
         logging::line("gui", &format!("{label}: hidden"));
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = (native, label);
 }
 
 /// `page:isShown()`, asked of the window system.
 fn is_shown(sh: &Rc<Shared>, id: u64) -> bool {
     let native = sh.pages.entries.borrow().get(&id).and_then(native_of);
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     return native.is_some_and(|n| n.is_shown());
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = native;
         false
@@ -769,13 +816,13 @@ fn post(lua: &Lua, sh: &Rc<Shared>, id: u64, value: Value) -> mlua::Result<()> {
             &format!("{label}: {dropped} message(s) that waited for the page were dropped — no more than {} wait", webview::MAX_QUEUED_POSTS),
         );
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     if let (Some(json), Some(native)) = (deliver, native) {
         if let Err(e) = native.post_json(&json) {
             logging::line("gui", &format!("{label}: a message could not be handed to the page: {e}"));
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = (deliver, native);
     Ok(())
 }
@@ -792,9 +839,9 @@ pub(crate) fn close(pages: &Pages, id: u64) {
         e.closed_upto = pages.next_build.get();
         e.window = None;
         e.asked = None;
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         let native = e.native.take();
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         let native: NativeRef = None;
         (native, e.label())
     };
@@ -807,40 +854,43 @@ pub(crate) fn close(pages: &Pages, id: u64) {
 /// it delivers a module's callback, so a `close` from inside `onReady` or `onClose` takes the
 /// window down too.
 fn take_down(native: NativeRef) {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     drop(native);
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = native;
 }
 
 /// Builds the pages whose `show` or `prepare` asked for it, at the end of the tick, and logs the
-/// WebView2 memory of the pages due for it.
+/// memory of the pages due for it (WebView2's processes; a Mac says once that it measures none).
 ///
 /// **The environment first, without waiting.** A page needs WebView2's environment — its browser
 /// process — which the first build asks for and the event loop does not wait for
-/// (`webview_win::environment`): until WebView2 has answered, the page stays queued, and the tick
+/// (`native_page::environment`): until WebView2 has answered, the page stays queued, and the tick
 /// after the answer builds it. A failed answer is a failed build for every page that waited for
 /// it, said by the next `show`; one no page waited for any more is dropped at the end of the
 /// tick. A build that fails in an environment a page was built in before — whose browser process
 /// may have gone, or whose runtime version an update removed — is tried once more, in a new one.
+/// On a Mac the same answers come from the pages' rule list, which WebKit compiles once a session
+/// off the event loop and which is never one to try again in.
 ///
 /// **Then the build, which waits.** wry makes the page's controller in the environment in a
-/// message loop of its own. Outside Luau: the tick's re-entrancy guard keeps a nested tick from
-/// running modules meanwhile. A page closed while it was being built gets nothing: the new window
-/// is taken down again. Should WebView2 never answer, the event loop waits here with it — never
-/// seen, and the reason for the line before each build: the log's last word is then `building …`.
+/// message loop of its own — on a Mac the window and the web view, with no controller to wait for.
+/// Outside Luau: the tick's re-entrancy guard keeps a nested tick from running modules meanwhile.
+/// A page closed while it was being built gets nothing: the new window is taken down again. Should
+/// WebView2 never answer, the event loop waits here with it — never seen, and the reason for the
+/// line before each build: the log's last word is then `building …`.
 pub(crate) fn build_pending(sh: &Shared) {
     let ids = std::mem::take(&mut *sh.pages.builds.borrow_mut());
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     let mut waiting: Vec<u64> = Vec::new();
     // Pages to build again in a new environment, at the next tick.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     let mut again: Vec<u64> = Vec::new();
     // The environment's failure, once one page has taken it: every other page of this pass fails
     // with it rather than start a new creation.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     let mut failed: Option<String> = None;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     for id in ids {
         let queued = {
             let entries = sh.pages.entries.borrow();
@@ -850,24 +900,24 @@ pub(crate) fn build_pending(sh: &Shared) {
             continue;
         }
         let now = match &failed {
-            Some(why) => crate::webview_win::EnvNow::Failed(why.clone()),
-            None => crate::webview_win::environment(),
+            Some(why) => native_page::EnvNow::Failed(why.clone()),
+            None => native_page::environment(),
         };
         let (env, reused) = match now {
-            crate::webview_win::EnvNow::Ready(env, reused) => (env, reused),
-            crate::webview_win::EnvNow::Waiting => {
+            native_page::EnvNow::Ready(env, reused) => (env, reused),
+            native_page::EnvNow::Waiting => {
                 if let Some(e) = sh.pages.entries.borrow_mut().get_mut(&id) {
                     if !std::mem::replace(&mut e.env_said, true) {
                         logging::line(
                             "gui",
-                            &format!("{}: waits for WebView2's environment; the event loop goes on meanwhile", e.label()),
+                            &format!("{}: waits for {}; the event loop goes on meanwhile", e.label(), words().env),
                         );
                     }
                 }
                 waiting.push(id);
                 continue;
             }
-            crate::webview_win::EnvNow::Failed(why) => {
+            native_page::EnvNow::Failed(why) => {
                 failed = Some(why.clone());
                 if let Some(e) = sh.pages.entries.borrow_mut().get_mut(&id) {
                     e.life.built(false);
@@ -877,9 +927,9 @@ pub(crate) fn build_pending(sh: &Shared) {
                     logging::line(
                         "gui",
                         &format!(
-                            "{}: could not be built: WebView2's environment could not be created ({why}); the \
-                             next show answers \"{}\" and tries again",
+                            "{}: could not be built: {} ({why}); the next show answers \"{}\" and tries again",
                             e.label(),
+                            words().env_failed,
                             Refusal::BuildFailed.reason()
                         ),
                     );
@@ -895,7 +945,7 @@ pub(crate) fn build_pending(sh: &Shared) {
             e.build = build;
             e.env_said = false;
             e.shown_this_build = false;
-            let spec = crate::webview_win::BuildSpec {
+            let spec = native_page::BuildSpec {
                 page: id,
                 build,
                 kind: e.kind,
@@ -908,10 +958,10 @@ pub(crate) fn build_pending(sh: &Shared) {
         };
         logging::line(
             "gui",
-            &format!("{label}: building in WebView2's environment — no module callback runs until WebView2 has made the page"),
+            &format!("{label}: {}", words().building),
         );
         let started = Instant::now();
-        let result = crate::webview_win::build(&spec, &env);
+        let result = native_page::build(&spec, &env);
         let ms = started.elapsed().as_millis();
         let leftover = {
             let mut entries = sh.pages.entries.borrow_mut();
@@ -957,28 +1007,30 @@ pub(crate) fn build_pending(sh: &Shared) {
             logging::line("gui", &format!("page {id}: closed while it was being built; its window was taken down again"));
         }
     }
-    // The pages still waiting for the environment, for the tick after WebView2 has answered —
-    // ahead of any asked for since (a build pumps messages, but no module runs meanwhile).
-    #[cfg(windows)]
+    // The pages still waiting for the environment, for the tick after WebView2 has answered (on a
+    // Mac, WebKit with the rule list) — ahead of any asked for since (a build pumps messages, but
+    // no module runs meanwhile).
+    #[cfg(any(windows, target_os = "macos"))]
     {
         waiting.extend(again);
         if waiting.is_empty() {
-            crate::webview_win::drop_unclaimed_failure();
+            native_page::drop_unclaimed_failure();
         } else {
             let mut builds = sh.pages.builds.borrow_mut();
             waiting.retain(|id| !builds.contains(id));
             builds.splice(0..0, waiting);
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = (ids, Phase::Idle);
     log_memory_due(sh);
 }
 
-/// The WebView2 memory line of each page due for one, at the end of the tick.
+/// The memory line of each page due for one, at the end of the tick: WebView2's processes on
+/// Windows; on a Mac none, said once a session (`native_page::Native::memory`).
 fn log_memory_due(sh: &Shared) {
     let due = std::mem::take(&mut *sh.pages.memory_due.borrow_mut());
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     for id in due {
         let Some((native, label)) = sh.pages.entries.borrow().get(&id).and_then(|e| Some((native_of(e)?, e.label())))
         else {
@@ -988,15 +1040,15 @@ fn log_memory_due(sh: &Shared) {
             logging::line("gui", &format!("{label}: {m}"));
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = due;
 }
 
 /// Hands the modules what their pages' windows sent since the last tick, in order ([`hand_on`]).
 pub(crate) fn fire_events(sh: &Shared) {
-    #[cfg(windows)]
-    let events = crate::webview_win::take_events();
-    #[cfg(not(windows))]
+    #[cfg(any(windows, target_os = "macos"))]
+    let events = native_page::take_events();
+    #[cfg(not(any(windows, target_os = "macos")))]
     let events: Vec<PageEvent> = Vec::new();
     hand_on(sh, events);
 }
@@ -1103,7 +1155,7 @@ fn loaded<H: PageHost>(h: &H, page: u64, build: u64) {
         let ready = e.on_ready.is_some().then(|| (e.owner, e.lua.clone()));
         (flush, native_of(e), ready, e.label(), e.asked.take())
     };
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     if let Some(native) = &native {
         for json in &flush {
             if let Err(e) = native.post_json(json) {
@@ -1146,9 +1198,9 @@ fn load_failed<H: PageHost>(h: &H, page: u64, build: u64, why: &str) {
             e.build = 0;
             e.window = None;
             e.asked = None;
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             let n = e.native.take();
-            #[cfg(not(windows))]
+            #[cfg(not(any(windows, target_os = "macos")))]
             let n: NativeRef = None;
             n
         } else {
@@ -1172,7 +1224,7 @@ fn load_failed<H: PageHost>(h: &H, page: u64, build: u64, why: &str) {
 }
 
 fn message<H: PageHost>(h: &H, page: u64, build: u64, text: String) {
-    // Its size was checked where it arrived (webview_win.rs), before it waited for this tick.
+    // Its size was checked where it arrived (`native_page`'s handler), before it waited for this tick.
     let (owner, lua) = {
         let entries = h.pages().entries.borrow();
         let Some(e) = entries.get(&page) else { return };
@@ -1196,9 +1248,9 @@ fn closed<H: PageHost>(h: &H, page: u64, build: u64, why: &'static str) {
             e.build = 0;
             e.window = None;
             e.asked = None;
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             let n = e.native.take();
-            #[cfg(not(windows))]
+            #[cfg(not(any(windows, target_os = "macos")))]
             let n: NativeRef = None;
             n
         } else {
@@ -1206,7 +1258,7 @@ fn closed<H: PageHost>(h: &H, page: u64, build: u64, why: &'static str) {
         };
         (native, e.on_close.is_some().then(|| (e.owner, e.lua.clone())), e.label())
     };
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     if let Some(n) = native.as_ref().filter(|_| why != "failed") {
         n.after_hidden();
     }
@@ -1233,14 +1285,14 @@ pub(crate) fn hide_pages_of(sh: &Shared, owner: usize) {
         .map(|e| (native_of(e), e.label()))
         .collect();
     for (native, label) in natives {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         if let Some(n) = native {
             if n.is_shown() {
                 n.hide();
                 logging::line("gui", &format!("{label}: hidden, its module was disabled"));
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         let _ = (native, label);
     }
 }
@@ -1254,9 +1306,9 @@ pub(crate) fn drop_pages(sh: &Shared, owned: impl Fn(usize) -> bool) {
         ids.into_iter().filter_map(|id| entries.remove(&id)).collect()
     };
     for mut e in gone {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         let native = e.native.take();
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         let native: NativeRef = None;
         take_down(native);
         logging::line("gui", &format!("{}: closed with its module", e.label()));
@@ -1298,11 +1350,11 @@ pub(crate) fn test_page(
         asked: None,
         env_said: false,
         over_said: false,
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         shown_this_build: false,
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         retried: false,
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         native: None,
     };
     test_build(pages, &mut entry, lane);
@@ -1464,6 +1516,25 @@ mod tests {
         let e = json::decode(&fresh, fresh.create_string("{not json").unwrap()).unwrap_err();
         let line = undecoded("[m1] page 'Test page'", &e);
         assert!(line.contains("a message that is not JSON was dropped"), "{line}");
+    }
+
+    /// Every call into a page's window here goes through `native_page`, the one name both
+    /// platforms' windows go by: Windows' window is named by its alias alone, and nothing here is
+    /// built for one of the two only but the alias and the question whether the engine is there
+    /// (`runtime_present`). So a Mac's page takes every path a Windows page takes, and a path
+    /// made for Windows alone shows here, not first on a Mac.
+    #[test]
+    fn both_platforms_reach_their_page_window_by_one_name() {
+        let src = include_str!("webview_lua.rs");
+        let code = &src[..src.find("#[cfg(test)]\nmod tests").expect("the tests")];
+        assert_eq!(code.matches("crate::webview_win").count(), 1, "only the alias names Windows' window");
+        assert!(code.contains("#[cfg(windows)]\nuse crate::webview_win as native_page;"));
+        assert!(code.contains("#[cfg(target_os = \"macos\")]\nuse crate::backend::page as native_page;"));
+        let runtime = crate::ocr_wiring_tests::body(code, "fn runtime_present() -> bool {");
+        let windows_only = |s: &str| s.matches("#[cfg(windows)]").count() + s.matches("#[cfg(not(windows))]").count();
+        assert_eq!(windows_only(runtime), 1, "the WebView2 runtime is asked on Windows");
+        assert_eq!(windows_only(code), 2, "a path for Windows alone: the alias and the runtime are the only two");
+        assert_eq!(code.matches("#[cfg(target_os = \"macos\")]").count(), 2, "the alias and WebKit's version");
     }
 
     #[test]

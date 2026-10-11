@@ -153,7 +153,7 @@ Tier = risk level · MVP = required for the ReaHotkey vertical slice · Feasibil
 | `host.input` | Mouse / keyboard simulation | yes | medium | ✅ | full | limited | Accessibility |
 | `host.screen` | Capture, image search, pixel/color | yes | medium | ✅ | full | limited | Screen Recording |
 | `host.ocr` | Text recognition in a region/image | yes | medium | ✅ | full | limited | (uses `screen`) |
-| `host.gui` | Own accessible windows: an HTML page (WebView2 through wry), native wxDragon windows planned | partly: `webview`, Windows only, experimental | medium | ○ | full | open (test M1) | — |
+| `host.gui` | Own accessible windows: an HTML page (WebView2 and WebKit through wry), native wxDragon windows planned | partly: `webview`, experimental | medium | ○ | full | open (stage 4, VoiceOver untested) | — |
 | `host.clipboard` | Read/write clipboard | **no** | medium | ○ | full | full | — |
 | `host.app` | Detect/focus/launch running apps | **no** | medium | ○ | full | limited | (Automation/AppleEvents partly) |
 | `host.ffi` | Load/call native libs | **no** | **high** | ○ | full | limited | (signature, no TCC) |
@@ -313,8 +313,8 @@ Accessibility enforced via the API (mandatory label, study §5).
 *As built so far, `host.gui` has one function, and it is not this one: `host.gui.webview{ file,
 title, onMessage }` shows an HTML page from the module's own folder in a window of its own, beside
 the plug-in — or, with `window = "app"`, in a window like any program's, in Alt+Tab and on the
-taskbar — with JSON messages both ways — experimental, Windows only, for the probe the
-maintainer runs with NVDA ([reference](api/gui)). The native windows above are still planned; the
+taskbar — with JSON messages both ways — experimental, for the probe the maintainer runs with
+NVDA, and on a Mac in WebKit, which has not met VoiceOver yet ([reference](api/gui)). The native windows above are still planned; the
 free-text search field of VPS Avenger's stage 4 is to be one of them (TODO.md).*
 
 ### host.ffi — native libs (gated, high)

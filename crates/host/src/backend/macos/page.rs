@@ -1,8 +1,8 @@
 //! `host.gui.webview` on a Mac: WKWebView, through wry, in a window of the application's own — a
 //! panel for a tool page, an ordinary window for an app page (`webview::WindowKind`). The Mac's
-//! `webview_win.rs`, with the same interface, so `webview_lua.rs` can build, show and take down a
-//! page the same way on both. It does not yet (stage 4, TODO.md): until it does, `page-check`
-//! (`page_check.rs`) is what builds pages here, on every Mac runner CI has.
+//! `webview_win.rs`, with the same interface, so `webview_lua.rs` builds, shows and takes down a
+//! page the same way on both (stage 4, TODO.md). `page-check` (`page_check.rs`) builds pages with
+//! it too, on every Mac runner CI has.
 //!
 //! **The tool page** is the VPS Avenger control tool's panel — a tool VoiceOver users run in
 //! production with Logic: an `NSPanel` that activates the application when it takes the keyboard
@@ -19,9 +19,11 @@
 //! page, which is the round trip docs/api/gui.md describes.
 //!
 //! **The app page** is an ordinary `NSWindow`: titled, closable, miniaturisable, resizable, at the
-//! normal level, in the window cycle. While one is shown the application claims the Dock
-//! (`dock.rs`, under the setting `dock_while_open`), and lets it go when the last one is hidden or
-//! taken down.
+//! normal level, in the window cycle — and never in full screen: its zoom button zooms it, as
+//! Windows' maximise box maximises, so a show with a rectangle to avoid can always put it beside
+//! that. While one is shown the application claims the Dock (`dock.rs`, under the setting
+//! `dock_while_open`), and lets it go when the last one is hidden — by its module, by the user, or
+//! because its show did not get the front — or taken down.
 //!
 //! **Taking the front** ([`Native::focus`]) is the tool's sequence — this application asked for
 //! the front (`app::activate_self`, `activateIgnoringOtherApps:`), the window made key and ordered
@@ -30,9 +32,15 @@
 //! log: the window becoming the key window (got); another application's activation announced first
 //! — not the one a page of ours leaving asked for just before, which was asked first and comes
 //! first — or a key the event tap saw pressed while none of our windows has the keyboard (not got —
-//! and a tool page placed over the rectangle to avoid is hidden again, Windows' rule); the page
-//! hidden first (abandoned). A request this application makes while it is the active one and that
-//! leaves the window without the keyboard is declined at once.
+//! and a page the show placed over the rectangle to avoid is hidden again, Windows' rule, unless it
+//! is an app page the user has open: `webview::not_got_hides`; a `focus` places nothing, and hides
+//! nothing); the page hidden first, or a newer request for the front made (abandoned). A request
+//! this application makes while it is the active one and that leaves the window without the
+//! keyboard is declined at once. An app page the user has open goes over the rectangle to avoid
+//! only once it has the keyboard its show asked for (`webview::place_when_key`), so one that does
+//! not get it stays where the user left it, as on Windows; the place waits with the request, and
+//! goes with it. The window is ordered in front before any answer, as the tool orders it: a page
+//! that does not get the keyboard has been raised all the same, at the normal level.
 //!
 //! **A request that outlives its page.** A page hidden before its show had an answer — or hidden
 //! again because a key went elsewhere — leaves the request for the front on its way, and it can
@@ -50,8 +58,9 @@
 //! to its application where that window had no name (`webview::front_goes_to_app`) — by
 //! `front::hand_front_to`: the activation asked for at once, the window raised and focused when the
 //! workspace announces it. Only while it has the keyboard (`backend::hand_plan`), and an app page
-//! only when it has kept the front since it took it, as on Windows. An app page lets its Dock claim
-//! go after that, as the last thing.
+//! only when it has kept the front since it took it, as on Windows — since its window got the
+//! keyboard a show or `focus` asked for, from another window. An app page lets its Dock claim go
+//! after that, as the last thing.
 //!
 //! **Keys.** The page and WebKit see every key first; a key equivalent they leave unhandled is the
 //! host's table (`webview::mac_key_of`): Command-W closes, the Edit keys edit the field the keyboard
@@ -237,9 +246,8 @@ enum Env {
 /// where Windows has WebView2's environment.
 pub(crate) enum EnvNow {
     /// Compiled. The second field is Windows' "reused, retry once in a new one", which has no
-    /// counterpart here: always `false`. Allowed dead: `webview_lua.rs` reads it once it takes this
-    /// window as it takes webview_win.rs (TODO.md, stage 4); macos-check names it meanwhile.
-    Ready(Retained<WKContentRuleList>, #[allow(dead_code)] bool),
+    /// counterpart here: always `false`.
+    Ready(Retained<WKContentRuleList>, bool),
     /// Being compiled; WebKit answers through the event loop, and the tick after that builds.
     Waiting,
     /// It could not be compiled; the next build asks again. A page is never built without it.
@@ -268,9 +276,6 @@ pub(crate) fn environment() -> EnvNow {
 
 /// At the end of a tick in which no page waits for the rule list: a failure WebKit answered that no
 /// build took is dropped, so a build much later asks again rather than fail with a stale reason.
-// Allowed dead: `webview_lua.rs` calls it once it takes this window as it takes webview_win.rs
-// (TODO.md, stage 4); macos-check names it meanwhile.
-#[allow(dead_code)]
 pub(crate) fn drop_unclaimed_failure() {
     let why = ENV.with(|e| match &*e.borrow() {
         Env::Failed(why) => Some(why.clone()),
@@ -405,16 +410,19 @@ struct PageState {
     refusals: Refusals,
     /// Where the page took the front from when it last took it; `None` until it first does.
     came_from: Cell<Option<Came>>,
-    /// Whether the page has kept the front since it last took it from another window: set when it
-    /// does ([`Native::focus`]), cleared when its window lets the keyboard go. Asked only for an
-    /// app page (`WindowKind::gives_front_back`).
+    /// Whether the page has kept the front since it last took it from another window: set when its
+    /// window gets the keyboard a show or `focus` asked for from another window ([`became_key`],
+    /// [`Asked::takes`]) — not when it is asked for, as a request may not be got — and cleared when
+    /// its window lets the keyboard go or the request is not got. Asked only for an app page
+    /// (`WindowKind::gives_front_back`).
     kept: Cell<bool>,
     /// Shown by the host and not hidden since: an app page miniaturised, or in an application that
     /// is hidden, is still shown.
     shown: Cell<bool>,
     /// Whether the window has been given a place yet: until then a show without `avoid` centres it.
     placed: Cell<bool>,
-    /// Whether its last place was over the rectangle to avoid (`webview::Placement::Over`).
+    /// Whether its last place was over the rectangle to avoid (`webview::Placement::Over`): after a
+    /// show's [`Native::put`], whether that show placed it there ([`Asked::over`]).
     over: Cell<bool>,
     /// The web view, once built.
     wk: RefCell<Option<Weak<WKWebView>>>,
@@ -524,8 +532,12 @@ fn guarded(what: &str, f: impl FnOnce()) {
     }
 }
 
-/// The page's window became the key window: a tool page floats while it has the keyboard, a show
-/// that asked for the front has its answer, and the keyboard goes back where it was in the page.
+/// The page's window became the key window: a tool page floats while it has the keyboard, and the
+/// keyboard goes back where it was in the page. A show or `focus` that asked for the front has its
+/// answer: a page that took the front from another window has kept it from here, and an app page
+/// the user has open goes over the rectangle to avoid where its show put it, now that it is in
+/// front. A window that gets the keyboard any other way — a click, Command-Tab — is neither kept
+/// nor moved.
 fn became_key(window: &NSWindow, state: &PageState) {
     if state.kind == WindowKind::Tool {
         window.setLevel(NSFloatingWindowLevel);
@@ -539,6 +551,18 @@ fn became_key(window: &NSWindow, state: &PageState) {
                 asked.since.elapsed().as_millis()
             ),
         );
+        if asked.takes {
+            state.kept.set(true);
+        }
+        if let (Some(r), Some(mtm)) = (asked.over_once_key, MainThreadMarker::new()) {
+            window.setFrame_display(cocoa_rect(r, primary_height(mtm)), true);
+            state.placed.set(true);
+            state.over.set(true);
+            crate::logging::line(
+                "gui",
+                &format!("page '{}': in front, so it goes over the rectangle to avoid now", state.title),
+            );
+        }
     }
     restore_focus(state);
 }
@@ -777,6 +801,22 @@ struct Asked {
     /// front, and whose activation was not announced yet (`front::waiting_for`): asked first, it
     /// comes first, and says nothing of this request. Its first announcement is passed over.
     before: Option<i32>,
+    /// Whether the page was shown already when it asked — for an app page, a window the user has
+    /// open, which a request that does not get the front leaves as and where it is.
+    open: bool,
+    /// Whether the front was taken from another window: got, the page has kept it
+    /// ([`PageState::kept`]). Already in front, it stays as it was, as on Windows.
+    takes: bool,
+    /// Whether the show placed the page over the rectangle to avoid just before it asked
+    /// ([`Native::put`]) — which a request that does not get the front undoes
+    /// (`webview::not_got_hides`). Never for `focus`, which places nothing: a page an earlier show
+    /// left there is not hidden for it, as on Windows, where a declined `focus` hides nothing.
+    over: bool,
+    /// Where an app page the user has open goes once it has the keyboard (`webview::place_when_key`,
+    /// set by [`Native::put`] after the request): kept here, so that it goes with the request —
+    /// answered, abandoned, or replaced by a newer one — and never moves the window at a later
+    /// `becomeKeyWindow` the request had no part in.
+    over_once_key: Option<Rect>,
 }
 
 /// A request for the front whose page left before it was answered ([`UNANSWERED`]).
@@ -858,6 +898,19 @@ fn take_asked(id: isize) -> Option<Asked> {
     })
 }
 
+/// Page `id`'s request for the front, while it has no answer: given `place`, where the window goes
+/// once it has the keyboard (`None` forgets one an earlier show left waiting). Whether there is
+/// such a request.
+fn place_once_key(id: isize, place: Option<Rect>) -> bool {
+    ASKED.with(|a| match a.borrow_mut().as_mut() {
+        Some(x) if x.id == id => {
+            x.over_once_key = place;
+            true
+        }
+        _ => false,
+    })
+}
+
 /// The workspace named process `pid` the active application (`watch.rs`). A show still waiting for
 /// the front, with the page not key, has its answer when another application's activation is
 /// announced: it did not get it — unless that is the activation a hand-over of ours asked for
@@ -907,16 +960,21 @@ pub(super) fn refresh() {
     not_got(asked, &format!("a key went to {name}"), true);
 }
 
-/// A show did not get the front: said; a tool page drops to the normal level, and one placed over
-/// the rectangle to avoid is hidden again — Windows' rule, as the page would cover what the
-/// application's own clicks and screen reads land on. An app page the user has open stays as and
-/// where it is. `on_its_way`: nothing has been announced since the request, which may still make
-/// this application the active one — a page hidden here leaves it behind ([`unanswered`]).
+/// A show did not get the front: said; a tool page drops to the normal level, the page has not kept
+/// the front, and a page this show placed over the rectangle to avoid is hidden again — Windows'
+/// rule, as the page would cover what the application's own clicks and screen reads land on — and
+/// an app page hidden so lets its Dock claim go, as any hidden app page does. An app page the user
+/// has open stays as and where it is. `on_its_way`: nothing has been announced since the request,
+/// which may still make this application the active one — a page hidden here leaves it behind
+/// ([`unanswered`]), and with no window of ours left to be in, the front goes back
+/// ([`became_active`]).
 fn not_got(asked: Asked, why: &str, on_its_way: bool) {
     let found = PAGES.with(|p| p.borrow().get(&asked.id).map(|b| (b.state.clone(), b.window.load())));
     let Some((state, Some(window))) = found else { return };
     let ms = asked.since.elapsed().as_millis();
-    let hidden = state.kind == WindowKind::Tool && state.over.get();
+    let hidden = webview::not_got_hides(state.kind, asked.over, asked.open);
+    let stayed = asked.over_once_key.is_some();
+    state.kept.set(false);
     if state.kind == WindowKind::Tool {
         window.setLevel(NSNormalWindowLevel);
     }
@@ -935,9 +993,18 @@ fn not_got(asked: Asked, why: &str, on_its_way: bool) {
         &format!(
             "page '{}': {why}, {ms} ms after the show asked for the front — the page did not get the keyboard{}",
             state.title,
-            if hidden { "; it was over the rectangle to avoid, so it is hidden again" } else { "" }
+            if hidden {
+                "; it was over the rectangle to avoid, so it is hidden again"
+            } else if stayed {
+                "; an application window the user has open, so it stays where it was, not over the rectangle to avoid"
+            } else {
+                ""
+            }
         ),
     );
+    if hidden && state.kind == WindowKind::App {
+        dock_release(state.id());
+    }
 }
 
 /// A page's content view as the window handle wry builds into.
@@ -1229,6 +1296,10 @@ fn make_window(mtm: MainThreadMarker, kind: WindowKind, title: &str, state: &Rc<
         };
         // SAFETY: as the panel's, above.
         unsafe { window.setReleasedWhenClosed(false) };
+        // Never in full screen: a resizable window's zoom button would take it there, into a Space
+        // of its own where no show can place it beside the rectangle to avoid. It zooms instead, as
+        // Windows' maximise box maximises.
+        window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenNone);
         Retained::into_super(window)
     };
     let Some(id) = own_id(window.windowNumber() as i64) else {
@@ -1342,11 +1413,8 @@ fn front_before() -> Option<Came> {
     NSWorkspace::sharedWorkspace().frontmostApplication().map(|a| Came { window: 0, pid: a.processIdentifier() })
 }
 
-// `hwnd`, `plan`, `focus` and `memory` are allowed dead: `webview_lua.rs` calls them once it takes
-// this window as it takes webview_win.rs (TODO.md, stage 4); macos-check names them meanwhile.
 impl Native {
     /// The page's window as `host.window` names it (`backend::own_id`).
-    #[allow(dead_code)]
     pub(crate) fn hwnd(&self) -> isize {
         self.state.id()
     }
@@ -1355,7 +1423,6 @@ impl Native {
     /// to be — or, where nothing is clear of it, at its smallest in the corner of that display where
     /// it covers the least of it (`webview::place`). Decided, not done: [`Native::put`] puts it
     /// there. `None` without `avoid`, and with no display.
-    #[allow(dead_code)]
     pub(crate) fn plan(&self, avoid: Option<Rect>) -> Option<Placement> {
         let a = avoid?;
         let mtm = MainThreadMarker::new()?;
@@ -1364,12 +1431,28 @@ impl Native {
 
     /// Puts the window where [`Native::plan`] decided, for a `show` with `avoid`; without `avoid`,
     /// the first time, in the middle of the display the window with the keyboard is on. A
-    /// miniaturised app page is brought back first.
+    /// miniaturised app page is brought back first. An app page the user has open, put over `avoid`
+    /// while its request for the front has no answer yet, goes there when it gets the keyboard
+    /// (`webview::place_when_key`) — the place kept with the request ([`Asked::over_once_key`]). A
+    /// place an earlier show left waiting is forgotten either way.
     pub(crate) fn put(&self, avoid: Option<Rect>, plan: Option<Placement>) {
+        let asked = place_once_key(self.state.id(), None);
         let Some(mtm) = MainThreadMarker::new() else { return };
         let h = primary_height(mtm);
         match (avoid, plan) {
             (Some(_), Some(p)) => {
+                if webview::place_when_key(self.state.kind, &p, asked) {
+                    place_once_key(self.state.id(), Some(p.rect()));
+                    crate::logging::line(
+                        "gui",
+                        &format!(
+                            "page '{}': goes over the rectangle to avoid once it has the keyboard, and stays where it \
+                             is if it does not get it",
+                            self.state.title
+                        ),
+                    );
+                    return;
+                }
                 if self.state.kind == WindowKind::App && self.window.isMiniaturized() {
                     self.window.deminiaturize(None);
                 }
@@ -1378,6 +1461,7 @@ impl Native {
                 self.state.over.set(matches!(p, Placement::Over { .. }));
             }
             (Some(_), None) => {
+                self.state.over.set(false);
                 crate::logging::line(
                     "gui",
                     &format!("page '{}': no display's area could be read; the window stays where it is", self.state.title),
@@ -1392,7 +1476,8 @@ impl Native {
                 self.state.placed.set(true);
                 self.state.over.set(false);
             }
-            (None, _) => {}
+            // Where it is: not placed over the rectangle to avoid by this show, as on Windows.
+            (None, _) => self.state.over.set(false),
         }
     }
 
@@ -1402,6 +1487,7 @@ impl Native {
     /// taking the front — "raised above the ordinary windows", as on Windows. An app page claims the
     /// Dock before it is shown, and a miniaturised one is brought back.
     pub(crate) fn show(&self, focus: bool) -> Result<(), Refusal> {
+        let open = self.is_shown();
         let _ = self.webview.set_visible(true);
         if self.state.kind == WindowKind::App {
             dock_claim(self.state.id());
@@ -1411,7 +1497,9 @@ impl Native {
         }
         self.state.shown.set(true);
         if focus {
-            return if self.take_front() { Ok(()) } else { Err(Refusal::Declined) };
+            // Placed by this show's `put` just before, if over `avoid` at all.
+            let over = self.state.over.get();
+            return if self.take_front(open, over) { Ok(()) } else { Err(Refusal::Declined) };
         }
         if self.state.kind == WindowKind::Tool && !self.window.isKeyWindow() {
             self.window.setLevel(NSNormalWindowLevel);
@@ -1421,10 +1509,10 @@ impl Native {
     }
 
     /// Brings the shown page to the front with the keyboard in its document ([`Native::take_front`]);
-    /// `false` when it is not shown, or when the system declined at once.
-    #[allow(dead_code)]
+    /// `false` when it is not shown, or when the system declined at once. It places nothing, so a
+    /// request it makes that is not got hides nothing ([`Asked::over`]).
     pub(crate) fn focus(&self) -> bool {
-        self.is_shown() && self.take_front()
+        self.is_shown() && self.take_front(true, false)
     }
 
     /// The control tool's sequence for its panel: this application asked for the front
@@ -1434,9 +1522,13 @@ impl Native {
     /// without a word leaves no floating page over the plug-in window. `true` when that was asked —
     /// what comes of it is an event (see the file) — and `false` when this application was the
     /// active one already and the window is still not key: declined by the system. Where the front
-    /// came from is kept, to give it back. An app page comes back from the Dock and from a hidden
-    /// application first.
-    fn take_front(&self) -> bool {
+    /// came from is kept, to give it back; whether the page has kept the front is decided when the
+    /// window gets the keyboard ([`became_key`]). An app page comes back from the Dock and from a
+    /// hidden application first. `open`: the page was shown already ([`Asked::open`]); `over`: the
+    /// show placed it over the rectangle to avoid ([`Asked::over`]). A request of another page's
+    /// still waiting for its answer is abandoned — this one decides where the front goes — and
+    /// said.
+    fn take_front(&self, open: bool, over: bool) -> bool {
         let Some(app) = super::own::app() else { return false };
         let w = &*self.window;
         let id = self.state.id();
@@ -1459,24 +1551,41 @@ impl Native {
         super::front::hook_own();
         // Read before `activate_self` gives that hand-over up: its activation is still on its way.
         let earlier = super::front::waiting_for();
-        ASKED.with(|a| {
-            let pressed = super::tap::pressed();
-            *a.borrow_mut() = Some(Asked { id, since: Instant::now(), pressed, before: earlier });
-        });
+        let takes = before.is_none_or(|c| c.window != id);
+        let asked = Asked {
+            id,
+            since: Instant::now(),
+            pressed: super::tap::pressed(),
+            before: earlier,
+            open,
+            takes,
+            over,
+            over_once_key: None,
+        };
+        if let Some(old) = ASKED.with(|a| a.borrow_mut().replace(asked)).filter(|old| old.id != id) {
+            let title = PAGES.with(|p| p.borrow().get(&old.id).map(|b| b.state.title.clone())).unwrap_or_default();
+            crate::logging::line(
+                "gui",
+                &format!(
+                    "page '{title}': page '{}' asked for the front {} ms after this page's show did, before this page had \
+                     the keyboard — the newer request decides, and nothing waits for this one any more",
+                    self.state.title,
+                    old.since.elapsed().as_millis()
+                ),
+            );
+        }
         super::app::activate_self();
         w.makeKeyAndOrderFront(None);
         w.orderFrontRegardless();
         if !w.makeFirstResponder(Some(&self.wk)) {
             crate::logging::line("gui", &format!("page '{}': AppKit did not make the web view the first responder", self.state.title));
         }
-        // Taken from another window: kept until the window lets the keyboard go. Already in front,
-        // it stays as it was.
-        if before.is_none_or(|c| c.window != id) {
-            self.state.kept.set(true);
-        }
         if w.isKeyWindow() {
-            // Its `becomeKeyWindow` has said so, inside the calls above.
-            let _ = take_asked(id);
+            // Its `becomeKeyWindow` has had the answer, inside the calls above — unless the window
+            // was the key window already, which has it here.
+            if take_asked(id).is_some_and(|a| a.takes) {
+                self.state.kept.set(true);
+            }
             return true;
         }
         if was_active {
@@ -1558,7 +1667,6 @@ impl Native {
     /// What the page's processes hold: not this application's to measure on a Mac — WebKit's
     /// content and networking processes are the system's, started for this application's web views
     /// and not its own — so always `None`, and said once a session.
-    #[allow(dead_code)]
     pub(crate) fn memory(&self) -> Option<String> {
         static SAID: AtomicBool = AtomicBool::new(false);
         if !SAID.swap(true, Ordering::Relaxed) {
