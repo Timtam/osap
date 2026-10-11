@@ -1,0 +1,15 @@
+id = "com.example.page"
+name = "Page Demo"
+version = "0.1.0"
+engine_api = ">=0.1, <0.2"
+entry = "src/main.luau"
+license = "MIT"
+# A page is shown on Windows only for now: on a Mac every show answers "not supported on this
+# platform yet" (docs/api/gui.md). And the window it clicks in is Notepad's.
+supported_os = ["windows"]
+
+[capabilities]
+# `gui` for the page, `hotkey` for the key that brings it and leaves it, `window` to find
+# Notepad, bring it to the front and ask what is drawn at a point, `input` for the click, `ocr`
+# to read the line clicked on, `speech` for what the page cannot say itself, `log` for the start.
+require = ["gui", "hotkey", "window", "input", "ocr", "speech", "log"]

@@ -1,0 +1,33 @@
+/* Plain and large: the page is visible on purpose, for whoever sits beside the user. */
+body {
+  font: 16px/1.5 "Segoe UI", system-ui, sans-serif;
+  margin: 0;
+  padding: 12px 16px;
+  color: #111;
+  background: #fff;
+}
+h1 {
+  font-size: 1.4em;
+  margin: 0 0 8px;
+}
+h2 {
+  font-size: 1.1em;
+  margin: 16px 0 4px;
+}
+.actions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+button {
+  font: inherit;
+  margin: 2px 0;
+}
+:focus {
+  outline: 3px solid #1a5fb4;
+  outline-offset: 2px;
+}
+#status {
+  padding: 6px;
+  border: 1px solid #888;
+}

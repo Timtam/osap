@@ -6906,6 +6906,22 @@ maintainer's German test instructions are a text of their own, not in the reposi
       first words), and whether the frame is deactivated while the keyboard moves into WebView2's
       own window inside it — which would make every app page leave the front to Windows' choice;
       the Alt+F4 line says so.
+- [ ] **The page example and its guide, once live** (2026-10-11). `examples/page` and
+      docs/building-a-page.md were written from the reference and are pinned by
+      `page_example_tests.rs` against the scripted host; neither has run. With NVDA, in Notepad on
+      Windows 11: the key (the page beside Notepad, "Building the page." the first time unless a
+      Notepad window prepared it), both click buttons (the caret where the guide says, the line
+      read back into the status and said once the page is back), "Back to the window", the key
+      pressed in the page, Alt+F4 in it, and Alt+Tab to another window while a line is read (the
+      trip given up, said once, the page not brought back). Unmeasured, and the guide promises
+      nothing about it: whether NVDA says the status posted right after the `show` that brings
+      the page back, after its own announcement of the page, or drops it (W9's two voices at once
+      is the same question); whether it says a status that is the same text as the one before
+      (the same button pressed twice on the same line); what NVDA says for Notepad on each trip,
+      and whether its mouse tracking reads what is under the pointer the click leaves in Notepad's
+      text; whether a line said with `interrupt = false` as the user lands in another window is
+      heard after NVDA's announcement of it or cut off by it; and, for a declined show, whether the
+      sentence that the page may still come is heard before NVDA announces the page coming.
 - [ ] **What the probe does not look at, and the reference promises nothing about yet.** Whether
       Chromium delays a posted message or a live region while the window is hidden or covered;
       JAWS at all (an Edge update once made web views silent to it).

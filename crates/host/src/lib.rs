@@ -45,6 +45,10 @@ mod overlay_avenger_tests;
 /// its keys, its report, W3's round trip, W7's landing and the automatic show.
 #[cfg(test)]
 mod html_probe_tests;
+/// The page example (examples/page, docs/building-a-page.md) against the same scripted host,
+/// with a scripted page: its key, its preparation and its round trip into Notepad.
+#[cfg(test)]
+mod page_example_tests;
 /// The overlay runtime's marks (O:here, O:stillHere), O:toScreenRect's `whole`, and a control's
 /// hook that raises, against the same scripted host.
 #[cfg(test)]
