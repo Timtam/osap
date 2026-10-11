@@ -312,7 +312,8 @@ Accessibility enforced via the API (mandatory label, study §5).
 
 *As built so far, `host.gui` has one function, and it is not this one: `host.gui.webview{ file,
 title, onMessage }` shows an HTML page from the module's own folder in a window of its own, beside
-the plug-in, with JSON messages both ways — experimental, Windows only, for the probe the
+the plug-in — or, with `window = "app"`, in a window like any program's, in Alt+Tab and on the
+taskbar — with JSON messages both ways — experimental, Windows only, for the probe the
 maintainer runs with NVDA ([reference](api/gui)). The native windows above are still planned; the
 free-text search field of VPS Avenger's stage 4 is to be one of them (TODO.md).*
 

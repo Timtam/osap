@@ -1,19 +1,32 @@
-//! `host.gui.webview` on Windows: WebView2, through wry, inside a wx tool window of our own.
+//! `host.gui.webview` on Windows: WebView2, through wry, inside a wx window of our own — a tool
+//! window, or with `window = "app"` an ordinary one (`webview::WindowKind`).
 //!
-//! **The window.** A wx frame with the tool-window style (`WS_EX_TOOLWINDOW`), so it has no
-//! taskbar button and no Alt+Tab entry; it has no owner. wx shows a tool window with `SW_SHOWNA`,
-//! which does not activate it and leaves it where it was in the stacking order, so `show` raises
-//! it to the top without activating it — a page shown without the front would otherwise stay
-//! under whatever covered it last, REAPER's main window say. Taking the foreground is a separate,
-//! explicit `SetForegroundWindow`, whose answer is the one `show` gives. Not topmost: NVDA speaks
-//! for a topmost window that is not in front, and a page's live region would then talk over the
-//! plug-in (research note of 2026-09-28).
+//! **The window.** A wx frame with no owner. A tool page's has the tool-window style
+//! (`WS_EX_TOOLWINDOW`), so it has no taskbar button and no Alt+Tab entry. An app page's has the
+//! ordinary frame style — an Alt+Tab entry with the page's title, a place on the taskbar (under
+//! the application's own button where Windows combines a program's windows, as Windows 11 does by
+//! default), a minimise and a maximise box — and is otherwise handled as a tool page is, except
+//! that a `show` never hides or moves one the user has open without bringing it to the front
+//! (`webview_lua::show_built`). wx shows a tool window with
+//! `SW_SHOWNA`, which does not activate it and leaves it where it was in the stacking order; an
+//! ordinary frame it shows with `SW_SHOW`, which activates it, so an app page is shown as wx
+//! shows a disabled frame — `SW_SHOWNA` — and enabled again at once ([`Native::unhide`]). Then
+//! `show` raises it to the top without activating it — a page shown without the front would
+//! otherwise stay under whatever covered it last, REAPER's main window say. Taking the foreground
+//! is a separate, explicit `SetForegroundWindow`, whose answer is the one `show` gives. Not
+//! topmost: NVDA speaks for a topmost window that is not in front, and a page's live region would
+//! then talk over the plug-in (research note of 2026-09-28).
 //!
 //! **Leaving the front.** With no owner, a page hidden or taken down while it is in front would
 //! leave the front to whichever window Windows puts next — REAPER's main window, or the desktop,
 //! rather than the plug-in's. So the window that had the front when the page last took it is
 //! remembered, and given the front back first ([`give_front_back`]): at the close box and Alt+F4,
-//! at `hide` (a module's, or its module disabled) and at `close` (or its module reloaded).
+//! at `hide` (a module's, or its module disabled) and at `close` (or its module reloaded). An app
+//! page only when it has kept the front since it took it: one the user came to with Alt+Tab or
+//! the taskbar is left as any program's window is (`WindowKind::gives_front_back`). A page that
+//! took the front from another page, hidden since — one page shown in place of another, the new
+//! one first so the front goes from page to page and never through the plug-in window — gives it
+//! to the window that other page came from ([`front_goes_to`]).
 //!
 //! **The page.** wry's `build`, which puts WebView2 into a child window of the frame that fills
 //! it, and subclasses the frame for three things this needs: its size, its moves (Chromium places
@@ -49,6 +62,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::num::NonZeroIsize;
 use std::path::{Path, PathBuf};
@@ -88,9 +102,9 @@ use windows_sys::Win32::System::ProcessStatus::{
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetForegroundWindow, GetWindowRect, IsWindow, IsWindowVisible, SetForegroundWindow,
-    SetWindowPos, WindowFromPoint, GA_ROOT, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER,
+    GetAncestor, GetForegroundWindow, GetWindowRect, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
+    SetForegroundWindow, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, HWND_TOP, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE,
 };
 use wry::raw_window_handle::{
     HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
@@ -101,7 +115,7 @@ use wry::{
 };
 use wxdragon::prelude::*;
 
-use crate::webview::{self, PageEvent, Rect, Refusal};
+use crate::webview::{self, PageEvent, Placement, Rect, Refusal, WindowKind};
 
 /// How many events wait for the next tick at most. A page whose script posts in a loop fills the
 /// queue faster than a tick empties it; past this, its messages are dropped and counted (a load
@@ -115,6 +129,9 @@ thread_local! {
     static EVENTS: RefCell<Vec<PageEvent>> = const { RefCell::new(Vec::new()) };
     /// Messages dropped because [`MAX_WAITING_EVENTS`] were waiting, since the last tick.
     static DROPPED: Cell<usize> = const { Cell::new(0) };
+    /// Every built page's window and the window it came from (its `came_from`), for a page leaving
+    /// the front that came from another page ([`front_goes_to`]). In while the page is built.
+    static CAME_FROM: RefCell<HashMap<isize, Rc<Cell<isize>>>> = RefCell::new(HashMap::new());
 }
 
 fn push(ev: PageEvent) {
@@ -520,6 +537,8 @@ fn user_language() -> String {
 pub(crate) struct BuildSpec {
     pub page: u64,
     pub build: u64,
+    /// A tool window or an ordinary one.
+    pub kind: WindowKind,
     pub title: String,
     pub scheme: String,
     /// The module's folder, canonical.
@@ -542,6 +561,7 @@ impl HasWindowHandle for Parent {
 /// whoever holds it then, a callback of the module's included — by [`Drop`].
 pub(crate) struct Native {
     frame: Frame,
+    kind: WindowKind,
     /// Dropped first, in `Drop`: the web view closes its controller and lets go of the frame
     /// before the frame is destroyed.
     webview: ManuallyDrop<WebView>,
@@ -553,13 +573,21 @@ pub(crate) struct Native {
     /// The window that had the front when the page last took it — the plug-in's, as a rule — for
     /// [`give_front_back`]; 0 until it first does. Shared with the close box's handler.
     came_from: Rc<Cell<isize>>,
+    /// Whether the page has kept the front since it last took it from another window: set when it
+    /// does ([`Native::focus`]); an app page's frame clears it when it is deactivated. Asked only
+    /// for an app page (`WindowKind::gives_front_back`). Shared with the close box's handler.
+    kept: Rc<Cell<bool>>,
 }
 
 impl Drop for Native {
     fn drop(&mut self) {
         // Taken down in front — a module's `close`, or its module reloaded — the window it came
         // from gets the front back first.
-        give_front_back(self.hwnd, self.came_from.get(), &self.refusals.title);
+        let gives = self.kind.gives_front_back(self.kept.get());
+        give_front_back(self.hwnd, self.came_from.get(), gives, &self.refusals.title);
+        // No page hands the front on through this one any more. (`try_with`: a page dropped as
+        // the thread ends finds the table gone.)
+        let _ = CAME_FROM.try_with(|pages| pages.borrow_mut().remove(&self.hwnd));
         // SAFETY: dropped here, once; nothing uses the web view after this.
         unsafe { ManuallyDrop::drop(&mut self.webview) };
         // Hidden first: wx leaves a window it destroys on screen until its next idle moment when
@@ -611,16 +639,7 @@ fn apartment() -> (&'static str, bool) {
 /// which starts loading at once. Pumps window messages while WebView2 makes the page's controller
 /// — see the file.
 pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<Native, String> {
-    let frame = Frame::builder()
-        .with_title(&spec.title)
-        .with_style(
-            FrameStyle::Caption
-                | FrameStyle::SystemMenu
-                | FrameStyle::CloseBox
-                | FrameStyle::ResizeBorder
-                | FrameStyle::ToolWindow,
-        )
-        .build();
+    let frame = Frame::builder().with_title(&spec.title).with_style(frame_style(spec.kind)).build();
     let hwnd = frame.get_handle() as isize;
     let Some(handle) = NonZeroIsize::new(hwnd) else {
         frame.destroy();
@@ -638,11 +657,12 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
     // The close box hides the page rather than destroy it: the module decides whether it is gone
     // (`close`), and a page the user closed keeps its state for the next `show`. Only a close
     // that cannot be refused — the application exiting — closes it. The window the page came
-    // from gets the front back first. (Whether Alt+F4 pressed in the page reaches the frame at
-    // all is unmeasured: TODO.md.)
-    let (page, build) = (spec.page, spec.build);
+    // from gets the front back first. Alt+F4 pressed in the page reaches the frame and does the
+    // same (the maintainer's run of 2026-10-11).
+    let (page, build, kind) = (spec.page, spec.build, spec.kind);
     let came_from = Rc::new(Cell::new(0isize));
-    let (back_to, close_title) = (came_from.clone(), spec.title.clone());
+    let kept = Rc::new(Cell::new(false));
+    let (back_to, close_kept, close_title) = (came_from.clone(), kept.clone(), spec.title.clone());
     frame.on_close(move |event| {
         if let WindowEventData::General(e) = &event {
             if !e.can_veto() {
@@ -650,10 +670,24 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
             }
             e.veto();
         }
-        give_front_back(hwnd, back_to.get(), &close_title);
-        frame.show(false);
+        give_front_back(hwnd, back_to.get(), kind.gives_front_back(close_kept.get()), &close_title);
+        conceal(&frame, kind);
         push(PageEvent::Closed { page, build, why: "user" });
     });
+    // An app page left for another window — by Alt+Tab, the taskbar, a click, or the module
+    // bringing the plug-in forward — has not kept the front. Passed on: wx's own handler moves the
+    // keyboard back to the control that had it when the frame is activated again.
+    if kind == WindowKind::App {
+        let left = kept.clone();
+        frame.on_activate(move |event| {
+            if let WindowEventData::Activate(a) = &event {
+                if !a.is_active() {
+                    left.set(false);
+                }
+            }
+            event.skip(true);
+        });
+    }
 
     let origin = webview::origin_for(&spec.scheme);
     let refusals = Refusals::new(&spec.title);
@@ -731,11 +765,52 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
         }
     };
     built_in(env);
-    let native = Native { frame, webview: ManuallyDrop::new(webview), hwnd, placed: Cell::new(false), refusals, came_from };
+    // Taken out again by `Drop`, so from here on with the `Native` that drops it.
+    CAME_FROM.with(|pages| pages.borrow_mut().insert(hwnd, came_from.clone()));
+    let native = Native {
+        frame,
+        kind,
+        webview: ManuallyDrop::new(webview),
+        hwnd,
+        placed: Cell::new(false),
+        refusals,
+        came_from,
+        kept,
+    };
     // Before the message loop runs again, so before the entry document can have loaded and
     // before any script of the page's has run. A failure here takes the page down again (Drop).
     native.watch(page, build, &spec.scheme, &origin)?;
     Ok(native)
+}
+
+/// The frame's style for a page of `kind` (`webview::Recipe`): a title bar, a system menu, a close
+/// box and a border to resize it by, and the tool-window style or a minimise and a maximise box.
+fn frame_style(kind: WindowKind) -> FrameStyle {
+    let recipe = kind.recipe();
+    let mut style = FrameStyle::Caption | FrameStyle::SystemMenu | FrameStyle::CloseBox | FrameStyle::ResizeBorder;
+    if !recipe.listed {
+        style |= FrameStyle::ToolWindow;
+    }
+    if recipe.minimise {
+        style |= FrameStyle::MinimizeBox;
+    }
+    if recipe.maximise {
+        style |= FrameStyle::MaximizeBox;
+    }
+    style
+}
+
+/// Hides the frame — the close box's way and [`Native::hide`]'s. wx remembers a frame hidden while
+/// minimised or maximised and shows it so again, with `SW_MINIMIZE`, which activates the next
+/// window in the stacking order, or `SW_MAXIMIZE`, which activates the frame — either moves the
+/// front; an app page's frame is told it is restored instead, so its next `show` takes
+/// [`Native::unhide`]'s way, which does not: a minimised one comes back restored, a maximised one
+/// maximised (the window keeps that state while hidden).
+fn conceal(frame: &Frame, kind: WindowKind) {
+    frame.show(false);
+    if kind == WindowKind::App {
+        frame.maximize(false);
+    }
 }
 
 /// Gives the front back to `back_to`, the window that had it when page `hwnd` last took it, while
@@ -743,29 +818,71 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
 /// leave the front to whichever window Windows puts next (see the file). Nothing when the page is
 /// not in front — a module that brought the plug-in window forward first, say. Windows lets this
 /// process hand the front on while it has it; a window that is gone or hidden by now is not asked,
-/// and Windows decides. Each case a line in the log.
-fn give_front_back(hwnd: isize, back_to: isize, title: &str) {
+/// and Windows decides — as it does for an app page that has not kept the front since it took it
+/// (`gives` false). `back_to` a page hidden since: the window that page came from
+/// ([`front_goes_to`]). Each case a line in the log.
+fn give_front_back(hwnd: isize, back_to: isize, gives: bool, title: &str) {
+    // SAFETY: a plain query.
+    if unsafe { GetForegroundWindow() } as isize != hwnd {
+        return;
+    }
+    if !gives {
+        crate::logging::line(
+            "gui",
+            &format!(
+                "page '{title}': leaves the front; it is an application window that has not kept the front since \
+                 it last took it (the user came to it another way), so Windows decides which window gets it"
+            ),
+        );
+        return;
+    }
+    let to = CAME_FROM
+        .try_with(|pages| {
+            let pages = pages.borrow();
+            front_goes_to(hwnd, back_to, pages.len(), |w| {
+                // SAFETY: a query on any handle.
+                pages.get(&w).map(|c| (unsafe { IsWindowVisible(w as HWND) } != 0, c.get()))
+            })
+        })
+        .unwrap_or(back_to);
+    let via = if to == back_to { String::new() } else { format!(" it was shown in place of (page window {back_to})") };
     // SAFETY: plain queries, and one request for a window checked to exist.
     unsafe {
-        if GetForegroundWindow() as isize != hwnd {
-            return;
-        }
-        if back_to == 0 || back_to == hwnd || IsWindow(back_to as HWND) == 0 || IsWindowVisible(back_to as HWND) == 0 {
+        if to == 0 || to == hwnd || IsWindow(to as HWND) == 0 || IsWindowVisible(to as HWND) == 0 {
             crate::logging::line(
                 "gui",
                 &format!("page '{title}': leaves the front; the window it came from is gone or hidden, so Windows decides which window gets it"),
             );
             return;
         }
-        let given = SetForegroundWindow(back_to as HWND) != 0;
+        let given = SetForegroundWindow(to as HWND) != 0;
         crate::logging::line(
             "gui",
             &format!(
-                "page '{title}': leaves the front; given back to window {back_to}, which had it before the page{}",
+                "page '{title}': leaves the front; given back to window {to}, which had it before the page{via}{}",
                 if given { "" } else { " — declined by the system, so Windows decides which window gets it" }
             ),
         );
     }
+}
+
+/// Where a page leaving the front gives it ([`give_front_back`]): `back_to`, the window it took the
+/// front from — or, when that is a page of the application's hidden since (the one this page was
+/// shown in place of), the window that page came from, and so on: a module that shows one page in
+/// place of another, the new one first, so the front goes from page to page and never through the
+/// plug-in window, still lands in the plug-in window when the new one leaves. `page` answers for a
+/// window that is a page: whether it is shown, and the window it came from (0 until it took the
+/// front). Never `this` page, never a window none came from; at most `pages` steps, so pages that
+/// came from each other end.
+fn front_goes_to(this: isize, back_to: isize, pages: usize, page: impl Fn(isize) -> Option<(bool, isize)>) -> isize {
+    let mut to = back_to;
+    for _ in 0..pages {
+        match page(to) {
+            Some((false, from)) if from != 0 && from != this => to = from,
+            _ => break,
+        }
+    }
+    to
 }
 
 /// `(w, h)` at 96 dots per inch, at `dpi`.
@@ -896,44 +1013,85 @@ impl Native {
         );
     }
 
-    /// Puts the window beside `avoid` — at its full size for the display scaling of the monitor
-    /// `avoid` is on, or smaller where it has to be — or, where nothing is clear of it, at its
-    /// smallest in the corner of that monitor where it covers the least of it (`webview::place`);
-    /// without `avoid`, the first time, in the middle of the monitor the window in front is on.
-    /// `Some(covered)` — how many of `avoid`'s pixels the page covers — when it went over it.
-    pub(crate) fn place(&self, avoid: Option<Rect>) -> Option<i64> {
-        match avoid {
-            Some(a) => {
-                let dpi = dpi_at(a);
-                let (full, min) = (scaled(webview::DEFAULT_SIZE, dpi), scaled(webview::MIN_SIZE, dpi));
-                match webview::place(full, min, a, &work_areas()) {
-                    Some(p) => {
-                        self.set_rect(p.rect());
-                        self.placed.set(true);
-                        match p {
-                            webview::Placement::Beside(_) => None,
-                            webview::Placement::Over { covered, .. } => Some(covered),
-                        }
+    /// Where the window goes beside `avoid` — at its full size for the display scaling of the
+    /// monitor `avoid` is on, or smaller where it has to be — or, where nothing is clear of it, at
+    /// its smallest in the corner of that monitor where it covers the least of it
+    /// (`webview::place`). Decided, not done: [`Native::put`] puts it there. `None` without
+    /// `avoid`, and where no monitor's work area could be read.
+    pub(crate) fn plan(&self, avoid: Option<Rect>) -> Option<Placement> {
+        let a = avoid?;
+        let dpi = dpi_at(a);
+        let (full, min) = (scaled(webview::DEFAULT_SIZE, dpi), scaled(webview::MIN_SIZE, dpi));
+        webview::place(full, min, a, &work_areas())
+    }
+
+    /// Puts the window where [`Native::plan`] decided, for a `show` with `avoid`; without `avoid`,
+    /// the first time, in the middle of the monitor the window in front is on. An app page the
+    /// user minimised or maximised is put back in its normal state first, without activating it —
+    /// a hidden one is shown for that, in the state it was hidden in, and then put where it goes.
+    pub(crate) fn put(&self, avoid: Option<Rect>, plan: Option<Placement>) {
+        match (avoid, plan) {
+            (Some(_), Some(p)) => {
+                if self.kind == WindowKind::App && self.minimised_or_maximised() {
+                    if !self.is_shown() {
+                        self.unhide();
                     }
-                    None => {
-                        crate::logging::line(
-                            "gui",
-                            &format!("page '{}': no monitor's work area could be read; the window stays where it is", self.refusals.title),
-                        );
-                        None
+                    if self.minimised_or_maximised() {
+                        // SAFETY: the frame's own window; its state only.
+                        unsafe { ShowWindow(self.hwnd as HWND, SW_SHOWNOACTIVATE) };
                     }
                 }
+                self.set_rect(p.rect());
+                self.placed.set(true);
             }
-            None if !self.placed.get() => {
+            (Some(_), None) => {
+                crate::logging::line(
+                    "gui",
+                    &format!("page '{}': no monitor's work area could be read; the window stays where it is", self.refusals.title),
+                );
+            }
+            (None, _) if !self.placed.get() => {
                 if let Some(area) = foreground_work_area() {
                     let now = self.rect();
                     let r = webview::centred((now.w, now.h), &area);
                     self.move_to(r.x, r.y);
                 }
                 self.placed.set(true);
-                None
             }
-            None => None,
+            (None, _) => {}
+        }
+    }
+
+    /// Whether the window is minimised or maximised — asked of Windows, which keeps that state for
+    /// a hidden window too.
+    fn minimised_or_maximised(&self) -> bool {
+        // SAFETY: plain queries on the frame's own window.
+        unsafe { IsIconic(self.hwnd as HWND) != 0 || IsZoomed(self.hwnd as HWND) != 0 }
+    }
+
+    /// Makes the window visible without activating it. A tool window wx shows with `SW_SHOWNA`.
+    /// An ordinary frame it shows with `SW_SHOW`, which activates it — and, where this process may
+    /// take the foreground, takes it before `focus` could note the window that had it — except a
+    /// disabled one, which it shows with `SW_SHOWNA` (`SW_SHOWNOACTIVATE` when minimised): so an
+    /// app page's frame is disabled for the call and enabled again at once, which keeps wx's own
+    /// idea of whether it is shown right. A minimised app page that is shown is restored, without
+    /// activating it.
+    fn unhide(&self) {
+        match self.kind {
+            WindowKind::Tool => self.frame.show(true),
+            WindowKind::App => {
+                if !self.is_shown() {
+                    self.frame.enable(false);
+                    self.frame.show(true);
+                    self.frame.enable(true);
+                }
+                // SAFETY: plain queries and one change of state of the frame's own window.
+                unsafe {
+                    if IsIconic(self.hwnd as HWND) != 0 {
+                        ShowWindow(self.hwnd as HWND, SW_SHOWNOACTIVATE);
+                    }
+                }
+            }
         }
     }
 
@@ -943,7 +1101,7 @@ impl Native {
     /// window in front keeps the keyboard.
     pub(crate) fn show(&self, focus: bool) -> Result<(), Refusal> {
         let _ = self.webview.set_visible(true);
-        self.frame.show(true);
+        self.unhide();
         // SAFETY: the frame's own window; its place in the stacking order only.
         unsafe {
             SetWindowPos(self.hwnd as HWND, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -967,10 +1125,13 @@ impl Native {
     }
 
     /// Brings the shown window to the front and the keyboard into the document; `false` when
-    /// it is hidden, or when Windows refused.
+    /// it is hidden, or when Windows refused. A minimised app page is restored first.
     pub(crate) fn focus(&self) -> bool {
         if !self.is_shown() {
             return false;
+        }
+        if self.kind == WindowKind::App {
+            self.unhide();
         }
         // The window the front is taken from, to give it back when the page leaves it.
         // SAFETY: a plain query.
@@ -981,6 +1142,12 @@ impl Native {
         // SAFETY: the frame's own window.
         if unsafe { SetForegroundWindow(self.hwnd as HWND) } == 0 {
             return false;
+        }
+        // Taken from another window: kept until the frame is deactivated. Already in front, it
+        // stays as it was: an app page the user came to by Alt+Tab is still not one that was
+        // brought from somewhere.
+        if before != self.hwnd {
+            self.kept.set(true);
         }
         // MoveFocus: the element that had focus in the page before, or the document. (The frame
         // becoming active has wry do the same once already, so NVDA may hear it twice: test W1.)
@@ -996,8 +1163,9 @@ impl Native {
     /// Hides the window; hidden in front, it gives the front back to the window it came from
     /// first.
     pub(crate) fn hide(&self) {
-        give_front_back(self.hwnd, self.came_from.get(), &self.refusals.title);
-        self.frame.show(false);
+        let gives = self.kind.gives_front_back(self.kept.get());
+        give_front_back(self.hwnd, self.came_from.get(), gives, &self.refusals.title);
+        conceal(&self.frame, self.kind);
         self.after_hidden();
     }
 
@@ -1271,5 +1439,52 @@ fn process_memory(pid: u32) -> Option<(u64, u64)> {
         let ok = K32GetProcessMemoryInfo(h, &mut c as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS, c.cb) != 0;
         CloseHandle(h);
         ok.then_some((c.WorkingSetSize as u64, c.PrivateUsage as u64))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The frame each kind is built as, with no window made: a tool page in no window list and
+    /// with no minimise or maximise box, an app page an ordinary frame with both — and neither
+    /// one topmost, nor kept off the taskbar any other way.
+    #[test]
+    fn a_tool_page_is_a_tool_window_and_an_app_page_an_ordinary_frame() {
+        let both = FrameStyle::Caption | FrameStyle::SystemMenu | FrameStyle::CloseBox | FrameStyle::ResizeBorder;
+        let tool = frame_style(WindowKind::Tool);
+        assert_eq!(tool, both | FrameStyle::ToolWindow);
+        let app = frame_style(WindowKind::App);
+        assert_eq!(app, both | FrameStyle::MinimizeBox | FrameStyle::MaximizeBox);
+        for style in [tool, app] {
+            assert!(!style.intersects(FrameStyle::StayOnTop | FrameStyle::NoTaskbar | FrameStyle::FloatOnParent), "{style:?}");
+        }
+    }
+
+    /// A page leaving the front gives it to the window it came from — through a page it was shown
+    /// in place of, hidden since, to the window that one came from; never through a page still
+    /// shown, one that came from no window, or this page itself; and pages that came from each
+    /// other end. With no window made: the pages are a table.
+    #[test]
+    fn a_page_shown_in_place_of_another_gives_the_front_to_where_that_one_came_from() {
+        const THIS: isize = 1;
+        const PLUGIN: isize = 100;
+        // window -> (shown, came from)
+        let goes_to = |back_to: isize, pages: &[(isize, bool, isize)]| {
+            front_goes_to(THIS, back_to, pages.len(), |w| pages.iter().find(|p| p.0 == w).map(|p| (p.1, p.2)))
+        };
+        assert_eq!(goes_to(PLUGIN, &[(THIS, true, PLUGIN)]), PLUGIN, "not a page: the window itself");
+        assert_eq!(goes_to(2, &[(THIS, true, 2), (2, false, PLUGIN)]), PLUGIN, "a page hidden since: where it came from");
+        assert_eq!(goes_to(2, &[(THIS, true, 2), (2, true, PLUGIN)]), 2, "a page still shown: that page");
+        assert_eq!(
+            goes_to(3, &[(THIS, true, 3), (3, false, 2), (2, false, PLUGIN)]),
+            PLUGIN,
+            "two in place of each other, both hidden since"
+        );
+        assert_eq!(goes_to(2, &[(THIS, true, 2), (2, false, 0)]), 2, "a page that came from no window: left to Windows");
+        assert_eq!(goes_to(2, &[(THIS, true, 2), (2, false, THIS)]), 2, "never this page itself");
+        // A loop ends, on one of its pages — hidden, so Windows decides.
+        assert!(matches!(goes_to(2, &[(THIS, true, 2), (2, false, 3), (3, false, 2)]), 2 | 3));
+        assert_eq!(goes_to(0, &[(THIS, true, 0)]), 0, "none: none");
     }
 }

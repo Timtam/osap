@@ -121,6 +121,13 @@ pub fn webview_calls() {
     let _: fn() -> Vec<(&'static str, String)> = webview::base_headers;
     let _ = (webview::MIN_SIZE, webview::MAX_FILE_BYTES);
     let _ = (Refusal::Unsupported, Refusal::Headless);
+    // The `window` option, and the recipe the Mac's page will be built from (stage 4, TODO.md).
+    let _: fn(&str) -> Option<webview::WindowKind> = webview::WindowKind::parse;
+    let _: fn(webview::WindowKind) -> &'static str = webview::WindowKind::name;
+    let _: fn(webview::WindowKind) -> webview::Recipe = webview::WindowKind::recipe;
+    let _: fn(webview::WindowKind, bool) -> bool = webview::WindowKind::gives_front_back;
+    let _ = (webview::WindowKind::NAMES, webview::WindowKind::default());
+    let _ = |r: webview::Recipe| (r.listed, r.minimise, r.maximise, r.panel);
 }
 
 /// Names what `lib.rs` calls in `system_events.rs`, and the speech path's own hook, for the

@@ -41,7 +41,7 @@ use crate::mailbox::{self, Event, MailHost, Opened};
 use crate::ocr::types::{current_priority, enter_priority, Priority};
 use crate::task::Ctx;
 use crate::vm_guard::host_call;
-use crate::webview::{self, Lifecycle, PageEvent, Phase, Rect, Refusal, ShowStep, Where};
+use crate::webview::{self, Lifecycle, PageEvent, Phase, Rect, Refusal, ShowStep, Where, WindowKind};
 use crate::{appcfg, json, logging, Shared};
 
 /// What a page's event calls, carried in its module's mailbox (`Event::Page`) and opened when it
@@ -102,6 +102,8 @@ struct Entry {
     /// The module whose file the page is, for the log.
     module: String,
     title: String,
+    /// The window it is in (`window = "tool" | "app"`), fixed when it is described.
+    kind: WindowKind,
     /// That module's folder, canonical.
     root: PathBuf,
     scheme: String,
@@ -191,7 +193,7 @@ fn fail(text: String) -> mlua::Error {
 }
 
 const CALL: &str = "host.gui.webview";
-const OPTIONS: [&str; 5] = ["file", "title", "onMessage", "onReady", "onClose"];
+const OPTIONS: [&str; 6] = ["file", "title", "window", "onMessage", "onReady", "onClose"];
 
 /// A callback option: a function, or absent where `required` is false.
 fn callback_option(t: &Table, key: &str, required: bool) -> mlua::Result<Option<Function>> {
@@ -222,10 +224,24 @@ fn text_option(t: &Table, key: &str) -> mlua::Result<String> {
     }
 }
 
+/// The `window` option: `"tool"` when it is absent, and only the two words.
+fn window_option(t: &Table) -> mlua::Result<WindowKind> {
+    let words = || format!("\"{}\" or \"{}\"", WindowKind::NAMES[0], WindowKind::NAMES[1]);
+    match t.get::<Value>("window")? {
+        Value::Nil => Ok(WindowKind::default()),
+        Value::String(s) => {
+            let s = s.to_string_lossy();
+            WindowKind::parse(&s).ok_or_else(|| fail(format!("{CALL}: window is {}, not \"{s}\"", words())))
+        }
+        other => Err(fail(format!("{CALL}: window is {}, not a {}", words(), json::luau_type(&other)))),
+    }
+}
+
 /// What `host.gui.webview` is given, read strictly.
 struct PageOptions {
     file: String,
     title: String,
+    kind: WindowKind,
     on_message: Function,
     on_ready: Option<Function>,
     on_close: Option<Function>,
@@ -244,13 +260,15 @@ fn page_options(opts: Value) -> mlua::Result<PageOptions> {
                 other => format!("a {} key", json::luau_type(other)),
             };
             return Err(fail(format!(
-                "{CALL}: {name} is not an option; the options are file, title, onMessage, onReady and onClose"
+                "{CALL}: {name} is not an option; the options are file, title, window, onMessage, \
+                 onReady and onClose"
             )));
         }
     }
     Ok(PageOptions {
         file: text_option(&t, "file")?,
         title: text_option(&t, "title")?,
+        kind: window_option(&t)?,
         // `required`: an absent one has raised by now.
         on_message: callback_option(&t, "onMessage", true)?.expect("required"),
         on_ready: callback_option(&t, "onReady", false)?,
@@ -258,11 +276,11 @@ fn page_options(opts: Value) -> mlua::Result<PageOptions> {
     })
 }
 
-/// `host.gui.webview{ file, title, onMessage, onReady?, onClose? }` — describes a page. Builds
+/// `host.gui.webview{ file, title, window?, onMessage, onReady?, onClose? }` — describes a page. Builds
 /// nothing: the first `show` does. Raises for a mistake in the options, and for a `file` that is
 /// not a file inside the module's folder, at the caller's line.
 fn create(lua: &Lua, sh: &Rc<Shared>, idx: usize, opts: Value) -> mlua::Result<PageHandle> {
-    let PageOptions { file, title, on_message, on_ready, on_close } = page_options(opts)?;
+    let PageOptions { file, title, kind, on_message, on_ready, on_close } = page_options(opts)?;
     let module = sh.ids.borrow().get(idx).cloned().unwrap_or_default();
     let root = sh
         .roots
@@ -285,6 +303,7 @@ fn create(lua: &Lua, sh: &Rc<Shared>, idx: usize, opts: Value) -> mlua::Result<P
         scheme: webview::scheme_for(&module),
         module,
         title,
+        kind,
         root,
         rel,
         on_message: lua.create_registry_value(on_message)?,
@@ -305,7 +324,16 @@ fn create(lua: &Lua, sh: &Rc<Shared>, idx: usize, opts: Value) -> mlua::Result<P
         #[cfg(windows)]
         native: None,
     };
-    logging::line("gui", &format!("{}: described, from {} (origin {})", entry.label(), entry.rel, webview::origin_for(&entry.scheme)));
+    logging::line(
+        "gui",
+        &format!(
+            "{}: described, from {} (origin {}), window \"{}\"",
+            entry.label(),
+            entry.rel,
+            webview::origin_for(&entry.scheme),
+            entry.kind.name()
+        ),
+    );
     sh.pages.entries.borrow_mut().insert(id, entry);
     Ok(PageHandle { id, sh: sh.clone() })
 }
@@ -507,18 +535,29 @@ fn prepare(sh: &Rc<Shared>, id: u64) -> mlua::Result<(bool, Option<&'static str>
 
 #[cfg(windows)]
 fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<Rect>) -> mlua::Result<(bool, Option<&'static str>)> {
-    let native = sh.pages.entries.borrow().get(&id).and_then(native_of);
-    let Some(native) = native else {
+    let found = sh.pages.entries.borrow().get(&id).map(|e| (native_of(e), e.kind));
+    let Some((Some(native), kind)) = found else {
         return Ok((false, Some(Refusal::NotReady.reason())));
     };
     let started = Instant::now();
     // Beside `avoid`, or — with no room beside it — over it, in a corner, at its smallest
     // (`webview::place`), for a show that brings it to the front: never refused for want of room,
     // so the page is always reachable. A show without `focus` never leaves it over `avoid`.
-    let over = native.place(avoid);
-    // Over `avoid` without the keyboard: not shown at all (`webview::over_refused`).
+    let plan = native.plan(avoid);
+    let over = match plan {
+        Some(webview::Placement::Over { covered, .. }) => Some(covered),
+        _ => None,
+    };
+    // An app page the user has open is the user's window, as any program's is: a show that would
+    // leave it over `avoid` without the keyboard neither hides it nor moves it, and one that is to
+    // put it there moves it only once it is in front.
+    let open_app = over.is_some() && kind == WindowKind::App && native.is_shown();
+    // Over `avoid` without the keyboard: not shown at all (`webview::over_refused`), and not
+    // moved either.
     if let (Some(_), Some(r)) = (over, webview::over_refused(focus, false)) {
-        let hidden = if native.is_shown() {
+        let hidden = if open_app {
+            "; it is an application window the user has open, so it stays as and where it is"
+        } else if native.is_shown() {
             native.hide();
             "; it was shown and is hidden"
         } else {
@@ -534,15 +573,29 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
         );
         return Ok((false, Some(r.reason())));
     }
-    let shown = native.show(focus);
-    // Over `avoid` and declined — raised without the keyboard: hidden again.
-    let unshown = over.is_some() && webview::over_refused(focus, shown.is_err()).is_some();
+    let shown = if open_app {
+        // In front first, where the user left it — not raised before that, so a decline leaves it
+        // as it was — and only then over `avoid`. `focus` restores a minimised one.
+        if native.focus() {
+            native.put(avoid, plan);
+            Ok(())
+        } else {
+            Err(Refusal::Declined)
+        }
+    } else {
+        native.put(avoid, plan);
+        native.show(focus)
+    };
+    // Over `avoid` and declined — raised without the keyboard: hidden again. Not an app page the
+    // user has open, which was not moved.
+    let unshown = over.is_some() && !open_app && webview::over_refused(focus, shown.is_err()).is_some();
     if unshown {
         native.hide();
     }
     // The first show of this build that succeeded: its memory line is due. The explanation of a
-    // page over the rectangle is said once for a run of such shows.
-    let stays_over = over.is_some() && !unshown;
+    // page over the rectangle is said once for a run of such shows. (Over `avoid`, only a show
+    // with `focus` gets here, and it stays there exactly when it was not declined.)
+    let stays_over = over.is_some() && shown.is_ok();
     let (first, explain) = match sh.pages.entries.borrow_mut().get_mut(&id) {
         Some(e) => {
             e.window = Some(native.hwnd() as i64);
@@ -557,6 +610,9 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
     let ms = started.elapsed().as_millis();
     let front = sh.backend.foreground_window();
     let place = match (avoid, over) {
+        (Some(a), Some(_)) if open_app && shown.is_err() => {
+            format!(", left where it was (no room beside {},{} {}x{})", a.x, a.y, a.w, a.h)
+        }
         (Some(a), Some(covered)) => {
             let area = (i64::from(a.w) * i64::from(a.h)).max(1);
             format!(
@@ -578,6 +634,11 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
             match (&shown, focus, unshown) {
                 (Ok(()), true, _) => "shown and brought to the front (accepted)",
                 (Ok(()), false, _) => "shown without taking the front",
+                (Err(_), _, false) if open_app => {
+                    "Windows DECLINED to bring it to the front — an application window the user has \
+                     open, so it stays where it was, neither moved over the rectangle to avoid nor \
+                     hidden (restored, if it was minimised)"
+                }
                 (Err(_), _, false) => "shown, and Windows DECLINED to bring it to the front",
                 (Err(_), _, true) => {
                     "shown, and Windows DECLINED to bring it to the front — over the rectangle to avoid \
@@ -837,6 +898,7 @@ pub(crate) fn build_pending(sh: &Shared) {
             let spec = crate::webview_win::BuildSpec {
                 page: id,
                 build,
+                kind: e.kind,
                 title: e.title.clone(),
                 scheme: e.scheme.clone(),
                 root: e.root.clone(),
@@ -1221,6 +1283,7 @@ pub(crate) fn test_page(
         owner,
         module: format!("m{owner}"),
         title: "Test page".to_string(),
+        kind: WindowKind::Tool,
         root: PathBuf::new(),
         scheme: "mod-test".to_string(),
         rel: "ui/index.html".to_string(),
@@ -1290,11 +1353,12 @@ mod tests {
     }
 
     #[test]
-    fn a_page_is_described_by_its_five_options_and_nothing_else() {
+    fn a_page_is_described_by_its_six_options_and_nothing_else() {
         let lua = Lua::new();
         let ok = page_options(opts(&lua, "return { file = 'ui/a.html', title = 'A', onMessage = function() end }")).unwrap();
         assert_eq!((ok.file.as_str(), ok.title.as_str()), ("ui/a.html", "A"));
         assert!(ok.on_ready.is_none() && ok.on_close.is_none());
+        assert_eq!(ok.kind, WindowKind::Tool, "a tool window unless it says otherwise");
         let all = page_options(opts(
             &lua,
             "return { file = 'a', title = 'A', onMessage = print, onReady = print, onClose = print }",
@@ -1309,8 +1373,34 @@ mod tests {
         assert!(err("return { file = 'a', title = 'A' }").contains("onMessage is a function, not a nil"));
         assert!(err("return { file = 'a', title = 'A', onMessage = print, onReady = 1 }").contains("onReady is a function, not a number"));
         let e = err("return { file = 'a', title = 'A', onMessage = print, url = 'https://x' }");
-        assert!(e.contains("'url' is not an option; the options are file, title"), "{e}");
+        assert!(
+            e.contains("'url' is not an option; the options are file, title, window, onMessage, onReady and onClose"),
+            "{e}"
+        );
         assert!(err("return { 'a' }").contains("a number key is not an option"));
+    }
+
+    /// `window` names the kind of window, `"tool"` or `"app"`, and nothing else: another word, the
+    /// right word in another case, or a value of another type raises, naming both words.
+    #[test]
+    fn the_window_option_is_tool_or_app() {
+        let lua = Lua::new();
+        let kind = |w: &str| {
+            page_options(opts(&lua, &format!("return {{ file = 'a', title = 'A', onMessage = print, window = {w} }}")))
+                .map(|o| o.kind)
+                .map_err(|e| e.to_string())
+        };
+        assert_eq!(kind("'tool'"), Ok(WindowKind::Tool));
+        assert_eq!(kind("'app'"), Ok(WindowKind::App));
+        assert_eq!(kind("nil"), Ok(WindowKind::Tool));
+        let e = kind("'App'").unwrap_err();
+        assert!(e.contains(r#"host.gui.webview: window is "tool" or "app", not "App""#), "{e}");
+        let e = kind("'application'").unwrap_err();
+        assert!(e.contains(r#"window is "tool" or "app", not "application""#), "{e}");
+        let e = kind("true").unwrap_err();
+        assert!(e.contains(r#"window is "tool" or "app", not a boolean"#), "{e}");
+        let e = kind("{ kind = 'app' }").unwrap_err();
+        assert!(e.contains(r#"window is "tool" or "app", not a table"#), "{e}");
     }
 
     #[test]

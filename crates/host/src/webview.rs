@@ -1,7 +1,7 @@
 //! `host.gui.webview`'s rules, with no window in them: which answer `show` gives and when, what
 //! happens to a message posted before the page is there, which file a request is served and with
-//! which headers, which navigations and messages are let through, where the window goes, and the
-//! page's own `platform` object. The window itself is `webview_win.rs` on Windows; the Luau side
+//! which headers, which navigations and messages are let through, which window a page is in and
+//! where it goes, and the page's own `platform` object. The window itself is `webview_win.rs` on Windows; the Luau side
 //! is `webview_lua.rs`.
 //!
 //! **Experimental.** Stage 1 of the plan the maintainer decided on 2026-09-28: a page a module
@@ -722,6 +722,86 @@ pub fn centred(size: (i32, i32), area: &Rect) -> Rect {
     Rect { x: area.x + (area.w - size.0) / 2, y: area.y + (area.h - size.1) / 2, w: size.0, h: size.1 }
 }
 
+/// Which window a page is in: `host.gui.webview`'s `window` option. Chosen when the page is
+/// described, not at each `show`, because it cannot change under a window that exists: Windows
+/// wants a window hidden before its taskbar button is given or taken away, and a Mac's panel and
+/// window are two classes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowKind {
+    /// `"tool"`, the default: a page beside a plug-in, reached by a key the module offers, and in
+    /// no list of windows, so the user's Alt+Tab and Command-Tab stay the DAW's (the research of
+    /// 2026-09-28).
+    #[default]
+    Tool,
+    /// `"app"`: a window like any program's — in the system's lists of windows, minimised,
+    /// maximised and closed as any is — for a module whose page is an interface of its own rather
+    /// than a companion of the plug-in window (the maintainer's decision of 2026-10-11, after W6).
+    App,
+}
+
+impl WindowKind {
+    /// The option's words, in the order the error names them.
+    pub const NAMES: [&'static str; 2] = ["tool", "app"];
+
+    /// The kind the option names, or `None`. Exactly these words, in lower case.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "tool" => Some(WindowKind::Tool),
+            "app" => Some(WindowKind::App),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            WindowKind::Tool => "tool",
+            WindowKind::App => "app",
+        }
+    }
+
+    /// What the window is on each platform.
+    pub fn recipe(self) -> Recipe {
+        match self {
+            WindowKind::Tool => Recipe { listed: false, minimise: false, maximise: false, panel: true },
+            WindowKind::App => Recipe { listed: true, minimise: true, maximise: true, panel: false },
+        }
+    }
+
+    /// Whether a page leaving the front — hidden, closed by the user or by its module, or its
+    /// module disabled or reloaded while it is in front — first gives the front back to the
+    /// window it took it from. A tool page always: the module's key is the only way into it, so
+    /// where the user was is where the page was brought from. An app page only when it has kept
+    /// the front since it last took it (`kept`): the user reaches it with Alt+Tab or the taskbar
+    /// as well, and one they came to from somewhere else is left as any program's window is —
+    /// the system hands the front on.
+    pub fn gives_front_back(self, kept: bool) -> bool {
+        match self {
+            WindowKind::Tool => true,
+            WindowKind::App => kept,
+        }
+    }
+}
+
+/// What a page's window is, on both platforms: one decision, which `webview_win.rs` builds on
+/// Windows and the Mac's page will build on (stage 4, TODO.md), so the two cannot drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Recipe {
+    /// In the system's lists of windows. Windows: an Alt+Tab entry with the page's title, and a
+    /// place on the taskbar — the application's own button, where Windows combines a program's
+    /// windows, as Windows 11 does by default — no `WS_EX_TOOLWINDOW`. macOS: Command-Tab and the
+    /// Dock list applications, not windows, and this application has no Dock icon; while such a
+    /// page is shown, the application is a regular one, by the claim the module manager's window
+    /// makes (`gui::dock`).
+    pub listed: bool,
+    /// A minimise box (Windows), a miniaturise button (macOS).
+    pub minimise: bool,
+    /// A maximise box (Windows). A Mac's titled, resizable window has its zoom button either way.
+    pub maximise: bool,
+    /// macOS: an `NSPanel` that does not activate the application when it takes the keyboard, so
+    /// the DAW stays the active application; otherwise an `NSWindow`, which activates it.
+    pub panel: bool,
+}
+
 /// A page's size, at 96 dots per inch: scaled by the monitor's.
 pub const DEFAULT_SIZE: (i32, i32) = (520, 640);
 
@@ -1341,6 +1421,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_window_kind_is_named_by_one_of_two_words_and_is_a_tool_window_by_default() {
+        assert_eq!(WindowKind::default(), WindowKind::Tool);
+        for kind in [WindowKind::Tool, WindowKind::App] {
+            assert_eq!(WindowKind::parse(kind.name()), Some(kind));
+            assert!(WindowKind::NAMES.contains(&kind.name()));
+        }
+        assert_eq!(WindowKind::NAMES, ["tool", "app"], "the order the error names them in");
+        for other in ["", "App", "TOOL", "application", "window", " app", "panel"] {
+            assert_eq!(WindowKind::parse(other), None, "{other:?}");
+        }
+    }
+
+    /// The tool page of stage 1 is unchanged: no window list, no minimise or maximise box, a
+    /// panel that does not activate the application on a Mac. The app page is the other way
+    /// round in every point.
+    #[test]
+    fn a_tool_page_is_in_no_window_list_and_an_app_page_is_a_window_like_any() {
+        let tool = WindowKind::Tool.recipe();
+        assert!(!tool.listed && !tool.minimise && !tool.maximise && tool.panel, "{tool:?}");
+        let app = WindowKind::App.recipe();
+        assert!(app.listed && app.minimise && app.maximise && !app.panel, "{app:?}");
+    }
+
+    /// A tool page gives the front back whenever it leaves it; an app page only when it has kept
+    /// the front since it took it — not when the user came to it some other way.
+    #[test]
+    fn an_app_page_gives_the_front_back_only_when_it_kept_it_since_it_took_it() {
+        assert!(WindowKind::Tool.gives_front_back(true));
+        assert!(WindowKind::Tool.gives_front_back(false));
+        assert!(WindowKind::App.gives_front_back(true));
+        assert!(!WindowKind::App.gives_front_back(false));
     }
 
     #[test]
