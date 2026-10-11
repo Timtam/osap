@@ -308,6 +308,30 @@ pub fn take_show_request() -> bool {
     SHOW_REQUESTED.swap(false, Ordering::SeqCst)
 }
 
+/// Set when the application's quit key was pressed. The press is answered inside the host's pump,
+/// which the window's tick runs and which cannot end the window loop itself; the tick reads this
+/// right after the pump and ends the loop the way the Quit items do. Set again by a Quit that
+/// ended a modal dialog instead, since wx cannot end the window loop from inside one: the next
+/// tick in the loop outside it takes it (`quit` in gui.rs).
+static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Asks the window to quit, as its Quit items do, once the pump or the dialog that asked has
+/// returned.
+pub fn request_quit() {
+    QUIT_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// Whether quitting has been asked for since the last call; clears the request.
+pub fn take_quit_request() -> bool {
+    QUIT_REQUESTED.swap(false, Ordering::SeqCst)
+}
+
+/// Whether the application is on its way out: a quit asked for and not taken yet, or Quit
+/// chosen ([`begin_quit`]). Clears nothing.
+pub fn quit_asked() -> bool {
+    QUIT_REQUESTED.load(Ordering::SeqCst) || QUITTING.load(Ordering::SeqCst)
+}
+
 /// Set the moment Quit is chosen: from then on a second start is told `quitting`.
 ///
 /// Global rather than a field of [`Primary`], because Quit is chosen in the window code, which
@@ -1275,6 +1299,15 @@ mod mac {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The quit key's request is the window's once: taken by the tick after the pump that asked,
+    /// and not again by the next tick.
+    #[test]
+    fn the_quit_request_is_taken_once() {
+        request_quit();
+        assert!(take_quit_request(), "the tick after the pump finds the request");
+        assert!(!take_quit_request(), "and the next one does not");
+    }
 
     #[test]
     fn windows_names_carry_the_user_and_the_session() {

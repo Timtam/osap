@@ -61,10 +61,12 @@ through whatever engine is available, screen reader or SAPI. A module was instal
 enabled deliberately; whoever did that asked for it. The overlay runtime is a module like any
 other, so every overlay announcement is module speech.
 
-**Application speech** is two sites and no more: the startup hint and the reload hotkey.
-Both go through `Shared::announce`, and the rule there turned out simpler than it was
-designed. It is not "speak when a screen reader is running, show otherwise" — it is **show,
-and speak only where there is nothing to show it in**:
+**Application speech** is a few fixed sites and no more: the startup hint, what a button on
+the Permissions page says it did, the reload hotkey's report, the sentence of a module the
+application stopped, and the quit key's sentence. All go through `Shared::announce`, and the
+rule there turned out simpler than it was designed. It is not "speak when a screen reader is
+running, show otherwise" — it is **show, and speak only where there is nothing to show it
+in**:
 
 1. Show a notification. On Windows a screen reader reads the balloon out and everybody else
    can see it, so one channel serves both, and the application never speaks at all.

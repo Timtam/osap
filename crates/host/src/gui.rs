@@ -1602,19 +1602,33 @@ pub fn run_gui(
             .append_item(MENU_QUIT, "&Quit	Ctrl+Q", "Quit Automation Platform")
             .build();
         frame.set_menu_bar(MenuBar::builder().append(file_menu, "&File").build());
-        {
-            let (frame, app) = (frame, app);
-            frame.on_menu_selected(move |event| match event.get_id() {
-                MENU_HIDE => hide_manager(&frame),
-                MENU_QUIT => {
-                    // First, so a second start from here on is told this copy is quitting
-                    // (and waits for it) instead of being told a window will be shown.
-                    crate::instance::begin_quit();
-                    app.exit_main_loop()
-                }
-                _ => {}
-            });
-        }
+        // The one way out of the window loop: this window's Quit, the tray's Quit and the
+        // application's quit key (taken by the tick below) all end it here.
+        //
+        // Not from inside a modal dialog's loop: wx ends only the main loop, and only while it
+        // is the loop running — `wxAppConsoleBase::ExitMainLoop` does nothing while a dialog's
+        // nested loop is (wxWidgets src/common/appbase.cpp, `IsRunning` in include/wx/evtloop.h).
+        // The tick goes on inside a dialog opened from a click, and inside the reviews, so the
+        // quit key can be answered there. The dialog is then ended as its Cancel would end it,
+        // and the quit is asked for again: the next tick that runs the pump, in the loop
+        // outside the dialog, comes back here, until that loop is the main one.
+        let quit = move || match quit_step(&open_dialogs()) {
+            QuitStep::EndDialog(dialog) => {
+                crate::instance::request_quit();
+                dialog.end_modal(ID_CANCEL);
+            }
+            QuitStep::EndLoop => {
+                // First, so a second start from here on is told this copy is quitting (and
+                // waits for it) instead of being told a window will be shown.
+                crate::instance::begin_quit();
+                app.exit_main_loop()
+            }
+        };
+        frame.on_menu_selected(move |event| match event.get_id() {
+            MENU_HIDE => hide_manager(&frame),
+            MENU_QUIT => quit(),
+            _ => {}
+        });
 
         // System tray icon + right-click menu (Show / Quit).
         // A status item in the menu bar, not a Dock icon. The default type maps to the
@@ -1679,10 +1693,7 @@ pub fn run_gui(
                     show_manager(&frame);
                 }
             }
-            MENU_QUIT => {
-                crate::instance::begin_quit(); // as for the window's own Quit, above
-                app.exit_main_loop()
-            }
+            MENU_QUIT => quit(),
             _ => {}
         });
 
@@ -1810,6 +1821,14 @@ pub fn run_gui(
                 }
                 let _reset = Reset(&in_tick);
                 pump();
+                // The quit key, pressed during that pump, or a Quit that ended a dialog: the host
+                // has logged the key and said its sentence, and the loop ends as the Quit items
+                // end it — or, inside a dialog, that dialog does first (`quit`). Nothing else of
+                // this tick is worth doing on the way out.
+                if crate::instance::take_quit_request() {
+                    quit();
+                    return;
+                }
                 // Only ever unticks: the speech pump switched Personal Voice off after macOS did
                 // not grant it, and the box and the stored value follow here. Ticking is the
                 // user's, and a two-way sync could fight a click.
@@ -2522,15 +2541,76 @@ fn report_error(
     });
 }
 
+thread_local! {
+    /// The modal dialogs open now, innermost last, pushed and popped around the one
+    /// `show_modal` (`show_modal_said`). Modal loops nest strictly, so the last is the dialog
+    /// whose loop is running: the one a Quit ends first (`quit` in `run_gui`).
+    static OPEN_DIALOGS: RefCell<Vec<Dialog>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The modal dialogs open now, innermost last.
+fn open_dialogs() -> Vec<Dialog> {
+    OPEN_DIALOGS.with(|open| open.borrow().clone())
+}
+
+/// What a Quit does next (`quit` in `run_gui`).
+#[derive(Debug, PartialEq)]
+enum QuitStep<D> {
+    /// End this dialog, the innermost open, as its Cancel would, and ask for the quit again for
+    /// the next tick in the loop outside it.
+    EndDialog(D),
+    /// End the window loop: no dialog is open, so the main loop is the one running.
+    EndLoop,
+}
+
+/// What a Quit does with the modal dialogs `open`, innermost last.
+fn quit_step<D: Copy>(open: &[D]) -> QuitStep<D> {
+    open.last().map_or(QuitStep::EndLoop, |d| QuitStep::EndDialog(*d))
+}
+
+#[cfg(test)]
+mod quit_step_tests {
+    use super::*;
+
+    /// A quit asked for inside dialogs is still asked for once each has closed, and ends the
+    /// window loop once, at the main loop: `quit` ends the innermost dialog and asks again, and
+    /// the next tick that runs the pump, in the loop outside it, takes the request.
+    #[test]
+    fn a_quit_inside_dialogs_survives_them_and_ends_the_loop_once() {
+        // A review opened over a dialog opened from a click: two loops inside the main one, and
+        // the quit key answered by a pump inside the review.
+        let mut open = vec!["settings", "review"];
+        let mut asked = true;
+        let (mut ended, mut loops_ended) = (Vec::new(), 0);
+        // Each tick that runs the pump takes the request and does `quit`'s step.
+        while std::mem::take(&mut asked) {
+            match quit_step(&open) {
+                QuitStep::EndDialog(d) => {
+                    asked = true;
+                    assert_eq!(open.pop(), Some(d), "the innermost, whose loop is running");
+                    ended.push(d);
+                }
+                QuitStep::EndLoop => loops_ended += 1,
+            }
+        }
+        assert_eq!(ended, ["review", "settings"]);
+        assert_eq!(loops_ended, 1, "the window loop ends once, with no dialog open");
+        assert_eq!(quit_step::<&str>(&[]), QuitStep::EndLoop);
+    }
+}
+
 /// `dialog.show_modal()`, with a `[gui]` line as it opens and one as it closes: how long it was
 /// open, how many pump iterations ran inside it — the pump goes on from its timer inside the
 /// dialog's own loop — and the longest of them (`crate::modal_spans`). Two lines per dialog, on
-/// the event loop, where the dialog is.
+/// the event loop, where the dialog is. While it is open the dialog is on `OPEN_DIALOGS`, for a
+/// Quit to end.
 fn show_modal_said(dialog: &Dialog, title: &str) -> i32 {
     crate::logging::line("gui", &format!("dialog '{title}' is open"));
     let span = crate::modal_spans::open();
     let opened = std::time::Instant::now();
+    OPEN_DIALOGS.with(|open| open.borrow_mut().push(*dialog));
     let res = dialog.show_modal();
+    OPEN_DIALOGS.with(|open| open.borrow_mut().pop());
     let inside = crate::modal_spans::close(span);
     let ms = opened.elapsed().as_millis() as u64;
     crate::logging::line(

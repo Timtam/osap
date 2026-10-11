@@ -23,7 +23,7 @@ are read silently by the screen reader — the app never speaks over it.
 > as described. See [macos-port.md](macos-port.md).
 
 > Closing the window **hides it to the tray**; modules keep running. Use the
-> tray icon's **Quit** to actually exit.
+> tray icon's **Quit** to actually exit, or the [quit key](#quit-key) from anywhere.
 
 The window's title ends with the version and the build, for example
 `Automation Platform — Modules (0.1.0, build 6c95c8b)`, so the build can be heard without
@@ -271,6 +271,60 @@ the reason is in the log.
 The combination is awkward on purpose: it rebuilds every VM in the application, and it
 has to be impossible to hit by accident while working in a plugin. If something else on
 the system already owns it, the app logs that at startup and carries on without it.
+
+### Quit: Ctrl+Alt+Shift+Win+Q, or Control-Shift-Command-Q on a Mac {#quit-key}
+
+> The reload key's family, with Q. On a Mac it cannot be the reload key's Command-Shift with
+> Q, which is the system's Log Out, nor Option-Shift-Command-Q, which logs out without
+> asking; and Control-Option belongs to VoiceOver, as above. So the Mac's chord is
+> Command-Shift with Control: `Ctrl+Shift+Win+Alt+Q` and `Meta+Cmd+Shift+Q` in the
+> [key spec](api/keys.md#key-spec-string-format), which the log names
+> `Ctrl+Alt+Shift+Win+Q` on Windows and `Meta+Shift+Cmd+Q` on a Mac. It has not been tried on
+> a Mac yet. Control-Command-Q, the same chord without Shift, locks the screen.
+
+Quits the application from anywhere, on a **system-wide** key — the tray's **Quit**
+without the tray, for when you cannot find the icon or its menu does not answer. It
+quits exactly as that Quit does: the window loop ends, every module stops with it, the
+text recognisers are released and the log is closed. Before it goes it says one
+sentence, "Automation Platform is quitting.", the way the reload key's report is said:
+as a notification where there is one (Windows), and otherwise spoken, only while a screen
+reader runs (VoiceOver on a Mac).
+
+With one of the module window's dialogs open — Details, Settings, a question such as
+Uninstall's, or the review before an install or an update — that dialog is closed first,
+as its Cancel would close it, so nothing is installed, updated, removed or saved; then the
+application quits. The tray's **Quit** does the same. The message that reports how an
+install or an update went is the exception: while it is open the modules wait for it, and
+so does this key, which is answered once the message is closed.
+
+On the way out, whichever Quit it was, the settings are saved first, then every captured
+key and hotkey goes back to the program in front, and then the application waits, 15
+seconds at most, until what it had handed to speech — a module's last words, and the
+sentence above where it is spoken — has been taken by the screen reader or the voice.
+Taken is not said: a screen reader says it in a process of its own, but on a Mac the
+system voice, which says it unless "Speak through VoiceOver" is on, says it in this one
+and can be cut short as the application ends (not checked on a Mac yet). A notification
+is not waited for; whether Windows still shows it, and a screen reader still reads it,
+once the application has gone has not been checked yet either.
+
+Pressed while a module's callback holds the application, it is not dropped with the
+keys Windows drops then: the application quits once the callback is stopped, as the reload
+key's press reloads then (see [A callback that runs too long](module-runtime-and-lifecycle.md#limits)).
+When both keys were pressed, it only quits: a reload asked for while the application is on
+its way out is not answered, and the log says `… is not answered: the application is
+quitting`.
+
+Among the log's start lines, the two keys are named one after the other:
+
+```
+[manager] Ctrl+Alt+Shift+Win+F5 reloads every module
+[manager] Ctrl+Alt+Shift+Win+Q quits the application
+```
+
+and a press writes `[keys] hotkey Ctrl+Alt+Shift+Win+Q arrived` and `[manager]
+Ctrl+Alt+Shift+Win+Q was pressed: the application quits, as the tray's Quit does`. If
+something else already owns the combination, the start line says `quit hotkey … unavailable`
+with the reason, and the tray's Quit is the way out.
 
 ### Uninstall
 
@@ -535,7 +589,7 @@ A loop that does not end therefore costs about 2 seconds during which nothing an
 — every module, speech, every key and hotkey callback, and on macOS the event tap —
 and then its keys go back to the program in front. Keys pressed meanwhile are dropped
 on Windows, so another overlay does not get them all at once afterwards — all but the
-application's own reload key, which is answered after the stop.
+application's own reload and quit keys, which are answered after the stop.
 
 What this does not cover is a host call that never returns — an accessibility query
 into a program that has stopped answering, say. The module is stopped only once the

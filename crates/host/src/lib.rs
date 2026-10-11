@@ -271,6 +271,10 @@ struct Shared {
     /// module list, and rebuilding a module has to replace entries in that same list. So the
     /// key only asks, and the loop — which owns the list — answers on its next turn.
     reload_all: Cell<bool>,
+    /// The app's own quit key's hotkey id, claimed beside `reload_hotkey_id` and for the same
+    /// reason. Its press needs no module list, so it is answered where it arrives
+    /// ([`Shared::quit_by_key`]), and the window's tick that ran it ends the window loop.
+    quit_hotkey_id: Cell<i32>,
     /// Audio output, opened lazily on first `host.sound.play` so we don't hold
     /// the audio device at startup — this tool overlays audio software, and
     /// grabbing the device can interrupt it. Opened again when it failed, when the default
@@ -1677,20 +1681,60 @@ impl Shared {
         }
     }
 
-    /// The hotkey presses a stall's stop drops, but the application's own reload key: that one is
-    /// how a user gets out of a stalled application, not a module's key, so it is answered — every
-    /// module reloads at the end of this turn — and the log says so. The others, to be dropped.
-    fn answer_reload_key(&self, ids: Vec<i32>) -> Vec<i32> {
-        let reload = self.reload_hotkey_id.get();
-        let (asked, others): (Vec<i32>, Vec<i32>) = ids.into_iter().partition(|id| *id == reload);
-        if !asked.is_empty() {
-            logging::line(
-                "keys",
-                &format!("{} was pressed while the application waited: it is answered after the stop, not dropped", reload_hotkey_shown()),
-            );
+    /// The hotkey presses a stall's stop drops, but the application's own keys: those are how a
+    /// user gets out of a stalled application, not a module's keys, so they are answered — every
+    /// module reloads at the end of this turn, or the application quits — and the log says so.
+    /// The others, to be dropped.
+    fn answer_own_keys(&self, ids: Vec<i32>) -> Vec<i32> {
+        let own = own_keys_in(ids, self.reload_hotkey_id.get(), self.quit_hotkey_id.get());
+        for (pressed, shown) in [(own.reload, reload_hotkey_shown()), (own.quit, quit_hotkey_shown())] {
+            if pressed {
+                logging::line(
+                    "keys",
+                    &format!("{shown} was pressed while the application waited: it is answered after the stop, not dropped"),
+                );
+            }
+        }
+        if own.reload {
             self.reload_all.set(true);
         }
-        others
+        if own.quit {
+            self.quit_by_key();
+        }
+        own.others
+    }
+
+    /// The quit key was pressed: its line, one sentence through [`Shared::announce`] while
+    /// everything is still running, and the window loop asked to end — by the window's tick that
+    /// ran this, right after it, where the window's and the tray's Quit end it (`gui.rs`, `quit`),
+    /// once the dialogs open have been ended. A reload asked for meanwhile, as by the reload key
+    /// pressed in the same stall, is not answered: the application is on its way out (the pump's
+    /// reload step). From there on it is the same way out: the settings are saved, the
+    /// keys given back, what is still waiting to be said handed over (`Manager::run`), and the
+    /// guard stops, the recognisers are released and the log is closed (`run`).
+    fn quit_by_key(&self) {
+        logging::line(
+            "manager",
+            &format!("{} was pressed: the application quits, as the tray's Quit does", quit_hotkey_shown()),
+        );
+        self.announce(QUIT_SENTENCE);
+        instance::request_quit();
+    }
+
+    /// Every key back to the program in front once the window loop has ended, on the way out:
+    /// the captures out of the keyboard hook or the event tap, and every hotkey the system holds
+    /// for this application unregistered, the modules' and its own two. Nothing answers a key from
+    /// there on, and what follows can take seconds (`Manager::run`), during which a captured key
+    /// would be swallowed and a hotkey's press lost.
+    fn give_keys_back_at_exit(&self) {
+        self.backend.set_captured_keys(&[]);
+        let held: Vec<i32> = self.hotkeys.borrow().iter().filter(|(_, r)| r.live).map(|(id, _)| *id).collect();
+        for id in held.into_iter().chain([self.reload_hotkey_id.get(), self.quit_hotkey_id.get()]) {
+            self.backend.unregister_hotkey(id);
+        }
+        for reg in self.hotkeys.borrow_mut().values_mut() {
+            reg.live = false;
+        }
     }
 
     /// Lets go of every mouse button module `idx` holds down, where the pointer is now — so the
@@ -2248,7 +2292,7 @@ impl stops::StopHost for Shared {
 
     fn drop_queued_input(&self) -> stops::Dropped {
         let d = self.backend.drop_queued_input();
-        let dropped = self.answer_reload_key(d.hotkeys);
+        let dropped = self.answer_own_keys(d.hotkeys);
         let hotkeys = self.hotkeys.borrow();
         let mut names: Vec<String> = d
             .keys
@@ -4141,6 +4185,66 @@ mod guard_tests {
         );
     }
 
+    /// The host's own quit key: Q with the reload key's four modifiers on Windows; on a Mac the
+    /// reload key's Command-Shift with Control, which is neither of the two log-out chords and
+    /// off VoiceOver's Control+Option layer.
+    #[test]
+    fn the_quit_key_is_the_reload_key_s_family_and_no_system_chord() {
+        use backend::{check_spec_for, key_spec, KeyOs, MASK_ALT, MASK_CTRL, MASK_SHIFT, MASK_WIN};
+        let expected = if cfg!(target_os = "macos") { QUIT_HOTKEY_MACOS } else { QUIT_HOTKEY_WINDOWS };
+        assert_eq!(QUIT_HOTKEY_SPEC, expected);
+        assert_eq!(key_spec(QUIT_HOTKEY_WINDOWS), Some((0x51, MASK_CTRL | MASK_ALT | MASK_SHIFT | MASK_WIN)));
+        assert_eq!(key_spec(QUIT_HOTKEY_MACOS), Some((0x51, MASK_CTRL | MASK_SHIFT | MASK_WIN)));
+        // The reload key's modifiers, and its own key.
+        assert_eq!(key_spec(QUIT_HOTKEY_WINDOWS).map(|k| k.1), key_spec(RELOAD_HOTKEY_WINDOWS).map(|k| k.1));
+        assert_ne!(key_spec(QUIT_HOTKEY_MACOS), key_spec(RELOAD_HOTKEY_MACOS));
+        for os in [KeyOs::Windows, KeyOs::Linux] {
+            assert!(backend::hotkey_refusal_for(os, QUIT_HOTKEY_WINDOWS).is_none(), "{os:?}");
+            assert!(check_spec_for(os, QUIT_HOTKEY_WINDOWS, |_, _| None).reasons.is_empty(), "{os:?}");
+        }
+        assert!(check_spec_for(KeyOs::Macos, QUIT_HOTKEY_MACOS, |_, _| None).reasons.is_empty());
+        // What it is not, on a Mac: Log Out, Log Out without asking, VoiceOver's layer.
+        for spec in ["Cmd+Shift+Q", "Cmd+Option+Shift+Q"] {
+            assert_eq!(
+                check_spec_for(KeyOs::Macos, spec, |_, _| None).reasons,
+                vec![backend::REASON_RESERVED],
+                "{spec} logs out"
+            );
+        }
+        assert_eq!(
+            check_spec_for(KeyOs::Macos, QUIT_HOTKEY_WINDOWS, |_, _| None).reasons,
+            vec![backend::REASON_VOICEOVER],
+            "why the Mac has a chord of its own"
+        );
+        // How the log and the dialogs name it.
+        assert_eq!(
+            backend::normalize_spec_for(KeyOs::Windows, QUIT_HOTKEY_WINDOWS).as_deref(),
+            Some("Ctrl+Alt+Shift+Win+Q")
+        );
+        assert_eq!(backend::normalize_spec_for(KeyOs::Macos, QUIT_HOTKEY_MACOS).as_deref(), Some("Meta+Shift+Cmd+Q"));
+        assert_eq!(
+            backend::describe_spec_for(KeyOs::Macos, QUIT_HOTKEY_MACOS, backend::KeyStyle::Spoken).as_deref(),
+            Some("Control+Shift+Command+Q")
+        );
+    }
+
+    /// A stall's stop drops the modules' hotkey presses, and answers the application's own: the
+    /// reload key and the quit key, each however often it was pressed, the others kept in order.
+    #[test]
+    fn a_stall_s_stop_answers_the_application_s_own_keys() {
+        let (reload, quit) = (1, 2);
+        assert_eq!(
+            own_keys_in(vec![7, 2, 9, 2, 8], reload, quit),
+            OwnKeys { reload: false, quit: true, others: vec![7, 9, 8] }
+        );
+        assert_eq!(
+            own_keys_in(vec![1, 7, 2], reload, quit),
+            OwnKeys { reload: true, quit: true, others: vec![7] }
+        );
+        assert_eq!(own_keys_in(vec![1], reload, quit), OwnKeys { reload: true, quit: false, others: vec![] });
+        assert_eq!(own_keys_in(vec![7, 8], reload, quit), OwnKeys { reload: false, quit: false, others: vec![7, 8] });
+    }
+
     #[test]
     fn dep_version_check_enforces_semver_requirements() {
         assert!(check_dep_version("a", "b", ">= 1.0.0", "1.2.0").is_ok());
@@ -4923,6 +5027,7 @@ impl Manager {
             speech,
             reload_hotkey_id: Cell::new(0),
             reload_all: Cell::new(false),
+            quit_hotkey_id: Cell::new(0),
             audio: RefCell::new(None),
             next_id: Cell::new(0),
             roots: RefCell::new(Vec::new()),
@@ -4982,10 +5087,11 @@ impl Manager {
         if let Some(job) = shared.backend.give_back_left_over_activation() {
             shared.acting.run(acting::Lane::Style, job, None);
         }
-        // Claimed before the first module is loaded, so it is the one id no module can be
-        // given (see the field). Registering with the OS happens later, in `run`, on the
-        // thread that will receive it.
+        // Claimed before the first module is loaded, so they are the two ids no module can be
+        // given (see the fields). Registering with the OS happens later, in `run`, on the
+        // thread that will receive them.
         shared.reload_hotkey_id.set(shared.alloc_id());
+        shared.quit_hotkey_id.set(shared.alloc_id());
         // What the guard's stops go to when the callback that began them has returned: turned
         // off at once, keys back, the log line (stops.rs). Weak, so the hook does not keep the
         // host alive; this thread runs every module's code.
@@ -5149,19 +5255,18 @@ impl Manager {
                 // A failure is logged rather than fatal — the combination could already be
                 // held by something else, and everything apart from this key still works.
                 // Logged either way: the key has no visible presence at all, so "did it
-                // even register" is otherwise unanswerable after the fact.
-                let reload_id = self.shared.reload_hotkey_id.get();
-                // By its canonical spelling, like every module hotkey, so a failure line names
-                // one chord once rather than the token and the chord side by side.
-                match self.shared.backend.register_hotkey(reload_id, &reload_hotkey_shown()) {
-                    Ok(()) => logging::line(
-                        "manager",
-                        &format!("{} reloads every module", reload_hotkey_shown()),
-                    ),
-                    Err(e) => logging::line(
-                        "manager",
-                        &format!("reload hotkey {} unavailable: {e}", reload_hotkey_shown()),
-                    ),
+                // even register" is otherwise unanswerable after the fact. The quit key the same
+                // way, on the line after the reload key's.
+                for (id, shown, does, which) in [
+                    (self.shared.reload_hotkey_id.get(), reload_hotkey_shown(), "reloads every module", "reload"),
+                    (self.shared.quit_hotkey_id.get(), quit_hotkey_shown(), "quits the application", "quit"),
+                ] {
+                    // By its canonical spelling, like every module hotkey, so a failure line names
+                    // one chord once rather than the token and the chord side by side.
+                    match self.shared.backend.register_hotkey(id, &shown) {
+                        Ok(()) => logging::line("manager", &format!("{shown} {does}")),
+                        Err(e) => logging::line("manager", &format!("{which} hotkey {shown} unavailable: {e}")),
+                    }
                 }
                 let mut module_infos: Vec<gui::ModuleInfo> = self
                     .modules
@@ -5411,16 +5516,26 @@ impl Manager {
                         // means replacing entries in the very list the dispatch above holds
                         // borrowed, so it happens here, once that borrow is gone.
                         if shared.reload_all.replace(false) {
-                            // The report, and nothing before it. There used to be a
-                            // "Reloading modules" first, because rebuilding every VM takes
-                            // long enough that silence would read as "the key did nothing" —
-                            // but that only works if it arrives at once, and it was written
-                            // for a channel where it did. Windows shows notifications when it
-                            // is ready to, so both of them turned up late and together, which
-                            // is two interruptions where one would do and no reassurance at
-                            // all. The reassurance is gone either way; the noise need not be.
-                            let (done, failed) = reload_everything(&shared, &modules);
-                            shared.announce(&reload_report_text(&done, &failed, shared.stops.count()));
+                            if instance::quit_asked() {
+                                // The quit key too, in the same stall or the same turn: every
+                                // VM rebuilt and the report said on the way out would only hold
+                                // the quit up, by seconds.
+                                logging::line(
+                                    "manager",
+                                    &format!("{} is not answered: the application is quitting", reload_hotkey_shown()),
+                                );
+                            } else {
+                                // The report, and nothing before it. There used to be a
+                                // "Reloading modules" first, because rebuilding every VM takes
+                                // long enough that silence would read as "the key did nothing" —
+                                // but that only works if it arrives at once, and it was written
+                                // for a channel where it did. Windows shows notifications when it
+                                // is ready to, so both of them turned up late and together, which
+                                // is two interruptions where one would do and no reassurance at
+                                // all. The reassurance is gone either way; the noise need not be.
+                                let (done, failed) = reload_everything(&shared, &modules);
+                                shared.announce(&reload_report_text(&done, &failed, shared.stops.count()));
+                            }
                         }
                         // The pages a `show` asked for, built last and outside Luau: WebView2's
                         // start pumps window messages while it runs, and this tick's
@@ -5457,7 +5572,22 @@ impl Manager {
                 )
                 .map_err(|e| anyhow::anyhow!("{e}"))
                 .context("wx GUI loop failed")?;
+                // The settings first, so nothing that holds up what follows, or a process ended
+                // during it, can cost them.
                 self.shared.flush_if_dirty();
+                // Then every key back to the program in front: from here on nothing answers a
+                // key, so a captured key would be swallowed and a hotkey's press lost.
+                self.shared.give_keys_back_at_exit();
+                // What was handed to speech before the loop ended — the quit key's sentence
+                // among it, where it is spoken rather than shown — is handed over before anything
+                // is torn down, whichever Quit ended the loop. Speech runs on workers of its own,
+                // which the end of the process would cut off while one still holds a line; on a
+                // Mac an AppleScript call hands it to VoiceOver. Handed over is not said: a
+                // screen reader says it in a process of its own, but the system voice of a Mac
+                // queues it in this one and goes on, so the end of the process can still cut it
+                // short (TODO.md), and a notification is not waited for at all. With nothing
+                // waiting this returns at once; it waits 15 s at most.
+                self.wait_for_speech();
             }
         } else {
             self.wait_for_speech();
@@ -5727,8 +5857,62 @@ const RELOAD_HOTKEY_MACOS: &str = "Cmd+Shift+F5";
 
 /// The reload key as the log names it: the chord it is on this platform.
 fn reload_hotkey_shown() -> String {
-    backend::normalize_spec_for(backend::KeyOs::CURRENT, RELOAD_HOTKEY_SPEC)
-        .unwrap_or_else(|| RELOAD_HOTKEY_SPEC.to_string())
+    own_hotkey_shown(RELOAD_HOTKEY_SPEC)
+}
+
+/// Quits the application from anywhere, as the tray's Quit does — the way out for somebody who
+/// cannot find the tray, or whose tray menu does not answer. The reload key's family, and awkward
+/// for the same reasons: it ends every module while the user is working in another program, and
+/// the modules claim the ordinary combinations.
+///
+/// Q with the reload key's modifiers on Windows. The four modifiers with a letter are the Office
+/// key's, and the shell holds its letters system-wide, but Q is not one of them (W, X, P, O, T,
+/// Y, N, D and L are).
+///
+/// On a Mac the reload key's reasoning, one modifier further. Control-Option is VoiceOver's (see
+/// the reload key), so the chord holds Command-Shift, the pair measured to arrive. Command-Shift-Q
+/// is the system's Log Out, so it needs one modifier more, and Option would make
+/// Option-Shift-Command-Q, which logs out without asking; both are refused as hotkeys
+/// (`backend::reserved_for`). That leaves Control: Control-Shift-Command-Q, off VoiceOver's layer
+/// and not one of the shortcuts macOS lists as its own. Control-Command-Q, the same chord without
+/// Shift, locks the screen. Not measured on a Mac yet (TODO.md).
+const QUIT_HOTKEY_SPEC: &str =
+    if cfg!(target_os = "macos") { QUIT_HOTKEY_MACOS } else { QUIT_HOTKEY_WINDOWS };
+/// The quit key on Windows and Linux.
+const QUIT_HOTKEY_WINDOWS: &str = "Ctrl+Shift+Win+Alt+Q";
+/// The quit key on macOS: Control+Shift+Command+Q (`Meta` is the Control key in a spec).
+const QUIT_HOTKEY_MACOS: &str = "Meta+Cmd+Shift+Q";
+
+/// What the quit key says before the application goes ([`Shared::quit_by_key`]).
+const QUIT_SENTENCE: &str = "Automation Platform is quitting.";
+
+/// The quit key as the log names it: the chord it is on this platform.
+fn quit_hotkey_shown() -> String {
+    own_hotkey_shown(QUIT_HOTKEY_SPEC)
+}
+
+/// One of the application's own keys as the log names it, and as it is registered: its spec's
+/// canonical spelling on this platform, like every module hotkey's.
+fn own_hotkey_shown(spec: &str) -> String {
+    backend::normalize_spec_for(backend::KeyOs::CURRENT, spec).unwrap_or_else(|| spec.to_string())
+}
+
+/// What a stall's stop finds among the hotkey presses it drops (`Shared::answer_own_keys`).
+#[derive(Debug, PartialEq)]
+struct OwnKeys {
+    /// The reload key was among them.
+    reload: bool,
+    /// The quit key was among them.
+    quit: bool,
+    /// The other presses, the modules', in their order: to be dropped.
+    others: Vec<i32>,
+}
+
+/// The presses `ids` sorted into the application's own keys — hotkey ids `reload` and `quit` —
+/// and the modules'.
+fn own_keys_in(ids: Vec<i32>, reload: i32, quit: i32) -> OwnKeys {
+    let (own, others): (Vec<i32>, Vec<i32>) = ids.into_iter().partition(|id| *id == reload || *id == quit);
+    OwnKeys { reload: own.contains(&reload), quit: own.contains(&quit), others }
 }
 
 /// Rebuild every module from source, dependencies before dependents.
@@ -6002,7 +6186,7 @@ impl HostEvents for Dispatcher<'_> {
     /// `RegisterHotKey` presses made during the stall a stop ended, dropped as they reached the
     /// queue after it (`Backend::drop_queued_input`): one `[keys]` line, by their combinations.
     fn on_stall_hotkeys_dropped(&mut self, ids: Vec<i32>) {
-        let ids = self.shared.answer_reload_key(ids);
+        let ids = self.shared.answer_own_keys(ids);
         if ids.is_empty() {
             return;
         }
@@ -6095,13 +6279,19 @@ impl HostEvents for Dispatcher<'_> {
                 .borrow()
                 .get(&id)
                 .map(|r| r.spec.clone())
+                .or_else(|| (id == self.shared.reload_hotkey_id.get()).then(reload_hotkey_shown))
+                .or_else(|| (id == self.shared.quit_hotkey_id.get()).then(quit_hotkey_shown))
                 .unwrap_or_else(|| format!("id {id}"));
             logging::line("keys", &format!("hotkey {spec} arrived"));
         }
-        // The app's own key, before any module lookup: it belongs to no module, so it is not in
-        // that map and would otherwise fall through as an unknown id.
+        // The app's own keys, before any module lookup: they belong to no module, so they are not
+        // in that map and would otherwise fall through as unknown ids.
         if id == self.shared.reload_hotkey_id.get() {
             self.shared.reload_all.set(true);
+            return;
+        }
+        if id == self.shared.quit_hotkey_id.get() {
+            self.shared.quit_by_key();
             return;
         }
         let found = {
@@ -6216,13 +6406,15 @@ impl HostEvents for Dispatcher<'_> {
 }
 
 /// Whether a hotkey holds the combination `(vk, mask)` at the system now: a module's registration
-/// that holds it (`live`, enabled module or not — the system matches what is registered), or the
-/// application's own reload key, counted as held whether the system granted it or not. What a key
-/// passed on to the program in front would be taken by instead (`captures::pass_on`). A
-/// registration whose combination only the system read (`binding` `None`) cannot be compared, and
-/// holds nothing here. The host's `KeyHost` and the key-scope tests' holder both ask this.
+/// that holds it (`live`, enabled module or not — the system matches what is registered), or one
+/// of the application's own keys, reload and quit, counted as held whether the system granted them
+/// or not. What a key passed on to the program in front would be taken by instead
+/// (`captures::pass_on`). A registration whose combination only the system read (`binding` `None`)
+/// cannot be compared, and holds nothing here. The host's `KeyHost` and the key-scope tests'
+/// holder both ask this.
 pub(crate) fn hotkey_holds(regs: &HashMap<i32, HotkeyReg>, vk: u32, mask: u8) -> bool {
-    backend::key_spec(RELOAD_HOTKEY_SPEC) == Some((vk, mask)) || regs.values().any(|r| r.live && r.binding == Some((vk, mask)))
+    [RELOAD_HOTKEY_SPEC, QUIT_HOTKEY_SPEC].iter().any(|spec| backend::key_spec(spec) == Some((vk, mask)))
+        || regs.values().any(|r| r.live && r.binding == Some((vk, mask)))
 }
 
 /// The hotkey registration a press of hotkey `id`, for module `owner`, goes to as it runs: `id`
@@ -6982,10 +7174,10 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         lua.create_function(move |_, id: i32| {
             host_call!("host.hotkey.unregister");
             // Whatever number Lua passes goes straight to the OS, so a stale or
-            // made-up id could release the app's own reload key — and nothing would
-            // report it; the key would simply stop working. It is not a module's to
-            // release.
-            if id == sh.reload_hotkey_id.get() {
+            // made-up id could release the app's own reload or quit key — and nothing
+            // would report it; the key would simply stop working. Neither is a module's
+            // to release.
+            if id == sh.reload_hotkey_id.get() || id == sh.quit_hotkey_id.get() {
                 return Ok(());
             }
             sh.backend.unregister_hotkey(id);
@@ -12232,5 +12424,76 @@ mod exit_release_tests {
         for later in ["attach_parent_console();", "host::ocr_bench(", "host::run(&dirs)"] {
             assert!(guard < main.find(later).unwrap_or_else(|| panic!("{later}")), "the guard before {later}");
         }
+    }
+}
+
+#[cfg(test)]
+mod quit_key_wiring_tests {
+    use super::ocr_wiring_tests::body;
+
+    const LIB: &str = include_str!("lib.rs");
+    const GUI: &str = include_str!("gui.rs");
+
+    /// The quit key ends the application where the window's and the tray's Quit end it: one
+    /// `quit` in gui.rs for all three, which inside a modal dialog ends the dialog and asks again
+    /// (the steps are tested in gui.rs), the key's request taken by the tick right after the pump
+    /// that answered it, its sentence said before the request, a reload asked for meanwhile not
+    /// answered, and on the way out the settings saved, the keys given back, and then what is
+    /// still waiting to be said handed over. None of it can run in a test — the window loop is
+    /// wxWidgets', and `Shared` opens the speech engines — so it is checked where it is written.
+    #[test]
+    fn the_quit_key_quits_the_way_the_tray_s_quit_does() {
+        let gui = body(GUI, "pub fn run_gui(");
+        assert_eq!(gui.matches("exit_main_loop()").count(), 1, "one way out of the window loop");
+        let quit = &gui[gui.find("let quit = move || match quit_step(&open_dialogs()) {").expect("the one way out")..];
+        let quit = &quit[..quit.find("\n        };\n").expect("its end")];
+        assert!(
+            quit.contains("QuitStep::EndDialog(dialog) => {\n                crate::instance::request_quit();\n                dialog.end_modal(ID_CANCEL);\n            }"),
+            "inside a dialog: asked again, then the dialog ended\n{quit}"
+        );
+        assert!(quit.ends_with("crate::instance::begin_quit();\n                app.exit_main_loop()\n            }"), "{quit}");
+        // Every dialog is on the list while its loop runs (`modal_spans` checks that every
+        // dialog opens through `show_modal_said`).
+        let said = body(GUI, "fn show_modal_said(");
+        let pushed = said.find("OPEN_DIALOGS.with(|open| open.borrow_mut().push(*dialog));").expect("pushed");
+        let shown = said.find("dialog.show_modal();").expect("shown");
+        let popped = said.find("OPEN_DIALOGS.with(|open| open.borrow_mut().pop());").expect("popped");
+        assert!(pushed < shown && shown < popped);
+        assert_eq!(gui.matches("MENU_QUIT => quit(),").count(), 2, "the window's Quit and the tray's");
+        let tick = &gui[gui.find("timer.on_tick(").expect("the tick")..];
+        let after_pump = &tick[tick.find("pump();").expect("the pump")..];
+        let taken = after_pump.find("if crate::instance::take_quit_request() {\n                    quit();").expect("the key's request");
+        assert!(taken < after_pump.find("drain_errors()").expect("the rest of the tick"), "taken right after the pump");
+        // The key: answered before any module lookup, in the dispatch and after a stall's stop.
+        let on = body(LIB, "fn on_hotkey(&mut self");
+        let key = on.find("if id == self.shared.quit_hotkey_id.get() {\n            self.shared.quit_by_key();").expect("the key");
+        assert!(key < on.find("mailbox::deliver(").expect("the modules"));
+        assert!(body(LIB, "fn answer_own_keys(&self").contains("self.quit_by_key();"));
+        let by_key = body(LIB, "fn quit_by_key(&self)");
+        let said = by_key.find("self.announce(QUIT_SENTENCE);").expect("the sentence");
+        assert!(said < by_key.find("instance::request_quit();").expect("the request"), "said before it goes");
+        // Registered beside the reload key, and its line in the log's start lines after the reload key's.
+        let run = body(LIB, "pub fn run(&mut self) -> Result<()>");
+        let own = run.find("(self.shared.reload_hotkey_id.get(), reload_hotkey_shown(), \"reloads every module\", \"reload\"),").expect("reload");
+        assert!(run[own..].starts_with(
+            "(self.shared.reload_hotkey_id.get(), reload_hotkey_shown(), \"reloads every module\", \"reload\"),\n                    (self.shared.quit_hotkey_id.get(), quit_hotkey_shown(), \"quits the application\", \"quit\"),"
+        ));
+        // A reload asked for in the same turn is not answered once a quit is asked for.
+        let step = run.find("if shared.reload_all.replace(false) {").expect("the reload step");
+        let asked = run[step..].find("if instance::quit_asked() {").expect("the quit asked for") + step;
+        let rebuilt = run[step..].find("reload_everything(&shared, &modules)").expect("the reload") + step;
+        assert!(run[step + "if shared.reload_all.replace(false) {".len()..asked].trim().is_empty());
+        assert!(asked < rebuilt);
+        // On the way out: the settings, then the keys, then the speech.
+        let gui_loop = run.find(".context(\"wx GUI loop failed\")?;").expect("the GUI loop");
+        let out = &run[gui_loop..];
+        let saved = out.find("self.shared.flush_if_dirty();").expect("the settings saved");
+        let keys = out.find("self.shared.give_keys_back_at_exit();").expect("the keys given back");
+        let speech = out.find("self.wait_for_speech();").expect("the speech handed over");
+        assert!(saved < keys && keys < speech, "settings, keys, speech");
+        let back = body(LIB, "fn give_keys_back_at_exit(&self)");
+        assert!(back.contains("self.backend.set_captured_keys(&[]);"));
+        assert!(back.contains(".chain([self.reload_hotkey_id.get(), self.quit_hotkey_id.get()])"));
+        assert!(back.contains("self.backend.unregister_hotkey(id);"));
     }
 }

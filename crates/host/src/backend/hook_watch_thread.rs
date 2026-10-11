@@ -605,8 +605,8 @@ fn arm_keys() {
         });
     });
     // The hook may have been installed with one of this process's windows in front already — the
-    // module manager at start, where the reload key is registered — and the foreground events
-    // tell only of the next window.
+    // module manager at start, where the reload and quit keys are registered — and the foreground
+    // events tell only of the next window.
     with_state(|s| {
         if let Some(k) = s.keys.as_mut() {
             converge(k);

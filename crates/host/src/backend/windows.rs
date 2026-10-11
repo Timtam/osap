@@ -325,9 +325,9 @@ impl WindowsBackend {
     /// at once, while modules load if that is when it comes — and for the rest of the session,
     /// the same lifetime captured keys give it. Not taken down again when the last hotkey goes:
     /// an overlay releases and registers its control hotkeys on every focus move, and an idle
-    /// hook costs microseconds per keystroke. In the module manager the host's own reload key
-    /// is registered at start, so there the hook is present from the start whatever the
-    /// modules do. It runs on a thread of its own that does nothing else
+    /// hook costs microseconds per keystroke. In the module manager the host's own reload and
+    /// quit keys are registered at start, so there the hook is present from the start whatever
+    /// the modules do. It runs on a thread of its own that does nothing else
     /// (`keyboard_hook_thread`), so a busy pump no longer holds up the keyboard: the price of a
     /// long callback is that the hotkey's own callback waits for it, not that the user's typing
     /// does.

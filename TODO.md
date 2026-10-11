@@ -8594,6 +8594,40 @@ time limit; a module past either is stopped until the next start.
       deactivated, the recognisers released, the log closed), says one short sentence before it
       goes, and is listed beside the reload key in the log's start lines, the manager and the
       docs.
+      **Done 2026-10-11, live checks open:** `QUIT_HOTKEY_SPEC` (lib.rs) is `Ctrl+Shift+Win+Alt+Q`
+      on Windows and `Meta+Cmd+Shift+Q` (Control+Shift+Command+Q) on a Mac: the reload key's
+      Command-Shift with Control, since Option would make the chord that logs out at once (now
+      refused as a hotkey as well, `backend::reserved_for`). It has its own hotkey id, claimed and
+      registered beside the reload key's (`[manager] Ctrl+Alt+Shift+Win+Q quits the application`
+      on the line after the reload key's), counts as held for a key passed on, and is answered
+      after a stall's stop. A press is logged, says "Automation Platform is quitting." through
+      `Shared::announce` and asks the window to quit (`instance::request_quit`); the tick that ran
+      the pump ends the window loop through the one `quit` the window's and the tray's Quit use
+      (gui.rs). Inside a modal dialog, where wx cannot end the window loop, that `quit` ends the
+      dialog as its Cancel would and asks again, until the tick runs at the main loop
+      (`quit_step`, `OPEN_DIALOGS`). A reload asked for meanwhile is not answered
+      (`instance::quit_asked`). On the way out `Manager::run` saves the settings, gives every key
+      back (`give_keys_back_at_exit`) and then waits for speech to be handed over (15 s at most).
+      Docs: module-manager.md "Quit", keys.md, hotkey.md, macos-permissions.md,
+      module-runtime-and-lifecycle.md.
+      **Open:**
+      - Measure the Mac chord on the Mac before it is fixed: it arrives with the default
+        VoiceOver modifier, and it neither logs out nor locks the screen (Control-Command-Q,
+        the same chord without Shift, does).
+      - Windows: the notification is shown and read although the application, and its tray
+        icon, are gone a moment later; if it is not, the sentence needs another way out.
+      - Mac, VoiceOver running and "Speak through VoiceOver" off (the default): the sentence goes
+        to the system voice, whose `pending` drops when `speakUtterance` has queued it
+        (speech/avspeech.rs), so the speech wait ends at once and the end of the process may cut
+        the sentence short. Listen for it in full. If it is cut, the worker could wait for
+        `isSpeaking` to go false; measure first whether that property changes while the main
+        thread waits and runs no run loop.
+      - Windows: the quit key with a dialog of the module window open (Details, Settings, an
+        Uninstall question, a review) closes the dialog and then quits, and the next start
+        shows its window instead of "still closing".
+      - Windows: the shell does not hold Ctrl+Shift+Alt+Win+Q (the Office key's letters are W,
+        X, P, O, T, Y, N, D and L): the start line says "quits the application", not
+        "unavailable".
 - [ ] **Reload-all must reread the manifests and resolve the module set again.** Observed by the
       maintainer: after editing a module's module.toml (its dependencies, for example) and
       pressing the reload key, the module dies with an error that does not say why.

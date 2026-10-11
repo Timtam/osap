@@ -2324,6 +2324,7 @@ pub fn reserved_for(os: KeyOs, vk: u32, mask: u8) -> Option<&'static str> {
         (0x4D, CMD, "Command+M minimises the window in front"),
         (0x51, CMD, "Command+Q quits the application in front"),
         (0x51, CMD | SHF, "Shift+Command+Q logs out"),
+        (0x51, CMD | OPT | SHF, "Option+Shift+Command+Q logs out without asking"),
         (0x51, CMD | CTL, "Control+Command+Q locks the screen"),
         (0x1B, CMD | OPT, "Option+Command+Escape opens Force Quit"),
         (0x33, CMD | SHF, "Shift+Command+3 takes a screenshot"),
@@ -2945,13 +2946,15 @@ mod key_grammar_tests {
         for s in [
             "Ctrl+F5", "Cmd+F5", "Ctrl+Alt+F5", "Cmd+Option+F5", "Ctrl+Tab", "Ctrl+Shift+Tab",
             "Ctrl+Space", "Ctrl+H", "Ctrl+M", "Ctrl+Q", "Command+Q", "Ctrl+Shift+Q", "Ctrl+Win+Q",
-            "Cmd+Meta+Q", "Ctrl+Alt+Esc", "Ctrl+Shift+3", "Ctrl+Shift+4", "Ctrl+Shift+5",
+            "Cmd+Meta+Q", "Cmd+Option+Shift+Q", "Ctrl+Alt+Esc", "Ctrl+Shift+3", "Ctrl+Shift+4",
+            "Ctrl+Shift+5",
         ] {
             assert!(reserved(Macos, s), "{s} on a Mac");
         }
         for s in [
             "F5", "Ctrl+Shift+F5", "Win+F5", "Meta+Alt+F5", "Win+Q", "Win+Tab", "Meta+Tab",
             "Meta+Space", "Win+H", "Option+H", "Ctrl+Shift+6", "Ctrl+W", "Ctrl+L", "Alt+Q",
+            "Meta+Cmd+Shift+Q",
         ] {
             assert!(!reserved(Macos, s), "{s} on a Mac");
         }

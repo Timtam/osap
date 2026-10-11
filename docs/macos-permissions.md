@@ -369,6 +369,10 @@ registered on both launches, never delivered, VoiceOver's error sound on every p
   keyboard back into a plugin window is **Command-Shift-F6** likewise (`Cmd+Shift+F6`, and
   `Ctrl+Shift+Win+Alt+F6` on Windows). Both use an F-key, so they additionally need "Use F1,
   F2, etc. as standard function keys" turned on, or the `fn` key held down.
+- The application's own **quit** key is `Ctrl+Alt+Shift+Win+Q` on Windows and
+  **Control-Shift-Command-Q** on a Mac (`Meta+Cmd+Shift+Q`). Command-Shift-Q is Log Out and
+  Option-Shift-Command-Q logs out without asking, so its third modifier is Control, which
+  without Option is off VoiceOver's layer. Not tried on a Mac yet.
 - The **calibrator's** keys are `Ctrl+Alt+Shift+S/T/V`: **Command-Option-Shift** on a Mac,
   where a spec's Ctrl is Command, off Control-Option, and Ctrl+Alt+Shift on Windows. They only
   exist once "Calibration keys and pictures in overlays" is ticked in the overlay runtime's

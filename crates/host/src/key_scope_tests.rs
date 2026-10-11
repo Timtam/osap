@@ -889,8 +889,8 @@ fn a_key_typed_after_it_reached_the_program_first_and_it_is_not_passed_on() {
 
 /// Nor while a screen reader's key is held — sent then, it would be the screen reader's command —
 /// nor while a hotkey holds the combination, which the system would hand the key to instead: a
-/// module's live registration, of this module or another, enabled or not; one that does not hold
-/// it at the system lets it go. And a key goes on the physical key it was pressed on — the keypad's
+/// module's live registration, of this module or another, enabled or not, or the application's own
+/// reload or quit key; one that does not hold it at the system lets it go. And a key goes on the physical key it was pressed on — the keypad's
 /// Enter — where the hook named one; a hotkey's, which the system matched, on none.
 #[test]
 fn a_key_is_not_passed_on_to_a_screen_reader_or_a_hotkey_and_goes_on_its_own_key() {
@@ -921,9 +921,11 @@ fn a_key_is_not_passed_on_to_a_screen_reader_or_a_hotkey_and_goes_on_its_own_key
     // Not holding it at the system any more: sent.
     h.hotkeys.borrow_mut().get_mut(&9).unwrap().live = false;
     assert_eq!(captures::pass_on(&*h, ctrl_v, ctrl, at(&h, W1)), PassedOn::Sent);
-    // The application's own reload key, always.
+    // The application's own reload and quit keys, always.
     let (f5, all) = backend::key_spec(crate::RELOAD_HOTKEY_SPEC).unwrap();
     assert_eq!(captures::pass_on(&*h, f5, all, at(&h, W1)), PassedOn::NotSent(NotPassed::HotkeyHolds));
+    let (q, all) = backend::key_spec(crate::QUIT_HOTKEY_SPEC).unwrap();
+    assert_eq!(captures::pass_on(&*h, q, all, at(&h, W1)), PassedOn::NotSent(NotPassed::HotkeyHolds));
     h.backend.take_passed();
     h.backend.take_passed_phys();
 

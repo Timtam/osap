@@ -873,6 +873,20 @@ mod tests {
         assert_eq!(mask_to_carbon(mask), 0x1B00);
     }
 
+    /// The quit key the host registers for itself on a Mac: Control-Shift-Command-Q, the reload
+    /// key's Command-Shift with Control (`Meta`), and so off VoiceOver's modifier as well. Q's key
+    /// code is the keyboard layout's, so only the modifiers are checked here.
+    #[test]
+    fn the_quit_hotkey_translates() {
+        let (_, mask) = key_spec("Meta+Cmd+Shift+Q").unwrap();
+        assert_eq!(mask_to_carbon(mask), 0x1300, "controlKey | shiftKey | cmdKey");
+        assert_ne!(
+            mask & crate::backend::MAC_VOICEOVER_LAYER,
+            crate::backend::MAC_VOICEOVER_LAYER,
+            "the Mac quit key must stay off VoiceOver's modifier"
+        );
+    }
+
     /// `host.keys.check`'s "no-keycode" is decided without this table (it has to answer for a
     /// Mac on any machine), so the two must agree on every key the parser accepts — under the
     /// US letters, the table's own. Under another layout a letter can have no key; that is the
