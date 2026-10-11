@@ -457,19 +457,15 @@ impl ListInner {
             // rather than corrected afterwards: not skipping it is the only point at which
             // nothing has happened yet for a screen reader to announce.
             let (checkable, items) = (checkable.clone(), items.clone());
-            let ctrl_for_keys = ctrl.clone();
             ctrl.on_key_down(move |e| {
                 const SPACE: i32 = 32;
                 if let WindowEventData::Keyboard(k) = &e {
                     if k.get_key_code() == Some(SPACE) {
-                        let blocked = ctrl_for_keys
-                            .get_selection()
-                            .and_then(|sel| {
-                                items
-                                    .borrow()
-                                    .iter()
-                                    .position(|it| native_checkboxes::same(it, &sel))
-                            })
+                        let caret = native_checkboxes::caret(hwnd);
+                        let blocked = items
+                            .borrow()
+                            .iter()
+                            .position(|it| native_checkboxes::is(it, caret))
                             .is_some_and(|i| checkable.borrow().get(i) == Some(&false));
                         if blocked {
                             // CONSUMED, not merely un-skipped. Declining to call `skip` still
@@ -559,9 +555,13 @@ impl ListInner {
         }
     }
 
+    /// The row with the tree's caret, asked of the native control (`TVGN_CARET`), which answers
+    /// null for none. Not wxdragon's `get_selection`: with no row selected — the empty tree that
+    /// the first `rebuild` asks before it has put a row in — that wraps an invalid item id,
+    /// rejects it, and writes a warning to the log at every start.
     fn selection(&self) -> Option<usize> {
-        let sel = self.ctrl.get_selection()?;
-        self.items.borrow().iter().position(|it| native_checkboxes::same(it, &sel))
+        let caret = native_checkboxes::caret(self.hwnd);
+        self.items.borrow().iter().position(|it| native_checkboxes::is(it, caret))
     }
 
     fn checked(&self, i: usize) -> bool {
@@ -3005,9 +3005,23 @@ mod native_checkboxes {
         (info.flags, info.h_item)
     }
 
-    /// Whether a wx item is the native handle a hit-test returned.
+    /// Whether a wx item is the native handle a hit-test or [`caret`] returned.
     pub fn is(item: &TreeItemId, h_item: *mut c_void) -> bool {
         !h_item.is_null() && htreeitem(item) == h_item
+    }
+
+    const TVM_GETNEXTITEM: u32 = TV_FIRST + 10;
+    const TVGN_CARET: usize = 0x0009;
+
+    /// The item with the caret — the selected one, in a single-selection tree — as its native
+    /// handle; null when there is none. What `wxTreeCtrl::GetSelection` asks on Windows, without
+    /// an item id made for "none".
+    pub fn caret(hwnd: *mut c_void) -> *mut c_void {
+        let hwnd = hwnd as HWND;
+        if hwnd.is_null() {
+            return std::ptr::null_mut();
+        }
+        unsafe { SendMessageW(hwnd, TVM_GETNEXTITEM, TVGN_CARET as WPARAM, 0) as *mut c_void }
     }
 
     /// Removes an item's checkbox — state-image index 0 is "no state image".
@@ -3057,12 +3071,6 @@ mod native_checkboxes {
             SendMessageW(hwnd, TVM_GETITEMW, 0 as WPARAM, &mut tvi as *mut _ as LPARAM);
         }
         ((tvi.state & TVIS_STATEIMAGEMASK) >> 12) == 2
-    }
-
-    /// True if two `TreeItemId`s refer to the same native tree node.
-    pub fn same(a: &TreeItemId, b: &TreeItemId) -> bool {
-        let ha = htreeitem(a);
-        !ha.is_null() && ha == htreeitem(b)
     }
 }
 
@@ -3151,5 +3159,23 @@ mod instance_lock_tests {
         let free = instance_lock(&names).expect("and ours once it is gone");
         assert!(matches!(free, AppLock::Checker(_)));
         assert!(!free.another_running());
+    }
+}
+
+/// The installed tree on Windows, which these tests cannot show: what they can check is that it
+/// never asks wxdragon for its selection.
+#[cfg(all(test, windows))]
+mod installed_tree_tests {
+    /// `get_selection` on a tree with no row selected — the empty one the first `rebuild` reads
+    /// before it has put a row in — wraps an invalid item id, rejects it and writes "C++ returned
+    /// invalid TreeItemId pointer …, rejecting" to the log, once at every start. The native caret
+    /// (`TVGN_CARET`) answers null instead, for the Space guard and for `selection` alike.
+    #[test]
+    fn the_installed_tree_asks_the_native_control_for_its_caret() {
+        const FILE: &str = include_str!("gui.rs");
+        let start = FILE.find("#[cfg(windows)]\nimpl ListInner {").expect("the Windows list");
+        let tree = &FILE[start..start + FILE[start..].find("\n}\n").expect("its end")];
+        assert!(!tree.contains(".get_selection()"), "wxdragon asked for the selection");
+        assert_eq!(tree.matches("native_checkboxes::caret(").count(), 2, "the Space guard and `selection`");
     }
 }
