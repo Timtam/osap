@@ -9,9 +9,9 @@ supported_os = ["windows"]
 dependencies = ["com.platform.daw-hosts"]
 
 [capabilities]
-# `gui` for the page. `input` for ONE click, the round trip of test W3: onto the plug-in window's
-# own background, clear of every control in it — never its title bar, where two clicks maximise
-# the window — and none at all where it has no such spot; `screen` for the picture of the plug-in
-# taken after that click, whose answer brings the page back, as an overlay reads after its own
-# click. `settings` for the switch that shows the page by itself (test W2 c), off by default.
-require = ["gui", "window", "hotkey", "speech", "log", "input", "screen", "settings"]
+# `gui` for the page. `input` for W3's round-trip click and W10's ways of clicking (posted, the
+# no-activate style); `element` for W10's element dump and accessibility press; `ocr` for W10's
+# reads of the plug-in near the target before and after; `screen` for the pictures — W3's after
+# its click, W10's baseline and change wait. `settings` for the switch that shows the page by
+# itself (test W2 c), off by default.
+require = ["gui", "window", "hotkey", "speech", "log", "input", "element", "ocr", "screen", "settings"]

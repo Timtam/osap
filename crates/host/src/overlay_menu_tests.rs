@@ -920,6 +920,7 @@ fn event_kind(kind: &str) -> mlua::Result<(bool, &'static str)> {
         "window" => (false, "window trigger"),
         "focus" => (false, "focus change"),
         "answer" => (false, "ocr.recognize"),
+        "acted" => (false, "input.click"),
         "setting" => (false, "settings onChange"),
         "page message" => (true, "page message"),
         "page ready" => (false, "page ready"),
@@ -932,8 +933,8 @@ fn event_kind(kind: &str) -> mlua::Result<(bool, &'static str)> {
 /// `T.hostCall(f, …)`, a plain `Function::call` as the host makes when it calls Lua back — an
 /// arbiter's onActivate and onDeactivate, an onChange, an included file's top level, none of
 /// which can wait; `T.call(kind, f, …)`, an event of the scenario's module through the real
-/// mailbox, run as a handler — "key", "hotkey", "timer", "window", "focus", "answer", "setting",
-/// "page message", "page ready" or "page close" — which says what became of it (`Ran`, `Parked`,
+/// mailbox, run as a handler — "key", "hotkey", "timer", "window", "focus", "answer", "acted" (a
+/// click's callback), "setting", "page message", "page ready" or "page close" — which says what became of it (`Ran`, `Parked`,
 /// `Queued`, `Dropped`); `T.later(kind, f, …)`, the same through the mailbox always, as the host
 /// delivers a setting changed in the dialog, to run in the next queued phase; `T.queued()`, the
 /// tick's queued phase; the tests' wait point `T.waitPoint(name)`, `T.release(name, value)` and

@@ -84,6 +84,25 @@ document.addEventListener("click", (event) => {
   releases = [];
 });
 
+// W10: "Read the plug-in's elements" and "Try it". Each sends what the three selects hold now —
+// the way, the target and how many times — so the module need keep no state of the page's. The
+// target select is refilled from the module's element list (below).
+const w10Select = (id) => {
+  const el = document.getElementById(id);
+  return el ? el.value : null;
+};
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-w10]");
+  if (!button) return;
+  send({
+    kind: "w10",
+    do: button.dataset.w10,
+    way: w10Select("w10-way"),
+    target: w10Select("w10-target"),
+    repeat: w10Select("w10-repeat"),
+  });
+});
+
 document.getElementById("search").addEventListener("change", (event) => {
   send({ kind: "search", value: event.target.value });
 });
@@ -102,6 +121,23 @@ if (window.platform) {
     // Which window this page is in, said once it has loaded: its switch button names the other.
     else if (message.kind === "window") {
       switchButton.textContent = message.window === "app" ? "Show as a tool window" : "Show as an application window";
+    }
+    // W10: the plug-in's elements, for the Target select — the remembered point first, then each
+    // element by name and type. Rebuilt from the message, never from HTML the module sent.
+    else if (message.kind === "w10elements") {
+      const sel = document.getElementById("w10-target");
+      if (!sel) return;
+      sel.textContent = "";
+      const point = document.createElement("option");
+      point.value = "point";
+      point.textContent = message.target ? "the remembered pointer point (" + String(message.target) + ")" : "the remembered pointer point";
+      sel.appendChild(point);
+      for (const item of Array.isArray(message.elements) ? message.elements : []) {
+        const option = document.createElement("option");
+        option.value = String(item.value);
+        option.textContent = String(item.label);
+        sel.appendChild(option);
+      }
     }
   };
 } else {

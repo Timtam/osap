@@ -16,9 +16,22 @@
 --   Ctrl+Shift+Win+Alt+F8  the same, registered with { foreground = true }: Windows delivers it
 --                          as WM_HOTKEY (W2 b).
 --   Ctrl+Shift+Win+Alt+F9  says what happened since it was last pressed, and counts anew.
+--   Ctrl+Shift+Win+Alt+F10 remembers the mouse pointer's point in the plug-in window as a target
+--                          for W10 (below) — put the pointer on the control first, with NVDA's
+--                          "move mouse to navigator object" or a module's overlay.
 -- And one setting, off by default: the tool page comes up by itself when a plug-in window comes
 -- to the front from another window (W2 c) — never the application window, which is reached as any
 -- program's window is.
+--
+-- W10 (clicking without the round trip, from the page): the page's "Read the plug-in's elements"
+-- lists what UIA has of the plug-in; then a way — nothing (only watch), the round trip, a posted
+-- click, a posted click with the pointer left where it is, the no-activate style, an accessibility
+-- press — and 1, 10 or 20 times; "Try it". Each attempt puts the pointer on the target first for
+-- the ways that move it, reads the plug-in near the target before and after, takes a baseline
+-- picture, acts, waits for the picture to change, and says what happened without cutting NVDA
+-- off: whether another window came forward, whether the pixels at the target changed, the text
+-- before and after, and the element's state where it is readable. The round trip goes as W3's,
+-- each step on the event that ends the one before. F7 or F8 gives a run up.
 --
 -- Two pages from the same files: the tool page of W1–W9, in no list of windows, and the same page
 -- in an application window (`window = "app"`), in Alt+Tab and on the taskbar, for W6 again — the
@@ -47,12 +60,15 @@ local daw = host.require("com.platform.daw-hosts")
 -- keyboard hook leaves the chain while a window of this application, the page's included, is in
 -- front, and whose page gives the front back to the window it came from as it goes; the way back
 -- keeps the page when Windows declines (2026-10-11). 4: the page in an application window as well,
--- for W6 again (2026-10-11).
-local REVISION = 4
+-- for W6 again (2026-10-11). 5: W10, the ways of acting in the plug-in without the round trip
+-- (host.input.click's via = "post"/"noactivate" and host.element.press), measured from the page
+-- (2026-10-11).
+local REVISION = 5
 
 local KEY_SHOW = "Ctrl+Shift+Win+Alt+F7"
 local KEY_SHOW_FG = "Ctrl+Shift+Win+Alt+F8"
 local KEY_REPORT = "Ctrl+Shift+Win+Alt+F9"
+local KEY_TARGET = "Ctrl+Shift+Win+Alt+F10"
 
 local AUTO = "autoShow"
 host.settings.define(AUTO, false, {
@@ -136,6 +152,12 @@ local lastClick = nil
 -- W7: after "back to the plug-in", the window whose keyboard is to be looked at once it is in
 -- front.
 local landing = nil
+
+-- W10: the remembered target (a point in the plug-in window's client area, as an offset so it
+-- survives the window moving), the plug-in's elements as the last read found them (name, type and
+-- a point of their own, each an offset too), and the run under way — nil when none is. A second
+-- "Try it" while one runs is ignored.
+local w10 = { target = nil, elements = {}, run = nil }
 
 -- Keys that are only modifiers: logged, not counted — pressed in the page, they are the report
 -- key's own, whose F9 RegisterHotKey takes there (the keyboard hook is out of the chain while the
@@ -457,6 +479,393 @@ local function w3Arrived(w)
   end)
 end
 
+-- ── W10: acting in the plug-in without the round trip ──────────────────────────
+
+-- A reading's text, or "" when it read nothing: what the before/after reads compare.
+local function readingText(r)
+  if r and r.status == "text" then
+    return r.text
+  end
+  return ""
+end
+
+-- Short enough to say and to read in the log.
+local function short(s)
+  if #s > 40 then
+    return s:sub(1, 40) .. "…"
+  end
+  return s
+end
+
+-- What an element says about its own state, where it is readable — the plug-in window's title is
+-- tried as the container (its UIA root carries it), so a Window/Pane named for it is the subtree
+-- searched; "—" when nothing answers.
+local function stateWords(p, el)
+  if not el then
+    return "—"
+  end
+  local st = host.element.stateProbe(p.id, p.title or "", el.name, el.ctype)
+  if not st then
+    return "—"
+  end
+  if st.toggle ~= nil then
+    return st.toggle == 1 and "on" or "off"
+  end
+  if st.checked then
+    return "checked"
+  end
+  return string.format("state 0x%x", st.legacyState)
+end
+
+-- A box of about ±64 px around the target, inside the plug-in window's client area: what the
+-- reads read and the picture watches.
+local function w10Region(x, y, p)
+  local c = p.client
+  local x1 = math.max(c.x, x - 64)
+  local y1 = math.max(c.y, y - 64)
+  local x2 = math.min(c.x + c.w, x + 64)
+  local y2 = math.min(c.y + c.h, y + 64)
+  if x2 - x1 < 2 then
+    x2 = math.min(c.x + c.w, x1 + 2)
+  end
+  if y2 - y1 < 2 then
+    y2 = math.min(c.y + c.h, y1 + 2)
+  end
+  return { x1, y1, x2, y2 }
+end
+
+-- The chosen target as a screen point now (offsets kept, so a moved window is followed), the
+-- element it is where it is one, and its words for the result.
+local function w10Resolve(p)
+  local run = w10.run
+  local c = p.client
+  if run.target == "point" then
+    if not w10.target then
+      return nil
+    end
+    return c.x + w10.target.dx, c.y + w10.target.dy, nil, "the remembered point"
+  end
+  local i = tonumber(string.match(tostring(run.target), "^el:(%d+)$"))
+  local el = i and w10.elements[i]
+  if not el then
+    return nil
+  end
+  local words = string.format("%q", el.name)
+  if (el.alike or 1) > 1 then
+    -- The press acts on the first of them the plug-in lists, which need not be this one.
+    words = string.format("%s (one of %d alike)", words, el.alike)
+  end
+  return c.x + el.dx, c.y + el.dy, el, words
+end
+
+-- Ends the run, saying `why` when it ended for a reason (a gone window or target) rather than
+-- having finished.
+local function w10Finish(why)
+  w10.run = nil
+  if why then
+    result("W10: %s", why)
+    say(why)
+  end
+end
+
+-- The ways that put the pointer on the target as they click. An attempt with one of them puts it
+-- there before anything is read or pictured, so a control that lights up under the pointer is lit
+-- in the baseline too, and only what the click did tells the two pictures apart.
+local MOVES_POINTER = { round = true, post = true, noactivate = true }
+
+-- How long a changed picture has to stand still before the change wait answers it.
+local SETTLE_MS = 150
+
+-- What the change wait saw, in words. `info.waited` counts from the wait's start — the act just
+-- before it — to the picture it answered with, the stretch that picture stood still included.
+local function pictureWords(info)
+  if not (info and info.changed == true) then
+    return "no change"
+  end
+  if info.settled then
+    return string.format("changed, settled %d ms after the wait began (the last %d ms of them still)", info.waited or 0, SETTLE_MS)
+  end
+  return string.format("changed, still changing when the wait ended after %d ms", info.waited or 0)
+end
+
+-- The act of `run`'s way at (x, y): nothing, the round trip, a posted click, a posted click with
+-- the pointer left where it is, the no-activate style, or an accessibility press. `done(made,
+-- why)` ends it — at once for the ones that act on the event loop, in a callback for the ones a
+-- thread makes. The round trip is W3's, every step on the event that says the one before is done:
+-- the plug-in window asked to the front here, the click on its foreground event (onTrigger, below),
+-- `done` after the click, and the page back once the change wait has answered (w10Attempt) — so the
+-- click never lands after the page is back, and the next attempt starts with the page in front.
+local function w10Act(run, x, y, el, p, done)
+  local way = run.way
+  if way == "watch" then
+    done(true, nil)
+  elseif way == "round" then
+    if not host.window.focus(p.id) then
+      done(false, "the plug-in would not come to the front")
+      return
+    end
+    run.forward = { id = p.id, x = x, y = y, done = done, t0 = host.now() }
+  elseif way == "post" then
+    host.input.click(x, y, { window = p.id, via = "post" }, done)
+  elseif way == "post-stay" then
+    host.input.click(x, y, { window = p.id, via = "post", move = false }, done)
+  elseif way == "noactivate" then
+    host.input.click(x, y, { window = p.id, via = "noactivate" }, done)
+  elseif way == "press" then
+    if not el then
+      done(false, "the accessibility press needs an element, not the point")
+      return
+    end
+    host.element.press(p.id, el.name, el.ctype, done)
+  else
+    done(false, "unknown way")
+  end
+end
+
+-- One attempt, every step on the event that ends the one before (no timer): the pointer to the
+-- target for the ways that move it, the before read, a baseline picture, the act, a wait for the
+-- picture to change, the page back for the round trip, the after read — then the result, and the
+-- next repetition if any. Nothing here interrupts what the screen reader is saying. A run given up
+-- meanwhile (F7, F8) leaves its answers to an attempt nobody waits for: each step asks first
+-- whether its run is still the one under way.
+local function w10Attempt()
+  local run = w10.run
+  if not run then
+    return
+  end
+  local function live()
+    return w10.run == run
+  end
+  local p = refreshed(plugin)
+  if not p then
+    return w10Finish("the plug-in window is gone")
+  end
+  local x, y, el, label = w10Resolve(p)
+  if not x then
+    return w10Finish("the target is gone")
+  end
+  run.label = label
+  run.otherFront = false
+  if MOVES_POINTER[run.way] then
+    host.input.move(x, y)
+  end
+  local region = w10Region(x, y, p)
+  local beforeState = stateWords(p, el)
+  host.ocr.recognize(region, { key = "w10" }, function(rBefore)
+    if not live() then
+      return
+    end
+    local beforeText = readingText(rBefore)
+    host.screen.snapshotAsync({ region = region, key = "w10" }, function(base)
+      if not live() then
+        if base then
+          base:release()
+        end
+        return
+      end
+      -- Kept on the run as well, for a round trip given up while it waits for the plug-in window:
+      -- nothing else lets go of it then (onShowKey).
+      run.base = base
+      local frontBefore = frontWords()
+      local change = { timeout = 1500, settle = SETTLE_MS }
+      if base then
+        change.from = base
+      end
+      w10Act(run, x, y, el, p, function(made, why)
+        if not live() then
+          if base then
+            base:release()
+          end
+          return
+        end
+        host.screen.snapshotAsync({ region = region, key = "w10", change = change }, function(snap, _why, info)
+          if base then
+            base:release()
+          end
+          if not live() then
+            if snap then
+              snap:release()
+            end
+            return
+          end
+          -- The round trip's last step: the page back, once the click has shown in the picture or
+          -- the wait gave up. A page that does not come back ends the run after this attempt.
+          if run.way == "round" then
+            local ok, note = cur.page:show({ focus = true, avoid = (refreshed(p) or p).bounds })
+            if not ok then
+              run.stop = "the page did not come back: " .. tostring(note)
+            end
+          end
+          local frontAfter = frontWords()
+          local afterState = stateWords(refreshed(p) or p, el)
+          local record = function(afterText)
+            if not live() then
+              return
+            end
+            run.n += 1
+            if made then run.stats.made += 1 end
+            local picChanged = info ~= nil and info.changed == true
+            if picChanged then run.stats.pic += 1 end
+            local textChanged = beforeText ~= afterText
+            if textChanged then run.stats.text += 1 end
+            local kept = not run.otherFront and frontBefore == "the page" and frontAfter == "the page"
+            if kept then run.stats.front += 1 end
+            local line = string.format(
+              "W10 %s on %s (%d/%d): %s; front: %s; picture: %s; text: %s; state: %s",
+              run.way, run.label, run.n, run.reps,
+              made and "made" or ("NOT made (" .. tostring(why) .. ")"),
+              kept and "the page throughout" or ("changed — now " .. frontAfter),
+              pictureWords(info),
+              textChanged and string.format("%q to %q", short(beforeText), short(afterText)) or "unchanged",
+              beforeState == afterState and beforeState or (beforeState .. " to " .. afterState)
+            )
+            if run.reps == 1 then
+              result("%s", line)
+            else
+              log("%s", line)
+            end
+            if run.n < run.reps and not run.stop then
+              w10Attempt()
+              return
+            end
+            w10.run = nil
+            if run.reps > 1 then
+              local summary = string.format(
+                "W10 %s on %s x%d: made %d, picture changed %d, text changed %d, front kept %d",
+                run.way, run.label, run.n, run.stats.made, run.stats.pic, run.stats.text, run.stats.front
+              )
+              result("%s", summary)
+              mention(summary)
+            else
+              mention(line)
+            end
+            if run.stop then
+              result("W10: %s", run.stop)
+              mention(run.stop)
+            end
+          end
+          if snap then
+            host.ocr.recognize(region, { snapshot = snap, key = "w10after" }, function(rAfter)
+              snap:release()
+              record(readingText(rAfter))
+            end)
+          else
+            record("")
+          end
+        end)
+      end)
+    end)
+  end)
+end
+
+-- F10: remember the pointer's point in the plug-in window in front (or the one remembered), as an
+-- offset into its client area, and say so. The pointer is put there by the tools the maintainer
+-- already has — NVDA's "move mouse to navigator object", a module's overlay.
+local function rememberTarget()
+  pressedAt = host.now()
+  local a = host.window.active()
+  if isPluginWindow(a) then
+    plugin = a
+  else
+    plugin = refreshed(plugin)
+  end
+  if not plugin then
+    say("No plug-in window is in front.")
+    log("W10: F10 pressed, but no plug-in window is in front or remembered")
+    return
+  end
+  local c = plugin.client
+  local pt = host.input.cursorPos()
+  w10.target = { dx = pt.x - c.x, dy = pt.y - c.y }
+  log(
+    "W10: target remembered at %d,%d on screen (%d,%d in the plug-in window '%s' client area)",
+    pt.x, pt.y, w10.target.dx, w10.target.dy, plugin.title or ""
+  )
+  say(string.format("Target remembered: %d, %d in the plug-in window.", w10.target.dx, w10.target.dy))
+end
+
+-- The page's "Read the plug-in's elements": the plug-in's named UIA elements with a rectangle
+-- inside its client area (at most 60), each as an offset so a moved window is followed, posted to
+-- the page `rec` that asked for its Target select.
+local function readElements(rec)
+  local p = refreshed(plugin)
+  if not p then
+    say("No plug-in window remembered. Press F10 with the pointer on the control first.")
+    return
+  end
+  local c = p.client
+  local out = {}
+  for _, e in ipairs(host.element.dump(p.id)) do
+    local b = e.bounds
+    if e.name ~= "" and b and b.w > 0 and b.h > 0
+      and b.x >= c.x - 1 and b.y >= c.y - 1
+      and b.x + b.w <= c.x + c.w + 1 and b.y + b.h <= c.y + c.h + 1 then
+      out[#out + 1] = { name = e.name, ctype = e.ctype, dx = b.x + b.w // 2 - c.x, dy = b.y + b.h // 2 - c.y }
+      if #out >= 60 then
+        break
+      end
+    end
+  end
+  w10.elements = out
+  -- Elements that share their name and type: a press finds the first of them the plug-in lists
+  -- (host.element.press, as find), which need not be the one chosen and watched here — so each is
+  -- marked in the list, and how many there are is in the log.
+  local alike = {}
+  for _, el in ipairs(out) do
+    local k = el.name .. "\0" .. el.ctype
+    alike[k] = (alike[k] or 0) + 1
+  end
+  local shared = 0
+  local items = {}
+  for i, el in ipairs(out) do
+    el.alike = alike[el.name .. "\0" .. el.ctype]
+    local label = string.format("%s (type %d)", el.name, el.ctype)
+    if el.alike > 1 then
+      shared += 1
+      label = string.format("%s, one of %d alike: a press acts on the first of them", label, el.alike)
+    end
+    items[i] = { value = "el:" .. i, label = label }
+  end
+  rec.page:post({
+    kind = "w10elements",
+    target = w10.target and string.format("%d, %d", w10.target.dx, w10.target.dy) or nil,
+    elements = items,
+  })
+  log(
+    "W10: %d named element(s) of the plug-in inside its client area read; %d of them share their name and type with another, and a press acts on the first of those the plug-in lists",
+    #out, shared
+  )
+  mention(string.format("%d elements read.", #out))
+end
+
+-- The page's "Try it": the chosen way on the chosen target, the chosen number of times — one run
+-- at a time.
+local function tryW10(m)
+  if w10.run then
+    log("W10: 'Try it' while a run is under way — ignored")
+    return
+  end
+  if not refreshed(plugin) then
+    say("No plug-in window remembered. Press F10 with the pointer on the control first.")
+    return
+  end
+  local reps = tonumber(m["repeat"]) or 1
+  if reps ~= 1 and reps ~= 10 and reps ~= 20 then
+    reps = 1
+  end
+  w3 = nil
+  pressedAt = host.now()
+  w10.run = {
+    way = tostring(m.way or "watch"),
+    target = tostring(m.target or "point"),
+    reps = reps,
+    n = 0,
+    stats = { made = 0, pic = 0, text = 0, front = 0 },
+  }
+  log("W10: try '%s' on target '%s', %d time(s)", w10.run.way, w10.run.target, reps)
+  w10Attempt()
+end
+
 -- W9: the live region of page `rec` and the host's speech at the same moment.
 local function announce(rec)
   local n = rec.actions.announce
@@ -579,6 +988,15 @@ local function onMessage(rec, m)
     elseif m.action == "switch" then
       switchWindow()
     end
+  elseif kind == "w10" then
+    -- `do` and `repeat` are keywords, so the page's fields are read by name.
+    if m["do"] == "read" then
+      readElements(rec)
+    elseif m["do"] == "try" then
+      tryW10(m)
+    else
+      log("page: an unknown W10 request '%s'", tostring(m["do"]))
+    end
   elseif kind == "loaded" then
     -- Which page it is, for the label of its switch button.
     rec.page:post({ kind = "window", window = rec.kind })
@@ -652,6 +1070,15 @@ local function onShowKey(key, how)
   local t0 = host.now()
   pressedAt = t0
   w3 = nil
+  if w10.run then
+    log("W10: the run of '%s' given up by %s after %d of %d attempt(s)", w10.run.way, key, w10.run.n, w10.run.reps)
+    -- Every other step still on its way lets go of the baseline as it comes; a round trip waiting
+    -- for the plug-in window has none on its way.
+    if w10.run.forward and w10.run.base then
+      w10.run.base:release()
+    end
+    w10.run = nil
+  end
   local f = host.window.foreground()
   if f and cur.page.window and f.id == cur.page.window and cur.page:isShown() then
     backToPlugin(key .. ", pressed in the page")
@@ -708,6 +1135,13 @@ host.hotkey.register(KEY_REPORT, function()
   if w3 and w3.stage == "forward" then
     parts[#parts + 1] = "W3 is still waiting for the plug-in window to come to the front."
   end
+  if w10.run then
+    parts[#parts + 1] = string.format(
+      "A W10 run is under way, %d of %d done%s; F7 gives it up.",
+      w10.run.n, w10.run.reps,
+      w10.run.forward and ", waiting for the plug-in window to come to the front" or ""
+    )
+  end
   local b = since.buttons
   parts[#parts + 1] = string.format(
     "Since the last report: buttons: click into the plug-in %d, back %d, window switch %d, announce %d. Key presses the page saw: %d%s.",
@@ -719,6 +1153,10 @@ host.hotkey.register(KEY_REPORT, function()
   log("the report was said; counting anew")
   fresh()
   landing = nil
+end)
+
+host.hotkey.register(KEY_TARGET, function()
+  rememberTarget()
 end)
 
 -- ── The windows: W2 c, W3, W7 ─────────────────────────────────────────────────
@@ -736,6 +1174,29 @@ host.window.onTrigger({}, function(w)
   local previous = lastFront
   lastFront = w.id
   log("in front: '%s' (%s), %d ms after the last press", w.title or "", w.app and w.app.exe or "?", host.now() - pressedAt)
+  -- A W10 run watches whether another window came forward while it acted: any window that is not
+  -- one of our pages (the plug-in a round trip brings forward among them).
+  if w10.run then
+    local ours = false
+    for _, rec in ipairs(both) do
+      if rec.page and rec.page.window and w.id == rec.page.window then
+        ours = true
+      end
+    end
+    if not ours then
+      w10.run.otherFront = true
+    end
+    -- W10's round trip: the plug-in window it asked for is in front — the click now, and then the
+    -- change wait (w10Act).
+    local fw = w10.run.forward
+    if fw and w.id == fw.id then
+      w10.run.forward = nil
+      host.input.click(fw.x, fw.y)
+      log("W10: the plug-in window came to the front %d ms after it was asked; clicked at %d,%d", host.now() - fw.t0, fw.x, fw.y)
+      fw.done(true, nil)
+      return
+    end
+  end
   if w3 and w3.stage == "forward" and w.id == w3.plugin.id then
     w3Arrived(w)
     return
@@ -790,12 +1251,14 @@ host.settings.onChange(AUTO, function(v)
 end)
 
 log(
-  "revision %d ready — %s shows the page (keyboard hook), %s shows it (WM_HOTKEY), %s says what happened; "
+  "revision %d ready — %s shows the page (keyboard hook), %s shows it (WM_HOTKEY), %s says what happened, "
+    .. "%s remembers the pointer's point in the plug-in for W10; "
     .. "the page's button 'Show as an application window' shows it in a window of its own, in Alt+Tab and on the "
     .. "taskbar (W6 again), and 'Show as a tool window' there goes back; automatic show is %s",
   REVISION,
   host.keys.describe(KEY_SHOW, { style = "short" }),
   host.keys.describe(KEY_SHOW_FG, { style = "short" }),
   host.keys.describe(KEY_REPORT, { style = "short" }),
+  host.keys.describe(KEY_TARGET, { style = "short" }),
   host.settings.get(AUTO) and "on" or "off"
 )

@@ -42,6 +42,7 @@ use super::overlay_host_panel_tests::run_with_helpers;
 const PR: &str = r##"
 local S = T.S
 T.F7, T.F8, T.F9 = "Ctrl+Shift+Win+Alt+F7", "Ctrl+Shift+Win+Alt+F8", "Ctrl+Shift+Win+Alt+F9"
+T.F10 = "Ctrl+Shift+Win+Alt+F10"
 
 -- An event of the probe's module through its mailbox. The probe never waits, so each runs at
 -- once: one that waited or was dropped would leave a check that something did not happen
@@ -185,7 +186,64 @@ function T.probe()
     S.hotkeyOpts[spec] = opts or false
     return register(spec, fn)
   end)
+  -- W10's reads of the plug-in: the pointer (T.cursor, default inside the FX client), and the
+  -- plug-in's elements (S.dump, a list of { name, ctype, bounds } as host.element.dump gives).
+  S.cursor = S.cursor or { x = 120, y = 90 }
+  rawset(T.host.input, "cursorPos", function() return S.cursor end)
+  S.dump = S.dump or {}
+  rawset(T.host.element, "dump", function(id) S.dumpedId = id; return S.dump end)
+  -- W10's acting, recorded: a click with options or a callback in S.acts, its callback answered
+  -- on a later tick through the module's mailbox (T.acted), as the host answers it; a plain click
+  -- — W3's, the round trip's — in S.clicks as ever; the pointer put somewhere in S.moves.
+  S.acts, S.actedCbs, S.moves = {}, {}, {}
+  rawset(T.host.input, "click", function(x, y, opts, cb)
+    if opts == nil and cb == nil then
+      S.clicks[#S.clicks + 1] = { x, y }
+    else
+      S.acts[#S.acts + 1] = { x = x, y = y, via = opts and opts.via, window = opts and opts.window, move = opts and opts.move }
+    end
+    if cb then S.actedCbs[#S.actedCbs + 1] = cb end
+    return true
+  end)
+  rawset(T.host.input, "move", function(x, y) S.moves[#S.moves + 1] = { x, y } end)
+  -- host.screen.snapshotAsync as the harness takes it, with its change wait and key kept.
+  local snapshotAsync = T.host.screen.snapshotAsync
+  rawset(T.host.screen, "snapshotAsync", function(opts, cb)
+    snapshotAsync(opts, cb)
+    local r = S.asyncs[#S.asyncs]
+    r.change, r.key = opts.change, opts.key
+  end)
   T.source("tools/html-probe/src/main.luau")(T.host)
+end
+
+-- W10: every click callback waiting answered `(made, why)`, each through the module's mailbox,
+-- as the host answers one on a later tick.
+function T.acted(made, why)
+  local cbs = S.actedCbs
+  S.actedCbs = {}
+  for _, cb in ipairs(cbs) do ran("acted", cb, made, why) end
+end
+-- The oldest read with a callback not answered yet, answered with `text` ("" reads nothing).
+function T.readNext(text)
+  for _, r in ipairs(S.reads) do
+    if not r.answered then
+      r.answered = true
+      S.epoch += 1
+      ran("answer", r.cb, { status = text ~= "" and "text" or "none", text = text, lines = {}, words = {} })
+      return r
+    end
+  end
+  error("no read is waiting: " .. T.dump())
+end
+-- The oldest picture asked of snapshotAsync, answered now with `info` (a plain one's by default);
+-- the snapshot it handed over.
+function T.picture(info)
+  local r = table.remove(S.asyncs, 1)
+  assert(r ~= nil, "no picture is waiting: " .. T.dump())
+  S.epoch += 1
+  local s = T.snap(r.region)
+  ran("answer", r.cb, s, nil, info or { waited = 0, frames = 1 })
+  return s
 end
 
 -- A key of the probe's pressed: the epoch turns over, and its callback runs as a handler.
@@ -275,9 +333,9 @@ fn the_probe_loads_with_its_keys_its_setting_and_its_page() {
     run(r##"
         local S = T.S
         T.probe()
-        T.ok(S.hotkeyFns[T.F7] and S.hotkeyFns[T.F8] and S.hotkeyFns[T.F9], "the three keys")
+        T.ok(S.hotkeyFns[T.F7] and S.hotkeyFns[T.F8] and S.hotkeyFns[T.F9] and S.hotkeyFns[T.F10], "the four keys")
         T.ok(S.hotkeyOpts[T.F8] and S.hotkeyOpts[T.F8].foreground == true, "F8 is Windows' own WM_HOTKEY")
-        T.ok(S.hotkeyOpts[T.F7] == false and S.hotkeyOpts[T.F9] == false, "the others arrive through the hook")
+        T.ok(S.hotkeyOpts[T.F7] == false and S.hotkeyOpts[T.F9] == false and S.hotkeyOpts[T.F10] == false, "the others arrive through the hook")
         local auto = S.defined.autoShow
         T.ok(auto and auto.default == false, "the automatic show is a setting, off by default")
         T.ok(T.has(auto.label, "test W2 c"), auto.label)
@@ -287,11 +345,11 @@ fn the_probe_loads_with_its_keys_its_setting_and_its_page() {
           "the same page in an application window")
         T.ok(#S.fgCbs == 1 and #S.focusCbs == 1, "one window trigger and one focus callback")
         T.ok(#S.pg.shows == 0 and #S.apg.shows == 0, "nothing is shown at load")
-        T.ok(T.count("[html-probe] revision 4 ready") == 1, "the revision, in the log at load")
+        T.ok(T.count("[html-probe] revision 5 ready") == 1, "the revision, in the log at load")
         T.ok(T.count("the page's button 'Show as an application window' shows it in a window of its own") == 1,
           "the start line says how to get the application window")
         local said = T.report()
-        T.ok(T.has(said, "HTML probe revision 4. The page's button Show as an application window"), said)
+        T.ok(T.has(said, "HTML probe revision 5. The page's button Show as an application window"), said)
     "##);
 }
 
@@ -875,5 +933,202 @@ fn a_switch_not_shown_keeps_the_page_in_use_and_a_way_back_gives_one_up() {
         T.ok(#S.apg.shows == shows and not S.apg.shown, "given up")
         said = T.report()
         T.ok(T.has(said, "the application window is ready: prepared, not shown"), said)
+    "##);
+}
+
+/// W10, the target: F10 remembers the pointer's point in the plug-in window as an offset into its
+/// client area and says it, and reads it afresh each press. Without a plug-in window it says so.
+#[test]
+fn f10_remembers_the_pointer_point_in_the_plugin_window() {
+    run(r##"
+        local S = T.S
+        T.probe()
+        -- No plug-in window in front: nothing remembered.
+        S.front = T.OTHER
+        T.turn()
+        T.key(T.F10)
+        T.ok(T.last() == "No plug-in window is in front." and T.count("no plug-in window is in front or remembered") == 1, T.last())
+        -- On the FX window, the pointer at 120,90 — 112,60 into its client area (8,30).
+        S.front = T.FX
+        S.cursor = { x = 120, y = 90 }
+        T.turn()
+        T.key(T.F10)
+        T.ok(T.last() == "Target remembered: 112, 60 in the plug-in window.", T.last())
+        T.ok(T.count("target remembered at 120,90 on screen (112,60 in the plug-in window") == 1, T.dump())
+    "##);
+}
+
+/// W10, the elements: "Read the plug-in's elements" dumps the plug-in window, keeps the named ones
+/// with a rectangle inside its client area (at most 60), and posts them to the page that asked —
+/// the remembered point first — each by name and type, those that share both marked, since a press
+/// acts on the first of them; how many share is in the log. Without a plug-in window it says so.
+#[test]
+fn reading_the_elements_posts_the_named_ones_inside_the_client_area() {
+    run(r##"
+        local S = T.S
+        T.probe()
+        T.shown()
+        S.cursor = { x = 120, y = 90 }
+        T.key(T.F10)
+        -- A dump with: a named button inside the client, one with no name, one off the client area,
+        -- a collapsed one, two buttons of the same name, and one of that name of another type. The
+        -- unnamed, the outside and the collapsed are left out.
+        S.dump = {
+          { name = "Bypass", ctype = 50000, bounds = { x = 100, y = 100, w = 40, h = 20 } },
+          { name = "", ctype = 50000, bounds = { x = 200, y = 100, w = 40, h = 20 } },
+          { name = "Off screen", ctype = 50000, bounds = { x = 2000, y = 100, w = 40, h = 20 } },
+          { name = "Collapsed", ctype = 50000, bounds = { x = 100, y = 200, w = 0, h = 0 } },
+          { name = "Preset", ctype = 50000, bounds = { x = 300, y = 100, w = 40, h = 20 } },
+          { name = "Preset", ctype = 50000, bounds = { x = 400, y = 100, w = 40, h = 20 } },
+          { name = "Preset", ctype = 50020, bounds = { x = 500, y = 100, w = 40, h = 20 } },
+        }
+        local posts = S.pg.posts
+        T.msg({ kind = "w10", ["do"] = "read" })
+        local last = posts[#posts]
+        T.ok(S.dumpedId == T.FX.id, "the remembered plug-in window was dumped")
+        T.ok(last.kind == "w10elements" and #last.elements == 4, "the named elements inside the client area")
+        T.ok(last.elements[1].value == "el:1" and last.elements[1].label == "Bypass (type 50000)", last.elements[1].label)
+        T.ok(last.elements[2].label == "Preset (type 50000), one of 2 alike: a press acts on the first of them", last.elements[2].label)
+        T.ok(last.elements[3].label == last.elements[2].label and last.elements[3].value == "el:3", "both marked")
+        T.ok(last.elements[4].label == "Preset (type 50020)", "another type is another element")
+        T.ok(last.target == "112, 60", "the remembered point goes with it")
+        T.ok(T.count("W10: 4 named element(s) of the plug-in inside its client area read; 2 of them share their name and type with another") == 1, T.dump())
+        -- The plug-in window gone: said, and nothing posted.
+        local n = #posts
+        S.listed = { T.MAIN, T.OTHER }
+        T.msg({ kind = "w10", ["do"] = "read" })
+        T.ok(T.last() == "No plug-in window remembered. Press F10 with the pointer on the control first.", T.last())
+        T.ok(#posts == n, "nothing posted")
+    "##);
+}
+
+/// W10, "Try it": a run with no plug-in window remembered says so and starts nothing; a bad or
+/// absent repeat count is one. (The acting ways themselves are measured live, with NVDA.)
+#[test]
+fn trying_without_a_plugin_window_says_so() {
+    run(r##"
+        local S = T.S
+        T.probe()
+        -- Nothing remembered, nothing in front: Try it says so.
+        S.front = T.OTHER
+        T.turn()
+        T.msg({ kind = "w10", ["do"] = "try", way = "post", target = "point", ["repeat"] = "20" })
+        T.ok(T.last() == "No plug-in window remembered. Press F10 with the pointer on the control first.", T.last())
+        T.ok(T.count("W10: try") == 0, "nothing was tried")
+        -- An unknown W10 request is logged, not run.
+        T.msg({ kind = "w10", ["do"] = "wat" })
+        T.ok(T.count("an unknown W10 request 'wat'") == 1, T.dump())
+    "##);
+}
+
+/// W10, one posted click, each step on the answer of the one before: the pointer on the target
+/// first — a control lit by it is lit in the baseline too — the read before, the baseline, the
+/// click posted to the plug-in window at the target, its answer on a later tick, the change wait
+/// against the baseline, the read after from the changed picture, and the result: a result line,
+/// said without cutting NVDA off, and in the report.
+#[test]
+fn a_posted_attempt_goes_step_by_step_and_says_what_happened() {
+    run(r##"
+        local S = T.S
+        T.probe()
+        T.shown()
+        S.cursor = { x = 120, y = 90 }
+        T.key(T.F10)
+        T.msg({ kind = "w10", ["do"] = "try", way = "post", target = "point", ["repeat"] = "1" })
+        T.ok(#S.moves == 1 and S.moves[1][1] == 120 and S.moves[1][2] == 90, "the pointer on the target before anything is read")
+        T.ok(#S.reads == 1 and S.reads[1].key == "w10" and T.region(S.reads[1].region) == "56,30,184,154", T.dump())
+        T.ok(#S.asyncs == 0 and #S.acts == 0, "nothing pictured or clicked before the read is answered")
+        T.readNext("Basic Saw")
+        T.ok(#S.asyncs == 1 and S.asyncs[1].change == nil, "the baseline")
+        local base = T.picture()
+        T.ok(#S.acts == 1, "one click")
+        local a = S.acts[1]
+        T.ok(a.x == 120 and a.y == 90 and a.via == "post" and a.window == T.FX.id and a.move == nil,
+          "posted to the plug-in window at the target")
+        T.ok(#S.asyncs == 0, "no change wait before the click is answered")
+        T.acted(true)
+        local w = S.asyncs[1]
+        T.ok(#S.asyncs == 1 and w.change and w.change.from == base and w.change.settle == 150 and w.change.timeout == 1500,
+          "the change wait, against the baseline")
+        T.picture({ waited = 210, frames = 6, changed = true, settled = true })
+        T.ok(base.released, "the baseline let go of")
+        T.ok(#S.reads == 2 and S.reads[2].key == "w10after" and S.reads[2].snapshot ~= nil, "the read after, from the changed picture")
+        T.readNext("Bright Lead")
+        local want = 'W10 post on the remembered point (1/1): made; front: the page throughout; picture: changed, settled 210 ms '
+          .. 'after the wait began (the last 150 ms of them still); text: "Basic Saw" to "Bright Lead"; state: —'
+        T.ok(T.count("RESULT " .. want) == 1, T.dump())
+        T.ok(T.last() == want and S.speech[#S.speech].interrupt == false, "said without cutting NVDA off: " .. T.last())
+        T.ok(T.has(T.report(), want), "and in the report")
+    "##);
+}
+
+/// W10, a series: ten posted clicks, each attempt only once the one before has been answered, the
+/// pointer on the target before each; the attempts in the log, and one summary at the end — a
+/// result, said once. The run is over then: the next "Try it" is not ignored.
+#[test]
+fn a_series_of_ten_ends_in_one_summary() {
+    run(r##"
+        local S = T.S
+        T.probe()
+        T.shown()
+        T.key(T.F10)
+        T.msg({ kind = "w10", ["do"] = "try", way = "post", target = "point", ["repeat"] = "10" })
+        for i = 1, 10 do
+          T.ok(#S.acts == i - 1 and #S.moves == i, "attempt " .. i .. " waits for the one before")
+          T.readNext("Preset " .. i)
+          T.picture()
+          T.acted(true)
+          T.picture({ waited = 200, frames = 5, changed = i ~= 7, settled = i ~= 7 })
+          T.readNext(i == 7 and ("Preset " .. i) or ("Preset " .. (i + 1)))
+        end
+        T.ok(#S.acts == 10 and #S.moves == 10, "ten clicks")
+        T.ok(T.count("[html-probe] W10 post on the remembered point (10/10): made") == 1
+          and T.count("RESULT W10 post on the remembered point (") == 0, "each attempt in the log, none a result of its own")
+        T.ok(T.count("(7/10): made; front: the page throughout; picture: no change; text: unchanged") == 1, T.dump())
+        local summary = "W10 post on the remembered point x10: made 10, picture changed 9, text changed 9, front kept 10"
+        T.ok(T.count("RESULT " .. summary) == 1, T.dump())
+        T.ok(T.last() == summary, T.last())
+        T.msg({ kind = "w10", ["do"] = "try", way = "post", target = "point", ["repeat"] = "1" })
+        T.ok(T.count("W10: try 'post' on target 'point', 1 time(s)") == 1 and T.count("while a run is under way") == 0, T.dump())
+    "##);
+}
+
+/// W10, the round trip as W3's: the plug-in window asked to the front and nothing clicked until it
+/// is there; the click at the target on its arrival, then the change wait, and the page back only
+/// once that wait has answered — so the click never lands after the page is back. The report says
+/// a run that waits for the plug-in window; F7 gives it up, and the window's arrival then clicks
+/// nothing.
+#[test]
+fn the_round_trip_clicks_on_the_plugins_arrival_and_brings_the_page_back_after_the_wait() {
+    run(r##"
+        local S = T.S
+        T.probe()
+        T.shown()
+        T.key(T.F10)
+        local shows = #S.pg.shows
+        T.msg({ kind = "w10", ["do"] = "try", way = "round", target = "point", ["repeat"] = "1" })
+        T.ok(#S.moves == 1, "the pointer on the target first")
+        T.readNext("Basic Saw")
+        T.picture()
+        T.ok(S.focusCalls[#S.focusCalls] == T.FX.id, "the plug-in window asked to the front")
+        T.ok(#S.clicks == 0 and #S.asyncs == 0 and #S.pg.shows == shows, "nothing clicked or shown before it is there")
+        T.ok(T.has(T.report(), "A W10 run is under way, 0 of 1 done, waiting for the plug-in window to come to the front"), T.last())
+        T.arrive(T.FX)
+        T.ok(#S.clicks == 1 and S.clicks[1][1] == 120 and S.clicks[1][2] == 90, "clicked at the target once it is in front")
+        T.ok(#S.asyncs == 1 and S.asyncs[1].change ~= nil and #S.pg.shows == shows, "the change wait, the page still away")
+        T.picture({ waited = 180, frames = 4, changed = true, settled = true })
+        T.ok(#S.pg.shows == shows + 1 and S.pg.shows[#S.pg.shows].focus == true, "the page back once the wait answered")
+        T.readNext("Bright Lead")
+        T.ok(T.count("RESULT W10 round on the remembered point (1/1): made; front: changed — now the page;") == 1, T.dump())
+        -- Another, given up by F7 while it waits for the plug-in window.
+        T.msg({ kind = "w10", ["do"] = "try", way = "round", target = "point", ["repeat"] = "1" })
+        T.readNext("Bright Lead")
+        local base = T.picture()
+        T.key(T.F7)
+        T.ok(T.count("W10: the run of 'round' given up by F7 after 0 of 1 attempt(s)") == 1, T.dump())
+        T.ok(base.released, "its baseline let go of")
+        local clicks = #S.clicks
+        T.arrive(T.FX)
+        T.ok(#S.clicks == clicks, "nothing clicked for a run given up")
     "##);
 }

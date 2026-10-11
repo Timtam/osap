@@ -6794,7 +6794,7 @@ maintainer's German test instructions are a text of their own, not in the reposi
       region and the host's speech in one callback — he heard it once; NVDA may get both and drop
       the first. Which of the two was heard, and whether the host's interrupting speech cancels the
       live region's or one of them never reaches NVDA, is open.
-- [ ] **W3: acting in the plug-in without the round trip** (2026-10-11). Each action that brings
+- [x] **W3: acting in the plug-in without the round trip** (2026-10-11). Each action that brings
       the plug-in window forward and the page back is heard: NVDA announces the focus leaving the
       page and coming back, and says the selected element of the page again — irritating, the
       maintainer says. To research before stage 2's `o:inPlugin` is built on the round trip: acting
@@ -6808,6 +6808,58 @@ maintainer's German test instructions are a text of their own, not in the reposi
       Qt (Kontakt), and a plug-in embedded in its DAW's window (Ableton Live); screen reads of a
       covered window as well (`PrintWindow`, a window capture rather than the screen's). What is
       found goes into stage 2's design; the round trip stays the way that works everywhere.
+
+      **Researched and built (2026-10-11), the maintainer's decision: the click function takes a
+      parameter, so a module decides per call and can try each way itself.** `host.input.click`'s
+      `via = "post"` (messages posted to the window) and `via = "noactivate"` (the window's
+      top-level window given `WS_EX_NOACTIVATE` on a thread of the host's, with a ledger beside the
+      executable so a crash gives the style back at the next start), and `host.element.press` (UIA
+      Invoke/Toggle/DoDefaultAction with `AutoSetFocus` off, a trailing callback like recognize's).
+      The documented default stays the click it always was; macOS answers "not supported on this
+      platform yet". Measured from the page by the HTML probe's W10 (below); the round trip stays
+      the fallback. The no-activate style is tested now, the maintainer's decision of the same day,
+      not after a test on windows of our own as the research had it. The research notes
+      (`click-noact-plan.md`, `…-windows.md`, `…-frameworks.md`) are the session's, not in the
+      repository.
+- [ ] **Run W10 live** (revision 5) — the maintainer, with NVDA, in REAPER; the probe build
+      started with `tools\html-probe`, then the log. For each control: put the pointer on it (NVDA's
+      "move mouse to navigator object", or a module's overlay whose click leaves the pointer there),
+      press Ctrl+Shift+Win+Alt+F10 ("Target remembered: X, Y …"), then on the page "Read the
+      plug-in's elements", pick the target, the way and the count, and "Try it". The result is said
+      without cutting NVDA off, and the `[html-probe]` lines — `W10 <way> on <label> …: made; front:
+      …; picture: …; text: …; state: …`, and a summary `… x20: made 20, picture changed 19, …` for
+      a series — go into the log. What to listen for, above the measurements: does NVDA stay in the
+      page (the quiet ways), or does it announce the focus leaving and coming back (the round trip)?
+      The guide for the session (not in the repository): the scratchpad's `html-probe-tests-r5.md`.
+      - **ReaEQ (REAPER's own, Win32/WDL):** a checkbox. "Nothing — only watch" first (does it
+        change by itself?), then the round trip (the reference NVDA chatter), Posted click, Posted
+        click pointer stays, The no-activate style, Accessibility press — each twice, so the
+        checkbox ends as it began. Does REAPER's control take a posted click and a press while its
+        dialog is not active, and does a real click with the style leave the page in front? The FX
+        window floating: a docked one is part of REAPER's main window, which the style refuses.
+      - **An accessible JUCE plug-in** (ON:EAR, BBC Symphony Orchestra, Albion Colossus, Bass
+        Sculptor): an element that is a button — Accessibility press, Posted click, The no-activate
+        style.
+      - **VPS Avenger (JUCE, no accessibility):** the pointer on ◀ ▶ with the Avenger overlay;
+        Posted click x20, Posted click pointer stays x20, The no-activate style x20, round trip x5
+        (the counts answer JUCE's WM_MOUSELEAVE race, and whether a real click with the style
+        brings Avenger forward itself). Then MENU by a posted click once — expected: no menu stays
+        open (JUCE closes it when REAPER is not in front).
+      - **Kontakt 8 (Qt):** a button by pointer, via the Kontakt overlay: Posted click, Posted
+        click pointer stays, The no-activate style. Kontakt in a DAW is a UIA leaf, so the press has
+        no element.
+      - **The FX window set to always on top** (REAPER's pin): the ReaEQ posted click and the
+        no-activate style once more — a topmost window's focus events pass NVDA's filter, so this
+        is where a click without the front could be heard after all.
+      With the W10 lines go the `[input]` ones of the style: `window … given the no-activate style
+      …`, `clicked window … without activating it`, any `click … (via = "noactivate") refused: …`,
+      and `… given back — another window came to the front` once F7 has taken the keyboard back to
+      the plug-in — the style held from the first such click until then. Then into the reference:
+      Posted that keeps the front and arrives in a plug-in class → a module for that class may
+      click without the front there (stage 2); the style keeping the front where a posted click is
+      lost → that way for that class, its holding and giving back as the log shows it; "pointer
+      stays" losing clicks in JUCE → the experimental `move` option goes; Press arriving without a
+      front change → it is the first choice where a plug-in exposes its controls.
 - [x] **A page in a window like any program's: `window = "app"`** (the maintainer's decision after
       W6, 2026-10-11 — modules are to be flexible, and a whole interface in HTML, CSS and JS is not
       far-fetched). `host.gui.webview{ …, window = "tool" | "app" }`, the tool page by default; what
