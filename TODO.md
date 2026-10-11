@@ -3,6 +3,30 @@
 Project backlog for the cross-platform automation platform.
 Architecture and feasibility foundation: [docs/architecture-feasibility-study.md](docs/architecture-feasibility-study.md).
 
+## API rule: failures are typed, not sentences (2026-10-11, from the maintainer)
+
+- [ ] **Replace every reason given as plain text with an error type.** The maintainer, on seeing
+      `page:show()` answer `false, "not ready yet"`: "das ist höchst fehleranfällig. zukünftig
+      stellen wir in allen solchen fällen auf error typen um." Today many calls answer a failure as
+      a second value that is an English sentence, and a module that wants to react has to compare
+      that sentence, which breaks the moment the wording is improved and invites matching on parts
+      of it. Examples: host.gui's show/prepare/focus/hide ("not ready yet", "WebView2 runtime not
+      installed", "not supported on this platform yet", the refusals of the foreground),
+      host.screen's snapshot reads ("the point is not inside the snapshot", "a newer request with
+      the same key ...", budget refusals), the keyed callbacks of recognize and profile, settings
+      and element calls, and the overlay runtime's own answers. To do: (1) inventory every such
+      return in the host and the runtime (grep the docs for `nil, "` and `false, "`, and the Rust
+      bindings for the strings they build); (2) decide one shape for all of them, e.g. a typed error
+      value with a stable `code` a module compares (`err.code == "not_ready"`, or constants such as
+      `host.gui.errors.NOT_READY`) and a human `message` for the log, also on the page's side
+      (platform.post replies); (3) convert all at once, document the codes per function in
+      docs/api, list the change in "For the first release's changelog" below, and update the
+      in-tree modules, tools and examples that compare reasons; (4) review the status words that are
+      already a closed set (a reading's `status`: "text", "blank", "none", "failed", "stale") in the
+      same step, so the result is one consistent rule. New APIs built before the conversion (the
+      click parameter of W10, host.element.press, the macOS page) keep the current style so the
+      conversion catches everything in one sweep.
+
 ## For the first release's changelog
 
 There is no CHANGELOG file yet. What the first release has to name — API removed or changed so
