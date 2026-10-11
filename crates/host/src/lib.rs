@@ -6,7 +6,8 @@
 //! bound to that module's root + the shared services.
 
 /// What a module asks of another program that the host does on a thread of its own, and the
-/// way its outcome comes back — `host.input.click`'s ways and their callback; see the file.
+/// way its outcome comes back — `host.input.click`'s ways and `host.element.press`, and their
+/// callbacks; see the file.
 mod acting;
 mod backend;
 /// Which build is running: the executable's commit and the package's. See the file.
@@ -1734,9 +1735,9 @@ impl Shared {
         }
     }
 
-    /// The outcomes of what modules asked other programs for on a thread of the host's — a click
-    /// made without the front, or refused there — each to its module's mailbox, in the lane it was
-    /// asked from, for the callback that waits for it (acting.rs). Both ticks drive it.
+    /// The outcomes of what modules asked other programs for, for the callbacks that wait for them —
+    /// a click made, or refused, an element pressed — each to its module's mailbox, in the lane it
+    /// was asked from (acting.rs). Both ticks drive it.
     fn fire_acted(&self) {
         for due in self.acting.take_due() {
             let _prio = ocr::types::enter_priority(due.prio);
@@ -5315,8 +5316,8 @@ impl Manager {
                         let t = std::time::Instant::now();
                         shared.fire_snapshot_results();
                         let snapshots_ms = t.elapsed().as_millis();
-                        // What modules asked other programs for on a thread of the host's
-                        // (acting.rs): a click made without the front, or refused there.
+                        // The outcomes of what modules asked other programs for, for their
+                        // callbacks (acting.rs): a click made or refused, an element pressed.
                         let t = std::time::Instant::now();
                         shared.fire_acted();
                         let acted_ms = t.elapsed().as_millis();
@@ -7670,6 +7671,36 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                     Ok(Some(t))
                 }
                 None => Ok(None),
+            }
+        })?,
+    )?;
+    // host.element.press(hwnd, name, controlType, cb?) -> true | false, why — or nothing with a
+    // callback. The element's own action (Invoke, Toggle, the default action), the keyboard focus
+    // left where it is (backend/uia.rs). Without a callback on the event loop, as every call here;
+    // with one on the host's element-press thread, the outcome to the callback on a later tick
+    // (acting.rs) — recognize's model, no second function.
+    let sh = shared.clone();
+    uia.set(
+        "press",
+        lua.create_function(move |lua, (hwnd, name, ctype, cb): (isize, String, i32, mlua::Value)| {
+            host_call!("host.element.press");
+            let cb = acting::callback("host.element.press", cb)?;
+            let press = sh.backend.element_press_fn();
+            // At once: a picture of this module's still out may show it (said once in the log).
+            sh.note_acting(lua, "host.element.press");
+            sh.bump_input_epoch();
+            match cb {
+                Some(cb) => {
+                    let answer = acting::Answer { idx, lua: lua.clone(), cb, what: "element.press" };
+                    sh.acting.run(acting::Lane::Element, Box::new(move || press(hwnd, &name, ctype)), Some(answer));
+                    Ok(mlua::MultiValue::new())
+                }
+                None => {
+                    let t = Instant::now();
+                    let pressed = press(hwnd, &name, ctype);
+                    slow_observation("uia.press", &name, t);
+                    acting::outcome_values(lua, pressed)
+                }
             }
         })?,
     )?;
@@ -10565,6 +10596,17 @@ mod ocr_wiring_tests {
         assert!(body(LIB, "fn stop_guard(&mut self)").contains("self.shared.give_back_activation_at_exit();"));
         let exit = body(LIB, "fn give_back_activation_at_exit(&self)");
         assert!(exit.contains("self.acting.run_and_wait(acting::Lane::Style, job, GIVE_BACK_AT_EXIT);"));
+        // host.element.press: noted as acting; with a callback on its own lane, its answer with it;
+        // without one, on the event loop, as every other host.element call.
+        let press = bindings(api, "uia").into_iter().find(|b| b.0 == "press").expect("host.element.press").1;
+        for part in [
+            "sh.note_acting(lua, \"host.element.press\");",
+            "acting::callback(\"host.element.press\", cb)?",
+            "sh.acting.run(acting::Lane::Element, Box::new(move || press(hwnd, &name, ctype)), Some(answer));",
+            "let pressed = press(hwnd, &name, ctype);",
+        ] {
+            assert!(press.contains(part), "host.element.press: `{part}`");
+        }
         let new = body(LIB, "pub fn new() -> Result<Self>");
         let left = new.find("give_back_left_over_activation()").expect("the last run's styles are not given back");
         assert!(left < new.find("shared.reload_hotkey_id.set(").expect("the reload key"), "given back before any module loads");

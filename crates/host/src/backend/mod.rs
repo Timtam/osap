@@ -832,7 +832,7 @@ pub enum MouseButton {
 }
 
 /// What a way of acting answers on a platform that does not have it yet: `host.input.click`'s
-/// `via = "post"` and `via = "noactivate"`, on a Mac for now.
+/// `via = "post"` and `via = "noactivate"`, and `host.element.press`, on a Mac for now.
 pub const NOT_YET: &str = "not supported on this platform yet";
 
 /// What a click for a `window` is refused with when another window is drawn over its point.
@@ -843,6 +843,16 @@ pub const COVERED: &str = "something else is drawn over the point";
 /// so must never run on the event loop. `Ok` when it was done; `Err` with what a module is told.
 /// Runs once, on a thread with nothing else of the host's on it.
 pub type ActJob = Box<dyn FnOnce() -> Result<(), String> + Send>;
+
+/// `host.element.press`'s work: the element of window `hwnd` with that name and control type
+/// asked to perform its action, the keyboard focus left where it is. A plain function, so the host
+/// calls it on the event loop and on a thread of its own alike; `Err` with what a module is told.
+pub type PressFn = fn(isize, &str, i32) -> Result<(), String>;
+
+/// [`PressFn`] where there is no way to press yet.
+fn press_not_yet(_hwnd: isize, _name: &str, _control_type: i32) -> Result<(), String> {
+    Err(NOT_YET.to_string())
+}
 
 /// Which windows an event gives their activation back to — see
 /// [`Backend::give_back_activation`].
@@ -1066,6 +1076,12 @@ pub trait Backend {
     /// none. For the same thread as the clicks, before any of them.
     fn give_back_left_over_activation(&self) -> Option<ActJob> {
         None
+    }
+
+    /// `host.element.press`'s work ([`PressFn`]), for the event loop or a thread of the host's.
+    /// The default is a platform without it, which answers [`NOT_YET`].
+    fn element_press_fn(&self) -> PressFn {
+        press_not_yet
     }
 
     /// Child controls (descendant windows) of a top-level window, for detecting

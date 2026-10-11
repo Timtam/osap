@@ -1289,6 +1289,10 @@ impl Backend for WindowsBackend {
         super::click_win::left_over_job()
     }
 
+    fn element_press_fn(&self) -> super::PressFn {
+        super::uia::element_press
+    }
+
     fn window_controls(&self, hwnd_val: isize) -> Vec<ControlInfo> {
         let mut hwnds: Vec<isize> = Vec::new();
         unsafe {

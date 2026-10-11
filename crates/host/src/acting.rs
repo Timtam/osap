@@ -3,10 +3,14 @@
 //!
 //! **Why a thread.** Some ways of acting wait for the other program: giving a window of another
 //! program the no-activate style (`host.input.click`'s `via = "noactivate"`) sends that program's
-//! thread a message and waits for its answer, with no bound Windows lets us set. Nothing that can
-//! wait for another program runs on the event loop, which carries every key a person presses, so
-//! such work is a job ([`crate::backend::ActJob`]) for a thread of the host's — one per [`Lane`],
-//! started at its first job, each lane's jobs in the order they were handed over.
+//! thread a message and waits for its answer, with no bound Windows lets us set; pressing an
+//! element (`host.element.press`) is a call into the program's accessibility provider, which runs
+//! on the program's own thread and answers when that thread gets to it. Nothing that can wait for
+//! another program runs on the event loop, which carries every key a person presses, so such work
+//! is a job ([`crate::backend::ActJob`]) for a thread of the host's — one per [`Lane`], started
+//! at its first job, each lane's jobs in the order they were handed over. (A press without a
+//! callback is the exception the module chose: it runs on the event loop, as every other
+//! `host.element` call does.)
 //!
 //! **The way back.** A module that hands over a callback gets the outcome on a later tick: the
 //! thread sends it here, the tick takes it ([`Acting::take_due`]) and hands it to the module's
@@ -36,22 +40,26 @@ pub(crate) enum Lane {
     /// Windows' styles: a click with `via = "noactivate"`, the style it gives, and giving it back.
     /// One thread, so a style is given back only after every click handed over before.
     Style = 0,
+    /// Accessibility actions: `host.element.press` with a callback. Apart from the styles, so a
+    /// press that waits for a slow plug-in holds no click up.
+    Element = 1,
 }
 
 /// How many lanes there are.
-const LANES: usize = 1;
+const LANES: usize = 2;
 
 impl Lane {
     /// Its thread's name.
     fn thread(self) -> &'static str {
         match self {
             Lane::Style => "window-style",
+            Lane::Element => "element-press",
         }
     }
 }
 
 /// Who an outcome is for: a module's callback, in the VM it came from, and the name its handler's
-/// errors are reported under (`"input.click"`).
+/// errors are reported under (`"input.click"`, `"element.press"`).
 pub(crate) struct Answer {
     pub idx: usize,
     pub lua: Lua,

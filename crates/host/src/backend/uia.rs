@@ -3,7 +3,7 @@
 //! class match alone is ambiguous — e.g. sforzando exposes a Pane (ControlType
 //! 50033) named "PlogueXMLGUI", which ReaHotkey also keys on.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use super::DumpNode;
 use windows::core::{Interface, BSTR, VARIANT};
@@ -12,7 +12,8 @@ use windows::Win32::UI::Accessibility::{
     IUIAutomation2,
     CUIAutomation8,
     CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
-    IUIAutomationLegacyIAccessiblePattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
+    IUIAutomationInvokePattern, IUIAutomationLegacyIAccessiblePattern, IUIAutomationTogglePattern,
+    IUIAutomationTreeWalker,
     TreeScope_Descendants, TreeScope_Subtree, UIA_BoundingRectanglePropertyId,
     UIA_ClassNamePropertyId, UIA_ControlTypePropertyId, UIA_NamePropertyId, UIA_PATTERN_ID,
 };
@@ -22,7 +23,10 @@ use windows::Win32::System::Com::{
 
 thread_local! {
     // UIA interfaces are thread-affine; cache per thread, created on first use.
-    static AUTOMATION: RefCell<Option<IUIAutomation>> = RefCell::new(None);
+    static AUTOMATION: RefCell<Option<IUIAutomation>> = const { RefCell::new(None) };
+    // Whether this thread's automation object leaves the keyboard focus where it is when it acts
+    // (`automation`): an action is made only when it does.
+    static ACTS_IN_PLACE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// How long a single cross-process UIA call may take before it is given up on.
@@ -128,11 +132,22 @@ fn automation(cell: &RefCell<Option<IUIAutomation>>) -> std::cell::RefMut<'_, Op
                 Ok(a2) => unsafe {
                     let _ = a2.SetConnectionTimeout(UIA_TIMEOUT_MS);
                     let _ = a2.SetTransactionTimeout(UIA_TIMEOUT_MS);
+                    // An action (`element_press`) leaves the keyboard focus where it is. UIA's
+                    // default moves it to the element first, which takes the keyboard from the
+                    // window in front — a page beside the plug-in — and is heard. Set where the
+                    // object is made, before anything acts; nothing before the press acted.
+                    let in_place = a2.SetAutoSetFocus(false).is_ok();
+                    ACTS_IN_PLACE.with(|c| c.set(in_place));
                     crate::logging::line(
                         "uia",
                         &format!(
                             "accessibility call timeout set to {UIA_TIMEOUT_MS} ms for this \
-                             thread (the default is about two minutes)"
+                             thread (the default is about two minutes); {}",
+                            if in_place {
+                                "an action leaves the keyboard focus where it is"
+                            } else {
+                                "an action could not be kept from moving the keyboard focus, so none is made"
+                            }
                         ),
                     );
                 },
@@ -299,6 +314,91 @@ pub fn element_locate_via(
         }
         Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2))
     })
+}
+
+/// What `host.element.press` is told for an accessibility call that failed with `code`.
+pub(super) fn press_failure(code: i32) -> String {
+    match code as u32 {
+        0x8007_0005 => "the program runs with higher rights".to_string(),
+        // UIA_E_TIMEOUT: the program did not answer within the bound `automation` sets.
+        0x8013_1505 => format!("the program did not answer within {UIA_TIMEOUT_MS} ms"),
+        // UIA_E_ELEMENTNOTAVAILABLE.
+        0x8004_0201 => "the element is gone".to_string(),
+        // UIA_E_ELEMENTNOTENABLED.
+        0x8004_0200 => "the element is not enabled".to_string(),
+        // UIA_E_INVALIDOPERATION, UIA_E_NOTSUPPORTED.
+        0x8013_1509 | 0x8004_0204 => "the element cannot be pressed".to_string(),
+        // RPC_E_DISCONNECTED, RPC_S_SERVER_UNAVAILABLE, RPC_S_CALL_FAILED: its process went.
+        0x8001_0108 | 0x8007_06BA | 0x8007_06BE => "the program is gone".to_string(),
+        other => format!("the program did not take the action (0x{other:08x})"),
+    }
+}
+
+/// `host.element.press`: the first element of `hwnd`'s tree with that Name and ControlType — as
+/// `element_find` finds it, an empty name being any of the type — asked to perform its action:
+/// Invoke, else Toggle, else LegacyIAccessible's default action, the first the element offers.
+/// The keyboard focus stays where it is (`automation`), so the window in front keeps it.
+///
+/// Every step is a call into the other program, each bounded by `UIA_TIMEOUT_MS`; a provider that
+/// acts before it answers (a Win32 button whose action opens a dialog, JUCE's handler) can take
+/// the whole bound. On the event loop this holds it, as every other call here does; the host
+/// runs it on a thread of its own when the module hands over a callback. `Ok` says the program
+/// accepted the action, not that it did what the module wanted. One log line either way.
+pub fn element_press(hwnd: isize, name: &str, control_type: i32) -> Result<(), String> {
+    // SAFETY: a local question about a handle, which a stale one answers no to.
+    if hwnd == 0 || unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd as _) } == 0 {
+        return Err("the window is gone".into());
+    }
+    let pressed = AUTOMATION.with(|cell| unsafe {
+        let borrow = automation(cell);
+        let Some(automation) = borrow.as_ref() else {
+            return Err("this system's accessibility interface could not be reached".to_string());
+        };
+        if !ACTS_IN_PLACE.with(|c| c.get()) {
+            return Err("this system cannot press an element without moving the keyboard focus to it".to_string());
+        }
+        let fail = |e: windows::core::Error| press_failure(e.code().0);
+        let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).map_err(fail)?;
+        let v_ctype: VARIANT = control_type.into();
+        let mut cond = automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &v_ctype).map_err(fail)?;
+        if !name.is_empty() {
+            let v_name: VARIANT = BSTR::from(name).into();
+            let cond_name = automation.CreatePropertyCondition(UIA_NamePropertyId, &v_name).map_err(fail)?;
+            cond = automation.CreateAndCondition(&cond_name, &cond).map_err(fail)?;
+        }
+        // A search that finds nothing answers no element, which windows-rs turns into an error
+        // without a failure code of the program's: that one is "not found".
+        let el = match root.FindFirst(TreeScope_Subtree, &cond) {
+            Ok(el) => el,
+            Err(e) if e.code().is_err() && e.code().0 as u32 != 0x8000_4003 => return Err(fail(e)),
+            Err(_) => return Err("no such element".to_string()),
+        };
+        // Invoke (10000), else Toggle (10015), else LegacyIAccessible's default action (10018) — the
+        // last only when the element names one.
+        if let Some(p) = el.GetCurrentPattern(UIA_PATTERN_ID(10000)).ok().and_then(|u| u.cast::<IUIAutomationInvokePattern>().ok()) {
+            return p.Invoke().map(|()| "Invoke").map_err(fail);
+        }
+        if let Some(p) = el.GetCurrentPattern(UIA_PATTERN_ID(10015)).ok().and_then(|u| u.cast::<IUIAutomationTogglePattern>().ok()) {
+            return p.Toggle().map(|()| "Toggle").map_err(fail);
+        }
+        if let Some(p) = el
+            .GetCurrentPattern(UIA_PATTERN_ID(10018))
+            .ok()
+            .and_then(|u| u.cast::<IUIAutomationLegacyIAccessiblePattern>().ok())
+        {
+            let action = p.CurrentDefaultAction().map(|b| b.to_string()).unwrap_or_default();
+            if !action.trim().is_empty() {
+                return p.DoDefaultAction().map(|()| "its default action").map_err(fail);
+            }
+        }
+        Err("the element cannot be pressed".to_string())
+    });
+    let what = if name.is_empty() { format!("the first element of type {control_type}") } else { format!("'{name}' (type {control_type})") };
+    match &pressed {
+        Ok(how) => crate::logging::line("uia", &format!("pressed {what} in window {hwnd} by {how}, the keyboard focus left where it was")),
+        Err(why) => crate::logging::line("uia", &format!("could not press {what} in window {hwnd}: {why}")),
+    }
+    pressed.map(|_| ())
 }
 
 /// An element's on-screen rectangle, or all zeros when it has none.
@@ -871,3 +971,35 @@ pub fn element_focus_step(hwnd: isize, direction: i32) -> Option<super::FocusSte
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An action that failed is said in the words a module is told: rights, time, the element, the
+    /// program; anything else with its code.
+    #[test]
+    fn a_failed_press_says_why_in_words() {
+        assert_eq!(press_failure(0x8007_0005_u32 as i32), "the program runs with higher rights");
+        assert_eq!(press_failure(0x8013_1505_u32 as i32), "the program did not answer within 1000 ms");
+        assert_eq!(press_failure(0x8004_0201_u32 as i32), "the element is gone");
+        assert_eq!(press_failure(0x8004_0200_u32 as i32), "the element is not enabled");
+        assert_eq!(press_failure(0x8013_1509_u32 as i32), "the element cannot be pressed");
+        assert_eq!(press_failure(0x8007_06BA_u32 as i32), "the program is gone");
+        assert_eq!(press_failure(0x8000_4005_u32 as i32), "the program did not take the action (0x80004005)");
+    }
+
+    /// The focus stays where it is: the automation object of every thread is made with UIA's
+    /// automatic focus off, and a press is refused on one where that could not be done.
+    #[test]
+    fn an_action_leaves_the_focus_where_it_is() {
+        const SRC: &str = include_str!("uia.rs");
+        let made = &SRC[SRC.find("fn automation(").unwrap()..SRC.find("fn find_element(").unwrap()];
+        assert!(made.contains("a2.SetAutoSetFocus(false).is_ok()") && made.contains("ACTS_IN_PLACE.with(|c| c.set(in_place));"));
+        let press = &SRC[SRC.find("pub fn element_press(").unwrap()..SRC.find("/// An element's on-screen rectangle").unwrap()];
+        assert!(press.find("ACTS_IN_PLACE.with(|c| c.get())").unwrap() < press.find("ElementFromHandle").unwrap());
+        // Invoke first, Toggle second, the default action last.
+        let (i, t, d) = (press.find("Invoke()").unwrap(), press.find("Toggle()").unwrap(), press.find("DoDefaultAction()").unwrap());
+        assert!(i < t && t < d);
+        assert!(!press.contains("SetFocus("), "a press never moves the focus itself");
+    }
+}

@@ -4,8 +4,8 @@
 //! **Every event of a module comes through here** — a hotkey, a captured key, a controller event,
 //! a timer, a window trigger's activation, the report of the window already in front, a focus
 //! change, the answer to a read, an image search or a snapshot, a setting's `onChange`, a page's
-//! message, `onReady` and `onClose` (`webview_lua.rs`), the outcome of a click made on a thread of
-//! the host's (`acting.rs`) — and runs as a handler of its VM. A module
+//! message, `onReady` and `onClose` (`webview_lua.rs`), the outcome of a click or an element's press
+//! a module handed a callback (`acting.rs`) — and runs as a handler of its VM. A module
 //! that has no handler and nothing queued is free, and its event runs at once, as a callback always
 //! did. A module is busy while its handler waits, while its mailbox is not empty, or while any
 //! module's handler is on the host's stack: no handler starts inside another. A busy module's

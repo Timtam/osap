@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 178 entries.
+Every call the platform offers a module, in one place. 179 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -181,6 +181,7 @@ Querying the accessibility tree an application publishes.
 | [`host.element.locate(hwnd, name, controlType)`](element#host-element-locate) | Finds the first UIA element in window `hwnd` matching `name` + `controlType` and returns the screen-pixel centre of its… |
 | [`host.element.locateVia(hwnd, viaName, viaType, name, controlType)`](element#host-element-locatevia) | Like `locate`, but in two levels |
 | [`host.element.pluginLocate(hwnd, containerName, name, controlType)`](element#host-element-pluginlocate) | Like `locate`, but for a plugin hosted inside another application. |
+| [`host.element.press(hwnd, name, controlType, cb?)`](element#host-element-press) | **This one acts.** It asks an element of `hwnd` to perform its own action, the one a screen reader's "activate" uses |
 | [`host.element.rawDump(hwnd)`](element#host-element-rawdump) | Diagnostic counterpart to `host.element.dump`, walking the **raw** tree instead of a condition-based search, so it crosses… |
 | [`host.element.stateProbe(hwnd, containerName, name, controlType)`](element#host-element-stateprobe) | Asks a named element what it reports about its **own** state, rather than inferring one from its control type. |
 | [`host.element.type`](element#host-element-type) | The UIA ControlType ids by name |

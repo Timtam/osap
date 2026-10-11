@@ -10,7 +10,7 @@ It is the first thing to try on a new plug-in, because a tree gives names and re
 
 Two shapes account for nearly all the use of it. **Identity**, where `findAny` asks "which of these names is present" and reports *which*, so Kontakt learns the version it is attached to from the same call that recognises it at all. And **geometry**, where `locate` and `pluginLocate` hand back a point to click — ON:EAR is driven entirely off the rectangles in a `rawDump`, its five identically named preset slots picked out as the only elements sharing an exact left edge.
 
-It is a cross-process query and it is not free: a 53-element window takes about 30 ms to walk, and took 211 ms before the backend learned to fetch a node's properties in one request, while a raw walk into a hosted plug-in has measured 60–300 ms against a pixel's 17 through the standard path. Detection and activation can afford that; a focus step cannot. Every call runs on the event loop and holds it for that long.
+It is a cross-process query and it is not free: a 53-element window takes about 30 ms to walk, and took 211 ms before the backend learned to fetch a node's properties in one request, while a raw walk into a hosted plug-in has measured 60–300 ms against a pixel's 17 through the standard path. Detection and activation can afford that; a focus step cannot. Every call runs on the event loop and holds it for that long — but [`press`](#host-element-press) handed a callback, which runs on a thread of the host's.
 
 `find`, `findAny` and `pluginLocate` are asked once per [epoch](./timer.md#host-epoch): a second identical call in the same epoch gets the first answer, a `false` or `nil` included, without asking the application again. The epoch turns over on OS events, on a `host.timer.after` callback coming due, on image results and on input the platform drives — but not on a [`host.timer.every`](./timer.md#host-timer-every) tick, so a poll can be handed an answer asked before the tick, and not on [`host.input.post`](./input.md#host-input-post), so a check repeated after a posted key in the same callback sees the answer from before it. The other calls here are asked afresh every time.
 
@@ -389,3 +389,33 @@ Not implemented — returns `nil`. Screen-reader users have OSARA's F6 there, an
 ### macOS
 
 Walked from the window itself, not from its first child as `focusStep` is: inside REAPER's FX window Kontakt's elements *are* the window's children, with no content group to scope to. The rectangle is the scope instead. A candidate qualifies when `AXFocused` is settable and its centre is inside the rectangle; the first in tree order that actually takes the focus (read back from the system-wide focused element, not assumed) wins, so a text field near the top of a panel is what usually gets it. Same bounds as `focusStep`. One log line either way, naming the element and its role, or the number of candidates that accepted the question and then did not take the focus. Unverified on hardware as of 2026-09-11.
+
+## host.element.press(hwnd, name, controlType, cb?) {#host-element-press}
+
+**Signature:** `host.element.press(hwnd: number, name: string, controlType: number, cb: ((pressed: boolean, why: string?) -> ())?) -> (boolean, string?)`, and nothing with `cb`
+
+**This one acts.** It asks an element of `hwnd` to perform its own action, the one a screen reader's "activate" uses — a button is pressed, a check box toggled — and **the keyboard focus stays where it is**. The element is found as [`find`](#host-element-find) finds it: the first in the tree with that Name and ControlType, an empty `name` matching any element of the type. No pointer and no click: the window does not have to be in front or uncovered, and the window in front — a page beside the plug-in — keeps the keyboard, so nothing is announced but what the plug-in itself says about the change. It is the first thing to try in a plug-in that publishes its controls (a [`dump`](#host-element-dump) shows their names). One that publishes nothing — Kontakt in a DAW, VPS Avenger — has nothing to press, and a click is what is left ([`host.input.click`](./input.md#host-input-click), with `via` for one that leaves the window in front where it is).
+
+**Answers** `true` when the program accepted the action — not that it did what you wanted: read the result where it shows — and `false` and the reason: `"the window is gone"`, `"no such element"`, `"the element cannot be pressed"` (it offers no action), `"the element is not enabled"`, `"the element is gone"`, `"the program did not answer within 1000 ms"`, `"the program runs with higher rights"`, `"the program is gone"`, `"the program did not take the action (0x…)"` with the system's code, `"this system's accessibility interface could not be reached"`, `"this system cannot press an element without moving the keyboard focus to it"` (see Windows), and on a platform without it `"not supported on this platform yet"`.
+
+**Where it waits.** Each step is a call into the other program, and a program takes its time to answer — a plug-in's accessibility runs on its DAW's own thread, and some act before they answer, a button that opens a dialog say — so each call is bounded at 1000 ms. Without `cb` the press runs on the event loop and holds it meanwhile, as every call on this page does. With `cb` the call returns at once, with nothing, and the press is made on the host's `element-press` thread, one after another in the order asked; `cb(true)` or `cb(false, why)` runs on a later tick of the event loop, as an event of the module, after whatever the module is busy with — and not at all when the module is disabled, reloaded or removed first. A `cb` that is not a function raises. Either way the call turns over [`host.inputEpoch()`](./timer.md#host-inputepoch), as a click does, and is never answered from the epoch's cache: every call asks again.
+
+```luau
+-- A plug-in's "Bypass" button (the name a dump shows), pressed from a page that stays in front.
+-- Needs "element" and "speech" in the manifest; `plugin` is the plug-in window's table.
+host.element.press(plugin.id, "Bypass", host.element.type.Button, function(pressed, why)
+  if not pressed then host.speech.output("Could not press Bypass: " .. why) end
+end)
+```
+
+### Windows
+
+UI Automation: one `FindFirst` over the subtree, then the element's Invoke pattern (`Invoke`), else its Toggle pattern (`Toggle`), else LegacyIAccessible's default action (`DoDefaultAction`) — the last only when the element names one. UI Automation moves the keyboard focus to an element before it acts on it unless told not to, so every automation object of the host's is made with `AutoSetFocus` off (`IUIAutomation2`, Windows 8 and later); where that cannot be set, a press answers `"this system cannot press an element without moving the keyboard focus to it"` rather than move it. What follows is the program's: JUCE's buttons (6.1 and later, where the plug-in leaves accessibility on) post their click to the plug-in's own thread; the system's proxy for a standard Windows button sends it `BM_CLICK`, which Microsoft says might fail while its dialog is not the active window; a provider that moves the focus itself as it acts still does. One line in the log per press:
+
+`[uia] pressed 'Bypass' (type 50000) in window 2755348 by Invoke, the keyboard focus left where it was`
+
+or `[uia] could not press 'Bypass' (type 50000) in window 2755348: no such element`.
+
+### macOS
+
+Not there yet: every press answers `false, "not supported on this platform yet"`, and the callback the same. The way it would go is `AXPress`; until a Mac has measured it, a module written for both platforms clicks there.
