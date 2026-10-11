@@ -777,6 +777,12 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       known: an English recognition model of PaddleOCR's PP-OCR mobile series, converted to ONNX
       with paddle2onnx from a PaddlePaddle 3 program (its graph's names say so). Which model, and
       from which release, was not recorded when it came in (2026-06-21); the notice should say.
+- [ ] **wxDragon on wxWidgets 3.3.4 — look regularly** (2026-10-11): 3.3.4 gives VoiceOver better
+      names on macOS. As of 2026-10-11 wxdragon-sys 0.9.22 on crates.io and wxDragon's main branch
+      still build wxWidgets 3.3.3, and this application is on 0.9.16. Where to look: the newest
+      wxdragon-sys on crates.io, and `WX_VERSION` in the build script (`build.rs`) of
+      AllenDang/wxDragon. Once it is 3.3.4: update, and hear on a Mac whether the module manager's
+      controls are named.
 
 ## Documentation
 
@@ -6731,6 +6737,99 @@ maintainer's German test instructions are a text of their own, not in the reposi
         (`[gui] page 'HTML probe': leaves the front; given back to window …`); and the select list ("Choice": Alt+Down, arrows, Enter) — does NVDA
         read the options, does a `page: select` line come, and where does its popup open once the
         window was moved?
+- [x] **Run live, 2026-10-11 (revision 3, build 6db767d)** — the maintainer with NVDA on ReaEQ in
+      REAPER, the automatic show on throughout. **W1:** NVDA says "HTML probe, HTML probe document,
+      HTML probe heading 1", once; browse mode is on (H), NVDA+Space switches to focus mode and
+      back, B, Tab and the arrows work, and F7 back and in again sounds the same; whether NVDA began
+      "say all" by itself at the very first show he could not tell, and does not mind. The keyboard
+      hook left the chain for the page every time it came forward. **W2:** F7 and F8 accepted every
+      time; W2 c in the notes below. **W3:** the FX window kept its place and size, but the round
+      trip is heard (the entry below). **W4**, **W7** and **W9** as expected — W7: the keyboard
+      lands on the FX window and moves on to REAPER's FX list (`SysListView32`), or lands there at
+      once; W9 in the notes below. W5 was not run as twenty presses; the nine presses of "Announce"
+      in the log arrived once each. **W6:** the page is in no list, as designed — and the
+      maintainer's decision that a module may have a real window as well (`window = "app"`,
+      below). **W8:** WebView2's environment answered inside the call that asked, in 13 ms; the
+      page's controller held the event loop for 3626 ms, and the page was ready 7150 ms after the
+      prepare: the part that is waited for is most of a cold start, which is what stage 3's build
+      that does not wait at all is for. **Alt+F4** gave the front back to the FX window, and the
+      word typed into the search field was still there when F7 brought the page back.
+- [ ] **Notes from that run, for later.** **W2 c:** the log has 26 automatic shows. Windows
+      declined 13 of them (`shown, and Windows DECLINED to bring it to the front`), and in 12 of
+      those 13 the page came to the front all the same, 58 to 146 ms later (its foreground event
+      in the log); only once, at 1791681014, did the FX window keep the front — the maintainer's
+      "it mostly comes by itself". 22 of the 26 came right after a switch of virtual desktops
+      (Explorer's "Virtual desktop hotkey switching preview" in front just before the FX window),
+      12 of the 13 declined ones among them; the other four after another program's window on the
+      same desktop. Why `SetForegroundWindow` answers no and the page comes forward anyway is not
+      known; the reference now says that `"declined by the system"` does not say where the
+      keyboard ends up. With a mouse click it seemed not to come, he said, and he is not sure that
+      is needed: a click from the page into the plug-in window is a return, which the probe answers
+      with no show by design (W2 c is about arrivals); a click from another program's window into
+      it would be an arrival. Not important now ("it works solidly for a start"). **W9:** the live
+      region and the host's speech in one callback — he heard it once; NVDA may get both and drop
+      the first. Which of the two was heard, and whether the host's interrupting speech cancels the
+      live region's or one of them never reaches NVDA, is open.
+- [ ] **W3: acting in the plug-in without the round trip** (2026-10-11). Each action that brings
+      the plug-in window forward and the page back is heard: NVDA announces the focus leaving the
+      page and coming back, and says the selected element of the page again — irritating, the
+      maintainer says. To research before stage 2's `o:inPlugin` is built on the round trip: acting
+      in the plug-in without bringing its window to the front — mouse messages posted to the
+      plug-in's own child window at client coordinates (`WM_LBUTTONDOWN`/`WM_LBUTTONUP`, which a
+      plug-in that reads the mouse with `GetAsyncKeyState` or raw input does not see), UI
+      Automation's Invoke or Toggle where the plug-in exposes the control, and the page kept in
+      front while a window behind it gets the click (whether a covered window handles and draws a
+      posted click is the question) — and for each, which kinds of plug-ins it works with:
+      REAPER's own (ReaEQ, Win32 dialogs), JUCE (one child window that draws everything), VSTGUI,
+      Qt (Kontakt), and a plug-in embedded in its DAW's window (Ableton Live); screen reads of a
+      covered window as well (`PrintWindow`, a window capture rather than the screen's). What is
+      found goes into stage 2's design; the round trip stays the way that works everywhere.
+- [x] **A page in a window like any program's: `window = "app"`** (the maintainer's decision after
+      W6, 2026-10-11 — modules are to be flexible, and a whole interface in HTML, CSS and JS is not
+      far-fetched). `host.gui.webview{ …, window = "tool" | "app" }`, the tool page by default; what
+      each kind is on both platforms in `webview::WindowKind` and `Recipe` (tested, compiled for the
+      Mac by macos-check). On Windows an app page is an ordinary frame with no owner — an Alt+Tab
+      entry with its title, a place on the taskbar (under the application's own button, as Windows
+      11 combines a program's windows by default), a minimise and a maximise box — shown without
+      being activated (wx shows an ordinary frame with `SW_SHOW`, so the host shows it as wx shows
+      a disabled one, `SW_SHOWNA`, and enables it again at once); `show` restores a minimised one,
+      and with `avoid` a maximised one, before it places it; the front is given back only when the
+      page has kept it since it took it (the frame's deactivation clears that). The host hides
+      neither kind when the user goes elsewhere, and a `show` that does not bring an app page the
+      user has open to the front neither hides nor moves it (with no room beside `avoid`, it goes
+      over it only once it is in front). For both kinds, a page that took the front from another
+      page, hidden since, gives it to where that one came from: a page shown in place of another,
+      the new one first, never passes the front through the plug-in window (W3's round trip, heard
+      by NVDA). docs/api/gui.md. The probe's revision 4 has the same page in an application window
+      behind the page's button "Show as an application window", built at the first press and never
+      brought by the automatic show.
+- [ ] **W6 again, with the application window (revision 4).** The page's "Show as an application
+      window" (built at the first press: "Building the page." first): does NVDA hear the tool page
+      go and the application window come, and not the FX window between them? Alt+Tab: is "HTML
+      probe window" listed, by that title? Windows+T: what does NVDA read on this application's
+      taskbar button — the application's name, a count of windows, the page's title — and is
+      there one button for the application's windows or one for each? (Windows 11 combines a
+      program's windows by default, and the executable has no version resource to name it by; a
+      taskbar identity of a page's own, an AppUserModelID, could be a general option later.)
+      JAWS's Insert+F10, if JAWS is there. Alt+Tab away and back: is NVDA in the document again, in
+      browse mode, and does the log say `[keys] the keyboard hook is out while one of our windows
+      is in front ('HTML probe window')` for that way in too? Minimise it (Alt+Space, N) and bring
+      it back by Alt+Tab, and by F7; maximise it (Alt+Space, X) and press F7 in the FX window: is
+      it beside the plug-in again? "Back to the plug-in" and F7 in it leave it open: Alt+Tab
+      reaches it. Alt+F4 in it after F7 brought it: the front back to the FX window (`given back
+      to window …`); right after the switch from the tool page: the same, by way of the tool page
+      (`… which had it before the page it was shown in place of …`); after Alt+Tab into it from
+      another program: Windows decides (`… has not kept the front since it last took it …`).
+      Virtual desktops, which he switches all the time: with the application window open, switch
+      to another desktop — is it in Alt+Tab and on the taskbar there (Windows lists the current
+      desktop's windows by default)? F7 there: does Windows switch back to the desktop the window
+      is on, or bring the window over? And the tool page: is it on every desktop? The automatic
+      show never brings the application window, which would otherwise come at every return from
+      another desktop. Unmeasured as well: whether the frame shown while
+      disabled and enabled at once leaves anything amiss (the keyboard in the document, NVDA's
+      first words), and whether the frame is deactivated while the keyboard moves into WebView2's
+      own window inside it — which would make every app page leave the front to Windows' choice;
+      the Alt+F4 line says so.
 - [ ] **What the probe does not look at, and the reference promises nothing about yet.** Whether
       Chromium delays a posted message or a live region while the window is hidden or covered;
       JAWS at all (an Edge update once made web views silent to it).
@@ -6814,6 +6913,22 @@ maintainer's German test instructions are a text of their own, not in the reposi
       NO`; the page placed for the display scaling of the monitor it goes to, not only of the one
       `avoid` is on), the answers of W1–W9 in the
       reference, and pages' settings in the Application settings tab.
+- [ ] **The Mac's app page** (`window = "app"`, 2026-10-11), with stage 4 below: what it is to be
+      is in docs/api/gui.md and `webview::WindowKind::recipe` — an ordinary `NSWindow` (titled,
+      closable, miniaturisable, resizable; `hidesOnDeactivate` off, as an `NSWindow`'s is; in the
+      window cycle) that activates the application, and while one is shown the application claims
+      the Dock through `gui::dock::want` (one owner for every app page, let go when the last one is
+      hidden, closed, disabled or reloaded) under the setting `dock_while_open`, whose label then
+      names pages beside the module manager. `setActivationPolicy` may switch between regular and
+      accessory at any time since macOS 10.9 (Apple's reference); Command-Tab and the Dock list
+      applications, never windows, so the Dock icon is the only way into Command-Tab. Only a Mac
+      can answer, once it is built: (M10) whether the application, made regular while an app page
+      is shown, is in Command-Tab at once, whether its Dock icon goes when it is made accessory
+      again, and whether its menu bar answers (the reported side effect the setting exists for);
+      (M11) whether VoiceOver follows the keyboard into the app page as into any application's
+      window, and where Command-Tab back to the DAW lands; (M12) whether REAPER's or Logic's
+      floating plug-in windows hide while an app page has this application active (M6's question,
+      for this window); (M13) whether VoiceOver's window chooser lists it, and under which name.
 - [ ] **Stage 4 — the Mac**, on the way M1 decides: a panel the host creates itself (objc2-app-kit,
       in `backend/macos`, so check-macos sees it) holding wry's WKWebView, with the panel settings
       of the recommendation (floating level, `hidesOnDeactivate = NO`, all Spaces and beside a
