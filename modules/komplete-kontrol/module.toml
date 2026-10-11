@@ -1,6 +1,9 @@
 id = "com.platform.komplete-kontrol"
 name = "Komplete Kontrol"
-version = "0.1.1"
+# 0.1.2: its identity search is asked with a callback, off the event loop, and kept per control
+# until the runtime has taken it; until the answer comes, and for a search the plug-in did not
+# answer, there is no verdict, asked again at the next recheck rather than ever kept as a no.
+version = "0.1.2"
 engine_api = ">=0.1, <0.2"
 entry = "src/main.luau"
 license = "MIT"

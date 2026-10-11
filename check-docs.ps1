@@ -31,9 +31,11 @@ $root = $PSScriptRoot
 #
 # gamepad_api.rs registers `host.gamepad` from a file of its own, so it is read beside lib.rs;
 # without it every documented `host.gamepad.*` call would be reported as one the host lacks.
-# timers.rs is the same for `host.timer`, and webview_lua.rs for `host.gui`.
+# timers.rs is the same for `host.timer`, webview_lua.rs for `host.gui`, and element_lua.rs for
+# `host.element`.
 $sources = @(
   (Get-Content (Join-Path $root "crates/host/src/lib.rs") -Raw),
+  (Get-Content (Join-Path $root "crates/host/src/element_lua.rs") -Raw),
   (Get-Content (Join-Path $root "crates/host/src/gamepad_api.rs") -Raw),
   (Get-Content (Join-Path $root "crates/host/src/timers.rs") -Raw),
   (Get-Content (Join-Path $root "crates/host/src/webview_lua.rs") -Raw),

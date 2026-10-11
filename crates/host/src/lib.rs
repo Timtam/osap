@@ -6,10 +6,14 @@
 //! bound to that module's root + the shared services.
 
 /// What a module asks of another program that the host does on a thread of its own, and the
-/// way its outcome comes back — `host.input.click`'s ways and `host.element.press`, and their
-/// callbacks; see the file.
+/// way its outcome comes back — `host.input.click`'s ways, and their callbacks; see the file.
 mod acting;
 mod backend;
+/// `host.element`'s questions: the thread that asks them off the event loop, one at a time, and
+/// the way their answers come back — see the file.
+mod element;
+/// `host.element`'s bindings, each with an optional callback — see the file.
+mod element_lua;
 /// Which build is running: the executable's commit and the package's. See the file.
 pub mod build_info;
 mod capture_source;
@@ -479,6 +483,9 @@ struct Shared {
     /// What modules asked of other programs on a thread of the host's, and the outcomes on their
     /// way back (acting.rs).
     acting: acting::Acting,
+    /// `host.element`'s questions on their way to the accessibility thread and their answers on
+    /// the way back (element.rs).
+    elements: element::Elements,
 }
 
 /// How long the end of the application waits for the windows given the no-activate style to get
@@ -490,28 +497,6 @@ const GIVE_BACK_AT_EXIT: std::time::Duration = std::time::Duration::from_millis(
 /// Max distinct template PNGs kept decoded in the cache before least-recently-used
 /// eviction. Far above any real module's fixed template count — purely a growth cap.
 const TEMPLATE_CACHE_CAP: usize = 64;
-
-/// One cached UIA element lookup. `key` renders the arguments; `go` does the traversal.
-fn located(
-    sh: &Rc<Shared>,
-    what: &str,
-    key: String,
-    go: impl FnOnce() -> Option<(i32, i32)>,
-) -> Option<(i32, i32)> {
-    {
-        let mut obs = sh.observations();
-        obs.asked += 1;
-        if let Some(cached) = obs.points.get(&key).copied() {
-            obs.served += 1;
-            return cached;
-        }
-    }
-    let t = Instant::now();
-    let found = go();
-    slow_observation(what, &key, t);
-    sh.observations().points.insert(key, found);
-    found
-}
 
 /// Names a single OS observation that blocked the pump thread for a long time.
 ///
@@ -548,6 +533,10 @@ fn slow_observation(what: &str, detail: &str, started: Instant) {
 /// is: in a poll, almost every identity check is expected to fail. "Not found" is a real
 /// answer within an epoch, not an "ask me later" — the epoch turning over IS ask-me-later,
 /// and it turns over on every image batch and every focus change.
+///
+/// An accessibility question the program did not answer is kept as what it is, "not known",
+/// never as a "not found": asked again in the same epoch it is not put to a program that did not
+/// answer it a moment ago, and the next epoch asks again (element_lua.rs).
 #[derive(Default)]
 struct Observations {
     epoch: u64,
@@ -557,10 +546,12 @@ struct Observations {
     /// input, window activate), so pairing it with `epoch` makes a stale click impossible
     /// while leaving the read-only questions as cheap as before.
     input_epoch: u64,
-    /// (hwnd, names, control types) → 1-based index of the matching name, or None.
-    uia_any: HashMap<(isize, Vec<String>, Vec<i32>), Option<usize>>,
-    /// (hwnd, name, control type) → present?
-    element_find: HashMap<(isize, String, i32), bool>,
+    /// `host.element.find`, `findAny` and `pluginLocate`, by question: what the tree answered —
+    /// a "not known" too, kept as not known for the rest of the epoch, never as a no
+    /// (element_lua.rs, `kept`). `pluginLocate` is the expensive one — it walks the RAW tree, the
+    /// only view that reaches into a DAW-embedded plugin's hosted fragment — and one of them sits
+    /// in Kontakt 7's `isRackView`, which its cells consult on every recheck.
+    elements: HashMap<backend::ElementAsk, backend::ElementOutcome>,
     /// hwnd → its child controls. Rc so handing it out does not copy the vector.
     controls: HashMap<isize, Rc<Vec<backend::ControlInfo>>>,
     /// The foreground window. Outer Option = not asked yet; inner = there isn't one.
@@ -572,11 +563,6 @@ struct Observations {
     focus_chain: Option<Rc<Vec<backend::ControlInfo>>>,
     served: u32,
     asked: u32,
-    /// UIA element LOOKUPS: "where is the element called X?", keyed by a rendering of the
-    /// arguments. These are the expensive ones — element_plugin_locate walks the RAW tree, the
-    /// only view that reaches into a DAW-embedded plugin's hosted fragment — and one of them
-    /// sits in `isRackView`, which every Kontakt cell consults on every recheck.
-    points: HashMap<String, Option<(i32, i32)>>,
     /// Screen pixel reads this epoch, and what they cost. NOT cached — a pixel is the one
     /// observation whose whole purpose can be to change between two reads — but counted,
     /// because each is a compositor frame and they were invisible.
@@ -783,9 +769,7 @@ impl Shared {
             }
             obs.epoch = now;
             obs.input_epoch = now_input;
-            obs.points.clear();
-            obs.uia_any.clear();
-            obs.element_find.clear();
+            obs.elements.clear();
             obs.controls.clear();
             obs.active = None;
             obs.focus_chain = None;
@@ -1476,6 +1460,7 @@ impl Shared {
         // belong to the VM that is going.
         self.ocr_drop_owner(idx, true);
         self.snap_drop_owner(idx);
+        self.elements.drop_owner(idx);
         mailbox::drop_owner(self, idx, mailbox::Why::Reloaded);
         self.task_drop_owner(idx);
         self.forget_key_owner(idx);
@@ -1525,6 +1510,7 @@ impl Shared {
         self.timers.retain(|i| i != idx);
         self.ocr_drop_owner(idx, true);
         self.snap_drop_owner(idx);
+        self.elements.drop_owner(idx);
         mailbox::drop_owner(self, idx, mailbox::Why::Reloaded);
         self.task_drop_owner(idx);
         self.forget_key_owner(idx);
@@ -1629,6 +1615,7 @@ impl Shared {
         if !enabled {
             self.ocr_drop_owner(idx, false);
             self.snap_drop_owner(idx);
+            self.elements.drop_owner(idx);
             // What waits in its mailbox, but a setting's `onChange`, which it still hears; and its
             // handler, which never goes on — not even after a quick enable.
             dropped = mailbox::drop_owner(self, idx, mailbox::Why::Disabled);
@@ -1790,13 +1777,27 @@ impl Shared {
     }
 
     /// The outcomes of what modules asked other programs for, for the callbacks that wait for them —
-    /// a click made, or refused, an element pressed — each to its module's mailbox, in the lane it
-    /// was asked from (acting.rs). Both ticks drive it.
+    /// a click made, or refused (acting.rs), and an accessibility tree's answer, an element pressed
+    /// among them (element.rs) — each to its module's mailbox, in the lane it was asked from. Both
+    /// ticks drive it. An answer of the program's to `find`, `findAny` or `pluginLocate` that comes
+    /// while the epoch and the input epoch it was asked in still stand is kept for the epoch, as one
+    /// the event loop waited for is (element_lua.rs); what the host told without asking the program
+    /// never is (element.rs, `Due::program`).
     fn fire_acted(&self) {
         for due in self.acting.take_due() {
             let _prio = ocr::types::enter_priority(due.prio);
             let acting::Answer { idx, lua, cb, what } = due.answer;
             mailbox::deliver(self, idx, &lua, Event::Acted { cb, result: due.result, what });
+        }
+        for due in self.elements.take_due() {
+            let out = due.pending.out();
+            let element::Pending { answer, prio, ask, asked_in, .. } = due.pending;
+            let _prio = ocr::types::enter_priority(prio);
+            if due.program && element_lua::kept(&ask) && asked_in == (self.epoch.get(), self.input_epoch.get()) {
+                self.observations().elements.insert(ask.clone(), due.outcome.clone());
+            }
+            let acting::Answer { idx, lua, cb, what } = answer;
+            mailbox::deliver(self, idx, &lua, Event::Element { cb, ask: Box::new(ask), outcome: due.outcome, what, out });
         }
     }
 
@@ -1857,6 +1858,7 @@ impl Shared {
         self.initial_pending.borrow_mut().retain(|(idx, _)| *idx < n);
         self.ocr_drop_from(n);
         self.snap_drop_from(n);
+        self.elements.drop_from(n);
         mailbox::drop_from(self, n);
         self.task_drop_from(n);
         self.drop_pad_listeners(|idx| idx >= n);
@@ -5193,6 +5195,7 @@ impl Manager {
             notify: RefCell::new(None),
             pages: webview_lua::Pages::default(),
             acting: acting::Acting::new(),
+            elements: element::Elements::new(),
         });
         // What the last run left of the no-activate style it gives windows for clicks — a crash, a
         // kill — given back first, on the thread that gives it, before any click of this run.
@@ -7043,6 +7046,11 @@ impl mailbox::MailHost for Shared {
             Event::Acted { cb, result, what } => {
                 self.window_opened(idx, what, acting::outcome_args(lua, &result).map(|args| Some((cb, args))))
             }
+            Event::Element { cb, ask, outcome, what, out } => {
+                // Handed over now: no longer out for `host.element.pending`, in its own callback too.
+                self.elements.settle(out);
+                self.window_opened(idx, what, element_lua::values(lua, &ask, &outcome).map(|args| Some((cb, args))))
+            }
             #[cfg(test)]
             Event::Call { f, args, what, .. } => mailbox::open_call(idx, f, args, what),
         }
@@ -7054,6 +7062,7 @@ impl mailbox::MailHost for Shared {
             Event::Read(r) => ocr::lua::discard_read(self, *r),
             Event::Image { p, ended, .. } => self.discard_image(*p, ended, why == mailbox::Why::Disabled),
             Event::Snapshot { p, .. } => self.discard_snapshot(*p),
+            Event::Element { out, .. } => self.elements.settle(out),
             _ => {}
         }
     }
@@ -8041,312 +8050,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     win.set("_requestInitial", initial_request_fn(lua, idx, shared.clone(), |s| &s.initial_pending)?)?;
     host.set("window", win)?;
 
-    // host.element.find(hwnd, name, controlType) — does the window's UI Automation
-    // subtree contain an element with that Name + ControlType? (Plugin identity.)
-    let uia = lua.create_table()?;
-    let sh = shared.clone();
-    uia.set(
-        "find",
-        lua.create_function(move |_, (hwnd, name, ctype): (isize, String, i32)| {
-            host_call!("host.element.find");
-            let key = (hwnd, name, ctype);
-            let mut obs = sh.observations();
-            obs.asked += 1;
-            if let Some(cached) = obs.element_find.get(&key).copied() {
-                obs.served += 1;
-                return Ok(cached);
-            }
-            drop(obs);
-            let t = Instant::now();
-            let answer = sh.backend.element_find(key.0, &key.1, key.2);
-            slow_observation("uia.find", &key.1, t);
-            sh.observations().element_find.insert(key, answer);
-            Ok(answer)
-        })?,
-    )?;
-    // host.element.type — the UIA ControlType ids, by name. Modules were declaring these as
-    // local constants (and writing bare integers where they hadn't), which reads as a
-    // magic number at every call site: `host.element.find(id, "Kontakt 8", 50033)`.
-    let types = lua.create_table()?;
-    for (name, id) in [
-        ("Button", 50000),
-        ("Calendar", 50001),
-        ("CheckBox", 50002),
-        ("ComboBox", 50003),
-        ("Edit", 50004),
-        ("Hyperlink", 50005),
-        ("Image", 50006),
-        ("ListItem", 50007),
-        ("List", 50008),
-        ("Menu", 50009),
-        ("MenuBar", 50010),
-        ("MenuItem", 50011),
-        ("ProgressBar", 50012),
-        ("RadioButton", 50013),
-        ("ScrollBar", 50014),
-        ("Slider", 50015),
-        ("Spinner", 50016),
-        ("StatusBar", 50017),
-        ("Tab", 50018),
-        ("TabItem", 50019),
-        ("Text", 50020),
-        ("ToolBar", 50021),
-        ("ToolTip", 50022),
-        ("Tree", 50023),
-        ("TreeItem", 50024),
-        ("Custom", 50025),
-        ("Group", 50026),
-        ("Thumb", 50027),
-        ("DataGrid", 50028),
-        ("DataItem", 50029),
-        ("Document", 50030),
-        ("SplitButton", 50031),
-        ("Window", 50032),
-        ("Pane", 50033),
-        ("Header", 50034),
-        ("HeaderItem", 50035),
-        ("Table", 50036),
-        ("TitleBar", 50037),
-        ("Separator", 50038),
-    ] {
-        types.set(name, id)?;
-    }
-    uia.set("type", types)?;
-    // host.element.findAny(hwnd, names, types) -> index | nil — "is any of these names
-    // present as any of these control types?", the shape a plugin-identity check takes
-    // ("Kontakt 8" as Window OR Pane). One tree traversal per NAME rather than one per
-    // name×type pair, and it returns WHICH name matched (1-based), so a caller can read
-    // the plugin's version straight out of the answer instead of asking once per version.
-    let sh = shared.clone();
-    uia.set(
-        "findAny",
-        lua.create_function(move |_, (hwnd, names, types): (isize, Vec<String>, Vec<i32>)| {
-            host_call!("host.element.findAny");
-            let key = (hwnd, names, types);
-            let mut obs = sh.observations();
-            obs.asked += 1;
-            if let Some(cached) = obs.uia_any.get(&key).copied() {
-                obs.served += 1;
-                return Ok(cached);
-            }
-            // Dropped before the traversal: it can re-enter Lua, and holding the RefMut
-            // across that would panic on the next observation from inside a callback.
-            drop(obs);
-            let t = Instant::now();
-            let answer = sh.backend.element_find_any(key.0, &key.1, &key.2);
-            slow_observation("uia.findAny", &key.1.join("/"), t);
-            sh.observations().uia_any.insert(key, answer);
-            Ok(answer)
-        })?,
-    )?;
-    // host.element.locate(hwnd, name, controlType) -> { x, y } (screen centre of the
-    // matching element, to click it) or nil. For driving plugin UI via UIA.
-    let sh = shared.clone();
-    uia.set(
-        "locate",
-        lua.create_function(move |lua, (hwnd, name, ctype): (isize, String, i32)| {
-            host_call!("host.element.locate");
-            match sh.backend.element_locate(hwnd, &name, ctype) {
-                Some((x, y)) => {
-                    let t = lua.create_table()?;
-                    t.set("x", x)?;
-                    t.set("y", y)?;
-                    Ok(Some(t))
-                }
-                None => Ok(None),
-            }
-        })?,
-    )?;
-    // host.element.locateVia(hwnd, viaName, viaType, name, controlType) -> { x, y } | nil.
-    // Like locate, but descends into a container element (viaName/viaType) first and
-    // searches within it — reaches a plugin's UI that hangs off an identity pane as a
-    // nested UIA fragment (a DAW-embedded Kontakt). Ports ReaHotkey's two-level find.
-    let sh = shared.clone();
-    uia.set(
-        "locateVia",
-        lua.create_function(
-            move |lua, (hwnd, via_name, via_type, name, ctype): (isize, String, i32, String, i32)| {
-                host_call!("host.element.locateVia");
-                match sh.backend.element_locate_via(hwnd, &via_name, via_type, &name, ctype) {
-                    Some((x, y)) => {
-                        let t = lua.create_table()?;
-                        t.set("x", x)?;
-                        t.set("y", y)?;
-                        Ok(Some(t))
-                    }
-                    None => Ok(None),
-                }
-            },
-        )?,
-    )?;
-    // host.element.pluginLocate(hwnd, containerName, name, controlType) -> { x, y } | nil.
-    // ReaHotkey's GetPluginUIAElement + FindElement: find the element that IS the plugin
-    // (containerName, Window/Pane, QuickWindow class preferred) and search within it over
-    // the RAW tree — the only view that reaches a DAW-embedded plugin's hosted Qt UI.
-    let sh = shared.clone();
-    uia.set(
-        "pluginLocate",
-        lua.create_function(
-            move |lua, (hwnd, container, name, ctype): (isize, String, String, i32)| {
-                host_call!("host.element.pluginLocate");
-                let key = format!("pluginLocate {hwnd} {container} {name} {ctype}");
-                match located(&sh, "uia.pluginLocate", key, || {
-                    sh.backend.element_plugin_locate(hwnd, &container, &name, ctype)
-                }) {
-                    Some((x, y)) => {
-                        let t = lua.create_table()?;
-                        t.set("x", x)?;
-                        t.set("y", y)?;
-                        Ok(Some(t))
-                    }
-                    None => Ok(None),
-                }
-            },
-        )?,
-    )?;
-    // host.element.stateProbe(hwnd, container, name, ctype) -> string | nil — what a named
-    // element says about its OWN state, rather than what its control type implies.
-    let sh = shared.clone();
-    uia.set(
-        "stateProbe",
-        lua.create_function(
-            move |lua, (hwnd, container, name, ctype): (isize, String, String, i32)| {
-                host_call!("host.element.stateProbe");
-                match sh.backend.element_state_probe(hwnd, &container, &name, ctype) {
-                    None => Ok(None),
-                    Some((toggle, legacy)) => {
-                        let t = lua.create_table()?;
-                        if toggle >= 0 {
-                            t.set("toggle", toggle)?;
-                        }
-                        t.set("legacyState", legacy)?;
-                        t.set("checked", legacy & 0x10 != 0)?;
-                        Ok(Some(t))
-                    }
-                }
-            },
-        )?,
-    )?;
-    // host.element.dump(hwnd) -> { {depth, name, class, ctype}, … } — diagnostic UIA
-    // tree walk (raw view) for discovering plugin identity properties.
-    let sh = shared.clone();
-    uia.set(
-        "dump",
-        lua.create_function(move |lua, hwnd: isize| {
-            host_call!("host.element.dump");
-            let arr = lua.create_table()?;
-            for (i, n) in sh.backend.element_dump(hwnd).into_iter().enumerate() {
-                arr.set(i + 1, dump_node_to_table(lua, n)?)?;
-            }
-            Ok(arr)
-        })?,
-    )?;
-    // host.element.rawDump(hwnd) — like dump, but over the RAW TreeWalker, which crosses
-    // into a hosted Qt fragment (a DAW-embedded plugin's real UI).
-    let sh = shared.clone();
-    uia.set(
-        "rawDump",
-        lua.create_function(move |lua, hwnd: isize| {
-            host_call!("host.element.rawDump");
-            let arr = lua.create_table()?;
-            for (i, n) in sh.backend.element_raw_dump(hwnd).into_iter().enumerate() {
-                arr.set(i + 1, dump_node_to_table(lua, n)?)?;
-            }
-            Ok(arr)
-        })?,
-    )?;
-    // host.element.classNavPoint(hwnd, className, ctype, child, sibling) -> {x,y} | nil —
-    // click-point of the element reached from the first ClassName-contains +
-    // ControlType match by walking `child` (nth child) then `sibling` siblings. Ports
-    // ReaHotkey's FindElement(ClassName) + WalkTree(path).Click.
-    let sh = shared.clone();
-    uia.set(
-        "classNavPoint",
-        lua.create_function(
-            move |lua, (hwnd, class, ctype, child, sibling): (isize, String, i32, i32, i32)| {
-                host_call!("host.element.classNavPoint");
-                match sh.backend.element_class_nav_point(hwnd, &class, ctype, child, sibling) {
-                    Some((x, y)) => {
-                        let t = lua.create_table()?;
-                        t.set("x", x)?;
-                        t.set("y", y)?;
-                        Ok(Some(t))
-                    }
-                    None => Ok(None),
-                }
-            },
-        )?,
-    )?;
-    // host.element.focusStep(hwnd, direction) -> { name, ctype, index, count, bounds? } | nil —
-    // Tab pass-through for a standalone plugin window: SetFocus the next (direction>=0)
-    // / previous keyboard-focusable descendant relative to the current focus, wrapping
-    // at the ends, and return the newly focused element — where it is included, so a
-    // caller can read what a stop with no name shows (see `focus_step_table`).
-    let sh = shared.clone();
-    uia.set(
-        "focusStep",
-        lua.create_function(move |lua, (hwnd, direction): (isize, i32)| {
-            host_call!("host.element.focusStep");
-            match sh.backend.element_focus_step(hwnd, direction) {
-                Some(step) => Ok(Some(focus_step_table(lua, step)?)),
-                None => Ok(None),
-            }
-        })?,
-    )?;
-    // host.element.focusWithin(hwnd, { x, y, w, h }) -> { name, ctype } | nil. Gives the
-    // keyboard to the first focusable element inside the rectangle — the way into a plugin
-    // that publishes elements, without pressing anything at its corner.
-    let sh = shared.clone();
-    uia.set(
-        "focusWithin",
-        lua.create_function(move |lua, (hwnd, rect): (isize, Table)| {
-            host_call!("host.element.focusWithin");
-            let x: i32 = rect.get("x")?;
-            let y: i32 = rect.get("y")?;
-            let w: i32 = rect.get("w")?;
-            let h: i32 = rect.get("h")?;
-            match sh.backend.element_focus_within(hwnd, x, y, w, h) {
-                Some((name, ctype)) => {
-                    let t = lua.create_table()?;
-                    t.set("name", name)?;
-                    t.set("ctype", ctype)?;
-                    Ok(Some(t))
-                }
-                None => Ok(None),
-            }
-        })?,
-    )?;
-    // host.element.press(hwnd, name, controlType, cb?) -> true | false, why — or nothing with a
-    // callback. The element's own action (Invoke, Toggle, the default action), the keyboard focus
-    // left where it is (backend/uia.rs). Without a callback on the event loop, as every call here;
-    // with one on the host's element-press thread, the outcome to the callback on a later tick
-    // (acting.rs) — recognize's model, no second function.
-    let sh = shared.clone();
-    uia.set(
-        "press",
-        lua.create_function(move |lua, (hwnd, name, ctype, cb): (isize, String, i32, mlua::Value)| {
-            host_call!("host.element.press");
-            let cb = acting::callback("host.element.press", cb)?;
-            let press = sh.backend.element_press_fn();
-            // At once: a picture of this module's still out may show it (said once in the log).
-            sh.note_acting(lua, "host.element.press");
-            sh.bump_input_epoch();
-            match cb {
-                Some(cb) => {
-                    let answer = acting::Answer { idx, lua: lua.clone(), cb, what: "element.press" };
-                    sh.acting.run(acting::Lane::Element, Box::new(move || press(hwnd, &name, ctype)), Some(answer));
-                    Ok(mlua::MultiValue::new())
-                }
-                None => {
-                    let t = Instant::now();
-                    let pressed = press(hwnd, &name, ctype);
-                    slow_observation("uia.press", &name, t);
-                    acting::outcome_values(lua, pressed)
-                }
-            }
-        })?,
-    )?;
-    host.set("element", uia)?;
+    // host.element — the accessibility tree: every call with an optional callback, asked off the
+    // event loop where the platform allows (element.rs, element_lua.rs).
+    element_lua::install(lua, &host, shared, idx)?;
 
     // host.screen.pixel / .size / .imageSearch
     let screen = lua.create_table()?;
@@ -11149,14 +10855,16 @@ mod focus_step_binding_tests {
         }
     }
 
-    /// The binding hands the backend's answer to `focus_step_table` and nothing else builds it.
+    /// The binding asks the focus step, and its answer is built by `focus_step_table` and
+    /// nothing else (element_lua.rs, `values`).
     #[test]
     fn the_binding_builds_its_answer_with_focus_step_table() {
-        const LIB: &str = include_str!("lib.rs");
-        let api = body(LIB, "fn install_host_api(");
-        let (_, text) = bindings(api, "uia").into_iter().find(|b| b.0 == "focusStep").expect("host.element.focusStep");
-        assert!(text.contains("sh.backend.element_focus_step(hwnd, direction)"), "{text}");
-        assert!(text.contains("Some(step) => Ok(Some(focus_step_table(lua, step)?))"), "{text}");
+        const ELEMENT_LUA: &str = include_str!("element_lua.rs");
+        let (_, text) = bindings(ELEMENT_LUA, "uia").into_iter().find(|b| b.0 == "focusStep").expect("host.element.focusStep");
+        assert!(text.contains("put(&sh, lua, idx, ElementAsk::FocusStep { hwnd, direction }, tail)"), "{text}");
+        let values = body(ELEMENT_LUA, "pub(crate) fn values(");
+        assert!(values.contains("Some(step) => Value::Table(focus_step_table(lua, step.clone())?)"), "{values}");
+        assert_eq!(values.matches("ElementAnswer::Step").count(), 1, "one way to build it");
     }
 }
 
@@ -11238,17 +10946,15 @@ mod ocr_wiring_tests {
         assert!(body(LIB, "fn stop_guard(&mut self)").contains("self.shared.give_back_activation_at_exit();"));
         let exit = body(LIB, "fn give_back_activation_at_exit(&self)");
         assert!(exit.contains("self.acting.run_and_wait(acting::Lane::Style, job, GIVE_BACK_AT_EXIT);"));
-        // host.element.press: noted as acting; with a callback on its own lane, its answer with it;
-        // without one, on the event loop, as every other host.element call.
-        let press = bindings(api, "uia").into_iter().find(|b| b.0 == "press").expect("host.element.press").1;
-        for part in [
-            "sh.note_acting(lua, \"host.element.press\");",
-            "acting::callback(\"host.element.press\", cb)?",
-            "sh.acting.run(acting::Lane::Element, Box::new(move || press(hwnd, &name, ctype)), Some(answer));",
-            "let pressed = press(hwnd, &name, ctype);",
-        ] {
-            assert!(press.contains(part), "host.element.press: `{part}`");
-        }
+        // host.element.press: noted as acting and the input epoch turned over before it is asked,
+        // as every other host.element question is — on the accessibility thread (element.rs).
+        const ELEMENT_LUA: &str = include_str!("element_lua.rs");
+        let press = bindings(ELEMENT_LUA, "uia").into_iter().find(|b| b.0 == "press").expect("host.element.press").1;
+        let noted = press.find("sh.note_acting(lua, \"host.element.press\");").expect("host.element.press does not note acting");
+        let bumped = press.find("sh.bump_input_epoch();").expect("host.element.press does not turn the input epoch over");
+        let asked = press.find("put(&sh, lua, idx, ElementAsk::Press { hwnd, name, ctype }, tail)").expect("host.element.press is not asked");
+        assert!(noted < asked && bumped < asked, "acting is noted before the press is asked");
+        assert!(body(LIB, "fn install_host_api(").contains("element_lua::install(lua, &host, shared, idx)?;"));
         let new = body(LIB, "pub fn new() -> Result<Self>");
         let left = new.find("give_back_left_over_activation()").expect("the last run's styles are not given back");
         assert!(left < new.find("shared.reload_hotkey_id.set(").expect("the reload key"), "given back before any module loads");
@@ -11309,6 +11015,27 @@ mod ocr_wiring_tests {
         assert!(body(LIB, "fn purge_module(").contains("self.snap_drop_owner(idx);"));
         assert!(body(LIB, "fn rollback_to(").contains("self.snap_drop_from(n);"));
         assert!(body(LIB, "pub fn run(&mut self)").contains("self.shared.snap_state.has_pending()"));
+    }
+
+    /// A module's accessibility questions with callbacks go with it when it is disabled, stopped,
+    /// reloaded or rolled back (element.rs, `drop_owner`); only the program's answers are kept for
+    /// the epoch, at the call and when a callback's comes; and an answer's event, run or dropped, is
+    /// no longer out for `host.element.pending`.
+    #[test]
+    fn a_modules_accessibility_questions_go_with_it_and_only_the_programs_answers_are_kept() {
+        assert!(body(LIB, "fn after_toggle(").contains("self.elements.drop_owner(idx);"));
+        assert_eq!(body(LIB, "fn purge_module(").matches("self.elements.drop_owner(idx);").count(), 2);
+        assert!(body(LIB, "fn rollback_to(").contains("self.elements.drop_from(n);"));
+        assert!(body(LIB, "fn fire_acted(").contains("if due.program && element_lua::kept(&ask)"));
+        let open = body(LIB, "fn open(&self, idx: usize, lua: &Lua, ev: Event) -> Opened");
+        assert!(open.contains("Event::Element { cb, ask, outcome, what, out } => {\n                // Handed over now"));
+        assert!(open.contains("self.elements.settle(out);"));
+        assert!(body(LIB, "fn discard(&self, _idx: usize, ev: Event, why: mailbox::Why)").contains("Event::Element { out, .. } => self.elements.settle(out),"));
+        const ELEMENT_LUA: &str = include_str!("element_lua.rs");
+        assert!(body(ELEMENT_LUA, "fn ask_here(").contains("if waited.program && kept(ask) {"));
+        let put = body(ELEMENT_LUA, "fn put(");
+        let replaced = put.find("sh.elements.replace(owner, key);").expect("a key replaces nothing");
+        assert!(replaced < put.find("match tail.cb {").expect("the forms"), "before every form, the cached and the waited ones too");
     }
 
     /// A page's events reach Luau on both ticks, and its builds happen on the GUI tick after the
@@ -12242,7 +11969,6 @@ mod ocr_wiring_tests {
             ("keys", "keys"),
             ("os", "os"),
             ("win", "window"),
-            ("uia", "element"),
             ("screen", "screen"),
             ("ocr", "ocr"),
             ("input", "input"),
@@ -12261,6 +11987,15 @@ mod ocr_wiring_tests {
                 named += 1;
             }
         }
+        // host.element's, written in element_lua.rs.
+        let element = bindings(include_str!("element_lua.rs"), "uia");
+        for (name, text) in &element {
+            if text.contains("create_function(") {
+                assert!(text.contains(&format!("host_call!(\"host.element.{name}\")")), "host.element.{name} does not name itself");
+                named += 1;
+            }
+        }
+        assert!(element.len() >= 13, "only {} host.element bindings found", element.len());
         assert!(named > 60, "only {named} bindings found: the scan no longer reads install_host_api");
         for name in ["require", "tryRequire", "now", "inputEpoch", "epoch", "path"] {
             assert!(api.contains(&format!("host_call!(\"host.{name}\")")), "host.{name} does not name itself");

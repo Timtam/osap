@@ -2,10 +2,21 @@
 //! given Name + ControlType? Used to confirm a plugin's identity where a window-
 //! class match alone is ambiguous — e.g. sforzando exposes a Pane (ControlType
 //! 50033) named "PlogueXMLGUI", which ReaHotkey also keys on.
+//!
+//! **Asked on one thread.** Everything here runs on the host's accessibility thread
+//! (`element.rs`), which enters the multithreaded COM apartment once ([`thread_init`]) and asks
+//! one question at a time through [`run`]; nothing here runs on the event loop any more. The
+//! automation object and its timeouts are that thread's ([`automation`]).
+//!
+//! **Not known is not "not there".** A call the program did not answer — it did not answer within
+//! [`UIA_TIMEOUT_MS`], it runs with higher rights, it went away — is noted for the question in
+//! progress ([`noted`]), and a question that found nothing after such a call is answered "not
+//! known" with the reason ([`settle`]), never "no". A walk stops at the first such call: a program
+//! that did not answer one question is not asked the next one of the same walk.
 
 use std::cell::{Cell, RefCell};
 
-use super::DumpNode;
+use super::{DumpNode, ElementAnswer, ElementAsk, ElementFailure, ElementOutcome};
 use windows::core::{Interface, BSTR, VARIANT};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{
@@ -27,6 +38,15 @@ thread_local! {
     // Whether this thread's automation object leaves the keyboard focus where it is when it acts
     // (`automation`): an action is made only when it does.
     static ACTS_IN_PLACE: Cell<bool> = const { Cell::new(false) };
+    // The first call of the question in progress that the program did not answer — the words a
+    // module is told, and whether it was the timeout. Cleared by `run` before each question and
+    // taken after it (`settle`).
+    static FAILED: RefCell<Option<(String, bool)>> = const { RefCell::new(None) };
+    // The first bound a walk of the question in progress stopped at before the end of the tree —
+    // its node budget or its time — in the words a module is told. Cleared by `run` before each
+    // question and taken after it (`settle`): a search it cut short that found nothing is not
+    // known, never "not there".
+    static CUT: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// How long a single cross-process UIA call may take before it is given up on.
@@ -46,7 +66,14 @@ thread_local! {
 /// `macos/ax.rs`, with a comment explaining that an unbounded walk against an unresponsive
 /// plugin hangs the thread that carries the keyboard). The same reasoning applies here and
 /// nobody had applied it: this platform had no bound at all.
-const UIA_TIMEOUT_MS: u32 = 1000;
+///
+/// The questions are asked on a thread of their own now, so a call that runs into this bound no
+/// longer holds the keyboard; it still bounds how long that thread, and an event loop that waits
+/// for its answer, can be kept by one program.
+pub(crate) const UIA_TIMEOUT_MS: u32 = 1000;
+
+/// `UIA_E_TIMEOUT`: the program did not answer within the bound `automation` sets.
+const TIMEOUT: u32 = 0x8013_1505;
 
 /// How long a whole tree walk may take before it stops and reports what it has.
 ///
@@ -65,6 +92,8 @@ const WALK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 /// What a bounded walk has left: nodes, and time.
 struct Budget {
     nodes: i32,
+    /// The nodes it began with, for the words of a cut ([`cut_by_nodes`]).
+    of: i32,
     until: std::time::Instant,
     /// True once either bound stopped it, so the caller can say the dump is partial instead
     /// of letting a truncated tree read as a complete one.
@@ -73,25 +102,71 @@ struct Budget {
 
 impl Budget {
     fn new(nodes: i32) -> Self {
-        Self { nodes, until: std::time::Instant::now() + WALK_DEADLINE, stopped: false }
+        Self { nodes, of: nodes, until: std::time::Instant::now() + WALK_DEADLINE, stopped: false }
     }
 
-    /// Spends one node. False when there is nothing left to spend.
+    /// Spends one node — a walk asks for it as it reaches the node, so a walk whose tree has no
+    /// more nodes than the budget never runs out. False when there is nothing left to spend: the
+    /// walk stopped before the end of the tree, which is noted for the question in progress
+    /// ([`CUT`]).
     ///
     /// The clock is read every 64 nodes rather than every one: `Instant::now` is a syscall on
     /// some platforms, and a walk that measured itself more often than it worked would be
     /// its own problem. 64 nodes is well under a second even at the timeout above.
     fn spend(&mut self) -> bool {
         if self.nodes <= 0 {
-            self.stopped = true;
+            self.cut(cut_by_nodes(self.of));
             return false;
         }
         self.nodes -= 1;
         if self.nodes % 64 == 0 && std::time::Instant::now() >= self.until {
-            self.stopped = true;
+            self.cut(cut_by_time());
             return false;
         }
         true
+    }
+
+    fn cut(&mut self, why: String) {
+        self.stopped = true;
+        note_cut(why);
+    }
+}
+
+/// What a module is told of a search that stopped at its node budget of `of` before the end of the
+/// tree.
+fn cut_by_nodes(of: i32) -> String {
+    format!("the tree holds more than the {of} elements a search reads")
+}
+
+/// What a module is told of a search that stopped at [`WALK_DEADLINE`] before the end of the tree.
+fn cut_by_time() -> String {
+    format!("the search took longer than {} s", WALK_DEADLINE.as_secs())
+}
+
+/// A walk of the question in progress stopped at a bound before the end of the tree: noted, the
+/// first one only ([`CUT`]).
+fn note_cut(why: String) {
+    CUT.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.is_none() {
+            *c = Some(why);
+        }
+    });
+}
+
+/// The accessibility thread's start (`element.rs`): it enters the multithreaded COM apartment, once,
+/// for its whole life — where Microsoft wants a UI Automation client, and an apartment whose calls
+/// wait on no message loop of the thread's own. The automation object is made at the first
+/// question (`automation`). A thread that could not enter it says so once; its questions then fail
+/// as UI Automation answers them there.
+pub fn thread_init() {
+    // SAFETY: no pointers; this thread entering its apartment, once.
+    let entered = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    if entered.is_err() {
+        crate::logging::line(
+            "uia",
+            &format!("the accessibility thread could not enter the multithreaded COM apartment (0x{:08x})", entered.0 as u32),
+        );
     }
 }
 
@@ -100,11 +175,11 @@ impl Budget {
 /// One place rather than nine. Every function here used to open its own with the same six
 /// lines, which is how the timeouts came to be missing everywhere at once: there was no
 /// single place to put them.
+///
+/// The thread's COM apartment is entered once, by [`thread_init`], and not here: entered at every
+/// call, it was never left, and the apartment's count of entries only grew (the system audit's
+/// P3 in TODO.md).
 fn automation(cell: &RefCell<Option<IUIAutomation>>) -> std::cell::RefMut<'_, Option<IUIAutomation>> {
-    // The event loop's thread is already in a single-threaded apartment (wxWidgets puts it
-    // there): this answers RPC_E_CHANGED_MODE there, and the automation object lives in that
-    // apartment. On a thread with no apartment yet it enters the multithreaded one.
-    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let mut borrow = cell.borrow_mut();
     if borrow.is_none() {
         // `CUIAutomation8` rather than `CUIAutomation`, and the difference is the whole point
@@ -141,7 +216,7 @@ fn automation(cell: &RefCell<Option<IUIAutomation>>) -> std::cell::RefMut<'_, Op
                     crate::logging::line(
                         "uia",
                         &format!(
-                            "accessibility call timeout set to {UIA_TIMEOUT_MS} ms for this \
+                            "accessibility call timeout set to {UIA_TIMEOUT_MS} ms on the accessibility \
                              thread (the default is about two minutes); {}",
                             if in_place {
                                 "an action leaves the keyboard focus where it is"
@@ -165,6 +240,95 @@ fn automation(cell: &RefCell<Option<IUIAutomation>>) -> std::cell::RefMut<'_, Op
     borrow
 }
 
+/// Whether a call's failure `code` means the program did not answer the question at all — it did
+/// not answer in time, it runs with higher rights, it went away — rather than that it answered
+/// "nothing": a search that found nothing (which windows-rs hands back as an error without a code
+/// of the program's), an element that went away while it was walked, a provider that cannot do
+/// what was asked. Only the first kind makes a question "not known".
+fn unanswered(code: u32) -> bool {
+    matches!(code, TIMEOUT | 0x8007_0005 | 0x8001_0108 | 0x8007_06BA | 0x8007_06BE)
+}
+
+/// `r`'s value, or `None` — and when the call failed because the program did not answer
+/// ([`unanswered`]), that is noted for the question in progress, the first such failure only.
+fn noted<T>(r: windows::core::Result<T>) -> Option<T> {
+    match r {
+        Ok(v) => Some(v),
+        Err(e) => {
+            let code = e.code().0 as u32;
+            if e.code().is_err() && unanswered(code) {
+                FAILED.with(|f| {
+                    let mut f = f.borrow_mut();
+                    if f.is_none() {
+                        *f = Some((failure(code as i32), code == TIMEOUT));
+                    }
+                });
+            }
+            None
+        }
+    }
+}
+
+/// Whether a call of the question in progress went unanswered: a walk stops there, and a list of
+/// names is not searched on.
+fn stopped() -> bool {
+    FAILED.with(|f| f.borrow().is_some())
+}
+
+/// What a question's answer becomes once it is known whether a call of it went unanswered
+/// (`failed`), or a walk of it stopped at its bound before the end of the tree (`cut`): an answer
+/// that found something stands — what was found is there; one that found nothing is "not known",
+/// with the reason, since the part not answered or not walked may have held it; a dump keeps what
+/// it found and says why it is not all. A program that did not answer is said before a bound: it
+/// is what stopped the walk. Only that makes the questions behind this one go unasked
+/// (`unanswered`, element.rs); a tree too large or too slow to walk answered every call.
+fn settle(answer: ElementAnswer, failed: Option<(String, bool)>, cut: Option<String>) -> ElementOutcome {
+    match (answer, failed.or(cut.map(|why| (why, false)))) {
+        (ElementAnswer::Nodes(nodes, _), Some((why, _))) => Ok(ElementAnswer::Nodes(nodes, Some(why))),
+        (a, Some((why, unanswered))) if a.is_nothing() => Err(ElementFailure { why, unanswered }),
+        (a, _) => Ok(a),
+    }
+}
+
+/// One question, on the accessibility thread: the [`super::ElementRunner`]'s `run`. A window that is
+/// gone holds nothing, and every read answers that; a press says so (`element_press`).
+pub fn run(ask: &ElementAsk) -> ElementOutcome {
+    if let ElementAsk::Press { hwnd, name, ctype } = ask {
+        return element_press(*hwnd, name, *ctype);
+    }
+    let hwnd = ask.hwnd();
+    // SAFETY: a local question about a handle, which a stale one answers no to.
+    if hwnd == 0 || unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd as _) } == 0 {
+        return ask.nothing();
+    }
+    FAILED.with(|f| *f.borrow_mut() = None);
+    CUT.with(|c| *c.borrow_mut() = None);
+    let answer = match ask {
+        ElementAsk::Find { hwnd, name, ctype } => ElementAnswer::Found(element_find(*hwnd, name, *ctype)),
+        ElementAsk::FindAny { hwnd, names, types } => ElementAnswer::Index(element_find_any(*hwnd, names, types)),
+        ElementAsk::Locate { hwnd, name, ctype } => ElementAnswer::Point(element_locate(*hwnd, name, *ctype)),
+        ElementAsk::LocateVia { hwnd, via_name, via_type, name, ctype } => {
+            ElementAnswer::Point(element_locate_via(*hwnd, via_name, *via_type, name, *ctype))
+        }
+        ElementAsk::PluginLocate { hwnd, container, name, ctype } => {
+            ElementAnswer::Point(element_plugin_locate(*hwnd, container, name, *ctype))
+        }
+        ElementAsk::StateProbe { hwnd, container, name, ctype } => {
+            ElementAnswer::State(element_state_probe(*hwnd, container, name, *ctype))
+        }
+        ElementAsk::Dump { hwnd } => ElementAnswer::Nodes(element_dump(*hwnd), None),
+        ElementAsk::RawDump { hwnd } => ElementAnswer::Nodes(element_raw_dump(*hwnd), None),
+        ElementAsk::ClassNavPoint { hwnd, class, ctype, child, sibling } => {
+            ElementAnswer::Point(element_class_nav_point(*hwnd, class, *ctype, *child, *sibling))
+        }
+        ElementAsk::FocusStep { hwnd, direction } => ElementAnswer::Step(element_focus_step(*hwnd, *direction)),
+        // Not here: OSARA's F6 is the way back into a plug-in on Windows (element.md).
+        ElementAsk::FocusWithin { .. } => ElementAnswer::Within(None),
+        ElementAsk::Press { .. } => unreachable!("a press is answered above"),
+    };
+    settle(answer, FAILED.with(|f| f.borrow_mut().take()), CUT.with(|c| c.borrow_mut().take()))
+}
+
 /// Finds the first element in `hwnd`'s UIA subtree whose Name == `name` and
 /// ControlType == `control_type`. Never panics; any failure / no-match → None.
 fn find_element(hwnd: isize, name: &str, control_type: i32) -> Option<IUIAutomationElement> {
@@ -172,7 +336,7 @@ fn find_element(hwnd: isize, name: &str, control_type: i32) -> Option<IUIAutomat
         let borrow = automation(cell);
         let automation = borrow.as_ref()?;
 
-        let element = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
+        let element = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
 
         // ControlType == `control_type` (VT_I4), AND Name == `name` (VT_BSTR) when
         // a name is given; an empty name means "any element of this type" (e.g.
@@ -191,12 +355,12 @@ fn find_element(hwnd: isize, name: &str, control_type: i32) -> Option<IUIAutomat
 
         // FindFirst is on the element; TreeScope_Subtree includes the element
         // itself. A no-match comes back as Err in windows-rs (null → Err).
-        element.FindFirst(TreeScope_Subtree, &cond).ok()
+        noted(element.FindFirst(TreeScope_Subtree, &cond))
     })
 }
 
 /// True if `hwnd`'s UIA subtree contains an element with that Name + ControlType.
-pub fn element_find(hwnd: isize, name: &str, control_type: i32) -> bool {
+fn element_find(hwnd: isize, name: &str, control_type: i32) -> bool {
     find_element(hwnd, name, control_type).is_some()
 }
 
@@ -207,15 +371,16 @@ pub fn element_find(hwnd: isize, name: &str, control_type: i32) -> bool {
 /// detection pass. Returns the 1-based index of the matching NAME (so the caller learns
 /// WHICH one matched, e.g. the plugin's version), or None.
 ///
-/// An empty name matches any element of the given types.
-pub fn element_find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
+/// An empty name matches any element of the given types. A name the program did not answer
+/// for ends the search: the names after it are not asked.
+fn element_find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
     if names.is_empty() || types.is_empty() {
         return None;
     }
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
         let automation = borrow.as_ref()?;
-        let element = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
+        let element = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
 
         // OR over the control types, ANDed with the name when one is given. One
         // traversal per NAME (a name is what we must tell apart in the result); the
@@ -245,8 +410,11 @@ pub fn element_find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<
                     Err(_) => continue,
                 }
             };
-            if element.FindFirst(TreeScope_Subtree, &cond).is_ok() {
+            if noted(element.FindFirst(TreeScope_Subtree, &cond)).is_some() {
                 return Some(i + 1);
+            }
+            if stopped() {
+                return None;
             }
         }
         None
@@ -255,10 +423,10 @@ pub fn element_find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<
 
 /// The screen-pixel centre of that element's bounding rectangle (to click it), or
 /// None if not found / it has no on-screen rect.
-pub fn element_locate(hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {
+fn element_locate(hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {
     let element = find_element(hwnd, name, control_type)?;
     unsafe {
-        let r = element.CurrentBoundingRectangle().ok()?;
+        let r = noted(element.CurrentBoundingRectangle())?;
         if r.right <= r.left || r.bottom <= r.top {
             return None; // collapsed / off-screen
         }
@@ -273,7 +441,7 @@ pub fn element_locate(hwnd: isize, name: &str, control_type: i32) -> Option<(i32
 /// the outer `hwnd` does NOT cross — searching from the container element itself does.
 /// Ports ReaHotkey's GetPluginUIAElement + `MainElement.FindElement(...)`. Returns the
 /// target's on-screen click centre, or None (container or target not found / off-screen).
-pub fn element_locate_via(
+fn element_locate_via(
     hwnd: isize,
     via_name: &str,
     via_type: i32,
@@ -283,7 +451,7 @@ pub fn element_locate_via(
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
         let automation = borrow.as_ref()?;
-        let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
+        let root = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
 
         // Build a Name(+Type) condition; an empty name means "any of this type".
         let make_cond = |nm: &str, ct: i32| -> Option<IUIAutomationCondition> {
@@ -305,10 +473,10 @@ pub fn element_locate_via(
         // Find the container (the plugin's identity pane), then search WITHIN it —
         // this crosses the hosted-fragment boundary that a search from `root` does not.
         let cond_via = make_cond(via_name, via_type)?;
-        let container = root.FindFirst(TreeScope_Subtree, &cond_via).ok()?;
+        let container = noted(root.FindFirst(TreeScope_Subtree, &cond_via))?;
         let cond = make_cond(name, control_type)?;
-        let el = container.FindFirst(TreeScope_Subtree, &cond).ok()?;
-        let r = el.CurrentBoundingRectangle().ok()?;
+        let el = noted(container.FindFirst(TreeScope_Subtree, &cond))?;
+        let r = noted(el.CurrentBoundingRectangle())?;
         if r.right <= r.left || r.bottom <= r.top {
             return None;
         }
@@ -316,12 +484,13 @@ pub fn element_locate_via(
     })
 }
 
-/// What `host.element.press` is told for an accessibility call that failed with `code`.
-pub(super) fn press_failure(code: i32) -> String {
+/// What `host.element.press` is told for an accessibility call that failed with `code` — and every
+/// other call here that the program did not answer ([`noted`]).
+pub(super) fn failure(code: i32) -> String {
     match code as u32 {
         0x8007_0005 => "the program runs with higher rights".to_string(),
         // UIA_E_TIMEOUT: the program did not answer within the bound `automation` sets.
-        0x8013_1505 => format!("the program did not answer within {UIA_TIMEOUT_MS} ms"),
+        TIMEOUT => format!("the program did not answer within {UIA_TIMEOUT_MS} ms"),
         // UIA_E_ELEMENTNOTAVAILABLE.
         0x8004_0201 => "the element is gone".to_string(),
         // UIA_E_ELEMENTNOTENABLED.
@@ -341,23 +510,23 @@ pub(super) fn press_failure(code: i32) -> String {
 ///
 /// Every step is a call into the other program, each bounded by `UIA_TIMEOUT_MS`; a provider that
 /// acts before it answers (a Win32 button whose action opens a dialog, JUCE's handler) can take
-/// the whole bound. On the event loop this holds it, as every other call here does; the host
-/// runs it on a thread of its own when the module hands over a callback. `Ok` says the program
-/// accepted the action, not that it did what the module wanted. One log line either way.
-pub fn element_press(hwnd: isize, name: &str, control_type: i32) -> Result<(), String> {
+/// the whole bound. On the accessibility thread, as every question here; the event loop waits for
+/// it only when the module handed over no callback (`element.rs`). `Ok` says the program accepted
+/// the action, not that it did what the module wanted. One log line either way.
+fn element_press(hwnd: isize, name: &str, control_type: i32) -> ElementOutcome {
     // SAFETY: a local question about a handle, which a stale one answers no to.
     if hwnd == 0 || unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd as _) } == 0 {
-        return Err("the window is gone".into());
+        return Err(ElementFailure { why: "the window is gone".into(), unanswered: false });
     }
     let pressed = AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
         let Some(automation) = borrow.as_ref() else {
-            return Err("this system's accessibility interface could not be reached".to_string());
+            return Err(("this system's accessibility interface could not be reached".to_string(), false));
         };
         if !ACTS_IN_PLACE.with(|c| c.get()) {
-            return Err("this system cannot press an element without moving the keyboard focus to it".to_string());
+            return Err(("this system cannot press an element without moving the keyboard focus to it".to_string(), false));
         }
-        let fail = |e: windows::core::Error| press_failure(e.code().0);
+        let fail = |e: windows::core::Error| (failure(e.code().0), e.code().0 as u32 == TIMEOUT);
         let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).map_err(fail)?;
         let v_ctype: VARIANT = control_type.into();
         let mut cond = automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &v_ctype).map_err(fail)?;
@@ -371,7 +540,7 @@ pub fn element_press(hwnd: isize, name: &str, control_type: i32) -> Result<(), S
         let el = match root.FindFirst(TreeScope_Subtree, &cond) {
             Ok(el) => el,
             Err(e) if e.code().is_err() && e.code().0 as u32 != 0x8000_4003 => return Err(fail(e)),
-            Err(_) => return Err("no such element".to_string()),
+            Err(_) => return Err(("no such element".to_string(), false)),
         };
         // Invoke (10000), else Toggle (10015), else LegacyIAccessible's default action (10018) — the
         // last only when the element names one.
@@ -391,14 +560,14 @@ pub fn element_press(hwnd: isize, name: &str, control_type: i32) -> Result<(), S
                 return p.DoDefaultAction().map(|()| "its default action").map_err(fail);
             }
         }
-        Err("the element cannot be pressed".to_string())
+        Err(("the element cannot be pressed".to_string(), false))
     });
     let what = if name.is_empty() { format!("the first element of type {control_type}") } else { format!("'{name}' (type {control_type})") };
     match &pressed {
         Ok(how) => crate::logging::line("uia", &format!("pressed {what} in window {hwnd} by {how}, the keyboard focus left where it was")),
-        Err(why) => crate::logging::line("uia", &format!("could not press {what} in window {hwnd}: {why}")),
+        Err((why, _)) => crate::logging::line("uia", &format!("could not press {what} in window {hwnd}: {why}")),
     }
-    pressed.map(|_| ())
+    pressed.map(|_| ElementAnswer::Pressed).map_err(|(why, unanswered)| ElementFailure { why, unanswered })
 }
 
 /// An element's on-screen rectangle, or all zeros when it has none.
@@ -406,18 +575,21 @@ pub fn element_press(hwnd: isize, name: &str, control_type: i32) -> Result<(), S
 /// Part of a dump because a dump exists to let somebody author coordinates for a machine
 /// they cannot look at, and "there is a slider" without "and it is here" is half an answer.
 fn rect_of(el: &IUIAutomationElement) -> (i32, i32, i32, i32) {
-    match unsafe { el.CurrentBoundingRectangle() } {
-        Ok(r) => (r.left, r.top, r.right - r.left, r.bottom - r.top),
-        Err(_) => (0, 0, 0, 0),
+    match noted(unsafe { el.CurrentBoundingRectangle() }) {
+        Some(r) => (r.left, r.top, r.right - r.left, r.bottom - r.top),
+        None => (0, 0, 0, 0),
     }
 }
+
+/// The most elements `element_dump` lists.
+const DUMP_CAP: i32 = 2000;
 
 /// Dev/diagnostic: walk `hwnd`'s UIA subtree in the RAW view and return the
 /// "interesting" elements — those with a non-empty Name, plus Qt window panes —
 /// as (depth, Name, ClassName, ControlType). Bounded (≤600 nodes, ≤16 deep). Used
 /// to discover the Name/ClassName/ControlType to key a plugin's identity on, e.g.
 /// a Kontakt rendered inside Komplete Kontrol's own Qt window.
-pub fn element_dump(hwnd: isize) -> Vec<DumpNode> {
+fn element_dump(hwnd: isize) -> Vec<DumpNode> {
     let mut out: Vec<DumpNode> = Vec::new();
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
@@ -425,9 +597,9 @@ pub fn element_dump(hwnd: isize) -> Vec<DumpNode> {
             Some(a) => a,
             None => return,
         };
-        let root = match automation.ElementFromHandle(HWND(hwnd as *mut _)) {
-            Ok(e) => e,
-            Err(_) => return,
+        let root = match noted(automation.ElementFromHandle(HWND(hwnd as *mut _))) {
+            Some(e) => e,
+            None => return,
         };
         // FindAll(Subtree, TrueCondition) — a flat list of all descendants, and
         // unlike the raw TreeWalker it crosses UIA fragment boundaries (e.g. into a
@@ -436,16 +608,23 @@ pub fn element_dump(hwnd: isize) -> Vec<DumpNode> {
             Ok(c) => c,
             Err(_) => return,
         };
-        let arr = match root.FindAll(TreeScope_Subtree, &cond) {
-            Ok(a) => a,
-            Err(_) => return,
+        let arr = match noted(root.FindAll(TreeScope_Subtree, &cond)) {
+            Some(a) => a,
+            None => return,
         };
-        let len = arr.Length().unwrap_or(0).min(2000);
-        for i in 0..len {
+        let all = arr.Length().unwrap_or(0);
+        if all > DUMP_CAP {
+            // The rest of the tree is not listed: the dump says so (`settle`).
+            note_cut(format!("the tree holds {all} elements, more than the {DUMP_CAP} a dump lists"));
+        }
+        for i in 0..all.min(DUMP_CAP) {
+            if stopped() {
+                return;
+            }
             if let Ok(el) = arr.GetElement(i) {
-                let name = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
-                let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
-                let ctype = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
+                let name = noted(el.CurrentName()).map(|b| b.to_string()).unwrap_or_default();
+                let class = noted(el.CurrentClassName()).map(|b| b.to_string()).unwrap_or_default();
+                let ctype = noted(el.CurrentControlType()).map(|t| t.0).unwrap_or(0);
                 if !name.is_empty() || !class.is_empty() {
                     let (x, y, w, h) = rect_of(&el);
                     out.push(DumpNode { depth: 0, name, class, ctype, x, y, w, h });
@@ -464,7 +643,7 @@ pub fn element_dump(hwnd: isize) -> Vec<DumpNode> {
 /// bounding-rect centre (to click it), or None if not found / off-screen. Closes
 /// KK's library browser (FileTypeSelector, child=0 sibling=-1) and Kontakt's
 /// What's-New dialog (WhatsNewScreen, child=2 sibling=0).
-pub fn element_class_nav_point(
+fn element_class_nav_point(
     hwnd: isize,
     class_substr: &str,
     ctype: i32,
@@ -474,29 +653,29 @@ pub fn element_class_nav_point(
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
         let automation = borrow.as_ref()?;
-        let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
+        let root = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
         let walker = automation.RawViewWalker().ok()?;
         let mut el = find_by_class(&walker, &root, class_substr, ctype, 0)?;
         // WalkTree `n` (nth child): first child, then n-1 next siblings.
         if child >= 1 {
-            el = walker.GetFirstChildElement(&el).ok()?;
+            el = noted(walker.GetFirstChildElement(&el))?;
             let mut k = child - 1;
             while k > 0 {
-                el = walker.GetNextSiblingElement(&el).ok()?;
+                el = noted(walker.GetNextSiblingElement(&el))?;
                 k -= 1;
             }
         }
         // WalkTree `-n` / `+n` (nth previous / next sibling).
         let mut n = sibling;
         while n < 0 {
-            el = walker.GetPreviousSiblingElement(&el).ok()?;
+            el = noted(walker.GetPreviousSiblingElement(&el))?;
             n += 1;
         }
         while n > 0 {
-            el = walker.GetNextSiblingElement(&el).ok()?;
+            el = noted(walker.GetNextSiblingElement(&el))?;
             n -= 1;
         }
-        let r = el.CurrentBoundingRectangle().ok()?;
+        let r = noted(el.CurrentBoundingRectangle())?;
         if r.right <= r.left || r.bottom <= r.top {
             return None;
         }
@@ -508,6 +687,9 @@ pub fn element_class_nav_point(
 /// every element. `visit` returning false stops the walk. The RAW walker is the only
 /// way into a Qt plugin's QML content: the condition-based FindAll/FindFirst stops at
 /// the QuickWindow fragment boundary, so a DAW-embedded Kontakt looks empty to it.
+/// It also stops at a call the program did not answer ([`stopped`]). A walk its budget stops says
+/// so for the question in progress (`Budget::spend`) — only when there is a node it did not reach:
+/// the next sibling is asked for before the budget is.
 unsafe fn raw_walk(
     walker: &IUIAutomationTreeWalker,
     el: &IUIAutomationElement,
@@ -515,26 +697,26 @@ unsafe fn raw_walk(
     budget: &mut Budget,
     visit: &mut impl FnMut(&IUIAutomationElement, i32) -> bool,
 ) -> bool {
-    if depth > 40 || !budget.spend() {
+    if depth > 40 || stopped() || !budget.spend() {
         return true;
     }
     if !visit(el, depth) {
         return false;
     }
-    let mut child = match walker.GetFirstChildElement(el) {
-        Ok(c) => c,
-        Err(_) => return true,
+    let mut child = match noted(walker.GetFirstChildElement(el)) {
+        Some(c) => c,
+        None => return true,
     };
     loop {
         if !raw_walk(walker, &child, depth + 1, budget, visit) {
             return false;
         }
-        if budget.nodes <= 0 || budget.stopped {
+        if budget.stopped || stopped() {
             return true;
         }
-        child = match walker.GetNextSiblingElement(&child) {
-            Ok(n) => n,
-            Err(_) => return true,
+        child = match noted(walker.GetNextSiblingElement(&child)) {
+            Some(n) => n,
+            None => return true,
         };
     }
 }
@@ -579,7 +761,7 @@ unsafe fn cached_walk(
     }
 }
 
-pub fn element_raw_dump(hwnd: isize) -> Vec<DumpNode> {
+fn element_raw_dump(hwnd: isize) -> Vec<DumpNode> {
     let mut out: Vec<DumpNode> = Vec::new();
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
@@ -587,9 +769,9 @@ pub fn element_raw_dump(hwnd: isize) -> Vec<DumpNode> {
             Some(a) => a,
             None => return,
         };
-        let root = match automation.ElementFromHandle(HWND(hwnd as *mut _)) {
-            Ok(e) => e,
-            Err(_) => return,
+        let root = match noted(automation.ElementFromHandle(HWND(hwnd as *mut _))) {
+            Some(e) => e,
+            None => return,
         };
 
         // ONE crossing of the process boundary, instead of six per element.
@@ -614,7 +796,7 @@ pub fn element_raw_dump(hwnd: isize) -> Vec<DumpNode> {
             req.AddProperty(UIA_BoundingRectanglePropertyId).ok()?;
             req.SetTreeScope(TreeScope_Subtree).ok()?;
             req.SetTreeFilter(&automation.RawViewCondition().ok()?).ok()?;
-            root.BuildUpdatedCache(&req).ok()
+            noted(root.BuildUpdatedCache(&req))
         });
 
         if let Some(cached_root) = cached {
@@ -631,6 +813,12 @@ pub fn element_raw_dump(hwnd: isize) -> Vec<DumpNode> {
                 "cached subtree came back empty; walking the raw tree instead".to_string()
             });
         }
+        // A program that did not answer the one request is not walked a question at a time.
+        if stopped() {
+            return;
+        }
+        // The walk below is the answer now: what bound the cached one stopped at is not its.
+        CUT.with(|c| *c.borrow_mut() = None);
 
         // The way it was done before, kept as the answer for whatever the cache cannot do.
         // Slow, and correct on every provider this project has ever met.
@@ -640,9 +828,9 @@ pub fn element_raw_dump(hwnd: isize) -> Vec<DumpNode> {
         };
         let mut budget = Budget::new(4000);
         raw_walk(&walker, &root, 0, &mut budget, &mut |el, depth| {
-            let name = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
-            let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
-            let ctype = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
+            let name = noted(el.CurrentName()).map(|b| b.to_string()).unwrap_or_default();
+            let class = noted(el.CurrentClassName()).map(|b| b.to_string()).unwrap_or_default();
+            let ctype = noted(el.CurrentControlType()).map(|t| t.0).unwrap_or(0);
             if !name.is_empty() || !class.is_empty() {
                 let (x, y, w, h) = rect_of(el);
                 out.push(DumpNode { depth, name, class, ctype, x, y, w, h });
@@ -670,6 +858,32 @@ fn report_partial(budget: &Budget, found: usize) {
     }
 }
 
+/// Every element of `root`'s raw tree that IS the plug-in — ReaHotkey's CheckElement: named
+/// `container_name`, a Window or a Pane — in raw-tree order, the `ni::qt::QuickWindow` ones first
+/// (ReaHotkey's Criteria order: the Qt scene root, which has the content, before the QWindowIcon
+/// host).
+unsafe fn containers_of(
+    walker: &IUIAutomationTreeWalker,
+    root: &IUIAutomationElement,
+    container_name: &str,
+) -> Vec<IUIAutomationElement> {
+    let mut containers: Vec<(bool, IUIAutomationElement)> = Vec::new();
+    let mut budget = Budget::new(4000);
+    raw_walk(walker, root, 0, &mut budget, &mut |el, _| {
+        let t = noted(el.CurrentControlType()).map(|t| t.0).unwrap_or(0);
+        if t == 50032 || t == 50033 {
+            let n = noted(el.CurrentName()).map(|b| b.to_string()).unwrap_or_default();
+            if n == container_name {
+                let class = noted(el.CurrentClassName()).map(|b| b.to_string()).unwrap_or_default();
+                containers.push((class.contains("QuickWindow"), el.clone()));
+            }
+        }
+        true
+    });
+    containers.sort_by_key(|(is_quick, _)| !*is_quick);
+    containers.into_iter().map(|(_, el)| el).collect()
+}
+
 /// ReaHotkey's `GetPluginUIAElement` + `MainElement.FindElement(...)`, ported.
 ///
 /// A DAW-embedded plugin hosts its real UI as a nested UIA fragment. ReaHotkey reaches
@@ -683,7 +897,7 @@ fn report_partial(budget: &Budget, found: usize) {
 ///
 /// `name` empty means "any element of this ControlType" (e.g. an open Menu, 50009).
 /// Returns the target's on-screen click centre, or None.
-pub fn element_plugin_locate(
+fn element_plugin_locate(
     hwnd: isize,
     container_name: &str,
     name: &str,
@@ -692,44 +906,24 @@ pub fn element_plugin_locate(
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
         let automation = borrow.as_ref()?;
-        let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
+        let root = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
         let walker = automation.RawViewWalker().ok()?;
 
-        // Every element that IS the plugin (ReaHotkey's CheckElement), in raw-tree order.
-        let mut containers: Vec<(bool, IUIAutomationElement)> = Vec::new();
-        let mut budget = Budget::new(4000);
-        raw_walk(&walker, &root, 0, &mut budget, &mut |el, _| {
-            let t = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
-            if t == 50032 || t == 50033 {
-                let n = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
-                if n == container_name {
-                    let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
-                    // ReaHotkey's Criteria order: ni::qt::QuickWindow before QWindowIcon.
-                    containers.push((class.contains("QuickWindow"), el.clone()));
-                }
-            }
-            true
-        });
-        if containers.is_empty() {
-            return None;
-        }
-        containers.sort_by_key(|(is_quick, _)| !*is_quick);
-
-        for (_, container) in &containers {
+        for container in &containers_of(&walker, &root, container_name) {
             let mut hit: Option<(i32, i32)> = None;
             let mut budget = Budget::new(4000);
             raw_walk(&walker, container, 0, &mut budget, &mut |el, _| {
-                let t = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
+                let t = noted(el.CurrentControlType()).map(|t| t.0).unwrap_or(0);
                 if t != control_type {
                     return true;
                 }
                 if !name.is_empty() {
-                    let n = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+                    let n = noted(el.CurrentName()).map(|b| b.to_string()).unwrap_or_default();
                     if n != name {
                         return true;
                     }
                 }
-                if let Ok(r) = el.CurrentBoundingRectangle() {
+                if let Some(r) = noted(el.CurrentBoundingRectangle()) {
                     if r.right > r.left && r.bottom > r.top {
                         hit = Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2));
                         return false; // found — stop walking
@@ -739,6 +933,9 @@ pub fn element_plugin_locate(
             });
             if hit.is_some() {
                 return hit;
+            }
+            if stopped() {
+                return None;
             }
         }
         None
@@ -756,7 +953,7 @@ pub fn element_plugin_locate(
 ///
 /// Returns None when the element cannot be found at all, so "not found" and "found, says
 /// nothing" stay distinguishable.
-pub fn element_state_probe(
+fn element_state_probe(
     hwnd: isize,
     container_name: &str,
     name: &str,
@@ -765,33 +962,18 @@ pub fn element_state_probe(
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
         let automation = borrow.as_ref()?;
-        let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
+        let root = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
         let walker = automation.RawViewWalker().ok()?;
 
-        let mut containers: Vec<(bool, IUIAutomationElement)> = Vec::new();
-        let mut budget = Budget::new(4000);
-        raw_walk(&walker, &root, 0, &mut budget, &mut |el, _| {
-            let t = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
-            if t == 50032 || t == 50033 {
-                let n = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
-                if n == container_name {
-                    let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
-                    containers.push((class.contains("QuickWindow"), el.clone()));
-                }
-            }
-            true
-        });
-        containers.sort_by_key(|(is_quick, _)| !*is_quick);
-
-        for (_, container) in &containers {
+        for container in &containers_of(&walker, &root, container_name) {
             let mut found: Option<(i32, i32)> = None;
             let mut budget = Budget::new(4000);
             raw_walk(&walker, container, 0, &mut budget, &mut |el, _| {
-                let t = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
+                let t = noted(el.CurrentControlType()).map(|t| t.0).unwrap_or(0);
                 if t != control_type {
                     return true;
                 }
-                let n = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+                let n = noted(el.CurrentName()).map(|b| b.to_string()).unwrap_or_default();
                 if n != name {
                     return true;
                 }
@@ -801,7 +983,7 @@ pub fn element_state_probe(
                     .GetCurrentPattern(UIA_PATTERN_ID(10015))
                     .ok()
                     .and_then(|unk| unk.cast::<IUIAutomationTogglePattern>().ok())
-                    .and_then(|tp| tp.CurrentToggleState().ok())
+                    .and_then(|tp| noted(tp.CurrentToggleState()))
                     .map(|v| v.0)
                     .unwrap_or(-1);
                 // Then LegacyIAccessible (10018) state bits, where a control that behaves like a
@@ -811,13 +993,16 @@ pub fn element_state_probe(
                     .GetCurrentPattern(UIA_PATTERN_ID(10018))
                     .ok()
                     .and_then(|unk| unk.cast::<IUIAutomationLegacyIAccessiblePattern>().ok())
-                    .and_then(|lp| lp.CurrentState().ok())
+                    .and_then(|lp| noted(lp.CurrentState()))
                     .unwrap_or(0) as i32;
                 found = Some((toggle, legacy));
                 false
             });
             if found.is_some() {
                 return found;
+            }
+            if stopped() {
+                return None;
             }
         }
         None
@@ -835,26 +1020,23 @@ unsafe fn find_by_class(
     ctype: i32,
     depth: i32,
 ) -> Option<IUIAutomationElement> {
-    if depth > 25 {
+    if depth > 25 || stopped() {
         return None;
     }
-    let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
-    let t = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
+    let class = noted(el.CurrentClassName()).map(|b| b.to_string()).unwrap_or_default();
+    let t = noted(el.CurrentControlType()).map(|t| t.0).unwrap_or(0);
     if t == ctype && class.contains(class_substr) {
         return Some(el.clone());
     }
-    let mut child = match walker.GetFirstChildElement(el) {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
+    let mut child = noted(walker.GetFirstChildElement(el))?;
     loop {
         if let Some(found) = find_by_class(walker, &child, class_substr, ctype, depth + 1) {
             return Some(found);
         }
-        child = match walker.GetNextSiblingElement(&child) {
-            Ok(n) => n,
-            Err(_) => return None,
-        };
+        if stopped() {
+            return None;
+        }
+        child = noted(walker.GetNextSiblingElement(&child))?;
     }
 }
 
@@ -871,11 +1053,11 @@ unsafe fn find_by_class(
 /// enumerated every step, so it tracks a tree that shifts as the user navigates. Returns
 /// the newly focused element's Name, ControlType, 1-based index, the count and its
 /// bounding rectangle, or None if the scope has no focusable descendant that accepts focus.
-pub fn element_focus_step(hwnd: isize, direction: i32) -> Option<super::FocusStep> {
+fn element_focus_step(hwnd: isize, direction: i32) -> Option<super::FocusStep> {
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
         let automation = borrow.as_ref()?;
-        let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
+        let root = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
 
         // Scope to the window's content area — its first child in the control view, i.e.
         // ReaHotkey's ElementFromPath(1). This structurally drops the window frame and the
@@ -884,22 +1066,28 @@ pub fn element_focus_step(hwnd: isize, direction: i32) -> Option<super::FocusSte
         let scope = automation
             .ControlViewWalker()
             .ok()
-            .and_then(|w| w.GetFirstChildElement(&root).ok())
+            .and_then(|w| noted(w.GetFirstChildElement(&root)))
             .unwrap_or_else(|| root.clone());
+        if stopped() {
+            return None;
+        }
 
         // The scope's VISIBLE, keyboard-focusable descendants in control-view order — the
         // same set NVDA would Tab through. TrueCondition + Rust-side filter avoids a bool
         // VARIANT and matches element_dump's proven path.
         let cond = automation.CreateTrueCondition().ok()?;
-        let arr = scope.FindAll(TreeScope_Descendants, &cond).ok()?;
+        let arr = noted(scope.FindAll(TreeScope_Descendants, &cond))?;
         let len = arr.Length().unwrap_or(0);
         let mut items: Vec<IUIAutomationElement> = Vec::new();
         for i in 0..len {
+            if stopped() {
+                return None;
+            }
             if let Ok(el) = arr.GetElement(i) {
-                if !el.CurrentIsKeyboardFocusable().map(|b| b.as_bool()).unwrap_or(false) {
+                if !noted(el.CurrentIsKeyboardFocusable()).map(|b| b.as_bool()).unwrap_or(false) {
                     continue;
                 }
-                if el.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) {
+                if noted(el.CurrentIsOffscreen()).map(|b| b.as_bool()).unwrap_or(false) {
                     continue; // collapsed panel / hidden tab — not a real stop
                 }
                 items.push(el);
@@ -911,7 +1099,7 @@ pub fn element_focus_step(hwnd: isize, direction: i32) -> Option<super::FocusSte
         let count = items.len() as i32;
 
         // Index of the element focused now, or -1 if focus is outside the ring.
-        let focused = automation.GetFocusedElement().ok();
+        let focused = noted(automation.GetFocusedElement());
         let mut cur: i32 = -1;
         if let Some(f) = focused.as_ref() {
             for (i, el) in items.iter().enumerate() {
@@ -924,9 +1112,12 @@ pub fn element_focus_step(hwnd: isize, direction: i32) -> Option<super::FocusSte
 
         // Step in `direction`, wrapping at the ends, and skip any candidate that does not
         // actually take focus (read focus back to confirm). Bounded by `count`, so it tries
-        // each element at most once before giving up.
+        // each element at most once before giving up — or before the program stops answering.
         let mut idx = cur;
         for _ in 0..count {
+            if stopped() {
+                return None;
+            }
             idx = if idx < 0 {
                 if direction >= 0 { 0 } else { count - 1 }
             } else if direction >= 0 {
@@ -935,17 +1126,15 @@ pub fn element_focus_step(hwnd: isize, direction: i32) -> Option<super::FocusSte
                 (idx - 1 + count) % count
             };
             let el = &items[idx as usize];
-            if el.SetFocus().is_ok() {
-                let landed = automation
-                    .GetFocusedElement()
-                    .ok()
+            if noted(el.SetFocus()).is_some() {
+                let landed = noted(automation.GetFocusedElement())
                     .map(|f| {
                         automation.CompareElements(&f, el).map(|b| b.as_bool()).unwrap_or(false)
                     })
                     .unwrap_or(false);
                 if landed {
-                    let name = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
-                    let ctype = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
+                    let name = noted(el.CurrentName()).map(|b| b.to_string()).unwrap_or_default();
+                    let ctype = noted(el.CurrentControlType()).map(|t| t.0).unwrap_or(0);
                     // Read once, AFTER the focus landed and was read back, so it has whatever the
                     // provider did to the element while it took the focus — a list scrolled to
                     // it inside SetFocus is where it is now, not where the enumeration found it.
@@ -954,7 +1143,7 @@ pub fn element_focus_step(hwnd: isize, direction: i32) -> Option<super::FocusSte
                     // One more cross-process property read per step. Physical pixels, the space
                     // every capture here uses: the application is per-monitor DPI aware (its
                     // manifest), and UIA hands such a client unscaled coordinates.
-                    let bounds = el.CurrentBoundingRectangle().ok().and_then(|r| {
+                    let bounds = noted(el.CurrentBoundingRectangle()).and_then(|r| {
                         // Subtracted as floats: a provider's nonsense edges cannot overflow here.
                         super::FocusBounds::new(
                             r.left as f64,
@@ -979,13 +1168,13 @@ mod tests {
     /// program; anything else with its code.
     #[test]
     fn a_failed_press_says_why_in_words() {
-        assert_eq!(press_failure(0x8007_0005_u32 as i32), "the program runs with higher rights");
-        assert_eq!(press_failure(0x8013_1505_u32 as i32), "the program did not answer within 1000 ms");
-        assert_eq!(press_failure(0x8004_0201_u32 as i32), "the element is gone");
-        assert_eq!(press_failure(0x8004_0200_u32 as i32), "the element is not enabled");
-        assert_eq!(press_failure(0x8013_1509_u32 as i32), "the element cannot be pressed");
-        assert_eq!(press_failure(0x8007_06BA_u32 as i32), "the program is gone");
-        assert_eq!(press_failure(0x8000_4005_u32 as i32), "the program did not take the action (0x80004005)");
+        assert_eq!(failure(0x8007_0005_u32 as i32), "the program runs with higher rights");
+        assert_eq!(failure(0x8013_1505_u32 as i32), "the program did not answer within 1000 ms");
+        assert_eq!(failure(0x8004_0201_u32 as i32), "the element is gone");
+        assert_eq!(failure(0x8004_0200_u32 as i32), "the element is not enabled");
+        assert_eq!(failure(0x8013_1509_u32 as i32), "the element cannot be pressed");
+        assert_eq!(failure(0x8007_06BA_u32 as i32), "the program is gone");
+        assert_eq!(failure(0x8000_4005_u32 as i32), "the program did not take the action (0x80004005)");
     }
 
     /// The focus stays where it is: the automation object of every thread is made with UIA's
@@ -993,13 +1182,109 @@ mod tests {
     #[test]
     fn an_action_leaves_the_focus_where_it_is() {
         const SRC: &str = include_str!("uia.rs");
-        let made = &SRC[SRC.find("fn automation(").unwrap()..SRC.find("fn find_element(").unwrap()];
+        let made = &SRC[SRC.find("fn automation(").unwrap()..SRC.find("fn unanswered(").unwrap()];
         assert!(made.contains("a2.SetAutoSetFocus(false).is_ok()") && made.contains("ACTS_IN_PLACE.with(|c| c.set(in_place));"));
-        let press = &SRC[SRC.find("pub fn element_press(").unwrap()..SRC.find("/// An element's on-screen rectangle").unwrap()];
+        let press = &SRC[SRC.find("fn element_press(").unwrap()..SRC.find("/// An element's on-screen rectangle").unwrap()];
         assert!(press.find("ACTS_IN_PLACE.with(|c| c.get())").unwrap() < press.find("ElementFromHandle").unwrap());
         // Invoke first, Toggle second, the default action last.
         let (i, t, d) = (press.find("Invoke()").unwrap(), press.find("Toggle()").unwrap(), press.find("DoDefaultAction()").unwrap());
         assert!(i < t && t < d);
         assert!(!press.contains("SetFocus("), "a press never moves the focus itself");
+    }
+
+    /// Only a program that did not answer makes a question not known: the timeout, higher rights,
+    /// a program that went away. A search that found nothing, an element that went away while it
+    /// was walked, a provider that cannot do it, are answers.
+    #[test]
+    fn only_a_program_that_did_not_answer_makes_a_question_not_known() {
+        for code in [0x8013_1505_u32, 0x8007_0005, 0x8001_0108, 0x8007_06BA, 0x8007_06BE] {
+            assert!(unanswered(code), "{code:08x}");
+        }
+        for code in [0x8000_4003_u32, 0x8004_0201, 0x8013_1509, 0x8004_0204, 0x8000_4005, 0x8007_0057] {
+            assert!(!unanswered(code), "{code:08x}");
+        }
+        // The first such call is the one said, and whether it was the timeout.
+        FAILED.with(|f| *f.borrow_mut() = None);
+        assert!(!stopped());
+        let found: windows::core::Result<u32> = Err(windows::core::Error::from_hresult(windows::core::HRESULT(0x8000_4003_u32 as i32)));
+        assert_eq!(noted(found), None);
+        assert!(!stopped(), "nothing found is an answer");
+        let late: windows::core::Result<u32> = Err(windows::core::Error::from_hresult(windows::core::HRESULT(0x8013_1505_u32 as i32)));
+        assert_eq!(noted(late), None);
+        let denied: windows::core::Result<u32> = Err(windows::core::Error::from_hresult(windows::core::HRESULT(0x8007_0005_u32 as i32)));
+        assert_eq!(noted(denied), None);
+        assert!(stopped());
+        assert_eq!(FAILED.with(|f| f.borrow_mut().take()), Some(("the program did not answer within 1000 ms".to_string(), true)));
+        assert_eq!(noted::<u32>(Ok(7)), Some(7));
+    }
+
+    /// What was found stands whatever else went unanswered; nothing found after a call that went
+    /// unanswered is not known, never no; a dump keeps what it found and says why it is not all.
+    #[test]
+    fn nothing_found_after_an_unanswered_call_is_not_known() {
+        let late = || Some(("the program did not answer within 1000 ms".to_string(), true));
+        assert_eq!(settle(ElementAnswer::Found(true), late(), None), Ok(ElementAnswer::Found(true)));
+        assert_eq!(settle(ElementAnswer::Index(Some(2)), late(), None), Ok(ElementAnswer::Index(Some(2))));
+        assert_eq!(settle(ElementAnswer::Point(Some((5, 6))), late(), None), Ok(ElementAnswer::Point(Some((5, 6)))));
+        for nothing in [
+            ElementAnswer::Found(false),
+            ElementAnswer::Index(None),
+            ElementAnswer::Point(None),
+            ElementAnswer::State(None),
+            ElementAnswer::Step(None),
+            ElementAnswer::Within(None),
+        ] {
+            assert_eq!(settle(nothing.clone(), None, None), Ok(nothing.clone()), "an answer when every call was answered");
+            assert_eq!(
+                settle(nothing.clone(), late(), None),
+                Err(ElementFailure { why: "the program did not answer within 1000 ms".into(), unanswered: true }),
+                "{nothing:?}"
+            );
+        }
+        let denied = Some(("the program runs with higher rights".to_string(), false));
+        assert_eq!(
+            settle(ElementAnswer::Found(false), denied.clone(), None),
+            Err(ElementFailure { why: "the program runs with higher rights".into(), unanswered: false })
+        );
+        let node = DumpNode { depth: 0, name: "FILE".into(), class: String::new(), ctype: 50000, x: 1, y: 2, w: 3, h: 4 };
+        assert_eq!(
+            settle(ElementAnswer::Nodes(vec![node.clone()], None), late(), None),
+            Ok(ElementAnswer::Nodes(vec![node.clone()], Some("the program did not answer within 1000 ms".into())))
+        );
+        assert_eq!(settle(ElementAnswer::Nodes(vec![node.clone()], None), None, None), Ok(ElementAnswer::Nodes(vec![node], None)));
+    }
+
+    /// A walk its bound stopped before the end of the tree — its node budget, or its time — is not
+    /// "not there" either: nothing found is not known, with the bound, and the questions behind it
+    /// are still asked (it answered every call); what was found stands; a dump says why it is not
+    /// all; a program that did not answer is said before the bound. Reached with a node to spare,
+    /// the budget notes nothing.
+    #[test]
+    fn a_walk_cut_short_by_its_bound_is_not_known() {
+        let cut = || Some(cut_by_nodes(4000));
+        assert_eq!(cut().unwrap(), "the tree holds more than the 4000 elements a search reads");
+        assert_eq!(cut_by_time(), "the search took longer than 5 s");
+        assert_eq!(
+            settle(ElementAnswer::Point(None), None, cut()),
+            Err(ElementFailure { why: "the tree holds more than the 4000 elements a search reads".into(), unanswered: false })
+        );
+        assert_eq!(settle(ElementAnswer::State(Some((1, 16))), None, cut()), Ok(ElementAnswer::State(Some((1, 16)))));
+        assert_eq!(
+            settle(ElementAnswer::Nodes(Vec::new(), None), None, Some(cut_by_time())),
+            Ok(ElementAnswer::Nodes(Vec::new(), Some("the search took longer than 5 s".into())))
+        );
+        let late = Some(("the program did not answer within 1000 ms".to_string(), true));
+        assert_eq!(
+            settle(ElementAnswer::Point(None), late, cut()),
+            Err(ElementFailure { why: "the program did not answer within 1000 ms".into(), unanswered: true })
+        );
+        // The budget: the last node is spent without a word; asked for one more, it says so, once.
+        CUT.with(|c| *c.borrow_mut() = None);
+        let mut b = Budget::new(2);
+        assert!(b.spend() && b.spend());
+        assert!(CUT.with(|c| c.borrow().is_none()) && !b.stopped, "a tree of exactly the budget is all walked");
+        assert!(!b.spend() && b.stopped);
+        assert!(!b.spend());
+        assert_eq!(CUT.with(|c| c.borrow_mut().take()), Some("the tree holds more than the 2 elements a search reads".to_string()));
     }
 }

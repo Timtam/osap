@@ -761,6 +761,7 @@ impl OcrWorker {
 /// window's own close button is the element that says how tall that title bar is.
 ///
 /// Screen coordinates, and `(0, 0, 0, 0)` for an element with no rectangle of its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DumpNode {
     pub depth: i32,
     pub name: String,
@@ -839,19 +840,192 @@ pub const NOT_YET: &str = "not supported on this platform yet";
 pub const COVERED: &str = "something else is drawn over the point";
 
 /// A piece of work a backend hands the host for a thread of the host's own, because it may wait
-/// for another program — a window's style changed across processes, an accessibility action — and
-/// so must never run on the event loop. `Ok` when it was done; `Err` with what a module is told.
-/// Runs once, on a thread with nothing else of the host's on it.
+/// for another program — a window's style changed across processes — and so must never run on
+/// the event loop. `Ok` when it was done; `Err` with what a module is told. Runs once, on a thread
+/// with nothing else of the host's on it.
 pub type ActJob = Box<dyn FnOnce() -> Result<(), String> + Send>;
 
-/// `host.element.press`'s work: the element of window `hwnd` with that name and control type
-/// asked to perform its action, the keyboard focus left where it is. A plain function, so the host
-/// calls it on the event loop and on a thread of its own alike; `Err` with what a module is told.
-pub type PressFn = fn(isize, &str, i32) -> Result<(), String>;
+/// A question to a window's accessibility tree: one `host.element` call, with its arguments.
+///
+/// One type for every call, so that the host treats them alike: hands them to the thread that asks
+/// them (`element.rs`), lets two that are the same share one answer, keeps an answer for the epoch.
+/// Plain data, and nothing in it holds anything of the window.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ElementAsk {
+    /// `host.element.find`.
+    Find { hwnd: isize, name: String, ctype: i32 },
+    /// `host.element.findAny`.
+    FindAny { hwnd: isize, names: Vec<String>, types: Vec<i32> },
+    /// `host.element.locate`.
+    Locate { hwnd: isize, name: String, ctype: i32 },
+    /// `host.element.locateVia`.
+    LocateVia { hwnd: isize, via_name: String, via_type: i32, name: String, ctype: i32 },
+    /// `host.element.pluginLocate`.
+    PluginLocate { hwnd: isize, container: String, name: String, ctype: i32 },
+    /// `host.element.stateProbe`.
+    StateProbe { hwnd: isize, container: String, name: String, ctype: i32 },
+    /// `host.element.dump`.
+    Dump { hwnd: isize },
+    /// `host.element.rawDump`.
+    RawDump { hwnd: isize },
+    /// `host.element.classNavPoint`.
+    ClassNavPoint { hwnd: isize, class: String, ctype: i32, child: i32, sibling: i32 },
+    /// `host.element.focusStep`.
+    FocusStep { hwnd: isize, direction: i32 },
+    /// `host.element.focusWithin`.
+    FocusWithin { hwnd: isize, x: i32, y: i32, w: i32, h: i32 },
+    /// `host.element.press`.
+    Press { hwnd: isize, name: String, ctype: i32 },
+}
 
-/// [`PressFn`] where there is no way to press yet.
-fn press_not_yet(_hwnd: isize, _name: &str, _control_type: i32) -> Result<(), String> {
-    Err(NOT_YET.to_string())
+impl ElementAsk {
+    /// The window it is about.
+    pub fn hwnd(&self) -> isize {
+        match self {
+            ElementAsk::Find { hwnd, .. }
+            | ElementAsk::FindAny { hwnd, .. }
+            | ElementAsk::Locate { hwnd, .. }
+            | ElementAsk::LocateVia { hwnd, .. }
+            | ElementAsk::PluginLocate { hwnd, .. }
+            | ElementAsk::StateProbe { hwnd, .. }
+            | ElementAsk::Dump { hwnd }
+            | ElementAsk::RawDump { hwnd }
+            | ElementAsk::ClassNavPoint { hwnd, .. }
+            | ElementAsk::FocusStep { hwnd, .. }
+            | ElementAsk::FocusWithin { hwnd, .. }
+            | ElementAsk::Press { hwnd, .. } => *hwnd,
+        }
+    }
+
+    /// Whether it acts on the program — presses an element, moves its keyboard focus — rather than
+    /// read: such a question is put every time it is asked, never shared with another or answered
+    /// from what an earlier one found.
+    pub fn acts(&self) -> bool {
+        matches!(self, ElementAsk::FocusStep { .. } | ElementAsk::FocusWithin { .. } | ElementAsk::Press { .. })
+    }
+
+    /// The call's name in the module's words: `"findAny"`.
+    pub fn call_name(&self) -> &'static str {
+        match self {
+            ElementAsk::Find { .. } => "find",
+            ElementAsk::FindAny { .. } => "findAny",
+            ElementAsk::Locate { .. } => "locate",
+            ElementAsk::LocateVia { .. } => "locateVia",
+            ElementAsk::PluginLocate { .. } => "pluginLocate",
+            ElementAsk::StateProbe { .. } => "stateProbe",
+            ElementAsk::Dump { .. } => "dump",
+            ElementAsk::RawDump { .. } => "rawDump",
+            ElementAsk::ClassNavPoint { .. } => "classNavPoint",
+            ElementAsk::FocusStep { .. } => "focusStep",
+            ElementAsk::FocusWithin { .. } => "focusWithin",
+            ElementAsk::Press { .. } => "press",
+        }
+    }
+
+    /// What it asks about, for the log: the names a search looks for, the container and the
+    /// element, the class; empty for a dump and a focus step.
+    pub fn detail(&self) -> String {
+        match self {
+            ElementAsk::Find { name, .. } | ElementAsk::Locate { name, .. } | ElementAsk::Press { name, .. } => name.clone(),
+            ElementAsk::FindAny { names, .. } => names.join("/"),
+            ElementAsk::LocateVia { via_name, name, .. } => format!("{via_name} > {name}"),
+            ElementAsk::PluginLocate { container, name, .. } | ElementAsk::StateProbe { container, name, .. } => {
+                format!("{container} > {name}")
+            }
+            ElementAsk::ClassNavPoint { class, .. } => class.clone(),
+            ElementAsk::Dump { .. } | ElementAsk::RawDump { .. } | ElementAsk::FocusStep { .. } | ElementAsk::FocusWithin { .. } => {
+                String::new()
+            }
+        }
+    }
+
+    /// What a tree with nothing in it answers — and for a press, a platform that cannot press:
+    /// the stub backend's answer to every question.
+    pub fn nothing(&self) -> ElementOutcome {
+        Ok(match self {
+            ElementAsk::Find { .. } => ElementAnswer::Found(false),
+            ElementAsk::FindAny { .. } => ElementAnswer::Index(None),
+            ElementAsk::Locate { .. }
+            | ElementAsk::LocateVia { .. }
+            | ElementAsk::PluginLocate { .. }
+            | ElementAsk::ClassNavPoint { .. } => ElementAnswer::Point(None),
+            ElementAsk::StateProbe { .. } => ElementAnswer::State(None),
+            ElementAsk::Dump { .. } | ElementAsk::RawDump { .. } => ElementAnswer::Nodes(Vec::new(), None),
+            ElementAsk::FocusStep { .. } => ElementAnswer::Step(None),
+            ElementAsk::FocusWithin { .. } => ElementAnswer::Within(None),
+            ElementAsk::Press { .. } => return Err(ElementFailure { why: NOT_YET.to_string(), unanswered: false }),
+        })
+    }
+}
+
+/// What an accessibility tree answered to an [`ElementAsk`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum ElementAnswer {
+    /// `find`: whether there is such an element.
+    Found(bool),
+    /// `findAny`: the 1-based index of the name found, or none.
+    Index(Option<usize>),
+    /// `locate`, `locateVia`, `pluginLocate`, `classNavPoint`: the element's centre on screen, or
+    /// none — not found, or it has no rectangle there.
+    Point(Option<(i32, i32)>),
+    /// `stateProbe`: the Toggle state (-1 for an element without one) and the legacy state word,
+    /// or none when the element is not there.
+    State(Option<(i32, i32)>),
+    /// `dump`, `rawDump`: what the walk found, and — when it stopped before the end because the
+    /// program did not answer one of its questions — why, so that a part of the tree does not read
+    /// as all of it.
+    Nodes(Vec<DumpNode>, Option<String>),
+    /// `focusStep`: where the keyboard focus landed, or none.
+    Step(Option<FocusStep>),
+    /// `focusWithin`: the name and control type of the element that took the focus, or none.
+    Within(Option<(String, i32)>),
+    /// `press`: the program accepted the action.
+    Pressed,
+}
+
+impl ElementAnswer {
+    /// Whether it says that nothing is there — what a question the program did not answer in full
+    /// must not be read as (see [`ElementFailure`]).
+    pub fn is_nothing(&self) -> bool {
+        matches!(
+            self,
+            ElementAnswer::Found(false)
+                | ElementAnswer::Index(None)
+                | ElementAnswer::Point(None)
+                | ElementAnswer::State(None)
+                | ElementAnswer::Step(None)
+                | ElementAnswer::Within(None)
+        )
+    }
+}
+
+/// A question that got no answer: what is not known is not "not there". The program did not
+/// answer in time, refused (it runs with higher rights), went away while it was asked — or, for a
+/// press, did not take the action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ElementFailure {
+    /// What a module is told, a sentence: `"the program did not answer within 1000 ms"`.
+    pub why: String,
+    /// The program did not answer within the bound the platform sets (UI Automation's timeout):
+    /// the questions to the same program that waited behind this one are not put to it.
+    pub unanswered: bool,
+}
+
+/// An [`ElementAsk`]'s outcome.
+pub type ElementOutcome = Result<ElementAnswer, ElementFailure>;
+
+/// How a platform that asks accessibility questions on a thread of their own answers them there —
+/// see [`Backend::element_runner`]. Plain functions, so that the host's thread can hold them.
+#[derive(Clone, Copy)]
+pub struct ElementRunner {
+    /// Called once, on that thread, before its first question: on Windows it enters the
+    /// multithreaded COM apartment, which is where Microsoft wants a UI Automation client.
+    pub init: fn(),
+    /// Answers one question, on that thread.
+    pub run: fn(&ElementAsk) -> ElementOutcome,
+    /// The process that answers questions about window `hwnd` — 0 for a window that is gone. Cheap
+    /// and local, asked on the event loop for every question.
+    pub process_of: fn(isize) -> u32,
 }
 
 /// Which windows an event gives their activation back to — see
@@ -1078,12 +1252,6 @@ pub trait Backend {
         None
     }
 
-    /// `host.element.press`'s work ([`PressFn`]), for the event loop or a thread of the host's.
-    /// The default is a platform without it, which answers [`NOT_YET`].
-    fn element_press_fn(&self) -> PressFn {
-        press_not_yet
-    }
-
     /// Child controls (descendant windows) of a top-level window, for detecting
     /// embedded plugins by control class + locating their coordinate origin.
     fn window_controls(&self, hwnd: isize) -> Vec<ControlInfo>;
@@ -1093,103 +1261,44 @@ pub trait Backend {
     /// plugin's control (which a foreground check alone can't see).
     fn window_focus_chain(&self) -> Vec<ControlInfo>;
 
-    /// Whether `hwnd`'s UI Automation subtree contains an element with the given
-    /// Name + ControlType — for confirming a plugin's identity.
-    fn element_find(&self, hwnd: isize, name: &str, control_type: i32) -> bool;
-
-    /// "Is any of these names present as any of these control types?" — one traversal
-    /// per name instead of one per name×type pair. Returns the 1-based index of the
-    /// matching name (so the caller learns which), or None.
-    fn element_find_any(&self, hwnd: isize, names: &[String], types: &[i32]) -> Option<usize>;
-
-    /// Screen-pixel centre of that UIA element (to click it), or None if not
-    /// found / it has no on-screen rect.
-    fn element_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)>;
-
-    /// Like `element_locate`, but first descends into a container element
-    /// (`via_name`/`via_type`) and searches for the target within it — crosses a
-    /// hosted-fragment boundary a search from `hwnd` does not (a DAW-embedded plugin
-    /// whose UI hangs off an identity pane). Click-centre, or None.
-    fn element_locate_via(
-        &self,
-        hwnd: isize,
-        via_name: &str,
-        via_type: i32,
-        name: &str,
-        control_type: i32,
-    ) -> Option<(i32, i32)>;
-
-    /// ReaHotkey's `GetPluginUIAElement` + FindElement: locate the element that IS the
-    /// plugin (Name == `container_name`, ControlType Window/Pane, `ni::qt::QuickWindow`
-    /// class preferred over the `…QWindowIcon` host) and find the target within it, over
-    /// the RAW tree walker — the only view that crosses into a DAW-embedded plugin's
-    /// hosted Qt fragment. Empty `name` = any element of that type. Click-centre, or None.
-    fn element_plugin_locate(
-        &self,
-        hwnd: isize,
-        container_name: &str,
-        name: &str,
-        control_type: i32,
-    ) -> Option<(i32, i32)>;
-
-    /// Dev/diagnostic: the "interesting" elements of `hwnd`'s UIA subtree (raw
-    /// view), as (depth, Name, ClassName, ControlType). For discovering plugin
-    /// identity properties.
-    fn element_dump(&self, hwnd: isize) -> Vec<DumpNode>;
-
-    /// Like `element_dump`, but over the RAW TreeWalker, which crosses into a hosted Qt
-    /// fragment that the condition-based dump cannot see.
-    fn element_raw_dump(&self, hwnd: isize) -> Vec<DumpNode>;
-
-    /// What a named element reports about its own state (Toggle pattern, then
-    /// LegacyIAccessible state bits), as a diagnostic string. None when not found.
-    fn element_state_probe(
-        &self,
-        hwnd: isize,
-        container_name: &str,
-        name: &str,
-        control_type: i32,
-    ) -> Option<(i32, i32)>;
-
-    /// Click-point (screen centre) of the element reached from the first element
-    /// whose ClassName contains `class_substr` + ControlType == `ctype` by walking
-    /// `child` (nth child, 0 = none) then `sibling` raw-view siblings. Ports
-    /// ReaHotkey FindElement(ClassName) + WalkTree (KK browser, Kontakt What's-New).
-    fn element_class_nav_point(
-        &self,
-        hwnd: isize,
-        class_substr: &str,
-        ctype: i32,
-        child: i32,
-        sibling: i32,
-    ) -> Option<(i32, i32)>;
-
-    /// Tab pass-through for a standalone plugin window: SetFocus the next
-    /// (`direction` >= 0) / previous keyboard-focusable descendant relative to the one
-    /// focused now, wrapping at the ends, and say where the focus landed — its name, control
-    /// type, 1-based index, the ring's count and its rectangle ([`FocusStep`]). None if the
-    /// window has no focusable descendant that takes the focus.
-    fn element_focus_step(&self, hwnd: isize, direction: i32) -> Option<FocusStep>;
-
-    /// Give keyboard focus to the first focusable element of `hwnd` whose centre lies inside
-    /// the rectangle (screen coordinates), and say which — `(name, control type)`.
-    ///
-    /// What "put the keyboard back into the plugin" means where the plugin publishes
-    /// elements: asking one of them for focus is what a screen reader's own navigation does,
-    /// raises a real focus event, and presses nothing. A plugin that publishes nothing has no
-    /// element to ask, and the caller falls back to whatever the platform does understand.
-    /// `None` when nothing inside the rectangle accepts focus, or the platform has no way to
-    /// ask; the default is the latter.
-    fn element_focus_within(
-        &self,
-        _hwnd: isize,
-        _x: i32,
-        _y: i32,
-        _w: i32,
-        _h: i32,
-    ) -> Option<(String, i32)> {
+    /// The thread of their own on which this platform asks every `host.element` question, if it
+    /// has one: Windows, where UI Automation is asked from the multithreaded COM apartment, as
+    /// Microsoft recommends for a client, and never from the event loop (`element.rs`). `None`: the
+    /// host asks [`element_ask`](Self::element_ask) on the event loop.
+    fn element_runner(&self) -> Option<ElementRunner> {
         None
     }
+
+    /// Answers `ask` on the calling thread — the event loop: what the host does with every
+    /// `host.element` question on a platform without [`element_runner`](Self::element_runner).
+    /// The questions, by [`ElementAsk`]'s variants:
+    ///
+    /// - `Find`: whether `hwnd`'s tree holds an element with that name and control type, an empty
+    ///   name being any element of the type.
+    /// - `FindAny`: "is any of these names present as any of these control types?" — one
+    ///   traversal per name — and the 1-based index of the name found.
+    /// - `Locate`: that element's centre on screen, to click it; none when it has no rectangle.
+    /// - `LocateVia`: the same, searched for within a container element (`via_name`/`via_type`)
+    ///   — a hosted fragment a search from the window does not cross.
+    /// - `PluginLocate`: ReaHotkey's `GetPluginUIAElement` + `FindElement`: the element that IS the
+    ///   plug-in (its name, Window or Pane, the `ni::qt::QuickWindow` class preferred over the
+    ///   `…QWindowIcon` host), then the target within it, over the RAW tree.
+    /// - `StateProbe`: what that element says about its own state: the Toggle pattern's state
+    ///   (-1 without one) and LegacyIAccessible's state word.
+    /// - `Dump`, `RawDump`: the elements of the window's tree that carry a name or a class, by a
+    ///   condition-based search and by the raw walker.
+    /// - `ClassNavPoint`: the centre of the element reached from the first one whose class contains
+    ///   `class` and whose control type is `ctype`, by `child` (nth child, 0 = none) and then
+    ///   `sibling` raw-view siblings — ReaHotkey's `FindElement(ClassName)` + `WalkTree`.
+    /// - `FocusStep`: the Tab pass-through of a standalone plug-in window: the keyboard focus moved
+    ///   to the next (`direction` >= 0) or previous focusable element, wrapping, and where it landed.
+    /// - `FocusWithin`: the keyboard focus given to the first focusable element whose centre lies
+    ///   inside the rectangle, and which element took it.
+    /// - `Press`: the element's own action, the keyboard focus left where it is.
+    ///
+    /// `Err` only for a question that got no answer ([`ElementFailure`]); "nothing there" is an
+    /// answer.
+    fn element_ask(&self, ask: &ElementAsk) -> ElementOutcome;
 
     /// Size of the primary display in pixels.
     fn screen_size(&self) -> (i32, i32);

@@ -10,8 +10,8 @@
 use std::cell::{Cell, RefCell};
 
 use super::{
-    Backend, CaptureFn, CaptureSource, CapturedImage, Captured, ControlInfo, DumpNode, HostEvents,
-    KeyboardNow, MouseButton, OwnerKeys, Stroke, WinInfo, CAPTURE_FAILED,
+    Backend, CaptureFn, CaptureSource, CapturedImage, Captured, ControlInfo, ElementAsk, ElementOutcome,
+    HostEvents, KeyboardNow, MouseButton, OwnerKeys, Stroke, WinInfo, CAPTURE_FAILED,
 };
 
 #[derive(Default)]
@@ -168,62 +168,9 @@ impl Backend for StubBackend {
     fn window_focus_chain(&self) -> Vec<ControlInfo> {
         Vec::new()
     }
-    fn element_find(&self, _hwnd: isize, _name: &str, _control_type: i32) -> bool {
-        false
-    }
-    fn element_find_any(&self, _hwnd: isize, _names: &[String], _types: &[i32]) -> Option<usize> {
-        None
-    }
-    fn element_locate(&self, _hwnd: isize, _name: &str, _control_type: i32) -> Option<(i32, i32)> {
-        None
-    }
-    fn element_locate_via(
-        &self,
-        _hwnd: isize,
-        _via_name: &str,
-        _via_type: i32,
-        _name: &str,
-        _control_type: i32,
-    ) -> Option<(i32, i32)> {
-        None
-    }
-    fn element_plugin_locate(
-        &self,
-        _hwnd: isize,
-        _container_name: &str,
-        _name: &str,
-        _control_type: i32,
-    ) -> Option<(i32, i32)> {
-        None
-    }
-    fn element_dump(&self, _hwnd: isize) -> Vec<DumpNode> {
-        Vec::new()
-    }
-    fn element_raw_dump(&self, _hwnd: isize) -> Vec<DumpNode> {
-        Vec::new()
-    }
-
-    fn element_state_probe(
-        &self,
-        _hwnd: isize,
-        _container_name: &str,
-        _name: &str,
-        _control_type: i32,
-    ) -> Option<(i32, i32)> {
-        None
-    }
-    fn element_class_nav_point(
-        &self,
-        _hwnd: isize,
-        _class_substr: &str,
-        _ctype: i32,
-        _child: i32,
-        _sibling: i32,
-    ) -> Option<(i32, i32)> {
-        None
-    }
-    fn element_focus_step(&self, _hwnd: isize, _direction: i32) -> Option<super::FocusStep> {
-        None
+    // No tree to ask: every question finds nothing, and a press is not supported.
+    fn element_ask(&self, ask: &ElementAsk) -> ElementOutcome {
+        ask.nothing()
     }
     fn set_captured_keys(&self, keys: &[Captured]) {
         self.keys.borrow_mut().0 = keys.to_vec();

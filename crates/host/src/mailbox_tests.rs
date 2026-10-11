@@ -121,6 +121,7 @@ fn kind_of(ev: &Event) -> &'static str {
         Event::Setting { .. } => "setting",
         Event::Page { .. } => "page",
         Event::Acted { .. } => "acted",
+        Event::Element { .. } => "element",
         Event::Call { .. } => "call",
     }
 }

@@ -98,10 +98,18 @@ return {
         -- with every coordinate measured against the dialog. A blind user then has no
         -- "Browse for folder" at all and a header full of controls that do the wrong
         -- thing. When the foreground window IS the dialog, there is nothing to weigh up.
-        identify = function(c)
+        --
+        -- Whether a Kontakt is in the window, and which control is the nested one, are answered
+        -- off the event loop (detect, "What a control is"): until they are, this keeps its last
+        -- verdict (detect.standing) — a dialog overlay must not come up inside Komplete Kontrol on
+        -- a container whose nested Kontakt is not known yet.
+        identify = D.standing(function(c)
           if D.inOwnDialog() then return true end
-          return D.kontaktPresent() and not D.isPluginHostContainer(c)
-        end,
+          local present = D.kontaktPresent()
+          if present == false then return false end
+          if present == nil or D.scenePending() then return nil end
+          return not D.isPluginHostContainer(c)
+        end),
         cacheIdentity = false,
       }, { slot = C.SLOT }),
       { specificity = O.layer.dialog }

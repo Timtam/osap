@@ -87,9 +87,45 @@ host.settings.onChange(CLOSE_KK_BROWSER, function(new)
 end)
 
 -- A Komplete Kontrol Qt control (same Qt class as Kontakt; the UIA name is what
--- distinguishes it). Non-relational, so the identity cache is safe here.
+-- distinguishes it). Non-relational, so the runtime's identity cache is safe here.
+--
+-- The search is asked with a callback, off the event loop (on Windows, on the host's
+-- accessibility thread): the runtime asks a kept `identify` again at every recheck until it has a
+-- verdict, and each search waited for there held the loop for as long as the DAW took to answer it.
+-- Its answer is kept here until the runtime has taken it, per control — per stay, for a DAW's
+-- plug-in panel, which is another plug-in at each — and asks the overlays to look again, since an
+-- answer is no window event. Until it comes, and when the plug-in did not answer it (`why`), this
+-- raises: the runtime takes a raise as no verdict, never counts it, and asks again at the next
+-- recheck (its log says so once per control). A `nil` would count, and the runtime keeps the
+-- eighth in a row as a no for the control's life. Asked at most once per epoch, never while an
+-- answer is out; at most KK_CAP controls are kept, and a control forgotten is asked about again.
+local KK_CAP = 64
+local kkAsked, kkN = {}, 0
 local function isKK(c)
-  return host.element.findAny(c.id, { "Komplete Kontrol" }, { U.Window, U.Pane }) ~= nil
+  local at = if c.stay ~= nil then tostring(c.id) .. "/" .. tostring(c.stay) else c.id
+  local k = kkAsked[at]
+  if not k then
+    if kkN >= KK_CAP then kkAsked, kkN = {}, 0 end
+    k = {}
+    kkAsked[at] = k
+    kkN += 1
+  end
+  local e = host.epoch()
+  if k.verdict == nil and not k.asking and k.askedIn ~= e then
+    k.asking, k.askedIn = true, e
+    host.element.findAny(c.id, { "Komplete Kontrol" }, { U.Window, U.Pane }, function(i, why)
+      k.asking = false
+      if why ~= nil then
+        k.why = why
+        return
+      end
+      k.verdict, k.why = i ~= nil, nil
+      host.window.recheck()
+    end)
+  end
+  if k.verdict ~= nil then return k.verdict end
+  if k.why then error("Komplete Kontrol's name was not answered: " .. k.why, 0) end
+  error("Komplete Kontrol's name is being asked; its answer comes on a later turn", 0)
 end
 
 -- Where KK can be: embedded in a DAW, or its own application window. Values, not

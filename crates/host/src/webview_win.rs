@@ -608,10 +608,11 @@ impl Drop for Native {
 /// The event loop's COM apartment, in a word, and whether WebView2 can live in it.
 ///
 /// WebView2 needs a single-threaded apartment. wxWidgets puts the event loop in one when it
-/// starts — unless something entered the multithreaded one on this thread first, and some of the
-/// host's own code does on the thread it runs on (UI Automation's `automation()` in uia.rs): a
-/// module that asked `host.element` at load, before the window system started, would leave the
-/// loop there. Which apartment the loop really has was never measured; the first build says so.
+/// starts — unless something entered the multithreaded one on this thread first. UI Automation
+/// did once, on whichever thread asked it, and a module that asked `host.element` at load would
+/// have left the loop there; it is asked on the host's accessibility thread now (element.rs),
+/// which enters that apartment for itself. Which apartment the loop really has was never
+/// measured; the first build says so.
 fn apartment() -> (&'static str, bool) {
     use windows::Win32::System::Com::{
         CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER, APTTYPEQUALIFIER_IMPLICIT_MTA,

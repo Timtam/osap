@@ -21,8 +21,9 @@ name = "Overlay runtime"
 # this application's own windows (a window table's `own`) and asks nothing there, not even the
 # window that lost the foreground; an overlay the arbiter elects while one of them has the keyboard
 # (host.window.foreground()'s `own` when none is shown) does not come up. Nothing a module calls is
-# new.
-version = "0.5.1"
+# new. 0.5.2 asks its accessibility menu tests with a callback, off the event loop, and keeps a
+# test's last answer for one the plug-in did not answer. Nothing a module calls is new.
+version = "0.5.2"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

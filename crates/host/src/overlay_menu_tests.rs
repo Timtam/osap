@@ -107,7 +107,9 @@ T.HOST = { class = "#32770", chrome = { "^SysListView32", "^reaperPluginHostWrap
 local S = {
   now = 1000,
   native = false,   -- host.keys.nativeMenuOpen()
-  find = false,     -- host.element.find(id, "", Menu): a boolean, or function(id) -> boolean
+  find = false,     -- host.element.find(id, "", Menu): a boolean or "late", or function(id) -> one
+  findLater = false, -- a callback's answer waits in findsOut for T.answerFinds()
+  findsOut = {},
   windows = { { id = 100, layer = 0, class = "REAPERwnd", x = 0, y = 0, w = 1600, h = 900 } },
   passed = {},      -- host.keys.passedThrough(), drained on read
   pixel = { r = 20, g = 20, b = 20 },
@@ -274,11 +276,25 @@ T.host = strict("host", {
   }),
   element = strict("host.element", {
     type = { Menu = 50009, MenuItem = 50011, Button = 50000, Pane = 50033, Window = 50032 },
-    find = function(id, name, ctype)
+    -- S.find (or what S.find(id) says): true, false, or "late" — the plug-in did not answer, which
+    -- the host answers `nil` and why. With a callback (the runtime's menu tests ask so) the answer
+    -- is handed to it inside the call, which the runtime takes as it takes one on a later turn —
+    -- unless S.findLater is set: then it is kept in S.findsOut until T.answerFinds() hands it over,
+    -- as an event of the module, on a later turn, as the host does.
+    find = function(id, name, ctype, opts, cb)
       assert(name == "" and ctype == 50009, "only the menu idiom is scripted")
+      if type(opts) == "function" then cb = opts end
       S.finds += 1
-      if type(S.find) == "function" then return S.find(id) end
-      return S.find
+      local v = S.find
+      if type(v) == "function" then v = v(id) end
+      local why = nil
+      if v == "late" then v, why = nil, "the program did not answer within 1000 ms" end
+      if cb == nil then return v, why end
+      if S.findLater then
+        S.findsOut[#S.findsOut + 1] = { cb = cb, v = v, why = why }
+      else
+        cb(v, why)
+      end
     end,
     -- Moves the plug-in's keyboard focus one stop along S.ring, wrapping at the ends as both
     -- backends do, and says where it landed: nil with no ring. From outside the ring, forwards
@@ -765,6 +781,15 @@ function T.deliver()
     end
     if r.list then T.call("answer", r.cb, list, byName) else T.call("answer", r.cb, list[1]) end
   end
+end
+
+-- The answers host.element.find kept while S.findLater is set, handed to their callbacks in the
+-- order they were asked, each as an event of the module — as the host hands an accessibility
+-- tree's answer on a later turn of the loop.
+function T.answerFinds()
+  local out = S.findsOut
+  S.findsOut = {}
+  for _, f in ipairs(out) do T.call("answer", f.cb, f.v, f.why) end
 end
 
 -- Ticks for `ms` of the scenario's time.
@@ -1442,6 +1467,70 @@ fn accessibility_asks_the_origin_for_a_menu_element() {
         T.tick(1)
         assert(asked[1] == 7, "asked about the origin control")
         assert(T.open() == true)
+    "#);
+}
+
+/// accessibility asks with a callback, so the tree is walked off the event loop: the answer opens
+/// the menu on the turn it comes, the test is not asked again while its answer is out, and an
+/// answer the plug-in did not give ("not known": `nil` and why) is no miss — the word stands, a
+/// menu that is open stays open and one that is not does not open.
+#[test]
+fn a_menu_element_answered_on_a_later_turn_or_not_known_keeps_the_word() {
+    run(r#"
+        local S = T.S
+        S.findLater, S.find = true, true
+        local o = T.overlay({ T.O.menuTests.accessibility })
+        T.press(o)
+        T.tick(1)
+        assert(S.finds >= 1 and #S.findsOut == S.finds, "asked with a callback: " .. S.finds)
+        assert(T.open() ~= true, "nothing is open before the tree has answered: " .. T.history(1))
+        local f = S.finds
+        T.tick(2)
+        assert(S.finds == f, "not asked again while its answer is out: " .. (S.finds - f))
+        T.answerFinds()
+        assert(T.open() == true, "open on the turn the answer came: " .. T.history(1))
+        -- Not known, twice: the menu stays open, where two answers of no close it.
+        S.find = "late"
+        for _ = 1, 2 do
+          T.tick(1)
+          T.answerFinds()
+        end
+        assert(T.open() == true, "the word stands: " .. T.history(1))
+        S.find = false
+        for _ = 1, 2 do
+          T.tick(1)
+          T.answerFinds()
+        end
+        assert(T.open() == false, "two answers of no close it: " .. T.history(1))
+        -- With no menu open, not known opens none.
+        S.find = "late"
+        T.tick(1)
+        T.answerFinds()
+        assert(T.open() == false, T.history(1))
+    "#);
+}
+
+/// accessibilityAfterPress counts no miss for an answer the plug-in did not give: the menu its
+/// press opened stays open through any number of them, and only two answers of no end the press.
+#[test]
+fn accessibility_after_press_counts_no_miss_for_an_answer_not_known() {
+    run(r#"
+        local S = T.S
+        local o = T.overlay({ T.O.menuTests.accessibilityAfterPress })
+        S.find = true
+        T.press(o)
+        T.tick(1)
+        assert(T.open() == true, T.history(1))
+        S.find = "late"
+        T.tick(4)
+        assert(T.open() == true, "not known is no miss: " .. T.history(1))
+        S.find = false
+        T.tick(2)
+        assert(T.open() == false, T.history(1))
+        local f = S.finds
+        S.find = true
+        T.run(3000)
+        assert(T.open() == false and S.finds == f, "done with that press: " .. (S.finds - f))
     "#);
 }
 

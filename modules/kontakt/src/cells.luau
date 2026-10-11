@@ -74,24 +74,42 @@ local MENUS_IN_KK = { O.menuTests.nativePopup, O.menuTests.accessibility, O.menu
 -- identity check alone would match KK too. And `not inOwnDialog`: one of Kontakt's own
 -- dialogs is a plugin host by our REAPER criteria, and the Qt window that draws it passes
 -- both the class test and the identity test — see detect.inOwnDialog for what that cost.
+--
+-- What the window's tree says is asked off the event loop and answered later (detect, "What a
+-- control is"): until a question this needs is answered, the verdict is nil, and the cell keeps
+-- the last one it reached (detect.standing) — a definite "no" from any part is a no at once.
 local function bareOfVersion(vIdx)
-  return function(c)
-    return not D.isKK(c)
-      and not D.inOwnDialog()
-      and D.variantIndex(c) == vIdx
-      and not D.kkPresent()
-  end
+  return D.standing(function(c)
+    local kk = D.isKK(c)
+    if kk == true or D.inOwnDialog() then return false end
+    local v = D.variantIndex(c)
+    if v == false or (v ~= nil and v ~= vIdx) then return false end
+    local wrapped = D.kkPresent()
+    if wrapped == true then return false end
+    if kk == nil or v == nil or wrapped == nil then return nil end
+    return true
+  end)
 end
 
 -- A Komplete Kontrol hosting a Kontakt of this version. The overlay anchors on the KK
 -- CONTAINER (that is the control the host window exposes), and reaches the Kontakt content
--- through the dynamic frame below.
+-- through the dynamic frame below. Not known yet, as above, while a question it needs is not
+-- answered: whether this is a Komplete Kontrol, or — with no nested Kontakt found — whether one
+-- of the window's controls is the nested Kontakt.
 local function kkHostingVersion(vIdx)
-  return function(c)
-    if not D.isKK(c) or D.inOwnDialog() then return false end
+  return D.standing(function(c)
+    local kk = D.isKK(c)
+    if kk == nil then return nil end
+    if not kk or D.inOwnDialog() then return false end
     local kc = D.findNestedKontakt(c)
-    return kc ~= nil and D.variantIndex(kc) == vIdx
-  end
+    if kc == nil then
+      if D.scenePending() then return nil end
+      return false
+    end
+    local v = D.variantIndex(kc)
+    if v == nil then return nil end
+    return v == vIdx
+  end)
 end
 
 -- The Kontakt STANDALONE application window (Kontakt N.exe on its own): a top-level

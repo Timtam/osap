@@ -380,23 +380,30 @@ end
 -- never registered are the same event, so the dropdown reads back afterwards whether a
 -- menu actually appeared.
 --
--- Only where the plugin answers UIA at all. host.element.find returns a bare boolean, so on a
--- DAW-embedded Kontakt 8 — which exposes no accessible content whatsoever — "no menu" and
--- "cannot see" are the same `false`, and this would announce a missing menu every single
--- time. There the press acknowledgement is all we can honestly give.
+-- Only where the plugin answers UIA at all. On a DAW-embedded Kontakt 8 — which exposes no
+-- accessible content whatsoever — "no menu" and "cannot see" are the same `false` from
+-- host.element.find, and this would announce a missing menu every single time. There the press
+-- acknowledgement is all we can honestly give.
 --
 -- And it reports what it OBSERVED, not what it concluded: a menu that failed to open for
 -- some other reason is still worth saying out loud, and "this instrument has no snapshots"
--- would be a claim this test cannot actually support.
+-- would be a claim this test cannot actually support. A walk the plug-in did not answer is
+-- no observation either: nothing is said then. Both questions — whether Kontakt answers here at
+-- all, and whether a menu is up — are asked with a callback, so neither walk is made on the event
+-- loop.
 local MENU_SETTLE = 350
 local function verifyMenuOpened(o)
   local fg = host.window.active()
-  if not (fg and fg.id and kontaktPaneName(fg.id)) then return end
   local ctrl = o:origin()
-  if not (ctrl and ctrl.id) then return end
-  if host.element.find(ctrl.id, "", U.Menu) then return end
-  host.log.info("Kontakt: no menu present after the snapshot dropdown was clicked")
-  host.speech.output("Snapshot menu did not open", { interrupt = true })
+  if not (fg and fg.id and ctrl and ctrl.id) then return end
+  kontaktPaneName(fg.id, function(via)
+    if not via then return end
+    host.element.find(ctrl.id, "", U.Menu, function(found, why)
+      if found or why ~= nil then return end
+      host.log.info("Kontakt: no menu present after the snapshot dropdown was clicked")
+      host.speech.output("Snapshot menu did not open", { interrupt = true })
+    end)
+  end)
 end
 
 -- `opensMenu` marks the control whose click is supposed to drop a menu, so it can be

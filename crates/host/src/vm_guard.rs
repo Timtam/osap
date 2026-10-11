@@ -9,7 +9,9 @@
 //! - **Time (G2).** A callback may take 2 s of the event loop's processor time, or 10 s on the wall
 //!   clock, counted from the outermost call into Lua — the slice ([`Entry`]). Past either, the VM
 //!   that runs Lua next takes the stop ([`on_interrupt`]): the one that loops, or the one whose slow
-//!   host call just returned, never one that waits on it.
+//!   host call just returned, never one that waits on it. The wall clock stands while a
+//!   `host.element` call without a callback waits behind a question asked before it
+//!   ([`Guard::stop_wall`], element.rs): that wait is another question's, often another module's.
 //!
 //! **Every VM is made here** ([`new_vm`]), with the default memory limit at once, a slot of the
 //! guard's in its app data ([`Slot`]) — which module it is, whose code runs in it, whether it was
@@ -104,7 +106,8 @@ pub(crate) const STOPPED: &str = "stopped by the host: this callback ran too lon
 
 /// A callback's budget of the event loop's processor time.
 pub(crate) const CPU_BUDGET: Duration = Duration::from_secs(2);
-/// A callback's budget on the wall clock, host calls and waiting for the processor included.
+/// A callback's budget on the wall clock, host calls and waiting for the processor included — but
+/// not a wait behind another accessibility question ([`Guard::stop_wall`]).
 pub(crate) const WALL_BUDGET: Duration = Duration::from_secs(10);
 /// How often the watchdog looks. The budgets are met up to one look late.
 pub(crate) const POLL: Duration = Duration::from_millis(50);
@@ -210,8 +213,12 @@ pub(crate) struct Guard {
     trips: Mutex<Vec<Trip>>,
     /// Odd while a slice runs; +1 at its start and end, +2 when a stop restarts its clocks.
     slice_seq: AtomicU64,
-    /// `wall_ns` at the slice's start or restart.
+    /// `wall_ns` at the slice's start or restart, moved on by the time its wall clock stood.
     slice_start_ns: AtomicU64,
+    /// `wall_ns` when the slice's wall clock was stopped ([`Guard::stop_wall`]); `None` while it
+    /// runs. Behind a lock with `slice_start_ns`'s move, so the watchdog never sees one without the
+    /// other.
+    wall_stopped: Mutex<Option<u64>>,
     /// The slice a round is armed for; 0 when none waits to be taken.
     armed_seq: AtomicU64,
     /// The serial of the innermost VM entered now; 0 for none.
@@ -247,6 +254,7 @@ impl Guard {
             trips: Mutex::new(Vec::new()),
             slice_seq: AtomicU64::new(0),
             slice_start_ns: AtomicU64::new(0),
+            wall_stopped: Mutex::new(None),
             armed_seq: AtomicU64::new(0),
             top: AtomicU64::new(0),
             outer: AtomicU64::new(0),
@@ -264,6 +272,36 @@ impl Guard {
         let mut slots = lock(&self.slots);
         slots.retain(|s| Arc::strong_count(s) > 1);
         slots.clone()
+    }
+
+    /// Stops the slice's wall clock: the callback waits for something that is not its own doing —
+    /// a `host.element` call without a callback, behind a question the accessibility thread was
+    /// asking or was to ask first (element.rs). Until [`Guard::go_on`] the watchdog sees the wall
+    /// clock where it stood; the processor time is not stopped, and waiting uses none. Any thread.
+    pub(crate) fn stop_wall(&self) {
+        *lock(&self.wall_stopped) = Some(self.clocks.wall_ns());
+    }
+
+    /// Starts the slice's wall clock again, the time it stood taken out of the slice. Any thread,
+    /// any number of times: only the first after a stop moves anything.
+    pub(crate) fn go_on(&self) {
+        let mut stopped = lock(&self.wall_stopped);
+        if let Some(at) = stopped.take() {
+            let stood = self.clocks.wall_ns().saturating_sub(at);
+            self.slice_start_ns.fetch_add(stood, Ordering::AcqRel);
+        }
+    }
+
+    /// Whether the slice's wall clock stands now, for the tests.
+    #[cfg(test)]
+    pub(crate) fn wall_stands(&self) -> bool {
+        lock(&self.wall_stopped).is_some()
+    }
+
+    /// The slice's start, and when its wall clock stopped if it stands now: read together.
+    fn wall_from(&self) -> (u64, Option<u64>) {
+        let stopped = lock(&self.wall_stopped);
+        (self.slice_start_ns.load(Ordering::Acquire), *stopped)
     }
 
     /// The host call running now, as its binding named it.
@@ -326,7 +364,9 @@ impl Guard {
         if seq % 2 == 1 {
             let used = cpu.zip(w.cpu_base).map(|(c, b)| c.saturating_sub(b)).unwrap_or_default();
             w.slice_used = used;
-            let wall = Duration::from_nanos(now.saturating_sub(self.slice_start_ns.load(Ordering::Acquire)));
+            // A wall clock that stands now counts to where it stopped (`stop_wall`).
+            let (start, stopped) = self.wall_from();
+            let wall = Duration::from_nanos(stopped.map_or(now, |at| at.min(now)).saturating_sub(start));
             if used >= self.budgets.cpu || wall >= self.budgets.wall {
                 if w.armed_for != Some(seq) {
                     let note = ArmNote {
@@ -1004,6 +1044,8 @@ impl Entry {
             entry.prev_call = g.call.swap(std::ptr::null_mut(), Ordering::AcqRel);
             if outermost {
                 g.outer.store(slot.serial, Ordering::Release);
+                // A new slice's wall clock runs, whatever a stop before it left.
+                *lock(&g.wall_stopped) = None;
                 g.slice_start_ns.store(now, Ordering::Release);
                 g.slice_seq.fetch_add(1, Ordering::AcqRel);
             }
@@ -1531,6 +1573,7 @@ fn claim(g: &Arc<Guard>, slot: &Arc<Slot>, s: Sampling) {
         }
     }
     // The outer callback starts afresh: a new slice to the watchdog, with its own budgets.
+    *lock(&g.wall_stopped) = None;
     g.slice_start_ns.store(g.clocks.wall_ns(), Ordering::Release);
     g.slice_seq.fetch_add(2, Ordering::AcqRel);
     let (kind, what, outer) = entry_context(slot);

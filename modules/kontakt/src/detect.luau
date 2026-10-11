@@ -34,10 +34,82 @@ local VARIANTS = {
 local VARIANT_NAMES = {}
 for i, v in ipairs(VARIANTS) do VARIANT_NAMES[i] = v.name end
 
--- WHICH Kontakt a control is, as an index into VARIANTS, or nil for "not a Kontakt".
+-- ── Komplete Kontrol nesting ──────────────────────────────────────────────────
+-- KK can itself host a Kontakt instance (DAW → KK → Kontakt → library). KK and
+-- Kontakt share the Qt control class and differ only by UIA name. EnumChildWindows
+-- enumerates the nested Kontakt control too, but ReaHotkey anchors a nested library
+-- on KK's control and crosses KK's chrome with a fixed content offset — we do the
+-- same, so the SAME library layout (authored in the bare-Kontakt frame) lands
+-- correctly without the library knowing anything about KK.
+local KK_NAME = { "Komplete Kontrol" }
+
+-- ── What a control is, by its window handle ──────────────────────────────────
+-- Whether a window is a Komplete Kontrol never changes for that window, nor does which Kontakt a
+-- window that is not one is. Both used to be asked by accessibility at every evaluation of every
+-- cell, on the event loop — each poll, each focus change, each tick of the runtime's menu test
+-- after a press — and on 2026-10-10 that held the loop for 1459 ms and 1541 ms while REAPER built
+-- its Load and Save dialogs, and for 2-3 s after Kontakt's Load dialog on 2026-09-26 (TODO.md). So
+-- they are asked with a callback — off the event loop, on the host's accessibility thread — at most
+-- once per epoch and never while one is out, and the answers are kept here, per handle:
+--
+--   kk       true, kept for the window's life; false — kept, and asked again once per epoch, since a
+--            Komplete Kontrol whose tree is not up yet the instant it appears answers no;
+--   variant  the index into VARIANTS of the Kontakt name the window's tree holds, or false for
+--            none. Kept for the window's life once found for a window that is not a Komplete
+--            Kontrol; otherwise — no name yet, or what a Komplete Kontrol holds, which changes as
+--            Kontakt is loaded into it and out — asked again once per epoch.
+--
+-- Until a question is first answered its answer is nil, "not known yet", and so is everything
+-- worked out from it (scene, the cells' verdicts): a cell's verdict then stays what it was
+-- (cells.luau, `standing`). An answer the plug-in did not give — it did not answer in time, the
+-- host says why — is no answer: the last one stands, and the next epoch asks again. An answer that
+-- changes what is known asks every overlay to look again (`host.window.recheck`), because an answer
+-- is not a window event and nothing else would. At most KNOWN_CAP handles are kept; past that the
+-- record starts again, and a window forgotten is simply asked about again.
+local KNOWN_CAP = 64
+local known, knownN = {}, 0
+
+local function knownOf(id)
+  local k = known[id]
+  if k then return k end
+  if knownN >= KNOWN_CAP then known, knownN = {}, 0 end
+  k = { asking = {}, askedIn = {} }
+  known[id] = k
+  knownN += 1
+  return k
+end
+
+-- Asks `field` ("kk" or "variant") of window `id`, unless it was asked in this epoch or its
+-- answer is still out.
+local function ask(id, field)
+  local k = knownOf(id)
+  local e = host.epoch()
+  if k.asking[field] or k.askedIn[field] == e then return end
+  k.asking[field], k.askedIn[field] = true, e
+  local names = if field == "kk" then KK_NAME else VARIANT_NAMES
+  host.element.findAny(id, names, IDENTITY_TYPES, function(i, why)
+    k.asking[field] = nil
+    if why ~= nil then return end -- not known: the last answer stands
+    local v = if field == "kk" then i ~= nil else (i or false)
+    if k[field] ~= v then
+      k[field] = v
+      host.window.recheck()
+    end
+  end)
+end
+
+-- Whether control `c` is a Komplete Kontrol: true, false, or nil while not known yet.
+local function isKK(c)
+  if not (c and c.id) then return false end
+  local k = knownOf(c.id)
+  if k.kk ~= true then ask(c.id, "kk") end
+  return k.kk
+end
+
+-- WHICH Kontakt a control is, as an index into VARIANTS — false for none, nil while not known yet.
 -- One question, one answer: a single UIA pass over both names and both types, so asking
 -- "is this a Kontakt?" and "which one?" costs the same as the old "is this a Kontakt 8?"
--- alone did — and this runs on every detection pass, per candidate control.
+-- alone did.
 local function variantIndex(c)
   -- A control that already knows what it is. The macOS panel below is found by Kontakt's own
   -- file-menu button or its header text, not by an identity element — nothing inside a DAW's
@@ -48,22 +120,16 @@ local function variantIndex(c)
       if v.name == c.variant then return i end
     end
   end
-  return c and c.id and host.element.findAny(c.id, VARIANT_NAMES, IDENTITY_TYPES) or nil
+  if not (c and c.id) then return false end
+  local k = knownOf(c.id)
+  if not (k.variant and k.kk == false) then ask(c.id, "variant") end
+  return k.variant
 end
+-- Whether control `c` holds a Kontakt name at all: true, false, or nil while not known yet.
 local function anyKontakt(c)
-  return variantIndex(c) ~= nil
-end
-
--- ── Komplete Kontrol nesting ──────────────────────────────────────────────────
--- KK can itself host a Kontakt instance (DAW → KK → Kontakt → library). KK and
--- Kontakt share the Qt control class and differ only by UIA name. EnumChildWindows
--- enumerates the nested Kontakt control too, but ReaHotkey anchors a nested library
--- on KK's control and crosses KK's chrome with a fixed content offset — we do the
--- same, so the SAME library layout (authored in the bare-Kontakt frame) lands
--- correctly without the library knowing anything about KK.
-local KK_NAME = { "Komplete Kontrol" }
-local function isKK(c)
-  return c ~= nil and c.id ~= nil and host.element.findAny(c.id, KK_NAME, IDENTITY_TYPES) ~= nil
+  local v = variantIndex(c)
+  if v == nil then return nil end
+  return v ~= false
 end
 -- KK chrome offset, from KK's control top-left to where Kontakt's content begins.
 -- Computed DYNAMICALLY at runtime (= nested Kontakt.client − KK.client, the exact inner
@@ -89,34 +155,75 @@ local KK_OFFSET = { 198, 222 }
 -- bare" is only true until a Komplete Kontrol wraps it, and a per-window cache would pin the
 -- answer from before that happened. That is the same reason these cells declare
 -- `cacheIdentity = false`, and this is how to honour it without paying for it every time.
+--
+-- What is not known yet about a control (see "What a control is", above) is recorded as such:
+-- `kkPending` while some candidate's kk is not known, `pending` while its kk or its variant is not.
 local scene = O.memoByEpoch(function()
-  local kk, kontakt, byId = {}, {}, {}
+  local kk, kontakt, byId, pending, kkPending = {}, {}, {}, false, false
   for _, c in ipairs(host.window.controls()) do
     if string.match(c.class, QT_PLUGIN) then
       -- Both questions asked once per candidate, here and nowhere else.
       local asKK = isKK(c)
       local variant = variantIndex(c)
       byId[c.id] = { control = c, isKK = asKK, variant = variant }
+      if asKK == nil then kkPending = true end
+      if asKK == nil or variant == nil then pending = true end
       if asKK then
         kk[#kk + 1] = c
-      elseif variant then
+      elseif asKK == false and variant then
         kontakt[#kontakt + 1] = c
       end
     end
   end
-  return { kk = kk, kontakt = kontakt, byId = byId }
+  return { kk = kk, kontakt = kontakt, byId = byId, pending = pending, kkPending = kkPending }
 end)
 
-local function kkPresent() return #scene().kk > 0 end
+-- Whether the window in front holds a Komplete Kontrol: true, false, or nil while that is not known.
+local function kkPresent()
+  local s = scene()
+  if #s.kk > 0 then return true end
+  if s.kkPending then return nil end
+  return false
+end
 -- "Any control that reports a Kontakt name", which INCLUDES a Komplete Kontrol — a KK
 -- exposes its nested Kontakt's name in its own subtree, and the old hasControl(anyKontakt)
 -- counted that. Read off the recorded variant rather than the two lists, because a KK with
--- nothing loaded in it is in `kk` and is NOT a Kontakt.
+-- nothing loaded in it is in `kk` and is NOT a Kontakt. nil while that is not known.
 local function kontaktPresent()
+  local unknown = false
   for _, e in pairs(scene().byId) do
-    if e.variant ~= nil then return true end
+    if e.variant then return true end
+    if e.variant == nil then unknown = true end
   end
+  if unknown then return nil end
   return false
+end
+
+-- Whether something about the window in front is not known yet: a candidate whose kk or variant
+-- has not been answered.
+local function scenePending()
+  return scene().pending
+end
+
+-- An `identify` made of `verdict(c)` — true, false, or nil when an answer it needs is not known
+-- yet — that answers the last verdict it reached for that control while one is not known: an
+-- overlay that is up is not taken down because the plug-in has not answered a question yet, or did
+-- not answer one in time, and one that is not up does not come up on a guess. A control never
+-- decided is not this cell's. Per control handle, at most KNOWN_CAP of them, as `known` above.
+local function standing(verdict)
+  local last, n = {}, 0
+  return function(c)
+    local v = verdict(c)
+    local id = c and c.id
+    if id == nil then return v == true end
+    if v == nil then return last[id] == true end
+    if last[id] == nil then
+      if n >= KNOWN_CAP then last, n = {}, 0 end
+      n += 1
+    end
+    last[id] = v
+    return v
+  end
 end
 
 -- True if `inner`'s centre lies within `outer` (both are {x,y,w,h} screen rects).
@@ -723,9 +830,17 @@ local function isEditView(ov)
   return p ~= nil and p.edit() == true
 end
 
--- The "Kontakt N" identity element's name under `hwnd`, or nil. Used to scope a
--- two-level UIA search into the plugin's real UI (see actions.luau's pluginLocate).
-local function kontaktPaneName(hwnd)
+-- The "Kontakt N" identity element's name under `hwnd`, or nil — nil too when the plug-in did not
+-- answer. Used to scope a two-level UIA search into the plugin's real UI (see actions.luau's
+-- pluginLocate). With `cb`, asked off the event loop: `cb(name)` on a later turn, nil as above.
+local function kontaktPaneName(hwnd, cb)
+  if cb then
+    if not hwnd then return cb(nil) end
+    host.element.findAny(hwnd, VARIANT_NAMES, IDENTITY_TYPES, function(i)
+      cb(i and VARIANTS[i].name or nil)
+    end)
+    return
+  end
   local i = hwnd and host.element.findAny(hwnd, VARIANT_NAMES, IDENTITY_TYPES)
   return i and VARIANTS[i].name or nil
 end
@@ -743,14 +858,17 @@ end
 --
 -- Fails OPEN, and that is deliberate: a wrong "no" here HIDES the controls, which is the
 -- failure the user actually hit — all seven silently gone. So "the plugin's UIA is not
--- answering at all" (no Kontakt pane resolves) counts as rack, and only a plugin that
--- answers but has no VIEW button counts as single-instrument view.
+-- answering at all" (no Kontakt pane resolves, or the search for VIEW is not answered) counts
+-- as rack, and only a plugin that answers but has no VIEW button counts as single-instrument
+-- view.
 local function isRackView()
   local fg = host.window.active()
   if not (fg and fg.id) then return true end
   local via = kontaktPaneName(fg.id)
   if not via then return true end -- cannot tell: keep the controls
-  return host.element.pluginLocate(fg.id, via, "VIEW", U.Button) ~= nil
+  local p, why = host.element.pluginLocate(fg.id, via, "VIEW", U.Button)
+  if why ~= nil then return true end -- not answered: keep the controls
+  return p ~= nil
 end
 
 return {
@@ -764,6 +882,8 @@ return {
   isKK = isKK,
   kkPresent = kkPresent,
   kontaktPresent = kontaktPresent,
+  scenePending = scenePending,
+  standing = standing,
   findNestedKontakt = findNestedKontakt,
   isPluginHostContainer = isPluginHostContainer,
   kkContentFrame = kkContentFrame,

@@ -647,9 +647,10 @@ fn a_recognize_in_a_text_hook_waits_and_its_reading_is_said() {
 // The runtime's version.
 // ---------------------------------------------------------------------------------------------
 
-/// The runtime is 0.5.1 (calibration as its own setting, `O.calibrating()`, a static text's
-/// `hotkey`, the checks after its own pixels, `O:probe`, and letting go in front of this
-/// application's own windows), so a module that depends on
+/// The runtime is 0.5.2 (calibration as its own setting, `O.calibrating()`, a static text's
+/// `hotkey`, the checks after its own pixels, `O:probe`, letting go in front of this
+/// application's own windows, and its accessibility menu tests asked off the event loop), so a
+/// module that depends on
 /// `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads against it, and
 /// so does one that asks for 0.4, 0.4.1 or 0.5, and neither against anything older.
 #[test]
@@ -657,7 +658,7 @@ fn the_runtime_is_0_5_so_a_module_that_asks_for_0_2_loads() {
     let m = module_manifest::ModuleManifest::parse(include_str!("../../../modules/overlay-runtime/module.toml"))
         .expect("the runtime's manifest parses");
     assert_eq!(m.id, "com.platform.overlay");
-    assert_eq!(m.version, "0.5.1");
+    assert_eq!(m.version, "0.5.2");
     for spec in [
         "com.platform.overlay >= 0.2",
         "com.platform.overlay >= 0.3",

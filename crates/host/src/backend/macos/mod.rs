@@ -25,8 +25,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{
-    Backend, CaptureFn, CaptureSource, CapturedImage, ControlInfo, DumpNode, HostEvents,
-    MouseButton, WinInfo,
+    Backend, CaptureFn, CaptureSource, CapturedImage, ControlInfo, ElementAnswer, ElementAsk,
+    ElementOutcome, HostEvents, MouseButton, WinInfo,
 };
 
 /// Whether a scroll has been sent yet in this run — so the first one is always recorded and
@@ -141,76 +141,35 @@ impl Backend for MacBackend {
         ax::window_focus_chain()
     }
 
-    fn element_find(&self, hwnd: isize, name: &str, control_type: i32) -> bool {
-        ax::find(hwnd, name, control_type)
-    }
-
-    fn element_find_any(&self, hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
-        ax::find_any(hwnd, names, types)
-    }
-
-    fn element_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {
-        ax::locate(hwnd, name, control_type)
-    }
-
-    fn element_locate_via(
-        &self,
-        hwnd: isize,
-        via_name: &str,
-        via_type: i32,
-        name: &str,
-        control_type: i32,
-    ) -> Option<(i32, i32)> {
-        ax::locate_via(hwnd, via_name, via_type, name, control_type)
-    }
-
-    fn element_plugin_locate(
-        &self,
-        hwnd: isize,
-        container_name: &str,
-        name: &str,
-        control_type: i32,
-    ) -> Option<(i32, i32)> {
-        ax::plugin_locate(hwnd, container_name, name, control_type)
-    }
-
-    fn element_dump(&self, hwnd: isize) -> Vec<DumpNode> {
-        ax::dump(hwnd)
-    }
-
-    fn element_raw_dump(&self, hwnd: isize) -> Vec<DumpNode> {
-        // No two views of the tree on this platform: AX has one. Both dumps answer the same
-        // question, and the calibrator calls this one.
-        ax::dump(hwnd)
-    }
-
-    fn element_state_probe(
-        &self,
-        hwnd: isize,
-        container_name: &str,
-        name: &str,
-        control_type: i32,
-    ) -> Option<(i32, i32)> {
-        ax::state_probe(hwnd, container_name, name, control_type)
-    }
-
-    fn element_class_nav_point(
-        &self,
-        hwnd: isize,
-        class_substr: &str,
-        ctype: i32,
-        child: i32,
-        sibling: i32,
-    ) -> Option<(i32, i32)> {
-        ax::class_nav_point(hwnd, class_substr, ctype, child, sibling)
-    }
-
-    fn element_focus_step(&self, hwnd: isize, direction: i32) -> Option<super::FocusStep> {
-        ax::focus_step(hwnd, direction)
-    }
-
-    fn element_focus_within(&self, hwnd: isize, x: i32, y: i32, w: i32, h: i32) -> Option<(String, i32)> {
-        ax::focus_within(hwnd, x, y, w, h)
+    // Asked on the event loop, as every accessibility question here always was: this platform has
+    // no thread of its own for them (`element_runner` is the trait's `None`). Accessibility's own
+    // per-call bound (`MESSAGING_TIMEOUT`, ax.rs) and the not-answering quarantine stay what they
+    // were, and a question that ran into either reads as "not found" here, as before — the answer
+    // is never "not known" on this platform yet. A press is not there yet.
+    fn element_ask(&self, ask: &ElementAsk) -> ElementOutcome {
+        Ok(match ask {
+            ElementAsk::Find { hwnd, name, ctype } => ElementAnswer::Found(ax::find(*hwnd, name, *ctype)),
+            ElementAsk::FindAny { hwnd, names, types } => ElementAnswer::Index(ax::find_any(*hwnd, names, types)),
+            ElementAsk::Locate { hwnd, name, ctype } => ElementAnswer::Point(ax::locate(*hwnd, name, *ctype)),
+            ElementAsk::LocateVia { hwnd, via_name, via_type, name, ctype } => {
+                ElementAnswer::Point(ax::locate_via(*hwnd, via_name, *via_type, name, *ctype))
+            }
+            ElementAsk::PluginLocate { hwnd, container, name, ctype } => {
+                ElementAnswer::Point(ax::plugin_locate(*hwnd, container, name, *ctype))
+            }
+            ElementAsk::StateProbe { hwnd, container, name, ctype } => {
+                ElementAnswer::State(ax::state_probe(*hwnd, container, name, *ctype))
+            }
+            // No two views of the tree on this platform: AX has one. Both dumps answer the same
+            // question, and the calibrator asks for the raw one.
+            ElementAsk::Dump { hwnd } | ElementAsk::RawDump { hwnd } => ElementAnswer::Nodes(ax::dump(*hwnd), None),
+            ElementAsk::ClassNavPoint { hwnd, class, ctype, child, sibling } => {
+                ElementAnswer::Point(ax::class_nav_point(*hwnd, class, *ctype, *child, *sibling))
+            }
+            ElementAsk::FocusStep { hwnd, direction } => ElementAnswer::Step(ax::focus_step(*hwnd, *direction)),
+            ElementAsk::FocusWithin { hwnd, x, y, w, h } => ElementAnswer::Within(ax::focus_within(*hwnd, *x, *y, *w, *h)),
+            ElementAsk::Press { .. } => return ask.nothing(),
+        })
     }
 
     fn screen_size(&self) -> (i32, i32) {

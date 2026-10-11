@@ -498,6 +498,7 @@ def without_test_modules(src):
 # check below — a call a module can make and nobody would be told is undocumented.
 BINDING_SOURCES = [
     os.path.join('crates', 'host', 'src', 'lib.rs'),
+    os.path.join('crates', 'host', 'src', 'element_lua.rs'),
     os.path.join('crates', 'host', 'src', 'gamepad_api.rs'),
     os.path.join('crates', 'host', 'src', 'webview_lua.rs'),
 ]

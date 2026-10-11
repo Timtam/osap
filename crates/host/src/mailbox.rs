@@ -4,8 +4,9 @@
 //! **Every event of a module comes through here** — a hotkey, a captured key, a controller event,
 //! a timer, a window trigger's activation, the report of the window already in front, a focus
 //! change, the answer to a read, an image search or a snapshot, a setting's `onChange`, a page's
-//! message, `onReady` and `onClose` (`webview_lua.rs`), the outcome of a click or an element's press
-//! a module handed a callback (`acting.rs`) — and runs as a handler of its VM. A module
+//! message, `onReady` and `onClose` (`webview_lua.rs`), the outcome of a click a module handed a
+//! callback (`acting.rs`), an accessibility tree's answer to one (`element.rs`) — and runs as a
+//! handler of its VM. A module
 //! that has no handler and nothing queued is free, and its event runs at once, as a callback always
 //! did. A module is busy while its handler waits, while its mailbox is not empty, or while any
 //! module's handler is on the host's stack: no handler starts inside another. A busy module's
@@ -158,6 +159,17 @@ pub(crate) enum Event {
     /// The outcome of what the module asked another program for, for the callback it handed over
     /// (acting.rs): called `(true)` or `(false, why)`, its errors reported as `what`'s.
     Acted { cb: Function, result: Result<(), String>, what: &'static str },
+    /// An accessibility tree's answer to the question `ask`, for the callback the module handed
+    /// over (element.rs): called with what the call would have returned (element_lua.rs,
+    /// `values`), its errors reported as `what`'s. `out`: the module VM and `opts.key` it counts
+    /// under for `host.element.pending` until it runs or is dropped (`Elements::settle`).
+    Element {
+        cb: Function,
+        ask: Box<crate::backend::ElementAsk>,
+        outcome: crate::backend::ElementOutcome,
+        what: &'static str,
+        out: Option<(Owner, String)>,
+    },
     /// The tests' own event: `f(args)`, an input or not, reported as `what` — an input against
     /// the pages' limit when `what` is `"page message"`, as a page's message is.
     #[cfg(test)]

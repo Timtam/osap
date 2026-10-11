@@ -6411,19 +6411,36 @@ end
 -- answer; the one-miss rule absorbs that. Kept for the transition to modules' own tests: an
 -- element that is in the tree whether or not anything is drawn counts as a menu for as long
 -- as it is there.
-local function menuElementIn(o)
+--
+-- Asked with a callback, so the walk is made off the event loop (on Windows, the host's
+-- accessibility thread) and the test answers when the tree has: `done(true | false)`, or
+-- `done(nil)` when the plug-in did not answer — which is not "no menu", and each test below keeps
+-- its last answer for it.
+local function menuElementIn(o, done)
   local ctrl = o:origin()
-  return ctrl ~= nil and ctrl.id ~= nil
-    and host.element.find(ctrl.id, "", host.element.type.Menu) == true
+  if not (ctrl and ctrl.id) then return done(false) end
+  host.element.find(ctrl.id, "", host.element.type.Menu, function(found, why)
+    if why ~= nil then return done(nil) end
+    done(found == true)
+  end)
 end
 
-O.menuTests.accessibility = {
-  name = "accessibility",
-  cheap = false,
-  test = function(o, answer)
-    answer(menuElementIn(o))
-  end,
-}
+do
+  -- The last answer of each overlay's test, for one the plug-in did not answer: it stands.
+  local last = setmetatable({}, { __mode = "k" })
+
+  O.menuTests.accessibility = {
+    name = "accessibility",
+    cheap = false,
+    test = function(o, answer)
+      menuElementIn(o, function(seen)
+        if seen == nil then return answer(last[o] == true) end
+        last[o] = seen
+        answer(seen)
+      end)
+    end,
+  }
+end
 
 -- The same question, asked only from a press of a control with `opensMenu` until that press is
 -- done with: the menu it opened was seen and has closed (missed twice in a row, the one-miss
@@ -6452,17 +6469,24 @@ do
     test = function(o, answer)
       local a = armed[o]
       if not a then return answer(false) end
-      local seen = menuElementIn(o)
-      if seen then
-        a.seen, a.misses = true, 0
-      elseif a.seen then
-        a.misses += 1
-        if a.misses >= 2 then
-          -- The menu this press opened has closed: nothing more to say until the next press.
-          armed[o] = nil
+      menuElementIn(o, function(seen)
+        -- Answered for a press that is over — the overlay left the front, or another press came
+        -- — the answer is handed on and the new press's record is left alone.
+        if armed[o] ~= a then return answer(seen == true) end
+        -- The plug-in did not answer: the last answer stands, and nothing is counted.
+        if seen == nil then return answer(a.last == true) end
+        a.last = seen
+        if seen then
+          a.seen, a.misses = true, 0
+        elseif a.seen then
+          a.misses += 1
+          if a.misses >= 2 then
+            -- The menu this press opened has closed: nothing more to say until the next press.
+            armed[o] = nil
+          end
         end
-      end
-      answer(seen)
+        answer(seen)
+      end)
     end,
   }
 end

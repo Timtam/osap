@@ -516,6 +516,37 @@ fn the_wall_budget_arms_when_the_cpu_does_not() {
     assert_eq!((clock, cpu, wall), (Clock::Wall, Duration::from_millis(500), Duration::from_secs(10)));
 }
 
+/// The wall clock stands while a callback waits behind another accessibility question
+/// (`stop_wall`), and goes on from where it stood: 6 s before the wait and 3 s after it are 9 s,
+/// whatever the wait took; a second `go_on` moves nothing; and a new slice's clock runs, whatever a
+/// stop before it left.
+#[test]
+fn the_wall_clock_stands_while_a_callback_waits_behind_another_question() {
+    let _h = hook();
+    let (guard, fake) = fake_guard();
+    let lua = vm(&guard, 0, "com.x.a", &[("com.x.a", 256)]);
+    let entry = Entry::enter(&lua, EntryKind::Handler, "hotkey").unwrap();
+    guard.poll();
+    fake.advance(Duration::from_secs(6), Duration::ZERO);
+    guard.stop_wall();
+    fake.advance(Duration::from_secs(30), Duration::ZERO);
+    assert!(guard.poll().armed.is_none(), "30 s behind another question count for nothing");
+    guard.go_on();
+    guard.go_on();
+    fake.advance(Duration::from_secs(3), Duration::ZERO);
+    assert!(guard.poll().armed.is_none(), "9 s of its own");
+    fake.advance(Duration::from_secs(1), Duration::ZERO);
+    let note = guard.poll().armed.expect("10 s of its own");
+    assert_eq!((note.clock, note.wall), (Clock::Wall, Duration::from_secs(10)));
+    drop(entry);
+    // A stop nothing started again goes with its slice.
+    guard.stop_wall();
+    let _entry = Entry::enter(&lua, EntryKind::Handler, "hotkey").unwrap();
+    guard.poll();
+    fake.advance(Duration::from_secs(10), Duration::ZERO);
+    assert!(guard.poll().armed.is_some(), "the next slice's clock runs");
+}
+
 /// The watchdog writes only into VMs on the entry stack: the one that is not stays as it was.
 #[test]
 fn the_watchdog_writes_only_vms_on_the_stack() {

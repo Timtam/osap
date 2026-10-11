@@ -19,7 +19,7 @@ use super::hook_watch_thread;
 use super::hotkey_hook::{self, Down, Mods, OsPress, Route, NO_ID};
 use super::{
     capture_decision, menu_flag_owners, scope_of, Backend, Capture, CaptureFn, CaptureSource,
-    CapturedImage, CompareFn, Captured, ControlInfo, DumpNode, HostEvents, MouseButton, OcrLine, OcrShot,
+    CapturedImage, CompareFn, Captured, ControlInfo, HostEvents, MouseButton, OcrLine, OcrShot,
     OcrText, OcrThread, OcrWord, OcrWorker, OwnerKeys, Pressed, Recognise, Taken, WinInfo, CAPTURE_FAILED,
     DUPLICATION_UNANSWERED,
 };
@@ -1314,10 +1314,6 @@ impl Backend for WindowsBackend {
         super::click_win::left_over_job()
     }
 
-    fn element_press_fn(&self) -> super::PressFn {
-        super::uia::element_press
-    }
-
     fn window_controls(&self, hwnd_val: isize) -> Vec<ControlInfo> {
         let mut hwnds: Vec<isize> = Vec::new();
         unsafe {
@@ -1362,69 +1358,20 @@ impl Backend for WindowsBackend {
         }
     }
 
-    fn element_find(&self, hwnd: isize, name: &str, control_type: i32) -> bool {
-        super::uia::element_find(hwnd, name, control_type)
+    // Every question is asked on the host's accessibility thread, in the multithreaded apartment
+    // (`uia.rs`), and never on the event loop.
+    fn element_runner(&self) -> Option<super::ElementRunner> {
+        Some(super::ElementRunner { init: super::uia::thread_init, run: super::uia::run, process_of: process_of_window })
     }
 
-    fn element_find_any(&self, hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
-        super::uia::element_find_any(hwnd, names, types)
-    }
-
-    fn element_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {
-        super::uia::element_locate(hwnd, name, control_type)
-    }
-    fn element_locate_via(
-        &self,
-        hwnd: isize,
-        via_name: &str,
-        via_type: i32,
-        name: &str,
-        control_type: i32,
-    ) -> Option<(i32, i32)> {
-        super::uia::element_locate_via(hwnd, via_name, via_type, name, control_type)
-    }
-
-    fn element_plugin_locate(
-        &self,
-        hwnd: isize,
-        container_name: &str,
-        name: &str,
-        control_type: i32,
-    ) -> Option<(i32, i32)> {
-        super::uia::element_plugin_locate(hwnd, container_name, name, control_type)
-    }
-
-    fn element_dump(&self, hwnd: isize) -> Vec<DumpNode> {
-        super::uia::element_dump(hwnd)
-    }
-
-    fn element_raw_dump(&self, hwnd: isize) -> Vec<DumpNode> {
-        super::uia::element_raw_dump(hwnd)
-    }
-
-    fn element_state_probe(
-        &self,
-        hwnd: isize,
-        container_name: &str,
-        name: &str,
-        control_type: i32,
-    ) -> Option<(i32, i32)> {
-        super::uia::element_state_probe(hwnd, container_name, name, control_type)
-    }
-
-    fn element_class_nav_point(
-        &self,
-        hwnd: isize,
-        class_substr: &str,
-        ctype: i32,
-        child: i32,
-        sibling: i32,
-    ) -> Option<(i32, i32)> {
-        super::uia::element_class_nav_point(hwnd, class_substr, ctype, child, sibling)
-    }
-
-    fn element_focus_step(&self, hwnd: isize, direction: i32) -> Option<super::FocusStep> {
-        super::uia::element_focus_step(hwnd, direction)
+    // Never reached: this platform has the thread (`element_runner`), and a thread that could not
+    // be started answers every question with why itself (`element.rs`). UI Automation is not asked
+    // from the event loop, whose apartment is single-threaded and whose messages it would hold up.
+    fn element_ask(&self, _ask: &super::ElementAsk) -> super::ElementOutcome {
+        Err(super::ElementFailure {
+            why: "accessibility questions are asked on the host's accessibility thread".to_string(),
+            unanswered: false,
+        })
     }
 
     fn screen_size(&self) -> (i32, i32) {
@@ -3614,6 +3561,16 @@ fn cloaked(hwnd: HWND) -> bool {
         )
     };
     hr >= 0 && value != 0
+}
+
+/// The process whose program answers accessibility questions about window `hwnd`: its owner, or 0
+/// for a window that is gone. Local — the window manager's own record, no message to the window —
+/// so the host asks it on the event loop for every question it puts (`element.rs`).
+fn process_of_window(hwnd: isize) -> u32 {
+    let mut pid = 0u32;
+    // SAFETY: validates the handle; a stale or null one answers 0 and leaves `pid` 0.
+    unsafe { GetWindowThreadProcessId(hwnd as HWND, &mut pid) };
+    pid
 }
 
 pub(super) fn process_exe(pid: u32) -> Option<String> {

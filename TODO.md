@@ -43,6 +43,24 @@ into the changelog with that release.
   callback there. Gone with it: the log line `[<module>] host.ocr.recognize could not wait here
   (…) and held the event loop <ms> ms instead; …` and its summary at exit, `[<module>]
   host.ocr.recognize held the event loop <n> time(s), <ms> ms in all, where it could not wait`.
+- **`host.element` answers `nil` and why where the program did not answer** (2026-10-12, NVDA
+  slice 6). On Windows every call that answered `false`, `nil` or an empty list for a question the
+  program did not answer — UI Automation's 1000 ms timeout, a program with higher rights, one that
+  went away — answers `nil` and the reason now: `find` too, which answered only `true` or `false`;
+  a dump its list so far and the reason; a press `false` and the reason, as before. Code that
+  tests `if not host.element.find(…)` still reads it as "not there"; code that compares with
+  `== false`, or keeps a `nil` as a no, does not. Every call takes an optional `opts`
+  (`{ key = … }`) and a callback after its own arguments (docs/api/element.md, "Asking without
+  waiting"). Gone inside the host: the `element-press` thread (presses are asked on the
+  `accessibility` thread with every other question), `Backend::element_press_fn`, `PressFn`,
+  and the eleven `Backend::element_*` methods (one `element_ask`, and `element_runner`). The
+  same answer, `nil` and why, for a search of the host's own walk (`pluginLocate`, `stateProbe`)
+  that stopped at its 4000 elements or its 5 s before the end of the tree and found nothing, which
+  answered `nil` alone; a dump cut short at one of its bounds says why as its second value. What
+  follows a call's own arguments is counted, as recognize counts it: an explicit `nil` where the
+  callback goes raises, and so does anything after the callback. A window of the application
+  itself (a page, the manager) is not asked about on Windows: every call answers `nil` and why. New:
+  `host.element.pending(key)`, as `host.ocr.pending`.
 
 ## Implementation
 
@@ -5065,8 +5083,9 @@ decision, hooked into one interface the overlay runtime provides.
       `snapshotAsync` with `at`, captured off the event loop and written when they arrive. The pictures now cover the
       origin whole (for a window, its frame too) rather than the content rectangle grown by the
       controls' points, and the log line says where the content begins. docs/api/overlay.md, O.calibrating.
-- [ ] **Accessibility context checks block the event loop while Kontakt loads** (2026-09-26,
-      NVDA test of phase 1). After Kontakt's Load dialog the overlay came back only after ~4 s:
+- [x] **Accessibility context checks block the event loop while Kontakt loads** (2026-09-26,
+      NVDA test of phase 1). Done 2026-10-12 with "UIA on a thread of its own" below: Kontakt asks
+      `isKK` and which Kontakt with a callback, off the event loop, and keeps the answers per window. After Kontakt's Load dialog the overlay came back only after ~4 s:
       `uia.findAny(Komplete Kontrol) blocked the pump for 2075 ms`, `uia.findAny(Kontakt 8/Kontakt
       7) blocked the pump for 1006 ms`, `[recheck] 'Kontakt 8' 3083 ms (context 3083, gate 0)`,
       `[pump] one iteration took 4372 ms (… window-activate 3097 + focus-change 1231 …)`.
@@ -5487,7 +5506,8 @@ the macOS system events) are not in this list. Done for Windows and the shared c
       (`gamepad/win_thread.rs`). O18 asks the same for the OCR threads; one measurement.
   - **System audit P3, `CoInitializeEx` on every UIA call** (`uia.rs`, `automation`), never
       balanced: a per-thread counter that wraps after about 4 billion calls. Initialise once
-      per thread.
+      per thread. Done 2026-10-12: UI Automation is asked on the accessibility thread only, which
+      enters the multithreaded apartment once at its start (`uia::thread_init`).
   - **System audit P3, nothing brings the application back after a reboot** (Windows
       Update): no `RegisterApplicationRestart`, no autostart. Optional; an Application
       settings switch if done.
@@ -6967,8 +6987,9 @@ maintainer's German test instructions are a text of their own, not in the reposi
       ends once the build has returned.)
 - [ ] **The event loop's COM apartment.** WebView2 needs a single-threaded one, which wxWidgets
       gives the loop when it starts — unless the multithreaded one was entered on that thread
-      first: UI Automation's `automation()` (uia.rs) enters it, so a module asking `host.element`
-      at load, before the window system starts, would leave the loop there. The first build logs
+      first. UI Automation's `automation()` (uia.rs) did, so a module asking `host.element` at load,
+      before the window system started, would have left the loop there; since 2026-10-12 it runs on
+      the accessibility thread only, and nothing known enters it on the loop. The first build logs
       `the event loop's COM apartment is …`, and in the multithreaded one the build fails with that
       reason instead of an error of WebView2's. Never measured; the probe's log answers it for its
       own set of modules only. Later hardening: the main thread enters the single-threaded one at
@@ -8227,9 +8248,89 @@ Follow-ups this work found and did not take on:
       Mac, inside a DAW and standalone, is reasoned, not seen: the NVDA check above and the Mac
       session show it when load, save and reset still click. On Windows in REAPER they did
       (session A, 2026-10-10); a Mac and the standalone are left.
-- [ ] **UIA on a thread of its own** (a multithreaded apartment, as Microsoft's UI Automation
+- [x] **UIA on a thread of its own** (a multithreaded apartment, as Microsoft's UI Automation
       threading notes recommend), its calls as waits. Measure first.
-- [ ] **Kontakt's identity questions hold the event loop while REAPER opens a file dialog**
+      **Done 2026-10-12 (NVDA slice 6), live checks open below.** One thread, `accessibility`, in
+      the multithreaded apartment, with no window, holds the automation object and its 1000 ms
+      timeouts and asks every `host.element` question one at a time (element.rs, backend/uia.rs);
+      the question the event loop waits for first, then a person's, then a poll's. An identical
+      question that waits is asked once, whichever module asked; one the same as the question being
+      asked shares its answer unless the input epoch turned over since it was put; a press, a focus
+      step and `focusWithin` are never shared. A question the program did not answer — the timeout,
+      higher rights, the program gone — answers "not known" (`nil`, why), never "not there"; the
+      epoch's store keeps it as not known, and the questions to the same program that waited behind
+      a timed-out one are answered "not known" without being put to it. Every call takes `opts?`
+      (`{ key }`) and a callback last, recognize's model: answers through the module's mailbox in its
+      lane, dropped for a module disabled, reloaded or stopped. Without a callback the event loop
+      waits for the answer in `MsgWaitForMultipleObjectsEx` + `PeekMessage(PM_QS_SENDMESSAGE)`,
+      which answers what other threads and programs send to our windows (a screen reader's
+      `WM_GETOBJECT`) and runs nothing posted; a question asked inside that wait is refused. Kontakt
+      (0.1.5) asks whether a control is a Komplete Kontrol and which Kontakt it is with a callback
+      and keeps the answers per window (a "yes" and a found Kontakt for the window's life, a "no" asked
+      again once per epoch), its cells keep their last verdict while an answer is not known
+      (`detect.standing`), its snapshot-menu check asks with a callback and says nothing when not
+      answered, and its rack-view test fails open on "not known"; the overlay runtime (0.5.2) asks
+      its accessibility menu tests with a callback and keeps a test's last answer when the plug-in
+      did not answer; Komplete Kontrol (0.1.2) asks its runtime-kept `identify` with a callback,
+      keeps the answer per control until the runtime has taken it, and raises until it comes and for
+      a search that was not answered, which the runtime takes as no verdict and never counts (a `nil`
+      it keeps as a no after eight in a row). After the review, the same day: no question is asked
+      before a press, a focus step or `focusWithin` to the same program asked before it, nor shares
+      one asked before such an act, and the act goes as early as the most urgent question behind
+      it; only the program's own answers are kept for the epoch, never what the host says without
+      asking it (not asked, replaced, refused, a thread not started); a module's questions not
+      asked yet go with it when it is disabled, reloaded or stopped, so its press is not made;
+      this application's own windows are not asked about on the thread, which would wait for the
+      event loop while the event loop waits for it; a key replaces the waiting questions whichever
+      form the newer one takes; `host.element.pending(key)`; the arguments after a call's own are
+      counted as recognize's, an explicit `nil` callback raising; a walk of the host's cut short by
+      its node budget or its 5 s is "not known" too, and a dump says so; the guard's wall clock
+      stands while a call without a callback waits behind questions asked before it, and its
+      `[observe]` line says how much of the wait that was (vm_guard.rs, `stop_wall`); the
+      platforms without the thread name a slow question and keep its answer at the call; Kontakt's
+      snapshot-menu check asks whether Kontakt answers there with a callback too. Docs: element.md
+      ("Asking without waiting", with Windows and macOS blocks; `host.element.pending`),
+      overlay.md (the menu tests), module-runtime-and-lifecycle.md (threads, the wall clock).
+- [ ] **Decide: the test of the accessibility wait makes a window.**
+      `element::tests::the_wait_answers_what_is_sent_to_this_threads_windows` makes a message-only
+      window (`HWND_MESSAGE`: never shown, not in the desktop's window list) for another thread to
+      `SendMessage` to while the event loop's wait is in progress: the one test of the wait's
+      answering what is sent to our windows (a screen reader's `WM_GETOBJECT`). Ignored by default
+      under the rule that nothing run unasked opens a window; run with `cargo test -p host --
+      --ignored the_wait_answers`. Keep it ignored, or let it run with the others.
+- [ ] **Live (Windows), the accessibility thread:** Kontakt 8 in REAPER, Ctrl+L and Ctrl+S with
+      NVDA: no `[observe] uia.findAny(…) blocked the pump` line after the click any more, `[uia] …
+      took … ms on the accessibility thread` lines where REAPER was slow, the overlay up through
+      the dialog and back after it; NVDA's freeze recoveries no longer lining up with our lines;
+      a new Kontakt window comes up a turn after its answers, which should not be heard as a delay;
+      Komplete Kontrol's and sforzando's identity, Kontakt 7's rack view, the snapshot dropdown's
+      "Snapshot menu did not open", a standalone Kontakt's Tab pass-through and a page's
+      `host.element.press` as before.
+- [ ] **The `host.element` calls still made without a callback:** they are asked on the
+      accessibility thread now, and the wait answers what is sent to our windows, but the event loop
+      still waits for each of them. Every one in the tree on 2026-10-12:
+      - The overlay runtime: the Tab pass-through (`focusStep`, which decides at the key whether the
+        key goes on); the calibrator's `rawDump` of the origin.
+      - Kontakt: Kontakt 7's `isRackView` (`kontaktPaneName` + `pluginLocate`), asked from `when`
+        predicates in scans; the header presses (`kontaktPaneName` + `pluginLocate`, 250-323 ms a
+        step in REAPER); `uiaChecked` (`kontaktPaneName` + `stateProbe`) for the status-bar toggles;
+        `closeWhatsNew`'s `classNavPoint` at every activation; on a Mac, the panel corner's `locate`
+        of the header's buttons (detect.luau).
+      - Komplete Kontrol: the browser toggle (`classNavPoint`), in a `when` predicate, at
+        activation (`onKKActive`) and from Alt+L; Alt+S's `locate` of the search field; the
+        standalone menu bar's `locate` of each menu.
+      - sforzando: its stored `identify` (`find` of `PlogueXMLGUI`).
+      - ON:EAR: `locate` and `rawDump`.
+      - daw-hosts: F6's `focusWithin` (on Windows it answers `nil` at once).
+      - The tools (probe, inspect, html-probe): `rawDump`, `dump`, `stateProbe` and `locate`, on
+        their own keys and pages.
+      The next step is recognize's (2da1d39): without a callback a call waits in a handler, its
+      module alone, and raises where it cannot wait.
+- [ ] **macOS has no accessibility thread yet:** every `host.element` question is asked on the
+      event loop there, as before, and its answer is never "not known" — a timed-out AX call reads
+      as nothing found. Whether AX calls can move to a thread of their own (and how the quarantine
+      of an application that does not answer goes with them) wants a Mac.
+- [x] **Kontakt's identity questions hold the event loop while REAPER opens a file dialog**
       (2026-10-10, session A, Kontakt 8 in REAPER). Load and Save Multi worked, but the timer
       after the click on the entry held the loop: `uia.findAny(Komplete Kontrol) blocked the pump
       for 1459 ms`, `[pump] one iteration took 1524 ms (… timers 1524 …)`, then `in front now:
@@ -8252,6 +8353,9 @@ Follow-ups this work found and did not take on:
       timed-out "no" is not kept. Same cause as "Accessibility context checks block the event
       loop while Kontakt loads" (2026-09-26); the return from the dialog cost 311 ms here, in a
       window event's recheck.
+      Done 2026-10-12 with "UIA on a thread of its own" above, as written here, with one change: a
+      "no" to "is it a Komplete Kontrol" is asked again once per epoch rather than kept, off the loop,
+      since a Komplete Kontrol whose tree is not up yet answers no the instant it appears.
 - [ ] **Luau's interrupt against a module that never ends.** Decide first whether there may be
       a limit at all.
 - [ ] **A real thread per module** ("way A"), only if measurements after the mailbox and the
@@ -8564,6 +8668,9 @@ time limit; a module past either is stopped until the next start.
         `RegisterHotKey delivered the keyboard's auto-repeat` line.
       - The transient cause stays open: our UIA calls into a stalled REAPER, made on the event
         loop, prolong NVDA's freeze recoveries (and a timeout is cached as "not a Kontakt").
+        Done 2026-10-12, live check open: UIA is asked on the accessibility thread, a timeout is
+        "not known" and never kept as a no, and the questions behind one REAPER did not answer
+        are not put to it ("UIA on a thread of its own").
       - Done 2026-10-10: the image worker and the matching pool (rayon's global pool, built at
         start-up) run below normal priority on Windows, so they no longer compete with other
         programs' normal-priority threads, a keyboard hook's among them; the keyboard hook's own
@@ -8584,7 +8691,8 @@ time limit; a module past either is stopped until the next start.
         window is coming. It is a UIA call on the event loop like the transient cause above and
         goes with it (UIA off the event loop; whether a window is a Komplete Kontrol, cached per
         window). To see it live: the "[dispatch] focus" line just before that "[deactivate]"
-        line, and any "[observe] uia.findAny ... blocked the pump" before it.
+        line, and any "[observe] uia.findAny ... blocked the pump" before it. Gone 2026-10-12
+        with it: Kontakt asks it with a callback, off the loop, and keeps the answer per window.
 - [ ] **A key that quits the application.** Windows: Ctrl+Shift+Alt+Win+Q, beside the reload key
       (Ctrl+Shift+Win+Alt+F5). macOS: a chord of the same family, chosen with the same care as
       the reload key (Cmd+Shift+F5, see RELOAD_HOTKEY_MACOS in crates/host/src/lib.rs):

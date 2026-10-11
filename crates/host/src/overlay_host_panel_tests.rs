@@ -168,24 +168,34 @@ function T.modules(root)
     send = function() end,
   }))
   -- The accessibility questions these modules ask, answered from S.buttons (name -> centre);
-  -- everything else finds nothing. The menu idiom is the harness's.
+  -- everything else finds nothing. The menu idiom is the harness's. A question asked with a
+  -- callback last (`opts?, cb?`) is answered to it inside the call, as the harness's `find` does;
+  -- the host answers on a later turn, which T.kontaktLater() plays for Kontakt's identity.
   S.buttons = S.buttons or {}
   S.located = {}
   local E = H.element
   local find = E.find
-  rawset(E, "find", function(id, name, ctype)
-    if name == "" and ctype == 50009 then return find(id, name, ctype) end
-    return false
+  local function given(a, b, ...)
+    local cb = if type(a) == "function" then a elseif type(b) == "function" then b else nil
+    if cb then
+      cb(...)
+      return
+    end
+    return ...
+  end
+  rawset(E, "find", function(id, name, ctype, a, b)
+    if name == "" and ctype == 50009 then return find(id, name, ctype, a, b) end
+    return given(a, b, false)
   end)
-  rawset(E, "findAny", function() return nil end)
-  rawset(E, "locate", function(id, name)
+  rawset(E, "findAny", function(_, _, _, a, b) return given(a, b, nil) end)
+  rawset(E, "locate", function(id, name, _, a, b)
     S.located[#S.located + 1] = name
-    return S.buttons[name]
+    return given(a, b, S.buttons[name])
   end)
-  rawset(E, "pluginLocate", function() return nil end)
-  rawset(E, "stateProbe", function() return nil end)
-  rawset(E, "classNavPoint", function() return nil end)
-  rawset(E, "focusWithin", function() return S.focusWithin end)
+  rawset(E, "pluginLocate", function(_, _, _, _, a, b) return given(a, b, nil) end)
+  rawset(E, "stateProbe", function(_, _, _, _, a, b) return given(a, b, nil) end)
+  rawset(E, "classNavPoint", function(_, _, _, _, _, a, b) return given(a, b, nil) end)
+  rawset(E, "focusWithin", function(_, _, a, b) return given(a, b, S.focusWithin) end)
   rawset(H.screen, "size", function() return { w = 2560, h = 1440 } end)
   rawset(H.screen, "imageSearchAsync", function() end)
   -- A read that waits, answered at once: S.ocr(region) says what is written there (default:
@@ -1073,6 +1083,85 @@ fn kontakt_8_is_taken_in_a_wider_box_and_a_miss_is_asked_again_up_to_eight_times
     "##);
 }
 
+/// Kontakt 8 bare in REAPER's FX window, on Windows: whether its control is a Komplete Kontrol and
+/// which Kontakt it is are asked with a callback — never waited for — and the overlay comes up on
+/// the evaluation after the answers came, not before. Which Kontakt it is is asked once for the
+/// window; whether it is a Komplete Kontrol, once per epoch at most and never while an answer is
+/// out. An answer the plug-in did not give changes nothing; a control whose identity is not known
+/// yet does not take the overlay down, and one that turns out to be a Komplete Kontrol does.
+#[test]
+fn kontakts_identity_is_asked_off_the_event_loop_once_per_window_and_not_known_takes_nothing_down() {
+    run(r##"
+        local S = T.S
+        local made = T.collect()
+        T.modules("modules/kontakt/")
+        -- Kontakt 8's Qt control in REAPER's wrapper, with the keyboard in it.
+        local K = { id = 70, class = "Qt652QWindowIcon{8d61}1", bounds = { x = 100, y = 50, w = 800, h = 600 },
+          client = { x = 100, y = 50, w = 800, h = 600 } }
+        S.controls = { T.LIST, T.WRAP, K }
+        S.front, S.chain = T.FX, { K, T.WRAP, T.FX }
+        T.turn()
+        -- Every identity question is held for the scenario to answer on a later turn, as the host does.
+        local out, asked = {}, {}
+        rawset(T.host.element, "findAny", function(id, names, _, a, b)
+          local cb = if type(a) == "function" then a else b
+          assert(type(cb) == "function", "asked without a callback: " .. tostring(names[1]))
+          asked[#asked + 1] = id .. ":" .. names[1]
+          out[#out + 1] = { cb = cb, id = id, name = names[1] }
+        end)
+        local function answer(f)
+          local qs = out
+          out = {}
+          for _, q in ipairs(qs) do T.call("answer", q.cb, f(q)) end
+        end
+        local function kontakt8(q)
+          if q.name == "Komplete Kontrol" then return nil end
+          return 1
+        end
+        local function late() return nil, "the program did not answer within 1000 ms" end
+        local function k8()
+          for _, o in ipairs(made) do
+            if o.label == "Kontakt 8" and o.active then return o end
+          end
+        end
+        local Kt = T.source("modules/kontakt/src/main.luau")(T.host)
+        Kt.activate()
+        T.runDue()
+        assert(not k8(), "not up before the tree has answered: " .. T.dump())
+        assert(table.concat(asked, ", ") == "70:Komplete Kontrol, 70:Kontakt 8", table.concat(asked, ", "))
+        local rechecks = S.rechecks
+        answer(kontakt8)
+        assert(S.rechecks > rechecks, "the answers ask the overlays to look again")
+        T.event()
+        assert(k8(), "up on the evaluation after the answers: " .. T.dump())
+        -- Which Kontakt: never asked again. A Komplete Kontrol: asked again in the new epoch, and not
+        -- again while that answer is out, however many events come.
+        for _ = 1, 4 do T.event() end
+        assert(table.concat(asked, ", ") == "70:Komplete Kontrol, 70:Kontakt 8, 70:Komplete Kontrol", table.concat(asked, ", "))
+        -- The plug-in does not answer: nothing changes.
+        rechecks = S.rechecks
+        answer(late)
+        T.event()
+        assert(k8() and S.rechecks == rechecks, "not known changes nothing: " .. T.dump())
+        -- Another plug-in's control comes into the window: until it is known, Kontakt stays up.
+        local P = { id = 71, class = "Qt671NI_6_7_1_R3QWindowIcon{8d61}", bounds = { x = 100, y = 50, w = 800, h = 600 },
+          client = { x = 100, y = 50, w = 800, h = 600 } }
+        S.controls = { T.LIST, T.WRAP, K, P }
+        T.event()
+        assert(k8(), "an unknown control takes nothing down: " .. T.dump())
+        answer(late)
+        T.event()
+        assert(k8(), "nor one that did not answer: " .. T.dump())
+        -- It is a Komplete Kontrol: a bare Kontakt is no more.
+        answer(function(q)
+          if q.id == 71 and q.name == "Komplete Kontrol" then return 1 end
+          return kontakt8(q)
+        end)
+        T.event()
+        assert(not k8(), "a Komplete Kontrol wraps it: " .. T.dump())
+    "##);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The review of 2026-09-28.
 // ---------------------------------------------------------------------------------------------
@@ -1792,6 +1881,66 @@ fn kontakt_8s_view_read_before_kontakt_redrew_is_replaced_at_the_next_key() {
         assert(T.count("[kontakt] view toggle: F10 for 'Switch to Play View'") == 2, T.dump())
         T.viewReadsWaitable()
     "##));
+}
+
+/// Komplete Kontrol in REAPER: whether its control is a Komplete Kontrol is asked with a callback —
+/// never waited for — once per epoch at most and never while an answer is out. Until the answer
+/// comes, and however often the plug-in does not answer, there is no verdict — not a "could not
+/// tell yet", which the runtime keeps as a no after eight in a row — and the control is recognised
+/// on the evaluation after the plug-in answers, which asks the overlays to look again.
+#[test]
+fn komplete_kontrols_identity_is_asked_off_the_event_loop_and_never_kept_as_no() {
+    run(r##"
+        local S = T.S
+        local made = T.collect()
+        T.modules("modules/komplete-kontrol/")
+        rawset(T.host, "path", function(p) return "C:/modules/komplete-kontrol/" .. p end)
+        rawset(T.host, "settings", T.strict("host.settings", {
+          define = function() return false end,
+          onChange = function() end,
+        }))
+        -- Every search is held for the scenario to answer on a later turn, as the host does.
+        local out, asked = {}, 0
+        rawset(T.host.element, "findAny", function(_, names, _, a, b)
+          local cb = if type(a) == "function" then a else b
+          assert(type(cb) == "function", "asked without a callback")
+          assert(names[1] == "Komplete Kontrol", tostring(names[1]))
+          asked += 1
+          out[#out + 1] = cb
+        end)
+        local function answer(...)
+          local cbs = out
+          out = {}
+          for _, cb in ipairs(cbs) do T.call("answer", cb, ...) end
+        end
+        S.controls = { T.LIST, T.WRAP, T.KK }
+        S.front, S.chain = T.FX, { T.KK, T.WRAP, T.FX }
+        T.turn()
+        local KK = T.source("modules/komplete-kontrol/src/main.luau")(T.host)
+        KK.activate()
+        T.runDue()
+        local function embedded()
+          for _, o in ipairs(made) do
+            if o.label == "Komplete Kontrol" and o.active then return o end
+          end
+        end
+        assert(not embedded() and asked == 1, "asked, not up before the answer: " .. asked .. "\n" .. T.dump())
+        for _ = 1, 3 do T.event() end
+        assert(asked == 1, "not again while its answer is out: " .. asked)
+        for _ = 1, 12 do
+          answer(nil, "the program did not answer within 1000 ms")
+          T.event()
+        end
+        assert(not embedded() and asked == 13, "asked again after each answer not given: " .. asked .. "\n" .. T.dump())
+        assert(T.count("times in a row, so it is taken as no") == 0, "never kept as no: " .. T.dump())
+        assert(T.count("identify raised: Komplete Kontrol's name is being asked") == 1, "said once in the log: " .. T.dump())
+        local rechecks = S.rechecks
+        answer(1)
+        assert(S.rechecks > rechecks, "the answer asks the overlays to look again")
+        T.event()
+        assert(embedded(), "recognised once the plug-in answers: " .. T.dump())
+        assert(asked == 13, "and not asked again: " .. asked)
+    "##);
 }
 
 /// Komplete Kontrol's one setting is defined as the module loads, before `activate`, and not

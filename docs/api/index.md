@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 179 entries.
+Every call the platform offers a module, in one place. 181 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -172,18 +172,19 @@ Querying the accessibility tree an application publishes.
 
 | | |
 |---|---|
-| [`host.element.classNavPoint(hwnd, className, controlType, child, sibling)`](element#host-element-classnavpoint) | Finds the first element whose class contains `className` and whose control type is `controlType`, walks a fixed path from it,… |
-| [`host.element.dump(hwnd)`](element#host-element-dump) | The condition-based counterpart to `host.element.rawDump`, and the first thing to run against a window nobody here has seen |
-| [`host.element.find(hwnd, name, controlType)`](element#host-element-find) | Returns `true` if the UI Automation subtree of the window `hwnd` contains at least one element whose Name equals `name`… |
-| [`host.element.findAny(hwnd, names, types)`](element#host-element-findany) | Answers "is any of these names present as any of these control types?" |
-| [`host.element.focusStep(hwnd, direction)`](element#host-element-focusstep) | **This one writes.** It enumerates the visible, keyboard-focusable descendants of `hwnd`'s content area and *moves keyboard… |
-| [`host.element.focusWithin(hwnd, rect)`](element#host-element-focuswithin) | **This one writes.** It gives keyboard focus to the **first** keyboard-focusable element of `hwnd` whose centre lies inside… |
-| [`host.element.locate(hwnd, name, controlType)`](element#host-element-locate) | Finds the first UIA element in window `hwnd` matching `name` + `controlType` and returns the screen-pixel centre of its… |
-| [`host.element.locateVia(hwnd, viaName, viaType, name, controlType)`](element#host-element-locatevia) | Like `locate`, but in two levels |
-| [`host.element.pluginLocate(hwnd, containerName, name, controlType)`](element#host-element-pluginlocate) | Like `locate`, but for a plugin hosted inside another application. |
-| [`host.element.press(hwnd, name, controlType, cb?)`](element#host-element-press) | **This one acts.** It asks an element of `hwnd` to perform its own action, the one a screen reader's "activate" uses |
-| [`host.element.rawDump(hwnd)`](element#host-element-rawdump) | Diagnostic counterpart to `host.element.dump`, walking the **raw** tree instead of a condition-based search, so it crosses… |
-| [`host.element.stateProbe(hwnd, containerName, name, controlType)`](element#host-element-stateprobe) | Asks a named element what it reports about its **own** state, rather than inferring one from its control type. |
+| [`host.element.classNavPoint(hwnd, className, controlType, child, sibling, opts?, cb?)`](element#host-element-classnavpoint) | Finds the first element whose class contains `className` and whose control type is `controlType`, walks a fixed path from it,… |
+| [`host.element.dump(hwnd, opts?, cb?)`](element#host-element-dump) | The condition-based counterpart to `host.element.rawDump`, and the first thing to run against a window nobody here has seen |
+| [`host.element.find(hwnd, name, controlType, opts?, cb?)`](element#host-element-find) | Returns `true` if the UI Automation subtree of the window `hwnd` contains at least one element whose Name equals `name`… |
+| [`host.element.findAny(hwnd, names, types, opts?, cb?)`](element#host-element-findany) | Answers "is any of these names present as any of these control types?" |
+| [`host.element.focusStep(hwnd, direction, opts?, cb?)`](element#host-element-focusstep) | **This one writes.** It enumerates the visible, keyboard-focusable descendants of `hwnd`'s content area and *moves keyboard… |
+| [`host.element.focusWithin(hwnd, rect, opts?, cb?)`](element#host-element-focuswithin) | **This one writes.** It gives keyboard focus to the **first** keyboard-focusable element of `hwnd` whose centre lies inside… |
+| [`host.element.locate(hwnd, name, controlType, opts?, cb?)`](element#host-element-locate) | Finds the first UIA element in window `hwnd` matching `name` + `controlType` and returns the screen-pixel centre of its… |
+| [`host.element.locateVia(hwnd, viaName, viaType, name, controlType, opts?, cb?)`](element#host-element-locatevia) | Like `locate`, but in two levels |
+| [`host.element.pending(key)`](element#host-element-pending) | Whether a question of this module with `key`, asked with a callback, is still out: not answered to its callback yet, nor dropped. |
+| [`host.element.pluginLocate(hwnd, containerName, name, controlType, opts?, cb?)`](element#host-element-pluginlocate) | Like `locate`, but for a plugin hosted inside another application. |
+| [`host.element.press(hwnd, name, controlType, opts?, cb?)`](element#host-element-press) | **This one acts.** It asks an element of `hwnd` to perform its own action, the one a screen reader's "activate" uses |
+| [`host.element.rawDump(hwnd, opts?, cb?)`](element#host-element-rawdump) | Diagnostic counterpart to `host.element.dump`, walking the **raw** tree instead of a condition-based search, so it crosses… |
+| [`host.element.stateProbe(hwnd, containerName, name, controlType, opts?, cb?)`](element#host-element-stateprobe) | Asks a named element what it reports about its **own** state, rather than inferring one from its control type. |
 | [`host.element.type`](element#host-element-type) | The UIA ControlType ids by name |
 
 ## host.input
@@ -396,6 +397,7 @@ The shapes and grammars the calls above are written in.
 |---|---|
 | [`A runtime shared by game modules`](require#a-runtime-shared-by-game-modules) | One reader for many games |
 | [`A slow callback`](timer#a-slow-callback) | What a callback that takes too long costs beyond delaying everything else on the loop depends on the platform. |
+| [`Asking without waiting`](element#asking-without-waiting) | Every call on this page but `pending` takes two more arguments after its own, either of which may be left out |
 | [`Button and axis names`](gamepad#button-and-axis-names) | Every name a filter accepts, beside what SDL3, pygame and XInput call it. |
 | [`Button combinations`](gamepad#button-combinations) | A combination fires once when every button of a set is held together on one pad. |
 | [`Failure reasons`](screen#failure-reasons) | When a read gets no picture, the call says why. |
