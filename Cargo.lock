@@ -942,6 +942,7 @@ dependencies = [
  "objc2-io-kit",
  "objc2-screen-capture-kit",
  "objc2-vision",
+ "objc2-web-kit",
  "ort",
  "os_info",
  "path-clean",
@@ -966,7 +967,8 @@ dependencies = [
  "windows-core 0.62.2",
  "windows-sys 0.61.2",
  "winnow",
- "wry",
+ "wry 0.57.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "wry 0.57.0 (git+https://github.com/tauri-apps/wry?rev=66cdfa1d76265cd9a5b1773087d7eec98918adc5)",
  "wxdragon",
  "zip",
 ]
@@ -1526,6 +1528,7 @@ dependencies = [
  "objc2-io-kit",
  "objc2-screen-capture-kit",
  "objc2-vision",
+ "objc2-web-kit",
  "ort",
  "os_info",
  "percent-encoding",
@@ -1534,6 +1537,7 @@ dependencies = [
  "toml",
  "tracing",
  "winnow",
+ "wry 0.57.0 (git+https://github.com/tauri-apps/wry?rev=66cdfa1d76265cd9a5b1773087d7eec98918adc5)",
 ]
 
 [[package]]
@@ -4482,6 +4486,41 @@ dependencies = [
  "objc2-ui-kit",
  "objc2-web-kit",
  "once_cell",
+ "percent-encoding",
+ "raw-window-handle",
+ "sha2 0.10.9",
+ "tao-macros",
+ "thiserror 2.0.18",
+ "url",
+ "webview2-com",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
+ "windows-version",
+]
+
+[[package]]
+name = "wry"
+version = "0.57.0"
+source = "git+https://github.com/tauri-apps/wry?rev=66cdfa1d76265cd9a5b1773087d7eec98918adc5#66cdfa1d76265cd9a5b1773087d7eec98918adc5"
+dependencies = [
+ "base64",
+ "block2",
+ "cookie",
+ "crossbeam-channel",
+ "dirs",
+ "dom_query",
+ "dpi",
+ "dunce",
+ "http",
+ "jni",
+ "libc",
+ "ndk 0.9.0",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-foundation",
+ "objc2-ui-kit",
+ "objc2-web-kit",
  "percent-encoding",
  "raw-window-handle",
  "sha2 0.10.9",

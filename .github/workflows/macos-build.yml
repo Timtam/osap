@@ -268,6 +268,55 @@ jobs:
         run: echo "LIBCLANG_PATH=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib" >> "$GITHUB_ENV"
         if: steps.reuse.outputs.reused != 'true'
 
+      # The Mac's wry has to be one that activates nothing for a web view built hidden or without
+      # the keyboard. 0.57.0 activates the application for every web view it builds
+      # (src/wkwebview/mod.rs), which takes the front from the DAW while no window of ours is in
+      # front. The fix, #1866, is at 66cdfa1 in wry's repository and in no release before 0.57.1,
+      # so crates/host/Cargo.toml takes the Mac's wry from that revision, under the name wry-mac.
+      # This asks Cargo which wry each slice resolves to, so that no edit of a manifest or of
+      # Cargo.lock brings 0.57.0 back without a word: that revision, or a release from 0.57.1 on,
+      # and nothing else. `--locked`, so it is the lock file as committed that is asked. Whether
+      # the application became active cannot show it on these runners: on macOS 14 and later the
+      # old wry asks with the call that cooperates, which a process started from a shell is
+      # likely refused in silence. The other guard comes with the Mac's page window: page-check
+      # is to count the activation requests each build makes.
+      - name: The Mac's wry carries the activation fix
+        if: steps.reuse.outputs.reused != 'true'
+        run: |
+          for t in $TARGETS; do
+            cargo metadata --format-version 1 --locked --filter-platform "$t" > "$RUNNER_TEMP/metadata-$t.json"
+            python3 - "$t" "$RUNNER_TEMP/metadata-$t.json" <<'PY'
+          import json, re, sys
+
+          fix = "66cdfa1d76265cd9a5b1773087d7eec98918adc5"
+          target, path = sys.argv[1], sys.argv[2]
+          with open(path, encoding="utf-8") as f:
+              meta = json.load(f)
+          packages = {p["id"]: p for p in meta["packages"]}
+          # Every wry some package of this slice depends on: the resolve is this target's only.
+          wry = {d["pkg"]: packages[d["pkg"]] for node in meta["resolve"]["nodes"]
+                 for d in node["deps"] if packages[d["pkg"]]["name"] == "wry"}
+          if not wry:
+              print(f"::error::the {target} build has no wry at all")
+              sys.exit(1)
+          wrong = False
+          for p in wry.values():
+              source = p.get("source") or ""
+              release = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", p["version"])
+              if source.startswith("git+https://github.com/tauri-apps/wry?") and source.endswith("#" + fix):
+                  print(f"{target}: wry {p['version']} at {fix[:7]}, the revision with the fix (#1866)")
+              elif (source == "registry+https://github.com/rust-lang/crates.io-index" and release
+                    and tuple(map(int, release.groups())) >= (0, 57, 1)):
+                  print(f"{target}: wry {p['version']}, a release with the fix")
+              else:
+                  print(f"::error::the {target} build has wry {p['version']} from {source or 'a path'}: "
+                        f"neither {fix[:7]} nor a release from 0.57.1 on, which activate nothing for a "
+                        f"web view built hidden or without the keyboard")
+                  wrong = True
+          sys.exit(1 if wrong else 0)
+          PY
+          done
+
       - name: Build both slices
         run: |
           for t in $TARGETS; do

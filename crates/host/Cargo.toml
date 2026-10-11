@@ -127,7 +127,8 @@ windows-sys = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse
 # through the Tauri team's wry — the data folder beside the executable, a scheme served from the
 # module's folder with real response headers, asynchronous messages both ways. Default features
 # off: they are WebKitGTK's, for Linux. Its `windows` is 0.62 where ours is 0.58, so a second
-# `windows` is built; nothing of it reaches the macOS build (this table is Windows-only).
+# `windows` is built; nothing of it reaches the macOS build (this table is Windows-only). The Mac's
+# wry is another source under another name, `wry-mac` in the macOS table below.
 wry = { version = "0.57.0", default-features = false }
 # What wry does not offer, on the same COM objects it hands out: host-to-page messages as JSON
 # (`PostWebMessageAsJson`, no script built from strings), whether the runtime is installed, a
@@ -161,6 +162,23 @@ dispatch2 = "0.3"
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "tracing", "load-dynamic"] }
 ndarray = "0.16"
 tracing = { version = "0.1", default-features = false, features = ["log"] }
+# `host.gui.webview` on the Mac (stage 4, TODO.md): WKWebView through wry, as WebView2 is on
+# Windows, but wry from its repository rather than a release. wry 0.57.0 activates the
+# application for every web view it builds (src/wkwebview/mod.rs), which takes the front from the
+# DAW while nothing of ours is in front. Its fix, #1866 (merged 2026-09-27 as 66cdfa1), leaves the
+# activation and the first responder alone for a web view built hidden or without the keyboard,
+# and no release before 0.57.1 carries it. So the Mac builds that revision, under a name of its
+# own: one name with two sources, Windows' release and this one, is an error in Cargo. Windows
+# stays on 0.57.0, and both move to 0.57.1 the day it is released (TODO.md). The macOS workflow
+# refuses a Mac build whose wry is neither this revision nor 0.57.1 or later. wry's manifest, this
+# revision's as every 0.57 release's, turns on two features of objc2 for the whole Mac build, for
+# as long as wry is in it: `exception`, whose helper is one Objective-C file a build script
+# compiles, so check-macos.ps1 needs a clang that can compile for macOS (it says where it looks);
+# and `disable-encoding-assertions` (wry's data store identifier crashes without it), which ends
+# objc2's check of each message's types against the runtime's, a check only debug builds make, so
+# a debug build on a Mac makes it for no code of ours either. Cargo.lock names the Git source for
+# every platform, so a Windows build fetches the repository once as well (README).
+wry-mac = { package = "wry", git = "https://github.com/tauri-apps/wry", rev = "66cdfa1d76265cd9a5b1773087d7eec98918adc5", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 version = "0.3"
@@ -172,7 +190,20 @@ features = ["NSString", "NSArray", "NSValue", "NSGeometry", "NSDictionary", "NSE
 version = "0.3"
 features = ["NSWorkspace", "NSRunningApplication", "NSScreen", "NSApplication", "NSResponder", "NSGraphics", "NSAccessibilityProtocols", "NSAccessibilityConstants", "NSEvent", "NSWindow", "objc2-core-foundation",
     # The panel `page-check` shows as a page's will be (backend/macos/page_check.rs).
-    "NSPanel"]
+    "NSPanel",
+    # The views of the Mac's page window (stage 4, TODO.md); a WKWebView is one.
+    "NSView"]
+
+# What the Mac's page window asks of WebKit beyond wry (stage 4, TODO.md): the content rule list
+# that refuses every load outside the module's scheme, compiled into a store in the portable
+# folder; host-to-page messages through callAsyncJavaScript in a content world, the message an
+# argument and never a script made from it; the preferences and a data store that keeps nothing.
+# The version wry's revision asks for, and its default features off as wry has them: the default is
+# the whole framework.
+[target.'cfg(target_os = "macos")'.dependencies.objc2-web-kit]
+version = "0.3.2"
+default-features = false
+features = ["std", "block2", "objc2-app-kit", "WKWebView", "WKWebViewConfiguration", "WKUserContentController", "WKContentRuleList", "WKContentRuleListStore", "WKContentWorld", "WKFrameInfo", "WKPreferences", "WKWebsiteDataStore"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
 version = "0.3"

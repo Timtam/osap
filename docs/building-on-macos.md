@@ -83,7 +83,10 @@ cargo build --release
 
 The **first** build compiles wxWidgets from source: the `wxdragon-sys` build script
 downloads a ~100 MB pinned wxWidgets 3.3.2 tarball and builds it with CMake. Expect
-several minutes and a network connection. Later builds reuse it.
+several minutes and a network connection. Later builds reuse it. Cargo also fetches wry, the web
+view, from its Git repository at a fixed revision until a release carries the fix the Mac needs
+(`crates/host/Cargo.toml` says which); an offline build needs that repository in Cargo's Git
+cache from an earlier build.
 
 Then, for something a person can actually run:
 
@@ -421,11 +424,22 @@ knowing which one catches what:
   `x86_64-apple-darwin`, the two halves of the universal application (`-Setup` installs both
   targets). It is the compiler front end only — it never links — and it covers the **backend**
   and its two support files. It catches wrong signatures and missing feature flags within
-  minutes.
+  minutes. One build script in it compiles C: wry turns on objc2's `exception` feature, whose
+  helper is one Objective-C file, so the check needs a `clang.exe` and an `llvm-ar.exe` that
+  compile for macOS — no Apple SDK, since the file includes no header. Visual Studio's own LLVM
+  has both (the installer's "C++ Clang Compiler for Windows", in `VC\Tools\Llvm\x64\bin`), and so
+  does LLVM for Windows. The script looks in `LIBCLANG_PATH`'s folder first, then asks `vswhere`,
+  then looks where the installer puts it and on `PATH`, and gives them to its own cargo calls as
+  `CC_<target>` and `AR_<target>`. One that is set already is taken as it is, and only the files
+  for those still unset are looked for, in one folder that holds them all. When no folder does,
+  it stops with a sentence that names the files it looked for and the variables still unset.
 - `.github/workflows/macos-build.yml` builds and links the **whole thing** on a real Mac
   runner — both slices, on Apple silicon, see above — and uploads the packaged app. That is the only place a missing framework, a bad
   `#[link]`, or an undefined Carbon symbol shows up — and the only place the GUI layer is
-  compiled for macOS at all, since the check crate deliberately excludes it.
+  compiled for macOS at all, since the check crate deliberately excludes it. Before it builds,
+  it asks Cargo (`cargo metadata --locked`) which wry each slice resolves to, and stops unless
+  it is the revision that carries wry's activation fix (#1866, at `66cdfa1`) or a release from
+  0.57.1 on: wry 0.57.0 activates the application for every web view it builds.
   It does not run on its own: every push to `main` that touches code runs the **Build** workflow
   (`.github/workflows/build.yml`), which runs it beside the Windows build, so a run that
   succeeds holds both downloads — `automation-platform-<version>-<commit>-macos.zip` and

@@ -8,9 +8,12 @@
 #
 # That works from Windows because `check` never links: rustup's aarch64-apple-darwin std
 # plus the objc2 crates (pure Rust bindings, no build scripts that need Apple tooling) are
-# all the front end needs. It cannot catch a wrong constant, a wrong coordinate convention,
-# or a call that is legal and does the wrong thing — but it catches every misremembered
-# signature, and on a blind port that is most of the mistakes.
+# all the front end needs. One build script does compile C: the helper of objc2's `exception`
+# feature, which wry turns on, one Objective-C file that includes no header — so any clang that
+# compiles for macOS compiles it without Apple's SDK, and check-macos.ps1 finds Visual Studio's.
+# The check cannot catch a wrong constant, a wrong coordinate convention, or a call that is
+# legal and does the wrong thing — but it catches every misremembered signature, and on a
+# blind port that is most of the mistakes.
 #
 # Why a separate crate rather than checking `host` for the Mac target: `host` depends on
 # wxdragon, whose build script compiles wxWidgets itself and cannot do that for macOS from
@@ -69,6 +72,11 @@ dispatch2 = "0.3"
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "tracing", "load-dynamic"] }
 ndarray = "0.16"
 tracing = { version = "0.1", default-features = false, features = ["log"] }
+# `host.gui.webview` on the Mac: as host's macOS table, wry from the revision that carries its
+# activation fix (#1866), under the name host gives it; host's comment says why. Its objc2
+# `exception` feature compiles one Objective-C file in a build script, the one C compile of this
+# check, which is why check-macos.ps1 looks for a clang.
+wry-mac = { package = "wry", git = "https://github.com/tauri-apps/wry", rev = "66cdfa1d76265cd9a5b1773087d7eec98918adc5", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 version = "0.3"
@@ -80,7 +88,15 @@ features = ["NSString", "NSArray", "NSValue", "NSGeometry", "NSDictionary", "NSE
 version = "0.3"
 features = ["NSWorkspace", "NSRunningApplication", "NSScreen", "NSApplication", "NSResponder", "NSGraphics", "NSAccessibilityProtocols", "NSAccessibilityConstants", "NSEvent", "NSWindow", "objc2-core-foundation",
     # The panel `page-check` shows as a page's will be (backend/macos/page_check.rs).
-    "NSPanel"]
+    "NSPanel",
+    # The views of the Mac's page window (stage 4, TODO.md); a WKWebView is one.
+    "NSView"]
+
+# What the Mac's page window asks of WebKit beyond wry: as host's macOS table, which says what for.
+[target.'cfg(target_os = "macos")'.dependencies.objc2-web-kit]
+version = "0.3.2"
+default-features = false
+features = ["std", "block2", "objc2-app-kit", "WKWebView", "WKWebViewConfiguration", "WKUserContentController", "WKContentRuleList", "WKContentRuleListStore", "WKContentWorld", "WKFrameInfo", "WKPreferences", "WKWebsiteDataStore"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
 version = "0.3"

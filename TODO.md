@@ -7032,8 +7032,9 @@ maintainer's German test instructions are a text of their own, not in the reposi
       reason instead of an error of WebView2's. Never measured; the probe's log answers it for its
       own set of modules only. Later hardening: the main thread enters the single-threaded one at
       start, so the bad case cannot happen.
-- [ ] **The macOS tests, M1–M9** — once a wry release carries #1866 (merged 2026-09-27, in no
-      release yet; 0.57.0 activates the application on every web view it creates), on the Air
+- [ ] **The macOS tests, M1–M9** — once the Mac's page window is built (wry's fix, #1866, merged
+      2026-09-27 and in no release yet, is in the Mac build from wry's repository since
+      2026-10-11; 0.57.0 activates the application on every web view it creates), on the Air
       (12.7.6) and the mini (14.5), with REAPER and a small page. The answers go here, not into the
       reference:
       - **M1 (decides the Mac design):** a panel that does not activate the application, given the
@@ -7170,6 +7171,23 @@ maintainer's German test instructions are a text of their own, not in the reposi
       in `backend/macos`, so check-macos sees it) holding wry's WKWebView, with the panel settings
       of the recommendation (floating level, `hidesOnDeactivate = NO`, all Spaces and beside a
       full-screen DAW, out of the window cycle) and no Dock claim.
+- [ ] **wry 0.57.1 on both platforms, the day it is on crates.io** (its release, #1852, was still
+      open on 2026-10-11). Until then the Mac builds wry from its repository at 66cdfa1, the merge
+      of #1866, under the name `wry-mac` in both macOS tables (crates/host and crates/macos-check),
+      and Windows stays on 0.57.0: one name from two sources is an error in Cargo, and two 0.57
+      releases cannot both be in one graph. That day: one `wry = "0.57.1"` for both platforms,
+      the name `wry-mac` and every `use wry_mac as wry` gone, and every word on the pin with
+      them. A grep for `wry-mac`, `wry_mac`, `66cdfa1` and `0.57.1` finds most of them; on
+      2026-10-11 they are the comments on both of crates/host's wry entries and on
+      crates/macos-check's, the comment on macos-build.yml's check of the Mac's wry (the check
+      itself takes 0.57.1 as it is), README's Windows build note on the Git repository in
+      Cargo.lock, building-on-macos.md's sentences on a Mac build fetching that repository and
+      on the workflow's check, and webview.rs's comment on `Refusal::Unsupported`; and whatever
+      gui.md's macOS blocks say of wry's version by then. Before it, a short Windows probe run
+      (W1, W3), since Windows' web view moves with it. What stays: every 0.57 release turns on
+      objc2's `exception` and `disable-encoding-assertions` as the revision does, so
+      check-macos.ps1 keeps needing its clang, and a debug build on a Mac keeps going without
+      objc2's encoding checks.
 - [ ] **Stage 5 — Avenger's first page**, after the maintainer's decisions: what a page is for, the
       native search field of Avenger's stage 4 or a page, whether two window changes per action are
       acceptable. The Tab ring stays.

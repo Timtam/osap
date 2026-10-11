@@ -23,8 +23,9 @@ use std::path::{Path, PathBuf};
 pub enum Refusal {
     /// A headless run has no window system to show anything in.
     Headless,
-    /// A platform the host cannot show a page on yet: macOS until wry releases its fix for the
-    /// activation on every web view (#1866), and any platform with no web view at all.
+    /// A platform the host cannot show a page on yet: macOS until its page window is built
+    /// (stage 4, TODO.md; wry's fix for the activation on every web view, #1866, is taken from
+    /// its repository until a release carries it), and any platform with no web view at all.
     Unsupported,
     /// The page is being built, or has not finished loading. `onReady` says when it has.
     NotReady,

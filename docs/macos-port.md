@@ -13,7 +13,10 @@ disclaimer, and it changes what counts as done:
 
 - **Compiled, not written.** `crates/macos-check` type-checks the backend against the
   `aarch64-apple-darwin` target from Windows — `cargo check` stops before linking, so it
-  needs Apple's std but neither an Apple linker nor a Mac. Run it with `.\check-macos.ps1`.
+  needs Apple's std but neither an Apple linker nor a Mac; a clang compiles the one
+  Objective-C file in it, objc2's exception helper, which wry needs
+  ([building-on-macos.md](building-on-macos.md#checking-macos-code-from-a-windows-machine)).
+  Run it with `.\check-macos.ps1`.
   It catches every misremembered signature and missing feature flag. It cannot catch a
   wrong constant, an inverted axis, or a call that is legal and does the wrong thing.
 - **Signatures from the source, never from memory.** The `objc2` crates are on disk in the
