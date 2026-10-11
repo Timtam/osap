@@ -113,6 +113,9 @@ mod stops;
 /// The stop's two steps, its words and the manager's details, against a recording host.
 #[cfg(test)]
 mod stops_tests;
+/// Who wants this application to have a Dock icon on a Mac: the claims of its windows, counted by
+/// owner — see the file. Borrowed by crates/macos-check.
+mod dock;
 mod gui;
 mod image_search;
 mod modal_spans;

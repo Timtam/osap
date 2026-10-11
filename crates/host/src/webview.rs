@@ -790,8 +790,8 @@ pub struct Recipe {
     /// place on the taskbar — the application's own button, where Windows combines a program's
     /// windows, as Windows 11 does by default — no `WS_EX_TOOLWINDOW`. macOS: Command-Tab and the
     /// Dock list applications, not windows, and this application has no Dock icon; while such a
-    /// page is shown, the application is a regular one, by the claim the module manager's window
-    /// makes (`gui::dock`).
+    /// page is shown, the application is a regular one, by a claim of its own through `dock.rs`,
+    /// as the module manager's window makes one, under the setting `dock_while_open`.
     pub listed: bool,
     /// A minimise box (Windows), a miniaturise button (macOS).
     pub minimise: bool,

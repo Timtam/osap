@@ -7153,18 +7153,19 @@ maintainer's German test instructions are a text of their own, not in the reposi
       is in docs/api/gui.md and `webview::WindowKind::recipe` — an ordinary `NSWindow` (titled,
       closable, miniaturisable, resizable; `hidesOnDeactivate` off, as an `NSWindow`'s is; in the
       window cycle) that activates the application, and while one is shown the application claims
-      the Dock through `gui::dock::want` (one owner for every app page, let go when the last one is
-      hidden, closed, disabled or reloaded) under the setting `dock_while_open`, whose label then
-      names pages beside the module manager. `setActivationPolicy` may switch between regular and
-      accessory at any time since macOS 10.9 (Apple's reference); Command-Tab and the Dock list
-      applications, never windows, so the Dock icon is the only way into Command-Tab. Only a Mac
-      can answer, once it is built: (M10) whether the application, made regular while an app page
-      is shown, is in Command-Tab at once, whether its Dock icon goes when it is made accessory
-      again, and whether its menu bar answers (the reported side effect the setting exists for);
-      (M11) whether VoiceOver follows the keyboard into the app page as into any application's
-      window, and where Command-Tab back to the DAW lands; (M12) whether REAPER's or Logic's
-      floating plug-in windows hide while an app page has this application active (M6's question,
-      for this window); (M13) whether VoiceOver's window chooser lists it, and under which name.
+      the Dock through `dock::want` (`dock.rs`, out of `gui.rs` so the backend can make the claim;
+      one owner for every app page, let go when the last one is hidden, closed, disabled or
+      reloaded) under the setting `dock_while_open`, whose label then names pages beside the module
+      manager. `setActivationPolicy` may switch between regular and accessory at any time since
+      macOS 10.9 (Apple's reference); Command-Tab and the Dock list applications, never windows, so
+      the Dock icon is the only way into Command-Tab. Only a Mac can answer, once it is built: (M10)
+      whether the application, made regular while an app page is shown, is in Command-Tab at once,
+      whether its Dock icon goes when it is made accessory again, and whether its menu bar answers
+      (the reported side effect the setting exists for); (M11) whether VoiceOver follows the
+      keyboard into the app page as into any application's window, and where Command-Tab back to the
+      DAW lands; (M12) whether REAPER's or Logic's floating plug-in windows hide while an app page
+      has this application active (M6's question, for this window); (M13) whether VoiceOver's window
+      chooser lists it, and under which name.
 - [ ] **Stage 4 — the Mac**, on the way M1 decides: a panel the host creates itself (objc2-app-kit,
       in `backend/macos`, so check-macos sees it) holding wry's WKWebView, with the panel settings
       of the recommendation (floating level, `hidesOnDeactivate = NO`, all Spaces and beside a

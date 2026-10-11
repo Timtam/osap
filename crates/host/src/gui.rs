@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use wxdragon::prelude::*;
 
+use crate::dock;
 use crate::settings;
 
 /// The tray's one Show/Close item. The window's own File menu keeps `MENU_HIDE` for Ctrl+W.
@@ -2271,87 +2272,6 @@ fn number_to_string(v: &settings::Value) -> String {
         settings::Value::Int(i) => i.to_string(),
         settings::Value::Float(f) => f.to_string(),
         _ => "0".to_string(),
-    }
-}
-
-/// Who currently wants the application to look like a regular, Dock-visible application.
-///
-/// macOS only in effect, deliberately not in structure. There, the application runs as an
-/// agent with no Dock icon and no entry in the application switcher; a window that opens has
-/// to promote it, and the last window to close has to demote it again. With one window that
-/// is a pair of calls. With two it is a refcount, and getting it wrong is not cosmetic: the
-/// manager window used to demote unconditionally when it was hidden, which stripped the Dock
-/// icon out from under an error window that was still on screen — reproducing, on the
-/// platform nobody here can test, exactly the unreachable-window bug the error frame was
-/// written to fix.
-///
-/// Keyed by owner rather than counted, so a second `want` from the same window is not a
-/// second claim. The bookkeeping is compiled everywhere and only the policy call is gated,
-/// because a rule that exists only on the platform nobody can run is a rule nobody can test.
-mod dock {
-    use std::cell::RefCell;
-    use std::collections::BTreeSet;
-
-    thread_local! {
-        static WANTERS: RefCell<BTreeSet<&'static str>> = const { RefCell::new(BTreeSet::new()) };
-    }
-
-    /// Records `owner` as wanting the icon. True when this is the FIRST wanter.
-    fn add(owner: &'static str) -> bool {
-        WANTERS.with(|w| {
-            let mut w = w.borrow_mut();
-            let was_empty = w.is_empty();
-            let is_new = w.insert(owner);
-            was_empty && is_new
-        })
-    }
-
-    /// Drops `owner`. True when that was the LAST wanter — never true for an owner that was
-    /// not holding a claim, which is what stops a stray release from demoting.
-    fn release_owner(owner: &'static str) -> bool {
-        WANTERS.with(|w| {
-            let mut w = w.borrow_mut();
-            let had = w.remove(owner);
-            had && w.is_empty()
-        })
-    }
-
-    pub fn want(owner: &'static str, why: &str) {
-        let first = add(owner);
-        let _ = (first, why);
-        #[cfg(target_os = "macos")]
-        if first && crate::appcfg::dock_while_open() {
-            crate::backend::set_regular(true, why);
-        }
-    }
-
-    pub fn release(owner: &'static str, why: &str) {
-        let last = release_owner(owner);
-        let _ = (last, why);
-        #[cfg(target_os = "macos")]
-        if last && crate::appcfg::dock_while_open() {
-            crate::backend::set_regular(false, why);
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn the_last_window_out_turns_the_icon_off_and_no_earlier_one_does() {
-            // Two windows want it; the first release must NOT demote.
-            assert!(add("manager"), "the first wanter promotes");
-            assert!(!add("errors"), "the second does not promote again");
-            assert!(!release_owner("manager"), "hiding the manager must not demote");
-            assert!(release_owner("errors"), "the last one out demotes");
-            // A second window asking twice is still one claim.
-            assert!(add("errors"));
-            assert!(!add("errors"));
-            assert!(release_owner("errors"), "one release clears one claim");
-            // And a release from someone who never asked demotes nothing.
-            assert!(!release_owner("manager"));
-        }
     }
 }
 

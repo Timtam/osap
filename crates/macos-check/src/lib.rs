@@ -46,6 +46,14 @@ pub fn thread_cpu_calls() {
 #[path = "../../host/src/instance.rs"]
 pub mod instance;
 
+/// Who wants this application to have a Dock icon: the claims of its windows, counted by owner.
+/// The module manager's window and the error window claim it from `gui.rs`, which this crate cannot
+/// borrow, and the Mac's app page will from the backend (stage 4, TODO.md), so it has to exist at
+/// `crate::dock` here as it does in `host`. Its macOS half — the setting it asks and the backend's
+/// policy call — has no other way to meet a compiler before it meets a Mac.
+#[path = "../../host/src/dock.rs"]
+pub mod dock;
+
 #[path = "../../host/src/backend/mod.rs"]
 pub mod backend;
 
@@ -286,11 +294,6 @@ pub fn checked() -> std::rc::Rc<dyn backend::Backend> {
     backend::platform()
 }
 
-/// Names the two application-level calls for the same reason `checked` names the backend.
-///
-/// They are called from `gui.rs`, which this crate cannot borrow (wxdragon), so without
-/// this the re-export is unreferenced here — and an unreferenced re-export warns instead of
-/// proving that the path resolves and the signatures are what the caller expects.
 /// The permissions page's three calls, named for the same reason as `app_calls` below.
 ///
 /// They live in `gui.rs`, which this crate cannot borrow (wxdragon), so without naming them
@@ -348,10 +351,17 @@ pub fn own_window_calls() -> fn() {
     backend::start_own_windows
 }
 
-pub fn app_calls() -> (fn(), fn(bool, &str) -> bool, fn(), fn(), fn()) {
+/// The application-level calls `gui.rs` and `lib.rs` make, named for the reason `checked` names
+/// the backend.
+///
+/// This crate can borrow neither file, so without this the re-exports are unreferenced here —
+/// and an unreferenced re-export warns instead of proving that the path resolves and the
+/// signatures are what the callers expect. `set_regular` is not among them: its one caller is the
+/// borrowed `dock.rs`, which names it with a real call.
+#[allow(clippy::type_complexity)]
+pub fn app_calls() -> (fn(), fn(), fn(), fn()) {
     (
         backend::activate_self,
-        backend::set_regular,
         backend::note_frontmost_before_gui,
         backend::restore_frontmost_after_gui_start,
         // Called from the settings switch in `gui.rs`, which this crate cannot borrow, so
