@@ -364,7 +364,7 @@ fn a_library_stop_turns_the_whole_group_off_in_one_step() {
     let ev = h.stops.record(1).unwrap();
     let ids: Vec<&str> = ev.members.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(ids, ["com.example.kit", "com.example.sampler", "com.example.synth"]);
-    assert_eq!(h.stops.count(), 3);
+    assert_eq!((0..16).filter(|&i| h.stops.is_stopped(i)).count(), 3, "and no other");
     assert_eq!(h.stops.turned_on_with(0), [0, 2, 1], "ticking the library turns them all on");
     assert_eq!(h.stops.turned_on_with(2), [2], "ticking another turns on only it");
     assert!(h.stops.clear(1));

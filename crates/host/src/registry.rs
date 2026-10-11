@@ -1268,7 +1268,9 @@ pub fn log_unloadable() {
     let _ = installed_in_with(&modules_dir(), true);
 }
 
-fn installed_in(dir: &Path) -> Vec<InstalledModule> {
+/// The modules installed in `dir` (see [`installed`]); also what a start without folders on its
+/// command line loads (`module_set::Sources::start_folders`).
+pub(crate) fn installed_in(dir: &Path) -> Vec<InstalledModule> {
     installed_in_with(dir, false)
 }
 

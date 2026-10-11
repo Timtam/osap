@@ -64,6 +64,15 @@ pub struct ModuleChange {
     pub stopped: Option<String>,
 }
 
+/// What the host changed in the Installed list without the user, drained by the tick.
+pub enum ListChange {
+    /// One row: a stop, or a turning on again after one.
+    Row(ModuleChange),
+    /// Every row, in order: after a reload-all, which can load modules, drop them, and rename
+    /// them or change what they depend on.
+    All(Vec<ModuleInfo>),
+}
+
 /// One built row in the Installed list: what the handlers need — the module index
 /// (toggle/settings callbacks), id + name (messages), its settings, and the ids it depends
 /// on (to block removing a needed module).
@@ -682,8 +691,8 @@ pub fn run_gui(
     mut pump: impl FnMut() + 'static,
     mut drain_errors: impl FnMut() -> Vec<(String, String)> + 'static,
     // The rows the host changed on its own — a module the guard stopped, or one turned on again
-    // after its stop — taken each tick.
-    mut drain_changes: impl FnMut() -> Vec<ModuleChange> + 'static,
+    // after its stop, or every row after a reload-all — taken each tick.
+    mut drain_changes: impl FnMut() -> Vec<ListChange> + 'static,
     // The text of Details… for a loaded module, by its index.
     details: impl Fn(usize) -> String + 'static,
     // A loaded module's settings with the values stored now, by its index, for Settings….
@@ -1855,23 +1864,35 @@ pub fn run_gui(
                     }
                 }
                 // A module the host's guard stopped is unticked and says why in its row; one
-                // turned on again loses the note. The list is rebuilt only when a row changed,
-                // since a rebuild can make the screen reader read the selected row again — and,
-                // like the error window, not while a review is being read.
+                // turned on again loses the note; after a reload-all every row is the host's
+                // again. The list is rebuilt only when a row changed, since a rebuild can make
+                // the screen reader read the selected row again — and, like the error window,
+                // not while a review is being read.
                 let changes = if reviewing.get() { Vec::new() } else { drain_changes() };
                 if !changes.is_empty() {
                     let changed = {
                         let mut rb = rows.borrow_mut();
                         let mut changed = false;
                         for c in &changes {
-                            if let Some(r) = rb.iter_mut().find(|r| r.module_idx == Some(c.idx)) {
-                                changed |= r.apply(c);
+                            match c {
+                                ListChange::All(infos) => {
+                                    *rb = infos.iter().map(Row::new).collect();
+                                    changed = true;
+                                }
+                                ListChange::Row(c) => {
+                                    if let Some(r) = rb.iter_mut().find(|r| r.module_idx == Some(c.idx)) {
+                                        changed |= r.apply(c);
+                                    }
+                                }
                             }
                         }
                         changed
                     };
                     if changed {
                         list.rebuild(&rows.borrow());
+                        // The selected row may be another module now, or one with other settings.
+                        refresh_settings_btn(&list, &rows.borrow(), &settings_btn);
+                        refresh_reload_btn(&list, &rows.borrow(), &reload_btn);
                     }
                 }
                 // Drain background-job results and apply them on the GUI thread.

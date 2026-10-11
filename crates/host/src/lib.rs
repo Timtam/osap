@@ -116,6 +116,9 @@ mod modal_spans;
 mod instance;
 mod json;
 pub mod logging;
+/// The module set as a start reads it, and the reload key's plan of it from the manifests on disk
+/// — see the file.
+mod module_set;
 /// `host.ocr.recognize`: the capture and recognise threads, their queue, languages and the shape a
 /// module is handed — see the folder.
 mod ocr;
@@ -432,6 +435,9 @@ struct Shared {
     /// Rows of the manager that changed without the user changing them — a module stopped, or
     /// turned on again after a stop — drained by the GUI's tick.
     module_changes: RefCell<Vec<gui::ModuleChange>>,
+    /// Every row of the manager's Installed list again, after a reload-all, which can add, drop and
+    /// rename modules: drained by the GUI's tick with `module_changes`.
+    module_rows: RefCell<Option<Vec<gui::ModuleInfo>>>,
     /// The mouse buttons each module pressed with `host.input.mouseDown` and has not let go of,
     /// by module index: released where the pointer is when the module stops running — stopped by
     /// the guard, disabled, reloaded, rolled back, or the application ends
@@ -2337,7 +2343,19 @@ struct Module {
     /// Ids this module depends on (used to mark depended-upon modules as
     /// libraries, hidden from the manager's toggle list).
     dependencies: Vec<String>,
+    /// The ids its manifest names under `optional_dependencies`, as of its last build. With
+    /// `dependencies`, the modules whose code it may run: a reload-all that keeps it running for a
+    /// manifest that does not read keeps those in the set (module_set.rs).
+    optional_dependencies: Vec<String>,
+    /// What the session read it from: its folder, or the `.zip` package its folder was unpacked
+    /// from — what a reload-all reads again, and how it knows the module when that does not read.
+    source: PathBuf,
     lua: Lua,
+    /// Dropped by a reload-all: the module set no longer holds it (`drop_module`). Its slot stays,
+    /// since every index is a position in the parallel vectors, with an empty VM, nothing
+    /// registered and no row in the manager, until a reload or an install finds it again and
+    /// builds it in the same slot.
+    dropped: bool,
 }
 
 /// Loads a module from an unpacked directory and runs its entry point, appending
@@ -4449,9 +4467,16 @@ fn load_module(
 ) -> Result<(String, bool)> {
     let module = LoadedModule::load(dir)?;
     let id = module.manifest.id.clone();
-    if modules.borrow().iter().any(|m| m.id == id) {
-        return Ok((id, false)); // already loaded (e.g. a shared dependency)
-    }
+    // Already loaded (a shared dependency, say) — unless a reload-all dropped it: then it is
+    // built again in its old slot, below, once what it depends on is loaded.
+    let dropped_slot = {
+        let mods = modules.borrow();
+        match mods.iter().position(|m| m.id == id) {
+            Some(i) if mods[i].dropped => Some(i),
+            Some(_) => return Ok((id, false)),
+            None => None,
+        }
+    };
 
     // A module that says it is not for this system is not loaded on it.
     //
@@ -4506,13 +4531,17 @@ fn load_module(
         anyhow::bail!("dependency cycle involving module '{id}'");
     }
     let parent = dir.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    // A dependency a reload-all dropped is not loaded: it is built again in its old slot, by the
+    // `load_module` below, rather than taken for loaded with an empty VM, no row, its `activate`
+    // never run and the version it had when it was dropped.
+    let running = |dep: &str| modules.borrow().iter().any(|m| m.id == dep && !m.dropped);
     // Resolve + load dependencies first, in a scope so `id` leaves the in-progress
     // set on every exit (including an error) — keeping insert/remove symmetric so
     // a missing/failing dependency can't leave a stale cycle-detection entry.
-    let deps = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+    let deps =std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
         for spec in module.manifest.dependencies.clone() {
             let dep = module_manifest::dep_id(&spec);
-            if !modules.borrow().iter().any(|m| m.id == dep) {
+            if !running(dep) {
                 let dep_dir = find_module_dir(&parent, dep).ok_or_else(|| {
                     anyhow::anyhow!(
                         "module '{id}' depends on '{dep}', not found beside {} or in a \
@@ -4525,8 +4554,11 @@ fn load_module(
             // Verify a declared min/compatible-version requirement against the
             // now-loaded dependency (fails the load with a clear error if unmet).
             if let Some(req) = module_manifest::dep_constraint(&spec) {
-                let found =
-                    modules.borrow().iter().find(|m| m.id == dep).map(|m| m.version.clone());
+                let found = modules
+                    .borrow()
+                    .iter()
+                    .find(|m| m.id == dep && !m.dropped)
+                    .map(|m| m.version.clone());
                 if let Some(ver) = found {
                     check_dep_version(&id, dep, req, &ver)?;
                 }
@@ -4540,7 +4572,7 @@ fn load_module(
         // defeat the point.
         for spec in module.manifest.optional_dependencies.clone() {
             let dep = module_manifest::dep_id(&spec);
-            if !modules.borrow().iter().any(|m| m.id == dep) {
+            if !running(dep) {
                 if let Some(dep_dir) = find_module_dir(&parent, dep) {
                     load_module(shared, modules, disabled_ids, loading, &dep_dir)?;
                 }
@@ -4554,6 +4586,29 @@ fn load_module(
     loading.remove(&id);
     deps?;
 
+    if let Some(idx) = dropped_slot {
+        modules.borrow_mut()[idx].source = dir.to_path_buf();
+        rebuild_module(shared, modules, idx, module, &parent)?;
+        return Ok((id, true));
+    }
+    add_module(shared, modules, disabled_ids, &parent, dir, module)?;
+    Ok((id, true))
+}
+
+/// Appends `module` to the module table and builds its VM: the shared vectors pushed, the VM
+/// populated (`populate_vm`), and everything rolled back on a failure. What it depends on is
+/// loaded already — by `load_module`, which loads it first, or by a reload-all, which builds in
+/// dependency order. `parent` is the folder its dependencies are looked for beside, `source`
+/// what it was read from (`Module::source`).
+fn add_module(
+    shared: &Rc<Shared>,
+    modules: &Rc<RefCell<Vec<Module>>>,
+    disabled_ids: &HashSet<String>,
+    parent: &Path,
+    source: &Path,
+    module: LoadedModule,
+) -> Result<()> {
+    let id = module.manifest.id.clone();
     let idx = modules.borrow().len();
     logging::line(
         "manager",
@@ -4604,7 +4659,7 @@ fn load_module(
     // catch_unwind turns it into a load error. RefCell borrows release on unwind,
     // so the rollback below can clean up the partial registrations safely.
     let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        populate_vm(shared, &parent, idx, &module, &lua)
+        populate_vm(shared, parent, idx, &module, &lua)
     }))
     .unwrap_or_else(|p| {
         Err(anyhow::anyhow!("panic while loading module '{id}': {}", panic_text(&p)))
@@ -4627,21 +4682,21 @@ fn load_module(
     // Store the dependency IDS (stripped of any version constraint) — the
     // install/uninstall graph + host.require match on ids; the constraint was
     // already verified above.
-    let dep_ids: Vec<String> = module
-        .manifest
-        .dependencies
-        .iter()
-        .map(|s| module_manifest::dep_id(s).to_string())
-        .collect();
+    let ids = |specs: &[String]| -> Vec<String> {
+        specs.iter().map(|s| module_manifest::dep_id(s).to_string()).collect()
+    };
     modules.borrow_mut().push(Module {
+        dependencies: ids(&module.manifest.dependencies),
+        optional_dependencies: ids(&module.manifest.optional_dependencies),
         id: module.manifest.id,
         name: module.manifest.name,
         version: module.manifest.version,
-        dependencies: dep_ids,
+        source: source.to_path_buf(),
         lua,
+        dropped: false,
     });
     debug_assert_eq!(shared.ids.borrow().len(), modules.borrow().len());
-    Ok((id, true))
+    Ok(())
 }
 
 /// Reloads module `idx` in place from its source directory: re-reads the manifest,
@@ -4682,6 +4737,34 @@ fn reload_module(
         );
     }
     let parent = dir.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    rebuild_module(shared, modules, idx, module, &parent)
+}
+
+/// Builds module `idx`'s VM afresh, in place, from `module` — its manifest as read now — with its
+/// dependencies looked for beside `parent`; [`reload_module`] says the rest. Also how a reload-all
+/// builds every module it rebuilds, and how a module it dropped comes back in its old slot.
+fn rebuild_module(
+    shared: &Rc<Shared>,
+    modules: &Rc<RefCell<Vec<Module>>>,
+    idx: usize,
+    module: LoadedModule,
+    parent: &Path,
+) -> Result<Vec<String>> {
+    let old_id = module.manifest.id.clone();
+    // What the manifest says now, before anything is built from it: the folder it is read from,
+    // and what the module may reach. The grant used to be pushed at load and never read again, so
+    // a capability added to module.toml was still refused after a reload — "used host.window
+    // without declaring it", about a manifest that declares it — until a restart; and a code
+    // dependency's grant, which `build_dep_host` reads for every VM that runs its code, likewise.
+    if let Some(root) = shared.roots.borrow_mut().get_mut(idx) {
+        *root = module.root.clone();
+    }
+    if let Some(caps) = shared.caps.borrow_mut().get_mut(idx) {
+        *caps = module.manifest.capabilities.require.iter().cloned().collect();
+    }
+    if let Some(m) = modules.borrow_mut().get_mut(idx) {
+        m.dropped = false;
+    }
 
     let store_snapshot = shared.store.borrow().snapshot(&old_id);
     shared.purge_module(idx);
@@ -4691,7 +4774,7 @@ fn reload_module(
 
     let lua = vm_guard::new_vm(&shared.guard);
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        populate_vm(shared, &parent, idx, &module, &lua)
+        populate_vm(shared, parent, idx, &module, &lua)
     }))
     .unwrap_or_else(|p| {
         Err(anyhow::anyhow!("panic while reloading module '{old_id}': {}", panic_text(&p)))
@@ -4732,6 +4815,12 @@ fn reload_module(
             .iter()
             .map(|s| module_manifest::dep_id(s).to_string())
             .collect();
+        m.optional_dependencies = module
+            .manifest
+            .optional_dependencies
+            .iter()
+            .map(|s| module_manifest::dep_id(s).to_string())
+            .collect();
     }
     if window_has_triggers(&modules.borrow()[idx].lua) {
         if let Err(e) = shared.backend.watch_foreground() {
@@ -4747,9 +4836,11 @@ fn reload_module(
     shared.refresh_hotkeys();
     logging::line("manager", &format!("reloaded module: {old_id}"));
 
+    // Of the modules in the set: one a reload-all dropped carries nobody's code any more.
     let graph: Vec<(String, Vec<String>)> = modules
         .borrow()
         .iter()
+        .filter(|m| !m.dropped)
         .map(|m| (m.id.clone(), m.dependencies.clone()))
         .collect();
     Ok(registry::transitive_dependents(&old_id, &graph))
@@ -4770,6 +4861,10 @@ fn toggle_module(shared: &Rc<Shared>, modules: &Rc<RefCell<Vec<Module>>>, idx: u
         return;
     }
     for i in shared.stops.turned_on_with(idx) {
+        // One a reload-all dropped since the stop is not in the set: there is nothing to turn on.
+        if modules.borrow().get(i).is_some_and(|m| m.dropped) {
+            continue;
+        }
         let stopped = modules.borrow().get(i).is_some_and(|m| vm_guard::stopped(&m.lua));
         if stopped {
             if let Err(e) = reload_module(shared, modules, i) {
@@ -4828,7 +4923,7 @@ fn reload_module_tree(
     }
 
     let graph: Vec<(String, Vec<String>)> =
-        modules.borrow().iter().map(|m| (m.id.clone(), m.dependencies.clone())).collect();
+        modules.borrow().iter().filter(|m| !m.dropped).map(|m| (m.id.clone(), m.dependencies.clone())).collect();
     for id in registry::reload_order(&root_id, &graph) {
         let dep_idx = modules.borrow().iter().position(|m| m.id == id);
         let Some(dep_idx) = dep_idx else { continue };
@@ -4948,6 +5043,19 @@ fn excluded_infos(shared: &Shared) -> Vec<gui::ModuleInfo> {
         .collect()
 }
 
+/// Every row of the manager's Installed list: the modules in the set, in their order, then the
+/// ones this platform will not run. At start, and again after a reload-all.
+fn all_rows(shared: &Shared, modules: &[Module]) -> Vec<gui::ModuleInfo> {
+    let mut rows: Vec<gui::ModuleInfo> = modules
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| !m.dropped)
+        .map(|(i, m)| module_info(shared, m, i))
+        .collect();
+    rows.extend(excluded_infos(shared));
+    rows
+}
+
 /// A module that was found and deliberately not loaded, because its manifest says it does not
 /// run here. Everything the manager needs to show it and to remove it.
 struct ExcludedModule {
@@ -4970,6 +5078,9 @@ pub struct Manager {
     disabled_ids: HashSet<String>,
     /// Module ids currently being loaded — for dependency-cycle detection.
     loading: HashSet<String>,
+    /// Where this session's modules come from, read again by the reload key; a module installed
+    /// from the module window joins it.
+    sources: Rc<RefCell<module_set::Sources>>,
     /// The guard's watchdog thread (`vm-guard`, vm_guard.rs): stopped by [`Manager::stop_guard`]
     /// at exit, or when the manager is dropped.
     watchdog: Option<vm_guard::Watchdog>,
@@ -5072,6 +5183,7 @@ impl Manager {
             guard: vm_guard::Guard::new(),
             stops: stops::Stops::default(),
             module_changes: RefCell::new(Vec::new()),
+            module_rows: RefCell::new(None),
             held_buttons: RefCell::new(BTreeMap::new()),
             vm_gens: RefCell::new(HashMap::new()),
             template_cache: RefCell::new(HashMap::new()),
@@ -5114,6 +5226,7 @@ impl Manager {
             modules: Rc::new(RefCell::new(Vec::new())),
             disabled_ids,
             loading: HashSet::new(),
+            sources: Rc::new(RefCell::new(module_set::Sources::Folders(Vec::new()))),
             watchdog: Some(watchdog),
         })
     }
@@ -5173,11 +5286,11 @@ impl Manager {
     /// it is not deduped: one failing code dependency reports once per dependent that could
     /// not load because of it. They land in one window, in one tick, which is why that window
     /// gives every report its own heading.
-    fn report_load_failure(&self, dir: &str, e: &anyhow::Error) {
-        let name = std::path::Path::new(dir)
+    fn report_load_failure(&self, dir: &Path, e: &anyhow::Error) {
+        let name = dir
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| dir.to_string());
+            .unwrap_or_else(|| dir.display().to_string());
         logging::line(
             "manager",
             &format!("module '{name}' did not load; the others carry on without it: {e:#}"),
@@ -5268,14 +5381,7 @@ impl Manager {
                         Err(e) => logging::line("manager", &format!("{which} hotkey {shown} unavailable: {e}")),
                     }
                 }
-                let mut module_infos: Vec<gui::ModuleInfo> = self
-                    .modules
-                    .borrow()
-                    .iter()
-                    .enumerate()
-                    .map(|(i, m)| module_info(&self.shared, m, i))
-                    .collect();
-                module_infos.extend(excluded_infos(&self.shared));
+                let module_infos = all_rows(&self.shared, &self.modules.borrow());
                 // What the window will contain, said once. The Installed list is the only
                 // place a module can be reached from, and a module that is missing from it is
                 // invisible to somebody who cannot look — so the count belongs in the log the
@@ -5305,6 +5411,8 @@ impl Manager {
                 let load_shared = self.shared.clone();
                 let load_modules = self.modules.clone();
                 let load_disabled = self.disabled_ids.clone();
+                let load_sources = self.sources.clone();
+                let reload_sources = self.sources.clone();
                 let remove_shared = self.shared.clone();
                 let reload_shared = self.shared.clone();
                 let reload_modules = self.modules.clone();
@@ -5326,6 +5434,18 @@ impl Manager {
                     // error string if loading failed.
                     move |dir: std::path::PathBuf| {
                         let before = load_modules.borrow().len();
+                        // The slots a reload-all dropped: the module, or a dependency of it, may
+                        // come back in one.
+                        let dropped: Vec<usize> = load_modules
+                            .borrow()
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, m)| m.dropped)
+                            .map(|(i, _)| i)
+                            .collect();
+                        // Part of the session's set from now on, loaded or not: the reload key
+                        // reads it again, and says why it does not load if it does not.
+                        load_sources.borrow_mut().add(&dir);
                         match load_module(
                             &load_shared,
                             &load_modules,
@@ -5336,10 +5456,15 @@ impl Manager {
                             // Report every newly loaded module, not just the target
                             // — a hot-load can pull in not-yet-loaded dependencies,
                             // which must get list rows too. They're appended in load
-                            // order (dependencies before the module that needs them).
+                            // order (dependencies before the module that needs them),
+                            // after those a reload-all had dropped that came back in their
+                            // old slots — the module itself, or a dependency of it.
                             Ok((id, true)) => {
                                 let mods = load_modules.borrow();
-                                let infos = (before..mods.len())
+                                let infos = dropped
+                                    .into_iter()
+                                    .filter(|&i| !mods[i].dropped)
+                                    .chain(before..mods.len())
                                     .map(|i| module_info(&load_shared, &mods[i], i))
                                     .collect::<Vec<_>>();
                                 Ok((id, infos))
@@ -5533,8 +5658,15 @@ impl Manager {
                                 // is ready to, so both of them turned up late and together, which
                                 // is two interruptions where one would do and no reassurance at
                                 // all. The reassurance is gone either way; the noise need not be.
-                                let (done, failed) = reload_everything(&shared, &modules);
-                                shared.announce(&reload_report_text(&done, &failed, shared.stops.count()));
+                                let report = reload_everything(&shared, &modules, &reload_sources.borrow());
+                                let stopped = stopped_in_set(&shared, &modules.borrow());
+                                shared.announce(&reload_report_text(&report, stopped));
+                                // The whole of each reason, where it can be read again: the
+                                // sentence names the module and the entry, not the parser's
+                                // words. Pushed as it is, not deduplicated: each press is news.
+                                if let Some(window) = reload_window_text(&report) {
+                                    shared.errors.borrow_mut().push(window);
+                                }
                             }
                         }
                         // The pages a `show` asked for, built last and outside Luau: WebView2's
@@ -5543,10 +5675,15 @@ impl Manager {
                         webview_lua::build_pending(&shared);
                     },
                     move || errors_shared.drain_errors(),
-                    // Rows a stop turned off, or that were turned on again after one.
+                    // Every row again after a reload-all, then the rows a stop turned off, or
+                    // that were turned on again after one.
                     {
                         let shared = self.shared.clone();
-                        move || std::mem::take(&mut *shared.module_changes.borrow_mut())
+                        move || {
+                            let all = shared.module_rows.borrow_mut().take().map(gui::ListChange::All);
+                            let rows = std::mem::take(&mut *shared.module_changes.borrow_mut());
+                            all.into_iter().chain(rows.into_iter().map(gui::ListChange::Row)).collect()
+                        }
                     },
                     // Details…: the module's state, its memory limit and use, where its code runs.
                     {
@@ -5638,6 +5775,27 @@ pub fn ocr_bench(args: &[String]) -> i32 {
 
 /// Convenience entry: load each directory as a module and run them together.
 pub fn run(dirs: &[String]) -> Result<()> {
+    run_set(module_set::Sources::Folders(dirs.iter().map(PathBuf::from).collect()))
+}
+
+/// Runs every module installed beside the application, or — when none is — the demo beside it,
+/// `examples/hello`: what the application runs when no folder is named on its command line.
+///
+/// Resolved against the application's own folder rather than the working directory: launched
+/// from a Finder or a shortcut, the working directory is somewhere unrelated (on macOS it is
+/// "/"), and a relative path there fails for a reason nobody could guess from the outside. And a
+/// demo that is not there either is not an error: the application starts with nothing loaded,
+/// which is how somebody installs their first module. Here rather than in the launcher because
+/// the reload key reads the same folders again (`module_set::Sources`).
+pub fn run_installed() -> Result<()> {
+    run_set(module_set::Sources::installed())
+}
+
+/// Loads the modules `sources` holds and runs them together.
+fn run_set(sources: module_set::Sources) -> Result<()> {
+    // Read before anything else, as the launcher read the installed list before calling in:
+    // what it finds wrong is said again once the log is open (`registry::log_unloadable`).
+    let dirs = sources.start_folders();
     // The settings before the log, because the log's own header reports them — and before
     // anything else, because `headless` decides whether there is going to be a window at all.
     // Read straight from the file rather than through the Manager's store: this happens
@@ -5695,6 +5853,7 @@ pub fn run(dirs: &[String]) -> Result<()> {
     let result = (|| -> Result<()> {
         let mut manager = Manager::new()?;
         ocr_stop = Some(manager.ocr_shutdown());
+        *manager.sources.borrow_mut() = sources;
         // Nothing to load is a legitimate state — it is how somebody installs their first
         // module — and it is also what a translocated bundle whose original was not found, an
         // application moved away from its folder or an empty `modules` directory look like.
@@ -5732,7 +5891,7 @@ pub fn run(dirs: &[String]) -> Result<()> {
                 ),
             );
         }
-        for dir in dirs {
+        for dir in &dirs {
             if let Err(e) = manager.load(dir) {
                 manager.report_load_failure(dir, &e);
             }
@@ -5915,78 +6074,203 @@ fn own_keys_in(ids: Vec<i32>, reload: i32, quit: i32) -> OwnKeys {
     OwnKeys { reload: own.contains(&reload), quit: own.contains(&quit), others }
 }
 
-/// Rebuild every module from source, dependencies before dependents.
+/// Drops module `idx` from the running set: a reload-all found that the set no longer holds it —
+/// its folder is gone, its manifest says it is for another system, or nothing names it any more
+/// (module_set.rs). What a failed rebuild leaves, on purpose: everything it registered purged, its
+/// VM an empty one, its slot kept, since every index is a position in the parallel vectors. Its
+/// enabled flag and its settings stay as they are: the folder may come back — a branch switched
+/// back, an install — and the module is then built again in the same slot, as it was left.
+fn drop_module(shared: &Rc<Shared>, modules: &Rc<RefCell<Vec<Module>>>, idx: usize) {
+    shared.purge_module(idx);
+    // Its settings' schemas stay: a module the plan keeps running may still run its code, which
+    // reads them under its id. A build in this slot clears them first.
+    if let Some(m) = modules.borrow_mut().get_mut(idx) {
+        m.lua = vm_guard::new_vm(&shared.guard);
+        m.dropped = true;
+    }
+    // Its combinations go to whoever was waiting, as after a failed rebuild.
+    shared.refresh_hotkeys();
+}
+
+/// What a reload-all did: its spoken report and its part of the error window.
+#[derive(Default)]
+struct ReloadAll {
+    /// Modules built again, by name.
+    rebuilt: Vec<String>,
+    /// Modules not running before that run now — new to the set, or back in it — by name.
+    added: Vec<String>,
+    /// Modules dropped from the set, by name.
+    dropped: Vec<String>,
+    /// (name, id, error) for each module whose build failed: it is inactive now.
+    failed: Vec<(String, String, String)>,
+    /// Modules not built (module_set.rs), each with what it is left as.
+    kept: Vec<(module_set::Kept, Left)>,
+}
+
+/// What a module a reload-all did not build is left as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Left {
+    /// It goes on running as it was.
+    Running,
+    /// Loaded, but with nothing running: its last build failed, which leaves an empty VM, or the
+    /// guard stopped it.
+    Inactive,
+    /// Not loaded, as before.
+    Unloaded,
+}
+
+impl Left {
+    /// What module `id` is left as, when a reload-all does not build it.
+    fn of(modules: &[Module], id: Option<&str>) -> Left {
+        match id.and_then(|id| modules.iter().find(|m| m.id == id && !m.dropped)) {
+            None => Left::Unloaded,
+            Some(m) if !vm_guard::built(&m.lua) || vm_guard::stopped(&m.lua) => Left::Inactive,
+            Some(_) => Left::Running,
+        }
+    }
+}
+
+/// Rebuild every module from source, dependencies before dependents — what a restart would load,
+/// from every manifest as it is now.
 ///
-/// Order is the whole difficulty. A dependent holds a COPY of a code dependency's functions —
+/// Order is the first difficulty. A dependent holds a COPY of a code dependency's functions —
 /// that is what `host.require` does for a code module — so rebuilding a dependent before its
 /// dependency copies the old code and the change stays invisible until a restart, which is
 /// exactly the symptom this is meant to remove.
 ///
+/// The second is that the manifests are what changed. The order, the set and what each module may
+/// reach all come from them, and they used to be taken from what the start had read: the old
+/// dependency lists ordered the rebuild, a dependency named since was never loaded — and the
+/// module that named it died in its rebuild with "code dependency … not in the module table",
+/// which the spoken report shortened to its name — and a capability added was still refused. So
+/// the whole set is planned first from the manifests on disk (`module_set::plan`), and only then
+/// built: the modules the set no longer holds are dropped, every other one is built in the order
+/// of the new graph, in its slot or appended when it is new, and what cannot be built is named
+/// with its reason and left running as it was.
+///
 /// A module that fails to rebuild is reported and skipped rather than aborting the rest: the
-/// others do not depend on it, and stopping halfway leaves more of the system stale than
-/// carrying on does.
+/// others do not depend on it, and stopping halfway leaves more of the system stale than carrying
+/// on does. One that needs it is not built after it, though: its build would copy the code of a
+/// module that is not in the table, or whose own build just failed, and fail on it with the
+/// running module already taken down — the error this plan exists to prevent. It is left as it
+/// runs and named, as the plan leaves one that needs a module it cannot build.
 fn reload_everything(
     shared: &Rc<Shared>,
     modules: &Rc<RefCell<Vec<Module>>>,
-) -> (Vec<String>, Vec<String>) {
-    let graph: Vec<(String, Vec<String>)> =
-        modules.borrow().iter().map(|m| (m.id.clone(), m.dependencies.clone())).collect();
+    sources: &module_set::Sources,
+) -> ReloadAll {
+    let loaded: Vec<module_set::Loaded> = {
+        let roots = shared.roots.borrow();
+        modules
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| !m.dropped)
+            .map(|(i, m)| module_set::Loaded {
+                id: m.id.clone(),
+                name: m.name.clone(),
+                root: roots.get(i).cloned().unwrap_or_default(),
+                source: m.source.clone(),
+                deps: m.dependencies.iter().chain(&m.optional_dependencies).cloned().collect(),
+            })
+            .collect()
+    };
+    let plan = module_set::plan(sources, &loaded, &runs_here, std::env::consts::OS);
+    let mut report = ReloadAll::default();
 
-    // Dependencies first: repeatedly take whatever has no unbuilt dependency left. A cycle
-    // would stall this, so anything still unplaced at the end is appended in its own order —
-    // rebuilding it in the wrong order is better than not rebuilding it at all.
-    let mut order: Vec<String> = Vec::new();
-    let mut placed: HashSet<String> = HashSet::new();
-    loop {
-        let mut progressed = false;
-        for (id, deps) in &graph {
-            if placed.contains(id) {
-                continue;
-            }
-            if deps.iter().all(|d| placed.contains(d) || !graph.iter().any(|(g, _)| g == d)) {
-                order.push(id.clone());
-                placed.insert(id.clone());
-                progressed = true;
-            }
-        }
-        if !progressed {
-            break;
-        }
-    }
-    for (id, _) in &graph {
-        if !placed.contains(id) {
-            order.push(id.clone());
-        }
-    }
-
-    // Names rather than ids from here on: the result is spoken, and
-    // "com.platform.kontakt" is not something anyone wants to hear read out.
-    let (mut done, mut failed) = (Vec::new(), Vec::new());
-    for id in order {
-        let found = modules.borrow().iter().position(|m| m.id == id);
+    // Dropped first, so the combinations and claims they held are free before anything is built.
+    for id in &plan.gone {
+        let found = modules.borrow().iter().position(|m| &m.id == id);
         let Some(idx) = found else { continue };
         let name = modules.borrow()[idx].name.clone();
-        match reload_module(shared, modules, idx) {
-            Ok(_) => done.push(name),
+        drop_module(shared, modules, idx);
+        logging::line("manager", &format!("dropped module: {id} — the module set no longer holds it"));
+        report.dropped.push(name);
+    }
+    // A module this session has not loaded is enabled or not as the settings file says now.
+    let disabled = shared.store.borrow().disabled_ids();
+    // The modules of this pass whose build failed, or that were not built for one that did.
+    let mut failed: HashSet<String> = HashSet::new();
+    let mut kept = plan.kept;
+    for module_set::Step { module, parent, source, needs } in plan.build {
+        let (id, name) = (module.manifest.id.clone(), module.manifest.name.clone());
+        if let Some(dep) = needs.iter().find(|d| failed.contains(*d)) {
+            let why = format!("it needs '{dep}', whose build failed");
+            kept.push(module_set::Kept { id: Some(id.clone()), name, manifest: None, why });
+            failed.insert(id);
+            continue;
+        }
+        let slot = modules.borrow().iter().position(|m| m.id == id);
+        let built = match slot {
+            Some(idx) => {
+                let back = modules.borrow()[idx].dropped;
+                modules.borrow_mut()[idx].source = source;
+                rebuild_module(shared, modules, idx, module, &parent).map(|_| back)
+            }
+            None => add_module(shared, modules, &disabled, &parent, &source, module).map(|()| true),
+        };
+        match built {
+            Ok(true) => report.added.push(name),
+            Ok(false) => report.rebuilt.push(name),
             Err(e) => {
                 logging::line("manager", &format!("reload of '{id}' failed: {e:#}"));
-                failed.push(name);
+                report.failed.push((name, id.clone(), format!("{e:#}")));
+                failed.insert(id);
             }
         }
     }
+    // The modules this platform will not run, as the manifests say now.
+    *shared.excluded.borrow_mut() = plan
+        .excluded
+        .iter()
+        .map(|m| ExcludedModule {
+            id: m.manifest.id.clone(),
+            name: m.manifest.name.clone(),
+            version: m.manifest.version.clone(),
+            claimed: m.manifest.supported_os.join(", "),
+        })
+        .collect();
+    for k in kept {
+        let left = Left::of(&modules.borrow(), k.id.as_deref());
+        logging::line(
+            "manager",
+            &format!(
+                "reload-all did not build {}: {} — {}",
+                k.id.as_deref().unwrap_or(&k.name),
+                k.why,
+                match left {
+                    Left::Running => "it goes on running as it was",
+                    Left::Inactive => "it stays inactive, as it was",
+                    Left::Unloaded => "it is not loaded",
+                }
+            ),
+        );
+        report.kept.push((k, left));
+    }
+    // Every row again: modules came, went or were renamed.
+    *shared.module_rows.borrow_mut() = Some(all_rows(shared, &modules.borrow()));
     logging::line(
         "manager",
         &format!(
-            "reload-all: {} reloaded{}",
-            done.len(),
-            if failed.is_empty() {
-                String::new()
-            } else {
-                format!(", {} failed: {}", failed.len(), failed.join(", "))
-            }
+            "reload-all: {} rebuilt, {} new, {} dropped, {} failed, {} not built",
+            report.rebuilt.len(),
+            report.added.len(),
+            report.dropped.len(),
+            report.failed.len(),
+            report.kept.len()
         ),
     );
-    (done, failed)
+    report
+}
+
+/// The modules the guard stopped that are still in the set: they stay off through a reload.
+fn stopped_in_set(shared: &Shared, modules: &[Module]) -> usize {
+    modules.iter().enumerate().filter(|(i, m)| !m.dropped && shared.stops.is_stopped(*i)).count()
+}
+
+/// An entry of a manifest as it is said: `[limits] memory_mib` is "limits memory_mib".
+fn entry_spoken(entry: &str) -> String {
+    entry.replace(['[', ']'], "")
 }
 
 /// Announce the outcome of a reload-all.
@@ -5994,20 +6278,182 @@ fn reload_everything(
 /// Spoken, not shown: the key can be pressed from inside any application, and the tray
 /// window is usually not open — a silent rebuild is indistinguishable from a key that did
 /// not arrive. Failures are named because that is the part that needs acting on; successes
-/// are counted because eleven module names is not feedback, it is a recital. Modules the guard
-/// stopped are rebuilt too and stay off — a reload is no way around a stop — and the report counts
-/// them, so a module that does not answer afterwards is not a mystery.
-fn reload_report_text(done: &[String], failed: &[String], stopped: usize) -> String {
-    let report = match (done.len(), failed.len()) {
-        (0, 0) => "No modules to reload".to_string(),
+/// are counted because eleven module names is not feedback, it is a recital. A manifest that does
+/// not read is named with its entry and line, which is what there is to fix; the error window has
+/// the rest (`reload_window_text`). Modules the guard stopped are rebuilt too and stay off — a
+/// reload is no way around a stop — and the report counts them, so a module that does not answer
+/// afterwards is not a mystery.
+fn reload_report_text(r: &ReloadAll, stopped: usize) -> String {
+    let done = r.rebuilt.len() + r.added.len();
+    let failed: Vec<&str> = r.failed.iter().map(|(name, _, _)| name.as_str()).collect();
+    let quiet = r.dropped.is_empty() && r.kept.is_empty();
+    let mut report = match (done, failed.len()) {
+        (0, 0) if quiet => "No modules to reload".to_string(),
+        (0, 0) => "Nothing reloaded".to_string(),
         (n, 0) => format!("{n} module{} reloaded", if n == 1 { "" } else { "s" }),
         (0, _) => format!("Reload failed: {}", failed.join(", ")),
-        (n, _) => format!("{n} reloaded, {} failed: {}", failed.len(), failed.join(", ")),
+        (n, f) => format!("{n} reloaded, {f} failed: {}", failed.join(", ")),
     };
+    if !r.added.is_empty() {
+        report.push_str(&format!("; new: {}", r.added.join(", ")));
+    }
+    if !r.dropped.is_empty() {
+        report.push_str(&format!("; no longer loaded: {}", r.dropped.join(", ")));
+    }
+    let mut not_built = Vec::new();
+    for (k, _) in &r.kept {
+        match &k.manifest {
+            Some(p) => {
+                let at = match (&p.entry, p.line) {
+                    (Some(e), Some(l)) => format!("is wrong at {}, line {l}", entry_spoken(e)),
+                    (Some(e), None) => format!("is wrong at {}", entry_spoken(e)),
+                    (None, Some(l)) => format!("is wrong at line {l}"),
+                    (None, None) => "cannot be read".to_string(),
+                };
+                report.push_str(&format!("; the manifest of {} {at}", k.name));
+            }
+            None => not_built.push(k.name.as_str()),
+        }
+    }
+    if !not_built.is_empty() {
+        report.push_str(&format!("; not rebuilt: {}", not_built.join(", ")));
+    }
     match stopped {
         0 => report,
         1 => format!("{report}; 1 stopped module stays off"),
         n => format!("{report}; {n} stopped modules stay off"),
+    }
+}
+
+/// The error window's report of a reload-all — every module that failed or was not built, with the
+/// whole reason — or `None` when there is nothing to fix.
+fn reload_window_text(r: &ReloadAll) -> Option<(String, String)> {
+    if r.failed.is_empty() && r.kept.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for (k, left) in &r.kept {
+        let who = match &k.id {
+            Some(id) => format!("{} ({id})", k.name),
+            None => format!("The folder \u{201c}{}\u{201d}", k.name),
+        };
+        let now = match left {
+            Left::Running => "It goes on running as it was; reload again once it is fixed.",
+            Left::Inactive => "It stays inactive, as it was; reload again once it is fixed.",
+            Left::Unloaded => "It is not loaded; reload again once it is fixed.",
+        };
+        lines.push(format!("\u{2022} {who}: {}. {now}", k.why));
+    }
+    for (name, id, e) in &r.failed {
+        lines.push(format!("\u{2022} {name} ({id}) could not be rebuilt and is inactive now: {e}"));
+    }
+    Some((
+        "Reload: modules to fix".to_string(),
+        format!(
+            "The reload key read every module.toml again and rebuilt what it could.\n\n{}",
+            lines.join("\n\n")
+        ),
+    ))
+}
+
+#[cfg(test)]
+mod reload_all_tests {
+    use super::ocr_wiring_tests::body;
+    use super::*;
+
+    const LIB: &str = include_str!("lib.rs");
+
+    fn kept(id: Option<&str>, name: &str, manifest: Option<module_manifest::Problem>, why: String) -> module_set::Kept {
+        module_set::Kept { id: id.map(str::to_string), name: name.to_string(), manifest, why }
+    }
+
+    /// What the reload key says, and what the error window then holds: a manifest that does not
+    /// read named by its module, its entry and its line, and every reason in full in the window,
+    /// with what became of the module.
+    #[test]
+    fn the_report_names_the_module_and_the_entry() {
+        let wrong = module_manifest::ModuleManifest::problem(
+            "id = \"com.t.a\"\nname = \"A\"\nversion = \"1.0.0\"\n\n[limits]\nmemory_mib = \"512\"\n",
+        )
+        .expect("a problem");
+        let missing = module_manifest::ModuleManifest::problem("id = \"com.t.f\"\nname = \"F\"\n").expect("a problem");
+        let r = ReloadAll {
+            rebuilt: vec!["B".into(), "C".into()],
+            added: vec!["Lib".into()],
+            dropped: vec!["Old".into()],
+            failed: vec![("D".into(), "com.t.d".into(), "error running module 'com.t.d': boom".into())],
+            kept: vec![
+                (kept(Some("com.t.a"), "A", Some(wrong.clone()), format!("its module.toml is wrong at {wrong}")), Left::Running),
+                (kept(Some("com.t.e"), "E", None, "it needs 'com.t.a', whose module.toml is wrong".into()), Left::Running),
+                (kept(None, "fresh", Some(missing.clone()), format!("its module.toml is wrong at {missing}")), Left::Unloaded),
+                (kept(Some("com.t.g"), "G", None, "it needs 'com.t.d', whose build failed".into()), Left::Inactive),
+            ],
+        };
+        assert_eq!(
+            reload_report_text(&r, 1),
+            "3 reloaded, 1 failed: D; new: Lib; no longer loaded: Old; the manifest of A is wrong at limits \
+             memory_mib, line 6; the manifest of fresh is wrong at version; not rebuilt: E, G; 1 stopped module stays off"
+        );
+        let (title, text) = reload_window_text(&r).expect("a window");
+        assert_eq!(title, "Reload: modules to fix");
+        for line in [
+            "\u{2022} A (com.t.a): its module.toml is wrong at `[limits] memory_mib`, line 6: invalid type: string \"512\", \
+             expected i64. It goes on running as it was; reload again once it is fixed.",
+            "\u{2022} E (com.t.e): it needs 'com.t.a', whose module.toml is wrong. It goes on running as it was; reload again \
+             once it is fixed.",
+            "\u{2022} The folder \u{201c}fresh\u{201d}: its module.toml is wrong at `version`: missing field `version`. It is not \
+             loaded; reload again once it is fixed.",
+            "\u{2022} G (com.t.g): it needs 'com.t.d', whose build failed. It stays inactive, as it was; reload again once it \
+             is fixed.",
+            "\u{2022} D (com.t.d) could not be rebuilt and is inactive now: error running module 'com.t.d': boom",
+        ] {
+            assert!(text.contains(line), "{line}\nis not in\n{text}");
+        }
+        // Nothing to fix: the sentence alone, as it always was.
+        let fine = ReloadAll { rebuilt: vec!["B".into(); 11], ..ReloadAll::default() };
+        assert_eq!(reload_report_text(&fine, 0), "11 modules reloaded");
+        assert!(reload_window_text(&fine).is_none());
+        assert_eq!(reload_report_text(&ReloadAll::default(), 0), "No modules to reload");
+        let only_kept = ReloadAll { kept: vec![(kept(Some("com.t.e"), "E", None, "x".into()), Left::Running)], ..ReloadAll::default() };
+        assert_eq!(reload_report_text(&only_kept, 0), "Nothing reloaded; not rebuilt: E");
+    }
+
+    /// Where it is written, since none of it runs in a test (`Shared` opens the speech engines):
+    /// the key's step plans the whole set before it touches a module, says the report and puts the
+    /// reasons in the error window; a rebuild takes the manifest's capabilities and folder before
+    /// the VM is built; a new module is appended, a dropped one comes back in its slot.
+    #[test]
+    fn the_reload_key_plans_from_the_manifests_and_reports() {
+        let run = body(LIB, "pub fn run(&mut self) -> Result<()>");
+        let step = &run[run.find("if shared.reload_all.replace(false) {").expect("the reload step")..];
+        let at = |what: &str| step.find(what).unwrap_or_else(|| panic!("{what}"));
+        assert!(at("reload_everything(&shared, &modules, &reload_sources.borrow())") < at("shared.announce(&reload_report_text(&report, stopped));"));
+        assert!(at("shared.announce(&reload_report_text(&report, stopped));") < at("shared.errors.borrow_mut().push(window);"));
+        let all = body(LIB, "fn reload_everything(");
+        let at = |what: &str| all.find(what).unwrap_or_else(|| panic!("{what}"));
+        assert!(at("module_set::plan(sources, &loaded, &runs_here, std::env::consts::OS)") < at("drop_module(shared, modules, idx);"));
+        assert!(at("drop_module(shared, modules, idx);") < at("rebuild_module(shared, modules, idx, module, &parent)"));
+        assert!(all.contains("None => add_module(shared, modules, &disabled, &parent, &source, module)"));
+        // A step that needs a module whose build failed in this pass is not built, and is named.
+        let skip = at("if let Some(dep) = needs.iter().find(|d| failed.contains(*d)) {");
+        assert!(skip < at("let slot = modules.borrow().iter().position(|m| m.id == id);"));
+        let err = at(r#"report.failed.push((name, id.clone(), format!("{e:#}")));"#);
+        assert!(all[err..].contains("failed.insert(id);"), "a failure holds back what needs it");
+        assert!(all.contains("let left = Left::of(&modules.borrow(), k.id.as_deref());"));
+        assert!(all.contains("*shared.module_rows.borrow_mut() = Some(all_rows(shared, &modules.borrow()));"));
+        let rebuild = body(LIB, "fn rebuild_module(");
+        let caps = rebuild.find("*caps = module.manifest.capabilities.require.iter().cloned().collect();").expect("the grant");
+        let root = rebuild.find("*root = module.root.clone();").expect("the folder");
+        let built = rebuild.find("populate_vm(shared, parent, idx, &module, &lua)").expect("the build");
+        assert!(caps < built && root < built, "taken from the manifest before the VM is built");
+        assert!(body(LIB, "fn reload_module(").contains("rebuild_module(shared, modules, idx, module, &parent)"));
+        let load = body(LIB, "fn load_module(");
+        assert!(load.contains("Some(i) if mods[i].dropped => Some(i),"));
+        // A dependency a reload-all dropped is loaded again, not taken for loaded.
+        assert!(load.contains("let running = |dep: &str| modules.borrow().iter().any(|m| m.id == dep && !m.dropped);"));
+        assert_eq!(load.matches("if !running(dep) {").count(), 2, "required and optional");
+        assert!(load.contains(".find(|m| m.id == dep && !m.dropped)"), "the version of the one loaded now");
+        assert!(load.find("deps?;").unwrap() < load.find("rebuild_module(shared, modules, idx, module, &parent)?;").unwrap());
     }
 }
 
@@ -11314,7 +11760,7 @@ mod ocr_wiring_tests {
         assert!(body(LIB, "fn rollback_to(").contains("self.task_drop_from(n);"));
         // The loop is the thread that builds the manager, and the summary is written at exit.
         assert!(body(LIB, "pub fn new() -> Result<Self>").contains("loop_guard::mark_loop_thread();"));
-        assert!(body(LIB, "pub fn run(dirs: &[String]) -> Result<()> {").contains("manager.shared.log_legacy_summary();"));
+        assert!(body(LIB, "fn run_set(sources: module_set::Sources) -> Result<()> {").contains("manager.shared.log_legacy_summary();"));
         // The overrun line counts the deliveries' callbacks, and names no task: no module starts one.
         assert!(LIB.contains(concat!("let ocr_n = shared.fire_ocr", "_results();")));
         assert!(LIB.contains(concat!("({} callback(s)), snapshot results ", "\\")));
@@ -11580,8 +12026,9 @@ mod ocr_wiring_tests {
         }
         assert!(found.is_empty(), "a VM the guard did not make: {found:?}");
         let new_vm = concat!("vm_guard::new", "_vm(&shared.guard)");
-        assert!(body(LIB, "fn load_module(").contains(new_vm));
-        assert_eq!(body(LIB, "fn reload_module(").matches(new_vm).count(), 2, "the rebuilt VM and the empty one after a failure");
+        assert!(body(LIB, "fn add_module(").contains(new_vm));
+        assert_eq!(body(LIB, "fn rebuild_module(").matches(new_vm).count(), 2, "the rebuilt VM and the empty one after a failure");
+        assert!(body(LIB, "fn drop_module(").contains(new_vm), "a dropped module's empty VM");
     }
 
     /// The calls into a VM's Lua that the guard watches: every handler stretch (task.rs), every
@@ -11670,7 +12117,7 @@ mod ocr_wiring_tests {
         assert!(toggle.contains("vm_guard::stopped(&m.lua)"), "only a stopped VM is rebuilt");
         assert!(LIB.contains("Some(i) => toggle_module(&toggle_shared, &toggle_modules, i, enabled),"), "the checkbox does not go through it");
         // A reload keeps a stopped module off: neither its record nor its flag is touched by it.
-        for f in ["fn reload_module(", "fn purge_module(", "fn reload_everything("] {
+        for f in ["fn reload_module(", "fn rebuild_module(", "fn purge_module(", "fn drop_module(", "fn reload_everything("] {
             let b = body(LIB, f);
             assert!(!b.contains("stops.clear(") && !b.contains("apply_enabled(") && !b.contains("set_enabled("), "{f} turns a stopped module on");
         }
@@ -11759,7 +12206,7 @@ mod ocr_wiring_tests {
         let install = new.find("vm_guard::install(&shared.guard);").expect("the guard is not this thread's");
         let spawn = new.find("vm_guard::spawn_watchdog(shared.guard.clone())").expect("no watchdog");
         assert!(install < spawn);
-        assert!(body(LIB, "pub fn run(dirs: &[String]) -> Result<()> {").contains("manager.stop_guard();"));
+        assert!(body(LIB, "fn run_set(sources: module_set::Sources) -> Result<()> {").contains("manager.stop_guard();"));
         let stop = body(LIB, "fn stop_guard(&mut self)");
         assert!(stop.contains("w.stop();") && stop.contains("self.shared.guard.cpu_summary()") && stop.contains("self.shared.release_all_held_buttons();"));
         let api = body(LIB, "fn install_host_api(");
@@ -12388,7 +12835,7 @@ mod exit_release_tests {
 
     #[test]
     fn the_exit_releases_onnx_runtime_last_and_ends_without_teardown_when_it_cannot() {
-        let run = body(LIB, "pub fn run(dirs: &[String]) -> Result<()> {");
+        let run = body(LIB, "fn run_set(sources: module_set::Sources) -> Result<()> {");
         let at = |what: &str| run.find(what).unwrap_or_else(|| panic!("{what} is no longer in run's exit"));
         let steps = [
             "stop.shutdown(ocr::policy::SHUTDOWN)",
@@ -12421,7 +12868,7 @@ mod exit_release_tests {
     fn main_holds_the_guard_before_anything_else_runs() {
         let main = body(MAIN, "fn main() -> Result<()> {");
         let guard = main.find("let _ort = host::ReleaseAtExit;").expect("main no longer holds the guard");
-        for later in ["attach_parent_console();", "host::ocr_bench(", "host::run(&dirs)"] {
+        for later in ["attach_parent_console();", "host::ocr_bench(", "host::run_installed()", "host::run(&args)"] {
             assert!(guard < main.find(later).unwrap_or_else(|| panic!("{later}")), "the guard before {later}");
         }
     }
@@ -12481,7 +12928,7 @@ mod quit_key_wiring_tests {
         // A reload asked for in the same turn is not answered once a quit is asked for.
         let step = run.find("if shared.reload_all.replace(false) {").expect("the reload step");
         let asked = run[step..].find("if instance::quit_asked() {").expect("the quit asked for") + step;
-        let rebuilt = run[step..].find("reload_everything(&shared, &modules)").expect("the reload") + step;
+        let rebuilt = run[step..].find("reload_everything(&shared, &modules, &reload_sources.borrow())").expect("the reload") + step;
         assert!(run[step + "if shared.reload_all.replace(false) {".len()..asked].trim().is_empty());
         assert!(asked < rebuilt);
         // On the way out: the settings, then the keys, then the speech.

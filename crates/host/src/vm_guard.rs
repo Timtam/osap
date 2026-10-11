@@ -882,6 +882,12 @@ pub(crate) fn loaded(lua: &Lua) {
     }
 }
 
+/// Whether a module's load went through in `lua` ([`loaded`]): not in the empty VM a failed
+/// rebuild leaves in its place.
+pub(crate) fn built(lua: &Lua) -> bool {
+    slot_of(lua).is_some_and(|s| !s.loading.load(Ordering::Acquire))
+}
+
 /// Whose VM `lua` is and whose code runs in it, as [`describe`] recorded it.
 pub(crate) fn info(lua: &Lua) -> Option<VmInfo> {
     slot_of(lua).map(|s| lock(&s.info).clone())

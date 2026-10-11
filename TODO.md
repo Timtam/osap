@@ -8640,6 +8640,44 @@ time limit; a module past either is stopped until the next start.
       manifests: read every manifest first, resolve dependencies and order on the new graph,
       load new modules and drop removed ones, and when a manifest is wrong, say which module and
       which entry, spoken and in the error window.
+      **Done 2026-10-11, live check open:** what produced the error was the rebuild of the
+      module that named a dependency this session had not loaded. `reload_everything` rebuilt
+      only the loaded modules, so the new dependency was never loaded, and `populate_vm` failed
+      with "code dependency ... not in the module table" after the module's old VM had been taken
+      down; the spoken report said only "Reload failed: <name>", and the reason was in the log
+      alone. Two more stale pieces were found on the way: the capability grant (`Shared::caps`)
+      was pushed at load and never read again, so a capability added to module.toml was refused
+      after any reload ("used host.x without declaring it") until a restart; and the order came
+      from the old dependency lists. The VM's memory limit, the code dependencies copied into a
+      VM and the settings schemas were already read afresh at every build. Now the reload key
+      plans first (module_set.rs, `plan`): it reads every manifest of the session's set (the
+      folders on the command line and those installed since, or every folder under modules/ for
+      a start without folders, `host::run_installed`, so that choice is the host's now), follows
+      the dependencies as a start finds them, and orders the build on the new graph. A module
+      the set no longer holds is dropped (`drop_module`: purged, an empty VM, its slot kept and
+      marked, built again in place when a later reload or an install finds it); a new one is
+      appended (`add_module`); every other one is built in place (`rebuild_module`, which takes
+      the capabilities and the folder from the manifest read now, for the module window's
+      Reload too). A module that cannot be built (its manifest, a dependency missing, for another
+      system, at a version it does not accept or not built itself, a cycle) is left running as
+      it was and reported. A manifest that does not read is named with its entry and line
+      (`ModuleManifest::problem`, module-manifest) in the spoken report ("the manifest of X is
+      wrong at dependencies, line 5") and in the error window ("Reload: modules to fix", every
+      reason in full), and the manager's rows are all sent again (`gui::ListChange::All`). Docs:
+      module-manager.md "Reload everything", module-package-format.md. After review: a loaded
+      module kept for its manifest keeps the modules whose code it runs in the set, built and
+      not dropped as needed by nothing (a library reached only through it, an optional
+      dependency, a `.zip` from the command line known by the package), and whatever a module
+      left as it runs ran the code of stays as it runs, its folder gone or not; a dependency whose
+      manifest does not read is named whoever needs it, and a new one with a typo by its
+      folder rather than as "not found"; a module that needs one whose build failed in the
+      same pass is not built after it but left as it runs ("it needs ..., whose build
+      failed"), and one whose last build failed is reported as inactive, not as running; an
+      install or update loads again a dependency a reload-all had dropped; the installed
+      folders are read in the order the file system lists them, as at start.
+      **Open:** press the key live after each of: a dependency added to a manifest, a folder
+      copied into modules/, a folder removed, and a typo in a manifest; listen to the sentence,
+      and read the error window and the rows.
 
 ## Dev tools
 

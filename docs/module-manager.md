@@ -233,11 +233,18 @@ modules that do not depend on it. Its state starts afresh: its pages are closed,
 the new VM runs the entry file again. Useful while **developing** a module.
 
 Only a module that is already loaded can be reloaded: Reload never looks for new folders
-under `modules/`. A module folder copied in by hand is loaded at the next start after
-**Quit**; one installed from the Browse tab is loaded at once.
+under `modules/`. A module folder copied in by hand is loaded by the
+[reload key](#reload-key) in a session started without folders on its command line, or at
+the next start after **Quit**; one installed from the Browse tab is loaded at once.
 
 - A broken `module.toml` leaves the running module intact (the manifest is
   re-read before anything is torn down).
+- What the manifest says now applies: its `[capabilities]`, `[limits]` and `[screen]`.
+  A dependency it names since the start, and that this session has not loaded, is not
+  loaded by Reload: the rebuild of a module that needs its code fails on it. Nor is one
+  the reload key no longer loads: the module is rebuilt with a copy of its code, and the
+  dependency itself stays unloaded, with no row and its own `activate` not run. The
+  [reload key](#reload-key) loads both.
 - A broken rebuild reports the error and leaves the module inactive until you fix
   it and reload again; persisted settings are preserved.
 - Every module that depends on this one through `dependencies` — directly, or
@@ -246,7 +253,7 @@ under `modules/`. A module folder copied in by hand is loaded at the next start 
   A module that reaches it only through `optional_dependencies` keeps the old copy
   until it is reloaded itself.
 
-### Reload everything: Ctrl+Alt+Shift+Win+F5, or Command-Shift-F5 on a Mac
+### Reload everything: Ctrl+Alt+Shift+Win+F5, or Command-Shift-F5 on a Mac {#reload-key}
 
 > Not the same chord translated: the Windows one would carry Control-Option on a Mac, which
 > is VoiceOver's own modifier and never reaches an application while VoiceOver keeps its
@@ -256,17 +263,63 @@ under `modules/`. A module folder copied in by hand is loaded at the next start 
 > F-key, so on a Mac it needs "Use F1, F2, etc. as standard function keys" turned on in
 > System Settings or the `fn` key held down as well.
 
-The same rebuild for **every** loaded module at once, on a **system-wide** key — it
-works from inside the plugin you are testing, so you never have to leave it, find the
-tray, and come back. The result is **spoken** ("11 modules reloaded", or the names of
-the ones that failed), because the window you are looking at is not ours and there is
-nothing on screen to check.
+The same rebuild for **every** module at once, on a **system-wide** key — it works from
+inside the plugin you are testing, so you never have to leave it, find the tray, and
+come back. The result is **spoken** ("11 modules reloaded", or the names of the ones
+that failed), because the window you are looking at is not ours and there is nothing on
+screen to check.
 
-Modules are rebuilt **dependencies first**: a module copies its code dependencies'
-functions when it is built, so the other order would hand a module the old code and
-the change would only appear after a restart — the exact thing this key exists to
-avoid. One module failing does not stop the rest; it is named in the announcement and
-the reason is in the log.
+It reads **every `module.toml` again first**, and builds from what they say now, as a
+start with the same command line would:
+
+- **Which modules.** Started without folders on its command line, the application reads
+  every folder under `modules/` again, so a module copied in since is loaded; started
+  with folders, it reads those, and the ones installed from the Browse tab since. Each
+  module's dependencies are found as at start — beside it, or in a `modules/` folder
+  beside that — so a dependency named since is loaded too. A module the set no longer
+  holds is **no longer loaded**: its folder is gone, its `supported_os` now names other
+  systems, or nothing in the set depends on it any more. Its row leaves the list and its
+  hotkeys and keys go; its enabled state and settings are kept, and it comes back if a
+  later reload finds it again, or when a module installed from the Browse tab needs it.
+  Not while a module that is not rebuilt (below) still runs its code: then it stays as it
+  runs too, named as not rebuilt.
+- **In which order.** **Dependencies first**, on the dependencies the manifests declare
+  now: a module copies its code dependencies' functions when it is built, so the other
+  order would hand a module the old code and the change would only appear after a
+  restart — the exact thing this key exists to avoid.
+- **With what.** Each module's `[capabilities]`, `[limits]` and `[screen]` as they are
+  written now, and the list's rows — names, versions, dependencies — afterwards.
+
+A module that **cannot be built** is not torn down: one whose `module.toml` does not
+read, or that needs a module that is not found, does not run on this system, is at a
+version it does not accept or cannot be built itself, or whose dependencies go round in
+a circle. It goes on running as it was — one that was not loaded stays unloaded, and one
+whose last build failed stays inactive — until a reload after the fix. It runs with the
+code of the modules it depended on, so those stay loaded even when nothing else names them
+or their folder is gone — rebuilt where they are found, and otherwise left as they run: a
+typo in one module's manifest takes nothing under it down. A manifest that does not read
+is named in the announcement with the entry and the line, whoever needs it — a dependency
+named since whose folder is there but whose manifest has a typo is named by its folder,
+not reported as missing — and one that needs it as not rebuilt:
+
+```
+10 modules reloaded; the manifest of Overlay kit is wrong at dependencies, line 5; not rebuilt: Synth overlay
+```
+
+The announcement also names the modules loaded for the first time ("new: …") and the
+ones no longer loaded ("no longer loaded: …"). One module failing does not stop the
+rest: it is named as failed, and it is inactive until a reload after the fix. A module
+that needs it is not built after it, which would fail on it too: it goes on as it was,
+and is named as not rebuilt, because "it needs …, whose build failed". The error
+window, "Reload: modules to fix", then lists every module that failed or was not built,
+with the whole reason — for a manifest, the parser's own words:
+
+```
+• Overlay kit (com.example.kit): its module.toml is wrong at `dependencies`, line 5: invalid type: string "com.example.base", expected a sequence. It goes on running as it was; reload again once it is fixed.
+```
+
+The log has a `[manager]` line for each, and one that counts what the reload did
+(`reload-all: 10 rebuilt, 0 new, 0 dropped, 0 failed, 2 not built`).
 
 The combination is awkward on purpose: it rebuilds every VM in the application, and it
 has to be impossible to hit by accident while working in a plugin. If something else on
@@ -346,11 +399,15 @@ each module's folder directly under `modules/` instead, then **Quit** from the t
 icon and start the application again — the folders load at that start. Closing the
 window only hides it, and starting the application while it runs only brings the
 window forward ([above](#starting-it-again-brings-the-window-forward)), so neither
-reads the new folders; nor does **Reload**, which rebuilds modules already loaded. A
+reads the new folders; nor does **Reload**, which rebuilds modules already loaded. The
+[reload key](#reload-key) does, in a session started without folders on its command
+line: it reads every folder under `modules/` again and loads the new ones. At a start, a
 folder there whose `module.toml` does not parse is skipped, with a line in the log
-saying why; one whose name starts with `.` is skipped without one. When two folders
-carry the same module id, the first one the file system lists is loaded and the other
-is skipped without a line in the log — keep one folder per id. See
+saying why; the reload key names it in its announcement and in the error window, with
+the entry and the line. One whose name starts with `.` is skipped without a word. When
+two folders carry the same module id, the first one the file system lists is loaded and
+the other is skipped without a line in the log — the reload key takes the same one — so
+keep one folder per id. See
 [where modules are found](module-package-format.md#where-modules-are-found).
 
 **Search** follows GitHub's result pages, 100 results each, up to GitHub's own ceiling of

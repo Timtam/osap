@@ -152,41 +152,12 @@ fn main() -> Result<()> {
         }
         Some("update") => cmd_update(),
         Some("uninstall") => cmd_uninstall(args.get(1).map(String::as_str)),
-        _ => {
-            let dirs = if args.is_empty() {
-                // No args: run every installed module (portable modules dir next
-                // to the exe). Fall back to the dev example if nothing's installed.
-                // (The repo keeps its own modules/ for real ones, examples/ for the
-                // demos and tools/ for dev tools — see run-dev.ps1.)
-                let installed: Vec<String> = registry::installed()
-                    .into_iter()
-                    .map(|m| m.dir.to_string_lossy().into_owned())
-                    .collect();
-                if installed.is_empty() {
-                    // The demo, resolved against the application's own folder rather than
-                    // the working directory — launched from a Finder or a shortcut, the
-                    // working directory is somewhere unrelated (on macOS it is "/"), and a
-                    // relative path there fails for a reason nobody could guess from the
-                    // outside.
-                    //
-                    // And if it is not there either, that is not an error: start with
-                    // nothing loaded. The manager runs perfectly well empty — that is how
-                    // someone installs their first module — whereas exiting leaves a user
-                    // with an application that did not appear and never said why.
-                    let demo = host::app_dir().join("examples").join("hello");
-                    if demo.is_dir() {
-                        vec![demo.to_string_lossy().into_owned()]
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    installed
-                }
-            } else {
-                args
-            };
-            host::run(&dirs)
-        }
+        // No args: every installed module (portable modules dir next to the exe), or the dev
+        // example when nothing is installed — decided by the host, because the reload key reads
+        // the same folders again (host::run_installed). (The repo keeps its own modules/ for
+        // real ones, examples/ for the demos and tools/ for dev tools — see run-dev.ps1.)
+        _ if args.is_empty() => host::run_installed(),
+        _ => host::run(&args),
     }
 }
 

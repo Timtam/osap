@@ -99,11 +99,6 @@ impl Stops {
         self.records.borrow().contains_key(&idx)
     }
 
-    /// How many modules are off because they were stopped.
-    pub(crate) fn count(&self) -> usize {
-        self.records.borrow().len()
-    }
-
     /// The stop that turned module `idx` off.
     pub(crate) fn record(&self, idx: usize) -> Option<Rc<StopEvent>> {
         self.records.borrow().get(&idx).cloned()

@@ -9,8 +9,9 @@ use serde::Deserialize;
 /// Contents of `module.toml`.
 ///
 /// `PartialEq` so that an install can hold the manifest it unpacked to the one that was
-/// reviewed, field for field (`registry.rs`, `differs`).
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+/// reviewed, field for field (`registry.rs`, `differs`); `Clone` so that the reload key's plan
+/// can hand on the manifests it read (`module_set.rs` in the host).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ModuleManifest {
     pub id: String,
     pub name: String,
@@ -222,30 +223,67 @@ impl ModuleManifest {
     /// install among every module published under the topic — and an id no module can have,
     /// an empty one above all, would read every candidate's manifest to find nothing.
     pub fn validate(&self) -> Result<()> {
-        check_single_name("id", &self.id, false)?;
-        check_single_name("version", &self.version, true)?;
-        check_relative_path("entry", &self.entry)?;
+        self.refused_entry().map_err(|(_, e)| e)
+    }
+
+    /// The first entry [`ModuleManifest::validate`] refuses, as the manifest writes it, with the
+    /// refusal: one rule, read by `validate` for its error and by [`ModuleManifest::problem`] for
+    /// the entry.
+    fn refused_entry(&self) -> std::result::Result<(), (&'static str, anyhow::Error)> {
+        fn at(entry: &'static str) -> impl FnOnce(anyhow::Error) -> (&'static str, anyhow::Error) {
+            move |e| (entry, e)
+        }
+        check_single_name("id", &self.id, false).map_err(at("id"))?;
+        check_single_name("version", &self.version, true).map_err(at("version"))?;
+        check_relative_path("entry", &self.entry).map_err(at("entry"))?;
         for (field, specs) in [
             ("dependencies", &self.dependencies),
             ("optional_dependencies", &self.optional_dependencies),
         ] {
             for spec in specs {
                 if dep_id(spec).is_empty() {
-                    anyhow::bail!("module.toml: `{field}` has an empty entry");
+                    return Err((field, anyhow::anyhow!("module.toml: `{field}` has an empty entry")));
                 }
-                check_single_name(field, dep_id(spec), false)?;
+                check_single_name(field, dep_id(spec), false).map_err(at(field))?;
             }
         }
         if let Some(mib) = self.limits.memory_mib {
             if !(i64::from(DEFAULT_MEMORY_MIB)..=i64::from(MAX_MEMORY_MIB)).contains(&mib) {
-                anyhow::bail!(
-                    "module.toml: `[limits] memory_mib` = {mib} is outside {DEFAULT_MEMORY_MIB} to \
-                     {MAX_MEMORY_MIB}: it is the most memory, in MiB, this module's code may use, \
-                     and {DEFAULT_MEMORY_MIB} is the default — leave it out unless the module needs more"
-                );
+                return Err((
+                    "[limits] memory_mib",
+                    anyhow::anyhow!(
+                        "module.toml: `[limits] memory_mib` = {mib} is outside {DEFAULT_MEMORY_MIB} to \
+                         {MAX_MEMORY_MIB}: it is the most memory, in MiB, this module's code may use, \
+                         and {DEFAULT_MEMORY_MIB} is the default — leave it out unless the module needs more"
+                    ),
+                ));
             }
         }
         Ok(())
+    }
+
+    /// What is wrong with the manifest `text`, for somebody who has to find it — the entry, its
+    /// line and what is wrong there — or `None` when [`ModuleManifest::parse`] accepts it.
+    ///
+    /// `parse`'s error says the same, and keeps saying it the way it always has (the parser's
+    /// own message with the line drawn under it). What it does not give is the ENTRY as a name
+    /// on its own, which the reload key's report says out loud: "the manifest of Melodyne is
+    /// wrong at dependencies" can be acted on without anyone reading the file to the screen
+    /// reader line by line. So the text is read again here, and the entry is the key on the line
+    /// the parser stopped at — or above it, for a value that spans lines — with the table it
+    /// is in.
+    pub fn problem(text: &str) -> Option<Problem> {
+        match toml::from_str::<ModuleManifest>(text) {
+            Ok(m) => m.refused_entry().err().map(|(entry, e)| {
+                let said = format!("{e:#}");
+                Problem {
+                    entry: Some(entry.to_string()),
+                    line: None,
+                    what: said.strip_prefix("module.toml: ").unwrap_or(&said).to_string(),
+                }
+            }),
+            Err(e) => Some(Problem::of_toml(text, &e)),
+        }
     }
 
     /// The MiB this module's own code may use: `[limits] memory_mib`, or
@@ -269,8 +307,98 @@ impl ModuleManifest {
     }
 }
 
+/// Where a `module.toml` that does not load goes wrong ([`ModuleManifest::problem`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    /// The entry, as the manifest writes it: `dependencies`, `[limits] memory_mib`, or a table
+    /// on its own, `[limits]`, when the table's line is what is wrong. `None` when no line of
+    /// the file names one.
+    pub entry: Option<String>,
+    /// The line the parser stopped at, counted from 1. `None` for an entry the file lacks (a
+    /// missing `id`) and for a value a rule refuses, which `what` quotes instead.
+    pub line: Option<usize>,
+    /// What is wrong, on one line: the parser's words, or the rule's.
+    pub what: String,
+}
+
+impl Problem {
+    /// The problem a TOML reader's error describes in `text`.
+    fn of_toml(text: &str, e: &toml::de::Error) -> Self {
+        let what = e.message().replace('\n', " ");
+        // A missing field is reported at the start of the file, where it is not.
+        if let Some(field) = what.strip_prefix("missing field `").and_then(|r| r.split('`').next()) {
+            return Problem { entry: Some(field.to_string()), line: None, what };
+        }
+        match e.span() {
+            Some(span) => {
+                let (entry, line) = entry_at(text, span.start);
+                Problem { entry, line: Some(line), what }
+            }
+            None => Problem { entry: None, line: None, what },
+        }
+    }
+}
+
+/// Said the way the reload key's error window writes it: "`dependencies`, line 4: invalid type:
+/// string "com.a", expected a sequence".
+impl std::fmt::Display for Problem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (&self.entry, self.line) {
+            (Some(entry), Some(line)) => write!(f, "`{entry}`, line {line}: {}", self.what),
+            (Some(entry), None) => write!(f, "`{entry}`: {}", self.what),
+            (None, Some(line)) => write!(f, "line {line}: {}", self.what),
+            (None, None) => f.write_str(&self.what),
+        }
+    }
+}
+
+/// The entry at byte `at` of the manifest `text`, and its line counted from 1: the key on that
+/// line, or on the nearest line above it that has one (an array written over several lines is
+/// one entry), with the table it is in — `[limits] memory_mib` — or the table alone when its own
+/// line is the one.
+fn entry_at(text: &str, at: usize) -> (Option<String>, usize) {
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    let line = text[..at].matches('\n').count();
+    let mut key: Option<String> = None;
+    let mut table: Option<String> = None;
+    for l in text.split('\n').take(line + 1).collect::<Vec<_>>().into_iter().rev() {
+        let t = l.trim();
+        if let Some(header) = t.strip_prefix('[') {
+            let name = header.trim_start_matches('[').split(']').next().unwrap_or("").trim();
+            table = Some(name.to_string());
+            break;
+        }
+        if key.is_none() {
+            key = key_of(t);
+        }
+    }
+    let entry = match (table, key) {
+        (Some(t), Some(k)) => Some(format!("[{t}] {k}")),
+        (None, Some(k)) => Some(k),
+        (Some(t), None) => Some(format!("[{t}]")),
+        (None, None) => None,
+    };
+    (entry, line + 1)
+}
+
+/// The key a trimmed manifest line assigns, `dependencies` in `dependencies = [`, or `None` for
+/// a line that assigns none: a comment, an array's element, a line of a string.
+fn key_of(line: &str) -> Option<String> {
+    if line.starts_with('#') {
+        return None;
+    }
+    let (key, _) = line.split_once('=')?;
+    let key = key.trim();
+    let plain = key.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '"' | '\'' | ' '));
+    (!key.is_empty() && plain && key.matches('"').count() % 2 == 0 && key.matches('\'').count() % 2 == 0)
+        .then(|| key.to_string())
+}
+
 /// `[capabilities]` block: which host capabilities the module requests (default-deny).
-#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 pub struct Capabilities {
     #[serde(default)]
     pub require: Vec<String>,
@@ -659,7 +787,7 @@ pub fn dep_constraint(spec: &str) -> Option<&str> {
 }
 
 /// A loaded module: package root + parsed manifest.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LoadedModule {
     pub root: PathBuf,
     pub manifest: ModuleManifest,
@@ -1411,5 +1539,41 @@ some_later_key = 3
         // Or the test would pass by finding nothing — the failure mode of every check that
         // walks a directory.
         assert!(checked >= 10, "expected the shipped modules, found {checked} Luau file(s)");
+    }
+
+    /// Where a manifest goes wrong, as the reload key's report says it: the entry — with its
+    /// table, and for a value written over several lines the key above the line — the line, and
+    /// what is wrong, on one line.
+    #[test]
+    fn a_problem_names_the_entry_and_the_line() {
+        let base = "id = \"com.x.y\"\nname = \"X\"\nversion = \"1.0.0\"\n";
+        let cases: Vec<(String, Option<&str>, Option<usize>, &str)> = vec![
+            (format!("{base}dependencies = \"com.a\"\n"), Some("dependencies"), Some(4), "invalid type"),
+            (format!("{base}dependencies = [\n  \"com.a\",\n  3,\n]\n"), Some("dependencies"), Some(6), "invalid type"),
+            (format!("{base}dependencies = [\"com.a\" \"com.b\"]\n"), Some("dependencies"), Some(4), "missing comma"),
+            (format!("{base}# x = y\ncode_module = yes\n"), Some("code_module"), Some(5), "must be quoted"),
+            (format!("{base}\n[limits]\nmemory_mib = \"512\"\n"), Some("[limits] memory_mib"), Some(6), "invalid type"),
+            (format!("{base}\n[capabilities]\nrequire = \"screen\"\n"), Some("[capabilities] require"), Some(6), "invalid type"),
+            (format!("{base}[limits\nmemory_mib = 3\n"), Some("[limits]"), Some(4), "unclosed table"),
+            ("name = \"X\"\nversion = \"1.0.0\"\n".to_string(), Some("id"), None, "missing field `id`"),
+            (format!("{base}dependencies = [\"com.a\"]\ndependencies = [\"com.b\"]\n"), Some("dependencies"), Some(5), "duplicate key"),
+            // A rule's refusal: its entry, and its words without the file's name in front.
+            (format!("{base}dependencies = [\"com.a\", \"\"]\n"), Some("dependencies"), None, "`dependencies` has an empty entry"),
+            (format!("{base}\n[limits]\nmemory_mib = 4096\n"), Some("[limits] memory_mib"), None, "= 4096 is outside 256 to 2048"),
+            ("id = \"../x\"\nname = \"X\"\nversion = \"1.0.0\"\n".to_string(), Some("id"), None, "contains '/'"),
+        ];
+        for (text, entry, line, what) in &cases {
+            let p = ModuleManifest::problem(text).unwrap_or_else(|| panic!("no problem found in\n{text}"));
+            assert_eq!(p.entry.as_deref(), *entry, "{text}");
+            assert_eq!(p.line, *line, "{text}");
+            assert!(p.what.contains(what), "{text}: {}", p.what);
+            assert!(!p.what.contains('\n') && !p.what.starts_with("module.toml"), "{text}: {}", p.what);
+            // `parse` refuses every one of them as well, in its own words.
+            assert!(ModuleManifest::parse(text).is_err(), "{text}");
+        }
+        assert_eq!(ModuleManifest::problem(&format!("{base}dependencies = [\"com.a\"]\n")), None, "nothing wrong");
+        // As the error window writes it.
+        let p = ModuleManifest::problem(&format!("{base}dependencies = \"com.a\"\n")).unwrap();
+        assert_eq!(p.to_string(), "`dependencies`, line 4: invalid type: string \"com.a\", expected a sequence");
     }
 }
