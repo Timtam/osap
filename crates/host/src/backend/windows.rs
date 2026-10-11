@@ -1251,6 +1251,44 @@ impl Backend for WindowsBackend {
         self.window_owns_point(id as isize, x, y)
     }
 
+    /// Stricter than `window_owns_point`, which compares top-level windows: the point has to be
+    /// in `window` itself or a window inside it, so a click for a plug-in's own window is not made
+    /// on the DAW's list beside it. And it says which of three things is wrong.
+    fn click_check(&self, window: isize, x: i32, y: i32) -> Result<(), String> {
+        super::click_win::target(window, x, y).map(|_| ())
+    }
+
+    fn mouse_click_posted(&self, window: isize, x: i32, y: i32, button: MouseButton, move_pointer: bool) -> Result<(), String> {
+        super::click_win::post_click(window, x, y, button, move_pointer)
+    }
+
+    fn mouse_click_noactivate(
+        &self,
+        window: isize,
+        x: i32,
+        y: i32,
+        button: MouseButton,
+        owner: usize,
+    ) -> Result<super::ActJob, String> {
+        super::click_win::prepare_hold(window, x, y, button, owner)
+    }
+
+    fn give_back_activation(&self, when: super::GiveBackWhen, why: &str) -> Option<super::ActJob> {
+        let rule = match when {
+            super::GiveBackWhen::Stopped(idx) => super::click_win::GiveBack::Owner(idx),
+            super::GiveBackWhen::CameForward(hwnd) => super::click_win::GiveBack::Front(hwnd),
+        };
+        super::click_win::give_back_job(rule, why)
+    }
+
+    fn give_back_activation_at_exit(&self) -> Option<super::ActJob> {
+        super::click_win::exit_job()
+    }
+
+    fn give_back_left_over_activation(&self) -> Option<super::ActJob> {
+        super::click_win::left_over_job()
+    }
+
     fn window_controls(&self, hwnd_val: isize) -> Vec<ControlInfo> {
         let mut hwnds: Vec<isize> = Vec::new();
         unsafe {
@@ -3696,7 +3734,7 @@ fn run_ocr(
     Ok((text, words, lines))
 }
 
-fn button_flags(button: MouseButton) -> (u32, u32) {
+pub(super) fn button_flags(button: MouseButton) -> (u32, u32) {
     match button {
         MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
         MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
@@ -3720,7 +3758,7 @@ unsafe fn move_injected(x: i32, y: i32) {
     SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
 }
 
-unsafe fn send_mouse_event(flags: u32, data: i32) {
+pub(super) unsafe fn send_mouse_event(flags: u32, data: i32) {
     let mut input: INPUT = std::mem::zeroed();
     input.r#type = INPUT_MOUSE;
     input.Anonymous.mi.dwFlags = flags;

@@ -4,7 +4,8 @@
 //! **Every event of a module comes through here** — a hotkey, a captured key, a controller event,
 //! a timer, a window trigger's activation, the report of the window already in front, a focus
 //! change, the answer to a read, an image search or a snapshot, a setting's `onChange`, a page's
-//! message, `onReady` and `onClose` (`webview_lua.rs`) — and runs as a handler of its VM. A module
+//! message, `onReady` and `onClose` (`webview_lua.rs`), the outcome of a click made on a thread of
+//! the host's (`acting.rs`) — and runs as a handler of its VM. A module
 //! that has no handler and nothing queued is free, and its event runs at once, as a callback always
 //! did. A module is busy while its handler waits, while its mailbox is not empty, or while any
 //! module's handler is on the host's stack: no handler starts inside another. A busy module's
@@ -154,6 +155,9 @@ pub(crate) enum Event {
     /// What page `page`'s build `build` sent: a message, its `onReady` or its `onClose`
     /// (`webview_lua::open_event`).
     Page { page: u64, build: u64, call: PageCall },
+    /// The outcome of what the module asked another program for, for the callback it handed over
+    /// (acting.rs): called `(true)` or `(false, why)`, its errors reported as `what`'s.
+    Acted { cb: Function, result: Result<(), String>, what: &'static str },
     /// The tests' own event: `f(args)`, an input or not, reported as `what` — an input against
     /// the pages' limit when `what` is `"page message"`, as a page's message is.
     #[cfg(test)]

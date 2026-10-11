@@ -120,6 +120,7 @@ fn kind_of(ev: &Event) -> &'static str {
         Event::Snapshot { .. } => "snapshot",
         Event::Setting { .. } => "setting",
         Event::Page { .. } => "page",
+        Event::Acted { .. } => "acted",
         Event::Call { .. } => "call",
     }
 }

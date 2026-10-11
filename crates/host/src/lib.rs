@@ -5,6 +5,9 @@
 //! see `docs/host-api-capability-catalog.md`) is installed per module VM and
 //! bound to that module's root + the shared services.
 
+/// What a module asks of another program that the host does on a thread of its own, and the
+/// way its outcome comes back — `host.input.click`'s ways and their callback; see the file.
+mod acting;
 mod backend;
 /// Which build is running: the executable's commit and the package's. See the file.
 pub mod build_info;
@@ -458,7 +461,16 @@ struct Shared {
     notify: RefCell<Option<Box<dyn Fn(&str, &str) -> bool>>>,
     /// `host.gui.webview`'s pages, every module's — see webview_lua.rs.
     pages: webview_lua::Pages,
+    /// What modules asked of other programs on a thread of the host's, and the outcomes on their
+    /// way back (acting.rs).
+    acting: acting::Acting,
 }
+
+/// How long the end of the application waits for the windows given the no-activate style to get
+/// their activation back (`Shared::give_back_activation_at_exit`): long enough for a few windows
+/// whose programs answer, each within its half second; what is not given back by then, the next
+/// start gives back.
+const GIVE_BACK_AT_EXIT: std::time::Duration = std::time::Duration::from_millis(2000);
 
 /// Max distinct template PNGs kept decoded in the cache before least-recently-used
 /// eviction. Far above any real module's fixed template count — purely a growth cap.
@@ -1678,8 +1690,10 @@ impl Shared {
 
     /// Lets go of every mouse button module `idx` holds down, where the pointer is now — so the
     /// pointer does not move — because the module stops running (`why`, for the log). The
-    /// buttons' names. Runs no Lua.
+    /// buttons' names. Runs no Lua. And the windows given the no-activate style for its clicks,
+    /// and no other module's, get their activation back, on the thread that gave it.
     fn release_held_buttons(&self, idx: usize, why: &str) -> Vec<&'static str> {
+        self.give_back_activation(backend::GiveBackWhen::Stopped(idx), why);
         let buttons = self.held_buttons.borrow_mut().remove(&idx).unwrap_or_default();
         if buttons.is_empty() {
             return Vec::new();
@@ -1697,6 +1711,38 @@ impl Shared {
             names.push(name);
         }
         names
+    }
+
+    /// The windows `when` ends that hold the no-activate style for clicks get their activation
+    /// back: the backend's job for it, on the thread that gave it, after every click handed to it
+    /// before. Nothing when no window holds it, which is asked without waiting for anything.
+    fn give_back_activation(&self, when: backend::GiveBackWhen, why: &str) {
+        if let Some(job) = self.backend.give_back_activation(when, why) {
+            self.acting.run(acting::Lane::Style, job, None);
+        }
+    }
+
+    /// At exit: every window that holds the no-activate style for clicks gets its activation back,
+    /// on the thread that gave it — after everything still handed to it, the last click included,
+    /// and with no thread beside it changing the list of windows — waited for at most
+    /// [`GIVE_BACK_AT_EXIT`]: a program that hangs as its window's style is changed holds that
+    /// thread without a bound, and the application ends all the same. What is not given back by
+    /// then, the next start gives back.
+    fn give_back_activation_at_exit(&self) {
+        if let Some(job) = self.backend.give_back_activation_at_exit() {
+            self.acting.run_and_wait(acting::Lane::Style, job, GIVE_BACK_AT_EXIT);
+        }
+    }
+
+    /// The outcomes of what modules asked other programs for on a thread of the host's — a click
+    /// made without the front, or refused there — each to its module's mailbox, in the lane it was
+    /// asked from, for the callback that waits for it (acting.rs). Both ticks drive it.
+    fn fire_acted(&self) {
+        for due in self.acting.take_due() {
+            let _prio = ocr::types::enter_priority(due.prio);
+            let acting::Answer { idx, lua, cb, what } = due.answer;
+            mailbox::deliver(self, idx, &lua, Event::Acted { cb, result: due.result, what });
+        }
     }
 
     /// At exit: every mouse button a module still holds is let go of.
@@ -4924,7 +4970,13 @@ impl Manager {
             initial_pending: RefCell::new(Vec::new()),
             notify: RefCell::new(None),
             pages: webview_lua::Pages::default(),
+            acting: acting::Acting::new(),
         });
+        // What the last run left of the no-activate style it gives windows for clicks — a crash, a
+        // kill — given back first, on the thread that gives it, before any click of this run.
+        if let Some(job) = shared.backend.give_back_left_over_activation() {
+            shared.acting.run(acting::Lane::Style, job, None);
+        }
         // Claimed before the first module is loaded, so it is the one id no module can be
         // given (see the field). Registering with the OS happens later, in `run`, on the
         // thread that will receive it.
@@ -4961,8 +5013,8 @@ impl Manager {
     }
 
     /// At exit, after the event loop: the watchdog stops, the `[cpu]` summary of the whole run is
-    /// written — what each module took of the event loop — and every mouse button a module still
-    /// holds down is let go of.
+    /// written — what each module took of the event loop — every mouse button a module still
+    /// holds down is let go of, and every window given the no-activate style gets it taken off.
     fn stop_guard(&mut self) {
         if let Some(mut w) = self.watchdog.take() {
             w.stop();
@@ -4971,6 +5023,10 @@ impl Manager {
             logging::line("cpu", &line);
         }
         self.shared.release_all_held_buttons();
+        // And every window given the no-activate style for a click gets its activation back, on
+        // the thread that gave it, waited for a bounded time (what is not given back by then, the
+        // next start sees to).
+        self.shared.give_back_activation_at_exit();
     }
 
     /// Loads a module from an unpacked directory and runs its entry point.
@@ -5259,6 +5315,11 @@ impl Manager {
                         let t = std::time::Instant::now();
                         shared.fire_snapshot_results();
                         let snapshots_ms = t.elapsed().as_millis();
+                        // What modules asked other programs for on a thread of the host's
+                        // (acting.rs): a click made without the front, or refused there.
+                        let t = std::time::Instant::now();
+                        shared.fire_acted();
+                        let acted_ms = t.elapsed().as_millis();
                         // The events that waited in a busy module's mailbox, and every setting
                         // changed in the dialog or by another module since the last tick.
                         let t = std::time::Instant::now();
@@ -5313,7 +5374,8 @@ impl Manager {
                                      {other_ms}, which is mostly key and hotkey dispatch; \
                                      timers {timers_ms}, image results {images_ms}, text \
                                      recognition results {ocr_ms} ({} callback(s)), snapshot results \
-                                     {snapshots_ms}, queued module events {queued_ms} ({} event(s), {} \
+                                     {snapshots_ms}, outcomes of acting {acted_ms}, queued module events \
+                                     {queued_ms} ({} event(s), {} \
                                      waiting), initial window report {initial_ms}, page \
                                      events {pages_ms}, stopped modules {stops_ms}) — {hazard}",
                                     ocr_n.callbacks,
@@ -5918,6 +5980,7 @@ impl HostEvents for Dispatcher<'_> {
         self.shared.fire_image_results();
         self.shared.fire_ocr_results();
         self.shared.fire_snapshot_results();
+        self.shared.fire_acted();
         self.shared.run_queued_events();
         // Nothing to hand on headless — no page is ever built there — but the same order as
         // the GUI tick, so a page that could be built one day is not a second code path.
@@ -6094,6 +6157,9 @@ impl HostEvents for Dispatcher<'_> {
         // having changed, not merely the world (see bump_input_epoch). Once, now: a module that
         // is busy hears it later without a second turn.
         self.shared.bump_input_epoch();
+        // A window given the no-activate style for clicks holds it only while the window that was
+        // in front at its last click stays in front (backend/click_win.rs).
+        self.shared.give_back_activation(backend::GiveBackWhen::CameForward(win.hwnd), "another window came to the front");
         let mut queued: Vec<usize> = Vec::new();
         for (idx, m) in self.modules.iter().enumerate() {
             if !self.enabled(idx) {
@@ -6331,6 +6397,9 @@ impl mailbox::MailHost for Shared {
             Event::Snapshot { p, answer } => self.open_snapshot(*p, answer),
             Event::Setting { setting_of, reg, key, new, old } => self.open_setting(setting_of, reg, &key, &new, old.as_ref()),
             Event::Page { page, build, call } => webview_lua::open_event(&self.pages, idx, lua, page, build, call),
+            Event::Acted { cb, result, what } => {
+                self.window_opened(idx, what, acting::outcome_args(lua, &result).map(|args| Some((cb, args))))
+            }
             #[cfg(test)]
             Event::Call { f, args, what, .. } => mailbox::open_call(idx, f, args, what),
         }
@@ -8156,19 +8225,74 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(())
         })?,
     )?;
+    // host.input.click(x, y, opts?, cb?) -> true | false, why. Three ways, the module's choice per
+    // call (acting.rs, `click_opts`): through Windows' input, as ever (the default); posted to the
+    // window as messages; or through the input with the window's top-level window holding the
+    // no-activate style, which a thread of the host's gives it (backend/click_win.rs). With a
+    // `window`, a click is made only where that window is drawn. The callback hears the outcome
+    // on a later tick, whichever way it went.
     let sh = shared.clone();
     input.set(
         "click",
-        lua.create_function(move |lua, (x, y, opts): (i32, i32, Option<Table>)| {
+        lua.create_function(move |lua, (x, y, opts, cb): (i32, i32, Option<Table>, mlua::Value)| {
             host_call!("host.input.click");
-            // At once: a picture of this module's still out may show it (said once in the log).
-            sh.note_acting(lua, "host.input.click");
-            sh.bump_input_epoch();
-            let button = button_from(opts.as_ref());
-            sh.backend.mouse_click(x, y, button);
-            // Its own release lets go of a button held down before it.
-            sh.let_go_button(idx, button);
-            Ok(())
+            let c = acting::click_opts(opts.as_ref())?;
+            let cb = acting::callback("host.input.click", cb)?;
+            let button = c.button;
+            let answer = cb.map(|cb| acting::Answer { idx, lua: lua.clone(), cb, what: "input.click" });
+            // The way's own checks first: a click refused is no input, and nothing is noted.
+            let ready: Result<Option<backend::ActJob>, String> = match (c.via, c.window) {
+                (acting::Via::NoActivate, Some(w)) => sh.backend.mouse_click_noactivate(w, x, y, button, idx).map(Some),
+                (acting::Via::Input, Some(w)) => sh.backend.click_check(w, x, y).map(|()| None),
+                // A posted click checks its window as it posts — or answers that the platform has no
+                // such way yet; and through the input for no window in particular, nothing to check
+                // (`click_opts` raised for the other ways without one).
+                _ => Ok(None),
+            };
+            let result = match ready {
+                Err(why) => Err(why),
+                Ok(Some(job)) => {
+                    // At once: a picture of this module's still out may show it (said once in the log).
+                    sh.note_acting(lua, "host.input.click");
+                    sh.bump_input_epoch();
+                    sh.let_go_button(idx, button);
+                    // Made on the thread, after the call returns; the outcome goes to the callback
+                    // from there.
+                    sh.acting.run(acting::Lane::Style, job, answer);
+                    return acting::outcome_values(lua, Ok(()));
+                }
+                Ok(None) => match (c.via, c.window) {
+                    (acting::Via::Post, Some(w)) => {
+                        let posted = sh.backend.mouse_click_posted(w, x, y, button, c.move_pointer);
+                        if posted.is_ok() {
+                            // A picture of this module's still out may show it (said once in the log).
+                            sh.note_acting(lua, "host.input.click");
+                            sh.bump_input_epoch();
+                        }
+                        posted
+                    }
+                    _ => {
+                        // At once: a picture of this module's still out may show it (said once in
+                        // the log).
+                        sh.note_acting(lua, "host.input.click");
+                        sh.bump_input_epoch();
+                        sh.backend.mouse_click(x, y, button);
+                        // Its own release lets go of a button held down before it.
+                        sh.let_go_button(idx, button);
+                        Ok(())
+                    }
+                },
+            };
+            if let (Err(why), Some(w)) = (&result, c.window) {
+                logging::line(
+                    "input",
+                    &format!("click at {x},{y} for window {w} (via = \"{}\") refused: {why}", c.via.word()),
+                );
+            }
+            if let Some(answer) = answer {
+                sh.acting.answer_now(answer, result.clone());
+            }
+            acting::outcome_values(lua, result)
         })?,
     )?;
     let sh = shared.clone();
@@ -10405,6 +10529,47 @@ mod ocr_wiring_tests {
             .collect()
     }
 
+    /// `host.input.click`'s ways: a click without the front made with the no-activate style is
+    /// made on the style lane's thread, its outcome — and every other way's, for a callback — comes
+    /// back through the module's mailbox in the lane it was asked from, and both ticks hand the
+    /// outcomes on. The windows holding the style get it taken off again whenever a window comes to
+    /// the front, a module stops, the application ends — and at the next start, before any module
+    /// could click, what the last run left.
+    #[test]
+    fn a_click_without_the_front_is_wired_and_given_back_on_every_path() {
+        let api = body(LIB, "fn install_host_api(");
+        let click = bindings(api, "input").into_iter().find(|b| b.0 == "click").expect("host.input.click").1;
+        for part in [
+            "acting::click_opts(opts.as_ref())?",
+            "acting::callback(\"host.input.click\", cb)?",
+            "sh.backend.mouse_click_noactivate(w, x, y, button, idx)",
+            "sh.backend.click_check(w, x, y)",
+            "sh.backend.mouse_click_posted(w, x, y, button, c.move_pointer)",
+            "sh.acting.run(acting::Lane::Style, job, answer);",
+            "sh.acting.answer_now(answer, result.clone());",
+        ] {
+            assert!(click.contains(part), "host.input.click: `{part}`");
+        }
+        let fire = body(LIB, "fn fire_acted(");
+        let lane = fire.find("enter_priority(due.prio)").expect("not in its lane");
+        let deliver = fire.find("mailbox::deliver(self, idx, &lua, Event::Acted { cb, result: due.result, what });");
+        assert!(lane < deliver.expect("not through the mailbox"));
+        assert!(body(LIB, "fn open(&self, idx: usize, lua: &Lua, ev: Event) -> Opened").contains("Event::Acted { cb, result, what } =>"));
+        let call = concat!("shared.fire", "_acted();");
+        assert!(body(LIB, "fn on_tick(&mut self)").contains(call), "the headless tick does not hand outcomes on");
+        assert_eq!(LIB.matches(call).count(), 2, "the GUI tick and the headless one each hand them on once");
+        assert!(body(LIB, "fn on_window_activate(&mut self").contains("give_back_activation(backend::GiveBackWhen::CameForward(win.hwnd)"));
+        assert!(body(LIB, "fn release_held_buttons(").contains("self.give_back_activation(backend::GiveBackWhen::Stopped(idx), why);"));
+        // At exit on the thread that gave the style, after everything handed to it, and waited
+        // for a bounded time — never beside it on this one.
+        assert!(body(LIB, "fn stop_guard(&mut self)").contains("self.shared.give_back_activation_at_exit();"));
+        let exit = body(LIB, "fn give_back_activation_at_exit(&self)");
+        assert!(exit.contains("self.acting.run_and_wait(acting::Lane::Style, job, GIVE_BACK_AT_EXIT);"));
+        let new = body(LIB, "pub fn new() -> Result<Self>");
+        let left = new.find("give_back_left_over_activation()").expect("the last run's styles are not given back");
+        assert!(left < new.find("shared.reload_hotkey_id.set(").expect("the reload key"), "given back before any module loads");
+    }
+
     /// Every `host.input` call that acts, and `host.window.focus`, acts at once and notes it
     /// (`note_acting`, tested in task_tests.rs): nothing on its way waits for the module's
     /// pictures, whose answer the module waits for itself. A new `host.input` call has to be put
@@ -10447,7 +10612,7 @@ mod ocr_wiring_tests {
         let calls = LIB.matches(call).count();
         assert_eq!(calls, 2, "lib.rs delivers snapshots {calls} times; the GUI tick and the headless one each do it once");
         assert!(
-            LIB.contains(concat!("snapshot results \\", "\n")) && LIB.contains(concat!("{snapshots_", "ms}, queued module events")),
+            LIB.contains(concat!("snapshot results \\", "\n")) && LIB.contains(concat!("{snapshots_", "ms}, outcomes of acting {acted_ms}")),
             "the overrun line does not name the snapshots' share"
         );
     }

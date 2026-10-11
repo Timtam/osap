@@ -46,6 +46,11 @@ mod dxgi;
 mod paddle_ocr;
 #[cfg(windows)]
 mod uia;
+/// Clicks into another program's window that leave the window in front where it is —
+/// `host.input.click`'s `via = "post"` and `via = "noactivate"` — and the check its `window` asks
+/// for. See the file.
+#[cfg(windows)]
+mod click_win;
 #[cfg(target_os = "macos")]
 mod macos;
 /// Bringing this process to the front, and whether it has a Dock icon — see
@@ -826,6 +831,29 @@ pub enum MouseButton {
     Middle,
 }
 
+/// What a way of acting answers on a platform that does not have it yet: `host.input.click`'s
+/// `via = "post"` and `via = "noactivate"`, on a Mac for now.
+pub const NOT_YET: &str = "not supported on this platform yet";
+
+/// What a click for a `window` is refused with when another window is drawn over its point.
+pub const COVERED: &str = "something else is drawn over the point";
+
+/// A piece of work a backend hands the host for a thread of the host's own, because it may wait
+/// for another program — a window's style changed across processes, an accessibility action — and
+/// so must never run on the event loop. `Ok` when it was done; `Err` with what a module is told.
+/// Runs once, on a thread with nothing else of the host's on it.
+pub type ActJob = Box<dyn FnOnce() -> Result<(), String> + Send>;
+
+/// Which windows an event gives their activation back to — see
+/// [`Backend::give_back_activation`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GiveBackWhen {
+    /// Module `idx` stopped running: the windows held for its clicks and no other module's.
+    Stopped(usize),
+    /// Window `hwnd` came to the front: the windows held while another was in front.
+    CameForward(isize),
+}
+
 /// OS-level operations the host needs. Lua-agnostic on purpose: callback/state
 /// mapping stays in the host; only OS specifics live behind this trait.
 pub trait Backend {
@@ -965,6 +993,78 @@ pub trait Backend {
     /// clicking an item in it wants to know that nothing is drawn over the item. The same three
     /// answers, and `None` from a backend that cannot say.
     fn listed_window_owns_point(&self, _id: u64, _x: i32, _y: i32) -> Option<bool> {
+        None
+    }
+
+    /// Whether a click at (x, y) may be made for `window` — `host.input.click`'s `window`: the
+    /// window is there, the point is in it, and nothing else is drawn over it. `Err` with what the
+    /// module is told. Asks nothing of any program, so it is cheap on the event loop.
+    ///
+    /// The default goes by [`window_owns_point`](Self::window_owns_point) and refuses only its
+    /// definite "no", with [`COVERED`]; Windows says which of three things it is.
+    fn click_check(&self, window: isize, x: i32, y: i32) -> Result<(), String> {
+        match self.window_owns_point(window, x, y) {
+            Some(false) => Err(COVERED.to_string()),
+            _ => Ok(()),
+        }
+    }
+
+    /// `host.input.click`'s `via = "post"`: the click posted as messages to the window a real
+    /// click at (x, y) reaches, when that is `window` or a window inside it — in that window's own
+    /// client coordinates, with the pointer moved there first unless `move_pointer` is false.
+    /// Nothing comes to the front. On the event loop: it never waits for the other program. `Ok`
+    /// says it was posted, not that the program did anything with it. The default is a platform
+    /// without it, [`NOT_YET`].
+    fn mouse_click_posted(
+        &self,
+        _window: isize,
+        _x: i32,
+        _y: i32,
+        _button: MouseButton,
+        _move_pointer: bool,
+    ) -> Result<(), String> {
+        Err(NOT_YET.to_string())
+    }
+
+    /// `host.input.click`'s `via = "noactivate"`, its part on the event loop: the checks of
+    /// [`click_check`](Self::click_check), and whether the window's top-level window may be given
+    /// the no-activate style at all — then the job that gives it and clicks, for a thread of the
+    /// host's ([`ActJob`]), because changing another program's window waits for that program.
+    /// `owner` is the module the click is for, whose stop gives the style back. The default is a
+    /// platform without it, [`NOT_YET`].
+    fn mouse_click_noactivate(
+        &self,
+        _window: isize,
+        _x: i32,
+        _y: i32,
+        _button: MouseButton,
+        _owner: usize,
+    ) -> Result<ActJob, String> {
+        Err(NOT_YET.to_string())
+    }
+
+    /// The job that gives back their activation — takes the no-activate style off again — to the
+    /// windows `when` ends, for the same thread as the clicks, after them; `why` for the log.
+    /// `None` when no window holds the style and no click that gives it is on its way, which is
+    /// asked without a lock: this runs on every window coming to the front. The default is a
+    /// platform that never gives it.
+    fn give_back_activation(&self, _when: GiveBackWhen, _why: &str) -> Option<ActJob> {
+        None
+    }
+
+    /// At exit: from now on no window is given the no-activate style, and the job that gives every
+    /// window holding it its activation back — for the same thread as the clicks, after
+    /// everything handed to it before; `None` when no window holds it and no click that gives it
+    /// is on its way. Each program has half a second to answer; what is not given back, the next
+    /// start sees to. The default is a platform that never gives it.
+    fn give_back_activation_at_exit(&self) -> Option<ActJob> {
+        None
+    }
+
+    /// At the start: the job that gives their activation back to the windows the last run left
+    /// with the no-activate style — a crash, a kill — as it wrote them down; `None` when it left
+    /// none. For the same thread as the clicks, before any of them.
+    fn give_back_left_over_activation(&self) -> Option<ActJob> {
         None
     }
 

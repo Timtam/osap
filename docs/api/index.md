@@ -191,7 +191,7 @@ Synthesising mouse and keyboard input.
 
 | | |
 |---|---|
-| [`host.input.click(x, y, opts?)`](input#host-input-click) | Moves to `(x, y)` and synthesizes a mouse click there. |
+| [`host.input.click(x, y, opts?, cb?)`](input#host-input-click) | Clicks at `(x, y)`, through the system's input or, experimentally, without bringing the window it clicks to the front. |
 | [`host.input.cursorPos()`](input#host-input-cursorpos) | Returns the current mouse cursor position in screen coordinates. |
 | [`host.input.drag(x1, y1, x2, y2, opts?)`](input#host-input-drag) | Presses the mouse button at `(x1, y1)`, drags to `(x2, y2)`, and releases — with real, paced movement in between. |
 | [`host.input.mouseDown(x, y, opts?)`](input#host-input-mousedown) | Presses a mouse button at `(x, y)` and **leaves it down**. |
