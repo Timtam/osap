@@ -63,6 +63,12 @@ pub(crate) use macos::app::{
 /// Re-exported for the same reason: `gui.rs` calls it as wxWidgets hands over.
 #[cfg(target_os = "macos")]
 pub(crate) use macos::own::start as start_own_windows;
+/// `host.gui.webview`'s window on a Mac — see `macos::page` — with the interface `webview_win.rs`
+/// has, which `webview_lua.rs` is to use as it uses that one (stage 4, TODO.md); `crates/macos-check`
+/// names it meanwhile, and `page-check` builds pages with it.
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+pub(crate) use macos::page;
 /// Asking the user to allow Apple Events to VoiceOver — see `macos::perm`. Re-exported for
 /// the same reason as the app calls above: `gui.rs` reaches it without a macOS-only `use`,
 /// and the path resolves identically in `crates/macos-check`, which borrows this file.
@@ -93,7 +99,7 @@ pub(crate) fn ocr_bench(args: &[String]) -> i32 {
 }
 
 /// `automation-platform page-check`, which measures how this application takes the front and gives
-/// it back — see `macos::page_check` — and returns the exit code. For `lib.rs`, and so that
+/// it back, and checks the page window — see `macos::page_check` — and returns the exit code. For `lib.rs`, and so that
 /// `crates/macos-check` can name it.
 #[cfg(target_os = "macos")]
 pub(crate) fn page_check(args: &[String]) -> i32 {

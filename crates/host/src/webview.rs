@@ -1,8 +1,10 @@
 //! `host.gui.webview`'s rules, with no window in them: which answer `show` gives and when, what
 //! happens to a message posted before the page is there, which file a request is served and with
 //! which headers, which navigations and messages are let through, which window a page is in and
-//! where it goes, and the page's own `platform` object. The window itself is `webview_win.rs` on Windows; the Luau side
-//! is `webview_lua.rs`.
+//! where it goes, which window the front goes back to, what a key equivalent does in a Mac's page,
+//! and the page's own `platform` object. The window itself is `webview_win.rs` on Windows and
+//! `backend/macos/page.rs` on a Mac (built, and not yet what `host.gui.webview` shows there: stage
+//! 4, TODO.md); the Luau side is `webview_lua.rs`.
 //!
 //! **Experimental.** Stage 1 of the plan the maintainer decided on 2026-09-28: a page a module
 //! shows beside a plug-in window, for the Windows probe (`tools/html-probe`) to measure with NVDA.
@@ -10,7 +12,8 @@
 //!
 //! Pure on purpose: everything here decides something, and a decision about a browser window is
 //! only testable if nothing opens one. `crates/macos-check` borrows the file, so the answer a Mac
-//! gives today — "not supported on this platform yet" — is compiled for the Mac as well.
+//! gives today — "not supported on this platform yet" — is compiled for the Mac as well, and so
+//! are the rules the Mac's page window is built on.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -307,6 +310,14 @@ pub fn origin_for(scheme: &str) -> String {
     format!("http://{scheme}.localhost")
 }
 
+/// The page's origin in WebKit (`backend/macos/page.rs`), which serves an application's own scheme
+/// as it is: `<scheme>://localhost`, the host every [`entry_url`] names. Windows' is
+/// [`origin_for`]'s.
+#[cfg(any(test, target_os = "macos"))]
+pub fn webkit_origin_for(scheme: &str) -> String {
+    format!("{scheme}://localhost")
+}
+
 /// What a URL path may carry unencoded: the unreserved characters and the sub-delimiters. `/`
 /// is encoded too, because this encodes one segment at a time.
 const SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
@@ -507,7 +518,7 @@ const DANGEROUS_SWITCHES: [(&str, &str); 10] = [
 
 /// `text` with every control character written out (`\n`, `\u{1b}`), so a value cannot put a
 /// line of its own into the log.
-fn escape_controls(text: &str) -> String {
+pub fn escape_controls(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { c.escape_default().to_string() } else { c.to_string() })
         .collect()
@@ -798,21 +809,41 @@ pub struct Recipe {
     pub minimise: bool,
     /// A maximise box (Windows). A Mac's titled, resizable window has its zoom button either way.
     pub maximise: bool,
-    /// macOS: an `NSPanel` that does not activate the application when it takes the keyboard, so
-    /// the DAW stays the active application; otherwise an `NSWindow`, which activates it.
+    /// macOS: an `NSPanel` — a utility panel in no window list, floating while it has the keyboard
+    /// and at the normal level otherwise — rather than an ordinary `NSWindow`. Either activates
+    /// the application when it takes the keyboard (the maintainer's decision of 2026-10-11, the
+    /// VPS Avenger control tool's way); a panel that does not is to be an experimental page option,
+    /// `activates = false`, still to come (TODO.md, stage 4).
     pub panel: bool,
 }
 
-/// A page's size, at 96 dots per inch: scaled by the monitor's.
+/// A page's size: on Windows at 96 dots per inch, scaled by the monitor's; on a Mac in points,
+/// which AppKit scales itself.
 pub const DEFAULT_SIZE: (i32, i32) = (520, 640);
 
-/// The smallest a page is made to fit beside the rectangle to avoid, at 96 dots per inch.
+/// The smallest a page is made to fit beside the rectangle to avoid, in the units of
+/// [`DEFAULT_SIZE`].
 pub const MIN_SIZE: (i32, i32) = (320, 360);
+
+/// The engine a page runs in, for the parts of its [`platform_shim`] that differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Engine {
+    /// WebView2, on Windows (`webview_win.rs`): the host's messages arrive as `chrome.webview`'s
+    /// `message` events. Never made on a Mac, where no WebView2 page is built.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    WebView2,
+    /// WebKit, on a Mac (`backend/macos/page.rs`): the host's messages arrive as JSON text through
+    /// `window.__platformDeliver` ([`WEBKIT_DELIVER`]), and the keyboard is put back where it was
+    /// in the page when its window takes the keyboard ([`WEBKIT_RESTORE_FOCUS`]). Built on a Mac only
+    /// (and in the tests).
+    #[cfg(any(test, target_os = "macos"))]
+    WebKit,
+}
 
 /// The script the host puts into every page before the page's own: `platform.post(value)` to
 /// send the module a value, and `platform.onmessage = function (value) … end` to receive what
-/// the module posts. It hides which engine carries the messages (WebView2's
-/// `chrome.webview` here, WebKit's message handler on a Mac later), so a page is written once.
+/// the module posts. It hides which engine carries the messages (WebView2's `chrome.webview` on
+/// Windows, a function only the host calls on a Mac), so a page is written once.
 ///
 /// Messages the module posts before the page has set `onmessage` wait for it, up to the same
 /// cap the host keeps. A handler that throws does not stop the next message; the error is
@@ -822,25 +853,115 @@ pub const MIN_SIZE: (i32, i32) = (320, 360);
 /// And `window.close()` does nothing: in WebView2 it takes the web view down and leaves its
 /// window empty, and a page is closed by its module (`page:close()`), not by itself. Should a
 /// page get round this, the host treats it as a page that failed (webview_win.rs).
-pub const PLATFORM_SHIM: &str = r#"(() => {
+///
+/// Built from parts the two engines share, so the one cannot drift from the other; Windows' is
+/// the very script stage 1 shipped, byte for byte (a test holds it to that), so no page of the
+/// Windows probe sees a change. WebKit's adds two things:
+///
+/// - **The host's messages** come through `window.__platformDeliver(json)`, which only the host
+///   calls ([`WEBKIT_DELIVER`]): a function the page cannot replace, with the message as an
+///   argument and never as a script made from it.
+/// - **The keyboard put back** where it was in the page when the page's window takes the keyboard:
+///   the host calls `window.__platformRestoreFocus()` ([`WEBKIT_RESTORE_FOCUS`]) at AppKit's word
+///   that the window became the key window, and the page's own window `focus` event calls it too —
+///   whichever comes first, the second finds the work done. The element the keyboard was last on
+///   gets it back if it is still in the page and shown; otherwise WebKit's own choice stands, which
+///   is gui.md's "the element that had the focus last time, or the document itself". From then on
+///   a guard watches, until the user's first key, pointer press or click in the page, or until the
+///   keyboard moves to another element: the keyboard going to nothing — the document's body —
+///   with the document still focused and no input meanwhile is put back once for each time it
+///   goes, and said in the host's log ([`SHIM_NOTE`]). A move to another element is never undone:
+///   with VoiceOver's "keyboard focus follows the VoiceOver cursor", the user's own navigation
+///   moves the page's focus with no key reaching the page. Events only; no timer decides anything.
+pub fn platform_shim(engine: Engine) -> String {
+    let cap = MAX_QUEUED_POSTS;
+    let mut s = String::from(SHIM_HEAD);
+    match engine {
+        Engine::WebView2 => {
+            s.push_str(
+                "  const ipc = window.ipc;\n  const channel = window.chrome && window.chrome.webview;\n  if (!ipc || !channel) return;\n",
+            );
+            s.push_str(SHIM_HANDLER);
+            s.push_str(&format!(
+                "  channel.addEventListener(\"message\", (event) => {{\n    if (handler) hand(event.data);\n    else if (waiting.length < {cap}) waiting.push(event.data);\n  }});\n"
+            ));
+        }
+        #[cfg(any(test, target_os = "macos"))]
+        Engine::WebKit => {
+            s.push_str("  const ipc = window.ipc;\n  if (!ipc) return;\n");
+            s.push_str(SHIM_HANDLER);
+            s.push_str(&format!(
+                "  const take = (value) => {{\n    if (handler) hand(value);\n    else if (waiting.length < {cap}) waiting.push(value);\n  }};\n"
+            ));
+            s.push_str("  Object.defineProperty(window, \"__platformDeliver\", { value: (text) => take(JSON.parse(text)) });\n");
+            s.push_str(SHIM_WEBKIT_FOCUS);
+        }
+    }
+    s.push_str(SHIM_TAIL);
+    s
+}
+
+/// The start of every [`platform_shim`]: the top frame only, once, and `window.close()` made to do
+/// nothing.
+const SHIM_HEAD: &str = r#"(() => {
   "use strict";
   if (window.top !== window || window.platform) return;
   try {
     Object.defineProperty(window, "close", { value: () => {}, writable: false, configurable: false });
   } catch (err) {}
-  const ipc = window.ipc;
-  const channel = window.chrome && window.chrome.webview;
-  if (!ipc || !channel) return;
-  let handler = null;
+"#;
+
+/// The handler `onmessage` sets, the messages waiting for it, and the call that keeps one
+/// handler's error from stopping the next message.
+const SHIM_HANDLER: &str = r#"  let handler = null;
   const waiting = [];
   const hand = (value) => {
     try { handler(value); } catch (err) { setTimeout(() => { throw err; }); }
   };
-  channel.addEventListener("message", (event) => {
-    if (handler) hand(event.data);
-    else if (waiting.length < 256) waiting.push(event.data);
-  });
-  const platform = Object.create(null);
+"#;
+
+/// WebKit's: the keyboard put back in the page and the guard (see [`platform_shim`]). Its notes
+/// go to the host's log through the page's own message channel, behind [`SHIM_NOTE`].
+#[cfg(any(test, target_os = "macos"))]
+const SHIM_WEBKIT_FOCUS: &str = r#"  const note = (text) => {
+    try { ipc.postMessage("\u0001platform: " + text); } catch (err) {}
+  };
+  let last = null;
+  let armed = false;
+  let lost = false;
+  const usable = (el) => !!el && el.isConnected && el !== document.body && el.getClientRects().length > 0;
+  document.addEventListener("focusin", (event) => {
+    if (event.target !== last) armed = false;
+    last = event.target;
+    lost = false;
+  }, true);
+  const disarm = (event) => {
+    if (event.isTrusted) armed = false;
+  };
+  for (const type of ["keydown", "pointerdown", "click"]) document.addEventListener(type, disarm, true);
+  document.addEventListener("focusout", (event) => {
+    if (!armed || lost || event.target !== last || event.relatedTarget !== null) return;
+    lost = true;
+    queueMicrotask(() => {
+      const nothing = document.activeElement === null || document.activeElement === document.body;
+      if (!armed || !lost || !nothing || !document.hasFocus() || !usable(last)) return;
+      last.focus();
+      note("the keyboard went to nothing with no input in the page, and is back on the element that had it");
+    });
+  }, true);
+  const restore = () => {
+    armed = true;
+    if (!usable(last)) return "where WebKit put it: no element had it before, or that one is gone or hidden";
+    if (document.activeElement === last) return "on the element that had it";
+    last.focus();
+    return "back on the element that had it";
+  };
+  Object.defineProperty(window, "__platformRestoreFocus", { value: restore });
+  window.addEventListener("focus", () => { restore(); });
+"#;
+
+/// The end of every [`platform_shim`]: the `platform` object itself, frozen.
+const SHIM_TAIL: &str = r#"  const platform = Object.create(null);
   Object.defineProperties(platform, {
     post: {
       value: (value) => {
@@ -859,8 +980,232 @@ pub const PLATFORM_SHIM: &str = r#"(() => {
   Object.defineProperty(window, "platform", { value: platform });
 })();"#;
 
+/// What the host has WebKit run to hand a page one message: the body of an asynchronous function
+/// whose one argument, `m`, is the JSON text the host encoded — data, never part of the script
+/// (`callAsyncJavaScript`, backend/macos/page.rs). [`platform_shim`] defines the function it calls.
+#[cfg(any(test, target_os = "macos"))]
+pub const WEBKIT_DELIVER: &str = "return window.__platformDeliver(m);";
+
+/// What the host has WebKit run when a page's window becomes the key window: the keyboard put
+/// back where it was in the page ([`platform_shim`]). Its answer says where the keyboard is, for
+/// the log; a document without the shim — none of the page's own — says so.
+#[cfg(any(test, target_os = "macos"))]
+pub const WEBKIT_RESTORE_FOCUS: &str =
+    "return window.__platformRestoreFocus ? window.__platformRestoreFocus() : \"not a document of the page's own\";";
+
+/// What a note of the WebKit shim's own begins with, on the page's message channel: a control
+/// character no message of `platform.post` can begin with — that is always `JSON.stringify`'s
+/// text — so the host tells the two apart ([`shim_note`]) and a note never reaches the module.
+#[cfg(any(test, target_os = "macos"))]
+pub const SHIM_NOTE: &str = "\u{1}platform: ";
+
+/// The shim's note in a message the page's channel carried, or `None` for a message of the
+/// page's own.
+#[cfg(any(test, target_os = "macos"))]
+pub fn shim_note(text: &str) -> Option<&str> {
+    text.strip_prefix(SHIM_NOTE)
+}
+
 /// The folder WebView2 keeps its data in: beside the application, like its settings and its log.
 pub const DATA_FOLDER: &str = "WebView2";
+
+/// The folder beside the application a Mac keeps its page rules in ([`RULE_LIST`], compiled by
+/// WebKit into a store of the host's own rather than WebKit's default one under `~/Library`), as
+/// Windows keeps WebView2's data in [`DATA_FOLDER`].
+#[cfg(any(test, target_os = "macos"))]
+pub const RULE_FOLDER: &str = "WebKitRules";
+
+/// The name the compiled [`RULE_LIST`] is kept under in its store. Compiled again at every start,
+/// so a changed list replaces the one kept.
+#[cfg(any(test, target_os = "macos"))]
+pub const RULE_LIST_ID: &str = "pages";
+
+/// The Mac's "403 for everything else": a WebKit content rule list every page's web view is built
+/// with (backend/macos/page.rs), which blocks every load — a document, a script, an image, a
+/// `fetch` — but the pages' own schemes ([`scheme_for`]: `mod-` and then lower-case letters,
+/// digits and hyphens, served at `localhost`) and `data:` URLs, which the policy allows for images.
+/// WebKit has no request filter of the kind WebView2's that answers 403 on Windows; this blocks
+/// before a request leaves, whatever the page's policy lets through. Another module's scheme is
+/// let past it and goes nowhere: a web view serves only its own module's. Like the 403, it does not
+/// cover WebRTC or the engine's own look-ahead (TODO.md, stage 3). A list WebKit does not compile
+/// is a page that is not built.
+#[cfg(any(test, target_os = "macos"))]
+pub const RULE_LIST: &str = r#"[{"trigger":{"url-filter":".*"},"action":{"type":"block"}},{"trigger":{"url-filter":"^mod-[a-z0-9-]+://localhost/"},"action":{"type":"ignore-previous-rules"}},{"trigger":{"url-filter":"^data:"},"action":{"type":"ignore-previous-rules"}}]"#;
+
+/// Where a page leaving the front gives it, on Windows: `back_to`, the window it took the front
+/// from — or, when that is a page of the application's hidden since (the one this page was shown
+/// in place of), the window that page came from, and so on: a module that shows one page in place
+/// of another, the new one first, so the front goes from page to page and never through the
+/// plug-in window, still lands in the plug-in window when the new one leaves. `page` answers for a
+/// window that is a page: whether it is shown, and the window it came from (0 until it took the
+/// front). Never `this` page, never a window none came from; at most `pages` steps, so pages that
+/// came from each other end. Window ids are HWNDs, and 0 is none. A Mac's page follows the same
+/// chain with each window's application as well ([`front_goes_to_app`]).
+// Not called on a Mac, which has `front_goes_to_app`.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn front_goes_to(this: isize, back_to: isize, pages: usize, page: impl Fn(isize) -> Option<(bool, isize)>) -> isize {
+    let mut to = back_to;
+    for _ in 0..pages {
+        match page(to) {
+            Some((false, from)) if from != 0 && from != this => to = from,
+            _ => break,
+        }
+    }
+    to
+}
+
+/// A Mac's [`front_goes_to`], with `host.window`'s ids: the window and its application, as
+/// `(window, pid)`. `page` answers for a window that is a page: whether it is shown, and where it
+/// came from — `None` until it took the front. Where a page came from an application whose window
+/// could not be named (window 0: accessibility did not answer), the chain ends on that application,
+/// whose own choice of window then stands; stopping on the page before it instead would end on a
+/// window of this application's that is hidden, and the front would go nowhere. Otherwise the same
+/// chain: never through a page still shown, one that never took the front, or this page itself, and
+/// at most `pages` steps.
+#[cfg(any(test, target_os = "macos"))]
+pub fn front_goes_to_app(
+    this: isize,
+    came: (isize, i32),
+    pages: usize,
+    page: impl Fn(isize) -> Option<(bool, Option<(isize, i32)>)>,
+) -> (isize, i32) {
+    let mut to = came;
+    for _ in 0..pages {
+        if to.0 == 0 {
+            break;
+        }
+        match page(to.0) {
+            Some((false, Some(from))) if from.0 != this => to = from,
+            _ => break,
+        }
+    }
+    to
+}
+
+/// An Edit command a Mac's page window sends to the first responder ([`MacKey::Edit`]), as an Edit
+/// menu's item would — there is none: the host's menus have no Edit menu, and a tool page is in
+/// an application whose menu bar is not shown.
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditCommand {
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    Undo,
+    Redo,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl EditCommand {
+    /// The action's selector, as AppKit names it: the one the page window sends
+    /// (backend/macos/page.rs).
+    pub fn selector(self) -> &'static std::ffi::CStr {
+        match self {
+            EditCommand::Cut => c"cut:",
+            EditCommand::Copy => c"copy:",
+            EditCommand::Paste => c"paste:",
+            EditCommand::SelectAll => c"selectAll:",
+            EditCommand::Undo => c"undo:",
+            EditCommand::Redo => c"redo:",
+        }
+    }
+}
+
+/// What a key equivalent does in a Mac's page window once the page and WebKit have left it
+/// unhandled ([`mac_key`]).
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MacKey {
+    /// Not one of the page's: AppKit goes on as it would — the main menu, then the system.
+    Pass,
+    /// Taken, and nothing done with it: Command-Q, Command-H and Option-Command-H in a tool page.
+    Nothing,
+    /// What the close box does: the page hidden, the front given back.
+    Close,
+    /// An Edit command sent to the first responder: the field the keyboard is in.
+    Edit(EditCommand),
+    /// The window miniaturised (an app page).
+    Miniaturise,
+    /// The application quits, by the host's own way out (an app page).
+    Quit,
+    /// The application hides, as any does (an app page).
+    Hide,
+    /// The other applications hide (an app page).
+    HideOthers,
+}
+
+/// What a key equivalent does in a page of `kind` on a Mac, from the key's characters as AppKit
+/// gives them without the modifiers (`charactersIgnoringModifiers`; Shift still applies) and the
+/// modifiers held. Asked only after the page and WebKit have left the key unhandled, so a page's
+/// own `keydown` handler sees every key first. Decided here, and not by whichever main menu
+/// wxWidgets last installed — the module manager's, with Close and Quit, or none at all before the
+/// manager was first opened — so a page's keys do not depend on whether the manager was ever
+/// open:
+///
+/// - **Both kinds:** Command-W does what the close box does; Command-X, C, V, A and Z and
+///   Shift-Command-Z cut, copy, paste, select all, undo and redo in the field the keyboard is in.
+/// - **A tool page:** Command-Q, Command-H and Option-Command-H do nothing (the maintainer's
+///   decision of 2026-10-11): a VoiceOver user in a companion panel reaches for the DAW's
+///   shortcuts, and quitting the application by accident takes every overlay away.
+/// - **An app page**, a window like any application's: Command-M miniaturises it, Command-Q quits
+///   the application by the host's own way out, Command-H hides it and Option-Command-H hides the
+///   others.
+///
+/// Every other key, and anything with Control held, is AppKit's as before.
+#[cfg(any(test, target_os = "macos"))]
+pub fn mac_key(kind: WindowKind, chars: &str, command: bool, shift: bool, option: bool, control: bool) -> MacKey {
+    if !command || control {
+        return MacKey::Pass;
+    }
+    let app = kind == WindowKind::App;
+    let plain = !shift && !option;
+    match chars.to_ascii_lowercase().as_str() {
+        "w" if plain => MacKey::Close,
+        "x" if plain => MacKey::Edit(EditCommand::Cut),
+        "c" if plain => MacKey::Edit(EditCommand::Copy),
+        "v" if plain => MacKey::Edit(EditCommand::Paste),
+        "a" if plain => MacKey::Edit(EditCommand::SelectAll),
+        "z" if !option => MacKey::Edit(if shift { EditCommand::Redo } else { EditCommand::Undo }),
+        "m" if plain && app => MacKey::Miniaturise,
+        "q" if !shift => {
+            if app {
+                MacKey::Quit
+            } else {
+                MacKey::Nothing
+            }
+        }
+        "h" if !shift => match (app, option) {
+            (false, _) => MacKey::Nothing,
+            (true, false) => MacKey::Hide,
+            (true, true) => MacKey::HideOthers,
+        },
+        _ => MacKey::Pass,
+    }
+}
+
+/// [`mac_key`] for a key event as AppKit hands it over: by its characters without the modifiers
+/// (`ignoring`, `charactersIgnoringModifiers`) first, and, where the table has nothing for those,
+/// by the characters the key types with the modifiers held (`typed`, `characters`). A keyboard
+/// layout whose letters are not Latin types Latin ones while Command is held — a Russian layout's
+/// Command-Й is Command-Q — and AppKit matches a menu's key equivalents by those, so a tool page's
+/// Command-Q is nothing under such a layout as well, and not the Quit item of whichever menu is
+/// installed.
+#[cfg(any(test, target_os = "macos"))]
+pub fn mac_key_of(
+    kind: WindowKind,
+    ignoring: &str,
+    typed: &str,
+    command: bool,
+    shift: bool,
+    option: bool,
+    control: bool,
+) -> MacKey {
+    match mac_key(kind, ignoring, command, shift, option, control) {
+        MacKey::Pass => mac_key(kind, typed, command, shift, option, control),
+        key => key,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1458,16 +1803,296 @@ mod tests {
         assert!(!WindowKind::App.gives_front_back(false));
     }
 
+    /// The script WebView2's pages got from stage 1 until the shim was built from parts, as it
+    /// was: the Windows shim is held to it byte for byte, so building the Mac's beside it changes
+    /// nothing for a page on Windows.
+    const WINDOWS_SHIM_OF_STAGE_1: &str = r#"(() => {
+  "use strict";
+  if (window.top !== window || window.platform) return;
+  try {
+    Object.defineProperty(window, "close", { value: () => {}, writable: false, configurable: false });
+  } catch (err) {}
+  const ipc = window.ipc;
+  const channel = window.chrome && window.chrome.webview;
+  if (!ipc || !channel) return;
+  let handler = null;
+  const waiting = [];
+  const hand = (value) => {
+    try { handler(value); } catch (err) { setTimeout(() => { throw err; }); }
+  };
+  channel.addEventListener("message", (event) => {
+    if (handler) hand(event.data);
+    else if (waiting.length < 256) waiting.push(event.data);
+  });
+  const platform = Object.create(null);
+  Object.defineProperties(platform, {
+    post: {
+      value: (value) => {
+        ipc.postMessage(JSON.stringify(value === undefined ? null : value));
+      },
+    },
+    onmessage: {
+      get: () => handler,
+      set: (fn) => {
+        handler = typeof fn === "function" ? fn : null;
+        while (handler && waiting.length) hand(waiting.shift());
+      },
+    },
+  });
+  Object.freeze(platform);
+  Object.defineProperty(window, "platform", { value: platform });
+})();"#;
+
     #[test]
-    fn the_shim_is_one_script_that_names_the_two_calls() {
-        assert!(PLATFORM_SHIM.contains("post:"));
-        assert!(PLATFORM_SHIM.contains("onmessage:"));
-        assert!(PLATFORM_SHIM.contains("chrome.webview"));
-        assert!(PLATFORM_SHIM.contains("JSON.stringify"));
-        assert!(PLATFORM_SHIM.contains(&MAX_QUEUED_POSTS.to_string()), "the page's cap is the host's");
-        assert!(
-            PLATFORM_SHIM.contains(r#"defineProperty(window, "close", { value: () => {}"#),
-            "a page cannot take its own web view down"
+    fn the_windows_shim_is_the_one_stage_1_shipped() {
+        assert_eq!(platform_shim(Engine::WebView2), WINDOWS_SHIM_OF_STAGE_1);
+    }
+
+    #[test]
+    fn both_shims_name_the_two_calls_and_keep_the_hosts_cap() {
+        for engine in [Engine::WebView2, Engine::WebKit] {
+            let shim = platform_shim(engine);
+            assert!(shim.starts_with("(() => {") && shim.ends_with("})();"), "{engine:?}: one script");
+            assert!(shim.contains("post:") && shim.contains("onmessage:"), "{engine:?}");
+            assert!(shim.contains("ipc.postMessage(JSON.stringify("), "{engine:?}");
+            assert!(shim.contains(&format!("waiting.length < {MAX_QUEUED_POSTS}")), "{engine:?}: the page's cap is the host's");
+            assert!(
+                shim.contains(r#"defineProperty(window, "close", { value: () => {}"#),
+                "{engine:?}: a page cannot take its own web view down"
+            );
+            assert!(shim.contains("if (window.top !== window || window.platform) return;"), "{engine:?}: the top frame, once");
+        }
+    }
+
+    /// WebKit's shim takes the host's messages through a function the page cannot replace, and
+    /// nothing of WebView2's is in it; it puts the keyboard back through a function the host calls,
+    /// and its notes are what [`shim_note`] recognises.
+    #[test]
+    fn the_webkit_shim_delivers_through_a_fixed_function_and_puts_the_keyboard_back() {
+        let shim = platform_shim(Engine::WebKit);
+        assert!(!shim.contains("chrome.webview"));
+        assert!(shim.contains(r#"Object.defineProperty(window, "__platformDeliver", { value: (text) => take(JSON.parse(text)) });"#));
+        assert!(WEBKIT_DELIVER.contains("window.__platformDeliver(m)"), "the host calls what the shim defines");
+        assert!(shim.contains(r#"Object.defineProperty(window, "__platformRestoreFocus", { value: restore });"#));
+        assert!(WEBKIT_RESTORE_FOCUS.contains("window.__platformRestoreFocus()"));
+        assert!(shim.contains(r#"window.addEventListener("focus", () => { restore(); });"#), "the page's own focus event as well");
+        // The guard: armed by a restore, ended by the user's input or a move elsewhere, and a loss
+        // to nothing only.
+        assert!(shim.contains(r#"for (const type of ["keydown", "pointerdown", "click"])"#));
+        assert!(shim.contains("if (event.isTrusted) armed = false;"));
+        assert!(shim.contains("if (event.target !== last) armed = false;"), "a move to another element ends it");
+        assert!(shim.contains("event.relatedTarget !== null) return;"), "a move to an element is never undone");
+        assert!(!shim.contains("setInterval") && !shim.contains("requestAnimationFrame"), "no timer decides");
+        // The note's prefix, as the script writes it, is the host's.
+        assert_eq!(SHIM_NOTE, "\u{1}platform: ");
+        assert!(shim.contains(r#"ipc.postMessage("\u0001platform: " + text)"#));
+        // The shared parts are the same text in both.
+        let windows = platform_shim(Engine::WebView2);
+        for part in [SHIM_HEAD, SHIM_HANDLER, SHIM_TAIL] {
+            assert!(shim.contains(part) && windows.contains(part));
+        }
+    }
+
+    /// No message of the page's own is a note: `platform.post` sends `JSON.stringify`'s text, and
+    /// that never begins with a control character.
+    #[test]
+    fn only_the_shims_notes_are_notes() {
+        assert_eq!(shim_note("\u{1}platform: put back"), Some("put back"));
+        for message in ["null", "\"text\"", "{\"a\":1}", "[1]", "12", "-1", "true", "false", "\"\\u0001platform: x\""] {
+            assert_eq!(shim_note(message), None, "{message}");
+        }
+        assert_eq!(shim_note("platform: x"), None);
+    }
+
+    #[test]
+    fn webkit_serves_the_scheme_itself_and_the_origin_is_the_pages_host() {
+        let scheme = scheme_for("com.tool.html-probe");
+        let origin = webkit_origin_for(&scheme);
+        assert_eq!(origin, format!("{scheme}://localhost"));
+        let entry = entry_url(&scheme, "ui/index.html");
+        assert!(own_origin(&entry, &origin), "{entry} is the page's own");
+        assert_eq!(request_path(&entry, &scheme), Some("ui/index.html"));
+        assert!(!own_origin(&format!("{scheme}://localhostx/"), &origin));
+        assert!(!own_origin(&format!("{scheme}://localhost"), &origin), "no path at all");
+        assert!(!own_origin(&entry.replace(&scheme, "mod-other-1"), &origin), "another module's");
+        assert!(!own_origin("https://localhost/ui/index.html", &origin));
+        assert!(!own_origin("about:blank", &origin));
+    }
+
+    /// The rule list blocks everything first and lets two things past it afterwards; every scheme a
+    /// page can have is one the second rule lets past, and `data:` is the third.
+    #[test]
+    fn the_rule_list_blocks_all_but_the_pages_schemes_and_data() {
+        let rules: Vec<&str> = RULE_LIST
+            .strip_prefix('[')
+            .and_then(|r| r.strip_suffix(']'))
+            .expect("a JSON array")
+            .split("},{")
+            .collect();
+        assert_eq!(rules.len(), 3, "{rules:?}");
+        assert!(rules[0].contains(r#""url-filter":".*""#) && rules[0].contains(r#""type":"block""#));
+        assert!(rules[1].contains(r#""url-filter":"^mod-[a-z0-9-]+://localhost/""#));
+        assert!(rules[2].contains(r#""url-filter":"^data:""#));
+        for later in &rules[1..] {
+            assert!(later.contains(r#""type":"ignore-previous-rules""#), "{later}");
+        }
+        assert!(!RULE_LIST.contains(char::is_whitespace), "one line, as WebKit is handed it");
+        // Every module's scheme is what the second rule lets past: `mod-`, then only lower-case
+        // letters, digits and hyphens.
+        for id in ["com.tool.html-probe", "Com.UPPER.case_9", "...", &"x".repeat(128), "com.platform.page-check"] {
+            let s = scheme_for(id);
+            let rest = s.strip_prefix("mod-").expect("mod-");
+            assert!(!rest.is_empty() && rest.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'), "{s}");
+            assert!(entry_url(&s, "ui/a.js").starts_with(&format!("{s}://localhost/")));
+        }
+        assert_eq!(RULE_LIST_ID, "pages");
+        assert!(!RULE_FOLDER.contains(['/', '\\']));
+    }
+
+    /// Moved here from webview_win.rs, beside the Mac's (the next test).
+    /// A page leaving the front gives it to the window it came from — through a page it was shown
+    /// in place of, hidden since, to the window that one came from; never through a page still
+    /// shown, one that came from no window, or this page itself; and pages that came from each
+    /// other end. With no window made: the pages are a table.
+    #[test]
+    fn a_page_shown_in_place_of_another_gives_the_front_to_where_that_one_came_from() {
+        const THIS: isize = 1;
+        const PLUGIN: isize = 100;
+        // window -> (shown, came from)
+        let goes_to = |back_to: isize, pages: &[(isize, bool, isize)]| {
+            front_goes_to(THIS, back_to, pages.len(), |w| pages.iter().find(|p| p.0 == w).map(|p| (p.1, p.2)))
+        };
+        assert_eq!(goes_to(PLUGIN, &[(THIS, true, PLUGIN)]), PLUGIN, "not a page: the window itself");
+        assert_eq!(goes_to(2, &[(THIS, true, 2), (2, false, PLUGIN)]), PLUGIN, "a page hidden since: where it came from");
+        assert_eq!(goes_to(2, &[(THIS, true, 2), (2, true, PLUGIN)]), 2, "a page still shown: that page");
+        assert_eq!(
+            goes_to(3, &[(THIS, true, 3), (3, false, 2), (2, false, PLUGIN)]),
+            PLUGIN,
+            "two in place of each other, both hidden since"
         );
+        assert_eq!(goes_to(2, &[(THIS, true, 2), (2, false, 0)]), 2, "a page that came from no window: left to the system");
+        assert_eq!(goes_to(2, &[(THIS, true, 2), (2, false, THIS)]), 2, "never this page itself");
+        // A loop ends, on one of its pages — hidden, so the system decides.
+        assert!(matches!(goes_to(2, &[(THIS, true, 2), (2, false, 3), (3, false, 2)]), 2 | 3));
+        assert_eq!(goes_to(0, &[(THIS, true, 0)]), 0, "none: none");
+    }
+
+    /// The Mac's: the same chain, with each window's application — and a page that came from an
+    /// application whose window could not be named sends the front to that application, not to
+    /// itself, hidden. With no window made: the pages are a table.
+    #[test]
+    fn a_macs_page_gives_the_front_to_the_application_a_page_came_from_when_its_window_had_no_name() {
+        const THIS: isize = 1 << 40;
+        const OURS: i32 = 10;
+        const DAW: i32 = 20;
+        const PLUGIN: (isize, i32) = (100, DAW);
+        // window -> (shown, came from)
+        type Page = (isize, bool, Option<(isize, i32)>);
+        let goes_to = |came: (isize, i32), pages: &[Page]| {
+            front_goes_to_app(THIS, came, pages.len(), |w| pages.iter().find(|p| p.0 == w).map(|p| (p.1, p.2)))
+        };
+        let a = THIS + 1;
+        let b = THIS + 2;
+        assert_eq!(goes_to(PLUGIN, &[(THIS, true, Some(PLUGIN))]), PLUGIN, "not a page: the window itself");
+        assert_eq!(
+            goes_to((a, OURS), &[(THIS, true, Some((a, OURS))), (a, false, Some(PLUGIN))]),
+            PLUGIN,
+            "through a page hidden since, with its application"
+        );
+        assert_eq!(
+            goes_to((a, OURS), &[(THIS, true, Some((a, OURS))), (a, false, Some((0, DAW)))]),
+            (0, DAW),
+            "a page that came from the DAW whose window had no name: the DAW, never the hidden page"
+        );
+        assert_eq!(
+            goes_to(
+                (b, OURS),
+                &[(THIS, true, Some((b, OURS))), (b, false, Some((a, OURS))), (a, false, Some((0, DAW)))]
+            ),
+            (0, DAW),
+            "two pages, the first from the DAW unnamed"
+        );
+        let this_from_a = (THIS, true, Some((a, OURS)));
+        assert_eq!(goes_to((a, OURS), &[this_from_a, (a, true, Some(PLUGIN))]), (a, OURS), "a page still shown: that page");
+        assert_eq!(goes_to((a, OURS), &[this_from_a, (a, false, None)]), (a, OURS), "a page that never took the front");
+        assert_eq!(goes_to((a, OURS), &[this_from_a, (a, false, Some((THIS, OURS)))]), (a, OURS), "never this page");
+        assert_eq!(goes_to((0, DAW), &[(THIS, true, Some((0, DAW)))]), (0, DAW), "the application alone: itself");
+        // A loop ends, on one of its pages.
+        let looped = goes_to((a, OURS), &[this_from_a, (a, false, Some((b, OURS))), (b, false, Some((a, OURS)))]);
+        assert!(looped == (a, OURS) || looped == (b, OURS), "{looped:?}");
+        // The Windows chain, read with no application, is the same chain.
+        let windows = [(THIS, true, 2), (2, false, 3), (3, false, PLUGIN.0)];
+        let as_mac: Vec<Page> = windows.iter().map(|&(w, s, f)| (w, s, (f != 0).then_some((f, DAW)))).collect();
+        assert_eq!(
+            goes_to((2, DAW), &as_mac).0,
+            front_goes_to(THIS, 2, windows.len(), |w| windows.iter().find(|p| p.0 == w).map(|p| (p.1, p.2)))
+        );
+    }
+
+    /// The Mac's page keys: the same for both kinds where a page is a page, the application's own
+    /// in an app page, and nothing in a tool page; Control, or no Command, is never the table's.
+    #[test]
+    fn a_macs_page_keys_are_the_hosts_and_a_tool_page_quits_and_hides_nothing() {
+        use EditCommand::*;
+        let (tool, app) = (WindowKind::Tool, WindowKind::App);
+        let cmd = |kind, chars| mac_key(kind, chars, true, false, false, false);
+        for kind in [tool, app] {
+            assert_eq!(cmd(kind, "w"), MacKey::Close, "{kind:?}");
+            assert_eq!(cmd(kind, "x"), MacKey::Edit(Cut));
+            assert_eq!(cmd(kind, "c"), MacKey::Edit(Copy));
+            assert_eq!(cmd(kind, "v"), MacKey::Edit(Paste));
+            assert_eq!(cmd(kind, "a"), MacKey::Edit(SelectAll));
+            assert_eq!(cmd(kind, "z"), MacKey::Edit(Undo));
+            // Shift-Command-Z: AppKit gives the capital without the other modifiers.
+            assert_eq!(mac_key(kind, "Z", true, true, false, false), MacKey::Edit(Redo));
+            // Not the table's: AppKit's as before.
+            assert_eq!(cmd(kind, "f"), MacKey::Pass);
+            assert_eq!(cmd(kind, ""), MacKey::Pass);
+            assert_eq!(cmd(kind, "ww"), MacKey::Pass);
+            assert_eq!(mac_key(kind, "c", false, false, false, false), MacKey::Pass, "no Command");
+            assert_eq!(mac_key(kind, "c", true, false, false, true), MacKey::Pass, "Control held");
+            assert_eq!(mac_key(kind, "c", true, false, true, false), MacKey::Pass, "Option-Command-C");
+            assert_eq!(mac_key(kind, "Q", true, true, false, false), MacKey::Pass, "Shift-Command-Q, the system's log out");
+        }
+        // A tool page: nothing for Quit and Hide, and Command-M is not its.
+        assert_eq!(cmd(tool, "q"), MacKey::Nothing);
+        assert_eq!(mac_key(tool, "q", true, false, true, false), MacKey::Nothing, "Option-Command-Q");
+        assert_eq!(cmd(tool, "h"), MacKey::Nothing);
+        assert_eq!(mac_key(tool, "h", true, false, true, false), MacKey::Nothing, "Option-Command-H");
+        assert_eq!(cmd(tool, "m"), MacKey::Pass);
+        // An app page: as any application.
+        assert_eq!(cmd(app, "q"), MacKey::Quit);
+        assert_eq!(cmd(app, "h"), MacKey::Hide);
+        assert_eq!(mac_key(app, "h", true, false, true, false), MacKey::HideOthers);
+        assert_eq!(cmd(app, "m"), MacKey::Miniaturise);
+        let selectors: Vec<&str> =
+            [Cut, Copy, Paste, SelectAll, Undo, Redo].iter().map(|c| c.selector().to_str().unwrap()).collect();
+        assert_eq!(selectors, ["cut:", "copy:", "paste:", "selectAll:", "undo:", "redo:"]);
+    }
+
+    /// Under a layout whose letters are not Latin, the characters typed with Command held decide,
+    /// as they do for AppKit's menus: a tool page's Command-Q is nothing there too. Where the
+    /// characters without the modifiers are the table's, they decide, as before.
+    #[test]
+    fn a_macs_page_keys_hold_under_a_layout_whose_letters_are_not_latin() {
+        let (tool, app) = (WindowKind::Tool, WindowKind::App);
+        // A Russian layout: Command-Й types Command-Q, Command-Р Command-H, Command-Ц Command-W.
+        assert_eq!(mac_key_of(tool, "й", "q", true, false, false, false), MacKey::Nothing);
+        assert_eq!(mac_key_of(tool, "р", "h", true, false, false, false), MacKey::Nothing);
+        assert_eq!(mac_key_of(tool, "р", "h", true, false, true, false), MacKey::Nothing, "Option-Command-H");
+        assert_eq!(mac_key_of(app, "й", "q", true, false, false, false), MacKey::Quit);
+        assert_eq!(mac_key_of(app, "р", "h", true, false, false, false), MacKey::Hide);
+        for kind in [tool, app] {
+            assert_eq!(mac_key_of(kind, "ц", "w", true, false, false, false), MacKey::Close);
+            assert_eq!(mac_key_of(kind, "с", "c", true, false, false, false), MacKey::Edit(EditCommand::Copy));
+            assert_eq!(mac_key_of(kind, "Я", "Z", true, true, false, false), MacKey::Edit(EditCommand::Redo));
+            // A Latin layout: what it was.
+            assert_eq!(mac_key_of(kind, "c", "c", true, false, false, false), MacKey::Edit(EditCommand::Copy));
+            // Option-Command-C types a "ç": not the table's either way.
+            assert_eq!(mac_key_of(kind, "c", "ç", true, false, true, false), MacKey::Pass);
+            assert_eq!(mac_key_of(kind, "й", "q", false, false, false, false), MacKey::Pass, "no Command");
+            assert_eq!(mac_key_of(kind, "й", "q", true, false, false, true), MacKey::Pass, "Control held");
+            assert_eq!(mac_key_of(kind, "й", "й", true, false, false, false), MacKey::Pass, "no Latin letter at all");
+        }
     }
 }

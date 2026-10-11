@@ -7032,7 +7032,8 @@ maintainer's German test instructions are a text of their own, not in the reposi
       reason instead of an error of WebView2's. Never measured; the probe's log answers it for its
       own set of modules only. Later hardening: the main thread enters the single-threaded one at
       start, so the bad case cannot happen.
-- [ ] **The macOS tests, M1–M9** — once the Mac's page window is built (wry's fix, #1866, merged
+- [ ] **The macOS tests, M1–M9** — once `host.gui.webview` shows its pages in the Mac's page
+      window, built since 2026-10-11 (stage 4, below; wry's fix, #1866, merged
       2026-09-27 and in no release yet, is in the Mac build from wry's repository since
       2026-10-11; 0.57.0 activates the application on every web view it creates), on the Air
       (12.7.6) and the mini (14.5), with REAPER and a small page. The answers go here, not into the
@@ -7150,27 +7151,69 @@ maintainer's German test instructions are a text of their own, not in the reposi
       NO`; the page placed for the display scaling of the monitor it goes to, not only of the one
       `avoid` is on), the answers of W1–W9 in the
       reference, and pages' settings in the Application settings tab.
-- [ ] **The Mac's app page** (`window = "app"`, 2026-10-11), with stage 4 below: what it is to be
-      is in docs/api/gui.md and `webview::WindowKind::recipe` — an ordinary `NSWindow` (titled,
+- [ ] **The Mac's app page** (`window = "app"`, 2026-10-11), with stage 4 below: what it is to be is
+      in docs/api/gui.md and `webview::WindowKind::recipe` — an ordinary `NSWindow` (titled,
       closable, miniaturisable, resizable; `hidesOnDeactivate` off, as an `NSWindow`'s is; in the
       window cycle) that activates the application, and while one is shown the application claims
       the Dock through `dock::want` (`dock.rs`, out of `gui.rs` so the backend can make the claim;
       one owner for every app page, let go when the last one is hidden, closed, disabled or
       reloaded) under the setting `dock_while_open`, whose label then names pages beside the module
-      manager. `setActivationPolicy` may switch between regular and accessory at any time since
-      macOS 10.9 (Apple's reference); Command-Tab and the Dock list applications, never windows, so
-      the Dock icon is the only way into Command-Tab. Only a Mac can answer, once it is built: (M10)
-      whether the application, made regular while an app page is shown, is in Command-Tab at once,
-      whether its Dock icon goes when it is made accessory again, and whether its menu bar answers
-      (the reported side effect the setting exists for); (M11) whether VoiceOver follows the
-      keyboard into the app page as into any application's window, and where Command-Tab back to the
-      DAW lands; (M12) whether REAPER's or Logic's floating plug-in windows hide while an app page
-      has this application active (M6's question, for this window); (M13) whether VoiceOver's window
-      chooser lists it, and under which name.
-- [ ] **Stage 4 — the Mac**, on the way M1 decides: a panel the host creates itself (objc2-app-kit,
-      in `backend/macos`, so check-macos sees it) holding wry's WKWebView, with the panel settings
-      of the recommendation (floating level, `hidesOnDeactivate = NO`, all Spaces and beside a
-      full-screen DAW, out of the window cycle) and no Dock claim.
+      manager. Built with the page window (2026-10-11, `backend/macos/page.rs`): its own class, the
+      claim made before the first app page is shown and let go when the last is hidden or taken
+      down, Command-M, Command-H and Option-Command-H as any application's, and Command-Q quitting
+      by the host's way out (`instance::request_quit`, ended at the window's next tick).
+      `setActivationPolicy` may switch between regular and accessory at any time since macOS 10.9
+      (Apple's reference); Command-Tab and the Dock list applications, never windows, so the Dock
+      icon is the only way into Command-Tab. Only a Mac can answer: (M10) whether the application,
+      made regular while an app page is shown, is in Command-Tab at once, whether its Dock icon goes
+      when it is made accessory again, and whether its menu bar answers (the reported side effect
+      the setting exists for); (M11) whether VoiceOver follows the keyboard into the app page as
+      into any application's window, and where Command-Tab back to the DAW lands; (M12) whether
+      REAPER's or Logic's floating plug-in windows hide while an app page has this application
+      active (M6's question, for this window); (M13) whether VoiceOver's window chooser lists it,
+      and under which name.
+- [ ] **Stage 4 — the Mac**: the page window is built (2026-10-11, `backend/macos/page.rs`, the
+      interface of `webview_win.rs`), and `host.gui.webview` does not use it yet — `Where::here`
+      still answers "not supported on this platform yet" there; next, `webview_lua.rs` takes it as
+      it takes `webview_win.rs`. A tool page is the VPS Avenger control tool's activating panel
+      (the maintainer's decision of 2026-10-11; the non-activating one is to be an experimental
+      page option, `activates = false`, still to come) whose level follows the keyboard: floating
+      while it is the key window, normal otherwise, also while a show waits for the keyboard. An
+      app page is an ordinary window that claims the Dock while shown. Command-W, the Edit keys and,
+      in a tool page, Command-Q and Command-H doing nothing are the host's (`webview::mac_key_of`,
+      under a keyboard layout whose letters are not Latin as well); the keyboard is put back where
+      it was in the page when its window takes the keyboard, with a guard against it going to
+      nothing (`webview::platform_shim`, WebKit's). A show's request for the front that outlives
+      its page gives the front back if it makes the application the active one with no window of
+      its own on screen. Every load but the page's own files is to be blocked by a content rule list
+      kept in `WebKitRules` beside the application, and `page-check` checks on its own that WebKit
+      applies one to the loads of a page the application serves, since the host's policy blocks
+      what it covers first; the data store keeps nothing. CI's `page-check` builds pages with it on
+      four runners and fails a leg on a broken promise (docs/building-on-macos.md); what it cannot
+      show:
+      - **MW14:** where VoiceOver lands when a page takes the keyboard again — a show, and after a
+        round trip to the plug-in. The log says what the page did (`the keyboard in the page is …`,
+        `its platform object says: the keyboard went to nothing …`) and which classes AppKit made
+        the first responder (`AppKit's first responder is now a …`); the guard only puts the
+        keyboard back from nothing, never from another element.
+      - **MW15:** one Return or Space on a button gives one message (`page-check` counts Return
+        without VoiceOver), and no system beep for a key the page leaves unhandled.
+      - **MW16:** with VoiceOver: Escape does nothing, Command-W hides, Command-C and Command-V in a
+        field are spoken; a captured overlay key does not fire while a page has the keyboard and a
+        hotkey does; Command-Q and Command-H do nothing in a tool page under the real wxWidgets menu
+        (`page-check` emulates it); and whether a live region updated while the page is not key is
+        spoken.
+      - **MW9:** on 12 and 13, where WebKit has no switch against throttling a page whose window
+        is not shown: how long a page hidden for minutes takes to answer its first message.
+      - The show's answer on a real Mac (`got the keyboard, … ms after the show asked for the
+        front`, `the front went to … instead`, `a key went to …`), a tool page placed over the
+        rectangle to avoid hidden again when it did not get the keyboard, and the front given back
+        when a page left before its show had an answer (`this application became the active one …
+        after the page had left`).
+      - **Below 14:** every CI runner is macOS 14 or later, so on 12 and 13 nothing of the page
+        window has run yet: the rule list, the host's policy over the application's scheme,
+        `callAsyncJavaScript`, the keys. `page-check` from the download on the 12.7.6 Mac, before
+        a module shows a page there (docs/building-on-macos.md).
 - [ ] **wry 0.57.1 on both platforms, the day it is on crates.io** (its release, #1852, was still
       open on 2026-10-11). Until then the Mac builds wry from its repository at 66cdfa1, the merge
       of #1866, under the name `wry-mac` in both macOS tables (crates/host and crates/macos-check),

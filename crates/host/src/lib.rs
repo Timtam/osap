@@ -5726,8 +5726,9 @@ pub fn ocr_bench(args: &[String]) -> i32 {
 }
 
 /// `automation-platform page-check`: how this application takes the front and gives it back on a
-/// Mac, measured with windows of its own (`backend/macos/page_check.rs`) — no module, no speech,
-/// and the log is not opened. Returns the exit code: 0 when it ran to the end, 1 when it could not
+/// Mac, measured with windows of its own, and the Mac's page window built and checked
+/// (`backend/macos/page_check.rs`) — no module, no speech, and the log is not opened. Returns the
+/// exit code: 0 when it ran to the end and no check failed, 3 when one failed, 1 when it could not
 /// run, 2 for a wrong argument or on another platform, where it only says that it runs on macOS.
 pub fn page_check(args: &[String]) -> i32 {
     #[cfg(target_os = "macos")]
@@ -5737,7 +5738,10 @@ pub fn page_check(args: &[String]) -> i32 {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = args;
-        println!("page-check measures how this application takes and gives the front on a Mac; it runs on macOS only.");
+        println!(
+            "page-check measures how this application takes and gives the front on a Mac and checks its page window; it \
+             runs on macOS only."
+        );
         2
     }
 }

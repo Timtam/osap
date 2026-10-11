@@ -310,9 +310,10 @@ pub fn take_show_request() -> bool {
 
 /// Set when the application's quit key was pressed. The press is answered inside the host's pump,
 /// which the window's tick runs and which cannot end the window loop itself; the tick reads this
-/// right after the pump and ends the loop the way the Quit items do. Set again by a Quit that
-/// ended a modal dialog instead, since wx cannot end the window loop from inside one: the next
-/// tick in the loop outside it takes it (`quit` in gui.rs).
+/// right after the pump and ends the loop the way the Quit items do. Set too by a window that is
+/// not wxWidgets' — a Mac's app page answering Command-Q (`backend/macos/page.rs`) — and again
+/// by a Quit that ended a modal dialog instead, since wx cannot end the window loop from inside
+/// one: the next tick in the loop outside it takes it (`quit` in gui.rs).
 static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Asks the window to quit, as its Quit items do, once the pump or the dialog that asked has

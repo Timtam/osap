@@ -1,0 +1,20 @@
+<!doctype html>
+<!-- page-check's page (crates/host/src/backend/macos/page_check.rs): the Mac's page window built,
+     loaded and spoken to on every Mac runner CI has. Built into the executable, which writes it to
+     a folder of its own when it runs; nothing reads this folder at run time. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>page-check</title>
+<script>
+  // Must not run: the host's policy allows no inline script. If it runs, it says so.
+  window.platform && window.platform.post("inline ran");
+</script>
+<script src="page.js" defer></script>
+</head>
+<body>
+<h1>page-check</h1>
+<p><label>Field <input id="field" type="text" value="copied by page-check"></label></p>
+<p><button id="button" type="button">Button</button></p>
+</body>
+</html>

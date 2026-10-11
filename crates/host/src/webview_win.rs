@@ -26,7 +26,7 @@
 //! the taskbar is left as any program's window is (`WindowKind::gives_front_back`). A page that
 //! took the front from another page, hidden since — one page shown in place of another, the new
 //! one first so the front goes from page to page and never through the plug-in window — gives it
-//! to the window that other page came from ([`front_goes_to`]).
+//! to the window that other page came from (`webview::front_goes_to`).
 //!
 //! **The page.** wry's `build`, which puts WebView2 into a child window of the frame that fills
 //! it, and subclasses the frame for three things this needs: its size, its moves (Chromium places
@@ -130,7 +130,7 @@ thread_local! {
     /// Messages dropped because [`MAX_WAITING_EVENTS`] were waiting, since the last tick.
     static DROPPED: Cell<usize> = const { Cell::new(0) };
     /// Every built page's window and the window it came from (its `came_from`), for a page leaving
-    /// the front that came from another page ([`front_goes_to`]). In while the page is built.
+    /// the front that came from another page (`webview::front_goes_to`). In while the page is built.
     static CAME_FROM: RefCell<HashMap<isize, Rc<Cell<isize>>>> = RefCell::new(HashMap::new());
 }
 
@@ -722,7 +722,7 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
             }
             push(PageEvent::Message { page, build, text });
         })
-        .with_initialization_script(webview::PLATFORM_SHIM)
+        .with_initialization_script(webview::platform_shim(webview::Engine::WebView2))
         .with_navigation_handler(move |uri: String| {
             let own = webview::own_origin(&uri, &nav_origin);
             if !own {
@@ -821,7 +821,7 @@ fn conceal(frame: &Frame, kind: WindowKind) {
 /// process hand the front on while it has it; a window that is gone or hidden by now is not asked,
 /// and Windows decides — as it does for an app page that has not kept the front since it took it
 /// (`gives` false). `back_to` a page hidden since: the window that page came from
-/// ([`front_goes_to`]). Each case a line in the log.
+/// (`webview::front_goes_to`). Each case a line in the log.
 fn give_front_back(hwnd: isize, back_to: isize, gives: bool, title: &str) {
     // SAFETY: a plain query.
     if unsafe { GetForegroundWindow() } as isize != hwnd {
@@ -840,7 +840,7 @@ fn give_front_back(hwnd: isize, back_to: isize, gives: bool, title: &str) {
     let to = CAME_FROM
         .try_with(|pages| {
             let pages = pages.borrow();
-            front_goes_to(hwnd, back_to, pages.len(), |w| {
+            webview::front_goes_to(hwnd, back_to, pages.len(), |w| {
                 // SAFETY: a query on any handle.
                 pages.get(&w).map(|c| (unsafe { IsWindowVisible(w as HWND) } != 0, c.get()))
             })
@@ -865,25 +865,6 @@ fn give_front_back(hwnd: isize, back_to: isize, gives: bool, title: &str) {
             ),
         );
     }
-}
-
-/// Where a page leaving the front gives it ([`give_front_back`]): `back_to`, the window it took the
-/// front from — or, when that is a page of the application's hidden since (the one this page was
-/// shown in place of), the window that page came from, and so on: a module that shows one page in
-/// place of another, the new one first, so the front goes from page to page and never through the
-/// plug-in window, still lands in the plug-in window when the new one leaves. `page` answers for a
-/// window that is a page: whether it is shown, and the window it came from (0 until it took the
-/// front). Never `this` page, never a window none came from; at most `pages` steps, so pages that
-/// came from each other end.
-fn front_goes_to(this: isize, back_to: isize, pages: usize, page: impl Fn(isize) -> Option<(bool, isize)>) -> isize {
-    let mut to = back_to;
-    for _ in 0..pages {
-        match page(to) {
-            Some((false, from)) if from != 0 && from != this => to = from,
-            _ => break,
-        }
-    }
-    to
 }
 
 /// `(w, h)` at 96 dots per inch, at `dpi`.
@@ -1460,32 +1441,5 @@ mod tests {
         for style in [tool, app] {
             assert!(!style.intersects(FrameStyle::StayOnTop | FrameStyle::NoTaskbar | FrameStyle::FloatOnParent), "{style:?}");
         }
-    }
-
-    /// A page leaving the front gives it to the window it came from — through a page it was shown
-    /// in place of, hidden since, to the window that one came from; never through a page still
-    /// shown, one that came from no window, or this page itself; and pages that came from each
-    /// other end. With no window made: the pages are a table.
-    #[test]
-    fn a_page_shown_in_place_of_another_gives_the_front_to_where_that_one_came_from() {
-        const THIS: isize = 1;
-        const PLUGIN: isize = 100;
-        // window -> (shown, came from)
-        let goes_to = |back_to: isize, pages: &[(isize, bool, isize)]| {
-            front_goes_to(THIS, back_to, pages.len(), |w| pages.iter().find(|p| p.0 == w).map(|p| (p.1, p.2)))
-        };
-        assert_eq!(goes_to(PLUGIN, &[(THIS, true, PLUGIN)]), PLUGIN, "not a page: the window itself");
-        assert_eq!(goes_to(2, &[(THIS, true, 2), (2, false, PLUGIN)]), PLUGIN, "a page hidden since: where it came from");
-        assert_eq!(goes_to(2, &[(THIS, true, 2), (2, true, PLUGIN)]), 2, "a page still shown: that page");
-        assert_eq!(
-            goes_to(3, &[(THIS, true, 3), (3, false, 2), (2, false, PLUGIN)]),
-            PLUGIN,
-            "two in place of each other, both hidden since"
-        );
-        assert_eq!(goes_to(2, &[(THIS, true, 2), (2, false, 0)]), 2, "a page that came from no window: left to Windows");
-        assert_eq!(goes_to(2, &[(THIS, true, 2), (2, false, THIS)]), 2, "never this page itself");
-        // A loop ends, on one of its pages — hidden, so Windows decides.
-        assert!(matches!(goes_to(2, &[(THIS, true, 2), (2, false, 3), (3, false, 2)]), 2 | 3));
-        assert_eq!(goes_to(0, &[(THIS, true, 0)]), 0, "none: none");
     }
 }

@@ -446,10 +446,8 @@ pub(super) fn kind_of(number: u32) -> Option<OwnKind> {
     Some(if PAGES.with(|p| p.borrow().contains(&number)) { OwnKind::Page } else { OwnKind::Other })
 }
 
-/// Notes the window with the number `number` as a page's window (`page`), or as no longer one.
-// Allowed dead: the Mac's page window notes itself here once it is built (TODO.md, "Stage 4 — the
-// Mac"); until then every window of ours is `Other`.
-#[allow(dead_code)]
+/// Notes the window with the number `number` as a page's window (`page`), or as no longer one:
+/// `page.rs`, when a page's window is built and when it is taken down.
 pub(super) fn note_page(number: u32, page: bool) {
     PAGES.with(|p| {
         let mut p = p.borrow_mut();

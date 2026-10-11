@@ -131,14 +131,16 @@ pub(crate) fn restore_frontmost_after_gui_start() {
 /// there it was a polite request that another application in front could decline.
 ///
 /// A hand-over of the front still waiting for another application's activation is given up
-/// first (`front.rs`): this application takes the front itself. Nothing is asked before the window
-/// system has started (`own::app`).
+/// first (`front.rs`), and so is a page's request for the front whose page left before it was
+/// answered (`page.rs`): this application takes the front itself. Nothing is asked before the
+/// window system has started (`own::app`).
 pub(crate) fn activate_self() {
     let Some(app) = super::own::app() else {
         crate::logging::line("macos", "this application did not ask for the front: the window system has not started");
         return;
     };
     super::front::cancel("this application takes the front itself");
+    super::page::superseded();
     #[allow(deprecated)]
     app.activateIgnoringOtherApps(true);
 }

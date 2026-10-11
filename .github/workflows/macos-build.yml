@@ -1258,18 +1258,32 @@ jobs:
   # and over once more the way `host.window.focus` does, shows a panel that does not activate the
   # application, and switches the activation policy while a panel is shown, each with what AppKit
   # and the workspace answered and after how long. It runs the application's own code for it: what
-  # takes the front for the module manager, and what `host.window.focus` hands it over with.
+  # takes the front for the module manager, and what `host.window.focus` hands it over with. Then it
+  # builds pages with the Mac's page window (crates/host/src/backend/macos/page.rs) from a small page
+  # the executable carries (tools/page-check) and checks what the host promises of one: the rule
+  # list compiled, and on its own blocking a file of the page's that the policy lets through, no
+  # activation asked for by a build, the page's own script running and an inline
+  # one not, messages both ways and in order, its own file fetched and nothing outside, no
+  # navigation away, `window.close()` doing nothing, and — while it has the keyboard — the Edit
+  # keys, Return on a button, Command-Q and Command-H doing nothing in a tool page, Command-W hiding
+  # it.
   #
   # Why: whether `activateIgnoringOtherApps:` still takes the front on 14 and later is disputed,
-  # and which way of handing it back works decides how the application does it (TODO.md, MW5).
-  # Nobody here has a Mac; these runners are the only ones that answer between the tester's
-  # sessions. They have a window server and no VoiceOver, and creating windows needs no permission.
+  # and which way of handing it back works decides how the application does it (TODO.md, MW5); and
+  # the page window is built blind, so these runners are where WebKit first meets it. Nobody here has
+  # a Mac; these runners are the only ones that answer between the tester's sessions. They have a
+  # window server and no VoiceOver, and creating windows needs no permission.
   #
-  # Data, not a gate: the answers depend on the runner's desktop, so none of them fails the leg. A
-  # leg goes red only when the check did not reach its end — the executable died in it, or perl's
-  # two minutes ran out. Each leg's whole output is kept as an artifact, and its lines go to the
-  # run's summary page. For every executable, built or reused, as the newer-macos job runs: about 42
-  # seconds a leg at most, and the runners' desktops change under a reused one too.
+  # The front's answers are data, not a gate: they depend on the runner's desktop, so none of them
+  # fails the leg; nor do the times and the rest of the page window's data lines. The page window's
+  # `check` lines are a gate: one that says FAILED fails the leg (exit status 3), whatever the
+  # desktop — where the page does not get the keyboard on a runner, the keys are not checked and a
+  # line says so. A leg goes red as well when the check did not reach its end — the executable died
+  # in it, or perl's five minutes ran out — and when it reached its end with any status but 0, as
+  # one that crashes after its last line does. Each leg's whole output is kept as an artifact, and
+  # its lines go to the run's summary page. For every executable, built or reused, as the
+  # newer-macos job runs: about a minute a leg where everything answers, and the runners' desktops
+  # change under a reused one too.
   page-check:
     needs: build
     strategy:
@@ -1298,7 +1312,7 @@ jobs:
             exit 1
           fi
 
-      - name: Taking the front and giving it back, measured
+      - name: Taking the front and giving it back, measured, and the page window checked
         env:
           LEG: ${{ matrix.os }}
         run: |
@@ -1322,8 +1336,9 @@ jobs:
             *) echo "::warning::TextEdit did not come to the front on $LEG within 30 s (in front: ${front:-nothing}); the hand-backs go to whatever is" ;;
           esac
           status=0
-          # Bounded by perl's alarm, which outlives the exec: macOS has no `timeout`.
-          perl -e 'alarm shift; exec @ARGV' 120 \
+          # Bounded by perl's alarm, which outlives the exec: macOS has no `timeout`. Every wait of
+          # the check has five seconds of its own; five minutes covers all of them running out.
+          perl -e 'alarm shift; exec @ARGV' 300 \
             ./AutomationPlatform.app/Contents/MacOS/automation-platform page-check > "$out" 2>&1 || status=$?
           echo "CI: $runner" >> "$out"
           cat "$out"
@@ -1336,6 +1351,18 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           if ! grep -q '^PAGE CHECK: done' "$out"; then
             echo "::error::page-check did not reach its end on $LEG ($(ended "$status"))"
+            exit 1
+          fi
+          if [ "$status" = 3 ] || grep -q '^PAGE CHECK: check .*: FAILED' "$out"; then
+            grep '^PAGE CHECK: check .*: FAILED' "$out" | while IFS= read -r line; do
+              echo "::error::page-check on $LEG: ${line#PAGE CHECK: }"
+            done
+            exit 1
+          fi
+          # Its last line said, and then it died or ended otherwise: in what it takes down at the
+          # end, or as it exited.
+          if [ "$status" != 0 ]; then
+            echo "::error::page-check reached its end on $LEG and then $(ended "$status")"
             exit 1
           fi
 

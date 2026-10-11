@@ -1616,8 +1616,9 @@ pub fn run_gui(
             .append_item(MENU_QUIT, "&Quit	Ctrl+Q", "Quit Automation Platform")
             .build();
         frame.set_menu_bar(MenuBar::builder().append(file_menu, "&File").build());
-        // The one way out of the window loop: this window's Quit, the tray's Quit and the
-        // application's quit key (taken by the tick below) all end it here.
+        // The one way out of the window loop: this window's Quit, the tray's Quit, the
+        // application's quit key and a Mac's app page's Command-Q (both taken by the tick below)
+        // all end it here.
         //
         // Not from inside a modal dialog's loop: wx ends only the main loop, and only while it
         // is the loop running — `wxAppConsoleBase::ExitMainLoop` does nothing while a dialog's
@@ -1835,10 +1836,11 @@ pub fn run_gui(
                 }
                 let _reset = Reset(&in_tick);
                 pump();
-                // The quit key, pressed during that pump, or a Quit that ended a dialog: the host
-                // has logged the key and said its sentence, and the loop ends as the Quit items
-                // end it — or, inside a dialog, that dialog does first (`quit`). Nothing else of
-                // this tick is worth doing on the way out.
+                // The quit key, pressed during that pump (the host has logged it and said its
+                // sentence), a Mac's app page answering Command-Q (logged by
+                // backend/macos/page.rs), or a Quit that ended a dialog: the loop ends as the Quit
+                // items end it — or, inside a dialog, that dialog does first (`quit`). Nothing else
+                // of this tick is worth doing on the way out.
                 if crate::instance::take_quit_request() {
                     quit();
                     return;

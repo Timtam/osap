@@ -378,12 +378,14 @@ captures, for at most ten minutes, and keeps the output as
 `automation-platform-<version>-<commit>-ocr-bench-windows-paddle.txt`; a picture that must be read
 and that the recogniser reads wrong is a warning there.
 
-## Measuring how it takes and gives the front {#page-check}
+## Measuring how it takes and gives the front, and checking the page window {#page-check}
 
 `page-check` measures how the application takes the front and gives it back on the Mac it runs
-on, with the calls the application itself makes (`crates/host/src/backend/macos/page_check.rs`).
-It needs another application in front when it starts — the one it hands the front back to — and
-for some seconds it shows windows of its own:
+on, with the calls the application itself makes, and then builds pages with the Mac's page window
+— the window `host.gui.webview` is to show its pages in there — and checks what the host promises
+of them (`crates/host/src/backend/macos/page_check.rs`). It needs another application in front
+when it starts — the one it hands the front back to — and for some seconds it shows windows of its
+own:
 
 ```bash
 open -a TextEdit
@@ -405,15 +407,47 @@ announced meanwhile, in order, and says whether the focus the hand-over waited f
 target's activation or given up because another application's came first. A hand-back is measured
 as a page's only while the panel has the keyboard, as a page hands the front back only then: after
 a show that left the panel without it, the line says what it measured instead, or that it could
-not measure anything. Exit status 0 when it ran to the end, 1 when it could not run, 2 for a wrong
-argument; on Windows it only says that it runs on macOS.
+not measure anything. Exit status 1 when it could not run, 2 for a wrong argument (the two others
+are below); on Windows it only says that it runs on macOS.
+
+Then the page window (`crates/host/src/backend/macos/page.rs`), from a small page the executable
+carries (`tools/page-check`), written to a folder of its own in the temporary folder for the run.
+Each of these is a line `check …: ok` or `check …: FAILED` with what was seen:
+
+- the pages' rule list compiles — the content rule list that is to block every load but a page's
+  own files, kept in the folder `WebKitRules` beside the application;
+- a tool page is built, without the build asking for the front — counted in `NSApplication`
+  itself: for the rest of the run, its two activation calls go through a counter first — and its
+  document loads;
+- the page's own script runs and an inline one does not (the host's policy);
+- a message makes the round trip, and twenty come back as twenty, in order;
+- the page fetches its own file, and a fetch of `https://example.com` is blocked;
+- a navigation to `https://example.com` is refused, and `window.close()` does nothing;
+- shown with the keyboard, under a main menu with what wxWidgets' Apple menu has (Hide, Hide
+  Others, Quit) whose items only count, with keys made in-process and sent through the application
+  as the window server's would be: Command-A and Command-C copy its field's text, Command-V pastes,
+  Return on its button gives one message, Command-Q, Command-H and Option-Command-H do nothing, and
+  Command-W hides the page. Where the page does not get the keyboard on a Mac, the keys are not
+  checked, and a line says so. These keys set the pasteboard;
+- last, the rule list on its own, since the host's policy blocks the fetch of `https://example.com`
+  above before any rule list is asked: a page built with the pages' rule list and one rule more,
+  which blocks a file of the page's own that the policy lets it fetch, does not get that file, and
+  gets its other one.
+
+The rest is data: WebKit's version, the build's and the load's times, the round trip with the page
+off screen and on it, what the page says of itself (`isSecureContext`, `navigator.clipboard`,
+`RTCPeerConnection`), the classes AppKit made the first responder while it was shown, an
+application page's Dock claim, Command-M and Command-Q, and whether WebKit's folders under
+`~/Library` exist before and after. The last line says how many checks failed. Exit status 0 when
+it ran to the end and no check failed, 3 when it ran to the end and a check failed.
 
 **In CI**, the `page-check` job of `.github/workflows/macos-build.yml` runs it from the downloaded
 zip on all four Mac runners — `macos-14`, `macos-15`, `macos-15-intel` and `macos-26` — after
-starting TextEdit, bounded to two minutes. Its lines go to the run's summary page, and each leg's
-whole output is kept as the artifact `page-check-<runner>.txt`. What it measures depends on the
-runner's desktop, so its answers are data and never fail the leg; a leg fails only when the check
-did not reach its end.
+starting TextEdit, bounded to five minutes. Its lines go to the run's summary page, and each leg's
+whole output is kept as the artifact `page-check-<runner>.txt`. What it measures of the front
+depends on the runner's desktop, so those answers are data and never fail the leg; a `check` line
+that says `FAILED` fails it, and so does a check that did not reach its end or ended with any status
+but 0 after its last line.
 
 ## Checking macOS code from a Windows machine
 

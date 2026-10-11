@@ -184,7 +184,10 @@ wry-mac = { package = "wry", git = "https://github.com/tauri-apps/wry", rev = "6
 version = "0.3"
 features = ["NSString", "NSArray", "NSValue", "NSGeometry", "NSDictionary", "NSError", "NSData", "NSRunLoop", "NSThread", "NSObjCRuntime", "NSEnumerator", "NSURL", "NSProcessInfo", "NSNotification", "NSOperation", "NSAppleScript", "NSAppleEventDescriptor", "objc2-core-services", "NSDate", "NSRange", "block2",
     # The user's preferred languages, for the OCR language a read without `lang` gets (ocr/lang.rs).
-    "NSLocale"]
+    "NSLocale",
+    # WebKit's version for the log, and this application's identifier for `page-check`'s look at
+    # the folders WebKit makes under ~/Library (backend/macos/page.rs, page_check.rs).
+    "NSBundle"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
 version = "0.3"
@@ -192,7 +195,11 @@ features = ["NSWorkspace", "NSRunningApplication", "NSScreen", "NSApplication", 
     # The panel `page-check` shows as a page's will be (backend/macos/page_check.rs).
     "NSPanel",
     # The views of the Mac's page window (stage 4, TODO.md); a WKWebView is one.
-    "NSView"]
+    "NSView",
+    # What `page-check` sends a page and reads back (backend/macos/page_check.rs): key events made
+    # in-process (their constructor takes a graphics context), a menu with the items wxWidgets'
+    # Apple menu has, and the pasteboard a copy and a paste go through.
+    "NSGraphicsContext", "NSMenu", "NSMenuItem", "NSPasteboard"]
 
 # What the Mac's page window asks of WebKit beyond wry (stage 4, TODO.md): the content rule list
 # that refuses every load outside the module's scheme, compiled into a store in the portable

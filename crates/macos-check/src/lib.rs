@@ -81,9 +81,9 @@ pub mod profile;
 
 /// `host.gui.webview`'s rules: which answer `show` gives — on a Mac, for now, "not supported on
 /// this platform yet" — which file a page's request is served and with which headers, where its
-/// window goes. Pure, with no window in it, so this checks that it is true for macOS as well, and
-/// `--tests` builds its tests here. The window itself (webview_win.rs) is Windows-only, and wry,
-/// which it is built on, is a Windows-only dependency of `host`: nothing of it reaches this build.
+/// window goes, what a key does in a Mac's page. Pure, with no window in it, so this checks that it
+/// is true for macOS as well, and `--tests` builds its tests here. Windows' window (webview_win.rs)
+/// is not borrowed; the Mac's (backend/macos/page.rs) is compiled here with the backend, wry with it.
 #[path = "../../host/src/webview.rs"]
 pub mod webview;
 
@@ -113,7 +113,8 @@ pub fn webview_calls() {
     let _: fn(&Path, &str, &str, &str) -> webview::Served = webview::serve;
     let _: fn(&str, &str) -> bool = webview::own_origin;
     let _ = |v: Vec<(String, String)>| -> Vec<String> { webview::webview2_overrides(v) };
-    let _ = (webview::PLATFORM_SHIM, webview::CSP, webview::DATA_FOLDER, webview::DEFAULT_SIZE);
+    let _: fn(webview::Engine) -> String = webview::platform_shim;
+    let _ = (webview::CSP, webview::DATA_FOLDER, webview::DEFAULT_SIZE);
     let _ = (webview::MAX_MESSAGE_BYTES, webview::MAX_QUEUED_POSTS);
     let _ = webview::PageEvent::Loaded { page: 0, build: 0 };
     let _ = webview::PageEvent::LoadFailed { page: 0, build: 0, why: String::new() };
@@ -136,6 +137,33 @@ pub fn webview_calls() {
     let _: fn(webview::WindowKind, bool) -> bool = webview::WindowKind::gives_front_back;
     let _ = (webview::WindowKind::NAMES, webview::WindowKind::default());
     let _ = |r: webview::Recipe| (r.listed, r.minimise, r.maximise, r.panel);
+}
+
+/// Names the Mac's page window (`backend/macos/page.rs`) as `webview_lua.rs` is to call it — the
+/// interface `webview_win.rs` has on Windows, which `webview_lua.rs` calls today — for the reason
+/// `webview_calls` exists: a signature that drifts from it fails here, from Windows, before the two
+/// are joined (stage 4, TODO.md). `page-check` builds pages with it meanwhile.
+#[allow(clippy::type_complexity)]
+pub fn page_calls() {
+    use backend::page::{self, BuildSpec, EnvNow, Native};
+    let _: fn() -> EnvNow = page::environment;
+    let _: fn() = page::drop_unclaimed_failure;
+    let _: fn() -> Option<String> = page::runtime_version;
+    let _: fn() -> Vec<webview::PageEvent> = page::take_events;
+    let _: fn(&BuildSpec, &objc2_web_kit::WKContentRuleList) -> Result<Native, String> = page::build;
+    let _ = |s: BuildSpec| (s.page, s.build, s.kind, s.title, s.scheme, s.root, s.entry_url);
+    let _ = |e: EnvNow| matches!(e, EnvNow::Ready(_, false) | EnvNow::Waiting | EnvNow::Failed(_));
+    let _: fn(&Native, Option<webview::Rect>) -> Option<webview::Placement> = Native::plan;
+    let _: fn(&Native, Option<webview::Rect>, Option<webview::Placement>) = Native::put;
+    let _: fn(&Native, bool) -> Result<(), webview::Refusal> = Native::show;
+    let _: fn(&Native) -> bool = Native::focus;
+    let _: fn(&Native) = Native::hide;
+    let _: fn(&Native) = Native::after_hidden;
+    let _: fn(&Native) -> bool = Native::is_shown;
+    let _: fn(&Native) -> isize = Native::hwnd;
+    let _: fn(&Native) -> bool = Native::on_top_at_centre;
+    let _: fn(&Native, &str) -> Result<(), String> = Native::post_json;
+    let _: fn(&Native) -> Option<String> = Native::memory;
 }
 
 /// Names what `lib.rs` calls in `system_events.rs`, and the speech path's own hook, for the

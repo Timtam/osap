@@ -300,6 +300,7 @@ fn on_app_activated(notification: &NSNotification) {
     // and the log's read of where the keyboard went after it, with no window read to wait for it.
     if !STARTED.load(Ordering::SeqCst) {
         super::front::activated(app.processIdentifier());
+        super::page::activated(app.processIdentifier());
         super::front::report_chain();
         return;
     }
@@ -384,6 +385,9 @@ fn activated(app: &NSRunningApplication, announce: bool) {
     // application lets it be raised. Two calls into the application, and only when a focus waits
     // for it; the read of where the keyboard went after them is for the log, and comes last.
     super::front::activated(pid);
+    // A page's show still waiting for the front has its answer when another application's
+    // activation comes first (`page.rs`). One borrow when none waits.
+    super::page::activated(pid);
 
     // The window, not the application, is what the host activates on. Resolving it here
     // rather than in the callback-to-pump handoff costs one accessibility read on a path

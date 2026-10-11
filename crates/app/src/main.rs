@@ -1,7 +1,8 @@
 //! Entry point. Without a subcommand, loads one or more module directories
 //! (default `examples/hello`) and runs them under the manager. The management
 //! subcommands discover/install/update modules from GitHub (registry); `ocr-bench`
-//! measures text recognition on a Mac, and `page-check` how it takes and gives the front there.
+//! measures text recognition on a Mac, and `page-check` how it takes and gives the front there and
+//! checks its page window.
 
 // No console window. This is a tray application with a wxWidgets GUI; the black box that
 // used to open behind it served nothing, since diagnostics go to a FILE and always have —
@@ -144,8 +145,8 @@ fn main() -> Result<()> {
         std::process::exit(host::ocr_bench(&args[1..]));
     }
     // Another measurement for the macOS port, run by CI on every Mac runner: how this application
-    // takes the front and gives it back, with windows of its own and no module. A terminal tool as
-    // well, so the default panic hook again, and the log is left alone.
+    // takes the front and gives it back, and its page window, with windows of its own and no module.
+    // A terminal tool as well, so the default panic hook again, and the log is left alone.
     if args.first().map(String::as_str) == Some("page-check") {
         drop(std::panic::take_hook());
         std::process::exit(host::page_check(&args[1..]));

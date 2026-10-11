@@ -142,8 +142,10 @@ impl Handed {
 /// to this application; the window raised and focused now, when its application is the active one
 /// already, since no activation will be announced; otherwise the activation asked for, and the
 /// window raised and focused when the workspace announces it ([`activated`]). A focus still waiting
-/// is given up only when something is asked: this request is the newer one. The notices it waits
-/// on are subscribed to first, also when no module watches windows.
+/// is given up only when something is asked: this request is the newer one, and for the same reason
+/// a page's request for the front whose page left before it was answered is forgotten
+/// (`page::superseded`). The notices it waits on are subscribed to first, also when no module
+/// watches windows.
 pub(super) fn hand_front_to(pid: i32, window: isize, leaving: Option<&NSWindow>, how: Handing) -> Handed {
     let name = super::ax::exe_for_pid(pid);
     let Some(target) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
@@ -176,6 +178,7 @@ pub(super) fn hand_front_to(pid: i32, window: isize, leaving: Option<&NSWindow>,
         }
         HandPlan::AtOnce => {
             cancel(&format!("the front is handed to {name} (pid {pid}) now"));
+            super::page::superseded();
             if let Some(w) = leaving {
                 w.orderOut(None);
             }
@@ -186,6 +189,7 @@ pub(super) fn hand_front_to(pid: i32, window: isize, leaving: Option<&NSWindow>,
         }
         HandPlan::Ask(planned) => {
             cancel(&format!("the front is handed to {name} (pid {pid}) now"));
+            super::page::superseded();
             super::watch::hook_activations();
             hook_own();
             // Waited for from before the request, so that no notice of the activation can come
@@ -300,8 +304,9 @@ fn cooperative(app: &NSApplication, target: &NSRunningApplication) -> bool {
 /// Subscribes, once for the life of the process, to AppKit's in-process notices of this application
 /// stopping being and becoming the active one ([`own_edge`]). With no queue, so they run where
 /// AppKit posts them: on the main thread, in the order they happened, inside a deactivation this
-/// application asks for as well. Main thread only.
-fn hook_own() {
+/// application asks for as well. Main thread only; also a page's show, whose request can outlive
+/// the page (`page.rs`).
+pub(super) fn hook_own() {
     if objc2::MainThreadMarker::new().is_none() || HOOKED_OWN.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -327,7 +332,9 @@ fn hook_own() {
 }
 
 /// AppKit told this application that it stopped being or became the active one: what that does to
-/// a focus waiting is `backend::on_own_edge`'s. One borrow and nothing else when no focus waits.
+/// a focus waiting is `backend::on_own_edge`'s; becoming it answers a page's request for the front
+/// whose page left first (`page::became_active`). One borrow each and nothing else when nothing
+/// waits.
 fn own_edge(edge: OwnEdge) {
     let gives_up = PENDING.with(|p| {
         let mut p = p.borrow_mut();
@@ -338,6 +345,9 @@ fn own_edge(edge: OwnEdge) {
     });
     if gives_up == Some(true) {
         cancel("this application became the active one again after it had stopped being it");
+    }
+    if edge == OwnEdge::Became {
+        super::page::became_active();
     }
 }
 

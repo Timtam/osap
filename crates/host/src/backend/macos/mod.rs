@@ -65,8 +65,12 @@ pub(crate) mod ocr;
 /// This application's own windows, answered by AppKit and never through accessibility — see the
 /// file. `pub(super)` for `start`, which `gui.rs` calls once the window system is up.
 pub(super) mod own;
-/// `automation-platform page-check`: how this application takes the front and gives it back,
-/// measured — see the file. `pub(super)` for `backend::page_check`.
+/// `host.gui.webview`'s window on a Mac: a tool page's panel and an app page's window, WKWebView in
+/// them through wry — see the file. `pub(crate)` for `backend::page`, which `webview_lua.rs` is to
+/// use as it uses `webview_win.rs` (stage 4, TODO.md).
+pub(crate) mod page;
+/// `automation-platform page-check`: how this application takes the front and gives it back, and
+/// how the page window behaves, measured — see the file. `pub(super)` for `backend::page_check`.
 pub(super) mod page_check;
 pub(crate) mod perm;
 mod queue;
@@ -476,6 +480,9 @@ impl Backend for MacBackend {
         // notifications missed is corrected here, and a change is a focus change for the drain
         // below. A few messages inside this process; nothing before the window system is up.
         own::refresh();
+        // A page's show still waiting for the front, and a key the tap has seen pressed elsewhere
+        // since: its answer. One borrow when nothing waits.
+        page::refresh();
         // A sleep, a lock, a display change (`system.rs`) are the first thing `queue::drain`
         // delivers: before the window events, as on Windows.
         queue::drain(events);

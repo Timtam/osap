@@ -1,6 +1,6 @@
 //! `automation-platform page-check`: how this application takes the front and gives it back,
-//! measured on the Mac it runs on — the first section of the check the Mac's page window will grow
-//! (TODO.md, MW5).
+//! measured on the Mac it runs on (TODO.md, MW5), and the Mac's page window built and checked
+//! (`page.rs`; TODO.md, stage 4).
 //!
 //! No wxWidgets and no module: an application object of its own, an accessory application as the
 //! bundle makes the real one, and an event loop of its own. A plain panel set up as the reference
@@ -14,36 +14,66 @@
 //! announced, in order, and whether the focus the hand-over waited for was made or given up.
 //!
 //! The answers depend on the desktop it runs on — CI starts TextEdit first, as the application to
-//! hand the front back to — so every line is data: the check fails only when it cannot run (exit
-//! status 1) or for a wrong argument (2). Every line starts with `PAGE CHECK:`; nothing goes into
-//! the application's log, which is never opened here.
+//! hand the front back to — so every line of those sections is data.
+//!
+//! **The web view** (`web_view`, after them): the pages' rule list compiled; a tool page built from
+//! a small page the executable carries (`tools/page-check`), with no activation asked for by the
+//! build — counted in `NSApplication` itself, whose two activation calls are wrapped for the rest
+//! of this process (`count_activations`) — and loaded; the page's own script running and an
+//! inline one not; a message's round trip and twenty in order; its own file fetched and one outside
+//! blocked; a navigation away refused; `window.close()` doing nothing. Then, shown with the keyboard
+//! under a main menu with what wxWidgets' Apple menu has, whose items only count: Command-A and
+//! Command-C copying its field's text, Command-V pasting, Return on its button giving one message,
+//! Command-Q, Command-H and Option-Command-H doing nothing, and Command-W hiding it — the keys
+//! made in-process and sent through the application as the window server's would be. Last, the
+//! rule list on its own (`rule_list_alone`), since the host's policy blocks that outside fetch
+//! before a rule list is asked: a page built with one rule more, which blocks a file of its own the
+//! policy lets it fetch, must not get that file. These are `check` lines, `ok` or `FAILED`: what
+//! the host promises, whatever the desktop. Where the page does not get the keyboard on a runner the
+//! keys are not checked, and a line says so. The rest is data: the times, what the page says of its
+//! context (`isSecureContext`, the clipboard, WebRTC), the classes AppKit made the first responder,
+//! an app page's Dock claim and keys, and the folders WebKit made under `~/Library`.
+//!
+//! Exit status 0 when it ran to the end and no check failed, 3 when it ran to the end and a check
+//! failed, 1 when it could not run, 2 for a wrong argument. Every line starts with `PAGE CHECK:`;
+//! nothing goes into the application's log, which is never opened here.
 //!
 //! The waits are a test's, not the application's: a section waits for the notices it measures for
 //! at most [`SECTION`] all together, and the activation policy, which announces nothing, is read
 //! after [`SETTLE`]. Four shows, three hand-overs and the non-activating panel, five seconds each at
-//! the most, and three settles bound the run to about 42 seconds.
+//! the most, and three settles bound the first part to about 42 seconds; each of the web view's
+//! waits is bounded the same way, and on a Mac where everything answers they take a few seconds.
 
 use std::cell::RefCell;
 use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use objc2::rc::{autoreleasepool, Retained};
-use objc2::{MainThreadMarker, MainThreadOnly as _};
+use objc2::runtime::{AnyObject, Bool, Imp, NSObject, Sel};
+use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDidBecomeActiveNotification,
-    NSApplicationDidResignActiveNotification, NSBackingStoreType, NSEventMask, NSFloatingWindowLevel,
-    NSPanel, NSRunningApplication, NSWindow, NSWindowCollectionBehavior, NSWindowDidBecomeKeyNotification,
-    NSWindowStyleMask, NSWorkspace, NSWorkspaceApplicationKey, NSWorkspaceDidActivateApplicationNotification,
+    NSApplicationDidResignActiveNotification, NSBackingStoreType, NSEvent, NSEventMask, NSEventModifierFlags,
+    NSEventType, NSFloatingWindowLevel, NSMenu, NSMenuItem, NSPanel, NSPasteboard, NSPasteboardTypeString,
+    NSRunningApplication, NSWindow, NSWindowCollectionBehavior, NSWindowDidBecomeKeyNotification, NSWindowStyleMask,
+    NSWorkspace, NSWorkspaceApplicationKey, NSWorkspaceDidActivateApplicationNotification,
 };
 use objc2_foundation::{
-    NSDate, NSDefaultRunLoopMode, NSNotification, NSNotificationCenter, NSOperationQueue, NSPoint,
-    NSProcessInfo, NSRect, NSSize, NSString,
+    NSBundle, NSDate, NSDefaultRunLoopMode, NSError, NSNotification, NSNotificationCenter, NSOperationQueue, NSPoint,
+    NSProcessInfo, NSRect, NSSize, NSString, NSURL,
 };
+use objc2_web_kit::{WKContentRuleList, WKContentRuleListStore};
 
 use super::front::{self, Ended, Handed};
+use super::page::{self, EnvNow};
 use crate::backend::Handing;
+use crate::webview::{self, PageEvent, WindowKind};
 
 const USAGE: &str = "\
 automation-platform page-check
@@ -52,9 +82,14 @@ Measures how this application takes the front and gives it back on this Mac: a p
 the way a page will be, the front handed back both ways to the application that was in front
 before (start one first, TextEdit for instance) and over once more the way host.window.focus hands
 it, a panel that does not activate the application, and the activation policy switched while a
-panel is shown. Opens windows of its own for some seconds, loads no module and writes nothing to
-the application's log; every line it prints starts with PAGE CHECK:. Exit status 0 when it ran to
-the end, 1 when it could not run, 2 for a wrong argument.";
+panel is shown. Then builds pages with the page window host.gui.webview uses and checks what the
+host promises of them: the rule list, also on its own, the page's own script and no inline one,
+messages both ways, its own file and nothing outside, no navigation away, and the keys in a page
+with the keyboard (Command-A, C and V in a field, Return on a button, Command-Q and Command-H doing
+nothing in a tool page, Command-W hiding it); it sets the pasteboard while it does. Opens windows of its own for
+some seconds, loads no module and writes nothing to the application's log; every line it prints
+starts with PAGE CHECK:, and a check that fails says FAILED. Exit status 0 when it ran to the end
+and no check failed, 3 when one failed, 1 when it could not run, 2 for a wrong argument.";
 
 /// How long a section waits for the notices it measures: a bound on the test, never a decision
 /// of the application's.
@@ -109,9 +144,13 @@ pub(crate) fn run(args: &[String]) -> i32 {
         say("cannot run: not on the main thread");
         return 1;
     };
-    autoreleasepool(|_| check(mtm));
-    say("done");
-    0
+    let tally = autoreleasepool(|_| check(mtm));
+    say(&format!("done; {} of the web view's {} checks failed", tally.failed, tally.run));
+    if tally.failed > 0 {
+        3
+    } else {
+        0
+    }
 }
 
 /// One line of output, written at once.
@@ -121,7 +160,7 @@ fn say(line: &str) {
     let _ = out.flush();
 }
 
-fn check(mtm: MainThreadMarker) {
+fn check(mtm: MainThreadMarker) -> Tally {
     let app = NSApplication::sharedApplication(mtm);
     // Asked before told: AppKit answers a request for the policy it is in already with `false`.
     if app.activationPolicy() != NSApplicationActivationPolicy::Accessory {
@@ -150,6 +189,9 @@ fn check(mtm: MainThreadMarker) {
     hand_back(&app, &panel, target, Over::Focus);
     nonactivating_panel(&app, mtm);
     policy_switch(&app, &panel);
+    let mut tally = Tally::default();
+    web_view(&app, mtm, &mut tally);
+    tally
 }
 
 /// A plain panel set up as a page's will be; `activating: false` adds the style that keeps this
@@ -499,5 +541,810 @@ fn yes(b: bool) -> &'static str {
         "yes"
     } else {
         "no"
+    }
+}
+
+/// The module id the page is served under, for its scheme (`webview::scheme_for`).
+const PAGE_MODULE: &str = "com.platform.page-check";
+
+/// The page the web view sections build, carried in the executable — so that a Mac with only the
+/// download runs the whole check, a module's developer's included — and written to a folder of its
+/// own when the check runs.
+const PAGE_FILES: [(&str, &str); 4] = [
+    ("ui/index.html", include_str!("../../../../../tools/page-check/ui/index.html")),
+    ("ui/page.js", include_str!("../../../../../tools/page-check/ui/page.js")),
+    ("ui/data.json", include_str!("../../../../../tools/page-check/ui/data.json")),
+    ("ui/rules-only.json", include_str!("../../../../../tools/page-check/ui/rules-only.json")),
+];
+
+/// The rule [`rule_list_alone`] adds to the pages' rule list: `ui/rules-only.json`, a file of the
+/// page's own, blocked. Last, so the rules before it that let the page's own files past do not
+/// undo it. JSON, whose `\\` is the regular expression's `\`.
+const RULES_ONLY_RULE: &str = r#"{"trigger":{"url-filter":"/ui/rules-only\\.json"},"action":{"type":"block"}}"#;
+
+/// The web view's checks: how many ran, and how many failed.
+#[derive(Default)]
+struct Tally {
+    run: u32,
+    failed: u32,
+}
+
+impl Tally {
+    /// One check's line: `ok` with what was seen, or `FAILED` with why. Such a line fails the CI leg.
+    fn check(&mut self, name: &str, result: Result<String, String>) {
+        self.run += 1;
+        match result {
+            Ok(seen) if seen.is_empty() => say(&format!("check {name}: ok")),
+            Ok(seen) => say(&format!("check {name}: ok — {seen}")),
+            Err(why) => {
+                self.failed += 1;
+                say(&format!("check {name}: FAILED — {why}"));
+            }
+        }
+    }
+}
+
+thread_local! {
+    /// Everything the pages sent since the web view sections began, with when it was taken from the
+    /// page window's queue.
+    static INBOX: RefCell<Vec<(Instant, PageEvent)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// How often the activation was asked for, counted in `NSApplication` itself ([`count_activations`]).
+static ACTIVATIONS: AtomicU32 = AtomicU32::new(0);
+/// The counting is in place; never twice, or a counter would call itself.
+static COUNTING: AtomicBool = AtomicBool::new(false);
+static ORIGINAL_ACTIVATE: OnceLock<Imp> = OnceLock::new();
+static ORIGINAL_IGNORING: OnceLock<Imp> = OnceLock::new();
+
+/// The counts of the menu items a wxWidgets-like Apple menu has ([`MenuCounter`]): Quit, Hide and
+/// Hide Others.
+static MENU_QUIT: AtomicU32 = AtomicU32::new(0);
+static MENU_HIDE: AtomicU32 = AtomicU32::new(0);
+static MENU_HIDE_OTHERS: AtomicU32 = AtomicU32::new(0);
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements, and the class does not implement `Drop`.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "AutomationPlatformPageCheckMenuCounter"]
+    struct MenuCounter;
+
+    impl MenuCounter {
+        #[unsafe(method(countQuit:))]
+        fn count_quit(&self, _sender: Option<&AnyObject>) {
+            MENU_QUIT.fetch_add(1, Ordering::Relaxed);
+        }
+
+        #[unsafe(method(countHide:))]
+        fn count_hide(&self, _sender: Option<&AnyObject>) {
+            MENU_HIDE.fetch_add(1, Ordering::Relaxed);
+        }
+
+        #[unsafe(method(countHideOthers:))]
+        fn count_hide_others(&self, _sender: Option<&AnyObject>) {
+            MENU_HIDE_OTHERS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+);
+
+/// `-[NSApplication activate]`, counted, then itself.
+unsafe extern "C-unwind" fn counted_activate(this: *mut AnyObject, cmd: Sel) {
+    ACTIVATIONS.fetch_add(1, Ordering::Relaxed);
+    if let Some(&imp) = ORIGINAL_ACTIVATE.get() {
+        // SAFETY: the method's own implementation, called with its own signature.
+        let original: unsafe extern "C-unwind" fn(*mut AnyObject, Sel) = unsafe { std::mem::transmute(imp) };
+        unsafe { original(this, cmd) };
+    }
+}
+
+/// `-[NSApplication activateIgnoringOtherApps:]`, counted, then itself.
+unsafe extern "C-unwind" fn counted_ignoring(this: *mut AnyObject, cmd: Sel, flag: Bool) {
+    ACTIVATIONS.fetch_add(1, Ordering::Relaxed);
+    if let Some(&imp) = ORIGINAL_IGNORING.get() {
+        // SAFETY: the method's own implementation, called with its own signature.
+        let original: unsafe extern "C-unwind" fn(*mut AnyObject, Sel, Bool) = unsafe { std::mem::transmute(imp) };
+        unsafe { original(this, cmd, flag) };
+    }
+}
+
+/// Puts a counter in front of `NSApplication`'s two activation calls — `activate` from macOS 14,
+/// `activateIgnoringOtherApps:` everywhere — for the rest of this process, which is the check's: a
+/// build of a page that asked for the front would be counted, not inferred from where the front
+/// went. In this subcommand only. Whether the counting is in place.
+fn count_activations() -> bool {
+    if COUNTING.swap(true, Ordering::SeqCst) {
+        return true;
+    }
+    let class = NSApplication::class();
+    let Some(ignoring) = class.instance_method(sel!(activateIgnoringOtherApps:)) else {
+        return false;
+    };
+    // SAFETY: the counter has the method's signature and calls the implementation it replaces.
+    unsafe {
+        let counter: Imp = std::mem::transmute(counted_ignoring as unsafe extern "C-unwind" fn(*mut AnyObject, Sel, Bool));
+        let _ = ORIGINAL_IGNORING.set(ignoring.set_implementation(counter));
+        if let Some(activate) = class.instance_method(sel!(activate)) {
+            let counter: Imp = std::mem::transmute(counted_activate as unsafe extern "C-unwind" fn(*mut AnyObject, Sel));
+            let _ = ORIGINAL_ACTIVATE.set(activate.set_implementation(counter));
+        }
+    }
+    true
+}
+
+/// A main menu with what wxWidgets' Apple menu has where a page might meet it — Hide (Command-H),
+/// Hide Others (Option-Command-H) and Quit (Command-Q) — whose items only count. The counter it
+/// targets is returned: a menu item does not keep its target.
+fn install_menu(app: &NSApplication, mtm: MainThreadMarker) -> Retained<MenuCounter> {
+    let this = MenuCounter::alloc(mtm).set_ivars(());
+    // SAFETY: NSObject's initialiser.
+    let counter: Retained<MenuCounter> = unsafe { msg_send![super(this), init] };
+    let bar = NSMenu::new(mtm);
+    let apple = NSMenu::new(mtm);
+    let items = [
+        ("Hide", sel!(countHide:), NSEventModifierFlags::Command),
+        ("Hide Others", sel!(countHideOthers:), NSEventModifierFlags::Command | NSEventModifierFlags::Option),
+        ("Quit", sel!(countQuit:), NSEventModifierFlags::Command),
+    ];
+    for (title, action, modifiers) in items {
+        let key = if title == "Quit" { "q" } else { "h" };
+        // SAFETY: an item of ours, with a selector its target answers.
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                Some(action),
+                &NSString::from_str(key),
+            )
+        };
+        item.setKeyEquivalentModifierMask(modifiers);
+        // SAFETY: the counter lives for the section that uses the menu.
+        unsafe { item.setTarget(Some(&counter)) };
+        apple.addItem(&item);
+    }
+    let top = NSMenuItem::new(mtm);
+    top.setSubmenu(Some(&apple));
+    bar.addItem(&top);
+    app.setMainMenu(Some(&bar));
+    counter
+}
+
+/// The page's files, written to a fresh folder of this run's.
+fn write_page() -> Result<PathBuf, String> {
+    let root = std::env::temp_dir().join(format!("automation-platform-page-check-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for (rel, text) in PAGE_FILES {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    root.canonicalize().map_err(|e| format!("{}: {e}", root.display()))
+}
+
+/// The folders WebKit is reported to make under `~/Library` for an application — its data and its
+/// caches — with a store that keeps nothing as well (TODO.md, MW): looked at before and after.
+fn library_folders() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return Vec::new() };
+    let id = NSBundle::mainBundle().bundleIdentifier().map(|s| s.to_string()).unwrap_or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_default()
+    });
+    vec![home.join("Library/WebKit").join(&id), home.join("Library/Caches").join(&id).join("WebKit")]
+}
+
+fn folders_line(folders: &[PathBuf]) -> String {
+    folders
+        .iter()
+        .map(|f| format!("{} {}", f.display(), if f.exists() { "exists" } else { "absent" }))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// What the page window sent since the last call, kept.
+fn drain() {
+    let now = Instant::now();
+    let events = page::take_events();
+    INBOX.with(|i| i.borrow_mut().extend(events.into_iter().map(|e| (now, e))));
+}
+
+/// Where the page's events from now on start.
+fn inbox_mark() -> usize {
+    drain();
+    INBOX.with(|i| i.borrow().len())
+}
+
+/// A message's text, for the plain strings the page posts.
+fn plain(text: &str) -> Option<&str> {
+    text.strip_prefix('"')?.strip_suffix('"').filter(|t| !t.contains('\\'))
+}
+
+/// The messages of page `page` since `from`, as text.
+fn messages(page: u64, from: usize) -> Vec<String> {
+    drain();
+    INBOX.with(|i| {
+        i.borrow()
+            .iter()
+            .skip(from)
+            .filter_map(|(_, e)| match e {
+                PageEvent::Message { page: p, text, .. } if *p == page => plain(text).map(str::to_string),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+/// Runs the event loop until an event of the page window's since `from` is one `want` takes — when
+/// it was taken, and the event — or until `until`, which is `None`.
+fn wait_page(app: &NSApplication, from: usize, until: Instant, want: impl Fn(&PageEvent) -> bool) -> Option<(Instant, PageEvent)> {
+    loop {
+        drain();
+        let found = INBOX.with(|i| i.borrow().iter().skip(from).find(|(_, e)| want(e)).cloned());
+        if found.is_some() {
+            return found;
+        }
+        if Instant::now() >= until {
+            return None;
+        }
+        pump(app, Duration::from_millis(20));
+    }
+}
+
+/// Runs the event loop until page `page` has sent a message since `from` that `want` takes.
+fn wait_message(app: &NSApplication, page: u64, from: usize, until: Instant, want: impl Fn(&str) -> bool) -> Option<(Instant, String)> {
+    wait_page(app, from, until, |e| match e {
+        PageEvent::Message { page: p, text, .. } => *p == page && plain(text).is_some_and(&want),
+        _ => false,
+    })
+    .and_then(|(at, e)| match e {
+        PageEvent::Message { text, .. } => plain(&text).map(|t| (at, t.to_string())),
+        _ => None,
+    })
+}
+
+/// Hands the page one command, as a plain string.
+fn tell(native: &page::Native, command: &str) {
+    if let Err(e) = native.post_json(&format!("\"{command}\"")) {
+        say(&format!("web view | the command '{command}' could not be posted: {e}"));
+    }
+}
+
+/// Hands page `page` one command and waits for its answer, the first message starting with `prefix`.
+fn ask(app: &NSApplication, native: &page::Native, page: u64, command: &str, prefix: &str) -> Option<String> {
+    let from = inbox_mark();
+    let t = Instant::now();
+    tell(native, command);
+    wait_message(app, page, from, t + SECTION, |m| m.starts_with(prefix)).map(|(_, m)| m)
+}
+
+/// A round trip: `echo n` posted, and its echo waited for; how long it took.
+fn round_trip(app: &NSApplication, native: &page::Native, page: u64, n: u32) -> Option<Duration> {
+    let from = inbox_mark();
+    let t0 = Instant::now();
+    tell(native, &format!("echo {n}"));
+    let want = format!("echo {n}");
+    wait_message(app, page, from, t0 + SECTION, |m| m == want).map(|(at, _)| at.saturating_duration_since(t0))
+}
+
+/// A key pressed and let go in `window`, made in-process and sent through the application as the
+/// window server's would be: a key equivalent goes to the key window first, then to the main menu.
+fn press(app: &NSApplication, window: &NSWindow, chars: &str, code: u16, modifiers: NSEventModifierFlags) {
+    let at = NSProcessInfo::processInfo().systemUptime();
+    let text = NSString::from_str(chars);
+    for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
+        let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            kind,
+            NSPoint::new(0.0, 0.0),
+            modifiers,
+            at,
+            window.windowNumber(),
+            None,
+            &text,
+            &text,
+            false,
+            code,
+        );
+        match event {
+            Some(event) => app.sendEvent(&event),
+            None => say(&format!("web view | AppKit made no key event for '{chars}'")),
+        }
+    }
+}
+
+/// The pasteboard's text, and how often it has changed.
+fn pasteboard() -> (Option<String>, isize) {
+    let board = NSPasteboard::generalPasteboard();
+    // SAFETY: a framework constant that lives for the process.
+    let kind = unsafe { NSPasteboardTypeString };
+    (board.stringForType(kind).map(|s| s.to_string()), board.changeCount())
+}
+
+fn set_pasteboard(text: &str) {
+    let board = NSPasteboard::generalPasteboard();
+    board.clearContents();
+    // SAFETY: a framework constant that lives for the process.
+    let kind = unsafe { NSPasteboardTypeString };
+    board.setString_forType(&NSString::from_str(text), kind);
+}
+
+/// Builds a page of `kind` as page `n` with the rule list, and checks that it was built without an
+/// activation being asked for; the page, if it was built. `name` is the page's in the lines.
+fn build_page(
+    tally: &mut Tally,
+    rules: &WKContentRuleList,
+    root: &Path,
+    kind: WindowKind,
+    name: &str,
+    n: u64,
+    counting: bool,
+) -> Option<page::Native> {
+    let scheme = webview::scheme_for(PAGE_MODULE);
+    let spec = page::BuildSpec {
+        page: n,
+        build: n,
+        kind,
+        title: format!("page-check: {name} page"),
+        scheme: scheme.clone(),
+        root: root.to_path_buf(),
+        entry_url: webview::entry_url(&scheme, "ui/index.html"),
+    };
+    let before = ACTIVATIONS.load(Ordering::Relaxed);
+    let t0 = Instant::now();
+    let built = page::build(&spec, rules);
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let asked = ACTIVATIONS.load(Ordering::Relaxed) - before;
+    tally.check(
+        &format!("the {name} page is built"),
+        built.as_ref().map(|_| format!("in {ms:.0} ms, which the event loop waits for")).map_err(Clone::clone),
+    );
+    if built.is_ok() {
+        tally.check(
+            &format!("building the {name} page asked for no activation"),
+            match (counting, asked) {
+                (false, _) => Err("the activation calls could not be counted".to_string()),
+                (true, 0) => Ok("none counted".to_string()),
+                (true, n) => Err(format!("{n} asked for")),
+            },
+        );
+    }
+    built.ok()
+}
+
+/// The page loaded: its document's own report, waited for.
+fn wait_loaded(app: &NSApplication, tally: &mut Tally, page: u64, from: usize, t0: Instant, name: &str) -> bool {
+    let ended = wait_page(app, from, t0 + SECTION, |e| match e {
+        PageEvent::Loaded { page: p, .. } | PageEvent::LoadFailed { page: p, .. } | PageEvent::Closed { page: p, .. } => *p == page,
+        PageEvent::Message { .. } => false,
+    });
+    let result = match ended {
+        Some((at, PageEvent::Loaded { .. })) => Ok(format!("after {:.0} ms", at.saturating_duration_since(t0).as_secs_f64() * 1000.0)),
+        Some((_, PageEvent::LoadFailed { why, .. })) => Err(format!("its document did not load: {why}")),
+        Some((_, PageEvent::Closed { why, .. })) => Err(format!("the page was closed ({why}) before it loaded")),
+        _ => Err(format!("not within {} s", SECTION.as_secs())),
+    };
+    let ok = result.is_ok();
+    tally.check(&format!("the {name} page loads"), result);
+    ok
+}
+
+/// The web view's sections: the rule list, a tool page built, loaded and spoken to, its keys, an app
+/// page, and the rule list on its own. Hard checks are `check` lines; everything else is data.
+fn web_view(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally) {
+    say(&format!(
+        "web view | {}",
+        page::runtime_version().unwrap_or_else(|| "WebKit's version could not be read".to_string())
+    ));
+    let library = library_folders();
+    let library_before = folders_line(&library);
+    let t0 = Instant::now();
+    let rules = loop {
+        match page::environment() {
+            EnvNow::Ready(list, _) => break Ok(list),
+            EnvNow::Failed(why) => break Err(why),
+            EnvNow::Waiting if t0.elapsed() >= SECTION => break Err(format!("not compiled within {} s", SECTION.as_secs())),
+            EnvNow::Waiting => pump(app, Duration::from_millis(20)),
+        }
+    };
+    tally.check(
+        "the rule list compiles",
+        rules.as_ref().map(|_| format!("after {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0)).map_err(Clone::clone),
+    );
+    let Ok(rules) = rules else { return };
+    let root = match write_page() {
+        Ok(root) => root,
+        Err(why) => {
+            tally.check("the page's files are written", Err(why));
+            return;
+        }
+    };
+    let counting = count_activations();
+    let from = inbox_mark();
+    let t0 = Instant::now();
+    if let Some(tool) = build_page(tally, &rules, &root, WindowKind::Tool, "tool", 1, counting) {
+        if wait_loaded(app, tally, 1, from, t0, "tool") {
+            tool_page(app, mtm, tally, &tool, from, t0);
+        }
+        drop(tool);
+    }
+    let from = inbox_mark();
+    let t0 = Instant::now();
+    if let Some(page) = build_page(tally, &rules, &root, WindowKind::App, "app", 2, counting) {
+        if wait_loaded(app, tally, 2, from, t0, "app") {
+            app_page(app, &page);
+        }
+        drop(page);
+    }
+    rule_list_alone(app, mtm, tally, &root, counting);
+    pump(app, Duration::from_millis(20));
+    let _ = std::fs::remove_dir_all(&root);
+    say(&format!("web view | ~/Library before: {library_before}; after: {}", folders_line(&library)));
+}
+
+/// The rule list on its own. The tool page's fetch of `https://example.com` is blocked by the host's
+/// policy (`connect-src 'self'`) before any rule list is asked, so it says nothing of the rule list.
+/// Here a tool page is built with the pages' rule list and one rule more ([`RULES_ONLY_RULE`]),
+/// which blocks a file of the page's own that the policy lets it fetch: that fetch blocked — while
+/// the page's other file of its own is fetched — is the rule list's doing alone, applied to the
+/// loads of a document the application's scheme handler served. Which is what the pages' own list
+/// relies on for everything the policy does not cover.
+fn rule_list_alone(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally, root: &Path, counting: bool) {
+    const NAME: &str = "rule-list";
+    let folder = std::env::temp_dir().join(format!("automation-platform-page-check-rules-{}", std::process::id()));
+    let base = webview::RULE_LIST.strip_suffix(']').unwrap_or(webview::RULE_LIST);
+    let list = compile_list(app, mtm, &folder, &format!("{base},{RULES_ONLY_RULE}]"));
+    tally.check(
+        "the rule list with one rule more compiles",
+        list.as_ref().map(|_| String::new()).map_err(Clone::clone),
+    );
+    if let Ok(list) = list {
+        let from = inbox_mark();
+        let t0 = Instant::now();
+        if let Some(page) = build_page(tally, &list, root, WindowKind::Tool, NAME, 3, counting) {
+            if wait_loaded(app, tally, 3, from, t0, NAME) {
+                let own = ask(app, &page, 3, "fetch-own", "fetch-own ");
+                let blocked = ask(app, &page, 3, "fetch-rules-only", "fetch-rules-only ");
+                tally.check(
+                    "the rule list on its own blocks a fetch the policy lets through",
+                    match (own.as_deref(), blocked.as_deref()) {
+                        (Some("fetch-own ok data.json"), Some(m)) if m.starts_with("fetch-rules-only blocked") => {
+                            Ok(format!("{}; its own data.json fetched", m.trim_start_matches("fetch-rules-only ")))
+                        }
+                        (own, blocked) => Err(format!(
+                            "data.json: {}; rules-only.json, which only the rule list blocks: {}",
+                            own.unwrap_or("no answer"),
+                            blocked.unwrap_or("no answer")
+                        )),
+                    },
+                );
+            }
+            drop(page);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// A rule list WebKit compiled, or why it did not.
+type Compiled = Result<Retained<WKContentRuleList>, String>;
+
+/// Compiles `list` into a rule store of the check's own in `folder`, the event loop running until
+/// WebKit answers, for at most [`SECTION`].
+fn compile_list(app: &NSApplication, mtm: MainThreadMarker, folder: &Path, list: &str) -> Compiled {
+    std::fs::create_dir_all(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    let url = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&folder.to_string_lossy()), true);
+    // SAFETY: a file URL of a folder that exists, on the main thread.
+    let store = unsafe { WKContentRuleListStore::storeWithURL(Some(&url), mtm) }
+        .ok_or_else(|| format!("WebKit made no rule store in {}", folder.display()))?;
+    let answer: Rc<RefCell<Option<Compiled>>> = Rc::default();
+    let put = answer.clone();
+    let block = RcBlock::new(move |list: *mut WKContentRuleList, error: *mut NSError| {
+        // An unwind out of a block WebKit calls would tear through frames that cannot handle it.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // SAFETY: WebKit's own objects for the duration of the call, retained if kept.
+            let list = unsafe { Retained::retain(list) };
+            let error = unsafe { error.as_ref() }.map(|e| e.localizedDescription().to_string());
+            *put.borrow_mut() = Some(match (list, error) {
+                (Some(list), None) => Ok(list),
+                (_, error) => Err(error.unwrap_or_else(|| "WebKit answered with no rule list".to_string())),
+            });
+        }));
+    });
+    // SAFETY: the identifier and the list are strings of ours; the store copies the block.
+    unsafe {
+        store.compileContentRuleListForIdentifier_encodedContentRuleList_completionHandler(
+            Some(&NSString::from_str("page-check")),
+            Some(&NSString::from_str(list)),
+            Some(&block),
+        );
+    }
+    let t0 = Instant::now();
+    loop {
+        if let Some(done) = answer.borrow_mut().take() {
+            return done;
+        }
+        if t0.elapsed() >= SECTION {
+            return Err(format!("not compiled within {} s", SECTION.as_secs()));
+        }
+        pump(app, Duration::from_millis(20));
+    }
+}
+
+/// The tool page: what ran in it, what it reaches, its messages both ways, and its keys.
+fn tool_page(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally, tool: &page::Native, from: usize, t0: Instant) {
+    let hello = wait_message(app, 1, from, t0 + SECTION, |m| m.starts_with("hello "));
+    tally.check(
+        "the page's own script runs",
+        hello.as_ref().map(|_| String::new()).ok_or_else(|| "page.js said nothing: the policy may block the page's own scripts".to_string()),
+    );
+    if let Some((_, hello)) = &hello {
+        say(&format!("web view | the page says: {}", hello.trim_start_matches("hello ")));
+    }
+    let not_shown = round_trip(app, tool, 1, 0);
+    tally.check(
+        "a message makes the round trip",
+        not_shown.map(|d| format!("{:.0} ms, with the page not on screen", d.as_secs_f64() * 1000.0)).ok_or_else(|| "no echo".to_string()),
+    );
+    let inline = messages(1, from).iter().any(|m| m == "inline ran");
+    tally.check(
+        "an inline script does not run",
+        if inline { Err("it ran: the policy is not applied".to_string()) } else { Ok(String::new()) },
+    );
+
+    let start = inbox_mark();
+    let t = Instant::now();
+    for n in 1..=20 {
+        tell(tool, &format!("echo {n}"));
+    }
+    let last = wait_message(app, 1, start, t + SECTION, |m| m == "echo 20");
+    let echoes: Vec<String> = messages(1, start).into_iter().filter(|m| m.starts_with("echo ")).collect();
+    let wanted: Vec<String> = (1..=20).map(|n| format!("echo {n}")).collect();
+    tally.check(
+        "20 messages come back as 20, in order",
+        if last.is_some() && echoes == wanted {
+            Ok(format!("in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0))
+        } else {
+            Err(format!("{} came back: {}", echoes.len(), echoes.join(", ")))
+        },
+    );
+
+    let asked = |command: &str, prefix: &str| ask(app, tool, 1, command, prefix);
+    let own = asked("fetch-own", "fetch-own ");
+    tally.check(
+        "the page fetches its own file",
+        match own.as_deref() {
+            Some("fetch-own ok data.json") => Ok(String::new()),
+            Some(other) => Err(other.to_string()),
+            None => Err("no answer".to_string()),
+        },
+    );
+    let outside = asked("fetch-outside", "fetch-outside ");
+    tally.check(
+        "a fetch outside is blocked",
+        match outside.as_deref() {
+            Some(m) if m.starts_with("fetch-outside blocked") => Ok(m.trim_start_matches("fetch-outside ").to_string()),
+            Some(other) => Err(other.to_string()),
+            None => Err("no answer".to_string()),
+        },
+    );
+
+    let entry = tool.url();
+    let refused = tool.refused();
+    tell(tool, "navigate");
+    let echoed = round_trip(app, tool, 1, 30);
+    tally.check(
+        "a navigation to https://example.com is refused",
+        if echoed.is_some() && tool.url() == entry {
+            Ok(format!("still on {entry}; {} refusal(s) said", tool.refused() - refused))
+        } else {
+            Err(format!("the page is on '{}', echo {}", tool.url(), if echoed.is_some() { "answered" } else { "unanswered" }))
+        },
+    );
+    let closed_from = inbox_mark();
+    let called = asked("close", "close called").is_some();
+    let echoed = round_trip(app, tool, 1, 31);
+    let closed = INBOX.with(|i| {
+        i.borrow().iter().skip(closed_from).any(|(_, e)| matches!(e, PageEvent::Closed { page: 1, .. }))
+    });
+    tally.check(
+        "window.close() does nothing",
+        if called && echoed.is_some() && !closed {
+            Ok(String::new())
+        } else {
+            Err(format!("close called {called}, echo after it {}, closed {closed}", echoed.is_some()))
+        },
+    );
+
+    // With the keyboard: the page shown as a key would show it, beside nothing.
+    let counter = install_menu(app, mtm);
+    let window = tool.window();
+    let n = window.windowNumber();
+    let seen = mark();
+    let t = Instant::now();
+    tool.put(None, None);
+    let shown = tool.show(true);
+    let key = wait(app, seen, t, t + SECTION, |s| s == Seen::Key(n));
+    say(&format!(
+        "web view | the tool page shown with the keyboard: show answered {}; the window key {}; this application active {}; \
+         its level {}; on top at its centre {}",
+        if shown.is_ok() { "true" } else { "\"declined by the system\"" },
+        after(key),
+        yes(app.isActive()),
+        window.level(),
+        yes(tool.on_top_at_centre())
+    ));
+    let on_screen = round_trip(app, tool, 1, 40);
+    say(&format!(
+        "web view | a round trip with the page on screen: {}",
+        on_screen.map(|d| format!("{:.0} ms", d.as_secs_f64() * 1000.0)).unwrap_or_else(|| "no echo".to_string())
+    ));
+    if window.isKeyWindow() {
+        keys(app, tally, tool);
+    } else {
+        say("web view | the keys are not checked: the page did not get the keyboard on this Mac");
+    }
+    say(&format!("web view | first responders while shown: {}", {
+        let r = tool.responders();
+        if r.is_empty() { "none said".to_string() } else { r.join(" → ") }
+    }));
+    app.setMainMenu(None);
+    drop(counter);
+}
+
+/// The tool page's keys, sent while it has the keyboard: the Edit keys in its field, Return on its
+/// button, Command-Q and the two Command-H that do nothing, and Command-W, which hides it — last.
+fn keys(app: &NSApplication, tally: &mut Tally, tool: &page::Native) {
+    let window = tool.window();
+    let cmd = NSEventModifierFlags::Command;
+    let focused = |what: &str| {
+        let from = inbox_mark();
+        let t = Instant::now();
+        tell(tool, &format!("focus-{what}"));
+        wait_message(app, 1, from, t + SECTION, |m| m.starts_with("focused ")).map(|(_, m)| m)
+    };
+    let field = focused("field");
+    if field.as_deref() != Some("focused field") {
+        tally.check("the field takes the keyboard", Err(format!("{field:?}")));
+        return;
+    }
+    // Command-A, Command-C: the field's text on the pasteboard.
+    set_pasteboard("page-check before the copy");
+    let (_, count) = pasteboard();
+    press(app, window, "a", 0, cmd);
+    press(app, window, "c", 8, cmd);
+    let t = Instant::now();
+    let copied = loop {
+        let (text, now) = pasteboard();
+        if now != count && text.as_deref() == Some("copied by page-check") {
+            break Ok(format!("after {:.0} ms", t.elapsed().as_secs_f64() * 1000.0));
+        }
+        if t.elapsed() >= SECTION {
+            break Err(format!("the pasteboard holds {text:?}"));
+        }
+        pump(app, Duration::from_millis(20));
+    };
+    tally.check("Command-A and Command-C copy the field's text", copied);
+    // Command-A, Command-V: the field's text replaced by the pasteboard's.
+    set_pasteboard("pasted by page-check");
+    let from = inbox_mark();
+    let t = Instant::now();
+    press(app, window, "a", 0, cmd);
+    press(app, window, "v", 9, cmd);
+    let pasted = wait_message(app, 1, from, t + SECTION, |m| m == "value pasted by page-check");
+    tally.check(
+        "Command-V pastes",
+        pasted.map(|_| String::new()).ok_or_else(|| format!("the field said: {}", messages(1, from).join(", "))),
+    );
+    // Return on the button: one message.
+    let button = focused("button");
+    if button.as_deref() == Some("focused button") {
+        let from = inbox_mark();
+        press(app, window, "\r", 36, NSEventModifierFlags::empty());
+        let echoed = round_trip(app, tool, 1, 50).is_some();
+        let clicks = messages(1, from).iter().filter(|m| m.starts_with("clicked ")).count();
+        tally.check(
+            "Return on a button gives one message",
+            if echoed && clicks == 1 { Ok(String::new()) } else { Err(format!("{clicks} message(s), echo after them {echoed}")) },
+        );
+    } else {
+        tally.check("the button takes the keyboard", Err(format!("{button:?}")));
+    }
+    // Command-Q, Command-H, Option-Command-H: nothing, and none of the menu's items.
+    let counts = || (MENU_QUIT.load(Ordering::Relaxed), MENU_HIDE.load(Ordering::Relaxed), MENU_HIDE_OTHERS.load(Ordering::Relaxed));
+    let before = counts();
+    press(app, window, "q", 12, cmd);
+    press(app, window, "h", 4, cmd);
+    press(app, window, "h", 4, cmd | NSEventModifierFlags::Option);
+    let echoed = round_trip(app, tool, 1, 60).is_some();
+    pump(app, Duration::from_millis(20));
+    let hidden = app.isHidden();
+    let quit = crate::instance::take_quit_request();
+    tally.check(
+        "Command-Q, Command-H and Option-Command-H do nothing in a tool page",
+        if echoed && counts() == before && !hidden && !quit && window.isVisible() {
+            Ok(String::new())
+        } else {
+            Err(format!(
+                "the menu's Quit, Hide and Hide Others counted {:?} → {:?}; this application hidden {hidden}; a quit asked for \
+                 {quit}; the page shown {}",
+                before,
+                counts(),
+                window.isVisible()
+            ))
+        },
+    );
+    if hidden {
+        app.unhide(None);
+    }
+    // Command-W: hidden, and the module told the user closed it.
+    let from = inbox_mark();
+    let t = Instant::now();
+    press(app, window, "w", 13, cmd);
+    let closed = wait_page(app, from, t + SECTION, |e| matches!(e, PageEvent::Closed { page: 1, why: "user", .. }));
+    tally.check(
+        "Command-W hides the tool page",
+        if closed.is_some() && !window.isVisible() {
+            Ok(String::new())
+        } else {
+            Err(format!("closed by the user said {}; the window shown {}", closed.is_some(), window.isVisible()))
+        },
+    );
+}
+
+/// The app page, as data: the Dock claim, the keyboard, Command-M and Command-Q, and the claim let go.
+fn app_page(app: &NSApplication, page: &page::Native) {
+    let window = page.window();
+    let n = window.windowNumber();
+    let seen = mark();
+    let t = Instant::now();
+    page.put(None, None);
+    let shown = page.show(true);
+    let key = wait(app, seen, t, t + SECTION, |s| s == Seen::Key(n));
+    settle(app);
+    say(&format!(
+        "app page | shown with the keyboard: show answered {}; the window key {}; this application active {}; its policy {}",
+        if shown.is_ok() { "true" } else { "\"declined by the system\"" },
+        after(key),
+        yes(app.isActive()),
+        policy(app)
+    ));
+    if !window.isKeyWindow() {
+        page.hide();
+        settle(app);
+        say(&format!("app page | its keys are not tried: it did not get the keyboard; hidden, its policy {}", policy(app)));
+        return;
+    }
+    press(app, window, "m", 46, NSEventModifierFlags::Command);
+    settle(app);
+    let minimised = window.isMiniaturized();
+    let shown_while = page.is_shown();
+    let again = page.show(true);
+    settle(app);
+    say(&format!(
+        "app page | Command-M: miniaturised {}, counted as shown {}; shown again: {}, miniaturised {}",
+        yes(minimised),
+        yes(shown_while),
+        if again.is_ok() { "true" } else { "\"declined by the system\"" },
+        yes(window.isMiniaturized())
+    ));
+    let before = MENU_QUIT.load(Ordering::Relaxed);
+    press(app, window, "q", 12, NSEventModifierFlags::Command);
+    pump(app, Duration::from_millis(20));
+    say(&format!(
+        "app page | Command-Q: the host asked to quit {}; a menu's Quit counted {}",
+        yes(crate::instance::take_quit_request()),
+        MENU_QUIT.load(Ordering::Relaxed) - before
+    ));
+    page.hide();
+    settle(app);
+    say(&format!("app page | hidden: its policy {}", policy(app)));
+}
+
+fn policy(app: &NSApplication) -> &'static str {
+    match app.activationPolicy() {
+        NSApplicationActivationPolicy::Regular => "regular (the Dock claimed)",
+        NSApplicationActivationPolicy::Accessory => "accessory",
+        _ => "prohibited",
     }
 }
