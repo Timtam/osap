@@ -945,9 +945,10 @@ fn foreground_client() -> Option<(i32, i32, i32, i32)> {
     }
 }
 
-/// A module's first-read comparison (`Backend::compare_capture_sources`), made by `caller`: the
-/// event loop for a call that reads synchronously, else the thread about to capture for the read
-/// that carries it, which waits for duplication as any read of its own does.
+/// A module's first-read comparison, made by `caller`: the thread about to capture for the read
+/// that carries it ([`compare_on_worker`]), which waits for duplication as any read of its own does.
+/// The event loop makes none: a call that captures there, where it cannot wait, leaves it to the
+/// module's next read handed to a thread.
 fn compare_sources(who: &str, read: (i32, i32, i32, i32), caller: Caller) -> bool {
     let Some((region, window)) = dxgi::comparison_region(read, foreground_client()) else {
         return true; // nothing this path could read, so nothing to compare
@@ -1395,10 +1396,6 @@ impl Backend for WindowsBackend {
 
     fn pixel(&self, x: i32, y: i32, src: CaptureSource) -> Result<(u8, u8, u8), String> {
         pixel_through(x, y, src, Caller::Pump)
-    }
-
-    fn compare_capture_sources(&self, who: &str, read: (i32, i32, i32, i32)) -> bool {
-        compare_sources(who, read, Caller::Pump)
     }
 
     fn capture(&self, x: i32, y: i32, w: i32, h: i32, src: CaptureSource) -> Result<CapturedImage, String> {

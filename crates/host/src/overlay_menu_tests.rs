@@ -447,7 +447,10 @@ T.host = strict("host", {
       for i in ipairs(points) do out[i] = S.pixel end
       return out
     end,
+    -- Written at once here; in the host a handler waits while the image worker writes it, and where
+    -- it could not wait, the place is noted (T.screenWait) — of a snapshot as well as of the screen.
     saveMarked = function(path, opts)
+      T.screenWait("host.screen.saveMarked")
       S.order[#S.order + 1] = "save"
       S.shots[#S.shots + 1] = { path = path, region = opts.region, marks = #opts.marks, at = S.now }
       return true
@@ -464,7 +467,9 @@ T.host = strict("host", {
     snapshotAsync = function(opts, cb)
       S.asyncs[#S.asyncs + 1] = { region = opts.region, at = opts.at or S.now, cb = cb, asked = S.now }
     end,
+    -- Its wait as saveMarked's.
     save = function(path, opts)
+      T.screenWait("host.screen.save")
       S.order[#S.order + 1] = "save"
       local s = opts and opts.snapshot
       assert(s == nil or not s.released, "a released snapshot was saved")

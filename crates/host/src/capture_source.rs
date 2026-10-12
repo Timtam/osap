@@ -15,7 +15,7 @@ use std::sync::Arc;
 use mlua::{Function, Lua};
 use module_manifest::{ModuleManifest, ScreenDecl};
 
-use crate::backend::{self, Backend, CaptureFn, CaptureSource, CapturedImage, CompareReq, CompareSlot};
+use crate::backend::{self, CaptureFn, CaptureSource, CapturedImage, CompareReq, CompareSlot};
 use crate::logging;
 
 /// One `code_module` dependency whose code runs inside a dependent's VM, with what the
@@ -201,39 +201,12 @@ pub(crate) fn vm_source(lua: &Lua) -> CaptureSource {
     lua.app_data_ref::<VmCapture>().map(|v| v.src).unwrap_or_default()
 }
 
-/// The source for a read of `region` from this VM that captures on the event loop: the
-/// bindings that read the screen synchronously.
-///
-/// The first time after the VM was built with duplication, it also has the backend compare
-/// the two sources and log the answer under the module's name: the question an author has
-/// right after declaring the key and reloading. Asked again at later reads until the backend
-/// could make it (duplication may still be opening). Not while a request handed to a thread
-/// carries it ([`take_compare`]): that thread makes it. A VM that reads the standard way pays
-/// one app-data lookup, as `vm_source` does.
-pub(crate) fn read_source(lua: &Lua, backend: &dyn Backend, region: (i32, i32, i32, i32)) -> CaptureSource {
-    read_source_with(lua, region, |who, r| backend.compare_capture_sources(who, r))
-}
-
-/// [`read_source`] with the comparison passed in, so the once-per-VM rule can be tested.
-fn read_source_with(
-    lua: &Lua,
-    region: (i32, i32, i32, i32),
-    compare: impl FnOnce(&str, (i32, i32, i32, i32)) -> bool,
-) -> CaptureSource {
-    let Some(v) = lua.app_data_ref::<VmCapture>() else {
-        return CaptureSource::Standard;
-    };
-    if let Some(req) = v.compare.take(&v.who, region) {
-        req.settle(compare(&v.who, region));
-    }
-    v.src
-}
-
 /// This VM's first-read comparison for a read of `region` that a thread captures for — a text
-/// read, a snapshot or a profile with a callback, an asynchronous search — when it is still owed:
-/// the request carries it, and that thread makes it before its capture, never the event loop.
-/// `None` when there is none to make, or another request carries it. The request's source is
-/// [`vm_source`].
+/// read, a snapshot or a profile with a callback, an asynchronous search, every call a handler
+/// waits for — when it is still owed: the request carries it, and that thread makes it before its
+/// capture, never the event loop. A call that captures on the event loop, where it cannot wait,
+/// makes none: the comparison is left to the module's next read handed to a thread. `None` when
+/// there is none to make, or another request carries it. The request's source is [`vm_source`].
 pub(crate) fn take_compare(lua: &Lua, region: (i32, i32, i32, i32)) -> Option<CompareReq> {
     let v = lua.app_data_ref::<VmCapture>()?;
     v.compare.take(&v.who, region)
@@ -267,8 +240,7 @@ pub(crate) fn apply(lua: &Lua, id: &str, manifest: &ModuleManifest, deps: &mut [
         logging::line("capture", l);
     }
     // The author's question after declaring it is "does it change anything for this
-    // application?", and the first read of the freshly built VM answers it — see `read_source`
-    // and `take_compare`.
+    // application?", and the first read of the freshly built VM answers it — see `take_compare`.
     let compare = Arc::new(CompareSlot::new(matches!(src, CaptureSource::Duplication { .. })));
     lua.set_app_data(VmCapture { src, who: id.to_string(), compare });
 }
@@ -651,38 +623,47 @@ mod tests {
 
     #[test]
     fn each_vm_compares_once_under_its_own_name_and_asks_again_until_it_could() {
-        let asked = Cell::new(0u32);
-        let can = Cell::new(false);
+        thread_local! {
+            static ASKED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+            static CAN: Cell<bool> = const { Cell::new(false) };
+        }
+        fn noted(who: &str, _: (i32, i32, i32, i32)) -> bool {
+            ASKED.with(|a| a.borrow_mut().push(who.to_string()));
+            CAN.with(Cell::get)
+        }
+        let asked = || ASKED.with(|a| a.borrow().len());
+        // A read handed to a thread: its request takes the comparison while it is owed, and the
+        // thread makes it before the read's own capture.
         let read = |lua: &Lua| {
-            read_source_with(lua, (1, 1, 1, 1), |who, _| {
-                assert_eq!(who, "com.game.menu", "the line names the module that read");
-                asked.set(asked.get() + 1);
-                can.get()
-            })
+            if let Some(req) = take_compare(lua, (1, 1, 1, 1)) {
+                req.make(noted);
+            }
+            vm_source(lua)
         };
         let lua = built(DUP_ONLY);
         if !cfg!(windows) {
             // Accepted and ignored off Windows: the standard source, and nothing to compare.
             assert_eq!(read(&lua), CaptureSource::Standard);
-            assert_eq!(asked.get(), 0);
+            assert_eq!(asked(), 0);
             return;
         }
         // Still opening: not made, so the next read asks again.
         assert_eq!(read(&lua), DUP_ONLY);
         assert_eq!(read(&lua), DUP_ONLY);
-        assert_eq!(asked.get(), 2);
+        assert_eq!(asked(), 2);
         // Made: never again for this VM.
-        can.set(true);
+        CAN.with(|c| c.set(true));
         read(&lua);
         read(&lua);
-        assert_eq!(asked.get(), 3);
+        assert_eq!(asked(), 3);
         // A second VM declaring the same gets its own, rather than none because the first
         // module took the process's only one.
         read(&built(DUP_ONLY));
-        assert_eq!(asked.get(), 4);
+        assert_eq!(asked(), 4);
         // A VM reading the standard way never compares.
         assert_eq!(read(&built(CaptureSource::Standard)), CaptureSource::Standard);
-        assert_eq!(asked.get(), 4);
+        assert_eq!(asked(), 4);
+        assert!(ASKED.with(|a| a.borrow().iter().all(|w| w == "com.game.menu")), "the line names the module that read");
     }
 
     fn could_not(_: &str, _: (i32, i32, i32, i32)) -> bool {
@@ -698,18 +679,11 @@ mod tests {
     }
 
     /// The three states: owed until a request takes it, then in flight — one request carries it,
-    /// and neither another request nor a call that reads on the event loop makes it meanwhile —
-    /// then made for good, or owed again when that request could not make it or ended without
-    /// making it. A request that ends after a later one took it does not take it from that one.
+    /// and no other request makes it meanwhile — then made for good, or owed again when that
+    /// request could not make it or ended without making it. A request that ends after a later one
+    /// took it does not take it from that one.
     #[test]
     fn one_request_carries_the_comparison_and_one_that_ends_without_it_gives_it_back() {
-        let on_loop = Cell::new(0u32);
-        let read_on_loop = |lua: &Lua| {
-            read_source_with(lua, (1, 1, 1, 1), |_, _| {
-                on_loop.set(on_loop.get() + 1);
-                true
-            })
-        };
         // A VM that reads the standard way has nothing to compare: made from the start.
         let standard = built(CaptureSource::Standard);
         assert_eq!(compare_state(&standard), Some(Compare::Done));
@@ -722,8 +696,6 @@ mod tests {
         let first = take_compare(&lua, (0, 0, 100, 100)).expect("owed, so the request carries it");
         assert_eq!(compare_state(&lua), Some(Compare::InFlight));
         assert!(take_compare(&lua, (0, 0, 100, 100)).is_none(), "one request at a time");
-        assert_eq!(read_on_loop(&lua), DUP_ONLY);
-        assert_eq!(on_loop.get(), 0, "not made on the event loop while a request carries it");
         // Copied with its request, and given back when the last copy ends without making it.
         let copy = first.clone();
         drop(first);
@@ -742,14 +714,12 @@ mod tests {
         next.make(could_not);
         next.make(could);
         assert_eq!(compare_state(&lua), Some(Compare::Owed), "a request makes it once at most");
-        // Made: never again, by a request or on the event loop.
+        // Made: never again.
         let last = take_compare(&lua, (0, 0, 100, 100)).unwrap();
         last.make(could);
         drop(last);
         assert_eq!(compare_state(&lua), Some(Compare::Done));
         assert!(take_compare(&lua, (0, 0, 100, 100)).is_none());
-        read_on_loop(&lua);
-        assert_eq!(on_loop.get(), 0);
         // One that panics counts as made: it would fail the same way at every read.
         crate::quiet_expected_panics();
         let other = Lua::new();

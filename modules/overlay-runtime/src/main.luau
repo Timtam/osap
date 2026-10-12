@@ -1580,41 +1580,10 @@ local function addTemplates(templates, labels, images, label)
   end
 end
 
--- Reads a graphical toggle's state by image-matching its region against the
--- on/off templates. Returns "on" / "off" / nil (unknown).
-local function gtoggleState(self, c)
-  if not c.region then return nil end
-  local region = regionOf(self, c)
-  if not region then return nil end
-  local opts = {
-    region = region,
-    tolerance = c.tolerance or MATCH_TOLERANCE,
-    scales = c.scales or MATCH_SCALES,
-  }
-  -- One capture, both templates: the region is touched ONCE (not once per template,
-  -- each a ~1-frame screen read), and on/off are matched against the SAME frame — so a
-  -- toggle changing mid-repaint can't slip between two separate captures (which read
-  -- nil). The hit's 1-based index maps back to the on/off label.
-  if host.screen.imageSearchMulti then
-    local templates, labels = {}, {}
-    addTemplates(templates, labels, c.onImage, "on")
-    addTemplates(templates, labels, c.offImage, "off")
-    if #templates == 0 then return nil end
-    local idx = host.screen.imageSearchMulti(templates, opts)
-    return idx and labels[idx] or nil
-  end
-  -- Fallback for a host without imageSearchMulti: one capture per template.
-  for _, t in ipairs(asList(c.onImage)) do
-    if host.screen.imageSearch(t, opts) then return "on" end
-  end
-  for _, t in ipairs(asList(c.offImage)) do
-    if host.screen.imageSearch(t, opts) then return "off" end
-  end
-  return nil
-end
-
 -- Where the slider's thumb is right now, in screen coordinates, or nil when it cannot be
--- found (the panel is not showing, or the plugin draws it differently than the template).
+-- found (the panel is not showing, or the plugin draws it differently than the template). The
+-- search waits in a handler, so whatever acts on the answer checks first that the overlay is
+-- still where it asked (sliderStep).
 local function sliderThumb(self, c)
   if not (c.region and c.thumbImage) then return nil end
   local region = regionOf(self, c)
@@ -1689,7 +1658,11 @@ end
 -- actually move, the target is extended a pixel at a time until it does, the track end is
 -- reached, or the attempt budget runs out. Everything after the first drag runs on a timer,
 -- so this never blocks the loop, and every continuation re-checks that the overlay is still
--- on the same window — a drag into whatever window arrived meanwhile is not recoverable.
+-- where the step began — active, in the same stay in front, on the same window — and so does
+-- every thumb search before its answer is used, since the search waits in a handler and the user
+-- can bring another window forward meanwhile: a drag into whatever window arrived is not
+-- recoverable, and a percentage said over it is not this slider's. Where it is not, nothing
+-- follows, and the log says why.
 local SLIDER_SETTLE, SLIDER_MAX_NUDGES = 25, 24
 local function sliderStep(self, c, dir)
   -- A track that cannot be placed now (a scaled overlay with no factor, a region function with
@@ -1703,7 +1676,16 @@ local function sliderStep(self, c, dir)
     local _, _, why = placePoint(self, c, c.from, 0)
     if why then return unplaced(self, c, why) end
   end
+  local mark = markAt(self, self.focus)
+  local function gone(after)
+    local fine, why = stillHereAt(self, mark)
+    if fine then return false end
+    host.log.info(string.format("[overlay] %s: '%s' not going on %s — %s",
+      tostring(self.label), tostring(c.label), after, why))
+    return true
+  end
   local thumb = sliderThumb(self, c)
+  if gone("after finding its thumb") then return end
   if not thumb then
     host.speech.output((c.label or "") .. ", not found", { interrupt = true })
     return
@@ -1716,18 +1698,17 @@ local function sliderStep(self, c, dir)
     if from and to then step = math.max(1, math.ceil((to - from) / 100)) end
   end
   local startPct = sliderPercent(self, c, thumb)
-  local pinned = self:hwnd()
   local target = thumb.cx + dir * step
   local nudges = 0
   local function attempt()
-    if not self.active or self:hwnd() ~= pinned then return end
     local t = sliderThumb(self, c)
-    if not t then return end
+    if gone("after finding its thumb to drag it") or not t then return end
     if refuseOutside(self, c, target, t.cy) then return end
     host.input.drag(t.cx, t.cy, target, t.cy)
     host.timer.after(SLIDER_SETTLE, function()
-      if not self.active or self:hwnd() ~= pinned then return end
+      if gone("after its drag") then return end
       local after = sliderThumb(self, c)
+      if gone("after finding its thumb again") then return end
       local pct = after and sliderPercent(self, c, after)
       local ended = pct == nil
         or (pct == 0 and dir < 0)
@@ -7353,8 +7334,9 @@ function Overlay:_pickSeen(t, value)
   -- a click made again after a tick gets (_pickFollow).
   p.shooting = true
   self:_pickShot(c, m, x, y, function(write)
-    -- Written on a later pass, the click made or not: a PNG takes the event loop for hundreds of
-    -- milliseconds in a debug build, and the click is what the user is waiting for.
+    -- Written on a later pass, the click made or not: a PNG keeps the module waiting for hundreds
+    -- of milliseconds in a debug build while the image worker writes it, and the click is what the
+    -- user is waiting for.
     host.timer.after(0, write)
     if self._pick ~= p then return end
     p.shooting = nil
@@ -8127,11 +8109,11 @@ end
 -- nothing else — waited for in the press's handler, taken on the `screen-capture` thread, and
 -- the click made only if the overlay is still where the press was (_menuOpening). The later two
 -- are taken off the event loop at their time (snapshotAsync with `at`) and written when they
--- arrive; the "before" one is written last, once both are in, and
--- its snapshot kept until then. Not on the next pass after the click: that is when the menu's
--- first answer, its window coming to the front and the user's first key arrive, and a PNG takes
--- the event loop for hundreds of milliseconds in a debug build. So a key pressed while the menu
--- opens waits for no capture and no PNG; one pressed at 600 or 1500 ms waits for one or two
+-- arrive; the "before" one is written last, once both are in, and its snapshot kept until then.
+-- Not on the next pass after the click: that is when the menu's first answer, its window coming
+-- to the front and the user's first key arrive, and a PNG keeps the module waiting for hundreds
+-- of milliseconds in a debug build while the image worker writes it. So a key pressed while the
+-- menu opens waits for no capture and no PNG; one pressed at 600 or 1500 ms waits for one or two
 -- PNGs. The timing is a measuring instrument, not menu state: nothing reads these pictures but
 -- the person calibrating.
 --

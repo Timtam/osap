@@ -173,7 +173,7 @@ local function expensiveThing()
 end
 ```
 
-The epoch is read after the work because work that waits — a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) without a callback, a [`host.screen.snapshot`](./screen.md#where-it-waits), `pixel`, `pixels`, `profile`, `cells`, `matchCells`, `template{ capture }` or `crop` in a handler — lets other events turn it over meanwhile (the wait itself does not), and an answer kept under the epoch it was asked in would be worked out again at the next call.
+The epoch is read after the work because work that waits — a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) without a callback, a [`host.screen.snapshot`](./screen.md#where-it-waits), `pixel`, `pixels`, `profile`, `cells`, `matchCells`, `template{ capture }`, `crop`, a search, `save` or `saveMarked` in a handler — lets other events turn it over meanwhile (the wait itself does not), and an answer kept under the epoch it was asked in would be worked out again at the next call.
 
 Deliberately **not** time-based, and it does not advance on an idle tick. A stale answer here means acting on the wrong screen position, and "it was fresh 50 ms ago" is not a safety property.
 

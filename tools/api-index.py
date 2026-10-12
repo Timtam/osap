@@ -400,9 +400,9 @@ CAPABILITIES = [
     '[`profile`](screen.md#profile-with-a-callback) given a callback runs on threads of the host\'s '
     'own and answers in a callback. Without one, a text read answers the handler that waits '
     'for it, and so do [`snapshot`](screen.md#where-it-waits), `pixel`, `pixels`, `profile`, '
-    '`cells`, `matchCells`, `template{ capture }` and a snapshot\'s `crop`: only their own '
-    'module waits. The searches without a callback, `template` from a file, `save` and `saveMarked` '
-    'hold the loop until they return. Which call runs where: '
+    '`cells`, `matchCells`, `template{ capture }`, a snapshot\'s `crop`, the searches without a '
+    'callback, `save` and `saveMarked`: only their own module waits. `template` from a file, and a '
+    'search\'s template file, are opened on the loop. Which call runs where: '
     '[Threads](../module-runtime-and-lifecycle.md#threads).',
     '- **A manifest that names its target window.** `module.toml` has no window or process '
     'field; matching is Luau — see the [manifest](../module-package-format.md).',

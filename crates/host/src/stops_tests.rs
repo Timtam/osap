@@ -606,21 +606,22 @@ fn the_messages_are_the_documented_ones() {
     found(&said);
 
     // A slow host call in the library's code: only the module whose callback ran it, at the
-    // library's line, which is named as the library's.
+    // library's line, which is named as the library's. One the event loop waits for: a search, which
+    // waits in a handler now, counts on no clock there.
     let mut t = time_trip(synth_vm(1), "hotkey", ("com.example.kit", "src/main.luau", 1595), &[]);
     t.cause = Cause::Time { clock: Clock::Wall, cpu: Duration::from_millis(1200), wall: Duration::from_millis(10040) };
-    t.call = Some("host.screen.imageSearchMulti");
+    t.call = Some("host.element.find");
     let slow = event(t);
     let said = stops::sentence(&slow);
     assert_eq!(
         said,
-        "Stopped Synth overlay: its hotkey callback ran for 10 seconds without returning, in \
-         host.screen.imageSearchMulti, at Overlay kit's src/main.luau line 1595. Its keys go to the program in front \
-         again; it stays off until you turn it on in the module manager."
+        "Stopped Synth overlay: its hotkey callback ran for 10 seconds without returning, in host.element.find, at \
+         Overlay kit's src/main.luau line 1595. Its keys go to the program in front again; it stays off until you turn \
+         it on in the module manager."
     );
     found(&said);
     let note = stops::row_note(&slow, 1);
-    assert_eq!(note, "stopped: its hotkey callback ran too long, in host.screen.imageSearchMulti, at Overlay kit's src/main.luau:1595");
+    assert_eq!(note, "stopped: its hotkey callback ran too long, in host.element.find, at Overlay kit's src/main.luau:1595");
     found(&note);
 
     // A library's code, in Synth overlay's hotkey callback: the library and the two modules that

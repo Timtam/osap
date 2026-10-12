@@ -136,6 +136,9 @@ mod region;
 /// The one strict reader of a Region argument, for the cells calls and `host.ocr.recognize`.
 mod region_lua;
 pub mod registry;
+/// `host.screen.save` and `saveMarked`: a region written as a PNG, with crosshairs for the second,
+/// on the image worker in a handler — see the file.
+mod save;
 mod settings;
 /// `host.screen.snapshot` and `pixels`: the Snapshot handle, its budget, and the rules every
 /// read of a snapshot applies — see the file.
@@ -8095,96 +8098,21 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     snapshot::install_crop(lua, idx, shared.clone())?;
     // The image-search bindings and template handles live in image_search.rs, with the rules
     // that belong to them: who an async answer is delivered to, what a module may hold in
-    // handles, and what a panic on the worker turns into. Registered HERE, by name, because
-    // this file is what check-docs.ps1 and tools/api-index.py read to learn what exists.
+    // handles, and what a panic on the worker turns into. `imageSearch`, `imageSearchMulti` and
+    // `imageSearchAll` wait in a handler while the image worker captures and matches, and where
+    // they cannot wait do both on the event loop, said in the log. Registered HERE, by name,
+    // because this file is what check-docs.ps1 and tools/api-index.py read to learn what exists.
     screen.set("template", image_search::template(lua, shared, idx)?)?;
     screen.set("imageSearch", image_search::image_search(lua, shared, idx)?)?;
     screen.set("imageSearchMulti", image_search::image_search_multi(lua, shared, idx)?)?;
     screen.set("imageSearchAsync", image_search::image_search_async(lua, shared, idx)?)?;
     screen.set("imageSearchEach", image_search::image_search_each(lua, shared, idx)?)?;
     // host.screen.saveMarked(path, opts) — like save, but draws a crosshair (and an index
-    // tick) at each point in `opts.marks` = { {x, y}, … } in SCREEN coordinates.
-    //
-    // This is the calibration question in one picture: "is my control on its button?"
-    // Reading a control's coordinates out of a log and finding that spot in a screenshot
-    // by hand is the step that hides errors — a set of toggles in this repo sat 16 px off,
-    // on the caption row under the buttons, for as long as it existed, because the colours
-    // sampled there happened to look plausible. A crosshair drawn where the click will
-    // actually land makes that a glance instead of an arithmetic exercise.
-    let sh = shared.clone();
-    screen.set(
-        "saveMarked",
-        lua.create_function(move |lua, (path, opts): (String, Table)| {
-            host_call!("host.screen.saveMarked");
-            let full = sh.root(idx).join(&path);
-            png_path_only("host.screen.saveMarked", &full)?;
-            // A window region is resolved to its screen rectangle first; the marks stay in
-            // screen coordinates whichever form the region takes.
-            let snap = snapshot::from_opts(Some(&opts), "host.screen.saveMarked")?;
-            let region = match &snap {
-                Some(f) => snapshot::opts_region_in(Some(&opts), "host.screen.saveMarked", f)?,
-                None => opts_region(&*sh.backend, Some(&opts), "host.screen.saveMarked")?,
-            };
-            let (rx, ry, rw, rh) = match region {
-                Ok(r) => (r.x, r.y, r.w, r.h),
-                Err(why) => return with_reason(lua, mlua::Value::Boolean(false), why),
-            };
-            let shot = match snap {
-                // On a snapshot, the part of the region inside it, copied out: the marks are
-                // then placed relative to that part's corner.
-                Some(frame) => snapshot::clip(&frame, region::ScreenRect { x: rx, y: ry, w: rw, h: rh }).and_then(|r| {
-                    frame.crop_image(r).map(|img| (r.x, r.y, img)).ok_or_else(|| snapshot::NO_OVERLAP.to_string())
-                }),
-                None => {
-                    let src = capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh));
-                    sh.backend.capture(rx, ry, rw, rh, src).map(|img| (rx, ry, img))
-                }
-            };
-            let (rx, ry, cap) = match shot {
-                Ok(shot) => shot,
-                Err(why) => return with_reason(lua, mlua::Value::Boolean(false), why),
-            };
-            let Some(mut img) = image::RgbaImage::from_raw(cap.w, cap.h, cap.rgba) else {
-                return with_reason(lua, mlua::Value::Boolean(false), SHORT_CAPTURE.to_string());
-            };
-            let marks: Table = opts.get("marks").unwrap_or(lua.create_table()?);
-            for (n, m) in marks.sequence_values::<Table>().enumerate() {
-                let Ok(m) = m else { continue };
-                let (mx, my): (i32, i32) = (m.get("x").unwrap_or(0), m.get("y").unwrap_or(0));
-                // Region-relative, and only what is actually inside the shot.
-                let (cx, cy) = (mx - rx, my - ry);
-                if cx < 0 || cy < 0 || cx >= cap.w as i32 || cy >= cap.h as i32 {
-                    continue;
-                }
-                // Magenta: not a colour these dark plugin UIs use, so it cannot be mistaken
-                // for part of the interface.
-                let ink = image::Rgba([255u8, 0, 255, 255]);
-                for d in -9i32..=9 {
-                    for (px, py) in [(cx + d, cy), (cx, cy + d)] {
-                        if px >= 0 && py >= 0 && px < cap.w as i32 && py < cap.h as i32 {
-                            img.put_pixel(px as u32, py as u32, ink);
-                        }
-                    }
-                }
-                // n+1 ticks below the crosshair, so marks stay tellable apart without text.
-                for t in 0..=(n as i32) {
-                    let (px, py) = (cx - (n as i32) + 2 * t, cy + 12);
-                    if px >= 0 && py >= 0 && px < cap.w as i32 && py < cap.h as i32 {
-                        img.put_pixel(px as u32, py as u32, ink);
-                    }
-                }
-            }
-            // Create the folder: image::save does not, and "the system cannot find the
-            // path" is a poor answer to "put a screenshot here".
-            if let Some(dir) = full.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            img.save(&full).map_err(|e| {
-                mlua::Error::external(format!("screen.saveMarked '{}': {e}", full.display()))
-            })?;
-            one_value(mlua::Value::Boolean(true))
-        })?,
-    )?;
+    // tick) at each point in `opts.marks` = { {x, y}, … } in SCREEN coordinates: the calibration
+    // question in one picture. Both wait in a handler while the image worker captures, marks,
+    // encodes and writes, and where they cannot wait the event loop does, said in the log: the rules
+    // are in save.rs; registered HERE, by name, for check-docs.ps1 and tools/api-index.py.
+    screen.set("saveMarked", save::save_marked(lua, shared, idx)?)?;
     // In image_search.rs too; see the note above imageSearch.
     screen.set("imageSearchAll", image_search::image_search_all(lua, shared, idx)?)?;
     // host.screen.predicate / cells / matchCells / matchCellsAsync — a region reduced to a
@@ -8243,55 +8171,11 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             image_search::enqueue_cells(&sh, lua, idx, cb, rect, matcher, st.names, call.snapshot)
         })?,
     )?;
-    // host.screen.save(path, opts?) — capture a screen region (opts.region, else the
-    // full screen) and write it to `path` (relative to the calling module's root; an
-    // absolute path is used as-is) as a PNG. Returns true on success. A calibration
-    // affordance: re-capture an image control's templates against the live plugin.
-    let sh = shared.clone();
-    screen.set(
-        "save",
-        lua.create_function(move |lua, (path, opts): (String, Option<Table>)| {
-            host_call!("host.screen.save");
-            let full = sh.root(idx).join(&path);
-            png_path_only("host.screen.save", &full)?;
-            let snap = snapshot::from_opts(opts.as_ref(), "host.screen.save")?;
-            let region = match &snap {
-                Some(f) => snapshot::opts_region_in(opts.as_ref(), "host.screen.save", f)?,
-                None => opts_region(&*sh.backend, opts.as_ref(), "host.screen.save")?,
-            };
-            let (rx, ry, rw, rh) = match region {
-                Ok(r) => (r.x, r.y, r.w, r.h),
-                Err(why) => return with_reason(lua, mlua::Value::Boolean(false), why),
-            };
-            // On a snapshot, the part of the region inside it, copied out; nothing is captured.
-            let shot = snap.map(|frame| {
-                snapshot::clip(&frame, region::ScreenRect { x: rx, y: ry, w: rw, h: rh })
-                    .and_then(|r| frame.crop_image(r).ok_or_else(|| snapshot::NO_OVERLAP.to_string()))
-            });
-            // Through the module's own source, like every other read. In a module that reads
-            // through duplication, a shot taken before it has opened is the standard picture
-            // (or `false` under fallback = "none") — docs/api/screen.md says so.
-            let shot = match shot {
-                Some(shot) => shot,
-                None => sh.backend.capture(rx, ry, rw, rh, capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh))),
-            };
-            match shot {
-                Ok(cap) => match image::RgbaImage::from_raw(cap.w, cap.h, cap.rgba) {
-                    Some(img) => {
-                        if let Some(dir) = full.parent() {
-                            let _ = std::fs::create_dir_all(dir);
-                        }
-                        img.save(&full).map_err(|e| {
-                            mlua::Error::external(format!("screen.save '{}': {e}", full.display()))
-                        })?;
-                        one_value(mlua::Value::Boolean(true))
-                    }
-                    None => with_reason(lua, mlua::Value::Boolean(false), SHORT_CAPTURE.to_string()),
-                },
-                Err(why) => with_reason(lua, mlua::Value::Boolean(false), why),
-            }
-        })?,
-    )?;
+    // host.screen.save(path, opts?) — capture a screen region (opts.region, else the full screen)
+    // and write it to `path` (relative to the calling module's root; an absolute path is used as-is)
+    // as a PNG. Returns true on success. A calibration affordance: re-capture an image control's
+    // templates against the live plugin. In save.rs, beside saveMarked.
+    screen.set("save", save::save(lua, shared, idx)?)?;
     host.set("screen", screen)?;
 
     let ocr = lua.create_table()?;
@@ -9634,19 +9518,6 @@ pub(crate) fn region_arg_on(
     Ok(given.resolve().map_err(|u| u.to_string()))
 }
 
-/// [`region_arg`] for `opts.region`, with no `opts` read as no region.
-pub(crate) fn opts_region(
-    backend: &dyn Backend,
-    opts: Option<&Table>,
-    fname: &str,
-) -> mlua::Result<std::result::Result<region::ScreenRect, String>> {
-    let v = match opts {
-        Some(o) => o.get::<mlua::Value>("region")?,
-        None => mlua::Value::Nil,
-    };
-    region_arg(backend, &v, fname, "opts.region")
-}
-
 /// `pixel(x, y)`'s screen coordinates, converted exactly as they always were (a fraction cut
 /// toward zero, a numeral string accepted). What does not convert is not a number, or one
 /// outside the 32-bit range every coordinate lives in (`1e10`), and raises naming it.
@@ -9660,20 +9531,6 @@ pub(crate) fn pixel_coords(lua: &Lua, x: &mlua::Value, y: &mlua::Value) -> mlua:
         })
     };
     Ok((coord(x, "x")?, coord(y, "y")?))
-}
-
-/// `save` and `saveMarked` write PNG only, and refuse any other path before anything is read:
-/// a wrong extension is the caller's mistake whatever the screen holds, so it raises even when
-/// the capture would have failed, as every other argument of theirs does. Matched without
-/// regard to case, as the image encoder matched it when it was the one to refuse.
-fn png_path_only(fname: &str, full: &std::path::Path) -> mlua::Result<()> {
-    if full.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
-        return Ok(());
-    }
-    Err(mlua::Error::external(format!(
-        "{fname}: '{}' does not end in .png; PNG is the one image format the host writes",
-        full.display()
-    )))
 }
 
 /// The reason given when a capture came back smaller than it said it was — which a backend
@@ -10687,11 +10544,13 @@ mod focus_step_binding_tests {
 /// moves, rather than silently when the rule goes.
 #[cfg(test)]
 mod ocr_wiring_tests {
-    use super::{one_value, pixel_coords, png_path_only, region, region_arg_on, with_reason};
+    use super::{one_value, pixel_coords, region, region_arg_on, with_reason};
+    use crate::save::png_path_only;
     use mlua::Lua;
 
     const LIB: &str = include_str!("lib.rs");
     const IMAGES: &str = include_str!("image_search.rs");
+    const SAVE: &str = include_str!("save.rs");
     const GAMEPAD: &str = include_str!("gamepad_api.rs");
     const SNAP: &str = include_str!("snapshot.rs");
     const OCR_LUA: &str = include_str!("ocr/lua.rs");
@@ -11046,9 +10905,8 @@ mod ocr_wiring_tests {
         let api = body(LIB, "fn install_host_api(");
         let screen = bindings(api, "screen");
         let text = |name: &str| screen.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.screen.{name}")).1;
-        for name in ["save", "saveMarked"] {
-            assert!(text(name).contains("opts_region(&*sh.backend"), "host.screen.{name} reads its region another way");
-        }
+        assert!(text("save").contains("save::save(lua, shared, idx)") && text("saveMarked").contains("save::save_marked(lua, shared, idx)"));
+        assert!(body(SAVE, "fn save_ask(").contains("crate::region_arg_on(screen, &v, fname, \"opts.region\")?"), "save and saveMarked");
         assert!(text("profile").contains("snapshot::profile(lua, shared, idx)"), "host.screen.profile");
         assert!(body(SNAP, "pub(crate) fn profile_args(").contains("crate::region_arg_on(screen, &region_value, FPR, \"opts.region\")?"));
         assert!(text("pixel").contains("snapshot::pixel(lua, shared, idx)"), "host.screen.pixel");
@@ -11065,16 +10923,20 @@ mod ocr_wiring_tests {
         assert!(body(OCR_LUA, "fn bad(").contains("format!(\"host.ocr.recognize: {msg}\")"));
         assert!(body(LIB, "fn region_arg(").contains("region_arg_on("));
         assert!(body(LIB, "fn region_arg_on(").contains("region_lua::read_loose("));
-        for f in ["fn image_search(", "fn image_search_multi(", "fn image_search_async(", "fn image_search_each(", "fn image_search_all("] {
-            assert!(body(IMAGES, f).contains("search_region(&sh, opts.as_ref()"), "`{f}` reads opts.region another way");
+        for f in ["fn image_search_async(", "fn image_search_each("] {
+            assert!(body(IMAGES, f).contains("search_region(sh.backend.screen_size(), opts.as_ref()"), "`{f}` reads opts.region another way");
         }
+        for (f, kind) in [("fn image_search(", "One"), ("fn image_search_multi(", "Multi"), ("fn image_search_all(", "All")] {
+            assert!(body(IMAGES, f).contains(&format!("search_ask(Search::{kind}, tv, opts, sh.backend.screen_size(), &load)")), "`{f}`");
+        }
+        assert!(body(IMAGES, "pub(crate) fn search_ask(").contains("None => search_region(screen, o, fname)?,"), "the searches that wait");
         assert!(body(IMAGES, "fn image_search_each(").contains("region_arg(&*sh.backend, &r, F"), "a `within` read another way");
         assert!(body(IMAGES, "fn parse_spec(").contains("region_lua::read_loose(&v, \"capture\""), "template{{ capture }}");
-        assert!(body(IMAGES, "fn search_region(").contains("opts_region("));
+        assert!(body(IMAGES, "fn search_region(").contains("crate::region_arg_on(screen, &v, fname, \"opts.region\")"));
         // Each call names ITSELF to the reader, so its mistakes are reported under its own name.
-        for name in ["save", "saveMarked"] {
-            assert!(text(name).contains(&format!("\"host.screen.{name}\"")), "host.screen.{name} reads its region under another name");
-        }
+        assert!(SAVE.contains("Shot::Plain => \"host.screen.save\",") && SAVE.contains("Shot::Marked => \"host.screen.saveMarked\","));
+        assert!(body(SAVE, "fn save_ask(").contains("let fname = shot.name();"), "save and saveMarked read their region under another name");
+        assert!(body(IMAGES, "pub(crate) fn search_ask(").contains("let fname = kind.name();"), "a search reads its region under another name");
         assert!(SNAP.contains("const FPR: &str = \"host.screen.profile\";"), "host.screen.profile reads its region under another name");
         for (f, name) in [
             ("fn image_search(", "imageSearch"),
@@ -11096,13 +10958,12 @@ mod ocr_wiring_tests {
         assert!(body(SNAP, "fn read_point_list(").contains("region_lua::read_point_any("));
         assert!(body(SNAP, "fn loose_region(").contains("region_lua::read_loose_within("));
         assert!(body(SNAP, "fn opts_region_in(").contains("loose_region("));
-        for name in ["save", "saveMarked"] {
-            assert!(text(name).contains("snapshot::opts_region_in("), "host.screen.{name} reads a snapshot's region another way");
-        }
+        assert!(body(SAVE, "fn save_ask(").contains("snapshot::opts_region_in(o, fname, f)?"), "save and saveMarked read a snapshot's region another way");
         assert!(body(SNAP, "pub(crate) fn profile_args(").contains("opts_region_in(opts, FPR, f)?"), "host.screen.profile");
-        for f in ["fn image_search(", "fn image_search_multi(", "fn image_search_async(", "fn image_search_each(", "fn image_search_all("] {
+        for f in ["fn image_search_async(", "fn image_search_each("] {
             assert!(body(IMAGES, f).contains("snapshot_region(opts.as_ref()"), "`{f}` reads a snapshot's region another way");
         }
+        assert!(body(IMAGES, "pub(crate) fn search_ask(").contains("Some(f) => snapshot_region(o, fname, f)?,"), "the searches that wait");
         assert!(body(IMAGES, "fn snapshot_region(").contains("snapshot::opts_region_in("));
         assert!(body(IMAGES, "fn image_search_each(").contains("snapshot::loose_region(&r, F, &format!(\"entries[{}].within\""));
         assert!(body(IMAGES, "fn parse_spec(").contains("region_lua::read_loose_within(&v, \"capture\""), "template{{ capture, snapshot }}");
@@ -11136,10 +10997,30 @@ mod ocr_wiring_tests {
         assert!(text("cells").contains("cells_fn(lua, shared, idx)") && text("matchCells").contains("match_cells_fn(lua, shared, idx)"));
         assert!(body(LIB, "fn cells_fn(").contains("cells_on_loop(&sh, lua, idx, CELLS, &why, ask)"));
         assert!(body(LIB, "fn match_cells_fn(").contains("cells_on_loop(&sh, lua, idx, MATCH_CELLS, &why, ask)"));
-        for (file, f) in [(LIB, "fn cells_on_loop("), (SNAP, "pub(crate) fn profile("), (IMAGES, "pub(crate) fn template(")] {
+        for (file, f) in [
+            (LIB, "fn cells_on_loop("),
+            (SNAP, "pub(crate) fn profile("),
+            (IMAGES, "pub(crate) fn template("),
+            (IMAGES, "fn live_capture("),
+            (SAVE, "fn live_capture("),
+        ] {
             let b = body(file, f);
             assert!(b.contains("capture_source::vm_source(lua)") && !b.contains("read_source("), "`{f}` compares on the loop");
         }
+        // The searches and the shots: the loop's capture is `live_capture`'s, and the work it
+        // hands the worker's own matching makes no comparison either.
+        for (file, f) in [
+            (IMAGES, "fn image_search("),
+            (IMAGES, "fn image_search_multi("),
+            (IMAGES, "fn image_search_all("),
+            (SAVE, "pub(crate) fn save("),
+            (SAVE, "pub(crate) fn save_marked("),
+        ] {
+            assert!(body(file, f).contains("|r| live_capture(&sh, lua, r)"), "`{f}`");
+        }
+        assert!(body(IMAGES, "fn search_on_loop<").contains("search_work(lua, kind, ask, region, false)"));
+        assert!(body(SAVE, "fn save_on_loop<").contains("save_work(lua, shot, ask, region, false)"));
+        assert!(body(IMAGES, "pub(crate) fn haystack(").contains("compare: if carry { capture_source::take_compare(lua, r) } else { None },"));
         // `pixel(x, y)` takes its options third and `pixel(point)` second.
         assert!(pixel.contains("_ => c,"), "pixel(x, y) reads its options from somewhere else");
         let read = body(SNAP, "pub(crate) fn pixels_args(");
@@ -11237,17 +11118,16 @@ mod ocr_wiring_tests {
             let e = png_path_only("host.screen.saveMarked", std::path::Path::new(bad)).expect_err(bad).to_string();
             assert!(e.contains("host.screen.saveMarked: '") && e.contains("does not end in .png"), "{bad}: {e}");
         }
-        let api = body(LIB, "fn install_host_api(");
-        let screen = bindings(api, "screen");
-        for name in ["save", "saveMarked"] {
-            let t = screen.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.screen.{name}")).1;
-            let check = t.find(&format!("png_path_only(\"host.screen.{name}\", &full)?;")).unwrap_or_else(|| panic!("host.screen.{name} does not check its path"));
-            let capture = t.find("sh.backend.capture(").expect("a capture");
-            assert!(check < capture, "host.screen.{name} checks its path only after capturing");
-            // And before the picture is a snapshot's, too.
-            let snap = t.find("snapshot::from_opts(").expect("a snapshot");
-            let cut = t.find("frame.crop_image(").expect("a snapshot's picture");
-            assert!(check < snap && check < cut, "host.screen.{name} checks its path only after reading a snapshot");
+        // Read with the arguments, before anything is read of the screen or of a snapshot: the
+        // capture, and the snapshot's copy, are the work after them (`save_work`).
+        let ask = body(SAVE, "fn save_ask(");
+        let check = ask.find("png_path_only(fname, &full)?;").expect("save and saveMarked do not check their path");
+        let snap = ask.find("snapshot::from_opts(").expect("a snapshot");
+        assert!(check < snap, "save and saveMarked check their path only after reading a snapshot");
+        assert!(!ask.contains("capture(") && !ask.contains("crop_image("), "save and saveMarked read a picture with their arguments");
+        for f in ["fn start_save<", "fn save_on_loop<"] {
+            let b = body(SAVE, f);
+            assert!(b.find("let region = match &ask.region {").unwrap() < b.find("save_work(").unwrap(), "`{f}`");
         }
     }
 
@@ -11286,14 +11166,10 @@ mod ocr_wiring_tests {
         assert_eq!(told.len(), 2);
         assert!(told[0].is_nil());
         assert_eq!(told[1].as_string().unwrap().to_string_lossy(), "screen capture failed");
-        let api = body(LIB, "fn install_host_api(");
-        let screen = bindings(api, "screen");
-        let text = |name: &str| screen.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.screen.{name}")).1;
-        for name in ["save", "saveMarked"] {
-            let t = text(name);
-            assert!(t.contains("one_value(") && t.contains("with_reason(lua, "), "host.screen.{name}");
-            assert!(!t.contains("mlua::Value::Nil))"), "host.screen.{name} answers two values where it answered one");
-        }
+        // `save` and `saveMarked` build their answers in save.rs, wherever they were made.
+        let saved = body(SAVE, "pub(crate) fn save_values(");
+        assert!(saved.contains("one_value(") && saved.contains("with_reason(lua, "), "save and saveMarked");
+        assert!(!saved.contains("Value::Nil))"), "save and saveMarked answer two values where they answered one");
         // `profile` builds its answers in snapshot.rs: on the event loop, and for a handler that waited.
         for f in ["pub(crate) fn profile_on_loop(", "fn waited_values("] {
             let t = body(SNAP, f);
@@ -11306,13 +11182,14 @@ mod ocr_wiring_tests {
             assert!(t.contains("one_value(") && t.contains("with_reason(lua, "), "`{f}`");
             assert!(!t.contains("nil_because(") && !t.contains("Value::Nil))"), "`{f}` answers two values where it answered one");
         }
-        for f in ["fn image_search(", "fn image_search_all(", "fn build_handle("] {
+        // The three searches build their answers in one function, wherever they were made.
+        for f in ["fn search_values(", "fn build_handle("] {
             let t = body(IMAGES, f);
             assert!(t.contains("one_value(") && t.contains("with_reason(lua, "), "`{f}`");
             assert!(!t.contains("nil_because("), "`{f}` answers two values where it answered one");
         }
-        let multi = body(IMAGES, "fn image_search_multi(");
-        assert!(multi.contains("vec![Value::Nil, Value::Nil, reason(lua, why)]"), "imageSearchMulti's reason is the third value");
+        let searched = body(IMAGES, "fn search_values(");
+        assert!(searched.contains("vec![Value::Nil, Value::Nil, reason(lua, why)]"), "imageSearchMulti's reason is the third value");
     }
 
     /// A module's reads are dropped, never delivered, when it is disabled, reloaded or rolled
@@ -11886,6 +11763,9 @@ mod ocr_wiring_tests {
         for name in ["template", "imageSearch", "imageSearchMulti", "imageSearchAsync", "imageSearchEach", "imageSearchAll"] {
             assert!(IMAGES.contains(&format!("host_call!(\"host.screen.{name}\")")), "host.screen.{name}");
         }
+        for name in ["save", "saveMarked"] {
+            assert!(include_str!("save.rs").contains(&format!("host_call!(\"host.screen.{name}\")")), "host.screen.{name}");
+        }
         for name in [
             "host.screen.snapshot",
             "host.screen.pixel",
@@ -11988,6 +11868,11 @@ mod ocr_wiring_tests {
             "snapshot.rs: profile",
             "snapshot.rs: install_crop",
             "image_search.rs: template",
+            "image_search.rs: image_search",
+            "image_search.rs: image_search_multi",
+            "image_search.rs: image_search_all",
+            "save.rs: save",
+            "save.rs: save_marked",
             "lib.rs: cells_fn",
             "lib.rs: match_cells_fn",
         ];
@@ -12212,6 +12097,9 @@ mod uptime_wiring_tests {
         assert!(submit.contains("logging::Said::Summary { count, over } =>"), "the summary is written");
         assert!(body(IMAGES, "fn worker_loop(").contains("waiting.retain(|t| !set.remove(&t.id));"));
         assert!(body(IMAGES, "pub(crate) fn purge_pending_images(").contains("self.images.ended.borrow_mut()"));
+        // A reload ends its searches and shots at the worker too: they are purged before its
+        // handlers' waits are withdrawn, which then end nothing.
+        assert!(body(IMAGES, "pub(crate) fn purge_pending_images(").contains("for p in gone.iter().filter(|p| !p.held) {\n            end_task(p.task.id);"));
         // OCR keys: forgotten when their last read is answered or dropped.
         assert!(body(OCR_LUA, "pub(crate) fn fire<H: MailHost>(h: &H)").contains("st.settled(p.owner, p.key.as_deref());"));
         assert!(body(OCR_LUA, "pub(crate) fn open_read<H: ReadHost>(").contains("st.settled(p.owner, p.key.as_deref());"));

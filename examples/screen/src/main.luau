@@ -2,9 +2,9 @@
 --
 -- In a timer's handler rather than at the top level: a handler is where a call can wait
 -- for what it asked, and a module's top level is not (see "Where it waits" in
--- docs/api/screen.md). Of the calls below, `pixel` and `snapshot` wait here for the screen while
--- the event loop goes on — a pixel of the snapshot touches no screen and answers at once —
--- and `size` and `imageSearch` run on the event loop wherever they are called.
+-- docs/api/screen.md). Of the calls below, `pixel` and `snapshot` wait here for the screen and
+-- `imageSearch` for the image worker while the event loop goes on — a pixel of the snapshot
+-- touches no screen and answers at once — and `size` runs on the event loop wherever it is called.
 
 host.timer.after(0, function()
   local size = host.screen.size()
@@ -30,7 +30,7 @@ host.timer.after(0, function()
   -- Image search for a bundled probe over a small region. The 8x8 magenta probe is
   -- almost certainly not on screen, so this proves the decode+capture+match pipeline
   -- runs end to end (returns nil). Point it at a real plugin asset to find a control.
-  local hit = host.screen.imageSearch("assets/probe.png", { region = { 0, 0, 400, 400 } })
+  local hit = host.screen.imageSearch("assets/probe.png", { region = { 0, 0, 400, 400 } })   -- waits here
   if hit then
     host.log.info(string.format("imageSearch: found probe at %d,%d (%dx%d)", hit.x, hit.y, hit.w, hit.h))
   else

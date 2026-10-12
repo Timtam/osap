@@ -195,7 +195,7 @@ end)
 
 A handler that has kept its module busy for 30 seconds or more with keys waiting behind it — one that reads again and again — is said once: `[com.example.game] has been busy for 31 s in a timer handler, waiting at com.example.game/src/main.luau:88; 4 key(s) wait behind it`.
 
-**A read's answer turns no epoch for the function that waited.** It goes on in the dispatch that asked, so the turn that hands it the reading leaves [`host.epoch()`](./timer.md#host-epoch) where it was; a callback's answer turns it, once for all that arrive together. [`host.screen.snapshot`](./screen.md#where-it-waits) waits in a handler the same way, for its picture, `pixel` and `pixels` for their colours, and `profile`, `cells`, `matchCells`, `template{ capture }` and a snapshot's `crop` for their answers.
+**A read's answer turns no epoch for the function that waited.** It goes on in the dispatch that asked, so the turn that hands it the reading leaves [`host.epoch()`](./timer.md#host-epoch) where it was; a callback's answer turns it, once for all that arrive together. [`host.screen.snapshot`](./screen.md#where-it-waits) waits in a handler the same way, for its picture, `pixel` and `pixels` for their colours, and `profile`, `cells`, `matchCells`, `template{ capture }`, a snapshot's `crop`, the searches without a callback, `save` and `saveMarked` for their answers.
 
 **After a wait, the world may have moved.** While a handler waits, the user can bring another window to the front, and a click made after the read lands there. An overlay checks with [`O:here()`](./overlay.md#o-here) before the read and [`O:stillHere`](./overlay.md#o-here) after it; other code compares `host.window.active()` before and after.
 

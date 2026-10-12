@@ -276,8 +276,10 @@ fn an_ocr_buttons_click_goes_by_its_control_not_by_the_focus() {
 // ---------------------------------------------------------------------------------------------
 
 /// The scripted pixel with something happening while it is read, as it can once a read of the
-/// screen waits: `T.during(fn)` runs `fn` inside the next reads, `T.during(nil)` stops it. And the
-/// overlay's window replaced by another one, `T.elsewhere()`, and back, `T.backHere()`.
+/// screen waits: `T.during(fn)` runs `fn` inside the next reads, `T.during(nil)` stops it. A
+/// slider's thumb search the same way: found centred at x = `S.thumb` (none while it is nil), on
+/// the row its region starts at. And the overlay's window replaced by another one,
+/// `T.elsewhere()`, and back, `T.backHere()`.
 const DURING: &str = r##"
 local S = T.S
 local during = nil
@@ -286,6 +288,14 @@ rawset(T.host.screen, "pixel", function()
   S.pixels += 1
   if during then during() end
   return S.pixel
+end)
+S.searches = 0
+rawset(T.host.screen, "imageSearchMulti", function(_, opts)
+  T.screenWait("host.screen.imageSearchMulti")
+  S.searches += 1
+  if during then during() end
+  if not S.thumb then return nil, nil end
+  return 1, { x = S.thumb - 5, y = opts.region[2], w = 10, h = 10, n = 1 }
 end)
 function T.during(fn) during = fn end
 local here = S.origin
@@ -419,6 +429,65 @@ fn a_reveal_probes_toggle_clicks_nothing_once_the_overlay_left_the_front_while_i
         assert(#S.clicks == 1, "the toggle clicked in another stay: " .. T.dump())
         assert(T.count("[overlay] Synth: 'Reverb' not going on after opening its panel — the overlay left the "
           .. "front and came back since") == 1, T.dump())
+    "#);
+}
+
+/// A slider's step finds its thumb, and a thumb search waits in a handler: the drag is made only while
+/// the overlay is still where the step began. Another window in front by the time the step's first
+/// search answers, or its search just before the drag, takes the drag away; another by the time the
+/// search after the drag answers takes away the percentage that would be said; and the log says
+/// why. Nothing changed, the same step drags by one percent and says where the thumb went.
+#[test]
+fn a_sliders_step_drags_nothing_once_another_window_came_to_the_front_during_its_search() {
+    run_during(r#"
+        local S = T.S
+        S.drags = {}
+        rawset(T.host.input, "drag", function(x1, y1, x2, y2) S.drags[#S.drags + 1] = { x1, y1, x2, y2 } end)
+        S.thumb = 145
+        local o = T.fields(function(o)
+          o:addSlider({ label = "Mix", region = { 10, 10, 110, 30 }, thumbImage = "C:/thumb.png", from = 10, to = 110 })
+        end)
+        o.focus = 3
+        local timers, said = #S.after, #S.speech
+        -- The step's first search.
+        T.during(T.elsewhere)
+        T.handled(o.adjust, o, 1)
+        assert(S.searches == 1 and #S.drags == 0 and #S.after == timers and #S.speech == said, T.dump())
+        assert(T.count("[overlay] Synth: 'Mix' not going on after finding its thumb — the overlay is on another "
+          .. "window now") == 1, T.dump())
+        -- The search just before the drag: the first one found the thumb where the step began.
+        T.during(nil)
+        T.backHere()
+        local first = true
+        T.during(function()
+          if first then first = false else T.elsewhere() end
+        end)
+        T.handled(o.adjust, o, 1)
+        assert(S.searches == 3 and #S.drags == 0 and #S.after == timers, T.dump())
+        assert(T.count("[overlay] Synth: 'Mix' not going on after finding its thumb to drag it — the overlay is on "
+          .. "another window now") == 1, T.dump())
+        -- Dragged, and the search after the drag answers with another window in front.
+        T.during(nil)
+        T.backHere()
+        T.handled(o.adjust, o, 1)
+        assert(S.searches == 5 and #S.drags == 1 and #S.after == timers + 1, T.dump())
+        local d = S.drags[1]
+        assert(d[1] == 145 and d[2] == 65 and d[3] == 146, "one percent of 110..210, from the thumb's centre: " .. table.concat(d, ","))
+        T.during(T.elsewhere)
+        S.now += 25
+        T.runDue()
+        assert(S.searches == 6 and #S.speech == said, "nothing said over the other window: " .. T.dump())
+        assert(T.count("[overlay] Synth: 'Mix' not going on after finding its thumb again — the overlay is on "
+          .. "another window now") == 1, T.dump())
+        -- Nothing changed: the step drags and says where the thumb went.
+        T.during(nil)
+        T.backHere()
+        T.handled(o.adjust, o, 1)
+        assert(#S.drags == 2, T.dump())
+        S.thumb = 146
+        S.now += 25
+        T.runDue()
+        assert(S.speech[#S.speech].text == "36 percent", "(146 - 110) / 100: " .. T.dump())
     "#);
 }
 
@@ -648,11 +717,11 @@ fn a_recognize_in_a_text_hook_waits_and_its_reading_is_said() {
 // The runtime's version.
 // ---------------------------------------------------------------------------------------------
 
-/// The runtime is 0.5.3 (calibration as its own setting, `O.calibrating()`, a static text's
+/// The runtime is 0.5.4 (calibration as its own setting, `O.calibrating()`, a static text's
 /// `hotkey`, the checks after its own pixels, `O:probe`, letting go in front of this
-/// application's own windows, its accessibility menu tests asked off the event loop, and the
-/// check after a calibrating run's waited picture before a press), so a
-/// module that depends on
+/// application's own windows, its accessibility menu tests asked off the event loop, the
+/// check after a calibrating run's waited picture before a press, and a slider's after each of its
+/// searches), so a module that depends on
 /// `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads against it, and
 /// so does one that asks for 0.4, 0.4.1 or 0.5, and neither against anything older.
 #[test]
@@ -660,7 +729,7 @@ fn the_runtime_is_0_5_so_a_module_that_asks_for_0_2_loads() {
     let m = module_manifest::ModuleManifest::parse(include_str!("../../../modules/overlay-runtime/module.toml"))
         .expect("the runtime's manifest parses");
     assert_eq!(m.id, "com.platform.overlay");
-    assert_eq!(m.version, "0.5.3");
+    assert_eq!(m.version, "0.5.4");
     for spec in [
         "com.platform.overlay >= 0.2",
         "com.platform.overlay >= 0.3",

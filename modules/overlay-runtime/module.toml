@@ -25,8 +25,10 @@ name = "Overlay runtime"
 # test's last answer for one the plug-in did not answer. Nothing a module calls is new. 0.5.3
 # waits for a calibrating run's picture before a press, which host.screen.snapshot takes on the
 # screen-capture thread, and makes the press's click only while the overlay is still where the
-# press was. Nothing a module calls is new.
-version = "0.5.3"
+# press was. Nothing a module calls is new. 0.5.4 drags a slider, and says where its thumb went,
+# only while the overlay is still where the step began, its thumb searched for again after each
+# search, which waits in a handler now. Nothing a module calls is new.
+version = "0.5.4"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

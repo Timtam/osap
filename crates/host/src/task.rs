@@ -2,8 +2,8 @@
 //! at a wait while the event loop goes on; and the waits it stops at: `host.ocr.recognize` without
 //! a callback, which raises where it cannot wait, and the `host.screen` calls that wait
 //! (`host.screen.snapshot`, `pixel`, `pixels`, `profile`, `cells`, `matchCells`,
-//! `template{ capture }` and a snapshot's `crop`), which run on the event loop where they cannot,
-//! with a log line.
+//! `template{ capture }`, a snapshot's `crop`, `imageSearch`, `imageSearchMulti`, `imageSearchAll`,
+//! `save` and `saveMarked`), which run on the event loop where they cannot, with a log line.
 //!
 //! **One handler per module at a time.** Every event a module hears — a hotkey, a captured key, a
 //! controller event, a timer, a window trigger, a focus change, the answer to a read, an image
@@ -22,7 +22,9 @@
 //! ([`Started::Now`]). The calls that work over a region wait for the image worker
 //! (`image_search.rs`): `profile` for its picture and then its reduction, `cells` and `matchCells`
 //! for their capture and their grid, `template{ capture }` for its picture, a snapshot's `crop` for
-//! its copy — each answered at once when there is nothing to read this time.
+//! its copy, the three searches for their capture and their matching, `save` and `saveMarked` for
+//! their capture and their file (`save.rs`) — each answered at once when there is nothing to read
+//! this time.
 //!
 //! **Why.** No text recognition may burden the event loop, and no `host.screen` call either.
 //! `recognize` used to photograph and recognise on the loop and return the reading; where it waits
@@ -208,6 +210,8 @@ fn callback_form(call: &str) -> Option<&'static str> {
         "host.screen.snapshot" => Some("host.screen.snapshotAsync(opts, function(snap, why) … end)"),
         "host.screen.profile" => Some("host.screen.profile(opts, function(profile, why) … end)"),
         "host.screen.matchCells" => Some("host.screen.matchCellsAsync(opts, states, function(match, why) … end)"),
+        "host.screen.imageSearch" => Some("host.screen.imageSearchAsync(template, opts, function(hit, why) … end)"),
+        "host.screen.imageSearchMulti" => Some("host.screen.imageSearchAsync(templates, opts, function(hit, why) … end)"),
         _ => None,
     }
 }
@@ -1294,9 +1298,9 @@ fn disown<H: ReadHost>(h: &H, lua: &Lua) {
 /// writes no line, so the first that answers still does.
 ///
 /// The `host.screen` calls that wait come here where they cannot (`host.screen.snapshot`, `pixel`
-/// and `pixels` when they read the screen, `profile`, `cells`, `matchCells`, `template{ capture }`
-/// and a snapshot's `crop` when there is something to read); `host.ocr.recognize` raises there
-/// instead.
+/// and `pixels` when they read the screen, `profile`, `cells`, `matchCells`, `template{ capture }`,
+/// a snapshot's `crop`, the three searches, `save` and `saveMarked` when there is something to
+/// read); `host.ocr.recognize` raises there instead.
 pub(crate) fn legacy<H: ReadHost, T>(
     h: &H,
     lua: &Lua,
@@ -1613,6 +1617,18 @@ mod tests {
         assert!(SCREEN_MD.contains(&profile), "docs/api/screen.md does not show this line word for word:\n{profile}");
         assert!(legacy_line("m", "host.screen.matchCells", Case::Outside, 1)
             .contains(", or use host.screen.matchCellsAsync(opts, states, function(match, why) … end); see"));
+        // `imageSearch` and `imageSearchMulti` name `imageSearchAsync`, which takes a list too — the
+        // first's line screen.md shows word for word — and `imageSearchAll`, `save` and
+        // `saveMarked` name none.
+        let search = legacy_line("com.example.game", "host.screen.imageSearch", Case::CannotWait, 24);
+        assert!(search.contains(", or use host.screen.imageSearchAsync(template, opts, function(hit, why) … end); see"), "{search}");
+        assert!(SCREEN_MD.contains(&search), "docs/api/screen.md does not show this line word for word:\n{search}");
+        assert!(legacy_line("m", "host.screen.imageSearchMulti", Case::Outside, 1)
+            .contains(", or use host.screen.imageSearchAsync(templates, opts, function(hit, why) … end); see"));
+        for call in ["host.screen.imageSearchAll", "host.screen.save", "host.screen.saveMarked"] {
+            let line = legacy_line("m", call, Case::OwnCoroutine, 1);
+            assert!(!line.contains(", or use ") && line.ends_with("see \"Where it waits\" in docs/api/screen.md"), "{line}");
+        }
         assert!(legacy_line("m", "host.screen.save", Case::CannotWait, 1).contains(
             "host.screen.save could not wait here (a place Luau cannot suspend, or a function the host calls and waits \
              for) and held the event loop 1 ms instead; call it from the event's own function; see"

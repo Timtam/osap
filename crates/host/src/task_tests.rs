@@ -9,7 +9,9 @@
 //! the event loop, the tasks, the timers, which VM each module runs and whether it is enabled —
 //! and each test builds module VMs over it with the host's own bindings: `host.ocr.recognize`, both
 //! forms, and `pending` (ocr/lua.rs and the shim), `host.screen.snapshot`, `pixel` and `pixels`,
-//! which wait, and `snapshotAsync` (snapshot.rs), and `host.timer` (timers.rs). The tick is `fire`:
+//! which wait, and `snapshotAsync` (snapshot.rs), the calls that wait for the image worker —
+//! `profile`, the cells calls, `template`, `crop`, the three searches (image_search.rs), `save`
+//! and `saveMarked` (save.rs) — and `host.timer` (timers.rs). The tick is `fire`:
 //! due timers, then the readings, as the loop runs them; the snapshots' delivery — the pixel
 //! reads' with them — is `fire_snaps`. A snapshot taken where it cannot wait is a picture of its
 //! region made on the spot, input epoch 7; the capture thread's rounds have pictures from
@@ -176,6 +178,17 @@ fn points_read(x: i32) -> Vec<(bool, String)> {
 
 /// Every region the image worker's fake capture read: its x, and the thread.
 static IMAGE_CAPTURED: Mutex<Vec<(i32, String)>> = Mutex::new(Vec::new());
+/// Every x whose image capture the fake has begun, held or not.
+static IMAGE_CAPTURING: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+/// Waits until the image worker's capture of `x` has begun — its batch taken, and held there when
+/// `x` is held — 10 s at most.
+fn wait_image_capturing(x: i32) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while !locked(&IMAGE_CAPTURING).contains(&x) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
 
 /// The image worker's capture (`image_search::spawn_image_worker`), and the event loop's where a
 /// call that waits for the worker cannot wait: from x = 20000 on, the picture a snapshot round has
@@ -186,6 +199,7 @@ fn fake_image_capture(regions: &[(i32, i32, i32, i32)], _: CaptureSource) -> Vec
     regions
         .iter()
         .map(|&(x, y, w, h)| {
+            locked(&IMAGE_CAPTURING).push(x);
             wait_while_held(x, true);
             locked(&IMAGE_CAPTURED).push((x, thread.clone()));
             if x >= SNAP_X {
@@ -453,7 +467,14 @@ fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     screen.set("cells", cells).unwrap();
     screen.set("matchCells", match_cells).unwrap();
     let dot = std::sync::Arc::new(crate::template::Decoded::from_png_rgba(1, 1, vec![0, 0, 0, 255]));
-    screen.set("template", crate::image_search::test_template(&lua, idx, h.clone(), fake_image_capture, dot).unwrap()).unwrap();
+    screen.set("template", crate::image_search::test_template(&lua, idx, h.clone(), fake_image_capture, dot.clone()).unwrap()).unwrap();
+    let [search, multi, all] = crate::image_search::test_searches(&lua, idx, h.clone(), fake_image_capture, dot).unwrap();
+    screen.set("imageSearch", search).unwrap();
+    screen.set("imageSearchMulti", multi).unwrap();
+    screen.set("imageSearchAll", all).unwrap();
+    let (save, save_marked) = crate::save::test_saves(&lua, idx, h.clone(), fake_image_capture, std::env::temp_dir()).unwrap();
+    screen.set("save", save).unwrap();
+    screen.set("saveMarked", save_marked).unwrap();
     crate::snapshot::install_crop(&lua, idx, h.clone()).unwrap();
     let hh = h.clone();
     screen
@@ -3106,4 +3127,337 @@ fn a_profile_past_its_limits_answers_alike_whether_it_waits_or_not() {
     assert_eq!(crate::snapshot::test_vm_bytes(&lua), 0, "nothing is held");
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
+}
+
+// ── The searches and the shots wait for the image worker ─────────────────────────────────────
+
+/// Lua's `cut(x, y, w, h)`: a template of the pixels the fake's pictures have at that place —
+/// `(x % 256, y % 256, 50)`, each once in any picture narrower than 256 — built from bytes, which
+/// never waits.
+const CUT: &str = r#"
+function cut(x, y, w, h)
+  local b = buffer.create(w * h * 4)
+  local i = 0
+  for py = y, y + h - 1 do
+    for px = x, x + w - 1 do
+      buffer.writeu8(b, i, px % 256)
+      buffer.writeu8(b, i + 1, py % 256)
+      buffer.writeu8(b, i + 2, 50)
+      buffer.writeu8(b, i + 3, 255)
+      i += 4
+    end
+  end
+  return host.screen.template({ name = "cut", rgba = b, w = w, h = h })
+end
+"#;
+
+/// A folder of the test's own for the shots it writes, empty.
+fn shots_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("host-task-tests-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// The pixels of the PNG at `path`, and its size.
+fn png(path: &std::path::Path) -> (u32, u32, Vec<u8>) {
+    let img = image::open(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).to_rgba8();
+    (img.width(), img.height(), img.into_raw())
+}
+
+/// `host.screen.imageSearch`, `imageSearchMulti`, `imageSearchAll`, `save` and `saveMarked` in a
+/// handler wait while the image worker captures the region — or reads the snapshot — and matches,
+/// or marks, encodes and writes, and only their module is busy meanwhile: its next key waits in
+/// its mailbox, another module's key runs. The handler goes on with exactly what the calls that do
+/// not wait answer: a hit, `nil` alone for none, `nil` and the reason; the index and the hit, `nil,
+/// nil`, `nil, nil` and the reason; the list, an empty one, an empty one and the reason; `true` and
+/// the same picture written, or `false` and the reason. The waits turn no epoch.
+#[test]
+fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_calls_that_do_not_wait_answer() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let other = vm(&h, 2);
+    run(&lua, ALIKE);
+    run(&lua, CUT);
+    let dir = shots_dir("waits");
+    lua.globals().set("DIR", dir.to_string_lossy().to_string()).unwrap();
+    let shot = crate::snapshot::test_handle(&lua, crate::snapshot::test_frame(22001, 5, 40, 30));
+    lua.globals().set("s", Value::UserData(shot)).unwrap();
+    run(
+        &lua,
+        r##"
+        local AREA = { region = { 22001, 5, 22041, 35 } }
+        local HIT = cut(22010, 8, 3, 2)
+        local LOST = { region = { 5, 5, 25, 25 } }
+        function ask(into, tag)
+          into.one = { host.screen.imageSearch(HIT, AREA) }
+          into.oneValues = select("#", host.screen.imageSearch(HIT, AREA))
+          into.none = { host.screen.imageSearch("dot.png", AREA) }
+          into.noneValues = select("#", host.screen.imageSearch("dot.png", AREA))
+          into.snapOne = { host.screen.imageSearch(HIT, { snapshot = s, region = { 22005, 6, 22030, 20 } }) }
+          into.notThere = { host.screen.imageSearch(HIT, LOST) }
+          into.multi = { host.screen.imageSearchMulti({ "dot.png", HIT }, AREA) }
+          into.multiNone = { host.screen.imageSearchMulti({ "dot.png" }, AREA) }
+          into.multiNoneValues = select("#", host.screen.imageSearchMulti({ "dot.png" }, AREA))
+          into.multiNotThere = { host.screen.imageSearchMulti({ HIT }, LOST) }
+          into.multiNotThereValues = select("#", host.screen.imageSearchMulti({ HIT }, LOST))
+          into.all = { host.screen.imageSearchAll(HIT, AREA) }
+          into.allValues = select("#", host.screen.imageSearchAll(HIT, AREA))
+          into.allNone = { host.screen.imageSearchAll("dot.png", AREA) }
+          into.snapAll = { host.screen.imageSearchAll(HIT, { snapshot = s }) }
+          into.allNotThere = { host.screen.imageSearchAll(HIT, LOST) }
+          into.saved = { host.screen.save(DIR .. "/" .. tag .. "-save.png", AREA) }
+          into.marked = { host.screen.saveMarked(DIR .. "/" .. tag .. "-marked.png",
+            { region = AREA.region, marks = { { x = 22010, y = 10 }, { x = 22030, y = 30 } } }) }
+          into.snapSaved = { host.screen.save(DIR .. "/" .. tag .. "-snap.png", { snapshot = s, region = { 22000, 0, 22011, 9 } }) }
+          into.unsaved = { host.screen.save(DIR .. "/" .. tag .. "-lost.png", LOST) }
+        end
+        blocked = {}
+        ask(blocked, "blocked")
+        order = {}
+        function look()
+          order[#order + 1] = "asked"
+          before = epoch()
+          waited = {}
+          ask(waited, "waited")
+          after = epoch()
+          order[#order + 1] = "answered"
+        end
+        function key() order[#order + 1] = "key" end
+        "##,
+    );
+    run(&other, "function key() ran = true end");
+    let me = current_thread();
+    assert!(image_captured(22001).iter().all(|t| *t == me), "where they cannot wait, on the loop");
+    let on_loop = image_captured(22001).len();
+    hold(22001);
+    assert_eq!(event(&h, &lua, "look", Vec::new(), true), mailbox::Delivered::Parked);
+    assert_eq!(event(&h, &lua, "key", Vec::new(), true), mailbox::Delivered::Queued, "its keys wait behind it");
+    let f: Function = other.globals().get("key").unwrap();
+    let ran = mailbox::deliver(&*h, 2, &other, Event::Call { f, args: MultiValue::new(), input: true, what: "key" });
+    assert_eq!(ran, mailbox::Delivered::Ran, "another module's key runs meanwhile");
+    assert!(yes(&lua, "return #order == 1 and waited.one == nil"));
+    release(22001);
+    settle_images(&h);
+    mailbox::run_queued(&*h);
+    assert!(
+        yes(&lua, r#"return table.concat(order, " | ") == "asked | answered | key""#),
+        "{:?}",
+        lua.load("return table.concat(order, ' | ')").eval::<String>()
+    );
+    for name in [
+        "one", "oneValues", "none", "noneValues", "snapOne", "notThere", "multi", "multiNone", "multiNoneValues", "multiNotThere",
+        "multiNotThereValues", "all", "allValues", "allNone", "snapAll", "allNotThere", "saved", "marked", "snapSaved", "unsaved",
+    ] {
+        assert!(yes(&lua, &format!("return alike(waited.{name}, blocked.{name})")), "{name}: not what the call that does not wait answers");
+    }
+    assert!(
+        yes(
+            &lua,
+            r#"return #waited.one == 1 and waited.one[1].x == 22010 and waited.one[1].y == 8 and waited.one[1].n == 1
+              and waited.one[1].name == "cut" and waited.oneValues == 1 and #waited.none == 0 and waited.noneValues == 1
+              and waited.snapOne[1].x == 22010 and waited.notThere[1] == nil and waited.notThere[2] == "no pixels here""#
+        ),
+        "a hit and nothing after it, nil alone, nil and why"
+    );
+    assert!(
+        yes(
+            &lua,
+            r#"return waited.multi[1] == 2 and waited.multi[2].n == 2 and waited.multi[2].x == 22010
+              and waited.multiNoneValues == 2 and waited.multiNotThereValues == 3 and waited.multiNotThere[3] == "no pixels here""#
+        ),
+        "the index and the hit, nil nil, nil nil why"
+    );
+    assert!(
+        yes(
+            &lua,
+            r#"return #waited.all[1] == 1 and waited.all[1][1].x == 22010 and waited.allValues == 1 and #waited.allNone[1] == 0
+              and #waited.snapAll[1] == 1 and #waited.allNotThere[1] == 0 and waited.allNotThere[2] == "no pixels here""#
+        ),
+        "the list, an empty one, an empty one and why"
+    );
+    assert!(
+        yes(&lua, r#"return #waited.saved == 1 and waited.saved[1] == true and waited.unsaved[1] == false and waited.unsaved[2] == "no pixels here""#),
+        "true, or false and why"
+    );
+    for shot in ["save", "marked", "snap"] {
+        let (b, w) = (png(&dir.join(format!("blocked-{shot}.png"))), png(&dir.join(format!("waited-{shot}.png"))));
+        assert_eq!(b, w, "{shot}: the same picture written");
+    }
+    assert_eq!((png(&dir.join("waited-save.png")).0, png(&dir.join("waited-snap.png")).1), (40, 4), "the region, and on a snapshot its part inside it");
+    let marked = png(&dir.join("waited-marked.png"));
+    let at = |x: u32, y: u32| marked.2[((y * marked.0 + x) * 4) as usize..][..4].to_vec();
+    assert_eq!(at(9, 5), [255, 0, 255, 255], "a crosshair where its screen point falls");
+    assert!(!dir.join("waited-lost.png").exists(), "nothing written for a shot with no picture");
+    let waited: Vec<String> = image_captured(22001)[on_loop..].to_vec();
+    assert!(!waited.is_empty() && waited.iter().all(|t| t == "image-worker"), "in a handler, on the image worker: {waited:?}");
+    assert!(yes(&lua, "return before == after"), "a wait turns no epoch");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Where a handler cannot stop, the searches and the shots work on the event loop as they always
+/// did and answer at once: outside every handler, where Luau cannot stop it, in a coroutine of the
+/// module's own. The host says so once per module, call and place, and counts every such call for
+/// the summary at exit; in the handler's own coroutine they wait. One with nothing to read this time
+/// — a window region with no rectangle, a region with no part inside its snapshot — reads nothing:
+/// it is answered at once wherever it is asked, neither said nor counted.
+#[test]
+fn where_the_searches_and_shots_cannot_wait_they_answer_at_once_and_are_said_once_per_place() {
+    let h = host();
+    let lua = vm(&h, 1);
+    run(&lua, CUT);
+    let dir = shots_dir("places");
+    lua.globals().set("DIR", dir.to_string_lossy().to_string()).unwrap();
+    let shot = crate::snapshot::test_handle(&lua, crate::snapshot::test_frame(22101, 5, 20, 20));
+    lua.globals().set("s", Value::UserData(shot)).unwrap();
+    run(
+        &lua,
+        r#"
+        local AREA = { region = { 22101, 5, 22121, 25 } }
+        local EMPTY = { region = { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0, 1, 1 } } }
+        local OFF = { snapshot = s, region = { 0, 0, 5, 5 } }
+        HIT = cut(22105, 6, 2, 2)
+        local function quiet()
+          return {
+            { host.screen.imageSearch(HIT, EMPTY) },
+            { host.screen.imageSearchMulti({ HIT }, EMPTY) },
+            { host.screen.imageSearchAll(HIT, EMPTY) },
+            { host.screen.save(DIR .. "/empty.png", EMPTY) },
+            { host.screen.saveMarked(DIR .. "/off.png", OFF) },
+            { host.screen.imageSearch(HIT, OFF) },
+          }
+        end
+        top = quiet()
+        hit = host.screen.imageSearch(HIT, AREA)
+        task.run(function()
+          got = {}
+          got.quiet = quiet()
+          got.host = hostCall(function() return host.screen.imageSearchMulti({ HIT }, AREA) end)
+          got.meta = setmetatable({}, { __index = function() return host.screen.imageSearchAll(HIT, AREA) end }).x
+          got.own = coroutine.wrap(function() return host.screen.save(DIR .. "/own.png", AREA) end)()
+          got.marked = coroutine.wrap(function() return host.screen.saveMarked(DIR .. "/marked.png", { region = AREA.region }) end)()
+          got.waited = host.screen.imageSearch(HIT, AREA)
+        end)
+        "#,
+    );
+    assert!(
+        yes(
+            &lua,
+            r#"local why = "the window's client area is empty (0x0)"
+              local off = "the region does not overlap the snapshot"
+              local function shaped(q)
+                return q[1][1] == nil and q[1][2] == why and q[2][1] == nil and q[2][2] == nil and q[2][3] == why
+                  and #q[3][1] == 0 and q[3][2] == why and q[4][1] == false and q[4][2] == why
+                  and q[5][1] == false and q[5][2] == off and q[6][1] == nil and q[6][2] == off
+              end
+              return shaped(top) and shaped(got.quiet) and hit ~= nil and got.waited == nil"#
+        ),
+        "nothing to read: at once, everywhere, in each call's own shape; the handler's own call waits"
+    );
+    for (call, case) in [
+        ("host.screen.imageSearch", Case::Outside),
+        ("host.screen.imageSearchMulti", Case::CannotWait),
+        ("host.screen.imageSearchAll", Case::CannotWait),
+        ("host.screen.save", Case::OwnCoroutine),
+        ("host.screen.saveMarked", Case::OwnCoroutine),
+    ] {
+        assert!(h.tasks.legacy_said("m1", call, case), "{call} {case:?} not said");
+    }
+    for call in ["host.screen.imageSearchMulti", "host.screen.imageSearchAll", "host.screen.save", "host.screen.saveMarked"] {
+        assert!(!h.tasks.legacy_said("m1", call, Case::Outside), "{call}: nothing was read, and it was said");
+    }
+    settle_images(&h);
+    assert!(
+        yes(&lua, "return got.waited ~= nil and got.host ~= nil and #got.meta == 1 and got.own == true and got.marked == true"),
+        "answered"
+    );
+    let summary = h.tasks.legacy_summary();
+    assert_eq!(summary.len(), 5, "{summary:?}");
+    assert!(summary.iter().all(|(scope, line)| *scope == "screen" && line.contains(" held the event loop 1 time(s), ")), "{summary:?}");
+    assert!(!dir.join("empty.png").exists() && !dir.join("off.png").exists() && dir.join("own.png").exists());
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A shot whose file cannot be written raises — at the caller's line in a handler, once the wait is
+/// over, as where it cannot wait — so a typo in a folder's name is not taken for a failed capture:
+/// `screen.save '<path>': <why>`, which a `pcall` around it returns, and the handler goes on. A shot
+/// of a snapshot raises the same way.
+#[test]
+fn a_shot_that_cannot_be_written_raises_at_the_call_that_waited() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let dir = shots_dir("unwritten");
+    // A folder where the file goes: the write fails, whatever the platform.
+    std::fs::create_dir_all(dir.join("taken.png")).unwrap();
+    lua.globals().set("DIR", dir.to_string_lossy().to_string()).unwrap();
+    let shot = crate::snapshot::test_handle(&lua, crate::snapshot::test_frame(22201, 5, 20, 20));
+    lua.globals().set("s", Value::UserData(shot)).unwrap();
+    run(
+        &lua,
+        r#"
+        local AREA = { region = { 22201, 5, 22221, 25 } }
+        topOk, topWhy = pcall(host.screen.save, DIR .. "/taken.png", AREA)
+        function look()
+          okLive, whyLive = pcall(function() return host.screen.save(DIR .. "/taken.png", AREA) end)
+          okSnap, whySnap = pcall(function() return host.screen.saveMarked(DIR .. "/taken.png", { snapshot = s, marks = {} }) end)
+          wentOn = true
+        end
+        "#,
+    );
+    assert_eq!(event(&h, &lua, "look", Vec::new(), false), mailbox::Delivered::Parked);
+    settle_images(&h);
+    assert!(yes(&lua, "return topOk == false and okLive == false and okSnap == false and wentOn == true"));
+    // The path as the module wrote it, joined to the folder.
+    let path = format!("{}/taken.png", dir.display());
+    for (name, call) in [("topWhy", "screen.save"), ("whyLive", "screen.save"), ("whySnap", "screen.saveMarked")] {
+        let got: String = lua.load(format!("return tostring({name})")).eval().unwrap();
+        assert!(got.contains(&format!("{call} '{path}': ")), "{name}: {got}");
+    }
+    for name in ["whyLive", "whySnap"] {
+        let got: String = lua.load(format!("return tostring({name})")).eval().unwrap();
+        assert!(got.starts_with("mod.luau:"), "{name}: raised at the caller's line: {got}");
+    }
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A shot whose module is disabled after the image worker began its batch is not written, and its
+/// folder is not made: a module that is gone — an uninstall deletes its folder — gets nothing
+/// written behind it. The handler never goes on; the module's next shot is written.
+#[test]
+fn a_shot_the_worker_has_when_its_module_goes_is_not_written() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let dir = shots_dir("gone");
+    lua.globals().set("DIR", dir.to_string_lossy().to_string()).unwrap();
+    run(
+        &lua,
+        r#"
+        function shoot()
+          saved = host.screen.saveMarked(DIR .. "/deeper/gone.png", { region = { 22301, 5, 22321, 25 }, marks = {} })
+          after = true
+        end
+        function again() later = host.screen.save(DIR .. "/later.png", { region = { 22341, 5, 22351, 15 } }) end
+        "#,
+    );
+    hold(22301);
+    assert_eq!(event(&h, &lua, "shoot", Vec::new(), false), mailbox::Delivered::Parked);
+    wait_image_capturing(22301);
+    disable(&h, 1);
+    release(22301);
+    enable(&h, 1);
+    // The worker takes one batch at a time: once the next shot is answered, the first's is over.
+    assert_eq!(event(&h, &lua, "again", Vec::new(), false), mailbox::Delivered::Parked);
+    settle_images(&h);
+    assert!(yes(&lua, "return later == true and saved == nil and after == nil"), "the next shot answered, and nothing of the first went on");
+    assert!(dir.join("later.png").exists());
+    assert!(!dir.join("deeper").exists(), "neither the file nor its folder");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
 }

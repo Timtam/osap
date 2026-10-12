@@ -8152,6 +8152,54 @@ kind of place that says how long the first held the loop.
       the duplication and comparison paragraphs, Failure reasons, Where it waits, `profile`, the
       Snapshot handle's `crop`, Reading a snapshot, `template`, `cells`, `matchCells`),
       module-runtime-and-lifecycle.md, overlay.md, ocr.md, timer.md, the index.
+      Step W3, 2026-10-12 (wbr-final.md): the searches and the shots wait in a handler.
+      `imageSearch`, `imageSearchMulti` and `imageSearchAll` are searches of the image worker
+      (`Job::Search`, `Mode::First`, and the new `Mode::All` for every match of one template at its
+      own size), `save` and `saveMarked` shots of it (`Job::Save`, save.rs): the region captured
+      through the module's source with the first-read comparison when it is owed — or read, or
+      copied, where it lies in the snapshot — then matched, or marked, encoded and written, on its
+      matching pool, and the handler going on with what the call answers on the event loop, built by
+      one function (`search_values`, `save_values`) from the worker's own work, which the event loop
+      runs where the call cannot wait (`answer_on_loop`). A file that cannot be written raises at
+      the call once the wait is over (`screen.save '<path>': <why>`), as where it cannot wait. A
+      shot nobody waits for any more once its PNG is encoded — its module disabled, reloaded,
+      stopped or removed, its handler cancelled — writes no file and makes no folder; a reload's
+      purge ends its module's searches and shots at the worker for that, as a withdrawn wait does.
+      The slow-batch line names the shots' writing beside the matching and the reductions. The
+      templates are opened at the call, as before (W3t moves that). Where they cannot wait the calls
+      work on the event loop as before, without the first-read comparison, with their line —
+      `imageSearch`'s and `imageSearchMulti`'s name `imageSearchAsync` — and the count; one with
+      nothing to read this time (a window region with no rectangle, a region with no part inside its
+      snapshot) answers at once anywhere, unsaid. With that no call makes the comparison on the
+      event loop any more: `read_source` and `Backend::compare_capture_sources` went. A search's
+      `opts` that is not a table, `imageSearchMulti`'s `templates` that is not one, and a shot's
+      path that is not a string or `opts` that is not a table raise with the call's name now, where
+      mlua's conversion raised before. The bindings of `save` and `saveMarked` moved to save.rs, and
+      the source tests with them. The overlay runtime 0.5.4 drags a slider, and says where its thumb
+      went, only while the overlay is still where the step began, each thumb search checked after
+      its answer (`[overlay] <o>: '<c>' not going on after finding its thumb — <why>`, and `… to
+      drag it`, `after its drag`, `after finding its thumb again`); `gtoggleState`, which nothing
+      called, is gone. The capture probe's `save of the snapshot` line says it waited. The docs'
+      example of a stop by the wall clock in a library's host call is `host.element.find` now, as a
+      search waits. The scripted host's `save` and `saveMarked`, and the scenario files' own fakes
+      of `saveMarked` and `imageSearchMulti`, note where the host's could not have waited. Tested
+      against the real shim, service and image worker with a fake capture (task_tests.rs): the three
+      searches and the two shots wait and answer what the calls that do not wait answer, live and on
+      a snapshot — the hit, `nil` alone, `nil` and why; the index and the hit, `nil, nil`, `nil,
+      nil` and why; the list, the empty one, the empty one and why; `true` with the same picture
+      written, crosshairs where their screen points fall, `false` and why — on the image worker, the
+      module alone busy and the epoch unturned; each place it cannot wait said once and counted,
+      nothing to read answered at once and unsaid in each call's own shape; a file that cannot be
+      written raises at the caller's line after the wait and where it cannot wait; a shot whose
+      module is disabled after the worker began its batch writes nothing, its folder included.
+      `Mode::All` answers every match (image_search.rs); `write_shot` marks and writes, and writes
+      nothing once nobody waits (save.rs); the comparison's three states without the event loop
+      (capture_source.rs); in the scripted host a slider's step drags nothing, and says nothing,
+      once another window came forward during one of its searches. Each fails against the code from
+      before. Docs: screen.md (the top, the image worker, the duplication and comparison paragraphs,
+      Failure reasons, Where it waits, Reading a snapshot, the Region form's example, `imageSearch`,
+      `imageSearchAsync`, `save`, `saveMarked`, `imageSearchAll`, `imageSearchMulti`),
+      module-runtime-and-lifecycle.md, module-manager.md, overlay.md, ocr.md, timer.md, the index.
 - [ ] **NVDA check of step V1 (session B, with V2 and T2)** — nothing should sound different.
       Kontakt with a CSS library in REAPER: a hotspot toggle pressed (its state said after the
       press, as before); the snapshot camera and its dropdown with the bar shut and open (the bar
@@ -8273,6 +8321,11 @@ kind of place that says how long the first held the loop.
       resolution as the event loop captures; a snapshot's `crop` copied there, the kept picture at
       the display's own resolution with it; the image worker's thread named `image-worker`. The
       capture-liveness tools and the probe's `profile` wait in their timers' handlers now.
+- [ ] **Step W3 never ran on a Mac** (type-checked only): a handler's `imageSearch`,
+      `imageSearchMulti`, `imageSearchAll`, `save` and `saveMarked` captured on the image worker
+      through `capture_many` at point resolution, as the event loop captures, and a shot encoded and
+      written on its matching pool; the capture probe's `save of the snapshot waited … ms` line in
+      the macOS jobs, which the next CI run shows.
 - [ ] **NVDA check of step W1b (session C)** — nothing should sound different; announcements that
       read a pixel come about one tick later. Kontakt with a CSS library: Tab through the hotspot
       toggles and press one (its state said after the press); the header's status toggles: Tab,
@@ -8286,6 +8339,14 @@ kind of place that says how long the first held the loop.
       judged step waits for its body's three row profiles, about three ticks). Bring the log: no
       `could not wait here` line, and the `[observe]` line's `profile` clause, which counts only
       profiles made on the event loop now.
+- [ ] **NVDA check of step W3 (session C)** — nothing should sound different. With a
+      sample-library module loaded, so its landmark gates poll: Left and Right on a slider of a
+      Soundiron or Audio Imperia library (the value said after each step, a little later; each
+      step waits for its thumb searches); the graphical toggles and buttons of Kontakt's header. In
+      a calibrating run: the calibration shot (Ctrl+Alt+Shift+S: both pictures written, the
+      crosshairs where they were), the crop (Ctrl+Alt+Shift+T) and the count (Ctrl+Alt+Shift+V),
+      each a little later; Avenger's calibration pictures if the plug-in is at hand (Q3 = A). Bring
+      the log: no `could not wait here` line, and any `not going on after finding its thumb` lines.
 - [ ] **W1a's remedies name `snapshotAsync`** (review of W1a): the `could not wait here` line and
       the timer's line offer `host.screen.snapshotAsync(opts, function(snap, why) … end)` as the
       form that waits for nothing, since `snapshot(opts, cb)` does not exist yet, and Q1 = A
@@ -8299,6 +8360,9 @@ kind of place that says how long the first held the loop.
       W2 `matchCells`' line names `matchCellsAsync`, which slice F folds into `matchCells(opts,
       states, cb)` — `callback_form` then names that — and `cells`, `template{ capture }` and a
       snapshot's `crop` name no such form; `profile`'s names its own callback form, which stays.
+      Since W3 `imageSearch`'s and `imageSearchMulti`'s lines name `imageSearchAsync`, which slice
+      F folds into `imageSearch(template | list, opts, cb)` — screen.md shows `imageSearch`'s line
+      word for word — and `imageSearchAll`, `save` and `saveMarked` name none.
 - [x] **NVDA check of step 11.3 (session A), before it is committed** — nothing should sound
       different; what changed is that a click, a key or a focus no longer waits for a picture the
       module has out. Windows, at the reads' own speed: sforzando's "Instrument" (an `opensMenu`
@@ -8400,9 +8464,9 @@ Follow-ups this work found and did not take on:
       keep the count to what the docs say.
 - [ ] **The synchronous `host.screen` captures** (the maintainer's decision 3; wbr-final.md, W1a
       to W4 and 12b), and with them a `read` of a snapshot that was taken on the event loop.
-      `snapshot` waits in a handler since W1a, `pixel` and `pixels` since W1b, and `profile`,
-      `cells`, `matchCells`, `template{ capture }` and a snapshot's `crop` since W2; the searches
-      and `save` (W3) and template decoding (W3t) do not yet. A module's own
+      `snapshot` waits in a handler since W1a, `pixel` and `pixels` since W1b, `profile`,
+      `cells`, `matchCells`, `template{ capture }` and a snapshot's `crop` since W2, and the three
+      searches, `save` and `saveMarked` since W3; template decoding (W3t) does not yet. A module's own
       menu test that reads a pixel on every tick reads it on the event loop, said once — the
       scripted host's `a_modules_own_pixel_test` keeps one — until 12b makes it raise.
       Perhaps later `snapshotAsync` as a wait, which would let Avenger's preset step be written in
@@ -8419,8 +8483,8 @@ Follow-ups this work found and did not take on:
       where it used to hold the whole application. Since W1a and W1b a handler's `snapshot`,
       `pixel` and `pixels` wait for that thread as well, and since W2 its `profile` (and its
       `cells`, `matchCells` and `template{ capture }` the image worker's capture, which has no bound
-      either), so every module that then asks it for a picture or a pixel waits behind the hung
-      one. Decide whether the hang clock covers the
+      either, as since W3 its searches, `save` and `saveMarked` do), so every module that then asks
+      it for a picture or a pixel waits behind the hung one. Decide whether the hang clock covers the
       capture too (wbr-final.md: the first follow-up after 12b).
 - [ ] **A handler that reads again at once after `"failed"`** (B1b+M): during a hang a read asked
       again fails at once and is handed over on the next turn, so a handler that reads in a loop

@@ -44,6 +44,7 @@ rawset(T.host.window, "ownsPoint", function(id, x, y, opts)
 end)
 rawset(T.host.element, "rawDump", function() return {} end)
 rawset(T.host.screen, "saveMarked", function(path, opts)
+  T.screenWait("host.screen.saveMarked")
   S.order[#S.order + 1] = "save"
   local marks = {}
   for _, m in ipairs(opts.marks or {}) do marks[#marks + 1] = { m.x, m.y } end

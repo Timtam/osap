@@ -592,13 +592,14 @@ pub(crate) fn inside(frame: &Frame, r: ScreenRect) -> Result<Rect, String> {
     }
 }
 
-// ── What a synchronous read reads ──────────────────────────────────────────────────────────
+// ── What a profile made on the event loop reads ────────────────────────────────────────────
 
-/// The picture a synchronous call reads: a capture made for it, or the part of a snapshot its
-/// region covers. The matching and reduction after it are the same code either way.
+/// The picture a `profile` made on the event loop reads, where it cannot wait: a capture made for
+/// it, or the part of a snapshot its region covers. The reduction after it is the same code either
+/// way.
 pub(crate) enum Picture {
-    /// Captured now: `img` is the region, whose top-left is `(x, y)` on screen.
-    Live { img: CapturedImage, x: i32, y: i32 },
+    /// Captured now: `img` is the region.
+    Live { img: CapturedImage },
     /// A snapshot, read where `rect` lies in it; `rect` is inside it.
     Snap { frame: Arc<Frame>, rect: Rect },
 }
@@ -606,37 +607,16 @@ pub(crate) enum Picture {
 impl Picture {
     pub(crate) fn image(&self) -> &CapturedImage {
         match self {
-            Picture::Live { img, .. } => img,
+            Picture::Live { img } => img,
             Picture::Snap { frame, .. } => &frame.img,
-        }
-    }
-
-    /// Where the image's top-left pixel is on screen: what every position found in it is
-    /// measured from.
-    pub(crate) fn origin(&self) -> (i32, i32) {
-        match self {
-            Picture::Live { x, y, .. } => (*x, *y),
-            Picture::Snap { frame, .. } => (frame.rect.x, frame.rect.y),
         }
     }
 
     /// The part of the image the region covers, in its own pixels: all of a live capture.
     pub(crate) fn area(&self) -> Area {
         match self {
-            Picture::Live { img, .. } => Area::full(img.w, img.h),
+            Picture::Live { img } => Area::full(img.w, img.h),
             Picture::Snap { frame, rect } => frame.area(*rect).unwrap_or(Area { x: 0, y: 0, w: 0, h: 0 }),
-        }
-    }
-
-    /// The area for the template matcher: `None` — the whole frame, exactly as a live search
-    /// has always been made — for a live capture.
-    pub(crate) fn search_area(&self) -> Option<crate::template::Rect> {
-        match self {
-            Picture::Live { .. } => None,
-            Picture::Snap { .. } => {
-                let a = self.area();
-                Some(crate::template::Rect { x: a.x, y: a.y, w: a.w, h: a.h })
-            }
         }
     }
 
@@ -2507,7 +2487,7 @@ pub(crate) fn profile_on_loop(
             Err(why) => return nil(why),
         },
         None => match capture(rx, ry, rw, rh) {
-            Ok(img) => Picture::Live { img, x: rx, y: ry },
+            Ok(img) => Picture::Live { img },
             Err(why) => return nil(why),
         },
     };

@@ -79,8 +79,10 @@ rawset(T.host.screen, "pixel", function(x, y)
   return S.pixel
 end)
 rawset(T.host.element, "rawDump", function() return S.dump end)
--- The calibration shot's pictures, with where their crosshairs are.
+-- The calibration shot's pictures, with where their crosshairs are; a shot made where the host's
+-- could not wait is noted, as the harness's is.
 rawset(T.host.screen, "saveMarked", function(path, opts)
+  T.screenWait("host.screen.saveMarked")
   S.order[#S.order + 1] = "save"
   local marks = {}
   for _, m in ipairs(opts.marks or {}) do marks[#marks + 1] = { m.x, m.y } end
@@ -465,7 +467,7 @@ fn a_calibration_shot_reads_every_crosshairs_pixel_in_one_read() {
           for i in ipairs(points) do out[i] = { r = i, g = 2 * i, b = 3 * i } end
           return out
         end)
-        assert(o:calibrationShot() == true)
+        assert(T.handled(o.calibrationShot, o) == true)
         assert(#asked == 1 and S.pixels == 0, "one read, and no pixel read on its own: " .. #asked .. ", " .. S.pixels)
         local pts = {}
         for _, p in ipairs(asked[1]) do pts[#pts + 1] = p[1] .. "," .. p[2] end
@@ -479,7 +481,7 @@ fn a_calibration_shot_reads_every_crosshairs_pixel_in_one_read() {
         assert(T.logged("[calibrate]" .. string.format("  -- %-24s hidden (its `when` is false)", "Hidden")), T.dump())
         local from = #S.logs + 1
         fails = "the screen capture failed"
-        assert(o:calibrationShot() == true)
+        assert(T.handled(o.calibrationShot, o) == true)
         assert(T.count("[calibrate]  the pixels could not be read: the screen capture failed", from) == 1, T.dump())
         assert(T.logged(line(1, "Undo", 110, 70, "?")) and T.logged(line(3, "Zoom", 121, 64, "?", "  [menu opener]")),
           T.dump())
@@ -519,6 +521,7 @@ fn a_slider_scales_its_track_and_its_step() {
         S.drags = {}
         rawset(T.host.input, "drag", function(x1, y1, x2, y2) S.drags[#S.drags + 1] = { x1, y1, x2, y2 } end)
         rawset(T.host.screen, "imageSearchMulti", function(_, opts)
+          T.screenWait("host.screen.imageSearchMulti")
           S.searched = opts.region
           return 1, { x = S.thumbX - 5, y = 85, w = 10, h = 10 }
         end)
@@ -526,7 +529,7 @@ fn a_slider_scales_its_track_and_its_step() {
           o:addSlider({ label = "Mix", region = { 10, 10, 110, 30 }, thumbImage = "thumb.png", from = 10, to = 110 })
         end)
         o.focus = 1
-        o:adjust(1)
+        T.handled(o.adjust, o, 1)
         local r = S.searched
         assert(r[1] == 120 and r[2] == 70 and r[3] == 320 and r[4] == 110, "the region placed: " .. table.concat(r, ","))
         local d = S.drags[1]
@@ -538,7 +541,7 @@ fn a_slider_scales_its_track_and_its_step() {
         -- No factor: said as a control that cannot be placed, nothing searched or dragged.
         S.k = nil
         S.searched = nil
-        o:adjust(1)
+        T.handled(o.adjust, o, 1)
         assert(S.searched == nil and #S.drags == 1, "nothing searched, nothing dragged")
         assert(S.speech[#S.speech].text == "Mix is not available now", T.said())
         -- Without a scale: the authored step, the region the plain sum.
@@ -547,7 +550,7 @@ fn a_slider_scales_its_track_and_its_step() {
         end, false)
         S.thumbX = 150
         p.focus = 1
-        p:adjust(-1)
+        T.handled(p.adjust, p, -1)
         r = S.searched
         assert(r[1] == 110 and r[3] == 210, table.concat(r, ","))
         d = S.drags[2]
@@ -626,15 +629,15 @@ fn a_reveal_probe_and_a_captured_region_are_placed_through_the_scale() {
         local p = S.pixelsAt[#S.pixelsAt]
         assert(p[1] == 200 and p[2] == 170, "the probe at 100 + 2*50, 50 + 2*60: " .. p[1] .. "," .. p[2])
         assert(T.lastClick() == "200,170", "the shut panel opened at the probe: " .. T.lastClick())
-        assert(o:captureRegion({ 10, 10, 20, 20 }, "C:/shot.png") == true)
+        assert(T.handled(o.captureRegion, o, { 10, 10, 20, 20 }, "C:/shot.png") == true)
         local shot = S.shots[#S.shots]
         assert(shot.region[1] == 120 and shot.region[2] == 70 and shot.region[3] == 140 and shot.region[4] == 90,
           table.concat(shot.region, ","))
         S.k = nil
-        assert(o:captureRegion({ 10, 10, 20, 20 }, "C:/shot.png") == false)
+        assert(T.handled(o.captureRegion, o, { 10, 10, 20, 20 }, "C:/shot.png") == false)
         assert(T.count("captureRegion: cannot be placed now (its scale function answered nil)") == 1, T.dump())
         local u = T.scaled(function(u) end, false)
-        assert(u:captureRegion({ 10, 10, 20, 20 }, "C:/shot.png") == true)
+        assert(T.handled(u.captureRegion, u, { 10, 10, 20, 20 }, "C:/shot.png") == true)
         shot = S.shots[#S.shots]
         assert(shot.region[1] == 110 and shot.region[4] == 70, table.concat(shot.region, ","))
     "##);

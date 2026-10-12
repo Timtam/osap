@@ -131,6 +131,7 @@ do
   end
 end
 rawset(T.host.screen, "saveMarked", function(path, opts)
+  T.screenWait("host.screen.saveMarked")
   local marks = {}
   for _, m in ipairs(opts.marks or {}) do marks[#marks + 1] = { m.x, m.y } end
   S.marked[#S.marked + 1] = { path = path, region = opts.region, marks = marks }

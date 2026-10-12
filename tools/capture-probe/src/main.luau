@@ -127,10 +127,11 @@ local function snapshotLines()
     report("pixels and pixel from the snapshot %s", agree and "agree" or "DIFFER")
   end
 
+  -- Waited for, as the image worker encodes and writes it.
   local t2 = now()
   local oksv, saved, swhy = pcall(host.screen.save, "probe-snapshot.png", { snapshot = snap })
   if oksv then
-    report("save of the snapshot returned in %d ms: %s%s", now() - t2, tostring(saved), swhy and (", " .. swhy) or "")
+    report("save of the snapshot waited %d ms (from asking to the answer): %s%s", now() - t2, tostring(saved), swhy and (", " .. swhy) or "")
   else
     report("save of the snapshot THREW: %s", tostring(saved))
   end

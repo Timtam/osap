@@ -1361,20 +1361,6 @@ pub trait Backend {
         frame::read_points(pts, |r| self.capture(r.x, r.y, r.w, r.h, src))
     }
 
-    /// Reads `region` through both sources — the region a module just read, or the
-    /// foreground window when that region is too small to say anything — and logs whether
-    /// the two pictures agree, naming the module `who`. The first-read comparison of a module
-    /// that declared `[screen] capture = "duplication"`, taken once per VM build. This is the
-    /// event loop's: a call that reads the screen synchronously makes it here, while every read
-    /// handed to a thread carries it there ([`CompareReq`], [`Backend::compare_fn`]).
-    ///
-    /// `false` when it could not be made yet (duplication still opening, backing off), so the
-    /// caller asks again at the module's next read. Everywhere but Windows there is only one
-    /// source and nothing to compare.
-    fn compare_capture_sources(&self, _who: &str, _region: (i32, i32, i32, i32)) -> bool {
-        true
-    }
-
     /// The functions `host.ocr.recognize`'s two threads call — see [`OcrWorker`]. Taken once, when
     /// the service starts. The default is a platform with no recogniser.
     fn ocr_worker(&self) -> OcrWorker {
