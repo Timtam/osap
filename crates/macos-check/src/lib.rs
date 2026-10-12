@@ -87,6 +87,12 @@ pub mod profile;
 #[path = "../../host/src/webview.rs"]
 pub mod webview;
 
+/// Where the keyboard lands after `host.window.focus` of a control (HW1): pure, and the Windows
+/// backend's to use, but built on every platform, so it is checked for macOS here and `--tests`
+/// builds its tests here too.
+#[path = "../../host/src/focus_landing.rs"]
+pub mod focus_landing;
+
 /// Names what `webview_lua.rs` calls in `webview.rs`, for the reason `cells_calls` exists: that
 /// file is not borrowed (it needs Luau), and a signature it no longer matches would otherwise
 /// reach the macOS CI job first.

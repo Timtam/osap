@@ -33,9 +33,12 @@ name = "Overlay runtime"
 # imageSearchAsync, imageSearchMulti and snapshotAsync are gone; a landmark gate keeps one search
 # out by its key (host.screen.pending), so it asks again after its module was off, whose answers
 # are dropped. Nothing a module calls is new. 0.5.6 gives an OCR button a `value` hook, which says
-# what the text read means where a module knows how the recogniser misreads it; a module that
-# uses it depends on "com.platform.overlay >= 0.5.6".
-version = "0.5.6"
+# what the text read means where a module knows how the recogniser misreads it. 0.6.0 gives an
+# overlay a page: O:addPage, O:inPlugin and its trip, o.away, O:pageBack, O:pageKey and
+# O:pageAgain. While the page is in front or a trip is under way, the overlay holds no keys and
+# its onActivate and onDeactivate wait. A module that uses either depends on
+# "com.platform.overlay >= 0.5.6" or ">= 0.6".
+version = "0.6.0"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

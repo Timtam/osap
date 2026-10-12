@@ -133,6 +133,7 @@ fn what_of(ask: &ElementAsk) -> &'static str {
         ElementAsk::FocusStep { .. } => "element.focusStep",
         ElementAsk::FocusWithin { .. } => "element.focusWithin",
         ElementAsk::Press { .. } => "element.press",
+        ElementAsk::FocusPut { .. } => "window.focus",
     }
 }
 
@@ -204,6 +205,7 @@ pub(crate) fn values(lua: &Lua, ask: &ElementAsk, outcome: &ElementOutcome) -> m
             None => Value::Nil,
         }),
         ElementAnswer::Pressed => one(Value::Boolean(true)),
+        ElementAnswer::Put(took) => one(Value::Boolean(*took)),
     })
 }
 

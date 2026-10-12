@@ -1244,19 +1244,64 @@ impl Backend for WindowsBackend {
         foreground_of(unsafe { GetForegroundWindow() })
     }
 
+    /// A control's id brings its top-level window forward and then lands the keyboard on the
+    /// control (HW1a); a top-level id is brought forward as ever — and lands on the control a page
+    /// in front took the front from, when the id is the window that page came from (HW1b). See
+    /// [`start_landing`]. A declined call starts no landing.
     fn focus_window(&self, id: isize) -> bool {
         let hwnd = id as HWND;
         if hwnd.is_null() {
             return false;
         }
-        unsafe {
+        // SAFETY: plain queries and requests about a handle; a stale one is refused.
+        let (root, accepted) = unsafe {
+            let root = GetAncestor(hwnd, GA_ROOT);
+            let root = if root.is_null() { hwnd } else { root };
             // Restored first: a minimised window can be made foreground and stay invisible,
             // which for somebody who cannot see the screen is the worst of both answers.
-            if IsIconic(hwnd) != 0 {
-                ShowWindow(hwnd, SW_RESTORE);
+            if IsIconic(root) != 0 {
+                ShowWindow(root, SW_RESTORE);
             }
-            SetForegroundWindow(hwnd) != 0
+            (root, SetForegroundWindow(root) != 0)
+        };
+        if !accepted {
+            return false;
         }
+        // SAFETY: a plain query.
+        let in_front = unsafe { GetForegroundWindow() } == root;
+        let page = if root == hwnd { crate::webview_win::front_page_came_from() } else { None };
+        let plan = crate::focus_landing::plan(id, root as isize, in_front, page);
+        if let Some(control) = plan.land_on {
+            start_landing(control, root as isize, plan.look_now);
+        }
+        true
+    }
+
+    fn take_focus_puts(&self) -> Vec<(u64, isize)> {
+        FOCUS_PUTS.with(|p| std::mem::take(&mut *p.borrow_mut()))
+    }
+
+    fn focus_put_answered(&self, landing: u64, took: Result<bool, String>) {
+        let answered = LANDING.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            match slot.as_mut() {
+                Some(l) if l.id == landing => {
+                    l.landing.put_answered(took);
+                    say_landing(l);
+                    true
+                }
+                _ => false,
+            }
+        });
+        // Read back on the accessibility thread; the next step is the thread's state now.
+        if answered {
+            landing_look();
+        }
+    }
+
+    fn input_made(&self) {
+        INPUT_CALLS.fetch_add(1, Ordering::Relaxed);
+        landing_look();
     }
 
     /// Compared at the TOP LEVEL, because an overlay's origin is often a child.
@@ -2020,6 +2065,9 @@ impl Backend for WindowsBackend {
         let pending: Vec<isize> = FOREGROUND_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
         let mut unmatched_fg = false;
         for hwnd in pending {
+            // A landing of host.window.focus looks at its window's foreground event, and ends at
+            // another window's (HW1).
+            landing_foreground(hwnd);
             match window_info(hwnd, true) {
                 Some(win) => events.on_window_activate(win),
                 // Foreground, but not matchable yet — remember to re-check shortly.
@@ -2037,6 +2085,8 @@ impl Backend for WindowsBackend {
         // window that is in front now.
         super::gamepad::drain_into(events);
         if FOCUS_DIRTY.with(|f| f.replace(false)) {
+            // And at every focus event (HW1).
+            landing_look();
             events.on_focus_change();
         }
 
@@ -2066,6 +2116,144 @@ impl Backend for WindowsBackend {
         if fire {
             events.on_focus_change();
         }
+    }
+}
+
+// ── The keyboard after host.window.focus (HW1) ──────────────────────────────────────────────
+// `host.window.focus(id)` of a control brings its window forward and then LANDS the keyboard on
+// the control, and a page leaving the front gives the keyboard back to the control it took the
+// front from (webview_win.rs). What a landing decides is `focus_landing.rs`'s, pure; here are its
+// looks — `GetGUIThreadInfo` of the window's thread, local, no message sent — on the call's own
+// turn when the window is in front already, at the window's foreground event and at every focus
+// event the pump drains; and its puts, which the host asks on the accessibility thread
+// (`take_focus_puts`, lib.rs `fire_focus_puts`, uia.rs `element_focus_put`), never here. Nothing
+// here calls `AttachThreadInput`. One landing at a time: a newer one ends it. Logged under
+// `[window]`.
+
+/// The landing under way: the decisions and what they are about.
+struct Landed {
+    id: u64,
+    landing: crate::focus_landing::Landing,
+    control: isize,
+    root: isize,
+    thread: u32,
+    /// `focus of control <id> ('<class>') in '<title>'`, the head of its log lines.
+    head: String,
+}
+
+thread_local! {
+    /// The landing under way, if any.
+    static LANDING: RefCell<Option<Landed>> = const { RefCell::new(None) };
+    /// The puts landings asked for, for the host to ask on the accessibility thread.
+    static FOCUS_PUTS: RefCell<Vec<(u64, isize)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Landings started, for their ids.
+static LANDINGS: AtomicU64 = AtomicU64::new(0);
+/// `host.input` calls made ([`Backend::input_made`]): a landing ends at the first after its start.
+static INPUT_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Window `hwnd`'s class, for a log line.
+fn class_name(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    // SAFETY: a buffer of its stated length; a stale handle answers 0.
+    let n = unsafe { GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+/// Window `hwnd`'s title, for a log line.
+fn title_text(hwnd: HWND) -> String {
+    let mut buf = [0u16; 512];
+    // SAFETY: as `class_name`.
+    let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+/// Starts a landing on `control` inside `root` (`focus_landing::plan`): one under way ends, "a
+/// newer focus". `look_now`: the window is in front already, and no foreground event will come. For
+/// [`Backend::focus_window`] and for a page giving the front back (webview_win.rs).
+pub(crate) fn start_landing(control: isize, root: isize, look_now: bool) {
+    let head = format!("focus of control {control} ('{}') in '{}'", class_name(control as HWND), title_text(root as HWND));
+    // SAFETY: a plain query; 0 for a window that is gone, whose looks then end the landing.
+    let thread = unsafe { GetWindowThreadProcessId(root as HWND, std::ptr::null_mut()) };
+    let id = LANDINGS.fetch_add(1, Ordering::Relaxed) + 1;
+    let landing = crate::focus_landing::Landing::new(crate::focus_landing::KEY_DOWNS.count(), INPUT_CALLS.load(Ordering::Relaxed));
+    LANDING.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if let Some(old) = slot.as_mut() {
+            old.landing.newer();
+            say_landing(old);
+        }
+        *slot = Some(Landed { id, landing, control, root, thread, head });
+    });
+    if look_now {
+        landing_look();
+    }
+}
+
+/// The lines a landing owes, under `[window]`.
+fn say_landing(l: &mut Landed) {
+    for line in l.landing.take_lines() {
+        crate::logging::line("window", &format!("{}: {line}", l.head));
+    }
+}
+
+/// One look at the landing's window (see the section's head). A put it asks for is queued for the
+/// host; a landing that is over is let go.
+fn landing_look() {
+    LANDING.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let Some(l) = slot.as_mut() else { return };
+        // SAFETY: plain queries about handles; stale ones answer no.
+        let look = unsafe { gui_look(l.root, l.control, l.thread) };
+        let step = l.landing.look(&look);
+        if step == crate::focus_landing::Step::Put {
+            FOCUS_PUTS.with(|p| p.borrow_mut().push((l.id, l.control)));
+        }
+        say_landing(l);
+        if matches!(step, crate::focus_landing::Step::Ended(_)) {
+            *slot = None;
+        }
+    });
+}
+
+/// What the root's GUI thread says: its active window, the window with the keyboard, and whether
+/// the control is still a visible window inside the root.
+unsafe fn gui_look(root: isize, control: isize, thread: u32) -> crate::focus_landing::Look {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsChild, IsWindow};
+    let mut gti: GUITHREADINFO = std::mem::zeroed();
+    gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+    let read = thread != 0 && GetGUIThreadInfo(thread, &mut gti) != 0;
+    let focus = if read { gti.hwndFocus } else { std::ptr::null_mut() };
+    let (root_h, control_h) = (root as HWND, control as HWND);
+    crate::focus_landing::Look {
+        activated: read && gti.hwndActive == root_h,
+        on_control: !focus.is_null() && (focus == control_h || IsChild(control_h, focus) != 0),
+        focus_class: (!focus.is_null()).then(|| class_name(focus)),
+        control_there: IsWindow(control_h) != 0
+            && IsWindowVisible(control_h) != 0
+            && (control_h == root_h || IsChild(root_h, control_h) != 0),
+        key_downs: crate::focus_landing::KEY_DOWNS.count(),
+        input_calls: INPUT_CALLS.load(Ordering::Relaxed),
+    }
+}
+
+/// Window `hwnd` became the foreground window: the landing's own window is a look; another window
+/// ends the landing.
+fn landing_foreground(hwnd: isize) {
+    let ours = LANDING.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let l = slot.as_mut()?;
+        if l.root == hwnd {
+            return Some(true);
+        }
+        l.landing.foreground(false);
+        say_landing(l);
+        *slot = None;
+        Some(false)
+    });
+    if ours == Some(true) {
+        landing_look();
     }
 }
 

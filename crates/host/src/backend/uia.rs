@@ -322,6 +322,7 @@ pub fn run(ask: &ElementAsk) -> ElementOutcome {
             ElementAnswer::Point(element_class_nav_point(*hwnd, class, *ctype, *child, *sibling))
         }
         ElementAsk::FocusStep { hwnd, direction } => ElementAnswer::Step(element_focus_step(*hwnd, *direction)),
+        ElementAsk::FocusPut { hwnd } => ElementAnswer::Put(element_focus_put(*hwnd)),
         // Not here: OSARA's F6 is the way back into a plug-in on Windows (element.md).
         ElementAsk::FocusWithin { .. } => ElementAnswer::Within(None),
         ElementAsk::Press { .. } => unreachable!("a press is answered above"),
@@ -1158,6 +1159,37 @@ fn element_focus_step(hwnd: isize, direction: i32) -> Option<super::FocusStep> {
         }
         None
     })
+}
+
+/// A landing's put (HW1, `focus_landing.rs`): UI Automation's SetFocus on window `hwnd` — a
+/// plug-in's child control, as a rule — asked here, on the accessibility thread, never on the event
+/// loop, and read back here: whether the keyboard is on the window, or a window inside it, afterwards
+/// (`GetGUIThreadInfo` of its thread, local). For a window with no provider of its own — a JUCE
+/// plug-in without accessibility — UI Automation's window proxy sets the focus itself, which may
+/// attach input to the window's thread for the moment it takes; this code never does. A program that
+/// does not answer within the UIA timeouts is "not known", with why. Unverified for such a window on
+/// Windows: the read-back says whether it took (TODO.md, HW1).
+fn element_focus_put(hwnd: isize) -> bool {
+    let took = AUTOMATION.with(|cell| unsafe {
+        let borrow = automation(cell);
+        let automation = borrow.as_ref()?;
+        let el = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
+        noted(el.SetFocus())
+    });
+    if took.is_none() {
+        return false;
+    }
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetGUIThreadInfo, GetWindowThreadProcessId, IsChild, GUITHREADINFO};
+    // SAFETY: plain queries about a handle; a stale one answers no.
+    unsafe {
+        let tid = GetWindowThreadProcessId(hwnd as _, std::ptr::null_mut());
+        let mut gti: GUITHREADINFO = std::mem::zeroed();
+        gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+        if tid == 0 || GetGUIThreadInfo(tid, &mut gti) == 0 || gti.hwndFocus.is_null() {
+            return false;
+        }
+        gti.hwndFocus as isize == hwnd || IsChild(hwnd as _, gti.hwndFocus) != 0
+    }
 }
 
 #[cfg(test)]

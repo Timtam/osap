@@ -14,6 +14,9 @@ mod backend;
 mod element;
 /// `host.element`'s bindings, each with an optional callback — see the file.
 mod element_lua;
+/// The keyboard after `host.window.focus` of a control, and after a page gives the front back:
+/// where it lands, decided by events, pure — see the file (HW1).
+mod focus_landing;
 /// Which build is running: the executable's commit and the package's. See the file.
 pub mod build_info;
 mod capture_source;
@@ -79,6 +82,11 @@ mod overlay_probe_tests;
 /// go and asks nothing there, against the same scripted host.
 #[cfg(test)]
 mod overlay_own_window_tests;
+/// An overlay's page (runtime 0.6.0): O:addPage, the group away while the page is in front, a trip
+/// into the plug-in (O:inPlugin) and its ends, the way back, against the same scripted host with a
+/// scripted page.
+#[cfg(test)]
+mod overlay_page_tests;
 /// Tasks and their two waits against a real Luau VM and a real read service over a fake
 /// recogniser.
 #[cfg(test)]
@@ -1666,6 +1674,7 @@ impl Shared {
     /// the event loop waited for is (element_lua.rs); what the host told without asking the program
     /// never is (element.rs, `Due::program`).
     fn fire_acted(&self) {
+        self.fire_focus_puts();
         for due in self.acting.take_due() {
             let _prio = ocr::types::enter_priority(due.prio);
             let acting::Answer { idx, lua, cb, what } = due.answer;
@@ -1680,6 +1689,26 @@ impl Shared {
             }
             let acting::Answer { idx, lua, cb, what } = answer;
             mailbox::deliver(self, idx, &lua, Event::Element { cb, ask: Box::new(ask), outcome: due.outcome, what, out });
+        }
+    }
+
+    /// The keyboard landings of `host.window.focus` (HW1, `focus_landing.rs`): the puts the backend
+    /// wants made, asked on the accessibility thread — never here, on the event loop — and the
+    /// answers that came back since, handed to the backend, which looks again. In `fire_acted`, so
+    /// both ticks drive it. Nothing on a platform without the thread: there are no landings there.
+    fn fire_focus_puts(&self) {
+        if let Some(runner) = self.backend.element_runner() {
+            for (landing, hwnd) in self.backend.take_focus_puts() {
+                self.elements.ask_host(runner, backend::ElementAsk::FocusPut { hwnd }, self.input_epoch.get(), landing);
+            }
+        }
+        for (landing, outcome) in self.elements.take_host_due() {
+            let took = match outcome {
+                Ok(backend::ElementAnswer::Put(took)) => Ok(took),
+                Ok(other) => Err(format!("answered {other:?}")),
+                Err(f) => Err(f.why),
+            };
+            self.backend.focus_put_answered(landing, took);
         }
     }
 

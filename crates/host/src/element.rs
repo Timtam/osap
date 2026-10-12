@@ -125,6 +125,9 @@ enum To {
     /// and the `opts.key` it was asked under, which a newer question of that VM with that key
     /// replaces while it waits.
     Call { token: u64, owner: Owner, key: Option<String> },
+    /// The host's own question, by its token: a landing's put (`focus_landing.rs`), whose answer
+    /// goes back to the backend ([`Elements::take_host_due`]). No module's; nothing drops it.
+    Host { token: u64 },
 }
 
 /// A question waiting to be asked, with everyone who waits for its answer.
@@ -319,7 +322,7 @@ fn answer(to: Vec<To>, outcome: &ElementOutcome, program: bool, done: &Sender<Do
     for t in to {
         match t {
             To::Wait(back) => back.give(outcome.clone(), program),
-            To::Call { token, .. } => {
+            To::Call { token, .. } | To::Host { token } => {
                 let _ = done.send((token, outcome.clone(), program));
             }
         }
@@ -462,6 +465,12 @@ pub(crate) struct Elements {
     /// (`host.element.pending`). Counted down as the answer's event runs or is dropped
     /// ([`Elements::settle`]), or as the question is dropped with its module.
     out: RefCell<HashMap<(Owner, String), u32>>,
+    /// The host's own questions on their way, by token: the landing each is for ([`To::Host`]).
+    host_pending: RefCell<HashMap<u64, u64>>,
+    /// What came back from the thread and is not handed out yet: the modules' answers, and the
+    /// host's — the channel is drained into both at once ([`Elements::drain`]).
+    module_due: RefCell<Vec<Due>>,
+    host_due: RefCell<Vec<(u64, ElementOutcome)>>,
 }
 
 impl Elements {
@@ -476,6 +485,9 @@ impl Elements {
             done_rx,
             waiting: Cell::new(false),
             out: RefCell::new(HashMap::new()),
+            host_pending: RefCell::new(HashMap::new()),
+            module_due: RefCell::new(Vec::new()),
+            host_due: RefCell::new(Vec::new()),
         }
     }
 
@@ -565,6 +577,35 @@ impl Elements {
         if lock(&self.inner.queue).submit(ask, pid, lane, input_epoch, To::Call { token, owner, key }) == Put::New {
             self.inner.work.notify_one();
         }
+    }
+
+    /// The host's own question `ask` — a landing's put — for `landing`, on the thread of `runner`, in
+    /// the interactive lane: what a person did led to it. Its answer comes back through
+    /// [`Elements::take_host_due`] on a later turn; a window of this application is answered
+    /// [`OWN_WINDOW`] without being asked, as any question about one is.
+    pub(crate) fn ask_host(&self, runner: ElementRunner, ask: ElementAsk, input_epoch: u64, landing: u64) {
+        let token = self.next.get() + 1;
+        self.next.set(token);
+        self.host_pending.borrow_mut().insert(token, landing);
+        let refuse = |why: String| {
+            let _ = self.done_tx.send((token, Err(ElementFailure { why, unanswered: false }), false));
+        };
+        if let Err(why) = self.start(runner) {
+            return refuse(why);
+        }
+        let pid = (runner.process_of)(ask.hwnd());
+        if pid == std::process::id() {
+            return refuse(OWN_WINDOW.to_string());
+        }
+        if lock(&self.inner.queue).submit(ask, pid, Lane::Interactive, input_epoch, To::Host { token }) == Put::New {
+            self.inner.work.notify_one();
+        }
+    }
+
+    /// The answers to the host's own questions that came since the last turn: `(landing, outcome)`.
+    pub(crate) fn take_host_due(&self) -> Vec<(u64, ElementOutcome)> {
+        self.drain();
+        std::mem::take(&mut *self.host_due.borrow_mut())
     }
 
     /// A newer question of module VM `owner` with `key` was asked: the callbacks of that VM and key
@@ -668,13 +709,23 @@ impl Elements {
     /// The answers that came since the last turn for callbacks, in the order they came. An answer
     /// for a question dropped with its module is let go here.
     pub(crate) fn take_due(&self) -> Vec<Due> {
-        let mut out = Vec::new();
+        self.drain();
+        std::mem::take(&mut *self.module_due.borrow_mut())
+    }
+
+    /// Everything that came back on the channel, sorted: a module's answer to [`take_due`]'s list,
+    /// the host's to [`take_host_due`]'s; an answer for a question dropped with its module is let go.
+    ///
+    /// [`take_due`]: Elements::take_due
+    /// [`take_host_due`]: Elements::take_host_due
+    fn drain(&self) {
         while let Ok((token, outcome, program)) = self.done_rx.try_recv() {
             if let Some(pending) = self.pending.borrow_mut().remove(&token) {
-                out.push(Due { pending, outcome, program });
+                self.module_due.borrow_mut().push(Due { pending, outcome, program });
+            } else if let Some(landing) = self.host_pending.borrow_mut().remove(&token) {
+                self.host_due.borrow_mut().push((landing, outcome));
             }
         }
-        out
     }
 }
 

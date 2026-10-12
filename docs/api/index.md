@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 179 entries.
+Every call the platform offers a module, in one place. 183 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -68,6 +68,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | | |
 |---|---|
 | [`Bindings — O.window / O.embedded / :with / O.hosts / O:bind`](overlay#bindings) | `O.window(matcher, opts?) -> Binding` · `O.embedded(spec, opts?) -> Binding` · `Binding:with(over) -> Binding` · `O.hosts(...)… |
+| [`O.away`](overlay#o-away) | Whether the overlay's group is **away** |
 | [`O.calibrating()`](overlay#o-calibrating) | Whether calibration is switched on |
 | [`O.contentSize(origin)`](overlay#o-contentsize) | The width and height of an origin's **content**, which is what coordinates are measured against |
 | [`O.doubleClick(x, y)`](overlay#o-doubleclick) | Two clicks at the same point, far enough apart in time to **be** a double-click. |
@@ -83,6 +84,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O:addHotspotButton(opts)`](overlay#o-addhotspotbutton) | Appends a button that, when activated, clicks a fixed origin-relative point. |
 | [`O:addHotspotToggle(opts)`](overlay#o-addhotspottoggle) | Appends a toggle whose on/off state is read from a **single pixel** at its click point (ReaHotkey's `HotspotToggleButton`) |
 | [`O:addOCRButton(opts)`](overlay#o-addocrbutton) | Appends a button whose label/value is read live by OCR over a region; activating re-reads it then clicks the region centre. |
+| [`O:addPage(spec) — an overlay's page`](overlay#o-addpage) | Gives the overlay a page |
 | [`O:addPassThrough(opts)`](overlay#o-addpassthrough) | Appends a stop that hands Tab to the plug-in's own focusable elements, for a plug-in window that does not move focus on Tab by itself. |
 | [`O:addStaticText(label)`](overlay#o-addstatictext) | Appends a static text control: Tab-reachable and read aloud on focus. |
 | [`O:addStepper(opts)`](overlay#o-addstepper) | Appends a **value changed with Left and Right**, where the module knows how to change it. |
@@ -97,9 +99,11 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O:gate(fn) / O:landmark(image)`](overlay#o-gate) | `gate(fn)` sets an extra activation condition ANDed onto the context match |
 | [`O:group(pred, build)`](overlay#o-group) | Adds everything `build` adds under a shared condition: `pred` is ANDed onto each control's own `when`, and groups nest. |
 | [`O:here() / O:stillHere(mark, opts?)`](overlay#o-here) | Whether the overlay is still where it was, for an answer that comes later and acts on what it learned |
+| [`O:inPlugin(spec) — a trip into the plug-in`](overlay#o-inplugin) | One action of the page's in the plug-in |
 | [`O:menuOpen()`](overlay#o-menuopen) | Whether a menu counts as open over the overlay now: one of its menu tests' word is that one is. |
 | [`O:onActivate(fn) / O:onDeactivate(fn)`](overlay#o-onactivate) | Hooks the module runs each time the overlay comes to the front and each time it leaves it. |
 | [`O:origin() / O:hwnd()`](overlay#o-origin) | The active context's coordinate window — the plugin control when embedded, the window when standalone — and its handle. |
+| [`O:pageBack() / O:pageKey(spec) / O:pageAgain()`](overlay#o-pageback) | The way back from an overlay's page to the plug-in, another page key, and the page described again. |
 | [`O:probe(name, points, opts?)`](overlay#o-probe) | The pixels a `when` answers from, which the runtime reads in the handler before a scan. |
 | [`O:resume(on)`](overlay#o-resume) | Whether the overlay, coming to the front again on the window it was last in front on, resumes on the control the user was on (`true`, the default |
 | [`O:scale(fn, opts?)`](overlay#o-scale) | Scales every authored coordinate of the overlay by the factor `fn` answers, for a plug-in that zooms its whole interface. |

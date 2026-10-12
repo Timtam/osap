@@ -1202,6 +1202,10 @@ impl Shared {
     /// `call` — `host.input.*` or `host.window.focus` — acts for the module that owns `lua`, at
     /// once: it never waits for a picture ([`note_acting`]).
     pub(crate) fn note_acting(&self, lua: &Lua, call: &str) {
+        // A landing of `host.window.focus` never moves the keyboard after a module's input (HW1).
+        if call.starts_with("host.input.") {
+            self.backend.input_made();
+        }
         let Some(o) = vm_owner(lua) else { return };
         note_acting(self, o.idx, call, self.snap_state.has_pending_for(o.idx));
     }

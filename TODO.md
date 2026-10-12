@@ -7035,6 +7035,25 @@ maintainer's German test instructions are a text of their own, not in the reposi
         whether REAPER's activation on the posted click leaves its FX dialog's focus memory on a
         window that is not focusable, and whether the way back can give the dialog its focus
         (generic: the window's last focused child, as Windows restores it on activation).
+      - **HW1 built (2026-10-12), for what the first results found:** `host.window.focus` of a
+        control brings its top-level window forward and LANDS the keyboard on the control —
+        decided by events (`GetGUIThreadInfo` at the call when the window is in front already, at its
+        foreground event and at each focus event), at most two puts (UI Automation's SetFocus, asked
+        on the accessibility thread, read back there), ended by the user's first key-down, any
+        `host.input` call, another window's foreground, the control gone, or a newer focus
+        (`focus_landing.rs`, docs/api/window.md). And a page leaving the front gives the keyboard back
+        to the control it took the front from (HW1b), also after the module's "focus first, then
+        hide". To confirm live: the probe's W7 and W10 again, which exercise HW1b unchanged — the
+        `[window] focus of control <id> ('<class>') in '<title>': …` lines say where the keyboard
+        was and whether the put took. ON:EAR's `host.window.focus(o.id)` before each click now
+        brings the root forward and lands on its control: in practice landed already, since its
+        overlay is active only with the keyboard in the plug-in, and its click ends the landing.
+        Open, read from those lines: whether UI Automation's SetFocus takes on a child window with no
+        provider (a JUCE plug-in without accessibility; `refused` there makes the next step a Win32
+        put on the accessibility thread, never on the event loop); whether the thread's active
+        window is set when the foreground event is drained (`waiting for the window's activation`
+        with nothing after it says no); and `LANDING_PUTS = 2` (a line that the application `moved it
+        … after 2 puts` raises it, by that measurement).
       - **ReaEQ (REAPER's own, Win32/WDL):** a checkbox. "Nothing — only watch" first (does it
         change by itself?), then the round trip (the reference NVDA chatter), Posted click, Posted
         click pointer stays, The no-activate style, Accessibility press — each twice, so the
@@ -7266,6 +7285,51 @@ maintainer's German test instructions are a text of their own, not in the reposi
       maintainer's call; "back to the plug-in" as daw-hosts' focus key made a building block, once
       its quarter-second re-read is an event, and a docked plug-in's way back (W7); tests in the
       scripted style of overlay_menu_tests.rs.
+      **Built 2026-10-12 (RG1a and RG1b of the VPS Avenger port's plan, overlay runtime 0.6.0, not
+      run live yet):** `O:addPage{ describe, key, open, onMessage, … }` — the page key, the show
+      beside the plug-in after the module's `open`, the page prepared at the first arrival — the
+      group away while the page is in front or a trip is under way (no key of any kind, nothing
+      announced, onActivate/onDeactivate paired by whether the module was told and settled when away
+      ends; the Mac's stay held, so no `identify` per round trip), `O:inPlugin{ label, act, after,
+      onGiveUp }` with its held context (no chrome gate, no keyboard test, no identify), its ends
+      (another application, the page key, the page closed, the window gone, 8 s on the way,
+      `trip:inFront()` false, another module's overlay outranking, a hook that raised) and its waits
+      (`trip:afterMenu`, `trip:afterDialog`), `o.away`, `O:pageBack()` (Logic's main window first
+      tolerated, 8 s), `O:pageKey()` and `O:pageAgain()`; docs/api/overlay.md and Step 10 of
+      docs/building-a-page.md; 51 scripted scenarios (overlay_page_tests.rs). The reads question was
+      answered by the trip itself: a trip brings the plug-in forward for reads as for clicks, and the
+      act asks `trip:inFront()` after each wait. **Left:** the nested overlays (a page for Kontakt
+      inside Komplete Kontrol); a docked plug-in's way back (W7: the probe finds no plug-in window
+      there); daw-hosts' "back to the plug-in" as a building block.
+      - [ ] **Its verification on Windows** (the port's slice 3), the maintainer, with NVDA in
+        REAPER, through a verification patch on ON:EAR's overlay (the session's `rg1-verify.patch`,
+        not committed: "Read", "Step", "Back" on a page): a trip — NVDA announces the plug-in's
+        window and the page coming back, and the overlay says nothing in between; the way back —
+        one press of the page key and NVDA is in the plug-in; the close box and Alt+F4 in the page;
+        Alt+Tab from the page to another program and back to the plug-in — the overlay announced,
+        its keys working. The lines that answer it: `[window] focus of control …`, `[page] … in the
+        plug-in after N ms; the keyboard on …`, `[page] … away ends …`; and, only if the page went
+        over the plug-in, a picture of the covered rectangle (`[page] … the page overlaps the
+        plug-in's window at …`): if the first picture after an arrival shows the page, the fix is a
+        change wait on the overlap, never a pause.
+      - [ ] **On a Mac (the port's P1 and P2)**, with Avenger, the tester and the module's
+        developer — the log lines they read: the held window's id at away's begin (`[page] … away —
+        the page in front, holding window id X …`) and at each arrival (`… the held window came back
+        as id X`), a window of the DAW titled as the plug-in's under another id (`… came forward as
+        id Y, not the held id X — waiting for X`): if Logic does not keep the id, the fix is in the
+        host's handle table; the keyboard at each arrival (`… the keyboard on <class>`); the end of
+        the way back (`[page] … away ends — …`, or `the way back: <Logic's main window> came first`);
+        each dialog's pid on Load (`… a dialog came forward — '<title>', window id … of pid …`: a
+        sandboxed DAW's open panel may be another process's, which ends a dialog wait as "another
+        application"); and with a page described `activates = false`, whether the plug-in's window
+        raises a foreground event at all (MW1b) — without one a trip ends by its 8 s bound, "not in
+        front".
+      - [ ] **GM2 — does the DAW drop the first click after its plug-in window comes forward?**
+        daw-hosts has a reserved entry field for it, `swallowsFirstClick`, set by no entry; with it
+        and a page's `prime = { x, y }` the runtime clicks once at that neutral point at each trip's
+        arrival, before the act (`[page] … primed at x,y …`), never on the way back. P2's developer
+        tries the answer by editing Logic's entry in place; set it in the repository only once GM2
+        has measured it.
 - [ ] **Stage 3 — the real `host.gui.webview`**: `prepare()` called on an overlay's first
       activation (the call and the asynchronous environment are there since 2026-09-28), a build
       that does not wait at all (above), the page kept off the internet (above), the placement

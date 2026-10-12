@@ -34,6 +34,13 @@
 --                 matcher takes windows that are no plug-in windows and nothing known yet tells
 --                 them apart for a `focusTarget` (Ableton Live on a Mac).
 --   daw           the DAW's name, for the focus key's log line.
+--   swallowsFirstClick
+--                 RESERVED, set by no entry: `true` when the DAW drops the first click after its
+--                 plug-in window comes forward, which is GM2's open question for a Mac (TODO.md,
+--                 GM2). The overlay runtime then makes one click at a page's neutral point at each
+--                 trip's arrival, before the module's act (docs/api/overlay.md, O:addPage's `prime`).
+--                 Set it only once GM2 has measured that the DAW does; a developer trying the
+--                 answer edits the entry in place.
 --
 -- Every entry of `all` is a plug-in window, and the focus key searches exactly those that can
 -- match on the platform it runs on, less those marked `focusKey = false`: there is no second list

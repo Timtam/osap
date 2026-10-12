@@ -13,7 +13,7 @@ This page builds one up from the smallest case to a page whose buttons click in 
 Pages run on **Windows**, where the maintainer has tried them with NVDA, and on **macOS**, where they were built on 2026-10-11, run on CI's Macs, and have not been tried with VoiceOver yet ([Step 8](#step-8)). `host.gui.webview` is experimental, and the API may change after the probes.
 :::
 
-**A page or an overlay?** An [overlay](building-an-overlay.md) lays a Tab ring over the plug-in itself, and the user never leaves the plug-in's window. A page is a window of its own: while it is in front, it has the keyboard and the plug-in does not — the DAW's keys do not reach the plug-in, and an overlay on the plug-in window is not active then. A page is for what a Tab ring does badly: a lot to read, a list to browse, a menu the plug-in draws where no screen reader reaches it.
+**A page or an overlay?** An [overlay](building-an-overlay.md) lays a Tab ring over the plug-in itself, and the user never leaves the plug-in's window. A page is a window of its own: while it is in front, it has the keyboard and the plug-in does not — the DAW's keys do not reach the plug-in, and an overlay on the plug-in window is not active then. A page is for what a Tab ring does badly: a lot to read, a list to browse, a menu the plug-in draws where no screen reader reaches it. **Both:** an overlay module adds a page with `O:addPage`, and the overlay runtime then does the key, the way back and the round trip for it — [Step 10](#step-10).
 
 ---
 
@@ -519,7 +519,7 @@ What to know about the trip:
 - **Windows decides whether the page may come back.** It lets a program bring its own window to the front only under conditions, and may refuse even then. Refused, `show` answers `false, "declined by the system"`: the page is shown and raised, without the keyboard — or hidden again, where it would have been over the window — so the module says the result with [`host.speech`](api/speech.md), after `notShown`'s sentence, and writes it to the log. The page has it as well, focused: Windows has been seen to bring a declined page to the front all the same a moment later ([Windows](api/gui.md#windows-1)), and the page then comes back on it, as it does when the user brings it with the key.
 - **The page comes back after the read, not with the click.** The read's answer is the event that ends the trip, and the click has been made before its picture was taken. A value the click itself changes — a preset name after "next" — is drawn when the window gets round to it: wait for the change with [`host.screen.snapshot`'s change wait](api/screen.md#waiting-for-the-picture-to-change), given a callback, and read that snapshot.
 - **A click from a hotkey carries the hotkey's modifiers.** On Windows a synthesised click inherits whatever the user is still holding. The example clicks from a page message, where nothing is held; a module that starts a trip from its own key waits for [`host.keys.modifiersDown()`](api/keys.md#host-keys-modifiersdown) to answer `false` first (and declares `keys` for it).
-- **The trip is heard.** The module says nothing on a trip that goes well, but the screen reader follows the keyboard: as Notepad comes forward it says what it says for any window coming to the front — Notepad's title, its text field, the line at the caret — and as the page comes back, the page's title and the element with the focus: the result ([Step 3](#step-3)). In the example's first run with NVDA, the click came through, Notepad came forward and the page came back, and a result posted to the status line right after the `show` was not heard: the announcement of the page cut it off. Whether the result is heard now that the page comes back on it is what the next run listens for (TODO.md). With the HTML probe in REAPER, NVDA was heard announcing the focus leaving the page and coming back, and the page's focused element again. Acting in a plug-in without bringing its window to the front is being researched (TODO.md, "W3: acting in the plug-in without the round trip"); the round trip is the way that works everywhere.
+- **The trip is heard.** The module says nothing on a trip that goes well, but the screen reader follows the keyboard: as Notepad comes forward it says what it says for any window coming to the front — Notepad's title, its text field, the line at the caret — and as the page comes back, the page's title and the element with the focus: the result ([Step 3](#step-3)). In the example's first run with NVDA, the click came through, Notepad came forward and the page came back, and a result posted to the status line right after the `show` was not heard: the announcement of the page cut it off. Whether the result is heard now that the page comes back on it is what the next run listens for (TODO.md). With the HTML probe in REAPER, NVDA was heard announcing the focus leaving the page and coming back, and the page's focused element again. Acting in a plug-in without bringing its window to the front is being researched (TODO.md, "W3: acting in the plug-in without the round trip"); the round trip is the way that works everywhere. A module whose plug-in has an overlay does not write it by hand: the overlay runtime makes it ([Step 10](#step-10)).
 - **The mouse pointer stays where it clicked.** [`host.input.click`](api/input.md#host-input-click) moves the pointer to the point and leaves it there, in Notepad's text. Whether a screen reader that follows the mouse — NVDA does by default — reads what is under it during the trip is not measured.
 - **An answer can come too late.** Text read off the screen comes back later, and the user may have moved on by then. The example gives the trip up when another window's foreground event comes, compares `trip` with the one the read was asked for, and asks `inFront` once more before it brings the page back; the key and a closed page give the trip up too.
 
@@ -696,6 +696,168 @@ end
 
 ---
 
+## Step 10 — a page for an overlay's plug-in {#step-10}
+
+Steps 4 to 6 built the round trip by hand, for a window no overlay lives on. A module whose plug-in has an [overlay](building-an-overlay.md) gets all of it from the overlay runtime instead, with [`O:addPage`](api/overlay.md#o-addpage): the key, the show beside the plug-in, the way back, the round trip into the plug-in and every way it ends. What stays the module's is the page itself, what it shows, and what each of its buttons does in the plug-in.
+
+**What the runtime takes over.**
+
+- **The key** (Steps 4 and 6). The page key, pressed in the plug-in, asks your `open` to post the page its state and its focus, checks that the overlay is still where it was, and shows the page beside the plug-in's window. Pressed in the page, it goes back: the plug-in forward first, then the page hidden. Pressed anywhere else, it says where it opens. With a menu open over the overlay, it says to close it first.
+- **Building the page early** (Step 4). The page is prepared the first time the overlay comes to the front, and not again from there after a failure.
+- **The overlay while the page is in front.** The overlay holds its place — **away**: it holds no key, says nothing, and its `onActivate` and `onDeactivate` wait, so a round trip is nothing to your hooks. It comes back, with its keys and its arrival said, when the user is back in the plug-in — by the page key, the page's close box, Alt+F4, Alt+Tab — or lets go when the user went to another program.
+- **The round trip** (Step 5). [`O:inPlugin`](api/overlay.md#o-inplugin) brings the plug-in forward, runs your `act` once it is there, and brings the page back after your `after` posted the result. It refuses a second trip while one is under way, and a message that arrives after the user went elsewhere. Another program coming forward, the page closed, the plug-in's window gone or not coming within 8 seconds give the trip up; the page comes back with your error, except over another program.
+
+**The module's part.**
+
+- `describe(on)` describes the page, handing the runtime its three events: `onMessage = on.message`, `onReady = on.ready`, `onClose = on.close`. It is yours because the page's `file` is relative to your folder.
+- `open(o)` posts what the page shows, then where its focus goes — the order of Step 5: the state, then the error or the focus, then the show (the runtime shows after `open` returns).
+- `onMessage(o, m)` is every message from the page. For an action in the plug-in it calls `o:inPlugin{ … }`; for "Back" it calls `o:pageBack()`.
+- A trip's `act(o, trip)` works in the plug-in as any handler of the overlay does — it reads, clicks, reads again — and asks `trip:inFront()` after every wait, before it clicks or reads. It ends with `trip:done(result)`. `after(o, result)` posts the result, and returns a sentence for when the page does not come back.
+
+The manifest depends on the runtime, and declares what the module's own code calls:
+
+```toml
+# module.toml
+id           = "com.example.synth-page"
+name         = "Synth page"
+version      = "0.1.0"
+dependencies = ["com.platform.overlay >= 0.6", "com.platform.daw-hosts"]
+
+[capabilities]
+require = ["gui", "screen", "ocr", "input", "element", "log"]
+```
+
+The whole module, over a fictional plug-in with a preset name at the top left and a "Next" arrow beside it — at fixed points of its own window, as an overlay's controls are:
+
+```luau
+-- src/main.luau
+local O = host.require("com.platform.overlay")
+local daw = host.require("com.platform.daw-hosts")
+
+local NAME = { 34, 7, 214, 22 } -- the preset's name, in the plug-in's coordinates
+local NEXT = { 230, 14 }        -- the "Next" arrow
+
+local ov = O.new("Synth")
+ov:addStaticText({
+  label = "Preset",
+  text = function(o)
+    local r = o:toScreenRect(NAME, { whole = true })
+    return r and host.ocr.recognize(r).text or nil
+  end,
+})
+
+-- Next, as a trip: the arrow clicked in the plug-in, the new name read once it is drawn.
+local function nextPreset(o)
+  local started, why = o:inPlugin({
+    label = "Next preset",
+    act = function(p, trip)
+      local region = p:toScreenRect(NAME, { whole = true })
+      local x, y = p:toScreen(NEXT[1], NEXT[2])
+      if not (region and x) then return trip:done({ error = "the plug-in cannot be placed now" }) end
+      host.screen.snapshot({ region = region }, function(before)
+        if not trip:inFront() then return end -- the user went elsewhere: nothing clicked
+        if host.window.ownsPoint(p:hwnd(), x, y) == false then
+          return trip:done({ error = "something covers Next" })
+        end
+        host.input.click(x, y)
+        host.screen.snapshot({ region = region, change = { from = before, timeout = 2000 } }, function(after)
+          if not trip:inFront() then return end
+          if not after then return trip:done({ error = "the name cannot be read now" }) end
+          host.ocr.recognize(region, { snapshot = after }, function(r)
+            trip:done({ name = r.status == "text" and r.lines[1] and r.lines[1].text or nil })
+          end)
+        end)
+      end)
+    end,
+    after = function(p, result)
+      if result.error then
+        p.page:post({ kind = "error", text = "Next preset: " .. result.error })
+      else
+        p.page:post({ kind = "result", text = "Preset: " .. (result.name or "not read") })
+      end
+      return result.name and ("Preset " .. result.name) or nil -- said only if the page does not come back
+    end,
+    onGiveUp = function(p, why2)
+      p.page:post({ kind = "error", text = "Next preset: " .. why2 })
+    end,
+  })
+  -- "busy" and "not in front" are the runtime's to log; the page shows the rest.
+  if not started and why ~= "busy" and why ~= "not in front" then
+    o.page:post({ kind = "error", text = "Next preset: " .. why })
+  end
+end
+
+ov:addPage({
+  describe = function(on)
+    return host.gui.webview({ file = "ui/index.html", title = "Synth page",
+      onMessage = on.message, onReady = on.ready, onClose = on.close })
+  end,
+  key = host.os.pick({ windows = "Ctrl+Shift+Alt+F1", macos = "Ctrl+Shift+Win+F1" }),
+  open = function(o)
+    local r = o:toScreenRect(NAME, { whole = true })
+    local name = r and host.ocr.recognize(r).text or nil
+    o.page:post({ kind = "status", text = "Preset: " .. (name or "not read") })
+    o.page:post({ kind = "focus" })
+  end,
+  onMessage = function(o, m)
+    if type(m) ~= "table" then return end
+    if m.action == "next" then
+      nextPreset(o)
+    elseif m.action == "back" then
+      o:pageBack()
+    end
+  end,
+})
+
+-- Which plug-in the control is: the synth's own accessibility pane, as Building an overlay shows.
+local function isSynth(c)
+  return host.element.find(c.id, "Synth", host.element.type.Pane) == true
+end
+ov:bind(O.embedded({ hosts = daw.all, control = { windows = "^JUCE_" }, identify = isSynth }),
+  { slot = "com.example.synth" })
+```
+
+And its page: a status line for what it was told while in front, one button per action, and the result focused when the page comes back, as in [Step 5](#step-5):
+
+```html
+<!-- ui/index.html -->
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>Synth page</title><script src="page.js" defer></script></head>
+  <body>
+    <h1>Synth</h1>
+    <p id="status" aria-live="polite" tabindex="-1">Nothing yet.</p>
+    <button id="next">Next preset</button>
+    <button id="back">Back to the plug-in</button>
+  </body>
+</html>
+```
+
+```js
+// ui/page.js
+const status = document.getElementById("status");
+document.getElementById("next").addEventListener("click", () => window.platform.post({ action: "next" }));
+document.getElementById("back").addEventListener("click", () => window.platform.post({ action: "back" }));
+window.platform.onmessage = (m) => {
+  if (!m || typeof m !== "object") return;
+  if (m.kind === "status") status.textContent = String(m.text);
+  if (m.kind === "result" || m.kind === "error") { status.textContent = String(m.text); status.focus(); }
+  if (m.kind === "focus") document.getElementById("next").focus();
+};
+```
+
+**What is quiet, and what is still heard.** On a trip that goes well the overlay says nothing: it comes up in the plug-in quietly, holds no key there, and lets go again. The screen reader still says what it says for any window coming forward — the plug-in's window, then the page coming back with its focused element, the result. A page that does not come back is said by the runtime, with your `after`'s sentence. A trip given up over another program is said behind the screen reader, which is busy saying where the user went.
+
+**The ends.** A trip ends when its work is done, or when it is given up: another program's window comes forward, the page key is pressed, the page is closed, the plug-in's window is gone or does not come within 8 seconds, `trip:inFront()` answers false (which ends it: your `act` just returns), another module's overlay holds the plug-in, or your `act` raised. A window of the plug-in's own application on the way is no end: Logic brings its main window forward before the plug-in's, REAPER may too. A menu your next click opens and a dialog that follows are waits of the trip ([`trip:afterMenu`](api/overlay.md#o-inplugin), [`trip:afterDialog`](api/overlay.md#o-inplugin)), and the user's time in them is theirs.
+
+**The page key is the way out of anything.** During a trip it gives the trip up and brings the page; in the page it goes back to the plug-in; on a way back that has not reached the plug-in yet it brings the page again. An act whose callbacks never come — a bug — is ended by it too.
+
+**The keyboard on Windows.** A trip and the way back ask for the plug-in's own control, not its window, and the host lands the keyboard in it ([`host.window.focus`](api/window.md#host-window-focus)): brought forward, the window's keyboard can be on REAPER's FX list or nowhere, which the host corrects — at most twice, and never after the user pressed a key. The page's own close box gives the keyboard back to the control it took the front from as well ([`page:hide`](api/gui.md#page-hide)).
+
+**On a Mac** the plug-in is the DAW's panel inside its window, and the way back and a trip ask for that window. Whether VoiceOver lands in the plug-in after the way back is unmeasured; the runtime's log says where the keyboard was at each arrival (`[page] … in the plug-in after N ms; the keyboard on …`).
+
+---
+
 ## A checklist
 
 - Describe the page once, at load; keep the object. Show it from `onReady` when a `show` answered `"not ready yet"` — and only if the user is still where they asked for it.
@@ -710,3 +872,4 @@ end
 - Say every `false` that `show` and `host.window.focus` answer; the user cannot see that the page did not come. A declined `show` is Windows keeping the keyboard, not a page that is not there.
 - When the user has just moved, speak with `interrupt = false`, behind the screen reader.
 - On a Mac a page is new and untried with VoiceOver: write it once, pick a Mac key with `host.os.pick`, and take a show's `true` there for the front asked for.
+- A page for an overlay's plug-in: `O:addPage` and `O:inPlugin` instead of Steps 4 to 6 by hand — `open` posts the state, then the focus; every `act` asks `trip:inFront()` after each wait and ends with `trip:done`.

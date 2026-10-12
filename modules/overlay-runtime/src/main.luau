@@ -99,6 +99,30 @@ Overlay.__index = Overlay
 -- Every overlay this VM made, held weakly: which of them are active decides who sets back the
 -- module's key scope and menu flag (see _deactivate).
 local overlaysMade = setmetatable({}, { __mode = "k" })
+-- How many overlays this VM made: each one's number, so that a page's group is listed in the order
+-- its overlays were made, the same every time (see "An overlay's page").
+local overlaysCounted = 0
+
+-- What an overlay's own comings and goings tell its page, if its group has one: the functions are
+-- set in the section "An overlay's page", below "Holding its place", where everything they read is
+-- defined. Until a module's first O:addPage there are no page records, and each costs one empty loop.
+--   pages.of(o)                the page record of o's group, or nil
+--   pages.leaving(o)           o is leaving the front (_deactivate): the place a page asked for is held
+--   pages.arrived(o, quiet)    o came to the front (_activate): quietly, while its group is away
+--   pages.rechecked(o)         o was looked at again (_recheck, _menuHoldEnds): a trip may have arrived
+--   pages.menuChanged(o, open) a menu opened or closed over o (_menuChange): a trip's menu wait
+--   pages.menuHeld(o, id)      o began to hold its place over its menu's window `id` (_menuHold)
+--   pages.joining(o, slot)     o is being bound on `slot` (_join): the page key's and the group's checks
+--   pages.stayHeld(win)        whether a page holds the stay in window `win` (endStay, watchStay)
+--   pages.stayWatch(a)         the stay is held, and `a` is in front (watchStay)
+--   pages.why(o)               why o's group is away, for a log line
+local pages = {}
+
+-- Whether overlay `o` holds no keys at all because its group is away — its page in front, or a trip
+-- of its page under way (see "An overlay's page"). The one guard of every place that takes a key.
+local function keysOff(o)
+  return o.away == true
+end
 
 -- Whether calibration is switched on: the calibration keys of the overlay in front, the menu shots
 -- and the picture of a search that missed, and whatever a module built on the runtime measures
@@ -190,10 +214,19 @@ function O.new(label)
       -- Free-form per-overlay scratch space for the module that owns it, so module
       -- state does not have to squat in the runtime's reserved `_`-prefixed fields.
       state = {},
+      -- Whether its group is away: its page in front, or a trip of its page under way. Read only;
+      -- see "An overlay's page".
+      away = false,
+      -- Whether its module has been told it is active (onActivate) and not told since that it is
+      -- not (onDeactivate): the two are paired by this, not by the activations, so that a stay in
+      -- front its page interrupts is one pair for the module (see "An overlay's page").
+      _toldActive = false,
     },
     Overlay
   )
   overlaysMade[o] = true
+  overlaysCounted += 1
+  o._made = overlaysCounted
   return o
 end
 
@@ -256,6 +289,18 @@ end
 -- Not a host API: plain Luau. A hook asked outside any pass — a single `when` on a key press —
 -- costs one coroutine of its own, as a whole pass does; `passesMade` counts them with the passes,
 -- so a test can hold a scan to one.
+--
+-- A PAGE's hooks (O:addPage, O:inPlugin; see "An overlay's page") all run where a read may wait,
+-- and never in a pass: `describe` in the addPage or pageAgain call, where it only describes;
+-- `open` in the page key's handler, or in the page's `onReady` handler when the page loaded after
+-- the key; `onMessage`, `onReady` and `onClose` as the page's own events, handlers of the module; a
+-- trip's `act`, and the `fn` of its afterMenu and afterDialog, on the module's next turn after the
+-- arrival (host.timer.after(0)) — the arbiter's call that sees the arrival only schedules them;
+-- `after` and `onGiveUp` on the next turn after `done` or the end, or in the page key's handler;
+-- `onShown` and `onBack` in the handler that showed or hid the page. Every one under pcall, logged
+-- `[page] '<overlay>': <hook> failed: <message>`: an act or a continuation that raises gives the trip
+-- up ("failed"), an `after` or `onGiveUp` that raises does not stop the page from coming back. The
+-- arbiter's calls stay plain calls: _activate and _deactivate only record and schedule for a page.
 local passDepth = 0
 local passesMade = 0
 
@@ -3396,8 +3441,9 @@ end
 function Overlay:_syncControlHotkeys()
   -- While a plug-in menu is open this overlay owns no keys at all (see
   -- _suspendControlHotkeys), and a re-sync from any other cause must not quietly take them
-  -- back — a tab switch or an origin change while a menu is up would otherwise undo it.
-  if self._hotkeysSuspended then return end
+  -- back — a tab switch or an origin change while a menu is up would otherwise undo it. Nor
+  -- while its group is away (keysOff): the page, or a trip of the page's, has them.
+  if self._hotkeysSuspended or keysOff(self) then return end
   -- The probes first, where the handler can wait: a reading that changed asks for this very sync
   -- (see the Probes section), and asked from the claimants' scans below it would run inside it.
   -- An overlay taken out of the front while its read waited has had its keys taken already.
@@ -3491,6 +3537,8 @@ end
 -- front (see applyMenuState in the Menus section).
 function Overlay:_suspendControlHotkeys(suspend)
   if suspend == (self._hotkeysSuspended == true) then return end
+  -- Away, nothing is taken back: its group's keys come back when away ends (see keysOff).
+  if not suspend and keysOff(self) then return end
   self._hotkeysSuspended = suspend
   -- Logged on every transition, because this is the state in which the overlay deliberately
   -- owns none of its keys — and an overlay that has silently stopped responding to its own
@@ -3517,6 +3565,8 @@ end
 -- says so in the log, whenever the menu closed. They also start given up while a menu still counts
 -- as open; at an ordinary activation none does.
 function Overlay:_registerHotkeys(suspended)
+  -- Away, it takes nothing (see keysOff): the keys are taken when away ends.
+  if keysOff(self) then return end
   self.registered = self.registered or {}
   self.capturedKeys = self.capturedKeys or {}
   self.capturedSpecs = {}
@@ -3702,6 +3752,7 @@ function Overlay:_suspendCapturedKeys(on)
     end
     self.capturedKeys = {}
   else
+    if keysOff(self) then return end
     local specs = self.capturedSpecs or {}
     self.capturedKeys = {}
     for _, e in ipairs(specs) do
@@ -3735,9 +3786,9 @@ end
 --
 -- Idempotent; called on every focus move and at registration. No-op unless active, and while
 -- the overlay holds its place over its own menu's window, when it holds no keys at all (see the
--- Menus section, "holding its place").
+-- Menus section, "holding its place"), or while its group is away (keysOff).
 function Overlay:_syncNativeKeys()
-  if not self.active or self:_heldOnMenu() then return end
+  if not self.active or self:_heldOnMenu() or keysOff(self) then return end
   -- Everything, or nothing at all: while the field has the keyboard this overlay is not
   -- entitled to any key, and the question is asked before any of the per-control ones below.
   if self._typingWhen then
@@ -4071,12 +4122,55 @@ local ANNOUNCE_DELAY = 350
 -- every window. Komplete Kontrol's standalone overlay comes back before its Preferences overlay
 -- leaves — they are rechecked in the order they were bound — and the Preferences overlay's
 -- `scope(false)` left Tab, Space and the arrows captured in every window until the standalone one
--- went again.
+-- went again. One active while its group is away holds no keys and pins nothing (keysOff), so it
+-- does not count: the scope goes back to every window, and it pins it again as its keys come back.
 local function anotherActive(self)
   for o in pairs(overlaysMade) do
-    if o ~= self and o.active then return true end
+    if o ~= self and o.active and not o.away then return true end
   end
   return false
+end
+
+-- Says overlay `self`'s arrival, shortly after it came to the front, once the screen reader's
+-- window-title announcement has passed (so it isn't clobbered). From _activate, and from the end of
+-- its group's away (see "An overlay's page"), which brings the arrival a quiet activation left out.
+local function announceArrival(self)
+  if not (host.timer and self.focus > 0) then return end
+  -- How LATE the announcement actually is, which is a different question from how long it
+  -- was asked to wait. Timer callbacks, speech and hotkeys share one thread with the
+  -- landmark poll, and the poll currently asks for more time than a tick contains — so a
+  -- delay of 350 ms can be served at 800 without a single thing being "slow". Reported
+  -- only when it overruns, because a punctual timer is not news.
+  local asked = host.now and host.now() or nil
+  -- A key of the overlay's own before the announcement — a Tab in the first moments — has said
+  -- where the user is, with the key's own sentence, and the arrival's would take its place:
+  -- its read under the same key as that sentence's, its words queued and without the key.
+  local keys = self._keys
+  host.timer.after(ANNOUNCE_DELAY, function()
+    if asked then
+      local late = host.now() - asked - ANNOUNCE_DELAY
+      if late > 20 then
+        host.log.info(string.format(
+          "[activate] '%s' spoke %d ms late — the timer thread was busy",
+          tostring(self.label), late
+        ))
+      end
+    end
+    if self.active and self._keys ~= keys then
+      host.log.info(string.format("[activate] '%s': a key reached it before its arrival was announced; "
+        .. "not announcing the arrival", tostring(self.label)))
+      return
+    end
+    -- Queued, not interrupting: see `speakControl`. Nobody pressed a key to hear this. Nor while
+    -- its group went away again meanwhile: nothing of the overlay is said then.
+    if self.active and not self.away then
+      -- Again, for a view that changed during the delay. On a slot this is the first scan in a
+      -- handler since the overlay came forward, so its probes are read here: the arbiter's call
+      -- that brought it forward could not wait for them (see the Probes section).
+      if self:_refocusIfHidden() then self:_syncNativeKeys() end
+      if self.focus > 0 then speakControl(self, self.focus, false, false, true) end
+    end
+  end)
 end
 
 function Overlay:_activate()
@@ -4155,6 +4249,15 @@ function Overlay:_activate()
   -- them is elsewhere, and moving the arrival position only hid the question.
   if self.focus == 0 then self.focus = firstFocusable(self) end
   self:_refocusIfHidden()
+  -- AWAY (see "An overlay's page"): its page in front, or a trip of its page under way. It comes to
+  -- the front quietly — in front, its stay counted, its origin and focus as above — and takes no key,
+  -- pins no scope, tells its module nothing and says nothing: the keys, the hook and the arrival
+  -- come when away ends, if it is still in front then. A trip may have arrived with it.
+  if self.away then
+    host.log.info(("[activate] '%s' — away, quiet (%s)"):format(tostring(self.label), pages.why(self)))
+    pages.arrived(self, true)
+    return
+  end
   -- Scope key suppression to this (now-foreground) window: when a control opens a menu
   -- (another window comes forward), Tab/Enter pass to it natively, and resume here once
   -- the plugin window is focused again. Pinned BEFORE the keys are taken: the hook runs on a
@@ -4164,51 +4267,19 @@ function Overlay:_activate()
   -- Guarded, because a module's own activate hook must not be able to stop the overlay from
   -- coming up. One did: a bad key spec threw out of it, activation aborted half-done, and the
   -- symptom reported was "the plug-in is not detected any more" — which is a long way from the
-  -- cause. The error is still reported, it just no longer takes the overlay with it.
-  if self._onActivate then
-    local ok, err = pcall(self._onActivate, self)
-    if not ok then
-      host.log.info(("[overlay] %s: onActivate failed: %s"):format(tostring(self.label), tostring(err)))
+  -- cause. The error is still reported, it just no longer takes the overlay with it. Once per stay
+  -- the module is told of (_toldActive): a stay its page interrupted is one stay to the module.
+  if not self._toldActive then
+    self._toldActive = true
+    if self._onActivate then
+      local ok, err = pcall(self._onActivate, self)
+      if not ok then
+        host.log.info(("[overlay] %s: onActivate failed: %s"):format(tostring(self.label), tostring(err)))
+      end
     end
   end
-  -- Announce the focused control shortly after the window gains focus, once the
-  -- screen reader's window-title announcement has passed (so it isn't clobbered).
-  if host.timer and self.focus > 0 then
-    -- How LATE the announcement actually is, which is a different question from how long it
-    -- was asked to wait. Timer callbacks, speech and hotkeys share one thread with the
-    -- landmark poll, and the poll currently asks for more time than a tick contains — so a
-    -- delay of 350 ms can be served at 800 without a single thing being "slow". Reported
-    -- only when it overruns, because a punctual timer is not news.
-    local asked = host.now and host.now() or nil
-    -- A key of the overlay's own before the announcement — a Tab in the first moments — has said
-    -- where the user is, with the key's own sentence, and the arrival's would take its place:
-    -- its read under the same key as that sentence's, its words queued and without the key.
-    local keys = self._keys
-    host.timer.after(ANNOUNCE_DELAY, function()
-      if asked then
-        local late = host.now() - asked - ANNOUNCE_DELAY
-        if late > 20 then
-          host.log.info(string.format(
-            "[activate] '%s' spoke %d ms late — the timer thread was busy",
-            tostring(self.label), late
-          ))
-        end
-      end
-      if self.active and self._keys ~= keys then
-        host.log.info(string.format("[activate] '%s': a key reached it before its arrival was announced; "
-          .. "not announcing the arrival", tostring(self.label)))
-        return
-      end
-      -- Queued, not interrupting: see `speakControl`. Nobody pressed a key to hear this.
-      if self.active then
-        -- Again, for a view that changed during the delay. On a slot this is the first scan in a
-        -- handler since the overlay came forward, so its probes are read here: the arbiter's call
-        -- that brought it forward could not wait for them (see the Probes section).
-        if self:_refocusIfHidden() then self:_syncNativeKeys() end
-        if self.focus > 0 then speakControl(self, self.focus, false, false, true) end
-      end
-    end)
-  end
+  pages.arrived(self, false)
+  announceArrival(self)
 end
 
 -- A RESUMED focus on a control that has hidden itself since: moved to the visible control that
@@ -4245,6 +4316,9 @@ end
 
 function Overlay:_deactivate()
   if not self.active then return end
+  -- Leaving for its page, which took the front from it: its group goes away, before anything is
+  -- let go of, so that its module is not told (see "An overlay's page").
+  pages.leaving(self)
   self.active = false
   -- One line, naming what took over. A Mac Kontakt 8 session came back to the overlay seven
   -- times in ten minutes, each return restarting the pass-through's lap, and nothing in the
@@ -4288,7 +4362,12 @@ function Overlay:_deactivate()
   -- outstanding are dropped, and the tests forget the press they were comparing against (see
   -- the Menus section).
   self:_menuLeave()
-  if self._onDeactivate then self._onDeactivate(self) end
+  -- Once per stay the module was told of (_toldActive), and not while its group is away: then the
+  -- module hears it when away ends, if the overlay is not back in front by then.
+  if self._toldActive and not self.away then
+    self._toldActive = false
+    if self._onDeactivate then self._onDeactivate(self) end
+  end
 end
 
 -- Re-evaluates the overlay's contexts against the current state (active window +
@@ -4461,6 +4540,8 @@ function Overlay:_recheck()
       self:_syncControlHotkeys()
     end
   end
+  -- A trip of its page may have arrived with this look (see "An overlay's page").
+  if self.active then pages.rechecked(self) end
 end
 
 -- ── Declaration checks ───────────────────────────────────────────────────────
@@ -4826,6 +4907,9 @@ end
 
 function Overlay:_join(slot, specificity, pollMs)
   report(self, { slot = slot, specificity = specificity })
+  -- A page's checks, before anything is registered: its key against this overlay's hotkeys, and
+  -- one page to a group (see "An overlay's page"). Raises.
+  pages.joining(self, slot)
   -- From here on the overlay is LIVE: its first _recheck is asked for below, so anything that
   -- changes what the overlay is must already be in place. See the guard below.
   self._bound = true
@@ -5425,6 +5509,10 @@ end
 -- See the note in attachEmbedded for why this is not per overlay. Weak keys: an entry
 -- lives exactly as long as the spec it answers for.
 local originMemo = setmetatable({}, { __mode = "k" })
+-- The DAW's entry an embedded binding found its control through, per control table it answered —
+-- the place a page holds keeps it (see "An overlay's page"), for what the entry says about the DAW
+-- (`swallowsFirstClick`). Weak keys: a control table lives as long as somebody holds it.
+local entryOfControl = setmetatable({}, { __mode = "k" })
 -- A panel's identity verdict per spec, for the same reason and with the same weak keys: see
 -- panelIdentity in attachEmbedded.
 local panelVerdicts = setmetatable({}, { __mode = "k" })
@@ -5454,6 +5542,8 @@ function Overlay:attach(matcher, opts)
       return a ~= nil and host.window.test(matcher, a)
     end,
     origin = function() return host.window.active() end,
+    -- The origin a page's trip holds (see "An overlay's page"): the held window itself, in front.
+    heldOrigin = function(win) return win end,
   }
   ensureTrigger(self, opts)
 end
@@ -5631,11 +5721,22 @@ end
 -- its evidence per stay the way this runtime keeps a verdict.
 local stay = { n = 0, win = nil }
 
-local function endStay()
+-- Ends the stay, whatever holds it.
+local function endStayNow()
   if stay.win ~= nil then
     stay.n += 1
     stay.win = nil
   end
+end
+
+-- Ends the stay — unless a page holds it: the page in front, or a trip of the page's under way,
+-- over the window the stay is in, from the moment the page key's show put the page in front (see
+-- "An overlay's page"). The stay is the VM's and every binding of the VM ends it, so the hold is
+-- here, where they all end it. Then only the page decides: endStayNow, at the window retitled,
+-- resized outside a trip, or a way back that did not reach it.
+local function endStay()
+  if stay.win ~= nil and pages.stayHeld(stay.win) then return end
+  endStayNow()
 end
 
 local function inStayWindow(a)
@@ -5656,6 +5757,8 @@ end
 local function watchStay()
   if stay.win == nil then return end
   local a = host.window.active()
+  -- Held by a page: what the window in front means for it is the page's to say.
+  if pages.stayHeld(stay.win) then return pages.stayWatch(a) end
   if not inStayWindow(a) then return endStay() end
   local x, y = a.client.x + stay.dx, a.client.y + stay.dy
   local b = { x = x, y = y, w = a.client.x + a.client.w - x, h = a.client.y + a.client.h - y }
@@ -6035,6 +6138,11 @@ function Overlay:attachEmbedded(spec, opts)
       end
     end
     if not entry then return nil end
+    -- The entry the control was found through, for the place a page holds (see entryOfControl).
+    local function kept(c)
+      if c then entryOfControl[c] = entry end
+      return c
+    end
     local chrome = entry.chrome
     local focusChain = host.window.focusChain()
     -- Focus gate (ReaHotkey-style): only treat the plugin as focused when the
@@ -6057,7 +6165,7 @@ function Overlay:attachEmbedded(spec, opts)
     end
     if type(own) == "string" then
       local c = ownByPattern(focusChain)
-      if c or not panelFallback then return c end
+      if c or not panelFallback then return kept(c) end
     end
     -- (b), or a function's answer: the panel. The chrome gate above cannot help here — it
     -- matches Win32 classes — so the same question is asked geometrically (keyboardIn), first
@@ -6106,17 +6214,17 @@ function Overlay:attachEmbedded(spec, opts)
       end
     end
     if not c then return nil end
-    if not identify then return c end
+    if not identify then return kept(c) end
     -- A function's control where the DAW gives no panel, and a relational identify: asked at
     -- every evaluation, as a function's control always was. A relational verdict can change
     -- inside one stay (a Kontakt loaded into a Komplete Kontrol through its own browser), so
     -- the stay does not pin it either. Asked at every evaluation, so it must not read.
     if not (cacheId and panel) then
       if not askedEveryTime(c) then return nil end
-      return c
+      return kept(c)
     end
     if not panelIdentity(c, active) then return nil end
-    return c
+    return kept(c)
   end
   -- The match also requires spec.present(control) when given — a per-call check,
   -- NOT cached like identify, so a condition that changes while the same control
@@ -6176,9 +6284,7 @@ function Overlay:attachEmbedded(spec, opts)
   -- (see "Where a hook runs"). One that raises is taken as not matching, and said once per binding;
   -- the recheck asking it goes on to its end.
   local presentSaid = false
-  local function matched()
-    local c = origin()
-    if not c then return false end
+  local function presentIn(c)
     if spec.present then
       local okCall, present = pcall(noWait, spec.present, c)
       if not okCall then
@@ -6193,7 +6299,48 @@ function Overlay:attachEmbedded(spec, opts)
     end
     return true
   end
-  self.contexts[#self.contexts + 1] = { match = matched, origin = origin }
+  local function matched()
+    local c = origin()
+    if not c then return false end
+    return presentIn(c)
+  end
+  -- The control a page's trip holds (see "An overlay's page"), in window `win` with `held` the place
+  -- the page key noted: the control pluginControl would find there, without the chrome gate, the
+  -- question of where the keyboard is, or `identify` — the trip has brought the window forward
+  -- itself, and the keyboard need not be in the plug-in for a click or a read of it. A child control
+  -- is the one with the held id, at its rectangle now (gone: nil); a panel is the DAW's, or the
+  -- module's function's answer on it, with the stay the page holds.
+  local function heldOrigin(win, held)
+    if held.origin.id ~= win.id then
+      for _, c in ipairs(host.window.controls()) do
+        if c.id == held.origin.id then
+          entryOfControl[c] = held.entry
+          return c
+        end
+      end
+      return nil
+    end
+    local entry = held.entry
+    if not entry then
+      for _, h in ipairs(hosts) do
+        if host.window.test(h, win) then
+          entry = h
+          break
+        end
+      end
+    end
+    local panel = entry and hostPanelOf(entry, win) or nil
+    if panel then panel.stay = held.origin.stay end
+    local c = panel
+    if type(own) == "function" then
+      c = own(win, panel)
+      if c and c ~= panel and panel then c.stay = panel.stay end
+    end
+    if c then entryOfControl[c] = entry end
+    return c
+  end
+  self.contexts[#self.contexts + 1] = { match = matched, origin = origin, present = presentIn,
+    heldOrigin = heldOrigin }
   ensureTrigger(self, opts)
 end
 
@@ -6582,9 +6729,10 @@ function Overlay:menuOpen()
 end
 
 -- Is a menu open over any overlay of this VM that is in front? What host.keys.menuOpen is set to.
+-- One in front while its group is away holds no keys (keysOff), so it has no say in the flag.
 local function anyMenuOpen()
   for _, o in ipairs(menuWatched) do
-    if o.active and not heldOnMenu(o) and o._menu.open then return true end
+    if o.active and not heldOnMenu(o) and not o.away and o._menu.open then return true end
   end
   return false
 end
@@ -6596,15 +6744,16 @@ end
 -- the front between two transitions falls into step, and a transition that failed half-way is
 -- completed on the next tick. An overlay holding its place over its menu's window is left out:
 -- it holds no keys, and the flag is not written for it — another overlay of this module may be
--- in front, and the flag is one for the module.
+-- in front, and the flag is one for the module. So is one whose group is away (keysOff): nothing is
+-- given up or taken back for it until away ends.
 local function applyMenuState()
   local open, inFront = anyMenuOpen(), false
   for _, o in ipairs(menuWatched) do
-    if o.active and not heldOnMenu(o) then inFront = true end
+    if o.active and not heldOnMenu(o) and not o.away then inFront = true end
   end
   if inFront then host.keys.menuOpen(open) end
   for _, o in ipairs(menuWatched) do
-    if o.active and not heldOnMenu(o) then o:_suspendControlHotkeys(open) end
+    if o.active and not heldOnMenu(o) and not o.away then o:_suspendControlHotkeys(open) end
   end
 end
 
@@ -6665,6 +6814,8 @@ function Overlay:_menuChange(open, by)
     if self._pick then self:_pickEnd("closed") end
   end
   applyMenuState()
+  -- A trip of its page waiting for this menu (trip:afterMenu): seen, or closed.
+  pages.menuChanged(self, open)
 end
 
 -- A transition, guarded: the state is settled whatever happens, and a hand-over that fails is
@@ -7610,6 +7761,8 @@ function Overlay:_menuHold()
         -- that ends takes the press with it). Only it can have the step after the hold (see
         -- _menuRefocus) — not a dialog the menu leads to, which the hold moves on to below.
         p.menuWindow, p.menuFront = a.id, a
+        -- Nor is it the dialog a trip of its page waits for (trip:afterDialog).
+        pages.menuHeld(self, a.id)
       end
       st.hold = { ctx = ctx }
       return "menu"
@@ -7716,9 +7869,12 @@ function Overlay:_menuKeysBack()
   -- The menu's window is over and the plug-in has the keyboard: an item still waiting was never
   -- chosen in it.
   if self._pick then self:_pickEnd("closed") end
-  -- Pinned before its keys are taken, as in _activate.
-  host.keys.scope(true)
-  self:_registerHotkeys(true)
+  -- Pinned before its keys are taken, as in _activate — and neither while its group is away
+  -- (keysOff): its keys come back when away ends.
+  if not keysOff(self) then
+    host.keys.scope(true)
+    self:_registerHotkeys(true)
+  end
   applyMenuState()
   self:_menuRound(host.now())
 end
@@ -7733,6 +7889,1535 @@ function Overlay:_menuHoldEnds()
   if not self.active then return end
   host.log.info(("[menu] '%s': the plug-in has the keyboard again"):format(tostring(self.label)))
   self:_menuKeysBack()
+  -- A trip of its page waiting for this menu to close may have arrived (trip:afterMenu).
+  pages.rechecked(self)
+end
+
+-- ── An overlay's page ────────────────────────────────────────────────────────
+-- A PAGE (host.gui.webview) beside the plug-in, for what a Tab ring does badly — a list to browse,
+-- a lot to read, a menu nobody can reach — and the overlay's place held while the page is in front.
+-- Stage 1 left all of it to the module: the overlay let go for the page as for any other window,
+-- and every action in the plug-in was a round trip written by hand (docs/building-a-page.md, Steps
+-- 4 to 6). Here it is the runtime's, for every overlay module alike, naming no plug-in and no DAW:
+-- the page and its messages are the module's (O:addPage), and so is what it posts.
+--
+-- THE HELD PLACE. The page key, pressed in the plug-in, notes where the overlay is — the window W in
+-- front, the control the overlay is active on, the DAW's entry W was matched through — asks the
+-- module to post the page its state (`open`), and shows the page beside W. When the page's window
+-- comes to the front the overlay lets go as it does for any window of this application's (_recheck),
+-- and in that _deactivate its group goes AWAY: the place is held (P.held) until the user is back in
+-- W, has gone to another application, or the page is closed.
+--
+-- THE QUIET GROUP. The group is the page's overlay and every overlay of this VM on its arbiter slot:
+-- a dialog-layer box over the same plug-in shares the page. Away, "active" keeps its one meaning —
+-- holds the slot — so the arbiter goes on electing as it always does; but none of the group holds a
+-- key (keysOff), none pins the module's scope, nothing is announced, and onActivate and onDeactivate
+-- wait: they are paired by `_toldActive`, settled on the turn after away ends, so a page round trip,
+-- a trip, and a box that came and went during one are nothing to the module's hooks.
+--
+-- A TRIP (O:inPlugin) is one action of the page's in the plug-in. W is asked to the front — on
+-- Windows the held CONTROL (host.window.focus lands the keyboard in it), on a Mac the window — and
+-- the group arrives through a HELD CONTEXT put first in its contexts: W in front, the held control
+-- in it, the binding's `present` and the overlay's gate, and nothing else asked — no chrome gate, no
+-- question of where the keyboard is, no `identify`. Where the keyboard landed does not decide it.
+-- The module's `act` runs on the next turn, once the group is active there; `trip:done` ends the
+-- work, and the page comes back with what `after` posted, unless the window in front is another
+-- application's.
+--
+-- LOGIC'S MAIN WINDOW FIRST. A DAW may bring another of its windows forward before W, on the way
+-- there and on the way back: a window of W's application is no end of a trip or of a way back. Only
+-- TRIP_LOOK_MS bounds the looking — a limit on how long a window that should come is looked for, as
+-- MENU_LOOK_MS is for a menu, never a guess that it has come.
+--
+-- THE ENDS. Another application's window, the page closed, W gone, W not come within TRIP_LOOK_MS,
+-- the module's own `trip:inFront()` answering false, another module's overlay holding the slot on W,
+-- a hook that raised — and the page key. THE PAGE KEY is the user's way out of anything: in the page
+-- it goes back to W, during a trip it gives the trip up and brings the page, on a way back that has
+-- not reached W it brings the page again.
+--
+-- Nothing here reads the screen or waits: the module's hooks do, in handlers of their own.
+do
+-- The section's own helpers, as fields of one table: the runtime's file is one Luau function,
+-- which has at most 200 locals live at once.
+local pg = {}
+
+local TRIP_LOOK_MS = 8000
+
+-- Every page record of this VM, in the order O:addPage made them. One per page, and one page per
+-- group. A record P: owner (the overlay that added it), page, spec, key = { spec, id }, ready, wanted
+-- (the origin a show waits for the page's load on), preparing / prepareFailed, asked (the place a
+-- show of the runtime's asked for), held (the place held while away), away, stage ("page" or
+-- "return" while away), covers (W's id when the page was put over it), trip, memo.
+local pageRecords = {}
+-- Whether this VM's page trigger is registered (see pageEvent).
+local pageTriggered = false
+
+function pg.inGroup(P, o)
+  if o == P.owner then return true end
+  local slot = P.owner._slot
+  return slot ~= false and slot ~= nil and o._slot == slot
+end
+
+-- The group, in the order its overlays were made. Resolved when asked: siblings bind after the page
+-- is added. A scan of the VM's overlays, made only for a VM with a page.
+function pg.groupOf(P)
+  local out = {}
+  for o in pairs(overlaysMade) do
+    if pg.inGroup(P, o) then out[#out + 1] = o end
+  end
+  table.sort(out, function(a, b) return a._made < b._made end)
+  return out
+end
+
+function pages.of(o)
+  for _, P in ipairs(pageRecords) do
+    if pg.inGroup(P, o) then return P end
+  end
+  return nil
+end
+
+function pg.plog(P, fmt, ...)
+  host.log.info(("[page] '%s': " .. fmt):format(tostring(P.owner.label), ...))
+end
+
+function pg.say(text, interrupt)
+  host.speech.output(text, { interrupt = interrupt == true })
+end
+
+-- The window that gets the keyboard, read afresh, or nil — nothing in front, or a read that failed.
+function pg.frontNow()
+  local ok, f = pcall(host.window.foreground)
+  return ok and type(f) == "table" and f or nil
+end
+
+function pg.pageWindowOf(P)
+  local ok, id = pcall(function() return P.page.window end)
+  return ok and id or nil
+end
+
+-- Whether the page has the keyboard now (host.window.foreground, read afresh).
+function pg.pageHasKeyboard(P)
+  local id = pg.pageWindowOf(P)
+  local f = pg.frontNow()
+  return id ~= nil and f ~= nil and f.id == id
+end
+
+function pg.shownNow(P)
+  local ok, v = pcall(P.page.isShown, P.page)
+  return ok and v == true
+end
+
+function pg.rectOf(r)
+  return r and { x = r.x, y = r.y, w = r.w, h = r.h } or nil
+end
+
+-- A window table, as a place keeps it: what it is, not where it was.
+function pg.windowPlace(a)
+  return { id = a.id, title = a.title, pid = a.app and a.app.pid, bounds = pg.rectOf(a.bounds) }
+end
+
+-- W's bounds now (host.window.list, which follows a move and a resize), or the kept ones.
+function pg.boundsNow(win)
+  local ok, list = pcall(host.window.list, { pids = { win.pid } })
+  if ok and type(list) == "table" then
+    for _, w in ipairs(list) do
+      if w.id == win.id then return w.bounds or win.bounds end
+    end
+  end
+  return win.bounds
+end
+
+-- Whether W is listed for its process: true, false, or nil when the list could not be read.
+function pg.listedNow(win)
+  local ok, list = pcall(host.window.list, { pids = { win.pid } })
+  if not (ok and type(list) == "table") then return nil end
+  for _, w in ipairs(list) do
+    if w.id == win.id then return true end
+  end
+  return false
+end
+
+-- What window `w` — host.window.active()'s table, or host.window.foreground()'s answer — is to page
+-- record P with `place` held or asked for: "page", "W", "app" (another window of W's application),
+-- "own" (another window of this application's), "other", or "nothing".
+function pg.classOf(P, place, w)
+  if w == nil then return "nothing" end
+  local pw = pg.pageWindowOf(P)
+  if pw ~= nil and w.id == pw then return "page" end
+  if place and w.id == place.window.id then return "W" end
+  if w.own then return "own" end
+  local pid = w.pid or (w.app and w.app.pid)
+  if place and pid ~= nil and pid == place.window.pid then return "app" end
+  return "other"
+end
+
+-- The rule the page comes back by: unless the window in front (read afresh) is another
+-- application's, or one of this application's that is not the page. With nothing in front, it does.
+function pg.backRule(P)
+  local f = pg.frontNow()
+  if f == nil then return true end
+  local class = pg.classOf(P, P.held, f)
+  return class ~= "own" and class ~= "other"
+end
+
+function pg.frontLine()
+  local f = pg.frontNow()
+  if not f then return "nothing has the keyboard" end
+  return ("window id %s of pid %s%s"):format(tostring(f.id), tostring(f.pid), f.own and " (this application's)" or "")
+end
+
+-- A module's hook, guarded: true and what it answered, or false when it raised (logged).
+function pg.hookCall(P, name, fn, ...)
+  if not fn then return true, nil end
+  local ok, v = pcall(fn, ...)
+  if not ok then
+    pg.plog(P, "%s failed: %s", name, tostring(v))
+    return false, nil
+  end
+  return true, v
+end
+
+-- A hook's answer as words that follow the runtime's own sentence: " <words>", or "".
+function pg.wordsAfter(v)
+  if type(v) == "string" and v ~= "" then return " " .. v end
+  return ""
+end
+
+function pg.notShownWords(why)
+  if why == "declined by the system" then
+    return "The page did not come to the front; if it does not come by itself, the page key brings it."
+  end
+  return "The page did not come to the front: " .. tostring(why) .. "."
+end
+
+function pages.why(o)
+  local P = pages.of(o)
+  local t = P and P.trip
+  if t then return ("trip '%s'"):format(tostring(t.label)) end
+  return "the page in front"
+end
+
+-- ── Away: beginning, the wake, the settle ──
+
+-- The overlay `o` of the group is leaving the front (_deactivate). When a show of the runtime's
+-- asked for the place, the page's window is the one in front, and `o` was last active on the place's
+-- control, the group goes away and the place is held. Only records: the arbiter's call is a plain
+-- call.
+function pages.leaving(o)
+  local P = pages.of(o)
+  if not (P and P.asked) then return end
+  local a = ownInFront()
+  local pw = pg.pageWindowOf(P)
+  if not (a and pw ~= nil and a.id == pw) then return end
+  if o._lastActiveId ~= P.asked.origin.id then return end
+  P.held, P.asked = P.asked, nil
+  local was = P.away
+  P.away = true
+  P.stage = "page"
+  for _, g in ipairs(pg.groupOf(P)) do g.away = true end
+  if not was then
+    local h = P.held
+    pg.plog(P, "away — the page in front, holding window id %s '%s' of pid %s, control '%s' id %s",
+      tostring(h.window.id), tostring(h.window.title), tostring(h.window.pid), tostring(h.origin.class),
+      tostring(h.origin.id))
+  end
+end
+
+-- The hooks of the group, paired (_toldActive): one told active that is not gets onDeactivate, one
+-- active that was not told — a sibling that came up while away — onActivate. On the turn after away
+-- ended, after every recheck of the event that ended it. Not while away again.
+function pg.settleHooks(P)
+  for _, o in ipairs(pg.groupOf(P)) do
+    if not o.away then
+      if o._toldActive and not o.active then
+        o._toldActive = false
+        if o._onDeactivate then
+          local ok, err = pcall(o._onDeactivate, o)
+          if not ok then
+            host.log.info(("[overlay] %s: onDeactivate failed: %s"):format(tostring(o.label), tostring(err)))
+          end
+        end
+      elseif o.active and not o._toldActive then
+        o._toldActive = true
+        if o._onActivate then
+          local ok, err = pcall(o._onActivate, o)
+          if not ok then
+            host.log.info(("[overlay] %s: onActivate failed: %s"):format(tostring(o.label), tostring(err)))
+          end
+        end
+      end
+    end
+  end
+end
+
+-- Away ends. Every overlay of the group in front now — quietly — WAKES: its scope and its keys, the
+-- menu state applied, and with `announce` its arrival. The hooks are settled on the next turn, and
+-- every overlay of the group is looked at again then, so that the ordinary match decides for one
+-- that was in front through a held context. `keepAsked`: a show the system declined, still waiting
+-- for a late grant (showBack).
+function pg.endAway(P, announce, why, keepAsked)
+  if not P.away then return end
+  P.away, P.stage, P.held = false, nil, nil
+  P.returnSeq = (P.returnSeq or 0) + 1
+  if not keepAsked then P.asked = nil end
+  local group = pg.groupOf(P)
+  for _, o in ipairs(group) do o.away = false end
+  local woke = 0
+  for _, o in ipairs(group) do
+    if o.active and not heldOnMenu(o) then
+      woke += 1
+      -- Pinned before its keys are taken, as in _activate.
+      host.keys.scope(true)
+      o:_registerHotkeys()
+    end
+  end
+  applyMenuState()
+  if announce then
+    for _, o in ipairs(group) do
+      if o.active and not heldOnMenu(o) then announceArrival(o) end
+    end
+  end
+  host.timer.after(0, function() pg.settleHooks(P) end)
+  for _, o in ipairs(group) do recheckOnNextTurn(o) end
+  pg.plog(P, "away ends — %s; in front: %s%s", tostring(why), pg.frontLine(),
+    woke > 0 and ("; " .. woke .. " overlay(s) of the group in front take their keys") or "")
+end
+
+-- A page over W, shown and not in front, when the user is back in W other than by a trip: hidden,
+-- which gives nothing back. A page beside W is left where it is.
+function pg.hideCovering(P, a)
+  if P.covers and a and a.id == P.covers and pg.shownNow(P) and not pg.pageHasKeyboard(P) then
+    P.page:hide()
+    pg.plog(P, "the page was over the plug-in's window; hidden as the user is back in it")
+  end
+end
+
+-- Away ends by the window in front, as at its event (pageEvent's table), when no event of its own
+-- will say so: after a trip that did not bring the page back, after the page closed.
+function pg.awayByFront(P, why)
+  if not P.away or P.trip then return end
+  local a = host.window.active()
+  local class = pg.classOf(P, P.held, a)
+  if class == "nothing" then return end
+  if class == "page" and pg.shownNow(P) then
+    P.stage = "page"
+    return
+  end
+  if class == "app" and P.stage == "return" then return end
+  if class == "W" then pg.hideCovering(P, a) end
+  pg.endAway(P, true, why)
+end
+
+-- The way back has been asked for — the page key in the page, its close box, O:pageBack — and W is
+-- looked for until TRIP_LOOK_MS: a window of W's application on the way is no end (Logic's main
+-- window first), and after the bound away ends where the user is, the stay with it on a Mac.
+function pg.startReturn(P)
+  P.stage = "return"
+  P.returnSeq = (P.returnSeq or 0) + 1
+  P.returnSaid = false
+  local seq = P.returnSeq
+  host.timer.after(TRIP_LOOK_MS, function()
+    if not (P.away and P.stage == "return" and P.returnSeq == seq) then return end
+    pg.endAway(P, true, ("the way back did not reach the plug-in's window within %d ms"):format(TRIP_LOOK_MS))
+    if host.os.current == "macos" then endStayNow() end
+  end)
+end
+
+-- ── The held context ──
+
+-- The control a trip holds, through binding context `base`, or nil: only while W is in front, and
+-- worked out once per epoch per binding — here, never in the spec's origin memo, which every overlay
+-- of the binding shares, the group's or not.
+function pg.heldControl(P, base)
+  local held = P.held
+  if not held then return nil end
+  local a = host.window.active()
+  if not (a and a.id == held.window.id) then return nil end
+  local e = host.epoch and host.epoch() or -1
+  local memo = P.memo
+  if not memo or memo.epoch ~= e then
+    memo = { epoch = e, by = {} }
+    P.memo = memo
+  end
+  local hit = memo.by[base]
+  if hit ~= nil then return hit or nil end
+  local c = nil
+  if base.heldOrigin then
+    local ok, v = pcall(base.heldOrigin, a, held)
+    if ok then
+      c = v
+    elseif not P.heldRaised then
+      P.heldRaised = true
+      pg.plog(P, "the held control could not be worked out: %s", tostring(v))
+    end
+  end
+  memo.by[base] = c or false
+  return c
+end
+
+-- Overlay `o`'s held context: the stand-in placed first in its contexts while a trip is under way,
+-- as _menuHold places one. `base` is its own binding's context, which a press records (_menuOpening).
+function pg.heldContextOf(P, base)
+  local ctx = { held = true, base = base }
+  ctx.origin = function() return pg.heldControl(P, base) end
+  ctx.match = function()
+    local c = pg.heldControl(P, base)
+    if not c then return false end
+    if base.present then return base.present(c) == true end
+    return true
+  end
+  return ctx
+end
+
+function pg.tripIn(P)
+  for _, o in ipairs(pg.groupOf(P)) do
+    local base = nil
+    for _, c in ipairs(o.contexts) do
+      if not c.held then
+        base = c
+        break
+      end
+    end
+    if base then table.insert(o.contexts, 1, pg.heldContextOf(P, base)) end
+    -- A focus that landed with no event of its own is seen all the same.
+    recheckOnNextTurn(o)
+  end
+end
+
+-- The held contexts out of the group, which is looked at again on the next turn: the ordinary match
+-- decides from there. Idempotent.
+function pg.tripOut(P)
+  for _, o in ipairs(pg.groupOf(P)) do
+    local had = false
+    for i = #o.contexts, 1, -1 do
+      if o.contexts[i].held then
+        table.remove(o.contexts, i)
+        had = true
+      end
+    end
+    if had then recheckOnNextTurn(o) end
+  end
+end
+
+-- The overlay of the group that is active on the held control and not holding its place over a
+-- menu, or nil.
+function pg.heldActive(P)
+  if not P.held then return nil end
+  for _, o in ipairs(pg.groupOf(P)) do
+    if o.active and not heldOnMenu(o) then
+      local okO, c = pcall(o.origin, o)
+      if okO and c and c.id == P.held.origin.id then return o end
+    end
+  end
+  return nil
+end
+
+-- Whether a menu counts open over an overlay of the group, or one holds its place over one.
+function pg.menuOverGroup(P)
+  for _, o in ipairs(pg.groupOf(P)) do
+    if o.active and (o:menuOpen() or heldOnMenu(o)) then return true end
+  end
+  return false
+end
+
+-- Why W is gone, or false. Windows: not listed for its process (closed, or hidden), or, with W in
+-- front, the held control not among its controls (the plug-in unloaded). macOS: only while W's
+-- application is the active one, since a DAW may hide its plug-in windows while it is not — W with
+-- another title, or, another window of its application in front, W not listed.
+function pg.goneWhy(P)
+  local held = P.held
+  local W = held.window
+  local a = host.window.active()
+  if host.os.current == "macos" then
+    local apid = a and a.app and a.app.pid
+    if apid == nil or apid ~= W.pid then return false end
+    if a.id == W.id then
+      return a.title ~= W.title and ("it came forward titled '" .. tostring(a.title) .. "'") or false
+    end
+    return pg.listedNow(W) == false and "it is not listed for its application" or false
+  end
+  if pg.listedNow(W) == false then return "it is not listed for its process (closed, or hidden)" end
+  if a and a.id == W.id and held.origin.id ~= W.id then
+    for _, c in ipairs(host.window.controls()) do
+      if c.id == held.origin.id then return false end
+    end
+    return "the plug-in's control is not in it any more"
+  end
+  return false
+end
+
+-- ── The trip ──
+
+local Trip = {}
+-- `trip.overlay` is the group's overlay active on the held control as it is asked: a sibling that
+-- took the slot meanwhile (a dialog-layer box) is the one a module then acts through.
+function Trip.__index(t, k)
+  if k == "overlay" then
+    local P = rawget(t, "_P")
+    return (P and pg.heldActive(P)) or rawget(t, "_overlay")
+  end
+  return Trip[k]
+end
+
+function pg.waitMet(t)
+  local w = t.wait
+  if not w then return false end
+  if w.kind == "menu" then return w.seen and w.closed end
+  return w.seen
+end
+
+function pg.arrivable(t)
+  return t.live and (t.stage == "forward" or (t.stage == "waiting" and pg.waitMet(t)))
+end
+
+-- A trip hook, as a handler: one that raises gives the trip up.
+function pg.runHook(P, t, name, fn, ...)
+  local ok, err = pcall(fn, ...)
+  if not ok then
+    pg.plog(P, "%s failed: %s", name, tostring(err))
+    if P.trip == t and t.live then pg.giveUp(P, t, "failed") end
+  end
+end
+
+-- One click at the module's neutral point before `act`, where the DAW's entry says it drops the
+-- first click after its window comes forward (`swallowsFirstClick`, GM2) and the module gave one
+-- (`prime`). Placed and checked as any click of the overlay's; refused, it is logged and `act` runs
+-- all the same.
+function pg.primeClick(P, o)
+  local p, entry = P.spec.prime, P.held.entry
+  if not (p and entry and entry.swallowsFirstClick == true) then return end
+  local x, y = o:toScreen(p.x, p.y)
+  local c = o:origin()
+  local b = c and (c.bounds or c.client)
+  if not x or not b or x < b.x or y < b.y or x >= b.x + b.w or y >= b.y + b.h then
+    pg.plog(P, "the prime at %s,%s cannot be placed inside the plug-in now — not clicked", tostring(p.x), tostring(p.y))
+    return
+  end
+  if host.window.ownsPoint(o:hwnd(), x, y) == false then
+    pg.plog(P, "the prime at %d,%d is covered by another window — not clicked", x, y)
+    return
+  end
+  host.input.click(x, y)
+  pg.plog(P, "primed at %d,%d (the DAW's entry says it drops the first click)", x, y)
+end
+
+-- How much of W the page covers, for the arrival of a trip after a page shown over it: whether the
+-- first picture can still show the page is not known (DWM composites a frame later).
+function pg.coverLine(P)
+  local pw = pg.pageWindowOf(P)
+  local pr = nil
+  local ok, list = pcall(host.window.list)
+  if ok and type(list) == "table" then
+    for _, w in ipairs(list) do
+      if w.id == pw then pr = w.bounds end
+    end
+  end
+  local wb = pg.boundsNow(P.held.window)
+  if not (pr and wb) then return "the page was shown over the plug-in's window; where it is now is not listed" end
+  local x1, y1 = math.max(pr.x, wb.x), math.max(pr.y, wb.y)
+  local x2, y2 = math.min(pr.x + pr.w, wb.x + wb.w), math.min(pr.y + pr.h, wb.y + wb.h)
+  if x2 <= x1 or y2 <= y1 then return "the page no longer overlaps the plug-in's window" end
+  return ("the page overlaps the plug-in's window at %d,%d %dx%d"):format(x1, y1, x2 - x1, y2 - y1)
+end
+
+-- The trip has arrived, or its wait's condition holds again — checked once more, now, on the
+-- module's turn: the trip is the same and live, W has the keyboard (afresh), a group overlay is
+-- active on the held control. Then `act`, or the wait's `fn`. Otherwise the stage is what it was,
+-- and a `forward` past its bound is given up.
+function pg.arrive(P, t)
+  t.arriving = false
+  local was = t.was
+  if P.trip ~= t or not t.live then return end
+  local f = pg.frontNow()
+  local o = (f and f.id == P.held.window.id) and pg.heldActive(P) or nil
+  if not o then
+    t.stage = was
+    if was == "forward" and host.now() >= t.deadline then pg.giveUp(P, t, "not in front") end
+    return
+  end
+  t._overlay = o
+  local wait = t.wait
+  t.wait = nil
+  t.stage = "acting"
+  local a = host.window.active()
+  local okC, chain = pcall(host.window.focusChain)
+  local first = okC and type(chain) == "table" and chain[1] or nil
+  local macId = host.os.current == "macos" and a and ("; the held window came back as id " .. tostring(a.id)) or ""
+  if wait == nil then
+    pg.plog(P, "trip '%s' in the plug-in after %d ms; the keyboard on %s%s", t.label, host.now() - t.started,
+      first and tostring(first.class) or "nothing the platform reports", macId)
+    if P.covers then pg.plog(P, "trip '%s': %s", t.label, pg.coverLine(P)) end
+    local okP, err = pcall(pg.primeClick, P, o)
+    if not okP then
+      pg.plog(P, "the prime failed: %s", tostring(err))
+      return pg.giveUp(P, t, "failed")
+    end
+    pg.runHook(P, t, "act", t.spec.act, o, t)
+  else
+    pg.plog(P, "trip '%s': back in the plug-in after the %s%s", t.label, wait.kind, macId)
+    pg.runHook(P, t, wait.kind == "menu" and "afterMenu" or "afterDialog", wait.fn, o, t, true)
+  end
+end
+
+-- Where the arrival can first hold — a group overlay came to the front (quietly), was looked at
+-- again, or its hold over a menu ended: the hook is scheduled for the module's next turn, and only
+-- scheduled, since this may be the arbiter's call.
+function pg.tripLook(P)
+  local t = P.trip
+  if not (t and not t.arriving and pg.arrivable(t)) then return end
+  local a = host.window.active()
+  if not (a and a.id == P.held.window.id and pg.heldActive(P)) then return end
+  t.arriving, t.was, t.stage = true, t.stage, "acting"
+  host.timer.after(0, function() pg.arrive(P, t) end)
+end
+
+function pages.rechecked(o)
+  local P = pages.of(o)
+  if P and P.trip then pg.tripLook(P) end
+end
+
+-- W's event while a trip waits for it: on the next turn — every recheck of the event in this VM has
+-- run by then — W in front, no overlay of the group active, and the slot held by a claim of
+-- another's at least as specific as the page's overlay is "outranked". A lower claim elected for a
+-- moment is not: this VM's own report replaces it.
+function pg.outrankedSoon(P, t)
+  if t.outrankAsked then return end
+  t.outrankAsked = true
+  host.timer.after(0, function()
+    t.outrankAsked = false
+    if P.trip ~= t or not pg.arrivable(t) then return end
+    local a = host.window.active()
+    if not (a and a.id == P.held.window.id) then return end
+    local group = pg.groupOf(P)
+    for _, o in ipairs(group) do
+      if o.active then return end
+    end
+    local slot = P.owner._slot
+    if not slot then return end
+    local winner = host.arbiter.winner(slot)
+    if winner == nil then return end
+    for _, o in ipairs(group) do
+      if o._claim == winner then return end
+    end
+    local rank = host.arbiter.winnerSpecificity(slot)
+    if rank ~= nil and rank >= (P.owner._specificity or 0) then pg.giveUp(P, t, "outranked") end
+  end)
+end
+
+-- The page brought back after a trip: beside W's bounds now, the keyboard asked for. Answered as the
+-- page key's show is, but in the runtime's sentence and the module's words (`words`, " …" or "")
+-- when it does not come; with W in front then, away ends, the keys back and nothing announced — the
+-- sentence said what happened — and the place stays asked for a late grant.
+function pg.showBack(P, words)
+  local place = P.held
+  if not place then return end
+  P.asked = place
+  local ok, why = P.page:show({ focus = true, avoid = pg.boundsNow(place.window) })
+  if ok then
+    P.covers = why == "over the rectangle to avoid" and place.window.id or false
+    pg.plog(P, "the page back: shown%s", why and (", " .. why) or "")
+    -- In front already — a page that never left it — has no event to come.
+    if pg.pageHasKeyboard(P) then
+      P.asked = nil
+      P.stage = "page"
+    end
+    return
+  end
+  pg.plog(P, "the page back: not shown — %s", tostring(why))
+  pg.say(pg.notShownWords(why) .. words, true)
+  local f = pg.frontNow()
+  if f and f.id == place.window.id then
+    pg.endAway(P, false, "the page did not come back, and the plug-in's window is in front", true)
+  end
+end
+
+-- The rest of a give-up (§4.5): the module's `onGiveUp` posts the error, and the page comes back
+-- with it unless the page was closed or the window in front is another application's — except at
+-- the key, which always brings it. Otherwise the runtime's sentence and the module's words, behind
+-- the screen reader.
+function pg.giveUpRest(P, t)
+  if P.trip ~= t then return end
+  P.trip = nil
+  if P.away then P.stage = "page" end
+  local why = t.why
+  local _, v = pg.hookCall(P, "onGiveUp", t.spec.onGiveUp, P.owner, why)
+  local words = pg.wordsAfter(v)
+  if why == "page closed" or not pg.shownNow(P) then
+    pg.say(t.label .. ": the page was closed; nothing more was done." .. words, false)
+    pg.awayByFront(P, "the page was closed")
+    return
+  end
+  if why ~= "key" and not pg.backRule(P) then
+    pg.plog(P, "trip '%s': the page is not brought back — %s", t.label, pg.frontLine())
+    pg.say(t.label .. ": another window came to the front; nothing more was done." .. words, false)
+    pg.awayByFront(P, "another window is in front")
+    return
+  end
+  pg.showBack(P, words)
+end
+
+-- A trip ends without its work done. At once: no longer live, the held contexts out. The rest on the
+-- module's next turn — or now, in the page key's handler (`now`). A trip whose work was done (`back`)
+-- runs its back step instead; one ending already is left to its end.
+function pg.giveUp(P, t, why, now)
+  if P.trip ~= t then return end
+  if t.stage == "back" then
+    if now then return pg.backStep(P, t) end
+    return
+  end
+  if t.stage == "ending" then
+    if now then
+      t.why = why
+      return pg.giveUpRest(P, t)
+    end
+    return
+  end
+  if why == "key" then
+    pg.plog(P, "trip '%s' given up at the key after %d ms in %s", t.label, host.now() - t.started, tostring(t.stage))
+  else
+    pg.plog(P, "trip '%s' given up — %s, after %d ms in %s", t.label, why, host.now() - t.started, tostring(t.stage))
+  end
+  t.live = false
+  t.stage = "ending"
+  t.why = why
+  t.wait = nil
+  pg.tripOut(P)
+  if now then return pg.giveUpRest(P, t) end
+  host.timer.after(0, function() pg.giveUpRest(P, t) end)
+end
+
+-- The back step (§4.5), on the turn after `trip:done`, or in the page key's handler: `after` posts
+-- the result — always, so the page has it whenever it next shows — the trip ends, and the page
+-- comes back by the rule. `after`'s words are said only when it does not.
+function pg.backStep(P, t)
+  if P.trip ~= t then return end
+  local _, v = pg.hookCall(P, "after", t.spec.after, P.owner, t.result)
+  P.trip = nil
+  if P.away then P.stage = "page" end
+  pg.tripOut(P)
+  local words = pg.wordsAfter(v)
+  pg.plog(P, "trip '%s' back after %d ms", t.label, host.now() - t.started)
+  if not pg.shownNow(P) then
+    pg.say(t.label .. ": the page was closed." .. words, false)
+    pg.awayByFront(P, "the page was closed")
+    return
+  end
+  if not pg.backRule(P) then
+    pg.plog(P, "trip '%s': the page is not brought back — %s", t.label, pg.frontLine())
+    if words ~= "" then pg.say(string.sub(words, 2), false) end
+    pg.awayByFront(P, "another window is in front")
+    return
+  end
+  pg.showBack(P, words)
+end
+
+-- Whether the trip may start a wait now: in its act, a continuation, or what they wait for, before
+-- `done` — the trip `acting` — and with no other wait pending. Raises at the module's line.
+function pg.mayWait(t, what, fn)
+  local P = rawget(t, "_P")
+  if t.live and t.wait then
+    error(("trip '%s': %s while a %s wait is pending — one wait at a time"):format(tostring(t.label), what,
+      tostring(t.wait.kind)), 3)
+  end
+  if not (t.live and P.trip == t and t.stage == "acting") then
+    error(("trip '%s': %s is for the trip's act and its continuations, while it is acting (it is %s)")
+      :format(tostring(t.label), what, t.live and tostring(t.stage) or "over"), 3)
+  end
+  if type(fn) ~= "function" then
+    error(("trip '%s': %s takes a function(overlay, trip, seen), got %s"):format(tostring(t.label), what, type(fn)), 3)
+  end
+  return P
+end
+
+-- True while the trip is live, W has the keyboard (afresh), and a group overlay is active on the
+-- held control and not holding its place over a menu. False ENDS the trip: "another application"
+-- when the window in front is another application's, or one of this application's that is not the
+-- page; "not in front" otherwise. The give-up runs on the next turn; the act just returns.
+function Trip:inFront()
+  local P = rawget(self, "_P")
+  if not self.live or P.trip ~= self then return false end
+  local f = pg.frontNow()
+  if f and f.id == P.held.window.id and pg.heldActive(P) then return true end
+  local class = pg.classOf(P, P.held, f)
+  local why = (class == "own" or class == "other") and "another application" or "not in front"
+  pg.plog(P, "trip '%s': its act asked, and it is not in the plug-in — %s", self.label, pg.frontLine())
+  pg.giveUp(P, self, why)
+  return false
+end
+
+-- The work is over: the back step runs on the module's next turn, so this may be called from
+-- anywhere — a read's callback, chooseMenuItem's onDone, a plain call. A pending wait is dropped. A
+-- second call, or one after the trip ended, is logged and ignored.
+function Trip:done(result)
+  local P = rawget(self, "_P")
+  if not self.live or P.trip ~= self then
+    pg.plog(P, "trip '%s': done after the trip ended — ignored", tostring(self.label))
+    return
+  end
+  self.live = false
+  self.result = result
+  self.wait = nil
+  self.stage = "back"
+  pg.plog(P, "trip '%s' done after %d ms", self.label, host.now() - self.started)
+  host.timer.after(0, function() pg.backStep(P, self) end)
+end
+
+-- The control a trip's press counts as, for the menu tests and a calibrating run's menu shots: one
+-- per label and overlay, kept, as chooseMenuItem keeps its own.
+function pg.tripControl(o, label)
+  o._tripControls = o._tripControls or {}
+  local c = o._tripControls[label]
+  if not c then
+    c = { kind = "trip", label = label }
+    o._tripControls[label] = c
+  end
+  return c
+end
+
+-- "The menu my next click opens, then fn": a press of a control with `opensMenu` on trip.overlay —
+-- the tests on every tick, newWindow's list — so called BEFORE the click. true, or false and
+-- "inactive" or "refused" (a calibrating run's picture), and then nothing is to be clicked.
+-- fn(o, trip, true) once a test of the group has seen a menu, then seen it closed, and the trip is
+-- on W again; fn(o, trip, false) when none saw a menu within MENU_LOOK_MS. Once seen, nothing bounds
+-- the wait: the user's time in a menu is theirs.
+function Trip:afterMenu(fn)
+  local P = pg.mayWait(self, "afterMenu", fn)
+  local o = self.overlay
+  if not (o and o._menu) then
+    error(("trip '%s': afterMenu needs menu tests on overlay '%s' — `menus` on its binding")
+      :format(tostring(self.label), tostring(o and o.label)), 2)
+  end
+  if not o.active then
+    pg.plog(P, "trip '%s': afterMenu — '%s' is not in front", self.label, tostring(o.label))
+    return false, "inactive"
+  end
+  local ok, why = o:_menuOpening(pg.tripControl(o, self.label))
+  if not ok then
+    pg.plog(P, "trip '%s': afterMenu — the press does not count (%s); nothing is to be clicked", self.label, tostring(why))
+    return false, why
+  end
+  local w = { kind = "menu", fn = fn, seen = false, closed = false }
+  self.wait = w
+  self.stage = "waiting"
+  self._overlay = o
+  pg.plog(P, "trip '%s': waits for the menu its next click opens, for up to %d ms", self.label, MENU_LOOK_MS)
+  host.timer.after(MENU_LOOK_MS, function()
+    if P.trip ~= self or self.wait ~= w or w.seen then return end
+    self.wait = nil
+    self.stage = "acting"
+    pg.plog(P, "trip '%s': no menu was seen within %d ms", self.label, MENU_LOOK_MS)
+    pg.runHook(P, self, "afterMenu", fn, self.overlay, self, false)
+  end)
+  return true
+end
+
+-- "The dialog that comes next, then the plug-in again, then fn". From the call on, a window of W's
+-- application other than W that comes forward is the dialog — not while a menu counts open over the
+-- group, and not the window a menu was held over for the trip's last press. fn(o, trip, true) once W
+-- is in front again with the trip arrived, after a dialog; fn(o, trip, false) when none came within
+-- TRIP_LOOK_MS. Once seen, nothing bounds the wait: the user's time in a file dialog is theirs.
+function Trip:afterDialog(fn)
+  local P = pg.mayWait(self, "afterDialog", fn)
+  local w = { kind = "dialog", fn = fn, seen = false, notDialog = rawget(self, "_menuWindow") }
+  self.wait = w
+  self.stage = "waiting"
+  pg.plog(P, "trip '%s': waits for the dialog that comes next, for up to %d ms", self.label, TRIP_LOOK_MS)
+  host.timer.after(TRIP_LOOK_MS, function()
+    if P.trip ~= self or self.wait ~= w or w.seen then return end
+    self.wait = nil
+    self.stage = "acting"
+    pg.plog(P, "trip '%s': no dialog came within %d ms", self.label, TRIP_LOOK_MS)
+    pg.runHook(P, self, "afterDialog", fn, self.overlay, self, false)
+  end)
+end
+
+function pages.menuChanged(o, open)
+  local P = pages.of(o)
+  local t = P and P.trip
+  local w = t and t.live and t.wait
+  if not (w and w.kind == "menu") then return end
+  if open then
+    if not w.seen then
+      w.seen = true
+      pg.plog(P, "trip '%s': its menu is seen", t.label)
+    end
+  elseif w.seen and not w.closed then
+    w.closed = true
+    pg.plog(P, "trip '%s': its menu has closed", t.label)
+    pg.tripLook(P)
+  end
+end
+
+function pages.menuHeld(o, id)
+  local P = pages.of(o)
+  if P and P.trip then P.trip._menuWindow = id end
+end
+
+-- ── The window events ──
+
+-- A window of W's application other than W came forward while a trip waits for a dialog: decided on
+-- the next turn, once every recheck of the event has run — a hold over the menu's own window, or
+-- its end, is what the group's overlays say then, not what the trigger that ran first saw. The
+-- dialog is that window, still in front, unless it is the window a menu was held over for the
+-- trip's last press, or a menu still counts open over (or holds) an overlay of the group.
+function pg.dialogSoon(P, t, w, a)
+  local id, title, pid = a.id, a.title, a.app and a.app.pid
+  host.timer.after(0, function()
+    if P.trip ~= t or t.wait ~= w or w.seen then return end
+    local now = host.window.active()
+    if not (now and now.id == id) then return end
+    if id == w.notDialog or pg.menuOverGroup(P) then
+      -- Said once per window.
+      w.notSaid = w.notSaid or {}
+      if not w.notSaid[id] then
+        w.notSaid[id] = true
+        pg.plog(P, "trip '%s': '%s' came forward, but it is the menu's window, not the dialog", t.label, tostring(title))
+      end
+      return
+    end
+    w.seen = true
+    pg.plog(P, "trip '%s': a dialog came forward — '%s', window id %s of pid %s", t.label, tostring(title),
+      tostring(id), tostring(pid))
+  end)
+end
+
+-- What the window in front ends of a trip under way (§4.3): another application's, or an own
+-- window that is not the page, ends it; W gone ends it; W again may be its arrival (the rechecks see
+-- to that) or another module's overlay holding the slot; a window of W's application is on the way,
+-- or the dialog a wait is for. Logged where a Mac session needs it.
+function pg.tripEvent(P, t, a, class)
+  if t.stage == "back" or t.stage == "ending" then return end
+  if class == "other" or class == "own" then
+    local w = t.wait
+    if w and w.kind == "dialog" and not w.seen then
+      pg.plog(P, "trip '%s': waiting for a dialog, a window of another application came forward — '%s' of pid %s",
+        t.label, tostring(a.title), tostring(a.app and a.app.pid))
+    end
+    return pg.giveUp(P, t, "another application")
+  end
+  if class == "page" then return end
+  local gone = pg.goneWhy(P)
+  if gone then
+    pg.plog(P, "trip '%s': the plug-in's window id %s is gone — %s", t.label, tostring(P.held.window.id), gone)
+    return pg.giveUp(P, t, "gone")
+  end
+  if class == "W" then
+    if pg.arrivable(t) then pg.outrankedSoon(P, t) end
+    return
+  end
+  local w = t.wait
+  if t.stage == "waiting" and w and w.kind == "dialog" and not w.seen then pg.dialogSoon(P, t, w, a) end
+  if host.os.current == "macos" and a.title == P.held.window.title and a.id ~= P.held.window.id
+    and t.otherId ~= a.id then
+    t.otherId = a.id
+    pg.plog(P, "a window of %s titled '%s' came forward as id %s, not the held id %s — waiting for %s",
+      tostring(a.app and (a.app.name or a.app.exe) or "the plug-in's application"), tostring(a.title),
+      tostring(a.id), tostring(P.held.window.id), tostring(P.held.window.id))
+  end
+end
+
+-- One page record at a window or focus event (§3.4): the page closed first, then the trip, then
+-- what the window in front means for the place held — or asked for, by a show the system declined.
+function pg.eventFor(P)
+  if not (P.asked or P.away or P.trip) then
+    -- A page that came forward without the runtime's show — the module's own show, an app page
+    -- reached with Alt+Tab — holds no place: the group let go of it as of any window. Said once
+    -- each time it comes.
+    local front = pg.classOf(P, nil, host.window.active()) == "page"
+    if front and not P.unheldSaid then
+      pg.plog(P, "the page came to the front without the page key — nothing held")
+    end
+    P.unheldSaid = front
+    return
+  end
+  -- Not shown while a trip is under way, or while away other than on the way back (which hid it):
+  -- the page was closed — by a disable, by the module, or it failed.
+  if (P.trip or (P.away and P.stage ~= "return")) and not pg.shownNow(P) then
+    local t = P.trip
+    if t then
+      pg.plog(P, "the page is not shown any more — trip '%s' ends", t.label)
+      if t.stage == "back" then
+        pg.backStep(P, t)
+      else
+        pg.giveUp(P, t, "page closed", true)
+      end
+    end
+    pg.awayByFront(P, "the page is not shown any more")
+    return
+  end
+  local a = host.window.active()
+  local class = pg.classOf(P, P.held or P.asked, a)
+  if class == "nothing" then return end
+  local t = P.trip
+  if t then return pg.tripEvent(P, t, a, class) end
+  if not P.away then
+    -- A show the system declined, held for a late grant: dropped at any other window.
+    if P.asked and class ~= "W" and class ~= "page" then
+      pg.plog(P, "the place asked for is let go — in front: %s", frontName(a))
+      P.asked = nil
+    end
+    return
+  end
+  if class == "page" then
+    if P.asked then
+      P.stage = "page"
+      P.asked = nil
+    end
+    return
+  end
+  if class == "W" then
+    P.asked = nil
+    pg.hideCovering(P, a)
+    pg.endAway(P, true, "the plug-in's window is in front")
+  elseif class == "app" then
+    if P.stage == "return" then
+      if not P.returnSaid then
+        P.returnSaid = true
+        pg.plog(P, "the way back: %s came first — waiting for the plug-in's window", frontName(a))
+      end
+    else
+      pg.endAway(P, true, "another window of the plug-in's application is in front")
+    end
+  else
+    pg.endAway(P, true, class == "own" and "another window of this application's is in front"
+      or "another application's window is in front")
+  end
+end
+
+-- The VM's page trigger, registered once at its first O:addPage: every window and focus event.
+function pg.pageEvent()
+  for _, P in ipairs(pageRecords) do pg.eventFor(P) end
+end
+
+-- ── The page key, and the page's own events ──
+
+-- A foreground event of the page that never came (it has been seen not to): when a show of the
+-- runtime's asked for the place and the page has the keyboard, the group's overlays in front are
+-- looked at again, which lets them go — and the group away (pages.leaving). At the page's next
+-- message or key, and before a trip or the way back is decided.
+function pg.recover(P)
+  if not (P.asked and not P.away and pg.pageHasKeyboard(P)) then return end
+  pg.plog(P, "the page has the keyboard, and no foreground event of it came — its overlays are looked at again")
+  for _, o in ipairs(pg.groupOf(P)) do
+    if o.active then o:_recheck() end
+  end
+end
+
+-- The way back (O:pageBack, the page key in the page): W asked to the front first — the held
+-- control, where HW1a lands the keyboard on Windows — then the page hidden, and W looked for
+-- (startReturn).
+function pg.backTo(P)
+  pg.recover(P)
+  local function refused(why)
+    pg.plog(P, "the way back not taken — %s", why)
+    return false, why
+  end
+  if P.trip then return refused("busy") end
+  if not pg.pageHasKeyboard(P) then return refused("not in front") end
+  if not P.held then return refused("nothing held") end
+  local o = P.owner
+  local function declined(why)
+    pg.plog(P, "the way back — %s", why == "gone" and "the plug-in's window is gone" or "its window was not brought forward")
+    if P.spec.onBack then
+      pg.hookCall(P, "onBack", P.spec.onBack, o, false, why)
+    elseif why == "gone" then
+      pg.say(tostring(o.label) .. ": the plug-in's window is gone.", true)
+    else
+      pg.say(tostring(o.label) .. ": the plug-in's window would not come to the front.", true)
+    end
+    return false, why
+  end
+  if pg.goneWhy(P) then return declined("gone") end
+  local okF, accepted = pcall(host.window.focus, P.held.origin.id)
+  if not (okF and accepted == true) then return declined("declined") end
+  P.page:hide()
+  pg.startReturn(P)
+  pg.plog(P, "the way back: control id %s of window id %s asked to the front, the page hidden",
+    tostring(P.held.origin.id), tostring(P.held.window.id))
+  pg.hookCall(P, "onBack", P.spec.onBack, o, true)
+  return true
+end
+
+-- The page shown at the key, for `place`, and its answer (§2.2's table).
+function pg.showAtKey(P, place)
+  local o = P.owner
+  P.asked = place
+  local ok, why = P.page:show({ focus = true, avoid = pg.boundsNow(place.window) })
+  pg.plog(P, "shown at the key beside window id %s: %s", tostring(place.window.id),
+    ok and ("true" .. (why and (", " .. why) or "")) or ("false, " .. tostring(why)))
+  if ok then
+    P.covers = why == "over the rectangle to avoid" and place.window.id or false
+    if P.away and pg.pageHasKeyboard(P) then
+      P.asked = nil
+      P.stage = "page"
+    end
+    pg.hookCall(P, "onShown", P.spec.onShown, o, true, why)
+    return
+  end
+  if why == "not ready yet" then
+    P.asked = nil
+    P.wanted = { id = place.origin.id }
+    pg.say("Building the page.", true)
+    return
+  end
+  -- Windows may grant a declined show a moment later: the place stays asked for.
+  if why ~= "declined by the system" then P.asked = nil end
+  if P.spec.onShown then
+    pg.hookCall(P, "onShown", P.spec.onShown, o, false, why)
+  else
+    pg.say(pg.notShownWords(why), true)
+  end
+end
+
+-- The page opened from the overlay in front (§2.2, case 4): the place noted, `open` asked to post
+-- the page its state, the place checked again after it — `open` may wait for a read — and the page
+-- shown beside W.
+function pg.openPage(P)
+  local o = P.owner
+  local mark = o:here()
+  local a = host.window.active()
+  local okO, c = pcall(o.origin, o)
+  if not (a and okO and c) then
+    pg.plog(P, "the page key: the overlay has no place to note — not shown")
+    return
+  end
+  local place = {
+    window = pg.windowPlace(a),
+    origin = { id = c.id, class = c.class, bounds = pg.rectOf(c.bounds), stay = c.stay },
+    entry = entryOfControl[c],
+  }
+  local okOpen, v = pcall(P.spec.open, o)
+  if not okOpen then
+    pg.plog(P, "open failed: %s", tostring(v))
+    return
+  end
+  if v == false then
+    pg.plog(P, "open answered false — nothing shown")
+    return
+  end
+  local still, why = o:stillHere(mark, { place = true })
+  if not still then
+    pg.plog(P, "not shown — %s", tostring(why))
+    return
+  end
+  pg.showAtKey(P, place)
+end
+
+-- The page key (§2.2): the recovery first, then the first case that applies.
+function pg.keyPressed(P)
+  local o = P.owner
+  pg.recover(P)
+  local t = P.trip
+  if t then
+    if t.stage == "back" then
+      pg.plog(P, "the page key: trip '%s' is done — the back step now", t.label)
+      return pg.backStep(P, t)
+    end
+    return pg.giveUp(P, t, "key", true)
+  end
+  if pg.pageHasKeyboard(P) then
+    pg.plog(P, "the page key in the page: the way back")
+    pg.backTo(P)
+    return
+  end
+  if P.away and P.stage == "return" then
+    pg.plog(P, "the page key before the way back reached the plug-in's window: the page again")
+    P.returnSeq = (P.returnSeq or 0) + 1
+    P.stage = "page"
+    return pg.showAtKey(P, P.held)
+  end
+  if o.active and not o.away then
+    if heldOnMenu(o) or o:menuOpen() then
+      pg.plog(P, "the page key with a menu open over the overlay — not opened")
+      pg.say(tostring(o.label) .. ": a menu is open; close it, then press the key again.", true)
+      return
+    end
+    pg.plog(P, "the page key in the plug-in: the page opens")
+    return pg.openPage(P)
+  end
+  pg.plog(P, "the page key with the overlay not in front — in front: %s", frontName(host.window.active()))
+  pg.say(P.spec.notHere or (tostring(o.label) .. " is not in front; its page opens from there."), true)
+end
+
+function pg.pageMessage(P, m)
+  pg.recover(P)
+  pg.hookCall(P, "onMessage", P.spec.onMessage, P.owner, m)
+end
+
+function pg.pageReady(P)
+  P.ready = true
+  local w = P.wanted
+  P.wanted = nil
+  if w then
+    local o = P.owner
+    local okO, c = false, nil
+    if o.active and not o.away then okO, c = pcall(o.origin, o) end
+    if okO and c and c.id == w.id then
+      pg.plog(P, "the page has loaded, and the overlay is still on that control: the page opens")
+      pg.openPage(P)
+    else
+      pg.plog(P, "the page has loaded; not shown — the overlay is not on the control it was asked from")
+    end
+  end
+  pg.hookCall(P, "onReady", P.spec.onReady, P.owner)
+end
+
+function pg.pageClosed(P, why)
+  if why == "failed" then
+    P.ready = false
+    P.preparing = false
+  end
+  local t = P.trip
+  if t then
+    pg.plog(P, "the page closed (%s) — trip '%s' ends", tostring(why), t.label)
+    pg.giveUp(P, t, "page closed", true)
+  elseif why == "user" and P.away and P.stage == "page" and P.held then
+    -- The host has hidden the page and given the front back: the way back, as at the key.
+    local okF, accepted = pcall(host.window.focus, P.held.origin.id)
+    pg.startReturn(P)
+    pg.plog(P, "the page closed by the user: the way back, control id %s asked to the front: %s",
+      tostring(P.held.origin.id), (okF and accepted == true) and "accepted" or "declined")
+  end
+  if why == "failed" and P.away and not pg.pageHasKeyboard(P) then pg.awayByFront(P, "the page failed") end
+  pg.hookCall(P, "onClose", P.spec.onClose, P.owner, why)
+end
+
+-- The page built before it is wanted (page:prepare), on the module's turn after the page's overlay
+-- first came to the front with its group not away. A prepare that fails is not asked again from
+-- here: the key builds the page from then on. The time of the call is logged: what the event loop
+-- waits for in a build is unmeasured (W8).
+function pg.preparePage(P)
+  if P.ready or P.prepareFailed then return end
+  local o = P.owner
+  if not (o.active and not o.away) then
+    P.preparing = false
+    return
+  end
+  local t0 = host.now()
+  local ok, why = P.page:prepare()
+  local ms = host.now() - t0
+  if ok then
+    pg.plog(P, "prepared: ready already (the call took %d ms)", ms)
+  elseif why == "not ready yet" then
+    pg.plog(P, "prepared: building (the call took %d ms)", ms)
+  else
+    P.prepareFailed = true
+    pg.plog(P, "not prepared (%s, the call took %d ms); the page key builds it from now on", tostring(why), ms)
+  end
+end
+
+function pages.arrived(o, quiet)
+  local P = pages.of(o)
+  if not P then return end
+  if quiet then return pg.tripLook(P) end
+  -- Back in W other than by a trip: a page over it, shown and not in front, is hidden.
+  if P.covers then pg.hideCovering(P, host.window.active()) end
+  if o == P.owner and not P.ready and not P.preparing and not P.prepareFailed then
+    P.preparing = true
+    host.timer.after(0, function() pg.preparePage(P) end)
+  end
+end
+
+-- The page record holding the stay in window `win`, or nil: away with W the window, or — in the
+-- moment between the page's show and the overlay letting go, which a watcher registered before the
+-- overlay's own trigger sees first — a show of the runtime's asked for the place in W and the page
+-- in front.
+function pg.stayHolder(win)
+  for _, P in ipairs(pageRecords) do
+    if P.away and P.held and P.held.window.id == win then return P end
+    if P.asked and P.asked.window.id == win and pg.classOf(P, P.asked, host.window.active()) == "page" then
+      return P
+    end
+  end
+  return nil
+end
+
+function pages.stayHeld(win)
+  return pg.stayHolder(win) ~= nil
+end
+
+-- The stay held by a page (§3.3), and `a` in front: the page, W, or a window of W's application on
+-- a trip or a way back keep it; W retitled ends it (and a trip, "gone"); W resized during a trip is a
+-- zoom step, whose size the stay takes; outside one, a new stay. Anything else changes nothing here.
+function pages.stayWatch(a)
+  if a == nil then return end
+  local P = pg.stayHolder(stay.win)
+  if not (P and P.held) or a.id ~= P.held.window.id then return end
+  local t = P.trip
+  if a.title ~= stay.title then
+    endStayNow()
+    pg.plog(P, "the plug-in's window came forward titled '%s' — another plug-in; the stay ends", tostring(a.title))
+    if t and t.live then pg.giveUp(P, t, "gone") end
+    return
+  end
+  if a.client and (a.client.w ~= stay.cw or a.client.h ~= stay.ch) then
+    if t then
+      pg.plog(P, "the plug-in's window is %dx%d now — a zoom step inside trip '%s'; the stay goes on",
+        a.client.w, a.client.h, tostring(t.label))
+      stay.cw, stay.ch = a.client.w, a.client.h
+    else
+      endStayNow()
+    end
+  end
+end
+
+-- The key against a group overlay's hotkeys: a control's or a tab's of the same key, by keyOf.
+function pg.hotkeyClash(o, spec)
+  local k = keyOf(spec)
+  for _, c in ipairs(o.controls) do
+    if type(c.hotkey) == "string" and keyOf(c.hotkey) == k then return "control '" .. tostring(c.label) .. "'" end
+    if c.kind == "tabcontrol" then
+      for _, tab in ipairs(c.tabs or {}) do
+        if type(tab.hotkey) == "string" and keyOf(tab.hotkey) == k then return "tab '" .. tostring(tab.label) .. "'" end
+      end
+    end
+  end
+  return nil
+end
+
+function pages.joining(o, slot)
+  local mine = {}
+  for _, P in ipairs(pageRecords) do
+    if P.owner == o or (slot and P.owner._slot == slot) then mine[#mine + 1] = P end
+  end
+  if #mine > 1 then
+    error(("overlay '%s': a second page in the same group — the overlays on slot '%s' share one page "
+      .. "(O:addPage of '%s' and of '%s')"):format(tostring(o.label), tostring(slot), tostring(mine[1].owner.label),
+      tostring(mine[2].owner.label)), 0)
+  end
+  local P = mine[1]
+  if not P then return end
+  local check = { o }
+  if P.owner == o and slot then
+    for s in pairs(overlaysMade) do
+      if s ~= o and s._slot == slot then check[#check + 1] = s end
+    end
+  end
+  for _, s in ipairs(check) do
+    local hit = pg.hotkeyClash(s, P.key.spec)
+    if hit then
+      error(("overlay '%s': the page key %s is the hotkey of %s of overlay '%s' — one key, one owner")
+        :format(tostring(o.label), tostring(P.key.spec), hit, tostring(s.label)), 0)
+    end
+  end
+  if P.away then o.away = true end
+end
+
+-- ── The API ──
+
+local ADD_PAGE_FIELDS = {
+  { "describe", "function" }, { "key", "string" }, { "open", "function" }, { "onMessage", "function" },
+  { "notHere", "string", true }, { "onReady", "function", true }, { "onClose", "function", true },
+  { "onShown", "function", true }, { "onBack", "function", true }, { "prime", "table", true },
+}
+local PAGE_METHODS = { "show", "hide", "post", "isShown", "prepare", "close" }
+
+-- `describe(on)` called, and its answer checked: the page's methods, and all three of `on`'s fields
+-- read. Raises at the line that called addPage or pageAgain (level 3).
+function pg.describePage(P)
+  local who = tostring(P.owner.label)
+  local handlers = {
+    message = function(m) pg.pageMessage(P, m) end,
+    ready = function() pg.pageReady(P) end,
+    close = function(why) pg.pageClosed(P, why) end,
+  }
+  local reads = { message = 0, ready = 0, close = 0 }
+  local on = setmetatable({}, {
+    __index = function(_, k)
+      if reads[k] == nil then
+        error(("overlay '%s': the page's `on` has message, ready and close, not '%s'"):format(who, tostring(k)), 2)
+      end
+      reads[k] += 1
+      return handlers[k]
+    end,
+    __newindex = function() error(("overlay '%s': the page's `on` is read, not written"):format(who), 2) end,
+  })
+  local ok, pg = pcall(P.spec.describe, on)
+  if not ok then error(("overlay '%s': the page's describe raised: %s"):format(who, tostring(pg)), 3) end
+  if type(pg) ~= "table" and type(pg) ~= "userdata" then
+    error(("overlay '%s': the page's describe answered a %s, not a page (host.gui.webview)"):format(who, type(pg)), 3)
+  end
+  for _, m in ipairs(PAGE_METHODS) do
+    local okM, f = pcall(function() return pg[m] end)
+    if not (okM and type(f) == "function") then
+      error(("overlay '%s': the page's describe answered no page — it has no `%s`"):format(who, m), 3)
+    end
+  end
+  if not pcall(function() return pg.window end) then
+    error(("overlay '%s': the page's describe answered no page — it has no `window`"):format(who), 3)
+  end
+  for _, k in ipairs({ "message", "ready", "close" }) do
+    if reads[k] == 0 then
+      error(("overlay '%s': the page's describe did not read on.%s — the page's onMessage, onReady and "
+        .. "onClose are the runtime's (on.message, on.ready, on.close)"):format(who, k), 3)
+    end
+  end
+  return pg
+end
+
+-- O:addPage(spec) -> page. See the section's head, and docs/api/overlay.md.
+function Overlay:addPage(spec)
+  assertUnbound(self, "addPage")
+  local who = tostring(self.label)
+  if type(spec) ~= "table" then
+    error(("overlay '%s': addPage takes { describe, key, open, onMessage, … }, got %s"):format(who, type(spec)), 2)
+  end
+  local known = {}
+  for _, f in ipairs(ADD_PAGE_FIELDS) do known[f[1]] = true end
+  for k in pairs(spec) do
+    if not known[k] then
+      error(("overlay '%s': addPage has no field '%s' (it has describe, key, open, onMessage, notHere, "
+        .. "onReady, onClose, onShown, onBack and prime)"):format(who, tostring(k)), 2)
+    end
+  end
+  for _, f in ipairs(ADD_PAGE_FIELDS) do
+    local name, kind, optional = f[1], f[2], f[3]
+    local v = spec[name]
+    if v == nil and not optional then
+      error(("overlay '%s': addPage needs `%s`, a %s"):format(who, name, kind), 2)
+    elseif v ~= nil and type(v) ~= kind then
+      error(("overlay '%s': addPage's `%s` must be a %s, got %s"):format(who, name, kind, type(v)), 2)
+    end
+  end
+  if spec.prime ~= nil and not (type(spec.prime.x) == "number" and type(spec.prime.y) == "number") then
+    error(("overlay '%s': addPage's `prime` must be { x, y }, in the overlay's coordinates"):format(who), 2)
+  end
+  local refused = hotkeyRefusal(spec.key)
+  if refused then
+    error(("overlay '%s': addPage's key %s is refused for a hotkey (%s)"):format(who, spec.key, refused), 2)
+  end
+  for _, R in ipairs(pageRecords) do
+    if R.owner == self then error(("overlay '%s': a second page — one page to a group"):format(who), 2) end
+  end
+  local P = { owner = self, spec = spec, key = { spec = spec.key }, ready = false, away = false,
+    covers = false, returnSeq = 0 }
+  P.page = pg.describePage(P)
+  pageRecords[#pageRecords + 1] = P
+  self.page = P.page
+  if not pageTriggered then
+    pageTriggered = true
+    host.window.onTrigger({}, { on = "activate" }, pg.pageEvent)
+    host.window.onFocus(pg.pageEvent)
+  end
+  -- No `foreground` option: a key matched in the keyboard hook was accepted every time (W2), and
+  -- that option may go (hotkey.md).
+  local ok, id = pcall(host.hotkey.register, spec.key, function() pg.keyPressed(P) end)
+  if ok then
+    P.key.id = id
+  else
+    pg.plog(P, "the page key %s is not registered: %s", spec.key, tostring(id))
+  end
+  return P.page
+end
+
+-- The page record of overlay `self`'s group, or a raise at the module's line.
+function pg.pageOrRaise(self, what)
+  local P = pages.of(self)
+  if not P then
+    error(("overlay '%s': %s — its group has no page (O:addPage)"):format(tostring(self.label), what), 3)
+  end
+  return P
+end
+
+local IN_PLUGIN_FIELDS = { label = true, act = true, after = true, onGiveUp = true }
+
+-- O:inPlugin(spec) -> true | false, why. See the section's head, and docs/api/overlay.md.
+function Overlay:inPlugin(spec)
+  local who = tostring(self.label)
+  if type(spec) ~= "table" then
+    error(("overlay '%s': inPlugin takes { label, act, after, onGiveUp? }, got %s"):format(who, type(spec)), 2)
+  end
+  for k in pairs(spec) do
+    if not IN_PLUGIN_FIELDS[k] then
+      error(("overlay '%s': inPlugin has no field '%s' (it has label, act, after and onGiveUp)"):format(who, tostring(k)), 2)
+    end
+  end
+  if type(spec.label) ~= "string" or spec.label == "" then
+    error(("overlay '%s': inPlugin needs a `label`, the action's name"):format(who), 2)
+  end
+  if type(spec.act) ~= "function" or type(spec.after) ~= "function" then
+    error(("overlay '%s': inPlugin's `act` and `after` must be functions"):format(who), 2)
+  end
+  if spec.onGiveUp ~= nil and type(spec.onGiveUp) ~= "function" then
+    error(("overlay '%s': inPlugin's `onGiveUp` must be a function or nil, got %s"):format(who, type(spec.onGiveUp)), 2)
+  end
+  local P = pg.pageOrRaise(self, "inPlugin")
+  local function refused(why)
+    pg.plog(P, "trip '%s' not started — %s", spec.label, why)
+    return false, why
+  end
+  if P.trip then return refused("busy") end
+  if not pg.pageHasKeyboard(P) then return refused("not in front") end
+  pg.recover(P)
+  if not P.held then return refused("nothing held") end
+  if pg.goneWhy(P) then return refused("gone") end
+  local okF, accepted = pcall(host.window.focus, P.held.origin.id)
+  if not (okF and accepted == true) then
+    -- On a Mac a DAW that quit has its handles forgotten: nothing of it is listed any more.
+    if host.os.current == "macos" then
+      local okL, list = pcall(host.window.list, { pids = { P.held.window.pid } })
+      if okL and type(list) == "table" and #list == 0 then return refused("gone") end
+    end
+    return refused("declined")
+  end
+  local now = host.now()
+  local t = setmetatable({
+    _P = P, label = spec.label, spec = spec, live = true, stage = "forward", started = now,
+    deadline = now + TRIP_LOOK_MS, _overlay = self,
+  }, Trip)
+  P.trip = t
+  pg.tripIn(P)
+  pg.plog(P, "trip '%s' started: control id %s of window id %s '%s' asked to the front", t.label,
+    tostring(P.held.origin.id), tostring(P.held.window.id), tostring(P.held.window.title))
+  host.timer.after(TRIP_LOOK_MS, function()
+    if P.trip == t and t.live and t.stage == "forward" then
+      pg.plog(P, "trip '%s': the plug-in's window did not come within %d ms", t.label, TRIP_LOOK_MS)
+      pg.giveUp(P, t, "not in front")
+    end
+  end)
+  return true
+end
+
+-- O:pageBack() -> true | false, why: the way back. Raises only for an overlay whose group has no page.
+function Overlay:pageBack()
+  return pg.backTo(pg.pageOrRaise(self, "pageBack"))
+end
+
+-- O:pageKey(spec) -> true | false, why: another page key, for a setting. The old one stays when the
+-- new one is refused.
+function Overlay:pageKey(spec)
+  local P = pg.pageOrRaise(self, "pageKey")
+  if type(spec) ~= "string" then return false, "parse" end
+  local refused = hotkeyRefusal(spec)
+  if refused then return false, refused end
+  for _, o in ipairs(pg.groupOf(P)) do
+    if pg.hotkeyClash(o, spec) then return false, "a control's hotkey" end
+  end
+  local ok, id = pcall(host.hotkey.register, spec, function() pg.keyPressed(P) end)
+  if not ok then return false, "refused: " .. tostring(id) end
+  if P.key.id ~= nil then host.hotkey.unregister(P.key.id) end
+  pg.plog(P, "the page key is %s now, was %s", spec, tostring(P.key.spec))
+  P.key = { spec = spec, id = id }
+  return true
+end
+
+-- O:pageAgain() -> page: the page closed and described again, for a setting fixed per page object.
+function Overlay:pageAgain()
+  local P = pg.pageOrRaise(self, "pageAgain")
+  if P.trip then pg.giveUp(P, P.trip, "page closed", true) end
+  P.page:close()
+  P.page = pg.describePage(P)
+  P.owner.page = P.page
+  P.ready, P.preparing, P.prepareFailed, P.wanted, P.covers = false, false, false, nil, false
+  pg.plog(P, "the page described again")
+  pg.awayByFront(P, "the page was described again")
+  local o = P.owner
+  if o.active and not o.away then
+    P.preparing = true
+    pg.preparePage(P)
+  end
+  return P.page
+end
 end
 
 -- ── Calibration ──────────────────────────────────────────────────────────────

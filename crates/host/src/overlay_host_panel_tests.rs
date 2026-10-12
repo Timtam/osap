@@ -232,6 +232,64 @@ end
 function T.region(r) return table.concat({ r[1], r[2], r[3], r[4] }, ",") end
 "##;
 
+/// The arbiter with the rule a module with a dialog layer needs: of a slot's matching claims, the
+/// most specific is active, and the one it replaces is deactivated first. (The harness's own
+/// activates every matching claim, which two overlays on one slot cannot live with, and answers
+/// specificity 0, so nothing is ever outranked with it.) Called back through `Function::call`, as
+/// the host calls them (`T.hostCall`). A claim is listed as `T.claimModule`'s when it registers
+/// (default `com.platform.overlay`). Shared by `overlay_avenger_tests.rs` and
+/// `overlay_page_tests.rs`; `T.claims` are its claims, for a scenario to look at.
+pub(crate) const SPECIFICITY_ARBITER: &str = r##"
+local claims = {}
+T.claims = claims
+local function settle(slot)
+  local best
+  for i, c in ipairs(claims) do
+    if c.slot == slot and c.matching and (not best or c.spec > claims[best].spec) then best = i end
+  end
+  for i, c in ipairs(claims) do
+    if c.slot == slot and c.active and i ~= best then
+      c.active = false
+      T.hostCall(c.off)
+    end
+  end
+  if best and not claims[best].active then
+    claims[best].active = true
+    T.hostCall(claims[best].on)
+  end
+end
+rawset(T.host, "arbiter", T.strict("host.arbiter", {
+  register = function(slot, specificity, on, off)
+    claims[#claims + 1] = { slot = slot, spec = specificity or 0, on = on, off = off,
+      matching = false, active = false, module = T.claimModule or "com.platform.overlay" }
+    return #claims
+  end,
+  setMatching = function(slot, id, m)
+    claims[id].matching = m == true
+    settle(slot)
+  end,
+  winner = function(slot)
+    for i, c in ipairs(claims) do
+      if c.slot == slot and c.active then return i end
+    end
+    return nil
+  end,
+  winnerSpecificity = function(slot)
+    for _, c in ipairs(claims) do
+      if c.slot == slot and c.active then return c.spec end
+    end
+    return nil
+  end,
+  participants = function(slot)
+    local out = {}
+    for _, c in ipairs(claims) do
+      if c.slot == slot then out[#out + 1] = { module = c.module } end
+    end
+    return out
+  end,
+}))
+"##;
+
 /// A fresh VM with the scripted host, the runtime, the prelude's matcher and the helpers above;
 /// the host plays `os`.
 fn run_on(os: &str, scenario: &str) {

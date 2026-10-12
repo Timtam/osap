@@ -346,8 +346,11 @@ free until it ends.
 
 **Signature:** `host.window.focus(id: number) -> boolean`
 
-Brings the window with that handle to the front and gives it the keyboard. Returns whether
-the system accepted it. Like `host.input.*`, it acts at once, also while the calling module has a
+Brings the window with that handle to the front and gives it the keyboard. `id` may also be a
+**control's**, on Windows — one of [`controls()`](#host-window-controls) or
+[`focusChain()`](#host-window-focuschain), or an embedded overlay's
+[`O:hwnd()`](./overlay.md#o-origin): its window is brought to the front, and the keyboard is then
+landed on the control (Windows, below). Returns whether the system accepted it. Like `host.input.*`, it acts at once, also while the calling module has a
 [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) or a snapshot request out: a picture asked for
 just before and not taken yet may show the window in front. Read first and focus once the read is
 answered, and the log notes a module that does not, once a session (see
@@ -396,9 +399,39 @@ On Windows a minimised window is restored first — a window that is made foregr
 still minimised stays invisible, which is the worst of both answers for somebody who cannot
 see it happen.
 
+```luau
+-- Back into an embedded plug-in from a page: its own control, so that the keyboard lands in it
+-- (Windows), not only its window to the front. On a Mac the same call takes the window.
+if not host.window.focus(ov:hwnd()) then
+  host.speech.output("The plug-in's window would not come to the front.")
+end
+```
+
 ### Windows
 
-A minimised window is restored first, then brought to the foreground with `SetForegroundWindow`. `true` means Windows accepted the request — not that the change has been made. For a window of another application the activation can finish only once that window's own thread has processed it, so [`active()`](#host-window-active), [`foreground()`](#host-window-foreground) and `focusChain()` asked straight after the call can still name the window that was in front; the foreground event follows once the change is made, and a module that wants to know where the keyboard went waits for that event rather than reading again at once. Which control inside the window gets the keyboard is the application's to decide, and nothing here moves it — REAPER may leave it on its FX window itself or on its FX list rather than in the plug-in. `false` means Windows refused: it limits which processes may change the foreground (the conditions are listed under `SetForegroundWindow` in Microsoft's documentation), and it does not say which one applied. Read [`focusChain()`](#host-window-focuschain) afterwards for where the keyboard is inside the window.
+A minimised window is restored first, then brought to the foreground with `SetForegroundWindow`. `true` means Windows accepted the request — not that the change has been made. For a window of another application the activation can finish only once that window's own thread has processed it, so [`active()`](#host-window-active), [`foreground()`](#host-window-foreground) and `focusChain()` asked straight after the call can still name the window that was in front; the foreground event follows once the change is made, and a module that wants to know where the keyboard went waits for that event rather than reading again at once. `false` means Windows refused: it limits which processes may change the foreground (the conditions are listed under `SetForegroundWindow` in Microsoft's documentation), and it does not say which one applied, and nothing more is done. Read [`focusChain()`](#host-window-focuschain) afterwards for where the keyboard is inside the window.
+
+**A control's id — the keyboard lands on it.** Which control of a window gets the keyboard is the application's to decide, and REAPER, brought forward, has been seen to leave it on its FX window itself, on its FX list, or nowhere (the HTML probe's W7 and W10) rather than in the plug-in. So for an `id` that is a control, the control's top-level window is brought forward, and an accepted request starts a **landing** on the control, which decides by events and by no timer:
+
+- **It looks** on the call's own turn when the window was in front already, at the window's foreground event, and at every focus event after that. A look reads the window's thread with `GetGUIThreadInfo` — local, no message sent to the application.
+- **Its activation not processed yet** (the thread's active window is not the window): it waits for the next event.
+- **The keyboard on the control, or inside it:** landed. Said once, and still looked at, since an application can move the keyboard on once more after its activation.
+- **Elsewhere in the window, or nowhere:** the keyboard is **put** on the control — UI Automation's `SetFocus`, asked on the host's accessibility thread as [`host.element`](./element.md)'s questions are, never on the event loop, and read back there. At most **two** puts: one for where the activation left it, one for an application that moves it on once (W7). Past that the application keeps it where it wants it, and the log says so. A control that is no longer a visible window inside its window gets none.
+- **It ends** at the user's first key-down after the call (a key held down at the call repeating is not one), at any `host.input` call, at another window's foreground event, at the control destroyed or hidden, and at a newer `host.window.focus`, which replaces it. So it never moves the keyboard after the user — or a module — acted: a Shift+Tab to the FX list is the user's.
+
+The key-downs are the ones raw input reports, which the host watches whenever a module holds a key. A plug-in whose process does not answer holds only the accessibility thread's put, up to its one-second timeout, never the event loop. Our own code never attaches input to another thread; for a window with no accessibility provider of its own — a JUCE plug-in without accessibility — UI Automation's window proxy may, on the accessibility thread, for the moment it takes. Whether a put takes there is unmeasured, and is in the log:
+
+`[window] focus of control <id> ('<class>') in '<title>': ` then `waiting for the window's activation`, `the keyboard landed on it`, `the keyboard was on '<class>'` (or `nothing (nowhere)`) `; put on the control: took` or `refused (<why>)`, `the application moved it to '<class>' after 2 puts — left there`, and `ended: a key was pressed`, `ended: a host.input call`, `ended: another window came to the front`, `ended: the control is gone or hidden`, `ended: a newer focus`.
+
+**A top-level window's id** is brought forward as it always was, with no landing — with one exception. A page of this application in front gives the keyboard back, with the front, to the control it took the front from ([`page:hide`](./gui.md#page-hide)); but a module that brings the plug-in's window forward **first**, as [`page:hide`](./gui.md#page-hide) asks, leaves the page nothing to hand back once it is no longer in front. So `host.window.focus` of the window a page in front came from lands on the control that page took the front from.
+
+```luau
+-- The way back from a page, in the order gui.md asks for: the plug-in's window first, then the page
+-- hidden. Its keyboard lands on the control it was on when the page came.
+if host.window.focus(plugin.id) then
+  page:hide()
+end
+```
 
 ### macOS
 
@@ -407,6 +440,8 @@ Three things are done: the window's application is made the active one, the wind
 `true` never means "the keyboard is in it". Measured in the first tester session, five presses out of five in REAPER: the raise, the activation and the focus flag were all accepted and the keyboard stayed on REAPER's own FX list, because that plug-in's view exposes no accessibility element there is to hand it to. An overlay gating on the focus being inside the plug-in can still decline to act after this reported success. Read [`focusChain()`](#host-window-focuschain) and take it three ways: **empty** means the backend could not read where the keyboard is; a chain whose last link is **not this window** belongs to another application, since activation is asynchronous; and a chain ending in this window tells you how deep the focus sits inside it. The `daw-hosts` shortcut does that, clicks just inside the plug-in's panel when the focus is deeper than the window itself, and reads the chain again a quarter of a second later, because a posted click has not been processed when the call returns. Whether that click moves REAPER's keyboard is not yet measured.
 
 Minimised windows are additionally dropped from `list()` and `find()` here, so one cannot normally be reached to pass in.
+
+**Pass a window's id.** A plug-in in a DAW publishes no control of its own here, and an embedded overlay's origin is the DAW's panel, whose id is its window's ([`attachEmbedded`](./overlay.md#o-attachembedded-macos)), so `host.window.focus(ov:hwnd())` is the same call on both platforms. Nothing here lands the keyboard on a control: where VoiceOver's keyboard goes inside the window is the application's (TODO.md, MW1b).
 
 A window of this application's own is focused with AppKit's calls instead: brought back if minimised, the application asked to become the active one (`NSApplication`'s `activateIgnoringOtherApps:`), and the window ordered in front and made key. `true` whenever the window is shown or minimised; the change is asynchronous, and the window becoming key is what says it happened. The window of a page described [`activates = false`](./gui.md#host-gui-webview) takes the keyboard without that request, so nothing is on its way and the answer is decided at the call: `true` when the window is the key window as the call returns, `false` when it is not. A hidden one — the module manager once it is closed, a page hidden, or any window of the application while the application is hidden — answers `false`, with a line in the log, as the window tables leave it out: only what hid it shows it again.
 

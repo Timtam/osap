@@ -29,6 +29,7 @@ An entry is a [window matcher](api/window.md#matchers) — `host.window.test` re
 | `focusTarget` | all | A matcher the focus key also requires of a window, for an entry whose matcher is wider than a plug-in window. Optional. |
 | `focusKey` | all | `false` leaves the entry out of the focus key's search: for an entry whose matcher also takes windows that are no plug-in windows, with nothing known yet that a `focusTarget` could tell them apart by (Ableton Live on a Mac). Optional; any other value searches it. |
 | `daw` | all | The DAW's name, for the log lines. |
+| `swallowsFirstClick` | all | **Reserved; no entry sets it.** `true` when the DAW drops the first click after its plug-in window comes forward — the open question GM2 for a Mac (TODO.md). An overlay with a page then has the runtime make one click at the page's neutral point at each trip's arrival into the plug-in, before the module acts ([`O:addPage`'s `prime`](api/overlay.md#o-addpage)). Set only once GM2 has measured that the DAW drops it; a developer trying the answer edits the entry in place. |
 
 ### Windows
 

@@ -30,62 +30,16 @@
 
 use super::overlay_host_panel_tests::run_with_helpers;
 
-/// The example's helpers, on top of the host-panel ones: Notepad, the page, the window events,
-/// the reading's answer, and the example loaded.
-const EX: &str = r##"
+/// `host.gui.webview` as the scenarios script it: one page object, recording what it was asked
+/// and answering what a scenario scripts, its window `T.PAGE` — a window of this application.
+/// Shared with `overlay_page_tests.rs`, where the overlay runtime describes and shows the page.
+/// A page described a second time (`O:pageAgain`) is allowed only where a scenario sets
+/// `S.redescribe`, and shares the first one's record.
+pub(crate) const PAGE_WEBVIEW: &str = r##"
 local S = T.S
-T.KEY = "Ctrl+Shift+Win+Alt+F12"
-
--- An event of the example's module through its mailbox. The example never waits, so each runs
--- at once: one that waited or was dropped stops the scenario here.
-local function ran(kind, f, ...)
-  local got = T.call(kind, f, ...)
-  assert(got == "Ran", kind .. ": " .. got)
-end
-
--- Notepad, as Windows 11 describes it, and the page's own window: a window of this application.
-T.NOTEPAD = { id = 300, title = "Untitled - Notepad", class = "Notepad",
-  app = { pid = 3000, exe = "Notepad.exe", name = "Notepad" },
-  bounds = { x = 100, y = 100, w = 800, h = 600 }, client = { x = 108, y = 131, w = 784, h = 561 } }
 T.PAGE = { id = 4000, title = "Click helper", class = "wxWindowNR", own = true,
   app = { pid = 9, exe = "automation-platform.exe", name = "automation-platform" },
   bounds = { x = 900, y = 100, w = 520, h = 640 }, client = { x = 908, y = 130, w = 504, h = 602 } }
-S.listed = { T.MAIN, T.FX, T.OTHER, T.NOTEPAD }
-
--- host.window.onTrigger, with or without options: T.arrive plays a window coming to the front,
--- its callback an event of the module's.
-S.fgCbs, S.fgOpts = {}, {}
-rawset(T.host.window, "onTrigger", function(m, opts, cb)
-  if cb == nil then
-    cb, opts = opts, nil
-  end
-  S.fgCbs[#S.fgCbs + 1] = cb
-  S.fgOpts[#S.fgOpts + 1] = { matcher = m, opts = opts }
-end)
-function T.arrive(win)
-  S.front, S.chain = win, { win }
-  S.epoch += 1
-  for _, cb in ipairs(S.fgCbs) do ran("window", cb, win) end
-end
-S.owns = true
-S.ownsAsked = {}
-rawset(T.host.window, "ownsPoint", function(id, x, y)
-  S.ownsAsked[#S.ownsAsked + 1] = { id, x, y }
-  S.order[#S.order + 1] = "ownsPoint"
-  return S.owns
-end)
-do
-  local focus = T.host.window.focus
-  rawset(T.host.window, "focus", function(id)
-    S.order[#S.order + 1] = "focus " .. tostring(id)
-    return focus(id)
-  end)
-  local submit = T.submit
-  T.submit = function(what, opts, cb)
-    S.order[#S.order + 1] = "read"
-    return submit(what, opts, cb)
-  end
-end
 
 -- host.gui.webview: the page, described once. `show` answers the page's `answers` in turn, and
 -- when they run out "not ready yet" until the page has loaded (T.ready), true after; accepted
@@ -94,7 +48,7 @@ S.pg = { shows = {}, hides = 0, posts = {}, answers = {}, shown = false, prepare
   prepareAnswers = {} }
 rawset(T.host, "gui", T.strict("host.gui", {
   webview = function(opts)
-    assert(S.page == nil, "the page is described once")
+    assert(S.page == nil or S.redescribe, "the page is described once")
     local st = S.pg
     local p = {}
     function p.show(self, o)
@@ -138,6 +92,62 @@ rawset(T.host, "gui", T.strict("host.gui", {
     return p
   end,
 }))
+
+"##;
+
+/// The example's helpers, on top of the host-panel ones: Notepad, the page, the window events,
+/// the reading's answer, and the example loaded.
+const EX: &str = r##"
+local S = T.S
+T.KEY = "Ctrl+Shift+Win+Alt+F12"
+
+-- An event of the example's module through its mailbox. The example never waits, so each runs
+-- at once: one that waited or was dropped stops the scenario here.
+local function ran(kind, f, ...)
+  local got = T.call(kind, f, ...)
+  assert(got == "Ran", kind .. ": " .. got)
+end
+
+-- Notepad, as Windows 11 describes it (the page's own window is the shared script's, T.PAGE).
+T.NOTEPAD = { id = 300, title = "Untitled - Notepad", class = "Notepad",
+  app = { pid = 3000, exe = "Notepad.exe", name = "Notepad" },
+  bounds = { x = 100, y = 100, w = 800, h = 600 }, client = { x = 108, y = 131, w = 784, h = 561 } }
+S.listed = { T.MAIN, T.FX, T.OTHER, T.NOTEPAD }
+
+-- host.window.onTrigger, with or without options: T.arrive plays a window coming to the front,
+-- its callback an event of the module's.
+S.fgCbs, S.fgOpts = {}, {}
+rawset(T.host.window, "onTrigger", function(m, opts, cb)
+  if cb == nil then
+    cb, opts = opts, nil
+  end
+  S.fgCbs[#S.fgCbs + 1] = cb
+  S.fgOpts[#S.fgOpts + 1] = { matcher = m, opts = opts }
+end)
+function T.arrive(win)
+  S.front, S.chain = win, { win }
+  S.epoch += 1
+  for _, cb in ipairs(S.fgCbs) do ran("window", cb, win) end
+end
+S.owns = true
+S.ownsAsked = {}
+rawset(T.host.window, "ownsPoint", function(id, x, y)
+  S.ownsAsked[#S.ownsAsked + 1] = { id, x, y }
+  S.order[#S.order + 1] = "ownsPoint"
+  return S.owns
+end)
+do
+  local focus = T.host.window.focus
+  rawset(T.host.window, "focus", function(id)
+    S.order[#S.order + 1] = "focus " .. tostring(id)
+    return focus(id)
+  end)
+  local submit = T.submit
+  T.submit = function(what, opts, cb)
+    S.order[#S.order + 1] = "read"
+    return submit(what, opts, cb)
+  end
+end
 
 -- An activation of `win` that waited behind the module's other events: by the time it runs, the
 -- window in front is already another one (`now`), whose own event has not come yet.
@@ -236,7 +246,7 @@ end
 /// prelude's matcher, the host-panel helpers and the ones above, on Windows; the scenario ends
 /// on the harness's checks.
 fn run(scenario: &str) {
-    run_with_helpers("windows", &[("page example helpers", EX)], scenario)
+    run_with_helpers("windows", &[("the scripted page", PAGE_WEBVIEW), ("page example helpers", EX)], scenario)
 }
 
 /// What the example declares at load: its key, its page — a tool page, from its own folder —

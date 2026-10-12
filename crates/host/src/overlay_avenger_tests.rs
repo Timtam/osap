@@ -47,7 +47,7 @@ use crate::backend::frame::Area;
 use crate::backend::CapturedImage;
 use crate::cells::{of_capture, to_hex, CellSpec, Predicate};
 
-use super::overlay_host_panel_tests::{HP, WINDOW_PRELUDE};
+use super::overlay_host_panel_tests::{HP, SPECIFICITY_ARBITER, WINDOW_PRELUDE};
 use super::overlay_menu_tests::{finish, harness, RUNTIME};
 
 /// The helpers, added on top of the host-panel ones.
@@ -58,57 +58,9 @@ S.owns = true
 S.ownsAsked = {}
 S.marked = {}
 
--- The arbiter with the rule a module with a dialog layer needs: of a slot's matching claims, the
--- most specific is active, and the one it replaces is deactivated first. (The harness's own
--- activates every matching claim, which two overlays on one slot cannot live with.) Called back
--- through `Function::call`, as the host calls them (T.hostCall).
-local claims = {}
-local function settle(slot)
-  local best
-  for i, c in ipairs(claims) do
-    if c.slot == slot and c.matching and (not best or c.spec > claims[best].spec) then best = i end
-  end
-  for i, c in ipairs(claims) do
-    if c.slot == slot and c.active and i ~= best then
-      c.active = false
-      T.hostCall(c.off)
-    end
-  end
-  if best and not claims[best].active then
-    claims[best].active = true
-    T.hostCall(claims[best].on)
-  end
-end
-rawset(T.host, "arbiter", T.strict("host.arbiter", {
-  register = function(slot, specificity, on, off)
-    claims[#claims + 1] = { slot = slot, spec = specificity or 0, on = on, off = off,
-      matching = false, active = false }
-    return #claims
-  end,
-  setMatching = function(slot, id, m)
-    claims[id].matching = m == true
-    settle(slot)
-  end,
-  winner = function(slot)
-    for i, c in ipairs(claims) do
-      if c.slot == slot and c.active then return i end
-    end
-    return nil
-  end,
-  winnerSpecificity = function(slot)
-    for _, c in ipairs(claims) do
-      if c.slot == slot and c.active then return c.spec end
-    end
-    return nil
-  end,
-  participants = function(slot)
-    local out = {}
-    for _, c in ipairs(claims) do
-      if c.slot == slot then out[#out + 1] = { module = "com.platform.vps-avenger" } end
-    end
-    return out
-  end,
-}))
+-- The arbiter is the shared one with the rule a module with a dialog layer needs
+-- (`overlay_host_panel_tests::SPECIFICITY_ARBITER`), its claims Avenger's.
+T.claimModule = "com.platform.vps-avenger"
 
 rawset(T.host.window, "ownsPoint", function(id, x, y)
   S.ownsAsked[#S.ownsAsked + 1] = { id, x, y }
@@ -1005,7 +957,7 @@ pub(crate) fn run_on(os: &str, scenario: &str) {
     });
     t.set("interrupts", lua.create_function(move |_, ()| Ok(ticks.load(Ordering::Relaxed))).unwrap()).unwrap();
     lua.globals().set("T", t).unwrap();
-    for (name, chunk) in [("host-panel helpers", HP), ("avenger helpers", AV)] {
+    for (name, chunk) in [("host-panel helpers", HP), ("specificity arbiter", SPECIFICITY_ARBITER), ("avenger helpers", AV)] {
         if let Err(e) = lua.load(chunk).set_name(name).exec() {
             panic!("{e}");
         }

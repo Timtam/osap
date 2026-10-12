@@ -20,6 +20,10 @@ pub mod frame;
 
 #[cfg(windows)]
 mod windows;
+/// A landing of the keyboard on a control (HW1), for a page that gives the front back
+/// (`webview_win.rs`).
+#[cfg(windows)]
+pub(crate) use windows::start_landing;
 /// Registered hotkeys matched in the low-level keyboard hook as well as by `RegisterHotKey`:
 /// the table and the one-press rules, with no OS call in them, so their tests run anywhere
 /// Windows builds. See the file.
@@ -1170,6 +1174,9 @@ pub enum ElementAsk {
     FocusWithin { hwnd: isize, x: i32, y: i32, w: i32, h: i32 },
     /// `host.element.press`.
     Press { hwnd: isize, name: String, ctype: i32 },
+    /// The host's own, never a module's: a landing of `host.window.focus` puts the keyboard on
+    /// window `hwnd`, a control, and reads it back (`focus_landing.rs`, HW1).
+    FocusPut { hwnd: isize },
 }
 
 impl ElementAsk {
@@ -1187,7 +1194,8 @@ impl ElementAsk {
             | ElementAsk::ClassNavPoint { hwnd, .. }
             | ElementAsk::FocusStep { hwnd, .. }
             | ElementAsk::FocusWithin { hwnd, .. }
-            | ElementAsk::Press { hwnd, .. } => *hwnd,
+            | ElementAsk::Press { hwnd, .. }
+            | ElementAsk::FocusPut { hwnd } => *hwnd,
         }
     }
 
@@ -1195,7 +1203,10 @@ impl ElementAsk {
     /// read: such a question is put every time it is asked, never shared with another or answered
     /// from what an earlier one found.
     pub fn acts(&self) -> bool {
-        matches!(self, ElementAsk::FocusStep { .. } | ElementAsk::FocusWithin { .. } | ElementAsk::Press { .. })
+        matches!(
+            self,
+            ElementAsk::FocusStep { .. } | ElementAsk::FocusWithin { .. } | ElementAsk::Press { .. } | ElementAsk::FocusPut { .. }
+        )
     }
 
     /// The call's name in the module's words: `"findAny"`.
@@ -1213,6 +1224,7 @@ impl ElementAsk {
             ElementAsk::FocusStep { .. } => "focusStep",
             ElementAsk::FocusWithin { .. } => "focusWithin",
             ElementAsk::Press { .. } => "press",
+            ElementAsk::FocusPut { .. } => "focusPut",
         }
     }
 
@@ -1227,9 +1239,11 @@ impl ElementAsk {
                 format!("{container} > {name}")
             }
             ElementAsk::ClassNavPoint { class, .. } => class.clone(),
-            ElementAsk::Dump { .. } | ElementAsk::RawDump { .. } | ElementAsk::FocusStep { .. } | ElementAsk::FocusWithin { .. } => {
-                String::new()
-            }
+            ElementAsk::Dump { .. }
+            | ElementAsk::RawDump { .. }
+            | ElementAsk::FocusStep { .. }
+            | ElementAsk::FocusWithin { .. }
+            | ElementAsk::FocusPut { .. } => String::new(),
         }
     }
 
@@ -1247,6 +1261,7 @@ impl ElementAsk {
             ElementAsk::Dump { .. } | ElementAsk::RawDump { .. } => ElementAnswer::Nodes(Vec::new(), None),
             ElementAsk::FocusStep { .. } => ElementAnswer::Step(None),
             ElementAsk::FocusWithin { .. } => ElementAnswer::Within(None),
+            ElementAsk::FocusPut { .. } => ElementAnswer::Put(false),
             ElementAsk::Press { .. } => return Err(ElementFailure { why: NOT_YET.to_string(), unanswered: false }),
         })
     }
@@ -1275,6 +1290,8 @@ pub enum ElementAnswer {
     Within(Option<(String, i32)>),
     /// `press`: the program accepted the action.
     Pressed,
+    /// The host's `FocusPut`: whether the keyboard is on the control, or inside it, afterwards.
+    Put(bool),
 }
 
 impl ElementAnswer {
@@ -1289,6 +1306,7 @@ impl ElementAnswer {
                 | ElementAnswer::State(None)
                 | ElementAnswer::Step(None)
                 | ElementAnswer::Within(None)
+                | ElementAnswer::Put(false)
         )
     }
 }
@@ -1448,6 +1466,23 @@ pub trait Backend {
         let _ = id;
         false
     }
+
+    /// The keyboard landings of `host.window.focus` (HW1, `focus_landing.rs`): the puts they want
+    /// made since the last call, each `(landing, control)` — asked on the accessibility thread by
+    /// the host, never on the event loop. Windows only; none elsewhere.
+    fn take_focus_puts(&self) -> Vec<(u64, isize)> {
+        Vec::new()
+    }
+
+    /// The answer to one of [`take_focus_puts`](Self::take_focus_puts)'s puts: whether the keyboard
+    /// is on the control afterwards, or why it could not be asked.
+    fn focus_put_answered(&self, landing: u64, took: Result<bool, String>) {
+        let _ = (landing, took);
+    }
+
+    /// A module made a `host.input` call: a landing of `host.window.focus` under way ends, so that
+    /// it never moves the keyboard after something acted.
+    fn input_made(&self) {}
 
     /// Is `hwnd`'s window the one lying under this screen point?
     ///

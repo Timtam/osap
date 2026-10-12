@@ -1336,6 +1336,9 @@ fn on_raw_input(wparam: WPARAM, handle: HRAWINPUT) {
         return;
     }
     let down = hook_watch::physical_down(device, kb.Flags, kb.VKey, kb.MakeCode);
+    // The user's key-downs, for a landing of host.window.focus to end at (HW1): one atomic add for a
+    // key that was not down already.
+    crate::focus_landing::KEY_DOWNS.note(u32::from(kb.VKey), down);
     // The input's own timestamp, on the tick clock the hook's calls are stamped with — see
     // `hook_watch::event_time` for when it is not believed.
     // SAFETY: plain queries: the message being dispatched, and the tick clock.

@@ -102,7 +102,7 @@ use windows_sys::Win32::System::ProcessStatus::{
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetForegroundWindow, GetWindowRect, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
+    GetAncestor, GetForegroundWindow, GetWindowRect, IsChild, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
     SetForegroundWindow, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, HWND_TOP, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE,
 };
@@ -122,6 +122,9 @@ use crate::webview::{self, PageEvent, Placement, Rect, Refusal, WindowKind};
 /// or a close never is).
 const MAX_WAITING_EVENTS: usize = 4096;
 
+/// A page's `came_from` and `came_from_focus`, shared with its close box's handler.
+type CameFrom = (Rc<Cell<isize>>, Rc<Cell<isize>>);
+
 thread_local! {
     /// What the pages' windows sent since the last tick, in order. Filled by wx's and WebView2's
     /// callbacks, which run on this thread while the loop dispatches messages; emptied by
@@ -129,9 +132,11 @@ thread_local! {
     static EVENTS: RefCell<Vec<PageEvent>> = const { RefCell::new(Vec::new()) };
     /// Messages dropped because [`MAX_WAITING_EVENTS`] were waiting, since the last tick.
     static DROPPED: Cell<usize> = const { Cell::new(0) };
-    /// Every built page's window and the window it came from (its `came_from`), for a page leaving
-    /// the front that came from another page (`webview::front_goes_to`). In while the page is built.
-    static CAME_FROM: RefCell<HashMap<isize, Rc<Cell<isize>>>> = RefCell::new(HashMap::new());
+    /// Every built page's window, the window it came from (its `came_from`) and the control the
+    /// keyboard was on there (its `came_from_focus`, HW1b), for a page leaving the front that came
+    /// from another page (`webview::front_goes_to`) and for `host.window.focus` of the window a page
+    /// in front came from (`front_page_came_from`). In while the page is built.
+    static CAME_FROM: RefCell<HashMap<isize, CameFrom>> = RefCell::new(HashMap::new());
 }
 
 fn push(ev: PageEvent) {
@@ -578,6 +583,10 @@ pub(crate) struct Native {
     /// The window that had the front when the page last took it — the plug-in's, as a rule — for
     /// [`give_front_back`]; 0 until it first does. Shared with the close box's handler.
     came_from: Rc<Cell<isize>>,
+    /// The control the keyboard was on in `came_from` then — the plug-in's child control, as a rule
+    /// — which gets the keyboard back with the front (HW1b); 0 for none
+    /// (`focus_landing::came_from_focus`). Shared with the close box's handler.
+    came_from_focus: Rc<Cell<isize>>,
     /// Whether the page has kept the front since it last took it from another window: set when it
     /// does ([`Native::focus`]); an app page's frame clears it when it is deactivated. Asked only
     /// for an app page (`WindowKind::gives_front_back`). Shared with the close box's handler.
@@ -589,7 +598,7 @@ impl Drop for Native {
         // Taken down in front — a module's `close`, or its module reloaded — the window it came
         // from gets the front back first.
         let gives = self.kind.gives_front_back(self.kept.get());
-        give_front_back(self.hwnd, self.came_from.get(), gives, &self.refusals.title);
+        give_front_back(self.hwnd, self.came_from.get(), self.came_from_focus.get(), gives, &self.refusals.title);
         // No page hands the front on through this one any more. (`try_with`: a page dropped as
         // the thread ends finds the table gone.)
         let _ = CAME_FROM.try_with(|pages| pages.borrow_mut().remove(&self.hwnd));
@@ -667,8 +676,10 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
     // same (the maintainer's run of 2026-10-11).
     let (page, build, kind) = (spec.page, spec.build, spec.kind);
     let came_from = Rc::new(Cell::new(0isize));
+    let came_from_focus = Rc::new(Cell::new(0isize));
     let kept = Rc::new(Cell::new(false));
     let (back_to, close_kept, close_title) = (came_from.clone(), kept.clone(), spec.title.clone());
+    let back_focus = came_from_focus.clone();
     frame.on_close(move |event| {
         if let WindowEventData::General(e) = &event {
             if !e.can_veto() {
@@ -676,7 +687,7 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
             }
             e.veto();
         }
-        give_front_back(hwnd, back_to.get(), kind.gives_front_back(close_kept.get()), &close_title);
+        give_front_back(hwnd, back_to.get(), back_focus.get(), kind.gives_front_back(close_kept.get()), &close_title);
         conceal(&frame, kind);
         push(PageEvent::Closed { page, build, why: "user" });
     });
@@ -772,7 +783,7 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
     };
     built_in(env);
     // Taken out again by `Drop`, so from here on with the `Native` that drops it.
-    CAME_FROM.with(|pages| pages.borrow_mut().insert(hwnd, came_from.clone()));
+    CAME_FROM.with(|pages| pages.borrow_mut().insert(hwnd, (came_from.clone(), came_from_focus.clone())));
     let native = Native {
         frame,
         kind,
@@ -781,6 +792,7 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
         placed: Cell::new(false),
         refusals,
         came_from,
+        came_from_focus,
         kept,
     };
     // Before the message loop runs again, so before the entry document can have loaded and
@@ -827,7 +839,12 @@ fn conceal(frame: &Frame, kind: WindowKind) {
 /// and Windows decides — as it does for an app page that has not kept the front since it took it
 /// (`gives` false). `back_to` a page hidden since: the window that page came from
 /// (`webview::front_goes_to`). Each case a line in the log.
-fn give_front_back(hwnd: isize, back_to: isize, gives: bool, title: &str) {
+///
+/// And the KEYBOARD back with the front (HW1b): the control it was on in that window when the page
+/// took the front — this page's `came_from_focus`, or, given to where another page came from, that
+/// page's — gets it, by a landing (`backend::start_landing`), when it is still a visible window
+/// inside the window the front goes to.
+fn give_front_back(hwnd: isize, back_to: isize, back_focus: isize, gives: bool, title: &str) {
     // SAFETY: a plain query.
     if unsafe { GetForegroundWindow() } as isize != hwnd {
         return;
@@ -842,15 +859,23 @@ fn give_front_back(hwnd: isize, back_to: isize, gives: bool, title: &str) {
         );
         return;
     }
-    let to = CAME_FROM
+    let (to, focus) = CAME_FROM
         .try_with(|pages| {
             let pages = pages.borrow();
-            webview::front_goes_to(hwnd, back_to, pages.len(), |w| {
+            let to = webview::front_goes_to(hwnd, back_to, pages.len(), |w| {
                 // SAFETY: a query on any handle.
-                pages.get(&w).map(|c| (unsafe { IsWindowVisible(w as HWND) } != 0, c.get()))
-            })
+                pages.get(&w).map(|c| (unsafe { IsWindowVisible(w as HWND) } != 0, c.0.get()))
+            });
+            // The control goes with the window it is in: this page's, or the one of the page whose
+            // `came_from` the front goes to.
+            let focus = if to == back_to {
+                back_focus
+            } else {
+                pages.iter().find(|(w, c)| **w != hwnd && c.0.get() == to).map_or(0, |(_, c)| c.1.get())
+            };
+            (to, focus)
         })
-        .unwrap_or(back_to);
+        .unwrap_or((back_to, back_focus));
     let via = if to == back_to { String::new() } else { format!(" it was shown in place of (page window {back_to})") };
     // SAFETY: plain queries, and one request for a window checked to exist.
     unsafe {
@@ -869,7 +894,40 @@ fn give_front_back(hwnd: isize, back_to: isize, gives: bool, title: &str) {
                 if given { "" } else { " — declined by the system, so Windows decides which window gets it" }
             ),
         );
+        if given && focus != 0 && IsWindowVisible(focus as HWND) != 0 && IsChild(to as HWND, focus as HWND) != 0 {
+            crate::backend::start_landing(focus, to, false);
+        }
     }
+}
+
+/// The control the keyboard is on in window `window`, when it is a window inside it; 0 otherwise —
+/// on the window itself, or nowhere. `GetGUIThreadInfo` of its thread, local.
+fn focus_inside(window: isize) -> isize {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO};
+    // SAFETY: plain queries about a handle; a stale one answers no.
+    unsafe {
+        let tid = GetWindowThreadProcessId(window as HWND, std::ptr::null_mut());
+        let mut gti: GUITHREADINFO = std::mem::zeroed();
+        gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+        if tid == 0 || GetGUIThreadInfo(tid, &mut gti) == 0 || gti.hwndFocus.is_null() {
+            return 0;
+        }
+        if IsChild(window as HWND, gti.hwndFocus) != 0 {
+            gti.hwndFocus as isize
+        } else {
+            0
+        }
+    }
+}
+
+/// HW1b's third clause: while a page of this application is the foreground window, the window it
+/// came from and the control the keyboard was on there — for `host.window.focus` of that window,
+/// which a module makes BEFORE it hides the page ("focus first, then hide"), so that the page's own
+/// hand-back finds itself no longer in front. `None` otherwise.
+pub(crate) fn front_page_came_from() -> Option<(isize, isize)> {
+    // SAFETY: a plain query.
+    let fg = unsafe { GetForegroundWindow() } as isize;
+    CAME_FROM.try_with(|pages| pages.borrow().get(&fg).map(|(c, f)| (c.get(), f.get()))).ok().flatten()
 }
 
 /// `(w, h)` at 96 dots per inch, at `dpi`.
@@ -1124,6 +1182,11 @@ impl Native {
         // SAFETY: a plain query.
         let before = unsafe { GetForegroundWindow() } as isize;
         if before != 0 && before != self.hwnd {
+            // With the control the keyboard is on there (HW1b), or, where it is on nothing inside
+            // the window, the one kept for the same window before (W10's window whose keyboard went
+            // nowhere).
+            let kept = Some((self.came_from.get(), self.came_from_focus.get()));
+            self.came_from_focus.set(crate::focus_landing::came_from_focus(kept, before, focus_inside(before)));
             self.came_from.set(before);
         }
         // SAFETY: the frame's own window.
@@ -1151,7 +1214,7 @@ impl Native {
     /// first.
     pub(crate) fn hide(&self) {
         let gives = self.kind.gives_front_back(self.kept.get());
-        give_front_back(self.hwnd, self.came_from.get(), gives, &self.refusals.title);
+        give_front_back(self.hwnd, self.came_from.get(), self.came_from_focus.get(), gives, &self.refusals.title);
         conceal(&self.frame, self.kind);
         self.after_hidden();
     }

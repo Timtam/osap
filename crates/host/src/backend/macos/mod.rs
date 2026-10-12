@@ -181,7 +181,7 @@ impl Backend for MacBackend {
             }
             ElementAsk::FocusStep { hwnd, direction } => ElementAnswer::Step(ax::focus_step(*hwnd, *direction)),
             ElementAsk::FocusWithin { hwnd, x, y, w, h } => ElementAnswer::Within(ax::focus_within(*hwnd, *x, *y, *w, *h)),
-            ElementAsk::Press { .. } => return ask.nothing(),
+            ElementAsk::Press { .. } | ElementAsk::FocusPut { .. } => return ask.nothing(),
         })
     }
 
