@@ -1,0 +1,178 @@
+/* VPS Avenger's page: the styles of the avenger_control project's panel (its panel/pages.py),
+   taken over with its developer's permission (NOTICE). Copied as they are, but for the page's
+   background: Canvas, where the tool's panel drew none of its own. */
+  :root { color-scheme: light dark; }
+  html, body { height: 100%; }
+  body {
+    font: 15pt/1.4 -apple-system, "SF Pro Text", system-ui, sans-serif;
+    margin: 0; padding: 1em 1.2em;
+    background: Canvas; color: CanvasText;
+  }
+  h1 { font-size: 1.25em; margin: 0.4em 0 0.6em; }
+  h2 { font-size: 1.1em; margin: 0.8em 0 0.3em; }
+  h3 { font-size: 1.0em; margin: 0.7em 0 0.25em; }
+  .group {
+    display: flex; flex-wrap: wrap; gap: 0.4em;
+    margin: 0.3em 0; align-items: center;
+  }
+  button, input[type="text"], select {
+    font: inherit; padding: 0.35em 0.7em; min-height: 2em;
+    border-radius: 6px; border: 1px solid currentColor;
+    background: Canvas; color: CanvasText;
+  }
+  button:focus, input:focus, select:focus, h2:focus, h3:focus {
+    outline: 3px solid #4a9eff; outline-offset: 2px;
+  }
+  .preset-heading:focus { border-radius: 4px; padding: 0.05em 0.25em; }
+  [hidden] { display: none !important; }
+  .error { color: #c33; margin: 0.2em 0; font-size: 0.95em; }
+  /* Preset menu — explicit trigger button + region disclosure.
+     Earlier we used <details>/<summary>: shorter HTML, but two
+     VoiceOver-on-WebKit problems made it untenable:
+       1. After expanding once, a second activation on the summary
+          didn't collapse it — VO had switched to treating the
+          summary as a region header, not a toggle.
+       2. When VO landed on the (open) summary it would read the
+          entire details body inline — "Menu expanded summary
+          Load Preset button Save Preset as button Initialize Preset
+          button details" — so the user heard all three options
+          before deciding to enter the menu at all.
+     The aria-expanded + aria-controls pattern fixes both: the
+     trigger stays a plain button (toggle works in either direction),
+     and VO only announces "Menu, button, expanded/collapsed". The
+     contained buttons live in a sibling region the user enters by
+     navigation, so they're announced one at a time on demand. */
+  #preset-menu-trigger { margin: 0.3em 0; }
+  #preset-menu-items {
+    display: flex; flex-wrap: wrap; gap: 0.4em;
+    margin: 0.3em 0 0.3em 0.4em;
+  }
+  .section-toggle {
+    font: inherit;
+    font-weight: 700;
+    text-align: left;
+    padding: 0.15em 0.3em;
+  }
+  /* Initialize-Preset confirmation — panel-internal alertdialog. We
+     can't reach Avenger's own warning popup ("This will initialize
+     all settings — Are you sure? YES NO") with VoiceOver, so the
+     panel asks first and only then drives Avenger's MENU → Init →
+     Yes/No sequence under the covers. Visible block (margin/border)
+     so a sighted observer can see it open/close, but the real cue
+     is VoiceOver: role="alertdialog" + aria-modal="true" announce the
+     warning, then focus lands on the main warning text so the user
+     reads the dialog deliberately before reaching Yes/No. */
+  #confirm-init-dialog {
+    margin: 0.6em 0; padding: 0.6em 0.8em;
+    border: 1px solid currentColor; border-radius: 6px;
+    background: Canvas; color: CanvasText;
+  }
+  #confirm-init-dialog p { margin: 0 0 0.5em; }
+  .dialog-message:focus {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+  }
+  #confirm-init-dialog .group { gap: 0.6em; }
+  .expansion-search-list {
+    display: grid;
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    gap: 0.35em;
+    margin: 0.4em 0 0.8em;
+  }
+  .expansion-search-list button {
+    text-align: left;
+    min-width: 0;
+    overflow: hidden;
+    overflow-wrap: normal;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    word-break: normal;
+  }
+  .category-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35em;
+    margin: 0.4em 0 0.8em;
+    align-items: flex-start;
+  }
+  table {
+    border-collapse: collapse;
+    margin: 0.4em 0 0.8em;
+    width: 100%;
+  }
+  th, td {
+    border: 1px solid currentColor;
+    padding: 0.3em 0.45em;
+    text-align: left;
+    vertical-align: top;
+  }
+  #osc-panel-table button {
+    width: 100%;
+    min-width: 5.5em;
+  }
+  #macro-panel-table button {
+    width: 100%;
+    min-width: 5.5em;
+  }
+  #osc-panel-table button.selected-tab {
+    font-weight: 700;
+  }
+  #macro-panel-table button.selected-tab {
+    font-weight: 700;
+  }
+  /* OSC menu — same disclosure pattern as the preset menu. Keep the
+     trigger as a plain aria-expanded button, not an aria-haspopup menu:
+     VoiceOver otherwise announces "menu" and treats the controlled
+     group like a popup rather than ordinary panel controls. */
+  .osc-menu-items {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25em;
+    margin-top: 0.25em;
+  }
+  #macro-tab-detail-items {
+    display: grid;
+    gap: 0.55em;
+    margin-top: 0.45em;
+    max-width: 38em;
+  }
+  .macro-detail-row {
+    display: grid;
+    gap: 0.45em;
+  }
+  .macro-detail-row.macros {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .macro-detail-row.buttons {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .macro-slot {
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    padding: 0.35em 0.45em;
+    min-height: 2.3em;
+  }
+  .macro-slot-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.35em;
+  }
+  .macro-slot-controls.drums-three-controls {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .macro-control-cell {
+    display: grid;
+    gap: 0.25em;
+    align-content: start;
+  }
+  .macro-control-cell.wide {
+    grid-column: 1 / -1;
+  }
+  .sample-editor-shell {
+    display: grid;
+    gap: 0.35em;
+  }
+  .macro-slot-controls button {
+    min-width: 0;
+    width: 100%;
+  }

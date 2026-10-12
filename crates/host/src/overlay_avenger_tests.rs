@@ -38,8 +38,14 @@
 //! read failed or disagrees; and the position is forgotten when the preset may have changed.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use mlua::{Function, Lua, Table};
+use mlua::{Function, Lua, Table, VmState};
+
+use crate::backend::frame::Area;
+use crate::backend::CapturedImage;
+use crate::cells::{of_capture, to_hex, CellSpec, Predicate};
 
 use super::overlay_host_panel_tests::{HP, WINDOW_PRELUDE};
 use super::overlay_menu_tests::{finish, harness, RUNTIME};
@@ -130,13 +136,317 @@ do
     if #S.reads > n then S.reads[#S.reads].lang = opts and opts.lang end
   end
 end
-rawset(T.host.screen, "saveMarked", function(path, opts)
-  T.screenWait("host.screen.saveMarked")
+-- A shot with its marks: written at once where a handler waits for it, and with a callback
+-- answered on the next turn (T.runDue) as the page's pictures are (S.screenOut).
+rawset(T.host.screen, "saveMarked", function(path, opts, cb)
+  if cb == nil then T.screenWait("host.screen.saveMarked") end
+  assert(opts.snapshot == nil or not opts.snapshot.released, "a released snapshot was saved")
   local marks = {}
-  for _, m in ipairs(opts.marks or {}) do marks[#marks + 1] = { m.x, m.y } end
-  S.marked[#S.marked + 1] = { path = path, region = opts.region, marks = marks }
+  for _, m in ipairs(opts.marks or {}) do
+    assert(m.x == math.floor(m.x) and m.y == math.floor(m.y), "a mark in whole pixels")
+    marks[#marks + 1] = { m.x, m.y }
+  end
+  S.marked[#S.marked + 1] = { path = path, region = opts.region, marks = marks, snapshot = opts.snapshot }
+  if cb then
+    S.screenOut[#S.screenOut + 1] = { cb = cb, value = true }
+    return
+  end
   return true
 end)
+
+-- ── The page's picture (read/open.luau) ──────────────────────────────────────
+-- What the page's reads see: S.picture, its shapes painted over its `bg` in order — { kind =
+-- "rect", x1, y1, x2, y2, c }, { kind = "ray", cx, cy, angle, r1, r2, width, c } (a pointer from
+-- r1 to r2 out along `angle` degrees, 0 right and 90 down), { kind = "disc", cx, cy, r, c } — and
+-- reduced by the host's own code (T.paintCells, T.paintProfile, T.paintPixels). Asked as the
+-- page's reads ask, of a snapshot: a grid of cells and a column profile with a callback, answered
+-- on the next turn (T.runDue); the points of a snapshot at once. Each checked as the host checks
+-- it, and a region outside the snapshot answered as the host answers it. A request with a key is
+-- out (host.screen.pending, S.out) until its callback runs, and T.dropScreen drops the requests
+-- out as disabling the module does.
+S.picture = { bg = { 24, 24, 24 }, shapes = {} }
+S.screenOut = {}   -- { cb, value, why }: answers to deliver on the next turn
+S.cellsAsked, S.cellsTotal, S.profilesAsked = 0, 0, 0
+S.pointLists = {}  -- the length of every list of points read off a snapshot
+S.words = {}       -- what the page's text read reads, by the region's name
+
+local function heldSnapshot(s, call)
+  assert(type(s) == "table" and s.region and not s.released, call .. ": a snapshot the module holds")
+  return s
+end
+
+local function whole(r, call)
+  assert(type(r) == "table" and #r == 4, call .. ": corners { x1, y1, x2, y2 }")
+  for k = 1, 4 do assert(r[k] == math.floor(r[k]), call .. ": corner " .. k .. " is not a whole number: " .. tostring(r[k])) end
+  assert(r[3] > r[1] and r[4] > r[2], call .. ": corners empty or turned around")
+end
+
+local function within(r, s)
+  local g = s.region
+  return r[1] >= g[1] and r[2] >= g[2] and r[3] <= g[3] and r[4] <= g[4]
+end
+
+rawset(T.host.screen, "predicate", function(src) return T.predicateCanonical(src) end)
+
+rawset(T.host.screen, "cells", function(opts, cb)
+  assert(type(cb) == "function", "the scripted host answers host.screen.cells with a callback only")
+  for k in pairs(opts) do
+    assert(k == "region" or k == "cols" or k == "rows" or k == "predicate" or k == "snapshot" or k == "key",
+      "host.screen.cells: opts has a key '" .. tostring(k) .. "'")
+  end
+  whole(opts.region, "host.screen.cells")
+  local snap = heldSnapshot(opts.snapshot, "host.screen.cells")
+  S.cellsAsked += 1
+  S.cellsTotal += opts.cols * opts.rows
+  local r = opts.region
+  local answer = { cb = cb, key = opts.key }
+  if opts.key then S.out[opts.key] = (S.out[opts.key] or 0) + 1 end
+  if within(r, snap) then
+    answer.value = { cells = T.paintCells(S.picture, r, opts.cols, opts.rows, opts.predicate),
+      x = r[1], y = r[2], w = r[3] - r[1], h = r[4] - r[2] }
+  else
+    answer.why = "the region is not inside the snapshot"
+  end
+  S.screenOut[#S.screenOut + 1] = answer
+end)
+
+rawset(T.host.screen, "profile", function(opts, cb)
+  assert(type(cb) == "function", "the scripted host answers host.screen.profile with a callback only")
+  for k in pairs(opts) do
+    assert(k == "region" or k == "axes" or k == "snapshot" or k == "key" or k == "dark",
+      "host.screen.profile: opts has a key '" .. tostring(k) .. "'")
+  end
+  assert(opts.axes == "columns", "the scripted host profiles columns")
+  whole(opts.region, "host.screen.profile")
+  local snap = heldSnapshot(opts.snapshot, "host.screen.profile")
+  S.profilesAsked += 1
+  local r = opts.region
+  local answer = { cb = cb, key = opts.key }
+  if opts.key then S.out[opts.key] = (S.out[opts.key] or 0) + 1 end
+  if within(r, snap) then
+    answer.value = T.paintProfile(S.picture, r)
+  else
+    answer.why = "the region does not overlap the snapshot"
+  end
+  S.screenOut[#S.screenOut + 1] = answer
+end)
+
+do
+  local pixels = rawget(T.host.screen, "pixels")
+  rawset(T.host.screen, "pixels", function(points, opts, cb)
+    if not (type(opts) == "table" and opts.snapshot ~= nil) then return pixels(points, opts, cb) end
+    assert(cb == nil, "the scripted host reads a snapshot's points without a callback")
+    local snap = heldSnapshot(opts.snapshot, "host.screen.pixels")
+    assert(#points <= 4096, "host.screen.pixels: points has " .. #points .. " entries; the limit is 4096")
+    for i, p in ipairs(points) do
+      assert(type(p) == "table" and #p == 2 and p[1] == math.floor(p[1]) and p[2] == math.floor(p[2]),
+        "host.screen.pixels: points[" .. i .. "] is not { x, y } in whole numbers")
+      local g = snap.region
+      if p[1] < g[1] or p[2] < g[2] or p[1] >= g[3] or p[2] >= g[4] then return nil, "the point is not inside the snapshot" end
+    end
+    S.pointLists[#S.pointLists + 1] = #points
+    return T.paintPixels(S.picture, points)
+  end)
+end
+
+-- The answers of the page's grids, profiles and pictures, on the next turn, the epoch turned over
+-- first, each as an event of the module.
+do
+  local runDue = T.runDue
+  T.runDue = function()
+    runDue()
+    local out = S.screenOut
+    if #out == 0 then return end
+    S.screenOut = {}
+    if S.turnsAtAnswers == false then S.turnsAtAnswers = T.interrupts() end
+    S.epoch += 1
+    for _, a in ipairs(out) do
+      if a.key then S.out[a.key] -= 1 end
+      T.call("answer", a.cb, a.value, a.why, {})
+    end
+  end
+end
+
+-- The module disabled and enabled again while requests are out: they are dropped, their callbacks
+-- never run, and none of their keys is pending any more.
+function T.dropScreen()
+  for _, a in ipairs(S.screenOut) do
+    if a.key then S.out[a.key] -= 1 end
+  end
+  S.screenOut = {}
+end
+
+-- A snapshot of corners against the module's budget, as the host keeps it (docs/api/screen.md):
+-- w * h * 4 bytes, five times that on a Mac, on top of S.snapHeld — what the module's other
+-- snapshots hold, nothing unless a scenario says — within 128 MiB, or the call raises the host's
+-- sentence. S.snapFails is the reason a capture that fails answers. (The primary screen is
+-- S.screenSize, 2560 x 1440 unless a scenario says: overlay_host_panel_tests.rs, T.modules.)
+S.snapHeld = 0
+do
+  local snapshot = rawget(T.host.screen, "snapshot")
+  rawset(T.host.screen, "snapshot", function(opts, cb)
+    local r = opts and opts.region
+    if cb == nil and type(r) == "table" and #r == 4 then
+      local bytes = (r[3] - r[1]) * (r[4] - r[2]) * 4 * (T.host.os.current == "macos" and 5 or 1)
+      if S.snapHeld + bytes > 128 * 1024 * 1024 then
+        error(string.format("host.screen.snapshot: this module's snapshots would hold %.1f MiB; the limit is 128 MiB "
+          .. "per module VM (512 MiB in the whole application). Release the ones you no longer need with s:release()",
+          (S.snapHeld + bytes) / 1048576), 2)
+      end
+      if S.snapFails then return nil, S.snapFails end
+    end
+    return snapshot(opts, cb)
+  end)
+end
+
+-- Avenger as a picture shows it, for the page's reads: shapes at the points of the module's own
+-- tables (src/tables), from Avenger's corner (cx, cy) at factor k, over a dark background. What
+-- is drawn is `spec`'s:
+--   osc = n            n OSC tabs, each with its green dot
+--   selected, index    the tab whose bottom strip is dark: "osc" (and which), "drums" or "trig"
+--   mute, solo         { [i] = true } for the OSC tabs lit red
+--   drumsMute, drumsSolo, trigMute, trigSolo   lit red
+--   pattern, lock, mode   the Drums tab: its pattern switch red, its lock green, and "sq" or
+--                      "drum" by which caption is the brighter (the project's rule: DRUMKIT's
+--                      brighter is SEQUENCE)
+--   central            the central tab whose bottom strip is dark
+--   sq = { chain, follow, on = { b = true }, selected }   DRUM SQ's boxes
+--   macroShown         the macro tab whose bottom strip is dark
+--   buttons = { on, on }, amounts = { a, a, a }   the macro buttons lit, the knobs' pointers
+--   volume, transpose, fine   the selected oscillator's knobs' pointers
+--   fav                FAV lit
+-- A pointer is a light ray out from the knob's middle, at the angle its value puts it: 135°
+-- (down and left) for nothing, 270° more clockwise for everything.
+function T.paintAvenger(cx, cy, k, spec)
+  local function tables(name) return T.source("modules/vps-avenger/src/tables/" .. name .. ".luau")(T.host) end
+  local ST, DR, CE, MA, EX = tables("strip"), tables("drums"), tables("centre"), tables("macros"), tables("expansion")
+  local shapes = {}
+  local function rect(x1, y1, x2, y2, c)
+    shapes[#shapes + 1] = { kind = "rect", x1 = cx + k * x1, y1 = cy + k * y1, x2 = cx + k * x2, y2 = cy + k * y2, c = c }
+  end
+  local function box(p, w, h, c) rect(p[1] - w / 2, p[2] - h / 2, p[1] + w / 2, p[2] + h / 2, c) end
+  local function pointer(p, angle, r1, r2, width)
+    shapes[#shapes + 1] = { kind = "ray", cx = cx + k * p[1], cy = cy + k * p[2], angle = angle, r1 = r1 * k,
+      r2 = r2 * k, width = width * k, c = { 235, 235, 235 } }
+  end
+  local RED, LIT, DARK, GREY = { 210, 40, 40 }, { 190, 190, 190 }, { 15, 15, 15 }, { 90, 90, 90 }
+  -- The strip: the tabs' band, the selected tab's dark bottom, the dots, Mute and Solo.
+  local n = spec.osc
+  rect(ST.PANEL_LEFT, ST.SELECTION_TOP, ST.TRIG_SELECTION[2], ST.SELECTION_BOTTOM, GREY)
+  if spec.selected == "osc" then
+    local t = ST.tabSpan(spec.index, n, 0, 0)
+    rect(t[1], 36, t[3], 40, DARK)
+  elseif spec.selected == "drums" then
+    rect(ST.DRUMS_SELECTION[1], 36, ST.DRUMS_SELECTION[2], 40, DARK)
+  elseif spec.selected == "trig" then
+    rect(ST.TRIG_SELECTION[1], 36, ST.TRIG_SELECTION[2], 40, DARK)
+  end
+  for i = 1, n or 0 do
+    local t = ST.tabSpan(i, n, 0, 0)
+    rect(t[1] + 2, 34.5, t[1] + 5, 37.5, { 100, 220, 180 })
+    local x = ST.tabX(i, n)
+    if spec.mute and spec.mute[i] then box({ x + ST.MUTE_X_OFFSET, ST.MUTE_Y }, 13, 8, RED) end
+    if spec.solo and spec.solo[i] then box({ x + ST.SOLO_X_OFFSET, ST.MUTE_Y }, 13, 8, RED) end
+  end
+  if spec.drumsMute then box(ST.DRUMS_MUTE, 13, 8, RED) end
+  if spec.drumsSolo then box(ST.DRUMS_SOLO, 13, 8, RED) end
+  if spec.trigMute then box(ST.TRIG_MUTE, 13, 8, RED) end
+  if spec.trigSolo then box(ST.TRIG_SOLO, 13, 8, RED) end
+  -- The Drums tab.
+  if spec.pattern then box(DR.PATTERN, 10, 10, RED) end
+  local bright, dim = { 200, 200, 200 }, { 110, 110, 110 }
+  if spec.mode then
+    rect(DR.MODE_DRUM_SELECTION[1], DR.MODE_SELECTION_TOP, DR.MODE_DRUM_SELECTION[2], DR.MODE_SELECTION_BOTTOM,
+      spec.mode == "sq" and bright or dim)
+    rect(DR.MODE_SQ_SELECTION[1], DR.MODE_SELECTION_TOP, DR.MODE_SQ_SELECTION[2], DR.MODE_SELECTION_BOTTOM,
+      spec.mode == "sq" and dim or bright)
+  end
+  if spec.lock then box(DR.MODE_LOCK, 10, 10, { 60, 230, 60 }) end
+  -- The central tabs and DRUM SQ.
+  rect(CE.TABS.editor[1] - 18, 239, CE.TABS.step_sq[1] + 18, 249, GREY)
+  if spec.central then
+    local p = CE.TABS[spec.central]
+    rect(p[1] - 18, 245, p[1] + 18, 249, DARK)
+  end
+  local sq = spec.sq
+  if sq then
+    box(CE.SQ_PATTERN_PLAYER, 14, 8, sq.chain and { 160, 160, 160 } or { 40, 40, 40 })
+    box(CE.SQ_AUTO_FOLLOW, 11, 8, sq.follow and { 170, 170, 170 } or { 40, 40, 40 })
+    for _, key in ipairs({ "b", "c", "d" }) do
+      box(CE.SQ_PATTERNS[key], 30, 8, sq.on and sq.on[key] and RED or { 40, 40, 40 })
+    end
+    if sq.selected then
+      box(CE.SQ_PATTERNS[sq.selected], 30, 9, LIT)
+      box(CE.SQ_PATTERNS[sq.selected], 28, 7, { 30, 30, 30 })
+    end
+  end
+  -- The macros: the tabs' band and the one shown, the buttons, the knobs' pointers.
+  rect(MA.TAB_SPANS[1][1], 429, MA.TAB_SPANS[4][3], 443, GREY)
+  if spec.macroShown then
+    local t = MA.TAB_SPANS[spec.macroShown]
+    rect(t[1], 439, t[3], 443, DARK)
+  end
+  for i, on in ipairs(spec.buttons or {}) do
+    if on then
+      local b = MA.BUTTON_BOUNDS[i]
+      rect(b[1], b[2], b[3], b[4], { 130, 130, 130 })
+    end
+  end
+  for i, a in ipairs(spec.amounts or {}) do
+    pointer({ MA.FIELDS["macro" .. i][1], MA.AMOUNT_Y }, 135 + a / 100 * 270, 5, 13, 2.5)
+  end
+  -- The selected oscillator's knobs.
+  if spec.volume then pointer({ 346, 68 }, 135 + spec.volume / 200 * 270, 1.5, 7.5, 1.5) end
+  local function semitones(p, st) pointer(p, 135 + 5 + (st + 48) / 96 * 260, 1.5, 7.5, 1.5) end
+  if spec.transpose then semitones({ 346, 114 }, spec.transpose) end
+  if spec.fine then semitones({ 346, 160 }, spec.fine / 100 * 48) end
+  if spec.fav then box(EX.FAVORITE_VIEW, 25, 10, { 220, 220, 220 }) end
+  S.picture = { bg = { 40, 40, 40 }, shapes = shapes }
+end
+
+-- What the page's text read reads: `words`, by the region's name (read/open.luau's names).
+function T.words(words)
+  S.words = words
+  S.ocr = function(_, name) return S.words[name] or "" end
+end
+
+-- A text read the module waits for, answered at once: a region's text is S.ocr(region, name) —
+-- a string, or a whole reading — and a list is answered (list, byName), as the host answers one.
+-- Every region asked is noted in S.recognized, with its name.
+function T.listReads()
+  T.answerWaits(function(what, opts)
+    local function one(r, name)
+      local snap = opts and opts.snapshot
+      S.recognized[#S.recognized + 1] = { r[1], r[2], r[3], r[4], name = name, snapshot = snap }
+      -- Cut to the snapshot, as the host reads one: a region it holds nothing of is "failed".
+      local g = snap and snap.region
+      if g and (r[3] <= g[1] or r[4] <= g[2] or r[1] >= g[3] or r[2] >= g[4]) then
+        return { text = "", words = {}, lines = {}, skipped = false, status = "failed",
+          error = "the region does not overlap the snapshot", name = name }
+      end
+      local said = S.ocr and S.ocr(r, name) or ""
+      local reading
+      if type(said) == "table" then
+        reading = table.clone(said)
+      else
+        local words = said ~= "" and { { text = said, x = r[1], y = r[2], w = r[3] - r[1], h = r[4] - r[2] } } or {}
+        reading = { text = said, words = words, lines = {}, skipped = false, status = said == "" and "none" or "text" }
+      end
+      reading.name = name
+      return reading
+    end
+    if type(what[1]) == "table" then
+      local list, byName = {}, {}
+      for i, e in ipairs(what) do
+        local reading = one(e.region or e, e.name)
+        list[i] = reading
+        if e.name then byName[e.name] = reading end
+      end
+      return list, byName
+    end
+    return one(what.region or what, what.name)
+  end)
+end
 
 -- Avenger's size at `zoom` % on a display of factor `d`: 871.25 across and 561 down at 50 %.
 function T.size(zoom, d)
@@ -217,6 +527,187 @@ function T.lastRead(key)
   return nil
 end
 
+-- ── The page's host (src/page.luau) ──────────────────────────────────────────
+-- The module's own host calls for its page, apart from the runtime's, so that the runtime's keys
+-- and settings stay as the menu tests count them: host.gui.webview as a page object that records
+-- what it is asked and answers what a scenario scripts — as page_example_tests.rs does for the
+-- example — the module's settings as the host keeps them, its hotkey, its sounds, the key checks,
+-- and host.window.focus noted in the page's order.
+S.pages = {}        -- every page described, in order: { opts, shows, hides, posts, prepares, closed, page }
+S.pageAnswers = {}  -- what the next shows answer, in turn: { ok, why }; then "not ready yet" until loaded
+S.pageLoaded = false
+S.pageOrder = {}    -- "post <kind>", "show", "hide", "focus <id>", "sound <path>", in order
+S.settings, S.settingDefs, S.settingCbs = {}, {}, {}
+S.pageKeys, S.pageKeyIds = {}, {}  -- spec -> callback; id -> spec, while registered
+S.badKeys = {}      -- spec -> the reasons host.keys.check gives for a key the platform cannot hold
+S.sounds = {}
+
+-- The page's window as host.window reports it while the page is in front: one of this
+-- application's own.
+T.PAGE_WIN = { id = 4000, title = "Avenger Control", class = "AXWindow/AXFloatingWindow/", own = true,
+  app = { pid = 9, exe = "automation-platform", name = "automation-platform", bundleId = "" },
+  bounds = { x = 1500, y = 100, w = 520, h = 640 }, client = { x = 1500, y = 128, w = 520, h = 612 } }
+
+function T.pageHost(AH)
+  local function webview(opts)
+    local st = { opts = opts, shows = {}, hides = 0, posts = {}, prepares = 0, closed = false, shown = false }
+    S.pages[#S.pages + 1] = st
+    local p = {}
+    st.page = p
+    function p.show(self, o)
+      assert(self == p and not st.closed, "page:show on the page in use")
+      st.shows[#st.shows + 1] = { focus = o and o.focus, avoid = o and o.avoid }
+      S.pageOrder[#S.pageOrder + 1] = "show"
+      local a = table.remove(S.pageAnswers, 1) or (S.pageLoaded and { true } or { false, "not ready yet" })
+      if a[1] or a[2] == "declined by the system" then
+        st.shown = true
+        p.window = T.PAGE_WIN.id
+      end
+      if a[1] and not (o and o.focus == false) then
+        S.front, S.chain = T.PAGE_WIN, { T.PAGE_WIN }
+        S.epoch += 1
+      end
+      return a[1], a[2]
+    end
+    function p.hide(self)
+      assert(self == p, "page:hide is a method")
+      st.hides += 1
+      st.shown = false
+      S.pageOrder[#S.pageOrder + 1] = "hide"
+    end
+    function p.post(self, v)
+      assert(self == p, "page:post is a method")
+      if v.kind == "state" and S.turnsAtState == false then S.turnsAtState = T.interrupts() end
+      st.posts[#st.posts + 1] = v
+      S.pageOrder[#S.pageOrder + 1] = "post " .. tostring(v.kind)
+    end
+    function p.prepare(self)
+      assert(self == p, "page:prepare is a method")
+      st.prepares += 1
+      if S.pageLoaded then return true end
+      return false, "not ready yet"
+    end
+    function p.isShown() return st.shown end
+    function p.focus() return st.shown end
+    function p.close(self)
+      assert(self == p, "page:close is a method")
+      st.closed, st.shown = true, false
+      p.window = nil
+    end
+    return p
+  end
+  AH.gui = T.strict("host.gui", { webview = webview })
+  AH.settings = T.strict("host.settings", {
+    define = function(key, default, opts)
+      assert(S.settingDefs[key] == nil, "defined once: " .. key)
+      assert(type(opts) == "table" and type(opts.label) == "string", "a label for the dialog: " .. key)
+      S.settingDefs[key] = { default = default, opts = opts }
+      if type(S.settings[key]) ~= type(default) then S.settings[key] = default end
+      return S.settings[key]
+    end,
+    get = function(key)
+      assert(S.settingDefs[key] ~= nil, "never defined: " .. tostring(key))
+      return S.settings[key]
+    end,
+    -- The module's own set: checked as the host checks it, and its callbacks run inside it.
+    set = function(key, v)
+      local d = S.settingDefs[key]
+      assert(d ~= nil and type(v) == type(d.default), "set: " .. tostring(key))
+      if d.opts.oneOf then assert(table.find(d.opts.oneOf, v) ~= nil, "not one of its choices") end
+      if d.opts.min then assert(v >= d.opts.min and v <= d.opts.max, "out of its bounds") end
+      local old = S.settings[key]
+      S.settings[key] = v
+      for _, cb in ipairs(S.settingCbs[key] or {}) do cb(v, old) end
+    end,
+    onChange = function(key, cb)
+      S.settingCbs[key] = S.settingCbs[key] or {}
+      table.insert(S.settingCbs[key], cb)
+    end,
+  })
+  AH.hotkey = T.strict("host.hotkey", {
+    register = function(spec, fn)
+      assert(S.badKeys[spec] == nil, "registered a key check refuses: " .. spec)
+      local id = #S.pageKeyIds + 1
+      S.pageKeyIds[id] = spec
+      S.pageKeys[spec] = fn
+      return id
+    end,
+    unregister = function(id)
+      local spec = S.pageKeyIds[id]
+      if spec then S.pageKeys[spec] = nil end
+    end,
+  })
+  AH.sound = T.strict("host.sound", { play = function(path)
+    S.sounds[#S.sounds + 1] = path
+    S.pageOrder[#S.pageOrder + 1] = "sound " .. path
+  end })
+  AH.keys = setmetatable({
+    check = function(spec)
+      local bad = S.badKeys[spec]
+      return { ok = bad == nil, resolved = spec, reasons = bad or {} }
+    end,
+  }, { __index = T.host.keys })
+  AH.window = setmetatable({
+    focus = function(id)
+      S.pageOrder[#S.pageOrder + 1] = "focus " .. tostring(id)
+      return T.host.window.focus(id)
+    end,
+  }, { __index = T.host.window })
+end
+
+-- The page key as the platform picks it, pressed: its callback runs as the hotkey's handler.
+function T.pageKey(spec)
+  spec = spec or T.host.os.pick({ macos = "Ctrl+Shift+Win+F1", windows = "Ctrl+Shift+Alt+F1" })
+  local fn = S.pageKeys[spec]
+  assert(fn ~= nil, "no page key " .. tostring(spec))
+  S.epoch += 1
+  local got = T.call("hotkey", fn)
+  assert(got == "Ran", "the key's handler: " .. got)
+end
+
+-- The page key pressed on an identified Avenger, and the next turn, which answers its reads of
+-- the picture (read/open.luau): the page is shown then.
+function T.openPage(spec)
+  T.pageKey(spec)
+  T.tick()
+end
+
+-- The page in use (the last described), and what it was last posted of `kind`.
+function T.page() return S.pages[#S.pages] end
+function T.lastPost(kind)
+  local posts = T.page().posts
+  for i = #posts, 1, -1 do
+    if kind == nil or posts[i].kind == kind then return posts[i] end
+  end
+  return nil
+end
+-- The page sends `m`; the page has loaded; the page's window goes ("user" or "failed"); the
+-- settings dialog's OK for `key`, its callbacks run as the module's handlers.
+function T.pageMsg(m)
+  local got = T.call("page message", T.page().opts.onMessage, m)
+  assert(got == "Ran", "the page's message: " .. got)
+end
+function T.pageReady()
+  S.pageLoaded = true
+  local got = T.call("page ready", T.page().opts.onReady)
+  assert(got == "Ran", "the page's onReady: " .. got)
+end
+function T.pageClosed(why)
+  local got = T.call("page close", T.page().opts.onClose, why)
+  assert(got == "Ran", "the page's onClose: " .. got)
+end
+function T.setting(key, v)
+  local old = S.settings[key]
+  S.settings[key] = v
+  for _, cb in ipairs(S.settingCbs[key] or {}) do T.call("setting", cb, v, old) end
+end
+-- S.pageOrder from entry `from` on, as one string.
+function T.pageSince(from)
+  local out = {}
+  for i = from + 1, #S.pageOrder do out[#out + 1] = S.pageOrder[i] end
+  return table.concat(out, ",")
+end
+
 -- Loads daw-hosts and the module as the host loads them, and hands back its two overlays: the
 -- header and the warning box. The module gets a host of its own whose `host.path` is its own
 -- folder, as the host scopes a module's identity; the runtime's pictures stay in the runtime's
@@ -238,7 +729,11 @@ function T.avenger()
     if id == "com.platform.vps-avenger-presets" then return S.presets end
     return nil
   end
+  T.pageHost(AH)
+  T.listReads()
+  -- Each file's value, by its path: a scenario reaches a file's table here (page.luau's lists).
   local included = {}
+  S.included = included
   -- An included file's top level runs through `Function::call`, as the host runs it (T.hostCall).
   AH.include = function(rel)
     local key = "modules/vps-avenger/" .. rel
@@ -454,7 +949,7 @@ end
 
 /// A fresh VM with the scripted host, the runtime, the prelude's matcher, the host-panel helpers
 /// and the ones above; the host plays `os`.
-fn run_on(os: &str, scenario: &str) {
+pub(crate) fn run_on(os: &str, scenario: &str) {
     let lua = Lua::new();
     let t: Table = harness(&lua);
     let host: Table = t.get("host").unwrap();
@@ -486,6 +981,29 @@ fn run_on(os: &str, scenario: &str) {
     t.set("source", source).unwrap();
     // The host's own JSON decoder, for the preset database's reader (T.presets).
     t.set("jsonDecode", lua.create_function(crate::json::decode).unwrap()).unwrap();
+    // The page's picture (T.paint…, AV): painted from shapes and reduced by the host's own code.
+    t.set("paintCells", lua.create_function(paint_cells).unwrap()).unwrap();
+    t.set("paintProfile", lua.create_function(paint_profile).unwrap()).unwrap();
+    t.set("paintPixels", lua.create_function(paint_pixels).unwrap()).unwrap();
+    t.set(
+        "predicateCanonical",
+        lua.create_function(|_, src: String| {
+            Predicate::parse(&src)
+                .map(|p| p.to_string())
+                .map_err(|e| mlua::Error::external(format!("host.screen.predicate: {e}")))
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    // Luau's interrupts — at calls and at the turns of loops — counted, so that a scenario can
+    // bound the work a stretch of the module did (T.interrupts()).
+    let ticks = Arc::new(AtomicU64::new(0));
+    let counted = ticks.clone();
+    lua.set_interrupt(move |_| {
+        counted.fetch_add(1, Ordering::Relaxed);
+        Ok(VmState::Continue)
+    });
+    t.set("interrupts", lua.create_function(move |_, ()| Ok(ticks.load(Ordering::Relaxed))).unwrap()).unwrap();
     lua.globals().set("T", t).unwrap();
     for (name, chunk) in [("host-panel helpers", HP), ("avenger helpers", AV)] {
         if let Err(e) = lua.load(chunk).set_name(name).exec() {
@@ -498,11 +1016,157 @@ fn run_on(os: &str, scenario: &str) {
     finish(&lua);
 }
 
-fn run(scenario: &str) {
+pub(crate) fn run(scenario: &str) {
     run_on("windows", scenario)
 }
 
-fn run_mac(scenario: &str) {
+// ---------------------------------------------------------------------------------------------
+// The page's picture: shapes painted in Rust, reduced by the host's own cells and profile code.
+// ---------------------------------------------------------------------------------------------
+
+/// A shape of a scripted picture, in screen coordinates; a pixel is in it when its middle is.
+enum Shape {
+    Rect { x1: f64, y1: f64, x2: f64, y2: f64, c: [u8; 3] },
+    /// A pointer: from `r1` to `r2` along (ux, uy) from (cx, cy), `half` either side of it.
+    Ray { cx: f64, cy: f64, ux: f64, uy: f64, r1: f64, r2: f64, half: f64, c: [u8; 3] },
+    Disc { cx: f64, cy: f64, r: f64, c: [u8; 3] },
+}
+
+impl Shape {
+    fn holds(&self, x: f64, y: f64) -> Option<[u8; 3]> {
+        let (inside, c) = match *self {
+            Shape::Rect { x1, y1, x2, y2, c } => (x >= x1 && x < x2 && y >= y1 && y < y2, c),
+            Shape::Ray { cx, cy, ux, uy, r1, r2, half, c } => {
+                let (dx, dy) = (x - cx, y - cy);
+                let along = dx * ux + dy * uy;
+                (along >= r1 && along <= r2 && (dx * uy - dy * ux).abs() <= half, c)
+            }
+            Shape::Disc { cx, cy, r, c } => ((x - cx).powi(2) + (y - cy).powi(2) <= r * r, c),
+        };
+        inside.then_some(c)
+    }
+}
+
+/// `S.picture`: `bg`, and `shapes` painted over it in order.
+struct Picture {
+    bg: [u8; 3],
+    shapes: Vec<Shape>,
+}
+
+impl Picture {
+    fn at(&self, x: i64, y: i64) -> [u8; 3] {
+        let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+        self.shapes.iter().rev().find_map(|s| s.holds(px, py)).unwrap_or(self.bg)
+    }
+
+    /// The `w` x `h` pixels from (x, y), as a capture holds them.
+    fn image(&self, x: i64, y: i64, w: u32, h: u32) -> CapturedImage {
+        let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
+        for j in 0..h as i64 {
+            for i in 0..w as i64 {
+                let c = self.at(x + i, y + j);
+                rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        CapturedImage { w, h, rgba }
+    }
+}
+
+fn colour_of(t: &Table) -> mlua::Result<[u8; 3]> {
+    Ok([t.get(1)?, t.get(2)?, t.get(3)?])
+}
+
+fn picture_of(p: &Table) -> mlua::Result<Picture> {
+    let bg = colour_of(&p.get::<Table>("bg")?)?;
+    let mut shapes = Vec::new();
+    for s in p.get::<Table>("shapes")?.sequence_values::<Table>() {
+        let s = s?;
+        let c = colour_of(&s.get::<Table>("c")?)?;
+        let kind: String = s.get("kind")?;
+        shapes.push(match kind.as_str() {
+            "rect" => Shape::Rect { x1: s.get("x1")?, y1: s.get("y1")?, x2: s.get("x2")?, y2: s.get("y2")?, c },
+            "ray" => {
+                let a = s.get::<f64>("angle")?.to_radians();
+                Shape::Ray {
+                    cx: s.get("cx")?,
+                    cy: s.get("cy")?,
+                    ux: a.cos(),
+                    uy: a.sin(),
+                    r1: s.get("r1")?,
+                    r2: s.get("r2")?,
+                    half: s.get::<f64>("width")? / 2.0,
+                    c,
+                }
+            }
+            "disc" => Shape::Disc { cx: s.get("cx")?, cy: s.get("cy")?, r: s.get("r")?, c },
+            other => return Err(mlua::Error::external(format!("the scripted picture has no shape '{other}'"))),
+        });
+    }
+    Ok(Picture { bg, shapes })
+}
+
+/// Corners `{ x1, y1, x2, y2 }` as the top left and the size.
+fn area_of(r: &Table) -> mlua::Result<(i64, i64, u32, u32)> {
+    let (x1, y1, x2, y2): (i64, i64, i64, i64) = (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
+    if x2 <= x1 || y2 <= y1 {
+        return Err(mlua::Error::external("an empty region"));
+    }
+    Ok((x1, y1, (x2 - x1) as u32, (y2 - y1) as u32))
+}
+
+/// `T.paintCells(picture, region, cols, rows, predicate)`: the grid as hex, as host.screen.cells
+/// answers it.
+fn paint_cells(_: &Lua, (p, region, cols, rows, pred): (Table, Table, u32, u32, String)) -> mlua::Result<String> {
+    let (x, y, w, h) = area_of(&region)?;
+    let pred = Predicate::parse(&pred).map_err(|e| mlua::Error::external(e.to_string()))?;
+    let spec = CellSpec::new(cols, rows, pred).map_err(mlua::Error::external)?;
+    let img = picture_of(&p)?.image(x, y, w, h);
+    let cells = of_capture(&img, w as i32, h as i32, &spec).map_err(mlua::Error::external)?;
+    Ok(to_hex(&cells))
+}
+
+/// `T.paintProfile(picture, region)`: the column profile host.screen.profile answers for it.
+fn paint_profile(lua: &Lua, (p, region): (Table, Table)) -> mlua::Result<Table> {
+    let (x, y, w, h) = area_of(&region)?;
+    let img = picture_of(&p)?.image(x, y, w, h);
+    let (cols, _) = crate::profile::profile(&img, Area { x: 0, y: 0, w, h }, true, false, 128)
+        .ok_or_else(|| mlua::Error::external("the profile could not be made"))?;
+    let cols = cols.ok_or_else(|| mlua::Error::external("no columns"))?;
+    let axis = lua.create_table()?;
+    axis.set("min", cols.min)?;
+    axis.set("max", cols.max)?;
+    axis.set("dark", cols.dark)?;
+    axis.set("mean", cols.mean)?;
+    axis.set("r", cols.r)?;
+    axis.set("g", cols.g)?;
+    axis.set("b", cols.b)?;
+    let out = lua.create_table()?;
+    out.set("x", x)?;
+    out.set("y", y)?;
+    out.set("w", w)?;
+    out.set("h", h)?;
+    out.set("columns", axis)?;
+    Ok(out)
+}
+
+/// `T.paintPixels(picture, points)`: the colour at every point, as host.screen.pixels answers.
+fn paint_pixels(lua: &Lua, (p, points): (Table, Table)) -> mlua::Result<Table> {
+    let pic = picture_of(&p)?;
+    let out = lua.create_table()?;
+    for pt in points.sequence_values::<Table>() {
+        let pt = pt?;
+        let c = pic.at(pt.get(1)?, pt.get(2)?);
+        let col = lua.create_table()?;
+        col.set("r", c[0])?;
+        col.set("g", c[1])?;
+        col.set("b", c[2])?;
+        col.set("hex", format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]))?;
+        out.raw_push(col)?;
+    }
+    Ok(out)
+}
+
+pub(crate) fn run_mac(scenario: &str) {
     run_on("macos", scenario)
 }
 
@@ -1931,5 +2595,105 @@ fn a_step_whose_window_left_the_front_during_its_name_read_clicks_nothing() {
         T.ok(#S.speech == said, "something said: " .. T.said(said + 1))
         T.ok(T.count("[avenger] 'Next preset': not going on after the name was read — the overlay is on another "
           .. "window now") == 1, T.dump())
+    "##);
+}
+
+// ---------------------------------------------------------------------------------------------
+// From the avenger_control project into stage 1 (the port's plan, slice 0): its reading of what
+// a recogniser makes of the blank preset, and Ableton Live on a Mac as a daw-hosts entry.
+// ---------------------------------------------------------------------------------------------
+
+/// The project's `_looks_like_init_preset_ocr`, as `read/ocr.luau` ports it: its own list of
+/// readings, and a reading with "preset" or "presst" in it that is 0.84 alike to "init preset" —
+/// alike as Python's difflib measures it, whose ratios for these readings are pinned here. A
+/// reading without either word is not taken however alike it is ("Init Pre5et"), as the project
+/// has it, nor a name of the user's own with "Preset" in it.
+#[test]
+fn the_projects_readings_of_the_blank_preset_are_taken_for_it() {
+    run_mac(r##"
+        local S = T.S
+        local R = T.source("modules/vps-avenger/src/read/ocr.luau")(T.host)
+        for _, t in ipairs({ "Init Preset", "init preset", "INIT PRESET", "  Init   Preset ", "hit Presst", "hit Preset",
+          "lnit Preset", "lnit Presst", "Init Presst", "Init", "Init Preset.", "Init Preset 2", "Inlt Preset", "Unit Preset" }) do
+          T.ok(R.isInitPreset(t), "taken: " .. t)
+          local name, init = R.presetName(t)
+          T.ok(name == "Init Preset" and init == true, t)
+        end
+        for _, t in ipairs({ "", "BA Deep Sub", "Pad Preset", "LD Init Lead", "Initial", "Presets", "My Preset 1",
+          "Init Pre5et", "Iinit Presest" }) do
+          T.ok(not R.isInitPreset(t), "not taken: " .. t)
+          T.ok(R.presetName(t) == t, "as it is: " .. t)
+        end
+        -- difflib's ratios, as Python 3 computes them for these.
+        for _, c in ipairs({ { "hit presst", 0.762 }, { "hit preset", 0.857 }, { "lnit presst", 0.818 },
+          { "init preset 2", 0.917 }, { "pad preset", 0.667 }, { "my preset 1", 0.636 }, { "init", 0.533 } }) do
+          local r = R.ratio(c[1], "init preset")
+          T.ok(math.abs(r - c[2]) < 0.001, c[1] .. ": " .. r)
+        end
+    "##);
+}
+
+/// In the ring: the Preset read-out says a reading of the blank preset as "Init Preset" — its
+/// `[read]` line keeps what was read — and ◀ and ▶ read the name the same way, before the click
+/// and after it: "hit Presst" before and "lnit Preset" after is the same preset, unchanged. The
+/// log says each reading taken so.
+#[test]
+fn the_ring_says_a_reading_of_the_blank_preset_as_init_preset() {
+    run_mac(r##"
+        local S = T.S
+        local header = T.avengerAt80("hit Presst")
+        T.ok(T.lastSaid() == "Preset, Init Preset", T.said())
+        T.ok(T.count("[read] 'Preset' = \"hit Presst\", said as \"Init Preset\" (region 34,7 180x15") == 1, T.dump())
+        T.ok(T.step(header, 3, "hit Presst", "lnit Preset") == "Init Preset, unchanged", T.said())
+        T.ok(T.count("[avenger] the name read 'hit Presst' is taken as Avenger's blank preset, Init Preset") >= 1, T.dump())
+        T.ok(T.count("[avenger] the name read 'lnit Preset' is taken as Avenger's blank preset, Init Preset") >= 1, T.dump())
+        T.ok(T.step(header, 3, "hit Presst", "BA Deep Sub") == "BA Deep Sub", T.said())
+    "##);
+}
+
+/// With the preset database, a reading of the blank preset is Avenger's blank preset, which is in
+/// no expansion: Preset info says "Init Preset, not in the database", the log says why, and a step
+/// from it has no neighbour.
+#[test]
+fn the_preset_database_takes_a_reading_of_the_blank_preset_for_no_catalog_name() {
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local header = T.avengerAt80("hit Presst")
+        T.ok(T.info(header, "hit Presst") == "Init Preset, not in the database", T.said())
+        T.ok(T.count("[avenger] 'Preset info': read 'Init Preset' — Avenger's blank preset") == 1, T.dump())
+        T.ok(T.step(header, 3, "Init Presst", "BA Deep Sub") == "BA Deep Sub", T.said())
+        T.ok(T.count("the database's neighbour: none, the position is not known") >= 1, T.dump())
+    "##);
+}
+
+/// Ableton Live on a Mac, by daw-hosts' new entry: a titled window of `com.ableton.live` — its
+/// title says nothing that matters, and its shape is not known — with the plug-in 16 below the
+/// window's top, from its left edge (the project's 18 and -2, less the difference VPS Avenger keeps
+/// on its own side). Its content origin taken here as its frame, as Logic's is. Avenger is read
+/// and clicked there as anywhere: its corner at the frame + (-2, 18), where the project's tables
+/// start in Live.
+#[test]
+fn avenger_in_an_ableton_live_window_on_a_mac() {
+    run_mac(r##"
+        local S = T.S
+        local LIVE = { pid = 7000, exe = "Live", name = "Live", bundleId = "com.ableton.live" }
+        local w, h = T.size(80)
+        local L = { id = 51, title = "VPS Avenger/1-MIDI", class = "AXWindow/AXStandardWindow/", app = LIVE,
+          bounds = { x = 300, y = 200, w = w, h = h + 16 }, client = { x = 300, y = 200, w = w, h = h + 16 } }
+        S.listed = { L }
+        T.at(L)
+        local header = T.avenger()
+        local r = T.lastRead("vps-avenger header")
+        -- The panel at the frame + (0, 16) = (300, 216), 1394 x 898: 627.4 -> 628 across, 51.2 -> 52 down.
+        T.ok(r and T.region(r.region) == "300,216,928,268", r and T.region(r.region))
+        T.answer(r, T.header(298, 218, 1.6, 80))
+        T.event()
+        T.ok(header.active, T.dump())
+        T.ok(T.count("panel of 'VPS Avenger/1-MIDI' id=51 at 0,16 1394x898 from its content origin, identify=true") == 1, T.dump())
+        T.ok(T.count("(+0.0,+0.0) and (+0.0,+0.0) from where the table puts them with Avenger's corner at the panel's -2,+2") == 1, T.dump())
+        -- Undo: 298 + 488 = 786, 218 + 22.4 -> 240.
+        T.pressAt(header, 8)
+        T.ok(T.clickAt() == "786,240", T.clickAt())
     "##);
 }

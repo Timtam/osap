@@ -30,10 +30,14 @@
 --                 matcher is wider than a plug-in window (REAPER's takes every dialog of its
 --                 process on Windows, as ReaHotkey's does, because a plug-in's own dialogs are
 --                 such windows too).
+--   focusKey      optional; `false` leaves the entry out of the focus key's search, where its
+--                 matcher takes windows that are no plug-in windows and nothing known yet tells
+--                 them apart for a `focusTarget` (Ableton Live on a Mac).
 --   daw           the DAW's name, for the focus key's log line.
 --
 -- Every entry of `all` is a plug-in window, and the focus key searches exactly those that can
--- match on the platform it runs on: there is no second list to keep in step.
+-- match on the platform it runs on, less those marked `focusKey = false`: there is no second list
+-- to keep in step.
 --
 -- A **code module**, and deliberately: it carries behaviour as well as data — the origin
 -- functions and one global command that puts the focus back into a plugin's window. A data
@@ -198,6 +202,25 @@ local function logicPluginOrigin(win)
   return p
 end
 
+-- Where the plug-in begins inside an Ableton Live plug-in window on a Mac: 16 points below the
+-- window's top edge, from its left edge. NOT MEASURED HERE, and not calibrated where it comes
+-- from: the third-party VPS Avenger tool named above lists Live beside Logic and REAPER, with its
+-- tables starting 18 below the window's top and 2 left of it, marked there as not calibrated yet.
+-- In the two hosts that tool and this file both have figures for, the tool's start lies 2 left of
+-- and 2 below where this file's panel begins — Logic's frame + (0, 90) against + (2, 88), REAPER's
+-- floating frame + (-2, 52) against + (0, 50) — a difference the VPS Avenger module keeps on its
+-- own side until pictures say whose it is (its geometry.luau). So the panel here is the tool's
+-- start without that difference: + (0, 16). Measured from the window's FRAME, as Logic's is,
+-- because what the host derives as a Live window's content origin is unknown. Unverified on a
+-- live Live: TODO.md, "Ableton Live on a Mac".
+local LIVE_TOP = 16
+
+local function livePluginOrigin(win)
+  local frame, client = win and win.bounds, win and win.client
+  if not (frame and client) then return { 0, LIVE_TOP } end
+  return { frame.x - client.x, frame.y + LIVE_TOP - client.y }
+end
+
 -- ── The entries ──────────────────────────────────────────────────────────────
 -- REAPER. The macOS block on the first entry is what lets a plugin be embedded in REAPER there
 -- at all: a matcher with a platform block for one system and none for the other says "not
@@ -223,12 +246,25 @@ local reaper = {
     app = { exe = { contains = "reaper" } }, windows = { class = { contains = "REAPERb32host" } },
     chrome = reaper_chrome },
 }
--- Ableton Live, Windows only: ReaHotkey's three plug-in window classes. `#32770` last, so the
+-- Ableton Live on Windows: ReaHotkey's three plug-in window classes. `#32770` last, so the
 -- focus key finds a window of a plug-in's own class before any dialog.
+--
+-- And on a Mac, from the VPS Avenger tool that supports Live there: a window of `com.ableton.live`
+-- with a title, its plug-in found by `livePluginOrigin`'s starting values. That tool finds Live's
+-- plug-in window by its title naming the plug-in, which an entry here must not do (no plug-in is
+-- named here); so the entry takes every titled window of Live — its main window, titled by the
+-- Set, included until a Mac session says what tells the two apart (their subroles, the shape of
+-- a plug-in window's title). That costs a plug-in module one `identify` there per stay, which
+-- answers no. The focus key leaves the entry out (`focusKey = false`) until then: it would find
+-- Live's main window — with Live running in the background, ahead of a Logic plug-in window the
+-- user is in, since this list comes first — and bring it forward.
 local ableton = {
   { daw = "Ableton Live", app = { exe = { contains = "Ableton Live" } }, windows = { class = { contains = "Vst3PlugWindow" } } },
   { daw = "Ableton Live", app = { exe = { contains = "Ableton Live" } }, windows = { class = { contains = "AbletonVstPlugClass" } } },
   { daw = "Ableton Live", app = { exe = { contains = "Ableton Live" } }, windows = { class = { contains = "#32770" } } },
+  { daw = "Ableton Live",
+    macos = { app = { bundleId = "com.ableton.live" }, title = { pattern = "%S" } },
+    pluginOrigin = { macos = livePluginOrigin }, focusKey = false },
 }
 
 -- Logic Pro, macOS only. From the probe of a VPS Avenger window in a tester's Mac log of
@@ -374,7 +410,7 @@ end
 -- platform can use) had the prelude list EVERY window on each press that found no plug-in
 -- window; on a Mac, the Windows-only bridged-REAPER entry listed REAPER's windows a second
 -- time, at the full timeout, on the thread that carries the event tap. And the DAWs the log line
--- names are the ones that could have been found.
+-- names are the ones that could have been found. Less the entries marked `focusKey = false`.
 local PLATFORMS = { "windows", "macos", "linux" }
 local function appliesHere(m)
   local named, here = false, false
@@ -395,7 +431,7 @@ local function appliesHere(m)
 end
 local searched = {}
 for _, h in ipairs(all) do
-  if appliesHere(h) then searched[#searched + 1] = h end
+  if appliesHere(h) and h.focusKey ~= false then searched[#searched + 1] = h end
 end
 
 -- The DAWs the key searches, for its log line: taken from the entries, so a DAW added there is
@@ -416,9 +452,9 @@ end
 --
 -- It searches `all`, the same entries every plug-in module binds with — one list, so a DAW
 -- added for the overlays is a DAW this key finds, and the other way round — less the entries
--- that cannot match on this platform (`searched`, above). It kept a list of its own until
--- 2026-09-27, which knew fewer windows than the overlays did (no bridged REAPER window, one of
--- Ableton's three).
+-- that cannot match on this platform or are marked `focusKey = false` (`searched`, above). It
+-- kept a list of its own until 2026-09-27, which knew fewer windows than the overlays did (no
+-- bridged REAPER window, one of Ableton's three).
 --
 -- It says what actually happened rather than what was attempted. `host.window.focus` reports
 -- whether the system accepted the change, and both platforms can decline - announcing "back

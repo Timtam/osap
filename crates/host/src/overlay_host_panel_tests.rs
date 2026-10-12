@@ -196,7 +196,8 @@ function T.modules(root)
   rawset(E, "stateProbe", function(_, _, _, _, a, b) return given(a, b, nil) end)
   rawset(E, "classNavPoint", function(_, _, _, _, _, a, b) return given(a, b, nil) end)
   rawset(E, "focusWithin", function(_, _, a, b) return given(a, b, S.focusWithin) end)
-  rawset(H.screen, "size", function() return { w = 2560, h = 1440 } end)
+  -- The primary screen: S.screenSize where a scenario sets one.
+  rawset(H.screen, "size", function() return S.screenSize or { w = 2560, h = 1440 } end)
   rawset(H.screen, "imageSearch", function() end)
   -- A read that waits, answered at once: S.ocr(region) says what is written there (default:
   -- nothing), or gives the whole reading as a table — a "failed" one. A read with a callback is
@@ -671,8 +672,9 @@ fn the_focus_key_finds_a_logic_plugin_window_and_asks_its_origin() {
     "##);
 }
 
-/// On a Mac the key searches only the entries that can match there — REAPER's and Logic's, not
-/// the Windows-only bridged REAPER or Ableton — and names those DAWs when it finds nothing.
+/// On a Mac the key searches only the entries that can match there — REAPER's and Logic's, not the
+/// Windows-only bridged REAPER or Ableton's window classes, and not Ableton Live's Mac entry, which
+/// takes Live's main window too (`focusKey = false`) — and names those DAWs when it finds nothing.
 #[test]
 fn the_focus_key_on_a_mac_searches_the_entries_a_mac_can_match() {
     run_mac(r##"
@@ -684,6 +686,34 @@ fn the_focus_key_on_a_mac_searches_the_entries_a_mac_can_match() {
         T.at(T.OTHER)
         press()
         assert(S.speech[#S.speech].text == "could not find a plugin window", T.dump())
+        assert(T.count("[daw-hosts] no plug-in window found (the plug-in windows of REAPER, Logic Pro); in front:") == 1, T.dump())
+    "##);
+}
+
+/// Ableton Live running in the background on a Mac, its main window titled by the Set: the key, in
+/// a Logic plug-in window, finds Logic's window and never Live's — Live's Mac entry, which comes
+/// first in `all` and takes that main window, is not searched. With Logic's window gone too, the
+/// key finds nothing rather than bringing Live's main window forward.
+#[test]
+fn the_focus_key_on_a_mac_finds_logic_with_live_running_and_never_lives_main_window() {
+    run_mac(r##"
+        local S = T.S
+        T.modules("modules/daw-hosts/")
+        T.daw.activate()
+        local press = S.hotkeyFns["Cmd+Shift+F6"]
+        local LIVE = { id = 51, title = "My Set", class = "AXWindow/AXStandardWindow/",
+          app = { pid = 7000, exe = "Live", name = "Live", bundleId = "com.ableton.live" },
+          bounds = { x = 0, y = 25, w = 1440, h = 875 }, client = { x = 0, y = 25, w = 1440, h = 875 } }
+        S.listed = { LIVE, T.LOGIC }
+        T.at(T.LOGIC)
+        press()
+        assert(#S.focusCalls >= 1 and S.focusCalls[1] == 21, "Logic's plug-in window: " .. T.dump())
+        for _, id in ipairs(S.focusCalls) do assert(id ~= 51, "Live's main window was asked for") end
+        local calls = #S.focusCalls
+        S.listed = { LIVE }
+        T.at(LIVE)
+        press()
+        assert(#S.focusCalls == calls and S.speech[#S.speech].text == "could not find a plugin window", T.dump())
         assert(T.count("[daw-hosts] no plug-in window found (the plug-in windows of REAPER, Logic Pro); in front:") == 1, T.dump())
     "##);
 }

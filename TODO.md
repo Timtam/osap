@@ -6679,6 +6679,93 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       envelopes, zones). And a standalone Avenger, if there is one and it is wanted: an `O.window`
       binding beside the embedded one, as sforzando has.
 
+## VPS Avenger, the page: the avenger_control panel ported (2026-10-12)
+
+The maintainer's decisions of 2026-10-12: the avenger_control tool's panel is ported to
+`modules/vps-avenger` as a page of the module's own (`host.gui.webview`), its page, texts, ids,
+help texts, ARIA and flows 1:1, the tool's defects fixed; the page activates by default, and the
+module's setting `pageLeavesDawActive` describes it with `activates = false`; Open, Close and
+Slider ship as the module's sounds; everything is built before the Mac tester gets one package.
+Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
+`avenger_page_tests.rs`); nothing of it has met a real Avenger or VoiceOver.
+
+- [x] **The tool's readings of the blank preset.** `read/ocr.luau` ports its
+      `_looks_like_init_preset_ocr`: "hit Presst" and the like are "Init Preset" in the ring's
+      Preset read-out (through the runtime's new OCR button `value`, runtime 0.5.6), in ◀ and ▶'s
+      reads, and in the preset database's lookup, which takes it for no catalog name.
+- [ ] **Ableton Live on a Mac.** daw-hosts' entry from the tool's starting values, which the tool
+      marks not calibrated: every titled window of `com.ableton.live`, the plug-in 16 points below
+      the window's top (the tool's 18, less the (-2, +2) VPS Avenger keeps on its own side). To
+      settle on a Mac with Live: a plug-in window's subrole and title, and what tells it from
+      Live's main window, which the entry takes as well until then — so daw-hosts' focus key leaves
+      the entry out (`focusKey = false`), which would otherwise bring Live's main window forward
+      ahead of a Logic plug-in window; the content origin the host derives for it; and where the
+      plug-in begins (the module's identification line, `MENU read at …`, at two zooms).
+- [x] **The page's first stage** (read-only): `ui/{index.html, panel.css, panel.js}` from the
+      tool's `panel/pages.py` (the transport through `platform`, `ACTIONS`, "not read" for every
+      value not read, the database's expansions marked, a reloaded page's reads with their age,
+      the Windows-only block, the dead OSC rename dialog and the focus retries left out, the
+      spelling fixed, the central tabs this page cannot reach saying so), `src/page.luau`,
+      `src/state.luau`, `NOTICE` and `sounds/`. The key (⌃⇧⌘F1, Ctrl+Shift+Alt+F1 on Windows, or
+      the `pageKey` setting, checked with `host.keys.check`) on an identified Avenger reads the
+      preset's name and shows the page beside Avenger; in the page it brings Avenger forward first
+      — also a window its DAW hid while the page was in front, which the host no longer lists —
+      and hides the page after. A press whose reads show no page says why, unless the user moved
+      on. Every action answers "<label> is not available in this module yet"; Initialize's No
+      clicks nothing. A state comes whole: whatever it leaves out is "not read" on the page, FAV
+      and the central tab included, and nothing of an earlier state is kept in its place. A
+      reload's state says how old its reads are; the state of a press that built the page does
+      not. Settings: `roster` (default "Factory Standard", the tool's), `pageKey`, `sounds`,
+      `pageLeavesDawActive`, `drumSqCadence`.
+- [x] **The open-time reads** (`src/read/*.luau`, `src/tables/*.luau`, `state.luau` filled in):
+      at the key, ONE snapshot of the plug-in's panel, waited for in the key's handler; the tool's
+      classifiers as grids of cells with its colour tests and column profiles, all asked of that
+      picture at once with callbacks; the knob reader over a few hundred of its points; ONE text
+      read of it with named regions (the preset's name, the browser's view, a region per OSC tab,
+      the macro tabs' captions and the shown tab's five names, the central tabs' captions); only
+      when the view reads none, a second text read, of the browser's area, which tells an open
+      expansion by the presets it names. The page is shown once the reads are in, and a press
+      while they are out does nothing. The database gives the preset's expansion, an open
+      expansion's lists, and its spelling of a name read near it, each marked "from the
+      database" on the page. Every share (with the tool's equivalent count), count, angle and
+      word is logged, and the time from the key to the show; a calibrating run writes
+      `calibration/{strip,macros,knob,centre,drumsq}-<zoom>pct.png` once per zoom, marked where
+      it read. The picture is cut at the primary display's right and bottom edges while Avenger's
+      corner is on that display, and what lies past them is not read (the page says so in its
+      error region): Avenger at 190 % and more is taller and wider than most screens, and on a
+      Mac one snapshot of all of it would pass what one may hold. One press at a time by the keys
+      of its questions (`host.screen.pending`), so that a disable that dropped them leaves the
+      key working. Tested in the scripted host, whose snapshot keeps the host's budget, with
+      painted pictures at 80 and 200 % (on a Mac cut at the screen's edge, on Windows whole), and
+      bounds on the Luau work of the whole open and of each read.
+- [ ] **The picture on a display the host does not name.** Only the primary display's size is
+      known (`host.screen.size`): Avenger whose corner is on another display is not cut, and on a
+      Mac at 190 % and more no snapshot may hold it — the key then says that Avenger could not be
+      read. A host call for the displays' rectangles would let the picture be cut on every one.
+- [ ] **What the first package's reads settle** (GM7; the `[avenger] [read]` lines and the
+      calibration pictures, at two zooms on the tester's Retina display):
+      - whether the tool's counts and sizes were a Retina display's backing pixels, as the port
+        takes them (`read/picture.luau`, `RETINA`): the log gives every share beside the count
+        the tool would have seen;
+      - the tables of the strip, the Drums tab, the central tabs, DRUM SQ and the macros, and the
+        two kinds of rectangles this module worked out itself, the macro name fields and the
+        macro tabs (`tables/macros.luau`);
+      - which macro tab is shown, read as the darkest bottom strip as the tool reads the OSC and
+        central tabs — the tool never read it, so this is an assumption until a picture shows it;
+      - the knob reader at larger zooms, where it reads one point in every few pixels each way
+        where the tool read them all, and its pointer's angle against Avenger's own value;
+      - Random Pitch, read beside an upright pointer as the tool reads it: a Fine Tune turned
+        away from the top is counted as Random Pitch then;
+      - the drum mode by the tool's rule, the brighter DRUMKIT caption meaning SEQUENCE;
+      - the central tabs' captions, read and logged only: whether they should confirm the
+        darkest strip, or name the nine tabs the tool has no points for.
+- [ ] **Not read yet, and said so on the page**: the drum slots' names and switches, the sample
+      editor and DRUM SQ's length (the drums' stage); the preset rows' favourite stars, and an
+      open expansion by its categories (the browser's stage).
+- [ ] **The next stages**: the runtime's page support and the header's actions through the page,
+      then the strip, the hand-overs, the knobs, the drums and the browser, and the page's own
+      Settings section.
+
 ## HTML pages, stage 1: `host.gui.webview` and the Windows probe (2026-09-28)
 
 The maintainer's decision of 2026-09-28: an HTML page is a core capability of the platform — a

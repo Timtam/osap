@@ -23,6 +23,10 @@
 -- oscillators, drums and the browser are later stages (TODO.md, "VPS Avenger"). Plug-in only: the
 -- project supports no standalone Avenger, and neither does this module yet (TODO.md).
 --
+-- And the project's panel as a page of this module's own (page.luau, ui/): its key on an
+-- identified Avenger reads Avenger off one picture (read/open.luau) and shows the page beside it;
+-- the page's actions come in later stages, and say so until then.
+--
 -- Coordinates are written as the project wrote them, at 50 % from Avenger's corner; the overlay
 -- scales them by the zoom READ off Avenger's zoom field (header.luau), and puts Avenger's corner
 -- where geometry.luau says it is on the DAW's panel.
@@ -34,6 +38,9 @@ local H = host.include("src/header.luau")
 local D = host.include("src/dialog.luau")
 -- The preset database, an optional dependency: DB.present says whether it is installed.
 local DB = host.include("src/presets.luau")
+-- The project's reading of what a recogniser makes of Avenger's text.
+local R = host.include("src/read/ocr.luau")
+local Page = host.include("src/page.luau")
 
 -- The arbiter slot the header and the warning box share: the box, at the dialog layer, takes the
 -- keyboard from the header while it is up.
@@ -165,6 +172,16 @@ local function tidy(text)
   return (string.gsub(t, " $", ""))
 end
 
+-- A name read, the project's way: what its recogniser made of Avenger's blank preset ("hit
+-- Presst" at 50 %) is "Init Preset", said and compared as that, and the log says it was taken so.
+local function asName(t)
+  local name, init = R.presetName(t)
+  if init and name ~= t then
+    host.log.info(string.format("[avenger] the name read '%s' is taken as Avenger's blank preset, %s", t, name))
+  end
+  return name
+end
+
 -- The name as read now — the press's handler waits for the reading — or nil.
 local function nameNow(o)
   local r = o:toScreenRect(G.NAME_REGION)
@@ -172,6 +189,7 @@ local function nameNow(o)
   local ok, res = pcall(host.ocr.recognize, r, { lang = H.lang() })
   local t = ok and res and tidy(res.text) or ""
   if t == "" then return nil end
+  t = asName(t)
   names.last = t
   return t
 end
@@ -187,7 +205,10 @@ local function nameAfter(o, gen)
         names.reading = false
         if gen ~= names.gen or res.status ~= "text" then return end
         local t = tidy(res.text)
-        if t ~= "" then names.text, names.textGen, names.last = t, gen, t end
+        if t ~= "" then
+          t = asName(t)
+          names.text, names.textGen, names.last = t, gen, t
+        end
       end)
       if not ok then names.reading = false end
     end
@@ -514,8 +535,10 @@ end
 -- ── The header overlay ───────────────────────────────────────────────────────
 local header = placed(O.new("VPS Avenger"))
 -- The first stop: arriving says the preset. Read, never clicked: pressing it reads it again. An
--- empty read is the recogniser's failure — Avenger always shows a name — and is said as that.
-header:addOCRButton({ label = "Preset", region = G.NAME_REGION, readOnly = true, fallback = "cannot be read now" })
+-- empty read is the recogniser's failure — Avenger always shows a name — and is said as that; a
+-- reading of the blank preset the project knows for a misread is said as "Init Preset" (`value`).
+header:addOCRButton({ label = "Preset", region = G.NAME_REGION, readOnly = true, fallback = "cannot be read now",
+  value = function(_, text) return (R.presetName(text)) end })
 presetStep(header, "Previous preset", G.PREV, -1)
 presetStep(header, "Next preset", G.NEXT, 1)
 if DB.present then presetInfo(header) end
@@ -542,6 +565,10 @@ header:addCustomButton({
   end,
 })
 zoomStepper(header)
+-- Avenger identified: the page is built now, not on its key (page.luau).
+header:onActivate(function()
+  Page.arrived()
+end)
 -- Away from the overlay, the preset can be changed in ways it does not see — the DAW's own
 -- preset menu, a file dialog, another project: the database's position goes with it.
 header:onDeactivate(function()
@@ -569,5 +596,14 @@ D.build(box)
 box:gate(D.gate)
 box:resume(false)
 box:bind(BINDING, { specificity = O.layer.dialog, pollMatch = 500, pollWhen = D.expecting })
+
+-- ── The page ─────────────────────────────────────────────────────────────────
+-- Its key, its settings and its description (page.luau): the zoom as the header read it; the rest
+-- is read off one picture when the key is pressed (read/open.luau).
+Page.start({
+  header = header,
+  zoomOf = function(origin) return (H.zoom(origin)) end,
+  DB = DB,
+})
 
 host.log.info("[avenger] VPS Avenger overlays ready: the header, and Avenger's warning box.")

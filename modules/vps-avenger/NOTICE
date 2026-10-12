@@ -1,0 +1,32 @@
+VPS Avenger overlay (com.platform.vps-avenger)
+
+Parts of this module come from the avenger_control project, a tool that makes VPS Avenger usable
+with VoiceOver, and are taken over with its developer's permission, given for this port: its
+code, its pages and its sounds may be taken over (2026-10-12). The avenger_control tool has not
+been published and has no licence of its own.
+
+  ui/index.html, ui/panel.css, ui/panel.js
+      the tool's panel (its panel/pages.py): the markup, the styles and the script, copied and
+      then changed where the files say so — the transport to this module, values that were not
+      read said as such, and the defects of the port's plan fixed.
+  src/geometry.luau, src/tables/*.luau
+      the coordinates of Avenger's header, its menu and its zoom list, and of its oscillator
+      strip, drums, macros, central area and expansion browser, from the tool's tables (as
+      starting values; the files say what is known of each).
+  src/read/*.luau
+      the tool's classifiers, ported to shares of one picture: its colour tests and numbers for
+      the oscillator tabs' dots, the selected tab's dark strip, a lit button, the drum lock, the
+      brighter mode caption, the central tab, DRUM SQ, the macro buttons and FAV; its knob
+      readers; its reading of what a recogniser makes of Avenger's blank preset ("Init Preset"),
+      of the OSC tabs' captions and of the macro tabs' count; and its recognition of an open
+      expansion from the browser's text.
+  src/state.luau
+      the tool's state for its panel (its dispatcher's state_snapshot), built from what is read.
+  sounds/Open.wav, sounds/Close.wav, sounds/Slider.wav
+      the tool's sounds for the page opening and closing and for a knob at its limit.
+
+LICENCE: these files are licensed as the rest of this repository, GPL-3.0-or-later (module.toml's
+`license`).
+
+VPS Avenger and its names belong to their makers. They are named here to say what this module
+works with; this project is not affiliated with them.

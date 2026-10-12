@@ -612,6 +612,10 @@ function Overlay:addOCRButton(opts)
     -- should say so in the plug-in's terms ("no value"), and the prior art this project
     -- ports from did exactly that.
     fallback = opts.fallback,
+    -- `value = function(overlay, text) -> string?`: what the text read says, where the plug-in's
+    -- module knows how the recogniser misreads it — VPS Avenger's blank preset, "Init Preset",
+    -- read as "hit Presst" at 50 %. nil, or no text, says the text as read (valueWords).
+    value = opts.value,
   })
 end
 
@@ -2072,13 +2076,23 @@ local function oneLine(text)
 end
 
 -- What an OCR control's value says, from its region's reading (nil: a region with nothing of it
--- left on screen). Text is said as read. A region with nothing drawn in it, or nothing the
--- recogniser read, says the control's `fallback` — "no text" without one — as an empty read said
--- before the read moved off the event loop. A read that FAILED says "cannot be read now", as a
--- region that cannot be placed does: "no text" would describe a read that was never made.
-local function valueWords(c, reading)
+-- left on screen). Text is said as read — or as the control's `value` hook says it, when it
+-- answers text of its own (hookValue: a hook that raises is logged once, and the text is said as
+-- read). A region with nothing drawn in it, or nothing the recogniser read, says the control's
+-- `fallback` — "no text" without one — as an empty read said before the read moved off the event
+-- loop. A read that FAILED says "cannot be read now", as a region that cannot be placed does: "no
+-- text" would describe a read that was never made.
+--
+-- What a control's hook answers, guarded; set just below.
+local hookValue
+local function valueWords(self, c, reading)
   if reading == nil then return c.fallback or "no text" end
-  if reading.status == "text" and reading.text ~= "" then return oneLine(reading.text) end
+  if reading.status == "text" and reading.text ~= "" then
+    local text = oneLine(reading.text)
+    local said = hookValue(self, c, "value", text)
+    if type(said) == "string" and said ~= "" then return said end
+    return text
+  end
   if reading.status == "failed" then return "cannot be read now" end
   return c.fallback or "no text"
 end
@@ -2090,8 +2104,9 @@ local READ_NOTE = {
   stale = "not recognised",
 }
 
--- What control `c`'s hook `hook` — its `text`, a tab control's `current` or `verticalName` —
--- answers now, called with the overlay and `...`: its value, or nil when it raised.
+-- What control `c`'s hook `hook` — its `text`, a tab control's `current` or `verticalName`, an
+-- OCR control's `value` — answers now, called with the overlay and `...`: its value, or nil when
+-- it raised.
 --
 -- Guarded, as every hook here is, and no longer silently. A raise was swallowed where the sentence
 -- is built, and before a step or an activation it came back as the VALUE — the error's own text —
@@ -2101,7 +2116,7 @@ local READ_NOTE = {
 -- the log it is trying to explain itself in. That is also where a hook whose host call raises — a
 -- region that is neither form, say — shows up, rather than as a value that went missing without a
 -- word.
-local function hookValue(self, c, hook, ...)
+hookValue = function(self, c, hook, ...)
   local f = c[hook]
   if f == nil then return nil end
   local ok, v = pcall(f, self, ...)
@@ -2396,7 +2411,7 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
       local lr, vr = byName.label, byName.value
       local name = c.label or ""
       if lr and lr.status == "text" and lr.text ~= "" then name = oneLine(lr.text) end
-      local value = region and valueWords(c, vr) or nil
+      local value = region and valueWords(self, c, vr) or nil
       local why = nil
       if (lr and lr.status == "stale") or (vr and vr.status == "stale") then
         why = "a later announcement's read replaced it before it was recognised"
@@ -2408,16 +2423,21 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
       end
       local outcome = why and ("; not spoken: " .. why) or "; spoken"
       -- One line per region read: the name's first, when there is a value line to carry the outcome.
-      local function line(head, r, authored, onScreen, last)
+      local function line(head, r, authored, onScreen, last, said)
         local placed, estimated = 0, 0
         for _, w in ipairs(r.words or {}) do
           if w.approx then estimated += 1 else placed += 1 end
         end
         local note = READ_NOTE[r.status]
         if r.status == "failed" then note = "the read failed (" .. tostring(r.error) .. ")" end
+        -- A value hook's answer, where it is not the text read: both are in the line.
+        local as = ""
+        if said and r.status == "text" and said ~= oneLine(r.text or "") then
+          as = string.format(", said as \"%s\"", forLog(said))
+        end
         host.log.info(string.format(
-          "%s = \"%s\" (region %s,%s %sx%s, %d ms, %d %s%s%s)%s%s%s",
-          head, forLog(r.text), tostring(authored[1]), tostring(authored[2]),
+          "%s = \"%s\"%s (region %s,%s %sx%s, %d ms, %d %s%s%s)%s%s%s",
+          head, forLog(r.text), as, tostring(authored[1]), tostring(authored[2]),
           tostring(authored[3] - authored[1]), tostring(authored[4] - authored[2]),
           ms, placed, placed == 1 and "word" or "words",
           estimated > 0 and string.format(", %d placed by estimate", estimated) or "",
@@ -2428,7 +2448,7 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
         ))
       end
       if lr then line(string.format("[read] '%s' name", tostring(c.label or "")), lr, labelAr, labelRegion, vr == nil) end
-      if vr then line(string.format("[read] '%s'", tostring(name)), vr, ar, region, true) end
+      if vr then line(string.format("[read] '%s'", tostring(name)), vr, ar, region, true, value) end
       if not why then say(name, value) end
       finish()
     end)
@@ -2442,7 +2462,7 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   else
     -- Nothing to read: said now, as it always was. A value region with nothing of it left on
     -- screen is answered as an empty read was.
-    say(c.label or "", region and valueWords(c, nil) or nil)
+    say(c.label or "", region and valueWords(self, c, nil) or nil)
     finish()
   end
 end

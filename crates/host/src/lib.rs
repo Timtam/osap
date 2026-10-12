@@ -45,6 +45,11 @@ mod overlay_menu_item_tests;
 /// scale, its clicks, its menus and its warning box.
 #[cfg(test)]
 mod overlay_avenger_tests;
+/// VPS Avenger's page (its src/page.luau and ui/) against the same scripted host, with a scripted
+/// page: its key, its gate, its state, its actions answered, and the page's list of actions held
+/// against what it sends and against the module.
+#[cfg(test)]
+mod avenger_page_tests;
 /// The HTML page probe (tools/html-probe) against the same scripted host, with a scripted page:
 /// its keys, its report, W3's round trip, W7's landing and the automatic show.
 #[cfg(test)]

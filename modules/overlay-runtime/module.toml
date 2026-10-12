@@ -32,8 +32,10 @@ name = "Overlay runtime"
 # toggle — and takes its calibration pictures with host.screen.snapshot and a callback, where
 # imageSearchAsync, imageSearchMulti and snapshotAsync are gone; a landmark gate keeps one search
 # out by its key (host.screen.pending), so it asks again after its module was off, whose answers
-# are dropped. Nothing a module calls is new.
-version = "0.5.5"
+# are dropped. Nothing a module calls is new. 0.5.6 gives an OCR button a `value` hook, which says
+# what the text read means where a module knows how the recogniser misreads it; a module that
+# uses it depends on "com.platform.overlay >= 0.5.6".
+version = "0.5.6"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

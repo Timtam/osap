@@ -1,0 +1,472 @@
+<!doctype html>
+<!--
+  VPS Avenger's page: the avenger_control project's panel (its panel/pages.py), taken over with
+  its developer's permission (NOTICE). The markup is the tool's, copied as it is — its sections,
+  ids, labels, help texts and ARIA patterns, which are its VoiceOver tuning — but for the port's
+  edits, each said where it is: the styles and the script are files of their own (the host runs
+  no inline script), the Windows-only block and the dead OSC rename dialog are left out, a note
+  says when a reloaded page's values were read, and four focus targets the module names can take
+  the focus.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Avenger Control</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="panel.css">
+<script src="panel.js" defer></script>
+</head>
+<body>
+
+<h1>Avenger Control &mdash; An accessible User Interface for VPS Avenger</h1>
+<p id="state-age" hidden></p>
+
+<!--
+  Header group — single outer <div>, no <main> landmark above it.
+  VoiceOver announces this as "Header group" on entry; user does
+  VO+Shift+arrow-down to step inside, where the controls then appear
+  flat (no nested regions/labels). All header controls live inside
+  this one group.
+
+  Order inside the group:
+    1. Size popup (aria-label only, no visible label, no extra
+       landmark — the popup is the first thing after entering the
+       Header group).
+    2. Preset group — preset name + 4 buttons.
+    3. Undo button.
+    4. Redo button.
+-->
+<div id="main-ui"
+     role="group"
+     aria-label="Header"
+     title="Control the VPS Avenger header: size, preset navigation, undo, and redo.">
+
+  <!-- ----- Size (just the popup, no label, no enclosing region) ----- -->
+  <!--
+    The Avenger zoom dropdown lists every 5 % from 50 to 100, then
+    every 10 % from 110 to 200 — 21 entries total. Matches Avenger's
+    own dropdown exactly so what the user picks here is what they
+    see on the next click.
+  -->
+  <div class="group">
+    <button type="button"
+            id="zoom-menu-trigger"
+            aria-expanded="false"
+            aria-controls="zoom-menu-items"
+            title="Set the display size of VPS Avenger">Size</button>
+    <div id="zoom-menu-items"
+         class="osc-menu-items"
+         role="group"
+         tabindex="0"
+         aria-label="Size"
+         title="Choose the display size of VPS Avenger."
+         hidden></div>
+  </div>
+
+  <!-- ----- Preset group (preset name IS the h3 heading) ----- -->
+  <!--
+    The preset name itself is the H3 — a real heading, asked for in
+    the tool's testing, so it can be jumped to with VoiceOver's heading-navigation
+    shortcuts (VO+Cmd+H, or rotor → Headings) from anywhere in the
+    panel. Previously we had a separate visible "Preset" H2 above the
+    name, then dropped it because it was redundant; promoting the
+    name itself to H3 gets the navigation benefit without the extra
+    heading step.
+
+    aria-live="polite" + aria-atomic on the H3 so VoiceOver re-reads
+    the WHOLE preset name when it changes (next/prev), not just the
+    diffed characters. tabindex="0" keeps it focusable so we can
+    land focus on it programmatically (restoreFocus).
+  -->
+  <div role="group"
+       aria-label="Preset"
+       id="preset-section"
+       title="Read, browse, rename, load, and save presets.">
+    <h3 id="preset-name"
+        class="preset-heading"
+        tabindex="0"
+        aria-live="polite" aria-atomic="true">Init Preset</h3>
+
+    <div class="group">
+      <button type="button"
+              id="prev-preset-button"
+              data-action="prev_preset"
+              title="Load the previous preset">Back</button>
+      <button type="button"
+              id="next-preset-button"
+              data-action="next_preset"
+              title="Load the next preset">Next</button>
+      <button type="button"
+              id="rename-preset-button"
+              data-action="start_rename"
+              title="Rename the current preset. Type the new name, then press Return to confirm.">Rename</button>
+    </div>
+
+    <!--
+      Preset Menu — panel-internal version. The original "Menu" button
+      drove Avenger's native popup, but VoiceOver couldn't navigate
+      that popup ("das Menü wird angeklickt und geht auch auf, aber
+      nicht in Avenger Control"). So we don't expose Avenger's popup
+      to the user at all — instead the three concrete entries live as
+      buttons inside this region, and each one does the menu-open +
+      item-click against Avenger by itself.
+
+      Disclosure pattern: a plain trigger button with aria-expanded +
+      aria-controls, and a sibling region (#preset-menu-items) that
+      gets the [hidden] flag flipped. We tried <details>/<summary>
+      first — shorter markup — but VoiceOver-on-WebKit had two issues
+      that made it unusable: a second activation on the summary
+      didn't collapse the menu again, and once expanded VO read the
+      entire body inline so the user heard all three picks before
+      ever entering the menu. The aria-expanded pattern restores
+      both behaviours: toggle works in either direction, and on the
+      trigger VO says only "Menu, button, expanded/collapsed".
+
+      "Save Preset" (overwrite-in-place) is intentionally absent: it
+      pops a Yes/No alert that VoiceOver can't reach reliably, so we
+      route saves through "Save Preset as" (which uses the standard
+      macOS save dialog and is fully accessible).
+    -->
+    <button type="button"
+            id="preset-menu-trigger"
+            aria-expanded="false"
+            aria-controls="preset-menu-items"
+            title="Load and save presets, or initialize all settings">Menu</button>
+    <div id="preset-menu-items"
+         role="group"
+         tabindex="0"
+         aria-label="Preset menu"
+         title="Load and save presets, or initialize all settings."
+         hidden>
+      <button type="button"
+              id="load-preset-button"
+              data-action="pick_load_preset"
+              title="Open a preset file from disk">
+        Load Preset
+      </button>
+      <button type="button"
+              id="save-preset-as-button"
+              data-action="pick_save_preset_as"
+              title="Save the current preset as a new preset file">
+        Save Preset as
+      </button>
+      <!--
+        Initialize Preset does NOT fire the action directly. We
+        show #confirm-init-dialog instead and let the user choose
+        Yes/No there — this mirrors Avenger's own "Are you sure?"
+        warning, but in a form VoiceOver can navigate. The dialog's
+        Yes button fires pick_initialize_preset: Avenger's MENU,
+        Initialize, and Avenger's own warning box read before its YES
+        is clicked. The No button fires cancel_initialize_preset,
+        which clicks nothing in Avenger: the dialog closes, and that
+        is all.
+      -->
+      <button type="button"
+              id="initialize-preset-trigger"
+              title="Initialize the current preset and reset all settings">
+        Initialize Preset
+      </button>
+    </div>
+
+    <!--
+      Init-confirmation alertdialog. Hidden until the user clicks
+      "Initialize Preset" above. role="alertdialog" tells VO this is
+      a modal alert; aria-modal lets compliant ATs trap VO inside.
+      We don't actually trap anything in CSS (the panel still has
+      tabindex on other controls), but the explicit Yes/No layout
+      is the only path the dialog actually offers — anyone tabbing
+      out before answering will just hit the rest of the panel,
+      which is fine. The warning sentence and the question are separate
+      focusable paragraphs, so VO can read them one at a time before
+      the Yes/No buttons.
+    -->
+    <div id="confirm-init-dialog"
+         role="alertdialog"
+         aria-modal="true"
+         aria-labelledby="confirm-init-title"
+         aria-describedby="confirm-init-warning confirm-init-question"
+         hidden>
+      <p id="confirm-init-title"
+         class="dialog-message"
+         tabindex="0"><strong>Warning</strong></p>
+      <p id="confirm-init-warning"
+         class="dialog-message"
+         tabindex="0">This will initialize all settings.</p>
+      <p id="confirm-init-question"
+         class="dialog-message"
+         tabindex="0">Are you sure?</p>
+      <div class="group">
+        <button type="button" id="confirm-init-yes"
+                title="Confirm initialization and reset all settings"
+                data-action="pick_initialize_preset">Yes</button>
+        <button type="button" id="confirm-init-no"
+                title="Cancel initialization"
+                data-action="cancel_initialize_preset">No</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ----- Undo / Redo (plain buttons, no group, no h2) ----- -->
+  <!--
+    Redo is a simple button: it triggers a right-click on Avenger's
+    Undo control, which opens Avenger's own redo dropdown. The dropdown
+    is accessible (confirmed in the tool's testing), so the user
+    navigates it with arrow keys + Enter directly inside Avenger. The
+    page stays away until the dropdown has closed.
+  -->
+  <div class="group">
+    <button type="button"
+            id="undo-button"
+            data-action="undo"
+            title="Undo the most recent editing step in VPS Avenger">Undo</button>
+    <button type="button"
+            id="redo-button"
+            data-action="redo_menu"
+            title="Open the list of editing steps that can be restored">Redo</button>
+  </div>
+
+</div>
+
+<!-- =================== Content Browser =================== -->
+<div id="expansion-ui">
+  <h2 id="content-browser-heading">
+    <button type="button"
+            id="content-browser-toggle"
+            class="section-toggle"
+            aria-expanded="true"
+            aria-controls="content-browser-group">
+      Content
+    </button>
+  </h2>
+
+  <div id="content-browser-group"
+       role="group"
+       tabindex="0"
+       aria-label="Browser"
+       title="Load, create and save presets and expansions.">
+    <div class="group" id="expansion-view-row">
+      <button type="button"
+              id="expansion-view-menu-trigger"
+              aria-expanded="false"
+              aria-controls="expansion-view-menu-items"
+              title="Choose how many expansions are shown per row. 8 per Row is required for the main expansion search view.">Expansion View</button>
+      <div id="expansion-view-menu-items"
+           class="osc-menu-items"
+           role="group"
+           tabindex="0"
+           aria-label="Expansion View"
+           title="Choose how many expansions are shown per row. 8 per Row is required for the main expansion search view."
+           hidden></div>
+      <input type="text"
+             id="expansion-search-input"
+             aria-label="Expansion Search"
+             title="Type to filter expansions">
+      <button type="button"
+              id="reset-expansion-search-button"
+              title="Clear the expansion search and show all expansions"
+              hidden>Reset Search</button>
+    </div>
+
+    <div id="expansion-search-section">
+      <div id="expansion-search-results"
+           class="expansion-search-list"
+           tabindex="-1"
+           title="Search and open installed VPS Avenger expansions."></div>
+    </div>
+
+    <div id="open-expansion-section" hidden>
+      <div class="group">
+        <button type="button"
+                id="close-expansion-button"
+                data-action="close_expansion"
+                title="Close the current expansion and return to the expansion list.">Close Expansion</button>
+        <button type="button"
+                id="browse-expansion-presets-button"
+                data-action="browse_expansion_presets"
+                title="Browse presets in VPS Avenger. Press Return to return to Avenger Control and refresh the loaded preset.">Browse Presets</button>
+        <h3 id="open-expansion-name"
+            class="preset-heading"
+            tabindex="0"
+            aria-live="polite"
+            aria-atomic="true"></h3>
+      </div>
+      <div id="open-expansion-categories"
+           class="category-list"
+           tabindex="-1"
+           role="group"
+           aria-label="Categories"
+           title="Categories in the selected expansion"></div>
+      <input type="text"
+             id="preset-search-input"
+             aria-label="Preset Search"
+             title="Type to filter presets">
+      <button type="button"
+              id="reset-preset-search-button"
+              title="Clear the preset search and show all presets"
+              hidden>Reset Search</button>
+      <button type="button"
+              id="go-to-loaded-preset-category-button"
+              data-action="go_to_loaded_preset_category"
+              title="Show the real category of the loaded preset"
+              hidden>Go to Category</button>
+      <table id="open-expansion-presets-table" hidden>
+        <caption>Presets</caption>
+        <thead>
+          <tr>
+            <th scope="col">Preset Name</th>
+            <th scope="col"></th>
+            <th scope="col">
+              <button type="button"
+                      id="favorite-view-toggle"
+                      aria-label="FAV view, not read">FAV, not read</button>
+            </th>
+          </tr>
+        </thead>
+        <tbody id="open-expansion-presets"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- =================== Oscillators =================== -->
+<h2 id="oscillator-area-heading" tabindex="-1">
+  <button type="button"
+          id="osc-panel-toggle"
+          class="section-toggle"
+          aria-expanded="false"
+          aria-controls="osc-panel-group">
+    Oscillators
+  </button>
+</h2>
+<div id="osc-panel-group"
+     role="group"
+     tabindex="0"
+     aria-label="OSC Panel">
+  <table id="osc-panel-table"
+         tabindex="0"
+         aria-label="Tabs">
+    <caption>Tabs</caption>
+    <thead>
+      <tr id="osc-panel-head"></tr>
+    </thead>
+    <tbody id="osc-panel-body"></tbody>
+  </table>
+  <div id="osc-tab-detail-group"
+       role="group"
+       tabindex="0"
+       aria-label="OSC 1">
+    <div id="osc-tab-detail-items"></div>
+  </div>
+</div>
+
+<div id="editor-area">
+  <h2 id="editor-area-heading">
+    <button type="button"
+            id="central-tabs-toggle"
+            class="section-toggle"
+            aria-expanded="false"
+            aria-controls="central-panel-group">
+      Central Tabs
+    </button>
+  </h2>
+  <div id="central-panel-group"
+       role="group"
+       tabindex="0"
+       aria-label="Central Panel"
+       hidden>
+    <div id="central-tabs-row"></div>
+    <div id="central-tab-content-group"
+         role="group"
+         tabindex="0"
+         aria-label="Editor">
+      <div id="sample-browser-group"
+           class="sample-editor-shell"
+           role="group"
+           tabindex="0"
+           aria-label="Sample Browser"
+           hidden>
+        <div id="sample-browser-items"></div>
+      </div>
+      <div id="editor-area-group"
+           role="group"
+           tabindex="0"
+           aria-label="Editor">
+        <h3 id="sample-editor-heading" tabindex="0">Editor</h3>
+        <div id="sample-editor-group"
+             class="sample-editor-shell"
+             role="group"
+             tabindex="0"
+             aria-label="Sample Editor">
+          <div id="sample-editor-tabs"></div>
+          <div id="sample-editor-detail-group"
+               class="osc-detail-control-group"
+               role="group"
+               tabindex="0"
+               aria-label="Sample">
+            <div id="sample-editor-detail-items"></div>
+          </div>
+        </div>
+        <div id="sample-editor-volume-group"
+             class="osc-detail-control-group"
+             role="group"
+             tabindex="0"
+             aria-label="Sample Controls">
+          <div id="sample-editor-volume-items"></div>
+        </div>
+      </div>
+      <div id="central-placeholder-group"
+           class="osc-detail-control-group"
+           role="group"
+           tabindex="0"
+           aria-label="Editor"
+           hidden>
+        <div id="central-placeholder-items"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- =================== Macros =================== -->
+<h2 id="macro-area-heading" tabindex="-1">
+  <button type="button"
+          id="macro-panel-toggle"
+          class="section-toggle"
+          aria-expanded="true"
+          aria-controls="macro-panel-group">
+    Macros
+  </button>
+</h2>
+<div id="macro-panel-group"
+     role="group"
+     tabindex="0"
+     aria-label="Macro Panel">
+  <table id="macro-panel-table"
+         tabindex="0"
+         aria-label="Macro Tabs">
+    <caption>Macro Tabs</caption>
+    <thead>
+      <tr id="macro-panel-head"></tr>
+    </thead>
+    <tbody id="macro-panel-body"></tbody>
+  </table>
+  <div id="macro-tab-detail-group"
+       role="group"
+       tabindex="0"
+       aria-label="Macro 1">
+    <div id="macro-tab-detail-items"></div>
+  </div>
+</div>
+
+<!-- =================== Errors =================== -->
+<!--
+  Plain <div> with aria-live, NOT a <section> — sections with
+  accessible names become "complementary" or "region" landmarks for
+  some screen readers. The error text shows up on its own when an
+  action fails; no surrounding landmark is needed.
+-->
+<div aria-live="assertive" id="error-section" hidden>
+  <p class="error" id="error-text" tabindex="-1"></p>
+</div>
+
+</body>
+</html>

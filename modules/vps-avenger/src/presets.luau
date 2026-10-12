@@ -21,7 +21,8 @@
 --      uses) of at least THRESHOLD, the tool's 0.72, first among the presets of the expansion the
 --      module last knew Avenger in; then among all of them, where the closest also has to be
 --      closer than every other name by MARGIN;
--- never "Init Preset" (Avenger's blank preset, in no expansion), and never a name that begins
+-- never "Init Preset" (Avenger's blank preset, in no expansion) nor what the project's recogniser
+-- read it as ("hit Presst", read/ocr.luau), and never a name that begins
 -- with the closest catalog name and goes on ("BA Deep Sub mine"): the tool's rule, because that is
 -- how people name their own variant of a catalog preset. 1 and 2 are what was READ, said in the
 -- catalog's spelling (the same words) and not marked; 3 is the database's reading of a poor read,
@@ -99,6 +100,7 @@
 -- compared with the catalog once, not before and after every step.
 
 local P = host.tryRequire("com.platform.vps-avenger-presets")
+local R = host.include("src/read/ocr.luau")
 
 local DB = {}
 
@@ -386,8 +388,8 @@ local snaps, snapCount = {}, 0
 local function snap(text)
   local t = tidy(text)
   if t == "" then return nil, "nothing read" end
+  if R.isInitPreset(t) then return nil, "Avenger's blank preset" end
   local f = folded(t)
-  if f == "init preset" or f == "init" then return nil, "Avenger's blank preset" end
   local key = t .. "\0" .. (anchor and E(anchor) or 0) .. (ownName and "\0own" or "")
   local kept = snaps[key]
   if kept then return kept.res, kept.why, kept.near end
@@ -543,6 +545,112 @@ function DB.after(step, now, unchanged)
     n and string.format("; not the database's neighbour '%s', which is said as well", nName) or ""))
   if n then said = said .. "; " .. nName .. ", " .. DB.MARK end
   return said
+end
+
+-- The expansions of roster `name`, in the catalog's order, for the page's list of expansions:
+-- "Factory Standard", the ones every owner of Avenger has, or "Complete", every expansion the
+-- catalog lists. The catalog's list, never Avenger's own — the page marks it as the database's —
+-- or nil and why there is none. It reads the index only (P.index, decoded once), not the lookups
+-- the name searches build.
+function DB.roster(name)
+  if not P then return nil, "not installed" end
+  local ok, idx, why = pcall(P.index)
+  if not ok then idx, why = nil, tostring(idx) end
+  if not idx then return nil, tostring(why or "no index") end
+  local out = {}
+  if name == "Factory Standard" then
+    for k, n in ipairs(idx.factoryStandard or {}) do out[k] = n end
+  else
+    for k, x in ipairs(idx.expansions) do out[k] = x.name end
+  end
+  return out
+end
+
+-- ── For the page ─────────────────────────────────────────────────────────────
+-- What the page's reads (read/open.luau) take from the database — every word of it marked there
+-- as the database's.
+
+-- The preset `read` (a name read off the screen) placed in the catalog, as Preset info places
+-- it, the anchor with it: { expansion, index (its place in the expansion's list), name (the
+-- catalog's spelling), how ("exact", "folded" or "fuzzy"), osc = { the tabs' names }, macros =
+-- { { a tab's five names: three knobs, two buttons }, … } } — the names as DB.info says them,
+-- Avenger's own ("OSC 2", "Macro 4") where the sound designer named none; `osc` and `macros` are
+-- left out when the expansion's file cannot be read. nil and why when the name is not placed.
+function DB.place(read)
+  if not catalog() then return nil, catWhy end
+  local res, why = snap(read)
+  if not res then
+    anchor = nil
+    host.log.info(string.format("[avenger] [page] the name read '%s' is not placed — %s", tostring(read), tostring(why)))
+    return nil, why
+  end
+  local p = pick(res)
+  anchor = p
+  if not p then
+    host.log.info(string.format("[avenger] [page] the name read '%s' is in the catalog more than once — not placed", read))
+    return nil, "in the catalog more than once"
+  end
+  local e = expansionOf(p)
+  local out = { expansion = e, index = I(p), name = tidy(nameAt(p)), how = res.how }
+  local ok, x, bad = pcall(P.expansion, e)
+  if not ok then x, bad = nil, tostring(x) end
+  if x then
+    out.osc = {}
+    for k, o in ipairs(P.oscillators(x, I(p))) do out.osc[k] = o.name end
+    out.macros = {}
+    for t, tab in ipairs(P.macros(x, I(p))) do
+      local five = {}
+      for _, m in ipairs(tab.knobs) do five[#five + 1] = m.name end
+      for _, m in ipairs(tab.buttons) do five[#five + 1] = m.name end
+      out.macros[t] = five
+    end
+  end
+  host.log.info(string.format("[avenger] [page] the name read '%s' — %s (%s)%s", read, where(p), how(res),
+    x and "" or string.format("; its file cannot be read: %s", tostring(bad))))
+  return out
+end
+
+-- Expansion `e`'s lists, for the page's open expansion: { categories = { names, in the file's
+-- order }, presets = { names, in the list's order }, presetCategories = { each preset's category,
+-- "" for none } } — or nil and why.
+function DB.lists(e)
+  if not P then return nil, "not installed" end
+  local ok, x, bad = pcall(P.expansion, e)
+  if not ok then x, bad = nil, tostring(x) end
+  if not x then return nil, tostring(bad) end
+  local categories, presets, presetCategories = {}, {}, {}
+  for i, pr in ipairs(x.presets) do
+    presets[i] = tidy(pr.name)
+    presetCategories[i] = ""
+  end
+  for _, c in ipairs(x.categories) do
+    categories[#categories + 1] = c.name
+    for i = c.start, c.start + c.count - 1 do
+      if presetCategories[i] then presetCategories[i] = c.name end
+    end
+  end
+  return { categories = categories, presets = presets, presetCategories = presetCategories }
+end
+
+-- The expansion whose presets text `text` (Avenger's browser read as text, in small letters)
+-- names most: 6 for every preset name of at least 8 characters found in it, at least one needed
+-- (the avenger_control project's _detect_open_expansion_from_area_text, without its categories,
+-- which are in the expansions' files and not in the index). Its name and score, or nil.
+local OPEN_NAME_MIN = 8
+local OPEN_PER_PRESET = 6
+
+function DB.openExpansion(text)
+  if not catalog() then return nil end
+  local best, bestScore = nil, 0
+  for e, own in ipairs(cat.folds) do
+    local score = 0
+    for _, f in ipairs(own) do
+      if #f >= OPEN_NAME_MIN and string.find(text, f, 1, true) then score += OPEN_PER_PRESET end
+    end
+    if score > bestScore then best, bestScore = cat.idx.expansions[e].name, score end
+  end
+  if bestScore < OPEN_PER_PRESET then return nil end
+  return best, bestScore
 end
 
 -- The oscillators and macros of preset `i` of expansion file `x`, as said.

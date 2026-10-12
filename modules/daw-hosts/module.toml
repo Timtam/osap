@@ -1,6 +1,6 @@
 id = "com.platform.daw-hosts"
 name = "DAW host definitions"
-version = "0.2.0"
+version = "0.2.1"
 license = "GPL-3.0-or-later"
 
 # A code module: its source is evaluated inside every VM that depends on it, so the matchers
