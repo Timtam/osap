@@ -1,16 +1,19 @@
 -- Does a screen capture come back at all on this macOS, through which system function, and
--- how fast — and, above all, does ScreenCaptureKit's answer arrive while the pump thread is
--- the thread waiting for it?
+-- how fast, from asking to the answer — and, above all, does ScreenCaptureKit's answer arrive
+-- while the capture thread waits for it?
 --
 -- Not for a tester — for CI. Screen capture moved to ScreenCaptureKit, whose rectangle capture
 -- answers through a completion handler, and capture.rs waits for that handler on a channel.
--- Nothing Apple documents says which queue the handler runs on. If it needs the main thread,
--- every capture asked from the pump — every pixel read and every OCR read, which is most of
--- what an overlay does — would wait out its deadline and then fall back to functions a newer
--- macOS may no longer have. A runner cannot grant Screen Recording, but a refusal travels back
--- through the same handler as an image does, so "did anything come back within the deadline"
--- is answerable here, and it is the question that decides whether the next Mac session reads
--- the screen at all.
+-- Nothing Apple documents says which queue the handler runs on. Every read below is made in a
+-- handler, as an overlay makes it: the handler waits while the `screen-capture` thread takes the
+-- picture or the points, and the event loop never captures for it — a capture there would be the
+-- loop guard's `[loop] screen capture on the event loop` line, which CI fails on. If the answer
+-- does not come to the thread that waits, every pixel read and every OCR read, which is most of
+-- what an overlay does, would wait out its deadline and then fall back to functions a newer macOS
+-- may no longer have. A runner cannot grant Screen Recording, but a refusal travels back through
+-- the same handler as an image does, so "did anything come back within the deadline" is
+-- answerable here, and it is the question that decides whether the next Mac session reads the
+-- screen at all.
 --
 -- Everything it prints is prefixed, so the job asserts on lines rather than on someone reading
 -- a log.
@@ -168,7 +171,7 @@ local SIX = { { 10, 10 }, { 60, 20 }, { 110, 30 }, { 160, 40 }, { 199, 50 }, { 5
 -- would ask it, not from inside module loading. Every read below waits in this timer's handler
 -- while the `screen-capture` thread takes it; its time is from asking to the answer.
 host.timer.after(1500, function()
-  report("asking from the pump thread")
+  report("asking in a handler")
 
   local t0 = now()
   local ok, px = pcall(host.screen.pixel, 10, 10)
@@ -192,7 +195,7 @@ host.timer.after(1500, function()
     report("recognize 200x60 THREW in %d ms: %s", now() - t1, tostring(res))
   end
 
-  -- A second pixel read outside the tile, so the second capture's cost is measured too: the
+  -- A second pixel read, far from the first, so the second capture's cost is measured too: the
   -- first one pays whatever ScreenCaptureKit costs to start.
   local t2 = now()
   local ok3, px2 = pcall(host.screen.pixel, 600, 400)

@@ -755,10 +755,11 @@ jobs:
           echo "the executable does not link ONNX Runtime; the bundle carries it ($archs, $(du -h "$dylib" | cut -f1)) and the model ($(du -h "$app/Contents/Resources/ppocr-rec.onnx" | cut -f1))"
 
       # The one question about ScreenCaptureKit no document answers and a runner can: does its
-      # completion handler arrive while the pump thread is the thread waiting for it? capture.rs
-      # gives up after a deadline, so a "no" hangs nothing — it silently moves every capture onto
-      # the older functions, which a newer macOS may not have. No Screen Recording grant is needed
-      # to ask: a refusal comes back through the same handler an image does.
+      # completion handler arrive while the capture thread waits for it? The probe's reads wait in
+      # its handlers while the `screen-capture` thread takes them, as every read of a handler does.
+      # capture.rs gives up after a deadline, so a "no" hangs nothing — it silently moves every
+      # capture onto the older functions, which a newer macOS may not have. No Screen Recording
+      # grant is needed to ask: a refusal comes back through the same handler an image does.
       - name: Screen capture, on a Mac
         run: |
           cd dist/AutomationPlatform
@@ -818,7 +819,7 @@ jobs:
             exit 1
           fi
           if grep -q "ScreenCaptureKit did not answer" automation-platform.log; then
-            echo "::error::ScreenCaptureKit's answer did not arrive while the pump thread waited for it — on a macOS without the older functions, nothing would read the screen"
+            echo "::error::ScreenCaptureKit did not answer on the capture thread — on a macOS without the older functions, nothing would read the screen"
             exit 1
           fi
           if ! grep -q "ScreenCaptureKit captureImageInRect present" automation-platform.log; then
@@ -827,12 +828,15 @@ jobs:
           echo "----- what served the captures -----"
           grep "screen capture paths\|screen captures are coming from\|ScreenCaptureKit refused\|first screen capture\|first capture for reading text\|CAPTURE PROBE:" automation-platform.log || true
 
-      # No text recognition on the event loop (crates/host/src/loop_guard.rs): a release build
-      # writes this line the first time a capture for a read or a recognition runs on the loop's
-      # thread, where no call may make one. A real run of the capture probe's reads on a Mac, the
-      # one place CI sees the macOS guard at work. After the probe whatever became of it: its log
-      # is what is read, and a probe that failed has said so.
-      - name: Nothing recognised text on the event loop
+      # No text recognition and no screen capture on the event loop (crates/host/src/loop_guard.rs):
+      # a release build writes `[loop] text recognition on the event loop` the first time a capture
+      # for a read or a recognition runs on the loop's thread, where no call may make one, and
+      # `[loop] screen capture on the event loop` the first time the screen is captured there
+      # outside a `host.screen` call that could not wait. A real run of the capture probe's reads on
+      # a Mac, the one place CI sees the macOS guards at work. After the probe whatever became of
+      # it: its log is what is read, and a probe that failed has said so. Both are looked for
+      # before either fails the step.
+      - name: Nothing recognised text or captured the screen on the event loop
         if: ${{ !cancelled() }}
         run: |
           log=dist/AutomationPlatform/automation-platform.log
@@ -840,11 +844,17 @@ jobs:
             echo "::warning::no capture-probe log to look at"
             exit 0
           fi
+          found=0
           if grep -q "\[loop\] text recognition on the event loop" "$log"; then
             echo "::error::text recognition ran on the event loop: $(grep -m1 '\[loop\] text recognition on the event loop' "$log")"
-            exit 1
+            found=1
           fi
-          echo "nothing recognised text on the event loop"
+          if grep -q "\[loop\] screen capture on the event loop" "$log"; then
+            echo "::error::the screen was captured on the event loop: $(grep -m1 '\[loop\] screen capture on the event loop' "$log")"
+            found=1
+          fi
+          if [ "$found" != 0 ]; then exit 1; fi
+          echo "nothing recognised text or captured the screen on the event loop"
 
       # The guard (crates/host/src/vm_guard.rs, stops.rs): the capture probe's callbacks are
       # short, and its reads wait in their timers' handlers, which counts on no clock — so a
@@ -1198,7 +1208,7 @@ jobs:
   # The next tester's Mac is new enough to run a macOS no build of this has met, and what that
   # risks does not compile away: whether the two older capture functions still exist there
   # (capture.rs looks them up by name and says which it found), whether ScreenCaptureKit answers
-  # while the pump thread waits, whether a module or a speech call that works on 15 aborts on a
+  # on the capture thread, whether a module or a speech call that works on 15 aborts on a
   # newer system. A separate job, so a red result here is a finding about that macOS rather than
   # a reason the download was not made.
   #
@@ -1364,12 +1374,16 @@ jobs:
             exit 1
           fi
           if grep -q "ScreenCaptureKit did not answer" automation-platform.log; then
-            echo "::error::ScreenCaptureKit did not answer while the pump thread waited, on the newer macOS"
+            echo "::error::ScreenCaptureKit did not answer on the capture thread, on the newer macOS"
             exit 1
           fi
-          # The loop guard's line (crates/host/src/loop_guard.rs), as in the build job.
+          # The loop guard's lines (crates/host/src/loop_guard.rs), as in the build job.
           if grep -q "\[loop\] text recognition on the event loop" automation-platform.log; then
             echo "::error::text recognition ran on the event loop on the newer macOS: $(grep -m1 '\[loop\] text recognition on the event loop' automation-platform.log)"
+            exit 1
+          fi
+          if grep -q "\[loop\] screen capture on the event loop" automation-platform.log; then
+            echo "::error::the screen was captured on the event loop on the newer macOS: $(grep -m1 '\[loop\] screen capture on the event loop' automation-platform.log)"
             exit 1
           fi
           # A call that could not wait, a `recognize` that raised — which is what it does where it

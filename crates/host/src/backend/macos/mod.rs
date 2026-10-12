@@ -176,11 +176,16 @@ impl Backend for MacBackend {
         capture::screen_size()
     }
 
+    // The four reads of the screen on the calling thread — the event loop's, for a `host.screen`
+    // call that could not wait, inside its scope (`task::legacy`). Anywhere else on the loop each
+    // is the bug the loop guard names before anything is captured.
+    //
     // The capture source is accepted and ignored on this platform. `[screen] capture =
     // "duplication"` names a Windows mechanism; here every read keeps going through
     // ScreenCaptureKit or CoreGraphics exactly as it did before the key existed, and the host
     // resolves such a module to the standard source before it ever gets this far.
     fn pixel(&self, x: i32, y: i32, _src: CaptureSource) -> Result<(u8, u8, u8), String> {
+        crate::loop_guard::off_loop_screen("a pixel (Backend::pixel)");
         Ok(capture::pixel(x, y))
     }
 
@@ -188,6 +193,7 @@ impl Backend for MacBackend {
     // once by `capture.rs`), a region wholly off the desktop, or a capture the window server
     // refused. The module is told `CAPTURE_FAILED`, as on the Windows standard path.
     fn capture(&self, x: i32, y: i32, w: i32, h: i32, _src: CaptureSource) -> Result<CapturedImage, String> {
+        crate::loop_guard::off_loop_screen("a region (Backend::capture)");
         capture::capture_region(x, y, w, h).ok_or_else(|| super::CAPTURE_FAILED.to_string())
     }
 
@@ -197,10 +203,12 @@ impl Backend for MacBackend {
 
     // The source is ignored, as for every read here (see `pixel` above).
     fn frame(&self, r: crate::ocr::types::Rect, _src: CaptureSource) -> Result<super::frame::Frame, String> {
+        crate::loop_guard::off_loop_screen("a snapshot's picture (Backend::frame)");
         capture::frame(r.x, r.y, r.w, r.h, false)
     }
 
     fn pixels(&self, pts: &[(i32, i32)], _src: CaptureSource) -> Result<Vec<(u8, u8, u8)>, String> {
+        crate::loop_guard::off_loop_screen("the points of a list (Backend::pixels)");
         capture::pixels(pts)
     }
 
@@ -467,8 +475,10 @@ impl Backend for MacBackend {
 
 /// The image worker's capture routine: each region captured on its own, in order, exactly as
 /// the worker did one at a time before it was handed several. The source is ignored — see
-/// `pixel` above.
+/// `pixel` above. Never on the event loop, not even for a call that could not wait, which
+/// captures through `Backend::capture`.
 fn capture_many(regions: &[(i32, i32, i32, i32)], _src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+    crate::loop_guard::off_loop_screen_always("the image worker's capture");
     regions
         .iter()
         .map(|&(x, y, w, h)| capture::capture_region(x, y, w, h).ok_or_else(|| super::CAPTURE_FAILED.to_string()))

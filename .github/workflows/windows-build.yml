@@ -219,8 +219,10 @@ jobs:
             if (-not (Select-String -Path $log -Pattern 'CAPTURE PROBE: snapshot callbacks (\d+) of \1 answered' -Quiet)) {
               Write-Host "::warning::capture probe ($($run.Name)): a snapshot callback never came"
             }
+            # Every read of the probe waits in a handler while a thread of the host's takes it, so
+            # none of them is what holds the event loop.
             if (Select-String -Path $log -Pattern '\[pump\] one iteration took' -Quiet) {
-              Write-Host "::warning::capture probe ($($run.Name)): the pump stalled"
+              Write-Host "::warning::capture probe ($($run.Name)): the event loop stalled, though every read waited on a thread of its own"
             }
             if ($run.Name -eq 'duplication' -and -not (Select-String -Path $log -Pattern 'reads the screen through desktop duplication' -Quiet)) {
               Write-Host "::warning::capture probe (duplication): the log never says the module resolved to desktop duplication"
@@ -234,12 +236,14 @@ jobs:
             }
           }
 
-      # No text recognition on the event loop (crates/host/src/loop_guard.rs): a release build
-      # writes this line the first time a capture for a read or a recognition runs on the loop's
-      # thread, where no call may make one. Not informational, unlike the probe above: the line is
-      # a bug in the host whatever the runner can capture. Both runs' logs, kept by the step
-      # above; a run without one has said so there.
-      - name: Nothing recognised text on the event loop
+      # No text recognition and no screen capture on the event loop (crates/host/src/loop_guard.rs):
+      # a release build writes `[loop] text recognition on the event loop` the first time a capture
+      # for a read or a recognition runs on the loop's thread, where no call may make one, and
+      # `[loop] screen capture on the event loop` the first time the screen is captured there
+      # outside a `host.screen` call that could not wait. Not informational, unlike the probe above:
+      # either line is a bug in the host whatever the runner can capture. Both runs' logs, kept by
+      # the step above; a run without one has said so there.
+      - name: Nothing recognised text or captured the screen on the event loop
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
@@ -252,9 +256,14 @@ jobs:
               Write-Host "::error::text recognition ran on the event loop ($name run): $($hit.Line)"
               $found = $true
             }
+            $shot = Select-String -Path $log -Pattern '\[loop\] screen capture on the event loop' | Select-Object -First 1
+            if ($shot) {
+              Write-Host "::error::the screen was captured on the event loop ($name run): $($shot.Line)"
+              $found = $true
+            }
           }
           if ($found) { exit 1 }
-          Write-Host "nothing recognised text on the event loop"
+          Write-Host "nothing recognised text or captured the screen on the event loop"
 
       # The guard (crates/host/src/vm_guard.rs, stops.rs): the capture probe's callbacks are
       # short, and its reads wait in their timers' handlers, which counts on no clock — so a

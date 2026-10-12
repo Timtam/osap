@@ -24,8 +24,11 @@
 //!
 //! The test's own thread stands where the event loop stands, and is marked as the loop's for as
 //! long as the holder lives (`loop_guard`); every function of the fake recogniser asks the guard
-//! first, as the platforms' do. So in a debug build a test that brought a capture or a
-//! recognition onto the loop fails.
+//! first, as the platforms' do, and the fakes the event loop reads the screen through where a
+//! call cannot wait — the pixel reads, the region captures, the snapshot — ask the screen guard, as
+//! the backends' four reads do. So in a debug build a test that brought a recognition onto the
+//! loop fails, and so does one that captured there outside the scope of a call that could not
+//! wait.
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
@@ -158,8 +161,10 @@ static POINTS_READ: Mutex<Vec<(i32, bool, String)>> = Mutex::new(Vec::new());
 /// The fake's pixel reads — the capture thread's for a handler that waits (`worker`'s `points`), the
 /// event loop's where the call cannot wait (`snapshot::test_points`): from x = 20000 on, the colour
 /// a snapshot round's picture has there, `(x, y, 50)`; elsewhere none, and why. A read of a held x
-/// waits until it is let go.
+/// waits until it is let go. On the loop it is let be only inside the call's scope, as
+/// `Backend::pixel` and `pixels` are.
 fn fake_points(at: &[(i32, i32)], _: CaptureSource, single: bool) -> Result<Vec<(u8, u8, u8)>, String> {
+    crate::loop_guard::off_loop_screen("the fake pixel read");
     for p in at {
         wait_while_held(p.0, true);
     }
@@ -193,8 +198,9 @@ fn wait_image_capturing(x: i32) {
 /// The image worker's capture (`image_search::spawn_image_worker`), and the event loop's where a
 /// call that waits for the worker cannot wait: from x = 20000 on, the picture a snapshot round has
 /// there (`snapshot::test_frame`); elsewhere none, and why. A capture of a held x waits until it is
-/// let go.
+/// let go. On the loop it is let be only inside the call's scope, as `Backend::capture` is.
 fn fake_image_capture(regions: &[(i32, i32, i32, i32)], _: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+    crate::loop_guard::off_loop_screen("the fake region capture");
     let thread = std::thread::current().name().unwrap_or("?").to_string();
     regions
         .iter()
@@ -260,9 +266,10 @@ pub(crate) fn worker() -> OcrWorker<Fake> {
         recognise: fake_recognise,
         languages: || Languages { available: vec!["en-US".into()], fast: vec![], preferred: vec!["en-US".into()] },
         // A snapshot round's pictures: from x = 20000 on, a picture of the region whose pixel at
-        // (px, py) is (px, py, 50) (`snapshot::test_frame`); elsewhere none.
+        // (px, py) is (px, py, 50) (`snapshot::test_frame`); elsewhere none. On the loop it is let
+        // be nowhere, as the backends' rounds are not.
         frames: |regions, _, _| {
-            crate::loop_guard::off_loop("the fake snapshot round");
+            crate::loop_guard::off_loop_screen_always("the fake snapshot round");
             for r in regions {
                 wait_while_held(r.0, true);
             }
@@ -278,10 +285,8 @@ pub(crate) fn worker() -> OcrWorker<Fake> {
                 })
                 .collect()
         },
-        points: |at, src, single| {
-            crate::loop_guard::off_loop("the fake pixel read");
-            fake_points(at, src, single)
-        },
+        // Guarded as the event loop's own read is (`fake_points`).
+        points: fake_points,
         compare: fake_compare,
         display_of: |_, _| 0,
         shot_of: |_, regions| {

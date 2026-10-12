@@ -8255,6 +8255,41 @@ kind of place that says how long the first held the loop.
       reasons, Where it waits, `template`, `imageSearch`, `imageSearchAsync`, `imageSearchEach`,
       `imageSearchAll`, `imageSearchMulti`), the index's "script host with threads",
       module-runtime-and-lifecycle.md's Threads.
+      Step W4, 2026-10-12 (wbr-final.md): the loop guard covers screen captures. The backend's
+      four reads of the screen on the calling thread — `pixel`, `pixels`, `capture` and `frame`,
+      on Windows and on a Mac — ask it first (`loop_guard::off_loop_screen`). On the event loop a
+      capture is let be only inside the scope of a `host.screen` call that could not wait
+      (`task::legacy`, `Kind::Screen`); anywhere else there it is a bug in the host: a panic in a
+      debug build, and in a release build `[loop] screen capture on the event loop: <what> — this
+      is a bug; please report it (<n> so far this session)` for the first and every power of two
+      after it, counted apart from the recognitions. The captures only a thread of the host's
+      makes — the capture thread's snapshot rounds and points, which asked the text guard before
+      and said "text recognition" for a pixel read, the image worker's capture (`capture_fn`) and
+      Windows' first-read comparison (`compare_fn`, `OcrWorker::compare`) — ask a variant no scope
+      lets be (`off_loop_screen_always`): on the loop they are that bug inside a screen call's
+      scope too, whose own reads go through the backend. CI fails on that line after the capture
+      probe, in both runs of the Windows job and in both macOS jobs, beside the text line. The
+      probe says it asks in a handler; its header, its manifest's comment and the macOS jobs'
+      wording say its captures are taken on the capture thread, and `ScreenCaptureKit did not
+      answer` stays an error there ("on the capture thread"). The test fakes the event loop reads
+      through where a call cannot wait ask the screen guard, as the backends' reads do, so every
+      test of such a place captures inside its scope; the fake snapshot round asks the variant.
+      Tested: the guard's panic, its line and its count in a release build (apart from the text
+      guard's); a capture let be only while a screen scope lasts, and not in a text scope, and a
+      worker's capture let be nowhere on the loop; each of the backends' eight reads, the four
+      capture-thread functions and the image worker's three routines beginning with its guard,
+      read from the source, and Windows' eight stopped there at run time before anything is
+      captured, its four worker captures inside a screen scope too; every call of the backend's
+      reads in the crate made in one of the seven functions a call that cannot wait reads
+      through, each inside the block its scope opens (brace-matched), and the closure such a call
+      reads through named only where it is made, taken and handed on, in its scope, and in a
+      branch that reads nothing. The guard's tests fail against the code without the change
+      (verified with the screen guard doing nothing, with the guards taken out of the Windows
+      backend, with the scope taken out of `task::legacy`, where ten tests of places that cannot
+      wait then panic, with the variant let be in a screen scope, and with the image worker's
+      capture back on the plain screen guard); the source test of the backend's callers holds
+      what W1a to W3t built, and fails on a read added outside a scope, before one or by a direct
+      call of the closure. Nothing audible changes. Docs: macos-port.md.
 - [ ] **NVDA check of step V1 (session B, with V2 and T2)** — nothing should sound different.
       Kontakt with a CSS library in REAPER: a hotspot toggle pressed (its state said after the
       press, as before); the snapshot camera and its dropdown with the bar shut and open (the bar
@@ -8385,6 +8420,13 @@ kind of place that says how long the first held the loop.
       borrow image_search.rs): a search's PNG decoded on the image worker and a handle's picture
       made there; nothing in it is platform-specific, and the capture probe searches no template, so
       the first sign is a library overlay that is found as before.
+- [ ] **Step W4 never ran on a Mac** (type-checked only): `MacBackend`'s four reads asking the
+      screen guard, and `capture::points`, `frames_for_round` and the image worker's
+      `capture_many` asking the variant no scope lets be (the first two asked the text guard
+      before); the next CI run's capture probe on macOS 15, 14 and 26 should show no `[loop]
+      screen capture on the event loop` line, and its `ScreenCaptureKit did not answer` check now
+      reads "on the capture thread". A Mac module's `host.screen` call where it cannot wait
+      captures on the pump thread as before, inside its scope.
 - [ ] **NVDA check of step W1b (session C)** — nothing should sound different; announcements that
       read a pixel come about one tick later. Kontakt with a CSS library: Tab through the hotspot
       toggles and press one (its state said after the press); the header's status toggles: Tab,

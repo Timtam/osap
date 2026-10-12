@@ -1322,6 +1322,15 @@ pub trait Backend {
     /// `host.screen.pixel` where it cannot wait. One that waits is read on the capture thread by
     /// [`OcrWorker::points`], the same way.
     ///
+    /// The Windows and macOS backends' `pixel`, `capture`, `frame` and `pixels` begin with the loop
+    /// guard's screen guard (`loop_guard::off_loop_screen`): on the event loop they are let be only
+    /// inside the scope of a call that could not wait (`task::legacy`), and anywhere else there
+    /// they are a bug — a panic in a debug build, a `[loop] screen capture on the event loop` line
+    /// in a release one. Their `capture_fn`, Windows' `compare_fn` (a Mac compares nothing), and
+    /// the capture thread's [`OcrWorker::frames`] and [`OcrWorker::points`] begin with the one no
+    /// scope lets be there (`loop_guard::off_loop_screen_always`). The stub backend reads nothing
+    /// and asks neither.
+    ///
     /// `Err` only where the source can fail without a fallback — a Windows module that
     /// declared `fallback = "none"` while duplication could not answer — with the reason, which
     /// the module is told. The standard path always has an answer, and the other backends

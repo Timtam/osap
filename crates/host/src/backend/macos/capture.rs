@@ -953,9 +953,10 @@ pub fn pixels(pts: &[(i32, i32)]) -> Result<Vec<(u8, u8, u8)>, String> {
 /// reads them — `capture_rgba`, never `frame`'s capture at the display's own resolution, so a
 /// colour is what the event loop's read gives. Without `pixel()`'s tile, which is the event loop's
 /// alone. A single point that cannot be read is black, with `pixel()`'s line once a session, as
-/// `pixel()` answers it; a list fails as `pixels` fails.
+/// `pixel()` answers it; a list fails as `pixels` fails. Never on the event loop, not even for a
+/// call that could not wait, which reads through `Backend::pixel` and `pixels`.
 pub fn points(pts: &[(i32, i32)], single: bool) -> Result<Vec<(u8, u8, u8)>, String> {
-    crate::loop_guard::off_loop("a pixel read a handler waits for");
+    crate::loop_guard::off_loop_screen_always("a pixel read a handler waits for");
     if !single {
         return pixels(pts);
     }

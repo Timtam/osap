@@ -1094,13 +1094,14 @@ fn say_reader_class() {
 /// A snapshot round's captures (`OcrWorker::frames`), on the capture thread: one
 /// `capture::frame` per rectangle, each at the display's own resolution and kept beside its
 /// point-sized pixels. The source is ignored here, as everywhere on this platform; `poll` skips
-/// the flat-picture watch for a change wait's rounds.
+/// the flat-picture watch for a change wait's rounds. Never on the event loop, not even for a
+/// call that could not wait, which captures through `Backend::frame`.
 pub fn frames_for_round(
     regions: &[(i32, i32, i32, i32)],
     _src: CaptureSource,
     poll: bool,
 ) -> Vec<Result<crate::backend::frame::Frame, String>> {
-    crate::loop_guard::off_loop("a snapshot round");
+    crate::loop_guard::off_loop_screen_always("a snapshot round");
     regions.iter().map(|&(x, y, w, h)| super::capture::frame(x, y, w, h, poll)).collect()
 }
 

@@ -5037,7 +5037,8 @@ impl Manager {
         // anything can read it. See `clock_origin`.
         clock_origin();
         // This thread loads the modules and then runs the event loop — the window's tick and the
-        // headless loop alike — so it is the loop no recogniser may run on (loop_guard.rs).
+        // headless loop alike — so it is the loop no recogniser may run on, and no capture but
+        // that of a call that could not wait (loop_guard.rs).
         loop_guard::mark_loop_thread();
         let backend = backend::platform();
         // `host.ocr.recognize`'s threads, first: the recognise thread publishes the language list
@@ -11466,6 +11467,165 @@ mod ocr_wiring_tests {
         assert!(body(LIB, "fn add_module(").contains(new_vm));
         assert_eq!(body(LIB, "fn rebuild_module(").matches(new_vm).count(), 2, "the rebuilt VM and the empty one after a failure");
         assert!(body(LIB, "fn drop_module(").contains(new_vm), "a dropped module's empty VM");
+    }
+
+    /// The event loop reads the screen through the backend only for a `host.screen` call that could
+    /// not wait, inside that call's scope of the loop guard (`task::legacy` with `Kind::Screen`):
+    /// every source file of the crate is searched, its test code left out, for a call of the
+    /// backend's four reads of the screen on the calling thread, and each is in one of the functions
+    /// such a call reads through — whose way into the scope is checked too. Anywhere else the read
+    /// would be the bug the screen guard names when it runs (`loop_guard::off_loop_screen`).
+    #[test]
+    fn the_backend_reads_the_screen_only_inside_a_call_that_could_not_wait() {
+        let mut found: Vec<String> = Vec::new();
+        for (name, src, tests) in production_sources() {
+            for read in ["pixel(", "pixels(", "capture(", "frame("] {
+                // Spelt in halves, so that this test's own text is not what is found.
+                let call = format!("{}{read}", concat!("backend", "."));
+                for (at, _) in src.match_indices(call.as_str()) {
+                    if !tests.iter().any(|r| r.contains(&at)) {
+                        found.push(format!("{name}: {}", enclosing_fn(&src, at)));
+                    }
+                }
+            }
+        }
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                "image_search.rs: live_capture",
+                "image_search.rs: template",
+                "lib.rs: cells_on_loop",
+                "save.rs: live_capture",
+                "snapshot.rs: profile",
+                "snapshot.rs: read_on_loop",
+                "snapshot.rs: read_on_loop",
+                "snapshot.rs: snapshot",
+            ],
+            "the backend reads the screen somewhere new"
+        );
+        let screen = "crate::loop_guard::Kind::Screen";
+        let reads = concat!("backend", ".");
+        // Read in the scope itself: every such read of the function in the block its scope opens.
+        inside("cells_on_loop", body(LIB, "fn cells_on_loop("), &format!("task::legacy(sh, lua, idx, fname, {screen}, why, || {{"), &format!("{reads}capture("));
+        inside("snapshot", body(SNAP, "pub(crate) fn snapshot("), &format!("crate::task::legacy(&*sh, lua, idx, FS, {screen}, &why, || {{"), &format!("{reads}frame("));
+        for (f, name) in [("pub(crate) fn pixel(", "FP"), ("pub(crate) fn pixels(", "FPS")] {
+            inside(f, body(SNAP, f), &format!("crate::task::legacy(&*sh, lua, idx, {name}, {screen}, &why, || {{"), "read_on_loop(&sh, lua, ");
+        }
+        assert_eq!(SNAP.matches("read_on_loop(&sh, lua, ").count(), 2, "read_on_loop is called somewhere else");
+        // Read through the closure the call hands to the function whose scope reads it: named in
+        // the binding only where it is made and handed on, and in that function only as its
+        // parameter, in its scope and in a branch that reads nothing — so nothing calls it outside
+        // the scope.
+        let profile = body(SNAP, "pub(crate) fn profile(");
+        named_only_in_scope("profile", profile, None, &[
+            &format!("let capture = |x, y, w, h| sh.{reads}capture("),
+            "profile_now(&*sh, lua, idx, &why, args, sh.input_epoch.get(), capture, observe)",
+        ]);
+        let now = body(SNAP, "fn profile_now<");
+        let scope = format!("crate::task::legacy(h, lua, scope, FPR, {screen}, why, || {{");
+        inside("profile_now", now, &scope, "profile_on_loop(lua, args, input_epoch, capture)?");
+        let nothing = "return profile_on_loop(lua, args, input_epoch, capture).map(|(v, _)| v);";
+        assert!(now.contains(&format!("if nothing_to_profile(&args) {{\n        {nothing}\n    }}")), "profile_now reads before its scope");
+        named_only_in_scope("profile_now", now, Some(&scope), &["capture: impl FnOnce(i32, i32, i32, i32)", nothing]);
+        // The binding's closure is written in the call that hands it on, and is its one live read.
+        assert!(body(IMAGES, "pub(crate) fn template(").contains("template_on_loop(\n"), "template's capture goes somewhere else");
+        let on_loop = body(IMAGES, "fn template_on_loop<");
+        assert!(on_loop.contains("Source::Capture { snapshot: None, .. } => true,"), "a live capture outside the scope");
+        let scoped = format!("crate::task::legacy(h, lua, scope, FT, {screen}, why, || build_handle(lua, parsed, making, capture))");
+        let unread = "build_handle(lua, parsed, making, capture)";
+        assert!(on_loop.contains(&format!("if reads {{\n        {scoped}\n    }} else {{\n        {unread}\n    }}")), "template_on_loop reads outside its scope");
+        named_only_in_scope("template_on_loop", on_loop, None, &["capture: impl FnOnce(i32, i32, i32, i32)", &scoped, unread]);
+        for (file, src, f, call, name) in [
+            ("image_search.rs", IMAGES, "fn search_on_loop<", "search_on_loop(", "kind.name()"),
+            ("save.rs", SAVE, "fn save_on_loop<", "save_on_loop(", "shot.name()"),
+        ] {
+            // Every use of `live_capture` hands it to the function whose scope reads it.
+            let uses: Vec<&str> = src.lines().filter(|l| l.contains("live_capture(") && !l.contains("fn live_capture(")).collect();
+            assert!(!uses.is_empty() && uses.iter().all(|l| l.contains(call) && l.contains("|r| live_capture(&sh, lua, r)")), "{file}: {uses:?}");
+            let scope = format!("crate::task::legacy(h, lua, scope, {name}, {screen}, why, || {{");
+            inside(f, body(src, f), &scope, "answer_on_loop(&t, capture)");
+            named_only_in_scope(f, body(src, f), Some(&scope), &["capture: impl FnOnce((i32, i32, i32, i32))"]);
+        }
+    }
+
+    /// The block of `text` that `scope` — a call's scope, written up to the brace that opens its
+    /// closure — opens: from that brace to the one that closes it, string literals and line
+    /// comments passed over.
+    fn scope_block(what: &str, text: &str, scope: &str) -> std::ops::Range<usize> {
+        assert!(scope.ends_with('{'), "{what}: `{scope}` opens no block");
+        assert_eq!(text.matches(scope).count(), 1, "{what}: not one `{scope}`");
+        let open = text.find(scope).unwrap() + scope.len() - 1;
+        let b = text.as_bytes();
+        let (mut i, mut depth) = (open, 0usize);
+        while i < b.len() {
+            match b[i] {
+                b'"' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        i += if b[i] == b'\\' { 2 } else { 1 };
+                    }
+                }
+                b'/' if b.get(i + 1) == Some(&b'/') => {
+                    while i < b.len() && b[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return open..i + 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        panic!("{what}: `{scope}` is not closed");
+    }
+
+    /// A read after its scope's closure has closed is outside the scope, though it comes after the
+    /// scope's text; a brace in a string or a comment closes nothing.
+    #[test]
+    fn a_read_after_its_scope_closes_is_outside_it() {
+        let text = "fn f() {\n    legacy(|| {\n        let s = \"}\"; // }\n        read();\n    });\n    read();\n}\n";
+        let block = scope_block("f", text, "legacy(|| {");
+        let reads: Vec<bool> = text.match_indices("read(").map(|(i, _)| block.contains(&i)).collect();
+        assert_eq!(reads, [true, false], "the first read in the scope, the second after it");
+    }
+
+    /// Every `read` in `text` is made in the block `scope` opens, and there is one at least.
+    fn inside(what: &str, text: &str, scope: &str, read: &str) {
+        let block = scope_block(what, text, scope);
+        let at: Vec<usize> = text.match_indices(read).map(|(i, _)| i).collect();
+        assert!(!at.is_empty(), "{what}: no `{read}`");
+        assert!(at.iter().all(|i| block.contains(i)), "{what}: a `{read}` outside its scope");
+    }
+
+    /// `capture`, the name of the closure a call reads through, stands in `text` only in the block
+    /// `scope` opens and on the lines that hold one of `elsewhere`, once each. A method or a field
+    /// of that name (`.capture`) and a longer name are not it.
+    fn named_only_in_scope(what: &str, text: &str, scope: Option<&str>, elsewhere: &[&str]) {
+        let block = scope.map(|s| scope_block(what, text, s));
+        let word = |c: Option<char>| c.is_some_and(|c| c == '_' || c.is_alphanumeric());
+        let mut seen = vec![0usize; elsewhere.len()];
+        for (at, name) in text.match_indices("capture") {
+            let before = text[..at].chars().next_back();
+            if word(before) || before == Some('.') || word(text[at + name.len()..].chars().next()) {
+                continue;
+            }
+            if block.as_ref().is_some_and(|b| b.contains(&at)) {
+                continue;
+            }
+            let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+            let line = text[start..].lines().next().unwrap_or("").trim();
+            match elsewhere.iter().position(|e| line.contains(e)) {
+                Some(k) => seen[k] += 1,
+                None => panic!("{what}: `capture` named outside its scope: {line}"),
+            }
+        }
+        assert!(seen.iter().all(|&n| n == 1), "{what}: {elsewhere:?} named {seen:?} times");
     }
 
     /// The calls into a VM's Lua that the guard watches: every handler stretch (task.rs), every

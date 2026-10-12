@@ -362,3 +362,13 @@ the log whether Vision read it. A read without a callback waits in its handler, 
 module waits; where it cannot wait — a module's top level, an arbiter's callback, a coroutine
 of the module's own — it raises, so no read runs on the pump thread any more
 ([Where it waits](api/ocr.md#where-it-waits)).
+
+**The `host.screen` captures leave the pump thread too.** In a handler `snapshot`, `pixel`,
+`pixels` and the calls that work over a region wait while the `screen-capture` thread or the
+image worker captures ([Where it waits](api/screen.md#where-it-waits)). Only where such a call
+cannot wait does the pump thread capture, for that one call, and the backend's four reads there
+(`pixel`, `pixels`, `capture` and `frame` of `MacBackend`) ask the loop guard first, as the
+capture thread's and the image worker's own captures do: a capture on the pump thread outside
+such a call is a bug in the host, and one of those threads' captures there is that bug inside
+one too — a panic in a debug build, and in a release one the line `[loop] screen capture on the
+event loop`, which the macOS CI jobs fail on.

@@ -2936,8 +2936,8 @@ pub(crate) fn test_submit_async<H: ReadHost>(h: &H, lua: &Lua, scope: usize, arg
 
 /// `host.screen.snapshot` as the host builds it, over `holder`, its wait the host's own
 /// ([`start_waited`]); where it cannot wait it captures a [`test_frame`] of its region with input
-/// epoch 7, through the host's own tally (`task::legacy`): for the tests' holders, which have no
-/// backend.
+/// epoch 7, through the host's own tally (`task::legacy`) and past the screen guard as
+/// `Backend::frame` is: for the tests' holders, which have no backend.
 #[cfg(test)]
 pub(crate) fn test_snapshot<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>) -> mlua::Result<Function> {
     let h = holder.clone();
@@ -2945,7 +2945,10 @@ pub(crate) fn test_snapshot<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>) -
     let h = holder.clone();
     let blocking = lua.create_function(move |lua, (why, opts): (String, Value)| {
         crate::task::legacy(&*h, lua, idx, FS, crate::loop_guard::Kind::Screen, &why, || {
-            take(lua, h.snap_bytes(), 7, &opts, |r| Ok(test_frame(r.x, r.y, r.w, r.h)))
+            take(lua, h.snap_bytes(), 7, &opts, |r| {
+                crate::loop_guard::off_loop_screen("the fake snapshot");
+                Ok(test_frame(r.x, r.y, r.w, r.h))
+            })
         })
     })?;
     crate::task::points(lua, idx, holder)?.call((FS, start, blocking))

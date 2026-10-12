@@ -20,9 +20,9 @@ pub mod logging;
 #[path = "../../host/src/build_info.rs"]
 pub mod build_info;
 
-/// The guard that keeps text recognition off the event loop: the backend's capture and
-/// recognition functions ask it first, so it has to exist at `crate::loop_guard` here as it does
-/// in `host`.
+/// The guard that keeps text recognition and screen captures off the event loop: the backend's
+/// capture and recognition functions ask it first, so it has to exist at `crate::loop_guard` here
+/// as it does in `host`.
 #[path = "../../host/src/loop_guard.rs"]
 pub mod loop_guard;
 

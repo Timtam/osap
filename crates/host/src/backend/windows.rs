@@ -600,8 +600,11 @@ fn duplicate_with(
 }
 
 /// The image worker's capture routine (`Backend::capture_fn`): a plain `fn`, so it is `Send`,
-/// and the duplication state it reaches is the engine thread's, not this backend's.
+/// and the duplication state it reaches is the engine thread's, not this backend's. Never the
+/// event loop's, not even for a call that could not wait, which captures through
+/// `Backend::capture`.
 fn capture_on_worker(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+    crate::loop_guard::off_loop_screen_always("the image worker's capture");
     capture_all(regions, src, Caller::Worker)
 }
 
@@ -698,9 +701,10 @@ fn pixels_through(pts: &[(i32, i32)], src: CaptureSource, caller: Caller) -> Res
 /// The pixel waits' capture (`OcrWorker::points`), on the capture thread: each point as
 /// [`pixel_through`] reads it for `host.screen.pixel` (`single`), or all of them as
 /// [`pixels_through`] reads them for `host.screen.pixels` — the event loop's own functions, waiting
-/// for desktop duplication as the capture thread's reads do, up to 250 ms.
+/// for desktop duplication as the capture thread's reads do, up to 250 ms. Never on the event loop,
+/// not even for a call that could not wait, which reads through `Backend::pixel` and `pixels`.
 fn points_on_capture_thread(pts: &[(i32, i32)], src: CaptureSource, single: bool) -> Result<Vec<(u8, u8, u8)>, String> {
-    crate::loop_guard::off_loop("a pixel read a handler waits for");
+    crate::loop_guard::off_loop_screen_always("a pixel read a handler waits for");
     if single {
         pts.iter().map(|&(x, y)| pixel_through(x, y, src, Caller::Worker)).collect()
     } else {
@@ -753,9 +757,10 @@ fn pixels_with(
 
 /// The snapshot rounds' capture (`OcrWorker::frames`), on the capture thread: `frames_all` as
 /// the image worker's reads wait for desktop duplication — up to 250 ms — with the path each
-/// frame came from. `poll` means nothing here.
+/// frame came from. `poll` means nothing here. Never on the event loop, not even for a call that
+/// could not wait, which captures through `Backend::frame`.
 fn frames_on_capture_thread(regions: &[(i32, i32, i32, i32)], src: CaptureSource, _poll: bool) -> Vec<Result<Frame, String>> {
-    crate::loop_guard::off_loop("a snapshot round");
+    crate::loop_guard::off_loop_screen_always("a snapshot round");
     frames_all(regions, src, Caller::Worker)
 }
 
@@ -973,8 +978,10 @@ fn compare_sources(who: &str, read: (i32, i32, i32, i32), caller: Caller) -> boo
 }
 
 /// The comparison the `screen-capture` thread and the image worker make (`Backend::compare_fn`,
-/// `OcrWorker::compare`): a plain `fn`, as [`capture_on_worker`] is.
+/// `OcrWorker::compare`): a plain `fn`, as [`capture_on_worker`] is, and like it never the event
+/// loop's.
 fn compare_on_worker(who: &str, read: (i32, i32, i32, i32)) -> bool {
+    crate::loop_guard::off_loop_screen_always("a first-read comparison");
     compare_sources(who, read, Caller::Worker)
 }
 
@@ -1394,11 +1401,16 @@ impl Backend for WindowsBackend {
         unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
     }
 
+    // The four reads of the screen on the calling thread — the event loop's, for a `host.screen`
+    // call that could not wait, inside its scope (`task::legacy`). Anywhere else on the loop each
+    // is the bug the loop guard names before anything is captured.
     fn pixel(&self, x: i32, y: i32, src: CaptureSource) -> Result<(u8, u8, u8), String> {
+        crate::loop_guard::off_loop_screen("a pixel (Backend::pixel)");
         pixel_through(x, y, src, Caller::Pump)
     }
 
     fn capture(&self, x: i32, y: i32, w: i32, h: i32, src: CaptureSource) -> Result<CapturedImage, String> {
+        crate::loop_guard::off_loop_screen("a region (Backend::capture)");
         capture_all(&[(x, y, w, h)], src, Caller::Pump)
             .pop()
             .unwrap_or_else(|| Err(CAPTURE_FAILED.to_string()))
@@ -1413,10 +1425,12 @@ impl Backend for WindowsBackend {
     }
 
     fn frame(&self, r: Rect, src: CaptureSource) -> Result<Frame, String> {
+        crate::loop_guard::off_loop_screen("a snapshot's picture (Backend::frame)");
         frames_all(&[r.tuple()], src, Caller::Pump).pop().unwrap_or_else(|| Err(CAPTURE_FAILED.to_string()))
     }
 
     fn pixels(&self, pts: &[(i32, i32)], src: CaptureSource) -> Result<Vec<(u8, u8, u8)>, String> {
+        crate::loop_guard::off_loop_screen("the points of a list (Backend::pixels)");
         pixels_through(pts, src, Caller::Pump)
     }
 
@@ -4149,48 +4163,105 @@ pub(super) fn bench_system_read(cap: &CapturedImage) -> Result<OcrText, String> 
 }
 
 /// Every Windows function that photographs for a read or recognises asks the loop guard first,
-/// so on the event loop's thread a debug build panics before it does
-/// anything: nothing is captured and no recogniser is asked here. (The guard's rules are tested
-/// in loop_guard.rs; this holds that the guard is where it has to be.)
+/// and every function that captures the screen for a `host.screen` call asks its screen guard, so
+/// on the event loop's thread a debug build panics before it does anything: nothing is captured
+/// and no recogniser is asked here. (The guard's rules are tested in loop_guard.rs; this holds
+/// that the guard is where it has to be.)
 #[cfg(all(test, debug_assertions))]
 mod loop_guard_tests {
     use super::*;
 
-    #[test]
-    fn every_capture_for_a_read_and_every_recognition_asks_the_guard_first() {
+    type Call<'a> = (&'static str, Box<dyn Fn() + 'a>);
+
+    /// The names of `calls` that, on a thread marked as the loop's, did not panic with a line that
+    /// begins with `line` — made inside the scope of a screen call that could not wait when
+    /// `in_a_screen_call`.
+    fn quiet_of(calls: impl FnOnce() -> Vec<Call<'static>> + Send + 'static, line: &'static str, in_a_screen_call: bool) -> Vec<&'static str> {
         crate::quiet_expected_panics();
-        let t = std::thread::spawn(|| {
+        let t = std::thread::spawn(move || {
             crate::loop_guard::mark_loop_thread();
-            let cap = || CapturedImage { w: 4, h: 4, rgba: vec![0; 64] };
-            let frame = || Frame::from_image(Rect::new(0, 0, 4, 4), cap(), std::time::Instant::now(), FrameVia::Gdi, None);
-            let ctx = Recognise { lang: None, fast_ok: false, preempt: None, stop: None, region_done: None };
-            type Call<'a> = (&'static str, Box<dyn Fn() + 'a>);
-            let calls: Vec<Call<'_>> = vec![
-                ("recognize_image", Box::new(move || drop(recognize_image(&cap(), None)))),
-                ("ocr_capture", Box::new(|| drop(ocr_capture(&[(0, 0, 4, 4)], CaptureSource::Standard)))),
-                ("ocr_recognise", Box::new(move || drop(ocr_recognise(&vec![Ok(cap())], &[(0, 0, 4, 4)], &ctx)))),
-                ("frames_on_capture_thread", Box::new(|| drop(frames_on_capture_thread(&[(0, 0, 4, 4)], CaptureSource::Standard, false)))),
-                ("ocr_shot_of", Box::new(move || {
-                    if let Some(f) = frame() {
-                        drop(ocr_shot_of(&f, &[(0, 0, 4, 4)]));
-                    }
-                })),
-                ("paddle_ocr::ask", Box::new(move || drop(super::super::paddle_ocr::ask(&cap())))),
-            ];
+            let _call = in_a_screen_call.then(|| crate::loop_guard::legacy(crate::loop_guard::Kind::Screen));
             let mut quiet = Vec::new();
-            for (name, call) in calls {
+            for (name, call) in calls() {
                 let raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call));
-                let guarded = raised.as_ref().err().and_then(|p| p.downcast_ref::<String>()).is_some_and(|m| {
-                    m.starts_with("[loop] text recognition on the event loop: ")
-                });
+                let guarded = raised.as_ref().err().and_then(|p| p.downcast_ref::<String>()).is_some_and(|m| m.starts_with(line));
                 if !guarded {
                     quiet.push(name);
                 }
             }
             quiet
         });
-        let quiet = t.join().unwrap();
+        t.join().unwrap()
+    }
+
+    #[test]
+    fn every_capture_for_a_read_and_every_recognition_asks_the_guard_first() {
+        let quiet = quiet_of(
+            || {
+                let cap = || CapturedImage { w: 4, h: 4, rgba: vec![0; 64] };
+                let frame = move || Frame::from_image(Rect::new(0, 0, 4, 4), cap(), std::time::Instant::now(), FrameVia::Gdi, None);
+                let ctx = Recognise { lang: None, fast_ok: false, preempt: None, stop: None, region_done: None };
+                let calls: Vec<Call<'static>> = vec![
+                    ("recognize_image", Box::new(move || drop(recognize_image(&cap(), None)))),
+                    ("ocr_capture", Box::new(|| drop(ocr_capture(&[(0, 0, 4, 4)], CaptureSource::Standard)))),
+                    ("ocr_recognise", Box::new(move || drop(ocr_recognise(&vec![Ok(cap())], &[(0, 0, 4, 4)], &ctx)))),
+                    ("ocr_shot_of", Box::new(move || {
+                        if let Some(f) = frame() {
+                            drop(ocr_shot_of(&f, &[(0, 0, 4, 4)]));
+                        }
+                    })),
+                    ("paddle_ocr::ask", Box::new(move || drop(super::super::paddle_ocr::ask(&cap())))),
+                ];
+                calls
+            },
+            "[loop] text recognition on the event loop: ",
+            false,
+        );
         assert!(quiet.is_empty(), "these ran on the event loop without asking the guard: {quiet:?}");
+    }
+
+    /// The captures only a thread of the host's makes: the capture thread's snapshot rounds and
+    /// points, the image worker's capture and the first-read comparison.
+    fn worker_captures(src: CaptureSource) -> Vec<Call<'static>> {
+        vec![
+            ("frames_on_capture_thread", Box::new(move || drop(frames_on_capture_thread(&[(0, 0, 4, 4)], src, false)))),
+            ("points_on_capture_thread", Box::new(move || drop(points_on_capture_thread(&[(0, 0)], src, true)))),
+            ("capture_on_worker", Box::new(move || drop(capture_on_worker(&[(0, 0, 4, 4)], src)))),
+            ("compare_on_worker", Box::new(|| {
+                let _ = compare_on_worker("a test", (0, 0, 4, 4));
+            })),
+        ]
+    }
+
+    /// The backend's four reads of the screen, outside the scope of a call that could not wait,
+    /// and the captures only a thread of the host's makes: each stopped at the screen guard,
+    /// through the standard path, before `GetPixel`, a blit or a duplication request is made.
+    #[test]
+    fn every_screen_capture_asks_the_screen_guard_first() {
+        let quiet = quiet_of(
+            || {
+                let src = CaptureSource::Standard;
+                let mut calls: Vec<Call<'static>> = vec![
+                    ("Backend::pixel", Box::new(move || drop(WindowsBackend::new().pixel(0, 0, src)))),
+                    ("Backend::pixels", Box::new(move || drop(WindowsBackend::new().pixels(&[(0, 0), (1, 1)], src)))),
+                    ("Backend::capture", Box::new(move || drop(WindowsBackend::new().capture(0, 0, 4, 4, src)))),
+                    ("Backend::frame", Box::new(move || drop(WindowsBackend::new().frame(Rect::new(0, 0, 4, 4), src)))),
+                ];
+                calls.extend(worker_captures(src));
+                calls
+            },
+            "[loop] screen capture on the event loop: ",
+            false,
+        );
+        assert!(quiet.is_empty(), "these captured on the event loop without asking the screen guard: {quiet:?}");
+    }
+
+    /// And the captures only a thread of the host's makes are stopped there inside the scope of a
+    /// screen call that could not wait too, which lets only the call's own reads be.
+    #[test]
+    fn a_worker_capture_is_stopped_inside_a_screen_call_too() {
+        let quiet = quiet_of(|| worker_captures(CaptureSource::Standard), "[loop] screen capture on the event loop: ", true);
+        assert!(quiet.is_empty(), "these captured on the event loop inside a screen call: {quiet:?}");
     }
 }
 
