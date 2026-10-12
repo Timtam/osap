@@ -1422,7 +1422,7 @@ look = function()
   local cx, cy = discCentre(origin, cw, ch)
   local mark = ov:here()
   local at = host.now()
-  host.screen.snapshotAsync({ region = discRegion(cx, cy), key = DISC_KEY, at = at }, function(snap)
+  host.screen.snapshot({ region = discRegion(cx, cy), key = DISC_KEY, at = at }, function(snap)
     if not snap then return end
     -- Answered a moment later: still the same Melodyne in the same stay, and no menu over it.
     local top = nil
@@ -2466,7 +2466,7 @@ local function measureNoteArea(o)
     return o:stillHere(frame.mark) and not nativeMenuOpen() and not host.ocr.pending(TIMESIG_KEY)
       and (noteAreaGate(o))
   end
-  host.screen.snapshotAsync({
+  host.screen.snapshot({
     region = region, key = AREA_KEY, at = frame.asked,
     change = from and { from = from, timeout = 1, tolerance = 0, minPixels = 1 } or nil,
   }, function(snap, _, info)
@@ -2657,7 +2657,7 @@ host.timer.every(WATCH_MS, function()
   local mark = ov:here()
   local asked = host.now and host.now() or nil
   local strip = onScreen(STRIP)
-  host.screen.snapshotAsync({ region = strip, key = WATCH_KEY, at = asked }, function(snap)
+  host.screen.snapshot({ region = strip, key = WATCH_KEY, at = asked }, function(snap)
     if not snap then return end
     if not ov:stillHere(mark) or nativeMenuOpen() then
       snap:release()

@@ -1,8 +1,8 @@
-//! The snapshot lane of the `screen-capture` thread: which of `host.screen.snapshotAsync`'s
+//! The snapshot lane of the `screen-capture` thread: which of `host.screen.snapshot`'s
 //! requests are photographed next, in which captures, and what each is answered — with no thread
 //! and no clock of its own, so every rule can be tested by stepping it.
 //!
-//! **One capture thread.** The pictures of `host.ocr.recognize` and of `snapshotAsync` are the same
+//! **One capture thread.** The pictures of `host.ocr.recognize` and of a snapshot are the same
 //! act — a capture at the call, off the event loop — so they are taken by one thread, the one
 //! `ocr/service.rs` runs, and weighed against each other by one rule: the class of `sched.rs`
 //! (aged, interactive, background), then whichever has been due longer, and on a tie the text read
@@ -136,8 +136,9 @@ pub struct ChangeInfo {
 pub enum SnapOutcome {
     /// Of exactly the request's region; `frames` pictures were taken for it.
     Picture { frame: Arc<Frame>, frames: u32, change: Option<ChangeInfo> },
-    /// A points request's colours, one per point, in order ([`SnapKind::Points`]).
-    Colours(Vec<(u8, u8, u8)>),
+    /// A points request's colours, one per point, in order ([`SnapKind::Points`]), with when the
+    /// read came back and `host.inputEpoch()` then: what a callback's `info` says.
+    Colours { colours: Vec<(u8, u8, u8)>, at: Instant, input_epoch: u64 },
     Failed { why: String, frames: u32, change: Option<ChangeInfo> },
     /// Its flag was set: the event loop answers or drops it itself.
     Cancelled,
@@ -473,15 +474,18 @@ impl Round {
     }
 
     /// A points round's answer, from what the capture thread's `points` gave: its colours, one per
-    /// point — a list of another length is a failed capture, never a short answer — or the reason
-    /// there are none. A round of pictures answers every request [`ROUND_FAILED`].
-    pub fn answer_points(self, colours: Result<Vec<(u8, u8, u8)>, String>) -> RoundDone {
+    /// point — a list of another length is a failed capture, never a short answer — read at `at`
+    /// with the input epoch `input_epoch`, or the reason there are none. A round of pictures
+    /// answers every request [`ROUND_FAILED`].
+    pub fn answer_points(self, colours: Result<Vec<(u8, u8, u8)>, String>, at: Instant, input_epoch: u64) -> RoundDone {
         let steps = self
             .members
             .into_iter()
             .map(|(req, _)| {
                 let outcome = match (&req.kind, &colours) {
-                    (SnapKind::Points { at, .. }, Ok(c)) if c.len() == at.len() => SnapOutcome::Colours(c.clone()),
+                    (SnapKind::Points { at: points, .. }, Ok(c)) if c.len() == points.len() => {
+                        SnapOutcome::Colours { colours: c.clone(), at, input_epoch }
+                    }
                     (SnapKind::Points { .. }, Ok(_)) => {
                         SnapOutcome::Failed { why: CAPTURE_FAILED.to_string(), frames: 0, change: None }
                     }
@@ -704,7 +708,7 @@ mod tests {
         let Some(round) = lane.take(now) else { return (Vec::new(), out) };
         if let Some((at, _)) = round.points() {
             let read = at.iter().map(|&(x, y)| shoot(Rect::new(x, y, 1, 1)).map(|_| (x as u8, y as u8, 7))).collect();
-            out.extend(lane.finish(round.answer_points(read), now));
+            out.extend(lane.finish(round.answer_points(read, now, 0), now));
             return (Vec::new(), out);
         }
         let rects = round.rects.clone();
@@ -739,8 +743,8 @@ mod tests {
         assert!(round.rects.is_empty(), "nothing photographed for it");
         assert_eq!(round.points(), Some((&[(3, 4), (5, 6)][..], false)));
         assert!(lane.picture_due(B.idx), "being read is not read");
-        let out = lane.finish(round.answer_points(Ok(vec![(1, 2, 3), (4, 5, 6)])), t0);
-        assert!(matches!(&out[0].outcome, SnapOutcome::Colours(c) if c == &vec![(1, 2, 3), (4, 5, 6)]));
+        let out = lane.finish(round.answer_points(Ok(vec![(1, 2, 3), (4, 5, 6)]), t0 + MS, 8), t0);
+        assert!(matches!(&out[0].outcome, SnapOutcome::Colours { colours, at, input_epoch: 8 } if colours == &vec![(1, 2, 3), (4, 5, 6)] && *at == t0 + MS));
         assert!(lane.is_empty() && !lane.picture_due(B.idx));
 
         // A person's goes ahead of a poll's, and a single point is read as `pixel` reads one.
@@ -750,13 +754,13 @@ mod tests {
         lane.submit(key);
         let round = lane.take(t0 + MS).unwrap();
         assert_eq!((round.ids(), round.points()), (vec![4], Some((&[(2, 2)][..], true))));
-        let out = lane.finish(round.answer_points(Ok(vec![(1, 1, 1), (2, 2, 2)])), t0 + MS);
+        let out = lane.finish(round.answer_points(Ok(vec![(1, 1, 1), (2, 2, 2)]), t0 + MS, 0), t0 + MS);
         assert!(
             matches!(&out[0].outcome, SnapOutcome::Failed { why, frames: 0, change: None } if why == CAPTURE_FAILED),
             "two colours for one point"
         );
         let round = lane.take(t0 + MS).unwrap();
-        let out = lane.finish(round.answer_points(Err("screen capture failed: it is still opening".into())), t0 + MS);
+        let out = lane.finish(round.answer_points(Err("screen capture failed: it is still opening".into()), t0 + MS, 0), t0 + MS);
         assert!(matches!(&out[0].outcome, SnapOutcome::Failed { why, .. } if why.ends_with("it is still opening")));
 
         // Cancelled while it is read: answered so, as any request is.
@@ -765,7 +769,7 @@ mod tests {
         lane.submit(gone);
         let round = lane.take(t0).unwrap();
         flag.store(true, Ordering::Release);
-        let out = lane.finish(round.answer_points(Ok(vec![(1, 1, 1)])), t0);
+        let out = lane.finish(round.answer_points(Ok(vec![(1, 1, 1)]), t0, 0), t0);
         assert!(matches!(out[0].outcome, SnapOutcome::Cancelled));
         assert!(lane.is_empty());
     }

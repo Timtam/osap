@@ -147,9 +147,9 @@ pub(crate) enum Event {
     /// A recurring timer: never queued — skipped while its module is busy.
     Every { token: i64 },
     Read(Box<ReadAnswer>),
-    /// An image search's answer; `ended`, answered with a reason because a newer request of the
-    /// module ended it, rather than searched.
-    Image { p: Box<PendingImage>, outcome: Outcome, ended: bool },
+    /// A callback's answer from the image worker — or decided without it — and the moment of the
+    /// picture it was read from, which the callback's `info` gives.
+    Image { p: Box<PendingImage>, outcome: Outcome, seen: Option<crate::snapshot::Moment> },
     Snapshot { p: Box<PendingSnap>, answer: Answer },
     /// Registration `reg` of an `onChange` for module `setting_of`'s setting `key`.
     Setting { setting_of: usize, reg: u64, key: String, new: crate::settings::Value, old: Option<crate::settings::Value> },

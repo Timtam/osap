@@ -770,7 +770,7 @@ fn the_menu_item_shot_is_asked_off_the_loop_and_the_item_clicked_once_it_is_in()
         assert(#S.clicks == 2 and T.clickAt(2) == "372,100", "clicked once the picture is in: " .. T.clickAt(2))
         local i = #S.order
         while S.order[i] ~= "click" do i -= 1 end
-        assert(S.order[i - 1] == "snapshotAsync", table.concat(S.order, " "))
+        assert(S.order[i - 1] == "snapshot(cb)", table.concat(S.order, " "))
         T.runDue()
         local shot
         for _, s in ipairs(S.shots) do
@@ -831,8 +831,10 @@ fn an_opener_whose_overlay_moved_on_while_its_picture_was_taken_is_not_clicked()
         local moveOn, cover = true, false
         local pictures = {}
         -- The window under the overlay changes while the picture is taken, while moveOn says so; or
-        -- another window is drawn over the opener, while cover does.
-        rawset(T.host.screen, "snapshot", function(opts)
+        -- another window is drawn over the opener, while cover does. A picture asked with a callback
+        -- is the harness's own.
+        rawset(T.host.screen, "snapshot", function(opts, cb)
+          if cb ~= nil then return snapshot(opts, cb) end
           local s = snapshot(opts)
           pictures[#pictures + 1] = s
           if moveOn then

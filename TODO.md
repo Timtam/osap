@@ -72,6 +72,30 @@ into the changelog with that release.
   when it is first named still raises. `template{ file }` with such a file no longer raises at the
   call either: the handle is answered, and every search with it answers that reason and tries the
   file again, so the handle has its picture once the file can be read.
+- **`host.screen.snapshotAsync`, `imageSearchAsync`, `matchCellsAsync` and `imageSearchMulti` are
+  gone** (2026-10-12, slice F). Each is the callback form of the call it belonged to:
+  `snapshotAsync(opts, cb)` is `snapshot(opts, cb)`, with `key`, `at` and `change`, its messages
+  now `host.screen.snapshot: …`; `imageSearchAsync(template | list, opts, cb)` is
+  `imageSearch(template | list, opts, cb)`; `matchCellsAsync(opts, states, cb)` is
+  `matchCells(opts, states, cb)`; and `imageSearchMulti(templates, opts)`, which returned the index
+  and the hit, and `nil, nil, reason` when it could not look, is `imageSearch(templates, opts)`,
+  whose hit carries the index as `n`, and `nil, reason` when it could not look. An empty list
+  raises `host.screen.imageSearch: no template given; the list is empty`. Every other call that
+  waits takes a callback after its own arguments too — `pixel`, `pixels`, `cells`, `template` (its
+  `key` in the spec), a snapshot's `crop`, `imageSearchAll`, `save` and `saveMarked` — and every
+  callback is called with the call's value, its reason (`nil` when there is none) and an `info`
+  table, whose `time` and `inputEpoch` are the moment of the picture read: `profile`'s callback,
+  which had `(profile)` or `(nil, reason)`, and `imageSearchEach`'s, which had `(list)` or `(nil,
+  reason)`, get it as well. `opts.key` replaces an older request of the same module VM and call,
+  and only a callback form takes it: `imageSearch`, `imageSearchAll`, `save` and `saveMarked`, which
+  read their options loosely, now raise for a `key` given without a callback, as the strict ones
+  do. Changed: a search whose module is disabled before its answer runs is dropped with its
+  callback, as a text read's is, where it used to be held and made again once the module was on;
+  a cells read so held is no longer answered `nil, "the module was disabled while the read
+  waited"` — that reason is gone. A poll keeps one request out with its `key` and
+  `host.screen.pending(key)`, which counts the image worker's requests now too. A file `save` or
+  `saveMarked` given a callback could not write is the callback's error, as it raises in their
+  other forms.
 
 ## Implementation
 
@@ -4087,11 +4111,14 @@ with a window of the application open, or against a game.
       region of the manager window, taken twice, gives equal hex; `matchCells` against that hex
       and an all-zero state gives index 1 with similarity 1.0; `matchCellsAsync` gives the
       same; a 5x20 px region with a 10x36 grid returns 720 hex digits.
-- [ ] **A `matchCellsAsync` held over a disable, live:** disable a module in the manager while
+- [x] **A `matchCellsAsync` held over a disable, live:** disable a module in the manager while
       its cells read waits, then enable it: the callback gets `nil, "the module was disabled
       while the read waited"` without a capture, and a poll gated on it asks again.
       `image_search::resend` is unit-tested; the path through `apply_enabled`, the worker and
       the drain has not run, and a headless run cannot disable a module.
+      Superseded by slice F (2026-10-12): `matchCellsAsync` is gone, and a cells read given a
+      callback is dropped with its disabled module, as every callback is; `resend` went with the
+      hold. A poll keeps one read out by its key, which a dropped read no longer is.
 - [ ] **End to end with the reader's author:** his reader and `cells` log hex for the same
       static menu at the same time, through the same source (`[screen] capture =
       "duplication"`, which his pack prefers). The golden test proves the reduction only; this
@@ -7685,6 +7712,9 @@ kind of place that says how long the first held the loop.
       raise at the resume for a wait, and something for the callback form slice F gives
       `matchCells` — is the question to settle first. (`template{ capture }`'s `count` is counted
       on the worker since the same review.)
+      Slice F gave `matchCells` its callback form, and both forms still check and decode the
+      states at the call, so a bad digit raises there in both; moved to the worker, it would be
+      answered `nil` and why to a callback and raised at the resume of a wait.
 - [ ] **What the note area costs the event loop now**: the capture is off it, and since
       `host.screen.profile` takes a callback (below) so is the reduction of its 910x522 profile;
       the profile's tables and the comparison are not, and since W2 `bodyBetween`'s small row
@@ -8290,6 +8320,59 @@ kind of place that says how long the first held the loop.
       capture back on the plain screen guard); the source test of the backend's callers holds
       what W1a to W3t built, and fails on a read added outside a scope, before one or by a direct
       call of the closure. Nothing audible changes. Docs: macos-port.md.
+      Slice F, 2026-10-12 (wbr-final.md; Q1 = A, Q2 = A, Q3 = A): every `host.screen` call that
+      waits takes a callback after its own arguments, as `host.ocr.recognize` does, and the four
+      calls that were callback forms of their own are gone: `snapshotAsync` is `snapshot(opts,
+      cb)`, with `key`, `at` and `change`; `imageSearchAsync` and `imageSearchMulti` are
+      `imageSearch(template | list, opts, cb?)`, the index the hit's `n`; `matchCellsAsync` is
+      `matchCells(opts, states, cb)`. `pixel`, `pixels`, `cells`, `template` (its `key` in the
+      spec), a snapshot's `crop`, `imageSearchAll`, `save` and `saveMarked` take one as well. The
+      shim takes the callback form when the argument after the call's own is given — `pixel`'s
+      third after a point, fourth after two numbers — so it never waits and returns nothing,
+      wherever it is called. The work is that of the call without one, on the same threads: the
+      points of `pixel` and `pixels` read on `screen-capture` (`Asker::Callback`; an answer known at
+      the call, a snapshot's points or a window point with no pixel, through the lane's `now` list
+      on the next tick), and the image worker's calls filed by one path (`Plan`, `start_plan`,
+      `submit_plan`, `submit_callback`, `submit_now`; `ImageWaiter`, `JobKind`, `BuildAnswer`), 64
+      a module VM together. Every callback is called `cb(value, why, info)`
+      (`snapshot::callback_values`): what the call answers in a handler, its reason second even
+      when `nil`, then `info`, whose `time` and `inputEpoch` are the moment of the picture read —
+      the worker stamps each capture as it comes back (`capture_source::Captured`,
+      `ImageResult.seen`, the input epoch shared with it), the capture thread the points it read
+      (`SnapOutcome::Colours`), and a snapshot's is its own; `profile`'s and `imageSearchEach`'s
+      callbacks get it too. `opts.key`, only with a callback, replaces an older request of the
+      same module VM and call: at the call, the worker skipping one it has not begun
+      (`ImageState::supersede`), and as it runs for one already answered (`replaced`);
+      `host.screen.pending(key)` asks the image worker's requests too, those in the mailbox
+      included (`handed`). "Held and run again" ended: a disabled module's image answers are
+      dropped like its reads' (`purge_pending_images` on a disable, the mailbox's discard), and
+      `Fate`, `Hold`, `resend` and `the module was disabled while the read waited` are gone; the
+      overlay runtime's landmark gate (0.5.5) keeps one search out by its key and `pending`, so
+      after a disable it asks again at its first pass instead of waiting for a held answer. A
+      shot's file that could not be written is the callback's error, its callback not called.
+      `callback_form` names each call's own form in the `could not wait here` and timer lines.
+      Kontakt (0.1.6) and Melodyne (0.1.8) call the new forms; the capture probe, the HTML probe
+      and the macOS workflow's check of the probe's line follow. Tested (task_tests.rs,
+      image_search.rs, mailbox_tests.rs, overlay_menu_tests.rs, task.rs): every call's callback
+      called with what its wait answers, then `info` with its picture's moment (a snapshot's own
+      for its points and a crop, none when nothing was read), the folded calls among them; a
+      disabled module's answers dropped, its key no longer out and the next ask answered; a newer
+      key ending the older request of its own call only, at the call and as it runs; the callback
+      forms' mistakes raising at the call, a `key` without a callback raising in every call, and an
+      unwritten shot reported; a worker's answer carrying its picture's moment; a landmark gate
+      asking again after its answer was dropped; an answer known at the call delivered when
+      nothing else is due, and one a newer key replaced answered as a replaced task is, with its
+      call's own could-not-look value; the lines naming each call's form. Each fails against the
+      code without the change (verified with the moment left out of `info`, a capture without
+      one, the image lane's drop on a disable taken out, a dropped answer left out under its key,
+      the ending at the call and the judging as it runs taken out, a `key` taken without a
+      callback, the gate on a flag again, the `now` list left out of the drain's check, and a
+      replaced answer known at the call given what was known). Docs: screen.md (the top, Failure
+      reasons, Where it waits, a new "With a callback", every call's section; `snapshotAsync`
+      folded into `snapshot`, `imageSearchAsync` and `imageSearchMulti` into `imageSearch`,
+      `matchCellsAsync` into `matchCells`), ocr.md, timer.md, input.md, gamepad.md, overlay.md,
+      require.md, building-a-page.md, module-runtime-and-lifecycle.md, the feasibility study's
+      note, the index.
 - [ ] **NVDA check of step V1 (session B, with V2 and T2)** — nothing should sound different.
       Kontakt with a CSS library in REAPER: a hotspot toggle pressed (its state said after the
       press, as before); the snapshot camera and its dropdown with the bar shut and open (the bar
@@ -8427,6 +8510,10 @@ kind of place that says how long the first held the loop.
       screen capture on the event loop` line, and its `ScreenCaptureKit did not answer` check now
       reads "on the capture thread". A Mac module's `host.screen` call where it cannot wait
       captures on the pump thread as before, inside its scope.
+- [ ] **Slice F never ran on a Mac** (type-checked only): `pixel` and `pixels` given a callback
+      read on the `screen-capture` thread through ScreenCaptureKit, as a handler's are; a
+      callback's `info.time` from that thread and from the image worker; the capture probe's
+      `snapshot with a callback` line in the macOS jobs, which the next CI run reads.
 - [ ] **NVDA check of step W1b (session C)** — nothing should sound different; announcements that
       read a pixel come about one tick later. Kontakt with a CSS library: Tab through the hotspot
       toggles and press one (its state said after the press); the header's status toggles: Tab,
@@ -8454,7 +8541,13 @@ kind of place that says how long the first held the loop.
       With `calibrate` on: a calibration shot, then the overlay finding the control it shot. Bring
       the log: no `cannot open template` line, and the `batch of … read(s) took` lines, whose second
       figure counts the templates' opening now.
-- [ ] **W1a's remedies name `snapshotAsync`** (review of W1a): the `could not wait here` line and
+- [ ] **NVDA check of slice F (session C)** — nothing should sound different. With Kontakt and a
+      sample library in front and its overlay up: turn the library's module off in the module
+      manager and on again — the overlay comes back within a poll or two (its landmark gate asks
+      again once its search was dropped, where it used to wait for a held one). Melodyne's tools
+      and note area, and Kontakt's header toggles, as before. Bring the log: no `could not wait
+      here` line, and no `[landmark] … could not look` line that stays.
+- [x] **W1a's remedies name `snapshotAsync`** (review of W1a): the `could not wait here` line and
       the timer's line offer `host.screen.snapshotAsync(opts, function(snap, why) … end)` as the
       form that waits for nothing, since `snapshot(opts, cb)` does not exist yet, and Q1 = A
       deletes `snapshotAsync`. Slice F, which folds it into a trailing callback of `snapshot`,
@@ -8470,6 +8563,9 @@ kind of place that says how long the first held the loop.
       Since W3 `imageSearch`'s and `imageSearchMulti`'s lines name `imageSearchAsync`, which slice
       F folds into `imageSearch(template | list, opts, cb)` — screen.md shows `imageSearch`'s line
       word for word — and `imageSearchAll`, `save` and `saveMarked` name none.
+      Done with slice F (2026-10-12): every call's line names its own callback form, and
+      screen.md shows `pixel`'s, `pixels`', `snapshot`'s, `profile`'s and `imageSearch`'s lines and
+      the timer's line word for word.
 - [x] **NVDA check of step 11.3 (session A), before it is committed** — nothing should sound
       different; what changed is that a click, a key or a focus no longer waits for a picture the
       module has out. Windows, at the reads' own speed: sforzando's "Instrument" (an `opensMenu`
@@ -8577,13 +8673,14 @@ Follow-ups this work found and did not take on:
       since W3t, except a search's that cannot wait. A module's own menu test that reads a pixel
       on every tick reads it on the event loop, said once — the scripted host's
       `a_modules_own_pixel_test` keeps one — until 12b makes it raise.
-      Perhaps later `snapshotAsync` as a wait, which would let Avenger's preset step be written in
-      a line. Where such a wait cannot wait — in the runtime's coroutine for the hooks asked on
-      every scan, in a coroutine of the module's own, where Luau cannot stop — it captures on the
-      event loop and is logged, until 12b makes it raise there (decided 2026-10-10; step B3's "for
-      good, and never raises" no longer holds). No `when` of the tree reads the screen any more:
-      Melodyne's read-out boxes are its watcher's answer (V2), and Kontakt's view and ON:EAR's
-      filled tiles are probes of their overlays, read in the handler before a scan (T2).
+      Perhaps later a change wait or an `at` without a callback, as a wait, which would let
+      Avenger's preset step be written in a line. Where such a wait cannot wait — in the runtime's
+      coroutine for the hooks asked on every scan, in a coroutine of the module's own, where Luau
+      cannot stop — it captures on the event loop and is logged, until 12b makes it raise there
+      (decided 2026-10-10; step B3's "for good, and never raises" no longer holds). No `when` of the
+      tree reads the screen any more: Melodyne's read-out boxes are its watcher's answer (V2), and
+      Kontakt's view and ON:EAR's filled tiles are probes of their overlays, read in the handler
+      before a scan (T2).
 - [ ] **A capture that hangs on Windows.** The read service's hang clock runs only while a
       recognition runs; on the Mac `SCK_TIMEOUT` bounds a capture, but the GDI capture has no
       bound. Since B1b+M a module waits for its reads, so a capture that never returns leaves it

@@ -807,17 +807,26 @@ function Overlay:_outranked()
   return rank ~= nil and rank >= (self._specificity or 0)
 end
 
+-- The landmark gates' keys, one per gate in this VM: what host.screen.pending asks about.
+local landmarks = 0
+
 function Overlay:landmark(image, opts)
   assertUnbound(self, "landmark")
   self._landmarkImage = image
   self._anchorLandmark = opts ~= nil and opts.anchor == true
-  -- The template match runs on a worker thread (host.screen.imageSearchAsync) so the
-  -- detection poll never blocks the main thread on it. The gate returns the LAST
-  -- known result and kicks off a refresh (at most one in flight); when the result
-  -- lands, a state TRANSITION re-checks immediately (snappy activate/deactivate)
-  -- while the steady state stays cheap. Sticky: once found, only a tiny region around
-  -- the last hit is re-searched; a miss there falls back to the full region.
-  local lastHit, matched, pending = nil, false, false
+  -- The template match runs on the image worker (host.screen.imageSearch with a callback) so the
+  -- detection poll never waits for it. The gate returns the LAST known result and kicks off a
+  -- refresh (at most one out, by its key: host.screen.pending); when the result lands, a state
+  -- TRANSITION re-checks immediately (snappy activate/deactivate) while the steady state stays
+  -- cheap. Sticky: once found, only a tiny region around the last hit is re-searched; a miss
+  -- there falls back to the full region.
+  --
+  -- The key, not a flag set until the callback runs: an answer that comes while the module is off
+  -- is dropped, its callback never called, and a flag would then stay set for good — the gate
+  -- would never search again. A dropped answer is no longer pending, so the next pass asks again.
+  landmarks += 1
+  local key = "overlay.landmark." .. landmarks
+  local lastHit, matched = nil, false
   -- Near-miss diagnosis, armed once per plug-in window and re-armed whenever a landmark that
   -- WAS matching stops.
   --
@@ -851,8 +860,7 @@ function Overlay:landmark(image, opts)
     -- Rank matters: a LESS specific winner (Kontakt's own header while no library is
     -- recognised) must not silence a library overlay, or it could never take over.
     if self:_outranked() then return matched end
-    if not pending then
-      pending = true
+    if not host.screen.pending(key) then
       local sticky = lastHit ~= nil
       local region
       if lastHit then
@@ -865,8 +873,7 @@ function Overlay:landmark(image, opts)
       -- region, and trying many scales over that (each a fresh full-region scan +
       -- resize) is far too slow and starves the worker when 1.0 misses. Scaling is for
       -- small regions (gtoggle); the wordmark is captured at this setup, so 1.0 fits.
-      host.screen.imageSearchAsync(image, { region = region, tolerance = MATCH_TOLERANCE }, function(hit, why)
-        pending = false
+      host.screen.imageSearch(image, { region = region, tolerance = MATCH_TOLERANCE, key = key }, function(hit, why)
         -- "Could not look" is not "not there". A reason means no search was made — the capture
         -- failed, or the search was ended because the module had too many waiting — so it says
         -- nothing about the landmark, and the last verdict stands until a search is made at the
@@ -904,7 +911,7 @@ function Overlay:landmark(image, opts)
         -- this exists for happened by loading a second patch into a window already open.
         if hit == nil and (probedOrigin ~= origin.id or was) then
           probedOrigin = origin.id
-          host.screen.imageSearchAsync(image, {
+          host.screen.imageSearch(image, {
             region = region,
             tolerance = MATCH_TOLERANCE * 3,
           }, function(near)
@@ -1196,7 +1203,7 @@ end
 
 -- Authored rectangle {x1, y1, x2, y2} on screen, likewise: what a `region` would read.
 --
--- `opts.whole = true` gives the corners host.ocr.recognize and host.screen.snapshotAsync take, which
+-- `opts.whole = true` gives the corners host.ocr.recognize and host.screen.snapshot take, which
 -- are whole numbers and not empty: cut toward zero, the pixels the overlay's own focus read takes
 -- (readCorners), and nil with "empty on screen" when nothing is left. A scaled overlay places whole
 -- numbers already; an unscaled one with a fractional frame does not, and a read would refuse its
@@ -1588,7 +1595,7 @@ local function sliderThumb(self, c)
   if not (c.region and c.thumbImage) then return nil end
   local region = regionOf(self, c)
   if not region then return nil end
-  local _, hit = host.screen.imageSearchMulti(asList(c.thumbImage), {
+  local hit = host.screen.imageSearch(asList(c.thumbImage), {
     region = region,
     tolerance = c.tolerance or MATCH_TOLERANCE,
     scales = c.scales or MATCH_SCALES,
@@ -1626,7 +1633,7 @@ local function graphicalButtonPoint(self, c)
   if not c.image then return nil end
   local rect = searchRect(self, c)
   if not rect then return nil end
-  local _, hit = host.screen.imageSearchMulti(asList(c.image), {
+  local hit = host.screen.imageSearch(asList(c.image), {
     region = rect,
     tolerance = c.tolerance or MATCH_TOLERANCE,
     scales = c.scales or MATCH_SCALES,
@@ -1929,7 +1936,7 @@ local function valueOfNow(self, c, done)
     addTemplates(templates, labels, c.onImage, "on")
     addTemplates(templates, labels, c.offImage, "off")
     if #templates == 0 then return done(nil) end
-    host.screen.imageSearchAsync(templates, opts, function(hit, why)
+    host.screen.imageSearch(templates, opts, function(hit, why)
       if hit == nil and why ~= nil then couldNotLook(c, why) end
       done(hit and labels[hit.n] or nil)
     end)
@@ -1950,7 +1957,7 @@ local function valueOfNow(self, c, done)
       if why then return done(why) end
     end
     -- `opts.region` is searchRect's already (above), so there is nothing to work out again.
-    host.screen.imageSearchAsync(asList(c.image), opts, function(hit, why)
+    host.screen.imageSearch(asList(c.image), opts, function(hit, why)
       if not hit and why ~= nil then
         couldNotLook(c, why)
         return done(nil)
@@ -2004,7 +2011,7 @@ local function valueOfNow(self, c, done)
   -- A slider: its value IS where the thumb is drawn. "not found" rather than a number
   -- when it cannot be located — a percentage invented from a failed search is worse than
   -- an admission, because it sounds right.
-  host.screen.imageSearchAsync(asList(c.thumbImage), opts, function(hit, why)
+  host.screen.imageSearch(asList(c.thumbImage), opts, function(hit, why)
     if not hit and why ~= nil then
       couldNotLook(c, why)
       return done(nil)
@@ -3106,7 +3113,7 @@ function Overlay:activate(index)
     local rect, rwhy = searchRect(self, c)
     if not rect then return unplaced(self, c, rwhy) end
     host.speech.output((c.label or "") .. ", activated", { interrupt = true })
-    host.screen.imageSearchAsync(asList(c.image), {
+    host.screen.imageSearch(asList(c.image), {
       region = rect,
       tolerance = c.tolerance or MATCH_TOLERANCE,
       scales = c.scales or MATCH_SCALES,
@@ -4532,7 +4539,7 @@ local function report(self, opts)
         end
       end
       -- `dragBy` is read on a worker callback, long after this control was declared, so a
-      -- wrong type there surfaces as a Lua error inside an imageSearchAsync continuation with
+      -- wrong type there surfaces as a Lua error inside an imageSearch callback with
       -- nothing in it naming the control. Caught here instead, where the message can.
       if c.dragBy ~= nil then
         local k = type(c.dragBy)
@@ -6183,7 +6190,7 @@ end
 --
 --   test(o, answer)   "is a menu open over this overlay's plug-in right now?" — calls
 --                     answer(seen) exactly once per call, at once or later (from an
---                     imageSearchAsync or snapshotAsync callback). Any value but nil and false
+--                     imageSearch or snapshot callback). Any value but nil and false
 --                     counts as seen, so a search's hit can be handed straight on. `o` is the
 --                     overlay.
 --
@@ -8108,7 +8115,7 @@ end
 -- (2026-09-26). Now the press takes a snapshot of a rectangle the origin already carries and
 -- nothing else — waited for in the press's handler, taken on the `screen-capture` thread, and
 -- the click made only if the overlay is still where the press was (_menuOpening). The later two
--- are taken off the event loop at their time (snapshotAsync with `at`) and written when they
+-- are taken off the event loop at their time (snapshot with a callback and `at`) and written when they
 -- arrive; the "before" one is written last, once both are in, and its snapshot kept until then.
 -- Not on the next pass after the click: that is when the menu's first answer, its window coming
 -- to the front and the user's first key arrive, and a PNG keeps the module waiting for hundreds
@@ -8194,7 +8201,7 @@ function Overlay:_menuShots(c)
     end
     for _, ms in ipairs({ 600, 1500 }) do
       local suffix, when = "-menu-after-" .. ms, ms .. " ms after"
-      local asked, err = pcall(host.screen.snapshotAsync, { region = region, at = pressed + ms },
+      local asked, err = pcall(host.screen.snapshot, { region = region, at = pressed + ms },
         function(later, reason)
           write(suffix, when, later, reason)
           oneIn()
@@ -8220,7 +8227,7 @@ end
 -- shots' later two come after the click has closed the menu, and the calibration shot is of the
 -- plug-in, with no menu open. What a tester sends back so an item offset can be measured.
 --
--- The capture is asked for here — one snapshotAsync, since the menu tick's pass that sees the menu
+-- The capture is asked for here — one snapshot with a callback, since the menu tick's pass that sees the menu
 -- cannot wait for a picture — and `andThen(write)` runs in its answer, or at once when it cannot be
 -- asked: the caller clicks the item there, after the picture, and runs `write`, which writes the
 -- PNG, on a later pass.
@@ -8244,7 +8251,7 @@ function Overlay:_pickShot(c, m, x, y, andThen)
         path, ok and "true" or ("false: " .. tostring(why or "no reason given"))))
     end
   end
-  local asked, err = pcall(host.screen.snapshotAsync, { region = region }, function(snap, why)
+  local asked, err = pcall(host.screen.snapshot, { region = region }, function(snap, why)
     -- The pass's work, a little later: no probe is read in it, nor in the pick's onDone at the click.
     asMenuTick(andThen, writer(snap, why))
   end)

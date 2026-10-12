@@ -793,7 +793,7 @@ jobs:
             echo "::error::a capture call threw: $(grep 'CAPTURE PROBE: .*THREW' automation-platform.log)"
             exit 1
           fi
-          # The answers from the screen-capture thread: a snapshotAsync and a change wait, always
+          # The answers from the screen-capture thread: a snapshot with a callback and a change wait, always
           # asked, and a text read of the snapshot the timer's handler waited for when there is one.
           # The probe says how many came of how many were asked without raising; a missing one is a
           # thread that never called back. A waited snapshot that answered nil is its own error, not
@@ -1363,7 +1363,7 @@ jobs:
             exit 1
           fi
           # An asynchronous ask that raised is not counted as asked, so it is looked for here.
-          if grep -q "CAPTURE PROBE: \(snapshotAsync\|change wait\|read of the snapshot\) THREW" automation-platform.log; then
+          if grep -q "CAPTURE PROBE: \(snapshot with a callback\|change wait\|read of the snapshot\) THREW" automation-platform.log; then
             echo "::error::a snapshot call threw on the newer macOS: $(grep 'CAPTURE PROBE: .*THREW' automation-platform.log)"
             exit 1
           fi

@@ -54,14 +54,12 @@ struct Host {
     /// Controller listeners, as the host keeps them (`Event::Pad`, opened by the host's own
     /// `open_pad_in`).
     pads: crate::gamepad_api::Pads,
-    /// Image searches waiting or held, as the host keeps them (`Event::Image`, opened by the host's
-    /// own `open_image_in`).
-    images: RefCell<HashMap<u64, crate::image_search::PendingImage>>,
     /// Snapshot requests' keys, and the bytes their pictures hold (`Event::Snapshot`, opened by the
     /// host's own `open_snapshot_in`).
     snaps: crate::snapshot::SnapState,
     snap_bytes: Rc<Cell<usize>>,
-    /// No image worker: the image searches here are filed and answered by hand.
+    /// No image worker: the image searches here are filed and answered by hand, and opened by the
+    /// host's own `open_image_in` (`Event::Image`).
     image_state: crate::image_search::ImageState,
     /// The pages, as the host keeps them (`Event::Page`, handed on by the host's own
     /// `webview_lua::hand_on` and opened by its `open_event`).
@@ -173,8 +171,8 @@ impl MailHost for Host {
             Event::Pad { token, event, delivery, .. } => {
                 crate::gamepad_api::open_pad_in(&self.pads, token, &event, &delivery, &|i, w, m| self.report_error(i, w, m))
             }
-            Event::Image { p, outcome, ended } => {
-                crate::image_search::open_image_in(&self.images, &self.enabled, &self.gens, *p, outcome, ended)
+            Event::Image { p, outcome, seen } => {
+                crate::image_search::open_image_in(&self.image_state, *p, outcome, seen, &|i, w, m| self.report_error(i, w, m))
             }
             Event::Snapshot { p, answer } => crate::snapshot::open_snapshot_in(&self.snaps, *p, answer, &self.snap_bytes, &|i, w, m| {
                 self.report_error(i, w, m)
@@ -189,7 +187,7 @@ impl MailHost for Host {
         match ev {
             Event::Read(r) => reads::discard_read(self, *r),
             Event::After { token } => self.timers.drop_queued(token),
-            Event::Image { p, ended, .. } => crate::image_search::discard_image_in(&self.images, *p, ended, why == Why::Disabled),
+            Event::Image { p, .. } => crate::image_search::discard_image_in(&self.image_state, *p),
             Event::Snapshot { p, .. } => crate::snapshot::drop_answer(&self.snaps, *p),
             _ => {}
         }
@@ -217,7 +215,6 @@ fn host() -> Rc<Host> {
         errors: RefCell::new(Vec::new()),
         settings: RefCell::new(HashMap::new()),
         pads: crate::gamepad_api::Pads::default(),
-        images: RefCell::new(HashMap::new()),
         snaps: crate::snapshot::SnapState::default(),
         snap_bytes: Rc::new(Cell::new(0)),
         image_state: crate::image_search::ImageState::detached(),
@@ -651,8 +648,8 @@ fn every_kind_of_handler_waits_at_a_read() {
     modules.push((a, "pad 9865,5"));
     // An image search's answer.
     let a = vm(&h, 6);
-    let p = crate::image_search::test_pending(&a, &h.gens.borrow(), 61, 6, f(&a, read("image", 9866)));
-    let ev = Event::Image { p: Box::new(p), outcome: crate::image_search::test_found_nothing(), ended: false };
+    let p = crate::image_search::test_pending(&h.image_state, &a, &h.gens.borrow(), 61, 6, f(&a, read("image", 9866)));
+    let ev = Event::Image { p: Box::new(p), outcome: crate::image_search::test_found_nothing(), seen: None };
     assert_eq!(mailbox::deliver(&*h, 6, &a, ev), Delivered::Parked);
     modules.push((a, "image 9866,5"));
     // A snapshot's answer.
@@ -781,29 +778,39 @@ fn a_busy_modules_controller_press_reaches_its_listener_or_nothing_once_it_went(
 }
 
 /// An image search's answer that waited in a busy module's mailbox runs its callback through the
-/// host's own arm (`open_image_in`) once the module is free; one whose module was disabled while
-/// it waited is held, to be searched again when the module is on again, and runs nothing now.
+/// host's own arm (`open_image_in`) once the module is free, with `info` after the hit and its
+/// reason; one whose module was disabled while it waited is dropped, as a read's is, and runs
+/// nothing — then or once the module is on again.
 #[test]
-fn a_busy_modules_image_answer_runs_once_it_is_free_and_is_held_when_it_was_disabled() {
+fn a_busy_modules_image_answer_runs_once_it_is_free_and_is_dropped_when_it_was_disabled() {
     let h = host();
     let a = vm(&h, 1);
-    let cb: Function = a.load("return function(hit) heard[#heard + 1] = 'searched ' .. tostring(hit) end").eval().unwrap();
-    let answer = |p| Event::Image { p: Box::new(p), outcome: crate::image_search::test_found_nothing(), ended: false };
-    let p = crate::image_search::test_pending(&a, &h.gens.borrow(), 41, 1, cb.clone());
+    let cb: Function = a
+        .load("return function(hit, why, info) heard[#heard + 1] = 'searched ' .. tostring(hit) .. ' ' .. type(info) end")
+        .eval()
+        .unwrap();
+    let answer = |p| Event::Image { p: Box::new(p), outcome: crate::image_search::test_found_nothing(), seen: None };
+    let p = crate::image_search::test_pending(&h.image_state, &a, &h.gens.borrow(), 41, 1, cb.clone());
     assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
     assert_eq!(mailbox::deliver(&*h, 1, &a, answer(p)), Delivered::Queued);
     assert!(task::test_release(&*h, "w", Value::Nil));
     mailbox::run_queued(&*h);
-    assert_eq!(heard(&a), "searched nil");
-    // Disabled while it waits: held, not run, not let go.
-    let p = crate::image_search::test_pending(&a, &h.gens.borrow(), 42, 1, cb);
+    assert_eq!(heard(&a), "searched nil table");
+    // Disabled while it waits: dropped, not run, and its key no longer out.
+    let owner = reads::owner_of(&a, &h.gens.borrow(), 1);
+    let p = crate::image_search::test_keyed(&h.image_state, &a, &h.gens.borrow(), 42, 1, cb, "k");
     assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
     assert_eq!(mailbox::deliver(&*h, 1, &a, answer(p)), Delivered::Queued);
+    assert!(h.image_state.waiting_with(owner.idx, owner.gen, "k"), "out while it waits in the mailbox");
     h.enabled.borrow_mut()[1] = false;
     mailbox::drop_owner(&*h, 1, Why::Disabled);
     task::drop_owner(&*h, 1);
-    assert!(crate::image_search::test_held(&h.images, 42), "held for the module's next turn on");
-    assert_eq!(heard(&a), "searched nil");
+    assert!(h.discarded.borrow().contains(&(1, "image", Why::Disabled)), "{:?}", h.discarded.borrow());
+    h.enabled.borrow_mut()[1] = true;
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), "searched nil table", "nothing ran for the dropped answer");
+    assert!(!h.image_state.has_pending(), "and nothing of it is kept");
+    assert!(!h.image_state.waiting_with(owner.idx, owner.gen, "k"), "nor is its key out");
     assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
 }
 
@@ -845,7 +852,7 @@ fn a_busy_modules_profile_answer_waits_as_a_handler_and_its_key_is_out_until_it_
     let a = vm(&h, 1);
     let owner = reads::owner_of(&a, &h.gens.borrow(), 1);
     let pending = |key: &str| {
-        crate::snapshot::pending_in(&h.snaps, &h.gens.borrow(), &a, 1, &Value::String(a.create_string(key).unwrap())).unwrap()
+        crate::snapshot::pending_in(&h.snaps, &h.image_state, &h.gens.borrow(), &a, 1, &Value::String(a.create_string(key).unwrap())).unwrap()
     };
     let cb: Function = a
         .load(

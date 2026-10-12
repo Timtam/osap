@@ -27,8 +27,13 @@ name = "Overlay runtime"
 # screen-capture thread, and makes the press's click only while the overlay is still where the
 # press was. Nothing a module calls is new. 0.5.4 drags a slider, and says where its thumb went,
 # only while the overlay is still where the step began, its thumb searched for again after each
-# search, which waits in a handler now. Nothing a module calls is new.
-version = "0.5.4"
+# search, which waits in a handler now. Nothing a module calls is new. 0.5.5 searches with
+# host.screen.imageSearch — a callback where it must not wait, a template list where it reads a
+# toggle — and takes its calibration pictures with host.screen.snapshot and a callback, where
+# imageSearchAsync, imageSearchMulti and snapshotAsync are gone; a landmark gate keeps one search
+# out by its key (host.screen.pending), so it asks again after its module was off, whose answers
+# are dropped. Nothing a module calls is new.
+version = "0.5.5"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

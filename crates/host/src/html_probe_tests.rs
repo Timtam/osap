@@ -206,10 +206,12 @@ function T.probe()
     return true
   end)
   rawset(T.host.input, "move", function(x, y) S.moves[#S.moves + 1] = { x, y } end)
-  -- host.screen.snapshotAsync as the harness takes it, with its change wait and key kept.
-  local snapshotAsync = T.host.screen.snapshotAsync
-  rawset(T.host.screen, "snapshotAsync", function(opts, cb)
-    snapshotAsync(opts, cb)
+  -- host.screen.snapshot with a callback as the harness takes it, with its change wait and key
+  -- kept; without one, the scripted host's own.
+  local snapshot = T.host.screen.snapshot
+  rawset(T.host.screen, "snapshot", function(opts, cb)
+    if cb == nil then return snapshot(opts) end
+    snapshot(opts, cb)
     local r = S.asyncs[#S.asyncs]
     r.change, r.key = opts.change, opts.key
   end)
@@ -235,7 +237,7 @@ function T.readNext(text)
   end
   error("no read is waiting: " .. T.dump())
 end
--- The oldest picture asked of snapshotAsync, answered now with `info` (a plain one's by default);
+-- The oldest picture asked with a callback, answered now with `info` (a plain one's by default);
 -- the snapshot it handed over.
 function T.picture(info)
   local r = table.remove(S.asyncs, 1)

@@ -2,8 +2,8 @@
 //! at a wait while the event loop goes on; and the waits it stops at: `host.ocr.recognize` without
 //! a callback, which raises where it cannot wait, and the `host.screen` calls that wait
 //! (`host.screen.snapshot`, `pixel`, `pixels`, `profile`, `cells`, `matchCells`,
-//! `template{ capture }`, a snapshot's `crop`, `imageSearch`, `imageSearchMulti`, `imageSearchAll`,
-//! `save` and `saveMarked`), which run on the event loop where they cannot, with a log line.
+//! `template{ capture }`, a snapshot's `crop`, `imageSearch`, `imageSearchAll`, `save` and
+//! `saveMarked`), which run on the event loop where they cannot, with a log line.
 //!
 //! **One handler per module at a time.** Every event a module hears — a hotkey, a captured key, a
 //! controller event, a timer, a window trigger, a focus change, the answer to a read, an image
@@ -22,7 +22,7 @@
 //! ([`Started::Now`]). The calls that work over a region wait for the image worker
 //! (`image_search.rs`): `profile` for its picture and then its reduction, `cells` and `matchCells`
 //! for their capture and their grid, `template{ capture }` for its picture, a snapshot's `crop` for
-//! its copy, the three searches for their capture and their matching, `save` and `saveMarked` for
+//! its copy, the two searches for their capture and their matching, `save` and `saveMarked` for
 //! their capture and their file (`save.rs`) — each answered at once when there is nothing to read
 //! this time.
 //!
@@ -207,11 +207,18 @@ fn library_of(call: &str) -> &str {
 fn callback_form(call: &str) -> Option<&'static str> {
     match call {
         "host.ocr.recognize" => Some("host.ocr.recognize(what, opts, function(reading) … end)"),
-        "host.screen.snapshot" => Some("host.screen.snapshotAsync(opts, function(snap, why) … end)"),
+        "host.screen.snapshot" => Some("host.screen.snapshot(opts, function(snap, why) … end)"),
+        "host.screen.pixel" => Some("host.screen.pixel(x, y, opts, function(colour, why) … end)"),
+        "host.screen.pixels" => Some("host.screen.pixels(points, opts, function(colours, why) … end)"),
         "host.screen.profile" => Some("host.screen.profile(opts, function(profile, why) … end)"),
-        "host.screen.matchCells" => Some("host.screen.matchCellsAsync(opts, states, function(match, why) … end)"),
-        "host.screen.imageSearch" => Some("host.screen.imageSearchAsync(template, opts, function(hit, why) … end)"),
-        "host.screen.imageSearchMulti" => Some("host.screen.imageSearchAsync(templates, opts, function(hit, why) … end)"),
+        "host.screen.cells" => Some("host.screen.cells(opts, function(cells, why) … end)"),
+        "host.screen.matchCells" => Some("host.screen.matchCells(opts, states, function(match, why) … end)"),
+        "host.screen.template" => Some("host.screen.template(spec, function(template, why) … end)"),
+        "Snapshot:crop" => Some("s:crop(region, function(crop, why) … end)"),
+        "host.screen.imageSearch" => Some("host.screen.imageSearch(template, opts, function(hit, why) … end)"),
+        "host.screen.imageSearchAll" => Some("host.screen.imageSearchAll(template, opts, function(hits, why) … end)"),
+        "host.screen.save" => Some("host.screen.save(path, opts, function(saved, why) … end)"),
+        "host.screen.saveMarked" => Some("host.screen.saveMarked(path, opts, function(saved, why) … end)"),
         _ => None,
     }
 }
@@ -266,7 +273,7 @@ pub(crate) fn timer_wait_line(module: &str, ms: u128, call: &str, place: &str, k
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Ctx {
     /// "hotkey", "key", "gamepad", "window trigger", "focus change", "timer", "ocr.recognize", an
-    /// image search's binding, "screen.snapshotAsync", "settings onChange (<key>)", "page message",
+    /// image search's binding, "screen.snapshot", "settings onChange (<key>)", "page message",
     /// "page ready", "page close".
     pub what: Cow<'static, str>,
     pub report: usize,
@@ -1299,7 +1306,7 @@ fn disown<H: ReadHost>(h: &H, lua: &Lua) {
 ///
 /// The `host.screen` calls that wait come here where they cannot (`host.screen.snapshot`, `pixel`
 /// and `pixels` when they read the screen, `profile`, `cells`, `matchCells`, `template{ capture }`,
-/// a snapshot's `crop`, the three searches, `save` and `saveMarked` when there is something to
+/// a snapshot's `crop`, the two searches, `save` and `saveMarked` when there is something to
 /// read); `host.ocr.recognize` raises there instead.
 pub(crate) fn legacy<H: ReadHost, T>(
     h: &H,
@@ -1587,7 +1594,7 @@ mod tests {
             l,
             "[com.example.game] host.screen.snapshot could not wait here (a place Luau cannot suspend, or a function \
              the host calls and waits for) and held the event loop 37 ms instead; call it from the event's own \
-             function, or use host.screen.snapshotAsync(opts, function(snap, why) … end); see \"Where it waits\" \
+             function, or use host.screen.snapshot(opts, function(snap, why) … end); see \"Where it waits\" \
              in docs/api/screen.md"
         );
         for case in [Case::Outside, Case::CannotWait, Case::OwnCoroutine] {
@@ -1598,41 +1605,49 @@ mod tests {
         assert!(outside.contains("(outside every event of the module: ") && outside.contains("; call it from a handler, such as host.timer.after(0, …), or use "));
         let own = legacy_line("m", "host.screen.snapshot", Case::OwnCoroutine, 1);
         assert!(own.contains("measure it in a handler and let the hook read what was measured (see \"Where a hook runs\" in docs/api/overlay.md)"), "{own}");
-        // A call without a form that waits for nothing names none: `pixel` and `pixels`, whose two
-        // lines screen.md shows word for word, `cells`, `template` and a snapshot's `crop`, whose
-        // page is screen.md as well, for now.
-        for (call, case) in [("host.screen.pixels", Case::Outside), ("host.screen.pixel", Case::OwnCoroutine)] {
+        // Every call that waits names its callback form: `pixel` and `pixels`, whose two lines
+        // screen.md shows word for word, and every other call on that page.
+        for (call, case, form) in [
+            ("host.screen.pixels", Case::Outside, "host.screen.pixels(points, opts, function(colours, why) … end)"),
+            ("host.screen.pixel", Case::OwnCoroutine, "host.screen.pixel(x, y, opts, function(colour, why) … end)"),
+        ] {
             let line = legacy_line("com.example.game", call, case, 17);
-            assert!(!line.contains(", or use "), "{line}");
+            assert!(line.ends_with(&format!(", or use {form}; see \"Where it waits\" in docs/api/screen.md")), "{line}");
             assert!(SCREEN_MD.contains(&line), "docs/api/screen.md does not show this line word for word:\n{line}");
         }
-        for call in ["host.screen.cells", "host.screen.template", "Snapshot:crop"] {
-            let line = legacy_line("m", call, Case::Outside, 1);
-            assert!(!line.contains(", or use ") && line.ends_with("see \"Where it waits\" in docs/api/screen.md"), "{line}");
+        for (call, form) in [
+            ("host.screen.cells", "host.screen.cells(opts, function(cells, why) … end)"),
+            ("host.screen.template", "host.screen.template(spec, function(template, why) … end)"),
+            ("Snapshot:crop", "s:crop(region, function(crop, why) … end)"),
+            ("host.screen.imageSearchAll", "host.screen.imageSearchAll(template, opts, function(hits, why) … end)"),
+            ("host.screen.save", "host.screen.save(path, opts, function(saved, why) … end)"),
+            ("host.screen.saveMarked", "host.screen.saveMarked(path, opts, function(saved, why) … end)"),
+        ] {
+            for case in [Case::Outside, Case::CannotWait, Case::OwnCoroutine] {
+                let line = legacy_line("m", call, case, 1);
+                assert!(line.ends_with(&format!(", or use {form}; see \"Where it waits\" in docs/api/screen.md")), "{line}");
+            }
         }
-        // `profile` names its callback form — its line screen.md shows word for word — and
-        // `matchCells` `matchCellsAsync`.
+        // `profile` names its callback form — its line screen.md shows word for word — and so does
+        // `matchCells`.
         let profile = legacy_line("com.example.game", "host.screen.profile", Case::CannotWait, 21);
         assert!(profile.contains(", or use host.screen.profile(opts, function(profile, why) … end); see"), "{profile}");
         assert!(SCREEN_MD.contains(&profile), "docs/api/screen.md does not show this line word for word:\n{profile}");
         assert!(legacy_line("m", "host.screen.matchCells", Case::Outside, 1)
-            .contains(", or use host.screen.matchCellsAsync(opts, states, function(match, why) … end); see"));
-        // `imageSearch` and `imageSearchMulti` name `imageSearchAsync`, which takes a list too — the
-        // first's line screen.md shows word for word — and `imageSearchAll`, `save` and
-        // `saveMarked` name none.
+            .contains(", or use host.screen.matchCells(opts, states, function(match, why) … end); see"));
+        // `imageSearch` names its callback form, which takes a list too — its line screen.md shows
+        // word for word.
         let search = legacy_line("com.example.game", "host.screen.imageSearch", Case::CannotWait, 24);
-        assert!(search.contains(", or use host.screen.imageSearchAsync(template, opts, function(hit, why) … end); see"), "{search}");
+        assert!(search.contains(", or use host.screen.imageSearch(template, opts, function(hit, why) … end); see"), "{search}");
         assert!(SCREEN_MD.contains(&search), "docs/api/screen.md does not show this line word for word:\n{search}");
-        assert!(legacy_line("m", "host.screen.imageSearchMulti", Case::Outside, 1)
-            .contains(", or use host.screen.imageSearchAsync(templates, opts, function(hit, why) … end); see"));
-        for call in ["host.screen.imageSearchAll", "host.screen.save", "host.screen.saveMarked"] {
-            let line = legacy_line("m", call, Case::OwnCoroutine, 1);
-            assert!(!line.contains(", or use ") && line.ends_with("see \"Where it waits\" in docs/api/screen.md"), "{line}");
-        }
         assert!(legacy_line("m", "host.screen.save", Case::CannotWait, 1).contains(
             "host.screen.save could not wait here (a place Luau cannot suspend, or a function the host calls and waits \
-             for) and held the event loop 1 ms instead; call it from the event's own function; see"
+             for) and held the event loop 1 ms instead; call it from the event's own function, or use \
+             host.screen.save(path, opts, function(saved, why) … end); see"
         ));
+        // A call the host has no callback form for — one that never waits — names none.
+        let plain = legacy_line("m", "host.screen.size", Case::CannotWait, 1);
+        assert!(plain.ends_with("call it from the event's own function; see \"Where it waits\" in docs/api/screen.md"), "{plain}");
         let summary = {
             let tasks = Tasks::default();
             tasks.legacy.borrow_mut().held.insert(("com.example.game".to_string(), "host.screen.snapshot"), (3, 52));
@@ -1669,6 +1684,11 @@ mod tests {
         assert_eq!(
             timer_wait_line("m", 40, "host.screen.save", "m/src/main.luau:12", &keys[..1]),
             "[m] a timer waited 40 ms for host.screen.save at m/src/main.luau:12; 1 key(s) (Tab) waited behind it — a \
+             poll should not wait: host.screen.save(path, opts, function(saved, why) … end)"
+        );
+        assert_eq!(
+            timer_wait_line("m", 40, "host.screen.size", "m/src/main.luau:12", &keys[..1]),
+            "[m] a timer waited 40 ms for host.screen.size at m/src/main.luau:12; 1 key(s) (Tab) waited behind it — a \
              poll should not wait"
         );
     }

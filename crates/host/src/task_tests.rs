@@ -8,10 +8,11 @@
 //! The holder below stands where the host's `Shared` stands — the service, the reads waiting on
 //! the event loop, the tasks, the timers, which VM each module runs and whether it is enabled —
 //! and each test builds module VMs over it with the host's own bindings: `host.ocr.recognize`, both
-//! forms, and `pending` (ocr/lua.rs and the shim), `host.screen.snapshot`, `pixel` and `pixels`,
-//! which wait, and `snapshotAsync` (snapshot.rs), the calls that wait for the image worker —
-//! `profile`, the cells calls, `template`, `crop`, the three searches (image_search.rs), `save`
-//! and `saveMarked` (save.rs) — and `host.timer` (timers.rs). The tick is `fire`:
+//! forms, and `pending` (ocr/lua.rs and the shim), `host.screen.snapshot` — which waits, or takes
+//! a callback — `pixel` and `pixels` (snapshot.rs), the calls that wait for the image worker —
+//! `profile`, the cells calls, `template`, `crop`, the two searches (image_search.rs), `save` and
+//! `saveMarked` (save.rs), with the callback forms of `profile`, `matchCells` and `imageSearch` —
+//! `host.screen.pending`, and `host.timer` (timers.rs). The tick is `fire`:
 //! due timers, then the readings, as the loop runs them; the snapshots' delivery — the pixel
 //! reads' with them — is `fire_snaps`. A snapshot taken where it cannot wait is a picture of its
 //! region made on the spot, input epoch 7; the capture thread's rounds have pictures from
@@ -379,6 +380,9 @@ impl MailHost for Host {
             Event::Snapshot { p, answer } => crate::snapshot::open_snapshot_in(&self.snaps, *p, answer, &self.snap_bytes, &|i, w, m| {
                 self.report_error(i, w, m)
             }),
+            Event::Image { p, outcome, seen } => {
+                crate::image_search::open_image_in(&self.images, *p, outcome, seen, &|i, w, m| self.report_error(i, w, m))
+            }
             Event::Call { f, args, what, .. } => mailbox::open_call(idx, f, args, what),
             _ => Opened::Gone,
         }
@@ -388,6 +392,7 @@ impl MailHost for Host {
             Event::Read(r) => reads::discard_read(self, *r),
             Event::After { token } => self.timers.drop_queued(token),
             Event::Snapshot { p, .. } => crate::snapshot::drop_answer(&self.snaps, *p),
+            Event::Image { p, .. } => crate::image_search::discard_image_in(&self.images, *p),
             _ => {}
         }
     }
@@ -412,8 +417,9 @@ fn holder((ocr, stop): (Service<Fake>, ShutdownHandle)) -> Rc<Host> {
         images: {
             let (tasks, task_rx) = std::sync::mpsc::channel();
             let (result_tx, results) = std::sync::mpsc::channel();
-            crate::image_search::spawn_image_worker(fake_image_capture, crate::backend::no_comparison, task_rx, result_tx);
-            crate::image_search::ImageState::new(tasks, results)
+            let epoch = Arc::new(AtomicU64::new(0));
+            crate::image_search::spawn_image_worker(fake_image_capture, crate::backend::no_comparison, epoch.clone(), task_rx, result_tx);
+            crate::image_search::ImageState::new(tasks, results, epoch)
         },
         tasks: Tasks::default(),
         mail: Mailboxes::default(),
@@ -487,9 +493,8 @@ fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     screen.set("cells", cells).unwrap();
     screen.set("matchCells", match_cells).unwrap();
     screen.set("template", crate::image_search::test_template(&lua, idx, h.clone(), fake_image_capture, templates_dir()).unwrap()).unwrap();
-    let [search, multi, all] = crate::image_search::test_searches(&lua, idx, h.clone(), fake_image_capture, templates_dir()).unwrap();
+    let [search, all] = crate::image_search::test_searches(&lua, idx, h.clone(), fake_image_capture, templates_dir()).unwrap();
     screen.set("imageSearch", search).unwrap();
-    screen.set("imageSearchMulti", multi).unwrap();
     screen.set("imageSearchAll", all).unwrap();
     let (save, save_marked) = crate::save::test_saves(&lua, idx, h.clone(), fake_image_capture, std::env::temp_dir()).unwrap();
     screen.set("save", save).unwrap();
@@ -499,16 +504,8 @@ fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     screen
         .set(
             "pending",
-            lua.create_function(move |lua, key: Value| crate::snapshot::pending_in(&hh.snaps, &hh.gens.borrow(), lua, idx, &key)).unwrap(),
-        )
-        .unwrap();
-    let hh = h.clone();
-    screen
-        .set(
-            "snapshotAsync",
-            lua.create_function(move |lua, (opts, cb): (Value, Function)| {
-                let args = crate::snapshot::parse_async(&opts, 0.0)?;
-                crate::snapshot::test_submit_async(&*hh, lua, idx, args, cb)
+            lua.create_function(move |lua, key: Value| {
+                crate::snapshot::pending_in(&hh.snaps, &hh.images, &hh.gens.borrow(), lua, idx, &key)
             })
             .unwrap(),
         )
@@ -585,11 +582,13 @@ fn settle(h: &Host) -> Delivered {
     }
 }
 
-/// What a disable does to a module's reads and tasks (`apply_enabled`, after the arbiter's
-/// re-election), and what the enable after it does.
+/// What a disable does to a module's reads, snapshots, image searches and tasks (`apply_enabled`,
+/// after the arbiter's re-election), and what the enable after it does.
 fn disable(h: &Host, idx: usize) {
     h.enabled.borrow_mut()[idx] = false;
     reads::drop_owner(h, idx, false);
+    crate::snapshot::drop_owner(h, idx);
+    crate::image_search::drop_owner(&h.images, idx);
     task::drop_owner(h, idx);
 }
 
@@ -1964,7 +1963,7 @@ fn where_a_snapshot_cannot_wait_it_answers_at_once_and_is_said_once_per_place() 
     assert_eq!(h.tasks.len(), 0);
 }
 
-/// A waited snapshot is one of its module's requests, under `snapshotAsync`'s limits: with the
+/// A waited snapshot is one of its module's requests, under the callback form's limits: with the
 /// whole application's 64 waiting it is not taken, and the handler goes on with `nil` and the
 /// reason, on the next turn — the answer the call gives for a limit, never a raise.
 #[test]
@@ -1977,7 +1976,7 @@ fn a_waited_snapshot_past_the_applications_limit_answers_nil_and_why() {
         run(
             l,
             "answered = 0\n\
-             for _ = 1, 16 do host.screen.snapshotAsync({ region = { 20041, 5, 20051, 9 } }, function() answered += 1 end) end",
+             for _ = 1, 16 do host.screen.snapshot({ region = { 20041, 5, 20051, 9 } }, function() answered += 1 end) end",
         );
     }
     run(&lua, "task.run(function() waited, why = host.screen.snapshot({ region = { 20061, 5, 20071, 9 } }); done = true end)");
@@ -2137,7 +2136,7 @@ fn a_key_queued_behind_a_polls_snapshot_makes_its_request_interactive() {
 
 /// A drain that only resumes handlers leaves `host.epoch()` where it was: a handler that waited
 /// for a snapshot or for a read sees after its wait the epoch it saw before, when nothing else ran.
-/// A drain that hands a callback its answer — a `snapshotAsync`'s, a read's — turns it once, before
+/// A drain that hands a callback its answer — a snapshot's, a read's — turns it once, before
 /// the callback runs.
 #[test]
 fn a_wait_turns_no_epoch_and_a_callbacks_answer_turns_it_once() {
@@ -2160,7 +2159,7 @@ fn a_wait_turns_no_epoch_and_a_callbacks_answer_turns_it_once() {
     settle(&h);
     assert!(yes(&lua, "return afterSnapshot == before and afterRead == before"));
     assert_eq!(h.epoch.get(), start, "nothing turned it");
-    run(&lua, "host.screen.snapshotAsync({ region = { 20142, 5, 20152, 9 } }, function() inSnapshot = epoch() end)");
+    run(&lua, "host.screen.snapshot({ region = { 20142, 5, 20152, 9 } }, function() inSnapshot = epoch() end)");
     settle_snaps(&h);
     assert_eq!(h.epoch.get(), start + 1, "the snapshot callback's drain");
     run(&lua, "host.ocr.recognize({ 9562, 5, 9592, 15 }, function() inRead = epoch() end)");
@@ -2359,7 +2358,7 @@ fn a_pixel_wait_is_one_of_its_modules_requests_and_goes_with_it() {
         run(
             l,
             "answered = 0\n\
-             for _ = 1, 16 do host.screen.snapshotAsync({ region = { 20251, 5, 20261, 9 } }, function() answered += 1 end) end",
+             for _ = 1, 16 do host.screen.snapshot({ region = { 20251, 5, 20261, 9 } }, function() answered += 1 end) end",
         );
     }
     run(&lua, "task.run(function() refused, why = host.screen.pixels({ { 20252, 5 } }); done = true end)");
@@ -3184,13 +3183,14 @@ fn png(path: &std::path::Path) -> (u32, u32, Vec<u8>) {
     (img.width(), img.height(), img.into_raw())
 }
 
-/// `host.screen.imageSearch`, `imageSearchMulti`, `imageSearchAll`, `save` and `saveMarked` in a
-/// handler wait while the image worker captures the region — or reads the snapshot — and matches,
-/// or marks, encodes and writes, and only their module is busy meanwhile: its next key waits in
-/// its mailbox, another module's key runs. The handler goes on with exactly what the calls that do
-/// not wait answer: a hit, `nil` alone for none, `nil` and the reason; the index and the hit, `nil,
-/// nil`, `nil, nil` and the reason; the list, an empty one, an empty one and the reason; `true` and
-/// the same picture written, or `false` and the reason. The waits turn no epoch.
+/// `host.screen.imageSearch` — of one template or a list — `imageSearchAll`, `save` and
+/// `saveMarked` in a handler wait while the image worker captures the region — or reads the
+/// snapshot — and matches, or marks, encodes and writes, and only their module is busy meanwhile:
+/// its next key waits in its mailbox, another module's key runs. The handler goes on with exactly
+/// what the calls that do not wait answer: a hit — of a list, the first template that matches, its
+/// `n` saying which — `nil` alone for none, `nil` and the reason; the list, an empty one, an empty
+/// one and the reason; `true` and the same picture written, or `false` and the reason. The waits
+/// turn no epoch.
 #[test]
 fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_calls_that_do_not_wait_answer() {
     let h = host();
@@ -3215,11 +3215,11 @@ fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_calls_that_do_no
           into.noneValues = select("#", host.screen.imageSearch("dot.png", AREA))
           into.snapOne = { host.screen.imageSearch(HIT, { snapshot = s, region = { 22005, 6, 22030, 20 } }) }
           into.notThere = { host.screen.imageSearch(HIT, LOST) }
-          into.multi = { host.screen.imageSearchMulti({ "dot.png", HIT }, AREA) }
-          into.multiNone = { host.screen.imageSearchMulti({ "dot.png" }, AREA) }
-          into.multiNoneValues = select("#", host.screen.imageSearchMulti({ "dot.png" }, AREA))
-          into.multiNotThere = { host.screen.imageSearchMulti({ HIT }, LOST) }
-          into.multiNotThereValues = select("#", host.screen.imageSearchMulti({ HIT }, LOST))
+          into.list = { host.screen.imageSearch({ "dot.png", HIT }, AREA) }
+          into.listNone = { host.screen.imageSearch({ "dot.png" }, AREA) }
+          into.listNoneValues = select("#", host.screen.imageSearch({ "dot.png" }, AREA))
+          into.listNotThere = { host.screen.imageSearch({ HIT }, LOST) }
+          into.listNotThereValues = select("#", host.screen.imageSearch({ HIT }, LOST))
           into.all = { host.screen.imageSearchAll(HIT, AREA) }
           into.allValues = select("#", host.screen.imageSearchAll(HIT, AREA))
           into.allNone = { host.screen.imageSearchAll("dot.png", AREA) }
@@ -3265,8 +3265,8 @@ fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_calls_that_do_no
         lua.load("return table.concat(order, ' | ')").eval::<String>()
     );
     for name in [
-        "one", "oneValues", "none", "noneValues", "snapOne", "notThere", "multi", "multiNone", "multiNoneValues", "multiNotThere",
-        "multiNotThereValues", "all", "allValues", "allNone", "snapAll", "allNotThere", "saved", "marked", "snapSaved", "unsaved",
+        "one", "oneValues", "none", "noneValues", "snapOne", "notThere", "list", "listNone", "listNoneValues", "listNotThere",
+        "listNotThereValues", "all", "allValues", "allNone", "snapAll", "allNotThere", "saved", "marked", "snapSaved", "unsaved",
     ] {
         assert!(yes(&lua, &format!("return alike(waited.{name}, blocked.{name})")), "{name}: not what the call that does not wait answers");
     }
@@ -3282,10 +3282,10 @@ fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_calls_that_do_no
     assert!(
         yes(
             &lua,
-            r#"return waited.multi[1] == 2 and waited.multi[2].n == 2 and waited.multi[2].x == 22010
-              and waited.multiNoneValues == 2 and waited.multiNotThereValues == 3 and waited.multiNotThere[3] == "no pixels here""#
+            r#"return #waited.list == 1 and waited.list[1].n == 2 and waited.list[1].x == 22010
+              and waited.listNoneValues == 1 and waited.listNotThereValues == 2 and waited.listNotThere[2] == "no pixels here""#
         ),
-        "the index and the hit, nil nil, nil nil why"
+        "the hit of the template that matched, nil alone, nil and why"
     );
     assert!(
         yes(
@@ -3341,7 +3341,7 @@ fn where_the_searches_and_shots_cannot_wait_they_answer_at_once_and_are_said_onc
         local function quiet()
           return {
             { host.screen.imageSearch(HIT, EMPTY) },
-            { host.screen.imageSearchMulti({ HIT }, EMPTY) },
+            { host.screen.imageSearch({ HIT }, EMPTY) },
             { host.screen.imageSearchAll(HIT, EMPTY) },
             { host.screen.save(DIR .. "/empty.png", EMPTY) },
             { host.screen.saveMarked(DIR .. "/off.png", OFF) },
@@ -3353,7 +3353,7 @@ fn where_the_searches_and_shots_cannot_wait_they_answer_at_once_and_are_said_onc
         task.run(function()
           got = {}
           got.quiet = quiet()
-          got.host = hostCall(function() return host.screen.imageSearchMulti({ HIT }, AREA) end)
+          got.host = hostCall(function() return host.screen.imageSearch({ HIT }, AREA) end)
           got.meta = setmetatable({}, { __index = function() return host.screen.imageSearchAll(HIT, AREA) end }).x
           got.own = coroutine.wrap(function() return host.screen.save(DIR .. "/own.png", AREA) end)()
           got.marked = coroutine.wrap(function() return host.screen.saveMarked(DIR .. "/marked.png", { region = AREA.region }) end)()
@@ -3367,7 +3367,7 @@ fn where_the_searches_and_shots_cannot_wait_they_answer_at_once_and_are_said_onc
             r#"local why = "the window's client area is empty (0x0)"
               local off = "the region does not overlap the snapshot"
               local function shaped(q)
-                return q[1][1] == nil and q[1][2] == why and q[2][1] == nil and q[2][2] == nil and q[2][3] == why
+                return q[1][1] == nil and q[1][2] == why and q[2][1] == nil and q[2][2] == why
                   and #q[3][1] == 0 and q[3][2] == why and q[4][1] == false and q[4][2] == why
                   and q[5][1] == false and q[5][2] == off and q[6][1] == nil and q[6][2] == off
               end
@@ -3377,14 +3377,14 @@ fn where_the_searches_and_shots_cannot_wait_they_answer_at_once_and_are_said_onc
     );
     for (call, case) in [
         ("host.screen.imageSearch", Case::Outside),
-        ("host.screen.imageSearchMulti", Case::CannotWait),
+        ("host.screen.imageSearch", Case::CannotWait),
         ("host.screen.imageSearchAll", Case::CannotWait),
         ("host.screen.save", Case::OwnCoroutine),
         ("host.screen.saveMarked", Case::OwnCoroutine),
     ] {
         assert!(h.tasks.legacy_said("m1", call, case), "{call} {case:?} not said");
     }
-    for call in ["host.screen.imageSearchMulti", "host.screen.imageSearchAll", "host.screen.save", "host.screen.saveMarked"] {
+    for call in ["host.screen.imageSearchAll", "host.screen.save", "host.screen.saveMarked"] {
         assert!(!h.tasks.legacy_said("m1", call, Case::Outside), "{call}: nothing was read, and it was said");
     }
     settle_images(&h);
@@ -3393,8 +3393,12 @@ fn where_the_searches_and_shots_cannot_wait_they_answer_at_once_and_are_said_onc
         "answered"
     );
     let summary = h.tasks.legacy_summary();
-    assert_eq!(summary.len(), 5, "{summary:?}");
-    assert!(summary.iter().all(|(scope, line)| *scope == "screen" && line.contains(" held the event loop 1 time(s), ")), "{summary:?}");
+    assert_eq!(summary.len(), 4, "{summary:?}");
+    let times = |line: &str| if line.contains("host.screen.imageSearch ") { 2 } else { 1 };
+    assert!(
+        summary.iter().all(|(scope, line)| *scope == "screen" && line.contains(&format!(" held the event loop {} time(s), ", times(line)))),
+        "{summary:?}"
+    );
     assert!(!dir.join("empty.png").exists() && !dir.join("off.png").exists() && dir.join("own.png").exists());
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
@@ -3508,7 +3512,7 @@ fn a_handlers_templates_are_opened_and_made_off_the_event_loop() {
         function look()
           local T = host.screen.template({ name = "grey", rgb = string.rep("\0", 7 * 3 * 3), w = 7, h = 3 })
           hit = host.screen.imageSearch("handler-fresh.png", AREA)
-          multi = { host.screen.imageSearchMulti({ T, "handler-fresh.png" }, AREA) }
+          listed = host.screen.imageSearch({ T, "handler-fresh.png" }, AREA)
           count = T.count
         end
         "#,
@@ -3516,7 +3520,7 @@ fn a_handlers_templates_are_opened_and_made_off_the_event_loop() {
     assert_eq!(event(&h, &lua, "look", Vec::new(), false), mailbox::Delivered::Parked);
     settle_images(&h);
     assert!(yes(&lua, "return hit ~= nil and hit.x == 22710 and hit.y == 9 and hit.name == 'handler-fresh.png'"), "the file's pixel");
-    assert!(yes(&lua, "return multi[1] == 2 and multi[2].x == 22710 and count == 21"), "the bytes matched nothing, the file did");
+    assert!(yes(&lua, "return listed.n == 2 and listed.x == 22710 and count == 21"), "the bytes matched nothing, the file did");
     let me = current_thread();
     let decoded = crate::template_store::test_made_on(&path.display().to_string());
     assert_eq!(decoded, ["image-worker"], "the PNG decoded once, on the worker");
@@ -3619,4 +3623,345 @@ fn a_missing_path_raises_and_a_broken_png_is_the_searchs_answer() {
     assert!(why.starts_with(&format!("cannot open template '{}': ", path.display())), "{why}");
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
+}
+
+// ── Every call that waits, with a callback ───────────────────────────────────────────────────
+
+/// Turns of the loop — the image worker's answers and the snapshots' — until nothing waits for
+/// either and `cond` holds in `lua`, 10 s at most.
+fn settle_until(h: &Host, lua: &Lua, cond: &str) {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        crate::image_search::fire_images(h);
+        fire_snaps(h);
+        if yes(lua, cond) && !(h.images.has_pending() || h.snaps.has_pending()) {
+            return;
+        }
+        assert!(Instant::now() < until, "never: {cond}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Every `host.screen` call that waits in a handler takes a callback as its last argument, and the
+/// callback is called with exactly what the call answers in a handler — its first value and its
+/// reason, the reason second whatever the call answered — and then `info`, which carries the
+/// moment of the picture the answer was read from: the capture's for a live read, the snapshot's
+/// for one of a snapshot, none where nothing was read. Golden against the waits: `snapshot`,
+/// `pixel`, `pixels`, `profile`, `cells`, `matchCells`, `template{ capture }`, a snapshot's `crop`,
+/// `imageSearch` of one template and of a list — whose hit's `n` says which matched —
+/// `imageSearchAll`, `save` and `saveMarked`. None of them waits: the module's next key runs at
+/// once, and the call returns nothing.
+#[test]
+fn every_call_that_waits_takes_a_callback_and_is_called_with_what_its_wait_answers_then_info() {
+    let h = host();
+    let lua = vm(&h, 1);
+    run(&lua, ALIKE);
+    run(&lua, CUT);
+    let dir = shots_dir("callbacks");
+    lua.globals().set("DIR", dir.to_string_lossy().to_string()).unwrap();
+    let shot = crate::snapshot::test_handle(&lua, crate::snapshot::test_frame(23001, 5, 40, 30));
+    lua.globals().set("s", Value::UserData(shot)).unwrap();
+    h.ocr.note_input_epoch(31);
+    h.images.note_input_epoch(31);
+    run(
+        &lua,
+        r##"
+        local AREA = { region = { 23001, 5, 23041, 35 } }
+        local GRID = { region = { 23001, 5, 23041, 35 }, cols = 4, rows = 3, predicate = "r > b" }
+        local STATES = { { name = "none", cells = string.rep("00", 12) }, { name = "all", cells = string.rep("ff", 12) } }
+        HIT = cut(23010, 8, 3, 2)
+        -- Each call's arguments, and a name for it; its callback is added last.
+        CALLS = {
+          snapshot = function(cb) return host.screen.snapshot({ region = { 23001, 5, 23041, 35 } }, cb) end,
+          pixel = function(cb) return host.screen.pixel(23005, 7, nil, cb) end,
+          pixelPoint = function(cb) return host.screen.pixel({ window = { client = { x = 23001, y = 5, w = 40, h = 30 } }, fraction = { 0.5, 0.5 } }, nil, cb) end,
+          pixelSnap = function(cb) return host.screen.pixel(23005, 7, { snapshot = s }, cb) end,
+          pixels = function(cb) return host.screen.pixels({ { 23005, 7 }, { 23010, 9 } }, nil, cb) end,
+          profile = function(cb) return host.screen.profile({ region = { 23001, 5, 23021, 15 }, axes = "columns" }, cb) end,
+          cells = function(cb) return host.screen.cells(GRID, cb) end,
+          matchCells = function(cb) return host.screen.matchCells(GRID, STATES, cb) end,
+          template = function(cb) return host.screen.template({ name = "t", capture = { 23010, 8, 23013, 10 } }, cb) end,
+          crop = function(cb) return s:crop({ 23005, 7, 23015, 17 }, cb) end,
+          one = function(cb) return host.screen.imageSearch(HIT, AREA, cb) end,
+          list = function(cb) return host.screen.imageSearch({ "dot.png", HIT }, AREA, cb) end,
+          none = function(cb) return host.screen.imageSearch("dot.png", AREA, cb) end,
+          notThere = function(cb) return host.screen.imageSearch(HIT, { region = { 5, 5, 25, 25 } }, cb) end,
+          all = function(cb) return host.screen.imageSearchAll(HIT, AREA, cb) end,
+          saved = function(cb) return host.screen.save(DIR .. "/" .. (cb and "called" or "waited") .. "-save.png", AREA, cb) end,
+          marked = function(cb)
+            return host.screen.saveMarked(DIR .. "/" .. (cb and "called" or "waited") .. "-marked.png",
+              { region = AREA.region, marks = { { x = 23010, y = 10 } } }, cb)
+          end,
+        }
+        -- What a value is, for the comparison: a snapshot and a template by what they hold.
+        local function shape(v)
+          if type(v) == "userdata" then
+            local t = tostring(v)
+            if string.find(t, "^Snapshot") then
+              local c = host.screen.pixel(v.x + 1, v.y + 1, { snapshot = v })
+              return { kind = "snapshot", x = v.x, y = v.y, w = v.w, h = v.h, via = v.via, pixel = c.hex }
+            end
+            return { kind = "template", w = v.w, h = v.h, count = v.count, name = v.name }
+          end
+          return v
+        end
+        waited, called, returned = {}, {}, {}
+        function look()
+          for name, call in pairs(CALLS) do
+            local first, why = call(nil)
+            waited[name] = { shape(first), why }
+          end
+        end
+        order = {}
+        for name, call in pairs(CALLS) do
+          returned[name] = select("#", call(function(...)
+            local first, why, info = ...
+            called[name] = { shape(first), why, info = info, n = select("#", ...) }
+            order[#order + 1] = name
+          end))
+        end
+        function key() keyRan = true end
+        -- An answer as words, for a failure's message.
+        function show(v)
+          if type(v) ~= "table" then return tostring(v) end
+          local keys = {}
+          for k in pairs(v) do keys[#keys + 1] = tostring(k) end
+          table.sort(keys)
+          local out = {}
+          for _, k in ipairs(keys) do
+            local x = v[k]
+            if x == nil then x = v[tonumber(k)] end
+            out[#out + 1] = k .. "=" .. show(x)
+          end
+          return "{" .. table.concat(out, ", ") .. "}"
+        end
+        "##,
+    );
+    assert_eq!(event(&h, &lua, "key", Vec::new(), true), mailbox::Delivered::Ran, "nothing waited: the key runs at once");
+    assert!(yes(&lua, "for _, n in pairs(returned) do if n ~= 0 then return false end end return true"), "a callback form returns nothing");
+    settle_until(&h, &lua, "local n = 0 for _ in pairs(called) do n += 1 end return n == 17");
+    assert_eq!(event(&h, &lua, "look", Vec::new(), false), mailbox::Delivered::Parked);
+    settle_until(&h, &lua, "local n = 0 for _ in pairs(waited) do n += 1 end return n == 17");
+    for name in [
+        "snapshot", "pixel", "pixelPoint", "pixelSnap", "pixels", "profile", "cells", "matchCells", "template", "crop", "one", "list",
+        "none", "notThere", "all", "saved", "marked",
+    ] {
+        assert!(
+            yes(&lua, &format!("return called.{name}.n == 3 and alike(called.{name}[1], waited.{name}[1]) and called.{name}[2] == waited.{name}[2]")),
+            "{name}: not what its wait answers, then info: {}",
+            lua.load(format!("return show(called.{name}) .. ' | ' .. show(waited.{name})")).eval::<String>().unwrap_or_default()
+        );
+    }
+    assert!(
+        yes(&lua, "return called.list[1].n == 2 and called.one[1].n == 1 and called.none[1] == nil and called.none[2] == nil and called.notThere[2] == 'no pixels here'"),
+        "a list's hit says which template matched; nil, and nil and why"
+    );
+    // The moment of the picture: a live read's, stamped with the input epoch as it came back; a
+    // snapshot's own; nothing read, none.
+    for name in ["snapshot", "pixel", "pixels", "profile", "cells", "matchCells", "template", "one", "list", "none", "all", "saved", "marked"] {
+        assert!(
+            yes(&lua, &format!("local i = called.{name}.info return type(i.time) == 'number' and i.inputEpoch == 31")),
+            "{name}: its picture's moment"
+        );
+    }
+    for name in ["pixelSnap", "crop"] {
+        assert!(yes(&lua, &format!("local i = called.{name}.info return i.time == s.time and i.inputEpoch == s.inputEpoch")), "{name}: the snapshot's moment");
+    }
+    assert!(yes(&lua, "local i = called.notThere.info return i.time == nil and i.inputEpoch == nil"), "nothing read, no moment");
+    assert!(yes(&lua, "return type(called.snapshot.info.waited) == 'number' and called.snapshot.info.frames == 1"), "a snapshot's info keeps what it said");
+    for shot in ["save", "marked"] {
+        assert_eq!(png(&dir.join(format!("waited-{shot}.png"))), png(&dir.join(format!("called-{shot}.png"))), "{shot}: the same picture written");
+    }
+    assert!(yes(&lua, "return keyRan == true"));
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A callback's answer is dropped when its module is disabled, as a read's is — never called, then
+/// or after the module is on again — and a task the image worker has not begun is not made.
+/// `host.screen.pending(key)` is `true` from the call until the callback runs, and `false` once the
+/// answer was dropped, so a poll that keeps one search out by its key asks again after a
+/// re-enable, and is answered: the landmark gate's way.
+#[test]
+fn a_callbacks_answer_is_dropped_with_its_disabled_module_and_its_key_is_no_longer_out() {
+    let h = host();
+    let lua = vm(&h, 1);
+    run(&lua, CUT);
+    run(
+        &lua,
+        r#"
+        HIT = cut(23110, 8, 3, 2)
+        answers = {}
+        function ask(tag)
+          host.screen.imageSearch(HIT, { region = { 23101, 5, 23141, 35 }, key = "gate" }, function(hit, why)
+            answers[#answers + 1] = tag .. ":" .. tostring(hit and hit.x)
+          end)
+        end
+        "#,
+    );
+    hold(23101);
+    run(&lua, "ask('first')");
+    assert!(yes(&lua, "return host.screen.pending('gate') and not host.screen.pending('other')"), "out from the call");
+    wait_image_capturing(23101);
+    disable(&h, 1);
+    assert!(!yes(&lua, "return host.screen.pending('gate')"), "dropped with its module: no longer out");
+    release(23101);
+    settle_images(&h);
+    enable(&h, 1);
+    settle_images(&h);
+    assert!(yes(&lua, "return #answers == 0"), "the dropped answer never came");
+    // Asked again, as a gate does when its key is not out: answered.
+    run(&lua, "if not host.screen.pending('gate') then ask('again') end");
+    settle_until(&h, &lua, "return #answers == 1");
+    assert!(yes(&lua, "return answers[1] == 'again:23110' and not host.screen.pending('gate')"));
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+}
+
+/// A newer call of a module with the same `opts.key` ends an older one of the same call that is
+/// still out: it is answered `nil` and the reason on the next tick, and the newer one is answered.
+/// Keys are each call's own: an `imageSearch` never ends a `matchCells`, nor a `pixels` a
+/// `snapshot`.
+#[test]
+fn a_newer_call_with_the_key_ends_the_older_one_of_the_same_call() {
+    let h = host();
+    let lua = vm(&h, 1);
+    run(&lua, CUT);
+    run(
+        &lua,
+        r#"
+        HIT = cut(23210, 8, 3, 2)
+        got = {}
+        local AREA = { region = { 23201, 5, 23241, 35 }, key = "k" }
+        local GRID = { region = { 23201, 5, 23241, 35 }, cols = 2, rows = 2, predicate = "r > b", key = "k" }
+        function note(tag) return function(first, why) got[tag] = { first ~= nil, why } end end
+        host.screen.imageSearch(HIT, AREA, note("older"))
+        host.screen.matchCells(GRID, { string.rep("00", 4) }, note("cells"))
+        host.screen.pixels({ { 23205, 7 } }, { key = "k" }, note("points"))
+        host.screen.snapshot({ region = { 23201, 5, 23211, 15 }, key = "k" }, note("snap"))
+        host.screen.imageSearch(HIT, AREA, note("newer"))
+        "#,
+    );
+    settle_until(&h, &lua, "local n = 0 for _ in pairs(got) do n += 1 end return n == 5");
+    let superseded = crate::snapshot::SUPERSEDED;
+    assert!(yes(&lua, &format!("return got.older[1] == false and got.older[2] == '{superseded}'")), "the older one ended");
+    assert!(yes(&lua, "return got.newer[1] and got.cells[1] and got.points[1] and got.snap[1]"), "the others answered");
+    assert!(yes(&lua, "return not host.screen.pending('k')"));
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+}
+
+/// A replaced answer that was known at the call is answered as a replaced task is: the call's own
+/// could-not-look answer with the reason — `nil` for a search, a template and the cells, `{}`
+/// for `imageSearchAll`, `false` for a shot — never what was known at the call, a template's
+/// handle or a window's reason. The newer one gets its own.
+#[test]
+fn a_replaced_answer_known_at_the_call_is_the_calls_could_not_look_answer() {
+    let h = host();
+    let lua = vm(&h, 1);
+    run(&lua, CUT);
+    let dir = shots_dir("replaced-at-call");
+    lua.globals().set("DIR", dir.to_string_lossy().to_string()).unwrap();
+    run(
+        &lua,
+        r#"
+        local EMPTY = { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0, 1, 1 } }
+        local HIT = cut(23510, 8, 3, 2)
+        local b = buffer.create(4)
+        got = {}
+        local function note(tag) return function(first, why) got[tag] = { first, why } end end
+        for _, age in ipairs({ "Older", "Newer" }) do
+          host.screen.imageSearch(HIT, { region = EMPTY, key = "k" }, note("one" .. age))
+          host.screen.imageSearchAll(HIT, { region = EMPTY, key = "k" }, note("all" .. age))
+          host.screen.cells({ region = EMPTY, cols = 1, rows = 1, predicate = "r > b", key = "k" }, note("cells" .. age))
+          host.screen.save(DIR .. "/never.png", { region = EMPTY, key = "k" }, note("save" .. age))
+          host.screen.template({ rgba = b, w = 1, h = 1, key = "k" }, note("template" .. age))
+        end
+        "#,
+    );
+    settle_until(&h, &lua, "local n = 0 for _ in pairs(got) do n += 1 end return n == 10");
+    let replaced = crate::snapshot::SUPERSEDED;
+    let empty = "the window's client area is empty (0x0)";
+    // Each call's could-not-look first value, as `v`.
+    for (call, first) in [
+        ("one", "v == nil"),
+        ("all", "type(v) == 'table' and #v == 0"),
+        ("cells", "v == nil"),
+        ("save", "v == false"),
+    ] {
+        let older = format!("local v = got.{call}Older[1] return {first} and got.{call}Older[2] == '{replaced}'");
+        assert!(yes(&lua, &older), "{call}: the older one replaced");
+        let newer = format!("local v = got.{call}Newer[1] return {first} and got.{call}Newer[2] == \"{empty}\"");
+        assert!(yes(&lua, &newer), "{call}: the newer one its own");
+    }
+    assert!(yes(&lua, &format!("return got.templateOlder[1] == nil and got.templateOlder[2] == '{replaced}'")), "no handle for the replaced one");
+    assert!(yes(&lua, "return type(got.templateNewer[1]) == 'userdata' and got.templateNewer[2] == nil"), "the newer one its handle");
+    assert!(yes(&lua, "return not host.screen.pending('k')"));
+    assert!(!dir.join("never.png").exists(), "nothing written");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A points callback whose answer is known at the call — a point of a snapshot, an empty list — is
+/// answered on the next tick when nothing else is due, and its key is no longer out once it ran.
+#[test]
+fn a_points_answer_known_at_the_call_comes_on_its_own_and_its_key_is_then_no_longer_out() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let shot = crate::snapshot::test_handle(&lua, crate::snapshot::test_frame(23601, 5, 20, 20));
+    lua.globals().set("s", Value::UserData(shot)).unwrap();
+    run(
+        &lua,
+        r#"
+        got = {}
+        host.screen.pixel(23605, 7, { snapshot = s, key = "p" }, function(c) got.point = c ~= nil end)
+        host.screen.pixels({}, { key = "e" }, function(list) got.empty = list ~= nil and #list == 0 end)
+        "#,
+    );
+    assert!(yes(&lua, "return host.screen.pending('p') and host.screen.pending('e') and next(got) == nil"), "out from the call, not answered in it");
+    fire_snaps(&h);
+    assert!(yes(&lua, "return got.point == true and got.empty == true"), "answered on the next tick, with nothing else due");
+    assert!(yes(&lua, "return not host.screen.pending('p') and not host.screen.pending('e')"));
+    assert!(!h.snaps.has_pending(), "nothing left waiting");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+}
+
+/// A callback form checks its arguments at the call, and raises there for a mistake, as the call
+/// does without one: a callback that is not a function, an `opts.key` that is not a non-empty
+/// string. Without a callback `opts.key` raises, as only the callback form takes it — and nothing
+/// was asked for a call that raised. A shot whose file cannot be written is the callback's error:
+/// reported, its callback not called.
+#[test]
+fn a_callback_forms_mistakes_raise_at_the_call_and_an_unwritten_shot_is_its_error() {
+    let h = host();
+    let lua = vm(&h, 1);
+    run(&lua, CUT);
+    let dir = shots_dir("callback-errors");
+    std::fs::create_dir_all(dir.join("taken.png")).unwrap();
+    lua.globals().set("DIR", dir.to_string_lossy().to_string()).unwrap();
+    for (code, want) in [
+        ("host.screen.imageSearch(cut(1, 1, 1, 1), nil, 5)", "host.screen.imageSearch: the callback (third argument) must be a function, got 5"),
+        ("host.screen.snapshot({ region = { 0, 0, 1, 1 } }, true)", "host.screen.snapshot: the callback (second argument) must be a function, got a boolean"),
+        ("host.screen.pixel(1, 1, nil, 'x')", "host.screen.pixel: the callback (the argument after opts) must be a function"),
+        ("host.screen.imageSearch(cut(1, 1, 1, 1), { key = '' }, function() end)", "host.screen.imageSearch: opts.key must be a non-empty string, got the string \"\""),
+        ("host.screen.cells({ region = { 0, 0, 1, 1 }, cols = 1, rows = 1, predicate = 'r > b', key = 'k' })", "host.screen.cells: opts.key is only taken with a callback (the second argument)"),
+        ("host.screen.matchCells({ region = { 0, 0, 1, 1 }, cols = 1, rows = 1, predicate = 'r > b', key = 'k' }, { '00' })", "host.screen.matchCells: opts.key is only taken with a callback (the third argument)"),
+        ("host.screen.pixels({ { 1, 1 } }, { key = 'k' })", "host.screen.pixels: opts.key is only taken with a callback (the third argument)"),
+        ("host.screen.imageSearchAll(cut(1, 1, 1, 1), { key = 'k' })", "host.screen.imageSearchAll: opts.key is only taken with a callback (the third argument)"),
+        ("host.screen.save(DIR .. '/x.png', { key = 'k' })", "host.screen.save: opts.key is only taken with a callback (the third argument)"),
+        ("host.screen.template({ capture = { 0, 0, 2, 2 }, key = 'k' })", "host.screen.template: key is only taken with a callback (the second argument)"),
+        ("host.screen.imageSearch({}, nil, function() end)", "host.screen.imageSearch: no template given; the list is empty"),
+    ] {
+        let e = match lua.load(code).set_name("=mod.luau").exec() {
+            Ok(()) => panic!("{code} did not raise"),
+            Err(e) => e.to_string(),
+        };
+        assert!(e.contains(want), "{code}:\n  got  {e}\n  want {want}");
+    }
+    assert!(!h.images.has_pending() && !h.snaps.has_pending(), "a call that raised asked for nothing");
+    run(&lua, "host.screen.save(DIR .. '/taken.png', { region = { 23301, 5, 23311, 15 } }, function() called = true end)");
+    settle_images(&h);
+    assert!(yes(&lua, "return called == nil"), "not called");
+    let errs = errors(&h);
+    assert!(errs.len() == 1 && errs[0].1 == "screen.save" && errs[0].2.contains("screen.save '"), "{errs:?}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

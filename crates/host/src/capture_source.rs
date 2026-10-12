@@ -386,23 +386,36 @@ pub(crate) fn frame_keys(tasks: impl Iterator<Item = FrameKey>) -> (Vec<FrameKey
     (keys, idx)
 }
 
+/// One frame of a batch as the image worker captured it: the picture or why there is none, the
+/// milliseconds it cost, when it came back and `host.inputEpoch()` then.
+pub(crate) struct Captured {
+    pub(crate) img: Result<CapturedImage, String>,
+    pub(crate) ms: u32,
+    pub(crate) at: std::time::Instant,
+    pub(crate) input_epoch: u64,
+}
+
 /// Captures every frame of a batch, each with the milliseconds it cost — or why it could not,
-/// which every task of that frame is answered with.
+/// which every task of that frame is answered with — and its moment: when it came back, and
+/// `input_epoch` as it stood then, which a callback's `info` says.
 ///
 /// Standard regions are read one at a time, as they always were — each is a
 /// compositor-synchronised touch of the screen, and running them together would contend
 /// rather than overlap. The duplication regions of one source go in ONE call: one request to
 /// the capture thread and one GPU sync for all of them. Its time is booked to the first of
 /// them, so the batch's total stays right.
-pub(crate) fn capture_frames(capture: CaptureFn, keys: &[FrameKey]) -> Vec<(Result<CapturedImage, String>, u32)> {
+pub(crate) fn capture_frames(capture: CaptureFn, keys: &[FrameKey], input_epoch: &std::sync::atomic::AtomicU64) -> Vec<Captured> {
     let missing = || Err(backend::CAPTURE_FAILED.to_string());
-    let mut out: Vec<(Result<CapturedImage, String>, u32)> = keys.iter().map(|_| (missing(), 0)).collect();
+    let stamp = || (std::time::Instant::now(), input_epoch.load(std::sync::atomic::Ordering::SeqCst));
+    let (at, epoch) = stamp();
+    let mut out: Vec<Captured> = keys.iter().map(|_| Captured { img: missing(), ms: 0, at, input_epoch: epoch }).collect();
     let mut groups: Vec<(CaptureSource, Vec<usize>)> = Vec::new();
     for (i, (region, src)) in keys.iter().enumerate() {
         if *src == CaptureSource::Standard {
             let t0 = std::time::Instant::now();
             let img = capture(std::slice::from_ref(region), *src).pop().unwrap_or_else(missing);
-            out[i] = (img, t0.elapsed().as_millis() as u32);
+            let (at, input_epoch) = stamp();
+            out[i] = Captured { img, ms: at.saturating_duration_since(t0).as_millis() as u32, at, input_epoch };
         } else {
             match groups.iter_mut().find(|(s, _)| s == src) {
                 Some((_, members)) => members.push(i),
@@ -414,9 +427,10 @@ pub(crate) fn capture_frames(capture: CaptureFn, keys: &[FrameKey]) -> Vec<(Resu
         let regions: Vec<(i32, i32, i32, i32)> = members.iter().map(|&i| keys[i].0).collect();
         let t0 = std::time::Instant::now();
         let images = capture(&regions, src);
-        let ms = t0.elapsed().as_millis() as u32;
+        let (at, input_epoch) = stamp();
+        let ms = at.saturating_duration_since(t0).as_millis() as u32;
         for (n, (i, img)) in members.into_iter().zip(images).enumerate() {
-            out[i] = (img, if n == 0 { ms } else { 0 });
+            out[i] = Captured { img, ms: if n == 0 { ms } else { 0 }, at, input_epoch };
         }
     }
     out
@@ -810,14 +824,14 @@ mod tests {
             ((9, 9, 4, 4), DUP),
             ((1, 1, 5, 5), DUP_ONLY),
         ];
-        let frames = capture_frames(recording, &keys);
+        let frames = capture_frames(recording, &keys, &std::sync::atomic::AtomicU64::new(0));
         let calls = CALLS.lock().unwrap().clone();
         assert_eq!(
             calls,
             vec![(1, CaptureSource::Standard), (1, CaptureSource::Standard), (2, DUP), (1, DUP_ONLY)]
         );
         // Every frame lands at its own key, whichever call brought it.
-        let sizes: Vec<u32> = frames.iter().map(|(f, _)| f.as_ref().unwrap().w).collect();
+        let sizes: Vec<u32> = frames.iter().map(|f| f.img.as_ref().unwrap().w).collect();
         assert_eq!(sizes, vec![1, 2, 3, 4, 5]);
     }
 }

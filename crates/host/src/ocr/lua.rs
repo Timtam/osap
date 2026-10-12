@@ -64,8 +64,8 @@ pub(crate) trait ReadHost: 'static {
     type Shot: Send + 'static;
     fn ocr(&self) -> &Service<Self::Shot>;
     fn ocr_state(&self) -> &OcrState;
-    /// The snapshot requests waiting for the capture thread — `snapshotAsync`'s and the handlers'
-    /// that wait in `host.screen.snapshot` — and what their pictures are charged against.
+    /// The snapshot requests waiting for the capture thread — the callbacks' and the handlers'
+    /// of `host.screen.snapshot` and the rest — and what their pictures are charged against.
     fn snap_state(&self) -> &crate::snapshot::SnapState;
     fn snap_bytes(&self) -> &Rc<Cell<usize>>;
     /// The image worker's tasks waiting for their answers — a callback's, and those a handler
@@ -82,6 +82,12 @@ pub(crate) trait ReadHost: 'static {
     fn bump_epoch(&self);
     /// A module's callback failed: the log line and the dialog.
     fn report_error(&self, idx: usize, context: &str, message: &str);
+    /// Module `idx` had a callback's task of the image worker ended by its cap (`why`,
+    /// `image_search::too_many_waiting`): a line in the log. The host writes it once and then counts
+    /// it, as a module's errors are; a test's holder writes it every time.
+    fn note_image_crowding(&self, idx: usize, why: &str) {
+        crate::logging::line("image", &format!("[{}] {why}", self.module_id(idx)));
+    }
 }
 
 impl ReadHost for Shared {
@@ -118,6 +124,22 @@ impl ReadHost for Shared {
     }
     fn report_error(&self, idx: usize, context: &str, message: &str) {
         self.report_callback_error(idx, context, message);
+    }
+    fn note_image_crowding(&self, idx: usize, why: &str) {
+        let who = self.module_id(idx);
+        let key = format!("{who}\u{1}image\u{1}{why}");
+        // Written the first time, then counted like a module error; the tick writes the count of a
+        // spell that stopped (`log_housekeeping`), and the summary due at an occurrence is written
+        // here.
+        match self.error_repeats.borrow_mut().note(&key, std::time::Instant::now()) {
+            crate::logging::Said::Line => {
+                crate::logging::line("image", &format!("[{who}] {why} (then counted, a line a minute at most)"))
+            }
+            crate::logging::Said::Counted => {}
+            crate::logging::Said::Summary { count, over } => {
+                crate::logging::line("image", &crate::repeat_summary(&who, "image", why, count, over))
+            }
+        }
     }
 }
 
@@ -574,8 +596,8 @@ pub(crate) struct OcrState {
     /// tick, never from inside the binding.
     ready: RefCell<Vec<(TicketId, Status, Option<String>)>>,
     /// (module index, VM generation, key) → the newest ticket asked with that key, while a read
-    /// with that key is waiting: forgotten once none is (`forget_settled`), as `snapshotAsync`
-    /// forgets its keys, so a key made from a row number or from text is not kept for the
+    /// with that key is waiting: forgotten once none is (`forget_settled`), as the snapshot
+    /// requests forget their keys, so a key made from a row number or from text is not kept for the
     /// module's whole life.
     key_seq: RefCell<HashMap<(usize, u64, String), TicketId>>,
     next_ticket: Cell<TicketId>,
@@ -737,7 +759,7 @@ fn with_unresolved(mut readings: Vec<Reading>, unresolved: &[Option<String>]) ->
 
 /// The VM a binding runs in, as `register_vm` tagged it — or, for a state it never tagged, the
 /// binding's own index at that index's current generation (the image search's rule). Shared
-/// with `snapshotAsync`.
+/// with the snapshot requests.
 pub(crate) fn owner_of(lua: &Lua, gens: &HashMap<usize, u64>, scope: usize) -> Owner {
     match vm_owner(lua) {
         Some(o) => Owner { idx: o.idx, gen: o.gen },

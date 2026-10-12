@@ -9,7 +9,8 @@
 -- line; a host.screen call runs on the event loop instead (`blocking`), which the host logs.
 -- `recognize` with a callback — the last argument a function, or exactly two arguments of which
 -- the second is one — asks the read service and returns at once (`submit`), and so does a
--- host.screen call given its callback (`profile(opts, cb)`), wherever either is made.
+-- host.screen call given its callback (`snapshot(opts, cb)`, `pixel(x, y, opts, cb)`), wherever
+-- either is made.
 --
 -- A Rust function cannot yield through mlua, so the wait is this file's `yield`: the host's
 -- `start` checks and queues what the call asks for, and the handler's coroutine then stops here
@@ -46,6 +47,9 @@
 --   submit(...)               for a call with a callback form, that form: taken wherever the call
 --                             is made when argument `at` is anything but nil, and never waits —
 --                             it checks the call, queues it and returns, and raises for a mistake
+--   at                        where the callback goes: a position, or a function of the call's
+--                             arguments that says it — `pixel`'s comes third after a point and
+--                             fourth after two numbers
 return function(where_, disown, yield, isyieldable, rawequal, error, select, type, pack, unpack, WAIT, RESUMED)
   -- Where the calling coroutine is, as a wait asks it: "handler" only where Luau can stop it.
   local function place()
@@ -101,9 +105,13 @@ return function(where_, disown, yield, isyieldable, rawequal, error, select, typ
 
     point = function(name, start, blocking, submit, at)
       return function(...)
-        if submit ~= nil and select("#", ...) >= at and select(at, ...) ~= nil then
-          local r = pack(submit(...))
-          return unpack(r, 1, r.n)
+        if submit ~= nil then
+          local i = at
+          if type(i) == "function" then i = i(...) end
+          if select("#", ...) >= i and select(i, ...) ~= nil then
+            local r = pack(submit(...))
+            return unpack(r, 1, r.n)
+          end
         end
         local w = place()
         if w ~= "handler" then

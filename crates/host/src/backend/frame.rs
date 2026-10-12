@@ -132,7 +132,8 @@ pub struct Frame {
     pub native: Option<NativeImage>,
     /// `host.inputEpoch()` once the capture had come back — what `s.inputEpoch` reports. 0 from
     /// [`Frame::from_image`]; stamped by whoever took the picture: the event loop for
-    /// `host.screen.snapshot`, the `screen-capture` thread for `snapshotAsync` (`Round::run`).
+    /// `host.screen.snapshot` where it cannot wait, the `screen-capture` thread for one given a
+    /// callback or waited for in a handler (`Round::run`).
     /// A copy keeps it.
     pub input_epoch: u64,
 }

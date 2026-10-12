@@ -408,7 +408,7 @@ fn the_sentence_fits_a_notification() {
     let mut t = time_trip(vm, "arbiter onDeactivate", ("com.example.kit", "src/main.luau", 1595), &[]);
     t.kind = EntryKind::Plain;
     t.outer = Some(game_hotkey());
-    t.call = Some("host.screen.imageSearchMulti");
+    t.call = Some("host.screen.imageSearch");
     t.culprit = Some(("com.example.kit".into(), "Overlay runtime".into()));
     let mut ev = event(t);
     ev.members = std::iter::once(stops::Member { idx: 0, id: "com.example.kit".into(), name: "Overlay runtime".into() })
@@ -419,7 +419,7 @@ fn the_sentence_fits_a_notification() {
     assert_eq!(
         said,
         "Stopped Overlay runtime and 12 modules that run its code: its code ran too long in Module with a thirty-char \
-         nm 01's arbiter onDeactivate callback, in host.screen.imageSearchMulti, at src/main.luau line 1595. Their \
+         nm 01's arbiter onDeactivate callback, in host.screen.imageSearch, at src/main.luau line 1595. Their \
          keys go to the program in front again."
     );
     // A name no form can hold.

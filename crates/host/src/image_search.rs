@@ -1,20 +1,30 @@
-//! Image search as a module sees it: template handles, the five search bindings, the worker
-//! that captures and matches off the event loop, and the delivery of its answers. The worker also
+//! Image search as a module sees it: template handles, the search bindings, the worker that
+//! captures and matches off the event loop, and the delivery of its answers. The worker also
 //! reduces the pictures of `host.screen.profile` (`Job::Profile`), whose requests and answers are
 //! snapshot.rs's.
 //!
 //! **The calls that wait for it.** In a handler, `host.screen.cells`, `matchCells`,
-//! `template{ capture }`, a snapshot's `crop`, the searches `imageSearch`, `imageSearchMulti` and
-//! `imageSearchAll`, and `save` and `saveMarked` are tasks of this worker too, and the handler waits
-//! for the answer (`task.rs`): `cells` and `matchCells` read and reduce as `matchCellsAsync` does
-//! (`Job::Cells`, with or without the ranking), `template{ capture }` captures — or cuts from its
-//! snapshot — and prepares its picture (`Job::Template`), `crop` copies its part of the snapshot
-//! (`Job::Crop`), a search captures and matches as `imageSearchAsync` does (`Job::Search`, every
-//! match for `imageSearchAll`: `Mode::All`), and a shot captures — or cuts from its snapshot — marks,
-//! encodes and writes its picture (`Job::Save`, save.rs). Their answers are built on the event loop
-//! as the handler goes on, by the same functions that build them where the call cannot wait and runs
-//! on the loop ([`cells_values`], [`template_values`], [`search_values`], `save::save_values`), and
-//! that work on the loop is the worker's own ([`answer_on_loop`]), so the two answer alike.
+//! `template{ capture }`, a snapshot's `crop`, the searches `imageSearch` and `imageSearchAll`, and
+//! `save` and `saveMarked` are tasks of this worker, and the handler waits for the answer
+//! (`task.rs`): `cells` and `matchCells` read and reduce their region (`Job::Cells`, with or without
+//! the ranking), `template{ capture }` captures — or cuts from its snapshot — and prepares its
+//! picture (`Job::Template`), `crop` copies its part of the snapshot (`Job::Crop`), a search captures
+//! and matches (`Job::Search`, every match for `imageSearchAll`: `Mode::All`), and a shot captures —
+//! or cuts from its snapshot — marks, encodes and writes its picture (`Job::Save`, save.rs). Their
+//! answers are built on the event loop as the handler goes on, by the same functions that build them
+//! where the call cannot wait and runs on the loop ([`cells_values`], [`template_values`],
+//! [`search_values`], `save::save_values`), and that work on the loop is the worker's own
+//! ([`answer_on_loop`]), so the two answer alike.
+//!
+//! **The same task with a callback.** Given a callback — `imageSearch(template, opts, cb)`,
+//! `matchCells(opts, states, cb)`, and `imageSearchEach`, which has no other form — the call is the
+//! same task with the callback as its waiter ([`ImageWaiter::Callback`]): it never waits, and its
+//! answer — what the call returns, built by the same function — is handed to the module's mailbox as
+//! a handler, then `info` with the moment of the picture read for it ([`ImageResult::seen`]). It is
+//! dropped when its module is disabled, reloaded, removed or stopped first, as a read's is; a newer
+//! one of its module with the same `opts.key`, of the same call, ends it, and `host.screen.pending`
+//! asks about it ([`ImageState::waiting_with`]). An answer known at the call — nothing to read this
+//! time — comes on the next tick, as every callback's does ([`submit_now`]).
 //!
 //! **Who goes first.** The worker takes, of the tasks waiting for it, those of the highest priority
 //! as one batch ([`next_batch`]): a key's wait is not batched with the library polls queued before
@@ -81,8 +91,8 @@ use crate::{
 /// That difference was a real bug. An async search remembered the scoped index, and the
 /// drain delivered only while THAT module was enabled — so disabling the overlay runtime in
 /// the manager silently dropped every dependent's landmark callback, and each landmark gate's
-/// in-flight flag stayed set for good: the poll kept firing and never searched again. (The
-/// same wedge, for the owner's OWN disable, is what `Fate::Hold` is for.)
+/// in-flight flag stayed set for good: the poll kept firing and never searched again. A gate asks
+/// `host.screen.pending(key)` now, which a dropped answer leaves `false`, so it asks again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct VmOwner {
     pub idx: usize,
@@ -119,58 +129,13 @@ pub(crate) fn vm_owner(lua: &Lua) -> Option<VmOwner> {
 /// the binding's own index at that index's current generation. That is the rule from before
 /// owners were recorded plus the reload check: answered while that module is enabled and has
 /// not been reloaded. With no generation recorded for the index either, the generation is 0,
-/// which no VM ever has (`NEXT_GEN` starts at 1), so `fate` drops the answer: there is no VM
-/// the host knows of to hand it to.
+/// which no VM ever has (`NEXT_GEN` starts at 1), so the mailbox drops the answer: there is no
+/// VM the host knows of to hand it to.
 fn owner_of(lua: &Lua, gens: &HashMap<usize, u64>, scope: usize) -> (usize, u64) {
     if let Some(o) = vm_owner(lua) {
         return (o.idx, o.gen);
     }
     (scope, gens.get(&scope).copied().unwrap_or(0))
-}
-
-/// What becomes of an answer when it arrives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Fate {
-    /// The owner is enabled and is still the VM that asked: call back.
-    Deliver,
-    /// The owner is still the VM that asked, but disabled. Kept, and searched AGAIN when the
-    /// owner is enabled (`Shared::resume_held_images`), so that the callback, when it comes,
-    /// describes the screen the module can act on rather than one from before it was switched
-    /// off. A `matchCellsAsync` is answered instead of read again (`resend`).
-    ///
-    /// Dropping it instead was a wedge. A caller that waits for its callback before it searches
-    /// again — the overlay runtime's landmark gate, which clears its in-flight flag only there
-    /// — never searched again after a disable and re-enable, and kept answering with whatever
-    /// it had last seen. For a library overlay that had matched, that meant claiming a match in
-    /// every Kontakt window, over the library that was really loaded. `host.timer.every`
-    /// promises a poll that survives a disable; a poll whose answer does not would break that.
-    Hold,
-    /// The VM that asked is gone — reloaded (a new generation at the same index), or rolled
-    /// back after a failed hot-load (no index at all). Nobody is left to call.
-    Drop,
-}
-
-fn fate(owner: usize, gen: u64, enabled: &[bool], gens: &HashMap<usize, u64>) -> Fate {
-    if gens.get(&owner) != Some(&gen) {
-        return Fate::Drop;
-    }
-    match enabled.get(owner) {
-        Some(true) => Fate::Deliver,
-        Some(false) => Fate::Hold,
-        None => Fate::Drop,
-    }
-}
-
-/// [`fate`], asked of whatever holds the modules: the VM that asked, enabled or not.
-fn fate_in<H: ReadHost>(h: &H, owner: usize, gen: u64) -> Fate {
-    if h.vm_gens().get(&owner) != Some(&gen) {
-        return Fate::Drop;
-    }
-    if h.module_enabled(owner) {
-        Fate::Deliver
-    } else {
-        Fate::Hold
-    }
 }
 
 /// Whether the worker answers with the first entry that matched, with every entry, or with every
@@ -179,29 +144,28 @@ fn fate_in<H: ReadHost>(h: &H, owner: usize, gen: u64) -> Fate {
 pub(crate) enum Mode {
     First,
     Each,
-    /// `imageSearchAll`: every match of the one template, at its own size — a handler's wait only.
+    /// `imageSearchAll`: every match of the one template, at its own size.
     All,
 }
 
-impl Mode {
-    fn binding(self) -> &'static str {
-        match self {
-            Mode::First => "imageSearchAsync",
-            Mode::Each => "imageSearchEach",
-            Mode::All => "imageSearchAll",
-        }
-    }
-}
-
-/// What a handler's wait for the worker answers with: what the call that waited returns, built in
-/// the VM from the worker's outcome.
+/// What a task's waiter goes on with: what the call returns, built in the VM from the worker's
+/// outcome.
 pub(crate) type BuildAnswer = Box<dyn FnOnce(&Lua, Outcome) -> mlua::Result<MultiValue>>;
 
 /// Who waits for a task's answer.
 pub(crate) enum ImageWaiter {
-    /// The callback of `imageSearchAsync`, `imageSearchEach` or `matchCellsAsync`, handed its answer
-    /// through its module's mailbox.
-    Callback(RegistryKey),
+    /// A callback, handed its answer through its module's mailbox: `imageSearchEach`'s, and the
+    /// callback form of the calls that wait.
+    Callback {
+        cb: RegistryKey,
+        /// The call, as a stop of its VM while the answer is built names it, and as its error and
+        /// its keys are told apart: `screen.imageSearch`.
+        call: &'static str,
+        /// Builds what the call returns, then handed to `cb` before `info`. Called only for an
+        /// answer that runs; it holds what that answer needs and the worker does not carry — a
+        /// charge reserved at the call, the states' and the templates' names.
+        answer: BuildAnswer,
+    },
     /// A handler stopped in a `host.screen` call that waits for the worker (`task.rs`).
     Handler {
         task: TaskId,
@@ -214,8 +178,20 @@ pub(crate) enum ImageWaiter {
     },
 }
 
-/// A task waiting for the worker's answer: an async search, or a handler's wait. Main thread
-/// only.
+/// What a task does, as an answer decided without the worker needs it: one of its own kind
+/// ([`Outcome::failing`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JobKind {
+    Search,
+    Cells,
+    Profile,
+    Crop,
+    Template,
+    Save,
+    Prepare,
+}
+
+/// A task waiting for its answer: a callback's, or a handler's wait. Main thread only.
 pub(crate) struct PendingImage {
     lua: Lua,
     waiter: ImageWaiter,
@@ -225,42 +201,29 @@ pub(crate) struct PendingImage {
     /// Whose VM the callback runs in, and which incarnation of it; see `VmOwner`.
     owner: usize,
     gen: u64,
-    /// Each entry's name — or each state's, for `matchCellsAsync` — travelling here rather
-    /// than through the worker: the worker only ever holds pixels, and a name is a Lua-side
-    /// affair.
-    names: Vec<Option<String>>,
-    /// The search as it was sent, so it can be sent again after a `Fate::Hold`. `Arc`s and a
-    /// few numbers: the pixels are shared with the worker's copy, not duplicated.
-    task: ImageTask,
-    /// Answered while its owner was disabled; waiting for the owner to be enabled again.
-    held: bool,
+    /// The task's number, which the worker answers with.
+    id: u64,
+    /// What the task does: what an answer decided without the worker is made of.
+    kind: JobKind,
+    /// A callback's `opts.key`: a newer task of its module VM with the same key, of the same call,
+    /// ends it ([`ImageState::supersede`]), and `host.screen.pending` asks about it.
+    key: Option<String>,
+    /// Handed to its module's mailbox, and counted there for `host.screen.pending` until it runs
+    /// or is dropped ([`ImageState::hand`]).
+    handed: bool,
     /// The priority of the dispatch that asked, which the callback runs under: a key press, then
     /// a search, then a text read stays the user waiting (`ocr::types::Priority`).
-    prio: crate::ocr::types::Priority,
+    prio: Priority,
 }
 
-/// A pending entry for a search made in `lua` under the identity `scope`, owned by the VM it
-/// runs in (see `VmOwner`). The one place an entry is made, so the rule is tested here.
-fn pending(
-    lua: &Lua,
-    gens: &HashMap<usize, u64>,
-    scope: usize,
-    cb: Function,
-    names: Vec<Option<String>>,
-    task: ImageTask,
-) -> mlua::Result<PendingImage> {
-    let (owner, gen) = owner_of(lua, gens, scope);
-    Ok(PendingImage {
-        lua: lua.clone(),
-        waiter: ImageWaiter::Callback(lua.create_registry_value(cb)?),
-        scope,
-        owner,
-        gen,
-        names,
-        task,
-        held: false,
-        prio: crate::ocr::types::current_priority(),
-    })
+impl PendingImage {
+    /// The call that asked, as its keys are told apart: a key of `imageSearch` never ends a
+    /// `matchCells`.
+    fn asked_as(&self) -> &'static str {
+        match &self.waiter {
+            ImageWaiter::Callback { call, .. } | ImageWaiter::Handler { call, .. } => call,
+        }
+    }
 }
 
 /// What a search or cells read is answered when a newer one of its module pushed it past
@@ -270,14 +233,14 @@ pub(crate) fn too_many_waiting() -> String {
 }
 
 /// The request of `owner`'s VM that a newer one pushes past `cap`: its oldest, when it has more
-/// than `cap` waiting (held ones included — they are sent again on re-enable). The newest always
-/// proceeds: it is what the module asked for last. A handler's wait is neither counted nor ended:
-/// a handler waits for one answer at a time, so its waits cannot pile up, and the one it waits for
-/// is a call the module is in the middle of. Pure, for the tests.
+/// than `cap` waiting. The newest always proceeds: it is what the module asked for last. A
+/// handler's wait is neither counted nor ended: a handler waits for one answer at a time, so its
+/// waits cannot pile up, and the one it waits for is a call the module is in the middle of. Pure,
+/// for the tests.
 fn oldest_over_cap(map: &HashMap<u64, PendingImage>, owner: usize, cap: usize) -> Option<u64> {
     let mine: Vec<u64> = map
         .iter()
-        .filter(|(_, p)| p.owner == owner && matches!(p.waiter, ImageWaiter::Callback(_)))
+        .filter(|(_, p)| p.owner == owner && matches!(p.waiter, ImageWaiter::Callback { .. }))
         .map(|(id, _)| *id)
         .collect();
     (mine.len() > cap).then(|| mine.into_iter().min()).flatten()
@@ -312,66 +275,11 @@ fn purge_owner(map: &mut HashMap<u64, PendingImage>, owner: usize) -> Vec<Pendin
     ids.into_iter().filter_map(|id| map.remove(&id)).collect()
 }
 
-/// The held searches of `owner`, now that it is enabled: the ones asked by its current VM
-/// (`gen`) are marked in flight again and returned to be sent; any held for an older VM at
-/// that index are taken out, to be dropped. (A reload purges them first, so the second list is
-/// empty in practice; it is here so that a held entry can never outlive the VM it belongs to.)
-fn unhold(
-    map: &mut HashMap<u64, PendingImage>,
-    owner: usize,
-    gen: Option<u64>,
-) -> (Vec<ImageTask>, Vec<PendingImage>) {
-    let mut again = Vec::new();
-    let mut stale = Vec::new();
-    for (id, p) in map.iter_mut() {
-        if p.owner != owner || !p.held {
-            continue;
-        }
-        if Some(p.gen) == gen {
-            p.held = false;
-            again.push(resend(&p.task));
-        } else {
-            stale.push(*id);
-        }
-    }
-    let stale = stale.into_iter().filter_map(|id| map.remove(&id)).collect();
-    (again, stale)
-}
-
-/// What a held `matchCellsAsync` is answered when its module is enabled again.
-const HELD_CELLS: &str = "the module was disabled while the read waited";
-
-/// What a held task is sent as when its owner is enabled again. A search is made again exactly
-/// as it was asked — a window region as the rectangle it was resolved to at the call, whose
-/// hits are true screen positions whatever the window did since. A `matchCellsAsync` is not
-/// read again: its rectangle was worked out at the
-/// call — a window region from the window table the module passed then — and minutes later the
-/// window may have moved, been resized or closed, so reading the old rectangle could rank the
-/// wrong pixels and speak a confident match. It is answered `nil, HELD_CELLS` instead, by the
-/// worker and without a capture, so the callback still comes on a later tick and still clears
-/// a caller's in-flight flag.
-fn resend(task: &ImageTask) -> ImageTask {
-    match &task.job {
-        // A profile is never held: its request is snapshot.rs's, dropped with its module. Nor is a
-        // handler's wait — a crop, a template, a shot — which goes with its module's handler, nor
-        // a handle's preparation, which nobody waits for.
-        Job::Search { .. } | Job::Profile { .. } | Job::Crop | Job::Template | Job::Save(_) | Job::Prepare(_) => task.clone(),
-        Job::Cells(c) => ImageTask {
-            job: Job::Cells(Arc::new(CellsJob {
-                matcher: c.matcher.clone(),
-                unresolved: Some(HELD_CELLS.to_string()),
-                rank: c.rank,
-            })),
-            ..task.clone()
-        },
-    }
-}
-
-/// Frees what finished or abandoned entries hold: a callback in its VM's registry, and what a
-/// handler's answer held — a charge it gives back.
+/// Frees what finished or abandoned entries hold: a callback in its VM's registry, and what an
+/// answer held — a charge it gives back.
 fn release(gone: impl IntoIterator<Item = PendingImage>) {
     for p in gone {
-        if let ImageWaiter::Callback(cb) = p.waiter {
+        if let ImageWaiter::Callback { cb, .. } = p.waiter {
             let _ = p.lua.remove_registry_value(cb);
         }
     }
@@ -379,8 +287,9 @@ fn release(gone: impl IntoIterator<Item = PendingImage>) {
 
 // ── The worker ─────────────────────────────────────────────────────────────────────────
 
-/// A queued async search. The worker CAPTURES its region itself (off the main thread) then
-/// matches `entries` against it — or, given a snapshot, reads the snapshot and captures
+/// A queued task: a search, a cells read, a profile's reduction, a crop, a template, a shot, or a
+/// handle's preparation. For a search the worker CAPTURES its region itself (off the main thread)
+/// then matches `entries` against it — or, given a snapshot, reads the snapshot and captures
 /// nothing. The region is (x, y, w, h) in screen coords, whose (x, y) is added back into every
 /// reported hit.
 ///
@@ -409,9 +318,7 @@ pub(crate) enum Haystack {
     Screen {
         region: (i32, i32, i32, i32),
         /// How the asking module's VM reads the screen (`capture_source.rs`). Part of the
-        /// frame's identity in a batch: the same region read two ways is two frames. Travels
-        /// with the task, so a held search sent again on re-enable reads the way it was first
-        /// asked to.
+        /// frame's identity in a batch: the same region read two ways is two frames.
         source: CaptureSource,
         /// The module's first-read comparison, when this task carries it: the worker makes it
         /// before the batch's captures (`capture_source::take_compare`).
@@ -440,9 +347,9 @@ pub(crate) enum Job {
         /// the callback still comes on a later tick.
         unresolved: Option<String>,
     },
-    /// `matchCellsAsync`, and `cells` and `matchCells` a handler waits for: the whole frame
-    /// reduced to cells, and ranked against the states unless it is `cells`'. A cells task shares
-    /// its capture with every search of the same region and source in its batch.
+    /// `cells` and `matchCells`, waited for or given a callback: the whole frame reduced to cells,
+    /// and ranked against the states unless it is `cells`'. A cells task shares its capture with
+    /// every search of the same region and source in its batch.
     Cells(Arc<CellsJob>),
     /// `host.screen.profile`: the part of a picture the task's region covers, reduced per column
     /// and row (`profile.rs`). Always a picture already taken — the `screen-capture` thread's, or
@@ -470,16 +377,15 @@ pub(crate) enum Job {
     Prepare(Weak<Prepared>),
 }
 
-/// A cells call's work: `matchCellsAsync`'s, or a handler's `cells` or `matchCells`.
+/// A cells call's work: `cells`' or `matchCells`'.
 pub(crate) struct CellsJob {
-    /// Shared, so that a held task can be sent again as an answer without copying the states.
     /// For `cells` it has no states, and only its grid is used.
     pub(crate) matcher: Arc<cells::Matcher>,
     /// Why there is nothing to read this time — the window's client area was empty when the
     /// call was made. Answered on the worker, without a capture, so that the callback still
     /// comes on a later tick like every other answer.
     pub(crate) unresolved: Option<String>,
-    /// Ranked against the states (`matchCells`, `matchCellsAsync`), or the grid alone (`cells`).
+    /// Ranked against the states (`matchCells`), or the grid alone (`cells`).
     pub(crate) rank: bool,
 }
 
@@ -516,16 +422,19 @@ impl ImageTask {
         }
     }
 
-    /// The binding that asked, for an error report.
-    fn binding(&self) -> &'static str {
-        match &self.job {
-            Job::Search { mode, .. } => mode.binding(),
-            Job::Cells(c) if c.rank => "matchCellsAsync",
-            Job::Cells(_) => "cells",
-            Job::Profile { .. } => "profile",
-            Job::Crop => "crop",
-            Job::Template | Job::Prepare(_) => "template",
-            Job::Save(s) => s.shot.short(),
+}
+
+impl Job {
+    /// What it does, as an answer decided without the worker needs it.
+    pub(crate) fn kind(&self) -> JobKind {
+        match self {
+            Job::Search { .. } => JobKind::Search,
+            Job::Cells(_) => JobKind::Cells,
+            Job::Profile { .. } => JobKind::Profile,
+            Job::Crop => JobKind::Crop,
+            Job::Template => JobKind::Template,
+            Job::Save(_) => JobKind::Save,
+            Job::Prepare(_) => JobKind::Prepare,
         }
     }
 }
@@ -560,6 +469,9 @@ pub(crate) enum Outcome {
     Save(Result<(), crate::save::Unsaved>),
     /// A handle's picture made — or why it could not be, which the handle keeps — for nobody.
     Prepared,
+    /// Never the worker's: a callback's answer decided at the call, which its waiter holds
+    /// ([`submit_now`]).
+    AtCall,
 }
 
 /// A profile's reduction, as the worker hands it back: plain data, the Lua tables are built when
@@ -593,36 +505,41 @@ pub(crate) const TEMPLATE_FAILED: &str = "internal error: the template could not
 impl Outcome {
     /// The answer of a task whose batch panicked: could not look.
     fn failed(t: &ImageTask) -> Outcome {
-        Outcome::failing(&t.job, failed_reason(&t.job).to_string())
+        let kind = t.job.kind();
+        Outcome::failing(kind, failed_reason(kind).to_string())
     }
 
-    /// The answer of a task of `job` that could not look, for `why`.
-    fn failing(job: &Job, why: String) -> Outcome {
-        match job {
-            Job::Search { .. } => Outcome::Search(Err(why)),
-            Job::Cells(_) => Outcome::Cells(Err(why)),
-            Job::Profile { .. } => Outcome::Profile(Err(why)),
-            Job::Crop => Outcome::Crop(Err(why)),
-            Job::Template => Outcome::Template(Err(why)),
-            Job::Save(_) => Outcome::Save(Err(crate::save::Unsaved::Unread(why))),
+    /// The answer of a task of `kind` that could not look, for `why`.
+    pub(crate) fn failing(kind: JobKind, why: String) -> Outcome {
+        match kind {
+            JobKind::Search => Outcome::Search(Err(why)),
+            JobKind::Cells => Outcome::Cells(Err(why)),
+            JobKind::Profile => Outcome::Profile(Err(why)),
+            JobKind::Crop => Outcome::Crop(Err(why)),
+            JobKind::Template => Outcome::Template(Err(why)),
+            JobKind::Save => Outcome::Save(Err(crate::save::Unsaved::Unread(why))),
             // The handle is left to the first search that needs its picture.
-            Job::Prepare(_) => Outcome::Prepared,
+            JobKind::Prepare => Outcome::Prepared,
         }
     }
 }
 
-/// The reason a task of `job` gets when the host's own code failed it: its batch panicked, or the
+/// The reason a task of `kind` gets when the host's own code failed it: its batch panicked, or the
 /// worker was gone when it was sent.
-fn failed_reason(job: &Job) -> &'static str {
-    match job {
-        Job::Search { .. } => SEARCH_PANICKED,
-        Job::Cells(_) => CELLS_FAILED,
-        Job::Profile { .. } => PROFILE_FAILED,
-        Job::Crop => CROP_FAILED,
-        Job::Template | Job::Prepare(_) => TEMPLATE_FAILED,
-        Job::Save(_) => crate::save::SAVE_FAILED,
+fn failed_reason(kind: JobKind) -> &'static str {
+    match kind {
+        JobKind::Search => SEARCH_PANICKED,
+        JobKind::Cells => CELLS_FAILED,
+        JobKind::Profile => PROFILE_FAILED,
+        JobKind::Crop => CROP_FAILED,
+        JobKind::Template | JobKind::Prepare => TEMPLATE_FAILED,
+        JobKind::Save => crate::save::SAVE_FAILED,
     }
 }
+
+/// When a task's picture was taken — `host.now()` milliseconds — and `host.inputEpoch()` once it
+/// had been: what a callback's `info` says.
+pub(crate) type Moment = crate::snapshot::Moment;
 
 /// The worker's answer.
 pub(crate) struct ImageResult {
@@ -640,14 +557,20 @@ pub(crate) struct ImageResult {
     /// Set on exactly one result per batch, so the timing is logged once rather than
     /// once per task (they all carry the same batch figures).
     first_of_batch: bool,
+    /// The moment of the picture the task read: its snapshot's, or when the worker's capture of
+    /// its region came back and the input epoch then. `None` for a task that read no picture — one
+    /// answered with why there is nothing to read, a search whose templates could not be opened, a
+    /// capture that failed.
+    pub(crate) seen: Option<Moment>,
 }
 
 /// The image-search worker: CAPTURES each task's region and runs the CPU-heavy
 /// template match, both off the main thread, so neither the ~1-frame capture nor the
 /// match blocks the event loop. `capture` is the backend's stateless capture routine
 /// (a plain `fn` pointer, hence `Send`), which reads each region through the source its
-/// task carries. Exits when the task sender is dropped (app teardown). Touches only owned
-/// data — safe to leave running across process exit.
+/// task carries. `input_epoch` is `host.inputEpoch()` as the event loop last turned it over
+/// (`ImageState::note_input_epoch`), read as each capture comes back. Exits when the task sender
+/// is dropped (app teardown). Touches only owned data — safe to leave running across process exit.
 ///
 /// FAN-OUT SHARING: after the first task, it briefly collects any others queued in the
 /// same tick (several libraries' landmark polls fire together, staggered by a few ms)
@@ -673,12 +596,13 @@ pub(crate) struct ImageResult {
 pub(crate) fn spawn_image_worker(
     capture: CaptureFn,
     compare: CompareFn,
+    input_epoch: Arc<AtomicU64>,
     tasks: Receiver<ImageTask>,
     results: Sender<ImageResult>,
 ) {
     let spawned = std::thread::Builder::new().name("image-worker".to_string()).spawn(move || {
         below_normal_priority();
-        worker_loop(capture, compare, tasks, results)
+        worker_loop(capture, compare, &input_epoch, tasks, results)
     });
     if let Err(e) = spawned {
         // Every task sent is then refused, and answered as the host's own failure.
@@ -734,6 +658,7 @@ pub(crate) fn build_matching_pool() {
 fn worker_loop(
     capture: CaptureFn,
     compare: CompareFn,
+    input_epoch: &AtomicU64,
     tasks: Receiver<ImageTask>,
     results: Sender<ImageResult>,
 ) {
@@ -783,7 +708,7 @@ fn worker_loop(
                 c.make(compare);
             }
         }
-        let out = match logging::contain(|| run_batch(&batch, capture)) {
+        let out = match logging::contain(|| run_batch(&batch, capture, input_epoch)) {
             Ok(out) => out,
             Err(report) => {
                 contained("a batch", "every search, cells match and profile in it was answered nil", &report);
@@ -800,6 +725,7 @@ fn worker_loop(
                         match_ms: 0,
                         batch: n,
                         first_of_batch: i == 0,
+                        seen: None,
                     })
                     .collect()
             }
@@ -821,8 +747,10 @@ fn next_batch(waiting: &mut Vec<ImageTask>) -> Vec<ImageTask> {
     batch
 }
 
-/// Captures each distinct frame of the batch once and answers every task from its frame.
-fn run_batch(batch: &[ImageTask], capture: CaptureFn) -> Vec<ImageResult> {
+/// Captures each distinct frame of the batch once and answers every task from its frame, each
+/// with the moment of the picture it read: its snapshot's, or its frame's, stamped with
+/// `input_epoch` as it stood once that capture came back.
+fn run_batch(batch: &[ImageTask], capture: CaptureFn, input_epoch: &AtomicU64) -> Vec<ImageResult> {
     // Capture each DISTINCT region once; match every task's template against its
     // region's shared frame. The batch is small (one task per active library), so
     // a linear region lookup is fine.
@@ -854,7 +782,7 @@ fn run_batch(batch: &[ImageTask], capture: CaptureFn) -> Vec<ImageResult> {
         .filter_map(|(i, t)| t.screen_key().map(|k| (i, k)))
         .collect();
     let (keys, frame_of_reading) = capture_source::frame_keys(reading.iter().map(|(_, k)| *k));
-    let frames: Vec<(Result<CapturedImage, String>, u32)> = capture_source::capture_frames(capture, &keys);
+    let frames: Vec<capture_source::Captured> = capture_source::capture_frames(capture, &keys, input_epoch);
     let mut frame_of: Vec<Option<usize>> = vec![None; batch.len()];
     for (&(i, _), &f) in reading.iter().zip(&frame_of_reading) {
         frame_of[i] = Some(f);
@@ -870,15 +798,16 @@ fn run_batch(batch: &[ImageTask], capture: CaptureFn) -> Vec<ImageResult> {
     let outcomes: Vec<Outcome> = plan
         .par_iter()
         .zip(found.into_par_iter())
-        .map(|(&(t, idx), found)| answer(t, idx.map(|i| frames[i].0.as_ref().map_err(String::as_str)), found))
+        .map(|(&(t, idx), found)| answer(t, idx.map(|i| frames[i].img.as_ref().map_err(String::as_str)), found))
         .collect();
     let match_ms = (opening + t1.elapsed()).as_millis() as u32;
-    let capture_ms: u32 = frames.iter().map(|f| f.1).sum();
+    let capture_ms: u32 = frames.iter().map(|f| f.ms).sum();
     plan.iter()
         .zip(outcomes)
         .enumerate()
-        .map(|(i, ((t, _), outcome))| ImageResult {
+        .map(|(i, ((t, idx), outcome))| ImageResult {
             id: t.id,
+            seen: seen_of(t, idx.map(|f| &frames[f])),
             outcome,
             capture_ms,
             match_ms,
@@ -886,6 +815,25 @@ fn run_batch(batch: &[ImageTask], capture: CaptureFn) -> Vec<ImageResult> {
             first_of_batch: i == 0,
         })
         .collect()
+}
+
+/// The moment of the picture task `t` read, given the frame the batch captured for it: its
+/// snapshot's own; its frame's, when that capture came back; none when it read no picture — there
+/// was nothing to read, the capture failed, or nothing was captured for it (a search whose
+/// templates could not be opened, a handle's preparation).
+fn seen_of(t: &ImageTask, frame: Option<&capture_source::Captured>) -> Option<Moment> {
+    let unresolved = match &t.job {
+        Job::Search { unresolved, .. } => unresolved.is_some(),
+        Job::Cells(c) => c.unresolved.is_some(),
+        Job::Prepare(_) => true,
+        Job::Profile { .. } | Job::Crop | Job::Template | Job::Save(_) => false,
+    };
+    match (&t.hay, frame) {
+        _ if unresolved => None,
+        (Haystack::Frame { frame, .. }, _) => Some(crate::snapshot::moment_of(frame)),
+        (Haystack::Screen { .. }, Some(f)) if f.img.is_ok() => Some((crate::snapshot::millis_of(f.at), f.input_epoch)),
+        (Haystack::Screen { .. }, _) => None,
+    }
 }
 
 /// What a task's matching reads: a picture, where its top-left pixel is on screen, and the part
@@ -1081,7 +1029,7 @@ fn profile_task(t: &ImageTask, cols: bool, rows: bool, dark: u8) -> Result<Box<R
     }
 }
 
-/// A cells read against its picture: `matchCellsAsync`'s, or a handler's `cells` or `matchCells`.
+/// A cells read against its picture: a callback's or a handler's `cells` or `matchCells`.
 /// A panic in the reduction is answered, like a template's, rather than taking the worker with it.
 fn cells_task(
     t: &ImageTask,
@@ -1199,18 +1147,34 @@ pub(crate) fn contained(what: &str, answered: &str, report: &str) {
 
 // ── Delivery, on the main thread ───────────────────────────────────────────────────────
 
+/// A callback's key as one module VM asked it of one call: its index, its generation, the call's
+/// name and the key.
+type CallKey = (usize, u64, &'static str, String);
+
 /// What the event loop keeps of the worker's work: the way a task reaches it and the way its
-/// answers come back, the tasks waiting for an answer — a callback's or a handler's — and those a
-/// module's cap ended or the worker could not take, answered on the next tick. Main thread only.
+/// answers come back, the tasks waiting for an answer — a callback's or a handler's — and the
+/// answers decided without the worker, delivered on the next tick; the callbacks' keys, and the
+/// input epoch the worker stamps its pictures with. Main thread only.
 pub(crate) struct ImageState {
     tasks: Sender<ImageTask>,
     results: Receiver<ImageResult>,
-    /// The tasks waiting for the worker's answer, by number, and the held searches of disabled
-    /// modules (`Fate::Hold`).
+    /// The tasks waiting for the worker's answer, by number.
     pending: RefCell<HashMap<u64, PendingImage>>,
-    /// Requests ended by a newer one of their module past `IMAGE_PER_OWNER` (`submit`), or that
-    /// the worker could not take, with the reason they are answered on the next tick.
-    ended: RefCell<Vec<(PendingImage, String)>>,
+    /// Answered without the worker, on the next tick: a task ended by a newer one with its key or
+    /// past its module's cap, one the worker could not take, and a callback's answer decided at
+    /// the call (`Outcome::AtCall`).
+    ready: RefCell<Vec<(PendingImage, Outcome)>>,
+    /// Per module VM (its index and generation), call and key, the newest callback's task asked
+    /// with it, while it has not been delivered: an older answer with the key that is delivered
+    /// after a newer task was asked — by an event that ran before it — is answered
+    /// [`SUPERSEDED`](crate::snapshot::SUPERSEDED) instead ([`open_image_in`]).
+    newest_key: RefCell<HashMap<CallKey, u64>>,
+    /// Per module VM and key, the answers in its mailbox, neither run nor dropped yet: still out
+    /// for `host.screen.pending`.
+    handed: RefCell<HashMap<(usize, u64, String), u32>>,
+    /// `host.inputEpoch()` as the event loop last turned it over, which the worker reads as each
+    /// of its captures comes back.
+    input_epoch: Arc<AtomicU64>,
 }
 
 /// Task numbers, process-wide and never reused: the worker's list of ended tasks (`ENDED`) is
@@ -1218,9 +1182,18 @@ pub(crate) struct ImageState {
 static NEXT_TASK: AtomicU64 = AtomicU64::new(1);
 
 impl ImageState {
-    /// The state over the worker that takes `tasks` and answers on `results`.
-    pub(crate) fn new(tasks: Sender<ImageTask>, results: Receiver<ImageResult>) -> ImageState {
-        ImageState { tasks, results, pending: RefCell::new(HashMap::new()), ended: RefCell::new(Vec::new()) }
+    /// The state over the worker that takes `tasks` and answers on `results`, stamping its
+    /// pictures with `input_epoch` (`spawn_image_worker`'s).
+    pub(crate) fn new(tasks: Sender<ImageTask>, results: Receiver<ImageResult>, input_epoch: Arc<AtomicU64>) -> ImageState {
+        ImageState {
+            tasks,
+            results,
+            pending: RefCell::new(HashMap::new()),
+            ready: RefCell::new(Vec::new()),
+            newest_key: RefCell::new(HashMap::new()),
+            handed: RefCell::new(HashMap::new()),
+            input_epoch,
+        }
     }
 
     /// A state with no worker behind it, for the tests' holders that make no image reads: every
@@ -1229,7 +1202,7 @@ impl ImageState {
     pub(crate) fn detached() -> ImageState {
         let (tasks, _) = std::sync::mpsc::channel();
         let (_, results) = std::sync::mpsc::channel();
-        ImageState::new(tasks, results)
+        ImageState::new(tasks, results, Arc::new(AtomicU64::new(0)))
     }
 
     /// A new task's number.
@@ -1245,15 +1218,112 @@ impl ImageState {
     /// Whether a task waits for its answer, or an answer for the next tick — a reason for the
     /// headless loop to run.
     pub(crate) fn has_pending(&self) -> bool {
-        !self.pending.borrow().is_empty() || !self.ended.borrow().is_empty()
+        !self.pending.borrow().is_empty() || !self.ready.borrow().is_empty()
+    }
+
+    /// `host.inputEpoch()` turned over to `epoch`: a picture the worker takes from now on carries
+    /// it. Told before anything acts, as the `screen-capture` thread is.
+    pub(crate) fn note_input_epoch(&self, epoch: u64) {
+        self.input_epoch.store(epoch, Ordering::SeqCst);
+    }
+
+    /// Whether a callback's task of module `owner`'s VM `gen` with `key` is out: with the worker,
+    /// answered and not delivered yet, or in its module's mailbox.
+    pub(crate) fn waiting_with(&self, owner: usize, gen: u64, key: &str) -> bool {
+        let mine = |p: &PendingImage| p.owner == owner && p.gen == gen && p.key.as_deref() == Some(key);
+        self.pending.borrow().values().any(mine)
+            || self.ready.borrow().iter().any(|(p, _)| mine(p))
+            || self.handed.borrow().contains_key(&(owner, gen, key.to_string()))
+    }
+
+    /// `p` goes to its module's mailbox: counted as out until it runs or is dropped (`unhand`).
+    fn hand(&self, p: &mut PendingImage) {
+        if let Some(k) = &p.key {
+            *self.handed.borrow_mut().entry((p.owner, p.gen, k.clone())).or_insert(0) += 1;
+            p.handed = true;
+        }
+    }
+
+    /// `p` left its module's mailbox: it runs, or it is dropped.
+    fn unhand(&self, p: &PendingImage) {
+        let Some(k) = p.key.as_ref().filter(|_| p.handed) else { return };
+        let mut handed = self.handed.borrow_mut();
+        let at = (p.owner, p.gen, k.clone());
+        if let Some(n) = handed.get_mut(&at) {
+            *n -= 1;
+            if *n == 0 {
+                handed.remove(&at);
+            }
+        }
+    }
+
+    /// `p` is the newest callback's task of its module VM and call with its key.
+    fn note_key(&self, p: &PendingImage) {
+        if let Some(k) = &p.key {
+            self.newest_key.borrow_mut().insert((p.owner, p.gen, p.asked_as(), k.clone()), p.id);
+        }
+    }
+
+    /// Whether a newer task with `p`'s key, of its call, was asked after `p` — so `p`'s answer,
+    /// not delivered yet, is superseded.
+    fn replaced(&self, p: &PendingImage) -> bool {
+        p.key.as_ref().is_some_and(|k| {
+            self.newest_key.borrow().get(&(p.owner, p.gen, p.asked_as(), k.clone())).is_some_and(|n| *n > p.id)
+        })
+    }
+
+    /// `p` was delivered or dropped: when it was the newest with its key, the key is forgotten.
+    fn forget_key(&self, p: &PendingImage) {
+        if let Some(k) = &p.key {
+            let mut keys = self.newest_key.borrow_mut();
+            let at = (p.owner, p.gen, p.asked_as(), k.clone());
+            if keys.get(&at) == Some(&p.id) {
+                keys.remove(&at);
+            }
+        }
+    }
+
+    /// Takes task `id` off the worker's hands — it skips it if it has not begun it — and answers it
+    /// `why` on the next tick. False when it was not waiting.
+    fn end(&self, id: u64, why: String) -> bool {
+        let Some(p) = self.pending.borrow_mut().remove(&id) else { return false };
+        end_task(id);
+        let outcome = Outcome::failing(p.kind, why);
+        self.ready.borrow_mut().push((p, outcome));
+        true
+    }
+
+    /// Latest wins per key: the callbacks' tasks of module `owner`'s VM `gen` of `call` with `key`
+    /// still with the worker are answered `SUPERSEDED`. Keys are each call's own: an `imageSearch`'s
+    /// never ends a `matchCells`. One answered and not delivered yet is judged as it runs
+    /// ([`open_image_in`]).
+    fn supersede(&self, owner: usize, gen: u64, call: &'static str, key: &str) {
+        let mut ids: Vec<u64> = self
+            .pending
+            .borrow()
+            .values()
+            .filter(|p| {
+                p.owner == owner
+                    && p.gen == gen
+                    && p.asked_as() == call
+                    && p.key.as_deref() == Some(key)
+                    && matches!(p.waiter, ImageWaiter::Callback { .. })
+            })
+            .map(|p| p.id)
+            .collect();
+        ids.sort_unstable();
+        for id in ids {
+            self.end(id, crate::snapshot::SUPERSEDED.to_string());
+        }
     }
 }
 
 /// Delivers what the worker answered, and what was decided without it: a handler that waited for
 /// a task goes on with its answer at once ([`crate::task::resume_image`]); a callback's answer is
-/// handed to its module's mailbox in the lane it was asked from, or held while its module is
-/// disabled (`Fate::Hold`); a profile's reduction goes to its request in snapshot.rs
-/// (`snapshot::deliver_reduced`). The host's tick and the tests' holders both run this.
+/// handed to its module's mailbox in the lane it was asked from, which drops it for a module that
+/// is disabled, reloaded, removed or stopped; a profile's reduction goes to its request in
+/// snapshot.rs (`snapshot::deliver_reduced`). The host's tick and the tests' holders both run
+/// this.
 ///
 /// ONE epoch for the whole drain, not one per result — and none for a drain that only resumes
 /// handlers, which go on in the dispatch that asked, as a read's or a picture's wait does.
@@ -1269,12 +1339,11 @@ impl ImageState {
 pub(crate) fn fire_images<H: MailHost>(h: &H) {
     let im = h.images();
     let mut bumped = false;
-    // Ended by a newer request past the module's cap (`submit`), or not taken by the worker:
-    // answered `(nil, reason)`.
-    let ended_now = std::mem::take(&mut *im.ended.borrow_mut());
-    for (p, why) in ended_now {
-        let outcome = Outcome::failing(&p.task.job, why);
-        hand_over(h, p, outcome, true, &mut bumped);
+    // Answered without the worker: ended by a newer task with its key or past its module's cap,
+    // not taken by the worker, or a callback's answer decided at the call.
+    let ready = std::mem::take(&mut *im.ready.borrow_mut());
+    for (p, outcome) in ready {
+        hand_over(h, p, outcome, None, &mut bumped);
     }
     while let Ok(res) = im.results.try_recv() {
         // The worker answered one that was ended meanwhile: its id leaves the set here.
@@ -1331,20 +1400,19 @@ pub(crate) fn fire_images<H: MailHost>(h: &H) {
         }
         let entry = im.pending.borrow_mut().remove(&res.id);
         let Some(p) = entry else { continue };
-        hand_over(h, p, res.outcome, false, &mut bumped);
+        hand_over(h, p, res.outcome, res.seen, &mut bumped);
     }
 }
 
 /// One answer, to whoever waits for it: a handler goes on with it — what its call returns, built
 /// in its VM only if it is still waiting — and turns no epoch; a callback's goes to its module's
-/// mailbox, the epoch turned once before the drain's first, unless its module is disabled (held,
-/// to be searched again on enable, for a search the worker answered: not one `ended`) or the VM
-/// that asked is gone.
-fn hand_over<H: MailHost>(h: &H, p: PendingImage, outcome: Outcome, ended: bool, bumped: &mut bool) {
-    let PendingImage { lua, waiter, scope, owner, gen, names, task, held, prio } = p;
-    let cb = match waiter {
-        ImageWaiter::Handler { task: id, call, answer } => {
-            crate::task::resume_image(h, id, task.id, || {
+/// mailbox with the moment of its picture (`seen`), the epoch turned once before the drain's
+/// first. The mailbox drops it for a module that may not hear it any more ([`discard_image_in`]).
+fn hand_over<H: MailHost>(h: &H, p: PendingImage, outcome: Outcome, seen: Option<Moment>, bumped: &mut bool) {
+    let PendingImage { lua, waiter, scope, owner, gen, id, kind, key, handed, prio } = p;
+    let waiter = match waiter {
+        ImageWaiter::Handler { task, call, answer } => {
+            crate::task::resume_image(h, task, id, || {
                 answer(&lua, outcome).map_err(|e| {
                     // A VM that ran out of memory building it is stopped, and the stop reports
                     // itself; the handler is not run in it again.
@@ -1354,31 +1422,18 @@ fn hand_over<H: MailHost>(h: &H, p: PendingImage, outcome: Outcome, ended: bool,
             });
             return;
         }
-        ImageWaiter::Callback(cb) => cb,
+        callback => callback,
     };
     if !*bumped {
         h.bump_epoch();
         *bumped = true;
     }
-    let mut p = PendingImage { lua, waiter: ImageWaiter::Callback(cb), scope, owner, gen, names, task, held, prio };
-    // Its own statement, so both borrows end HERE. A match on the call itself would keep them
-    // alive through the callback, and a callback that enables a module or loads one would then
-    // panic on a borrow the drain still held.
-    let verdict = fate_in(h, owner, gen);
-    match verdict {
-        Fate::Deliver => {
-            // In the lane it was asked from, through its module's mailbox (`open_image`).
-            let _prio = crate::ocr::types::enter_priority(p.prio);
-            let lua = p.lua.clone();
-            mailbox::deliver(h, owner, &lua, Event::Image { p: Box::new(p), outcome, ended });
-        }
-        Fate::Hold if !ended => {
-            // The answer itself is let go: it is searched again on re-enable.
-            p.held = true;
-            h.images().pending.borrow_mut().insert(p.task.id, p);
-        }
-        Fate::Hold | Fate::Drop => release([p]),
-    }
+    let mut p = PendingImage { lua, waiter, scope, owner, gen, id, kind, key, handed, prio };
+    // In the lane it was asked from, through its module's mailbox (`open_image`).
+    let _prio = crate::ocr::types::enter_priority(p.prio);
+    h.images().hand(&mut p);
+    let lua = p.lua.clone();
+    mailbox::deliver(h, owner, &lua, Event::Image { p: Box::new(p), outcome, seen });
 }
 
 /// A handler's wait for task `id` given up — the handler was cancelled or ended, its module went,
@@ -1394,11 +1449,12 @@ pub(crate) fn withdraw<H: ReadHost>(h: &H, id: u64) {
             Some(p)
         }
         None => {
-            let mut list = im.ended.borrow_mut();
-            list.iter().position(|(p, _)| p.task.id == id).map(|at| list.remove(at).0)
+            let mut list = im.ready.borrow_mut();
+            list.iter().position(|(p, _)| p.id == id).map(|at| list.remove(at).0)
         }
     };
     if let Some(p) = p {
+        im.forget_key(&p);
         release([p]);
     }
 }
@@ -1429,18 +1485,190 @@ pub(crate) fn submit_wait<H: ReadHost>(
         scope,
         owner,
         gen,
-        names: Vec::new(),
-        task: t.clone(),
-        held: false,
+        id,
+        kind: t.job.kind(),
+        key: None,
+        handed: false,
         prio,
     };
     if im.send(t) {
         im.pending.borrow_mut().insert(id, p);
     } else {
-        let why = failed_reason(&p.task.job).to_string();
-        im.ended.borrow_mut().push((p, why));
+        let outcome = Outcome::failing(p.kind, failed_reason(p.kind).to_string());
+        im.ready.borrow_mut().push((p, outcome));
     }
     id
+}
+
+/// What a call that works over a region asks of the image worker, its arguments read: its answer
+/// at once — nothing to read this time — or the work, and how its answer is built. One plan for
+/// both of the call's forms: a handler waits for it ([`start_plan`]), a callback is handed it
+/// ([`submit_plan`]). An answer at once comes with how the call answers a task that could not
+/// look, for a callback's that a newer request with its key replaced before it ran
+/// ([`submit_now`]).
+pub(crate) enum Plan {
+    Now(MultiValue, BuildAnswer),
+    Work { hay: Haystack, job: Job, answer: BuildAnswer },
+}
+
+/// A waited call `call` (as a module writes it), whose arguments `parse` reads into its plan as the
+/// call that does not wait reads them — a mistake raises at the call: answered at once when there is
+/// nothing to read this time; otherwise a task of the image worker filed for the handler that waits,
+/// as `stop` names it ([`submit_wait`]).
+pub(crate) fn start_plan<H: ReadHost>(
+    h: &H,
+    lua: &Lua,
+    scope: usize,
+    call: &'static str,
+    stop: &'static str,
+    nonce: Table,
+    parse: impl FnOnce() -> mlua::Result<Plan>,
+) -> mlua::Result<MultiValue> {
+    crate::task::start_point(h, lua, scope, call, nonce, parse, |plan, task, prio| match plan {
+        Plan::Now(values, _) => Ok(Started::Now(values)),
+        Plan::Work { hay, job, answer } => Ok(Started::Waits(On::Image(submit_wait(h, lua, scope, task, prio, hay, job, stop, answer)))),
+    })
+}
+
+/// A call's callback form, its plan read as the call reads it ([`Plan`]): the task filed with `cb`
+/// as its waiter, under `key` ([`submit_callback`]); an answer decided at the call delivered on the
+/// next tick all the same ([`submit_now`]). `kind` is what the call's task does.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn submit_plan<H: ReadHost>(
+    h: &H,
+    lua: &Lua,
+    scope: usize,
+    cb: Function,
+    key: Option<String>,
+    stop: &'static str,
+    kind: JobKind,
+    plan: Plan,
+) -> mlua::Result<()> {
+    match plan {
+        Plan::Now(values, otherwise) => submit_now(h, lua, scope, cb, key, stop, kind, values, otherwise),
+        Plan::Work { hay, job, answer } => submit_callback(h, lua, scope, cb, key, stop, hay, job, answer),
+    }
+}
+
+/// Files a callback's task of the VM `lua`, called under the identity `scope` as `call`
+/// (`screen.imageSearch`, …), at the priority of the dispatch that asks: the worker reads `hay`
+/// and does `job`, and `cb` is handed what `answer` builds of it, then `info`. The newest of its
+/// module's tasks of `call` with `key` — older ones still with the worker are answered
+/// `SUPERSEDED` on the next tick — and one of the module's [`IMAGE_PER_OWNER`] callbacks' tasks: a
+/// newer one past that ends its oldest. A worker that is gone answers it, on the next tick, as the
+/// host's own failure. Never answered from inside the call.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn submit_callback<H: ReadHost>(
+    h: &H,
+    lua: &Lua,
+    scope: usize,
+    cb: Function,
+    key: Option<String>,
+    call: &'static str,
+    hay: Haystack,
+    job: Job,
+    answer: BuildAnswer,
+) -> mlua::Result<()> {
+    let im = h.images();
+    let prio = crate::ocr::types::current_priority();
+    let task = ImageTask { id: im.next_id(), hay, job, prio };
+    let p = callback_entry(h, lua, scope, cb, key, call, task.id, task.job.kind(), answer)?;
+    file_callback(h, p, Some(task));
+    Ok(())
+}
+
+/// A callback's answer decided at the call — nothing to read this time, or nothing the worker has to
+/// do — handed to `cb` on the next tick, as every callback's answer is: `values`, then `info`. Under
+/// `key` and its call's rules as [`submit_callback`]'s, but it waits for nothing. Replaced by a newer
+/// request with its key before it ran, it is answered as a task replaced so is: what `otherwise`,
+/// the call's own answer to a task that could not look, builds of that reason ([`open_image_in`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn submit_now<H: ReadHost>(
+    h: &H,
+    lua: &Lua,
+    scope: usize,
+    cb: Function,
+    key: Option<String>,
+    call: &'static str,
+    kind: JobKind,
+    values: MultiValue,
+    otherwise: BuildAnswer,
+) -> mlua::Result<()> {
+    let answer: BuildAnswer = Box::new(move |lua, outcome| match outcome {
+        Outcome::AtCall => Ok(values),
+        replaced => otherwise(lua, replaced),
+    });
+    let p = callback_entry(h, lua, scope, cb, key, call, h.images().next_id(), kind, answer)?;
+    file_callback(h, p, None);
+    Ok(())
+}
+
+/// A callback's entry, numbered `id`, owned by the VM `lua` runs in, at the priority of the dispatch
+/// that asks.
+#[allow(clippy::too_many_arguments)]
+fn callback_entry<H: ReadHost>(
+    h: &H,
+    lua: &Lua,
+    scope: usize,
+    cb: Function,
+    key: Option<String>,
+    call: &'static str,
+    id: u64,
+    kind: JobKind,
+    answer: BuildAnswer,
+) -> mlua::Result<PendingImage> {
+    let (owner, gen) = owner_of(lua, &h.vm_gens(), scope);
+    Ok(PendingImage {
+        lua: lua.clone(),
+        waiter: ImageWaiter::Callback { cb: lua.create_registry_value(cb)?, call, answer },
+        scope,
+        owner,
+        gen,
+        id,
+        kind,
+        key,
+        handed: false,
+        prio: crate::ocr::types::current_priority(),
+    })
+}
+
+/// Files callback entry `p`: the newest with its key, then its task to the worker — or, with no
+/// task, its answer for the next tick — and past its module's cap, its module's oldest ended.
+fn file_callback<H: ReadHost>(h: &H, p: PendingImage, task: Option<ImageTask>) {
+    let im = h.images();
+    // A newer task with the key is the newest whether or not it can be taken.
+    if let Some(k) = &p.key {
+        im.supersede(p.owner, p.gen, p.asked_as(), k);
+    }
+    im.note_key(&p);
+    let Some(task) = task else {
+        im.ready.borrow_mut().push((p, Outcome::AtCall));
+        return;
+    };
+    // The worker captures the region itself and ALWAYS posts a result (a failed capture or a
+    // contained panic becomes an answer on the tick), so the pending callback is always drained.
+    if !im.send(task) {
+        // Worker thread gone (it contains its own panics, so this means teardown): answered as the
+        // host's own failure, as a handler's wait is.
+        let outcome = Outcome::failing(p.kind, failed_reason(p.kind).to_string());
+        im.ready.borrow_mut().push((p, outcome));
+        return;
+    }
+    let owner = p.owner;
+    im.pending.borrow_mut().insert(p.id, p);
+    // Past the module's cap, its oldest request is ended — the rule OCR reads and snapshots
+    // have. A module searching on a timer faster than the worker answers grew this map and the
+    // worker's queue without a bound. The cap is for that runaway, not for a busy module: a
+    // library module's VM holds one overlay per library and per Kontakt cell, each landmark gate
+    // with one search waiting and a near-miss probe beside it, and every gate asks in the same
+    // poll, so a sample-library module can have a dozen or two waiting at once by design.
+    let over = oldest_over_cap(&im.pending.borrow(), owner, IMAGE_PER_OWNER);
+    if let Some(old) = over {
+        let why = too_many_waiting();
+        if im.end(old, why.clone()) {
+            h.note_image_crowding(owner, &why);
+        }
+    }
 }
 
 impl Shared {
@@ -1450,113 +1678,135 @@ impl Shared {
     }
 
     /// An answer as it runs (`Event::Image`), by [`open_image_in`].
-    pub(crate) fn open_image(&self, p: PendingImage, outcome: Outcome, ended: bool) -> Opened {
-        open_image_in(&self.images.pending, &self.enabled, &self.vm_gens, p, outcome, ended)
+    pub(crate) fn open_image(&self, p: PendingImage, outcome: Outcome, seen: Option<Moment>) -> Opened {
+        open_image_in(&self.images, p, outcome, seen, &|idx, what, e| self.report_callback_error(idx, what, e))
     }
 
     /// An answer that will not run, by [`discard_image_in`].
-    pub(crate) fn discard_image(&self, p: PendingImage, ended: bool, hold: bool) {
-        discard_image_in(&self.images.pending, p, ended, hold);
+    pub(crate) fn discard_image(&self, p: PendingImage) {
+        discard_image_in(&self.images, p);
     }
 
-    /// Drops every search still waiting for an answer on behalf of module `owner`'s VM, held
-    /// ones included.
+    /// Drops every task still waiting for an answer on behalf of module `owner`'s VM, and every
+    /// answer of it not delivered yet: its module disabled, reloaded or removed.
     ///
     /// Part of `purge_module`: a pending entry holds a clone of the VM, so leaving it would keep
-    /// the old VM alive past a reload — and hand it a callback once the answer came.
+    /// the old VM alive past a reload — and hand it a callback once the answer came. And of a
+    /// disable: a callback's answer is dropped then, as a read's is, and the worker skips what it
+    /// has not begun.
     pub(crate) fn purge_pending_images(&self, owner: usize) {
-        let gone = purge_owner(&mut self.images.pending.borrow_mut(), owner);
-        // Ended at the worker as well, as a handler's withdrawn wait is: one it has not begun is
-        // not made, and a shot it has is not written (`save_task`). This runs before the module's
-        // handlers are dropped, whose withdrawal then finds nothing here to end. Not a held one: it
-        // was answered already, and no answer would come to take its number out of the set again.
-        for p in gone.iter().filter(|p| !p.held) {
-            end_task(p.task.id);
-        }
-        release(gone);
-        // And the ones ended past the cap, not answered yet: they hold the same VM.
-        let ended: Vec<PendingImage> = {
-            let mut list = self.images.ended.borrow_mut();
-            let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *list).into_iter().partition(|(p, _)| p.owner == owner);
-            *list = rest;
-            mine.into_iter().map(|(p, _)| p).collect()
-        };
-        release(ended);
-    }
-
-    /// Sends again every search that was answered while module `owner` was disabled (see
-    /// `Fate::Hold`), and every held cells read as the answer it gets instead (`resend`).
-    /// Called by `apply_enabled` when the module is enabled.
-    pub(crate) fn resume_held_images(&self, owner: usize) {
-        let gen = self.vm_gens.borrow().get(&owner).copied();
-        let (again, stale) = unhold(&mut self.images.pending.borrow_mut(), owner, gen);
-        release(stale);
-        for task in again {
-            let id = task.id;
-            if !self.images.send(task) {
-                // Worker gone (teardown): nothing will answer, so nothing may wait.
-                let gone = self.images.pending.borrow_mut().remove(&id);
-                release(gone);
-            }
-        }
+        drop_owner(&self.images, owner);
     }
 }
 
-/// An answer as it runs (`Event::Image`), its fate asked again against `enabled` and `gens`: the
-/// callback's call for an owner that is still the VM that asked and enabled; held again in
-/// `pending`, to be searched afresh on re-enable, for one disabled meanwhile — a search, not one
-/// ended with a reason; let go otherwise. The host's own `open` and the mailbox tests' holder both
-/// run this, so the tests run the host's rule and not a copy of it.
+/// Every task and answer of module `owner`'s VM, dropped ([`Shared::purge_pending_images`]): the
+/// host's and the tests' holders'.
+pub(crate) fn drop_owner(im: &ImageState, owner: usize) {
+    let gone = purge_owner(&mut im.pending.borrow_mut(), owner);
+    // Ended at the worker as well, as a handler's withdrawn wait is: one it has not begun is
+    // not made, and a shot it has is not written (`save_task`). This runs before the module's
+    // handlers are dropped, whose withdrawal then finds nothing here to end.
+    for p in &gone {
+        end_task(p.id);
+    }
+    release(gone);
+    // And the ones answered without the worker, not delivered yet: they hold the same VM.
+    let ready: Vec<PendingImage> = {
+        let mut list = im.ready.borrow_mut();
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *list).into_iter().partition(|(p, _)| p.owner == owner);
+        *list = rest;
+        mine.into_iter().map(|(p, _)| p).collect()
+    };
+    release(ready);
+    im.newest_key.borrow_mut().retain(|(o, ..), _| *o != owner);
+    // Its answers in the mailbox go with the mailbox; none of them is out any more.
+    im.handed.borrow_mut().retain(|(o, ..), _| *o != owner);
+}
+
+/// An answer as it runs (`Event::Image`), its module still the VM that asked and enabled: answered
+/// `SUPERSEDED` when a newer task with its key, of its call, was asked since — by an event that ran
+/// before it — as it would have been had the newer one come before the worker answered. Its key is
+/// forgotten when it was the newest with it, and it is no longer out. The callback is called with
+/// what the call returns, built in the VM ([`ImageWaiter::Callback`]'s `answer`), then `info` with
+/// `seen`, the moment of its picture ([`crate::snapshot::callback_values`]). An answer that cannot
+/// be built — a shot whose file could not be written, which the call raises — is reported as the
+/// callback's error, through `report` (module, kind of callback, message), and the callback is not
+/// called. The host's own `open` and the tests' holders both run this, so the tests run the host's
+/// rule and not a copy of it.
 pub(crate) fn open_image_in(
-    pending: &RefCell<HashMap<u64, PendingImage>>,
-    enabled: &RefCell<Vec<bool>>,
-    gens: &RefCell<HashMap<usize, u64>>,
+    im: &ImageState,
     p: PendingImage,
     outcome: Outcome,
-    ended: bool,
+    seen: Option<Moment>,
+    report: &dyn Fn(usize, &str, &str),
 ) -> Opened {
-    let verdict = fate(p.owner, p.gen, &enabled.borrow(), &gens.borrow());
-    if verdict != Fate::Deliver {
-        discard_image_in(pending, p, ended, verdict == Fate::Hold);
-        return Opened::Gone;
-    }
-    // Only a callback's answer comes through the mailbox; a handler's goes on in the drain.
-    let f = match &p.waiter {
-        ImageWaiter::Callback(cb) => p.lua.registry_value::<Function>(cb),
-        ImageWaiter::Handler { .. } => Err(mlua::Error::external("internal error: a handler's wait has no callback")),
-    };
-    let run = f.map(|f| {
-        let args = result_args(&p.lua, &p.task, &p.names, outcome);
-        Opened::Run { f, args, ctx: Ctx::new(p.task.binding(), p.scope) }
-    });
-    release([p]);
-    run.unwrap_or(Opened::Gone)
-}
-
-/// An answer that will not run: put back held in `pending` — to be searched again when its module
-/// is enabled — when `hold` (its module was disabled) and it was a search; let go otherwise.
-pub(crate) fn discard_image_in(pending: &RefCell<HashMap<u64, PendingImage>>, mut p: PendingImage, ended: bool, hold: bool) {
-    if hold && !ended {
-        p.held = true;
-        let id = p.task.id;
-        pending.borrow_mut().insert(id, p);
+    im.unhand(&p);
+    let (outcome, seen) = if im.replaced(&p) {
+        (Outcome::failing(p.kind, crate::snapshot::SUPERSEDED.to_string()), None)
     } else {
-        release([p]);
+        (outcome, seen)
+    };
+    im.forget_key(&p);
+    let PendingImage { lua, waiter, scope, .. } = p;
+    // Only a callback's answer comes through the mailbox; a handler's goes on in the drain.
+    let ImageWaiter::Callback { cb, call, answer } = waiter else { return Opened::Gone };
+    let f = lua.registry_value::<Function>(&cb);
+    let _ = lua.remove_registry_value(cb);
+    let built = f.and_then(|f| {
+        let values = answer(&lua, outcome)?;
+        Ok((f, crate::snapshot::callback_values(values, lua.create_table()?, seen)?))
+    });
+    match built {
+        Ok((f, args)) => Opened::Run { f, args, ctx: Ctx::new(call, scope) },
+        Err(e) => {
+            // A VM that ran out of memory building it is stopped, and the stop reports itself.
+            if !crate::vm_guard::note_failure(&lua, crate::vm_guard::EntryKind::Handler, call, &e) {
+                report(scope, call, &e.to_string());
+            }
+            Opened::Gone
+        }
     }
 }
 
-/// A search `id` of the VM `lua` under the identity `scope`, answered to `cb`, as `imageSearchAsync`
-/// files it — one entry, the screen's 10x10 pixels at the origin: for the tests' holders, which
-/// have no `Shared`.
+/// An answer that will not run — its module disabled, reloaded, removed or stopped: no longer out,
+/// its key forgotten when it was the newest with it, its callback and what its answer held let go.
+pub(crate) fn discard_image_in(im: &ImageState, p: PendingImage) {
+    im.unhand(&p);
+    im.forget_key(&p);
+    release([p]);
+}
+
+/// A callback's search `id` of the VM `lua` under the identity `scope`, answered to `cb` as
+/// `imageSearch(template, opts, cb)` answers it — counted as handed to its module's mailbox, as the
+/// delivery hands it over: for the tests' holders, which have no `Shared`.
 #[cfg(test)]
-pub(crate) fn test_pending(lua: &Lua, gens: &HashMap<usize, u64>, id: u64, scope: usize, cb: Function) -> PendingImage {
-    let task = ImageTask {
+pub(crate) fn test_pending(im: &ImageState, lua: &Lua, gens: &HashMap<usize, u64>, id: u64, scope: usize, cb: Function) -> PendingImage {
+    let (owner, gen) = owner_of(lua, gens, scope);
+    let answer: BuildAnswer = Box::new(|lua, outcome| search_values(lua, Search::One, outcome, &[]));
+    let mut p = PendingImage {
+        lua: lua.clone(),
+        waiter: ImageWaiter::Callback { cb: lua.create_registry_value(cb).expect("the callback is kept"), call: "screen.imageSearch", answer },
+        scope,
+        owner,
+        gen,
         id,
-        hay: Haystack::Screen { region: (0, 0, 10, 10), source: CaptureSource::Standard, compare: None },
-        job: Job::Search { entries: Vec::new(), tol: 0, scales: vec![1.0], mode: Mode::First, unresolved: None },
+        kind: JobKind::Search,
+        key: None,
+        handed: false,
         prio: crate::ocr::types::current_priority(),
     };
-    pending(lua, gens, scope, cb, vec![None], task).expect("the entry is made")
+    im.hand(&mut p);
+    p
+}
+
+/// [`test_pending`] asked with `opts.key` `key`: counted as out under it while it waits in its
+/// module's mailbox.
+#[cfg(test)]
+pub(crate) fn test_keyed(im: &ImageState, lua: &Lua, gens: &HashMap<usize, u64>, id: u64, scope: usize, cb: Function, key: &str) -> PendingImage {
+    let mut p = test_pending(im, lua, gens, id, scope, cb);
+    p.key = Some(key.to_string());
+    im.hand(&mut p);
+    p
 }
 
 /// What the worker answers `t` with, its picture already there: a profile's, or a snapshot's
@@ -1593,82 +1843,32 @@ pub(crate) fn test_found_nothing() -> Outcome {
     Outcome::Search(Ok(vec![None]))
 }
 
-/// Whether search `id` is held in `pending`, waiting for its module to be enabled again.
-#[cfg(test)]
-pub(crate) fn test_held(pending: &RefCell<HashMap<u64, PendingImage>>, id: u64) -> bool {
-    pending.borrow().get(&id).is_some_and(|p| p.held)
-}
-
-/// What the callback is called with: a search's one value, or `(nil, reason)` when it could not
-/// look; a cells match's `(match, nil)` / `(nil, reason)`.
-fn result_args(lua: &Lua, task: &ImageTask, names: &[Option<String>], outcome: Outcome) -> MultiValue {
-    let values = match (&task.job, outcome) {
-        (Job::Search { mode, .. }, Outcome::Search(Ok(found))) => vec![result_value(lua, *mode, names, Some(found))],
-        // One value more than a search that looked, so a callback written for `cb(hit)` reads
-        // it exactly as before.
-        (Job::Search { .. }, Outcome::Search(Err(why))) => vec![Value::Nil, reason(lua, why)],
-        (_, Outcome::Cells(Ok((live, ranked)))) => {
-            let (x, y, w, h) = task.region();
-            let r = ScreenRect { x, y, w, h };
-            let table = match &ranked {
-                Some(ranked) => cells_match_table(lua, &live, r, ranked, names),
-                None => cells_table(lua, &live, r),
-            };
-            match table {
-                Ok(t) => vec![Value::Table(t), Value::Nil],
-                Err(e) => vec![Value::Nil, reason(lua, format!("internal error: {e}"))],
-            }
-        }
-        (_, Outcome::Cells(Err(why))) => vec![Value::Nil, reason(lua, why)],
-        // A search answered as cells, or the reverse, or a profile, a crop, a template, a shot or a
-        // preparation here at all: cannot happen, as the worker answers each task by its own job, a
-        // profile is answered in snapshot.rs, a crop, a template or a shot only ever to a handler,
-        // and a preparation to nobody. Answered as "could not look" rather than unwrapped.
-        (Job::Cells(_) | Job::Profile { .. } | Job::Crop | Job::Template | Job::Save(_) | Job::Prepare(_), Outcome::Search(_))
-        | (_, Outcome::Profile(_) | Outcome::Crop(_) | Outcome::Template(_) | Outcome::Save(_) | Outcome::Prepared) => {
-            vec![Value::Nil, reason(lua, "internal error".to_string())]
-        }
-    };
-    MultiValue::from_vec(values)
-}
-
+/// A reason as a Lua string, or `nil` when the VM cannot make one.
 fn reason(lua: &Lua, why: String) -> Value {
     lua.create_string(why).map(Value::String).unwrap_or(Value::Nil)
 }
 
-/// What a search's callback receives. Built in the owner's VM, from the answer and the names
-/// that stayed on this side.
-fn result_value(
-    lua: &Lua,
-    mode: Mode,
-    names: &[Option<String>],
-    found: Option<Vec<Option<ScreenHit>>>,
-) -> Value {
-    let name = |h: &ScreenHit| names.get(h.n - 1).and_then(|n| n.as_deref());
-    let hit = |h: &ScreenHit| match hit_table(lua, h.x, h.y, h.w, h.h, h.n, name(h)) {
-        Ok(t) => Value::Table(t),
-        Err(_) => Value::Nil,
+/// What `imageSearchEach` answers — its callback's first two values: the list, a hit or `false` for
+/// each entry, its hits named from `names`; or `nil` and the reason when it could not look.
+fn each_values(lua: &Lua, outcome: Outcome, names: &[Option<String>]) -> mlua::Result<MultiValue> {
+    let found = match outcome {
+        Outcome::Search(found) => found,
+        // Never: the worker answers a search with a search.
+        _ => Err(SEARCH_PANICKED.to_string()),
     };
-    match (mode, found) {
-        (_, None) => Value::Nil,
-        (Mode::First, Some(v)) => v.into_iter().next().flatten().map(|h| hit(&h)).unwrap_or(Value::Nil),
-        // Only ever a handler's wait (`search_values`), whose list is built there: here as a list
-        // of the hits all the same.
-        (Mode::All, Some(v)) => match lua.create_sequence_from(v.iter().flatten().map(hit)) {
-            Ok(list) => Value::Table(list),
-            Err(_) => Value::Nil,
-        },
-        (Mode::Each, Some(v)) => {
-            let Ok(list) = lua.create_table_with_capacity(v.len(), 0) else { return Value::Nil };
-            for (i, slot) in v.iter().enumerate() {
+    match found {
+        Ok(slots) => {
+            let list = lua.create_table_with_capacity(slots.len(), 0)?;
+            for (i, slot) in slots.iter().enumerate() {
                 let item = match slot {
-                    Some(h) => hit(h),
+                    Some(h) => Value::Table(hit_table(lua, h.x, h.y, h.w, h.h, h.n, names.get(h.n - 1).and_then(|n| n.as_deref()))?),
                     None => Value::Boolean(false),
                 };
-                let _ = list.raw_set(i + 1, item);
+                list.raw_set(i + 1, item)?;
             }
-            Value::Table(list)
+            one_value(Value::Table(list))
         }
+        Err(why) => Ok(MultiValue::from_vec(vec![Value::Nil, reason(lua, why)])),
     }
 }
 
@@ -1842,6 +2042,8 @@ enum Source {
 struct ParsedSpec {
     name: Option<String>,
     source: Source,
+    /// The callback form's `key`.
+    key: Option<String>,
 }
 
 /// Names longer than this are refused: a name goes into hits and log lines, and a paragraph
@@ -1874,9 +2076,11 @@ fn whole(v: &Value, field: &str) -> mlua::Result<i64> {
 /// is a template that does something other than what its author reads in it. The `capture`
 /// region is read by the Region form's one reader, as every other call's is: corners the way
 /// `opts.region` takes them, or a window region resolved here, at the call. With `snapshot`,
-/// a corner left out is the snapshot's edge, and the template is cut from that snapshot.
-fn parse_spec(spec: &Table, sw: i32, sh: i32) -> mlua::Result<ParsedSpec> {
+/// a corner left out is the snapshot's edge, and the template is cut from that snapshot. `key` is
+/// the callback form's (`cb`): a non-empty string there, and a mistake without one.
+fn parse_spec(spec: &Table, sw: i32, sh: i32, cb: bool) -> mlua::Result<ParsedSpec> {
     let mut name = None;
+    let mut wanted_key = None;
     let (mut w, mut h) = (None, None);
     let mut snapshot_value: Option<Value> = None;
     let mut sources: Vec<(String, Value)> = Vec::new();
@@ -1910,11 +2114,16 @@ fn parse_spec(spec: &Table, sw: i32, sh: i32) -> mlua::Result<ParsedSpec> {
             "w" => w = Some(whole(&v, "w")?),
             "h" => h = Some(whole(&v, "h")?),
             "snapshot" => snapshot_value = Some(v),
+            "key" if !cb => return Err(spec_err("key is only taken with a callback (the second argument)")),
+            "key" => match v {
+                Value::String(s) if !s.to_str()?.is_empty() => wanted_key = Some(s.to_str()?.to_string()),
+                other => return Err(spec_err(format!("key must be a non-empty string, got {}", crate::describe_value(&other)))),
+            },
             "rgba" | "rgb" | "capture" | "file" => sources.push((key, v)),
             other => {
                 return Err(spec_err(format!(
                     "unknown field '{other}'; a spec takes name and exactly one of rgba, rgb, \
-                     capture or file (and snapshot with capture)"
+                     capture or file (and snapshot with capture, and key with a callback)"
                 )))
             }
         }
@@ -2009,7 +2218,7 @@ fn parse_spec(spec: &Table, sw: i32, sh: i32) -> mlua::Result<ParsedSpec> {
             Source::File(p.to_str()?.to_string())
         }
     };
-    Ok(ParsedSpec { name, source })
+    Ok(ParsedSpec { name, source, key: wanted_key })
 }
 
 /// A `file` template's path, resolved, and the width and height its PNG header gives.
@@ -2088,6 +2297,13 @@ fn template_values(lua: &Lua, outcome: Outcome, name: Option<String>, charge: Ch
             let handle = TemplateHandle { pic: Prepared::made(dec, count), w, h, name, _charge: charge };
             one_value(Value::UserData(lua.create_userdata(handle)?))
         }
+        other => template_failed(lua, other),
+    }
+}
+
+/// What `template` answers when there is no template: `nil` and the reason.
+fn template_failed(lua: &Lua, outcome: Outcome) -> mlua::Result<MultiValue> {
+    match outcome {
         Outcome::Template(Err(why)) => with_reason(lua, Value::Nil, why),
         // Never: the worker answers a template's task with a template.
         _ => with_reason(lua, Value::Nil, TEMPLATE_FAILED.to_string()),
@@ -2097,20 +2313,52 @@ fn template_values(lua: &Lua, outcome: Outcome, name: Option<String>, charge: Ch
 /// `host.screen.template`, as messages and log lines name it.
 const FT: &str = "host.screen.template";
 
-/// The spec of `host.screen.template`, which must be a table, read and checked.
-fn spec_of(v: &Value, (sw, sh): (i32, i32)) -> mlua::Result<ParsedSpec> {
+/// The spec of `host.screen.template`, which must be a table, read and checked — its `key` too for
+/// the callback form (`cb`).
+fn spec_of(v: &Value, (sw, sh): (i32, i32), cb: bool) -> mlua::Result<ParsedSpec> {
     match v {
-        Value::Table(spec) => parse_spec(spec, sw, sh),
+        Value::Table(spec) => parse_spec(spec, sw, sh, cb),
         other => Err(spec_err(format!("takes a spec table, got {}", crate::describe_value(other)))),
     }
 }
 
+/// The stop, the callback and the keys of a template go by this name.
+const TEMPLATE_STOP: &str = "screen.template";
+
+/// A template's plan: for a `capture`, its charge reserved at the call and a task of the image
+/// worker — the region captured through the module's source, with the first-read comparison when
+/// it is owed, or cut from its snapshot; then made a template ([`template_values`]). A spec that
+/// captures nothing — bytes, a file, a window region with nothing to capture this time, a region
+/// not wholly inside its snapshot — is answered at once, a handle's picture left to the worker.
+fn template_plan(lua: &Lua, parsed: ParsedSpec, making: &Making) -> mlua::Result<Plan> {
+    let ParsedSpec { name, source, key } = parsed;
+    let Source::Capture { x, y, w, h: ht, snapshot: snap } = source else {
+        let now = build_handle(lua, ParsedSpec { name, source, key }, making, |_, _, _, _| Err(TEMPLATE_FAILED.to_string()))?;
+        return Ok(Plan::Now(now, Box::new(template_failed)));
+    };
+    let charge = reserve(lua, &budget(lua), template::dense_bytes(w as u32, ht as u32))?;
+    let r = geo::Rect::new(x, y, w, ht);
+    let hay = match snap {
+        // Cut from the snapshot, whole or not at all, as on the event loop: nothing to cut is
+        // answered at once.
+        Some(frame) if !frame.contains(r) => {
+            let now = template_values(lua, Outcome::Template(Err(snapshot::NOT_INSIDE.to_string())), name, charge)?;
+            return Ok(Plan::Now(now, Box::new(template_failed)));
+        }
+        Some(frame) => Haystack::Frame { frame, region: r },
+        None => Haystack::Screen {
+            region: r.tuple(),
+            source: capture_source::vm_source(lua),
+            compare: capture_source::take_compare(lua, r.tuple()),
+        },
+    };
+    let answer: BuildAnswer = Box::new(move |lua, outcome| template_values(lua, outcome, name, charge));
+    Ok(Plan::Work { hay, job: Job::Template, answer })
+}
+
 /// A waited `host.screen.template`: the spec read as the call that does not wait reads it — a
-/// mistake raises at the call — and, for a `capture`, its charge reserved at the call and a task
-/// of the image worker filed for the handler that waits: the region captured through the module's
-/// source, with the first-read comparison when it is owed, or cut from its snapshot; then made a
-/// template ([`template_values`]). A spec that captures nothing — bytes, a file, a window region
-/// with nothing to capture this time — is answered at once, a handle's picture left to the worker.
+/// mistake raises at the call — and planned ([`template_plan`]): a `capture` waits for the image
+/// worker, anything else is answered at once.
 fn start_template<H: ReadHost>(
     h: &H,
     lua: &Lua,
@@ -2119,31 +2367,18 @@ fn start_template<H: ReadHost>(
     parse: impl FnOnce() -> mlua::Result<ParsedSpec>,
     making: &Making,
 ) -> mlua::Result<MultiValue> {
-    crate::task::start_point(h, lua, scope, FT, nonce, parse, |parsed, task, prio| {
-        let ParsedSpec { name, source } = parsed;
-        let Source::Capture { x, y, w, h: ht, snapshot: snap } = source else {
-            let now = build_handle(lua, ParsedSpec { name, source }, making, |_, _, _, _| Err(TEMPLATE_FAILED.to_string()))?;
-            return Ok(Started::Now(now));
-        };
-        let charge = reserve(lua, &budget(lua), template::dense_bytes(w as u32, ht as u32))?;
-        let r = geo::Rect::new(x, y, w, ht);
-        let hay = match snap {
-            // Cut from the snapshot, whole or not at all, as on the event loop: nothing to cut is
-            // answered at once.
-            Some(frame) if !frame.contains(r) => {
-                return Ok(Started::Now(template_values(lua, Outcome::Template(Err(snapshot::NOT_INSIDE.to_string())), name, charge)?))
-            }
-            Some(frame) => Haystack::Frame { frame, region: r },
-            None => Haystack::Screen {
-                region: r.tuple(),
-                source: capture_source::vm_source(lua),
-                compare: capture_source::take_compare(lua, r.tuple()),
-            },
-        };
-        let answer: BuildAnswer = Box::new(move |lua, outcome| template_values(lua, outcome, name, charge));
-        let id = submit_wait(h, lua, scope, task, prio, hay, Job::Template, "screen.template", answer);
-        Ok(Started::Waits(On::Image(id)))
-    })
+    start_plan(h, lua, scope, FT, TEMPLATE_STOP, nonce, || template_plan(lua, parse()?, making))
+}
+
+/// `host.screen.template(spec, cb)`: the same template with `cb` as its waiter — it never waits,
+/// and the handle, or `nil` and the reason, is handed to `cb` on a later tick, a `capture`'s once the
+/// image worker made it, any other on the next tick — under the spec's `key`.
+fn submit_template<H: ReadHost>(h: &H, lua: &Lua, scope: usize, cb: Value, parse: impl FnOnce() -> mlua::Result<ParsedSpec>, making: &Making) -> mlua::Result<()> {
+    let cb = callback_arg(FT, cb, "second argument")?;
+    let mut parsed = parse()?;
+    let key = parsed.key.take();
+    let plan = template_plan(lua, parsed, making)?;
+    submit_plan(h, lua, scope, cb, key, TEMPLATE_STOP, JobKind::Template, plan)
 }
 
 /// `host.screen.template` where it cannot wait: a `capture` made on the event loop through
@@ -2200,9 +2435,10 @@ fn preparation(id: u64, p: &Arc<Prepared>) -> ImageTask {
     ImageTask { id, hay, job: Job::Prepare(Arc::downgrade(p)), prio: crate::ocr::types::current_priority() }
 }
 
-/// `host.screen.template(spec) -> Template | nil, reason`. A `capture` waits in a handler for the
-/// image worker ([`start_template`]); where it cannot wait it captures on the event loop, said in
-/// the log ([`template_on_loop`]). Bytes and a file never wait: their picture is the worker's.
+/// `host.screen.template(spec, cb?) -> Template | nil, reason`. A `capture` waits in a handler for
+/// the image worker ([`start_template`]); where it cannot wait it captures on the event loop, said
+/// in the log ([`template_on_loop`]). Bytes and a file never wait: their picture is the worker's.
+/// With a callback nothing waits ([`submit_template`]).
 pub(crate) fn template(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, spec): (Table, Value)| {
@@ -2210,12 +2446,12 @@ pub(crate) fn template(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Resu
         let screen = sh.backend.screen_size();
         let file = |path: &str| template_file(&sh.root(idx), path);
         let prepare = |p: Arc<Prepared>| queue_preparation(&*sh, p);
-        start_template(&*sh, lua, idx, nonce, || spec_of(&spec, screen), &Making { file: &file, prepare: &prepare })
+        start_template(&*sh, lua, idx, nonce, || spec_of(&spec, screen, false), &Making { file: &file, prepare: &prepare })
     })?;
     let sh = shared.clone();
     let blocking = lua.create_function(move |lua, (why, spec): (String, Value)| {
         host_call!("host.screen.template");
-        let parsed = spec_of(&spec, sh.backend.screen_size())?;
+        let parsed = spec_of(&spec, sh.backend.screen_size(), false)?;
         let file = |path: &str| template_file(&sh.root(idx), path);
         let prepare = |p: Arc<Prepared>| queue_preparation(&*sh, p);
         template_on_loop(
@@ -2250,7 +2486,15 @@ pub(crate) fn template(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Resu
             },
         )
     })?;
-    crate::task::points(lua, idx, shared.clone())?.call((FT, start, blocking))
+    let sh = shared.clone();
+    let submit = lua.create_function(move |lua, (spec, cb): (Value, Value)| {
+        host_call!("host.screen.template");
+        let screen = sh.backend.screen_size();
+        let file = |path: &str| template_file(&sh.root(idx), path);
+        let prepare = |p: Arc<Prepared>| queue_preparation(&*sh, p);
+        submit_template(&*sh, lua, idx, cb, || spec_of(&spec, screen, true), &Making { file: &file, prepare: &prepare })
+    })?;
+    crate::task::points(lua, idx, shared.clone())?.call((FT, start, blocking, submit, 2))
 }
 
 /// `host.screen.template` as the host builds it, over `holder`, its wait the host's own
@@ -2270,18 +2514,24 @@ pub(crate) fn test_template<H: ReadHost>(
     let start = lua.create_function(move |lua, (nonce, spec): (Table, Value)| {
         let file = |path: &str| template_file(&r, path);
         let prepare = |p: Arc<Prepared>| queue_preparation(&*h, p);
-        start_template(&*h, lua, idx, nonce, || spec_of(&spec, (1920, 1080)), &Making { file: &file, prepare: &prepare })
+        start_template(&*h, lua, idx, nonce, || spec_of(&spec, (1920, 1080), false), &Making { file: &file, prepare: &prepare })
     })?;
-    let h = holder.clone();
+    let (h, r) = (holder.clone(), root.clone());
     let blocking = lua.create_function(move |lua, (why, spec): (String, Value)| {
-        let parsed = spec_of(&spec, (1920, 1080))?;
-        let file = |path: &str| template_file(&root, path);
+        let parsed = spec_of(&spec, (1920, 1080), false)?;
+        let file = |path: &str| template_file(&r, path);
         let prepare = |p: Arc<Prepared>| queue_preparation(&*h, p);
         template_on_loop(&*h, lua, idx, &why, parsed, &Making { file: &file, prepare: &prepare }, |x, y, w, hh| {
             capture(&[(x, y, w, hh)], capture_source::vm_source(lua)).pop().unwrap_or_else(|| Err(crate::backend::CAPTURE_FAILED.to_string()))
         })
     })?;
-    crate::task::points(lua, idx, holder)?.call((FT, start, blocking))
+    let h = holder.clone();
+    let submit = lua.create_function(move |lua, (spec, cb): (Value, Value)| {
+        let file = |path: &str| template_file(&root, path);
+        let prepare = |p: Arc<Prepared>| queue_preparation(&*h, p);
+        submit_template(&*h, lua, idx, cb, || spec_of(&spec, (1920, 1080), true), &Making { file: &file, prepare: &prepare })
+    })?;
+    crate::task::points(lua, idx, holder)?.call((FT, start, blocking, submit, 2))
 }
 
 // ── Template arguments ─────────────────────────────────────────────────────────────────
@@ -2317,9 +2567,9 @@ fn resolve_with(
 
 /// Every template in a list, checked BEFORE anything is captured.
 ///
-/// `imageSearchMulti` used to open each file inside its loop, after the capture, so a bad
-/// path late in the list lay dormant until every earlier template happened to miss. Now a bad
-/// path raises on the first call, wherever it sits.
+/// A search of a list used to open each file inside its loop, after the capture, so a bad path
+/// late in the list lay dormant until every earlier template happened to miss. Now a bad path
+/// raises on the first call, wherever it sits.
 fn resolve_list(
     list: &Table,
     what: &str,
@@ -2386,15 +2636,14 @@ fn live_capture(sh: &Shared, lua: &Lua, (x, y, w, h): (i32, i32, i32, i32)) -> R
     sh.backend.capture(x, y, w, h, capture_source::vm_source(lua))
 }
 
-// ── host.screen.imageSearch, imageSearchMulti and imageSearchAll wait ───────────────────────
+// ── host.screen.imageSearch and imageSearchAll ──────────────────────────────────────────────
 
-/// The three searches a handler waits for.
+/// The two searches a handler waits for, or a callback is handed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Search {
-    /// `imageSearch`: the first match of one template.
+    /// `imageSearch`: the first match of one template, or of the first template of a list that
+    /// matches.
     One,
-    /// `imageSearchMulti`: the first template of a list that matches, and which one it is.
-    Multi,
     /// `imageSearchAll`: every match of one template, at its own size.
     All,
 }
@@ -2404,16 +2653,15 @@ impl Search {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Search::One => "host.screen.imageSearch",
-            Search::Multi => "host.screen.imageSearchMulti",
             Search::All => "host.screen.imageSearchAll",
         }
     }
 
-    /// The call as a stop of its VM while its answer is built names it.
+    /// The call as a stop of its VM while its answer is built names it, and as its callback's
+    /// keys and errors do.
     fn stop(self) -> &'static str {
         match self {
             Search::One => "screen.imageSearch",
-            Search::Multi => "screen.imageSearchMulti",
             Search::All => "screen.imageSearchAll",
         }
     }
@@ -2423,7 +2671,6 @@ impl Search {
     fn short(self) -> &'static str {
         match self {
             Search::One => "imageSearch",
-            Search::Multi => "imageSearchMulti",
             Search::All => "imageSearchAll",
         }
     }
@@ -2431,7 +2678,7 @@ impl Search {
     /// How the worker answers it.
     fn mode(self) -> Mode {
         match self {
-            Search::One | Search::Multi => Mode::First,
+            Search::One => Mode::First,
             Search::All => Mode::All,
         }
     }
@@ -2439,7 +2686,8 @@ impl Search {
 
 /// What a search asks, its arguments read ([`search_ask`]).
 pub(crate) struct SearchAsk {
-    /// Each template, in order — one but for `imageSearchMulti` — and the name its hit reports.
+    /// Each template, in order — one but for `imageSearch` given a list — and the name its hit
+    /// reports.
     templates: Vec<(Needle, Option<String>)>,
     /// Where to look — or why there is nothing to look at this time (a window region with no
     /// rectangle; on a snapshot, a region with no part inside it), answered at once.
@@ -2448,41 +2696,42 @@ pub(crate) struct SearchAsk {
     snap: Option<Arc<Frame>>,
     tol: u8,
     scales: Vec<f32>,
+    /// `opts.key`, read only for the callback form.
+    key: Option<String>,
 }
 
 /// A search's arguments, read as the call has always read them, before anything is captured: the
-/// types of the template list (`imageSearchMulti`) and of `opts`; then the templates — every path
-/// checked through `locate` the first time it is named, so a bad one raises wherever it sits in a
-/// list, and opened on the image worker; then `opts.snapshot`, then `opts.region`, resolved now
-/// against a primary screen of `screen`'s size; then the tolerance and, but for `imageSearchAll`,
-/// which matches at the template's own size only, the scales. A mistake raises; a region with
-/// nothing to look at this time is answered.
+/// type of `opts`; then the templates — `imageSearch` takes one, or a list of them tried in order
+/// against one frame, which may not be empty; every path checked through `locate` the first time it
+/// is named, so a bad one raises wherever it sits in a list, and opened on the image worker; then
+/// `opts.snapshot`, then `opts.region`, resolved now against a primary screen of `screen`'s size;
+/// then the tolerance and, but for `imageSearchAll`, which matches at the template's own size only,
+/// the scales; then `opts.key`, which only the callback form (`cb`) takes. A mistake raises; a region
+/// with nothing to look at this time is answered.
 pub(crate) fn search_ask(
     kind: Search,
     tv: Value,
     opts: Value,
     screen: (i32, i32),
     locate: &dyn Fn(&str) -> mlua::Result<PathBuf>,
+    cb: bool,
 ) -> mlua::Result<SearchAsk> {
     let fname = kind.name();
-    let list = match (kind, &tv) {
-        (Search::Multi, Value::Table(list)) => Some(list.clone()),
-        (Search::Multi, other) => {
-            return Err(mlua::Error::external(format!(
-                "{fname}: templates must be a list of paths and Templates, got {}",
-                crate::describe_value(other)
-            )))
-        }
-        _ => None,
-    };
     let opts = match opts {
         Value::Nil => None,
         Value::Table(t) => Some(t),
         other => return Err(mlua::Error::external(format!("{fname}: opts must be a table, got {}", crate::describe_value(&other)))),
     };
-    let templates = match list {
-        Some(list) => resolve_list(&list, kind.short(), locate)?,
-        None => vec![resolve_with(&tv, kind.short(), locate)?],
+    let templates = match (kind, &tv) {
+        // A list: several renderings of one thing, matched in order against the same frame.
+        (Search::One, Value::Table(list)) => {
+            let templates = resolve_list(list, kind.short(), locate)?;
+            if templates.is_empty() {
+                return Err(mlua::Error::external(format!("{fname}: no template given; the list is empty")));
+            }
+            templates
+        }
+        _ => vec![resolve_with(&tv, kind.short(), locate)?],
     };
     let o = opts.as_ref();
     let snap = snapshot::from_opts(o, fname)?;
@@ -2491,15 +2740,15 @@ pub(crate) fn search_ask(
         None => search_region(screen, o, fname)?,
     };
     let scales = if kind == Search::All { Vec::new() } else { read_scales(o) };
-    Ok(SearchAsk { templates, region, snap, tol: read_tol(o), scales })
+    let key = snapshot::opts_key(o, fname, cb, "the third argument")?;
+    Ok(SearchAsk { templates, region, snap, tol: read_tol(o), scales, key })
 }
 
-/// What a search answers — on the event loop and for a handler that waited alike, in the shape the
-/// call has always had. `imageSearch`: the hit, `nil` alone when it looked and found nothing, `nil`
-/// and the reason when it could not look. `imageSearchMulti`: the index and the hit, `nil, nil`, or
-/// `nil, nil` and the reason. `imageSearchAll`: the list of hits, never `nil` — empty and alone when
-/// it found none, empty with the reason after it when it could not look. `names` is the name each
-/// template's hit reports.
+/// What a search answers — on the event loop, for a handler that waited and to a callback alike,
+/// in the shape the call has always had. `imageSearch`: the hit, `nil` alone when it looked and
+/// found nothing, `nil` and the reason when it could not look. `imageSearchAll`: the list of hits,
+/// never `nil` — empty and alone when it found none, empty with the reason after it when it could
+/// not look. `names` is the name each template's hit reports.
 fn search_values(lua: &Lua, kind: Search, outcome: Outcome, names: &[Option<String>]) -> mlua::Result<MultiValue> {
     let found = match outcome {
         Outcome::Search(found) => found,
@@ -2514,13 +2763,6 @@ fn search_values(lua: &Lua, kind: Search, outcome: Outcome, names: &[Option<Stri
             None => one_value(Value::Nil),
         },
         (Search::One, Err(why)) => with_reason(lua, Value::Nil, why),
-        (Search::Multi, Ok(v)) => Ok(MultiValue::from_vec(match v.into_iter().next().flatten() {
-            Some(h) => vec![Value::Integer(h.n as i64), Value::Table(hit(&h)?)],
-            None => vec![Value::Nil, Value::Nil],
-        })),
-        // "Could not look" is a THIRD value, after the two `nil`s "nothing matched" has always
-        // returned: a caller that reads one or two values reads exactly what it did before.
-        (Search::Multi, Err(why)) => Ok(MultiValue::from_vec(vec![Value::Nil, Value::Nil, reason(lua, why)])),
         (Search::All, Ok(v)) => {
             let list = lua.create_table_with_capacity(v.len(), 0)?;
             for (i, h) in v.iter().flatten().enumerate() {
@@ -2534,10 +2776,10 @@ fn search_values(lua: &Lua, kind: Search, outcome: Outcome, names: &[Option<Stri
 }
 
 /// The work of a search of `region`: its templates — opened, and made, by whoever does the work —
-/// matched against the region of the screen — or of its snapshot — as `imageSearchAsync` matches
-/// them, every match for `imageSearchAll`. A task
-/// for the worker (`carry`) takes the module's first-read comparison when it is owed; the event
-/// loop's own work makes none. The names stay on this side, for the answer.
+/// matched against the region of the screen — or of its snapshot — in order, the first that
+/// matches answering, or every match for `imageSearchAll`. A task for the worker (`carry`) takes the
+/// module's first-read comparison when it is owed; the event loop's own work makes none. The names
+/// stay on this side, for the answer.
 fn search_work(lua: &Lua, kind: Search, ask: SearchAsk, region: (i32, i32, i32, i32), carry: bool) -> (Haystack, Job, Vec<Option<String>>) {
     let SearchAsk { templates, snap, tol, scales, .. } = ask;
     let (entries, names): (Vec<_>, Vec<_>) = templates.into_iter().map(|(d, n)| ((d, None), n)).unzip();
@@ -2545,30 +2787,22 @@ fn search_work(lua: &Lua, kind: Search, ask: SearchAsk, region: (i32, i32, i32, 
     (hay, Job::Search { entries, tol, scales, mode: kind.mode(), unresolved: None }, names)
 }
 
-/// A waited search: its arguments read by `parse` as the call that does not wait reads them — a
-/// mistake raises at the call — and answered at once when there is nothing to look at this time;
-/// otherwise a search of the image worker filed for the handler that waits, which captures the
-/// region through the module's source, with the first-read comparison when it is owed, or reads
-/// its snapshot, and matches ([`search_values`] answers it).
-pub(crate) fn start_search<H: ReadHost>(
-    h: &H,
-    lua: &Lua,
-    scope: usize,
-    kind: Search,
-    nonce: Table,
-    parse: impl FnOnce() -> mlua::Result<SearchAsk>,
-) -> mlua::Result<MultiValue> {
-    crate::task::start_point(h, lua, scope, kind.name(), nonce, parse, |ask, task, prio| {
-        let region = match &ask.region {
-            Ok(r) => *r,
-            // Nothing to look at this time: answered at once, as where it cannot wait.
-            Err(none) => return Ok(Started::Now(search_values(lua, kind, Outcome::Search(Err(none.clone())), &[])?)),
-        };
-        let (hay, job, names) = search_work(lua, kind, ask, region, true);
-        let answer: BuildAnswer = Box::new(move |lua, outcome| search_values(lua, kind, outcome, &names));
-        let id = submit_wait(h, lua, scope, task, prio, hay, job, kind.stop(), answer);
-        Ok(Started::Waits(On::Image(id)))
-    })
+/// A search's plan ([`Plan`]): answered at once when there is nothing to look at this time;
+/// otherwise a search of the image worker, which captures the region through the module's source,
+/// with the first-read comparison when it is owed, or reads its snapshot, and matches
+/// ([`search_values`] answers it).
+fn search_plan(lua: &Lua, kind: Search, ask: SearchAsk) -> mlua::Result<Plan> {
+    let region = match &ask.region {
+        Ok(r) => *r,
+        // Nothing to look at this time: answered at once, as where it cannot wait.
+        Err(none) => {
+            let otherwise: BuildAnswer = Box::new(move |lua, outcome| search_values(lua, kind, outcome, &[]));
+            return Ok(Plan::Now(search_values(lua, kind, Outcome::Search(Err(none.clone())), &[])?, otherwise));
+        }
+    };
+    let (hay, job, names) = search_work(lua, kind, ask, region, true);
+    let answer: BuildAnswer = Box::new(move |lua, outcome| search_values(lua, kind, outcome, &names));
+    Ok(Plan::Work { hay, job, answer })
 }
 
 /// A search where it cannot wait (`why`, the shim's word for the place): answered at once, and not
@@ -2595,50 +2829,61 @@ fn search_on_loop<H: ReadHost>(
     })
 }
 
-/// `host.screen.imageSearch(template, opts?) -> (Hit?, string?)`: `nil` alone when it looked and
-/// found nothing, `nil` and the reason when it could not look. In a handler it waits while the
-/// image worker captures and matches ([`start_search`]); where it cannot wait it does both on the
-/// event loop, said in the log ([`search_on_loop`]).
+/// A search's callback form, `imageSearch(template | list, opts, cb)`: its arguments read as the
+/// call reads them, `opts.key` with them, and its plan handed to `cb` ([`submit_plan`]): it never
+/// waits, wherever it is called.
+fn submit_search<H: ReadHost>(h: &H, lua: &Lua, scope: usize, kind: Search, cb: Value, parse: impl FnOnce() -> mlua::Result<SearchAsk>) -> mlua::Result<()> {
+    let cb = callback_arg(kind.name(), cb, "third argument")?;
+    let mut ask = parse()?;
+    let key = ask.key.take();
+    let plan = search_plan(lua, kind, ask)?;
+    submit_plan(h, lua, scope, cb, key, kind.stop(), JobKind::Search, plan)
+}
+
+/// The callback of `fname`, the argument `which` names: a function, or a raise naming what it got.
+pub(crate) fn callback_arg(fname: &str, cb: Value, which: &str) -> mlua::Result<Function> {
+    match cb {
+        Value::Function(f) => Ok(f),
+        other => Err(mlua::Error::external(format!(
+            "{fname}: the callback ({which}) must be a function, got {}",
+            crate::describe_value(&other)
+        ))),
+    }
+}
+
+/// `host.screen.imageSearch(template | list, opts?, cb?) -> (Hit?, string?)`: `nil` alone when it
+/// looked and found nothing, `nil` and the reason when it could not look; given a list, the first
+/// template that matches answers, its `n` saying which. In a handler it waits while the image worker
+/// captures and matches ([`search_plan`]); where it cannot wait it does both on the event loop, said
+/// in the log ([`search_on_loop`]). With a callback it never waits ([`submit_search`]).
+///
+/// A LIST is tried in order against the SAME captured frame, first hit wins: several renderings of
+/// one thing (a toggle's on/off pair, a dialog's close glyph as two plugin versions draw it). One
+/// capture serves every comparison — half the ~1-frame screen touches of two searches — and the
+/// templates are matched against the same pixels, so a state that changes mid-repaint cannot fall
+/// between two captures.
 pub(crate) fn image_search(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, tv, opts): (Table, Value, Value)| {
         host_call!("host.screen.imageSearch");
         let locate = |p: &str| locate_in(&sh.root(idx), p);
-        start_search(&*sh, lua, idx, Search::One, nonce, || search_ask(Search::One, tv, opts, sh.backend.screen_size(), &locate))
+        let parse = || search_plan(lua, Search::One, search_ask(Search::One, tv, opts, sh.backend.screen_size(), &locate, false)?);
+        start_plan(&*sh, lua, idx, Search::One.name(), Search::One.stop(), nonce, parse)
     })?;
     let sh = shared.clone();
     let blocking = lua.create_function(move |lua, (why, tv, opts): (String, Value, Value)| {
         host_call!("host.screen.imageSearch");
         let locate = |p: &str| locate_in(&sh.root(idx), p);
-        let ask = search_ask(Search::One, tv, opts, sh.backend.screen_size(), &locate)?;
+        let ask = search_ask(Search::One, tv, opts, sh.backend.screen_size(), &locate, false)?;
         search_on_loop(&*sh, lua, idx, Search::One, &why, ask, |r| live_capture(&sh, lua, r))
     })?;
-    crate::task::points(lua, idx, shared.clone())?.call((Search::One.name(), start, blocking))
-}
-
-/// `host.screen.imageSearchMulti(templates, opts?) -> (n, Hit) | (nil, nil) | (nil, nil, reason)`.
-///
-/// Captures the region ONCE and tries each template in order, returning the 1-based index of
-/// the first match plus its hit. One capture serves many comparisons (e.g. a toggle's on/off
-/// pair) — half the ~1-frame screen touches of two imageSearch calls, and both templates are
-/// matched against the SAME frame, so a state change mid-repaint can't fall between two
-/// separate captures. Paths share the decode cache. It waits in a handler, and works on the event
-/// loop where it cannot wait, as `imageSearch` does.
-pub(crate) fn image_search_multi(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
-    let start = lua.create_function(move |lua, (nonce, tv, opts): (Table, Value, Value)| {
-        host_call!("host.screen.imageSearchMulti");
+    let submit = lua.create_function(move |lua, (tv, opts, cb): (Value, Value, Value)| {
+        host_call!("host.screen.imageSearch");
         let locate = |p: &str| locate_in(&sh.root(idx), p);
-        start_search(&*sh, lua, idx, Search::Multi, nonce, || search_ask(Search::Multi, tv, opts, sh.backend.screen_size(), &locate))
+        submit_search(&*sh, lua, idx, Search::One, cb, || search_ask(Search::One, tv, opts, sh.backend.screen_size(), &locate, true))
     })?;
-    let sh = shared.clone();
-    let blocking = lua.create_function(move |lua, (why, tv, opts): (String, Value, Value)| {
-        host_call!("host.screen.imageSearchMulti");
-        let locate = |p: &str| locate_in(&sh.root(idx), p);
-        let ask = search_ask(Search::Multi, tv, opts, sh.backend.screen_size(), &locate)?;
-        search_on_loop(&*sh, lua, idx, Search::Multi, &why, ask, |r| live_capture(&sh, lua, r))
-    })?;
-    crate::task::points(lua, idx, shared.clone())?.call((Search::Multi.name(), start, blocking))
+    crate::task::points(lua, idx, shared.clone())?.call((Search::One.name(), start, blocking, submit, 3))
 }
 
 /// `host.screen.imageSearchAll(template, opts?) -> ({ Hit }, string?)` — EVERY match of the
@@ -2652,29 +2897,37 @@ pub(crate) fn image_search_multi(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> 
 /// The list is never `nil`, as it never was: when the region could not be read it is empty
 /// and the reason comes as a SECOND value, so "no match" and "could not look" can be told
 /// apart by a caller that asks, and one that does not reads what it always did. It waits in a
-/// handler, and works on the event loop where it cannot wait, as `imageSearch` does.
+/// handler, and works on the event loop where it cannot wait, as `imageSearch` does; with a
+/// callback it never waits.
 pub(crate) fn image_search_all(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, tv, opts): (Table, Value, Value)| {
         host_call!("host.screen.imageSearchAll");
         let locate = |p: &str| locate_in(&sh.root(idx), p);
-        start_search(&*sh, lua, idx, Search::All, nonce, || search_ask(Search::All, tv, opts, sh.backend.screen_size(), &locate))
+        let parse = || search_plan(lua, Search::All, search_ask(Search::All, tv, opts, sh.backend.screen_size(), &locate, false)?);
+        start_plan(&*sh, lua, idx, Search::All.name(), Search::All.stop(), nonce, parse)
     })?;
     let sh = shared.clone();
     let blocking = lua.create_function(move |lua, (why, tv, opts): (String, Value, Value)| {
         host_call!("host.screen.imageSearchAll");
         let locate = |p: &str| locate_in(&sh.root(idx), p);
-        let ask = search_ask(Search::All, tv, opts, sh.backend.screen_size(), &locate)?;
+        let ask = search_ask(Search::All, tv, opts, sh.backend.screen_size(), &locate, false)?;
         search_on_loop(&*sh, lua, idx, Search::All, &why, ask, |r| live_capture(&sh, lua, r))
     })?;
-    crate::task::points(lua, idx, shared.clone())?.call((Search::All.name(), start, blocking))
+    let sh = shared.clone();
+    let submit = lua.create_function(move |lua, (tv, opts, cb): (Value, Value, Value)| {
+        host_call!("host.screen.imageSearchAll");
+        let locate = |p: &str| locate_in(&sh.root(idx), p);
+        submit_search(&*sh, lua, idx, Search::All, cb, || search_ask(Search::All, tv, opts, sh.backend.screen_size(), &locate, true))
+    })?;
+    crate::task::points(lua, idx, shared.clone())?.call((Search::All.name(), start, blocking, submit, 3))
 }
 
-/// `imageSearch`, `imageSearchMulti` and `imageSearchAll` as the host builds them, over `holder`,
-/// their waits the host's own ([`start_search`]); where they cannot wait they capture through
-/// `capture`, as the event loop would, through the host's own tally, and every template path is
-/// resolved against `root`: for the tests' holders, which have no backend. The primary screen is
-/// 1920x1080.
+/// `imageSearch` and `imageSearchAll` as the host builds them, over `holder`, their waits the
+/// host's own ([`search_plan`]), and their callback forms ([`submit_search`]); where they
+/// cannot wait they capture through `capture`, as the event loop would, through the host's own
+/// tally, and every template path is resolved against `root`: for the tests' holders, which have no
+/// backend. The primary screen is 1920x1080.
 #[cfg(test)]
 pub(crate) fn test_searches<H: ReadHost>(
     lua: &Lua,
@@ -2682,24 +2935,30 @@ pub(crate) fn test_searches<H: ReadHost>(
     holder: Rc<H>,
     capture: CaptureFn,
     root: PathBuf,
-) -> mlua::Result<[Function; 3]> {
+) -> mlua::Result<[Function; 2]> {
     let build = |kind: Search| -> mlua::Result<Function> {
         let (h, r) = (holder.clone(), root.clone());
         let start = lua.create_function(move |lua, (nonce, tv, opts): (Table, Value, Value)| {
             let locate = |p: &str| locate_in(&r, p);
-            start_search(&*h, lua, idx, kind, nonce, || search_ask(kind, tv, opts, (1920, 1080), &locate))
+            let parse = || search_plan(lua, kind, search_ask(kind, tv, opts, (1920, 1080), &locate, false)?);
+            start_plan(&*h, lua, idx, kind.name(), kind.stop(), nonce, parse)
         })?;
         let (h, r) = (holder.clone(), root.clone());
         let blocking = lua.create_function(move |lua, (why, tv, opts): (String, Value, Value)| {
             let locate = |p: &str| locate_in(&r, p);
-            let ask = search_ask(kind, tv, opts, (1920, 1080), &locate)?;
+            let ask = search_ask(kind, tv, opts, (1920, 1080), &locate, false)?;
             search_on_loop(&*h, lua, idx, kind, &why, ask, |(x, y, w, hh)| {
                 capture(&[(x, y, w, hh)], capture_source::vm_source(lua)).pop().unwrap_or_else(|| Err(crate::backend::CAPTURE_FAILED.to_string()))
             })
         })?;
-        crate::task::points(lua, idx, holder.clone())?.call((kind.name(), start, blocking))
+        let (h, r) = (holder.clone(), root.clone());
+        let submit = lua.create_function(move |lua, (tv, opts, cb): (Value, Value, Value)| {
+            let locate = |p: &str| locate_in(&r, p);
+            submit_search(&*h, lua, idx, kind, cb, || search_ask(kind, tv, opts, (1920, 1080), &locate, true))
+        })?;
+        crate::task::points(lua, idx, holder.clone())?.call((kind.name(), start, blocking, submit, 3))
     };
-    Ok([build(Search::One)?, build(Search::Multi)?, build(Search::All)?])
+    Ok([build(Search::One)?, build(Search::All)?])
 }
 
 /// What a queued task reads, decided here on the main thread — the worker never sees a Lua
@@ -2732,50 +2991,6 @@ pub(crate) fn haystack(
     }
 }
 
-/// Queues a task for the worker, with its callback waiting on this side. `region` may instead
-/// be why a window region has nothing to read this time; the worker answers that without a
-/// capture, on a later tick like every other answer.
-#[allow(clippy::too_many_arguments)]
-fn enqueue(
-    sh: &Shared,
-    lua: &Lua,
-    scope: usize,
-    cb: Function,
-    region: Result<(i32, i32, i32, i32), String>,
-    entries: Vec<(Needle, Option<Rect>)>,
-    names: Vec<Option<String>>,
-    opts: Option<&Table>,
-    mode: Mode,
-    snap: Option<Arc<Frame>>,
-) -> mlua::Result<()> {
-    let tol = read_tol(opts);
-    let scales = read_scales(opts);
-    // The one place both async searches decide what the worker reads.
-    let (hay, unresolved) = haystack(lua, snap, region, true);
-    submit(sh, lua, scope, cb, names, hay, Job::Search { entries, tol, scales, mode, unresolved })
-}
-
-/// Queues `host.screen.matchCellsAsync`: the worker captures `rect` through this VM's source —
-/// or reads it where it lies in `snap` — reduces it to cells and ranks them against the
-/// matcher's states. `rect` may instead be why there is nothing to read this time; that is
-/// answered on the worker's next batch without a capture, so the callback comes on a later
-/// tick either way.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn enqueue_cells(
-    sh: &Shared,
-    lua: &Lua,
-    scope: usize,
-    cb: Function,
-    rect: Result<(i32, i32, i32, i32), String>,
-    matcher: cells::Matcher,
-    names: Vec<Option<String>>,
-    snap: Option<Arc<Frame>>,
-) -> mlua::Result<()> {
-    let (hay, unresolved) = haystack(lua, snap, rect, true);
-    let job = Job::Cells(Arc::new(CellsJob { matcher: Arc::new(matcher), unresolved, rank: true }));
-    submit(sh, lua, scope, cb, names, hay, job)
-}
-
 // ── host.screen.cells and matchCells wait ──────────────────────────────────────────────────
 
 /// What a call of `host.screen.cells` or `matchCells` asks, its arguments read (`crate::cells_ask`).
@@ -2791,11 +3006,13 @@ pub(crate) struct CellsAsk {
     pub(crate) rank: bool,
     /// The snapshot to read instead of the screen.
     pub(crate) snapshot: Option<Arc<Frame>>,
+    /// `opts.key`, which only the callback form takes.
+    pub(crate) key: Option<String>,
 }
 
-/// What a cells call answers — on the event loop and for a handler that waited alike, two values
-/// as these calls always returned: `cells`' `{ cells, x, y, w, h }` or `matchCells`' match, then
-/// `nil`; or `nil` and the reason.
+/// What a cells call answers — on the event loop, for a handler that waited and to a callback
+/// alike, two values as these calls always returned: `cells`' `{ cells, x, y, w, h }` or
+/// `matchCells`' match, then `nil`; or `nil` and the reason.
 fn cells_values(lua: &Lua, outcome: Outcome, r: ScreenRect, names: &[Option<String>]) -> mlua::Result<MultiValue> {
     let (first, second) = match outcome {
         Outcome::Cells(Ok((live, Some(ranked)))) => (Value::Table(cells_match_table(lua, &live, r, &ranked, names)?), Value::Nil),
@@ -2807,33 +3024,33 @@ fn cells_values(lua: &Lua, outcome: Outcome, r: ScreenRect, names: &[Option<Stri
     Ok(MultiValue::from_vec(vec![first, second]))
 }
 
-/// A waited `host.screen.cells` or `matchCells` (`call`): the arguments read by `parse` as the call
-/// that does not wait reads them — a mistake raises at the call — and answered at once when there
-/// is nothing to read this time; otherwise a cells task of the image worker filed for the handler
-/// that waits, which reads the region through the module's source, with the first-read comparison
-/// when it is owed, or where it lies in the snapshot, and reduces and ranks it as
-/// `matchCellsAsync` does.
-pub(crate) fn start_cells<H: ReadHost>(
-    h: &H,
-    lua: &Lua,
-    scope: usize,
-    call: &'static str,
-    nonce: Table,
-    parse: impl FnOnce() -> mlua::Result<CellsAsk>,
-) -> mlua::Result<MultiValue> {
-    crate::task::start_point(h, lua, scope, call, nonce, parse, |ask, task, prio| {
-        let r = match ask.rect {
-            Ok(r) => r,
-            Err(why) => return Ok(Started::Now(cells_values(lua, Outcome::Cells(Err(why)), ScreenRect { x: 0, y: 0, w: 0, h: 0 }, &[])?)),
-        };
-        let (hay, _) = haystack(lua, ask.snapshot, Ok((r.x, r.y, r.w, r.h)), true);
-        let job = Job::Cells(Arc::new(CellsJob { matcher: Arc::new(ask.matcher), unresolved: None, rank: ask.rank }));
-        let names = ask.names;
-        let answer: BuildAnswer = Box::new(move |lua, outcome| cells_values(lua, outcome, r, &names));
-        let stop = if ask.rank { "screen.matchCells" } else { "screen.cells" };
-        let id = submit_wait(h, lua, scope, task, prio, hay, job, stop, answer);
-        Ok(Started::Waits(On::Image(id)))
-    })
+/// A cells call's plan ([`Plan`]): answered at once when there is nothing to read this time;
+/// otherwise a cells task of the image worker, which reads the region through the module's source,
+/// with the first-read comparison when it is owed, or where it lies in the snapshot, and reduces —
+/// and for `matchCells` ranks — it ([`cells_values`] answers it).
+pub(crate) fn cells_plan(lua: &Lua, ask: CellsAsk) -> mlua::Result<Plan> {
+    let r = match ask.rect {
+        Ok(r) => r,
+        Err(why) => {
+            const NONE: ScreenRect = ScreenRect { x: 0, y: 0, w: 0, h: 0 };
+            let otherwise: BuildAnswer = Box::new(|lua, outcome| cells_values(lua, outcome, NONE, &[]));
+            return Ok(Plan::Now(cells_values(lua, Outcome::Cells(Err(why)), NONE, &[])?, otherwise));
+        }
+    };
+    let (hay, _) = haystack(lua, ask.snapshot, Ok((r.x, r.y, r.w, r.h)), true);
+    let job = Job::Cells(Arc::new(CellsJob { matcher: Arc::new(ask.matcher), unresolved: None, rank: ask.rank }));
+    let names = ask.names;
+    let answer: BuildAnswer = Box::new(move |lua, outcome| cells_values(lua, outcome, r, &names));
+    Ok(Plan::Work { hay, job, answer })
+}
+
+/// The name a cells call's wait, callback and stop go by: `screen.matchCells` or `screen.cells`.
+pub(crate) fn cells_stop(rank: bool) -> &'static str {
+    if rank {
+        "screen.matchCells"
+    } else {
+        "screen.cells"
+    }
 }
 
 /// A cells call on the event loop, where it cannot wait: the region read where it lies in the
@@ -2864,19 +3081,20 @@ pub(crate) fn cells_now(
 }
 
 /// `host.screen.cells` and `matchCells` as the host builds them (lib.rs, `cells_ask`), over
-/// `holder`, their waits the host's own ([`start_cells`]); where they cannot wait they capture
-/// through `capture`, as the event loop would, through the host's own tally: for the tests'
-/// holders, which have no backend. The pair, `cells` first.
+/// `holder`, their waits the host's own ([`cells_plan`]), and their callback forms; where they
+/// cannot wait they capture through `capture`, as the event loop would, through the host's own
+/// tally: for the tests' holders, which have no backend. The pair, `cells` first.
 #[cfg(test)]
 pub(crate) fn test_cells<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>, capture: CaptureFn) -> mlua::Result<(Function, Function)> {
     let build = |call: &'static str, rank: bool| -> mlua::Result<Function> {
         let h = holder.clone();
         let start = lua.create_function(move |lua, (nonce, opts, states): (Table, Value, Value)| {
-            start_cells(&*h, lua, idx, call, nonce, || crate::cells_ask(lua, call, opts, rank.then_some(states)))
+            let parse = || cells_plan(lua, crate::cells_ask(lua, call, opts, rank.then_some(states), false)?);
+            start_plan(&*h, lua, idx, call, cells_stop(rank), nonce, parse)
         })?;
         let h = holder.clone();
         let blocking = lua.create_function(move |lua, (why, opts, states): (String, Value, Value)| {
-            let ask = crate::cells_ask(lua, call, opts, rank.then_some(states))?;
+            let ask = crate::cells_ask(lua, call, opts, rank.then_some(states), false)?;
             if ask.rect.is_err() {
                 return cells_now(lua, ask, |_| unreachable!("nothing to read"));
             }
@@ -2888,119 +3106,45 @@ pub(crate) fn test_cells<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>, capt
                 })
             })
         })?;
-        crate::task::points(lua, idx, holder.clone())?.call((call, start, blocking))
+        let points = crate::task::points(lua, idx, holder.clone())?;
+        let h = holder.clone();
+        if !rank {
+            let submit = lua.create_function(move |lua, (opts, cb): (Value, Value)| {
+                let cb = callback_arg(call, cb, "second argument")?;
+                let mut ask = crate::cells_ask(lua, call, opts, None, true)?;
+                let key = ask.key.take();
+                submit_plan(&*h, lua, idx, cb, key, cells_stop(false), JobKind::Cells, cells_plan(lua, ask)?)
+            })?;
+            return points.call((call, start, blocking, submit, 2));
+        }
+        let submit = lua.create_function(move |lua, (opts, states, cb): (Value, Value, Value)| {
+            let cb = callback_arg(call, cb, "third argument")?;
+            let mut ask = crate::cells_ask(lua, call, opts, Some(states), true)?;
+            let key = ask.key.take();
+            let plan = cells_plan(lua, ask)?;
+            submit_plan(&*h, lua, idx, cb, key, cells_stop(true), JobKind::Cells, plan)
+        })?;
+        points.call((call, start, blocking, submit, 3))
     };
     Ok((build("host.screen.cells", false)?, build("host.screen.matchCells", true)?))
 }
 
-/// Sends a task to the worker, with its callback waiting on this side.
-#[allow(clippy::too_many_arguments)]
-fn submit(
-    sh: &Shared,
-    lua: &Lua,
-    scope: usize,
-    cb: Function,
-    names: Vec<Option<String>>,
-    hay: Haystack,
-    job: Job,
-) -> mlua::Result<()> {
-    // The worker captures the region itself and ALWAYS posts a result (a failed capture
-    // or a contained panic becomes an answer on the tick), so the pending callback is
-    // always drained.
-    let id = sh.images.next_id();
-    let task = ImageTask { id, hay, job, prio: crate::ocr::types::current_priority() };
-    let entry = pending(lua, &sh.vm_gens.borrow(), scope, cb, names, task.clone())?;
-    let owner = entry.owner;
-    sh.images.pending.borrow_mut().insert(id, entry);
-    if !sh.images.send(task) {
-        // Worker thread gone (it contains its own panics, so this means teardown): drop the
-        // pending entry we just inserted so it can't leak (its registry value is freed with
-        // it), instead of a callback that never fires.
-        let gone = sh.images.pending.borrow_mut().remove(&id);
-        release(gone);
-        return Ok(());
-    }
-    // Past the module's cap, its oldest request is ended — the rule OCR reads and snapshots
-    // have. A module searching on a timer faster than the worker answers grew this map and the
-    // worker's queue without a bound. The cap is for that runaway, not for a busy module: a
-    // library module's VM holds one overlay per library and per Kontakt cell, each landmark gate
-    // with one search waiting and a near-miss probe beside it, and every gate asks in the same
-    // poll, so a sample-library module can have a dozen or two waiting at once by design.
-    let over = oldest_over_cap(&sh.images.pending.borrow(), owner, IMAGE_PER_OWNER);
-    if let Some(old) = over {
-        let gone = sh.images.pending.borrow_mut().remove(&old);
-        if let Some(p) = gone {
-            if !p.held {
-                ended().get_or_insert_with(HashSet::new).insert(old);
-            }
-            let why = too_many_waiting();
-            let who = sh.ids.borrow().get(owner).cloned().unwrap_or_else(|| "?".into());
-            let key = format!("{who}\u{1}image\u{1}{why}");
-            // Written the first time, then counted like a module error; the tick writes the count
-            // of a spell that stopped (`log_housekeeping`), and the summary due at an occurrence
-            // is written here.
-            match sh.error_repeats.borrow_mut().note(&key, Instant::now()) {
-                logging::Said::Line => {
-                    logging::line("image", &format!("[{who}] {why} (then counted, a line a minute at most)"))
-                }
-                logging::Said::Counted => {}
-                logging::Said::Summary { count, over } => {
-                    logging::line("image", &crate::repeat_summary(&who, "image", &why, count, over))
-                }
-            }
-            sh.images.ended.borrow_mut().push((p, why));
-        }
-    }
-    Ok(())
-}
-
-/// `host.screen.imageSearchAsync(template | {template, …}, opts?, cb)` — offloads BOTH the
-/// region capture (the ~1-frame DWM-compositor cost) and the template match to the worker,
-/// calling cb(Hit) | cb(nil) | cb(nil, reason) on a later tick, so a detection poll (e.g. the
-/// 500 ms landmark poll) never blocks the event loop on either. Only the paths are checked here,
-/// the first time each is named, and the region resolved: the worker opens the templates.
-///
-/// Given a LIST, the templates are tried in order against the SAME captured frame and the
-/// first hit wins, with `n` reporting which one matched — for a thing with several
-/// renderings (a dialog's close glyph as two plugin versions draw it). Chaining separate
-/// searches instead costs a fresh capture per template.
-pub(crate) fn image_search_async(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
-    let sh = shared.clone();
-    lua.create_function(move |lua, (tv, opts, cb): (Value, Option<Table>, Function)| {
-        host_call!("host.screen.imageSearchAsync");
-        let locate = |p: &str| locate_in(&sh.root(idx), p);
-        let list = match &tv {
-            Value::Table(list) => resolve_list(list, "imageSearchAsync", &locate)?,
-            other => vec![resolve_with(other, "imageSearchAsync", &locate)?],
-        };
-        if list.is_empty() {
-            return Err(mlua::Error::external("imageSearchAsync: no template given".to_string()));
-        }
-        let snap = snapshot::from_opts(opts.as_ref(), "host.screen.imageSearchAsync")?;
-        let region = match &snap {
-            Some(f) => snapshot_region(opts.as_ref(), "host.screen.imageSearchAsync", f)?,
-            None => search_region(sh.backend.screen_size(), opts.as_ref(), "host.screen.imageSearchAsync")?,
-        };
-        let (entries, names) = list.into_iter().map(|(d, n)| ((d, None), n)).unzip();
-        enqueue(&sh, lua, idx, cb, region, entries, names, opts.as_ref(), Mode::First, snap)
-    })
-}
-
 /// `host.screen.imageSearchEach(entries, opts?, cb)` — ONE capture, and an answer for every
 /// entry: `cb(list)` with a hit or `false` in each slot, or `cb(nil, reason)` when the region
-/// could not be captured.
+/// could not be captured; then `info`, as every callback of host.screen gets it.
 ///
 /// For "which of these states is showing": a menu with a cursor that can be in one of several
-/// places, a panel that shows one of several pages. `imageSearchAsync` with a list answers
-/// only the first match; separate calls share a frame only when they happen to land in the
-/// worker's 5 ms batch window, which is an implementation detail. Here one frame is the
-/// contract, and each entry may look only inside its own `within` part of it — a state's own
-/// region, so a template is neither slower nor more likely to invent a hit elsewhere.
+/// places, a panel that shows one of several pages. `imageSearch` with a list answers only the
+/// first match; separate calls share a frame only when they happen to land in the worker's 5 ms
+/// batch window, which is an implementation detail. Here one frame is the contract, and each
+/// entry may look only inside its own `within` part of it — a state's own region, so a template
+/// is neither slower nor more likely to invent a hit elsewhere.
 pub(crate) fn image_search_each(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
-    lua.create_function(move |lua, (list, opts, cb): (Table, Option<Table>, Function)| {
+    lua.create_function(move |lua, (list, opts, cb): (Table, Option<Table>, Value)| {
         host_call!("host.screen.imageSearchEach");
         const F: &str = "host.screen.imageSearchEach";
+        let cb = callback_arg(F, cb, "third argument")?;
         let locate = |p: &str| locate_in(&sh.root(idx), p);
         let snap = snapshot::from_opts(opts.as_ref(), F)?;
         let region = match &snap {
@@ -3070,7 +3214,23 @@ pub(crate) fn image_search_each(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> m
         if entries.is_empty() {
             return Err(mlua::Error::external("imageSearchEach: no template given".to_string()));
         }
-        enqueue(&sh, lua, idx, cb, region, entries, names, opts.as_ref(), Mode::Each, snap)
+        let key = snapshot::opts_key(opts.as_ref(), F, true, "the third argument")?;
+        let o = opts.as_ref();
+        let (tol, scales) = (read_tol(o), read_scales(o));
+        let stop = "screen.imageSearchEach";
+        match region {
+            // Nothing to look at this time: answered on the next tick, as every callback is.
+            Err(why) => {
+                let otherwise: BuildAnswer = Box::new(|lua, outcome| each_values(lua, outcome, &[]));
+                submit_now(&*sh, lua, idx, cb, key, stop, JobKind::Search, each_values(lua, Outcome::Search(Err(why)), &[])?, otherwise)
+            }
+            Ok(r) => {
+                let (hay, _) = haystack(lua, snap, Ok(r), true);
+                let job = Job::Search { entries, tol, scales, mode: Mode::Each, unresolved: None };
+                let answer: BuildAnswer = Box::new(move |lua, outcome| each_values(lua, outcome, &names));
+                submit_callback(&*sh, lua, idx, cb, key, stop, hay, job, answer)
+            }
+        }
     })
 }
 
@@ -3124,7 +3284,7 @@ mod tests {
 
     fn spec(lua: &Lua, src: &str) -> mlua::Result<ParsedSpec> {
         let t: Table = lua.load(src).eval()?;
-        parse_spec(&t, 1920, 1080)
+        parse_spec(&t, 1920, 1080, false)
     }
 
     fn err_text<T>(r: mlua::Result<T>) -> String {
@@ -3333,7 +3493,7 @@ mod tests {
         assert!(Rc::ptr_eq(&budget(&lua), &budget(&lua)));
         let make = |lua: &Lua| {
             lua.create_function(|lua, t: Table| {
-                let s = parse_spec(&t, 100, 100)?;
+                let s = parse_spec(&t, 100, 100, false)?;
                 build_handle(lua, s, &making(), |_, _, _, _| Err("screen capture failed".to_string()))
             })
             .unwrap()
@@ -3358,7 +3518,7 @@ mod tests {
         let lua = Lua::new();
         let f = lua
             .create_function(|lua, t: Table| {
-                let s = parse_spec(&t, 100, 100)?;
+                let s = parse_spec(&t, 100, 100, false)?;
                 build_handle(lua, s, &making(), |_, _, _, _| Err("screen capture failed".to_string()))
             })
             .unwrap();
@@ -3385,29 +3545,16 @@ mod tests {
 
     // ── owners, generations and the purge ──────────────────────────────────────────────
 
-    #[test]
-    fn only_the_live_owner_is_answered_and_a_disabled_one_is_held() {
-        let enabled = vec![true, false, true];
-        let gens: HashMap<usize, u64> = [(0, 7), (1, 8), (2, 9)].into_iter().collect();
-        assert_eq!(fate(0, 7, &enabled, &gens), Fate::Deliver);
-        assert_eq!(fate(1, 8, &enabled, &gens), Fate::Hold, "a disabled owner is held, not dropped");
-        assert_eq!(fate(2, 3, &enabled, &gens), Fate::Drop, "an older incarnation of an enabled owner");
-        assert_eq!(fate(1, 3, &enabled, &gens), Fate::Drop, "an older incarnation of a disabled owner");
-        assert_eq!(fate(5, 1, &enabled, &gens), Fate::Drop, "an index nobody holds");
-        // Rolled back after a failed hot-load: the generation is still recorded, the index is not.
-        let rolled: HashMap<usize, u64> = [(3, 4)].into_iter().collect();
-        assert_eq!(fate(3, 4, &enabled, &rolled), Fate::Drop);
-    }
-
+    /// A callback's search `id`, as `imageSearch(template, opts, cb)` files it: owned by the VM
+    /// `lua` runs in, at the priority of the dispatch that asks.
     fn entry(lua: &Lua, gens: &HashMap<usize, u64>, id: u64, scope: usize) -> PendingImage {
         let cb: Function = lua.load("return function() end").eval().unwrap();
-        pending(lua, gens, scope, cb, vec![None], task(id, (0, 0, 10, 10), vec![(dot([1, 2, 3]), None)], Mode::First))
-            .unwrap()
+        test_pending(&ImageState::detached(), lua, gens, id, scope, cb)
     }
 
     /// The bug this fixes: a search made by a code dependency's code (scope = the dependency)
-    /// inside a dependent's VM belongs to the DEPENDENT. Disabling the dependency must not
-    /// drop it; disabling the dependent holds it for that dependent.
+    /// inside a dependent's VM belongs to the DEPENDENT: its answer goes to the dependent's mailbox,
+    /// which a disable of the dependency does not touch.
     #[test]
     fn a_dependency_search_belongs_to_the_vm_that_ran_it() {
         let lua = Lua::new();
@@ -3416,12 +3563,6 @@ mod tests {
         let gens: HashMap<usize, u64> = [(1, 2), (4, 11)].into_iter().collect();
         let p = entry(&lua, &gens, 1, 1);
         assert_eq!((p.scope, p.owner, p.gen), (1, 4, 11), "scope 1, owned by the VM of module 4");
-        // Dependency (idx 1) disabled, dependent (idx 4) enabled: delivered.
-        let enabled = vec![true, false, true, true, true];
-        assert_eq!(fate(p.owner, p.gen, &enabled, &gens), Fate::Deliver);
-        let mut off = enabled.clone();
-        off[4] = false;
-        assert_eq!(fate(p.owner, p.gen, &off, &gens), Fate::Hold);
         release([p]);
     }
 
@@ -3443,14 +3584,14 @@ mod tests {
     }
 
     /// A state nobody tagged answers to the binding's own index at its current generation; one
-    /// whose index has no generation either is never answered.
+    /// whose index has no generation either is generation 0, which no VM has, so the mailbox never
+    /// delivers its answer.
     #[test]
     fn an_untagged_state_falls_back_to_its_scope() {
         let lua = Lua::new();
         let gens: HashMap<usize, u64> = [(1, 5)].into_iter().collect();
         assert_eq!(owner_of(&lua, &gens, 1), (1, 5));
         assert_eq!(owner_of(&lua, &gens, 2), (2, 0));
-        assert_eq!(fate(2, 0, &[true, true, true], &gens), Fate::Drop);
     }
 
     #[test]
@@ -3462,11 +3603,10 @@ mod tests {
             p.owner = owner;
             map.insert(id, p);
         }
-        map.get_mut(&3).unwrap().held = true;
         let gone = purge_owner(&mut map, 3);
-        let mut ids: Vec<u64> = gone.iter().map(|p| p.task.id).collect();
+        let mut ids: Vec<u64> = gone.iter().map(|p| p.id).collect();
         ids.sort_unstable();
-        assert_eq!(ids, vec![2, 3], "held entries go too");
+        assert_eq!(ids, vec![2, 3]);
         release(gone);
         let mut left: Vec<u64> = map.keys().copied().collect();
         left.sort_unstable();
@@ -3474,8 +3614,8 @@ mod tests {
         assert!(purge_owner(&mut map, 9).is_empty());
     }
 
-    /// Past the cap, the module's oldest request is the one ended — held ones counted, other
-    /// modules' never touched — and within it nothing is.
+    /// Past the cap, the module's oldest request is the one ended — other modules' never touched —
+    /// and within it nothing is.
     #[test]
     fn past_the_cap_the_modules_oldest_request_is_ended() {
         let lua = Lua::new();
@@ -3492,75 +3632,15 @@ mod tests {
         let mut newer = entry(&lua, &HashMap::new(), 8, 9);
         newer.owner = 4;
         map.insert(8, newer);
-        map.get_mut(&1).unwrap().held = true;
-        assert_eq!(oldest_over_cap(&map, 4, 3), Some(1), "its oldest, held or not");
+        assert_eq!(oldest_over_cap(&map, 4, 3), Some(1), "its oldest");
         assert_eq!(oldest_over_cap(&map, 5, 0), Some(7), "another module is counted on its own");
         release(map.into_values());
         assert!(too_many_waiting().contains(&IMAGE_PER_OWNER.to_string()));
     }
 
-    /// Disable while a search is in flight, then enable: the search is sent again under the
-    /// same id, so the callback still comes — the landmark gate's wedge.
-    #[test]
-    fn a_held_search_is_sent_again_on_enable() {
-        let lua = Lua::new();
-        let _ = lua.try_set_app_data(VmOwner { idx: 2, gen: 6 });
-        let gens: HashMap<usize, u64> = [(2, 6)].into_iter().collect();
-        let mut map: HashMap<u64, PendingImage> = HashMap::new();
-        for id in [10u64, 11, 12] {
-            map.insert(id, entry(&lua, &gens, id, 0));
-        }
-        map.get_mut(&10).unwrap().held = true;
-        // It was asked through desktop duplication: sent again, it reads the same way, not the
-        // default the task type would give a rebuilt task.
-        set_source(&mut map.get_mut(&10).unwrap().task, CaptureSource::Duplication { or_standard: false });
-        map.get_mut(&11).unwrap().held = true;
-        // 11 was held for an older VM at the same index.
-        map.get_mut(&11).unwrap().gen = 5;
-        // 12 is still in flight: its answer is on its way and must not be asked for twice.
-        let (again, stale) = unhold(&mut map, 2, gens.get(&2).copied());
-        assert_eq!(again.iter().map(|t| t.id).collect::<Vec<_>>(), vec![10]);
-        assert_eq!(again[0].region(), (0, 0, 10, 10), "the same search");
-        assert_eq!(
-            source_of(&again[0]),
-            CaptureSource::Duplication { or_standard: false },
-            "read the way it was first asked to"
-        );
-        assert_eq!(stale.iter().map(|p| p.task.id).collect::<Vec<_>>(), vec![11]);
-        release(stale);
-        assert!(!map[&10].held, "in flight again, so its answer is delivered");
-        assert!(map.contains_key(&12) && !map.contains_key(&11));
-        // A second enable finds nothing more to send.
-        assert!(unhold(&mut map, 2, Some(6)).0.is_empty());
-        release(map.into_values());
-    }
-
-    /// A held `matchCellsAsync` is not read again on enable — its rectangle is from the window
-    /// as it was at the call — but answered `nil, HELD_CELLS`, without a capture.
-    #[test]
-    fn a_held_cells_read_is_answered_not_read_again() {
-        let lua = Lua::new();
-        let _ = lua.try_set_app_data(VmOwner { idx: 2, gen: 6 });
-        let gens: HashMap<usize, u64> = [(2, 6)].into_iter().collect();
-        let cb: Function = lua.load("return function() end").eval().unwrap();
-        let mut p = pending(&lua, &gens, 2, cb, vec![None, None], cells_matching(20, (5, 5, 2, 2), None)).unwrap();
-        p.held = true;
-        let mut map: HashMap<u64, PendingImage> = [(20, p)].into_iter().collect();
-        let (again, stale) = unhold(&mut map, 2, Some(6));
-        assert!(stale.is_empty());
-        assert_eq!(again.len(), 1);
-        let t = &again[0];
-        assert_eq!(t.id, 20, "the same id, so the waiting callback gets the answer");
-        assert!(!t.captures(), "nothing is captured for it");
-        match answer(t, None, None) {
-            Outcome::Cells(Err(why)) => assert_eq!(why, HELD_CELLS),
-            _ => panic!("a held cells read must be answered with the reason"),
-        }
-        // Held again before that answer came: answered the same way on the next enable.
-        map.get_mut(&20).unwrap().held = true;
-        let (again, _) = unhold(&mut map, 2, Some(6));
-        assert!(!again[0].captures());
-        release(map.into_values());
+    /// A batch as the worker runs it, its pictures stamped with input epoch 0.
+    fn batch(tasks: &[ImageTask], capture: CaptureFn) -> Vec<ImageResult> {
+        run_batch(tasks, capture, &AtomicU64::new(0))
     }
 
     // ── the worker ─────────────────────────────────────────────────────────────────────
@@ -3611,13 +3691,6 @@ mod tests {
         t.hay = Haystack::Screen { region, source, compare: None };
     }
 
-    fn source_of(t: &ImageTask) -> CaptureSource {
-        match &t.hay {
-            Haystack::Screen { source, .. } => *source,
-            Haystack::Frame { .. } => panic!("a snapshot's task has no source"),
-        }
-    }
-
     /// A handle's picture of one pixel of `rgb`, made already.
     fn dot(rgb: [u8; 3]) -> Needle {
         Needle::Handle(Prepared::made(Arc::new(Decoded::from_png_rgba(1, 1, vec![rgb[0], rgb[1], rgb[2], 255])), 1))
@@ -3645,7 +3718,7 @@ mod tests {
             (dot([0, 255, 0]), Some(Rect { x: 0, y: 0, w: 8, h: 10 })),
             (dot([0, 255, 0]), Some(within_frame((100, 200, 10, 10), (106, 203, 200, 200)))),
         ];
-        let out = run_batch(&[task(1, (100, 200, 10, 10), entries, Mode::Each)], two_dots);
+        let out = batch(&[task(1, (100, 200, 10, 10), entries, Mode::Each)], two_dots);
         let found = out[0].found().expect("captured");
         assert_eq!(found[0], Some(ScreenHit { x: 103, y: 202, w: 1, h: 1, n: 1 }));
         assert_eq!(found[1], None);
@@ -3658,35 +3731,38 @@ mod tests {
     /// at a time; a colour that is not there is an empty list, which is not "could not look".
     #[test]
     fn all_answers_every_match_of_its_one_entry() {
-        let out = run_batch(&[task(1, (100, 200, 10, 10), vec![(dot([255, 0, 0]), None)], Mode::All)], two_dots);
+        let out = batch(&[task(1, (100, 200, 10, 10), vec![(dot([255, 0, 0]), None)], Mode::All)], two_dots);
         assert_eq!(out[0].found(), Ok(vec![Some(ScreenHit { x: 103, y: 202, w: 1, h: 1, n: 1 })]));
-        let out = run_batch(&[task(1, (100, 200, 10, 10), vec![(dot([50, 50, 50]), None)], Mode::All)], two_dots);
+        let out = batch(&[task(1, (100, 200, 10, 10), vec![(dot([50, 50, 50]), None)], Mode::All)], two_dots);
         let hits = out[0].found().expect("captured");
         assert_eq!(hits.len(), 98);
         assert!(hits.iter().all(|h| h.is_some_and(|h| h.n == 1 && h.w == 1 && h.h == 1)));
         assert_eq!(hits[0], Some(ScreenHit { x: 100, y: 200, w: 1, h: 1, n: 1 }));
         assert!(!hits.contains(&Some(ScreenHit { x: 103, y: 202, w: 1, h: 1, n: 1 })), "not at the red dot");
-        let out = run_batch(&[task(1, (0, 0, 10, 10), vec![(dot([0, 0, 255]), None)], Mode::All)], two_dots);
+        let out = batch(&[task(1, (0, 0, 10, 10), vec![(dot([0, 0, 255]), None)], Mode::All)], two_dots);
         assert_eq!(out[0].found(), Ok(Vec::new()));
     }
 
     #[test]
     fn first_answers_the_first_entry_that_matches() {
         let entries = vec![(dot([0, 0, 255]), None), (dot([0, 255, 0]), None), (dot([255, 0, 0]), None)];
-        let out = run_batch(&[task(1, (0, 0, 10, 10), entries, Mode::First)], two_dots);
+        let out = batch(&[task(1, (0, 0, 10, 10), entries, Mode::First)], two_dots);
         assert_eq!(out[0].found(), Ok(vec![Some(ScreenHit { x: 8, y: 5, w: 1, h: 1, n: 2 })]));
     }
 
     #[test]
     fn a_failed_capture_is_none_not_a_list_of_misses() {
         let entries = vec![(dot([255, 0, 0]), None)];
-        let out = run_batch(&[task(1, (0, 0, 10, 10), entries, Mode::Each)], |r, _| r.iter().map(|_| Err("screen capture failed".to_string())).collect());
+        let out = batch(&[task(1, (0, 0, 10, 10), entries, Mode::Each)], |r, _| r.iter().map(|_| Err("screen capture failed".to_string())).collect());
         assert_eq!(out[0].found(), Err("screen capture failed".to_string()), "could not look, and why");
+        assert_eq!(out[0].seen, None, "no picture was read");
         let lua = Lua::new();
-        assert!(result_value(&lua, Mode::Each, &[None], None).is_nil());
+        let v = each_values(&lua, Outcome::Search(Err("screen capture failed".into())), &[None]).unwrap().into_vec();
+        assert!(v[0].is_nil() && v[1].as_string().is_some_and(|s| s.to_string_lossy() == "screen capture failed"));
         // ...while a capture that worked but matched nothing is a list of `false`.
-        let v = result_value(&lua, Mode::Each, &[None, None], Some(vec![None, None]));
-        let Value::Table(t) = v else { panic!("expected a list") };
+        let v = each_values(&lua, Outcome::Search(Ok(vec![None, None])), &[None, None]).unwrap().into_vec();
+        let Value::Table(t) = &v[0] else { panic!("expected a list") };
+        assert_eq!(v.len(), 1, "the list alone");
         assert_eq!(t.raw_len(), 2);
         assert_eq!(t.raw_get::<Value>(1).unwrap(), Value::Boolean(false));
     }
@@ -3696,16 +3772,12 @@ mod tests {
         let lua = Lua::new();
         let names = vec![Some("menu".to_string()), None];
         let hit = ScreenHit { x: 1, y: 2, w: 3, h: 4, n: 1 };
-        let Value::Table(t) = result_value(&lua, Mode::First, &names, Some(vec![Some(hit)])) else {
-            panic!("expected a hit")
-        };
+        let v = search_values(&lua, Search::One, Outcome::Search(Ok(vec![Some(hit)])), &names).unwrap().into_vec();
+        let Value::Table(t) = &v[0] else { panic!("expected a hit") };
         assert_eq!(t.get::<String>("name").unwrap(), "menu");
         assert_eq!(t.get::<u32>("n").unwrap(), 1);
-        let Value::Table(list) =
-            result_value(&lua, Mode::Each, &names, Some(vec![None, Some(ScreenHit { n: 2, ..hit })]))
-        else {
-            panic!("expected a list")
-        };
+        let v = each_values(&lua, Outcome::Search(Ok(vec![None, Some(ScreenHit { n: 2, ..hit })])), &names).unwrap().into_vec();
+        let Value::Table(list) = &v[0] else { panic!("expected a list") };
         let second: Table = list.raw_get(2).unwrap();
         assert!(second.get::<Value>("name").unwrap().is_nil(), "an unnamed handle has no name");
     }
@@ -3744,7 +3816,7 @@ mod tests {
         set_source(&mut dup, CaptureSource::Duplication { or_standard: true });
         let mut none = task(3, region, red(), Mode::First);
         set_source(&mut none, CaptureSource::Duplication { or_standard: false });
-        let out = run_batch(&[task(1, region, red(), Mode::First), dup, none], by_source);
+        let out = batch(&[task(1, region, red(), Mode::First), dup, none], by_source);
         assert_eq!(out[0].found(), Ok(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]));
         assert_eq!(out[1].found(), Ok(vec![None]), "not the standard frame of the same region");
         assert_eq!(
@@ -3763,7 +3835,7 @@ mod tests {
         crate::quiet_expected_panics();
         let (task_tx, task_rx) = mpsc::channel();
         let (res_tx, res_rx) = mpsc::channel();
-        spawn_image_worker(panics_at_666, crate::backend::no_comparison, task_rx, res_tx);
+        spawn_image_worker(panics_at_666, crate::backend::no_comparison, Arc::new(AtomicU64::new(0)), task_rx, res_tx);
         task_tx.send(task(1, (666, 0, 10, 10), vec![(dot([255, 0, 0]), None)], Mode::First)).unwrap();
         let first = res_rx.recv_timeout(Duration::from_secs(10)).expect("an answer, not silence");
         assert_eq!(first.id, 1);
@@ -3800,7 +3872,7 @@ mod tests {
         for t in [at(11, Priority::Background), at(12, Priority::Background), at(13, Priority::Background), at(14, Priority::Interactive)] {
             task_tx.send(t).unwrap();
         }
-        spawn_image_worker(two_dots, crate::backend::no_comparison, task_rx, res_tx);
+        spawn_image_worker(two_dots, crate::backend::no_comparison, Arc::new(AtomicU64::new(0)), task_rx, res_tx);
         let answers: Vec<ImageResult> = (0..4).map(|_| res_rx.recv_timeout(Duration::from_secs(10)).expect("an answer")).collect();
         assert_eq!((answers[0].id, answers[0].batch), (14, 1), "the key's task first, alone");
         assert_eq!(answers[1..].iter().map(|r| (r.id, r.batch)).collect::<Vec<_>>(), [(11, 3), (12, 3), (13, 3)]);
@@ -3830,7 +3902,7 @@ mod tests {
         }
         let (task_tx, task_rx) = mpsc::channel();
         let (res_tx, res_rx) = mpsc::channel();
-        spawn_image_worker(capture, crate::backend::no_comparison, task_rx, res_tx);
+        spawn_image_worker(capture, crate::backend::no_comparison, Arc::new(AtomicU64::new(0)), task_rx, res_tx);
         task_tx.send(task(1, (0, 0, 10, 10), vec![(dot([255, 0, 0]), None)], Mode::First)).unwrap();
         res_rx.recv_timeout(Duration::from_secs(10)).expect("an answer");
         assert_eq!(*AT_CAPTURE.lock().unwrap(), Some(THREAD_PRIORITY_BELOW_NORMAL));
@@ -3856,7 +3928,7 @@ mod tests {
         let _loop = crate::loop_guard::mark_for_a_test();
         let (task_tx, task_rx) = mpsc::channel();
         let (res_tx, res_rx) = mpsc::channel();
-        spawn_image_worker(capture, compare, task_rx, res_tx);
+        spawn_image_worker(capture, compare, Arc::new(AtomicU64::new(0)), task_rx, res_tx);
         let slot = Arc::new(crate::backend::CompareSlot::new(true));
         let region = (0, 0, 10, 10);
         let mut t = task(1, region, vec![(dot([255, 0, 0]), None)], Mode::First);
@@ -3901,7 +3973,7 @@ mod tests {
         thread_local! {
             static ASKED: std::cell::RefCell<Vec<((i32, i32, i32, i32), CaptureSource)>> = const { std::cell::RefCell::new(Vec::new()) };
         }
-        let out = run_batch(&[search, cells_here, unresolved, not_read], record);
+        let out = batch(&[search, cells_here, unresolved, not_read], record);
         assert_eq!(
             ASKED.with(|a| a.borrow().clone()),
             vec![(region, CaptureSource::Standard), (region, CaptureSource::Duplication { or_standard: false })]
@@ -3917,7 +3989,7 @@ mod tests {
         let short = |regions: &[(i32, i32, i32, i32)], _: CaptureSource| -> Vec<Result<CapturedImage, String>> {
             regions.iter().map(|_| Ok(opaque(3, 3, [0, 0, 0]))).collect()
         };
-        let out = run_batch(&[cells_matching(5, region, None)], short);
+        let out = batch(&[cells_matching(5, region, None)], short);
         assert!(out[0].cells().as_ref().unwrap_err().contains("came back 3x3, not the region's 10x10"));
     }
 
@@ -3965,8 +4037,8 @@ mod tests {
         let frame = scene_frame();
         let red = || vec![(dot([255, 0, 0]), None)];
         for region in [(100, 200, 20, 12), (102, 201, 10, 8), (103, 202, 1, 1), (104, 200, 16, 12)] {
-            let live = run_batch(&[task(1, region, red(), Mode::First)], scene_capture);
-            let snap = run_batch(&[on_frame(task(1, region, red(), Mode::First), &frame)], no_capture);
+            let live = batch(&[task(1, region, red(), Mode::First)], scene_capture);
+            let snap = batch(&[on_frame(task(1, region, red(), Mode::First), &frame)], no_capture);
             assert_eq!(snap[0].found(), live[0].found(), "{region:?}");
             let entries = vec![
                 (dot([255, 0, 0]), None),
@@ -3974,11 +4046,11 @@ mod tests {
                 (dot([0, 255, 0]), Some(within_frame(region, (106, 203, 200, 200)))),
                 (dot([255, 0, 0]), Some(within_frame(region, (106, 203, 200, 200)))),
             ];
-            let live = run_batch(&[task(2, region, entries.clone(), Mode::Each)], scene_capture);
-            let snap = run_batch(&[on_frame(task(2, region, entries, Mode::Each), &frame)], no_capture);
+            let live = batch(&[task(2, region, entries.clone(), Mode::Each)], scene_capture);
+            let snap = batch(&[on_frame(task(2, region, entries, Mode::Each), &frame)], no_capture);
             assert_eq!(snap[0].found(), live[0].found(), "{region:?}, each");
         }
-        let whole = run_batch(&[on_frame(task(3, (100, 200, 20, 12), red(), Mode::First), &frame)], no_capture);
+        let whole = batch(&[on_frame(task(3, (100, 200, 20, 12), red(), Mode::First), &frame)], no_capture);
         assert_eq!(whole[0].found(), Ok(vec![Some(ScreenHit { x: 103, y: 202, w: 1, h: 1, n: 1 })]));
     }
 
@@ -3996,9 +4068,9 @@ mod tests {
         let frame = scene_frame();
         let region = (100, 200, 20, 12);
         let red = || vec![(dot([255, 0, 0]), None)];
-        let only = run_batch(&[on_frame(task(1, region, red(), Mode::First), &frame)], no_capture);
+        let only = batch(&[on_frame(task(1, region, red(), Mode::First), &frame)], no_capture);
         assert_eq!(only[0].capture_ms, 0);
-        let out = run_batch(&[on_frame(task(1, region, red(), Mode::First), &frame), task(2, region, red(), Mode::First)], record);
+        let out = batch(&[on_frame(task(1, region, red(), Mode::First), &frame), task(2, region, red(), Mode::First)], record);
         assert_eq!(ASKED.with(|a| a.borrow().clone()), vec![region], "only the screen task is captured");
         assert_eq!(out[0].found(), out[1].found());
     }
@@ -4009,10 +4081,10 @@ mod tests {
     fn frame_task_hits_are_screen_coordinates() {
         let frame = scene_frame();
         let green = vec![(dot([0, 255, 0]), None)];
-        let out = run_batch(&[on_frame(task(1, (105, 204, 5, 3), green, Mode::First), &frame)], no_capture);
+        let out = batch(&[on_frame(task(1, (105, 204, 5, 3), green, Mode::First), &frame)], no_capture);
         assert_eq!(out[0].found(), Ok(vec![Some(ScreenHit { x: 108, y: 205, w: 1, h: 1, n: 1 })]));
         // A region of the snapshot the dot is not in: looked, and not there.
-        let out = run_batch(&[on_frame(task(2, (110, 200, 5, 3), vec![(dot([0, 255, 0]), None)], Mode::First), &frame)], no_capture);
+        let out = batch(&[on_frame(task(2, (110, 200, 5, 3), vec![(dot([0, 255, 0]), None)], Mode::First), &frame)], no_capture);
         assert_eq!(out[0].found(), Ok(vec![None]));
     }
 
@@ -4032,7 +4104,7 @@ mod tests {
         for region in [geo::Rect::new(100, 200, 20, 12), geo::Rect::new(102, 201, 10, 8), geo::Rect::new(103, 202, 1, 1)] {
             let t = profile_of(1, region);
             assert!(!t.captures(), "nothing is captured for it");
-            let out = run_batch(&[t], no_capture);
+            let out = batch(&[t], no_capture);
             let got = out[0].profile().as_ref().expect("reduced");
             let want = profile::profile(&frame.img, frame.area(region).unwrap(), true, true, 128).unwrap();
             assert_eq!((got.columns.clone(), got.rows.clone()), want, "{region:?}");
@@ -4046,17 +4118,17 @@ mod tests {
             ASKED.with(|a| a.borrow_mut().extend(regions.iter().copied()));
             scene_capture(regions, src)
         }
-        let out = run_batch(&[profile_of(1, geo::Rect::new(100, 200, 20, 12)), task(2, (0, 0, 4, 4), vec![(dot([255, 0, 0]), None)], Mode::First)], record);
+        let out = batch(&[profile_of(1, geo::Rect::new(100, 200, 20, 12)), task(2, (0, 0, 4, 4), vec![(dot([255, 0, 0]), None)], Mode::First)], record);
         assert_eq!(ASKED.with(|a| a.borrow().clone()), vec![(0, 0, 4, 4)], "only the screen task is captured");
         assert!(out[0].profile().is_ok());
         // Columns or rows alone, and a batch that panicked: answered, never left without an answer.
         let mut t = profile_of(3, geo::Rect::new(100, 200, 20, 12));
         t.job = Job::Profile { cols: false, rows: true, dark: 128 };
-        let out = run_batch(&[t.clone()], no_capture);
+        let out = batch(&[t.clone()], no_capture);
         let got = out[0].profile().as_ref().unwrap();
         assert!(got.columns.is_none() && got.rows.as_ref().is_some_and(|r| r.min.len() == 12));
         assert!(matches!(Outcome::failed(&t), Outcome::Profile(Err(why)) if why == PROFILE_FAILED));
-        assert_eq!(t.binding(), "profile");
+        assert_eq!(t.job.kind(), JobKind::Profile);
     }
 
     /// A snapshot region that had nothing to read at the call — no overlap, or a minimised
@@ -4068,7 +4140,7 @@ mod tests {
         let Job::Search { unresolved, .. } = &mut t.job else { unreachable!() };
         *unresolved = Some(snapshot::NO_OVERLAP.to_string());
         assert!(!t.captures());
-        let out = run_batch(&[t], no_capture);
+        let out = batch(&[t], no_capture);
         assert_eq!(out[0].found(), Err(snapshot::NO_OVERLAP.to_string()));
     }
 
@@ -4078,32 +4150,75 @@ mod tests {
     fn a_frame_cells_task_equals_the_live_one() {
         let frame = scene_frame();
         for region in [(100, 200, 20, 12), (101, 201, 5, 5)] {
-            let live = run_batch(&[cells_matching(1, region, None)], scene_capture);
-            let snap = run_batch(&[on_frame(cells_matching(1, region, None), &frame)], no_capture);
+            let live = batch(&[cells_matching(1, region, None)], scene_capture);
+            let snap = batch(&[on_frame(cells_matching(1, region, None), &frame)], no_capture);
             assert_eq!(snap[0].cells(), live[0].cells(), "{region:?}");
             assert!(snap[0].cells().is_ok());
         }
     }
 
-    /// A search on a snapshot held while its module was disabled is sent again as it was — the
-    /// same picture, which gives the same answer however long the module was off.
+    /// A task's answer carries the moment of the picture it read: a snapshot's its own, a capture's
+    /// when it came back with the input epoch as it stood then; one that read nothing, none.
     #[test]
-    fn a_held_frame_search_is_resent_as_is() {
-        let lua = Lua::new();
-        let _ = lua.try_set_app_data(VmOwner { idx: 2, gen: 6 });
-        let gens: HashMap<usize, u64> = [(2, 6)].into_iter().collect();
+    fn a_tasks_answer_carries_the_moment_of_its_picture() {
         let frame = scene_frame();
-        let cb: Function = lua.load("return function() end").eval().unwrap();
-        let t = on_frame(task(30, (100, 200, 20, 12), vec![(dot([255, 0, 0]), None)], Mode::First), &frame);
-        let mut p = pending(&lua, &gens, 2, cb, vec![None], t).unwrap();
-        p.held = true;
-        let mut map: HashMap<u64, PendingImage> = [(30, p)].into_iter().collect();
-        let (again, stale) = unhold(&mut map, 2, Some(6));
-        assert!(stale.is_empty());
-        let Haystack::Frame { frame: f, region } = &again[0].hay else { panic!("sent again as a screen search") };
-        assert!(Arc::ptr_eq(f, &frame), "the same picture");
-        assert_eq!(*region, geo::Rect::new(100, 200, 20, 12));
-        release(map.into_values());
+        let on_snap = on_frame(task(1, (100, 200, 20, 12), vec![(dot([255, 0, 0]), None)], Mode::First), &frame);
+        let epoch = AtomicU64::new(41);
+        let before = crate::snapshot::millis_of(Instant::now());
+        let out = run_batch(&[on_snap, task(2, (0, 0, 10, 10), vec![(dot([255, 0, 0]), None)], Mode::First)], scene_capture, &epoch);
+        assert_eq!(out[0].seen, Some(crate::snapshot::moment_of(&frame)), "the snapshot's own");
+        let (at, input_epoch) = out[1].seen.expect("a capture's");
+        assert!(at >= before && input_epoch == 41, "{at} {before} {input_epoch}");
+        let mut unresolved = task(3, (0, 0, 0, 0), vec![(dot([255, 0, 0]), None)], Mode::First);
+        let Job::Search { unresolved: u, .. } = &mut unresolved.job else { unreachable!() };
+        *u = Some("nothing".to_string());
+        assert_eq!(batch(&[unresolved], scene_capture)[0].seen, None);
+    }
+
+    /// A newer callback's task of the same call with the key ends an older one still with the
+    /// worker at the call — answered `SUPERSEDED` on the next tick, and the worker told to skip it
+    /// — and leaves another call's task with the key, another module VM's and one without a key
+    /// with the worker.
+    #[test]
+    fn a_newer_key_ends_the_older_task_of_its_call_at_the_call() {
+        let lua = Lua::new();
+        let im = ImageState::detached();
+        let gens = HashMap::new();
+        let cb = lua.create_function(|_, ()| Ok(())).unwrap();
+        let file = |scope: usize, call: &'static str, key: Option<&str>| -> u64 {
+            let mut p = test_pending(&im, &lua, &gens, im.next_id(), scope, cb.clone());
+            p.key = key.map(str::to_string);
+            if let ImageWaiter::Callback { call: c, .. } = &mut p.waiter {
+                *c = call;
+            }
+            let id = p.id;
+            im.pending.borrow_mut().insert(id, p);
+            id
+        };
+        let older = file(1, "screen.imageSearch", Some("k"));
+        let cells = file(1, "screen.matchCells", Some("k"));
+        let elsewhere = file(2, "screen.imageSearch", Some("k"));
+        let unkeyed = file(1, "screen.imageSearch", None);
+        im.supersede(1, 0, "screen.imageSearch", "k");
+        {
+            let ready = im.ready.borrow();
+            assert_eq!(ready.iter().map(|(p, _)| p.id).collect::<Vec<_>>(), vec![older], "the older one ended");
+            assert!(
+                matches!(&ready[0].1, Outcome::Search(Err(why)) if why == crate::snapshot::SUPERSEDED),
+                "answered as replaced"
+            );
+        }
+        assert!(is_ended(older) && !im.pending.borrow().contains_key(&older), "and the worker skips it");
+        for id in [cells, elsewhere, unkeyed] {
+            assert!(im.pending.borrow().contains_key(&id) && !is_ended(id), "task {id} left with the worker");
+        }
+        let gone: Vec<PendingImage> = im.ready.borrow_mut().drain(..).map(|(p, _)| p).collect();
+        release(gone);
+        let left: Vec<PendingImage> = im.pending.borrow_mut().drain().map(|(_, p)| p).collect();
+        release(left);
+        if let Some(s) = ended().as_mut() {
+            s.remove(&older);
+        }
     }
 
     /// `template{ capture, snapshot }` cuts the template out of the snapshot — whole or not at
@@ -4172,39 +4287,46 @@ mod tests {
             *unresolved = Some(empty.to_string());
             assert!(!t.captures());
         }
-        let out = run_batch(&[task(1, region, red(), Mode::First), first, each], record);
+        let out = batch(&[task(1, region, red(), Mode::First), first, each], record);
         assert_eq!(ASKED.with(|a| a.borrow().clone()), vec![region], "only the search that has a region is captured");
         assert_eq!(out[0].found(), Ok(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]));
         assert_eq!(out[1].found(), Err(empty.to_string()));
         assert_eq!(out[2].found(), Err(empty.to_string()), "could not look, not a list of false");
     }
 
-    /// The callback's arguments: `(match, nil)`, or `(nil, reason)`.
+    /// A match's answer: `(match, nil)`, or `(nil, reason)`; a search's, its one value when it
+    /// looked and the reason beside a nil when it could not — and a callback's, those two, then
+    /// `info` (`snapshot::callback_values`).
     #[test]
     fn a_cells_answer_is_a_table_or_a_reason() {
         let lua = Lua::new();
-        let t = cells_matching(1, (5, 6, 10, 10), None);
+        let r = ScreenRect { x: 5, y: 6, w: 10, h: 10 };
         let names = vec![Some("off".to_string()), Some("on".to_string())];
         let live = vec![0u8; 4];
         let ranked = cells::rank(&live, &[vec![0u8; 4].into(), vec![255u8; 4].into()], &[0, 1]).unwrap();
-        let args = result_args(&lua, &t, &names, Outcome::Cells(Ok((live, Some(ranked))))).into_vec();
+        let args = cells_values(&lua, Outcome::Cells(Ok((live, Some(ranked)))), r, &names).unwrap().into_vec();
         let Value::Table(m) = &args[0] else { panic!("expected a match") };
         assert!(args[1].is_nil());
         assert_eq!(m.get::<String>("cells").unwrap(), "00000000");
         assert_eq!(m.get::<String>("name").unwrap(), "off");
         assert_eq!((m.get::<i32>("x").unwrap(), m.get::<i32>("y").unwrap()), (5, 6));
-        let args = result_args(&lua, &t, &names, Outcome::Cells(Err("the screen could not be read".into()))).into_vec();
+        let args = cells_values(&lua, Outcome::Cells(Err("the screen could not be read".into())), r, &names).unwrap().into_vec();
         assert!(args[0].is_nil());
         let Value::String(why) = &args[1] else { panic!("expected a reason") };
         assert_eq!(why.to_string_lossy(), "the screen could not be read");
-        assert_eq!(t.binding(), "matchCellsAsync");
-        // A search's callback still gets exactly one value when it looked, and the reason
-        // beside a nil when it could not.
-        let s = task(2, (0, 0, 10, 10), vec![(dot([1, 2, 3]), None)], Mode::First);
-        assert_eq!(result_args(&lua, &s, &[None], Outcome::Search(Ok(vec![None]))).len(), 1);
-        let args = result_args(&lua, &s, &[None], Outcome::Search(Err("screen capture failed".into()))).into_vec();
+        // A search still answers exactly one value when it looked, and the reason beside a nil
+        // when it could not.
+        assert_eq!(search_values(&lua, Search::One, Outcome::Search(Ok(vec![None])), &[None]).unwrap().len(), 1);
+        let args = search_values(&lua, Search::One, Outcome::Search(Err("screen capture failed".into())), &[None]).unwrap().into_vec();
         assert!(args[0].is_nil());
         assert_eq!(args[1].as_string().map(|s| s.to_string_lossy()).as_deref(), Some("screen capture failed"));
+        // A callback gets the two, the reason always second, then `info`.
+        let found = search_values(&lua, Search::One, Outcome::Search(Ok(vec![None])), &[None]).unwrap();
+        let args = crate::snapshot::callback_values(found, lua.create_table().unwrap(), Some((12, 3))).unwrap().into_vec();
+        assert_eq!(args.len(), 3);
+        assert!(args[0].is_nil() && args[1].is_nil());
+        let Value::Table(info) = &args[2] else { panic!("expected info") };
+        assert_eq!((info.get::<i64>("time").unwrap(), info.get::<i64>("inputEpoch").unwrap()), (12, 3));
     }
 
     /// The reasons that are the host's own rather than the capture path's are listed in
@@ -4231,7 +4353,6 @@ mod tests {
         for reason in [
             crate::backend::CAPTURE_FAILED.to_string(),
             SHORT_CAPTURE.to_string(),
-            HELD_CELLS.to_string(),
             SEARCH_PANICKED.to_string(),
             CROP_FAILED.to_string(),
             TEMPLATE_FAILED.to_string(),
@@ -4255,8 +4376,8 @@ mod tests {
     }
 
     /// A path is the needle of its file under the module's root, named as written, and nothing of
-    /// it is decoded where it is read — the reading of every search, `imageSearchAsync`'s and
-    /// `imageSearchEach`'s among them. A list is read whole before anything is captured, so a path
+    /// it is decoded where it is read — the reading of every search, a list given to `imageSearch`
+    /// and `imageSearchEach`'s among them. A list is read whole before anything is captured, so a path
     /// that is not there raises wherever it sits in it; a value that is no template raises too.
     #[test]
     fn a_path_names_itself_and_a_stranger_is_refused() {
@@ -4274,14 +4395,14 @@ mod tests {
         let e = err_text(resolve_with(&Value::Integer(3), "imageSearch", &locate));
         assert!(e.contains("expected a path or a Template, got a number"), "{e}");
         let list: Table = lua.load("return { 'images/a.png', 'b.png' }").eval().unwrap();
-        assert_eq!(resolve_list(&list, "imageSearchMulti", &locate).unwrap().len(), 2);
+        assert_eq!(resolve_list(&list, "imageSearch", &locate).unwrap().len(), 2);
         for p in ["images/a.png", "b.png"] {
             assert!(template_store::test_made_on(&root.join(p).display().to_string()).is_empty(), "{p}: decoded where it was read");
         }
         let bad: Table = lua.load("return { 'b.png', true }").eval().unwrap();
-        assert!(resolve_list(&bad, "imageSearchMulti", &locate).is_err());
+        assert!(resolve_list(&bad, "imageSearch", &locate).is_err());
         let missing: Table = lua.load("return { 'b.png', 'images/missing.png' }").eval().unwrap();
-        let e = err_text(resolve_list(&missing, "imageSearchMulti", &locate));
+        let e = err_text(resolve_list(&missing, "imageSearch", &locate));
         assert!(e.contains("cannot open template '") && e.contains("missing.png"), "{e}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4295,7 +4416,7 @@ mod tests {
         template_store::test_write_dot(&path, [255, 0, 0], 0);
         let (task_tx, task_rx) = mpsc::channel();
         let (res_tx, res_rx) = mpsc::channel();
-        spawn_image_worker(two_dots, crate::backend::no_comparison, task_rx, res_tx);
+        spawn_image_worker(two_dots, crate::backend::no_comparison, Arc::new(AtomicU64::new(0)), task_rx, res_tx);
         task_tx.send(task(1, (0, 0, 10, 10), vec![(Needle::File(path.clone()), None)], Mode::First)).unwrap();
         // Red, then four wildcards: what is still to be made when the search comes.
         let mut bytes = vec![0u8; 5 * 4];
@@ -4320,7 +4441,7 @@ mod tests {
         let root = test_dir("again");
         let path = root.join("dot.png");
         template_store::test_write_dot(&path, [255, 0, 0], 0);
-        let search = || run_batch(&[task(1, (0, 0, 10, 10), vec![(Needle::File(path.clone()), None)], Mode::First)], two_dots);
+        let search = || batch(&[task(1, (0, 0, 10, 10), vec![(Needle::File(path.clone()), None)], Mode::First)], two_dots);
         assert_eq!(search()[0].found(), Ok(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]), "the red dot");
         template_store::test_write_dot(&path, [0, 255, 0], 10);
         assert_eq!(search()[0].found(), Ok(vec![Some(ScreenHit { x: 8, y: 5, w: 1, h: 1, n: 1 })]), "the green one now");
@@ -4342,7 +4463,7 @@ mod tests {
         let root = test_dir("cannot-open");
         let gone = Needle::File(root.join("gone.png"));
         let red = || vec![(dot([255, 0, 0]), None)];
-        let out = run_batch(
+        let out = batch(
             &[
                 task(1, (5, 5, 10, 10), vec![(dot([255, 0, 0]), None), (gone.clone(), None)], Mode::First),
                 task(2, (5, 5, 10, 10), vec![(gone.clone(), None)], Mode::Each),
@@ -4368,7 +4489,7 @@ mod tests {
         let p = Prepared::of(Raw::Rgb { w: 1, h: 1, bytes: vec![0, 255, 0] });
         let prepare = preparation(1, &p);
         assert!(!prepare.captures());
-        let out = run_batch(&[prepare, task(2, (0, 0, 10, 10), vec![(Needle::Handle(p.clone()), None)], Mode::First)], two_dots);
+        let out = batch(&[prepare, task(2, (0, 0, 10, 10), vec![(Needle::Handle(p.clone()), None)], Mode::First)], two_dots);
         assert!(matches!(out[0].outcome, Outcome::Prepared));
         assert_eq!(out[1].found(), Ok(vec![Some(ScreenHit { x: 8, y: 5, w: 1, h: 1, n: 1 })]));
         assert_eq!(p.get().unwrap().as_ref().unwrap().1, 1);
@@ -4398,7 +4519,7 @@ mod tests {
         let tasks = queued.take();
         let Job::Prepare(gone) = &tasks[0].job else { panic!("a preparation") };
         assert!(gone.upgrade().is_none(), "the bytes went with the handle");
-        let out = run_batch(&tasks, two_dots);
+        let out = batch(&tasks, two_dots);
         assert!(out.iter().all(|r| matches!(r.outcome, Outcome::Prepared)));
         assert!(template_store::test_made_on("bytes 9x13").is_empty(), "nothing made for a handle nobody holds");
         assert_eq!(template_store::test_made_on("bytes 11x13").len(), 1, "the one still held is made");
@@ -4412,7 +4533,7 @@ mod tests {
         let root = test_dir("decode-panics");
         let bad = root.join(template_store::TEST_PANICS);
         template_store::test_write_dot(&bad, [255, 0, 0], 0);
-        let out = run_batch(
+        let out = batch(
             &[
                 task(1, (0, 0, 10, 10), vec![(Needle::File(bad), None)], Mode::First),
                 task(2, (0, 0, 10, 10), vec![(dot([255, 0, 0]), None)], Mode::First),

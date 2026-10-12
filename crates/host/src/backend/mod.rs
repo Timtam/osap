@@ -716,8 +716,8 @@ pub struct OcrWorker<S = OcrShot> {
     pub recognise: fn(&S, &[(i32, i32, i32, i32)], &Recognise) -> Vec<Result<OcrText, String>>,
     /// The languages the engine reads and the user prefers. Called on the recognise thread.
     pub languages: fn() -> crate::ocr::lang::Languages,
-    /// Photographs a snapshot round, on the capture thread: `host.screen.snapshotAsync`'s
-    /// pictures and change waits share the thread with the text reads' captures.
+    /// Photographs a snapshot round, on the capture thread: `host.screen.snapshot`'s pictures
+    /// and change waits share the thread with the text reads' captures.
     pub frames: FramesFn,
     /// Reads the points a handler waits for in `host.screen.pixel` or `pixels`, on the capture
     /// thread, through the functions those calls read with on the event loop ([`PointsFn`]) —

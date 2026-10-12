@@ -293,23 +293,25 @@ local function samePicture(a, b)
   return true
 end
 
--- host.screen.snapshotAsync as the harness takes it, at its time and answered by T.runDue, counted
--- per key; a newer request with a key takes the place of an older one not answered yet, whose
--- callback is then never called here (the host answers it nil, which the module drops alike). Each
--- picture keeps what it showed; a change wait (`change`, kept in S.changeWaits) is answered, as one
--- of a single round is, with the picture taken and whether it differs from `from`'s.
-local snapshotAsync = T.host.screen.snapshotAsync
-rawset(T.host.screen, "snapshotAsync", function(opts, cb)
+-- host.screen.snapshot with a callback as the harness takes it, at its time and answered by
+-- T.runDue, counted per key; a newer request with a key takes the place of an older one not
+-- answered yet, whose callback is then never called here (the host answers it nil, which the module
+-- drops alike). Each picture keeps what it showed; a change wait (`change`, kept in S.changeWaits)
+-- is answered, as one of a single round is, with the picture taken and whether it differs from
+-- `from`'s. Without a callback it is the scripted host's own.
+local snapshot = T.host.screen.snapshot
+rawset(T.host.screen, "snapshot", function(opts, cb)
+  if cb == nil then return snapshot(opts) end
   for k in pairs(opts) do
     assert(k == "region" or k == "key" or k == "at" or k == "change",
-      "snapshotAsync: an option " .. tostring(k))
+      "snapshot: an option " .. tostring(k))
   end
   assert(type(opts.at) == "number", "asked at a set time, so Melodyne's own clicks do not wait for it")
   local change = opts.change
   if change ~= nil then
     for k in pairs(change) do
       assert(k == "from" or k == "timeout" or k == "tolerance" or k == "minPixels",
-        "snapshotAsync: a change option " .. tostring(k))
+        "snapshot: a change option " .. tostring(k))
     end
     assert(change.from == nil or not change.from.released, "a change wait's from was released")
     S.changeWaits[#S.changeWaits + 1] = change
@@ -318,7 +320,7 @@ rawset(T.host.screen, "snapshotAsync", function(opts, cb)
   for i = #S.asyncs, 1, -1 do
     if S.asyncs[i].key == opts.key then table.remove(S.asyncs, i) end
   end
-  snapshotAsync(opts, function(snap, why, info)
+  snapshot(opts, function(snap, why, info)
     if snap then
       snap.shows = shows()
       S.pictures[opts.key] = snap

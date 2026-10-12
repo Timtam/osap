@@ -14,6 +14,11 @@
 //! A region with nothing to read this time — a window region with no rectangle, or on a snapshot
 //! one with no part inside it — is answered at once wherever it is asked, unsaid.
 //!
+//! **With a callback** — `save(path, opts, cb)` — the same shot is filed with the callback as its
+//! waiter and nothing waits: `cb(true)`, or `cb(false, reason)`, then `info`, on a later tick; a
+//! file that cannot be written is reported as the callback's error, which is not called — the call
+//! raises for it in every other form.
+//!
 //! Its own file, as the profile's bindings are snapshot.rs's: the bindings are registered in lib.rs,
 //! by name, where check-docs.ps1 and tools/api-index.py read what exists.
 
@@ -26,9 +31,8 @@ use mlua::{Function, Lua, MultiValue, Table, Value};
 use crate::backend::frame::Frame;
 use crate::backend::CapturedImage;
 use crate::capture_source;
-use crate::image_search::{self, BuildAnswer, Haystack, ImageTask, Job, Outcome};
+use crate::image_search::{self, BuildAnswer, Haystack, ImageTask, Job, JobKind, Outcome, Plan};
 use crate::ocr::lua::ReadHost;
-use crate::task::{On, Started};
 use crate::vm_guard::host_call;
 use crate::{describe_value, one_value, snapshot, with_reason, Shared, SHORT_CAPTURE};
 
@@ -92,6 +96,8 @@ pub(crate) struct SaveAsk {
     region: Result<(i32, i32, i32, i32), String>,
     snap: Option<Arc<Frame>>,
     marks: Vec<(i32, i32)>,
+    /// `opts.key`, which only the callback form takes.
+    key: Option<String>,
 }
 
 /// `save` and `saveMarked` write PNG only, and refuse any other path before anything is read:
@@ -113,9 +119,10 @@ pub(crate) fn png_path_only(fname: &str, full: &Path) -> mlua::Result<()> {
 /// `saveMarked`; the path's extension; `opts.snapshot`; `opts.region`, resolved now against a primary
 /// screen of `screen`'s size, or with the snapshot's edges as its defaults and cut to the snapshot;
 /// and `saveMarked`'s marks, read loosely as they always were: an entry that is not a table is
-/// passed over, and a coordinate that is not a whole number is 0. A mistake raises; a region with
-/// nothing to read this time is answered.
-fn save_ask(lua: &Lua, shot: Shot, root: &Path, screen: (i32, i32), path: Value, opts: Value) -> mlua::Result<SaveAsk> {
+/// passed over, and a coordinate that is not a whole number is 0; then `opts.key`, which only the
+/// callback form (`cb`) takes. A mistake raises; a region with nothing to read this time is
+/// answered.
+fn save_ask(lua: &Lua, shot: Shot, root: &Path, screen: (i32, i32), path: Value, opts: Value, cb: bool) -> mlua::Result<SaveAsk> {
     let fname = shot.name();
     let err = |m: String| mlua::Error::external(format!("{fname}: {m}"));
     let path = <String as mlua::FromLua>::from_lua(path.clone(), lua)
@@ -149,7 +156,8 @@ fn save_ask(lua: &Lua, shot: Shot, root: &Path, screen: (i32, i32), path: Value,
         (Shot::Marked, Some(t)) => read_marks(lua, t)?,
         _ => Vec::new(),
     };
-    Ok(SaveAsk { path: full, region, snap, marks })
+    let key = snapshot::opts_key(o, fname, cb, "the third argument")?;
+    Ok(SaveAsk { path: full, region, snap, marks, key })
 }
 
 /// `opts.marks` of `saveMarked`, as it has always been read: by name, `{ x = 100, y = 200 }`, an
@@ -248,6 +256,19 @@ fn save_work(lua: &Lua, shot: Shot, ask: SaveAsk, region: (i32, i32, i32, i32), 
     (hay, Job::Save(Arc::new(SaveJob { path, marks, shot })))
 }
 
+/// A shot's plan: answered at once when there is nothing to read this time; otherwise a shot of
+/// the image worker, answered by [`save_values`].
+fn save_plan(lua: &Lua, shot: Shot, ask: SaveAsk) -> mlua::Result<Plan> {
+    let region = match &ask.region {
+        Ok(r) => *r,
+        // Nothing to read this time: answered at once, as where it cannot wait.
+        Err(none) => return Ok(Plan::Now(with_reason(lua, Value::Boolean(false), none.clone())?, Box::new(save_values))),
+    };
+    let (hay, job) = save_work(lua, shot, ask, region, true);
+    let answer: BuildAnswer = Box::new(save_values);
+    Ok(Plan::Work { hay, job, answer })
+}
+
 /// A waited `save` or `saveMarked`: its arguments read by `parse` as the call that does not wait
 /// reads them — a mistake raises at the call — and answered at once when there is nothing to read
 /// this time; otherwise a shot of the image worker filed for the handler that waits.
@@ -259,17 +280,17 @@ fn start_save<H: ReadHost>(
     nonce: Table,
     parse: impl FnOnce() -> mlua::Result<SaveAsk>,
 ) -> mlua::Result<MultiValue> {
-    crate::task::start_point(h, lua, scope, shot.name(), nonce, parse, |ask, task, prio| {
-        let region = match &ask.region {
-            Ok(r) => *r,
-            // Nothing to read this time: answered at once, as where it cannot wait.
-            Err(none) => return Ok(Started::Now(with_reason(lua, Value::Boolean(false), none.clone())?)),
-        };
-        let (hay, job) = save_work(lua, shot, ask, region, true);
-        let answer: BuildAnswer = Box::new(save_values);
-        let id = image_search::submit_wait(h, lua, scope, task, prio, hay, job, shot.short(), answer);
-        Ok(Started::Waits(On::Image(id)))
-    })
+    image_search::start_plan(h, lua, scope, shot.name(), shot.short(), nonce, || save_plan(lua, shot, parse()?))
+}
+
+/// `save(path, opts, cb)` or `saveMarked(path, opts, cb)`: the same shot with `cb` as its waiter,
+/// under `opts.key` — it never waits — answered on a later tick.
+fn submit_save<H: ReadHost>(h: &H, lua: &Lua, scope: usize, shot: Shot, cb: Value, parse: impl FnOnce() -> mlua::Result<SaveAsk>) -> mlua::Result<()> {
+    let cb = image_search::callback_arg(shot.name(), cb, "third argument")?;
+    let mut ask = parse()?;
+    let key = ask.key.take();
+    let plan = save_plan(lua, shot, ask)?;
+    image_search::submit_plan(h, lua, scope, cb, key, shot.short(), JobKind::Save, plan)
 }
 
 /// A shot where it cannot wait (`why`, the shim's word for the place): answered at once, and not
@@ -302,23 +323,29 @@ fn live_capture(sh: &Shared, lua: &Lua, (x, y, w, h): (i32, i32, i32, i32)) -> R
     sh.backend.capture(x, y, w, h, capture_source::vm_source(lua))
 }
 
-/// `host.screen.save(path, opts?) -> (boolean, string?)`. In a handler it waits while the image
-/// worker captures, encodes and writes ([`start_save`]); where it cannot wait the event loop does,
-/// said in the log ([`save_on_loop`]).
+/// `host.screen.save(path, opts?, cb?) -> (boolean, string?)`. In a handler it waits while the
+/// image worker captures, encodes and writes ([`start_save`]); where it cannot wait the event loop
+/// does, said in the log ([`save_on_loop`]); with a callback nothing waits ([`submit_save`]).
 pub(crate) fn save(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, path, opts): (Table, Value, Value)| {
         host_call!("host.screen.save");
         let root = sh.root(idx);
-        start_save(&*sh, lua, idx, Shot::Plain, nonce, || save_ask(lua, Shot::Plain, &root, sh.backend.screen_size(), path, opts))
+        start_save(&*sh, lua, idx, Shot::Plain, nonce, || save_ask(lua, Shot::Plain, &root, sh.backend.screen_size(), path, opts, false))
     })?;
     let sh = shared.clone();
     let blocking = lua.create_function(move |lua, (why, path, opts): (String, Value, Value)| {
         host_call!("host.screen.save");
-        let ask = save_ask(lua, Shot::Plain, &sh.root(idx), sh.backend.screen_size(), path, opts)?;
+        let ask = save_ask(lua, Shot::Plain, &sh.root(idx), sh.backend.screen_size(), path, opts, false)?;
         save_on_loop(&*sh, lua, idx, Shot::Plain, &why, ask, |r| live_capture(&sh, lua, r))
     })?;
-    crate::task::points(lua, idx, shared.clone())?.call((Shot::Plain.name(), start, blocking))
+    let sh = shared.clone();
+    let submit = lua.create_function(move |lua, (path, opts, cb): (Value, Value, Value)| {
+        host_call!("host.screen.save");
+        let root = sh.root(idx);
+        submit_save(&*sh, lua, idx, Shot::Plain, cb, || save_ask(lua, Shot::Plain, &root, sh.backend.screen_size(), path, opts, true))
+    })?;
+    crate::task::points(lua, idx, shared.clone())?.call((Shot::Plain.name(), start, blocking, submit, 3))
 }
 
 /// `host.screen.saveMarked(path, opts) -> (boolean, string?)`: `save`, with a crosshair drawn at every
@@ -336,15 +363,21 @@ pub(crate) fn save_marked(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::R
     let start = lua.create_function(move |lua, (nonce, path, opts): (Table, Value, Value)| {
         host_call!("host.screen.saveMarked");
         let root = sh.root(idx);
-        start_save(&*sh, lua, idx, Shot::Marked, nonce, || save_ask(lua, Shot::Marked, &root, sh.backend.screen_size(), path, opts))
+        start_save(&*sh, lua, idx, Shot::Marked, nonce, || save_ask(lua, Shot::Marked, &root, sh.backend.screen_size(), path, opts, false))
     })?;
     let sh = shared.clone();
     let blocking = lua.create_function(move |lua, (why, path, opts): (String, Value, Value)| {
         host_call!("host.screen.saveMarked");
-        let ask = save_ask(lua, Shot::Marked, &sh.root(idx), sh.backend.screen_size(), path, opts)?;
+        let ask = save_ask(lua, Shot::Marked, &sh.root(idx), sh.backend.screen_size(), path, opts, false)?;
         save_on_loop(&*sh, lua, idx, Shot::Marked, &why, ask, |r| live_capture(&sh, lua, r))
     })?;
-    crate::task::points(lua, idx, shared.clone())?.call((Shot::Marked.name(), start, blocking))
+    let sh = shared.clone();
+    let submit = lua.create_function(move |lua, (path, opts, cb): (Value, Value, Value)| {
+        host_call!("host.screen.saveMarked");
+        let root = sh.root(idx);
+        submit_save(&*sh, lua, idx, Shot::Marked, cb, || save_ask(lua, Shot::Marked, &root, sh.backend.screen_size(), path, opts, true))
+    })?;
+    crate::task::points(lua, idx, shared.clone())?.call((Shot::Marked.name(), start, blocking, submit, 3))
 }
 
 /// `save` and `saveMarked` as the host builds them, over `holder`, their waits the host's own
@@ -362,16 +395,20 @@ pub(crate) fn test_saves<H: ReadHost>(
     let build = |shot: Shot| -> mlua::Result<Function> {
         let (h, r) = (holder.clone(), root.clone());
         let start = lua.create_function(move |lua, (nonce, path, opts): (Table, Value, Value)| {
-            start_save(&*h, lua, idx, shot, nonce, || save_ask(lua, shot, &r, (1920, 1080), path, opts))
+            start_save(&*h, lua, idx, shot, nonce, || save_ask(lua, shot, &r, (1920, 1080), path, opts, false))
         })?;
         let (h, r) = (holder.clone(), root.clone());
         let blocking = lua.create_function(move |lua, (why, path, opts): (String, Value, Value)| {
-            let ask = save_ask(lua, shot, &r, (1920, 1080), path, opts)?;
+            let ask = save_ask(lua, shot, &r, (1920, 1080), path, opts, false)?;
             save_on_loop(&*h, lua, idx, shot, &why, ask, |(x, y, w, hh)| {
                 capture(&[(x, y, w, hh)], capture_source::vm_source(lua)).pop().unwrap_or_else(|| Err(crate::backend::CAPTURE_FAILED.to_string()))
             })
         })?;
-        crate::task::points(lua, idx, holder.clone())?.call((shot.name(), start, blocking))
+        let (h, r) = (holder.clone(), root.clone());
+        let submit = lua.create_function(move |lua, (path, opts, cb): (Value, Value, Value)| {
+            submit_save(&*h, lua, idx, shot, cb, || save_ask(lua, shot, &r, (1920, 1080), path, opts, true))
+        })?;
+        crate::task::points(lua, idx, holder.clone())?.call((shot.name(), start, blocking, submit, 3))
     };
     Ok((build(Shot::Plain)?, build(Shot::Marked)?))
 }

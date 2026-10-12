@@ -155,8 +155,9 @@ local S = {
   -- is not empty (`finish`), unless it is about such a call (`S.mayNotWait`).
   couldNotWait = {},
   mayNotWait = false,
-  asyncs = {},      -- host.screen.snapshotAsync requests not answered yet
-  order = {},       -- "snapshot", "snapshotAsync", "save", "acted", in the order they happened
+  asyncs = {},      -- host.screen.snapshot requests with a callback not answered yet
+  order = {},       -- "snapshot", "snapshot(cb)", "save", "acted", in the order they happened
+  out = {},         -- key -> how many requests with a callback asked with it are out (host.screen.pending)
   captured = {},    -- spec -> callback, as host.keys.capture was last handed it
   holding = {},     -- spec -> token, while that capture has not been released
   tokens = {},      -- token -> spec
@@ -456,16 +457,23 @@ T.host = strict("host", {
       return true
     end,
     -- One picture, kept: in the host a handler waits for it, answered at once here; where it
-    -- could not wait, the place is noted (T.screenWait).
-    snapshot = function(opts)
+    -- could not wait, the place is noted (T.screenWait). Given a callback, it waits nowhere: taken
+    -- off the event loop at `at` (or at once) and answered on the tick after — see T.runDue.
+    snapshot = function(opts, cb)
+      if cb ~= nil then
+        S.asyncs[#S.asyncs + 1] = { region = opts.region, at = opts.at or S.now, cb = cb, asked = S.now }
+        return
+      end
       T.screenWait("host.screen.snapshot")
       S.snaps += 1
       S.order[#S.order + 1] = "snapshot"
       return T.snap(opts.region)
     end,
-    -- Taken off the event loop at `at` (or at once) and answered on the tick after: see T.runDue.
-    snapshotAsync = function(opts, cb)
-      S.asyncs[#S.asyncs + 1] = { region = opts.region, at = opts.at or S.now, cb = cb, asked = S.now }
+    -- Whether a request this module asked with a callback and `key` is out (S.out, which a
+    -- scenario's own fakes keep).
+    pending = function(key)
+      assert(type(key) == "string" and key ~= "", "host.screen.pending takes a non-empty key")
+      return (S.out[key] or 0) > 0
     end,
     -- Its wait as saveMarked's.
     save = function(path, opts)
@@ -640,7 +648,7 @@ function T.runDue()
       i += 1
     end
   end
-  -- The pictures asked of snapshotAsync that are due: taken at their time, answered now.
+  -- The pictures asked of snapshot with a callback that are due: taken at their time, answered now.
   for _, r in ipairs(S.asyncs) do
     if r.at <= S.now then
       S.epoch += 1
@@ -652,7 +660,7 @@ function T.runDue()
     local r = S.asyncs[i]
     if r.at <= S.now then
       table.remove(S.asyncs, i)
-      S.order[#S.order + 1] = "snapshotAsync"
+      S.order[#S.order + 1] = "snapshot(cb)"
       local s = T.snap(r.region)
       s.time = r.at
       T.call("answer", r.cb, s, nil, { waited = r.at - r.asked, frames = 1 })
@@ -3211,8 +3219,14 @@ fn the_menu_shots_put_one_capture_before_the_click_and_write_afterwards() {
         -- The harness's `save` refuses a released snapshot, so it was kept until it was written.
         assert(S.shots[3].snapshot.released, "and let go after")
         assert(T.count("(true)") == 3, T.dump())
-        -- A capture that fails says why, and neither the control nor the other pictures stop.
-        rawset(T.host.screen, "snapshot", function() error("the budget is spent") end)
+        -- A capture that fails says why, and neither the control nor the other pictures stop: the
+        -- press's picture, which the handler waits for, raises; the later two, asked with a
+        -- callback, are taken.
+        local snapshot = rawget(T.host.screen, "snapshot")
+        rawset(T.host.screen, "snapshot", function(opts, cb)
+          if cb ~= nil then return snapshot(opts, cb) end
+          error("the budget is spent")
+        end)
         local acted = S.acted
         T.press(o)
         assert(S.acted == acted + 1, "the control acted")
@@ -3382,15 +3396,19 @@ fn a_landmark_search_that_could_not_look_keeps_the_last_verdict() {
     run(r#"
         local S = T.S
         local searches = {}
-        rawset(T.host.screen, "imageSearchAsync", function(_, opts, cb)
-          searches[#searches + 1] = { cb = cb, region = opts.region }
+        rawset(T.host.screen, "imageSearch", function(_, opts, cb)
+          assert(cb ~= nil, "a landmark is searched with a callback")
+          searches[#searches + 1] = { cb = cb, region = opts.region, key = opts.key }
+          if opts.key then S.out[opts.key] = (S.out[opts.key] or 0) + 1 end
         end)
-        -- Answers the search waiting now (the gate has at most one).
+        -- Answers the search waiting now (the gate has at most one): no longer out once its
+        -- callback runs, as the host's pending says.
         local function answer(hit, why)
           local s = searches[#searches]
           assert(s and not s.done, "no search waits: " .. #searches)
           s.done = true
-          s.cb(hit, why)
+          if s.key then S.out[s.key] -= 1 end
+          s.cb(hit, why, {})
         end
         local o = T.embedded(nil, "Library", function(o) o:landmark("C:/library.png") end)
         assert(#searches == 1 and not o.active, "the first search is out: " .. T.dump())
@@ -3419,6 +3437,36 @@ fn a_landmark_search_that_could_not_look_keeps_the_last_verdict() {
         answer(nil)
         assert(not o.active, "lost: " .. T.dump())
         assert(T.count("Library: lost") == 1, T.dump())
+    "#);
+}
+
+/// A landmark gate keeps one search out by its key, and asks again once that search is no longer
+/// out — also when its answer never came because the module was turned off meanwhile, which drops
+/// a callback's answer as a read's is dropped: the gate does not wait for good, and finds its
+/// library again.
+#[test]
+fn a_landmark_gate_asks_again_after_its_answer_was_dropped() {
+    run(r#"
+        local S = T.S
+        local searches = {}
+        rawset(T.host.screen, "imageSearch", function(_, opts, cb)
+          assert(cb ~= nil and opts.key ~= nil, "a landmark is searched with a callback and a key")
+          searches[#searches + 1] = { cb = cb, key = opts.key }
+          S.out[opts.key] = (S.out[opts.key] or 0) + 1
+        end)
+        local o = T.embedded(nil, "Library", function(o) o:landmark("C:/library.png") end)
+        assert(#searches == 1 and not o.active, "the first search is out: " .. T.dump())
+        T.event()
+        assert(#searches == 1, "one out at a time: " .. T.dump())
+        -- The module is off while the search is answered: the host drops the answer, and the
+        -- search is no longer out.
+        local key = searches[1].key
+        S.out[key] -= 1
+        T.event()
+        assert(#searches == 2 and searches[2].key == key, "asked again, under the same key: " .. T.dump())
+        S.out[key] -= 1
+        searches[2].cb({ x = 300, y = 60, w = 40, h = 12 }, nil, {})
+        assert(o.active, "found: " .. T.dump())
     "#);
 }
 

@@ -6,7 +6,7 @@
 //! ```
 //!
 //! **Two readings of corners, one of the window form.** `read` is the strict one, for the calls
-//! built with it — `host.screen.cells`, `matchCells`, `matchCellsAsync` and `host.ocr.recognize`: a
+//! built with it — `host.screen.cells`, `matchCells` and `host.ocr.recognize`: a
 //! mistake in the call raises, at the call: a value that is not a table, a key the form does not
 //! take, named and positional corners mixed, a corner missing, a corner that is not a whole
 //! number or lies outside the screen's coordinate range, corners that are empty or turned

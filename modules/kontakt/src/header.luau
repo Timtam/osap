@@ -231,7 +231,7 @@ local function afterResize(ov, before)
   if not (o and o.client) then return end
   local w, h = O.contentSize(o)
   if w == 0 or h == 0 then return end
-  host.screen.imageSearchAsync({ host.path("images/resize-grip.png") }, {
+  host.screen.imageSearch({ host.path("images/resize-grip.png") }, {
     region = { o.client.x, o.client.y, o.client.x + w, o.client.y + h },
     tolerance = 20,
     scales = { 1.0 },

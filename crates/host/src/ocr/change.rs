@@ -1,5 +1,5 @@
-//! A change wait, with no thread and no clock of its own: what `host.screen.snapshotAsync { change
-//! = … }` decides about each picture its polling rounds take, stepped by the `screen-capture`
+//! A change wait, with no thread and no clock of its own: what `host.screen.snapshot({ change =
+//! … }, cb)` decides about each picture its polling rounds take, stepped by the `screen-capture`
 //! thread (`snap_queue.rs`) and by the tests below.
 //!
 //! **What "changed" means.** At least `min_pixels` of the watched pixels differ from the baseline

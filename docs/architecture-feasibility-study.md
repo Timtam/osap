@@ -16,9 +16,9 @@
 >   not Windows.Graphics.Capture.
 > - **There is no worker pool for scripts.** Module code and most host calls run on the one
 >   event-loop thread; `host.ocr.recognize` recognises on threads of its own, answering in a
->   callback or to a handler that waits while only its own module waits, and `matchCellsAsync`
->   and the asynchronous image searches run on one image worker, each answering in a callback,
->   while the synchronous screen reads still hold the loop —
+>   callback or to a handler that waits while only its own module waits, and the screen calls
+>   do their work on a capture thread and one image worker the same way, holding the loop only
+>   where a call without a callback cannot wait —
 >   [threads](module-runtime-and-lifecycle.md#threads).
 > - **A memory limit and a time limit** hold the Luau VMs: a module that runs its VM out of memory,
 >   or whose callback runs past 2 s of processor time or 10 s in all, is stopped until the next

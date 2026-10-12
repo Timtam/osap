@@ -42,7 +42,7 @@ local function describe(v)
 end
 
 -- Snapshots: answers that come back from the `screen-capture` thread in a callback — a plain
--- `snapshotAsync` and a change wait on a screen nobody touches, asked first and whatever else
+-- snapshot with a callback and a change wait on a screen nobody touches, asked first and whatever else
 -- happens, and a text read of the snapshot the timer's handler waited for, asked only when that
 -- snapshot exists — and that one picture read several ways. The job compares the callbacks that
 -- came with the ones asked for: a missing one is a thread that never answered, never a snapshot
@@ -55,16 +55,16 @@ local expected = 0
 
 local function askTheThread()
   local t3 = now()
-  local oka, aerr = pcall(host.screen.snapshotAsync, { region = SNAP_REGION }, function(s, why2, info)
+  local oka, aerr = pcall(host.screen.snapshot, { region = SNAP_REGION }, function(s, why2, info)
     answered = answered + 1
-    report("snapshotAsync answered after %d ms: %s (waited %d ms, %d picture(s))",
+    report("snapshot with a callback answered after %d ms: %s (waited %d ms, %d picture(s))",
       now() - t3, s and tostring(s) or ("nil, " .. tostring(why2)), info.waited, info.frames)
     if s then s:release() end
   end)
-  if oka then expected = expected + 1 else report("snapshotAsync THREW: %s", tostring(aerr)) end
+  if oka then expected = expected + 1 else report("snapshot with a callback THREW: %s", tostring(aerr)) end
 
   local t4 = now()
-  local okw, werr = pcall(host.screen.snapshotAsync, { region = SNAP_REGION, change = { timeout = 300 } },
+  local okw, werr = pcall(host.screen.snapshot, { region = SNAP_REGION, change = { timeout = 300 } },
     function(s, why2, info)
       answered = answered + 1
       report("change wait answered after %d ms: %s, changed=%s settled=%s rebased=%s, %d picture(s), %.1f ms a round",

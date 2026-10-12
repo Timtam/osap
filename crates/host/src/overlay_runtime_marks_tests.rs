@@ -290,12 +290,12 @@ rawset(T.host.screen, "pixel", function()
   return S.pixel
 end)
 S.searches = 0
-rawset(T.host.screen, "imageSearchMulti", function(_, opts)
-  T.screenWait("host.screen.imageSearchMulti")
+rawset(T.host.screen, "imageSearch", function(_, opts)
+  T.screenWait("host.screen.imageSearch")
   S.searches += 1
   if during then during() end
-  if not S.thumb then return nil, nil end
-  return 1, { x = S.thumb - 5, y = opts.region[2], w = 10, h = 10, n = 1 }
+  if not S.thumb then return nil end
+  return { x = S.thumb - 5, y = opts.region[2], w = 10, h = 10, n = 1 }
 end)
 function T.during(fn) during = fn end
 local here = S.origin
@@ -717,11 +717,12 @@ fn a_recognize_in_a_text_hook_waits_and_its_reading_is_said() {
 // The runtime's version.
 // ---------------------------------------------------------------------------------------------
 
-/// The runtime is 0.5.4 (calibration as its own setting, `O.calibrating()`, a static text's
+/// The runtime is 0.5.5 (calibration as its own setting, `O.calibrating()`, a static text's
 /// `hotkey`, the checks after its own pixels, `O:probe`, letting go in front of this
 /// application's own windows, its accessibility menu tests asked off the event loop, the
-/// check after a calibrating run's waited picture before a press, and a slider's after each of its
-/// searches), so a module that depends on
+/// check after a calibrating run's waited picture before a press, a slider's after each of its
+/// searches, and its searches and pictures through the calls' callback forms), so a module that
+/// depends on
 /// `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads against it, and
 /// so does one that asks for 0.4, 0.4.1 or 0.5, and neither against anything older.
 #[test]
@@ -729,7 +730,7 @@ fn the_runtime_is_0_5_so_a_module_that_asks_for_0_2_loads() {
     let m = module_manifest::ModuleManifest::parse(include_str!("../../../modules/overlay-runtime/module.toml"))
         .expect("the runtime's manifest parses");
     assert_eq!(m.id, "com.platform.overlay");
-    assert_eq!(m.version, "0.5.4");
+    assert_eq!(m.version, "0.5.5");
     for spec in [
         "com.platform.overlay >= 0.2",
         "com.platform.overlay >= 0.3",

@@ -520,10 +520,10 @@ fn a_slider_scales_its_track_and_its_step() {
         S.thumbX = 170
         S.drags = {}
         rawset(T.host.input, "drag", function(x1, y1, x2, y2) S.drags[#S.drags + 1] = { x1, y1, x2, y2 } end)
-        rawset(T.host.screen, "imageSearchMulti", function(_, opts)
-          T.screenWait("host.screen.imageSearchMulti")
+        rawset(T.host.screen, "imageSearch", function(_, opts)
+          T.screenWait("host.screen.imageSearch")
           S.searched = opts.region
-          return 1, { x = S.thumbX - 5, y = 85, w = 10, h = 10 }
+          return { x = S.thumbX - 5, y = 85, w = 10, h = 10, n = 1 }
         end)
         local o = T.scaled(function(o)
           o:addSlider({ label = "Mix", region = { 10, 10, 110, 30 }, thumbImage = "thumb.png", from = 10, to = 110 })
@@ -569,7 +569,7 @@ fn a_graphical_buttons_click_offset_and_fixed_drag_are_scaled_distances() {
         S.k = 2
         S.drags = {}
         rawset(T.host.input, "drag", function(x1, y1, x2, y2) S.drags[#S.drags + 1] = { x1, y1, x2, y2 } end)
-        rawset(T.host.screen, "imageSearchAsync", function(_, opts, cb) S.search = { region = opts.region, cb = cb } end)
+        rawset(T.host.screen, "imageSearch", function(_, opts, cb) S.search = { region = opts.region, cb = cb } end)
         local o = T.O.new("Synth")
         o:frame(function() return 3, 4 end)
         o:scale(function() return S.k end, { about = { 50, 50 } })
@@ -619,7 +619,7 @@ fn a_reveal_probe_and_a_captured_region_are_placed_through_the_scale() {
     run(r##"
         local S = T.S
         S.k = 2
-        rawset(T.host.screen, "imageSearchMulti", function() return nil end)
+        rawset(T.host.screen, "imageSearch", function() return nil end)
         local o = T.scaled(function(o)
           o:addGraphicalToggle({ label = "Chorus", region = { 10, 10, 60, 30 }, onImage = "on.png",
             offImage = "off.png", reveal = { at = { 50, 60 }, closedColor = { 0, 0, 0 } } })

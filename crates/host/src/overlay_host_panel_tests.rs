@@ -197,7 +197,7 @@ function T.modules(root)
   rawset(E, "classNavPoint", function(_, _, _, _, _, a, b) return given(a, b, nil) end)
   rawset(E, "focusWithin", function(_, _, a, b) return given(a, b, S.focusWithin) end)
   rawset(H.screen, "size", function() return { w = 2560, h = 1440 } end)
-  rawset(H.screen, "imageSearchAsync", function() end)
+  rawset(H.screen, "imageSearch", function() end)
   -- A read that waits, answered at once: S.ocr(region) says what is written there (default:
   -- nothing), or gives the whole reading as a table — a "failed" one. A read with a callback is
   -- kept for the scenario to answer (T.submit).

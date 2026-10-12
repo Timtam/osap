@@ -59,7 +59,7 @@ pub const SHUTDOWN: Duration = Duration::from_secs(1);
 pub const SLOW_JOB: Duration = Duration::from_millis(100);
 pub const SLOW_LOG_EVERY: Duration = Duration::from_secs(10);
 
-// ── host.screen.snapshotAsync, on the same capture thread ────────────────────────────────────
+// ── The snapshot requests, on the same capture thread ────────────────────────────────────────
 
 /// Snapshot requests of one module VM waiting at once — plain, timed and change waits together.
 /// The 17th ends that module's oldest one: the newest always proceeds, since the newest is the
@@ -77,8 +77,8 @@ pub const SNAP_TOTAL: usize = 64;
 
 // ── The image worker's searches (image_search.rs) ─────────────────────────────────────────────
 
-/// `imageSearchAsync`, `imageSearchEach` and `matchCellsAsync` requests of one module VM
-/// waiting for the image worker at once. The 65th ends that module's oldest: the newest always
+/// Requests with a callback of one module VM — every image worker call's, `imageSearchEach`'s
+/// among them — waiting for the image worker at once. The 65th ends that module's oldest: the newest always
 /// proceeds, as with snapshots.
 ///
 /// 64, not the snapshots' 16: the cap is for a timer that searches faster than the worker

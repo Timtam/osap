@@ -142,7 +142,7 @@ local function closeWhatsNew(_)
   local b = kc.bounds
   -- Both glyphs against ONE captured frame (the search takes a template list), rather
   -- than a chain of searches that would each pay a fresh region capture.
-  host.screen.imageSearchAsync(
+  host.screen.imageSearch(
     WHATSNEW_CLOSE,
     { region = { b.x, b.y, b.x + b.w, b.y + b.h }, tolerance = 8 },
     function(hit)

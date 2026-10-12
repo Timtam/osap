@@ -14,7 +14,7 @@ Timers are how a module waits without blocking. `after` covers the settling time
 
 `host.epoch` is what an expensive reading should be memoized against instead of a clock. It moves whenever an OS event, a one-shot `after` coming due, or the module's own synthesised input could have changed the screen, so a cached answer is free within one dispatch and re-taken after the next such event — which "it was fresh 50 ms ago" cannot promise. An `every` tick does not move it, so a poll is handed what was cached before the tick until something else moves it.
 
-Where a wait is for a *value to change* rather than for a length of time, a guessed delay is wrong in both directions. An overlay has [`O:watch`](./overlay.md#o-watch) for it, which exists only on an overlay and runs only while that overlay is active. A module that is not an overlay — a game module on a shared runtime, say — has no change wait: it polls with [`every`](#host-timer-every), keeps one asynchronous read in flight (the example under [`matchCellsAsync`](./screen.md#host-screen-matchcellsasync)) and compares each reading with the last, or, after a press or an input it caused, reads in a burst until a reading differs or a deadline passes: either asking again straight from each asynchronous read's callback, as the menu example under [`host.gamepad.on`](./gamepad.md#host-gamepad-on) does, or with a few `after`s at growing delays.
+Where a wait is for a *value to change* rather than for a length of time, a guessed delay is wrong in both directions. An overlay has [`O:watch`](./overlay.md#o-watch) for it, which exists only on an overlay and runs only while that overlay is active. A module that is not an overlay — a game module on a shared runtime, say — has no change wait: it polls with [`every`](#host-timer-every), keeps one asynchronous read in flight (the example under [`matchCells`](./screen.md#host-screen-matchcells)) and compares each reading with the last, or, after a press or an input it caused, reads in a burst until a reading differs or a deadline passes: either asking again straight from each asynchronous read's callback, as the menu example under [`host.gamepad.on`](./gamepad.md#host-gamepad-on) does, or with a few `after`s at growing delays.
 
 ## What to declare {#declare}
 
@@ -68,20 +68,18 @@ The timer belongs to the module whose VM runs the call. A `code_module` runtime 
 Arming costs a registry slot and a list entry, as for `after`; the list is looked at once per tick, and every tick the timer is due its callback runs on the main thread, so what it costs is what the callback does.
 
 ```luau
--- A poll that only works while the game is in front, and never has two searches in flight.
+-- A poll that only works while the game is in front, and never has two searches in flight:
+-- the search's key is out until its callback runs, or until a disable drops it.
 -- Besides "timer", this needs "window", "screen", "path" and "log" in the manifest.
 local GAME = { title = { contains = "My Game" } }
-local busy = false
 host.timer.every(150, function()
-  if busy then return end
+  if host.screen.pending("cursor") then return end
   local win = host.window.active()
   if not win or not host.window.test(GAME, win) then return end
   local b = win.client
-  busy = true
-  host.screen.imageSearchAsync(host.path("images/menu-cursor.png"),
-    { region = { b.x, b.y, b.x + 400, b.y + 300 }, tolerance = 8 },
+  host.screen.imageSearch(host.path("images/menu-cursor.png"),
+    { region = { b.x, b.y, b.x + 400, b.y + 300 }, tolerance = 8, key = "cursor" },
     function(hit)
-      busy = false
       if hit then host.log.info(("cursor at %d,%d"):format(hit.x, hit.y)) end
     end)
 end)
@@ -158,7 +156,7 @@ The system switches off an event tap whose thread stops answering, and keys go u
 
 **Signature:** `host.epoch() -> number`
 
-A counter that changes whenever the world may have: an OS event dispatched into a module (hotkey, key, window activation, focus change, controller event), a one-shot [`after`](#host-timer-after) coming due, an async image result (a [`profile`](./screen.md#profile-with-a-callback)'s given a callback among them), a [text read](./ocr.md#host-ocr-recognize)'s readings or a [`snapshotAsync`](./screen.md#host-screen-snapshotasync) answer arriving for a callback (once for all that arrive together, before the first of them — a reading, a picture, a colour, a profile, a grid or a crop a handler [waited](../module-runtime-and-lifecycle.md#a-handler-waits) for does not move it: the handler goes on in the dispatch that asked), [`host.window.focus`](./window.md#host-window-focus), the turn's callbacks that waited for their module — a setting's [`onChange`](./settings.md#host-settings-onchange) called for the settings dialog or for another module's `set` (once before the first of them) — or the module itself driving input (click, move, drag, scroll, key send, typing). A [`host.timer.every`](#host-timer-every) tick does not move it, and neither does [`host.input.post`](./input.md#host-input-post).
+A counter that changes whenever the world may have: an OS event dispatched into a module (hotkey, key, window activation, focus change, controller event), a one-shot [`after`](#host-timer-after) coming due, an async image result (a [`profile`](./screen.md#profile-with-a-callback)'s given a callback among them), a [text read](./ocr.md#host-ocr-recognize)'s readings or a [`host.screen`](./screen.md#with-a-callback) call's answer arriving for a callback (once for all that arrive together, before the first of them — a reading, a picture, a colour, a profile, a grid or a crop a handler [waited](../module-runtime-and-lifecycle.md#a-handler-waits) for does not move it: the handler goes on in the dispatch that asked), [`host.window.focus`](./window.md#host-window-focus), the turn's callbacks that waited for their module — a setting's [`onChange`](./settings.md#host-settings-onchange) called for the settings dialog or for another module's `set` (once before the first of them) — or the module itself driving input (click, move, drag, scroll, key send, typing). A [`host.timer.every`](#host-timer-every) tick does not move it, and neither does [`host.input.post`](./input.md#host-input-post).
 
 Memoize an expensive observation against it, so repeats within one dispatch are free while a genuinely new situation is always re-observed:
 

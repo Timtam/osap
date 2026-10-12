@@ -19,7 +19,7 @@
 //! per-region loop is where a closing application stops a job.
 //!
 //! **One capture thread**, named `screen-capture`, for the text reads' pictures and for
-//! `host.screen.snapshotAsync`'s: a snapshot is the same act as the first half of a read. The
+//! `host.screen.snapshot`'s: a snapshot is the same act as the first half of a read. The
 //! snapshots wait in a lane of their own beside the reads' queue (`snap_queue.rs`) — plain ones,
 //! timed ones and the rounds of change waits, and the points a handler waits for in
 //! `host.screen.pixel` or `pixels`, read through `OcrWorker::points` — and the thread takes
@@ -157,7 +157,7 @@ type Pixels<S> = Result<Pic<S>, String>;
 
 struct State<S> {
     sched: Scheduler<Spec, Pixels<S>>,
-    /// `host.screen.snapshotAsync`'s requests, beside the reads, on the same thread.
+    /// The snapshot requests, beside the reads, on the same thread.
     lane: SnapLane,
     /// While a recognition runs: when it began, or answered its last region, whichever is later.
     /// `None` when none is running.
@@ -714,16 +714,21 @@ fn snapshot_round<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, mu
     let (source, poll) = (round.source, round.poll);
     let read = round.points().map(|(at, single)| {
         let n = at.len();
-        match logging::contain(|| (worker.points)(at, source, single)) {
-            Ok(colours) => (n, colours),
+        let colours = match logging::contain(|| (worker.points)(at, source, single)) {
+            Ok(colours) => colours,
             Err(report) => {
                 contained("a pixel read", &report);
-                (n, Err(CAPTURE_PANICKED.to_string()))
+                Err(CAPTURE_PANICKED.to_string())
             }
-        }
+        };
+        // When the read came back, and the epoch as it stood then: input the host drives from here
+        // on turns it over after them.
+        (n, colours, (inner.clock)(), inner.input_epoch.load(Ordering::SeqCst))
     });
     let (what, slow, done) = match read {
-        Some((n, colours)) => (format!("a pixel read of {n} point(s)"), &SLOW_POINT_ROUNDS, round.answer_points(colours)),
+        Some((n, colours, at, epoch)) => {
+            (format!("a pixel read of {n} point(s)"), &SLOW_POINT_ROUNDS, round.answer_points(colours, at, epoch))
+        }
         None => {
             let done = match logging::contain(|| (worker.frames)(&rects, source, poll)) {
                 // The epoch as it stands now the pictures exist: input the host drives from here on
@@ -1874,17 +1879,21 @@ mod tests {
             snap(id, region, SnapKind::Points { at: at.to_vec(), single }, Instant::now())
         };
         s.submit_snap(pts(1, &[(4242, 3), (300, 4)], false));
+        s.note_input_epoch(23);
         match &collect_snaps(&s, 1)[0].outcome {
-            SnapOutcome::Colours(c) => assert_eq!(c, &vec![(4242_i32 as u8, 3, 0), (300_i32 as u8, 4, 0)]),
+            SnapOutcome::Colours { colours, input_epoch, .. } => {
+                assert_eq!(colours, &vec![(4242_i32 as u8, 3, 0), (300_i32 as u8, 4, 0)]);
+                assert_eq!(*input_epoch, 23, "the epoch as the read came back");
+            }
             _ => panic!("no colours"),
         }
         s.submit_snap(pts(2, &[(4242, 7)], true));
-        assert!(matches!(&collect_snaps(&s, 1)[0].outcome, SnapOutcome::Colours(c) if c == &vec![(4242_i32 as u8, 7, 1)]));
+        assert!(matches!(&collect_snaps(&s, 1)[0].outcome, SnapOutcome::Colours { colours, .. } if colours == &vec![(4242_i32 as u8, 7, 1)]));
         assert_eq!(*locked(&POINT_THREADS), ["screen-capture", "screen-capture"]);
         s.submit_snap(pts(3, &[(668, 0)], true));
         assert!(matches!(&collect_snaps(&s, 1)[0].outcome, SnapOutcome::Failed { why, .. } if why == CAPTURE_PANICKED));
         s.submit_snap(pts(4, &[(20, 0)], true));
-        assert!(matches!(collect_snaps(&s, 1)[0].outcome, SnapOutcome::Colours(_)), "the capture thread still answers");
+        assert!(matches!(collect_snaps(&s, 1)[0].outcome, SnapOutcome::Colours { .. }), "the capture thread still answers");
         std::thread::sleep(Duration::from_millis(30));
         assert!(s.drain_snaps().is_empty(), "each once");
         stop.shutdown(Duration::from_secs(2));

@@ -417,8 +417,9 @@ struct Shared {
     /// What every module's snapshots hold between them, against the application's budget
     /// (snapshot.rs). Each VM keeps its own total in its app data beside this one.
     snap_bytes: Rc<Cell<usize>>,
-    /// `host.screen.snapshotAsync`'s callbacks waiting for the capture thread, and the answers
-    /// decided without it (snapshot.rs).
+    /// The callbacks of `host.screen.snapshot` and `profile` waiting for the capture thread, the
+    /// handlers that wait in them, in `pixel` and `pixels`, and the answers decided without it
+    /// (snapshot.rs).
     snap_state: snapshot::SnapState,
     /// `host.ocr.recognize`: the capture and recognise threads (ocr/service.rs)...
     ocr: ocr::service::Service<backend::OcrShot>,
@@ -788,11 +789,13 @@ impl Shared {
     ///
     /// The `screen-capture` thread is told the new value (`Service::note_input_epoch`) before
     /// anything acts, so a snapshot it takes carries the epoch as it stood once its capture was
-    /// back: input the host drives after that turns it over after the picture.
+    /// back: input the host drives after that turns it over after the picture. The image worker is
+    /// told too (`ImageState::note_input_epoch`), for the moment a callback's `info` gives.
     fn bump_input_epoch(&self) {
         let e = self.input_epoch.get().wrapping_add(1);
         self.input_epoch.set(e);
         self.ocr.note_input_epoch(e);
+        self.images.note_input_epoch(e);
         self.bump_epoch();
     }
 
@@ -1453,6 +1456,7 @@ impl Shared {
         self.timers.retain(|i| i != idx);
         self.ocr_drop_owner(idx, true);
         self.snap_drop_owner(idx);
+        self.purge_pending_images(idx);
         self.elements.drop_owner(idx);
         mailbox::drop_owner(self, idx, mailbox::Why::Reloaded);
         self.task_drop_owner(idx);
@@ -1549,15 +1553,17 @@ impl Shared {
         for slot in slots {
             self.arbiter_resolve(&slot);
         }
-        // A disabled module's text reads, snapshots and tasks are dropped, as its one-shot timers
-        // are: a callback that clicked or spoke minutes later, over whatever is in front then, is
-        // worse than none. Enabled again, its polls simply read afresh. After the re-election, so
-        // that what an onDeactivate it ran started goes too — a read answered after a quick
-        // re-enable would otherwise still be delivered, the generation being the same.
+        // A disabled module's text reads, snapshots, image searches and tasks are dropped, as its
+        // one-shot timers are: a callback that clicked or spoke minutes later, over whatever is in
+        // front then, is worse than none. Enabled again, its polls simply read afresh — a poll that
+        // keeps one request out by its key asks again, as the dropped one is no longer pending. After
+        // the re-election, so that what an onDeactivate it ran started goes too — a read answered
+        // after a quick re-enable would otherwise still be delivered, the generation being the same.
         let mut dropped = Vec::new();
         if !enabled {
             self.ocr_drop_owner(idx, false);
             self.snap_drop_owner(idx);
+            self.purge_pending_images(idx);
             self.elements.drop_owner(idx);
             // What waits in its mailbox, but a setting's `onChange`, which it still hears; and its
             // handler, which never goes on — not even after a quick enable.
@@ -1571,11 +1577,10 @@ impl Shared {
             // And a mouse button it holds down: nothing of it will let go of it now.
             self.release_held_buttons(idx, "it was disabled");
         }
-        // Searches answered while it was off are asked again, so their callbacks still come.
+        // A trigger that asked to hear about the window already in front hears about it again: to
+        // a module that was off, whatever is in front now is new. Its searches' answers that came
+        // while it was off were dropped, as a read's are; a poll asks again (`host.screen.pending`).
         if enabled {
-            self.resume_held_images(idx);
-            // And a trigger that asked to hear about the window already in front hears about
-            // it again: to a module that was off, whatever is in front now is new.
             self.request_initial(idx, true);
         }
         logging::line(
@@ -5078,7 +5083,10 @@ impl Manager {
         // Capture and comparison fn pointers taken before `backend` is moved into Shared — they
         // are `Copy` and `Send`, so the worker can capture without the non-`Send` Rc backend.
         image_search::build_matching_pool();
-        image_search::spawn_image_worker(backend.capture_fn(), backend.compare_fn(), image_task_rx, image_result_tx);
+        // `host.inputEpoch()` as the event loop turns it over, which the worker stamps its pictures
+        // with (`ImageState::note_input_epoch`).
+        let image_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        image_search::spawn_image_worker(backend.capture_fn(), backend.compare_fn(), image_epoch.clone(), image_task_rx, image_result_tx);
         let shared = Rc::new(Shared {
             backend,
             speech,
@@ -5115,7 +5123,7 @@ impl Manager {
             captured_line: RefCell::new((None, String::new())),
             system_since: RefCell::new(system_events::Since::default()),
             display_env_said: RefCell::new(display_env),
-            images: image_search::ImageState::new(image_tasks, image_results),
+            images: image_search::ImageState::new(image_tasks, image_results, image_epoch),
             snap_bytes: Rc::new(Cell::new(0)),
             snap_state: snapshot::SnapState::default(),
             ocr,
@@ -6977,7 +6985,7 @@ impl mailbox::MailHost for Shared {
                 None => Opened::Gone,
             },
             Event::Read(r) => ocr::lua::open_read(self, *r),
-            Event::Image { p, outcome, ended } => self.open_image(*p, outcome, ended),
+            Event::Image { p, outcome, seen } => self.open_image(*p, outcome, seen),
             Event::Snapshot { p, answer } => self.open_snapshot(*p, answer),
             Event::Setting { setting_of, reg, key, new, old } => self.open_setting(setting_of, reg, &key, &new, old.as_ref()),
             Event::Page { page, build, call } => webview_lua::open_event(&self.pages, idx, lua, page, build, call),
@@ -6994,11 +7002,11 @@ impl mailbox::MailHost for Shared {
         }
     }
 
-    fn discard(&self, _idx: usize, ev: Event, why: mailbox::Why) {
+    fn discard(&self, _idx: usize, ev: Event, _why: mailbox::Why) {
         match ev {
             Event::After { token } => self.timers.drop_queued(token),
             Event::Read(r) => ocr::lua::discard_read(self, *r),
-            Event::Image { p, ended, .. } => self.discard_image(*p, ended, why == mailbox::Why::Disabled),
+            Event::Image { p, .. } => self.discard_image(*p),
             Event::Snapshot { p, .. } => self.discard_snapshot(*p),
             Event::Element { out, .. } => self.elements.settle(out),
             _ => {}
@@ -8004,16 +8012,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // sixty of them is a second. The rules are in snapshot.rs; registered HERE, by name, for
     // check-docs.ps1 and tools/api-index.py, which read this file.
     screen.set("pixel", snapshot::pixel(lua, shared, idx)?)?;
-    // host.screen.snapshot(opts) — one picture taken once and read by every call given
-    // `{ snapshot = s }`. It waits in a handler for the `screen-capture` thread's picture, and where
-    // it cannot wait takes its picture on the event loop, said in the log.
+    // host.screen.snapshot(opts, cb?) — one picture taken once and read by every call given
+    // `{ snapshot = s }`. Without a callback it waits in a handler for the `screen-capture` thread's
+    // picture, and where it cannot wait takes its picture on the event loop, said in the log; with
+    // one it never waits, and the picture is taken on that thread at once, at a set time, or when
+    // the region changes.
     screen.set("snapshot", snapshot::snapshot(lua, shared, idx)?)?;
     screen.set("pixels", snapshot::pixels(lua, shared, idx)?)?;
-    // host.screen.snapshotAsync(opts, cb) — the picture taken on the `screen-capture` thread that
-    // host.ocr.recognize photographs on: at once, at a set time, or when the region changes.
-    screen.set("snapshotAsync", snapshot::snapshot_async(lua, shared, idx)?)?;
-    // host.screen.pending(key) — whether this module's `snapshotAsync` or `profile` with a callback
-    // with that key is still out (snapshot.rs).
+    // host.screen.pending(key) — whether a call of this module given a callback and that key is
+    // still out (snapshot.rs).
     screen.set("pending", snapshot::pending(lua, shared, idx)?)?;
     let sh = shared.clone();
     screen.set(
@@ -8041,15 +8048,14 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // that it can wait (snapshot.rs, `install_crop`).
     snapshot::install_crop(lua, idx, shared.clone())?;
     // The image-search bindings and template handles live in image_search.rs, with the rules
-    // that belong to them: who an async answer is delivered to, what a module may hold in
-    // handles, and what a panic on the worker turns into. `imageSearch`, `imageSearchMulti` and
-    // `imageSearchAll` wait in a handler while the image worker captures and matches, and where
-    // they cannot wait do both on the event loop, said in the log. Registered HERE, by name,
-    // because this file is what check-docs.ps1 and tools/api-index.py read to learn what exists.
+    // that belong to them: who a callback's answer is delivered to, what a module may hold in
+    // handles, and what a panic on the worker turns into. `imageSearch` and `imageSearchAll` wait
+    // in a handler while the image worker captures and matches, and where they cannot wait do both
+    // on the event loop, said in the log; `imageSearch` given a callback never waits. Registered
+    // HERE, by name, because this file is what check-docs.ps1 and tools/api-index.py read to learn
+    // what exists.
     screen.set("template", image_search::template(lua, shared, idx)?)?;
     screen.set("imageSearch", image_search::image_search(lua, shared, idx)?)?;
-    screen.set("imageSearchMulti", image_search::image_search_multi(lua, shared, idx)?)?;
-    screen.set("imageSearchAsync", image_search::image_search_async(lua, shared, idx)?)?;
     screen.set("imageSearchEach", image_search::image_search_each(lua, shared, idx)?)?;
     // host.screen.saveMarked(path, opts) — like save, but draws a crosshair (and an index
     // tick) at each point in `opts.marks` = { {x, y}, … } in SCREEN coordinates: the calibration
@@ -8059,7 +8065,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     screen.set("saveMarked", save::save_marked(lua, shared, idx)?)?;
     // In image_search.rs too; see the note above imageSearch.
     screen.set("imageSearchAll", image_search::image_search_all(lua, shared, idx)?)?;
-    // host.screen.predicate / cells / matchCells / matchCellsAsync — a region reduced to a
+    // host.screen.predicate / cells / matchCells — a region reduced to a
     // grid of cells, each the share of its pixels that pass a colour test, and the ranking of
     // that grid against stored ones. Built to read the signatures an outside game-menu reader
     // records, bit for bit: the rules are in cells.rs, the window-relative region in region.rs,
@@ -8085,36 +8091,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 .map_err(|e| predicate_error(F, "the predicate", &src, &e))
         })?,
     )?;
-    // cells(opts) -> { cells, x, y, w, h } | nil, reason, and matchCells(opts, states) -> match |
-    // nil, reason: the region read once and reduced to cells, and for matchCells ranked against
-    // the states in Rust. In a handler both wait while the image worker captures, reduces and
-    // ranks (image_search.rs, `start_cells`), and where they cannot wait they do it on the event
-    // loop, said in the log (`cells_on_loop`). Every argument is checked before anything is read,
-    // so a bad state raises on the first call, not on the first call whose region resolves.
+    // cells(opts) -> { cells, x, y, w, h } | nil, reason, and matchCells(opts, states, cb?) ->
+    // match | nil, reason: the region read once and reduced to cells, and for matchCells ranked
+    // against the states in Rust. In a handler both wait while the image worker captures, reduces
+    // and ranks (image_search.rs, `cells_plan`), and where they cannot wait they do it on the event
+    // loop, said in the log (`cells_on_loop`); matchCells given a callback never waits. Every
+    // argument is checked before anything is read, so a bad state raises on the first call, not on
+    // the first call whose region resolves.
     screen.set("cells", cells_fn(lua, shared, idx)?)?;
     screen.set("matchCells", match_cells_fn(lua, shared, idx)?)?;
-    // matchCellsAsync(opts, states, cb) — capture, reduction and ranking on the image worker,
-    // `cb(match, nil)` or `cb(nil, reason)` on a later tick, with the ownership rules of
-    // imageSearchAsync (image_search.rs).
-    let sh = shared.clone();
-    screen.set(
-        "matchCellsAsync",
-        lua.create_function(move |lua, (opts, states, cb): (mlua::Value, mlua::Value, mlua::Value)| {
-            host_call!("host.screen.matchCellsAsync");
-            const F: &str = "host.screen.matchCellsAsync";
-            let call = read_cells_opts(lua, F, opts)?;
-            let st = read_states(F, states, call.spec.cells())?;
-            let mlua::Value::Function(cb) = cb else {
-                return Err(mlua::Error::external(format!(
-                    "{F}: the third argument must be the callback, got {}",
-                    describe_value(&cb)
-                )));
-            };
-            let matcher = cells::Matcher { item_of: cells::items_of(&st.names), spec: call.spec, states: st.bytes };
-            let rect = call.rect.map(|r| (r.x, r.y, r.w, r.h));
-            image_search::enqueue_cells(&sh, lua, idx, cb, rect, matcher, st.names, call.snapshot)
-        })?,
-    )?;
     // host.screen.save(path, opts?) — capture a screen region (opts.region, else the full screen)
     // and write it to `path` (relative to the calling module's root; an absolute path is used as-is)
     // as a PNG. Returns true on success. A calibration affordance: re-capture an image control's
@@ -9497,7 +9482,7 @@ fn read_scales(opts: Option<&Table>) -> Vec<f32> {
     v
 }
 
-// ---- host.screen.cells, matchCells and matchCellsAsync: their arguments and answers --------
+// ---- host.screen.cells and matchCells: their arguments and answers ----------------------------
 //
 // STRICT, where the older screen calls read their options loosely, and on purpose: a cell
 // signature is only worth anything if it is read from exactly the pixels it was recorded from,
@@ -9551,7 +9536,7 @@ impl<'de> serde::Deserialize<'de> for WholeIn {
     }
 }
 
-/// `opts` of the three cells calls, minus the region and the snapshot (read by hand).
+/// `opts` of the cells calls, minus the region, the snapshot and the key (read by hand).
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CellsOptsIn {
@@ -9565,6 +9550,9 @@ struct CellsOptsIn {
     /// `read_cells_opts` puts `true` here for the snapshot `snapshot::from_value` reads.
     #[serde(rename = "snapshot", default)]
     _snapshot: Option<serde::de::IgnoredAny>,
+    /// Only its name likewise: the callback form's `key`, which `read_cells_opts` reads.
+    #[serde(rename = "key", default)]
+    _key: Option<serde::de::IgnoredAny>,
 }
 
 /// Hex text, from a Luau string whatever its bytes; `cells::from_hex` judges it.
@@ -9658,7 +9646,7 @@ fn predicate_error(fname: &str, what: &str, src: &str, e: &cells::PredError) -> 
     mlua::Error::external(format!("{fname}: {what}: {} (column {} of \"{shown}\")", e.message, e.column))
 }
 
-/// What the three cells calls read from `opts`.
+/// What the cells calls read from `opts`.
 struct CellsCall {
     /// Where to read — or why there is nothing to read this time, which the call answers as
     /// `nil, reason` (an empty client area; on a snapshot, a region not wholly inside it).
@@ -9666,10 +9654,14 @@ struct CellsCall {
     spec: cells::CellSpec,
     /// The snapshot to read instead of the screen, when `opts.snapshot` gave one.
     snapshot: Option<Arc<backend::frame::Frame>>,
+    /// `opts.key`, which only the callback form takes.
+    key: Option<String>,
 }
 
-/// Reads `opts = { region, cols, rows, predicate, snapshot? }`, raising for every mistake in it.
-fn read_cells_opts(lua: &Lua, fname: &str, opts: mlua::Value) -> mlua::Result<CellsCall> {
+/// Reads `opts = { region, cols, rows, predicate, snapshot?, key? }`, raising for every mistake in
+/// it: `key` is the callback form's (`cb`), and raises without one, naming `which` argument the
+/// callback goes in.
+fn read_cells_opts(lua: &Lua, fname: &str, opts: mlua::Value, cb: bool, which: &str) -> mlua::Result<CellsCall> {
     let err = |m: String| mlua::Error::external(format!("{fname}: {m}"));
     let mlua::Value::Table(t) = opts else {
         return Err(err(format!(
@@ -9677,9 +9669,11 @@ fn read_cells_opts(lua: &Lua, fname: &str, opts: mlua::Value) -> mlua::Result<Ce
             describe_value(&opts)
         )));
     };
+    let key = snapshot::opts_key(Some(&t), fname, cb, which)?;
     // serde reads everything but the region, which `region_lua::read` reads below. It stands
     // in as `true`, so a missing region is reported like any other missing option. The snapshot
-    // is read by `snapshot::from_value`; it stands in as `true` too, so serde knows its name.
+    // is read by `snapshot::from_value`, and the key above; they stand in as `true` too, so serde
+    // knows their names.
     let copy = lua.create_table()?;
     let mut region_value = mlua::Value::Nil;
     let mut snapshot_value = mlua::Value::Nil;
@@ -9690,6 +9684,8 @@ fn read_cells_opts(lua: &Lua, fname: &str, opts: mlua::Value) -> mlua::Result<Ce
             copy.raw_set(k, true)?;
         } else if matches!(&k, mlua::Value::String(s) if s.as_bytes().as_ref() == b"snapshot") {
             snapshot_value = v;
+            copy.raw_set(k, true)?;
+        } else if matches!(&k, mlua::Value::String(s) if s.as_bytes().as_ref() == b"key") {
             copy.raw_set(k, true)?;
         } else {
             copy.raw_set(k, v)?;
@@ -9730,7 +9726,7 @@ fn read_cells_opts(lua: &Lua, fname: &str, opts: mlua::Value) -> mlua::Result<Ce
             rect = Err(why);
         }
     }
-    Ok(CellsCall { rect, spec, snapshot })
+    Ok(CellsCall { rect, spec, snapshot, key })
 }
 
 /// `host.screen.cells` and `host.screen.matchCells`, as their messages and log lines name them.
@@ -9738,14 +9734,17 @@ const CELLS: &str = "host.screen.cells";
 const MATCH_CELLS: &str = "host.screen.matchCells";
 
 /// What a call of `cells` (`states` `None`) or `matchCells` asks, every argument read and checked
-/// — `opts`, then the states — before anything is read: the region, the grid and the states.
+/// — `opts`, then the states — before anything is read: the region, the grid and the states, and
+/// for the callback form (`cb`) the key.
 pub(crate) fn cells_ask(
     lua: &Lua,
     fname: &str,
     opts: mlua::Value,
     states: Option<mlua::Value>,
+    cb: bool,
 ) -> mlua::Result<image_search::CellsAsk> {
-    let call = read_cells_opts(lua, fname, opts)?;
+    let which = if states.is_some() { "the third argument" } else { "the second argument" };
+    let call = read_cells_opts(lua, fname, opts, cb, which)?;
     let (st, rank) = match states {
         Some(v) => (read_states(fname, v, call.spec.cells())?, true),
         None => (StatesIn { bytes: Vec::new(), names: Vec::new() }, false),
@@ -9756,6 +9755,7 @@ pub(crate) fn cells_ask(
         names: st.names,
         rank,
         snapshot: call.snapshot,
+        key: call.key,
     })
 }
 
@@ -9812,8 +9812,7 @@ pub(crate) fn cells_table(lua: &Lua, bytes: &[u8], r: region::ScreenRect) -> mlu
 }
 
 /// `cells_table` plus the ranking: `index` (1-based, the winning state), `name`, `similarity`,
-/// `distance`, `runnerUp` and `similarities` (one per state). Shared by `matchCells` and the
-/// image worker's delivery of `matchCellsAsync`.
+/// `distance`, `runnerUp` and `similarities` (one per state). Shared by every form of `matchCells`.
 pub(crate) fn cells_match_table(
     lua: &Lua,
     bytes: &[u8],
@@ -9848,39 +9847,61 @@ pub(crate) fn with_reason(lua: &Lua, first: mlua::Value, why: String) -> mlua::R
     Ok(mlua::MultiValue::from_vec(vec![first, mlua::Value::String(lua.create_string(why)?)]))
 }
 
-/// `host.screen.cells(opts) -> ({ cells, x, y, w, h }?, string?)`: in a handler it waits while the
-/// image worker reads and reduces the region (`image_search::start_cells`); where it cannot wait it
-/// does that on the event loop, said in the log ([`cells_on_loop`]).
+/// `host.screen.cells(opts, cb?) -> ({ cells, x, y, w, h }?, string?)`: in a handler it waits while
+/// the image worker reads and reduces the region (`image_search::cells_plan`); where it cannot wait
+/// it does that on the event loop, said in the log ([`cells_on_loop`]). With a callback it never
+/// waits.
 fn cells_fn(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, opts): (Table, mlua::Value)| {
         host_call!("host.screen.cells");
-        image_search::start_cells(&*sh, lua, idx, CELLS, nonce, || cells_ask(lua, CELLS, opts, None))
+        let parse = || image_search::cells_plan(lua, cells_ask(lua, CELLS, opts, None, false)?);
+        image_search::start_plan(&*sh, lua, idx, CELLS, image_search::cells_stop(false), nonce, parse)
     })?;
     let sh = shared.clone();
     let blocking = lua.create_function(move |lua, (why, opts): (String, mlua::Value)| {
         host_call!("host.screen.cells");
-        let ask = cells_ask(lua, CELLS, opts, None)?;
+        let ask = cells_ask(lua, CELLS, opts, None, false)?;
         cells_on_loop(&sh, lua, idx, CELLS, &why, ask)
     })?;
-    task::points(lua, idx, shared.clone())?.call((CELLS, start, blocking))
+    let sh = shared.clone();
+    let submit = lua.create_function(move |lua, (opts, cb): (mlua::Value, mlua::Value)| {
+        host_call!("host.screen.cells");
+        let cb = image_search::callback_arg(CELLS, cb, "second argument")?;
+        let mut ask = cells_ask(lua, CELLS, opts, None, true)?;
+        let key = ask.key.take();
+        let plan = image_search::cells_plan(lua, ask)?;
+        image_search::submit_plan(&*sh, lua, idx, cb, key, image_search::cells_stop(false), image_search::JobKind::Cells, plan)
+    })?;
+    task::points(lua, idx, shared.clone())?.call((CELLS, start, blocking, submit, 2))
 }
 
-/// `host.screen.matchCells(opts, states) -> (CellsMatch?, string?)`: `cells`, and the grid ranked
-/// against the states — on the image worker in a handler, on the event loop where it cannot wait.
+/// `host.screen.matchCells(opts, states, cb?) -> (CellsMatch?, string?)`: `cells`, and the grid
+/// ranked against the states — on the image worker in a handler, on the event loop where it cannot
+/// wait. With a callback it never waits: the same task, its answer handed to `cb` on a later tick.
 fn match_cells_fn(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, opts, states): (Table, mlua::Value, mlua::Value)| {
         host_call!("host.screen.matchCells");
-        image_search::start_cells(&*sh, lua, idx, MATCH_CELLS, nonce, || cells_ask(lua, MATCH_CELLS, opts, Some(states)))
+        let parse = || image_search::cells_plan(lua, cells_ask(lua, MATCH_CELLS, opts, Some(states), false)?);
+        image_search::start_plan(&*sh, lua, idx, MATCH_CELLS, image_search::cells_stop(true), nonce, parse)
     })?;
     let sh = shared.clone();
     let blocking = lua.create_function(move |lua, (why, opts, states): (String, mlua::Value, mlua::Value)| {
         host_call!("host.screen.matchCells");
-        let ask = cells_ask(lua, MATCH_CELLS, opts, Some(states))?;
+        let ask = cells_ask(lua, MATCH_CELLS, opts, Some(states), false)?;
         cells_on_loop(&sh, lua, idx, MATCH_CELLS, &why, ask)
     })?;
-    task::points(lua, idx, shared.clone())?.call((MATCH_CELLS, start, blocking))
+    let sh = shared.clone();
+    let submit = lua.create_function(move |lua, (opts, states, cb): (mlua::Value, mlua::Value, mlua::Value)| {
+        host_call!("host.screen.matchCells");
+        let cb = image_search::callback_arg(MATCH_CELLS, cb, "third argument")?;
+        let mut ask = cells_ask(lua, MATCH_CELLS, opts, Some(states), true)?;
+        let key = ask.key.take();
+        let plan = image_search::cells_plan(lua, ask)?;
+        image_search::submit_plan(&*sh, lua, idx, cb, key, image_search::cells_stop(true), image_search::JobKind::Cells, plan)
+    })?;
+    task::points(lua, idx, shared.clone())?.call((MATCH_CELLS, start, blocking, submit, 3))
 }
 
 /// A cells call `fname` where it cannot wait (`why`, the shim's word for the place): answered at
@@ -9923,7 +9944,7 @@ mod cells_binding_tests {
 
     fn opts(lua: &Lua, src: &str) -> mlua::Result<CellsCall> {
         let v: mlua::Value = lua.load(src).eval()?;
-        read_cells_opts(lua, "host.screen.cells", v)
+        read_cells_opts(lua, "host.screen.cells", v, false, "the second argument")
     }
 
     fn opts_err(lua: &Lua, src: &str) -> String {
@@ -10691,7 +10712,7 @@ mod ocr_wiring_tests {
         let lane = fire.find("let _prio = enter_priority(p.prio);").expect("no priority scope");
         let deliver = fire.find("mailbox::deliver(h, idx, &lua, Event::Snapshot").expect("not through the mailbox");
         assert!(lane < deliver, "the mailbox takes the priority the answer arrives with");
-        assert!(body(SNAP, "pub(crate) fn snap_async(").contains("Asker::Callback(cb), current_priority(), now)"));
+        assert!(body(SNAP, "pub(crate) fn snap_callback<").contains("Asker::Callback(cb), current_priority(), now)"));
         assert!(body(SNAP, "pub(crate) fn submit_snap<").contains("ticket: SnapTicket { id, owner, prio },"));
         assert!(body(SNAP, "pub(crate) fn fire_snapshot_results(").contains("fire_snaps(self);"));
         // The mailbox runs every event in the priority it arrived with.
@@ -10750,20 +10771,20 @@ mod ocr_wiring_tests {
     fn a_profile_without_a_callback_refuses_key_and_at_before_it_answers() {
         let profile = body(SNAP, "pub(crate) fn profile(");
         let blocking = &profile[profile.find("let blocking = lua.create_function(").expect("where it cannot wait")..];
-        let refused = blocking.find("callback_only(opts.as_ref(), FPR, &[\"key\", \"at\"])?;").expect("key and at refused");
+        let refused = blocking.find("callback_only(opts.as_ref(), FPR, &[\"key\", \"at\"], \"the second argument\")?;").expect("key and at refused");
         assert!(blocking.find("profile_args(").unwrap() < refused, "before the other options are read");
         assert!(refused < blocking.find("profile_now(").unwrap(), "after a reason was answered or a capture made");
         let start = body(SNAP, "pub(crate) fn start_profile<");
-        let refused = start.find("callback_only(o, FPR, &[\"key\", \"at\"])?;").expect("key and at refused in a handler");
+        let refused = start.find("callback_only(o, FPR, &[\"key\", \"at\"], \"the second argument\")?;").expect("key and at refused in a handler");
         assert!(refused < start.find("submit_profile(").unwrap(), "after the request was filed");
         assert!(!body(SNAP, "pub(crate) fn submit_profile<").contains("callback_only("), "the callback form refuses them");
     }
 
-    /// What `snapshotAsync` does with its charge: reserved by the region's form
+    /// What `snapshot` with a callback does with its charge: reserved by the region's form
     /// (`snapshot::reserve_for`, tested there), and given back when the application's limit
     /// refuses the request.
     #[test]
-    fn snap_async_reserves_by_the_form_and_gives_a_refused_charge_back() {
+    fn a_snapshot_callback_reserves_by_the_form_and_gives_a_refused_charge_back() {
         let f = body(SNAP, "pub(crate) fn submit_snap<");
         // The budget by the form the region was given in: a window region's overrun is answered.
         assert!(f.contains("reserve_by_form(lua, h.snap_bytes(), reservation_for(*r, change), fname, ask.window, true)?"));
@@ -10772,8 +10793,10 @@ mod ocr_wiring_tests {
         let refused = &f[f.find("if let Some(why) = refused {").expect("the refusal")..];
         let queued = refused.find("st.ready.borrow_mut().push((p, why));").expect("queued");
         assert!(refused[..queued].contains("p.res = None;"), "the charge goes back first");
-        // The epoch a picture is handed to the module with is the one stamped when it was taken.
-        assert!(body(LIB, "fn bump_input_epoch(").contains("self.ocr.note_input_epoch(e);"));
+        // The epoch a picture is handed to the module with is the one stamped when it was taken,
+        // by the capture thread and by the image worker alike.
+        let bump = body(LIB, "fn bump_input_epoch(");
+        assert!(bump.contains("self.ocr.note_input_epoch(e);") && bump.contains("self.images.note_input_epoch(e);"));
     }
 
     /// `host.ocr` is `recognize`, `pending`, `languages` and `resolveLanguage`. `recognize` is the
@@ -10859,19 +10882,17 @@ mod ocr_wiring_tests {
         for f in ["fn cells_fn(", "fn match_cells_fn("] {
             assert!(body(LIB, f).contains("cells_ask(lua, "), "`{f}`");
         }
-        assert!(body(LIB, "pub(crate) fn cells_ask(").contains("read_cells_opts(lua, fname, opts)?"));
-        assert!(text("matchCellsAsync").contains("read_cells_opts("), "host.screen.matchCellsAsync");
+        assert!(body(LIB, "pub(crate) fn cells_ask(").contains("read_cells_opts(lua, fname, opts, cb, which)?"));
+        assert!(body(LIB, "fn match_cells_fn(").contains("cells_ask(lua, MATCH_CELLS, opts, Some(states), true)?"), "matchCells' callback form");
         assert!(body(LIB, "fn read_cells_opts(").contains("region_lua::read(&region_value"));
         // `recognize`, both its forms: the strict reader, under its name.
         assert!(body(OCR_LUA, "fn region(").contains("region_lua::read(v, what).map_err(bad)"));
         assert!(body(OCR_LUA, "fn bad(").contains("format!(\"host.ocr.recognize: {msg}\")"));
         assert!(body(LIB, "fn region_arg(").contains("region_arg_on("));
         assert!(body(LIB, "fn region_arg_on(").contains("region_lua::read_loose("));
-        for f in ["fn image_search_async(", "fn image_search_each("] {
-            assert!(body(IMAGES, f).contains("search_region(sh.backend.screen_size(), opts.as_ref()"), "`{f}` reads opts.region another way");
-        }
-        for (f, kind) in [("fn image_search(", "One"), ("fn image_search_multi(", "Multi"), ("fn image_search_all(", "All")] {
-            assert!(body(IMAGES, f).contains(&format!("search_ask(Search::{kind}, tv, opts, sh.backend.screen_size(), &locate)")), "`{f}`");
+        assert!(body(IMAGES, "fn image_search_each(").contains("search_region(sh.backend.screen_size(), opts.as_ref()"), "imageSearchEach reads opts.region another way");
+        for (f, kind) in [("fn image_search(", "One"), ("fn image_search_all(", "All")] {
+            assert!(body(IMAGES, f).contains(&format!("search_ask(Search::{kind}, tv, opts, sh.backend.screen_size(), &locate, ")), "`{f}`");
         }
         assert!(body(IMAGES, "pub(crate) fn search_ask(").contains("None => search_region(screen, o, fname)?,"), "the searches that wait");
         assert!(body(IMAGES, "fn image_search_each(").contains("region_arg(&*sh.backend, &r, F"), "a `within` read another way");
@@ -10884,8 +10905,6 @@ mod ocr_wiring_tests {
         assert!(SNAP.contains("const FPR: &str = \"host.screen.profile\";"), "host.screen.profile reads its region under another name");
         for (f, name) in [
             ("fn image_search(", "imageSearch"),
-            ("fn image_search_multi(", "imageSearchMulti"),
-            ("fn image_search_async(", "imageSearchAsync"),
             ("fn image_search_each(", "imageSearchEach"),
             ("fn image_search_all(", "imageSearchAll"),
         ] {
@@ -10904,17 +10923,17 @@ mod ocr_wiring_tests {
         assert!(body(SNAP, "fn opts_region_in(").contains("loose_region("));
         assert!(body(SAVE, "fn save_ask(").contains("snapshot::opts_region_in(o, fname, f)?"), "save and saveMarked read a snapshot's region another way");
         assert!(body(SNAP, "pub(crate) fn profile_args(").contains("opts_region_in(opts, FPR, f)?"), "host.screen.profile");
-        for f in ["fn image_search_async(", "fn image_search_each("] {
-            assert!(body(IMAGES, f).contains("snapshot_region(opts.as_ref()"), "`{f}` reads a snapshot's region another way");
-        }
+        assert!(body(IMAGES, "fn image_search_each(").contains("snapshot_region(opts.as_ref()"), "imageSearchEach reads a snapshot's region another way");
         assert!(body(IMAGES, "pub(crate) fn search_ask(").contains("Some(f) => snapshot_region(o, fname, f)?,"), "the searches that wait");
         assert!(body(IMAGES, "fn snapshot_region(").contains("snapshot::opts_region_in("));
         assert!(body(IMAGES, "fn image_search_each(").contains("snapshot::loose_region(&r, F, &format!(\"entries[{}].within\""));
         assert!(body(IMAGES, "fn parse_spec(").contains("region_lua::read_loose_within(&v, \"capture\""), "template{{ capture, snapshot }}");
         assert!(body(LIB, "fn read_cells_opts(").contains("snapshot::inside(frame, *r)"), "the cells calls cut a snapshot's region");
-        // snapshotAsync: its region and each `watch` region strictly, through the one reader.
-        assert!(text("snapshotAsync").contains("snapshot::snapshot_async(lua, shared, idx)"), "host.screen.snapshotAsync");
-        assert!(body(SNAP, "pub(crate) fn parse_async(").contains("region_lua::read(&region_v, \"opts.region\")"));
+        // `snapshot` with a callback: its region and each `watch` region strictly, through the one
+        // reader.
+        assert!(body(SNAP, "pub(crate) fn snapshot(").contains("sh.snap_callback(lua, idx, opts, cb)"), "host.screen.snapshot's callback form");
+        assert!(body(SNAP, "pub(crate) fn snap_callback<").contains("parse_with_callback(&opts, now_ms)?"));
+        assert!(body(SNAP, "pub(crate) fn parse_with_callback(").contains("region_lua::read(&region_v, \"opts.region\")"));
         assert!(body(SNAP, "fn read_watch(").contains("region_lua::read(&item, &format!(\"{W}[{i}]\"))"));
     }
 
@@ -10924,13 +10943,7 @@ mod ocr_wiring_tests {
     /// the worker's own work, which the event loop runs only where a call cannot wait.
     #[test]
     fn no_binding_opens_a_template_where_it_reads_its_arguments() {
-        for f in [
-            "pub(crate) fn image_search(",
-            "pub(crate) fn image_search_multi(",
-            "pub(crate) fn image_search_all(",
-            "pub(crate) fn image_search_async(",
-            "pub(crate) fn image_search_each(",
-        ] {
+        for f in ["pub(crate) fn image_search(", "pub(crate) fn image_search_all(", "pub(crate) fn image_search_each("] {
             let b = body(IMAGES, f);
             assert!(b.contains("let locate = |p: &str| locate_in(&sh.root(idx), p);"), "`{f}` reads its paths another way");
             assert!(!b.contains("template_store::open(") && !b.contains(".make()"), "`{f}` opens a template where it reads it");
@@ -10956,11 +10969,11 @@ mod ocr_wiring_tests {
         let screen = bindings(api, "screen");
         let text = |name: &str| screen.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.screen.{name}")).1;
         let pixel = body(SNAP, "pub(crate) fn pixel_args(");
-        let opts = pixel.find("let snap = strict_opts(opts, F)?;").expect("pixel reads its options strictly");
-        let answered = pixel.find("return Ok(Reading::Now(with_reason(").expect("pixel answers nil and why");
+        let opts = pixel.find("let (snap, key) = strict_opts(opts, F, cb, PIXEL_CALLBACK)?;").expect("pixel reads its options strictly");
+        let answered = pixel.find("return Ok((Reading::Now(with_reason(").expect("pixel answers nil and why");
         assert!(opts < answered, "pixel reads its options after it may already have answered");
         let branch = pixel.find("if let Some(frame) = snap {").expect("pixel's snapshot branch");
-        let live = pixel.find("Ok(Reading::Live(vec![(x, y)]))").expect("pixel's live read");
+        let live = pixel.find("Ok((Reading::Live(vec![(x, y)]), key))").expect("pixel's live read");
         assert!(branch < live && !pixel.contains("observations()"), "a snapshot's pixel is counted as a screen read");
         assert!(body(SNAP, "pub(crate) fn profile(").contains("if c.live {"), "a snapshot's profile is counted as a screen read");
         assert!(body(LIB, "fn cells_on_loop(").contains("if live {"), "a snapshot's cells are counted as a screen read");
@@ -10982,7 +10995,6 @@ mod ocr_wiring_tests {
         // hands the worker's own matching makes no comparison either.
         for (file, f) in [
             (IMAGES, "fn image_search("),
-            (IMAGES, "fn image_search_multi("),
             (IMAGES, "fn image_search_all("),
             (SAVE, "pub(crate) fn save("),
             (SAVE, "pub(crate) fn save_marked("),
@@ -10996,7 +11008,7 @@ mod ocr_wiring_tests {
         assert!(pixel.contains("_ => c,"), "pixel(x, y) reads its options from somewhere else");
         let read = body(SNAP, "pub(crate) fn pixels_args(");
         let snap = read.find("if let Some(frame) = snap {").expect("pixels' snapshot branch");
-        let live = read.find("Ok(Reading::Live(at))").expect("pixels' live read");
+        let live = read.find("Ok((Reading::Live(at), key))").expect("pixels' live read");
         assert!(snap < live && !read.contains("observations()"));
         // Where they cannot wait: the module's source, no comparison, one count per call.
         let on_loop = body(SNAP, "fn read_on_loop(");
@@ -11096,7 +11108,7 @@ mod ocr_wiring_tests {
         let snap = ask.find("snapshot::from_opts(").expect("a snapshot");
         assert!(check < snap, "save and saveMarked check their path only after reading a snapshot");
         assert!(!ask.contains("capture(") && !ask.contains("crop_image("), "save and saveMarked read a picture with their arguments");
-        for f in ["fn start_save<", "fn save_on_loop<"] {
+        for f in ["fn save_plan(", "fn save_on_loop<"] {
             let b = body(SAVE, f);
             assert!(b.find("let region = match &ask.region {").unwrap() < b.find("save_work(").unwrap(), "`{f}`");
         }
@@ -11153,14 +11165,15 @@ mod ocr_wiring_tests {
             assert!(t.contains("one_value(") && t.contains("with_reason(lua, "), "`{f}`");
             assert!(!t.contains("nil_because(") && !t.contains("Value::Nil))"), "`{f}` answers two values where it answered one");
         }
-        // The three searches build their answers in one function, wherever they were made.
+        // The two searches build their answers in one function, wherever they were made — and a
+        // callback is handed the same values, the reason second, `info` after them.
         for f in ["fn search_values(", "fn build_handle("] {
             let t = body(IMAGES, f);
             assert!(t.contains("one_value(") && t.contains("with_reason(lua, "), "`{f}`");
             assert!(!t.contains("nil_because("), "`{f}` answers two values where it answered one");
         }
-        let searched = body(IMAGES, "fn search_values(");
-        assert!(searched.contains("vec![Value::Nil, Value::Nil, reason(lua, why)]"), "imageSearchMulti's reason is the third value");
+        let called = body(SNAP, "pub(crate) fn callback_values(");
+        assert!(called.contains("v.resize(2, Value::Nil);") && called.contains("v.push(Value::Table(info));"), "a callback's info is not third");
     }
 
     /// A module's reads are dropped, never delivered, when it is disabled, reloaded or rolled
@@ -11180,7 +11193,12 @@ mod ocr_wiring_tests {
     fn a_modules_tasks_go_with_it_and_after_its_deactivation() {
         let enable = body(LIB, "fn after_toggle(");
         let resolve = enable.find("self.arbiter_resolve(&slot);").expect("the re-election");
-        for drop in ["self.ocr_drop_owner(idx, false);", "self.snap_drop_owner(idx);", "self.task_drop_owner(idx);"] {
+        for drop in [
+            "self.ocr_drop_owner(idx, false);",
+            "self.snap_drop_owner(idx);",
+            "self.purge_pending_images(idx);",
+            "self.task_drop_owner(idx);",
+        ] {
             assert!(enable.find(drop).is_some_and(|at| at > resolve), "`{drop}` before the re-election");
         }
         let purge = body(LIB, "fn purge_module(");
@@ -11190,6 +11208,7 @@ mod ocr_wiring_tests {
             "self.timers.retain(|i| i != idx);",
             "self.ocr_drop_owner(idx, true);",
             "self.snap_drop_owner(idx);",
+            "self.purge_pending_images(idx);",
             "self.task_drop_owner(idx);",
         ] {
             assert!(second.contains(drop), "`{drop}` is not done again after the onDeactivate");
@@ -11890,7 +11909,7 @@ mod ocr_wiring_tests {
         for name in ["list", "state", "on", "off", "status"] {
             assert!(GAMEPAD.contains(&format!("host_call!(\"host.gamepad.{name}\")")), "host.gamepad.{name}");
         }
-        for name in ["template", "imageSearch", "imageSearchMulti", "imageSearchAsync", "imageSearchEach", "imageSearchAll"] {
+        for name in ["template", "imageSearch", "imageSearchEach", "imageSearchAll"] {
             assert!(IMAGES.contains(&format!("host_call!(\"host.screen.{name}\")")), "host.screen.{name}");
         }
         for name in ["save", "saveMarked"] {
@@ -11901,7 +11920,6 @@ mod ocr_wiring_tests {
             "host.screen.pixel",
             "host.screen.pixels",
             "host.screen.profile",
-            "host.screen.snapshotAsync",
             "snapshot:crop",
             "snapshot:release",
         ] {
@@ -11999,7 +12017,6 @@ mod ocr_wiring_tests {
             "snapshot.rs: install_crop",
             "image_search.rs: template",
             "image_search.rs: image_search",
-            "image_search.rs: image_search_multi",
             "image_search.rs: image_search_all",
             "save.rs: save",
             "save.rs: save_marked",
@@ -12220,16 +12237,21 @@ mod uptime_wiring_tests {
         let line = body(LOGGING, "pub fn line(scope: &str, msg: &str)");
         assert!(line.contains("guard.as_mut().is_some_and(|sink| sink.write(text.as_bytes()))"));
         assert!(line.contains("sink.rotate(&continued);"));
-        // Image searches: the cap at submit, and the worker skipping what was ended.
-        let submit = body(IMAGES, "fn submit(");
-        assert!(submit.contains("oldest_over_cap(&sh.images.pending.borrow(), owner, IMAGE_PER_OWNER)"));
-        assert!(submit.contains("sh.images.ended.borrow_mut().push((p, why));"));
-        assert!(submit.contains("logging::Said::Summary { count, over } =>"), "the summary is written");
+        // Image searches: the cap where a callback's task is filed, and the worker skipping what
+        // was ended.
+        let filed = body(IMAGES, "fn file_callback<");
+        assert!(filed.contains("oldest_over_cap(&im.pending.borrow(), owner, IMAGE_PER_OWNER)"));
+        assert!(filed.contains("if im.end(old, why.clone()) {\n            h.note_image_crowding(owner, &why);"));
+        assert!(body(IMAGES, "fn end(&self, id: u64, why: String) -> bool {").contains("self.ready.borrow_mut().push((p, outcome));"));
+        let crowding = body(OCR_LUA, "fn note_image_crowding(&self, idx: usize, why: &str) {\n        let who");
+        assert!(crowding.contains("self.error_repeats.borrow_mut().note(&key, std::time::Instant::now())"));
+        assert!(crowding.contains("crate::logging::Said::Summary { count, over } =>"), "the summary is written");
         assert!(body(IMAGES, "fn worker_loop(").contains("waiting.retain(|t| !set.remove(&t.id));"));
-        assert!(body(IMAGES, "pub(crate) fn purge_pending_images(").contains("self.images.ended.borrow_mut()"));
+        assert!(body(IMAGES, "pub(crate) fn purge_pending_images(").contains("drop_owner(&self.images, owner);"));
+        assert!(body(IMAGES, "pub(crate) fn drop_owner(im: &ImageState").contains("im.ready.borrow_mut()"));
         // A reload ends its searches and shots at the worker too: they are purged before its
         // handlers' waits are withdrawn, which then end nothing.
-        assert!(body(IMAGES, "pub(crate) fn purge_pending_images(").contains("for p in gone.iter().filter(|p| !p.held) {\n            end_task(p.task.id);"));
+        assert!(body(IMAGES, "pub(crate) fn drop_owner(im: &ImageState").contains("for p in &gone {\n        end_task(p.id);"));
         // OCR keys: forgotten when their last read is answered or dropped.
         assert!(body(OCR_LUA, "pub(crate) fn fire<H: MailHost>(h: &H)").contains("st.settled(p.owner, p.key.as_deref());"));
         assert!(body(OCR_LUA, "pub(crate) fn open_read<H: ReadHost>(").contains("st.settled(p.owner, p.key.as_deref());"));

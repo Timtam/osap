@@ -440,7 +440,7 @@ local function w3Arrived(w)
   w3.clicked = spot ~= nil
   local c = w.client
   local region = { c.x, c.y, c.x + math.clamp(c.w, 1, 400), c.y + math.clamp(c.h, 1, 300) }
-  host.screen.snapshotAsync({ region = region, key = "w3" }, function(snap, why)
+  host.screen.snapshot({ region = region, key = "w3" }, function(snap, why)
     if snap then
       snap:release()
     end
@@ -656,7 +656,7 @@ local function w10Attempt()
       return
     end
     local beforeText = readingText(rBefore)
-    host.screen.snapshotAsync({ region = region, key = "w10" }, function(base)
+    host.screen.snapshot({ region = region, key = "w10" }, function(base)
       if not live() then
         if base then
           base:release()
@@ -678,7 +678,7 @@ local function w10Attempt()
           end
           return
         end
-        host.screen.snapshotAsync({ region = region, key = "w10", change = change }, function(snap, _why, info)
+        host.screen.snapshot({ region = region, key = "w10", change = change }, function(snap, _why, info)
           if base then
             base:release()
           end

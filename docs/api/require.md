@@ -129,16 +129,14 @@ local M = {}
 -- Called once by each game module's entry, in that game's VM, with that game's pack.
 function M.start(pack)
   host.screen.predicate(pack.predicate)       -- a bad pack fails the game's load, here
-  local poll, key, since, last
+  local poll, key, last
 
   local function readMenu(w)
-    if since and host.now() - since < 1000 then return end   -- one read in flight
-    since = host.now()
-    host.screen.matchCellsAsync({
+    if host.screen.pending("menu") then return end   -- one read in flight
+    host.screen.matchCells({
       region = { window = w, fraction = pack.region },
-      cols = pack.cols, rows = pack.rows, predicate = pack.predicate,
+      cols = pack.cols, rows = pack.rows, predicate = pack.predicate, key = "menu",
     }, pack.states, function(m)
-      since = nil
       local name = m and m.similarity >= pack.minScore
         and m.similarity - m.runnerUp >= pack.margin and m.name or nil
       if name and name ~= last then host.speech.output(name) end
