@@ -1,8 +1,9 @@
 id = "com.platform.vps-avenger"
 name = "VPS Avenger"
-version = "0.2.0"
+version = "0.3.0"
 license = "GPL-3.0-or-later"
-dependencies = ["com.platform.overlay >= 0.5.6", "com.platform.daw-hosts"]
+# The runtime's page support (O:addPage, O:inPlugin) came with version 0.6.
+dependencies = ["com.platform.overlay >= 0.6", "com.platform.daw-hosts"]
 # The catalog of Avenger's expansions (modules/vps-avenger-presets), when it is installed:
 # the preset's expansion, category, oscillators and macros, and the neighbour ◀ and ▶ lead to,
 # said marked as the database's (src/presets.luau). Without it the module is what it was.
@@ -17,17 +18,17 @@ optional_dependencies = ["com.platform.vps-avenger-presets"]
 #   window  ownsPoint before a click of its own, recheck once a read has decided, the window's title
 #   ocr     Avenger's header (identity and zoom), the preset's name, the warning box; for the
 #           page, the words of one picture of Avenger (src/read/open.luau)
-#   input   the clicks on ◀ and ▶, the redo list's right click, and an opener clicked again to
-#           close a popup a choice left open
+#   input   the clicks on ◀ and ▶, UNDO and the redo list's right click, an opener clicked again
+#           to close a popup a choice left open, and the warning box's YES the page answers
 #   speech  the new preset name, the refusals of its own clicks, and why the page key opened nothing
 #   log     what was read, and where
 #   screen  the screen's size, before a choice that opens Avenger's warning box; for the page, one
 #           picture of Avenger and its grids, profiles and points (src/read); the calibration
 #           pictures of the header, the warning box and the page's reads, in a calibrating run only
 #   path    where those pictures are written
-#   gui     the page: the avenger_control project's panel, beside Avenger (src/page.luau, ui/)
-#   hotkey  the page's key
+#   gui     the page: the avenger_control project's panel, beside Avenger (src/page.luau, ui/);
+#           its key is the overlay runtime's (O:addPage)
 #   settings  the page's: its key, the expansions list, its sounds, the Mac page mode, and the
 #           Drum SQ watcher's cadence
 #   sound   Open.wav and Close.wav as the page comes and goes (sounds/, the project's)
-require = ["window", "ocr", "input", "speech", "log", "screen", "path", "gui", "hotkey", "settings", "sound"]
+require = ["window", "ocr", "input", "speech", "log", "screen", "path", "gui", "settings", "sound"]

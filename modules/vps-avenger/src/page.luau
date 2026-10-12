@@ -1,28 +1,32 @@
 -- VPS Avenger's page: the avenger_control project's panel, as an HTML page of this module's own
--- (ui/, host.gui.webview) beside Avenger — the maintainer's decisions of 2026-10-12. This is its
--- read-only stage, which clicks nothing:
+-- (ui/, host.gui.webview) beside Avenger — the maintainer's decisions of 2026-10-12 — on the
+-- overlay runtime's page support (O:addPage, docs/api/overlay.md), which holds the header
+-- overlay's place while the page is in front and makes every action in Avenger a trip:
 --
 --   the key       the tool's chord, ⌃⇧⌘F1 on a Mac (Ctrl+Shift+Alt+F1 on Windows), or the
 --                 `pageKey` setting: pressed on an identified Avenger it reads Avenger off one
 --                 picture (read/open.luau) and shows the page beside Avenger, with Open.wav;
---                 pressed in the page it brings Avenger's window forward first and hides the page
---                 after, with Close.wav; pressed while the last press's reads are still out, it
---                 does nothing; a press whose reads show no page says why, unless the user moved on
+--                 pressed in the page the runtime brings Avenger's window forward first and hides
+--                 the page after, with Close.wav; a press whose reads show no page says why,
+--                 unless the user moved on
 --   the gate      anywhere else the key says why it opens nothing, as the tool's sentence does
 --   the state     only what was read (state.luau): the preset's name, the zoom, the browser, the
 --                 oscillator strip and the selected oscillator's knobs, the central tab and DRUM
 --                 SQ, the macros; what the preset database gives is marked so; everything else
 --                 "not read"
---   the actions   every action the page sends is answered "<label> is not available in this
---                 module yet" in its error region, until the stage that builds it (the plan's
---                 slices 3 to 10); Initialize's No clicks nothing, as it is meant to
+--   the actions   the header's are trips into Avenger (actions.luau); Initialize's No clicks
+--                 nothing, as it is meant to; every other action the page sends is answered
+--                 "<label> is not available in this module yet" in its error region, until the
+--                 stage that builds it (the plan's slices 5 to 10)
 --
 -- A message counts only while the page has the keyboard (host.window.foreground), so a press that
--- reaches the module after the user went elsewhere does nothing. The page's own word for it — the
--- `focused` it sends — is logged where the two disagree, which on a Mac with the page described
--- `activates = false` is the question (TODO.md, MW1b). The page is described once, and again only
--- when the `pageLeavesDawActive` setting changes, since that is fixed per page object; it is built
--- the first time Avenger is identified, not on the key.
+-- reaches the module after the user went elsewhere does nothing; and one trip at a time, which the
+-- runtime keeps (a second message while one is out is dropped, and logged). The page's own word
+-- for its keyboard — the `focused` it sends — is logged where the two disagree, which on a Mac
+-- with the page described `activates = false` is the question (TODO.md, MW1b). The page is
+-- described once, and again only when the `pageLeavesDawActive` setting changes, since that is
+-- fixed per page object (O:pageAgain); the runtime builds it the first time Avenger is identified,
+-- not on the key.
 
 local P = {}
 
@@ -123,22 +127,22 @@ P.LABELS = {
   central_drum_sq_speed = "The DRUM SQ speed",
 }
 
--- The actions this module has a handler for. `cancel_initialize_preset` is Initialize's No in the
--- page's own dialog, which clicks nothing in Avenger (the maintainer's decision: the tool clicked
--- MENU, Initialize and NO, three clicks that change nothing): the page closes its dialog, and
--- nothing is left to do here but say so in the log.
-P.HANDLERS = {
-  cancel_initialize_preset = function()
-    host.log.info("[avenger] [page] Initialize Preset: No — the page's dialog closed; nothing clicked in Avenger")
-  end,
-}
+-- The actions this module has a handler for: the header's trips (actions.luau), and
+-- `cancel_initialize_preset`, Initialize's No in the page's own dialog, which clicks nothing in
+-- Avenger (the maintainer's decision: the tool clicked MENU, Initialize and NO, three clicks that
+-- change nothing): the page closes its dialog, and nothing is left to do here but say so in the
+-- log.
+local A = host.include("src/actions.luau")
+P.HANDLERS = table.clone(A.HANDLERS)
+P.HANDLERS.cancel_initialize_preset = function()
+  host.log.info("[avenger] [page] Initialize Preset: No — the page's dialog closed; nothing clicked in Avenger")
+end
 
 -- The actions not built yet, by name: each is answered "<label> is not available in this module
 -- yet". Explicit, so that a name the page sends and nobody listed is a test's failure rather than
 -- an answer nobody chose.
 P.NOT_BUILT = {
-  "prev_preset", "next_preset", "start_rename", "pick_load_preset", "pick_save_preset_as",
-  "pick_initialize_preset", "undo", "redo_menu", "set_zoom", "set_expansion_view",
+  "start_rename", "set_expansion_view",
   "open_expansion", "close_expansion", "browse_expansion_presets", "select_all_expansion_presets",
   "select_expansion_category", "go_to_loaded_preset_category", "select_expansion_preset",
   "load_expansion_preset", "mark_expansion_preset_favorite", "toggle_expansion_favorite_view",
@@ -165,17 +169,21 @@ local E = nil -- what main.luau hands over (P.start)
 local S = host.include("src/state.luau")
 local Reads = host.include("src/read/open.luau")
 
-local page = nil
-local ready = false -- built, and its document has loaded
-local prepareFailed = false -- a prepare answered a failure: from then on only the key builds it
-local wanted = nil -- a show answered "not ready yet": { win, t0 }, shown once the page has loaded
+local ready = false -- this page object's document has loaded
 local plugin = nil -- the plug-in window the page was last shown beside, as a window table
 local shownOnce = false -- the first show lands on the preset's name, later ones where the user was
-local key, keyId = nil, nil -- the page key in effect, and its registration
+local key = nil -- the page key in effect
+local keyAt = nil -- when the key whose reads the next show answers was pressed (host.now)
+local spec = nil -- what O:addPage was given: its `notHere` follows the key (P.start)
 -- When the reads were made whose state this page object was last posted by a press: its document
 -- has them, or gets them when it loads (posts wait for the load), so `ready` answers them without
 -- their age. Forgotten when the page is described again, fails, or reloads itself.
 local given = nil
+
+local function post(value)
+  local page = E.header.page
+  if page then page:post(value) end
+end
 
 local function inFront(id)
   local f = host.window.foreground()
@@ -205,14 +213,16 @@ local function say(words)
 end
 
 -- The tool's sentence for a key pressed where no Avenger is in front, without the DAWs it named:
--- which DAWs there are is daw-hosts' to say.
-local function notInFront()
-  say("It seems that the VPS Avenger plug-in window is not at the front. Please open the plug-in window, "
-    .. "then press " .. keyWords() .. " again.")
+-- which DAWs there are is daw-hosts' to say. The runtime says it (`notHere`), and this module where
+-- its own look finds no window in front.
+local function notHereWords()
+  return "It seems that the VPS Avenger plug-in window is not at the front. Please open the plug-in window, "
+    .. "then press " .. keyWords() .. " again."
 end
 
-local function post(value)
-  if page then page:post(value) end
+-- What the page says of a plug-in window that is gone: the tool's sentence.
+local function closedWords()
+  return "The plug-in window was closed. Please open it again, then press " .. keyWords() .. " again."
 end
 
 -- The database's list of expansions for the `roster` setting, or nil.
@@ -224,30 +234,17 @@ local function roster()
   return names
 end
 
+-- The state of window `id` posted as a press or a trip read it: this page object has its reads.
+local function postState(id)
+  post({ kind = "state", state = S.snapshot(id, roster()) })
+  given = S.at(id)
+end
+
 local function notShown(why)
   if why == "declined by the system" then
     return "The system did not bring the page to the front; if it does not come by itself, the key brings it."
   end
   return "The page did not come to the front: " .. tostring(why) .. "."
-end
-
--- Shows the page beside `win`, the key pressed at `t0`: what the page is told comes first.
-local function show(win, t0)
-  local ok, why = page:show({ focus = true, avoid = win.bounds })
-  if ok then
-    wanted = nil
-    shownOnce = true
-    sound("Open")
-    host.log.info(string.format("[avenger] [page] shown beside '%s', %d ms after the key%s", tostring(win.title),
-      host.now() - t0, why and (" (" .. why .. ")") or ""))
-  elseif why == "not ready yet" then
-    wanted = { win = win, t0 = t0 }
-    say("Building the page.")
-  else
-    wanted = nil
-    host.log.info("[avenger] [page] not shown: " .. tostring(why))
-    say(notShown(why))
-  end
 end
 
 -- In the error region when the picture was cut at the screen's edge (read/open.luau).
@@ -256,95 +253,85 @@ local function cutWords(zoom)
     .. " of VPS Avenger lies past the edge of the screen: what lies there was not read."
 end
 
--- The key on an identified Avenger: Avenger read off one picture (read/open.luau) — the picture
--- taken in the key's handler while Avenger is unobscured, its questions answered on later turns —
--- then, once the reads are in and the overlay is still where the key was pressed, the state, the
--- focus, and the page. The log has the time from the key to the show. Where no page comes of it,
--- the user hears why — except when they moved on, and are somewhere else by then.
+-- The key on an identified Avenger — the runtime's `open`, in the key's handler, where the reads
+-- wait: Avenger read off one picture (read/open.luau), taken while Avenger is unobscured; then,
+-- once the overlay is still where the key was pressed, the state, the error region and the focus.
+-- The runtime shows the page after. `false` where no page comes of it, with why said — except when
+-- the user moved on, and is somewhere else by then.
 local function open(o)
   local t0 = host.now()
   local win = host.window.active()
   local origin = o:origin()
   if not (win and origin) then
     host.log.info("[avenger] [page] the key, with no window in front to read: nothing opened")
-    notInFront()
-    return
+    say(notHereWords())
+    return false
   end
   local mark = o:here()
-  local zoom = E.zoomOf(origin)
-  local ok, err = pcall(Reads.read, o, { zoom = zoom, mark = mark, roster = roster() }, function(values, why, words)
-    if not values then
-      host.log.info("[avenger] [page] not shown: " .. tostring(why))
-      if words then say(words) end
-      return
-    end
-    local fine, gone = o:stillHere(mark)
-    if not fine then
-      host.log.info("[avenger] [page] not shown: the user moved on while Avenger was read — " .. tostring(gone))
-      return
-    end
-    S.read(win.id, values)
-    host.log.info(string.format("[avenger] [page] read for the page: the preset %s, the zoom %s",
-      values.preset and ("'" .. values.preset .. "'") or "not read", values.zoom and (values.zoom .. " %") or "not read"))
-    plugin = win
-    post({ kind = "state", state = S.snapshot(win.id, roster()) })
-    given = S.at(win.id)
-    post({ kind = "error", text = values.cut and cutWords(values.zoom) or "" })
-    if shownOnce then
-      post({ kind = "restoreFocus" })
-    else
-      post({ kind = "focus", id = "preset-name" })
-    end
-    show(win, t0)
-  end)
+  local ok, values, why, words = pcall(Reads.read, o, { zoom = E.zoomOf(origin), mark = mark, roster = roster() })
   if not ok then
-    host.log.info("[avenger] [page] not shown: the reads could not be made — " .. tostring(err))
+    host.log.info("[avenger] [page] not shown: the reads could not be made — " .. tostring(values))
     say(Reads.FAILED)
+    return false
   end
+  if not values then
+    host.log.info("[avenger] [page] not shown: " .. tostring(why))
+    if words then say(words) end
+    return false
+  end
+  local fine, gone = o:stillHere(mark)
+  if not fine then
+    host.log.info("[avenger] [page] not shown: the user moved on while Avenger was read — " .. tostring(gone))
+    return false
+  end
+  S.read(win.id, values)
+  host.log.info(string.format("[avenger] [page] read for the page: the preset %s, the zoom %s",
+    values.preset and ("'" .. values.preset .. "'") or "not read", values.zoom and (values.zoom .. " %") or "not read"))
+  plugin, keyAt = win, t0
+  postState(win.id)
+  post({ kind = "error", text = values.cut and cutWords(values.zoom) or "" })
+  if shownOnce then
+    post({ kind = "restoreFocus" })
+  else
+    post({ kind = "focus", id = "preset-name" })
+  end
+  return nil
 end
 
--- The key in the page: Avenger's window forward first, the page hidden after — and kept, with the
--- reason in its error region, when the window would not come. The window is asked for even when
--- the host no longer lists it: a DAW may hide its plug-in windows while another application is
--- active (docs/api/gui.md, "DAWs" — Logic's floating ones are reported to), and the focus brings
--- the DAW forward, which shows them again. Only a window that refused and is not listed is taken
--- as closed.
-local function back()
-  local id = plugin and plugin.id
-  if id and host.window.focus(id) then
+-- Every show the runtime made at the key: Open.wav and the time from the key; or why not, said.
+local function onShown(_, ok, why)
+  if ok then
+    shownOnce = true
+    sound("Open")
+    host.log.info(string.format("[avenger] [page] shown beside '%s', %d ms after the key%s",
+      tostring(plugin and plugin.title), host.now() - (keyAt or host.now()), why and (" (" .. why .. ")") or ""))
+    return
+  end
+  host.log.info("[avenger] [page] not shown: " .. tostring(why))
+  say(notShown(why))
+end
+
+-- The way back (the key in the page, the runtime's): Avenger's window asked forward first, the page
+-- hidden after — and kept, with the reason in its error region, when the window would not come.
+-- The runtime asks for the window even when the host no longer lists it: a DAW may hide its
+-- plug-in windows while another application is active (docs/api/gui.md, "DAWs" — Logic's floating
+-- ones are reported to), and the focus brings the DAW forward, which shows them again. Only a
+-- window that refused and is not listed is taken as closed.
+local function onBack(_, ok, why)
+  if ok then
     -- Whether the DAW hid it while the page was in front is a Mac session's question (TODO.md, MW6).
-    if not current(plugin) then
+    if plugin and not current(plugin) then
       host.log.info(string.format("[avenger] [page] '%s' (id=%s) is not listed while the page is in front; "
-        .. "its focus was accepted", tostring(plugin.title), tostring(id)))
+        .. "its focus was accepted", tostring(plugin.title), tostring(plugin.id)))
     end
-    page:hide()
     sound("Close")
     return
   end
-  if not current(plugin) then
-    post({ kind = "error", text = "The plug-in window was closed. Please open it again, then press "
-      .. keyWords() .. " again." })
+  if why == "gone" or not current(plugin) then
+    post({ kind = "error", text = closedWords() })
     return
   end
   post({ kind = "error", text = "VPS Avenger's window would not come to the front." })
-end
-
-local function onKey()
-  if page and inFront(page.window) then
-    back()
-    return
-  end
-  if Reads.busy() then
-    host.log.info("[avenger] [page] the key again while the last press's reads are out: nothing done")
-    return
-  end
-  local o = E.header
-  if o.active and o:origin() then
-    open(o)
-    return
-  end
-  host.log.info("[avenger] [page] the key, with no VPS Avenger identified in front: nothing opened")
-  notInFront()
 end
 
 -- The page loaded, or reloaded itself: its state, from the reads already made — with how long ago
@@ -367,7 +354,7 @@ local function noteFocus(said, front)
     .. "window %s in front", said and "has" or "has not", front and "is" or "is not"))
 end
 
-local function onMessage(m)
+local function onMessage(o, m)
   if type(m) ~= "table" then return end
   if m.kind == "problem" then
     host.log.info("[avenger] [page] the page reports: " .. tostring(m.text))
@@ -379,6 +366,7 @@ local function onMessage(m)
   end
   local action = m.action
   if type(action) ~= "string" then return end
+  local page = E.header.page
   local front = page ~= nil and inFront(page.window)
   noteFocus(m.focused, front)
   if not front then
@@ -387,7 +375,7 @@ local function onMessage(m)
   end
   local handler = P.HANDLERS[action]
   if handler then
-    handler(type(m.args) == "table" and m.args or {})
+    handler(o, type(m.args) == "table" and m.args or {})
     return
   end
   local label = P.LABELS[action]
@@ -408,16 +396,9 @@ local function onReady()
     given = nil
     if S.at(plugin and plugin.id) then answerReady() end
   end
-  local w = wanted
-  if w and inFront(w.win.id) then
-    show(current(w.win) or w.win, w.t0)
-  else
-    wanted = nil
-  end
 end
 
-local function onClose(why)
-  wanted = nil
+local function onClose(_, why)
   if why == "failed" then
     ready, given = false, nil
     host.log.info("[avenger] [page] the page failed; it is built again the next time it is needed")
@@ -426,44 +407,34 @@ local function onClose(why)
   sound("Close")
 end
 
-local function describe()
+-- The page described, for the runtime (O:addPage, O:pageAgain): its three events are the
+-- runtime's, which runs this module's hooks after its own part.
+local function describe(on)
   local leaves = host.settings.get("pageLeavesDawActive") == true
-  page = host.gui.webview({
+  ready, shownOnce, given = false, false, nil
+  return host.gui.webview({
     file = "ui/index.html",
     title = "Avenger Control",
     activates = not leaves,
-    onMessage = onMessage,
-    onReady = onReady,
-    onClose = onClose,
+    onMessage = on.message,
+    onReady = on.ready,
+    onClose = on.close,
   })
-  ready, prepareFailed, wanted, shownOnce, given = false, false, nil, false, nil
 end
 
-local function prepare()
-  local ok, why = page:prepare()
-  if not ok and why ~= "not ready yet" then
-    prepareFailed = true
-    host.log.info("[avenger] [page] the page was not prepared (" .. tostring(why) .. "); the key builds it from now on")
-  end
-end
-
--- The page key: `spec` registered in place of the one in effect — or nil and why not, for a spec
--- the platform cannot hold (host.keys.check) or the host refused.
-local function claim(spec)
-  local ok, c = pcall(host.keys.check, spec)
-  if not ok then return nil, tostring(c) end
-  if not c.ok then return nil, table.concat(c.reasons or {}, ", ") end
-  local fine, id = pcall(host.hotkey.register, spec, onKey)
-  if not fine then return nil, tostring(id) end
-  if keyId then host.hotkey.unregister(keyId) end
-  key, keyId = spec, id
-  return true
+-- Why `s` cannot be the page key on this platform (host.keys.check), or nil when it can.
+local function refusal(s)
+  local ok, c = pcall(host.keys.check, s)
+  if not ok then return tostring(c) end
+  if not c.ok then return table.concat(c.reasons or {}, ", ") end
+  return nil
 end
 
 -- ── What main.luau calls ─────────────────────────────────────────────────────
 
--- At load: the settings, the key and the page. `env`: { header = the header overlay, zoomOf =
--- (origin) -> the zoom read or nil, DB = presets.luau }.
+-- At load, before the header overlay is bound (O:addPage asks it then): the settings, the key and
+-- the page. `env`: { header = the header overlay, zoomOf = (origin) -> the zoom read or nil, DB =
+-- presets.luau, ring = main.luau's own clicks, reads and choices, for the trips (actions.luau) }.
 function P.start(env)
   E = env
   host.settings.define("roster", P.ROSTERS[1], {
@@ -476,51 +447,71 @@ function P.start(env)
   host.settings.define("drumSqCadence", 250, {
     label = "Drum SQ auto follow: milliseconds between reads (100 to 1000)", min = 100, max = 1000 })
 
-  local ok, why = claim(stored)
-  if not ok then
+  key = stored
+  local why = refusal(stored)
+  if why then
     host.log.info(string.format("[avenger] [page] the page key '%s' cannot be used (%s): %s instead",
       tostring(stored), tostring(why), KEY_DEFAULT))
-    local fine, because = claim(KEY_DEFAULT)
-    if not fine then
-      host.log.info("[avenger] [page] the default page key cannot be used either: " .. tostring(because))
-    elseif stored ~= KEY_DEFAULT then
-      host.settings.set("pageKey", KEY_DEFAULT)
-    end
+    key = KEY_DEFAULT
+    if stored ~= KEY_DEFAULT then host.settings.set("pageKey", KEY_DEFAULT) end
   end
+  spec = {
+    describe = describe,
+    key = key,
+    notHere = notHereWords(),
+    open = open,
+    onMessage = onMessage,
+    onReady = onReady,
+    onClose = onClose,
+    onShown = onShown,
+    onBack = onBack,
+  }
+  env.header:addPage(spec)
+
   host.settings.onChange("pageKey", function(new)
     if new == key then return end
-    local fine, because = claim(new)
-    if fine then
+    local because = refusal(new)
+    if not because then
+      local fine, whyNot = env.header:pageKey(new)
+      if not fine then because = tostring(whyNot) end
+    end
+    if not because then
+      key = new
+      -- What the key says elsewhere names the key: the runtime reads `notHere` at every press.
+      spec.notHere = notHereWords()
       host.log.info("[avenger] [page] the page key is now " .. tostring(new))
       say("Page key changed to " .. keyWords() .. ".")
       return
     end
     -- Refused: the key in effect stays, and the setting says it again.
     host.log.info(string.format("[avenger] [page] '%s' cannot be the page key (%s); it stays %s",
-      tostring(new), tostring(because), tostring(key)))
+      tostring(new), because, tostring(key)))
     say(string.format("%s cannot be the page key; it stays %s.", tostring(new), keyWords()))
     if key then host.settings.set("pageKey", key) end
   end)
   host.settings.onChange("pageLeavesDawActive", function(new, old)
     if new == old then return end
     -- Fixed for the life of a page object: the page is taken down and described again.
-    page:close()
-    describe()
+    env.header:pageAgain()
     host.log.info("[avenger] [page] the page is described again: activates = " .. tostring(not new))
   end)
   host.settings.onChange("roster", function(new, old)
     if new ~= old and ready then answerReady() end
   end)
 
-  describe()
+  A.start({
+    header = env.header,
+    DB = env.DB,
+    ring = env.ring,
+    zoomOf = env.zoomOf,
+    LABELS = P.LABELS,
+    post = post,
+    roster = roster,
+    plugin = function() return plugin end,
+    postState = postState,
+    closedWords = closedWords,
+  })
   host.log.info("[avenger] [page] " .. keyWords() .. " shows the Avenger Control page beside an identified VPS Avenger")
-end
-
--- The header overlay came to the front on an identified Avenger: the page is built now, if it is
--- not, so that the key shows it at once. In the arbiter's call, where nothing waits: a prepare
--- only asks for the build.
-function P.arrived()
-  if page and not ready and not prepareFailed then prepare() end
 end
 
 return P

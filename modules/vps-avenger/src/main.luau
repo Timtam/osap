@@ -23,9 +23,11 @@
 -- oscillators, drums and the browser are later stages (TODO.md, "VPS Avenger"). Plug-in only: the
 -- project supports no standalone Avenger, and neither does this module yet (TODO.md).
 --
--- And the project's panel as a page of this module's own (page.luau, ui/): its key on an
--- identified Avenger reads Avenger off one picture (read/open.luau) and shows the page beside it;
--- the page's actions come in later stages, and say so until then.
+-- And the project's panel as a page of this module's own (page.luau, ui/), on the overlay
+-- runtime's page support (O:addPage): its key on an identified Avenger reads Avenger off one
+-- picture (read/open.luau) and shows the page beside it; the header's actions are trips into
+-- Avenger made with this file's own clicks, reads and choices (actions.luau); the page's other
+-- actions come in later stages, and say so until then.
 --
 -- Coordinates are written as the project wrote them, at 50 % from Avenger's corner; the overlay
 -- scales them by the zoom READ off Avenger's zoom field (header.luau), and puts Avenger's corner
@@ -82,12 +84,13 @@ end
 -- plug-in, and not under another window (host.window.ownsPoint: "a module only needs it directly
 -- when it clicks a coordinate itself", docs/api/window.md). Each refusal is said, as the runtime
 -- says its own — unless `quiet`, for a click that tidies up after something the runtime has
--- already said. A click from a hotkey would inherit held modifiers on Windows; these controls have
--- none, and Return and Space arrive with none.
+-- already said, and for a trip of the page's, which shows the refusal in the page instead (it is
+-- handed back with the `false`). A click from a hotkey would inherit held modifiers on Windows;
+-- these controls have none, and Return and Space arrive with none.
 local function clickAt(o, label, at, button, quiet)
   local function refuse(said)
     if not quiet then host.speech.output(said, { interrupt = true }) end
-    return false
+    return false, said
   end
   local x, y = o:toScreen(at[1], at[2])
   if not x then
@@ -291,6 +294,23 @@ local function presetStep(ov, label, at, dir)
         end,
       })
     end,
+  })
+end
+
+-- For a trip of the page's (actions.luau): the name after a click of the module's own, watched as
+-- a step's is — read again and again until it differs from `was`, up to NAME_WITHIN — and
+-- `onEnd(now, before, changed)` once, with the last name read (nil: none). The watch ends
+-- unreported where the overlay leaves (O:watch); the trip's own ends cover that.
+local function watchName(o, was, onEnd)
+  names.gen += 1
+  local gen = names.gen
+  o:watch({
+    read = function(w) return nameAfter(w, gen) end,
+    was = was,
+    done = function(now, before) return before ~= nil and now ~= before end,
+    within = NAME_WITHIN,
+    onDone = function(now, before) onEnd(now, before, true) end,
+    onGiveUp = function(now, before) onEnd(now, before, false) end,
   })
 end
 
@@ -565,10 +585,6 @@ header:addCustomButton({
   end,
 })
 zoomStepper(header)
--- Avenger identified: the page is built now, not on its key (page.luau).
-header:onActivate(function()
-  Page.arrived()
-end)
 -- Away from the overlay, the preset can be changed in ways it does not see — the DAW's own
 -- preset menu, a file dialog, another project: the database's position goes with it.
 header:onDeactivate(function()
@@ -577,6 +593,29 @@ header:onDeactivate(function()
   names.pending = nil
   DB.forget("the overlay left the front")
 end)
+-- ── The page ─────────────────────────────────────────────────────────────────
+-- Its key, its settings and its description (page.luau), added before the header is bound, as
+-- O:addPage asks: the zoom as the header read it; the rest is read off one picture when the key is
+-- pressed (read/open.luau). The header's actions in the page use this file's own clicks, reads and
+-- choices (actions.luau), and the tables of the ring's.
+Page.start({
+  header = header,
+  zoomOf = function(origin) return (H.zoom(origin)) end,
+  DB = DB,
+  ring = {
+    clickAt = clickAt,
+    nameNow = nameNow,
+    lastName = function() return names.last end,
+    watchName = watchName,
+    menuItemAt = menuItemAt,
+    zoomEntry = zoomEntry,
+    closeLeftOpen = closeLeftOpen,
+    boxOffScreen = boxOffScreen,
+    OWN_NAME = OWN_NAME,
+    ZOOM_SETTLE = ZOOM_SETTLE,
+  },
+})
+
 -- `newWindow`: Avenger's popups — MENU, the zoom list, the redo list — are JUCE windows of the
 -- DAW's process (the process Avenger runs in; a DAW that runs plug-ins apart is the popup's owner
 -- then, unmeasured), which is what this test sees, and says where, so an item can be chosen in
@@ -596,14 +635,5 @@ D.build(box)
 box:gate(D.gate)
 box:resume(false)
 box:bind(BINDING, { specificity = O.layer.dialog, pollMatch = 500, pollWhen = D.expecting })
-
--- ── The page ─────────────────────────────────────────────────────────────────
--- Its key, its settings and its description (page.luau): the zoom as the header read it; the rest
--- is read off one picture when the key is pressed (read/open.luau).
-Page.start({
-  header = header,
-  zoomOf = function(origin) return (H.zoom(origin)) end,
-  DB = DB,
-})
 
 host.log.info("[avenger] VPS Avenger overlays ready: the header, and Avenger's warning box.")

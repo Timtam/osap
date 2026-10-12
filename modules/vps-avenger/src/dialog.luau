@@ -222,6 +222,82 @@ function D.gate(origin)
   return armed == a and a.seen ~= nil
 end
 
+-- ── For the page ─────────────────────────────────────────────────────────────
+-- Initialize from the page (actions.luau): the box answered inside the page's trip, with no
+-- overlay of its own — the page's own dialog has asked Yes already, and the trip holds Avenger in
+-- front. The box is READ before anything is clicked: YES is clicked where it was read, never where
+-- the table puts it, and only once a reading shows the pair; then the box is read until it has gone
+-- (GONE_READS readings of text without the pair), so that what is read after it is Avenger, not the
+-- box. Each read is a text read of the box's band with a callback, the next asked in the last one's
+-- answer, one out at a time; bounded by counts, as the box overlay's own looking is — the box not
+-- seen, nothing read, or the box still up after YES, DIALOG_READS_MAX times each — never by a
+-- clock. `trip:inFront()` is asked at every answer, before the click too: false has ended the trip,
+-- and nothing more is done. `done(true, text)` once the box has gone after YES, `done(false, why)`
+-- otherwise — once, in a read's answer, a handler of the module where a read may wait.
+function D.answer(o, trip, label, done)
+  local seen, clicked = nil, false
+  local reads, fails, after, misses = 0, 0, 0, 0
+  local look
+  local function answered(r, origin, k, rect)
+    if not trip:inFront() then return end
+    local box = r.status == "text" and parseBox(r) or nil
+    if r.status ~= "text" then
+      fails += 1
+      if fails >= DIALOG_READS_MAX then
+        host.log.info(string.format("[avenger] [page] '%s': the warning box could not be read %d times (%s)", label,
+          fails, tostring(r.status)))
+        return done(false, "Avenger's warning box cannot be read now")
+      end
+      return look()
+    end
+    if not clicked then
+      if not box then
+        reads += 1
+        if reads >= DIALOG_READS_MAX then
+          host.log.info(string.format("[avenger] [page] '%s': no warning box in %d reads; last read: \"%s\"", label,
+            reads, forLog(r.text)))
+          return done(false, "Avenger's warning box was not seen; nothing was answered")
+        end
+        return look()
+      end
+      seen = box
+      local tx, ty = G.place(origin, k, G.YES[1], G.YES[2])
+      host.log.info(string.format("[avenger] [page] '%s': Avenger's warning box is up: \"%s\"; YES read at (%.0f,%.0f), "
+        .. "(%+.0f,%+.0f) from where the table puts it — clicking it there", label, forLog(box.text), box.yes[1],
+        box.yes[2], box.yes[1] - tx, box.yes[2] - ty))
+      boxShot(origin, k, rect, box, label)
+      local x, y = math.floor(box.yes[1] + 0.5), math.floor(box.yes[2] + 0.5)
+      local ok, mine = pcall(host.window.ownsPoint, origin.id, x, y)
+      if ok and mine == false then return done(false, "something else is covering the warning box's YES") end
+      host.input.click(x, y)
+      clicked = true
+      return look()
+    end
+    if box then
+      misses = 0
+      after += 1
+      if after >= DIALOG_READS_MAX then return done(false, "Avenger's warning box is still up after YES") end
+      return look()
+    end
+    -- Text without the pair, twice in a row: gone.
+    misses += 1
+    if misses < GONE_READS then return look() end
+    host.log.info(string.format("[avenger] [page] '%s': the warning box has gone after YES", label))
+    return done(true, seen.text)
+  end
+  look = function()
+    local origin = o:origin()
+    local k = origin and H.factor(origin)
+    local rect = k and G.placeRect(origin, k, G.DIALOG_BAND)
+    if not rect then return done(false, "Avenger's warning box cannot be placed now") end
+    local ok = pcall(host.ocr.recognize, rect, { lang = H.lang(), key = "vps-avenger page box" }, function(r)
+      answered(r, origin, k, rect)
+    end)
+    if not ok then return done(false, "Avenger's warning box cannot be read now") end
+  end
+  look()
+end
+
 -- The box overlay's stops: the box's text, then YES and NO — each clicked where it was read, in
 -- the plug-in's own pixels (`rawOrigin`: neither framed nor scaled, because a read word's place
 -- is on screen already).

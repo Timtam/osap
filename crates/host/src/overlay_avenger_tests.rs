@@ -111,11 +111,12 @@ end)
 -- "rect", x1, y1, x2, y2, c }, { kind = "ray", cx, cy, angle, r1, r2, width, c } (a pointer from
 -- r1 to r2 out along `angle` degrees, 0 right and 90 down), { kind = "disc", cx, cy, r, c } — and
 -- reduced by the host's own code (T.paintCells, T.paintProfile, T.paintPixels). Asked as the
--- page's reads ask, of a snapshot: a grid of cells and a column profile with a callback, answered
--- on the next turn (T.runDue); the points of a snapshot at once. Each checked as the host checks
--- it, and a region outside the snapshot answered as the host answers it. A request with a key is
--- out (host.screen.pending, S.out) until its callback runs, and T.dropScreen drops the requests
--- out as disabling the module does.
+-- page's reads ask, of a snapshot: a grid of cells and a column profile waited for in a handler,
+-- answered at once (and where the host could not wait, raising its message: T.screenWait), or
+-- with a callback, answered on the next turn (T.runDue); the points of a snapshot at once. Each
+-- checked as the host checks it, and a region outside the snapshot answered as the host answers
+-- it. A request with a key is out (host.screen.pending, S.out) until its callback runs, and
+-- T.dropScreen drops the requests out as disabling the module does.
 S.picture = { bg = { 24, 24, 24 }, shapes = {} }
 S.screenOut = {}   -- { cb, value, why }: answers to deliver on the next turn
 S.cellsAsked, S.cellsTotal, S.profilesAsked = 0, 0, 0
@@ -141,7 +142,7 @@ end
 rawset(T.host.screen, "predicate", function(src) return T.predicateCanonical(src) end)
 
 rawset(T.host.screen, "cells", function(opts, cb)
-  assert(type(cb) == "function", "the scripted host answers host.screen.cells with a callback only")
+  if cb == nil then T.screenWait("host.screen.cells") end
   for k in pairs(opts) do
     assert(k == "region" or k == "cols" or k == "rows" or k == "predicate" or k == "snapshot" or k == "key",
       "host.screen.cells: opts has a key '" .. tostring(k) .. "'")
@@ -152,18 +153,19 @@ rawset(T.host.screen, "cells", function(opts, cb)
   S.cellsTotal += opts.cols * opts.rows
   local r = opts.region
   local answer = { cb = cb, key = opts.key }
-  if opts.key then S.out[opts.key] = (S.out[opts.key] or 0) + 1 end
   if within(r, snap) then
     answer.value = { cells = T.paintCells(S.picture, r, opts.cols, opts.rows, opts.predicate),
       x = r[1], y = r[2], w = r[3] - r[1], h = r[4] - r[2] }
   else
     answer.why = "the region is not inside the snapshot"
   end
+  if cb == nil then return answer.value, answer.why end
+  if opts.key then S.out[opts.key] = (S.out[opts.key] or 0) + 1 end
   S.screenOut[#S.screenOut + 1] = answer
 end)
 
 rawset(T.host.screen, "profile", function(opts, cb)
-  assert(type(cb) == "function", "the scripted host answers host.screen.profile with a callback only")
+  if cb == nil then T.screenWait("host.screen.profile") end
   for k in pairs(opts) do
     assert(k == "region" or k == "axes" or k == "snapshot" or k == "key" or k == "dark",
       "host.screen.profile: opts has a key '" .. tostring(k) .. "'")
@@ -174,12 +176,13 @@ rawset(T.host.screen, "profile", function(opts, cb)
   S.profilesAsked += 1
   local r = opts.region
   local answer = { cb = cb, key = opts.key }
-  if opts.key then S.out[opts.key] = (S.out[opts.key] or 0) + 1 end
   if within(r, snap) then
     answer.value = T.paintProfile(S.picture, r)
   else
     answer.why = "the region does not overlap the snapshot"
   end
+  if cb == nil then return answer.value, answer.why end
+  if opts.key then S.out[opts.key] = (S.out[opts.key] or 0) + 1 end
   S.screenOut[#S.screenOut + 1] = answer
 end)
 
@@ -480,11 +483,13 @@ function T.lastRead(key)
 end
 
 -- ── The page's host (src/page.luau) ──────────────────────────────────────────
--- The module's own host calls for its page, apart from the runtime's, so that the runtime's keys
--- and settings stay as the menu tests count them: host.gui.webview as a page object that records
--- what it is asked and answers what a scenario scripts — as page_example_tests.rs does for the
--- example — the module's settings as the host keeps them, its hotkey, its sounds, the key checks,
--- and host.window.focus noted in the page's order.
+-- The module's own host calls for its page, apart from the runtime's, so that the runtime's
+-- settings stay as the menu tests count them: host.gui.webview as a page object that records what
+-- it is asked and answers what a scenario scripts — as page_example_tests.rs does for the example
+-- — the module's settings as the host keeps them, its sounds and the key checks. And two of the
+-- runtime's own, since the page key and the trips are the runtime's (O:addPage): its
+-- host.hotkey.register, which keeps the page key's callback (S.pageKeys), and host.window.focus,
+-- noted in the page's order.
 S.pages = {}        -- every page described, in order: { opts, shows, hides, posts, prepares, closed, page }
 S.pageAnswers = {}  -- what the next shows answer, in turn: { ok, why }; then "not ready yet" until loaded
 S.pageLoaded = false
@@ -576,19 +581,20 @@ function T.pageHost(AH)
       table.insert(S.settingCbs[key], cb)
     end,
   })
-  AH.hotkey = T.strict("host.hotkey", {
-    register = function(spec, fn)
-      assert(S.badKeys[spec] == nil, "registered a key check refuses: " .. spec)
-      local id = #S.pageKeyIds + 1
-      S.pageKeyIds[id] = spec
-      S.pageKeys[spec] = fn
-      return id
-    end,
-    unregister = function(id)
-      local spec = S.pageKeyIds[id]
-      if spec then S.pageKeys[spec] = nil end
-    end,
-  })
+  local register, unregister = T.host.hotkey.register, T.host.hotkey.unregister
+  rawset(T.host.hotkey, "register", function(spec, fn)
+    assert(S.badKeys[spec] == nil, "registered a key check refuses: " .. spec)
+    local id = register(spec, fn)
+    S.pageKeyIds[id] = spec
+    S.pageKeys[spec] = fn
+    return id
+  end)
+  rawset(T.host.hotkey, "unregister", function(id)
+    local spec = S.pageKeyIds[id]
+    if spec then S.pageKeys[spec] = nil end
+    S.pageKeyIds[id] = nil
+    return unregister(id)
+  end)
   AH.sound = T.strict("host.sound", { play = function(path)
     S.sounds[#S.sounds + 1] = path
     S.pageOrder[#S.pageOrder + 1] = "sound " .. path
@@ -599,12 +605,11 @@ function T.pageHost(AH)
       return { ok = bad == nil, resolved = spec, reasons = bad or {} }
     end,
   }, { __index = T.host.keys })
-  AH.window = setmetatable({
-    focus = function(id)
-      S.pageOrder[#S.pageOrder + 1] = "focus " .. tostring(id)
-      return T.host.window.focus(id)
-    end,
-  }, { __index = T.host.window })
+  local focus = T.host.window.focus
+  rawset(T.host.window, "focus", function(id)
+    S.pageOrder[#S.pageOrder + 1] = "focus " .. tostring(id)
+    return focus(id)
+  end)
 end
 
 -- The page key as the platform picks it, pressed: its callback runs as the hotkey's handler.
@@ -617,8 +622,8 @@ function T.pageKey(spec)
   assert(got == "Ran", "the key's handler: " .. got)
 end
 
--- The page key pressed on an identified Avenger, and the next turn, which answers its reads of
--- the picture (read/open.luau): the page is shown then.
+-- The page key pressed on an identified Avenger — its reads of the picture (read/open.luau) are
+-- waited for in the key's handler, and the page shown there — and the next turn.
 function T.openPage(spec)
   T.pageKey(spec)
   T.tick()
@@ -658,6 +663,30 @@ function T.pageSince(from)
   local out = {}
   for i = from + 1, #S.pageOrder do out[#out + 1] = S.pageOrder[i] end
   return table.concat(out, ",")
+end
+
+-- A trip from the page (actions.luau): the page, with the keyboard, sends `m`; the runtime asks
+-- Avenger's window `W` forward, which lands (T.land) with its foreground event; and the act runs on
+-- the module's next turn.
+function T.tripFrom(m, W)
+  S.focusAtOnce = false
+  S.focusLands = function() S.front, S.chain = W, { W } end
+  T.pageMsg(m)
+  T.land()
+  T.runDue()
+end
+
+-- The name's reads after a click, as the watch makes them, each answered `name` (nil: nothing
+-- read), for `ms` of the scenario's time (default 3750: the watch looks once a tick here, so its
+-- twenty looks take twenty ticks, past its bound).
+function T.nameReads(name, ms)
+  for _ = 1, math.floor((ms or 3750) / 150) do
+    T.run(150)
+    local r = T.lastRead("vps-avenger name")
+    if r and not r.answered then
+      T.answer(r, name and T.nameRead(name) or { status = "none", text = "", words = {} })
+    end
+  end
 end
 
 -- Loads daw-hosts and the module as the host loads them, and hands back its two overlays: the

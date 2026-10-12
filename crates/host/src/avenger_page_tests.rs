@@ -1,7 +1,7 @@
 //! VPS Avenger's page (`modules/vps-avenger/src/page.luau`, `ui/`): the avenger_control project's
-//! panel shown with `host.gui.webview` beside Avenger, as the maintainer decided on 2026-10-12 —
-//! its first stage, which reads the preset's name and the zoom and clicks nothing. The module is
-//! loaded for real against the scripted host of `overlay_avenger_tests.rs`, with its scripted page
+//! panel shown with `host.gui.webview` beside Avenger, as the maintainer decided on 2026-10-12, on
+//! the overlay runtime's page support (`O:addPage`, `O:inPlugin`). The module is loaded for real
+//! against the scripted host of `overlay_avenger_tests.rs`, with the runtime and its scripted page
 //! (`T.pageHost`): a page object that records what it is asked, as `page_example_tests.rs` has one.
 //!
 //! What the stage does is pinned here, with no window: the page is described once at load — and
@@ -18,9 +18,16 @@
 //! have the keyboard; and the page key's setting refuses a key the platform cannot hold.
 //!
 //! And the reads: one picture, cut at the primary screen's edge, within what one snapshot may hold
-//! (the scripted snapshot keeps the host's budget); one press at a time by the keys of its questions,
-//! so that a disable that dropped them leaves the key working; and a bound on the Luau work of the
-//! open and of each read, which a loop over any box's pixels passes.
+//! (the scripted snapshot keeps the host's budget); every question waited for in the key's handler,
+//! so one press at a time and nothing left out for a disable to drop; and a bound on the Luau work
+//! of the open and of each read, which a loop over any box's pixels passes.
+//!
+//! And the header's actions (slice 4, `src/actions.luau`), each a trip from a scripted page message
+//! as the ring's scenarios play Avenger: ◀ and ▶ with the name watched and "unchanged" said, Load
+//! with Escape in its file dialog, Save as, Initialize's Yes — its warning box read before YES is
+//! clicked where it was read, then everything read again — and No, which clicks nothing; UNDO, the
+//! redo list ended by its menu's close, any size from the zoom list; and a second message while a
+//! trip is out, dropped.
 //!
 //! And the protocol, with no JS run: every action name `ui/panel.js` sends and every `data-action`
 //! of `ui/index.html` is on the page's own list, `ACTIONS`, and every name on it has a handler in
@@ -115,9 +122,8 @@ fn the_key_shows_the_page_beside_avenger_and_in_the_page_goes_back_to_it() {
         T.pageKey()
         T.ok(T.pageSince(from) == "focus 31,hide,sound sounds/Close.wav", T.pageSince(from))
         T.ok(S.front == W, "Avenger in front")
-        -- Back on Avenger, identified again in its new stay, the key shows the page where the user was.
-        T.event()
-        T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
+        -- Back on Avenger — its stay held across the page, so it is not identified again — the key
+        -- shows the page where the user was.
         T.event()
         T.ok(header.active, "the header again")
         T.setting("sounds", false)
@@ -182,7 +188,8 @@ fn the_key_away_from_an_identified_avenger_says_why_and_opens_nothing() {
         T.ok(#T.page().shows == 0 and #T.page().posts == 0 and T.page().prepares == 0, "nothing built or shown")
         T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
         T.event()
-        T.ok(header.active and T.page().prepares == 1, "identified, and the page built")
+        T.runDue()
+        T.ok(header.active and T.page().prepares == 1, "identified, and the page built on the next turn")
         S.listed = { W, T.OTHER }
         T.show(T.OTHER)
         T.ok(not header.active)
@@ -232,9 +239,9 @@ fn ready_gets_one_state_message_from_the_reads_already_made() {
     "##);
 }
 
-/// While the page has the keyboard, every action it sends is answered in its error region with
-/// the action's own words — "not available in this module yet" — and so is a name the page does
-/// not have, which the log calls so; Initialize's No closes the page's dialog and clicks nothing,
+/// While the page has the keyboard, every action it sends that is not built yet is answered in its
+/// error region with the action's own words — "not available in this module yet" — and so is a
+/// name the page does not have, which the log calls so; Initialize's No closes the page's dialog and clicks nothing,
 /// and says nothing. A message while the page does not have the keyboard is not acted on, a problem
 /// the page reports is logged wherever the user is, and the page's own word for its keyboard is
 /// logged where it disagrees with the host's.
@@ -247,8 +254,8 @@ fn actions_are_answered_not_available_yet_and_only_while_the_page_has_the_keyboa
         T.openPage()
         T.ok(S.front == T.PAGE_WIN, "in front")
         local clicks = #S.clicks
-        T.pageMsg({ action = "next_preset", args = {}, focused = true })
-        T.ok(T.lastPost().kind == "error" and T.lastPost().text == "Next preset is not available in this module yet",
+        T.pageMsg({ action = "start_rename", args = {}, focused = true })
+        T.ok(T.lastPost().kind == "error" and T.lastPost().text == "Renaming the preset is not available in this module yet",
           tostring(T.lastPost().text))
         T.pageMsg({ action = "osc_control", args = { control = "volume" }, focused = true })
         T.ok(T.lastPost().text == "An oscillator's control is not available in this module yet", T.lastPost().text)
@@ -329,8 +336,8 @@ const WORDS: &str = r#"{
 }"#;
 
 /// The key on Avenger at 80 % in REAPER's floating window: ONE snapshot of the plug-in's panel,
-/// waited for in the key's handler; every grid and profile of it asked at once, with callbacks, and
-/// the page shown only once they and one text read of the same picture are in. The state carries
+/// waited for in the key's handler; every grid and profile of it waited for there too, and the page
+/// shown only once they and one text read of the same picture are in. The state carries
 /// what the picture shows under the tool's keys: the count of the dots, the names cleaned the
 /// project's way ("0SC 2" is OSC 2), the tab whose bottom strip is darkest, Mute and Solo by their
 /// red, Drums' and Trig's too; the selected oscillator's knobs from their pointers; the macro tabs
@@ -348,14 +355,14 @@ fn the_reads_of_one_picture_give_the_tools_state_keys() {
           drumsMute = true, trigSolo = true, macroShown = 2, buttons = { true, false }, amounts = { 40, 0, 100 },
           volume = 100, transpose = 24, fine = 0, fav = true })
         T.words(@WORDS@)
-        local snaps, from = S.snaps, #S.pageOrder
+        local snaps, from, asked = S.snaps, #S.pageOrder, S.cellsAsked + S.profilesAsked
         T.pageKey()
         T.ok(S.snaps == snaps + 1, "one picture, in the key's handler")
-        T.ok(#S.screenOut > 0 and S.screenOut[#S.screenOut].cb ~= nil and T.pageSince(from) == "",
-          "every question asked with a callback, and nothing shown yet")
-        local asked = S.cellsAsked + S.profilesAsked
-        T.tick()
+        T.ok(#S.screenOut == 0 and S.cellsAsked + S.profilesAsked == asked + 19,
+          "every question waited for in the key's handler: " .. (S.cellsAsked + S.profilesAsked - asked))
         T.ok(T.pageSince(from) == "post state,post error,post focus,show,sound sounds/Open.wav", T.pageSince(from))
+        asked = S.cellsAsked + S.profilesAsked
+        T.tick()
         T.ok(S.snaps == snaps + 1 and S.cellsAsked + S.profilesAsked == asked, "nothing asked again")
         local texts = 0
         for _, r in ipairs(S.recognized) do if r.snapshot then texts += 1 end end
@@ -610,32 +617,35 @@ fn an_open_expansion_is_read_from_the_browsers_area() {
     "##);
 }
 
-/// One press at a time: a second press while the first one's reads are out does nothing; and a
-/// press whose reads come back after the user moved on — the overlay left the front — shows no
-/// page.
+/// One press at a time: the reads are waited for in the key's handler, so a second press comes
+/// after the page is shown — and, the page then having the keyboard, goes back without reading
+/// anything; and a press whose reads end after the user moved on — another window came to the
+/// front while Avenger's words were read — shows no page.
 #[test]
-fn a_press_while_the_reads_are_out_does_nothing_and_a_page_is_not_shown_after_the_user_moved_on() {
+fn one_press_at_a_time_and_a_page_is_not_shown_after_the_user_moved_on() {
     run_mac(r##"
         local S = T.S
         local W = select(3, T.avengerAt80("Init Preset"))
         T.pageReady()
         local snaps = S.snaps
         T.pageKey()
-        T.pageKey()
-        T.ok(S.snaps == snaps + 1, "one picture")
-        T.ok(T.count("[avenger] [page] the key again while the last press's reads are out: nothing done") == 1, T.dump())
-        T.tick()
-        T.ok(#T.page().shows == 1, "shown once")
-        -- In the page and back: then the key, and the user leaves before the reads are in.
+        T.ok(S.snaps == snaps + 1 and #T.page().shows == 1 and S.front == T.PAGE_WIN, "read once, and shown")
+        T.event()
         S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
         T.pageKey()
+        T.ok(S.snaps == snaps + 1 and T.page().hides == 1 and S.front == W, "the second press goes back, reading nothing")
         T.event()
-        T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
-        T.event()
-        T.pageKey()
+        -- The user leaves while the key's words are read.
         S.listed = { W, T.OTHER }
-        T.show(T.OTHER)
-        T.tick()
+        local words = S.ocr
+        S.ocr = function(r, name)
+          if name == "preset" then
+            S.front, S.chain = T.OTHER, { T.OTHER }
+            S.epoch += 1
+          end
+          return words(r, name)
+        end
+        T.pageKey()
         T.ok(#T.page().shows == 1, "not shown over another window")
         T.ok(T.count("[avenger] [page] not shown: the user moved on while Avenger was read — ") == 1, T.dump())
     "##);
@@ -657,8 +667,6 @@ fn a_calibrating_run_writes_a_marked_picture_per_part_and_zoom() {
         local function back()
           S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
           T.pageKey()
-          T.event()
-          T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
           T.event()
         end
         local function pictures()
@@ -777,14 +785,18 @@ fn the_open_reads_loop_over_no_pixels_in_luau() {
         counted()
         T.paintAvenger(248, 60, 4, @PAINT@)
         T.words({ ["macro tabs"] = "MACRO 1 MACRO 2 MACRO 3" })
-        -- The key's handler — the picture and the questions — and then the answers' callbacks up to
-        -- the state: the reads' own work, without the runtime's tick that runs in the same turn.
-        local before = T.interrupts()
+        -- The reads' own work, from the picture to the values (read/open.luau), which the page's open
+        -- waits for in the key's handler: without the runtime's own part of the key.
+        local Open = S.included["modules/vps-avenger/src/read/open.luau"][1]
+        local read, turns = Open.read, 0
+        Open.read = function(...)
+          local t0 = T.interrupts()
+          local out = table.pack(read(...))
+          turns += T.interrupts() - t0
+          return table.unpack(out, 1, out.n)
+        end
         T.pageKey()
-        local turns = T.interrupts() - before
-        S.turnsAtAnswers, S.turnsAtState = false, false
-        T.tick()
-        turns += S.turnsAtState - S.turnsAtAnswers
+        Open.read = read
         local st = T.lastPost("state").state
         local o, m = st.osc_panel, st.macro_panel
         @CHECK@
@@ -918,7 +930,8 @@ fn a_press_whose_reads_show_no_page_says_why() {
 /// A page the key builds — pressed before it was ever ready, so its state is posted before it has
 /// loaded and waits for the load — is not told that its reads are old: the page's own `ready`,
 /// which comes as it loads, is answered with the reads the press made and no age, and the host's
-/// onReady of that first load posts nothing more.
+/// onReady of that first load shows the page with Avenger read afresh (the runtime asks `open`
+/// again there), with no age either.
 #[test]
 fn a_page_the_key_builds_is_not_told_its_fresh_reads_are_old() {
     run_mac(r##"
@@ -935,28 +948,261 @@ fn a_page_the_key_builds_is_not_told_its_fresh_reads_are_old() {
         st = T.lastPost().state
         T.ok(#T.page().posts == n + 1 and st.preset == "LD Lead 1" and st.read_age_seconds == nil, "ready: no age")
         T.pageReady()
-        T.ok(#T.page().shows == 2 and #T.page().posts == n + 1, "shown, and nothing posted again")
+        st = T.lastPost("state").state
+        T.ok(#T.page().shows == 2 and #T.page().posts > n + 1 and st.read_age_seconds == nil,
+          "shown once loaded, read afresh, with no age")
     "##);
 }
 
-/// The module disabled and enabled again while a press's questions are out: they are dropped and
-/// their callbacks never come — and the next press reads Avenger again, rather than finding the last
-/// press's reads still out for good.
+/// Nothing is left out once the key's handler is over: every question was waited for in it, so a
+/// disable has nothing of a press's to drop that could keep the next press from reading Avenger
+/// again — which it does.
 #[test]
-fn a_press_after_a_disable_dropped_the_last_ones_questions_reads_again() {
+fn nothing_of_a_press_is_out_after_its_handler_and_the_next_press_reads_again() {
     run_mac(r##"
         local S = T.S
-        T.avengerAt80("Init Preset")
+        local W = select(3, T.avengerAt80("Init Preset"))
         T.pageReady()
         local snaps = S.snaps
         T.pageKey()
-        T.ok(S.snaps == snaps + 1 and #S.screenOut > 0, "the questions are out")
+        T.ok(S.snaps == snaps + 1 and #S.screenOut == 0, "nothing out")
+        for k, n in pairs(S.out) do T.ok(n == 0, "a request still out: " .. k) end
         T.dropScreen()
+        T.event()
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
         T.pageKey()
-        T.ok(S.snaps == snaps + 2, "read again")
-        T.ok(T.count("the key again while the last press's reads are out") == 0, T.dump())
-        T.tick()
-        T.ok(#T.page().shows == 1, "shown")
+        T.event()
+        T.pageKey()
+        T.ok(S.snaps == snaps + 2 and #T.page().shows == 2, "read again, and shown")
+    "##);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The header's actions (slice 4): each a trip from a page message, as the ring's scenarios play
+// Avenger at 80 % in REAPER's floating window on a Mac.
+// ---------------------------------------------------------------------------------------------
+
+/// ▶ from the page: Avenger's window asked forward (its id, on a Mac), ▶ clicked where the ring
+/// clicks it, nothing posted until the name is read — and the name watched until it changes; then
+/// the state with the preset heading from it, the error region cleared, the focus back where the
+/// user was, and the page back. ◀ at a name that does not change is said "unchanged", in the error
+/// region the page comes back on.
+#[test]
+fn previous_and_next_from_the_page_click_watch_the_name_and_say_unchanged() {
+    run_mac(r##"
+        local S = T.S
+        local header, _, W = T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.nameIs("LD Lead 1")
+        T.openPage()
+        T.event()
+        T.ok(header.away, "away while the page is in front")
+        local clicks, from = #S.clicks, #S.pageOrder
+        T.tripFrom({ action = "next_preset", args = {}, focused = true }, W)
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "469,106", "▶ where the ring clicks it: " .. T.clickAt())
+        T.ok(T.pageSince(from) == "focus 31", "nothing posted before the name is read: " .. T.pageSince(from))
+        T.nameReads("LD Lead 2", 600)
+        T.ok(T.pageSince(from) == "focus 31,post state,post error,post restoreFocus,show", T.pageSince(from))
+        T.ok(T.lastPost("state").state.preset == "LD Lead 2" and T.lastPost("error").text == "", "the heading, read")
+        T.ok(S.front == T.PAGE_WIN and #S.clicks == clicks + 1, "the page back, and one click")
+        T.event()
+        T.nameIs("LD Lead 2")
+        T.tripFrom({ action = "prev_preset", args = {}, focused = true }, W)
+        T.ok(T.clickAt() == "450,106", "◀: " .. T.clickAt())
+        T.nameReads("LD Lead 2")
+        T.ok(T.lastPost("error").text == "Previous preset: unchanged, LD Lead 2" and T.lastPost("error").focus == true,
+          tostring(T.lastPost("error").text))
+        T.ok(T.lastPost("state").state.preset == "LD Lead 2" and S.front == T.PAGE_WIN, "the page back on it")
+    "##);
+}
+
+/// One trip at a time: ▶ pressed twice in the page before Avenger's window has come — the page
+/// still has the keyboard — starts one trip; the second message is dropped, and the runtime logs
+/// it. One click, one name.
+#[test]
+fn a_second_message_while_a_trip_is_out_is_dropped() {
+    run_mac(r##"
+        local S = T.S
+        local _, _, W = T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.nameIs("LD Lead 1")
+        T.openPage()
+        T.event()
+        local clicks = #S.clicks
+        S.focusAtOnce = false
+        S.focusLands = function() S.front, S.chain = W, { W } end
+        T.pageMsg({ action = "next_preset", args = {}, focused = true })
+        T.pageMsg({ action = "next_preset", args = {}, focused = true })
+        T.ok(T.count("trip 'Next preset' not started — busy") == 1, T.dump())
+        T.land()
+        T.runDue()
+        T.nameReads("LD Lead 2", 600)
+        T.ok(#S.clicks == clicks + 1 and S.front == T.PAGE_WIN, "one click, and the page back")
+    "##);
+}
+
+/// Load from the page: MENU clicked, Load chosen in Avenger's popup once it is seen (the ring's
+/// rows), then the file dialog that comes — a window of the DAW's, the user's for as long as they
+/// like — and Escape in it: Avenger in front again ends the wait, the name is watched, and the page
+/// comes back with it, unchanged and not called an error. Save as the same, its dialog saving under
+/// a new name, which the heading then shows.
+#[test]
+fn load_with_escape_in_its_dialog_and_save_as_read_the_name_after_the_dialog() {
+    run_mac(r##"
+        local S = T.S
+        local _, _, W = T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.nameIs("LD Lead 1")
+        T.openPage()
+        T.event()
+        local function dialog(title)
+          return { id = 950, title = title, class = "AXWindow/AXDialog/", app = T.MAC_REAPER,
+            bounds = { x = 300, y = 200, w = 700, h = 450 }, client = { x = 300, y = 228, w = 700, h = 422 } }
+        end
+        T.tripFrom({ action = "pick_load_preset", args = {}, focused = true }, W)
+        T.ok(T.clickAt() == "517,106", "MENU: " .. T.clickAt())
+        T.popup(300, 490, 116, 192, 96)
+        T.tick(1)
+        T.ok(T.clickAt() == "586,135", "Load's row: " .. T.clickAt())
+        T.closePopups()
+        T.tick(2)
+        local open = dialog("Open")
+        S.listed = { W, open }
+        T.show(open)
+        T.runDue()
+        T.ok(T.count("a dialog came forward — 'Open'") == 1, T.dump())
+        T.run(6000)
+        T.ok(S.front == open, "nothing bounds the user's time in the dialog")
+        -- Escape: Avenger in front again, the same name.
+        S.listed = { W }
+        T.show(W)
+        T.runDue()
+        T.nameReads("LD Lead 1")
+        T.ok(S.front == T.PAGE_WIN and T.lastPost("state").state.preset == "LD Lead 1"
+          and T.lastPost("error").text == "", "the name read, and the page back with nothing called wrong")
+        T.event()
+        T.tripFrom({ action = "pick_save_preset_as", args = {}, focused = true }, W)
+        T.popup(300, 490, 116, 192, 96)
+        T.tick(1)
+        T.ok(T.clickAt() == "586,172", "Save as's row: " .. T.clickAt())
+        T.closePopups()
+        T.tick(2)
+        local save = dialog("Save")
+        S.listed = { W, save }
+        T.show(save)
+        T.runDue()
+        S.listed = { W }
+        T.show(W)
+        T.runDue()
+        T.nameReads("My Lead")
+        T.ok(S.front == T.PAGE_WIN and T.lastPost("state").state.preset == "My Lead", "the new name")
+    "##);
+}
+
+/// Initialize: the page's No closes its dialog and clicks nothing in Avenger — no window asked
+/// forward, nothing posted. Its Yes chooses Initialize in MENU, then READS Avenger's warning box —
+/// nothing is clicked while the box is not read — and clicks YES where it was read; the box read
+/// until two readings without it, then everything read again off one picture, and the page comes
+/// back with it. The box overlay of the ring is never armed: the page answered the box.
+#[test]
+fn initialize_from_the_page_reads_the_box_before_yes_and_no_clicks_nothing() {
+    run_mac(r##"
+        local S = T.S
+        local _, box, W = T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.nameIs("LD Lead 1")
+        T.openPage()
+        T.event()
+        local clicks, posts, focuses = #S.clicks, #T.page().posts, #S.focusCalls
+        T.pageMsg({ action = "cancel_initialize_preset", args = {}, focused = true })
+        T.ok(#S.clicks == clicks and #T.page().posts == posts and #S.focusCalls == focuses, "No: nothing at all")
+        T.tripFrom({ action = "pick_initialize_preset", args = {}, focused = true }, W)
+        T.ok(T.clickAt() == "517,106", "MENU: " .. T.clickAt())
+        T.popup(300, 490, 116, 192, 96)
+        T.tick(1)
+        T.ok(T.clickAt() == "586,193", "Initialize's row: " .. T.clickAt())
+        T.closePopups()
+        T.tick(2)
+        local r = T.lastRead("vps-avenger page box")
+        T.ok(r and T.region(r.region) == "546,404,1058,622", "the box's band: " .. (r and T.region(r.region) or "no read"))
+        clicks = #S.clicks
+        T.answer(r, T.noBox())
+        T.ok(#S.clicks == clicks and T.lastRead("vps-avenger page box") ~= r, "not drawn yet: read again, nothing clicked")
+        T.answer(T.lastRead("vps-avenger page box"), T.boxReading("Are you sure?"))
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "718,581", "YES where it was read: " .. T.clickAt())
+        T.words({ preset = "Init Preset" })
+        local snaps = S.snaps
+        T.answer(T.lastRead("vps-avenger page box"), T.boxReading("Are you sure?"))
+        T.answer(T.lastRead("vps-avenger page box"), T.noBox())
+        T.ok(S.snaps == snaps, "one reading without the box is not yet its going")
+        T.answer(T.lastRead("vps-avenger page box"), T.noBox())
+        T.ok(S.snaps == snaps + 1 and #S.clicks == clicks + 1, "gone: Avenger read again, one picture, no other click")
+        T.runDue()
+        T.ok(S.front == T.PAGE_WIN and T.lastPost("state").state.preset == "Init Preset"
+          and T.lastPost("error").text == "", "the page back with what was read")
+        T.ok(T.count("[avenger] [page] 'Initialize preset': Avenger's warning box is up: \"Are you sure?\"") == 1, T.dump())
+        T.ok(not box.active and T.count("Avenger's warning box is looked for") == 0, "the ring's box never armed")
+    "##);
+}
+
+/// UNDO from the page, then the name — no change is no error; and the redo list: UNDO right-clicked
+/// as the ring does, the trip holding for as long as the list is up — the user's choice in it — and
+/// going on once the menu tests see it closed: then the name, which the heading shows.
+#[test]
+fn undo_and_the_redo_list_from_the_page_read_the_name_after() {
+    run_mac(r##"
+        local S = T.S
+        local _, _, W = T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.nameIs("LD Lead 1")
+        T.openPage()
+        T.event()
+        T.tripFrom({ action = "undo", args = {}, focused = true }, W)
+        T.ok(T.clickAt() == "586,106" and S.clicks[#S.clicks].button == nil, "UNDO: " .. T.clickAt())
+        T.nameReads("LD Lead 1")
+        T.ok(S.front == T.PAGE_WIN and T.lastPost("error").text == "", "no change, and nothing called wrong")
+        T.event()
+        T.tripFrom({ action = "redo_menu", args = {}, focused = true }, W)
+        T.ok(T.clickAt() == "586,106" and S.clicks[#S.clicks].button == "right", "UNDO, right: " .. T.clickAt())
+        T.popup(320, 586, 110, 150, 200)
+        T.tick(1)
+        T.run(3000)
+        T.ok(S.front ~= T.PAGE_WIN and T.lastRead("vps-avenger name") == nil or T.lastRead("vps-avenger name").answered,
+          "the list is the user's for as long as it is up")
+        T.closePopups()
+        T.tick(2)
+        T.runDue()
+        T.nameReads("LD Lead 2")
+        T.ok(S.front == T.PAGE_WIN and T.lastPost("state").state.preset == "LD Lead 2", "the name after the list")
+    "##);
+}
+
+/// Size from the page: the zoom list opened and the entry for the size asked chosen — 100 %, four
+/// entries below 80 %, where the ring's stepper takes only the one beside — then the zoom field
+/// read until it shows the new zoom, which the page's state then has.
+#[test]
+fn a_size_from_the_page_is_chosen_at_any_entry_and_read_back() {
+    run_mac(r##"
+        local S = T.S
+        local _, _, W = T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.nameIs("LD Lead 1")
+        T.openPage()
+        T.event()
+        T.tripFrom({ action = "set_zoom", args = { percent = 100 }, focused = true }, W)
+        T.ok(T.clickAt() == "132,106", "the zoom field: " .. T.clickAt())
+        T.popup(310, 114, 114, 96, 390)
+        T.tick(1)
+        T.ok(T.clickAt() == "162,309", "100 %'s entry: " .. T.clickAt())
+        T.closePopups()
+        T.tick(2)
+        T.run(300)
+        local r = T.lastRead("vps-avenger header")
+        T.ok(r and not r.answered, "the zoom field read again")
+        T.answer(r, T.header(98, 84, 2, 100))
+        T.run(300)
+        T.ok(S.front == T.PAGE_WIN and T.lastPost("state").state.zoom == 100 and T.lastPost("error").text == "",
+          tostring(T.lastPost("state").state.zoom) .. " " .. tostring(T.lastPost("error").text))
     "##);
 }
 

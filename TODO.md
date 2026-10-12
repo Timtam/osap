@@ -6724,8 +6724,9 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       read of it with named regions (the preset's name, the browser's view, a region per OSC tab,
       the macro tabs' captions and the shown tab's five names, the central tabs' captions); only
       when the view reads none, a second text read, of the browser's area, which tells an open
-      expansion by the presets it names. The page is shown once the reads are in, and a press
-      while they are out does nothing. The database gives the preset's expansion, an open
+      expansion by the presets it names. The page is shown once the reads are in. (Since slice 4
+      the questions are waited for one after another in the page's `open`, which the runtime shows
+      after — see below.) The database gives the preset's expansion, an open
       expansion's lists, and its spelling of a name read near it, each marked "from the
       database" on the page. Every share (with the tool's equivalent count), count, angle and
       word is logged, and the time from the key to the show; a calibrating run writes
@@ -6733,9 +6734,9 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       it read. The picture is cut at the primary display's right and bottom edges while Avenger's
       corner is on that display, and what lies past them is not read (the page says so in its
       error region): Avenger at 190 % and more is taller and wider than most screens, and on a
-      Mac one snapshot of all of it would pass what one may hold. One press at a time by the keys
-      of its questions (`host.screen.pending`), so that a disable that dropped them leaves the
-      key working. Tested in the scripted host, whose snapshot keeps the host's budget, with
+      Mac one snapshot of all of it would pass what one may hold. One press at a time: everything
+      is waited for in the key's handler, so nothing is left out for a disable to drop (until
+      slice 4, the keys of its questions and `host.screen.pending`). Tested in the scripted host, whose snapshot keeps the host's budget, with
       painted pictures at 80 and 200 % (on a Mac cut at the screen's edge, on Windows whole), and
       bounds on the Luau work of the whole open and of each read.
 - [ ] **The picture on a display the host does not name.** Only the primary display's size is
@@ -6762,9 +6763,46 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
 - [ ] **Not read yet, and said so on the page**: the drum slots' names and switches, the sample
       editor and DRUM SQ's length (the drums' stage); the preset rows' favourite stars, and an
       open expansion by its categories (the browser's stage).
-- [ ] **The next stages**: the runtime's page support and the header's actions through the page,
-      then the strip, the hand-overs, the knobs, the drums and the browser, and the page's own
-      Settings section.
+- [x] **The header through the page** (the plan's slice 4, module 0.3.0, on the overlay runtime's
+      page support, `com.platform.overlay >= 0.6`). `src/page.luau` is the runtime's page now
+      (`O:addPage`): the key, the show beside Avenger, the away, the way back and the page built at
+      the first identification are the runtime's; the module keeps its key setting (checked with
+      `host.keys.check`, then `O:pageKey`), the tool's sentence where Avenger is not in front
+      (`notHere`, following the key), `open` with the reads, the state then the focus, Open and
+      Close behind `sounds`, `pageLeavesDawActive` through `O:pageAgain`, `ready`, `problem`, a
+      message counting only while the page has the keyboard, and "not available in this module
+      yet" for what is not built. The open-time questions are waited for one after another in
+      `open` (the runtime shows once `open` has returned), where slice 2 asked them all at once
+      with callbacks. The nine header actions are trips (`src/actions.luau`, `O:inPlugin`) through
+      the ring's own clicks, reads and choices: ◀ ▶ with the name watched and "unchanged" said;
+      Load and Save as chosen in MENU, then the file dialog waited for and Avenger in front again
+      (`trip:afterDialog`), then the name; Initialize's Yes chosen in MENU, Avenger's warning box
+      READ and YES clicked where it was read (`D.answer`, no overlay armed), then everything read
+      again; its No clicks nothing; UNDO and the name; the redo list right-clicked, the trip held
+      until the menu tests see it closed (`trip:afterMenu`), then the name; Size at any entry of
+      the zoom list, then the zoom field. After each the page gets the state with the preset
+      heading from the read, then the error (the module's own words) or the focus back where the
+      user was. Tested in the scripted host: each action from a page message, Load with Escape in
+      its dialog, Initialize's Yes and No, a second message while a trip is out dropped, and the
+      slice 1–2 scenarios on the runtime's page.
+- [ ] **What the Mac tester confirms for slice 4** (P2, with Avenger, in REAPER and Logic):
+      - ▶ and ◀ from the page: the click lands, the heading says the new name, "unchanged" at the
+        first preset, and the page comes back on the button pressed — and whether VoiceOver reads
+        the heading's change;
+      - Load and Save as: whether the DAW's file dialog belongs to the DAW's process (a sandboxed
+        open panel of another process ends the trip as "another application"; the log names its
+        pid), and that Escape in it brings Avenger and then the page back with the name read;
+      - Initialize: the log's `YES read at … from where the table puts it` from the page's trip, the
+        box gone after YES, and everything read again; No clicks nothing;
+      - the redo list: VoiceOver in the list while the trip holds, and the page back once it closes;
+      - Size: an entry several rows from the current zoom chosen, the window resized, the page back
+        beside it, and the zoom read;
+      - the time from the key to the show now that the questions are waited for one after another
+        (`[avenger] [read] … questions of one picture; … the questions N ms`), against slice 2's;
+      - with `pageLeavesDawActive`, whether a trip arrives at all (the plug-in window's foreground
+        event with the page described `activates = false` is unmeasured).
+- [ ] **The next stages**: the strip, the hand-overs, the knobs, the drums and the browser, and
+      the page's own Settings section.
 
 ## HTML pages, stage 1: `host.gui.webview` and the Windows probe (2026-09-28)
 

@@ -44,6 +44,16 @@ function S.read(id, values)
   st.at = host.now()
 end
 
+-- What a trip read again in window `id` — the preset's name after a step, the zoom after a choice
+-- of size — over what was read before: `fields` replace those keys alone (a false one clears its
+-- key), and the rest stays as it was read, with its time.
+function S.set(id, fields)
+  local st = forWindow(id)
+  for k, v in pairs(fields) do
+    if v == false then st.values[k] = nil else st.values[k] = v end
+  end
+end
+
 -- When window `id`'s values were read (host.now), or nil: nothing read there yet.
 function S.at(id)
   local st = id and byWindow[id] or nil
