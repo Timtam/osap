@@ -921,6 +921,29 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
         `docs/` now carry the language the platform actually runs. Verified against a file
         that was not edited, so the highlighting is the alias's doing and not the relabelling.
 
+- [ ] **Each module's documentation on its own, linked from its manifest (2026-10-12, from the
+      maintainer; to be discussed before anything is built).** The maintainer: "das overlay-runtime
+      ist ja ein vom host unabhängiges modul, d.h. die anleitung zur erstellung eines solchen
+      overlays sind auch unabhängig davon und sollten getrennt dokumentiert werden." Today one site
+      holds it all: the host.* reference in `docs/api/`, and in the same place the overlay runtime's
+      API (`docs/api/overlay.md`) and its tutorial (`docs/building-an-overlay.md`), although the
+      runtime is a module (`com.platform.overlay`) with a version of its own, which its
+      documentation should follow instead of `engine_api`. The idea: a manifest field for a module's
+      documentation (for example `docs = "<url>"` in `module.toml`); the module manager offers to
+      open it when a module has one; it is hosted wherever the module's author likes, for instance
+      on GitHub Pages from the module's own repository.
+
+      To discuss: (1) the field's name and form: a URL only, a package-relative path for
+      documentation shipped in the package and readable offline, or both; (2) what moves out of this
+      site (the overlay runtime's API and tutorial, daw-hosts' entries, the data modules) and what
+      stays in the host's reference, and how the two link to each other; (3) where the runtime's
+      documentation is built and published (a site of its own or a section of this one) and how it
+      is versioned by the module's version; (4) how the manager opens it: in the system's browser,
+      an https URL checked like the install URLs, nothing loaded inside the application, the control
+      native and accessible like the rest of the manager; (5) whether the GitHub-topic discovery
+      shows the link before a module is installed; (6) `docs/module-package-format.md` documents the
+      field.
+
 ## Shared components, pulled into the runtime (2026-08-31)
 
 Asked for after ON:EAR: go back over the modules and centralise what several of them had each
