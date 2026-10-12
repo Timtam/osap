@@ -882,6 +882,7 @@ fn the_frames_name_module_files_lines_c_and_host() {
         "(host) window_prelude:120: in function '_dispatchActivate'"
     );
     assert_eq!(frame_text(&f(Some("=host.ocr"), "Lua", Some(4), None), &chunks).0, "(host) host.ocr:4: in function <(host) host.ocr:230>");
+    assert_eq!(frame_text(&f(Some("=host.screen"), "Lua", Some(4), None), &chunks).0, "(host) host.screen:4: in function <(host) host.screen:230>");
     assert_eq!(frame_text(&f(Some("=probe"), "main", Some(1), None), &chunks).0, "probe:1: in the file's top level");
 }
 

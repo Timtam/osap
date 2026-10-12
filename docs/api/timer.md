@@ -158,7 +158,7 @@ The system switches off an event tap whose thread stops answering, and keys go u
 
 **Signature:** `host.epoch() -> number`
 
-A counter that changes whenever the world may have: an OS event dispatched into a module (hotkey, key, window activation, focus change, controller event), a one-shot [`after`](#host-timer-after) coming due, an async image result (a [`profile`](./screen.md#profile-with-a-callback)'s given a callback among them), a [text read](./ocr.md#host-ocr-recognize)'s readings or a [`snapshotAsync`](./screen.md#host-screen-snapshotasync) answer arriving (once for all that arrive together), [`host.window.focus`](./window.md#host-window-focus), the turn's callbacks that waited for their module — a setting's [`onChange`](./settings.md#host-settings-onchange) called for the settings dialog or for another module's `set` (once before the first of them) — or the module itself driving input (click, move, drag, scroll, key send, typing). A [`host.timer.every`](#host-timer-every) tick does not move it, and neither does [`host.input.post`](./input.md#host-input-post).
+A counter that changes whenever the world may have: an OS event dispatched into a module (hotkey, key, window activation, focus change, controller event), a one-shot [`after`](#host-timer-after) coming due, an async image result (a [`profile`](./screen.md#profile-with-a-callback)'s given a callback among them), a [text read](./ocr.md#host-ocr-recognize)'s readings or a [`snapshotAsync`](./screen.md#host-screen-snapshotasync) answer arriving for a callback (once for all that arrive together, before the first of them — a reading or a picture a handler [waited](../module-runtime-and-lifecycle.md#a-handler-waits) for does not move it: the handler goes on in the dispatch that asked), [`host.window.focus`](./window.md#host-window-focus), the turn's callbacks that waited for their module — a setting's [`onChange`](./settings.md#host-settings-onchange) called for the settings dialog or for another module's `set` (once before the first of them) — or the module itself driving input (click, move, drag, scroll, key send, typing). A [`host.timer.every`](#host-timer-every) tick does not move it, and neither does [`host.input.post`](./input.md#host-input-post).
 
 Memoize an expensive observation against it, so repeats within one dispatch are free while a genuinely new situation is always re-observed:
 
@@ -173,7 +173,7 @@ local function expensiveThing()
 end
 ```
 
-The epoch is read after the work because work that waits — a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) without a callback — lets other events turn it over meanwhile, and an answer kept under the epoch it was asked in would be worked out again at the next call.
+The epoch is read after the work because work that waits — a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) without a callback, a [`host.screen.snapshot`](./screen.md#where-it-waits) in a handler — lets other events turn it over meanwhile (the wait itself does not), and an answer kept under the epoch it was asked in would be worked out again at the next call.
 
 Deliberately **not** time-based, and it does not advance on an idle tick. A stale answer here means acting on the wrong screen position, and "it was fresh 50 ms ago" is not a safety property.
 

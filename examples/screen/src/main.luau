@@ -2,8 +2,9 @@
 --
 -- In a timer's handler rather than at the top level: a handler is where a call can wait
 -- for what it asked, and a module's top level is not (see "Where it waits" in
--- docs/api/ocr.md). host.screen's calls do not wait yet: for now they capture on the event
--- loop here too, as they would at the top level.
+-- docs/api/screen.md). Of the calls below, `snapshot` waits here for its picture while the
+-- event loop goes on; `size`, `pixel` and `imageSearch` run on the event loop wherever they
+-- are called.
 
 host.timer.after(0, function()
   local size = host.screen.size()
@@ -14,6 +15,17 @@ host.timer.after(0, function()
 
   local c = host.screen.pixel(math.floor(size.w / 2), math.floor(size.h / 2))
   host.log.info("Pixel @ center = " .. c.hex)
+
+  -- One picture of the top-left corner, waited for in this handler, then read without touching
+  -- the screen again.
+  local snap, why = host.screen.snapshot({ region = { 0, 0, 64, 64 } })
+  if snap then
+    local corner = host.screen.pixel(0, 0, { snapshot = snap })
+    host.log.info("Snapshot " .. tostring(snap) .. ": pixel @ 0,0 = " .. corner.hex)
+    snap:release()
+  else
+    host.log.info("Snapshot: none (" .. why .. ")")
+  end
 
   -- Image search for a bundled probe over a small region. The 8x8 magenta probe is
   -- almost certainly not on screen, so this proves the decode+capture+match pipeline

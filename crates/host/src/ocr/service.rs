@@ -53,7 +53,7 @@ use super::lang::{self, LangReq, Languages};
 use super::pipeline;
 use super::policy::{CAPTURED_BUDGET, HANG, LANG_REREAD, ROUND_SLOW};
 use super::sched::{JobId, Owner, Scheduler, Started, Submitted, Ticket, TicketId};
-use super::snap_queue::{choose, Pick, Round, SnapDone, SnapLane, SnapReq};
+use super::snap_queue::{choose, Pick, Round, SnapDone, SnapId, SnapLane, SnapReq};
 use super::types::{EngineLine, EngineOut, Priority, Reading, Rect, WordBox};
 
 /// The two limits the threads enforce, as numbers the tests can shrink.
@@ -353,6 +353,26 @@ impl<S: Send + 'static> Service<S> {
         st.lane.submit(req);
         drop(st);
         self.inner.capture_cv.notify_one();
+    }
+
+    /// Makes snapshot request `id` an interactive one, unless its picture is being taken already
+    /// (`SnapLane::promote`): a handler waits for it, and somebody waits on what queued behind
+    /// that handler. The capture thread is woken, as `submit_snap` wakes it: the request may now go
+    /// before a poll's. True when it was raised.
+    pub fn promote_snap(&self, id: SnapId) -> bool {
+        let mut st = locked(&self.inner.state);
+        let raised = st.lane.promote(id);
+        drop(st);
+        if raised {
+            self.inner.capture_cv.notify_one();
+        }
+        raised
+    }
+
+    /// The lane snapshot request `id` waits in, while it waits: for the tests.
+    #[cfg(test)]
+    pub(crate) fn snap_waiting_prio(&self, id: SnapId) -> Option<Priority> {
+        locked(&self.inner.state).lane.waiting_prio(id)
     }
 
     /// The event loop set some requests' cancel flags: the capture thread answers them now,

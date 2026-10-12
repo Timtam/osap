@@ -7851,9 +7851,9 @@ kind of place that says how long the first held the loop.
       `examples/ocr` reads with a callback, `examples/screen` in a timer's handler, and a
       `could not wait here` in the capture probe's runs (Windows, macOS, the newer macOS) fails
       CI; the probe's waits and sforzando's `"text"` came with 8df17ff. The two examples were not
-      run, only compiled. `examples/screen`'s comment points at "Where it waits" in ocr.md and says
-      the `host.screen` calls do not wait yet: W1a points it at screen.md's own section and drops
-      the "yet".
+      run, only compiled. `examples/screen`'s comment pointed at "Where it waits" in ocr.md and said
+      the `host.screen` calls did not wait yet: since W1a it points at screen.md's own section, and
+      the example takes a snapshot, which waits there.
       Step 11.1, the same day: the first-read comparison of a module that reads through desktop
       duplication goes with the read handed to a thread (a text read, `snapshotAsync`, `profile`
       with a callback, the three image-worker calls) and is made there, before that read's
@@ -8018,6 +8018,39 @@ kind of place that says how long the first held the loop.
       fails against the code from before. Docs: overlay.md (`O:probe`; Where a hook runs, its table
       and example; Coming to the front; the menu item shot), building-an-overlay.md,
       screen-frame-sharing-design.md.
+      Step W1a, 2026-10-12 (wbr-final.md): the machinery of the `host.screen` waits, and `snapshot`
+      the first call that waits. In a handler `host.screen.snapshot` waits for its picture, which
+      the `screen-capture` thread takes as a plain `snapshotAsync` request whose waiter is the
+      handler (`snapshot::SnapWaiter`, `task::On::Snap`): only its module is busy meanwhile; its
+      charge is reserved at the call; it is one of the module's 16 requests, a 17th ending the
+      module's oldest, and one of the application's 64, past which it answers `nil` and the reason
+      on the next turn; a key queued behind a poll's wait raises the request (`SnapLane::promote`);
+      a disable, a reload, a cancel or module code resuming the handler withdraws it and gives its
+      charge back at once, while module code closing the handler gives the charge back only when
+      the picture comes — until then the request stays on the capture thread and the module busy.
+      Where it cannot wait it
+      captures on the event loop as before, without the first-read comparison, inside the loop
+      guard's `Screen` scope, with one line per module, call and place — three places now: outside
+      every event, where Luau cannot stop or the host waits, a coroutine — and the summary at exit
+      (`task::legacy`); the line's remedy depends on the place. The shim builds these calls
+      (`point(name, start, blocking)`, loaded a second time as `host.screen`) and has an error
+      channel: an answer that cannot be handed over raises at the caller's line. A drain that only
+      resumes handlers turns no epoch, and one that hands a callback its answer turns it once,
+      before the first: reads and snapshots alike, which changes what 8df17ff shipped for a read's
+      wait. The timer's line names the call and the form that waits for nothing (ocr.md and
+      screen.md give it). The overlay runtime 0.5.3 waits for a calibrating run's picture before a
+      press and makes the press's click only while the overlay is still where the press was. The
+      capture probe's `snapshot 200x60` waits in its timer's handler (`waited … ms (from asking to
+      the answer)`, `answered nil after …`), and CI reads those words. The scripted host notes a
+      snapshot made where the host's could not wait (`S.couldNotWait`) and fails a scenario on one
+      it did not expect (`S.mayNotWait`). Tested against the real shim and service, with a capture
+      that makes pictures: the wait holds only its module and answers what the call that does not
+      wait answers (rectangle, pixels, way of reading); each place answers at once, with its line
+      and the count; the limit; a disable; module code resuming or closing it; the error channel;
+      the raise of a key behind it; the epoch; and the runtime's check after a waited menu shot.
+      Each fails against the code from before. Nothing audible changes outside a calibrating run.
+      Docs: screen.md (Where it waits, `snapshot`), ocr.md, timer.md,
+      module-runtime-and-lifecycle.md, overlay.md.
 - [ ] **NVDA check of step V1 (session B, with V2 and T2)** — nothing should sound different.
       Kontakt with a CSS library in REAPER: a hotspot toggle pressed (its state said after the
       press, as before); the snapshot camera and its dropdown with the bar shut and open (the bar
@@ -8117,6 +8150,18 @@ kind of place that says how long the first held the loop.
       counts, the `gave up … rather than keep the reads behind it waiting` line), and ocr-bench's
       own ladder. The next ocr-bench run in CI says whether `prod`'s figures stayed where they
       were.
+- [ ] **Step W1a never ran on a Mac** (type-checked only): a handler's `host.screen.snapshot`
+      taken by ScreenCaptureKit on the `screen-capture` thread, as a `snapshotAsync`'s is, and the
+      handler going on with it; the capture probe's `snapshot 200x60 waited … ms` line in the
+      macOS jobs, which the next CI run reads; a calibrating run's press waiting for its menu shot
+      before the opener's click.
+- [ ] **W1a's remedies name `snapshotAsync`** (review of W1a): the `could not wait here` line and
+      the timer's line offer `host.screen.snapshotAsync(opts, function(snap, why) … end)` as the
+      form that waits for nothing, since `snapshot(opts, cb)` does not exist yet, and Q1 = A
+      deletes `snapshotAsync`. Slice F, which folds it into a trailing callback of `snapshot`,
+      rewrites `callback_form` in task.rs (and with it both lines), the lines screen.md gives word
+      for word and its advice to poll with `snapshotAsync` ("Where it waits"), the poll entry of
+      api-index.py, and the tests in task.rs that pin the lines.
 - [x] **NVDA check of step 11.3 (session A), before it is committed** — nothing should sound
       different; what changed is that a click, a key or a focus no longer waits for a picture the
       module has out. Windows, at the reads' own speed: sforzando's "Instrument" (an `opensMenu`
@@ -8218,6 +8263,8 @@ Follow-ups this work found and did not take on:
       keep the count to what the docs say.
 - [ ] **The synchronous `host.screen` captures** (the maintainer's decision 3; wbr-final.md, W1a
       to W4 and 12b), and with them a `read` of a snapshot that was taken on the event loop.
+      `snapshot` waits in a handler since W1a; `pixel`, `pixels` (W1b), the region calls (W2), the
+      searches and `save` (W3) and template decoding (W3t) do not yet.
       Perhaps later `snapshotAsync` as a wait, which would let Avenger's preset step be written in
       a line. Where such a wait cannot wait — in the runtime's coroutine for the hooks asked on
       every scan, in a coroutine of the module's own, where Luau cannot stop — it captures on the
@@ -8229,8 +8276,10 @@ Follow-ups this work found and did not take on:
       recognition runs; on the Mac `SCK_TIMEOUT` bounds a capture, but the GDI capture has no
       bound. Since B1b+M a module waits for its reads, so a capture that never returns leaves it
       deaf — its keys wait behind the handler, and after 30 s the `has been busy` line says so —
-      where it used to hold the whole application. Decide whether the hang clock covers the
-      capture too.
+      where it used to hold the whole application. Since W1a a handler's `snapshot` waits for
+      that thread as well, so every module that then asks it for a picture waits behind the hung
+      one. Decide whether the hang clock covers the capture too (wbr-final.md: the first
+      follow-up after 12b).
 - [ ] **A handler that reads again at once after `"failed"`** (B1b+M): during a hang a read asked
       again fails at once and is handed over on the next turn, so a handler that reads in a loop
       until it gets text turns once a tick and keeps its module busy for as long as the recogniser

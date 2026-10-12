@@ -149,7 +149,12 @@ local S = {
   logs = {},
   speech = {},
   shots = {},       -- { path, region, snapshot?, at } per saved picture
-  snaps = 0,        -- host.screen.snapshot calls: a capture on the event loop
+  snaps = 0,        -- host.screen.snapshot calls: a picture the handler waits for
+  -- Every host.screen call that waits in the host, made where it could not wait — "<call> (<place>)",
+  -- in the shim's words — as the host would have logged it: a scenario fails at its end while this
+  -- is not empty (`finish`), unless it is about such a call (`S.mayNotWait`).
+  couldNotWait = {},
+  mayNotWait = false,
   asyncs = {},      -- host.screen.snapshotAsync requests not answered yet
   order = {},       -- "snapshot", "snapshotAsync", "save", "acted", in the order they happened
   captured = {},    -- spec -> callback, as host.keys.capture was last handed it
@@ -438,8 +443,10 @@ T.host = strict("host", {
       S.shots[#S.shots + 1] = { path = path, region = opts.region, marks = #opts.marks, at = S.now }
       return true
     end,
-    -- One capture on the event loop, kept.
+    -- One picture, kept: in the host a handler waits for it, answered at once here; where it
+    -- could not wait, the place is noted (T.screenWait).
     snapshot = function(opts)
+      T.screenWait("host.screen.snapshot")
       S.snaps += 1
       S.order[#S.order + 1] = "snapshot"
       return T.snap(opts.region)
@@ -716,6 +723,16 @@ function T.answerWaits(answer)
   end)
 end
 
+-- A host.screen call that waits in the host, as the scripted host plays it: answered at once, but
+-- where the host's could not wait — outside a handler, in a coroutine, at a place Luau cannot stop
+-- — the place is noted in S.couldNotWait, in the shim's words (T.whereNow), as the host's log
+-- would say it.
+function T.screenWait(call)
+  local where = T.whereNow()
+  if where == "handler" and not coroutine.isyieldable() then where = "cannot-wait" end
+  if where ~= "handler" then S.couldNotWait[#S.couldNotWait + 1] = call .. " (" .. where .. ")" end
+end
+
 -- One tick of the menu timer, 150 ms after the last, with any timer.after that came due first,
 -- and then — as the host's tick — the events that waited in the module's mailbox.
 function T.tick(n)
@@ -863,6 +880,8 @@ return T
 pub(crate) struct Scripted {
     ocr: OnceCell<(Service<Fake>, ShutdownHandle)>,
     state: OcrState,
+    snaps: crate::snapshot::SnapState,
+    snap_bytes: Rc<Cell<usize>>,
     tasks: Tasks,
     mail: Mailboxes,
     gens: RefCell<HashMap<usize, u64>>,
@@ -892,6 +911,12 @@ impl ReadHost for Scripted {
     }
     fn ocr_state(&self) -> &OcrState {
         &self.state
+    }
+    fn snap_state(&self) -> &crate::snapshot::SnapState {
+        &self.snaps
+    }
+    fn snap_bytes(&self) -> &Rc<Cell<usize>> {
+        &self.snap_bytes
     }
     fn tasks(&self) -> &Tasks {
         &self.tasks
@@ -977,6 +1002,8 @@ pub(crate) fn harness(lua: &Lua) -> Table {
     let h = Rc::new(Scripted {
         ocr: OnceCell::new(),
         state: OcrState::default(),
+        snaps: crate::snapshot::SnapState::default(),
+        snap_bytes: Rc::new(Cell::new(0)),
         tasks: Tasks::default(),
         mail: Mailboxes::default(),
         gens: RefCell::new([(IDX, gen)].into_iter().collect()),
@@ -1053,11 +1080,20 @@ pub(crate) fn harness(lua: &Lua) -> Table {
 /// What every scenario ends on, whichever loader ran it: nothing was asked of the scripted host
 /// that it does not have — a raise that a `pcall` of the runtime swallowed included (`S.missing`) —
 /// no control's hook raised (`[overlay] '…': its text raised: …`) unless the scenario is about
-/// one (`S.hooksMayRaise`), and no handler ended with an error — a key's, a timer's, the menu
-/// tick's — unless the scenario is about that (`S.tasksMayRaise`). A `recognize` without a callback
-/// in a hook that cannot wait raises there, as in the host, so this is where such a hook is found
-/// rather than as a value that went missing without a word.
+/// one (`S.hooksMayRaise`), no handler ended with an error — a key's, a timer's, the menu
+/// tick's — unless the scenario is about that (`S.tasksMayRaise`), and no `host.screen` call that
+/// waits in the host was made where it could not wait (`S.couldNotWait`) unless the scenario is
+/// about one (`S.mayNotWait`). A `recognize` without a callback in a hook that cannot wait raises
+/// there, as in the host, so this is where such a hook is found rather than as a value that went
+/// missing without a word; a `snapshot` there holds the event loop in the host, and is found here.
 pub(crate) fn finish(lua: &Lua) {
+    if let Err(e) = end_checks(lua) {
+        panic!("{e}");
+    }
+}
+
+/// What [`finish`] checks, answered instead of failed: for a test of the checks themselves.
+fn end_checks(lua: &Lua) -> Result<(), String> {
     let check = r#"
         local S = T.S
         assert(#S.missing == 0, "the scripted host was asked for what it does not have: "
@@ -1070,10 +1106,11 @@ pub(crate) fn finish(lua: &Lua) {
         if not S.tasksMayRaise then
           assert(#S.taskErrors == 0, "a handler raised: " .. table.concat(S.taskErrors, " | "))
         end
+        if not S.mayNotWait then
+          assert(#S.couldNotWait == 0, "a host.screen call could not wait: " .. table.concat(S.couldNotWait, ", "))
+        end
     "#;
-    if let Err(e) = lua.load(check).set_name("the end of the scenario").exec() {
-        panic!("{e}");
-    }
+    lua.load(check).set_name("the end of the scenario").exec().map_err(|e| e.to_string())
 }
 
 /// A fresh VM with the scripted host and the runtime loaded into it; the scenario runs with the
@@ -1096,6 +1133,19 @@ fn run_on(os: &str, scenario: &str) {
 /// `run_on`, with `prelude` run first as a chunk of its own, with `T` already global: the
 /// helpers a sibling test file adds to the harness (`overlay_passthrough_tests.rs`).
 pub(crate) fn run_with(os: &str, prelude: &str, scenario: &str) {
+    let lua = scenario_vm(os);
+    if let Err(e) = lua.load(prelude).set_name("prelude").exec() {
+        panic!("{e}");
+    }
+    if let Err(e) = lua.load(scenario).set_name("scenario").exec() {
+        panic!("{e}");
+    }
+    finish(&lua);
+}
+
+/// The VM a scenario runs in: the scripted host for `os` and the runtime loaded against it, the
+/// harness as the global `T` and the runtime as `T.O`.
+fn scenario_vm(os: &str) -> Lua {
     let lua = Lua::new();
     let t = harness(&lua);
     let host: Table = t.get("host").unwrap();
@@ -1109,13 +1159,7 @@ pub(crate) fn run_with(os: &str, prelude: &str, scenario: &str) {
     let o: Table = wrapped.call(host).expect("the runtime loads against the scripted host");
     t.set("O", o).unwrap();
     lua.globals().set("T", t).unwrap();
-    if let Err(e) = lua.load(prelude).set_name("prelude").exec() {
-        panic!("{e}");
-    }
-    if let Err(e) = lua.load(scenario).set_name("scenario").exec() {
-        panic!("{e}");
-    }
-    finish(&lua);
+    lua
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3266,11 +3310,17 @@ fn menu_shots_are_counted_per_overlay_and_control_not_per_label() {
         local a = T.overlay(nil, "Kontakt 8 - Library")
         local b = T.overlay(nil, "Kontakt 8 - Library")
         local ca, cb = { label = "Snapshot menu" }, { label = "Snapshot menu" }
+        -- As a press that acts takes them: in a handler, where its picture waits, and then the rest.
+        local function press(o, c)
+          T.call("key", function()
+            local shots = o:_menuShots(c)
+            if shots then shots.go() end
+          end)
+          T.run(2000)
+        end
         for _ = 1, 3 do
-          a:_menuShots(ca)
-          T.run(2000)
-          b:_menuShots(cb)
-          T.run(2000)
+          press(a, ca)
+          press(b, cb)
         end
         assert(#S.shots == 12, #S.shots .. " pictures: two openings each, three pictures each")
         assert(T.count("later ones are not photographed until the module is reloaded") == 2, T.dump())
@@ -3497,4 +3547,30 @@ fn a_key_pressed_while_the_scripted_module_is_busy_runs_on_the_next_tick() {
         T.tick()
         assert(o.focus == 2, "the Tab ran on the tick after")
     "#);
+}
+
+/// The scripted host's `snapshot` answers at once, as a waited one is answered, and notes where
+/// the host's could not have waited — outside every handler, in a coroutine made inside one, where
+/// Luau cannot stop the handler — in the shim's words (`S.couldNotWait`). A scenario that leaves
+/// one there fails at its end, naming it, unless it says it is about one (`S.mayNotWait`).
+#[test]
+fn a_snapshot_where_the_host_could_not_wait_is_noted_and_fails_the_scenario() {
+    run(r#"
+        local S = T.S
+        local R = { region = { 0, 0, 10, 10 } }
+        T.host.screen.snapshot(R)
+        T.call("key", function()
+          inHandler = T.host.screen.snapshot(R)
+          coroutine.wrap(function() T.host.screen.snapshot(R) end)()
+          local _ = setmetatable({}, { __index = function() return T.host.screen.snapshot(R) end }).y
+        end)
+        assert(inHandler ~= nil, "answered in the handler")
+        local got = table.concat(S.couldNotWait, ", ")
+        assert(got == "host.screen.snapshot (none), host.screen.snapshot (foreign), host.screen.snapshot (cannot-wait)", got)
+        S.mayNotWait = true
+    "#);
+    let lua = scenario_vm("windows");
+    lua.load("T.host.screen.snapshot({ region = { 0, 0, 10, 10 } })").exec().expect("the scenario runs");
+    let failed = end_checks(&lua).expect_err("a snapshot that could not wait passed the scenario");
+    assert!(failed.contains("a host.screen call could not wait: host.screen.snapshot (none)"), "{failed}");
 }

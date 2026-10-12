@@ -793,12 +793,12 @@ jobs:
             exit 1
           fi
           # The answers from the screen-capture thread: a snapshotAsync and a change wait, always
-          # asked, and a text read of the snapshot taken on the pump when there is one. The probe
-          # says how many came of how many were asked without raising; a missing one is a thread
-          # that never called back. A snapshot that failed on the pump is its own error, not a
-          # missing callback.
-          if grep -q "CAPTURE PROBE: snapshot 200x60 returned nil" automation-platform.log; then
-            echo "::error::the snapshot on the pump thread returned nil: $(grep 'CAPTURE PROBE: snapshot 200x60' automation-platform.log)"
+          # asked, and a text read of the snapshot the timer's handler waited for when there is one.
+          # The probe says how many came of how many were asked without raising; a missing one is a
+          # thread that never called back. A waited snapshot that answered nil is its own error, not
+          # a missing callback.
+          if grep -q "CAPTURE PROBE: snapshot 200x60 answered nil" automation-platform.log; then
+            echo "::error::the snapshot the timer's handler waited for answered nil: $(grep 'CAPTURE PROBE: snapshot 200x60' automation-platform.log)"
             exit 1
           fi
           counts=$(grep -o "CAPTURE PROBE: snapshot callbacks [0-9]* of [0-9]* answered" automation-platform.log | head -n1 | awk '{print $5, $7}')
@@ -1342,8 +1342,8 @@ jobs:
           launch "$GITHUB_WORKSPACE/tools/capture-probe"
           grep -q "CAPTURE PROBE: still alive after capturing" automation-platform.log \
             || { echo "::error::the capture probe did not report back on the newer macOS"; exit 1; }
-          if grep -q "CAPTURE PROBE: snapshot 200x60 \(THREW\|returned nil\)" automation-platform.log; then
-            echo "::error::the snapshot on the pump thread failed on the newer macOS: $(grep 'CAPTURE PROBE: snapshot 200x60' automation-platform.log)"
+          if grep -q "CAPTURE PROBE: snapshot 200x60 \(THREW\|answered nil\)" automation-platform.log; then
+            echo "::error::the snapshot the timer's handler waited for failed on the newer macOS: $(grep 'CAPTURE PROBE: snapshot 200x60' automation-platform.log)"
             exit 1
           fi
           # An asynchronous ask that raised is not counted as asked, so it is looked for here.

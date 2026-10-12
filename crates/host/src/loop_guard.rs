@@ -20,7 +20,8 @@
 //! A blocking call — a host call that runs on the loop where it cannot wait (`task::legacy`) —
 //! holds `legacy(kind)` while it runs, and only that call: the exception is scoped to the call and
 //! to its kind of work, not to the module or the thread. Recognition has no such call any more,
-//! and a scope of another kind never lets it be.
+//! and a scope of another kind never lets it be: `host.screen.snapshot` where it cannot wait holds
+//! one of `Kind::Screen`.
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,9 +31,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub enum Kind {
     /// Text recognition, and the captures made for it (`off_loop`).
     Text,
-    /// A screen capture of a `host.screen` call. No call opens a scope of it yet: see
-    /// `task::legacy`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// A screen capture of a `host.screen` call that could not wait, which takes its picture on the
+    /// loop for that one call (`task::legacy`): `host.screen.snapshot` outside a handler's own
+    /// coroutine. Nothing guards screen captures on the loop yet; the scope says which work is the
+    /// call's.
     Screen,
 }
 

@@ -43,6 +43,8 @@ struct Host {
     ocr: Service<Fake>,
     stop: ShutdownHandle,
     state: OcrState,
+    snaps: crate::snapshot::SnapState,
+    snap_bytes: Rc<Cell<usize>>,
     tasks: Tasks,
     mail: Mailboxes,
     gens: RefCell<HashMap<usize, u64>>,
@@ -71,6 +73,12 @@ impl ReadHost for Host {
     }
     fn ocr_state(&self) -> &OcrState {
         &self.state
+    }
+    fn snap_state(&self) -> &crate::snapshot::SnapState {
+        &self.snaps
+    }
+    fn snap_bytes(&self) -> &Rc<Cell<usize>> {
+        &self.snap_bytes
     }
     fn tasks(&self) -> &Tasks {
         &self.tasks
@@ -136,6 +144,8 @@ fn host() -> Rc<Host> {
         ocr,
         stop,
         state: OcrState::default(),
+        snaps: crate::snapshot::SnapState::default(),
+        snap_bytes: Rc::new(Cell::new(0)),
         tasks: Tasks::default(),
         mail: Mailboxes::default(),
         gens: RefCell::new(HashMap::new()),

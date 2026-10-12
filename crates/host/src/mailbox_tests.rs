@@ -85,6 +85,12 @@ impl ReadHost for Host {
     fn ocr_state(&self) -> &OcrState {
         &self.state
     }
+    fn snap_state(&self) -> &crate::snapshot::SnapState {
+        &self.snaps
+    }
+    fn snap_bytes(&self) -> &Rc<Cell<usize>> {
+        &self.snap_bytes
+    }
     fn tasks(&self) -> &Tasks {
         &self.tasks
     }

@@ -809,6 +809,85 @@ fn an_item_whose_pick_ended_while_its_picture_was_taken_is_not_clicked() {
     "##);
 }
 
+/// In a calibrating run the press waits for its picture before the opener's click, so the overlay
+/// may have moved on when it comes: on another window then, the opener is not clicked, the log says
+/// why, and a pick asked with `chooseMenuItem` is over — `onDone(overlay, false, "inactive")`; with
+/// something drawn over the opener since, `"refused"`. A press that does not act counts for nothing:
+/// no test set running, no `pressed` hook, the last press's item still waited for, no later picture
+/// asked, its picture let go, and none of the control's two menu shots or numbers used up. Still
+/// where the press was, the opener is clicked as ever.
+#[test]
+fn an_opener_whose_overlay_moved_on_while_its_picture_was_taken_is_not_clicked() {
+    run(r##"
+        local S = T.S
+        T.calibrate(true)
+        -- A test of the scenario's own beside newWindow, counting the presses that counted.
+        local pressed = 0
+        local o = T.header({ T.O.menuTests.newWindow,
+          { name = "counts presses", test = function(_, answer) answer(false) end,
+            pressed = function() pressed += 1 end } })
+        local snapshot = rawget(T.host.screen, "snapshot")
+        local moveOn, cover = true, false
+        local pictures = {}
+        -- The window under the overlay changes while the picture is taken, while moveOn says so; or
+        -- another window is drawn over the opener, while cover does.
+        rawset(T.host.screen, "snapshot", function(opts)
+          local s = snapshot(opts)
+          pictures[#pictures + 1] = s
+          if moveOn then
+            S.origin = table.clone(S.origin)
+            S.origin.id += 1
+          end
+          if cover then S.owns = false end
+          return s
+        end)
+        -- Twice: a press that did not act would have used up both of the control's menu shots.
+        for n = 1, 2 do
+          T.press(o)
+          assert(#S.clicks == 0, "the opener clicked on another window: " .. T.clickAt(1))
+          assert(T.count("[calibrate] 'Avenger' 'Load preset': not acting after the menu shot — the overlay is on "
+            .. "another window now") == n, T.dump())
+        end
+        local st = o._menu
+        assert(pressed == 0 and st.lookUntil == 0 and st.press == nil and st.pressed == nil,
+          "a press that did not act set the tests running")
+        assert(#S.asyncs == 0 and #pictures == 2 and pictures[1].released and pictures[2].released,
+          "a press that did not act asked for later pictures, or kept its own")
+        T.call("key", function()
+          chosen = o:chooseMenuItem({ label = "Zoom", at = { 280, 14 }, menuItem = { 5, 5 },
+            onDone = function(_, ok, why) done = { ok, why } end })
+        end)
+        assert(chosen == false and #S.clicks == 0 and done and done[1] == false and done[2] == "inactive",
+          "chosen on another window: " .. tostring(done and done[2]))
+        moveOn = false
+        T.press(o)
+        assert(#S.clicks == 1 and T.clickAt(1) == "362,64", "where the press was, the opener is clicked: " .. T.clickAt(1))
+        assert(pressed == 1 and #S.asyncs == 2, "the press counted, and was photographed")
+        local pick = o._pick
+        assert(pick and pick.c.label == "Load preset" and pick.shoot, "its item is waited for")
+        -- Something drawn over the next opener while its picture is taken: refused, and it ends no pick.
+        cover = true
+        T.call("key", function()
+          chosen = o:chooseMenuItem({ label = "Zoom", at = { 280, 14 }, menuItem = { 5, 5 },
+            onDone = function(_, ok, why) done = { ok, why } end })
+        end)
+        assert(chosen == false and #S.clicks == 1 and done[2] == "refused", "chosen under a cover: " .. tostring(done[2]))
+        assert(T.count("Avenger: 'Zoom' at (380,64) is inside our window's frame but another window is "
+          .. "drawn there — not clicking") == 1, T.dump())
+        assert(o._pick == pick and pressed == 1 and #S.asyncs == 2 and pictures[#pictures].released,
+          "a refused press ended the last one's pick, counted, or kept its picture")
+        S.owns, cover = true, false
+        -- The press that acted is the control's first photographed, numbered first.
+        T.run(2000)
+        local before
+        for _, s in ipairs(S.shots) do
+          if string.find(s.path, "menu%-before") then before = s.path end
+        end
+        assert(before == "C:/modules/overlay-runtime/calibration/Avenger-Load-preset-menu-before.png",
+          tostring(before))
+    "##);
+}
+
 /// The popup of a plug-in whose menu takes the front — a window of the same process: the overlay
 /// holds its place over it, and the item is chosen there, asked of that window.
 #[test]

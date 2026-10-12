@@ -40,11 +40,11 @@ end
 
 -- Snapshots: answers that come back from the `screen-capture` thread in a callback — a plain
 -- `snapshotAsync` and a change wait on a screen nobody touches, asked first and whatever else
--- happens, and a text read of the snapshot taken on the pump, asked only when that snapshot
--- exists — and that one picture read several ways. The job compares the callbacks that came with
--- the ones asked for: a missing one is a thread that never answered, never a snapshot that failed
--- on the pump, which has a line of its own, nor a call that raised, which says THREW and is not
--- counted as asked.
+-- happens, and a text read of the snapshot the timer's handler waited for, asked only when that
+-- snapshot exists — and that one picture read several ways. The job compares the callbacks that
+-- came with the ones asked for: a missing one is a thread that never answered, never a snapshot
+-- that answered nil, which has a line of its own, nor a call that raised, which says THREW and is
+-- not counted as asked.
 local SNAP_REGION = { 0, 0, 200, 60 }
 local POINTS = { { 10, 10 }, { 100, 30 }, { 199, 59 } }
 local answered = 0
@@ -75,6 +75,9 @@ end
 local function snapshotLines()
   askTheThread()
 
+  -- Without a callback, in this timer's handler: the handler waits for the picture, which the
+  -- `screen-capture` thread takes, and the time is from asking to the answer — the thread's queue
+  -- and the tick that hands it over included.
   local t = now()
   local ok, snap, why = pcall(host.screen.snapshot, { region = SNAP_REGION })
   if not ok then
@@ -82,10 +85,10 @@ local function snapshotLines()
     return
   end
   if not snap then
-    report("snapshot 200x60 returned nil in %d ms: %s", now() - t, tostring(why))
+    report("snapshot 200x60 answered nil after %d ms (from asking to the answer): %s", now() - t, tostring(why))
     return
   end
-  report("snapshot 200x60 returned in %d ms: %s", now() - t, tostring(snap))
+  report("snapshot 200x60 waited %d ms (from asking to the answer): %s", now() - t, tostring(snap))
 
   local t1 = now()
   local okl, live, lwhy = pcall(host.screen.pixels, POINTS)

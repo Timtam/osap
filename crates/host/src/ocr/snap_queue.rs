@@ -350,6 +350,27 @@ impl SnapLane {
         Some(Round { source, rects, poll, members: members.into_iter().map(|e| e.req).zip(at).collect(), started: now })
     }
 
+    /// Request `id` is waited on by a person now: a handler waits for its picture, and an event
+    /// somebody waits on queued behind that handler (`task::promote`). It goes as an interactive
+    /// one from here — before the polls' pictures, and alone in a round when its region cannot
+    /// share theirs. One being taken already is taken as it started. True when a waiting request
+    /// of the background lane was raised.
+    pub fn promote(&mut self, id: SnapId) -> bool {
+        match self.waiting.iter_mut().find(|e| e.req.ticket.id == id) {
+            Some(e) if e.req.ticket.prio == Priority::Background => {
+                e.req.ticket.prio = Priority::Interactive;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The lane request `id` waits in, while it waits: for the tests.
+    #[cfg(test)]
+    pub fn waiting_prio(&self, id: SnapId) -> Option<Priority> {
+        self.waiting.iter().find(|e| e.req.ticket.id == id).map(|e| e.req.ticket.prio)
+    }
+
     /// Whether module `idx` has a request waiting or being taken whose next picture is meant to
     /// show the screen as it was at the call ([`SnapReq::shows_the_call`]). Only asked, never
     /// waited for: acting meanwhile is noted (`ocr::lua::note_acting`).

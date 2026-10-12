@@ -38,6 +38,7 @@
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -63,6 +64,10 @@ pub(crate) trait ReadHost: 'static {
     type Shot: Send + 'static;
     fn ocr(&self) -> &Service<Self::Shot>;
     fn ocr_state(&self) -> &OcrState;
+    /// The snapshot requests waiting for the capture thread — `snapshotAsync`'s and the handlers'
+    /// that wait in `host.screen.snapshot` — and what their pictures are charged against.
+    fn snap_state(&self) -> &crate::snapshot::SnapState;
+    fn snap_bytes(&self) -> &Rc<Cell<usize>>;
     fn tasks(&self) -> &Tasks;
     /// module_idx → the generation of the VM it runs now (`image_search::register_vm`).
     fn vm_gens(&self) -> Ref<'_, HashMap<usize, u64>>;
@@ -82,6 +87,12 @@ impl ReadHost for Shared {
     }
     fn ocr_state(&self) -> &OcrState {
         &self.ocr_state
+    }
+    fn snap_state(&self) -> &crate::snapshot::SnapState {
+        &self.snap_state
+    }
+    fn snap_bytes(&self) -> &Rc<Cell<usize>> {
+        &self.snap_bytes
     }
     fn tasks(&self) -> &Tasks {
         &self.tasks
@@ -872,9 +883,10 @@ pub(crate) struct Delivered {
 /// Delivers what the threads finished and what was decided without them: each callback handed to
 /// its module's mailbox — run at once if the module is free — and each handler waiting for one
 /// resumed, in one order: first what was decided without the threads, in the order it was decided,
-/// then the finished jobs, in the order they finished. First of all, the hang answer: a recogniser
-/// that has answered nothing for `HANG` ends every read still out (`Service::hang_sweep`). Driven
-/// by the loop tick, after the image results.
+/// then the finished jobs, in the order they finished. The epoch turns once, before the first
+/// callback's answer; a drain that only resumes handlers leaves it where it was. First of all, the
+/// hang answer: a recogniser that has answered nothing for `HANG` ends every read still out
+/// (`Service::hang_sweep`). Driven by the loop tick, after the image results.
 pub(crate) fn fire<H: MailHost>(h: &H) -> Delivered {
     let st = h.ocr_state();
     // Only while a read is out: with none, there is nothing to end, and the service's lock is
@@ -919,12 +931,18 @@ pub(crate) fn fire<H: MailHost>(h: &H) -> Delivered {
     if deliveries.is_empty() {
         return out;
     }
-    // One epoch for the drain: every answer in it is a fresh look at the screen.
-    h.bump_epoch();
+    // One epoch for the drain's callbacks, turned before the first of them: every answer handed
+    // to one is a fresh look at the screen. A handler that waited goes on with its own answer,
+    // which continues the dispatch that asked and turns nothing (`task.rs`).
+    let mut turned = false;
     for (p, readings, picture) in deliveries {
         match p.waiter {
             // Judged when it runs (`open_read`): a key queued before it may read again.
             Waiter::Callback(_) => {
+                if !turned {
+                    h.bump_epoch();
+                    turned = true;
+                }
                 let (idx, lua, prio) = (p.owner.idx, p.lua.clone(), p.prio);
                 let _prio = enter_priority(prio);
                 let ran = mailbox::deliver(h, idx, &lua, Event::Read(Box::new(ReadAnswer { p, readings, picture })));

@@ -8,8 +8,11 @@
 //! The holder below stands where the host's `Shared` stands — the service, the reads waiting on
 //! the event loop, the tasks, the timers, which VM each module runs and whether it is enabled —
 //! and each test builds module VMs over it with the host's own bindings: `host.ocr.recognize`, both
-//! forms, and `pending` (ocr/lua.rs and the shim), and `host.timer` (timers.rs). The tick is
-//! `fire`: due timers, then the readings, as the loop runs them.
+//! forms, and `pending` (ocr/lua.rs and the shim), `host.screen.snapshot`, which waits, and
+//! `snapshotAsync` (snapshot.rs), and `host.timer` (timers.rs). The tick is `fire`: due timers,
+//! then the readings, as the loop runs them; the snapshots' delivery is `fire_snaps`. A snapshot
+//! taken where it cannot wait is a picture of its region made on the spot, input epoch 7; the
+//! capture thread's rounds have pictures from x = 20000 on.
 //!
 //! The fake recogniser reads every region as "x,y" — its corner — and can be held: a capture of
 //! a region whose x a test `hold`s waits until it lets go, a snapshot round's as well, and so does
@@ -61,6 +64,8 @@ static HELD_CV: Condvar = Condvar::new();
 /// Every x the fake photographed, and every x it has begun to recognise.
 static TAKEN: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 static RECOGNISING: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+/// Every x whose text read's capture the fake has begun, held or not.
+static CAPTURING: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
 pub(crate) fn hold(x: i32) {
     locked(&HELD).0.push(x);
@@ -98,8 +103,18 @@ fn wait_recognising(x: i32) {
     }
 }
 
+/// Waits until the capture of a text read of `x` has begun — the capture thread is in it, held
+/// there when `x` is held — 10 s at most.
+fn wait_capturing(x: i32) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while !locked(&CAPTURING).contains(&x) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn fake_capture(regions: &[(i32, i32, i32, i32)], _: CaptureSource) -> (Fake, usize) {
     crate::loop_guard::off_loop("the fake capture");
+    locked(&CAPTURING).extend(regions.iter().map(|r| r.0));
     for r in regions {
         wait_while_held(r.0, true);
     }
@@ -128,6 +143,9 @@ fn fake_recognise(shot: &Fake, _: &[(i32, i32, i32, i32)], ctx: &Recognise) -> V
         Ok(line_of(format!("{x},{y}")))
     })
 }
+
+/// Where the fake's snapshot rounds begin to have pictures (`worker`'s `frames`).
+const SNAP_X: i32 = 20_000;
 
 /// Whether the language list of the holder that holds it is still held back (`held_langs`).
 static LANGS_HELD: Mutex<bool> = Mutex::new(true);
@@ -172,12 +190,24 @@ pub(crate) fn worker() -> OcrWorker<Fake> {
         capture: fake_capture,
         recognise: fake_recognise,
         languages: || Languages { available: vec!["en-US".into()], fast: vec![], preferred: vec!["en-US".into()] },
+        // A snapshot round's pictures: from x = 20000 on, a picture of the region whose pixel at
+        // (px, py) is (px, py, 50) (`snapshot::test_frame`); elsewhere none.
         frames: |regions, _, _| {
             crate::loop_guard::off_loop("the fake snapshot round");
             for r in regions {
                 wait_while_held(r.0, true);
             }
-            regions.iter().map(|_| Err("no snapshots here".to_string())).collect()
+            locked(&TAKEN).extend(regions.iter().map(|r| r.0));
+            regions
+                .iter()
+                .map(|&(x, y, w, h)| {
+                    if x >= SNAP_X {
+                        Ok(crate::snapshot::test_frame(x, y, w, h))
+                    } else {
+                        Err("no snapshots here".to_string())
+                    }
+                })
+                .collect()
         },
         compare: fake_compare,
         display_of: |_, _| 0,
@@ -195,6 +225,8 @@ struct Host {
     ocr: Service<Fake>,
     stop: ShutdownHandle,
     state: OcrState,
+    snaps: crate::snapshot::SnapState,
+    snap_bytes: Rc<Cell<usize>>,
     tasks: Tasks,
     mail: Mailboxes,
     timers: Timers,
@@ -220,6 +252,12 @@ impl ReadHost for Host {
     }
     fn ocr_state(&self) -> &OcrState {
         &self.state
+    }
+    fn snap_state(&self) -> &crate::snapshot::SnapState {
+        &self.snaps
+    }
+    fn snap_bytes(&self) -> &Rc<Cell<usize>> {
+        &self.snap_bytes
     }
     fn tasks(&self) -> &Tasks {
         &self.tasks
@@ -255,6 +293,9 @@ impl MailHost for Host {
             Event::Read(r) => reads::open_read(self, *r),
             Event::After { token } => timer(self.timers.take_queued(token)),
             Event::Every { token } => timer(self.timers.every_fn(token)),
+            Event::Snapshot { p, answer } => crate::snapshot::open_snapshot_in(&self.snaps, *p, answer, &self.snap_bytes, &|i, w, m| {
+                self.report_error(i, w, m)
+            }),
             Event::Call { f, args, what, .. } => mailbox::open_call(idx, f, args, what),
             _ => Opened::Gone,
         }
@@ -263,6 +304,7 @@ impl MailHost for Host {
         match ev {
             Event::Read(r) => reads::discard_read(self, *r),
             Event::After { token } => self.timers.drop_queued(token),
+            Event::Snapshot { p, .. } => crate::snapshot::drop_answer(&self.snaps, *p),
             _ => {}
         }
     }
@@ -282,6 +324,8 @@ fn holder((ocr, stop): (Service<Fake>, ShutdownHandle)) -> Rc<Host> {
         ocr,
         stop,
         state: OcrState::default(),
+        snaps: crate::snapshot::SnapState::default(),
+        snap_bytes: Rc::new(Cell::new(0)),
         tasks: Tasks::default(),
         mail: Mailboxes::default(),
         timers: Timers::default(),
@@ -329,10 +373,26 @@ fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     let waits = task::waits(&lua, idx, h.clone(), submit).unwrap();
     ocr.set("recognize", waits.get::<Function>("recognize").unwrap()).unwrap();
     host.set("ocr", ocr).unwrap();
+    let screen = lua.create_table().unwrap();
+    screen.set("snapshot", crate::snapshot::test_snapshot(&lua, idx, h.clone()).unwrap()).unwrap();
+    let hh = h.clone();
+    screen
+        .set(
+            "snapshotAsync",
+            lua.create_function(move |lua, (opts, cb): (Value, Function)| {
+                let args = crate::snapshot::parse_async(&opts, 0.0)?;
+                crate::snapshot::test_submit_async(&*hh, lua, idx, args, cb)
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    host.set("screen", screen).unwrap();
     lua.globals().set("host", host).unwrap();
     lua.globals()
         .set("hostCall", lua.create_function(|_, (f, args): (Function, MultiValue)| f.call::<MultiValue>(args)).unwrap())
         .unwrap();
+    let hh = h.clone();
+    lua.globals().set("epoch", lua.create_function(move |_, ()| Ok(hh.epoch.get())).unwrap()).unwrap();
     lua.globals()
         .set(
             "boom",
@@ -815,7 +875,7 @@ fn a_blocking_call_is_said_once_per_module_call_and_case_and_counted() {
         l.globals().set("blocking", blocking).unwrap();
     }
     run(&lua, "pcall(blocking, 'pixel', 'none', true)");
-    assert!(!h.tasks.legacy_said("m1", "host.screen.pixel", Case::CannotWait), "a raise was logged as the first call");
+    assert!(!h.tasks.legacy_said("m1", "host.screen.pixel", Case::Outside), "a raise was logged as the first call");
     run(
         &lua,
         "blocking('pixel', 'none', false); blocking('pixel', 'cannot-wait', false)\n\
@@ -823,19 +883,20 @@ fn a_blocking_call_is_said_once_per_module_call_and_case_and_counted() {
     );
     run(&other, "blocking('pixel', 'none', false)");
     for (id, call, case) in [
+        ("m1", "host.screen.pixel", Case::Outside),
         ("m1", "host.screen.pixel", Case::CannotWait),
         ("m1", "host.screen.pixel", Case::OwnCoroutine),
-        ("m1", "host.screen.save", Case::CannotWait),
-        ("m2", "host.screen.pixel", Case::CannotWait),
+        ("m1", "host.screen.save", Case::Outside),
+        ("m2", "host.screen.pixel", Case::Outside),
     ] {
         assert!(h.tasks.legacy_said(id, call, case), "{id} {call} {case:?} not said");
     }
-    assert!(!h.tasks.legacy_said("m2", "host.screen.save", Case::CannotWait));
+    assert!(!h.tasks.legacy_said("m2", "host.screen.save", Case::Outside));
     h.tasks.forget_legacy_said("m1");
-    assert!(!h.tasks.legacy_said("m1", "host.screen.pixel", Case::CannotWait));
-    assert!(h.tasks.legacy_said("m2", "host.screen.pixel", Case::CannotWait), "only m1's lines are forgotten");
+    assert!(!h.tasks.legacy_said("m1", "host.screen.pixel", Case::Outside));
+    assert!(h.tasks.legacy_said("m2", "host.screen.pixel", Case::Outside), "only m1's lines are forgotten");
     run(&lua, "blocking('pixel', 'none', false)");
-    assert!(h.tasks.legacy_said("m1", "host.screen.pixel", Case::CannotWait), "written again after it was forgotten");
+    assert!(h.tasks.legacy_said("m1", "host.screen.pixel", Case::Outside), "written again after it was forgotten");
     let summary: Vec<String> = h.tasks.legacy_summary().into_iter().map(|(scope, line)| format!("{scope}: {line}")).collect();
     assert_eq!(summary.len(), 3, "{summary:?}");
     assert!(summary[0].starts_with("screen: [m1] host.screen.pixel held the event loop 5 time(s), "), "{summary:?}");
@@ -1128,7 +1189,7 @@ fn start_called_by_module_code_raises_and_leaves_no_reading() {
         local sneaky = setmetatable({}, { __index = function(_, k)
           if k == "client" then
             stolen = stealStart()
-            nested = { pcall(stolen, { 9091, 5, 9121, 15 }, nil, {}) }
+            nested = { pcall(stolen, {}, { 9091, 5, 9121, 15 }, nil) }
             return { x = 9093, y = 0, w = 30, h = 10 }
           end
           return nil
@@ -1137,7 +1198,7 @@ fn start_called_by_module_code_raises_and_leaves_no_reading() {
           okWait, errWait = pcall(host.ocr.recognize, { window = sneaky, fraction = { 0, 0, 1, 1 } })
           errWait = tostring(errWait)
         end)
-        ok, err = pcall(stolen, { 9092, 5, 9122, 15 }, nil, {})
+        ok, err = pcall(stolen, {}, { 9092, 5, 9122, 15 }, nil)
         err = tostring(err)
         "#,
     );
@@ -1643,6 +1704,343 @@ fn pending_says_whether_a_read_or_a_wait_with_the_key_is_out() {
         let e = lua.load(bad).exec().expect_err(bad).to_string();
         assert!(e.contains(says), "{bad}: {e}");
     }
+}
+
+// ── host.screen.snapshot waits ───────────────────────────────────────────────────────────────
+
+/// The snapshots' delivery, as the tick runs it: a handler that waited goes on, a callback's answer
+/// goes to its module's mailbox. No profile is asked in these tests.
+fn fire_snaps(h: &Host) {
+    crate::snapshot::fire_snaps(h, &|_, _| panic!("no profile is asked in these tests"));
+}
+
+/// Turns of the loop — the snapshots only — until no snapshot request is waiting any more, 10 s at
+/// most.
+fn settle_snaps(h: &Host) {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        fire_snaps(h);
+        if !h.snaps.has_pending() || Instant::now() >= until {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// The snapshot `v`: its rectangle, pixels, `time`, `inputEpoch` and `via`.
+fn picture_of(v: Value) -> (Rect, Vec<u8>, i64, u64, &'static str) {
+    crate::snapshot::test_picture(&v).expect("a snapshot")
+}
+
+/// The snapshot in global `name` of `lua`.
+fn picture(lua: &Lua, name: &str) -> (Rect, Vec<u8>, i64, u64, &'static str) {
+    picture_of(lua.globals().get::<Value>(name).unwrap())
+}
+
+/// `host.screen.snapshot` in a handler waits for the `screen-capture` thread's picture: only its
+/// module is busy — its next key waits in its mailbox, and another module's key runs meanwhile —
+/// its charge is reserved at the call, and the handler goes on with what the call that does not
+/// wait returns: one value, a handle of the same rectangle, the same pixels and the same way of
+/// reading. Its `time` and `inputEpoch` are its picture's, taken on the thread.
+#[test]
+fn a_snapshot_in_a_handler_waits_and_answers_what_the_call_that_does_not_wait_answers() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let other = vm(&h, 2);
+    hold(20001);
+    run(
+        &lua,
+        r##"
+        order = {}
+        blocked = host.screen.snapshot({ region = { 20001, 5, 20011, 9 } })
+        function shoot()
+          order[#order + 1] = "asked"
+          waited, why = host.screen.snapshot({ region = { 20001, 5, 20011, 9 } })
+          values = select("#", host.screen.snapshot({ region = { 20012, 5, 20022, 9 } }))
+          order[#order + 1] = "answered"
+        end
+        function key() order[#order + 1] = "key" end
+        "##,
+    );
+    run(&other, "function key() ran = true end");
+    let before = h.snap_bytes.get();
+    h.ocr.note_input_epoch(41);
+    assert_eq!(event(&h, &lua, "shoot", Vec::new(), true), mailbox::Delivered::Parked);
+    assert!(h.snap_bytes.get() > before, "the wait's charge is reserved at the call");
+    assert_eq!(event(&h, &lua, "key", Vec::new(), true), mailbox::Delivered::Queued, "its keys wait behind it");
+    let f: Function = other.globals().get("key").unwrap();
+    let ran = mailbox::deliver(&*h, 2, &other, Event::Call { f, args: MultiValue::new(), input: true, what: "key" });
+    assert_eq!(ran, mailbox::Delivered::Ran, "another module's key runs meanwhile");
+    assert!(yes(&lua, "return #order == 1 and waited == nil"));
+    release(20001);
+    settle_snaps(&h);
+    mailbox::run_queued(&*h);
+    assert!(
+        yes(&lua, r#"return table.concat(order, " | ") == "asked | answered | key" and why == nil and values == 1"#),
+        "{:?}",
+        lua.load("return table.concat(order, ' | ')").eval::<String>()
+    );
+    let (rect, pixels, _, epoch, via) = picture(&lua, "blocked");
+    let (wrect, wpixels, wtime, wepoch, wvia) = picture(&lua, "waited");
+    assert_eq!((wrect, wvia), (rect, via), "the same rectangle, read the same way");
+    assert_eq!(wpixels, pixels, "the same pixels");
+    assert_eq!((epoch, wepoch), (7, 41), "the event loop's at the call, and the thread's once taken");
+    assert!(wtime >= 0);
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// Where a handler cannot stop, `host.screen.snapshot` takes its picture on the event loop as it
+/// always did, and answers at once: outside every handler (the top level), where Luau cannot stop
+/// the handler (a function the host calls, a metamethod), in a coroutine of the module's own. The
+/// host says so once per module, call and place, and counts every call there for the summary at
+/// exit — a mistake, which still raises, included; in the handler's own coroutine it waits.
+#[test]
+fn where_a_snapshot_cannot_wait_it_answers_at_once_and_is_said_once_per_place() {
+    let h = host();
+    let lua = vm(&h, 1);
+    run(
+        &lua,
+        r#"
+        local R = { region = { 20021, 5, 20031, 9 } }
+        okMistake = pcall(host.screen.snapshot, { region = { 0, 0, 10 } })
+        top = host.screen.snapshot(R)
+        top2 = host.screen.snapshot(R)
+        task.run(function()
+          got = {}
+          got.host = hostCall(function() return host.screen.snapshot(R) end)
+          got.meta = setmetatable({}, { __index = function() return host.screen.snapshot(R) end }).x
+          got.own = coroutine.wrap(function() return host.screen.snapshot(R) end)()
+          got.waited = host.screen.snapshot(R)
+        end)
+        "#,
+    );
+    assert!(yes(&lua, "return okMistake == false and got.waited == nil"), "the task's own call waits");
+    for case in [Case::Outside, Case::CannotWait, Case::OwnCoroutine] {
+        assert!(h.tasks.legacy_said("m1", "host.screen.snapshot", case), "{case:?} not said");
+    }
+    settle_snaps(&h);
+    for name in ["top", "top2"] {
+        assert_eq!(picture(&lua, name).3, 7, "{name}: taken on the event loop");
+    }
+    let got: Table = lua.globals().get("got").unwrap();
+    for name in ["host", "meta", "own"] {
+        assert_eq!(picture_of(got.get(name).unwrap()).3, 7, "{name}: taken on the event loop");
+    }
+    let (waited, _, _, epoch, _) = picture_of(got.get("waited").unwrap());
+    assert_eq!((waited, epoch), (Rect::new(20021, 5, 10, 4), 0), "taken on the capture thread");
+    let summary = h.tasks.legacy_summary();
+    assert_eq!(summary.len(), 1, "{summary:?}");
+    assert_eq!(summary[0].0, "screen");
+    assert!(summary[0].1.starts_with("[m1] host.screen.snapshot held the event loop 6 time(s), "), "{summary:?}");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// A waited snapshot is one of its module's requests, under `snapshotAsync`'s limits: with the
+/// whole application's 64 waiting it is not taken, and the handler goes on with `nil` and the
+/// reason, on the next turn — the answer the call gives for a limit, never a raise.
+#[test]
+fn a_waited_snapshot_past_the_applications_limit_answers_nil_and_why() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let askers: Vec<Lua> = (2..6).map(|i| vm(&h, i)).collect();
+    hold(20041);
+    for l in &askers {
+        run(
+            l,
+            "answered = 0\n\
+             for _ = 1, 16 do host.screen.snapshotAsync({ region = { 20041, 5, 20051, 9 } }, function() answered += 1 end) end",
+        );
+    }
+    run(&lua, "task.run(function() waited, why = host.screen.snapshot({ region = { 20061, 5, 20071, 9 } }); done = true end)");
+    assert!(yes(&lua, "return done == nil"), "it waits for its answer, a refusal too");
+    fire_snaps(&h);
+    assert!(yes(&lua, "return done == true and waited == nil"));
+    let why: String = lua.globals().get("why").unwrap();
+    assert_eq!(why, crate::snapshot::all_requests_refused());
+    release(20041);
+    settle_snaps(&h);
+    for l in &askers {
+        assert!(yes(l, "return answered == 16"));
+    }
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// A module disabled while its handler waits for a snapshot: the handler never goes on, and its
+/// request is withdrawn — its charge given back at once — so nothing of it is answered later.
+#[test]
+fn a_snapshot_wait_goes_with_its_module_and_gives_its_charge_back() {
+    let h = host();
+    let lua = vm(&h, 1);
+    hold(20081);
+    run(&lua, "function shoot() s = host.screen.snapshot({ region = { 20081, 5, 20091, 9 } }); after = true end");
+    let before = h.snap_bytes.get();
+    assert_eq!(event(&h, &lua, "shoot", Vec::new(), false), mailbox::Delivered::Parked);
+    assert!(h.snap_bytes.get() > before);
+    assert_eq!(h.snaps.test_ids_of(1).len(), 1);
+    disable(&h, 1);
+    assert_eq!(h.snap_bytes.get(), before, "its charge is back at once");
+    assert!(h.snaps.test_ids_of(1).is_empty(), "its request is withdrawn");
+    assert_eq!(h.tasks.len(), 0);
+    release(20081);
+    settle_snaps(&h);
+    enable(&h, 1);
+    settle_snaps(&h);
+    assert!(yes(&lua, "return after == nil and s == nil"), "nothing of it went on");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+}
+
+/// Module code that resumes the coroutine of a handler waiting for a snapshot: the wait raises
+/// there, the handler is the host's no more, and its request is withdrawn with its charge. Module
+/// code that closes it: it has ended, and its picture is let go when it comes, charge and all.
+#[test]
+fn module_code_resuming_or_closing_a_snapshot_wait_takes_it_from_the_host() {
+    let h = host();
+    let lua = vm(&h, 1);
+    hold(20101);
+    let before = h.snap_bytes.get();
+    run(
+        &lua,
+        r#"
+        id = task.run(function()
+          co = coroutine.running()
+          ok, err = pcall(host.screen.snapshot, { region = { 20101, 5, 20111, 9 } })
+          finished = true
+        end)
+        resumedBy = { coroutine.resume(co, "not the host") }
+        "#,
+    );
+    assert!(yes(&lua, "return ok == false and finished == true and resumedBy[1] == true and task.alive(id) == false"));
+    let err: String = lua.load("return tostring(err)").eval().unwrap();
+    assert!(err.contains(&format!("host.screen.snapshot{}", task::RESUMED)), "{err}");
+    assert_eq!(h.snap_bytes.get(), before, "the disowned wait's charge is back");
+    assert!(h.snaps.test_ids_of(1).is_empty(), "and its request withdrawn");
+    release(20101);
+    run(
+        &lua,
+        r#"
+        closed = task.run(function()
+          co2 = coroutine.running()
+          host.screen.snapshot({ region = { 20102, 5, 20112, 9 } })
+          resumed = true
+        end)
+        closedOk = coroutine.close(co2)
+        "#,
+    );
+    settle_snaps(&h);
+    assert!(yes(&lua, "return closedOk == true and resumed == nil and task.alive(closed) == false"));
+    assert_eq!(h.snap_bytes.get(), before, "the closed wait's picture is let go");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// An answer that cannot be handed over raises at the line of the call that waited — caught there
+/// by a `pcall`, or reported as the handler's error — as the delivery answers a picture it could
+/// not build in the module's VM. The request's own answer, when it comes, finds nobody.
+#[test]
+fn an_answer_that_cannot_be_handed_over_raises_at_the_call_that_waited() {
+    let h = host();
+    let lua = vm(&h, 1);
+    hold(20161);
+    hold(20162);
+    run(
+        &lua,
+        "id = task.run(function()\n\
+           ok, err = pcall(function() return host.screen.snapshot({ region = { 20161, 5, 20171, 9 } }) end)\n\
+           host.screen.snapshot({ region = { 20162, 5, 20172, 9 } })\n\
+           after = true\n\
+         end)",
+    );
+    let id: i64 = lua.globals().get("id").unwrap();
+    let first = h.snaps.test_ids_of(1);
+    assert_eq!(first.len(), 1);
+    assert!(task::resume_snap(&*h, id, first[0], || Err("the picture could not be handed over".to_string())));
+    let err: String = lua.load("return tostring(err)").eval().unwrap();
+    assert!(yes(&lua, "return ok == false and after == nil"));
+    assert!(err.contains("mod.luau:2: the picture could not be handed over"), "{err}");
+    let second = *h.snaps.test_ids_of(1).last().unwrap();
+    assert!(task::resume_snap(&*h, id, second, || Err("again".to_string())));
+    let e = errors(&h);
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert!(e[0].1 == "task" && e[0].2.contains("mod.luau:3: again"), "{e:?}");
+    release(20161);
+    release(20162);
+    settle_snaps(&h);
+    assert!(yes(&lua, "return after == nil"));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// A key queued behind a handler that waits for a poll's snapshot makes its request an interactive
+/// one while it waits for the capture thread — ahead of the polls' pictures — as it does a read;
+/// a poll's own timer queued behind it raises nothing.
+#[test]
+fn a_key_queued_behind_a_polls_snapshot_makes_its_request_interactive() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let other = vm(&h, 2);
+    hold(9501);
+    run(&other, "host.ocr.recognize({ 9501, 5, 9531, 15 }, function(r) seen = r.text end)");
+    wait_capturing(9501);
+    run(
+        &lua,
+        "function poll() s = host.screen.snapshot({ region = { 20121, 5, 20131, 9 } }) end\n\
+         presses = 0\n\
+         function key() presses += 1 end",
+    );
+    assert_eq!(event(&h, &lua, "poll", Vec::new(), false), mailbox::Delivered::Parked);
+    let id = h.snaps.test_ids_of(1)[0];
+    assert_eq!(h.ocr.snap_waiting_prio(id), Some(Priority::Background), "a poll's, waiting behind the read");
+    assert_eq!(event(&h, &lua, "key", Vec::new(), false), mailbox::Delivered::Queued);
+    assert_eq!(h.ocr.snap_waiting_prio(id), Some(Priority::Background), "nobody waits on a poll's timer");
+    {
+        let _key = enter_priority(Priority::Interactive);
+        assert_eq!(event(&h, &lua, "key", Vec::new(), true), mailbox::Delivered::Queued);
+    }
+    assert_eq!(h.ocr.snap_waiting_prio(id), Some(Priority::Interactive), "a key waits behind it");
+    release(9501);
+    settle(&h);
+    settle_snaps(&h);
+    mailbox::run_queued(&*h);
+    assert!(yes(&lua, "return s ~= nil and presses == 2"));
+    assert!(yes(&other, "return seen == '9501,5'"));
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+}
+
+/// A drain that only resumes handlers leaves `host.epoch()` where it was: a handler that waited
+/// for a snapshot or for a read sees after its wait the epoch it saw before, when nothing else ran.
+/// A drain that hands a callback its answer — a `snapshotAsync`'s, a read's — turns it once, before
+/// the callback runs.
+#[test]
+fn a_wait_turns_no_epoch_and_a_callbacks_answer_turns_it_once() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let start = h.epoch.get();
+    run(
+        &lua,
+        r#"
+        task.run(function()
+          before = epoch()
+          host.screen.snapshot({ region = { 20141, 5, 20151, 9 } })
+          afterSnapshot = epoch()
+          host.ocr.recognize({ region = { 9561, 5, 9591, 15 } })
+          afterRead = epoch()
+        end)
+        "#,
+    );
+    settle_snaps(&h);
+    settle(&h);
+    assert!(yes(&lua, "return afterSnapshot == before and afterRead == before"));
+    assert_eq!(h.epoch.get(), start, "nothing turned it");
+    run(&lua, "host.screen.snapshotAsync({ region = { 20142, 5, 20152, 9 } }, function() inSnapshot = epoch() end)");
+    settle_snaps(&h);
+    assert_eq!(h.epoch.get(), start + 1, "the snapshot callback's drain");
+    run(&lua, "host.ocr.recognize({ 9562, 5, 9592, 15 }, function() inRead = epoch() end)");
+    settle(&h);
+    assert_eq!(h.epoch.get(), start + 2, "the read callback's drain");
+    assert!(yes(&lua, &format!("return inSnapshot == {} and inRead == {}", start + 1, start + 2)), "turned before the callback");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
 }
 
 // ── A read a key waits behind, and the hang answer ───────────────────────────────────────────

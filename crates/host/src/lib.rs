@@ -8129,8 +8129,10 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // host.screen.snapshot(opts) / host.screen.pixels(points, opts?) — one picture taken once and
     // read by every call given `{ snapshot = s }`, and many points from as few captures as they
     // allow. The rules are in snapshot.rs; registered HERE, by name, for check-docs.ps1 and
-    // tools/api-index.py, which read this file.
-    screen.set("snapshot", snapshot::snapshot(lua, shared)?)?;
+    // tools/api-index.py, which read this file. `snapshot` waits in a handler for the
+    // `screen-capture` thread's picture (task.rs, task_shim.luau), and where it cannot wait takes
+    // its picture on the event loop, said in the log.
+    screen.set("snapshot", snapshot::snapshot(lua, shared, idx)?)?;
     screen.set("pixels", snapshot::pixels(lua, shared)?)?;
     // host.screen.snapshotAsync(opts, cb) — the picture taken on the `screen-capture` thread that
     // host.ocr.recognize photographs on: at once, at a set time, or when the region changes.
@@ -11073,11 +11075,13 @@ mod ocr_wiring_tests {
     /// and an image search's do.
     #[test]
     fn a_snapshot_callback_runs_in_its_lane() {
-        let fire = body(SNAP, "pub(crate) fn fire_snapshot_results(");
+        let fire = body(SNAP, "pub(crate) fn fire_snaps<");
         let lane = fire.find("let _prio = enter_priority(p.prio);").expect("no priority scope");
-        let deliver = fire.find("mailbox::deliver(self, idx, &lua, Event::Snapshot").expect("not through the mailbox");
+        let deliver = fire.find("mailbox::deliver(h, idx, &lua, Event::Snapshot").expect("not through the mailbox");
         assert!(lane < deliver, "the mailbox takes the priority the answer arrives with");
-        assert!(body(SNAP, "pub(crate) fn snap_async(").contains("prio: current_priority(),"));
+        assert!(body(SNAP, "pub(crate) fn snap_async(").contains("Asker::Callback(cb), current_priority(), now)"));
+        assert!(body(SNAP, "pub(crate) fn submit_snap<").contains("ticket: SnapTicket { id, owner, prio },"));
+        assert!(body(SNAP, "pub(crate) fn fire_snapshot_results(").contains("fire_snaps(self, &|p, frame| self.reduce(p, frame));"));
         // The mailbox runs every event in the priority it arrived with.
         let run = body(MAILBOX, "fn run<H: MailHost>(");
         assert!(run.find("let _prio = enter_priority(prio);").expect("no priority scope") < run.find("h.open(").unwrap());
@@ -11105,8 +11109,8 @@ mod ocr_wiring_tests {
         assert!(f.contains("self.ocr.submit_snap(req);"), "a region's picture is the capture thread's");
         assert!(f.contains("Some(frame) => self.reduce(p, frame),"), "a snapshot goes straight to the worker");
         assert!(f.contains("prio: current_priority(),"));
-        let fire = body(SNAP, "pub(crate) fn fire_snapshot_results(");
-        let on = fire.find("Answer::Picture { frame, .. } if p.profile.is_some() => self.reduce(p, frame),").expect("a profile's picture goes on");
+        let fire = body(SNAP, "pub(crate) fn fire_snaps<");
+        let on = fire.find("Answer::Picture { frame, .. } if p.profile.is_some() => reduce(p, frame),").expect("a profile's picture goes on");
         assert!(on < fire.find("mailbox::deliver(").unwrap(), "before anything is delivered");
         assert!(body(SNAP, "fn reduce(").contains("self.image_tasks.send(sent)"));
         assert!(body(IMAGES, "pub(crate) fn fire_image_results(").contains("self.deliver_reduced(p, reduced);"));
@@ -11138,9 +11142,10 @@ mod ocr_wiring_tests {
     /// refuses the request.
     #[test]
     fn snap_async_reserves_by_the_form_and_gives_a_refused_charge_back() {
-        let f = body(SNAP, "pub(crate) fn snap_async(");
+        let f = body(SNAP, "pub(crate) fn submit_snap<");
         // The budget by the form the region was given in: a window region's overrun is answered.
-        assert!(f.contains("reserve_for(lua, &self.snap_bytes, reservation_for(*r, change), FA, &args.form)?"));
+        assert!(f.contains("reserve_by_form(lua, h.snap_bytes(), reservation_for(*r, change), fname, ask.window, true)?"));
+        assert!(body(SNAP, "fn ask(self) -> Ask {").contains("let window = matches!(self.form, region::Region::Window(..));"));
         // A request the application's limit refuses gives its charge back before it is queued.
         let refused = &f[f.find("if let Some(why) = refused {").expect("the refusal")..];
         let queued = refused.find("st.ready.borrow_mut().push((p, why));").expect("queued");
@@ -11258,7 +11263,7 @@ mod ocr_wiring_tests {
         // Snapshots: `snapshot` and `crop` read the Region form strictly, `pixels` its points
         // through the one point reader, and every call given a snapshot reads its region through
         // the same loose reader with the snapshot's edges as the defaults.
-        assert!(text("snapshot").contains("snapshot::snapshot(lua, shared)"), "host.screen.snapshot");
+        assert!(text("snapshot").contains("snapshot::snapshot(lua, shared, idx)"), "host.screen.snapshot");
         assert!(text("pixels").contains("snapshot::pixels(lua, shared)"), "host.screen.pixels");
         assert!(body(SNAP, "fn read_opts(").contains("region_lua::read(&t.get::<Value>(\"region\")?, \"opts.region\")"));
         assert!(body(SNAP, "fn crop(").contains("region_lua::read(v, \"the region\")"));
@@ -11544,7 +11549,7 @@ mod ocr_wiring_tests {
         }
         assert!(body(GAMEPAD, "fn deliver_pad_events(").contains("mailbox::deliver(self, idx, &lua, Event::Pad"));
         assert!(body(IMAGES, "pub(crate) fn fire_image_results(").matches("mailbox::deliver(self, owner, &lua, Event::Image").count() == 2);
-        assert!(body(SNAP, "pub(crate) fn fire_snapshot_results(").contains("mailbox::deliver(self, idx, &lua, Event::Snapshot"));
+        assert!(body(SNAP, "pub(crate) fn fire_snaps<").contains("mailbox::deliver(h, idx, &lua, Event::Snapshot"));
         assert!(body(OCR_LUA, "pub(crate) fn fire<H: MailHost>(h: &H)").contains("mailbox::deliver(h, idx, &lua, Event::Read"));
         assert!(body(TIMERS, "pub(crate) fn fire_due(").contains("deliver(Due::Once { token, idx, lua });"));
         // The one place a module's own onChange runs inside its own set: the caller's VM.
@@ -12028,7 +12033,7 @@ mod ocr_wiring_tests {
             ("lib.rs", "initial_request_fn"),
             ("lib.rs", "populate_vm"),
             ("task.rs", "prims"),
-            ("task.rs", "waits"),
+            ("task.rs", "shim"),
         ];
         let mut missing = Vec::new();
         for (name, src, tests) in production_sources() {
@@ -12095,7 +12100,9 @@ mod ocr_wiring_tests {
             "lib.rs: trigger_seq",
             "lib.rs: wants_initial",
             "task.rs: status",
+            "task.rs: shim",
             "task.rs: waits",
+            "snapshot.rs: snapshot",
         ];
         let expected: std::collections::BTreeSet<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(found, expected, "a call into a VM the guard does not know");

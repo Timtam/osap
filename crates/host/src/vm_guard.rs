@@ -1616,7 +1616,7 @@ fn whose_code(s: &Sampling) -> (Option<Location>, Option<Location>) {
 }
 
 /// The chunks the host owns, written `(host) name:line` in a trip's frames.
-const HOST_CHUNKS: [&str; 2] = ["window_prelude", crate::task::SHIM_NAME];
+const HOST_CHUNKS: [&str; 3] = ["window_prelude", crate::task::SHIM_NAME, crate::task::SCREEN_SHIM_NAME];
 
 /// One frame of a sample of the stack.
 struct SampleFrame {

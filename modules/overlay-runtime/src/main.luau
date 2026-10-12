@@ -2959,7 +2959,7 @@ function Overlay:activate(index)
   -- and any other control from its activation — its click is the module's own code.
   local onePoint = c.kind == "hotspot" and c.at ~= nil and not c.points
   local ocrPress = (c.kind == "ocr" or c.kind == "ocredit") and c.region ~= nil
-  if c.opensMenu and not onePoint and not ocrPress then self:_menuOpening(c) end
+  if c.opensMenu and not onePoint and not ocrPress and not self:_menuOpening(c) then return end
   if c.kind == "hotspot" and c.points then
     -- Acknowledge at PRESS time, like every other control. Speaking after the last click
     -- instead would land hundreds of milliseconds late — indistinguishable from a key that
@@ -3001,7 +3001,9 @@ function Overlay:activate(index)
       return
     end
     if refuseOutside(self, c, px, py) then return end
-    if c.opensMenu then self:_menuOpening(c) end
+    -- A calibrating run's picture before the press is waited for, and the point asked again after
+    -- it (_menuOpening).
+    if c.opensMenu and not self:_menuOpening(c, px, py) then return end
     -- WHERE it clicked, in the log. A hotspot that presses nothing and a hotspot that presses
     -- the wrong thing are the same experience for someone who cannot see the screen — the
     -- control says "activated" either way — and telling them apart cost a whole test round
@@ -3087,7 +3089,7 @@ function Overlay:activate(index)
       end
       -- The press counts here, just before its click, as a single point's does: newWindow's
       -- starting point and a calibrating run's menu shots belong to the moment before the click.
-      if c.opensMenu then self:_menuOpening(c) end
+      if c.opensMenu and not self:_menuOpening(c) then return end
       local cx, cy, cwhy = ocrCenter(self, c)
       -- Quiet when the read has just said "cannot be read now" about the same region.
       if not cx then return unplaced(self, c, cwhy, not placed) end
@@ -6929,9 +6931,39 @@ end
 -- A control with `opensMenu` is being activated, before it acts: the tests run on every tick
 -- for a while, and a test that compares against this moment (newWindow) takes its starting
 -- point. Counts no menu as open — only a test does that. In a calibrating run it also takes the
--- menu shots (see the Calibration section).
-function Overlay:_menuOpening(c)
-  if not self.active then return end
+-- menu shots (see the Calibration section), whose first picture the press waits for: an overlay
+-- that is no longer where the press was made when it comes — no longer active, in front again
+-- after leaving, or on another window — does not act, and this answers false and "inactive"
+-- (logged); nor does a press whose point `x, y`, when given, is no longer its own after the wait
+-- (refuseOutside says so), false and "refused". Anything else answers true.
+--
+-- The picture comes FIRST, and the press counts only once it has passed: a press that does not act
+-- ends no pick, sets no test running, takes no newWindow list, asks for no later picture and uses
+-- up none of the control's menu shots — the rule `activate` keeps for an opener that is never
+-- clicked.
+function Overlay:_menuOpening(c, x, y)
+  if not self.active then return true end
+  -- Whether this press was photographed, so the item it chooses is photographed with it (see
+  -- _pickShot): the same first two openings per control, not a count of its own.
+  self._pressShot = false
+  local shots
+  if calibrating then
+    local mark = markAt(self, self.focus)
+    shots = self:_menuShots(c)
+    local fine, why = stillHereAt(self, mark)
+    if not fine then
+      if shots then shots.drop() end
+      host.log.info(("[calibrate] '%s' '%s': not acting after the menu shot — %s")
+        :format(tostring(self.label), tostring(c and c.label or "control"), why))
+      return false, "inactive"
+    end
+    -- The picture was waited for: the point is asked again, as after any read, since something
+    -- drawn over it meanwhile would take the click.
+    if shots and x and refuseOutside(self, c, x, y) then
+      shots.drop()
+      return false, "refused"
+    end
+  end
   local st = self._menu
   -- A new press: an item the last one was waiting to choose is not this press's menu.
   if self._pick then self:_pickEnd("press") end
@@ -6952,10 +6984,11 @@ function Overlay:_menuOpening(c)
     end
     menuHook(self, "pressed")
   end
-  -- Whether this press was photographed, so the item it chooses is photographed with it (see
-  -- _pickShot): the same first two openings per control, not a count of its own.
-  self._pressShot = false
-  if calibrating then self._pressShot = self:_menuShots(c) == true end
+  if shots then
+    shots.go()
+    self._pressShot = true
+  end
+  return true
 end
 
 -- One of the overlay's own keys arrived with no menu counted open: the user is back in the
@@ -7423,8 +7456,10 @@ function Overlay:chooseMenuItem(spec)
     return fail("unplaced")
   end
   if refuseOutside(self, c, px, py) then return fail("refused") end
-  -- Placed and checked: now it is a press (step 1).
-  self:_menuOpening(c)
+  -- Placed and checked: now it is a press (step 1). A calibrating run's picture before it is
+  -- waited for, and the overlay must still be where it was, the point still its own.
+  local opened, notWhy = self:_menuOpening(c, px, py)
+  if not opened then return fail(notWhy) end
   host.log.info((PICK_LOG .. "opening its menu, clicking (%d,%d)%s"):format(who,
     label, px, py, c.button and (" with the " .. tostring(c.button) .. " button") or ""))
   if c.button ~= nil then
@@ -8089,8 +8124,10 @@ end
 -- the press and worked out every visible control's point to size the picture, and in a debug
 -- build that put about 700 ms between the key and the click — Diva's preset menu felt slow
 -- (2026-09-26). Now the press takes a snapshot of a rectangle the origin already carries and
--- nothing else. The later two are taken off the event loop at their time (snapshotAsync with
--- `at`) and written when they arrive; the "before" one is written last, once both are in, and
+-- nothing else — waited for in the press's handler, taken on the `screen-capture` thread, and
+-- the click made only if the overlay is still where the press was (_menuOpening). The later two
+-- are taken off the event loop at their time (snapshotAsync with `at`) and written when they
+-- arrive; the "before" one is written last, once both are in, and
 -- its snapshot kept until then. Not on the next pass after the click: that is when the menu's
 -- first answer, its window coming to the front and the user's first key arrive, and a PNG takes
 -- the event loop for hundreds of milliseconds in a debug build. So a key pressed while the menu
@@ -8110,14 +8147,18 @@ end
 local MENU_SHOTS_PER_CONTROL = 2
 local menuShotsTaken = setmetatable({}, { __mode = "k" })
 
--- Takes the menu shots of one press, as above. Returns true when this press is photographed, so
--- that the item a control chooses in its menu on this press is photographed too (_pickShot).
+-- Takes the picture before one press, as above — the press's handler waits for it — and answers nil
+-- when this press is not photographed, or its shots: `go()`, once the press counts and just before
+-- its click, numbers them, asks for the later two and writes all three as they come in; `drop()`,
+-- for a press that does not act, lets the picture go and gives the opening back to the control's
+-- count, so that press writes nothing, takes no number and uses up none of the two. A press that is
+-- photographed has the item it chooses in its menu photographed too (_pickShot).
 function Overlay:_menuShots(c)
   local who, what = tostring(self.label), tostring(c and c.label or "control")
   local o = self:origin()
   if not (o and o.client and o.bounds) then
     host.log.info(("[calibrate] '%s' '%s': no active origin, so no menu shots"):format(who, what))
-    return false
+    return nil
   end
   local mine = menuShotsTaken[self]
   if not mine then
@@ -8137,44 +8178,53 @@ function Overlay:_menuShots(c)
   end
   local b = o.bounds
   local region = { b.x, b.y, b.x + b.w, b.y + b.h }
-  local stem = shotPath(who .. "-" .. what, "-menu-before")
-  -- Writes one picture, and lets its pixels go. A shot that fails says why and stops nothing.
-  local function write(suffix, when, snap, why)
-    local path = host.path("calibration/" .. stem .. suffix .. ".png")
-    local ok = false
-    if snap then
-      local fine, saved, reason = pcall(host.screen.save, path, { snapshot = snap })
-      ok, why = fine and saved == true, fine and reason or saved
-      pcall(snap.release, snap)
-    end
-    host.log.info(("[calibrate] '%s' '%s': menu shot %s, (%d,%d)-(%d,%d), content at (%d,%d) "
-      .. "-> %s (%s)"):format(who, what, when, region[1], region[2], region[3], region[4],
-      o.client.x, o.client.y, path,
-      ok and "true" or ("false: " .. tostring(why or "no reason given"))))
-  end
-  local pressed = host.now()
   local fine, snap, why = pcall(host.screen.snapshot, { region = region })
   if not fine then snap, why = nil, snap end
-  -- The "before" picture once the later two are in (see above).
-  local waiting = 2
-  local function oneIn()
-    waiting -= 1
-    if waiting == 0 then write("-menu-before", "just before the control acts", snap, why) end
+  local shots = {}
+  function shots.drop()
+    if snap then pcall(snap.release, snap) end
+    mine[key] = taken
   end
-  for _, ms in ipairs({ 600, 1500 }) do
-    local suffix, when = "-menu-after-" .. ms, ms .. " ms after"
-    local asked, err = pcall(host.screen.snapshotAsync, { region = region, at = pressed + ms },
-      function(later, reason)
-        write(suffix, when, later, reason)
-        oneIn()
-      end)
-    if not asked then
-      write(suffix, when, nil, err)
-      -- Counted on a later pass, not now: now would write the "before" picture ahead of the click.
-      host.timer.after(0, oneIn)
+  function shots.go()
+    local stem = shotPath(who .. "-" .. what, "-menu-before")
+    -- Writes one picture, and lets its pixels go. A shot that fails says why and stops nothing.
+    local function write(suffix, when, pic, reason)
+      local path = host.path("calibration/" .. stem .. suffix .. ".png")
+      local ok = false
+      if pic then
+        local done, saved, failed = pcall(host.screen.save, path, { snapshot = pic })
+        ok, reason = done and saved == true, done and failed or saved
+        pcall(pic.release, pic)
+      end
+      host.log.info(("[calibrate] '%s' '%s': menu shot %s, (%d,%d)-(%d,%d), content at (%d,%d) "
+        .. "-> %s (%s)"):format(who, what, when, region[1], region[2], region[3], region[4],
+        o.client.x, o.client.y, path,
+        ok and "true" or ("false: " .. tostring(reason or "no reason given"))))
+    end
+    -- The click follows at once, so the later two are timed from here, not from the key: the wait
+    -- for the first picture is not part of what they measure.
+    local pressed = host.now()
+    -- The "before" picture once the later two are in (see above).
+    local waiting = 2
+    local function oneIn()
+      waiting -= 1
+      if waiting == 0 then write("-menu-before", "just before the control acts", snap, why) end
+    end
+    for _, ms in ipairs({ 600, 1500 }) do
+      local suffix, when = "-menu-after-" .. ms, ms .. " ms after"
+      local asked, err = pcall(host.screen.snapshotAsync, { region = region, at = pressed + ms },
+        function(later, reason)
+          write(suffix, when, later, reason)
+          oneIn()
+        end)
+      if not asked then
+        write(suffix, when, nil, err)
+        -- Counted on a later pass, not now: now would write the "before" picture ahead of the click.
+        host.timer.after(0, oneIn)
+      end
     end
   end
-  return true
+  return shots
 end
 
 -- The MENU ITEM SHOT, in a calibrating run: a control that chooses a menu item has just been

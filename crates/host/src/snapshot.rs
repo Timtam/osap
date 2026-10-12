@@ -43,6 +43,13 @@
 //! both for one request — and never raise. Everything here that decides — the keys, the caps, the answers — works on [`SnapState`]
 //! alone, so it is tested without the application around it.
 //!
+//! **`host.screen.snapshot` waits.** In a handler it is one of these requests too, a plain one with
+//! no key, whose waiter is the handler (`task.rs`): its charge reserved at the call, under the same
+//! limits, answered by the same delivery — which resumes the handler at once with what the call
+//! returns where it cannot wait, the handle or `nil` and the reason, rather than handing a callback
+//! to the mailbox ([`fire_snaps`]). Where it cannot wait it captures on the event loop as it
+//! always did, held there for that one call (`task::legacy`).
+//!
 //! **`host.screen.profile` with a callback** is one of these requests too, with a second stage:
 //! its picture is taken on the `screen-capture` thread as a plain or timed `snapshotAsync`'s is —
 //! or, given a snapshot, is that snapshot — and is then reduced on the image worker
@@ -63,8 +70,9 @@ use mlua::{Function, Lua, MetaMethod, MultiValue, RegistryKey, Table, UserData, 
 use crate::backend::frame::{self, Area, Frame, FrameVia};
 use crate::backend::CapturedImage;
 use crate::image_search::{self, Haystack, ImageTask, Job, Reduced};
-use crate::mailbox::{self, Event, Opened};
-use crate::task::Ctx;
+use crate::mailbox::{self, Event, MailHost, Opened};
+use crate::ocr::lua::ReadHost;
+use crate::task::{Ctx, TaskId};
 use crate::ocr::change::{ChangeSpec, Wait};
 use crate::ocr::policy::{
     AT_MAX, MAX_WAIT_PIXELS, MAX_WATCH, SLOW_LOG_EVERY, SNAP_PER_OWNER, SNAP_TOTAL, SNAP_WAITS, SNAP_WAITS_PER_OWNER,
@@ -581,7 +589,7 @@ fn take(
     opts: &Value,
     capture: impl FnOnce(Rect) -> Result<Frame, String>,
 ) -> mlua::Result<MultiValue> {
-    const F: &str = "host.screen.snapshot";
+    const F: &str = FS;
     let (r, given) = match read_opts(opts, F)? {
         Ok(r) => r,
         Err(why) => return with_reason(lua, Value::Nil, why),
@@ -596,23 +604,49 @@ fn take(
     }
 }
 
-/// `host.screen.snapshot(opts) -> (Snapshot?, string?)`: one capture on the event loop, through
-/// the module's source, counted in the observation line like `profile`.
-pub(crate) fn snapshot(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Function> {
+/// `host.screen.snapshot(opts) -> (Snapshot?, string?)`. In a handler it waits: its picture is
+/// taken on the `screen-capture` thread, as a plain `snapshotAsync`'s is ([`start_waited`]), and
+/// the handler goes on with the handle. Where it cannot wait, it captures on the event loop through
+/// the module's source, counted in the observation line like `profile`, and the log says where and
+/// how long (`task::legacy`) — without the first-read comparison, which is left to the module's next
+/// read: made on the event loop by one that reads there, carried by one handed to a thread.
+pub(crate) fn snapshot(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
-    lua.create_function(move |lua, opts: Value| {
+    let start = lua.create_function(move |lua, (nonce, opts): (Table, Value)| {
         host_call!("host.screen.snapshot");
-        take(lua, &sh.snap_bytes, sh.input_epoch.get(), &opts, |r| {
-            // The source first, outside the timing, as every read does: in a module that reads
-            // through desktop duplication the first read also compares the two sources, once.
-            let src = capture_source::read_source(lua, &*sh.backend, r.tuple());
-            let t0 = Instant::now();
-            let got = sh.backend.frame(r, src);
-            let mut obs = sh.observations();
-            obs.pixels += 1;
-            obs.pixel_us += t0.elapsed().as_micros();
-            got
+        start_waited(&*sh, lua, idx, nonce, opts)
+    })?;
+    let sh = shared.clone();
+    let blocking = lua.create_function(move |lua, (why, opts): (String, Value)| {
+        host_call!("host.screen.snapshot");
+        crate::task::legacy(&*sh, lua, idx, FS, crate::loop_guard::Kind::Screen, &why, || {
+            take(lua, &sh.snap_bytes, sh.input_epoch.get(), &opts, |r| {
+                let src = capture_source::vm_source(lua);
+                let t0 = Instant::now();
+                let got = sh.backend.frame(r, src);
+                let mut obs = sh.observations();
+                obs.pixels += 1;
+                obs.pixel_us += t0.elapsed().as_micros();
+                got
+            })
         })
+    })?;
+    crate::task::points(lua, idx, shared.clone())?.call((FS, start, blocking))
+}
+
+/// A waited `host.screen.snapshot`: its options read as the call that does not wait reads them —
+/// a mistake raises at the call — and a plain request filed for the handler that waits
+/// ([`submit_snap`]): its charge reserved at the call, one of the module's requests under their
+/// limits, with no key. A window region with no rectangle this time, or past a limit, is answered
+/// `nil` and the reason, as the call that does not wait answers it.
+pub(crate) fn start_waited<H: ReadHost>(h: &H, lua: &Lua, scope: usize, nonce: Table, opts: Value) -> mlua::Result<()> {
+    crate::task::start_wait(h, lua, scope, FS, nonce, || read_opts(&opts, FS), |parsed, task, prio| {
+        let (rect, window) = match parsed {
+            Ok((r, given)) => (Ok(r), matches!(given, region::Region::Window(..))),
+            Err(why) => (Err(why), false),
+        };
+        let ask = Ask { rect, window, key: None, at_ms: None, change: None };
+        Ok(crate::task::On::Snap(submit_snap(h, lua, scope, FS, ask, Asker::Handler(task), prio, Instant::now())?))
     })
 }
 
@@ -761,6 +795,8 @@ pub(crate) struct AsyncArgs {
 }
 
 const FA: &str = "host.screen.snapshotAsync";
+/// `host.screen.snapshot`, as its messages and its log lines name it.
+const FS: &str = "host.screen.snapshot";
 
 /// The keys of a strict options table, raising for any other.
 fn strict_keys(t: &Table, what: &str, allowed: &[&str], list: &str) -> mlua::Result<Vec<(String, Value)>> {
@@ -991,11 +1027,18 @@ fn reservation_for(r: Rect, change: bool) -> usize {
     estimate(r).saturating_add(if change { pixels.saturating_mul(2) } else { 0 })
 }
 
+/// Who waits for a request: the callback of `snapshotAsync` or of `profile`, or a handler stopped in
+/// `host.screen.snapshot`, resumed with what the call returns (`task.rs`).
+pub(crate) enum SnapWaiter {
+    Callback(RegistryKey),
+    Handler(TaskId),
+}
+
 /// A request waiting for its answer. Main thread only.
 pub(crate) struct PendingSnap {
     id: SnapId,
     lua: Lua,
-    cb: RegistryKey,
+    waiter: SnapWaiter,
     /// The identity the call was made under, named in an error report.
     scope: usize,
     owner: Owner,
@@ -1323,10 +1366,12 @@ impl SnapState {
     }
 }
 
-/// Lets go of a request's callback.
+/// Lets go of a request's callback, and of its charge.
 fn release(p: PendingSnap) {
-    let PendingSnap { lua, cb, .. } = p;
-    let _ = lua.remove_registry_value(cb);
+    let PendingSnap { lua, waiter, .. } = p;
+    if let SnapWaiter::Callback(cb) = waiter {
+        let _ = lua.remove_registry_value(cb);
+    }
 }
 
 /// The `info` a callback gets.
@@ -1347,7 +1392,11 @@ fn info_table(lua: &Lua, frames: u32, change: Option<ChangeInfo>, waited: Durati
 /// profile `cb(profile)`, its tables built here, or `cb(nil, reason)`. Its charge goes either way.
 fn call_args(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> mlua::Result<(Function, MultiValue)> {
     let lua = p.lua.clone();
-    let f: Function = lua.registry_value(&p.cb)?;
+    let f: Function = match &p.waiter {
+        SnapWaiter::Callback(cb) => lua.registry_value(cb)?,
+        // Never: a handler's answer is not called back (`waited_values`).
+        SnapWaiter::Handler(_) => return Err(mlua::Error::external("internal error: a waited snapshot has no callback")),
+    };
     if let Some(job) = &p.profile {
         p.res.take();
         let args = match answer {
@@ -1384,6 +1433,23 @@ fn call_args(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> 
         }
     };
     Ok((f, MultiValue::from_vec(args)))
+}
+
+/// What a handler that waited in `host.screen.snapshot` goes on with: what the call returns where
+/// it cannot wait — the handle, charged by the request's reservation settled to what the picture
+/// holds, or `nil` and the reason; no `info`. The charge goes either way.
+fn waited_values(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> mlua::Result<MultiValue> {
+    let lua = p.lua.clone();
+    let res = p.res.take();
+    match answer {
+        Answer::Picture { frame, .. } => {
+            let res = res.unwrap_or_else(|| Reservation::nothing(&lua, process));
+            one_value(Value::UserData(lua.create_userdata(SnapshotHandle::of(frame, res, process.clone()))?))
+        }
+        Answer::Failed { why, .. } => with_reason(&lua, Value::Nil, why),
+        // Never: only a profile is reduced.
+        Answer::Profile(_) => with_reason(&lua, Value::Nil, "internal error".to_string()),
+    }
 }
 
 /// An answer as it runs (`Event::Snapshot`), its module still the VM that asked and enabled: answered
@@ -1460,7 +1526,7 @@ pub(crate) fn test_request(st: &SnapState, lua: &Lua, owner: Owner, key: Option<
     let p = PendingSnap {
         id: st.next(),
         lua: lua.clone(),
-        cb: lua.create_registry_value(cb).expect("the callback is kept"),
+        waiter: SnapWaiter::Callback(lua.create_registry_value(cb).expect("the callback is kept")),
         scope: owner.idx,
         owner,
         prio: Priority::Background,
@@ -1549,8 +1615,253 @@ fn deliver(
     }
 }
 
+/// What a request asks of the `screen-capture` thread, its arguments checked: the region's
+/// rectangle, or why there is none this time (answered on the next tick); whether the region was a
+/// window's, whose budget overrun is answered where corners raise; and `snapshotAsync`'s options.
+pub(crate) struct Ask {
+    pub rect: Result<Rect, String>,
+    pub window: bool,
+    pub key: Option<String>,
+    pub at_ms: Option<f64>,
+    pub change: Option<ChangeArgs>,
+}
+
+impl AsyncArgs {
+    /// What `snapshotAsync` asks ([`Ask`]).
+    fn ask(self) -> Ask {
+        let window = matches!(self.form, region::Region::Window(..));
+        Ask { rect: self.rect, window, key: self.key, at_ms: self.at_ms, change: self.change }
+    }
+}
+
+/// Who a request is answered to, as the call hands it over: `snapshotAsync`'s callback, or the
+/// handler that waits in `host.screen.snapshot`.
+pub(crate) enum Asker {
+    Callback(Function),
+    Handler(TaskId),
+}
+
+/// Files a request of the VM `lua`, called under the identity `scope` as `fname`, for `asker`, at
+/// `prio`: its charge reserved at the call — a call that raises for it changes nothing else, and a
+/// window region that does not fit is answered like one past the size limit — the newest with its
+/// key, within the module's and the application's limits, and handed to the capture thread with
+/// the module's first-read comparison when it is owed. What is decided without the thread —
+/// nothing to capture this time, a refusal — is answered on the next tick, never from inside the
+/// call. `snapshotAsync` and a waited `snapshot` share it, and so the same limits and answers.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn submit_snap<H: ReadHost>(
+    h: &H,
+    lua: &Lua,
+    scope: usize,
+    fname: &str,
+    ask: Ask,
+    asker: Asker,
+    prio: Priority,
+    now: Instant,
+) -> mlua::Result<SnapId> {
+    let owner = crate::ocr::lua::owner_of(lua, &h.vm_gens(), scope);
+    let change = ask.change.is_some();
+    let mut rect = ask.rect;
+    let res = match &rect {
+        Ok(r) => match reserve_by_form(lua, h.snap_bytes(), reservation_for(*r, change), fname, ask.window, true)? {
+            Ok(res) => Some(res),
+            Err(why) => {
+                note_crowding(h, owner.idx, &why);
+                rect = Err(why);
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    let waiter = match asker {
+        Asker::Callback(f) => SnapWaiter::Callback(lua.create_registry_value(f)?),
+        Asker::Handler(task) => SnapWaiter::Handler(task),
+    };
+    let st = h.snap_state();
+    let p = PendingSnap {
+        id: st.next(),
+        lua: lua.clone(),
+        waiter,
+        scope,
+        owner,
+        prio,
+        key: ask.key.clone(),
+        res,
+        change,
+        cancel: Arc::new(AtomicBool::new(false)),
+        asked: now,
+        profile: None,
+        handed: false,
+    };
+    let id = p.id;
+    // A newer request with the key is the newest whether or not it can be taken.
+    let mut ended = ask.key.as_deref().map_or(0, |k| st.supersede(owner, Kind::Snapshot, k));
+    st.note_key(&p);
+    let rect = match rect {
+        Ok(r) => r,
+        Err(why) => {
+            st.ready.borrow_mut().push((p, why));
+            if ended > 0 {
+                h.ocr().wake_snaps();
+            }
+            return Ok(id);
+        }
+    };
+    let (crowded, refused) = st.make_room(owner, change);
+    ended += crowded.len();
+    if let Some(why) = crowded.first().or(refused.as_ref()) {
+        note_crowding(h, owner.idx, why);
+    }
+    if ended > 0 {
+        h.ocr().wake_snaps();
+    }
+    if let Some(why) = refused {
+        // Refused: no picture comes, so its charge goes back now, not on the next tick.
+        let mut p = p;
+        p.res = None;
+        st.ready.borrow_mut().push((p, why));
+        return Ok(id);
+    }
+    // The comparison, when it is owed, goes with the request and is made on the capture thread.
+    let source = capture_source::vm_source(lua);
+    let compare = capture_source::take_compare(lua, rect.tuple());
+    let at = ask.at_ms.map(|ms| instant_at(ms).max(now));
+    let kind = match ask.change {
+        Some(c) => {
+            let start = at.unwrap_or(now);
+            let wait = Box::new(Wait::new(rect, &c.watch, c.spec, c.from, start));
+            SnapKind::Change { wait, start }
+        }
+        None => at.map_or(SnapKind::Plain, SnapKind::At),
+    };
+    let req = SnapReq {
+        ticket: SnapTicket { id, owner, prio },
+        region: rect,
+        source,
+        kind,
+        asked: now,
+        cancel: p.cancel.clone(),
+        compare,
+    };
+    st.pending.borrow_mut().insert(id, p);
+    h.ocr().submit_snap(req);
+    Ok(id)
+}
+
+/// One line per module per `SLOW_LOG_EVERY` when its snapshot requests are ended or refused by a
+/// limit, or a window region's is answered for the budget.
+fn note_crowding<H: ReadHost>(h: &H, idx: usize, why: &str) {
+    let now = Instant::now();
+    {
+        let mut logged = h.snap_state().logged.borrow_mut();
+        if logged.get(&idx).is_some_and(|t| now.duration_since(*t) < SLOW_LOG_EVERY) {
+            return;
+        }
+        logged.insert(idx, now);
+    }
+    logging::line("snapshot", &format!("[{}] {why} (said at most every 10 s)", h.module_id(idx)));
+}
+
+/// Delivers what the capture thread answered and what was decided without it: a handler that
+/// waited in `host.screen.snapshot` goes on with its answer at once (`task::resume_snap`), and a
+/// callback's answer is handed to its module's mailbox in the lane it was asked from, which decides
+/// whether it may still be delivered and judges its key when it runs ([`open_answer`]). A
+/// profile's picture is not the answer: it goes on to the image worker by `reduce`, and the answer
+/// comes from there. The epoch turns once, before the first callback's answer is handed over: a
+/// handler that waited goes on with its own answer, which continues its dispatch and turns nothing.
+/// The host's tick and the tests' holders both run this.
+pub(crate) fn fire_snaps<H: MailHost>(h: &H, reduce: &dyn Fn(PendingSnap, Arc<Frame>)) {
+    let st = h.snap_state();
+    let done = h.ocr().drain_snaps();
+    if done.is_empty() && st.ready.borrow().is_empty() {
+        return;
+    }
+    let answers = st.take_answers(done, Instant::now());
+    if answers.is_empty() {
+        return;
+    }
+    for (p, a) in &answers {
+        if let (true, Answer::Picture { change: Some(c), frames, waited, .. }) = (p.change, a) {
+            let id = h.module_id(p.owner.idx);
+            logging::trace("snapshot", || {
+                format!(
+                    "[{id}] change wait: changed {}, settled {}, rebased {}, {frames} picture(s), {} ms",
+                    c.changed,
+                    c.settled,
+                    c.rebased,
+                    waited.as_millis()
+                )
+            });
+        }
+    }
+    // A profile's picture is not the answer: it goes on to the image worker, and the answer
+    // comes from there (`deliver_reduced`). Its failures are answered here like any other.
+    let mut due = Vec::with_capacity(answers.len());
+    for (p, answer) in answers {
+        match answer {
+            Answer::Picture { frame, .. } if p.profile.is_some() => reduce(p, frame),
+            answer => due.push((p, answer)),
+        }
+    }
+    let mut turned = false;
+    for (mut p, answer) in due {
+        match p.waiter {
+            SnapWaiter::Handler(task) => {
+                // Built only once the handler is found still waiting for it: a picture nobody
+                // takes is let go here, charge and all, not left for the collector.
+                let (snap, lua) = (p.id, p.lua.clone());
+                st.forget_key(&p);
+                crate::task::resume_snap(h, task, snap, || {
+                    waited_values(&mut p, answer, h.snap_bytes()).map_err(|e| {
+                        // A VM that ran out of memory building it is stopped, and the stop
+                        // reports itself; the handler is not run in it again.
+                        crate::vm_guard::note_failure(&lua, crate::vm_guard::EntryKind::Handler, "screen.snapshot", &e);
+                        e.to_string()
+                    })
+                });
+            }
+            SnapWaiter::Callback(_) => {
+                // One epoch for the drain's callbacks: every answer in it is a fresh look at the screen.
+                if !turned {
+                    h.bump_epoch();
+                    turned = true;
+                }
+                // In the lane it was asked from, through its module's mailbox, which decides whether
+                // it may still be delivered and judges its key when it runs (`open_snapshot`).
+                let _prio = enter_priority(p.prio);
+                st.hand(&mut p);
+                let (idx, lua) = (p.owner.idx, p.lua.clone());
+                mailbox::deliver(h, idx, &lua, Event::Snapshot { p: Box::new(p), answer });
+            }
+        }
+    }
+}
+
+/// A handler's wait for request `id` given up — the handler was cancelled or ended, its module went,
+/// or module code resumed it itself: off the list, its picture no longer taken (the thread answers
+/// it `Cancelled`, which finds nobody) and its charge given back now. Nothing happens for a request
+/// that is not waiting.
+pub(crate) fn withdraw<H: ReadHost>(h: &H, id: SnapId) {
+    let st = h.snap_state();
+    let found = st.pending.borrow_mut().remove(&id);
+    let p = found.or_else(|| {
+        let mut ready = st.ready.borrow_mut();
+        let at = ready.iter().position(|(p, _)| p.id == id)?;
+        Some(ready.remove(at).0)
+    });
+    let Some(p) = p else { return };
+    p.cancel.store(true, Ordering::Release);
+    if let Some(t) = p.profile.as_ref().and_then(|j| j.task) {
+        image_search::end_task(t);
+    }
+    st.forget_key(&p);
+    release(p);
+    h.ocr().wake_snaps();
+}
+
 impl Shared {
-    /// `host.screen.snapshotAsync(opts, cb)`, called from the VM `lua` under the identity `scope`.
+    /// `host.screen.snapshotAsync(opts, cb)`, called from the VM `lua` under the identity `scope`
+    /// ([`submit_snap`]).
     pub(crate) fn snap_async(&self, lua: &Lua, scope: usize, opts: Value, cb: Value) -> mlua::Result<()> {
         let cb: Function = match cb {
             Value::Function(f) => f,
@@ -1560,152 +1871,15 @@ impl Shared {
         };
         let now = Instant::now();
         let now_ms = now.saturating_duration_since(crate::clock_origin()).as_secs_f64() * 1000.0;
-        let mut args = parse_async(&opts, now_ms)?;
-        let owner = crate::ocr::lua::owner_of(lua, &self.vm_gens.borrow(), scope);
-        let change = args.change.is_some();
-        // The budget first: a call that raises for it changes nothing else. A window region
-        // that does not fit is answered like one past the size limit.
-        let res = match &args.rect {
-            Ok(r) => match reserve_for(lua, &self.snap_bytes, reservation_for(*r, change), FA, &args.form)? {
-                Ok(res) => Some(res),
-                Err(why) => {
-                    self.snap_note_crowding(owner.idx, &why);
-                    args.rect = Err(why);
-                    None
-                }
-            },
-            Err(_) => None,
-        };
-        let st = &self.snap_state;
-        let p = PendingSnap {
-            id: st.next(),
-            lua: lua.clone(),
-            cb: lua.create_registry_value(cb)?,
-            scope,
-            owner,
-            prio: current_priority(),
-            key: args.key.clone(),
-            res,
-            change,
-            cancel: Arc::new(AtomicBool::new(false)),
-            asked: now,
-            profile: None,
-            handed: false,
-        };
-        // A newer request with the key is the newest whether or not it can be taken.
-        let mut ended = args.key.as_deref().map_or(0, |k| st.supersede(owner, Kind::Snapshot, k));
-        st.note_key(&p);
-        let rect = match args.rect {
-            Ok(r) => r,
-            Err(why) => {
-                st.ready.borrow_mut().push((p, why));
-                if ended > 0 {
-                    self.ocr.wake_snaps();
-                }
-                return Ok(());
-            }
-        };
-        let (crowded, refused) = st.make_room(owner, change);
-        ended += crowded.len();
-        if let Some(why) = crowded.first().or(refused.as_ref()) {
-            self.snap_note_crowding(owner.idx, why);
-        }
-        if ended > 0 {
-            self.ocr.wake_snaps();
-        }
-        if let Some(why) = refused {
-            // Refused: no picture comes, so its charge goes back now, not on the next tick.
-            let mut p = p;
-            p.res = None;
-            st.ready.borrow_mut().push((p, why));
-            return Ok(());
-        }
-        // The comparison, when it is owed, goes with the request and is made on the capture thread.
-        let source = capture_source::vm_source(lua);
-        let compare = capture_source::take_compare(lua, rect.tuple());
-        let at = args.at_ms.map(|ms| instant_at(ms).max(now));
-        let kind = match args.change {
-            Some(c) => {
-                let start = at.unwrap_or(now);
-                let wait = Box::new(Wait::new(rect, &c.watch, c.spec, c.from, start));
-                SnapKind::Change { wait, start }
-            }
-            None => at.map_or(SnapKind::Plain, SnapKind::At),
-        };
-        let req = SnapReq {
-            ticket: SnapTicket { id: p.id, owner, prio: p.prio },
-            region: rect,
-            source,
-            kind,
-            asked: now,
-            cancel: p.cancel.clone(),
-            compare,
-        };
-        st.pending.borrow_mut().insert(p.id, p);
-        self.ocr.submit_snap(req);
+        let args = parse_async(&opts, now_ms)?;
+        submit_snap(self, lua, scope, FA, args.ask(), Asker::Callback(cb), current_priority(), now)?;
         Ok(())
     }
 
-    /// One line per module per `SLOW_LOG_EVERY` when its snapshot requests are ended or refused
-    /// by a limit, or a window region's is answered for the budget.
-    fn snap_note_crowding(&self, idx: usize, why: &str) {
-        let now = Instant::now();
-        let mut logged = self.snap_state.logged.borrow_mut();
-        if logged.get(&idx).is_some_and(|t| now.duration_since(*t) < SLOW_LOG_EVERY) {
-            return;
-        }
-        logged.insert(idx, now);
-        let id = self.ids.borrow().get(idx).cloned().unwrap_or_default();
-        logging::line("snapshot", &format!("[{id}] {why} (said at most every 10 s)"));
-    }
-
-    /// Delivers what the capture thread answered and what was decided without it. Driven by
-    /// both ticks, after the text reads' results.
+    /// Delivers what the capture thread answered and what was decided without it ([`fire_snaps`]).
+    /// Driven by both ticks, after the text reads' results.
     pub(crate) fn fire_snapshot_results(&self) {
-        let done = self.ocr.drain_snaps();
-        if done.is_empty() && self.snap_state.ready.borrow().is_empty() {
-            return;
-        }
-        let answers = self.snap_state.take_answers(done, Instant::now());
-        if answers.is_empty() {
-            return;
-        }
-        for (p, a) in &answers {
-            if let (true, Answer::Picture { change: Some(c), frames, waited, .. }) = (p.change, a) {
-                let id = self.ids.borrow().get(p.owner.idx).cloned().unwrap_or_default();
-                logging::trace("snapshot", || {
-                    format!(
-                        "[{id}] change wait: changed {}, settled {}, rebased {}, {frames} picture(s), {} ms",
-                        c.changed,
-                        c.settled,
-                        c.rebased,
-                        waited.as_millis()
-                    )
-                });
-            }
-        }
-        // A profile's picture is not the answer: it goes on to the image worker, and the answer
-        // comes from there (`deliver_reduced`). Its failures are answered here like any other.
-        let mut due = Vec::with_capacity(answers.len());
-        for (p, answer) in answers {
-            match answer {
-                Answer::Picture { frame, .. } if p.profile.is_some() => self.reduce(p, frame),
-                answer => due.push((p, answer)),
-            }
-        }
-        if due.is_empty() {
-            return;
-        }
-        // One epoch for the drain: every answer in it is a fresh look at the screen.
-        self.bump_epoch();
-        for (mut p, answer) in due {
-            // In the lane it was asked from, through its module's mailbox, which decides whether
-            // it may still be delivered and judges its key when it runs (`open_snapshot`).
-            let _prio = enter_priority(p.prio);
-            self.snap_state.hand(&mut p);
-            let (idx, lua) = (p.owner.idx, p.lua.clone());
-            mailbox::deliver(self, idx, &lua, Event::Snapshot { p: Box::new(p), answer });
-        }
+        fire_snaps(self, &|p, frame| self.reduce(p, frame));
     }
 
     /// A profile's picture, to the image worker ([`SnapState::to_worker`]). With the worker gone —
@@ -1873,7 +2047,7 @@ impl Shared {
             (None, Ok(r)) => match reserve_by_form(lua, &self.snap_bytes, estimate(*r), F, window, false)? {
                 Ok(res) => Some(res),
                 Err(why) => {
-                    self.snap_note_crowding(owner.idx, &why);
+                    note_crowding(self, owner.idx, &why);
                     rect = Err(why);
                     None
                 }
@@ -1893,7 +2067,7 @@ impl Shared {
         let p = PendingSnap {
             id: st.next(),
             lua: lua.clone(),
-            cb: lua.create_registry_value(cb)?,
+            waiter: SnapWaiter::Callback(lua.create_registry_value(cb)?),
             scope,
             owner,
             prio: current_priority(),
@@ -1923,7 +2097,7 @@ impl Shared {
         let (crowded, refused) = st.make_room(owner, false);
         ended += crowded.len();
         if let Some(why) = crowded.first().or(refused.as_ref()) {
-            self.snap_note_crowding(owner.idx, why);
+            note_crowding(self, owner.idx, why);
         }
         if ended > 0 {
             self.ocr.wake_snaps();
@@ -2011,6 +2185,51 @@ pub(crate) fn test_frame(x: i32, y: i32, w: i32, h: i32) -> Frame {
     }
     Frame::from_image(Rect::new(x, y, w, h), CapturedImage { w: w as u32, h: h as u32, rgba }, Instant::now(), FrameVia::Gdi, None)
         .expect("a whole frame")
+}
+
+/// The rectangle and the pixels of a snapshot handle, its `time`, `inputEpoch` and `via` beside
+/// them; `None` for a value that is no snapshot, or one released: for other modules' tests.
+#[cfg(test)]
+pub(crate) fn test_picture(v: &Value) -> Option<(Rect, Vec<u8>, i64, u64, &'static str)> {
+    let Value::UserData(ud) = v else { return None };
+    let s = ud.borrow::<SnapshotHandle>().ok()?;
+    let f = s.frame()?;
+    Some((f.rect, f.img.rgba.clone(), s.time_ms, s.input_epoch, s.via.word()))
+}
+
+impl SnapState {
+    /// The requests of module `idx` waiting for the capture thread, in the order they were made:
+    /// for the tests.
+    #[cfg(test)]
+    pub(crate) fn test_ids_of(&self, idx: usize) -> Vec<SnapId> {
+        let mut ids: Vec<SnapId> = self.pending.borrow().values().filter(|p| p.owner.idx == idx).map(|p| p.id).collect();
+        ids.sort_unstable();
+        ids
+    }
+}
+
+/// `host.screen.snapshotAsync(opts, cb)` with its arguments read (`parse_async`), filed as the
+/// host files it ([`submit_snap`]): for the tests' holders.
+#[cfg(test)]
+pub(crate) fn test_submit_async<H: ReadHost>(h: &H, lua: &Lua, scope: usize, args: AsyncArgs, cb: Function) -> mlua::Result<()> {
+    submit_snap(h, lua, scope, FA, args.ask(), Asker::Callback(cb), current_priority(), Instant::now()).map(|_| ())
+}
+
+/// `host.screen.snapshot` as the host builds it, over `holder`, its wait the host's own
+/// ([`start_waited`]); where it cannot wait it captures a [`test_frame`] of its region with input
+/// epoch 7, through the host's own tally (`task::legacy`): for the tests' holders, which have no
+/// backend.
+#[cfg(test)]
+pub(crate) fn test_snapshot<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>) -> mlua::Result<Function> {
+    let h = holder.clone();
+    let start = lua.create_function(move |lua, (nonce, opts): (Table, Value)| start_waited(&*h, lua, idx, nonce, opts))?;
+    let h = holder.clone();
+    let blocking = lua.create_function(move |lua, (why, opts): (String, Value)| {
+        crate::task::legacy(&*h, lua, idx, FS, crate::loop_guard::Kind::Screen, &why, || {
+            take(lua, h.snap_bytes(), 7, &opts, |r| Ok(test_frame(r.x, r.y, r.w, r.h)))
+        })
+    })?;
+    crate::task::points(lua, idx, holder)?.call((FS, start, blocking))
 }
 
 #[cfg(test)]
@@ -2567,7 +2786,7 @@ mod tests {
             PendingSnap {
                 id,
                 lua: lua.clone(),
-                cb: lua.create_registry_value(cb).unwrap(),
+                waiter: SnapWaiter::Callback(lua.create_registry_value(cb).unwrap()),
                 scope: owner.idx,
                 owner,
                 prio: Priority::Background,
@@ -2903,7 +3122,7 @@ mod tests {
         let p = PendingSnap {
             id,
             lua: lua.clone(),
-            cb: lua.create_registry_value(cb).unwrap(),
+            waiter: SnapWaiter::Callback(lua.create_registry_value(cb).unwrap()),
             scope: A.idx,
             owner: A,
             prio: Priority::Background,

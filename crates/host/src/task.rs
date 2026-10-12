@@ -1,6 +1,7 @@
 //! Handlers: every callback of a module runs as a coroutine of its VM — a handler — that can stop
-//! at a wait while the event loop goes on; and the wait it stops at, `host.ocr.recognize` without a
-//! callback, which raises where it cannot wait.
+//! at a wait while the event loop goes on; and the waits it stops at: `host.ocr.recognize` without
+//! a callback, which raises where it cannot wait, and the `host.screen` calls that wait
+//! (`host.screen.snapshot`), which run on the event loop where they cannot, with a log line.
 //!
 //! **One handler per module at a time.** Every event a module hears — a hotkey, a captured key, a
 //! controller event, a timer, a window trigger, a focus change, the answer to a read, an image
@@ -12,28 +13,40 @@
 //!
 //! **Every handler waits.** `host.ocr.recognize` without a callback, called in a handler's own
 //! coroutine, asks the read service and stops the handler until the reading comes: its module is
-//! busy meanwhile, and nothing else is. With a callback it is the read that never waits.
+//! busy meanwhile, and nothing else is. With a callback it is the read that never waits. So does
+//! `host.screen.snapshot`: it asks the `screen-capture` thread for its picture (`snapshot.rs`), and
+//! the handler goes on with the handle.
 //!
-//! **Why.** No text recognition may burden the event loop. `recognize` used to photograph and
-//! recognise on the loop and return the reading; where it waits it asks the read service instead
-//! (`ocr/lua.rs`), and only its module waits. Where it cannot wait — a place Luau cannot suspend, a
-//! function the host calls and waits for, a coroutine the module made — it raises
-//! ([`wait_message`]); the callback form reads there.
+//! **Why.** No text recognition may burden the event loop, and no `host.screen` call either.
+//! `recognize` used to photograph and recognise on the loop and return the reading; where it waits
+//! it asks the read service instead (`ocr/lua.rs`), and only its module waits. Where it cannot wait
+//! — a place Luau cannot suspend, a function the host calls and waits for, a coroutine the module
+//! made — it raises ([`wait_message`]); the callback form reads there. A `host.screen` call that
+//! cannot wait takes its picture on the loop as it always did, held there for that one call
+//! ([`legacy`]), and the log says where and how long, once per module, call and place
+//! ([`legacy_line`]).
 //!
 //! **How it waits.** A Rust function cannot yield through mlua, so the wait is a `coroutine.yield`
-//! in a small Luau shim the host builds once per VM (`task_shim.luau`), with every helper an
-//! upvalue. The host creates and resumes every handler with mlua's own `Thread` API: the first
-//! stretch at once, inside `run_handler`; every later one from the tick, in the delivery of text
-//! readings, while the module is enabled and its VM is the one that asked. A handler is never
-//! resumed into a VM that was disabled, reloaded or removed, and nothing of it runs after it ends —
-//! Luau has no `__gc` and no `__close`, so throwing a stopped thread away runs no code.
+//! in a small Luau shim the host builds once per VM and library (`task_shim.luau`), with every
+//! helper an upvalue. The host creates and resumes every handler with mlua's own `Thread` API: the
+//! first stretch at once, inside `run_handler`; every later one from the tick, in the delivery of
+//! text readings or of snapshots, while the module is enabled and its VM is the one that asked. A
+//! handler is never resumed into a VM that was disabled, reloaded or removed, and nothing of it
+//! runs after it ends — Luau has no `__gc` and no `__close`, so throwing a stopped thread away runs
+//! no code.
 //!
 //! **Who answers a wait.** A wait point is answered only by a thread of the host or by state the
-//! host keeps — the capture and recognise threads through the delivery of readings, the tests'
-//! `test_release` — never by an event delivered to the waiting module: that event waits in the
-//! module's mailbox behind the very handler it would answer. A "wait for my own key-up" built on
-//! the module's own key events could never end; one answered from the hook's record of held keys
-//! could.
+//! host keeps — the capture and recognise threads through the delivery of readings and pictures,
+//! the tests' `test_release` — never by an event delivered to the waiting module: that event waits
+//! in the module's mailbox behind the very handler it would answer. A "wait for my own key-up"
+//! built on the module's own key events could never end; one answered from the hook's record of
+//! held keys could.
+//!
+//! **A wait turns no epoch.** The handler going on with its answer continues the dispatch that
+//! asked, so the delivery that resumes it leaves `host.epoch()` where it was: a memo the handler
+//! kept before its wait still holds after it. A delivery that hands a callback its answer turns
+//! the epoch once, before the first such callback, as every delivery always did (`ocr/lua.rs`,
+//! `snapshot.rs`).
 //!
 //! **What module code can do to a handler, and what the host does about it.**
 //! - It can get the handler's coroutine (`coroutine.running()`, which is never `nil` in a callback
@@ -66,6 +79,7 @@ use mlua::{Function, Lua, MultiValue, RegistryKey, Table, Thread, ThreadStatus, 
 use crate::logging;
 use crate::ocr::lua::{self as reads, owner_of, ReadHost, Waiter};
 use crate::ocr::sched::{Owner, TicketId};
+use crate::ocr::snap_queue::SnapId;
 use crate::ocr::types::{current_priority, enter_priority, Priority};
 
 /// A handler's number: positive, unique for the life of the process, never reused — as a timer's.
@@ -77,6 +91,9 @@ const SHIM: &str = include_str!("task_shim.luau");
 /// The shim's chunk name, which a traceback and `debug.info` show: `host.ocr`, the calls it
 /// carries. The `=` keeps Luau from wrapping it as `[string "…"]`.
 pub(crate) const SHIM_NAME: &str = "=host.ocr";
+
+/// The same shim's chunk name where it carries the `host.screen` calls that wait ([`points`]).
+pub(crate) const SCREEN_SHIM_NAME: &str = "=host.screen";
 
 /// How many handler stretches may be on the host's stack at once, one inside the other — a
 /// test's task started in the stretch of another, before that one waited again — across every VM.
@@ -100,17 +117,23 @@ pub(crate) const RESUMED: &str = ": this callback's coroutine was resumed by the
 pub(crate) const NIL_CB: &str = "host.ocr.recognize: the callback is nil — pass a function to be called back with the \
      reading, or leave the third argument out to wait for it";
 
-/// The named registry's per-VM entries: the handles below, and the shim's `recognize`. Luau has no
-/// `debug.getregistry`, so no module reaches them.
+/// The named registry's per-VM entries: the handles below, the shim's `recognize` and its builder
+/// of the `host.screen` calls that wait. Luau has no `debug.getregistry`, so no module reaches
+/// them.
 const PRIMS_KEY: &str = "__task_prims";
 const WAITS_KEY: &str = "__task_waits";
+const POINTS_KEY: &str = "__task_points";
 
-/// The two kinds of place `recognize` without a callback cannot wait, as the shim names them.
+/// The kinds of place a call without a callback cannot wait, as the shim tells them apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Case {
-    /// Outside every handler of the VM, or in one at a place Luau cannot stop it: the top level of
-    /// a module or of an included file, a function the host calls and waits for (an arbiter's
-    /// `onActivate`, an `onChange` from the module's own `set`), a metamethod, a sort comparator.
+    /// Outside every handler of the VM: the top level of a module or of an included file, or a
+    /// function the host calls between its events (an arbiter's `onActivate` moved by another
+    /// module's claim, say).
+    Outside,
+    /// In a handler, at a place Luau cannot stop it: a function the host calls and waits for (an
+    /// arbiter's `onActivate`, an `onChange` from the module's own `set`, an included file's top
+    /// level), a metamethod, a sort comparator.
     CannotWait,
     /// In a coroutine the module made, or the overlay runtime made for a hook that must not read,
     /// inside a handler.
@@ -118,10 +141,11 @@ pub(crate) enum Case {
 }
 
 impl Case {
-    /// The shim's word for it: "foreign" is a coroutine of the module's own; "none" and
-    /// "cannot-wait" — and a word it never says — are a place that cannot wait.
+    /// The shim's word for it: "none" is outside every handler, "foreign" a coroutine of the
+    /// module's own; "cannot-wait" — and a word it never says — a place that cannot wait.
     pub(crate) fn of(why: &str) -> Case {
         match why {
+            "none" => Case::Outside,
             "foreign" => Case::OwnCoroutine,
             _ => Case::CannotWait,
         }
@@ -130,18 +154,20 @@ impl Case {
     /// The words the blocking call's log line gives the place.
     fn words(self) -> &'static str {
         match self {
+            Case::Outside => "outside every event of the module: its top level, an included file's, or a function the host calls between its events",
             Case::CannotWait => "a place Luau cannot suspend, or a function the host calls and waits for",
-            Case::OwnCoroutine => "a coroutine the module made",
+            Case::OwnCoroutine => "a coroutine the module made, or the overlay runtime made for a hook",
         }
     }
 }
 
 /// What `recognize` without a callback raises in a place of `case`, at the caller's line. The shim
 /// raises it, in the scripted test host as in the host, so a scenario that reads where it could
-/// not wait fails. docs/api/ocr.md gives both, word for word.
+/// not wait fails. docs/api/ocr.md gives both, word for word: outside every handler is one of the
+/// places Luau cannot suspend.
 pub(crate) fn wait_message(case: Case) -> &'static str {
     match case {
-        Case::CannotWait => {
+        Case::Outside | Case::CannotWait => {
             "host.ocr.recognize cannot wait here: this function runs inside one the host calls and waits for, or \
              one Luau cannot suspend — an arbiter's onActivate or onDeactivate, an onChange fired by your own \
              host.settings.set, the top level of a module or of an included file, a metamethod, a table.sort \
@@ -163,29 +189,54 @@ fn library_of(call: &str) -> &str {
     call.strip_prefix("host.").and_then(|c| c.split('.').next()).unwrap_or(call)
 }
 
+/// The form of `call` that waits for nothing, as code to write: what a poll, and a place that
+/// cannot wait, are to use instead. `None` for a call that has none.
+fn callback_form(call: &str) -> Option<&'static str> {
+    match call {
+        "host.ocr.recognize" => Some("host.ocr.recognize(what, opts, function(reading) … end)"),
+        "host.screen.snapshot" => Some("host.screen.snapshotAsync(opts, function(snap, why) … end)"),
+        _ => None,
+    }
+}
+
+/// What to write instead of `call` where it could not wait, in a place of `case`: at a module's
+/// top level, a handler such as `host.timer.after(0, …)`; in a coroutine — the overlay runtime's for
+/// its hooks, or the module's own, which the shim cannot tell apart — a measurement made in a
+/// handler for the hook to read, or the event's own function; elsewhere the event's own function.
+/// Each with the call's form that waits for nothing, when it has one.
+fn remedy(call: &str, case: Case) -> String {
+    let other = callback_form(call).map(|f| format!(", or use {f}")).unwrap_or_default();
+    match case {
+        Case::Outside => format!("call it from a handler, such as host.timer.after(0, …){other}"),
+        Case::CannotWait => format!("call it from the event's own function{other}"),
+        Case::OwnCoroutine => format!(
+            "in a hook the overlay runtime asks on every scan, measure it in a handler and let the hook read what \
+             was measured (see \"Where a hook runs\" in docs/api/overlay.md); in a coroutine of your own, call it \
+             from the event's own function{other}"
+        ),
+    }
+}
+
 /// The line a blocking call writes, once per module, call and case: where it could not wait, how
-/// long it held the event loop instead, and what to write.
-///
-/// What to write is one remedy for every place, as the shim tells only two kinds apart. Before a
-/// `host.screen` call comes here it is to depend on the place: at a module's top level, a handler
-/// such as `host.timer.after(0, …)`; in the overlay runtime's hooks, a measurement made in a
-/// handler for the hook to read; elsewhere the event's own function, or a callback (TODO.md, "The
-/// synchronous `host.screen` captures").
+/// long it held the event loop instead, and what to write there ([`remedy`]).
 pub(crate) fn legacy_line(module: &str, call: &str, case: Case, ms: u128) -> String {
     format!(
-        "[{module}] {call} could not wait here ({}) and held the event loop {ms} ms instead; call it from the \
-         event's own function; see \"Where it waits\" in docs/api/{}.md",
+        "[{module}] {call} could not wait here ({}) and held the event loop {ms} ms instead; {}; see \"Where it \
+         waits\" in docs/api/{}.md",
         case.words(),
+        remedy(call, case),
         library_of(call)
     )
 }
 
-/// The line for a timer whose handler waited for a read while inputs queued behind it, once per
-/// module and place in a session: a poll that holds the module's keys (docs/api/ocr.md shows it).
-pub(crate) fn timer_wait_line(module: &str, ms: u128, place: &str, keys: &[String]) -> String {
+/// The line for a timer whose handler waited in `call` while inputs queued behind it, once per
+/// module and place in a session: a poll that holds the module's keys (docs/api/ocr.md and
+/// docs/api/screen.md show it).
+pub(crate) fn timer_wait_line(module: &str, ms: u128, call: &str, place: &str, keys: &[String]) -> String {
+    let how = callback_form(call).map(|f| format!(": {f}")).unwrap_or_default();
     format!(
-        "[{module}] a timer waited {ms} ms for a text read at {place}; {} key(s) ({}) waited behind it — a poll that \
-         reads should pass a callback: host.ocr.recognize(what, opts, function(reading) … end)",
+        "[{module}] a timer waited {ms} ms for {call} at {place}; {} key(s) ({}) waited behind it — a poll should \
+         not wait{how}",
         keys.len(),
         crate::stops::counted(keys).join(", ")
     )
@@ -220,9 +271,11 @@ enum Kind {
 }
 
 /// What a wait waits for.
-enum On {
+pub(crate) enum On {
     /// A read of the service.
     Read(TicketId),
+    /// A picture of the `screen-capture` thread (`snapshot.rs`).
+    Snap(SnapId),
     /// The tests' own wait point, by name (`test_wait`): answered by `test_release`.
     #[cfg(test)]
     Test(String),
@@ -236,6 +289,8 @@ struct Wait {
     on: On,
     /// The fresh table the shim yields beside `WAIT` and gets back from the host, and nobody else.
     nonce: RegistryKey,
+    /// The call that waits, as a module writes it: what the timer's line names.
+    call: &'static str,
 }
 
 /// One handler, or one task of the tests' entry. Main thread only, like the rest of `Shared`.
@@ -462,6 +517,9 @@ fn prims(lua: &Lua) -> mlua::Result<Prims> {
     t.set("error", lua.globals().get::<Function>("error")?)?;
     t.set("select", lua.globals().get::<Function>("select")?)?;
     t.set("type", lua.globals().get::<Function>("type")?)?;
+    let table: Table = lua.globals().get("table")?;
+    t.set("pack", table.get::<Function>("pack")?)?;
+    t.set("unpack", table.get::<Function>("unpack")?)?;
     lua.set_named_registry_value(PRIMS_KEY, t)?;
     Ok(Prims { status, noop, wait })
 }
@@ -799,10 +857,13 @@ fn parked_on_its_wait(tasks: &Tasks, id: TaskId, lua: &Lua, values: &MultiValue)
     lua.registry_value::<Table>(&w.nonce).is_ok_and(|n| n.to_pointer() == b.to_pointer())
 }
 
-/// A wait given up: its read withdrawn, its nonce let go.
+/// A wait given up: its read or its picture withdrawn — the picture's charge given back — its nonce
+/// let go.
 fn end_wait<H: ReadHost>(h: &H, lua: &Lua, w: Wait) {
-    if let On::Read(t) = w.on {
-        reads::withdraw(h, t);
+    match w.on {
+        On::Read(t) => reads::withdraw(h, t),
+        On::Snap(s) => crate::snapshot::withdraw(h, s),
+        _ => {}
     }
     let _ = lua.remove_registry_value(w.nonce);
 }
@@ -826,13 +887,32 @@ fn forget<H: ReadHost>(h: &H, id: TaskId, ended: bool) {
 /// enabled or no longer runs that VM, or its coroutine is no longer stopped where the host left it
 /// (closed by module code). True when it went on.
 pub(crate) fn resume_wait<H: ReadHost>(h: &H, id: TaskId, ticket: TicketId, values: MultiValue) -> bool {
-    resume_parked(h, id, |on| matches!(on, On::Read(t) if *t == ticket), values)
+    resume_parked(h, id, |on| matches!(on, On::Read(t) if *t == ticket), || Ok(values))
 }
 
-/// Resumes handler `id`, parked on a wait `this` names, with `values`: [`resume_wait`]'s rules. A
-/// timer's handler that inputs waited behind is said ([`timer_wait_line`]), once per module and
-/// place.
-fn resume_parked<H: ReadHost>(h: &H, id: TaskId, this: impl Fn(&On) -> bool, values: MultiValue) -> bool {
+/// Handler `id`'s picture `snap` was answered: it goes on with what `answer` builds — what the call
+/// that does not wait returns — or raises the message `answer` gives at its call's line, by
+/// [`resume_wait`]'s rules. `answer` is called only for a handler found still waiting for it, so
+/// nothing is built in a VM that will not go on. True when it went on.
+pub(crate) fn resume_snap<H: ReadHost>(
+    h: &H,
+    id: TaskId,
+    snap: SnapId,
+    answer: impl FnOnce() -> Result<MultiValue, String>,
+) -> bool {
+    resume_parked(h, id, |on| matches!(on, On::Snap(s) if *s == snap), answer)
+}
+
+/// Resumes handler `id`, parked on a wait `this` names, with what `answer` builds once the checks
+/// passed: `(nonce, true, values…)`, or `(nonce, false, message)`, which the shim raises at the
+/// call's line — by [`resume_wait`]'s rules. A timer's handler that inputs waited behind is said
+/// ([`timer_wait_line`]), once per module and place.
+fn resume_parked<H: ReadHost>(
+    h: &H,
+    id: TaskId,
+    this: impl Fn(&On) -> bool,
+    answer: impl FnOnce() -> Result<MultiValue, String>,
+) -> bool {
     let tasks = h.tasks();
     let found = {
         let table = tasks.table.borrow();
@@ -861,7 +941,7 @@ fn resume_parked<H: ReadHost>(h: &H, id: TaskId, this: impl Fn(&On) -> bool, val
     if let Some((parked, place, behind)) = timer {
         let module = h.module_id(owner.idx);
         if tasks.timer_said.borrow_mut().insert((module.clone(), place.clone())) {
-            logging::line("ocr", &timer_wait_line(&module, parked.as_millis(), &place, &behind));
+            logging::line(library_of(w.call), &timer_wait_line(&module, parked.as_millis(), w.call, &place, &behind));
         }
     }
     let nonce = lua.registry_value::<Table>(&w.nonce);
@@ -870,7 +950,20 @@ fn resume_parked<H: ReadHost>(h: &H, id: TaskId, this: impl Fn(&On) -> bool, val
         forget(h, id, false);
         return false;
     };
-    let mut args = values;
+    let mut args = match answer() {
+        Ok(mut values) => {
+            values.push_front(Value::Boolean(true));
+            values
+        }
+        Err(message) => match lua.create_string(message) {
+            Ok(s) => MultiValue::from_vec(vec![Value::Boolean(false), Value::String(s)]),
+            Err(_) => {
+                // A VM too full for the message: the handler cannot go on in it.
+                forget(h, id, false);
+                return false;
+            }
+        },
+    };
     args.push_front(Value::Table(nonce));
     let _prio = enter_priority(prio);
     let delivery = enter_delivery(tasks, id);
@@ -881,14 +974,15 @@ fn resume_parked<H: ReadHost>(h: &H, id: TaskId, this: impl Fn(&On) -> bool, val
 }
 
 /// Somebody waits on an event that queued behind module `owner`'s parked handler — it came in the
-/// interactive lane (`mailbox.rs`): the read the handler waits for is made interactive
-/// (`Service::promote`), and so is every read it waits for after it (`raised`). A read of a poll
-/// would otherwise hold the key behind it as long as the polls' lane takes. A read being recognised
-/// already runs on as it started. The handler's own lane stays: what it arms after the read — a
-/// timer, a read with a callback — is in the lane it began in, so a poll stays a poll. True when a
-/// handler that was parked in the background lane was raised.
+/// interactive lane (`mailbox.rs`): the read or the picture the handler waits for is made
+/// interactive (`Service::promote`, `Service::promote_snap`), and so is everything it waits for
+/// after it (`raised`). A wait of a poll would otherwise hold the key behind it as long as the
+/// polls' lane takes. A read being recognised, or a picture being taken, already runs on as it
+/// started. The handler's own lane stays: what it arms after the wait — a timer, a read with a
+/// callback — is in the lane it began in, so a poll stays a poll. True when a handler that was
+/// parked in the background lane was raised.
 pub(crate) fn promote<H: ReadHost>(h: &H, owner: Owner) -> bool {
-    let ticket = {
+    let on = {
         let mut table = h.tasks().table.borrow_mut();
         let Some(t) = table
             .values_mut()
@@ -898,12 +992,19 @@ pub(crate) fn promote<H: ReadHost>(h: &H, owner: Owner) -> bool {
         };
         t.raised = true;
         match t.wait.as_ref().map(|w| &w.on) {
-            Some(On::Read(ticket)) => Some(*ticket),
+            Some(On::Read(ticket)) => Some(On::Read(*ticket)),
+            Some(On::Snap(snap)) => Some(On::Snap(*snap)),
             _ => None,
         }
     };
-    if let Some(ticket) = ticket {
-        h.ocr().promote(ticket);
+    match on {
+        Some(On::Read(ticket)) => {
+            h.ocr().promote(ticket);
+        }
+        Some(On::Snap(snap)) => {
+            h.ocr().promote_snap(snap);
+        }
+        _ => {}
     }
     true
 }
@@ -1033,33 +1134,43 @@ fn in_place(tasks: &Tasks, me: Owner, calling: usize) -> Option<TaskId> {
 }
 
 /// Where in the module the wait the calling coroutine of `lua` asks for was asked: the first frame
-/// of its stack that is Luau and not the shim's — past a `pcall` around `host.ocr.recognize` — as
+/// of its stack that is Luau and not the shim's — past a `pcall` around the call — as
 /// `<module>/<file>:<line>`, or the chunk's name and the line for a chunk no module loaded. Asked of
 /// Luau's own stack, so no module code can change the answer.
 fn caller_place(lua: &Lua) -> Option<String> {
     (0..12).map_while(|level| crate::vm_guard::raw_frame(lua, level)).find_map(|f| {
         let source = f.source.clone().unwrap_or_default();
-        if f.what == "C" || source == SHIM_NAME {
+        if f.what == "C" || source == SHIM_NAME || source == SCREEN_SHIM_NAME {
             return None;
         }
         Some(crate::vm_guard::frame_place(lua, &f))
     })
 }
 
-/// The shim's `start`: queues the read a wait asks for, for the innermost running handler of this
-/// VM, which must be the one calling, in its own coroutine, with no wait in this stretch yet.
-/// Raises for a mistake in the call. In a module that is not enabled, or for a handler cancelled
-/// while it ran, nothing is queued: the wait ends the handler.
-fn start<H: ReadHost>(h: &H, lua: &Lua, scope: usize, what: Value, opts: Value, nonce: Table) -> mlua::Result<()> {
+/// A shim's `start`: files what a wait of `call` asks for, for the innermost running handler of
+/// this VM, which must be the one calling, in its own coroutine, with no wait in this stretch yet.
+/// `parse` reads the call's arguments, and raises for a mistake in them; `submit` files what they
+/// ask for, for the handler it is given at the priority its wait asks with, and says what the wait
+/// waits on. In a module that is not enabled, or for a handler cancelled while it ran, nothing is
+/// filed: the wait ends the handler.
+pub(crate) fn start_wait<H: ReadHost, A>(
+    h: &H,
+    lua: &Lua,
+    scope: usize,
+    call: &'static str,
+    nonce: Table,
+    parse: impl FnOnce() -> mlua::Result<A>,
+    submit: impl FnOnce(A, TaskId, Priority) -> mlua::Result<On>,
+) -> mlua::Result<()> {
     let me = owner(h, lua, scope);
     let calling = lua.current_thread().to_pointer() as usize;
     let tasks = h.tasks();
-    let misplaced = || mlua::Error::external("host.ocr.recognize: the host's wait was called from outside its place");
+    let misplaced = || mlua::Error::external(format!("{call}: the host's wait was called from outside its place"));
     let first = in_place(tasks, me, calling).ok_or_else(misplaced)?;
     // A handler whose module went is not asked anything more: not even its arguments are read,
     // which could raise, and a `pcall` around the wait would then run on in a module that is gone.
     let gone = tasks.table.borrow().get(&first).is_some_and(|t| t.gone);
-    let args = if gone { None } else { Some(reads::parse_read(&what, &opts)?) };
+    let args = if gone { None } else { Some(parse()?) };
     let place = caller_place(lua);
     // Reading the arguments can run module code (a metamethod), which may have registered a wait
     // or ended the handler: everything is checked again, and the wait registered only now.
@@ -1072,16 +1183,13 @@ fn start<H: ReadHost>(h: &H, lua: &Lua, scope: usize, what: Value, opts: Value, 
         .map(|t| (t.ending, if t.raised { Priority::Interactive } else { t.prio }))
         .unwrap_or((true, Priority::Background));
     let on = match args {
-        Some(args) if !ending && h.module_enabled(me.idx) => {
-            let list = args.list;
-            On::Read(reads::submit(h, lua, me.idx, args, prio, Waiter::Handler { id, list })?)
-        }
+        Some(args) if !ending && h.module_enabled(me.idx) => submit(args, id, prio)?,
         _ => On::Void,
     };
     let nonce = lua.create_registry_value(nonce)?;
     match tasks.table.borrow_mut().get_mut(&id) {
         Some(t) => {
-            t.wait = Some(Wait { on, nonce });
+            t.wait = Some(Wait { on, nonce, call });
             t.place = place;
         }
         None => {
@@ -1092,8 +1200,17 @@ fn start<H: ReadHost>(h: &H, lua: &Lua, scope: usize, what: Value, opts: Value, 
     Ok(())
 }
 
+/// `recognize`'s `start`: the read a wait asks for ([`start_wait`]).
+fn start<H: ReadHost>(h: &H, lua: &Lua, scope: usize, nonce: Table, what: Value, opts: Value) -> mlua::Result<()> {
+    let idx = owner(h, lua, scope).idx;
+    start_wait(h, lua, scope, "host.ocr.recognize", nonce, || reads::parse_read(&what, &opts), |args, id, prio| {
+        let list = args.list;
+        Ok(On::Read(reads::submit(h, lua, idx, args, prio, Waiter::Handler { id, list })?))
+    })
+}
+
 /// The shim's `disown`: module code resumed a parked handler's coroutine itself. The host forgets
-/// it — without a reset, since that code is running it — and withdraws its read.
+/// it — without a reset, since that code is running it — and withdraws its read or its picture.
 fn disown<H: ReadHost>(h: &H, lua: &Lua) {
     let calling = lua.current_thread().to_pointer() as usize;
     let id = h.tasks().table.borrow().iter().find(|(_, t)| t.ptr == calling && !t.running).map(|(id, _)| *id);
@@ -1111,10 +1228,8 @@ fn disown<H: ReadHost>(h: &H, lua: &Lua) {
 /// counted for the summary at exit. A call that raises — a mistake in its arguments, mostly —
 /// writes no line, so the first that answers still does.
 ///
-/// Nothing calls it yet: `host.ocr.recognize` raises where it cannot wait. The `host.screen` calls
-/// that capture are to wait in a handler and to come here where they cannot (TODO.md, "The
-/// synchronous `host.screen` captures").
-#[cfg_attr(not(test), allow(dead_code))]
+/// The `host.screen` calls that wait come here where they cannot (`host.screen.snapshot`);
+/// `host.ocr.recognize` raises there instead.
 pub(crate) fn legacy<H: ReadHost, T>(
     h: &H,
     lua: &Lua,
@@ -1146,6 +1261,36 @@ pub(crate) fn legacy<H: ReadHost, T>(
     out
 }
 
+/// The shim of VM `lua`, loaded under `name` — the library whose calls it carries, which a raise in
+/// them shows in the traceback of a module's error, in the log and in the error dialog — with its
+/// `where_` and `disown` over `holder`: the table of its two builders, `recognize` and `point`.
+fn shim<H: ReadHost>(lua: &Lua, scope: usize, holder: Rc<H>, name: &str) -> mlua::Result<Table> {
+    let p = prims(lua)?;
+    let prim: Table = lua.named_registry_value(PRIMS_KEY)?;
+    let h = holder.clone();
+    let where_ = lua.create_function(move |lua, ()| Ok(where_now(&*h, lua, scope)))?;
+    let h = holder;
+    let disown = lua.create_function(move |lua, ()| {
+        disown(&*h, lua);
+        Ok(())
+    })?;
+    let shim: Function = lua.load(SHIM).set_name(name).eval()?;
+    shim.call((
+        where_,
+        disown,
+        prim.get::<Function>("yield")?,
+        prim.get::<Function>("isyieldable")?,
+        prim.get::<Function>("rawequal")?,
+        prim.get::<Function>("error")?,
+        prim.get::<Function>("select")?,
+        prim.get::<Function>("type")?,
+        prim.get::<Function>("pack")?,
+        prim.get::<Function>("unpack")?,
+        p.wait,
+        RESUMED,
+    ))
+}
+
 /// `host.ocr.recognize` of VM `lua` — the table with `recognize` the shim returns — built on the
 /// first call and the same table after it. `submit` is the callback form, `submit(what, opts, cb)`,
 /// which opens the guard's host call itself, as the shim's `start` does here. Where the call
@@ -1154,44 +1299,38 @@ pub(crate) fn waits<H: ReadHost>(lua: &Lua, scope: usize, holder: Rc<H>, submit:
     if let Ok(t) = lua.named_registry_value::<Table>(WAITS_KEY) {
         return Ok(t);
     }
-    let p = prims(lua)?;
-    let prim: Table = lua.named_registry_value(PRIMS_KEY)?;
     let h = holder.clone();
-    let start = lua.create_function(move |lua, (what, opts, nonce): (Value, Value, Table)| {
+    let start = lua.create_function(move |lua, (nonce, what, opts): (Table, Value, Value)| {
         // Named for the guard as the module wrote it: a stop in it says "in host.ocr.recognize".
         static NAME: &str = "host.ocr.recognize";
         let _host_call = crate::vm_guard::HostCall::enter(&NAME);
-        start(&*h, lua, scope, what, opts, nonce)
+        start(&*h, lua, scope, nonce, what, opts)
     })?;
-    let h = holder.clone();
-    let where_ = lua.create_function(move |lua, ()| Ok(where_now(&*h, lua, scope)))?;
-    let h = holder;
-    let disown = lua.create_function(move |lua, ()| {
-        disown(&*h, lua);
-        Ok(())
-    })?;
-    // Named for the calls it carries: a raise in `recognize` shows its frames in the traceback of
-    // a module's error, in the log and in the error dialog.
-    let shim: Function = lua.load(SHIM).set_name(SHIM_NAME).eval()?;
-    let t: Table = shim.call((
+    let builders = shim(lua, scope, holder, SHIM_NAME)?;
+    let recognize: Function = builders.get::<Function>("recognize")?.call((
         start,
-        where_,
-        disown,
         submit,
-        prim.get::<Function>("yield")?,
-        prim.get::<Function>("isyieldable")?,
-        prim.get::<Function>("rawequal")?,
-        prim.get::<Function>("error")?,
-        prim.get::<Function>("select")?,
-        prim.get::<Function>("type")?,
-        p.wait,
-        RESUMED,
         NIL_CB,
         wait_message(Case::CannotWait),
         wait_message(Case::OwnCoroutine),
     ))?;
+    let t = lua.create_table()?;
+    t.set("recognize", recognize)?;
     lua.set_named_registry_value(WAITS_KEY, t.clone())?;
     Ok(t)
+}
+
+/// The builder of VM `lua`'s `host.screen` calls that wait — `point(name, start, blocking)` of the
+/// shim loaded as `host.screen` — made on the first call and the same function after it. The call
+/// it builds waits in a handler, by `start(nonce, …)` ([`start_wait`]), and anywhere else is
+/// `blocking(why, …)`, which runs it on the event loop ([`legacy`]).
+pub(crate) fn points<H: ReadHost>(lua: &Lua, scope: usize, holder: Rc<H>) -> mlua::Result<Function> {
+    if let Ok(f) = lua.named_registry_value::<Function>(POINTS_KEY) {
+        return Ok(f);
+    }
+    let point: Function = shim(lua, scope, holder, SCREEN_SHIM_NAME)?.get("point")?;
+    lua.set_named_registry_value(POINTS_KEY, point.clone())?;
+    Ok(point)
 }
 
 /// The tests' own wait point: `wait(name)` stops the handler that calls it, in its own coroutine,
@@ -1204,7 +1343,7 @@ pub(crate) fn test_wait<H: ReadHost>(lua: &Lua, scope: usize, holder: Rc<H>) -> 
         return function(name)
           local nonce = {}
           start(name, nonce)
-          local got, value = yield(WAIT, nonce)
+          local got, _, value = yield(WAIT, nonce)
           if not rawequal(got, nonce) then
             disown()
             error("the test wait was resumed by the module's own code", 2)
@@ -1225,7 +1364,7 @@ pub(crate) fn test_wait<H: ReadHost>(lua: &Lua, scope: usize, holder: Rc<H>) -> 
         let on = if !ending && h.module_enabled(me.idx) { On::Test(name) } else { On::Void };
         let nonce = lua.create_registry_value(nonce)?;
         if let Some(t) = tasks.table.borrow_mut().get_mut(&id) {
-            t.wait = Some(Wait { on, nonce });
+            t.wait = Some(Wait { on, nonce, call: "the test wait" });
         }
         Ok(())
     })?;
@@ -1264,7 +1403,7 @@ pub(crate) fn test_release<H: ReadHost>(h: &H, name: &str, value: Value) -> bool
         .find(|(_, t)| !t.running && t.wait.as_ref().is_some_and(|w| matches!(&w.on, On::Test(n) if n == name)))
         .map(|(id, _)| *id);
     let Some(id) = id else { return false };
-    resume_parked(h, id, |on| matches!(on, On::Test(n) if n == name), MultiValue::from_vec(vec![value]))
+    resume_parked(h, id, |on| matches!(on, On::Test(n) if n == name), || Ok(MultiValue::from_vec(vec![value])))
 }
 
 /// Whether a handler is parked at the tests' wait point `name`.
@@ -1317,41 +1456,63 @@ mod tests {
         assert!(OCR_MD.contains(NIL_CB), "docs/api/ocr.md does not show the nil callback's message:\n{NIL_CB}");
     }
 
+    /// The shim's three words are the three places; a word it never says is one that cannot wait.
+    /// `recognize` raises the same message outside every handler as at a place Luau cannot stop.
     #[test]
-    fn the_shims_words_are_read_as_the_two_cases() {
-        assert_eq!(Case::of("none"), Case::CannotWait);
+    fn the_shims_words_are_read_as_the_three_cases() {
+        assert_eq!(Case::of("none"), Case::Outside);
         assert_eq!(Case::of("cannot-wait"), Case::CannotWait);
         assert_eq!(Case::of("foreign"), Case::OwnCoroutine);
         assert_eq!(Case::of("anything else"), Case::CannotWait, "a word the shim never says");
+        assert_eq!(wait_message(Case::Outside), wait_message(Case::CannotWait));
     }
 
-    /// The timer's line is the one docs/api/ocr.md shows, word for word.
+    /// The timer's line is the one docs/api/ocr.md shows for a read and docs/api/screen.md for a
+    /// snapshot, word for word: it names the call that waited and its form that waits for nothing.
     #[test]
     fn the_timers_line_is_the_documented_one() {
         const OCR_MD: &str = include_str!("../../../docs/api/ocr.md");
+        const SCREEN_MD: &str = include_str!("../../../docs/api/screen.md");
         let keys = ["Tab".to_string(), "Tab".to_string(), "Down".to_string()];
-        let timer = timer_wait_line("com.example.game", 2140, "com.example.game/src/main.luau:88", &keys);
-        assert!(OCR_MD.contains(&timer), "docs/api/ocr.md does not show this line word for word:\n{timer}");
+        let read = timer_wait_line("com.example.game", 2140, "host.ocr.recognize", "com.example.game/src/main.luau:88", &keys);
+        assert!(OCR_MD.contains(&read), "docs/api/ocr.md does not show this line word for word:\n{read}");
+        let snap = timer_wait_line("com.example.game", 63, "host.screen.snapshot", "com.example.game/src/main.luau:41", &keys);
+        assert!(SCREEN_MD.contains(&snap), "docs/api/screen.md does not show this line word for word:\n{snap}");
     }
 
     /// A blocking call's line names the module, the call, the place it could not wait and the time
-    /// it held the loop, in the words CI looks for (`could not wait here`), and points at its call's
-    /// own page; the summary counts per module and call, with the call's library as its scope.
-    /// Nothing about tasks, which no module has.
+    /// it held the loop, in the words CI looks for (`could not wait here`), says what to write in
+    /// that place — the call's form that waits for nothing among it — and points at its call's own
+    /// page; the summary counts per module and call, with the call's library as its scope.
+    /// docs/api/screen.md shows `snapshot`'s three lines and its summary word for word. Nothing
+    /// about tasks, which no module has.
     #[test]
     fn the_line_names_the_call_where_and_how_long() {
-        let l = legacy_line("com.example.game", "host.screen.pixel", Case::OwnCoroutine, 37);
+        const SCREEN_MD: &str = include_str!("../../../docs/api/screen.md");
+        let l = legacy_line("com.example.game", "host.screen.snapshot", Case::CannotWait, 37);
         assert_eq!(
             l,
-            "[com.example.game] host.screen.pixel could not wait here (a coroutine the module made) and held the \
-             event loop 37 ms instead; call it from the event's own function; see \"Where it waits\" in \
-             docs/api/screen.md"
+            "[com.example.game] host.screen.snapshot could not wait here (a place Luau cannot suspend, or a function \
+             the host calls and waits for) and held the event loop 37 ms instead; call it from the event's own \
+             function, or use host.screen.snapshotAsync(opts, function(snap, why) … end); see \"Where it waits\" \
+             in docs/api/screen.md"
         );
+        for case in [Case::Outside, Case::CannotWait, Case::OwnCoroutine] {
+            let line = legacy_line("com.example.game", "host.screen.snapshot", case, 18);
+            assert!(SCREEN_MD.contains(&line), "docs/api/screen.md does not show this line word for word:\n{line}");
+        }
+        let outside = legacy_line("m", "host.screen.snapshot", Case::Outside, 1);
+        assert!(outside.contains("(outside every event of the module: ") && outside.contains("; call it from a handler, such as host.timer.after(0, …), or use "));
+        let own = legacy_line("m", "host.screen.snapshot", Case::OwnCoroutine, 1);
+        assert!(own.contains("measure it in a handler and let the hook read what was measured (see \"Where a hook runs\" in docs/api/overlay.md)"), "{own}");
+        // A call without a form that waits for nothing names none.
         assert!(legacy_line("m", "host.screen.save", Case::CannotWait, 1).contains(
-            "host.screen.save could not wait here (a place Luau cannot suspend, or a function the host calls and waits for)"
+            "host.screen.save could not wait here (a place Luau cannot suspend, or a function the host calls and waits \
+             for) and held the event loop 1 ms instead; call it from the event's own function; see"
         ));
         let summary = {
             let tasks = Tasks::default();
+            tasks.legacy.borrow_mut().held.insert(("com.example.game".to_string(), "host.screen.snapshot"), (3, 52));
             tasks.legacy.borrow_mut().held.insert(("m".to_string(), "host.screen.pixel"), (2, 50));
             tasks.legacy.borrow_mut().held.insert(("m".to_string(), "host.screen.save"), (1, 9));
             tasks.legacy_summary()
@@ -1359,10 +1520,17 @@ mod tests {
         assert_eq!(
             summary,
             [
+                (
+                    "screen",
+                    "[com.example.game] host.screen.snapshot held the event loop 3 time(s), 52 ms in all, where it could \
+                     not wait"
+                        .to_string()
+                ),
                 ("screen", "[m] host.screen.pixel held the event loop 2 time(s), 50 ms in all, where it could not wait".to_string()),
                 ("screen", "[m] host.screen.save held the event loop 1 time(s), 9 ms in all, where it could not wait".to_string()),
             ]
         );
+        assert!(SCREEN_MD.contains(&summary[0].1), "docs/api/screen.md does not show the summary word for word:\n{}", summary[0].1);
         for text in std::iter::once(&l).chain(summary.iter().map(|(_, s)| s)) {
             assert!(!text.contains("task") && !text.contains("host.ocr"), "{text}");
         }
@@ -1370,9 +1538,14 @@ mod tests {
         assert_eq!(library_of("host.screen.pixel"), "screen");
         let keys = ["Tab".to_string(), "Tab".to_string(), "Down".to_string()];
         assert_eq!(
-            timer_wait_line("m", 40, "m/src/main.luau:12", &keys),
-            "[m] a timer waited 40 ms for a text read at m/src/main.luau:12; 3 key(s) (Tab \u{d7}2, Down) waited behind \
-             it — a poll that reads should pass a callback: host.ocr.recognize(what, opts, function(reading) … end)"
+            timer_wait_line("m", 40, "host.ocr.recognize", "m/src/main.luau:12", &keys),
+            "[m] a timer waited 40 ms for host.ocr.recognize at m/src/main.luau:12; 3 key(s) (Tab \u{d7}2, Down) waited \
+             behind it — a poll should not wait: host.ocr.recognize(what, opts, function(reading) … end)"
+        );
+        assert_eq!(
+            timer_wait_line("m", 40, "host.screen.save", "m/src/main.luau:12", &keys[..1]),
+            "[m] a timer waited 40 ms for host.screen.save at m/src/main.luau:12; 1 key(s) (Tab) waited behind it — a \
+             poll should not wait"
         );
     }
 
