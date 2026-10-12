@@ -880,11 +880,11 @@ jobs:
       # No text recognition and no screen capture on the event loop (crates/host/src/loop_guard.rs):
       # a release build writes `[loop] text recognition on the event loop` the first time a capture
       # for a read or a recognition runs on the loop's thread, where no call may make one, and
-      # `[loop] screen capture on the event loop` the first time the screen is captured there
-      # outside a `host.screen` call that could not wait. A real run of the capture probe's reads on
-      # a Mac, the one place CI sees the macOS guards at work. After the probe whatever became of
-      # it: its log is what is read, and a probe that failed has said so. Both are looked for
-      # before either fails the step.
+      # `[loop] screen capture on the event loop` the first time the screen is captured there, where
+      # nothing may capture since a `host.screen` call that cannot wait raises. A real run of the
+      # capture probe's reads on a Mac, the one place CI sees the macOS guards at work. After the
+      # probe whatever became of it: its log is what is read, and a probe that failed has said so.
+      # Both are looked for before either fails the step.
       - name: Nothing recognised text or captured the screen on the event loop
         if: ${{ !cancelled() }}
         run: |
@@ -908,8 +908,9 @@ jobs:
       # The guard (crates/host/src/vm_guard.rs, stops.rs): the capture probe's callbacks are
       # short, and its reads wait in their timers' handlers, which counts on no clock — so a
       # `[guard] [<module>] stopped` line is a bug, in the host or in the probe. So is a call that
-      # could not wait and held the event loop instead (`could not wait here`, task.rs): the probe
-      # makes every call in a handler of its own. Both are looked for before either fails the step.
+      # raised because it could not wait (`cannot wait here` or `cannot wait in a coroutine`,
+      # task.rs, in the module's error line): the probe makes every call in a handler of its own.
+      # Both are looked for before either fails the step.
       - name: No module was stopped, and every call waited
         if: ${{ !cancelled() }}
         run: |
@@ -919,8 +920,8 @@ jobs:
             exit 0
           fi
           found=0
-          if grep -q "could not wait here" "$log"; then
-            echo "::error::a call could not wait and held the event loop: $(grep -m1 'could not wait here' "$log")"
+          if grep -q "cannot wait here\|cannot wait in a coroutine" "$log"; then
+            echo "::error::a call raised because it could not wait: $(grep -m1 'cannot wait here\|cannot wait in a coroutine' "$log")"
             found=1
           fi
           if grep -q "\[guard\] \[[^]]*\] stopped" "$log"; then
@@ -1560,12 +1561,12 @@ jobs:
             echo "::error::the screen was captured on the event loop on the newer macOS: $(grep -m1 '\[loop\] screen capture on the event loop' automation-platform.log)"
             exit 1
           fi
-          # A call that could not wait, a `recognize` that raised — which is what it does where it
-          # cannot wait; the build job fails on every raise of the probe's — and the guard's stop:
-          # all are looked for before any fails the step.
+          # A call that raised because it could not wait, a `recognize` that raised — the build job
+          # fails on every raise of the probe's — and the guard's stop: all are looked for before any
+          # fails the step.
           found=0
-          if grep -q "could not wait here" automation-platform.log; then
-            echo "::error::a call could not wait and held the event loop on the newer macOS: $(grep -m1 'could not wait here' automation-platform.log)"
+          if grep -q "cannot wait here\|cannot wait in a coroutine" automation-platform.log; then
+            echo "::error::a call raised because it could not wait on the newer macOS: $(grep -m1 'cannot wait here\|cannot wait in a coroutine' automation-platform.log)"
             found=1
           fi
           if grep -q "CAPTURE PROBE: \(late \)\{0,1\}recognize .*THREW" automation-platform.log; then

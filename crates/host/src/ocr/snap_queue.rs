@@ -760,8 +760,8 @@ mod tests {
             "two colours for one point"
         );
         let round = lane.take(t0 + MS).unwrap();
-        let out = lane.finish(round.answer_points(Err("screen capture failed: it is still opening".into()), t0 + MS, 0), t0 + MS);
-        assert!(matches!(&out[0].outcome, SnapOutcome::Failed { why, .. } if why.ends_with("it is still opening")));
+        let out = lane.finish(round.answer_points(Err("screen capture failed: an earlier read has not come back yet".into()), t0 + MS, 0), t0 + MS);
+        assert!(matches!(&out[0].outcome, SnapOutcome::Failed { why, .. } if why.ends_with("an earlier read has not come back yet")));
 
         // Cancelled while it is read: answered so, as any request is.
         let gone = req(5, A, r, points(&[(1, 1)], false), t0);

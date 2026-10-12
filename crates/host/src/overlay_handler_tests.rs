@@ -215,17 +215,14 @@ fn a_recognize_in_a_text_reached_through_focus_next_waits_as_the_handler() {
 
 /// A `text` that reads a pixel, reached through Tab: `host.screen.pixel`, built as the host builds
 /// it, waits there — the Tab's handler parks until the colour comes, and the sentence says it. A
-/// `when` that reads one runs in the scan's pass, where it cannot wait: it reads on the event loop
-/// at once, which the host's log says ("a coroutine the module made"), and nothing parks.
+/// `when` that reads one runs in the scan's pass, where it cannot wait: it raises there — "a
+/// coroutine the module made" — nothing parks, and the control is hidden, with the line every
+/// failing `when` has.
 #[test]
 fn a_text_that_reads_a_pixel_parks_its_handler_and_a_when_cannot_wait() {
     run(r##"
         local S = T.S
-        local loop = {}
-        rawset(T.host.screen, "pixel", T.pixelWait(function(why)
-          loop[#loop + 1] = why
-          return S.pixel
-        end))
+        rawset(T.host.screen, "pixel", T.pixelWait())
         local peek = false
         local o = T.fields(function(o)
           o:addStaticText({ label = "Lamp", text = function()
@@ -242,13 +239,13 @@ fn a_text_that_reads_a_pixel_parks_its_handler_and_a_when_cannot_wait() {
         assert(o.focus == 3 and T.waiting("host.screen.pixel"))
         assert(T.release("host.screen.pixel", { r = 255, g = 0, b = 0, hex = "#FF0000" }))
         assert(T.last().text == "Lamp, #FF0000", T.last().text)
-        assert(#loop == 0, "nothing read on the event loop")
 
-        peek, S.pixel = true, { r = 9, g = 9, b = 9, hex = "#090909" }
+        peek = true
         assert(T.key("Tab") == "Ran", "nothing waited: " .. T.dump())
-        assert(o.focus == 4, "Peek shown, from the pixel read at once: " .. o.focus)
-        assert(#loop == 1 and loop[1] == "foreign", table.concat(loop, ", "))
+        assert(o.focus == 1, "Peek hidden, the ring wrapped: " .. o.focus)
         assert(not T.waiting("host.screen.pixel"))
+        assert(T.count("Synth: 'Peek' — its `when` failed (") == 1, T.dump())
+        assert(T.count("host.screen.pixel cannot wait in a coroutine the module made") == 1, T.dump())
     "##);
 }
 

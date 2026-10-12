@@ -96,6 +96,27 @@ into the changelog with that release.
   `host.screen.pending(key)`, which counts the image worker's requests now too. A file `save` or
   `saveMarked` given a callback could not write is the callback's error, as it raises in their
   other forms.
+- **The `host.screen` calls without a callback raise where they cannot wait** (2026-10-12, step
+  12b). `snapshot`, `pixel` and `pixels` of the screen, `profile`, `cells`, `matchCells`,
+  `template{ capture }`, a snapshot's `crop`, `imageSearch`, `imageSearchAll`, `save` and
+  `saveMarked`: at the top level of a module or of an included file, in an arbiter's `onActivate`
+  or `onDeactivate`, in an `onChange` fired by the module's own `host.settings.set`, in a
+  metamethod, a `table.sort` comparator, a `string.gsub` function, a `for` loop's iterator, an
+  `xpcall` error handler, and in a coroutine the module made — the overlay runtime's for the hooks
+  asked on every scan among them — they used to capture and work on the event loop and hold the
+  whole application until they had; they raise there now, at the caller's line, with the message
+  for the place (`host.screen.<call> cannot wait here: …`, docs/api/screen.md, "Where it waits").
+  Pass a callback there, or make the call in a handler. A call that touches nothing it would wait
+  for — the points of a snapshot, a window with no pixel this time, an empty list, a template from
+  bytes or a file — is answered at once there, as before. `host.ocr.recognize` raises the same
+  three messages now: outside every handler one of its own, which names a handler such as
+  `host.timer.after(0, …)`, and in a coroutine one that names the hooks' remedy. Gone with it: the
+  log line `[<module>] host.screen.<call> could not wait here (…) and held the event loop <ms> ms
+  instead; …` and its summary at exit, `[<module>] host.screen.<call> held the event loop <n>
+  time(s), <ms> ms in all, where it could not wait`; the `[observe]` line's `screen pixel read(s)`
+  and its `profile ×…` clause, which counted the reads made on the event loop; and on Windows two
+  reasons of `fallback = "none"`, `it is still opening` and `this turn of the event loop already
+  waited its share for it`, which only a read on the event loop could get.
 
 ## Implementation
 
@@ -7906,13 +7927,14 @@ kind of place that says how long the first held the loop.
       answer of 2026-10-05 to pk-final.md's question a), and only with no module capturing Tab there
       does it go to the DAW (`was passed on to the program in front`). Then a quarter of an hour on
       a release build with no `[guard] … stopped` line, bringing the `[cpu]` lines, the poll lines
-      and every `could not wait here`.
+      and every `could not wait here` (since 12b, every `cannot wait` error).
 - [ ] **Step B1b+M never ran on a Mac** (type-checked only): Kontakt's Alt+V, load and save read
       the file menu in English and click the right entry, and a Cmd+Tab away during a read slow
       enough to try it clicks nothing and sends no Escape; Avenger's preset steps and "Preset info";
       sforzando recognised on the Intel Air, freshly loaded too; keys pressed in another window
       during a read; no `the system disabled the event tap` line while a module waits, no
-      `[guard] … stopped`, no `could not wait here` (since B5 not even the OCR example's); and the
+      `[guard] … stopped`, no `could not wait here` (since B5 not even the OCR example's; since 12b
+      none can be written, and a `cannot wait` error takes its place); and the
       reads asked while Vision's first request hangs at start end `"failed"` after 5 s.
 - [x] **Step B4, Melodyne's polls with a callback** (b0-final.md, B4; 2026-10-05). The read-out
       watcher and the note area's time signature read with `host.ocr.recognize` and a callback, so
@@ -8660,6 +8682,57 @@ kind of place that says how long the first held the loop.
       `matchCellsAsync` into `matchCells`), ocr.md, timer.md, input.md, gamepad.md, overlay.md,
       require.md, building-a-page.md, module-runtime-and-lifecycle.md, the feasibility study's
       note, the index.
+      Step 12b, 2026-10-12 (wbr-final.md; the maintainer's go the same day): every `host.screen`
+      call that waits raises where it cannot wait, as `recognize` does since 12a, with
+      `task::wait_message(call, case)` — one function for every call, three places: outside every
+      handler (`call it from a handler, such as host.timer.after(0, …)`), where Luau cannot stop
+      or the host called and waits (`make the call in the event's own function`), and in a
+      coroutine (`in a hook, measure it in a handler …; in a coroutine of your own, …`), each with
+      `pass a callback, <the call's form>`. The shim asks the host for a call's three messages when
+      it builds the call (`messages`), and where it cannot wait calls the call's `now`, which
+      answers at once a call that touches nothing it would wait for — the same cases a handler is
+      answered at once in (`Started::Now`, `Plan::Now`, `Reading::Now`; `task::now_answer`,
+      `image_search::now_plan`, `snapshot::now_of`) — or answers nothing, and then it raises at
+      the caller's line; `snapshot` has no `now` and raises whatever it was given. `recognize`'s
+      message outside every handler is its own now too. Deleted: the blocking bodies of every call
+      (`take`, `read_on_loop`, `profile_on_loop` and `LoopProfile`, `cells_on_loop`,
+      `cells_now`, `template_on_loop`, `search_on_loop`, `save_on_loop`, the two `live_capture`s,
+      `answer_on_loop`, `Picture`, the capture arm of `build_handle`), `task::legacy` with its
+      tally, line, summary and exit call (`LegacyTally`, `legacy_line`, `legacy_summary`,
+      `forget_legacy_said`, `log_legacy_summary`), the loop guard's scopes (`Legacy`,
+      `legacy(kind)`) and with them the difference between `off_loop_screen` and
+      `off_loop_screen_always`, which is one guard now; `Backend::pixel`, `pixels`, `capture`
+      and `frame` and their implementations on Windows, macOS and the stub, whose only callers
+      were those bodies (the `[observe]` counters `pixels` and `pixel_us` and the profile's
+      split `ProfileCost` counted nothing else, and went with them); Windows' event-loop reads of
+      desktop duplication (`dxgi::Caller`, the pump's 60 ms wait and its 60-in-300 ms budget,
+      `Fallback::Opening` and `Budget`, the opening's one pump wait — the prewarm keeps its own
+      flag, `warming`); and the Mac's `pixel()` with its tile. `grab()` stays: it serves the
+      capture thread and the image worker. Kept: `task::Case`, the timer's line, `callback_form`.
+      The scripted host raises the host's message where a fake `host.screen` call could not wait
+      (`T.screenWait`), and `S.couldNotWait` and `S.mayNotWait` are gone; `T.pixelWait()` raises
+      too. Tested (task_tests.rs, task.rs, loop_guard.rs, overlay_menu_tests.rs,
+      overlay_handler_tests.rs, dxgi.rs, lib.rs): every place raises a `host.screen` call's
+      message at the caller's line — the top level, an included file, a metamethod, sort, gsub,
+      a for loop's iterator, an xpcall handler, Lua the host calls back, a coroutine of the
+      module's own — nothing is captured there, the handler's own call waits, and a snapshot's
+      point is answered in a coroutine; `snapshot`, `pixel`, `pixels`, the region calls, the
+      searches and the shots each raise where they cannot wait and answer at once with nothing to
+      read; the three messages of every call, `recognize`'s and `pixel`'s word for word in the
+      docs; a `when` that reads a pixel hidden with the raise in its line; a menu test that reads
+      the screen counted as failing; the waits' answers checked against the pictures the threads
+      read, where they were compared with the blocking call's; the backend's reads gone from the
+      source and from the trait; the duplication gate's rules without the pump. Each fails without
+      the change: with the raise taken out of the shim's `point` and of the scripted host's
+      `T.screenWait`, eleven of them fail; the source tests fail on main's backend reads. CI's
+      checks look for
+      `cannot wait here` and `cannot wait in a coroutine` — a raise in a module's error line —
+      where they looked for `could not wait here`. Docs: screen.md (the top, which picture a read
+      sees, Failure reasons, Where it waits, `pixel`, `pixels`, `snapshot`, Reading a snapshot,
+      `profile`, `template`, the searches, the cells calls, the shots), ocr.md (the three
+      messages), overlay.md, settings.md, module-runtime-and-lifecycle.md (threads, a handler
+      waits), the index, macos-port.md, the frame-sharing design note, the feasibility study,
+      the in-memory templates note. Nothing audible changes.
 - [ ] **NVDA check of step V1 (session B, with V2 and T2)** — nothing should sound different.
       Kontakt with a CSS library in REAPER: a hotspot toggle pressed (its state said after the
       press, as before); the snapshot camera and its dropdown with the bar shut and open (the bar
@@ -8801,19 +8874,27 @@ kind of place that says how long the first held the loop.
       read on the `screen-capture` thread through ScreenCaptureKit, as a handler's are; a
       callback's `info.time` from that thread and from the image worker; the capture probe's
       `snapshot with a callback` line in the macOS jobs, which the next CI run reads.
+- [ ] **Step 12b never ran on a Mac** (type-checked only, with check-macos.ps1): `MacBackend`
+      without its four reads of the screen on the calling thread, and `capture.rs` without
+      `pixel()` and its tile — a `host.screen` call where it cannot wait raises, so the pump
+      thread captures nothing; `capture::points` answers a single point that cannot be read black
+      with the line once a session, as `pixel()` did. The next CI run's capture probe on macOS 15,
+      14 and 26 should show neither a `cannot wait` error nor a `[loop] screen capture on the event
+      loop` line, and its `pixels of 6 points waited … ms` line as before.
 - [ ] **NVDA check of step W1b (session C)** — nothing should sound different; announcements that
       read a pixel come about one tick later. Kontakt with a CSS library: Tab through the hotspot
       toggles and press one (its state said after the press); the header's status toggles: Tab,
       and a press after 250 ms; the snapshot camera. Melodyne's tool bar: Tab, F1 to F6, Up and
       Down through the variants. Kontakt 8's view and editor after F10 and Alt+E (the probes).
       ON:EAR's switches if a device is at hand (Q3 = A). Bring the log: no `could not wait here`
-      line should be there, and none of `[guard] … stopped`. The guard probe's TEST 8, 8b and 17.
+      line should be there (since 12b no `cannot wait` error), and none of `[guard] … stopped`. The
+      guard probe's TEST 8, 8b and 17.
 - [ ] **NVDA check of step W2 (session C)** — nothing should sound different. Melodyne: F-keys and
       Tab under Pitch while the selection watcher polls, without a delay; the selection read-outs
       as before; under Time, Ctrl+Right and Alt+Right say the same words, a little later (each
       judged step waits for its body's three row profiles, about three ticks). Bring the log: no
-      `could not wait here` line, and the `[observe]` line's `profile` clause, which counts only
-      profiles made on the event loop now.
+      `could not wait here` line (since 12b no `cannot wait` error); the `[observe]` line has no
+      `profile ×` clause any more, only the one of profiles given a callback.
 - [ ] **NVDA check of step W3 (session C)** — nothing should sound different. With a
       sample-library module loaded, so its landmark gates poll: Left and Right on a slider of a
       Soundiron or Audio Imperia library (the value said after each step, a little later; each
@@ -8821,7 +8902,8 @@ kind of place that says how long the first held the loop.
       a calibrating run: the calibration shot (Ctrl+Alt+Shift+S: both pictures written, the
       crosshairs where they were), the crop (Ctrl+Alt+Shift+T) and the count (Ctrl+Alt+Shift+V),
       each a little later; Avenger's calibration pictures if the plug-in is at hand (Q3 = A). Bring
-      the log: no `could not wait here` line, and any `not going on after finding its thumb` lines.
+      the log: no `could not wait here` line (since 12b no `cannot wait` error), and any `not going
+      on after finding its thumb` lines.
 - [ ] **NVDA check of step W3t (session C)** — nothing should sound different. Arrival in a
       Kontakt library still names it, and a library overlay found after a start or a calibration's
       re-capture is found as quickly (its landmark templates are decoded on the image worker now).
@@ -8833,7 +8915,8 @@ kind of place that says how long the first held the loop.
       manager and on again — the overlay comes back within a poll or two (its landmark gate asks
       again once its search was dropped, where it used to wait for a held one). Melodyne's tools
       and note area, and Kontakt's header toggles, as before. Bring the log: no `could not wait
-      here` line, and no `[landmark] … could not look` line that stays.
+      here` line (since 12b no `cannot wait` error), and no `[landmark] … could not look` line that
+      stays.
 - [x] **W1a's remedies name `snapshotAsync`** (review of W1a): the `could not wait here` line and
       the timer's line offer `host.screen.snapshotAsync(opts, function(snap, why) … end)` as the
       form that waits for nothing, since `snapshot(opts, cb)` does not exist yet, and Q1 = A
@@ -8952,19 +9035,20 @@ Follow-ups this work found and did not take on:
       costs nothing; while `identify` answers nil, its count goes up by two, and the eighth "could
       not tell" comes after four evaluations. Asking each control id once per evaluation would
       keep the count to what the docs say.
-- [ ] **The synchronous `host.screen` captures** (the maintainer's decision 3; wbr-final.md, W1a
+- [x] **The synchronous `host.screen` captures** (the maintainer's decision 3; wbr-final.md, W1a
       to W4 and 12b), and with them a `read` of a snapshot that was taken on the event loop.
       `snapshot` waits in a handler since W1a, `pixel` and `pixels` since W1b, `profile`,
       `cells`, `matchCells`, `template{ capture }` and a snapshot's `crop` since W2, and the three
       searches, `save` and `saveMarked` since W3; the templates are opened on the image worker
-      since W3t, except a search's that cannot wait. A module's own menu test that reads a pixel
-      on every tick reads it on the event loop, said once — the scripted host's
-      `a_modules_own_pixel_test` keeps one — until 12b makes it raise.
+      since W3t. Since 12b (2026-10-12) each of them raises where it cannot wait, and nothing reads
+      the screen on the event loop: a module's own menu test that reads a pixel of the screen on
+      every tick fails there — the scripted host's `a_modules_own_pixel_test` shows one, and one
+      that reads a snapshot a handler took.
       Perhaps later a change wait or an `at` without a callback, as a wait, which would let
       Avenger's preset step be written in a line. Where such a wait cannot wait — in the runtime's
       coroutine for the hooks asked on every scan, in a coroutine of the module's own, where Luau
-      cannot stop — it captures on the event loop and is logged, until 12b makes it raise there
-      (decided 2026-10-10; step B3's "for good, and never raises" no longer holds). No `when` of the
+      cannot stop — it raises, as every other wait does (decided 2026-10-10; step B3's "for good,
+      and never raises" no longer holds). No `when` of the
       tree reads the screen any more: Melodyne's read-out boxes are its watcher's answer (V2), and
       Kontakt's view and ON:EAR's filled tiles are probes of their overlays, read in the handler
       before a scan (T2).
@@ -8977,7 +9061,7 @@ Follow-ups this work found and did not take on:
       `cells`, `matchCells` and `template{ capture }` the image worker's capture, which has no bound
       either, as since W3 its searches, `save` and `saveMarked` do), so every module that then asks
       it for a picture or a pixel waits behind the hung one. Decide whether the hang clock covers the
-      capture too (wbr-final.md: the first follow-up after 12b).
+      capture too. **Next, now that 12b is in** (wbr-final.md: the first follow-up after it).
 - [ ] **A handler that reads again at once after `"failed"`** (B1b+M): during a hang a read asked
       again fails at once and is handed over on the next turn, so a handler that reads in a loop
       until it gets text turns once a tick and keeps its module busy for as long as the recogniser

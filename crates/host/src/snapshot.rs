@@ -47,9 +47,9 @@
 //! **`host.screen.snapshot` without a callback waits.** In a handler it is one of these requests
 //! too, a plain one with no key, whose waiter is the handler (`task.rs`): its charge reserved at the
 //! call, under the same limits, answered by the same delivery — which resumes the handler at once
-//! with what the call returns where it cannot wait, the handle or `nil` and the reason, rather than
-//! handing a callback to the mailbox ([`fire_snaps`]). Where it cannot wait it captures on the event
-//! loop as it always did, held there for that one call (`task::legacy`).
+//! with what the call returns, the handle or `nil` and the reason, rather than handing a callback to
+//! the mailbox ([`fire_snaps`]). Where it cannot wait it raises (`task::wait_message`), and nothing
+//! is captured.
 //!
 //! **Every callback is called alike** ([`callback_values`]): with what the call returns — its first
 //! value and its reason, `nil` when there is none — and then `info`, which carries `time` and
@@ -57,11 +57,10 @@
 //!
 //! **So do `host.screen.pixel` and `pixels`.** In a handler a read of the screen is a request of
 //! the same lane with no picture and no charge ([`submit_points`], `SnapKind::Points`): the
-//! `screen-capture` thread reads its points through the functions the event loop reads them with
-//! (`OcrWorker::points`), and the handler goes on with what the call returns where it cannot wait
-//! ([`live_values`], one function for both). A read of a snapshot, a window point with no pixel
-//! this time and an empty list touch no screen, and are answered at once wherever the call is
-//! made ([`Reading::Now`]).
+//! `screen-capture` thread reads its points (`OcrWorker::points`), and the handler goes on with what
+//! a callback is handed ([`live_values`], one function for both). A read of a snapshot, a window
+//! point with no pixel this time and an empty list touch no screen, and are answered at once
+//! wherever the call is made ([`Reading::Now`]); any other raises where it cannot wait.
 //!
 //! **`host.screen.profile`** is one of these requests too, with a second stage: its picture is
 //! taken on the `screen-capture` thread as a plain or timed snapshot's is — or, given a
@@ -69,12 +68,14 @@
 //! `Job::Profile`) while the request stays on the list, with its key, its share of the limits and
 //! its charge. Only the answer's tables are built on the event loop: as its callback runs, or as
 //! the handler that waits in the call without one goes on ([`start_profile`]). Where that call
-//! cannot wait it captures and reduces on the event loop ([`profile_on_loop`]). Its keys are its
-//! own (`Kind`): a profile never replaces a snapshot, nor the other way round;
+//! cannot wait it raises, unless there is nothing to profile this time, which is answered at once
+//! there too ([`nothing_to_profile`]). Its keys are its own (`Kind`): a profile never replaces a
+//! snapshot, nor the other way round;
 //! `host.screen.pending(key)` asks about both, and about the image worker's callbacks.
 //!
 //! **A snapshot's `crop`** waits too, for the image worker's copy of its part (`Job::Crop`), its
-//! charge reserved at the call; where it cannot wait it copies on the event loop ([`install_crop`]).
+//! charge reserved at the call; where it cannot wait it raises, unless there is nothing to copy
+//! ([`install_crop`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -85,7 +86,8 @@ use std::time::{Duration, Instant};
 
 use mlua::{Function, Lua, MetaMethod, MultiValue, RegistryKey, Table, UserData, UserDataFields, UserDataMethods, Value};
 
-use crate::backend::frame::{self, Area, Frame, FrameVia};
+use crate::backend::frame::{self, Frame, FrameVia};
+#[cfg(test)]
 use crate::backend::CapturedImage;
 use crate::image_search::{self, Haystack, ImageTask, Job, Outcome, Reduced};
 use crate::mailbox::{self, Event, MailHost, Opened};
@@ -308,8 +310,8 @@ pub(crate) struct SnapshotHandle {
 }
 
 impl SnapshotHandle {
-    /// A handle over a picture taken on the event loop, where `host.inputEpoch()` was
-    /// `input_epoch` from the call until the capture came back: no input is acted on meanwhile.
+    /// A handle over `frame` with `input_epoch` as its own: a crop's copy, which keeps the moment
+    /// of the snapshot it was cut from.
     fn new(mut frame: Frame, res: Reservation, input_epoch: u64, process: Rc<Cell<usize>>) -> SnapshotHandle {
         frame.input_epoch = input_epoch;
         SnapshotHandle::of(Arc::new(frame), res, process)
@@ -478,9 +480,9 @@ fn crop_args(lua: &Lua, s: &Value, v: &Value) -> mlua::Result<CropAsk> {
     Ok(CropAsk::Copy { frame, r, res, input_epoch, process })
 }
 
-/// What a crop answers of its copy — on the event loop and for a handler that waited alike: a
-/// snapshot of its own, charged by the reservation settled to what it holds, with the source's
-/// moment; or `nil` and the reason, the charge given back.
+/// What a crop answers of its copy — to a handler that waited and to a callback alike: a snapshot
+/// of its own, charged by the reservation settled to what it holds, with the source's moment; or
+/// `nil` and the reason, the charge given back.
 fn crop_values(lua: &Lua, outcome: Outcome, res: Reservation, input_epoch: u64, process: &Rc<Cell<usize>>) -> mlua::Result<MultiValue> {
     match outcome {
         Outcome::Crop(Ok(f)) => handle_value(lua, f, res, input_epoch, process),
@@ -497,8 +499,9 @@ fn crop_failed(lua: &Lua, outcome: Outcome) -> mlua::Result<MultiValue> {
     }
 }
 
-/// `s:crop(region) -> (Snapshot?, string?)` on the event loop: a snapshot of its own of a part of
-/// `s`, the pixels copied here and charged anew, from the same moment.
+/// `s:crop(region) -> (Snapshot?, string?)` copied on the spot, for a VM the host did not build: a
+/// snapshot of its own of a part of `s`, the pixels copied here and charged anew, from the same
+/// moment.
 fn crop_now(lua: &Lua, ask: CropAsk) -> mlua::Result<MultiValue> {
     match ask {
         CropAsk::Now(values) => Ok(values),
@@ -541,9 +544,8 @@ fn submit_crop<H: ReadHost>(h: &H, lua: &Lua, scope: usize, s: Value, v: Value, 
 }
 
 /// Makes the VM's `s:crop(region, cb?)` over `holder`, once: in a handler it waits while the image
-/// worker copies the part ([`start_crop`]); where it cannot wait it copies on the event loop, held
-/// there for that one call and said in the log (`task::legacy`) — a crop with nothing to copy is
-/// answered at once, unsaid, wherever it is asked; with a callback it never waits ([`submit_crop`]).
+/// worker copies the part ([`start_crop`]); where it cannot wait it raises — a crop with nothing to
+/// copy is answered at once wherever it is asked; with a callback it never waits ([`submit_crop`]).
 /// A code dependency's host, installed into the same VM, finds it made.
 pub(crate) fn install_crop<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>) -> mlua::Result<()> {
     if matches!(lua.named_registry_value::<Value>(CROP_KEY)?, Value::Function(_)) {
@@ -554,13 +556,12 @@ pub(crate) fn install_crop<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>) ->
         host_call!("snapshot:crop");
         start_crop(&*h, lua, idx, nonce, s, v)
     })?;
-    let h = holder.clone();
-    let blocking = lua.create_function(move |lua, (why, s, v): (String, Value, Value)| {
+    let now = lua.create_function(move |lua, (s, v): (Value, Value)| {
         host_call!("snapshot:crop");
-        match crop_args(lua, &s, &v)? {
-            CropAsk::Now(values) => Ok(values),
-            ask => crate::task::legacy(&*h, lua, idx, FC, crate::loop_guard::Kind::Screen, &why, || crop_now(lua, ask)),
-        }
+        Ok(crate::task::now_answer(match crop_args(lua, &s, &v)? {
+            CropAsk::Now(values) => Some(values),
+            CropAsk::Copy { .. } => None,
+        }))
     })?;
     let h = holder.clone();
     let submit = lua.create_function(move |lua, (s, v, cb): (Value, Value, Value)| {
@@ -568,7 +569,7 @@ pub(crate) fn install_crop<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>) ->
         submit_crop(&*h, lua, idx, s, v, cb)
     })?;
     // `s:crop(region, cb)`: the callback is the call's third argument, after the snapshot.
-    let crop: Function = crate::task::points(lua, idx, holder)?.call((FC, start, blocking, submit, 3))?;
+    let crop: Function = crate::task::points(lua, idx, holder)?.call((FC, start, now, submit, 3))?;
     lua.set_named_registry_value(CROP_KEY, crop)
 }
 
@@ -673,41 +674,6 @@ pub(crate) fn inside(frame: &Frame, r: ScreenRect) -> Result<Rect, String> {
     }
 }
 
-// ── What a profile made on the event loop reads ────────────────────────────────────────────
-
-/// The picture a `profile` made on the event loop reads, where it cannot wait: a capture made for
-/// it, or the part of a snapshot its region covers. The reduction after it is the same code either
-/// way.
-pub(crate) enum Picture {
-    /// Captured now: `img` is the region.
-    Live { img: CapturedImage },
-    /// A snapshot, read where `rect` lies in it; `rect` is inside it.
-    Snap { frame: Arc<Frame>, rect: Rect },
-}
-
-impl Picture {
-    pub(crate) fn image(&self) -> &CapturedImage {
-        match self {
-            Picture::Live { img } => img,
-            Picture::Snap { frame, .. } => &frame.img,
-        }
-    }
-
-    /// The part of the image the region covers, in its own pixels: all of a live capture.
-    pub(crate) fn area(&self) -> Area {
-        match self {
-            Picture::Live { img } => Area::full(img.w, img.h),
-            Picture::Snap { frame, rect } => frame.area(*rect).unwrap_or(Area { x: 0, y: 0, w: 0, h: 0 }),
-        }
-    }
-
-    /// Whether a screen was touched for it: a live capture is counted in the observation line,
-    /// a read of a snapshot is not.
-    pub(crate) fn is_live(&self) -> bool {
-        matches!(self, Picture::Live { .. })
-    }
-}
-
 // ── host.screen.snapshot ───────────────────────────────────────────────────────────────────
 
 /// `host.screen.snapshot`'s options without a callback: `{ region = … }`, strictly, and the region's
@@ -749,40 +715,12 @@ fn read_opts(v: &Value, fname: &str) -> mlua::Result<Result<(Rect, region::Regio
     Ok(Ok((r, given)))
 }
 
-/// `host.screen.snapshot(opts)` without the backend: reads `opts`, reserves the budget
-/// ([`reserve_for`]: a window region's overrun is answered), takes the picture through `capture`
-/// and answers the handle — or `nil` and why, giving the reservation back. The binding passes the
-/// backend's `frame`; the tests a fake.
-fn take(
-    lua: &Lua,
-    process: &Rc<Cell<usize>>,
-    input_epoch: u64,
-    opts: &Value,
-    capture: impl FnOnce(Rect) -> Result<Frame, String>,
-) -> mlua::Result<MultiValue> {
-    const F: &str = FS;
-    let (r, given) = match read_opts(opts, F)? {
-        Ok(r) => r,
-        Err(why) => return with_reason(lua, Value::Nil, why),
-    };
-    let res = match reserve_for(lua, process, estimate(r), F, &given)? {
-        Ok(res) => res,
-        Err(why) => return with_reason(lua, Value::Nil, why),
-    };
-    match capture(r) {
-        Ok(frame) => handle_value(lua, frame, res, input_epoch, process),
-        Err(why) => with_reason(lua, Value::Nil, why),
-    }
-}
-
 /// `host.screen.snapshot(opts) -> (Snapshot?, string?)`, and with a callback
 /// `host.screen.snapshot(opts, cb)`. Without one, in a handler it waits: its picture is taken on the
 /// `screen-capture` thread, as a plain request with a callback is ([`start_waited`]), and the
-/// handler goes on with the handle. Where it cannot wait, it captures on the event loop through the
-/// module's source, counted in the observation line like `profile`, and the log says where and how
-/// long (`task::legacy`) — without the first-read comparison, which is left to the module's next
-/// read, carried by one handed to a thread. With a callback it never waits, and files its request
-/// wherever it is called ([`Shared::snap_callback`]): at once, at `at`, or as a change wait.
+/// handler goes on with the handle. Where it cannot wait it raises, whatever it was given
+/// (`task::wait_message`). With a callback it never waits, and files its request wherever it is
+/// called ([`Shared::snap_callback`]): at once, at `at`, or as a change wait.
 pub(crate) fn snapshot(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, opts): (Table, Value)| {
@@ -790,33 +728,17 @@ pub(crate) fn snapshot(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Resu
         start_waited(&*sh, lua, idx, nonce, opts)
     })?;
     let sh = shared.clone();
-    let blocking = lua.create_function(move |lua, (why, opts): (String, Value)| {
-        host_call!("host.screen.snapshot");
-        crate::task::legacy(&*sh, lua, idx, FS, crate::loop_guard::Kind::Screen, &why, || {
-            take(lua, &sh.snap_bytes, sh.input_epoch.get(), &opts, |r| {
-                let src = capture_source::vm_source(lua);
-                let t0 = Instant::now();
-                let got = sh.backend.frame(r, src);
-                let mut obs = sh.observations();
-                obs.pixels += 1;
-                obs.pixel_us += t0.elapsed().as_micros();
-                got
-            })
-        })
-    })?;
-    let sh = shared.clone();
     let submit = lua.create_function(move |lua, (opts, cb): (Value, Value)| {
         host_call!("host.screen.snapshot");
         sh.snap_callback(lua, idx, opts, cb)
     })?;
-    crate::task::points(lua, idx, shared.clone())?.call((FS, start, blocking, submit, 2))
+    crate::task::points(lua, idx, shared.clone())?.call((FS, start, Value::Nil, submit, 2))
 }
 
-/// A waited `host.screen.snapshot`: its options read as the call that does not wait reads them —
-/// a mistake raises at the call — and a plain request filed for the handler that waits
-/// ([`submit_snap`]): its charge reserved at the call, one of the module's requests under their
-/// limits, with no key. A window region with no rectangle this time, or past a limit, is answered
-/// `nil` and the reason, as the call that does not wait answers it.
+/// A waited `host.screen.snapshot`: its options read strictly — a mistake raises at the call — and a
+/// plain request filed for the handler that waits ([`submit_snap`]): its charge reserved at the
+/// call, one of the module's requests under their limits, with no key. A window region with no
+/// rectangle this time, or past a limit, is answered `nil` and the reason, as a callback is.
 pub(crate) fn start_waited<H: ReadHost>(h: &H, lua: &Lua, scope: usize, nonce: Table, opts: Value) -> mlua::Result<()> {
     crate::task::start_wait(h, lua, scope, FS, nonce, || read_opts(&opts, FS), |parsed, task, prio| {
         let (rect, window) = match parsed {
@@ -953,8 +875,8 @@ pub(crate) fn pixels_args(lua: &Lua, points: &Value, opts: &Value, cb: bool) -> 
     Ok((Reading::Live(at), key))
 }
 
-/// What a live `pixel` or `pixels` of `n` points answers, from what was read — the same on the
-/// event loop and for a handler that waited: one colour, or the list in order; a list of another
+/// What a live `pixel` or `pixels` of `n` points answers, from what was read — the same to a
+/// handler that waited and to a callback: one colour, or the list in order; a list of another
 /// length is a failed capture, never a short answer; a failed read is `nil` and its reason.
 fn live_values(lua: &Lua, call: PointCall, n: usize, got: Result<Vec<(u8, u8, u8)>, String>) -> mlua::Result<MultiValue> {
     match got {
@@ -967,9 +889,9 @@ fn live_values(lua: &Lua, call: PointCall, n: usize, got: Result<Vec<(u8, u8, u8
     }
 }
 
-/// A waited `host.screen.pixel` or `pixels`: the arguments read as the call that does not wait
-/// reads them — a mistake raises at the call — and answered at once when they touch no screen;
-/// otherwise a points request filed for the handler that waits ([`submit_points`]).
+/// A waited `host.screen.pixel` or `pixels`: the arguments read strictly — a mistake raises at the
+/// call — and answered at once when they touch no screen; otherwise a points request filed for the
+/// handler that waits ([`submit_points`]).
 fn start_points<H: ReadHost>(
     h: &H,
     lua: &Lua,
@@ -1023,44 +945,30 @@ fn pixel_callback_at(lua: &Lua) -> mlua::Result<Function> {
     })
 }
 
-/// The live read of the call that cannot wait, on the event loop through the module's source —
-/// without the first-read comparison, which is left to the module's next read — counted as one
-/// screen read in the observation line: each point as `Backend::pixel` reads one, or the list as
-/// `Backend::pixels` reads it.
-fn read_on_loop(sh: &Shared, lua: &Lua, call: PointCall, at: &[(i32, i32)]) -> Result<Vec<(u8, u8, u8)>, String> {
-    let src = capture_source::vm_source(lua);
-    let t0 = Instant::now();
-    let got = match call {
-        PointCall::Pixel => at.iter().map(|&(x, y)| sh.backend.pixel(x, y, src)).collect(),
-        PointCall::Pixels => sh.backend.pixels(at, src),
-    };
-    let mut obs = sh.observations();
-    obs.pixels += 1;
-    obs.pixel_us += t0.elapsed().as_micros();
-    got
+/// Where `pixel` or `pixels` cannot wait (`task::now_answer`): a reading that touches no screen,
+/// answered at once; one of the screen, nothing — the call raises.
+fn now_of(reading: Reading) -> MultiValue {
+    crate::task::now_answer(match reading {
+        Reading::Now(values, _) => Some(values),
+        Reading::Live(_) => None,
+    })
 }
 
 /// `host.screen.pixel(x, y, opts?, cb?)` or `pixel(point, opts?, cb?) -> (Colour?, string?)`. In a
-/// handler a screen point waits: it is read on the `screen-capture` thread as the event loop reads
-/// it ([`start_points`]), and the handler goes on with the colour. Where it cannot wait it is read
-/// on the event loop, and the log says where and how long (`task::legacy`). A snapshot's pixel, and
-/// a window point with no pixel this time, are answered at once wherever the call is made, and
-/// neither waits nor is counted. With a callback it never waits ([`submit_points_cb`]).
+/// handler a screen point waits: it is read on the `screen-capture` thread ([`start_points`]), and
+/// the handler goes on with the colour. Where it cannot wait it raises (`task::wait_message`). A
+/// snapshot's pixel, and a window point with no pixel this time, are answered at once wherever the
+/// call is made, and neither waits nor is counted. With a callback it never waits
+/// ([`submit_points_cb`]).
 pub(crate) fn pixel(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, a, b, c): (Table, Value, Value, Value)| {
         host_call!("host.screen.pixel");
         start_points(&*sh, lua, idx, PointCall::Pixel, nonce, || pixel_args(lua, &a, &b, &c, false))
     })?;
-    let sh = shared.clone();
-    let blocking = lua.create_function(move |lua, (why, a, b, c): (String, Value, Value, Value)| {
+    let now = lua.create_function(move |lua, (a, b, c): (Value, Value, Value)| {
         host_call!("host.screen.pixel");
-        match pixel_args(lua, &a, &b, &c, false)?.0 {
-            Reading::Now(values, _) => Ok(values),
-            Reading::Live(at) => crate::task::legacy(&*sh, lua, idx, FP, crate::loop_guard::Kind::Screen, &why, || {
-                live_values(lua, PointCall::Pixel, at.len(), read_on_loop(&sh, lua, PointCall::Pixel, &at))
-            }),
-        }
+        Ok(now_of(pixel_args(lua, &a, &b, &c, false)?.0))
     })?;
     let sh = shared.clone();
     let submit = lua.create_function(move |lua, (a, b, c, d): (Value, Value, Value, Value)| {
@@ -1068,35 +976,29 @@ pub(crate) fn pixel(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<
         let (a, b, c, cb) = pixel_callback_args(a, b, c, d);
         submit_points_cb(&*sh, lua, idx, PointCall::Pixel, cb, PIXEL_CALLBACK, || pixel_args(lua, &a, &b, &c, true))
     })?;
-    crate::task::points(lua, idx, shared.clone())?.call((FP, start, blocking, submit, pixel_callback_at(lua)?))
+    crate::task::points(lua, idx, shared.clone())?.call((FP, start, now, submit, pixel_callback_at(lua)?))
 }
 
 /// `host.screen.pixels(points, opts?, cb?) -> ({ Colour }?, string?)`: every point from as few
 /// captures as the backend can make of them — in a handler on the `screen-capture` thread, which the
-/// handler waits for, and where it cannot wait on the event loop, said in the log — or from a
-/// snapshot, touching nothing, at once wherever it is called. With a callback it never waits.
+/// handler waits for; where it cannot wait it raises — or from a snapshot, touching nothing, at once
+/// wherever it is called. With a callback it never waits.
 pub(crate) fn pixels(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, points, opts): (Table, Value, Value)| {
         host_call!("host.screen.pixels");
         start_points(&*sh, lua, idx, PointCall::Pixels, nonce, || pixels_args(lua, &points, &opts, false))
     })?;
-    let sh = shared.clone();
-    let blocking = lua.create_function(move |lua, (why, points, opts): (String, Value, Value)| {
+    let now = lua.create_function(move |lua, (points, opts): (Value, Value)| {
         host_call!("host.screen.pixels");
-        match pixels_args(lua, &points, &opts, false)?.0 {
-            Reading::Now(values, _) => Ok(values),
-            Reading::Live(at) => crate::task::legacy(&*sh, lua, idx, FPS, crate::loop_guard::Kind::Screen, &why, || {
-                live_values(lua, PointCall::Pixels, at.len(), read_on_loop(&sh, lua, PointCall::Pixels, &at))
-            }),
-        }
+        Ok(now_of(pixels_args(lua, &points, &opts, false)?.0))
     })?;
     let sh = shared.clone();
     let submit = lua.create_function(move |lua, (points, opts, cb): (Value, Value, Value)| {
         host_call!("host.screen.pixels");
         submit_points_cb(&*sh, lua, idx, PointCall::Pixels, cb, "third argument", || pixels_args(lua, &points, &opts, true))
     })?;
-    crate::task::points(lua, idx, shared.clone())?.call((FPS, start, blocking, submit, 3))
+    crate::task::points(lua, idx, shared.clone())?.call((FPS, start, now, submit, 3))
 }
 
 /// Files the points `asker` waits for in `host.screen.pixel` or `pixels` (`call`) — a handler, or a
@@ -1947,12 +1849,12 @@ fn call_args(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> 
     Ok((f, args))
 }
 
-/// What a handler that waited goes on with: what its call returns where it cannot wait. For
-/// `host.screen.snapshot` the handle, charged by the request's reservation settled to what the
-/// picture holds, or `nil` and the reason; no `info`. The charge goes either way. For
-/// `host.screen.pixel` or `pixels` the colour or the list, or `nil` and the reason, built as the
-/// call that cannot wait builds them ([`live_values`]). For `host.screen.profile` its table, its
-/// picture's `time` and `inputEpoch` with it ([`profile_answer`]), or `nil` and the reason.
+/// What a handler that waited goes on with: what its call returns. For `host.screen.snapshot` the
+/// handle, charged by the request's reservation settled to what the picture holds, or `nil` and the
+/// reason; no `info`. The charge goes either way. For `host.screen.pixel` or `pixels` the colour or
+/// the list, or `nil` and the reason, built as a callback's are ([`live_values`]). For
+/// `host.screen.profile` its table, its picture's `time` and `inputEpoch` with it
+/// ([`profile_answer`]), or `nil` and the reason.
 fn waited_values(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> mlua::Result<MultiValue> {
     let lua = p.lua.clone();
     let res = p.res.take();
@@ -2639,140 +2541,27 @@ fn profile_answer(
     Ok(t)
 }
 
-/// What a profile made on the event loop spent, for the observation line: when it began, when its
-/// picture was there (on a snapshot, the clip), when it was reduced and when its tables were built,
-/// and whether the screen was read for it.
-pub(crate) struct LoopProfile {
-    pub(crate) t0: Instant,
-    pub(crate) captured: Instant,
-    pub(crate) reduced: Instant,
-    pub(crate) end: Instant,
-    pub(crate) live: bool,
-}
-
-/// Whether a profile of `args` has nothing to read this time — a window region with no
-/// rectangle, an empty region, a region outside its snapshot — and is answered without a picture.
-fn nothing_to_profile(args: &ProfileArgs) -> bool {
-    match (&args.region, &args.snap) {
-        (Err(_), _) => true,
-        (Ok(r), _) if r.w <= 0 || r.h <= 0 => true,
-        (Ok(r), Some(frame)) => clip(frame, *r).is_err(),
-        (Ok(_), None) => false,
-    }
-}
-
-/// `host.screen.profile` on the event loop, as it always ran there: the picture — the part of the
-/// snapshot the region covers, or a capture of the region through `capture` — reduced, and the
-/// table built with its `time` and `inputEpoch`: a snapshot's own, or when the capture came back
-/// and `input_epoch`, the event loop's at the call, as nothing is acted on while it captures. `nil`
-/// and the reason when there is nothing to profile. What it spent, for one that answered a table.
-pub(crate) fn profile_on_loop(
-    lua: &Lua,
-    args: ProfileArgs,
-    input_epoch: u64,
-    capture: impl FnOnce(i32, i32, i32, i32) -> Result<CapturedImage, String>,
-) -> mlua::Result<(MultiValue, Option<LoopProfile>)> {
-    let nil = |why: String| -> mlua::Result<(MultiValue, Option<LoopProfile>)> { Ok((with_reason(lua, Value::Nil, why)?, None)) };
-    let (rx, ry, rw, rh) = match args.region {
-        Ok(r) => (r.x, r.y, r.w, r.h),
-        Err(why) => return nil(why),
-    };
-    if rw <= 0 || rh <= 0 {
-        return nil(format!("{} ({rw}x{rh})", crate::EMPTY_REGION));
-    }
-    let t0 = Instant::now();
-    // The picture: the part of the snapshot the region covers, or a capture made now.
-    let pic = match args.snap {
-        Some(frame) => match clip(&frame, ScreenRect { x: rx, y: ry, w: rw, h: rh }) {
-            Ok(rect) => Picture::Snap { frame, rect },
-            Err(why) => return nil(why),
+/// What a profile of `args` answers when it has nothing to read this time — a window region with no
+/// rectangle, an empty region, a region outside its snapshot: `nil` and the reason, without a
+/// picture, at once wherever the call is made. `None` for one that reads.
+fn nothing_to_profile(lua: &Lua, args: &ProfileArgs) -> mlua::Result<Option<MultiValue>> {
+    let why = match (&args.region, &args.snap) {
+        (Err(why), _) => why.clone(),
+        (Ok(r), _) if r.w <= 0 || r.h <= 0 => format!("{} ({}x{})", crate::EMPTY_REGION, r.w, r.h),
+        (Ok(r), Some(frame)) => match clip(frame, *r) {
+            Err(why) => why,
+            Ok(_) => return Ok(None),
         },
-        None => match capture(rx, ry, rw, rh) {
-            Ok(img) => Picture::Live { img },
-            Err(why) => return nil(why),
-        },
+        (Ok(_), None) => return Ok(None),
     };
-    let captured = Instant::now();
-    let moment = match &pic {
-        Picture::Snap { frame, .. } => (millis_of(frame.taken), frame.input_epoch),
-        Picture::Live { .. } => (millis_of(captured), input_epoch),
-    };
-    // The reduction reads only the area it is given, and nothing at all from a buffer shorter
-    // than its own size: a capture that came back short — a clipped region, a backend that
-    // rounded a dimension — would otherwise index past the end, and a panic inside a Lua binding
-    // is not a module error that gets reported: it is the process. Answering nil is what every
-    // other failure in this function does.
-    let area = pic.area();
-    let Some((columns, rows)) = crate::profile::profile(pic.image(), area, args.cols, args.rows, args.dark) else {
-        return nil(crate::SHORT_CAPTURE.to_string());
-    };
-    let reduced = Instant::now();
-    // The rectangle read: the region asked for, or, on a snapshot, its part inside it.
-    let (ox, oy) = match &pic {
-        Picture::Snap { rect, .. } => (rect.x, rect.y),
-        Picture::Live { .. } => (rx, ry),
-    };
-    let out = profile_answer(lua, (ox, oy, area.w as i32, area.h as i32), columns, rows, Some(moment))?;
-    // Timed to HERE, not to the end of the capture. The capture is a fixed frame; the traversal
-    // and the six sequences are the only part that grows with the region, and leaving them outside
-    // the measurement would hide them from the one report this project uses to find event-loop
-    // stalls — while making this call look free.
-    let end = Instant::now();
-    Ok((one_value(Value::Table(out))?, Some(LoopProfile { t0, captured, reduced, end, live: pic.is_live() })))
+    with_reason(lua, Value::Nil, why).map(Some)
 }
 
-/// `host.screen.profile` where it cannot wait (`why`): answered at once, and not said, when there
-/// is nothing to profile or a window region is past a limit; otherwise made on the event loop
-/// ([`profile_on_loop`]), held there for that one call and said in the log (`task::legacy`), and
-/// what it spent handed to `observe`.
-#[allow(clippy::too_many_arguments)]
-fn profile_now<H: ReadHost>(
-    h: &H,
-    lua: &Lua,
-    scope: usize,
-    why: &str,
-    args: ProfileArgs,
-    input_epoch: u64,
-    capture: impl FnOnce(i32, i32, i32, i32) -> Result<CapturedImage, String>,
-    observe: impl FnOnce(LoopProfile),
-) -> mlua::Result<MultiValue> {
-    if nothing_to_profile(&args) {
-        return profile_on_loop(lua, args, input_epoch, capture).map(|(v, _)| v);
-    }
-    // A picture of its own is held under the limits a wait's is ([`submit_profile`]), so that both
-    // forms answer alike: corners past them raise, and a window region past them is answered at
-    // once, unsaid, as nothing was read. Its charge is held while it is taken and reduced.
-    let _res = match (&args.snap, &args.region) {
-        (None, Ok(r)) => {
-            let r = match within_limit(rect_of(*r), args.window, FPR, frame::MAX_FRAME_PIXELS)? {
-                Ok(r) => r,
-                Err(why) => return with_reason(lua, Value::Nil, why),
-            };
-            match reserve_by_form(lua, h.snap_bytes(), estimate(r), FPR, args.window, false)? {
-                Ok(res) => Some(res),
-                Err(why) => {
-                    let owner = crate::ocr::lua::owner_of(lua, &h.vm_gens(), scope);
-                    note_crowding(h, owner.idx, &why);
-                    return with_reason(lua, Value::Nil, why);
-                }
-            }
-        }
-        _ => None,
-    };
-    crate::task::legacy(h, lua, scope, FPR, crate::loop_guard::Kind::Screen, why, || {
-        let (v, cost) = profile_on_loop(lua, args, input_epoch, capture)?;
-        if let Some(c) = cost {
-            observe(c);
-        }
-        Ok(v)
-    })
-}
-
-/// A waited `host.screen.profile`: its options read as the call that does not wait reads them —
-/// a mistake, a `key` or an `at` raise at the call — and answered at once when there is nothing to
-/// profile this time; otherwise a request filed for the handler that waits ([`submit_profile`]): its
-/// picture taken on the `screen-capture` thread, or its snapshot's, reduced on the image worker, and
-/// the handler going on with the table ([`waited_values`]).
+/// A waited `host.screen.profile`: its options read — a mistake, a `key` or an `at` raise at the
+/// call — and answered at once when there is nothing to profile this time ([`nothing_to_profile`]);
+/// otherwise a request filed for the handler that waits ([`submit_profile`]): its picture taken on
+/// the `screen-capture` thread, or its snapshot's, reduced on the image worker, and the handler
+/// going on with the table ([`waited_values`]).
 pub(crate) fn start_profile<H: ReadHost>(
     h: &H,
     lua: &Lua,
@@ -2789,9 +2578,8 @@ pub(crate) fn start_profile<H: ReadHost>(
         Ok(args)
     };
     crate::task::start_point(h, lua, scope, FPR, nonce, parse, |args, task, prio| {
-        // Nothing to read this time: answered at once, as where it cannot wait, with no picture.
-        if nothing_to_profile(&args) {
-            let (now, _) = profile_on_loop(lua, args, 0, |_, _, _, _| Err(crate::backend::CAPTURE_FAILED.to_string()))?;
+        // Nothing to read this time: answered at once, with no picture.
+        if let Some(now) = nothing_to_profile(lua, &args)? {
             return Ok(Started::Now(now));
         }
         let id = submit_profile(h, lua, scope, Asker::Handler(task), o, args, prio, Instant::now())?;
@@ -2812,9 +2600,9 @@ fn profile_opts_table(v: Value) -> mlua::Result<Option<Table>> {
 /// `host.screen.profile(opts, cb)`. Without one it waits in a handler: its picture is taken on the
 /// `screen-capture` thread as a plain snapshot's is — none for a snapshot — reduced on the
 /// image worker, and only the table is built on the event loop as the handler goes on
-/// ([`start_profile`]). Where it cannot wait it captures and reduces on the event loop, said in the
-/// log and counted in the observation line ([`profile_now`]). With a callback it never waits, and
-/// files the request wherever it is called ([`submit_profile`]).
+/// ([`start_profile`]). Where it cannot wait it raises, unless there is nothing to profile this
+/// time ([`nothing_to_profile`]). With a callback it never waits, and files the request wherever it
+/// is called ([`submit_profile`]).
 ///
 /// ONE capture, reduced in Rust to a shape a module can reason about. The reason this exists is a
 /// measurement, not a preference. On this machine a BitBlt capture costs ~16.6 ms at 55x27 and
@@ -2836,26 +2624,9 @@ pub(crate) fn profile(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Resul
         start_profile(&*sh, lua, idx, nonce, profile_opts_table(opts)?, sh.backend.screen_size())
     })?;
     let sh = shared.clone();
-    let blocking = lua.create_function(move |lua, (why, opts): (String, Value)| {
+    let now = lua.create_function(move |lua, opts: Value| {
         host_call!("host.screen.profile");
-        let opts = profile_opts_table(opts)?;
-        let args = profile_args(opts.as_ref(), sh.backend.screen_size())?;
-        // `key` and `at` are the callback form's. Here they raise, before anything is answered,
-        // rather than being passed over.
-        callback_only(opts.as_ref(), FPR, &["key", "at"], "the second argument")?;
-        let capture = |x, y, w, h| sh.backend.capture(x, y, w, h, capture_source::vm_source(lua));
-        // Counted as one screen touch in the observation log, because that is exactly what it is;
-        // a snapshot's profile touched no screen and is not counted as a pixel read, but its
-        // reduction ran here all the same, so the profile's own split counts both.
-        let observe = |c: LoopProfile| {
-            let mut obs = sh.observations();
-            if c.live {
-                obs.pixels += 1;
-                obs.pixel_us += c.end.duration_since(c.t0).as_micros();
-            }
-            obs.profile.add(c.t0, c.captured, c.reduced, c.end, !c.live);
-        };
-        profile_now(&*sh, lua, idx, &why, args, sh.input_epoch.get(), capture, observe)
+        profile_now(lua, opts, sh.backend.screen_size())
     })?;
     let sh = shared.clone();
     let submit = lua.create_function(move |lua, (opts, cb): (Value, Value)| {
@@ -2866,29 +2637,32 @@ pub(crate) fn profile(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Resul
         submit_profile(&*sh, lua, idx, Asker::Callback(cb), opts.as_ref(), args, current_priority(), Instant::now())?;
         Ok(())
     })?;
-    crate::task::points(lua, idx, shared.clone())?.call((FPR, start, blocking, submit, 2))
+    crate::task::points(lua, idx, shared.clone())?.call((FPR, start, now, submit, 2))
 }
 
-/// `host.screen.profile` as the host builds it, over `holder` — its wait and its callback form the
-/// host's own ([`start_profile`], [`submit_profile`]) — capturing through `capture` where it cannot
-/// wait, as the event loop would, with input epoch 7, through the host's own tally: for the tests'
-/// holders, which have no backend. The primary screen is 1920x1080.
+/// `host.screen.profile` where it cannot wait (`task::now_answer`): its options read as a handler's
+/// are — a mistake, a `key` or an `at` raise, before anything is answered — and answered at once
+/// when there is nothing to profile this time; any other raises. `screen` is the primary screen's
+/// size, the default region.
+fn profile_now(lua: &Lua, opts: Value, screen: (i32, i32)) -> mlua::Result<MultiValue> {
+    let opts = profile_opts_table(opts)?;
+    let args = profile_args(opts.as_ref(), screen)?;
+    // `key` and `at` are the callback form's. Here they raise, before anything is answered,
+    // rather than being passed over.
+    callback_only(opts.as_ref(), FPR, &["key", "at"], "the second argument")?;
+    Ok(crate::task::now_answer(nothing_to_profile(lua, &args)?))
+}
+
+/// `host.screen.profile` as the host builds it, over `holder` — its wait, where it cannot wait and
+/// its callback form the host's own ([`start_profile`], [`profile_now`], [`submit_profile`]): for
+/// the tests' holders, which have no backend. The primary screen is 1920x1080.
 #[cfg(test)]
-pub(crate) fn test_profile_fn<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>, capture: crate::backend::CaptureFn) -> mlua::Result<Function> {
+pub(crate) fn test_profile_fn<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>) -> mlua::Result<Function> {
     let h = holder.clone();
     let start = lua.create_function(move |lua, (nonce, opts): (Table, Value)| {
         start_profile(&*h, lua, idx, nonce, profile_opts_table(opts)?, (1920, 1080))
     })?;
-    let h = holder.clone();
-    let blocking = lua.create_function(move |lua, (why, opts): (String, Value)| {
-        let opts = profile_opts_table(opts)?;
-        let args = profile_args(opts.as_ref(), (1920, 1080))?;
-        callback_only(opts.as_ref(), FPR, &["key", "at"], "the second argument")?;
-        let one = |x, y, w, hh| {
-            capture(&[(x, y, w, hh)], capture_source::vm_source(lua)).pop().unwrap_or_else(|| Err(crate::backend::CAPTURE_FAILED.to_string()))
-        };
-        profile_now(&*h, lua, idx, &why, args, 7, one, |_| {})
-    })?;
+    let now = lua.create_function(move |lua, opts: Value| profile_now(lua, opts, (1920, 1080)))?;
     let h = holder.clone();
     let submit = lua.create_function(move |lua, (opts, cb): (Value, Value)| {
         let cb = image_search::callback_arg(FPR, cb, "second argument")?;
@@ -2897,7 +2671,7 @@ pub(crate) fn test_profile_fn<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>,
         submit_profile(&*h, lua, idx, Asker::Callback(cb), opts.as_ref(), args, current_priority(), Instant::now())?;
         Ok(())
     })?;
-    crate::task::points(lua, idx, holder)?.call((FPR, start, blocking, submit, 2))
+    crate::task::points(lua, idx, holder)?.call((FPR, start, now, submit, 2))
 }
 
 /// Files a `host.screen.profile` of the VM `lua`, called under the identity `scope`, for `asker`,
@@ -3138,72 +2912,43 @@ impl SnapState {
 }
 
 /// `host.screen.snapshot` as the host builds it, over `holder`, its wait and its callback form the
-/// host's own ([`start_waited`], [`snap_callback`]); where it cannot wait it captures a
-/// [`test_frame`] of its region with input epoch 7, through the host's own tally (`task::legacy`) and
-/// past the screen guard as `Backend::frame` is: for the tests' holders, which have no backend.
+/// host's own ([`start_waited`], [`snap_callback`]), raising where it cannot wait: for the tests'
+/// holders, which have no backend.
 #[cfg(test)]
 pub(crate) fn test_snapshot<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>) -> mlua::Result<Function> {
     let h = holder.clone();
     let start = lua.create_function(move |lua, (nonce, opts): (Table, Value)| start_waited(&*h, lua, idx, nonce, opts))?;
     let h = holder.clone();
-    let blocking = lua.create_function(move |lua, (why, opts): (String, Value)| {
-        crate::task::legacy(&*h, lua, idx, FS, crate::loop_guard::Kind::Screen, &why, || {
-            take(lua, h.snap_bytes(), 7, &opts, |r| {
-                crate::loop_guard::off_loop_screen("the fake snapshot");
-                Ok(test_frame(r.x, r.y, r.w, r.h))
-            })
-        })
-    })?;
-    let h = holder.clone();
     let submit = lua.create_function(move |lua, (opts, cb): (Value, Value)| snap_callback(&*h, lua, idx, opts, cb))?;
-    crate::task::points(lua, idx, holder)?.call((FS, start, blocking, submit, 2))
+    crate::task::points(lua, idx, holder)?.call((FS, start, Value::Nil, submit, 2))
 }
 
 /// `host.screen.pixel` and `pixels` as the host builds them, over `holder`, their waits the host's
-/// own ([`start_points`]); where they cannot wait they read through `live`, as the capture thread
-/// would — given the points, the module's source and whether each is read as `pixel` reads one —
-/// through the host's own tally (`task::legacy`): for the tests' holders, which have no backend.
-/// The pair, `pixel` first.
+/// own ([`start_points`]), and where they cannot wait the host's too ([`now_of`]): for the tests'
+/// holders, which have no backend. The pair, `pixel` first.
 #[cfg(test)]
-pub(crate) fn test_points<H: ReadHost>(
-    lua: &Lua,
-    idx: usize,
-    holder: Rc<H>,
-    live: crate::backend::PointsFn,
-) -> mlua::Result<(Function, Function)> {
-    let blocking = move |call: PointCall, why: &str, reading: Reading, h: &H, lua: &Lua| match reading {
-        Reading::Now(values, _) => Ok(values),
-        Reading::Live(at) => crate::task::legacy(h, lua, idx, call.name(), crate::loop_guard::Kind::Screen, why, || {
-            live_values(lua, call, at.len(), live(&at, capture_source::vm_source(lua), call.single()))
-        }),
-    };
+pub(crate) fn test_points<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>) -> mlua::Result<(Function, Function)> {
     let h = holder.clone();
     let start = lua.create_function(move |lua, (nonce, a, b, c): (Table, Value, Value, Value)| {
         start_points(&*h, lua, idx, PointCall::Pixel, nonce, || pixel_args(lua, &a, &b, &c, false))
     })?;
-    let h = holder.clone();
-    let block = lua.create_function(move |lua, (why, a, b, c): (String, Value, Value, Value)| {
-        blocking(PointCall::Pixel, &why, pixel_args(lua, &a, &b, &c, false)?.0, &h, lua)
-    })?;
+    let now = lua.create_function(move |lua, (a, b, c): (Value, Value, Value)| Ok(now_of(pixel_args(lua, &a, &b, &c, false)?.0)))?;
     let h = holder.clone();
     let submit = lua.create_function(move |lua, (a, b, c, d): (Value, Value, Value, Value)| {
         let (a, b, c, cb) = pixel_callback_args(a, b, c, d);
         submit_points_cb(&*h, lua, idx, PointCall::Pixel, cb, PIXEL_CALLBACK, || pixel_args(lua, &a, &b, &c, true))
     })?;
-    let pixel: Function = crate::task::points(lua, idx, holder.clone())?.call((FP, start, block, submit, pixel_callback_at(lua)?))?;
+    let pixel: Function = crate::task::points(lua, idx, holder.clone())?.call((FP, start, now, submit, pixel_callback_at(lua)?))?;
     let h = holder.clone();
     let start = lua.create_function(move |lua, (nonce, points, opts): (Table, Value, Value)| {
         start_points(&*h, lua, idx, PointCall::Pixels, nonce, || pixels_args(lua, &points, &opts, false))
     })?;
-    let h = holder.clone();
-    let block = lua.create_function(move |lua, (why, points, opts): (String, Value, Value)| {
-        blocking(PointCall::Pixels, &why, pixels_args(lua, &points, &opts, false)?.0, &h, lua)
-    })?;
+    let now = lua.create_function(move |lua, (points, opts): (Value, Value)| Ok(now_of(pixels_args(lua, &points, &opts, false)?.0)))?;
     let h = holder.clone();
     let submit = lua.create_function(move |lua, (points, opts, cb): (Value, Value, Value)| {
         submit_points_cb(&*h, lua, idx, PointCall::Pixels, cb, "third argument", || pixels_args(lua, &points, &opts, true))
     })?;
-    let pixels: Function = crate::task::points(lua, idx, holder)?.call((FPS, start, block, submit, 3))?;
+    let pixels: Function = crate::task::points(lua, idx, holder)?.call((FPS, start, now, submit, 3))?;
     Ok((pixel, pixels))
 }
 
@@ -3215,6 +2960,32 @@ mod tests {
     fn blank(r: Rect) -> Frame {
         let img = CapturedImage { w: r.w as u32, h: r.h as u32, rgba: vec![255; (r.w * r.h * 4) as usize] };
         Frame::from_image(r, img, Instant::now(), FrameVia::Gdi, None).expect("a whole frame")
+    }
+
+    /// A snapshot of `opts` as a request's answer is made of it, with the capture passed in: reads
+    /// `opts`, reserves the budget ([`reserve_for`]: a window region's overrun is answered), takes
+    /// the picture through `capture` and answers the handle with `input_epoch` — or `nil` and why,
+    /// giving the reservation back.
+    fn take(
+        lua: &Lua,
+        process: &Rc<Cell<usize>>,
+        input_epoch: u64,
+        opts: &Value,
+        capture: impl FnOnce(Rect) -> Result<Frame, String>,
+    ) -> mlua::Result<MultiValue> {
+        const F: &str = FS;
+        let (r, given) = match read_opts(opts, F)? {
+            Ok(r) => r,
+            Err(why) => return with_reason(lua, Value::Nil, why),
+        };
+        let res = match reserve_for(lua, process, estimate(r), F, &given)? {
+            Ok(res) => res,
+            Err(why) => return with_reason(lua, Value::Nil, why),
+        };
+        match capture(r) {
+            Ok(frame) => handle_value(lua, frame, res, input_epoch, process),
+            Err(why) => with_reason(lua, Value::Nil, why),
+        }
     }
 
     /// `host.screen.snapshot` over a fake capture, charging `process`, with input epoch 7.
@@ -3571,7 +3342,7 @@ mod tests {
         );
     }
 
-    /// `host.screen.pixels` as the call that cannot wait answers it, with `live` reading the screen.
+    /// `host.screen.pixels` as a read answers it, with `live` reading the screen.
     fn read_pixels(
         lua: &Lua,
         points: &Value,
@@ -3644,11 +3415,13 @@ mod tests {
     fn a_failed_live_read_is_nil_and_why() {
         let lua = Lua::new();
         let p: Value = lua.load("return { { 1, 2 }, { 3, 4 } }").eval().unwrap();
-        let got = read_pixels(&lua, &p, &Value::Nil, |_| Err("screen capture failed: desktop duplication could not answer — it is still opening".into()))
-            .unwrap()
-            .into_vec();
+        let got = read_pixels(&lua, &p, &Value::Nil, |_| {
+            Err("screen capture failed: desktop duplication could not answer — an earlier read has not come back yet".into())
+        })
+        .unwrap()
+        .into_vec();
         assert!(got[0].is_nil());
-        assert!(got[1].as_string().unwrap().to_string_lossy().ends_with("it is still opening"));
+        assert!(got[1].as_string().unwrap().to_string_lossy().ends_with("an earlier read has not come back yet"));
         let short = read_pixels(&lua, &p, &Value::Nil, |_| Ok(vec![(0, 0, 0)])).unwrap().into_vec();
         assert_eq!(short[1].as_string().unwrap().to_string_lossy(), "screen capture failed");
         // `pixel` the same: one colour and nothing after it, or `nil` and the reason.

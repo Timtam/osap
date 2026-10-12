@@ -1,5 +1,7 @@
-//! Screen reading: the size of the display, one pixel, a region as an image, and a region kept
-//! as a snapshot's frame with the backing-store image beside it (`frame`, `NativeImage`).
+//! Screen reading: the size of the display, a region as an image, the colours at a list of
+//! points, and a region kept as a snapshot's frame with the backing-store image beside it (`frame`,
+//! `NativeImage`). Every one of them on a thread of the host's — the image worker, the
+//! `screen-capture` thread — never the event loop: a `host.screen` call that cannot wait raises.
 //!
 //! The unit rule lives here. A capture is asked for in points and must come back as
 //! **exactly** that many pixels — `w * h * 4` bytes of tightly packed top-down RGBA, alpha
@@ -29,7 +31,6 @@
 
 use core::ffi::{c_void, CStr};
 use core::ptr::NonNull;
-use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::{Mutex, OnceLock};
@@ -74,33 +75,6 @@ use super::backoff::{Attempt, Backoff};
 use crate::backend::frame::{Frame, FrameVia};
 use crate::backend::{CapturedImage, CAPTURE_FAILED};
 use crate::ocr::types::Rect;
-
-/// How much of the screen a `pixel()` read grabs, in points, and where the asked-for point
-/// sits inside it.
-///
-/// Sized from the one module that makes this method hurt: Melodyne's tool bar is read with
-/// up to eight `pixel()` calls per keystroke (`modules/melodyne/src/main.luau`, `activeTool`
-/// + `activeVariant`), and every one of those points lies within x 84..200, y 59..72 of the
-/// window's client origin. A tile that reaches 96 points left and 32 points up from the
-/// first of them covers all eight, so a keystroke costs one round trip to the window server
-/// instead of eight. Kontakt's two probes are far apart and gain nothing, which is fine —
-/// they cost exactly what they cost today.
-const TILE_W: i32 = 256;
-const TILE_H: i32 = 96;
-const TILE_BACK_X: i32 = 96;
-const TILE_BACK_Y: i32 = 32;
-
-/// How long a tile may answer for.
-///
-/// Short enough that no tile survives from one 15 ms pump tick to the next, which is the
-/// blunt half of the argument. The sharper half: the callers that must not be answered from
-/// a cache are the ones that have just driven input and want to see the result — the host
-/// bumps its input epoch for exactly that reason. But a click is a `CGEvent` posted to
-/// another process, which then has to notice it and repaint, and that is at minimum one
-/// compositor frame away. A capture taken 5 ms after a click shows the same pre-click screen
-/// the cache does, so the cache adds no staleness the caller was not already going to get.
-/// Anything on the order of a frame would not be true, which is why this is milliseconds.
-const TILE_TTL: Duration = Duration::from_millis(5);
 
 /// Flat captures in a row before the permission is questioned. More than one because a
 /// legitimately uniform region does occur — a plugin's flat panel background — and fewer
@@ -220,118 +194,13 @@ pub fn screen_size() -> (i32, i32) {
     (w, h)
 }
 
-/// A tile of the screen, and when it was taken.
-struct Tile {
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    rgba: Vec<u8>,
-    taken: Instant,
-}
-
-thread_local! {
-    /// The last region a `pixel()` read grabbed. Thread-local rather than shared: the only
-    /// caller is the pump thread, and a lock in the pump to serve a thread that is not
-    /// contending for it would be pure cost.
-    static TILE: RefCell<Option<Tile>> = const { RefCell::new(None) };
-}
-
-/// What is composited at that point right now.
-///
-/// The same caveat the Windows implementation records applies unchanged, because it is a
-/// property of compositing rather than of an API: right after a focus change this still
-/// reads the window that used to be there. Callers re-ask; nothing here tries to hide it.
-///
-/// This is the expensive method on every platform and there is no cheap version of it — a
-/// point on the screen can only be read by capturing the screen. Windows pays a measured
-/// fixed ~16.7 ms per read, one compositor frame, regardless of size. The macOS cost is a
-/// synchronous round trip to the window server and is **unmeasured**; the first capture of a
-/// session is timed into the log so the tester's log answers it. What this can do is ask
-/// fewer times: a read grabs a tile rather than a point and the next few reads inside it are
-/// free, which turns Melodyne's eight probes per keystroke into one round trip.
-///
-/// No failure value exists — `(0,0,0)` is a real black pixel — so a failure is logged rather
-/// than signalled.
-pub fn pixel(x: i32, y: i32) -> (u8, u8, u8) {
-    if let Some(px) = TILE.with(|cell| {
-        let tile = cell.borrow();
-        let t = tile.as_ref()?;
-        if t.taken.elapsed() > TILE_TTL
-            || x < t.x
-            || y < t.y
-            || x >= t.x + t.w
-            || y >= t.y + t.h
-        {
-            return None;
-        }
-        sample(&t.rgba, t.w, x - t.x, y - t.y)
-    }) {
-        crate::logging::trace("macos", || {
-            format!("pixel({x},{y}) = {},{},{} from the held tile", px.0, px.1, px.2)
-        });
-        return px;
-    }
-
-    let (tx, ty, tw, th) = tile_rect(x, y);
-    if let Some(rgba) = capture_rgba(tx, ty, tw, th) {
-        if let Some(px) = sample(&rgba, tw, x - tx, y - ty) {
-            TILE.with(|cell| {
-                *cell.borrow_mut() = Some(Tile {
-                    x: tx,
-                    y: ty,
-                    w: tw,
-                    h: th,
-                    rgba,
-                    taken: Instant::now(),
-                });
-            });
-            crate::logging::trace("macos", || {
-                format!(
-                    "pixel({x},{y}) = {},{},{} from a fresh {tw}x{th} tile at {tx},{ty}",
-                    px.0, px.1, px.2
-                )
-            });
-            return px;
-        }
-    }
-    // The tile is gone either way — a stale one must not answer for a point it never covered.
-    TILE.with(|cell| *cell.borrow_mut() = None);
-
-    // A tile can fail where a single point does not: it reaches past the edge of the display
-    // and the window server clips it, which `grab` refuses because a clipped image drawn into
-    // an unclipped destination is a silent geometry lie. One point cannot be clipped.
-    if let Some(rgba) = capture_rgba(x, y, 1, 1) {
-        if let Some(px) = sample(&rgba, 1, 0, 0) {
-            crate::logging::trace("macos", || {
-                format!("pixel({x},{y}) = {},{},{} from a single-point read", px.0, px.1, px.2)
-            });
-            return px;
-        }
-    }
-
-    if !FAILURE_REPORTED.swap(true, Ordering::Relaxed) {
-        crate::logging::line(
-            "macos",
-            &format!(
-                "could not read the screen at {x},{y} — pixel reads will report black until this \
-                 clears. Check the Screen Recording permission; this is logged once."
-            ),
-        );
-    }
-    crate::logging::trace("macos", || format!("pixel({x},{y}) failed; reporting black"));
-    (0, 0, 0)
-}
-
 /// A region as an image. A bare `fn` on purpose: the image worker calls it from another
 /// thread, without the backend.
 ///
 /// Nothing in the path below needs a run loop or any state of ours on the calling thread:
 /// ScreenCaptureKit answers on a queue of its own and this thread waits on a channel for it,
 /// the older functions are synchronous window-server calls, `CGImage` is `Send + Sync` in
-/// these bindings, and the bitmap context is created, used and dropped inside one call. The
-/// tile cache that `pixel()` keeps is thread-local, so a worker-thread capture neither reads
-/// nor disturbs it.
+/// these bindings, and the bitmap context is created, used and dropped inside one call.
 pub fn capture_region(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
     if w <= 0 || h <= 0 {
         crate::logging::trace("macos", || {
@@ -353,7 +222,7 @@ pub fn capture_region(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
     let rgba = capture_rgba(x, y, w, h)?;
 
     // Only here, and not in the pixel path: a region asked for by name is one a module means
-    // to search or read, and a flat one is a symptom. A pixel probe's tile is very often
+    // to search or read, and a flat one is a symptom. A pixel probe's capture is very often
     // deliberately flat — Kontakt's panel toggles read a plain background — so watching those
     // would raise the alarm on the thing working correctly.
     watch_for_blank(&rgba, w, h);
@@ -418,9 +287,9 @@ pub fn capture_backing(x: i32, y: i32, w: i32, h: i32) -> Option<(CFRetained<CGI
     // The image is owned outright, so it outlives the pool; see `capture_rgba`.
     let captured = objc2::rc::autoreleasepool(|_| grab(x, y, vw, vh, true)).map(|g| (g.image, g.scale));
     // THE Retina measurement, at line level. The "first screen capture" line belongs to the
-    // pixel path, whose scale depends on which capture function served it and need not be the
-    // display's; this is the image OCR actually reads, and its scale is the one every word box
-    // is divided by. Before this line it was written only under trace, so a Retina session
+    // point-sized captures, whose scale depends on which capture function served it and need not
+    // be the display's; this is the image OCR actually reads, and its scale is the one every word
+    // box is divided by. Before this line it was written only under trace, so a Retina session
     // would have had to be run twice to learn what it measured.
     if let Some((image, scale)) = &captured {
         if !BACKING_REPORTED.swap(true, Ordering::Relaxed) {
@@ -436,43 +305,6 @@ pub fn capture_backing(x: i32, y: i32, w: i32, h: i32) -> Option<(CFRetained<CGI
         }
     }
     captured
-}
-
-/// One byte triple out of a tightly packed RGBA buffer.
-fn sample(rgba: &[u8], stride_px: i32, dx: i32, dy: i32) -> Option<(u8, u8, u8)> {
-    if dx < 0 || dy < 0 || stride_px <= 0 {
-        return None;
-    }
-    let i = (dy as usize).checked_mul(stride_px as usize)?.checked_add(dx as usize)?.checked_mul(4)?;
-    let px = rgba.get(i..i + 3)?;
-    Some((px[0], px[1], px[2]))
-}
-
-/// Where to put the tile a `pixel()` read grabs.
-///
-/// Clamped to the display the point is on, because a rect that reaches past the edge comes
-/// back clipped and is then refused; clamping keeps the fast path fast for a plugin window
-/// sitting against the edge of the screen instead of making every read there cost two round
-/// trips. A point on no display at all gets a single point, which will fail, which is the
-/// honest answer.
-fn tile_rect(x: i32, y: i32) -> (i32, i32, i32, i32) {
-    let Some((_, left, top, right, bottom)) = display_at(x, y) else {
-        crate::logging::trace("macos", || {
-            format!("no display contains {x},{y}; reading the single point")
-        });
-        return (x, y, 1, 1);
-    };
-
-    let tx = (x - TILE_BACK_X).max(left);
-    let ty = (y - TILE_BACK_Y).max(top);
-    let tw = TILE_W.min(right - tx);
-    let th = TILE_H.min(bottom - ty);
-    if tw < 1 || th < 1 || x < tx || y < ty || x >= tx + tw || y >= ty + th {
-        // A display smaller than the tile, or a layout the arithmetic above did not survive.
-        // One point always works and is never clipped, so it is the safe answer.
-        return (x, y, 1, 1);
-    }
-    (tx, ty, tw, th)
 }
 
 /// The rectangle that all displays together cover, in points.
@@ -615,9 +447,9 @@ fn capture_rgba(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
         crate::logging::line(
             "macos",
             &format!(
-                "a {w}x{h} point capture took {} ms. Everything runs on one thread here, and past \
-                 roughly 300 ms in a single pump iteration macOS disables the event tap outright. \
-                 Logged once; turn on AUTOMATION_PLATFORM_TRACE for every capture.",
+                "a {w}x{h} point capture took {} ms, on a thread of the host's: every read queued \
+                 behind it there, every module's, waited as long. Logged once; turn on \
+                 AUTOMATION_PLATFORM_TRACE for every capture.",
                 elapsed.as_millis()
             ),
         );
@@ -933,12 +765,11 @@ pub fn frame(x: i32, y: i32, w: i32, h: i32, poll: bool) -> Result<Frame, String
 
 /// The colours at `pts` for `host.screen.pixels`. A point on no display — off the desktop, or
 /// in the gap between two displays of different sizes, which `desktop_bounds` counts as inside —
-/// reads black with nothing captured for it, as `pixel()` answers it; so a stray point neither
-/// fails the call nor widens a capture. The others: the rectangles `frame::plan_points` plans
-/// for them, each captured at point resolution like any region read, and sampled. Not through
-/// `pixel()`'s tile, and without the flat-picture watch, which a handful of probe points would
-/// trip.
-pub fn pixels(pts: &[(i32, i32)]) -> Result<Vec<(u8, u8, u8)>, String> {
+/// reads black with nothing captured for it; so a stray point neither fails the call nor widens a
+/// capture. The others: the rectangles `frame::plan_points` plans for them, each captured at point
+/// resolution like any region read, and sampled — without the flat-picture watch, which a handful
+/// of probe points would trip.
+fn pixels(pts: &[(i32, i32)]) -> Result<Vec<(u8, u8, u8)>, String> {
     use crate::backend::frame;
     frame::black_where_off(pts, |x, y| display_at(x, y).is_none(), |on| {
         frame::read_points(on, |r| {
@@ -948,15 +779,14 @@ pub fn pixels(pts: &[(i32, i32)]) -> Result<Vec<(u8, u8, u8)>, String> {
     })
 }
 
-/// The colours a handler waits for in `host.screen.pixel` (`single`) or `pixels`, read on the
-/// `screen-capture` thread (`OcrWorker::points`): every point at point resolution, as `pixels`
-/// reads them — `capture_rgba`, never `frame`'s capture at the display's own resolution, so a
-/// colour is what the event loop's read gives. Without `pixel()`'s tile, which is the event loop's
-/// alone. A single point that cannot be read is black, with `pixel()`'s line once a session, as
-/// `pixel()` answers it; a list fails as `pixels` fails. Never on the event loop, not even for a
-/// call that could not wait, which reads through `Backend::pixel` and `pixels`.
+/// The colours a handler waits for, or a callback is handed, in `host.screen.pixel` (`single`) or
+/// `pixels`, read on the `screen-capture` thread (`OcrWorker::points`): every point at point
+/// resolution, as [`pixels`] reads them — `capture_rgba`, never `frame`'s capture at the display's
+/// own resolution, so a colour is what a pixel read has always given. A single point that cannot be
+/// read is black, with a line once a session; a list fails as `pixels` fails. Never on the event
+/// loop.
 pub fn points(pts: &[(i32, i32)], single: bool) -> Result<Vec<(u8, u8, u8)>, String> {
-    crate::loop_guard::off_loop_screen_always("a pixel read a handler waits for");
+    crate::loop_guard::off_loop_screen("a pixel read a handler waits for");
     if !single {
         return pixels(pts);
     }
@@ -1332,7 +1162,7 @@ fn image_to_rgba(
 /// several do in a row.
 ///
 /// Only for regions big enough that flatness means something: a plugin's panel background is
-/// genuinely one colour, and every `pixel()` tile would otherwise raise this. The test itself
+/// genuinely one colour, and every pixel probe's capture would otherwise raise this. The test itself
 /// samples rather than scans, and gives up at the first pixel that differs, so the cost on a
 /// normal capture is a handful of comparisons.
 fn watch_for_blank(rgba: &[u8], w: i32, h: i32) {

@@ -140,7 +140,9 @@ one of its handlers [waits](../module-runtime-and-lifecycle.md#a-handler-waits) 
 waits behind it and runs once the module is free, in the order its events came, never dropped; and
 it may wait itself, for a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) without a callback.
 Your own, run inside your `set`, is a plain call: it runs at once, also while a handler of your
-module waits, and a read there without a callback cannot wait, and raises ([Where it waits](./ocr.md#where-it-waits)).
+module waits, and a read there without a callback cannot wait, and raises
+([Where it waits](./ocr.md#where-it-waits)), as a `host.screen` call that would wait does
+([its own](./screen.md#where-it-waits)).
 
 ```luau
 -- Module A defines "lang" and watches it.

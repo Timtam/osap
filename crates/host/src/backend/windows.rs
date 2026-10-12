@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicI32, AtomicBool, AtomicIsize, AtomicU32, AtomicU64
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
-use super::dxgi::{self, Caller, Fallback};
+use super::dxgi::{self, Fallback};
 use super::frame::{self, Frame, FrameVia};
 use super::hook_watch;
 use super::hook_watch_thread;
@@ -414,9 +414,9 @@ fn repeat_threshold_now() -> u32 {
 
 /// Stateless GDI screen-region capture (BitBlt → GetDIBits → RGBA, top-down). Free-
 /// standing (uses no `self`) so the async image worker can call it off the main thread
-/// without holding the non-`Send` `Rc<dyn Backend>`; `WindowsBackend::capture` and
-/// `capture_fn` both route through it. GDI screen reads are thread-safe; the ~1-frame
-/// DWM-compositor cost then lands on the worker, not the event loop.
+/// without holding the non-`Send` `Rc<dyn Backend>`; `capture_fn` and the capture thread's
+/// functions route through it. GDI screen reads are thread-safe; the ~1-frame DWM-compositor cost
+/// then lands on the worker or the capture thread, never the event loop.
 ///
 /// The standard source, unchanged, and still the fallback of the duplication path. Visible
 /// to `dxgi.rs` for its live tests, which compare the two.
@@ -516,11 +516,7 @@ pub(super) fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedI
 /// either reads the standard way or fails each region with the reason, as the module's
 /// `fallback` says. The error is a sentence that begins with [`CAPTURE_FAILED`] — for a request
 /// duplication did not answer, with [`DUPLICATION_UNANSWERED`].
-fn capture_all(
-    regions: &[(i32, i32, i32, i32)],
-    src: CaptureSource,
-    caller: Caller,
-) -> Vec<Result<CapturedImage, String>> {
+fn capture_all(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
     let CaptureSource::Duplication { or_standard } = src else {
         // Exactly the read every module has always had.
         return regions
@@ -528,7 +524,7 @@ fn capture_all(
             .map(|&(x, y, w, h)| capture_screen(x, y, w, h).ok_or_else(|| CAPTURE_FAILED.to_string()))
             .collect();
     };
-    match duplicate(regions, caller) {
+    match duplicate(regions) {
         Ok(images) => images,
         Err(why) => {
             dxgi::note_fallback(why, or_standard);
@@ -559,11 +555,8 @@ fn unanswered(why: Fallback) -> String {
 }
 
 /// Every region through desktop duplication in ONE request — or the reason nothing came back.
-fn duplicate(
-    regions: &[(i32, i32, i32, i32)],
-    caller: Caller,
-) -> Result<Vec<Result<CapturedImage, String>>, Fallback> {
-    duplicate_with(regions, |rects| dxgi::capture(rects, caller))
+fn duplicate(regions: &[(i32, i32, i32, i32)]) -> Result<Vec<Result<CapturedImage, String>>, Fallback> {
+    duplicate_with(regions, dxgi::capture)
 }
 
 /// [`duplicate`] with the engine call passed in, so the mapping can be tested.
@@ -601,11 +594,10 @@ fn duplicate_with(
 
 /// The image worker's capture routine (`Backend::capture_fn`): a plain `fn`, so it is `Send`,
 /// and the duplication state it reaches is the engine thread's, not this backend's. Never the
-/// event loop's, not even for a call that could not wait, which captures through
-/// `Backend::capture`.
+/// event loop's.
 fn capture_on_worker(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
-    crate::loop_guard::off_loop_screen_always("the image worker's capture");
-    capture_all(regions, src, Caller::Worker)
+    crate::loop_guard::off_loop_screen("the image worker's capture");
+    capture_all(regions, src)
 }
 
 // ── Snapshots ───────────────────────────────────────────────────────────────────────────────
@@ -613,10 +605,9 @@ fn capture_on_worker(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Ve
 /// [`capture_all`] as frames: every region from `src`, one answer each, in order, each frame
 /// recording the path that actually answered it — `Duplication` only for a picture duplication
 /// gave, `Gdi` for the standard path and for the fallback to it. The same decisions as
-/// `capture_all`, fallback and reasons included; `caller` is who waits (`Caller::Pump` on the
-/// event loop).
-fn frames_all(regions: &[(i32, i32, i32, i32)], src: CaptureSource, caller: Caller) -> Vec<Result<Frame, String>> {
-    frames_with(regions, src, |rects| duplicate(rects, caller), |&(x, y, w, h)| {
+/// `capture_all`, fallback and reasons included.
+fn frames_all(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<Frame, String>> {
+    frames_with(regions, src, duplicate, |&(x, y, w, h)| {
         capture_screen(x, y, w, h).ok_or_else(|| CAPTURE_FAILED.to_string())
     })
 }
@@ -689,26 +680,24 @@ fn frames_with(
 /// captures the rectangles `frame::plan_points` plans for them — one `BitBlt` of the box they
 /// lie in when it is small, one per 2048x976 tile they reach otherwise; desktop duplication gets
 /// each of them as a 1x1 piece of ONE request, and when it cannot answer they are read the
-/// standard way or fail with the reason, as the module's `fallback` says. `caller` is who waits
-/// for duplication: the event loop (`Caller::Pump`) where the call cannot wait, the capture thread
-/// (`Caller::Worker`, up to 250 ms) for a handler that waits.
-fn pixels_through(pts: &[(i32, i32)], src: CaptureSource, caller: Caller) -> Result<Vec<(u8, u8, u8)>, String> {
-    pixels_with(pts, src, |rects| dxgi::capture(rects, caller), off_every_monitor, |r| {
+/// standard way or fail with the reason, as the module's `fallback` says. The capture thread waits
+/// for duplication up to 250 ms.
+fn pixels_through(pts: &[(i32, i32)], src: CaptureSource) -> Result<Vec<(u8, u8, u8)>, String> {
+    pixels_with(pts, src, dxgi::capture, off_every_monitor, |r| {
         capture_screen(r.x, r.y, r.w, r.h).ok_or_else(|| CAPTURE_FAILED.to_string())
     })
 }
 
-/// The pixel waits' capture (`OcrWorker::points`), on the capture thread: each point as
-/// [`pixel_through`] reads it for `host.screen.pixel` (`single`), or all of them as
-/// [`pixels_through`] reads them for `host.screen.pixels` — the event loop's own functions, waiting
-/// for desktop duplication as the capture thread's reads do, up to 250 ms. Never on the event loop,
-/// not even for a call that could not wait, which reads through `Backend::pixel` and `pixels`.
+/// The pixel reads' capture (`OcrWorker::points`), on the capture thread, for a handler that waits
+/// and for a callback: each point as [`pixel_through`] reads it for `host.screen.pixel` (`single`),
+/// or all of them as [`pixels_through`] reads them for `host.screen.pixels`, waiting for desktop
+/// duplication as the capture thread's reads do, up to 250 ms. Never on the event loop.
 fn points_on_capture_thread(pts: &[(i32, i32)], src: CaptureSource, single: bool) -> Result<Vec<(u8, u8, u8)>, String> {
-    crate::loop_guard::off_loop_screen_always("a pixel read a handler waits for");
+    crate::loop_guard::off_loop_screen("a pixel read a handler waits for");
     if single {
-        pts.iter().map(|&(x, y)| pixel_through(x, y, src, Caller::Worker)).collect()
+        pts.iter().map(|&(x, y)| pixel_through(x, y, src)).collect()
     } else {
-        pixels_through(pts, src, Caller::Worker)
+        pixels_through(pts, src)
     }
 }
 
@@ -757,11 +746,10 @@ fn pixels_with(
 
 /// The snapshot rounds' capture (`OcrWorker::frames`), on the capture thread: `frames_all` as
 /// the image worker's reads wait for desktop duplication — up to 250 ms — with the path each
-/// frame came from. `poll` means nothing here. Never on the event loop, not even for a call that
-/// could not wait, which captures through `Backend::frame`.
+/// frame came from. `poll` means nothing here. Never on the event loop.
 fn frames_on_capture_thread(regions: &[(i32, i32, i32, i32)], src: CaptureSource, _poll: bool) -> Vec<Result<Frame, String>> {
-    crate::loop_guard::off_loop_screen_always("a snapshot round");
-    frames_all(regions, src, Caller::Worker)
+    crate::loop_guard::off_loop_screen("a snapshot round");
+    frames_all(regions, src)
 }
 
 /// A read of a snapshot (`OcrWorker::shot_of`): each region's pixels copied out of the frame, as
@@ -790,7 +778,7 @@ fn ocr_capture(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> (OcrShot
 /// screen edge.
 fn capture_for_read(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> OcrShot {
     if let CaptureSource::Duplication { or_standard } = src {
-        match duplicate(regions, Caller::Worker) {
+        match duplicate(regions) {
             Ok(caps) => return caps,
             Err(why) => {
                 dxgi::note_fallback(why, or_standard);
@@ -898,9 +886,9 @@ fn ensure_winrt() {
 }
 
 /// A pixel through `src`: `GetPixel` for the standard source, a 1x1 region of the duplicated
-/// picture otherwise, which `caller` waits for. `Err` only when duplication could not answer and
-/// the module forbade the fallback: the reason, as [`unanswered`] words it for every other read.
-fn pixel_through(x: i32, y: i32, src: CaptureSource, caller: Caller) -> Result<(u8, u8, u8), String> {
+/// picture otherwise. `Err` only when duplication could not answer and the module forbade the
+/// fallback: the reason, as [`unanswered`] words it for every other read.
+fn pixel_through(x: i32, y: i32, src: CaptureSource) -> Result<(u8, u8, u8), String> {
     let CaptureSource::Duplication { or_standard } = src else {
         return Ok(pixel_gdi(x, y));
     };
@@ -912,7 +900,7 @@ fn pixel_through(x: i32, y: i32, src: CaptureSource, caller: Caller) -> Result<(
     }
     // Its fallback is `GetPixel`, not a 1x1 blit, so a module that allows the standard way
     // gets exactly the answer it got before.
-    match dxgi::capture(&[(x, y, 1, 1)], caller) {
+    match dxgi::capture(&[(x, y, 1, 1)]) {
         Ok(images) => images
             .first()
             .map(|c| (c.rgba[0], c.rgba[1], c.rgba[2]))
@@ -950,17 +938,16 @@ fn foreground_client() -> Option<(i32, i32, i32, i32)> {
     }
 }
 
-/// A module's first-read comparison, made by `caller`: the thread about to capture for the read
-/// that carries it ([`compare_on_worker`]), which waits for duplication as any read of its own does.
-/// The event loop makes none: a call that captures there, where it cannot wait, leaves it to the
-/// module's next read handed to a thread.
-fn compare_sources(who: &str, read: (i32, i32, i32, i32), caller: Caller) -> bool {
+/// A module's first-read comparison, made by the thread about to capture for the read that carries
+/// it ([`compare_on_worker`]), which waits for duplication as any read of its own does. The event
+/// loop makes none: nothing captures there.
+fn compare_sources(who: &str, read: (i32, i32, i32, i32)) -> bool {
     let Some((region, window)) = dxgi::comparison_region(read, foreground_client()) else {
         return true; // nothing this path could read, so nothing to compare
     };
     // Its own duplication read, so the module's read is not held up or changed by it — and when
     // duplication cannot answer yet (still opening, backing off), a later read asks again.
-    let dup = match dxgi::capture(&[region], caller) {
+    let dup = match dxgi::capture(&[region]) {
         Ok(mut images) => match images.pop() {
             Some(img) => img,
             None => return true,
@@ -981,8 +968,8 @@ fn compare_sources(who: &str, read: (i32, i32, i32, i32), caller: Caller) -> boo
 /// `OcrWorker::compare`): a plain `fn`, as [`capture_on_worker`] is, and like it never the event
 /// loop's.
 fn compare_on_worker(who: &str, read: (i32, i32, i32, i32)) -> bool {
-    crate::loop_guard::off_loop_screen_always("a first-read comparison");
-    compare_sources(who, read, Caller::Worker)
+    crate::loop_guard::off_loop_screen("a first-read comparison");
+    compare_sources(who, read)
 }
 
 /// The standard pixel read, unchanged: `GetPixel` on the screen DC.
@@ -1401,37 +1388,12 @@ impl Backend for WindowsBackend {
         unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
     }
 
-    // The four reads of the screen on the calling thread — the event loop's, for a `host.screen`
-    // call that could not wait, inside its scope (`task::legacy`). Anywhere else on the loop each
-    // is the bug the loop guard names before anything is captured.
-    fn pixel(&self, x: i32, y: i32, src: CaptureSource) -> Result<(u8, u8, u8), String> {
-        crate::loop_guard::off_loop_screen("a pixel (Backend::pixel)");
-        pixel_through(x, y, src, Caller::Pump)
-    }
-
-    fn capture(&self, x: i32, y: i32, w: i32, h: i32, src: CaptureSource) -> Result<CapturedImage, String> {
-        crate::loop_guard::off_loop_screen("a region (Backend::capture)");
-        capture_all(&[(x, y, w, h)], src, Caller::Pump)
-            .pop()
-            .unwrap_or_else(|| Err(CAPTURE_FAILED.to_string()))
-    }
-
     fn capture_fn(&self) -> CaptureFn {
         capture_on_worker
     }
 
     fn compare_fn(&self) -> CompareFn {
         compare_on_worker
-    }
-
-    fn frame(&self, r: Rect, src: CaptureSource) -> Result<Frame, String> {
-        crate::loop_guard::off_loop_screen("a snapshot's picture (Backend::frame)");
-        frames_all(&[r.tuple()], src, Caller::Pump).pop().unwrap_or_else(|| Err(CAPTURE_FAILED.to_string()))
-    }
-
-    fn pixels(&self, pts: &[(i32, i32)], src: CaptureSource) -> Result<Vec<(u8, u8, u8)>, String> {
-        crate::loop_guard::off_loop_screen("the points of a list (Backend::pixels)");
-        pixels_through(pts, src, Caller::Pump)
     }
 
     fn ocr_worker(&self) -> OcrWorker {
@@ -4180,13 +4142,11 @@ mod loop_guard_tests {
     type Call<'a> = (&'static str, Box<dyn Fn() + 'a>);
 
     /// The names of `calls` that, on a thread marked as the loop's, did not panic with a line that
-    /// begins with `line` — made inside the scope of a screen call that could not wait when
-    /// `in_a_screen_call`.
-    fn quiet_of(calls: impl FnOnce() -> Vec<Call<'static>> + Send + 'static, line: &'static str, in_a_screen_call: bool) -> Vec<&'static str> {
+    /// begins with `line`.
+    fn quiet_of(calls: impl FnOnce() -> Vec<Call<'static>> + Send + 'static, line: &'static str) -> Vec<&'static str> {
         crate::quiet_expected_panics();
         let t = std::thread::spawn(move || {
             crate::loop_guard::mark_loop_thread();
-            let _call = in_a_screen_call.then(|| crate::loop_guard::legacy(crate::loop_guard::Kind::Screen));
             let mut quiet = Vec::new();
             for (name, call) in calls() {
                 let raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call));
@@ -4221,53 +4181,31 @@ mod loop_guard_tests {
                 calls
             },
             "[loop] text recognition on the event loop: ",
-            false,
         );
         assert!(quiet.is_empty(), "these ran on the event loop without asking the guard: {quiet:?}");
     }
 
-    /// The captures only a thread of the host's makes: the capture thread's snapshot rounds and
-    /// points, the image worker's capture and the first-read comparison.
-    fn worker_captures(src: CaptureSource) -> Vec<Call<'static>> {
-        vec![
-            ("frames_on_capture_thread", Box::new(move || drop(frames_on_capture_thread(&[(0, 0, 4, 4)], src, false)))),
-            ("points_on_capture_thread", Box::new(move || drop(points_on_capture_thread(&[(0, 0)], src, true)))),
-            ("capture_on_worker", Box::new(move || drop(capture_on_worker(&[(0, 0, 4, 4)], src)))),
-            ("compare_on_worker", Box::new(|| {
-                let _ = compare_on_worker("a test", (0, 0, 4, 4));
-            })),
-        ]
-    }
-
-    /// The backend's four reads of the screen, outside the scope of a call that could not wait,
-    /// and the captures only a thread of the host's makes: each stopped at the screen guard,
+    /// The captures for a `host.screen` call — the capture thread's snapshot rounds and points, the
+    /// image worker's capture and the first-read comparison — each stopped at the screen guard,
     /// through the standard path, before `GetPixel`, a blit or a duplication request is made.
     #[test]
     fn every_screen_capture_asks_the_screen_guard_first() {
         let quiet = quiet_of(
             || {
                 let src = CaptureSource::Standard;
-                let mut calls: Vec<Call<'static>> = vec![
-                    ("Backend::pixel", Box::new(move || drop(WindowsBackend::new().pixel(0, 0, src)))),
-                    ("Backend::pixels", Box::new(move || drop(WindowsBackend::new().pixels(&[(0, 0), (1, 1)], src)))),
-                    ("Backend::capture", Box::new(move || drop(WindowsBackend::new().capture(0, 0, 4, 4, src)))),
-                    ("Backend::frame", Box::new(move || drop(WindowsBackend::new().frame(Rect::new(0, 0, 4, 4), src)))),
+                let calls: Vec<Call<'static>> = vec![
+                    ("frames_on_capture_thread", Box::new(move || drop(frames_on_capture_thread(&[(0, 0, 4, 4)], src, false)))),
+                    ("points_on_capture_thread", Box::new(move || drop(points_on_capture_thread(&[(0, 0)], src, true)))),
+                    ("capture_on_worker", Box::new(move || drop(capture_on_worker(&[(0, 0, 4, 4)], src)))),
+                    ("compare_on_worker", Box::new(|| {
+                        let _ = compare_on_worker("a test", (0, 0, 4, 4));
+                    })),
                 ];
-                calls.extend(worker_captures(src));
                 calls
             },
             "[loop] screen capture on the event loop: ",
-            false,
         );
         assert!(quiet.is_empty(), "these captured on the event loop without asking the screen guard: {quiet:?}");
-    }
-
-    /// And the captures only a thread of the host's makes are stopped there inside the scope of a
-    /// screen call that could not wait too, which lets only the call's own reads be.
-    #[test]
-    fn a_worker_capture_is_stopped_inside_a_screen_call_too() {
-        let quiet = quiet_of(|| worker_captures(CaptureSource::Standard), "[loop] screen capture on the event loop: ", true);
-        assert!(quiet.is_empty(), "these captured on the event loop inside a screen call: {quiet:?}");
     }
 }
 
@@ -5039,7 +4977,7 @@ mod capture_tests {
         assert_eq!(got[0].as_ref().map(|f| f.via).ok(), Some(FrameVia::Duplication));
         assert_eq!(got[1].as_ref().err().map(String::as_str), Some(CAPTURE_FAILED), "a degenerate region fails on its own");
 
-        let lost = |_: &[(i32, i32, i32, i32)]| -> Result<Vec<Result<CapturedImage, String>>, Fallback> { Err(Fallback::Opening) };
+        let lost = |_: &[(i32, i32, i32, i32)]| -> Result<Vec<Result<CapturedImage, String>>, Fallback> { Err(Fallback::Overdue) };
         let got = frames_with(&[(0, 0, 4, 4), (0, 0, 60_000, 60_000)], both, lost, gdi);
         assert_eq!(got[0].as_ref().map(|f| f.via).ok(), Some(FrameVia::Gdi), "read the standard way, and it says so");
         let too_large = got[1].as_ref().err().unwrap();
@@ -5063,7 +5001,7 @@ mod capture_tests {
         let none = CaptureSource::Duplication { or_standard: false };
         let got = frames_with(&[(0, 0, 4, 4)], none, lost, |_| panic!("the standard path was asked"));
         let why = got[0].as_ref().err().unwrap();
-        assert!(why.starts_with(DUPLICATION_UNANSWERED) && why.ends_with("it is still opening"), "{why}");
+        assert!(why.starts_with(DUPLICATION_UNANSWERED) && why.ends_with("an earlier read has not come back yet"), "{why}");
 
         let short = frames_with(&[(0, 0, 4, 4)], CaptureSource::Standard, |_| unreachable!(), |_| Ok(img(4, 3)));
         assert_eq!(short[0].as_ref().err().map(String::as_str), Some(CAPTURE_FAILED), "a picture of the wrong size is not kept");
@@ -5152,7 +5090,7 @@ mod capture_tests {
         let mut pts = quadrant_points(x, y, w, h);
         pts.extend(quadrant_points(x + 10, y + 5, w - 20, h - 10));
         let t = std::time::Instant::now();
-        let got = pixels_through(&pts, CaptureSource::Standard, Caller::Pump);
+        let got = pixels_through(&pts, CaptureSource::Standard);
         let one = t.elapsed();
         let t = std::time::Instant::now();
         let each: Vec<(u8, u8, u8)> = pts.iter().map(|&(px, py)| pixel_gdi(px, py)).collect();
@@ -5183,14 +5121,14 @@ mod capture_tests {
         let win = TestWindow::show(x, y, w, h);
         win.settle(std::time::Duration::from_millis(300));
         let region = [(x, y, w, h)];
-        let a = frames_all(&region, CaptureSource::Standard, Caller::Worker).pop().unwrap().expect("a standard frame");
-        let b = frames_all(&region, CaptureSource::Standard, Caller::Worker).pop().unwrap().expect("a standard frame");
+        let a = frames_all(&region, CaptureSource::Standard).pop().unwrap().expect("a standard frame");
+        let b = frames_all(&region, CaptureSource::Standard).pop().unwrap().expect("a standard frame");
         assert_eq!((a.via, b.via), (FrameVia::Gdi, FrameVia::Gdi));
         assert!(a.img.rgba == b.img.rgba, "two standard snapshots of a still window differ");
         let dup = CaptureSource::Duplication { or_standard: false };
         let mut got = None;
         for _ in 0..40 {
-            match frames_all(&region, dup, Caller::Worker).pop().unwrap() {
+            match frames_all(&region, dup).pop().unwrap() {
                 Ok(f) => {
                     got = Some(f);
                     break;
@@ -5250,7 +5188,7 @@ mod capture_tests {
                 let now = Instant::now();
                 match lane.take(now) {
                     Some(round) => {
-                        let frames = frames_all(&round.tuples(), round.source, Caller::Worker);
+                        let frames = frames_all(&round.tuples(), round.source);
                         let done = round.run(frames, Instant::now(), 0);
                         if let Some(d) = lane.finish(done, Instant::now()).pop() {
                             return d;
@@ -5287,9 +5225,9 @@ mod capture_tests {
         assert_eq!(colorref_rgb(0x00FF_FFFF), (255, 255, 255));
         let (x, y) = (-30_000, -30_000);
         assert!(off_every_monitor(x, y));
-        let standard = pixel_through(x, y, CaptureSource::Standard, Caller::Pump);
-        assert_eq!(pixel_through(x, y, CaptureSource::Duplication { or_standard: false }, Caller::Pump), standard);
-        assert_eq!(pixel_through(x, y, CaptureSource::Duplication { or_standard: true }, Caller::Pump), standard);
+        let standard = pixel_through(x, y, CaptureSource::Standard);
+        assert_eq!(pixel_through(x, y, CaptureSource::Duplication { or_standard: false }), standard);
+        assert_eq!(pixel_through(x, y, CaptureSource::Duplication { or_standard: true }), standard);
     }
 
     /// What a module is told when duplication had no picture is part of the API: every reason
@@ -5304,9 +5242,7 @@ mod capture_tests {
             (Fallback::Crashed, None),
             (Fallback::NoThread, None),
             (Fallback::Closing, None),
-            (Fallback::Opening, None),
             (Fallback::Overdue, None),
-            (Fallback::Budget, None),
             (Fallback::TooLarge, None),
             (Fallback::Unsupported(0x887A_0004_u32 as i32), Some("0x887A0004")),
             (Fallback::TooManyRecorders, None),

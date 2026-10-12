@@ -18,13 +18,13 @@
 //! factory, no device, not a line in the log. The verified plug-in overlays never get here.
 //!
 //! **One owner thread.** Every Direct3D and DXGI object lives on the `dxgi-capture` thread.
-//! Both the pump and the image worker read the screen, a process may hold one duplication
-//! per output, the immediate context must not be used from two threads at once — and, the
-//! decisive reason, a mutex cannot put a time limit on a call that is stuck inside a graphics
-//! driver. Every captured key and hotkey waits for the pump — the low-level keyboard hook has a
-//! thread of its own, but what it matches is dispatched there — so callers send a request and
-//! wait with a deadline, and a driver that stops answering costs them a bounded wait, once, and
-//! then nothing.
+//! Both the image worker and the `screen-capture` thread read the screen, a process may hold one
+//! duplication per output, the immediate context must not be used from two threads at once — and,
+//! the decisive reason, a mutex cannot put a time limit on a call that is stuck inside a graphics
+//! driver. Every read queued behind a reader that waits waits with it, every module's, so callers
+//! send a request and wait with a deadline, and a driver that stops answering costs them a bounded
+//! wait, once, and then nothing. The event loop never reads through it: a `host.screen` call that
+//! cannot wait raises (task.rs).
 //!
 //! **Pull, not push.** Each request calls `AcquireNextFrame(0)` once per output it touches.
 //! A new frame is copied (GPU to GPU) into a kept "last frame"; `WAIT_TIMEOUT` means nothing
@@ -39,7 +39,6 @@
 //! load, a fullscreen game on an integrated GPU (6-7 ms per 1280x1024 read, device 32 ms), is
 //! under M4.
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
@@ -83,39 +82,11 @@ use crate::logging;
 /// A Lua region of 60000x60000 would otherwise ask for about 14 GB and abort the process; the
 /// GDI path is protected from that only by accident (its bitmap creation fails first).
 const MAX_PIXELS: i64 = 40_000_000;
-/// How long a pump read waits for an open duplication. The design's estimate for a small
-/// read is well under 2 ms; this is the margin for a GPU busy with a game (M9) — and for the
-/// reopen a read makes at once when it finds the duplication lost (a fullscreen switch),
-/// which then waits up to [`FIRST_FRAME_WAIT`] for its first picture. A pump that gave up
-/// sooner than that would call the engine late when it is doing exactly what it should.
-const PUMP_READY_WAIT: Duration = Duration::from_millis(60);
-const _: () = assert!(PUMP_READY_WAIT.as_millis() >= FIRST_FRAME_WAIT.as_millis() + 10);
-/// How long the FIRST pump read of an opening waits — device creation and `DuplicateOutput`
-/// together, estimated at 35-330 ms (M2). Only one pump read per opening waits at all, and
-/// the budget below is the stricter rule: as the constants stand it caps this wait at 60 ms.
-/// The opening measured on the reference machine (about 200 ms with a warm driver) is longer
-/// than either, so there that first read gets the standard picture — which is what `prewarm`
-/// is for. On the machine of M4 the device took 32 ms and the first picture came 4-16 ms
-/// after the duplication opened; whether that first read got it is not recorded.
-const PUMP_OPENING_WAIT: Duration = Duration::from_millis(150);
-/// The image worker's wait. Shorter than the design's first 1000 ms because the worker is
-/// shared by every VM, including the ones that read the standard way, and a batch stuck
-/// behind a driver holds up all of them.
+/// How long a read waits for the engine's answer: the image worker's and the `screen-capture`
+/// thread's. Shorter than the design's first 1000 ms because each of them is shared by every VM,
+/// including the ones that read the standard way, and a batch stuck behind a driver holds up all
+/// of them.
 const WORKER_WAIT: Duration = Duration::from_millis(250);
-/// How much of any 300 ms the pump may spend waiting for this thread. 300 ms was the keyboard
-/// hook's budget (`LowLevelHooksTimeout`) while it shared the pump; it has a thread of its own
-/// now, but every captured key and hotkey still waits for the pump, and that budget is shared
-/// with everything else the pump does. Duplication may take a fifth of it and no more.
-const PUMP_BUDGET: Duration = Duration::from_millis(60);
-const PUMP_BUDGET_WINDOW: Duration = Duration::from_millis(300);
-/// What an answered read costs anyway — about 1 ms measured for a small region. Only the part
-/// of a pump wait beyond this is charged to the budget, which exists for SLOW answers: a module
-/// reading quickly and often must not run it out and be sent to the 16 ms standard read the
-/// budget was meant to spare it.
-const PUMP_QUICK: Duration = Duration::from_millis(5);
-/// With less budget left than this a pump read is not sent at all. A wait of a millisecond or
-/// less can only time out, and a timed-out read is a request the engine then discards.
-const PUMP_MIN_WAIT: Duration = Duration::from_millis(5);
 /// How long a freshly opened duplication may take to deliver its first real picture.
 const FIRST_FRAME_WAIT: Duration = Duration::from_millis(50);
 /// A duplication unused this long is released: it holds one of the four duplication slots
@@ -350,12 +321,8 @@ pub(crate) enum Fallback {
     NoThread,
     /// The application is shutting down.
     Closing,
-    /// Opening, and another pump read of this opening already waited.
-    Opening,
     /// An earlier read has not come back; nothing is sent until it does.
     Overdue,
-    /// The pump already spent its share of the last 300 ms waiting for duplication.
-    Budget,
     TooLarge,
     /// `DXGI_ERROR_UNSUPPORTED` or `SESSION_DISCONNECTED`: Remote Desktop, or a two-GPU laptop
     /// running this application on the chip that does not drive the display.
@@ -399,9 +366,7 @@ impl Fallback {
                 .into(),
             Fallback::NoThread => "its thread could not be started".into(),
             Fallback::Closing => "the application is closing".into(),
-            Fallback::Opening => "it is still opening".into(),
             Fallback::Overdue => "an earlier read has not come back yet".into(),
-            Fallback::Budget => "this turn of the event loop already waited its share for it".into(),
             Fallback::TooLarge => "the region is larger than 40 million pixels".into(),
             Fallback::Unsupported(hr) => format!(
                 "Windows does not support it here (0x{hr:08X}): over Remote Desktop, or on a laptop \
@@ -428,10 +393,11 @@ impl Fallback {
         }
     }
 
-    /// Reasons that are part of normal operation rather than news: a read that did not wait
-    /// because another already did. They are counted and traced, not logged each time.
+    /// Reasons that are part of normal operation rather than news: a read that was not sent
+    /// because an earlier one has not come back. They are counted and traced, not logged each
+    /// time.
     fn is_quiet(self) -> bool {
-        matches!(self, Fallback::Opening | Fallback::Budget | Fallback::Overdue)
+        matches!(self, Fallback::Overdue)
     }
 }
 
@@ -454,46 +420,6 @@ pub(crate) fn backoff_for(why: Fallback, streak: u32) -> Option<Duration> {
     }
 }
 
-/// Who is asking, which decides how long they may wait.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Caller {
-    /// The event loop, which every captured key and hotkey waits for (the keyboard hook itself
-    /// has a thread of its own).
-    Pump,
-    /// A thread of the host's own: the image worker, or `screen-capture` (a text read's, a
-    /// snapshot's or a waited pixel read's capture, and the first-read comparison it carries).
-    Worker,
-}
-
-/// How much of the sliding budget window is left, given the waits already in it. Pure over
-/// the ring so it can be tested; drops what has aged out.
-pub(crate) fn budget_left(ring: &mut VecDeque<(Instant, Duration)>, now: Instant) -> Duration {
-    while ring.front().is_some_and(|(at, _)| now.duration_since(*at) >= PUMP_BUDGET_WINDOW) {
-        ring.pop_front();
-    }
-    let spent: Duration = ring.iter().map(|(_, d)| *d).sum();
-    PUMP_BUDGET.saturating_sub(spent)
-}
-
-/// Records one pump wait in the budget ring, charged by [`charge`]. A wait that costs nothing
-/// is not recorded at all, so a module reading quickly and often does not grow the ring.
-pub(crate) fn record_wait(ring: &mut VecDeque<(Instant, Duration)>, at: Instant, spent: Duration, answered: bool) {
-    let charged = charge(spent, answered);
-    if !charged.is_zero() {
-        ring.push_back((at, charged));
-    }
-}
-
-/// What a pump wait costs the budget: the part beyond an ordinary answer, or all of it when
-/// nothing came back in time. See [`PUMP_QUICK`].
-pub(crate) fn charge(spent: Duration, answered: bool) -> Duration {
-    if answered {
-        spent.saturating_sub(PUMP_QUICK)
-    } else {
-        spent
-    }
-}
-
 // ---- Shared state between the callers and one engine thread --------------------------------
 
 const IDLE: u8 = 0;
@@ -506,10 +432,6 @@ const BACKOFF: u8 = 3;
 const DISABLED: u8 = 4;
 /// The engine thread panicked, or its inbox closed. Left the same way as DISABLED.
 const CRASHED: u8 = 5;
-
-/// [`Gate::open_waiter`] while a prewarm's opening is queued or running. No pump read waits
-/// for it: it takes longer than any pump wait (about 200 ms warm, seconds cold).
-const WARMING: u64 = u64::MAX;
 
 /// What the callers and ONE engine thread share: the engine's state, and the caller rules
 /// that read it.
@@ -529,11 +451,9 @@ pub(crate) struct Gate {
     /// Slow there is not a hang until [`OPEN_HANG`].
     opening: AtomicBool,
     opening_since_ms: AtomicU64,
-    /// Who holds the one pump wait an opening allows: the seq of the pump read waiting for
-    /// it, [`WARMING`], or 0. Given back by the engine when THAT request ends — answered,
-    /// failed, or skipped because its caller had stopped waiting — so it cannot outlive the
-    /// request that took it.
-    open_waiter: AtomicU64,
+    /// While a prewarm's opening is queued or running: one at a time, however many windows come
+    /// forward. Given back by the engine when the warm-up ends, and by a thread that is gone.
+    warming: AtomicBool,
     /// Hangs counted by this gate, in all.
     hangs: AtomicU32,
     /// When the hangs of the last [`HANG_WINDOW`] were counted (the process clock, ms): what
@@ -558,7 +478,7 @@ impl Gate {
             overdue: AtomicBool::new(false),
             opening: AtomicBool::new(false),
             opening_since_ms: AtomicU64::new(0),
-            open_waiter: AtomicU64::new(0),
+            warming: AtomicBool::new(false),
             hangs: AtomicU32::new(0),
             hang_times: Mutex::new(VecDeque::new()),
             busy_seq: AtomicU64::new(0),
@@ -605,16 +525,8 @@ impl Gate {
     }
 
     /// The caller rules, checked before anything is sent: a session that gave up, a back-off,
-    /// a read that has not come back, the pump's budget, and the one pump wait an opening
-    /// allows. `Ok` is how long to wait for the answer, and whether the budget rather than the
-    /// rule for this state set that wait.
-    pub(crate) fn admit(
-        &self,
-        caller: Caller,
-        now: u64,
-        budget_left: Duration,
-        seq: u64,
-    ) -> Result<(Duration, bool), Fallback> {
+    /// a read that has not come back. `Ok` is how long to wait for the answer.
+    pub(crate) fn admit(&self, now: u64) -> Result<Duration, Fallback> {
         if let Some(why) = self.stopped() {
             return Err(why);
         }
@@ -632,34 +544,18 @@ impl Gate {
                 return Err(self.stopped().unwrap_or(Fallback::Overdue));
             }
         }
-        let Caller::Pump = caller else { return Ok((WORKER_WAIT, false)) };
-        if budget_left < PUMP_MIN_WAIT {
-            return Err(Fallback::Budget);
-        }
-        let base = if self.state() == READY {
-            PUMP_READY_WAIT
-        } else if self.open_waiter.compare_exchange(0, seq, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-            return Err(Fallback::Opening);
-        } else {
-            PUMP_OPENING_WAIT
-        };
-        let wait = base.min(budget_left);
-        Ok((wait, wait < base))
+        Ok(WORKER_WAIT)
     }
 
-    /// A caller's wait ran out. Only a wait that ran its full length says the engine is late
-    /// and stops the reads after it; one the budget cut short says nothing about the engine.
-    pub(crate) fn missed(&self, caller: Caller, wait: Duration, cut_short: bool) -> Fallback {
+    /// A caller's wait ran out: the engine is late, and the reads after it skip it until it
+    /// answers.
+    pub(crate) fn missed(&self, wait: Duration) -> Fallback {
         let opening = self.opening.load(Ordering::SeqCst) || self.state() == OPENING;
-        if cut_short {
-            return if opening { Fallback::Opening } else { Fallback::Budget };
-        }
         if !self.overdue.swap(true, Ordering::SeqCst) {
             logging::line(
                 "capture",
                 &format!(
-                    "desktop duplication did not answer a {} read within {} ms{}; reads skip it until it does",
-                    if caller == Caller::Pump { "pump" } else { "worker" },
+                    "desktop duplication did not answer a read within {} ms{}; reads skip it until it does",
                     wait.as_millis(),
                     if opening {
                         " — it is still opening, and the first opening in a process loads the graphics driver"
@@ -682,12 +578,12 @@ impl Gate {
         {
             return false;
         }
-        self.open_waiter.compare_exchange(0, WARMING, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+        self.warming.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok()
     }
 
-    /// Gives back the opening wait `holder` took, if it still holds it.
-    pub(crate) fn release_waiter(&self, holder: u64) {
-        let _ = self.open_waiter.compare_exchange(holder, 0, Ordering::SeqCst, Ordering::SeqCst);
+    /// The warm-up [`claim_warm`](Self::claim_warm) took has ended, or was never sent.
+    pub(crate) fn warmed(&self) {
+        self.warming.store(false, Ordering::SeqCst);
     }
 
     // -- The engine's side. --
@@ -708,8 +604,8 @@ impl Gate {
         self.opening.store(false, Ordering::SeqCst);
     }
 
-    /// Request `seq` is done: counted as a hang if it was one, its opening wait given back,
-    /// and a caller that gave up on it told that the engine is back.
+    /// Request `seq` is done: counted as a hang if it was one, and a caller that gave up on it told
+    /// that the engine is back.
     fn end(&self, seq: u64, took: Duration, opening_spent: Duration) {
         self.end_at(seq, took, opening_spent, now_ms());
     }
@@ -734,13 +630,7 @@ impl Gate {
                 ),
             );
         }
-        self.release_waiter(seq);
         self.busy_seq.store(0, Ordering::SeqCst);
-    }
-
-    /// Request `seq` was dropped unread, its caller having stopped waiting.
-    fn skipped(&self, seq: u64) {
-        self.release_waiter(seq);
     }
 
     /// Counts request `busy` as a hang when it has been outstanding too long: [`HANG`] for a
@@ -813,7 +703,7 @@ impl Gate {
     fn crashed(&self, why: &str) {
         let was = self.state.swap(CRASHED, Ordering::SeqCst);
         self.overdue.store(false, Ordering::SeqCst);
-        self.open_waiter.store(0, Ordering::SeqCst);
+        self.warming.store(false, Ordering::SeqCst);
         self.busy_seq.store(0, Ordering::SeqCst);
         if was != CRASHED {
             logging::line(
@@ -1036,7 +926,7 @@ fn now_ms() -> u64 {
     clock().elapsed().as_millis() as u64
 }
 
-/// Never 0 (no request) and, in any session that ends, never [`WARMING`].
+/// Never 0 (no request).
 fn next_seq() -> u64 {
     SEQ.fetch_add(1, Ordering::SeqCst) + 1
 }
@@ -1127,19 +1017,13 @@ fn retire(old: Running, why: &str) {
     // Dropping `old` closes the thread's inbox and detaches its JoinHandle.
 }
 
-thread_local! {
-    /// The pump's recent waits for this thread: (when, charge). Thread-local because only the
-    /// pump has a budget, and it is one thread.
-    static WAITED: RefCell<VecDeque<(Instant, Duration)>> = const { RefCell::new(VecDeque::new()) };
-}
-
 /// Reads `rects` through desktop duplication, one image per rectangle, each exactly the size
 /// asked for — or the reason it could not.
 ///
 /// The caller rules ([`Gate::admit`]) are checked on the caller's thread before anything is
-/// sent. Only then is the engine asked, with a deadline; a pump read waits once per opening
-/// and within its budget, and never for a thread that is already late.
-pub(crate) fn capture(rects: &[(i32, i32, i32, i32)], caller: Caller) -> Result<Vec<CapturedImage>, Fallback> {
+/// sent. Only then is the engine asked, with a deadline, and never while it is already late. The
+/// image worker and the `screen-capture` thread call this, never the event loop.
+pub(crate) fn capture(rects: &[(i32, i32, i32, i32)]) -> Result<Vec<CapturedImage>, Fallback> {
     if !crate::appcfg::desktop_duplication() {
         return Err(Fallback::SwitchedOff);
     }
@@ -1148,24 +1032,16 @@ pub(crate) fn capture(rects: &[(i32, i32, i32, i32)], caller: Caller) -> Result<
     }
     let (tx, gate) = engine()?;
     let asked = Instant::now();
-    let left = match caller {
-        Caller::Pump => WAITED.with(|w| budget_left(&mut w.borrow_mut(), asked)),
-        Caller::Worker => Duration::MAX,
-    };
     let seq = next_seq();
-    let (wait, cut_short) = gate.admit(caller, now_ms(), left, seq)?;
+    let wait = gate.admit(now_ms())?;
     let (reply, answer) = mpsc::sync_channel(1);
     let req = Req::Capture { seq, rects: rects.to_vec(), deadline: asked + wait, reply };
     if tx.send(req).is_err() {
-        gate.release_waiter(seq);
         gate.crashed("its inbox is closed");
         return Err(Fallback::Crashed);
     }
     let got = answer.recv_timeout(wait);
     let spent = asked.elapsed();
-    if caller == Caller::Pump {
-        WAITED.with(|w| record_wait(&mut w.borrow_mut(), asked, spent, got.is_ok()));
-    }
     // Every round trip, answered or not: what duplication cost the reads that asked it.
     DUP_US.fetch_add(spent.as_micros() as u64, Ordering::Relaxed);
     match got {
@@ -1178,7 +1054,7 @@ pub(crate) fn capture(rects: &[(i32, i32, i32, i32)], caller: Caller) -> Result<
         // A dropped reply is the engine discarding a request whose deadline passed while it
         // queued behind a slow one — late all the same — or a thread that died serving it.
         Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
-            Err(gate.stopped().unwrap_or_else(|| gate.missed(caller, wait, cut_short)))
+            Err(gate.stopped().unwrap_or_else(|| gate.missed(wait)))
         }
     }
 }
@@ -1196,7 +1072,7 @@ pub(crate) fn prewarm() {
         return;
     }
     if tx.send(Req::Warm).is_err() {
-        gate.release_waiter(WARMING);
+        gate.warmed();
         gate.crashed("its inbox is closed");
     }
 }
@@ -1430,7 +1306,7 @@ impl Engine {
 }
 
 /// The thread's body, with a panic caught: without that, a panic would leave the callers
-/// waiting for a request that never ends, which reads as "still opening" or "late" forever
+/// waiting for a request that never ends, which reads as "late" forever
 /// and says nothing in the log.
 fn run_guarded(rx: Receiver<Req>, gate: Arc<Gate>) {
     let theirs = gate.clone();
@@ -1474,12 +1350,12 @@ fn run(rx: Receiver<Req>, gate: Arc<Gate>) {
             }
             Req::Warm => {
                 if crate::appcfg::desktop_duplication() && gate.stopped().is_none() {
-                    // Marked busy like a read, so a read queued behind a slow opening sees a
-                    // busy engine and does not wait for it.
+                    // Marked busy like a read, so an opening that never ends counts as a hang,
+                    // as a read's does.
                     eng.last_request = Instant::now();
                     busy(&mut eng, next_seq(), |e| e.warm());
                 }
-                gate.release_waiter(WARMING);
+                gate.warmed();
             }
             Req::WaitChange { .. } => {}
             Req::Capture { seq, rects, deadline, reply } => {
@@ -1487,7 +1363,6 @@ fn run(rx: Receiver<Req>, gate: Arc<Gate>) {
                     logging::trace("capture", || {
                         "desktop duplication: a read whose caller had already stopped waiting was skipped".into()
                     });
-                    gate.skipped(seq);
                     continue;
                 }
                 eng.last_request = Instant::now();
@@ -2034,8 +1909,7 @@ impl Engine {
             }
         }
         // Only when a duplication was actually read. A request wholly off the desktop opens
-        // nothing, and calling it open would give the next pump read the short wait of an
-        // open duplication against a real opening.
+        // nothing, and calling it open would keep a prewarm from opening the real one.
         if !involved.is_empty() {
             self.answered();
         }
@@ -2307,131 +2181,62 @@ pub(super) mod tests {
         // Recreated on the next read, not waited out: the driver is already back by then.
         assert_eq!(backoff_for(Fallback::DeviceRemoved, 0), None);
         // A caller-side reason never backs the engine off.
-        assert_eq!(backoff_for(Fallback::Budget, 0), None);
         assert_eq!(backoff_for(Fallback::Overdue, 0), None);
     }
 
+    /// A read ending, answered or skipped, leaves the warm-up as it is: only the engine's warm-up
+    /// gives it back — one at a time, however many windows come forward, and nothing to warm while
+    /// duplication is open.
     #[test]
-    fn the_pump_budget_is_a_sliding_window() {
-        let t0 = Instant::now();
-        let mut ring = VecDeque::new();
-        assert_eq!(budget_left(&mut ring, t0), PUMP_BUDGET);
-        ring.push_back((t0, Duration::from_millis(40)));
-        assert_eq!(budget_left(&mut ring, t0 + Duration::from_millis(10)), Duration::from_millis(20));
-        ring.push_back((t0 + Duration::from_millis(20), Duration::from_millis(30)));
-        assert_eq!(budget_left(&mut ring, t0 + Duration::from_millis(50)), Duration::ZERO);
-        // The first wait ages out of the window; only the second still counts.
-        assert_eq!(budget_left(&mut ring, t0 + Duration::from_millis(305)), Duration::from_millis(30));
-        assert_eq!(ring.len(), 1);
-    }
-
-    #[test]
-    fn quick_answers_do_not_spend_the_pump_budget() {
-        // A module reading through duplication in a loop: two hundred answers of 1 ms each in
-        // one window. Charged in full they would run the budget out after sixty, and every read
-        // after that would go to the 16 ms standard path the budget exists to spare.
-        let t0 = Instant::now();
-        let mut ring = VecDeque::new();
-        for i in 0..200u64 {
-            record_wait(&mut ring, t0 + Duration::from_micros(i * 1500), Duration::from_millis(1), true);
-        }
-        assert_eq!(budget_left(&mut ring, t0 + Duration::from_millis(299)), PUMP_BUDGET);
-        assert!(ring.is_empty(), "nothing charged, nothing kept");
-        // What is slow beyond an ordinary answer is charged; a wait that ran out, all of it.
-        assert_eq!(charge(Duration::from_millis(12), true), Duration::from_millis(7));
-        assert_eq!(charge(Duration::from_millis(12), false), Duration::from_millis(12));
-    }
-
-    #[test]
-    fn a_pump_read_is_not_sent_with_a_sliver_of_budget_and_a_budget_cut_wait_blames_nobody() {
-        let g = Gate::new();
-        g.set_state(READY);
-        // Too little left to wait for anything: not sent at all, rather than sent with a
-        // deadline of a fraction of a millisecond that can only run out.
-        assert_eq!(g.admit(Caller::Pump, 0, Duration::from_micros(300), 1), Err(Fallback::Budget));
-        assert_eq!(g.admit(Caller::Pump, 0, Duration::from_millis(4), 2), Err(Fallback::Budget));
-        // A wait the budget shortened, and that ran out: the budget's answer, not a late
-        // engine. Nothing stops the next read, and nothing is logged.
-        let (wait, cut) = g.admit(Caller::Pump, 0, Duration::from_millis(20), 3).unwrap();
-        assert_eq!((wait, cut), (Duration::from_millis(20), true));
-        assert_eq!(g.missed(Caller::Pump, wait, cut), Fallback::Budget);
-        assert!(!g.overdue.load(Ordering::SeqCst));
-        // A full wait that ran out does say the engine is late.
-        let (wait, cut) = g.admit(Caller::Pump, 0, PUMP_BUDGET, 4).unwrap();
-        assert_eq!((wait, cut), (PUMP_READY_WAIT, false));
-        assert_eq!(g.missed(Caller::Pump, wait, cut), Fallback::Overdue);
-        assert!(g.overdue.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn a_pump_read_dropped_unread_does_not_shut_the_pump_out_for_good() {
-        // The sequence the review found. The first pump read of an opening takes the one wait
-        // an opening allows, its wait runs out before the engine even picks the request up,
-        // and the engine drops it unread. Before, nothing gave that wait back, and every pump
-        // read after it heard "still opening" for the rest of the session.
-        for cut_short in [false, true] {
-            let g = Gate::new();
-            let (wait, _) = g.admit(Caller::Pump, 1_000, PUMP_BUDGET, 1).unwrap();
-            let why = g.missed(Caller::Pump, wait, cut_short);
-            assert!(matches!(why, Fallback::Overdue | Fallback::Budget), "{why:?}");
-            g.skipped(1);
-            let next = g.admit(Caller::Pump, 1_100, PUMP_BUDGET, 2);
-            assert!(next.is_ok(), "cut short: {cut_short}: {next:?}");
-        }
-    }
-
-    #[test]
-    fn an_opening_allows_one_pump_wait_until_the_request_that_took_it_ends() {
-        let g = Gate::new();
-        let (wait, _) = g.admit(Caller::Pump, 0, PUMP_BUDGET, 1).unwrap();
-        assert_eq!(wait, PUMP_OPENING_WAIT.min(PUMP_BUDGET));
-        g.begin(1, 0);
-        g.set_state(OPENING);
-        g.opening_started(0);
-        // Another pump read of the same opening does not wait at all...
-        assert_eq!(g.admit(Caller::Pump, 10, PUMP_BUDGET, 2), Err(Fallback::Opening));
-        // ...while the worker, which has its own wait and blocks no hook, is still sent.
-        assert_eq!(g.admit(Caller::Worker, 10, Duration::MAX, 3), Ok((WORKER_WAIT, false)));
-        // A worker read ending does not give back the pump's wait: only its own request does.
-        g.release_waiter(3);
-        assert_eq!(g.admit(Caller::Pump, 20, PUMP_BUDGET, 4), Err(Fallback::Opening));
-        g.opening_ended(200);
-        g.set_state(READY);
-        g.end(1, Duration::from_millis(210), Duration::from_millis(200));
-        assert_eq!(g.admit(Caller::Pump, 220, PUMP_BUDGET, 5), Ok((PUMP_READY_WAIT, false)));
-    }
-
-    #[test]
-    fn a_prewarm_takes_the_opening_so_no_pump_read_waits_behind_it() {
+    fn a_prewarm_is_one_at_a_time_until_the_engine_gives_it_back() {
         let g = Gate::new();
         assert!(g.claim_warm(0));
         assert!(!g.claim_warm(1), "one warm-up at a time, however many windows come forward");
-        // The first detection read of the trigger that caused the warm-up: no wait, the
-        // standard picture (or none) this once.
-        assert_eq!(g.admit(Caller::Pump, 2, PUMP_BUDGET, 1), Err(Fallback::Opening));
-        // The engine runs the warm-up under a seq of its own and then gives WARMING back.
+        // A read meanwhile is sent, and waits as any read does.
+        assert_eq!(g.admit(2), Ok(WORKER_WAIT));
+        g.begin(3, 2);
+        g.end(3, Duration::from_millis(1), Duration::ZERO);
+        assert!(!g.claim_warm(3), "a read ending does not give the warm-up back");
+        // The engine runs the warm-up under a seq of its own and then gives it back.
         g.begin(7, 3);
         g.set_state(READY);
         g.end(7, Duration::from_millis(200), Duration::from_millis(195));
-        g.release_waiter(WARMING);
-        assert_eq!(g.admit(Caller::Pump, 250, PUMP_BUDGET, 2), Ok((PUMP_READY_WAIT, false)));
+        g.warmed();
+        assert_eq!(g.admit(250), Ok(WORKER_WAIT));
         assert!(!g.claim_warm(251), "nothing to warm while it is open");
+    }
+
+    /// A read whose wait ran out says the engine is late: the reads after it are not sent until
+    /// it answers.
+    #[test]
+    fn a_read_that_waited_its_full_wait_makes_the_engine_overdue() {
+        let g = Gate::new();
+        g.set_state(READY);
+        let wait = g.admit(0).unwrap();
+        assert_eq!(wait, WORKER_WAIT);
+        g.begin(1, 0);
+        assert_eq!(g.missed(wait), Fallback::Overdue);
+        assert!(g.overdue.load(Ordering::SeqCst));
+        assert_eq!(g.admit(10), Err(Fallback::Overdue));
+        g.end(1, Duration::from_millis(300), Duration::ZERO);
+        assert!(!g.overdue.load(Ordering::SeqCst), "the late answer ends it");
+        assert_eq!(g.admit(400), Ok(WORKER_WAIT));
     }
 
     #[test]
     fn an_opening_that_never_ends_is_counted_as_a_hang_and_a_cold_one_is_not() {
         let g = Gate::new();
-        let (wait, cut) = g.admit(Caller::Worker, 0, Duration::MAX, 1).unwrap();
+        let wait = g.admit(0).unwrap();
         g.begin(1, 0);
         g.set_state(OPENING);
         g.opening_started(0);
-        assert_eq!(g.missed(Caller::Worker, wait, cut), Fallback::Overdue);
+        assert_eq!(g.missed(wait), Fallback::Overdue);
         // Five seconds into an opening is a cold driver (measured up to 4.3 s), not a hang.
-        assert_eq!(g.admit(Caller::Pump, 5_000, PUMP_BUDGET, 2), Err(Fallback::Overdue));
+        assert_eq!(g.admit(5_000), Err(Fallback::Overdue));
         assert_eq!(g.hangs.load(Ordering::SeqCst), 0);
         // Past OPEN_HANG it is one, counted once however often it is asked about.
-        assert_eq!(g.admit(Caller::Pump, 10_500, PUMP_BUDGET, 3), Err(Fallback::Overdue));
-        assert_eq!(g.admit(Caller::Pump, 12_000, PUMP_BUDGET, 4), Err(Fallback::Overdue));
+        assert_eq!(g.admit(10_500), Err(Fallback::Overdue));
+        assert_eq!(g.admit(12_000), Err(Fallback::Overdue));
         assert_eq!(g.hangs.load(Ordering::SeqCst), 1);
         // An opening that does end, but only after OPEN_HANG, counts on the engine's side.
         g.begin(9, 0);
@@ -2450,16 +2255,17 @@ pub(super) mod tests {
             g.begin(seq, 0);
             g.end(seq, HANG, Duration::ZERO);
         }
-        assert_eq!(g.admit(Caller::Worker, 0, Duration::MAX, 9), Err(Fallback::Disabled));
+        assert_eq!(g.admit(0), Err(Fallback::Disabled));
         // A request that finishes late does not undo it.
         g.set_state(READY);
-        assert_eq!(g.admit(Caller::Pump, 0, PUMP_BUDGET, 10), Err(Fallback::Disabled));
+        assert_eq!(g.admit(0), Err(Fallback::Disabled));
         assert!(!g.claim_warm(0));
 
         let g = Gate::new();
         assert!(g.claim_warm(0));
         g.crashed("a test");
-        assert_eq!(g.admit(Caller::Pump, 0, PUMP_BUDGET, 1), Err(Fallback::Crashed));
+        assert!(!g.warming.load(Ordering::SeqCst), "a thread that is gone gives its warm-up back");
+        assert_eq!(g.admit(0), Err(Fallback::Crashed));
         assert_ne!(Fallback::Crashed.describe(), Fallback::Disabled.describe());
     }
 
@@ -2477,11 +2283,11 @@ pub(super) mod tests {
         g.begin(3, 0);
         g.end_at(3, HANG, Duration::ZERO, 11 * min);
         assert_eq!(g.hangs.load(Ordering::SeqCst), 3, "all counted");
-        assert!(g.admit(Caller::Worker, 11 * min, Duration::MAX, 9).is_ok(), "not stopped");
+        assert!(g.admit(11 * min).is_ok(), "not stopped");
         // A third within ten minutes of the second does stop it.
         g.begin(4, 0);
         g.end_at(4, HANG, Duration::ZERO, 12 * min);
-        assert_eq!(g.admit(Caller::Worker, 12 * min, Duration::MAX, 10), Err(Fallback::Disabled));
+        assert_eq!(g.admit(12 * min), Err(Fallback::Disabled));
         let mut ring = VecDeque::new();
         assert_eq!(hangs_within(&mut ring, 0), 1);
         assert_eq!(hangs_within(&mut ring, 10 * min - 1), 2);
@@ -2580,7 +2386,7 @@ pub(super) mod tests {
         b.back_off(Fallback::AccessLost, Duration::from_secs(2), 0);
         assert_eq!(after_system_event(&b, false, 500, &last), None);
         assert_eq!(after_system_event(&b, true, 500, &last), Some(Forgotten { backoff: true, ..Default::default() }));
-        assert!(b.admit(Caller::Worker, 501, Duration::MAX, 9).is_ok());
+        assert!(b.admit(501).is_ok());
         // Where it is wired: the Windows pump passes whether any event was more than a display
         // or scale change, and only a full event forgives the doubling.
         const SRC: &str = include_str!("dxgi.rs");
@@ -2809,15 +2615,15 @@ pub(super) mod tests {
         }
     }
 
-    /// A read that waits out the engine's own opening and lateness, as a test may and a pump
-    /// must not: Overdue and Opening mean "ask again shortly", and the time until the answer
-    /// came is itself worth printing (M2).
+    /// A read that waits out the engine's own opening and lateness, as a test may and a reader
+    /// that others queue behind must not: Overdue and NoFrameYet mean "ask again shortly", and the
+    /// time until the answer came is itself worth printing (M2).
     fn capture_patiently(rects: &[(i32, i32, i32, i32)]) -> (Result<Vec<CapturedImage>, Fallback>, Duration) {
         let t = Instant::now();
         loop {
-            let r = capture(rects, Caller::Worker);
+            let r = capture(rects);
             match r {
-                Err(Fallback::Overdue) | Err(Fallback::Opening) | Err(Fallback::NoFrameYet)
+                Err(Fallback::Overdue) | Err(Fallback::NoFrameYet)
                     if t.elapsed() < Duration::from_secs(5) =>
                 {
                     std::thread::sleep(Duration::from_millis(50));
@@ -2952,7 +2758,7 @@ pub(super) mod tests {
                 last_g = super::super::windows::capture_screen(0, 0, w, h);
                 g.push(t.elapsed().as_secs_f64() * 1000.0);
                 let t = Instant::now();
-                last_d = capture(&[(0, 0, w, h)], Caller::Worker).ok().and_then(|mut v| v.pop());
+                last_d = capture(&[(0, 0, w, h)]).ok().and_then(|mut v| v.pop());
                 d.push(t.elapsed().as_secs_f64() * 1000.0);
             }
             let agree = match (&last_g, &last_d) {

@@ -5,8 +5,9 @@
 -- through a wait names the call's own library.
 --
 -- A call without a callback waits: in a handler, as a `coroutine.yield` here, while the event loop
--- goes on. Where it cannot wait, `recognize` raises the message for that place at the caller's
--- line; a host.screen call runs on the event loop instead (`blocking`), which the host logs.
+-- goes on. Where it cannot wait it raises the message for that place at the caller's line — a
+-- host.screen call unless it touches nothing it would wait for (a pixel of a snapshot), which is
+-- answered at once (`now`).
 -- `recognize` with a callback — the last argument a function, or exactly two arguments of which
 -- the second is one — asks the read service and returns at once (`submit`), and so does a
 -- host.screen call given its callback (`snapshot(opts, cb)`, `pixel(x, y, opts, cb)`), wherever
@@ -23,34 +24,34 @@
 --                     coroutine; "foreign": one of its handlers runs, but another coroutine is
 --                     calling; "none": no handler of it runs
 --   disown()          module code resumed the handler's coroutine: the host forgets it
+--   messages(name)    the three messages call `name` raises where it cannot wait: outside every
+--                     handler, at a place Luau cannot suspend, in a coroutine the module made
 --
 -- The host resumes a wait with the nonce, then `true` and the answer's values, or `false` and the
 -- message the call raises at the caller's line — an answer that could not be handed over.
 --
--- recognize(start, submit, NIL_CB, CANNOT_WAIT, OWN_COROUTINE) builds host.ocr.recognize:
+-- recognize(start, submit, NIL_CB) builds host.ocr.recognize:
 --   start(nonce, what, opts)  queues the read for the innermost running handler of this VM, whose
 --                             own coroutine must be the one calling; raises for a mistake in the
 --                             call, at the wait
 --   submit(what, opts, cb)    the callback form: checks the call and queues the read; raises for a
 --                             mistake in it
---   CANNOT_WAIT               what it raises where it cannot wait: outside every handler, in a
---                             function the host calls and waits for, or one Luau cannot suspend
---   OWN_COROUTINE             what it raises in a coroutine the module made
 --
--- point(name, start, blocking, submit?, at?) builds a host.screen call that waits:
+-- point(name, start, now?, submit?, at?) builds a host.screen call that waits:
 --   start(nonce, ...)         queues what the call asks for, as `recognize`'s start does, and
 --                             returns nothing; or, for a call that touches nothing it would wait
 --                             for (a pixel of a snapshot), returns true and its answer, which the
 --                             call returns at once
---   blocking(why, ...)        the call made on the event loop, where it cannot wait: `why` is
---                             where_'s word for the place, or "cannot-wait"
+--   now(...)                  where it cannot wait: true and the answer for a call that touches
+--                             nothing it would wait for, which the call returns; nothing for one
+--                             that would wait, which then raises. Without it, every such call raises
 --   submit(...)               for a call with a callback form, that form: taken wherever the call
 --                             is made when argument `at` is anything but nil, and never waits —
 --                             it checks the call, queues it and returns, and raises for a mistake
 --   at                        where the callback goes: a position, or a function of the call's
 --                             arguments that says it — `pixel`'s comes third after a point and
 --                             fourth after two numbers
-return function(where_, disown, yield, isyieldable, rawequal, error, select, type, pack, unpack, WAIT, RESUMED)
+return function(where_, disown, messages, yield, isyieldable, rawequal, error, select, type, pack, unpack, WAIT, RESUMED)
   -- Where the calling coroutine is, as a wait asks it: "handler" only where Luau can stop it.
   local function place()
     local w = where_()
@@ -61,6 +62,13 @@ return function(where_, disown, yield, isyieldable, rawequal, error, select, typ
       w = "cannot-wait"
     end
     return w
+  end
+
+  -- Which of a call's three messages a place other than a handler's raises: `w` is place()'s word.
+  local function refusal(w, OUTSIDE, CANNOT_WAIT, OWN_COROUTINE)
+    if w == "none" then return OUTSIDE end
+    if w == "foreign" then return OWN_COROUTINE end
+    return CANNOT_WAIT
   end
 
   -- Level 1 is this function, 2 the call below it, 3 whoever called the host's function: a raise
@@ -83,7 +91,8 @@ return function(where_, disown, yield, isyieldable, rawequal, error, select, typ
   -- `local r = pack(…); return unpack(…)` rather than a tail call, so the wait's level 3 is the
   -- module's line.
   return {
-    recognize = function(start, submit, NIL_CB, CANNOT_WAIT, OWN_COROUTINE)
+    recognize = function(start, submit, NIL_CB)
+      local OUTSIDE, CANNOT_WAIT, OWN_COROUTINE = messages("host.ocr.recognize")
       return function(...)
         local n = select("#", ...)
         local what, opts, cb = ...
@@ -96,14 +105,14 @@ return function(where_, disown, yield, isyieldable, rawequal, error, select, typ
           return
         end
         local w = place()
-        if w == "foreign" then error(OWN_COROUTINE, 2) end
-        if w ~= "handler" then error(CANNOT_WAIT, 2) end
+        if w ~= "handler" then error(refusal(w, OUTSIDE, CANNOT_WAIT, OWN_COROUTINE), 2) end
         local r = pack(wait("host.ocr.recognize", start, what, opts))
         return unpack(r, 1, r.n)
       end
     end,
 
-    point = function(name, start, blocking, submit, at)
+    point = function(name, start, now, submit, at)
+      local OUTSIDE, CANNOT_WAIT, OWN_COROUTINE = messages(name)
       return function(...)
         if submit ~= nil then
           local i = at
@@ -115,8 +124,12 @@ return function(where_, disown, yield, isyieldable, rawequal, error, select, typ
         end
         local w = place()
         if w ~= "handler" then
-          local r = pack(blocking(w, ...))
-          return unpack(r, 1, r.n)
+          -- Answered at once, as in a handler, when the call touches nothing it would wait for.
+          if now ~= nil then
+            local r = pack(now(...))
+            if r[1] then return unpack(r, 2, r.n) end
+          end
+          error(refusal(w, OUTSIDE, CANNOT_WAIT, OWN_COROUTINE), 2)
         end
         local r = pack(wait(name, start, ...))
         return unpack(r, 1, r.n)

@@ -204,9 +204,9 @@ pub(crate) fn vm_source(lua: &Lua) -> CaptureSource {
 /// This VM's first-read comparison for a read of `region` that a thread captures for — a text
 /// read, a snapshot or a profile with a callback, an asynchronous search, every call a handler
 /// waits for — when it is still owed: the request carries it, and that thread makes it before its
-/// capture, never the event loop. A call that captures on the event loop, where it cannot wait,
-/// makes none: the comparison is left to the module's next read handed to a thread. `None` when
-/// there is none to make, or another request carries it. The request's source is [`vm_source`].
+/// capture, never the event loop, which captures nothing: a call that cannot wait raises. `None`
+/// when there is none to make, or another request carries it. The request's source is
+/// [`vm_source`].
 pub(crate) fn take_compare(lua: &Lua, region: (i32, i32, i32, i32)) -> Option<CompareReq> {
     let v = lua.app_data_ref::<VmCapture>()?;
     v.compare.take(&v.who, region)

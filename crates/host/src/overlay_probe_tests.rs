@@ -21,7 +21,7 @@
 //!
 //! Every read here records where it was made — the handler's own coroutine, where it may wait, or a
 //! pass of the runtime's, where it may not — so each scenario also holds that no probe is read
-//! where a capture could not wait.
+//! where a capture could not wait, and would raise in the host.
 
 use super::overlay_menu_tests::run_with;
 

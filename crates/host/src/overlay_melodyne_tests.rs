@@ -235,8 +235,8 @@ rawset(T.host.screen, "profile", function(opts, cb)
     end
   else
     assert(cb == nil, "a body's rows are profiled in the handler, which waits for them")
-    -- In the host it waits for its reduction, answered at once here; where it could not wait,
-    -- the place is noted (T.screenWait).
+    -- In the host it waits for its reduction, answered at once here; where it could not wait, it
+    -- raises (T.screenWait).
     T.screenWait("host.screen.profile")
   end
   -- As the host does: without a callback, `key` and then `at` raise.

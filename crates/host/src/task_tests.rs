@@ -14,9 +14,8 @@
 //! `saveMarked` (save.rs), with the callback forms of `profile`, `matchCells` and `imageSearch` —
 //! `host.screen.pending`, and `host.timer` (timers.rs). The tick is `fire`:
 //! due timers, then the readings, as the loop runs them; the snapshots' delivery — the pixel
-//! reads' with them — is `fire_snaps`. A snapshot taken where it cannot wait is a picture of its
-//! region made on the spot, input epoch 7; the capture thread's rounds have pictures from
-//! x = 20000 on, and a pixel read there, on either thread, the colour such a picture has.
+//! reads' with them — is `fire_snaps`. The capture thread's rounds have pictures from x = 20000 on,
+//! and a pixel read there the colour such a picture has; where a call cannot wait it raises.
 //!
 //! The fake recogniser reads every region as "x,y" — its corner — and can be held: a capture of
 //! a region whose x a test `hold`s waits until it lets go, a snapshot round's as well, and so does
@@ -25,11 +24,9 @@
 //!
 //! The test's own thread stands where the event loop stands, and is marked as the loop's for as
 //! long as the holder lives (`loop_guard`); every function of the fake recogniser asks the guard
-//! first, as the platforms' do, and the fakes the event loop reads the screen through where a
-//! call cannot wait — the pixel reads, the region captures, the snapshot — ask the screen guard, as
-//! the backends' four reads do. So in a debug build a test that brought a recognition onto the
-//! loop fails, and so does one that captured there outside the scope of a call that could not
-//! wait.
+//! first, as the platforms' do, and the fakes the threads read the screen through — the pixel
+//! reads, the region captures, the snapshot rounds — ask the screen guard, as the backends' do. So
+//! in a debug build a test that brought a recognition or a capture onto the loop fails.
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
@@ -159,11 +156,10 @@ const SNAP_X: i32 = 20_000;
 /// one, and the thread.
 static POINTS_READ: Mutex<Vec<(i32, bool, String)>> = Mutex::new(Vec::new());
 
-/// The fake's pixel reads — the capture thread's for a handler that waits (`worker`'s `points`), the
-/// event loop's where the call cannot wait (`snapshot::test_points`): from x = 20000 on, the colour
-/// a snapshot round's picture has there, `(x, y, 50)`; elsewhere none, and why. A read of a held x
-/// waits until it is let go. On the loop it is let be only inside the call's scope, as
-/// `Backend::pixel` and `pixels` are.
+/// The fake's pixel reads — the capture thread's, for a handler that waits and for a callback
+/// (`worker`'s `points`): from x = 20000 on, the colour a snapshot round's picture has there,
+/// `(x, y, 50)`; elsewhere none, and why. A read of a held x waits until it is let go. On the loop
+/// it is the bug the screen guard names, as the backends' reads are.
 fn fake_points(at: &[(i32, i32)], _: CaptureSource, single: bool) -> Result<Vec<(u8, u8, u8)>, String> {
     crate::loop_guard::off_loop_screen("the fake pixel read");
     for p in at {
@@ -196,10 +192,10 @@ fn wait_image_capturing(x: i32) {
     }
 }
 
-/// The image worker's capture (`image_search::spawn_image_worker`), and the event loop's where a
-/// call that waits for the worker cannot wait: from x = 20000 on, the picture a snapshot round has
-/// there (`snapshot::test_frame`); elsewhere none, and why. A capture of a held x waits until it is
-/// let go. On the loop it is let be only inside the call's scope, as `Backend::capture` is.
+/// The image worker's capture (`image_search::spawn_image_worker`): from x = 20000 on, the picture a
+/// snapshot round has there (`snapshot::test_frame`); elsewhere none, and why. A capture of a held x
+/// waits until it is let go. On the loop it is the bug the screen guard names, as the backends'
+/// captures are.
 fn fake_image_capture(regions: &[(i32, i32, i32, i32)], _: CaptureSource) -> Vec<Result<CapturedImage, String>> {
     crate::loop_guard::off_loop_screen("the fake region capture");
     let thread = std::thread::current().name().unwrap_or("?").to_string();
@@ -270,7 +266,7 @@ pub(crate) fn worker() -> OcrWorker<Fake> {
         // (px, py) is (px, py, 50) (`snapshot::test_frame`); elsewhere none. On the loop it is let
         // be nowhere, as the backends' rounds are not.
         frames: |regions, _, _| {
-            crate::loop_guard::off_loop_screen_always("the fake snapshot round");
+            crate::loop_guard::off_loop_screen("the fake snapshot round");
             for r in regions {
                 wait_while_held(r.0, true);
             }
@@ -286,7 +282,7 @@ pub(crate) fn worker() -> OcrWorker<Fake> {
                 })
                 .collect()
         },
-        // Guarded as the event loop's own read is (`fake_points`).
+        // Guarded as the backends' are (`fake_points`).
         points: fake_points,
         compare: fake_compare,
         display_of: |_, _| 0,
@@ -485,18 +481,18 @@ fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     host.set("ocr", ocr).unwrap();
     let screen = lua.create_table().unwrap();
     screen.set("snapshot", crate::snapshot::test_snapshot(&lua, idx, h.clone()).unwrap()).unwrap();
-    let (pixel, pixels) = crate::snapshot::test_points(&lua, idx, h.clone(), fake_points).unwrap();
+    let (pixel, pixels) = crate::snapshot::test_points(&lua, idx, h.clone()).unwrap();
     screen.set("pixel", pixel).unwrap();
     screen.set("pixels", pixels).unwrap();
-    screen.set("profile", crate::snapshot::test_profile_fn(&lua, idx, h.clone(), fake_image_capture).unwrap()).unwrap();
-    let (cells, match_cells) = crate::image_search::test_cells(&lua, idx, h.clone(), fake_image_capture).unwrap();
+    screen.set("profile", crate::snapshot::test_profile_fn(&lua, idx, h.clone()).unwrap()).unwrap();
+    let (cells, match_cells) = crate::image_search::test_cells(&lua, idx, h.clone()).unwrap();
     screen.set("cells", cells).unwrap();
     screen.set("matchCells", match_cells).unwrap();
-    screen.set("template", crate::image_search::test_template(&lua, idx, h.clone(), fake_image_capture, templates_dir()).unwrap()).unwrap();
-    let [search, all] = crate::image_search::test_searches(&lua, idx, h.clone(), fake_image_capture, templates_dir()).unwrap();
+    screen.set("template", crate::image_search::test_template(&lua, idx, h.clone(), templates_dir()).unwrap()).unwrap();
+    let [search, all] = crate::image_search::test_searches(&lua, idx, h.clone(), templates_dir()).unwrap();
     screen.set("imageSearch", search).unwrap();
     screen.set("imageSearchAll", all).unwrap();
-    let (save, save_marked) = crate::save::test_saves(&lua, idx, h.clone(), fake_image_capture, std::env::temp_dir()).unwrap();
+    let (save, save_marked) = crate::save::test_saves(&lua, idx, h.clone(), std::env::temp_dir()).unwrap();
     screen.set("save", save).unwrap();
     screen.set("saveMarked", save_marked).unwrap();
     crate::snapshot::install_crop(&lua, idx, h.clone()).unwrap();
@@ -882,11 +878,12 @@ fn acting_with_a_read_out_waits_for_nothing_and_is_noted_once() {
 
 /// Where a handler cannot stop, `recognize` without a callback raises the message for the place at
 /// the caller's line, and reads nothing: outside every handler — the top level of a module, an
-/// included file's top level, which the host calls as a function — and inside one, in a
-/// metamethod, a sort comparator, a gsub function, a for loop's iterator, an `xpcall` error
-/// handler, `table.foreach` and `foreachi`, Lua the host calls back (an arbiter's `onActivate` or
-/// `onDeactivate`, an `onChange` from the module's own `set`), and a coroutine of the module's
-/// own. A `pcall` returns the message; the handler goes on, and its own wait still waits.
+/// included file's top level, which the host calls as a function — with the message for that, and
+/// inside one, in a metamethod, a sort comparator, a gsub function, a for loop's iterator, an
+/// `xpcall` error handler, `table.foreach` and `foreachi`, Lua the host calls back (an arbiter's
+/// `onActivate` or `onDeactivate`, an `onChange` from the module's own `set`), and a coroutine of
+/// the module's own, each with its own. A `pcall` returns the message; the handler goes on, and its
+/// own wait still waits.
 #[test]
 fn where_a_task_cannot_wait_recognize_raises_at_the_callers_line() {
     let h = host();
@@ -924,27 +921,28 @@ fn where_a_task_cannot_wait_recognize_raises_at_the_callers_line() {
            got.waited = host.ocr.recognize(R).text\n\
          end)\n",
     );
-    let cannot = task::wait_message(Case::CannotWait);
-    let own = task::wait_message(Case::OwnCoroutine);
+    let outside = task::wait_message("host.ocr.recognize", Case::Outside);
+    let cannot = task::wait_message("host.ocr.recognize", Case::CannotWait);
+    let own = task::wait_message("host.ocr.recognize", Case::OwnCoroutine);
     let top: String = lua.globals().get("top").unwrap();
     assert!(yes(&lua, "return okTop == false and okInc == false"));
-    assert!(top.contains(&format!("mod.luau:3: {cannot}")), "{top}");
+    assert!(top.contains(&format!("mod.luau:3: {outside}")), "{top}");
     let inc: String = lua.globals().get("inc").unwrap();
-    assert!(inc.contains(&format!("inc.luau:1: {cannot}")), "{inc}");
+    assert!(inc.contains(&format!("inc.luau:1: {outside}")), "{inc}");
     settle(&h);
     assert!(yes(&lua, "return got.waited == '9021,5'"), "the handler went on, and its own wait waited");
     let got: Table = lua.globals().get("got").unwrap();
     for (place, line, message) in [
-        ("meta", 9, cannot),
-        ("sort", 11, cannot),
-        ("gsub", 12, cannot),
-        ("iter", 13, cannot),
-        ("handler", 15, cannot),
-        ("foreach", 17, cannot),
-        ("foreachi", 18, cannot),
-        ("onActivate", 19, cannot),
-        ("onChange", 20, cannot),
-        ("own", 21, own),
+        ("meta", 9, &cannot),
+        ("sort", 11, &cannot),
+        ("gsub", 12, &cannot),
+        ("iter", 13, &cannot),
+        ("handler", 15, &cannot),
+        ("foreach", 17, &cannot),
+        ("foreachi", 18, &cannot),
+        ("onActivate", 19, &cannot),
+        ("onChange", 20, &cannot),
+        ("own", 21, &own),
     ] {
         let t: Table = got.get(place).unwrap();
         let e: String = t.get("e").unwrap();
@@ -965,7 +963,7 @@ fn a_mistaken_call_where_it_cannot_wait_raises_the_places_message() {
     run(&lua, "ok, err = pcall(host.ocr.recognize, { mistake = true }); err = tostring(err)");
     assert!(yes(&lua, "return ok == false"));
     let err: String = lua.globals().get("err").unwrap();
-    assert!(err.contains(task::wait_message(Case::CannotWait)), "{err}");
+    assert!(err.contains(&task::wait_message("host.ocr.recognize", Case::Outside)), "{err}");
     let traced: String = lua
         .load("return select(2, xpcall(host.ocr.recognize, debug.traceback, { 1, 2, 3, 4 }))")
         .set_name("=mod.luau")
@@ -974,60 +972,84 @@ fn a_mistaken_call_where_it_cannot_wait_raises_the_places_message() {
     assert!(traced.contains("host.ocr:") && !traced.contains("task_shim"), "{traced}");
 }
 
-/// The blocking calls' tally, which a call that cannot wait on the event loop goes through
-/// (`task::legacy`): its first answer per module, call and case is written with how long it held
-/// the loop — a raise writes nothing, so the first that answers still does — every call is
-/// counted per module and call for the summary at exit, a module's lines are news again once
-/// forgotten, and the scope it runs in is the loop guard's of its kind.
+/// Where a handler cannot stop, a `host.screen` call without a callback raises the message for the
+/// place at the caller's line, as `recognize` does, and nothing is captured: outside every handler —
+/// the top level, an included file's — and inside one, in a metamethod, a sort comparator, a gsub
+/// function, a for loop's iterator, an `xpcall` error handler, Lua the host calls back (an arbiter's
+/// `onActivate` or `onDeactivate`, an `onChange` from the module's own `set`), and a coroutine of the
+/// module's own — the overlay runtime's for its hooks (`noWait`) is one. A `pcall` returns the
+/// message, whatever the call was given; the handler goes on, and its own wait still waits. A call
+/// that touches nothing it would wait for — a snapshot's point — is answered in every one of them.
 #[test]
-fn a_blocking_call_is_said_once_per_module_call_and_case_and_counted() {
+fn where_a_task_cannot_wait_a_screen_call_raises_at_the_callers_line() {
     let h = host();
     let lua = vm(&h, 1);
-    let other = vm(&h, 2);
-    for l in [&lua, &other] {
-        let hh = h.clone();
-        let blocking = l
-            .create_function(move |lua, (call, why, fail): (String, String, bool)| {
-                let call: &'static str = if call == "pixel" { "host.screen.pixel" } else { "host.screen.save" };
-                let idx = lua.app_data_ref::<VmOwner>().map(|o| o.idx).unwrap_or(0);
-                task::legacy(&*hh, lua, idx, call, crate::loop_guard::Kind::Screen, &why, || {
-                    if fail {
-                        return Err(mlua::Error::external("a mistake in the call"));
-                    }
-                    Ok(true)
-                })
-            })
-            .unwrap();
-        l.globals().set("blocking", blocking).unwrap();
-    }
-    run(&lua, "pcall(blocking, 'pixel', 'none', true)");
-    assert!(!h.tasks.legacy_said("m1", "host.screen.pixel", Case::Outside), "a raise was logged as the first call");
+    lua.globals().set("s", Value::UserData(crate::snapshot::test_handle(&lua, crate::snapshot::test_frame(20601, 5, 10, 10)))).unwrap();
+    let included = lua
+        .load("return host.screen.snapshot({ region = { 20602, 5, 20612, 9 } })")
+        .set_name("=inc.luau")
+        .into_function()
+        .unwrap();
+    lua.globals().set("included", included).unwrap();
     run(
         &lua,
-        "blocking('pixel', 'none', false); blocking('pixel', 'cannot-wait', false)\n\
-         blocking('pixel', 'foreign', false); blocking('save', 'none', false)",
+        "local R = { region = { 20601, 5, 20611, 9 } }\n\
+         okTop, top = pcall(function()\n\
+           return host.screen.pixel(20603, 5)\n\
+         end)\n\
+         okInc, inc = pcall(hostCall, included); inc = tostring(inc)\n\
+         okMistake, mistake = pcall(host.screen.snapshot, { region = { 0, 0, 10 } }); mistake = tostring(mistake)\n\
+         task.run(function()\n\
+           local function try(f, ...) local ok, e = pcall(f, ...); return { ok = ok, e = tostring(e) } end\n\
+           got = { handler = {} }\n\
+           local meta = setmetatable({}, { __index = function() return host.screen.snapshot(R) end })\n\
+           got.meta = try(function() return meta.x end)\n\
+           got.sort = try(table.sort, { 3, 1, 2 }, function(a, b) host.screen.pixels({ { 20604, 5 } }); return a < b end)\n\
+           got.gsub = try(string.gsub, 'ab', '.', function(c) host.screen.profile(R); return c end)\n\
+           got.iter = try(function() for _ in function() return host.screen.cells({ region = R.region, cols = 1, rows = 1, predicate = 'r > b' }) end do end end)\n\
+           xpcall(error, function()\n\
+             got.handler.ok, got.handler.e = pcall(function() return host.screen.imageSearch('dot.png', R) end)\n\
+           end, 'raised')\n\
+           got.onActivate = try(hostCall, function() host.screen.template({ capture = { 20605, 5, 20607, 7 } }) end)\n\
+           got.onChange = try(hostCall, function() host.screen.save('x.png', R) end)\n\
+           got.own = try(coroutine.wrap(function() return s:crop({ 20601, 5, 20603, 7 }) end))\n\
+           got.snapPoint = coroutine.wrap(function() return host.screen.pixel(20602, 6, { snapshot = s }) end)()\n\
+           got.waited = host.screen.pixel(20606, 5)\n\
+         end)\n",
     );
-    run(&other, "blocking('pixel', 'none', false)");
-    for (id, call, case) in [
-        ("m1", "host.screen.pixel", Case::Outside),
-        ("m1", "host.screen.pixel", Case::CannotWait),
-        ("m1", "host.screen.pixel", Case::OwnCoroutine),
-        ("m1", "host.screen.save", Case::Outside),
-        ("m2", "host.screen.pixel", Case::Outside),
+    let message = |call: &str, case: Case| task::wait_message(call, case);
+    let top: String = lua.globals().get("top").unwrap();
+    assert!(yes(&lua, "return okTop == false and okInc == false and okMistake == false"));
+    assert!(top.contains(&format!("mod.luau:3: {}", message("host.screen.pixel", Case::Outside))), "{top}");
+    let inc: String = lua.globals().get("inc").unwrap();
+    assert!(inc.contains(&format!("inc.luau:1: {}", message("host.screen.snapshot", Case::Outside))), "{inc}");
+    let mistake: String = lua.globals().get("mistake").unwrap();
+    assert!(mistake.contains(&message("host.screen.snapshot", Case::Outside)), "the place's message, whatever it was given: {mistake}");
+    settle_snaps(&h);
+    assert!(yes(&lua, "return got.waited ~= nil and got.waited.hex == '#7E0532'"), "the handler went on, and its own wait waited");
+    assert!(yes(&lua, "return got.snapPoint ~= nil and got.snapPoint.hex == '#7A0632'"), "a snapshot's point, at once");
+    let got: Table = lua.globals().get("got").unwrap();
+    for (place, line, call, case) in [
+        ("meta", 10, "host.screen.snapshot", Case::CannotWait),
+        ("sort", 12, "host.screen.pixels", Case::CannotWait),
+        ("gsub", 13, "host.screen.profile", Case::CannotWait),
+        ("iter", 14, "host.screen.cells", Case::CannotWait),
+        ("handler", 16, "host.screen.imageSearch", Case::CannotWait),
+        ("onActivate", 18, "host.screen.template", Case::CannotWait),
+        ("onChange", 19, "host.screen.save", Case::CannotWait),
+        ("own", 20, "Snapshot:crop", Case::OwnCoroutine),
     ] {
-        assert!(h.tasks.legacy_said(id, call, case), "{id} {call} {case:?} not said");
+        let t: Table = got.get(place).unwrap();
+        let e: String = t.get("e").unwrap();
+        assert!(!t.get::<bool>("ok").unwrap(), "{place}: it did not raise");
+        assert!(e.contains(&format!("mod.luau:{line}: {}", message(call, case))), "{place}: {e}");
     }
-    assert!(!h.tasks.legacy_said("m2", "host.screen.save", Case::Outside));
-    h.tasks.forget_legacy_said("m1");
-    assert!(!h.tasks.legacy_said("m1", "host.screen.pixel", Case::Outside));
-    assert!(h.tasks.legacy_said("m2", "host.screen.pixel", Case::Outside), "only m1's lines are forgotten");
-    run(&lua, "blocking('pixel', 'none', false)");
-    assert!(h.tasks.legacy_said("m1", "host.screen.pixel", Case::Outside), "written again after it was forgotten");
-    let summary: Vec<String> = h.tasks.legacy_summary().into_iter().map(|(scope, line)| format!("{scope}: {line}")).collect();
-    assert_eq!(summary.len(), 3, "{summary:?}");
-    assert!(summary[0].starts_with("screen: [m1] host.screen.pixel held the event loop 5 time(s), "), "{summary:?}");
-    assert!(summary[1].starts_with("screen: [m1] host.screen.save held the event loop 1 time(s), "), "{summary:?}");
-    assert!(summary[2].starts_with("screen: [m2] host.screen.pixel held the event loop 1 time(s), "), "{summary:?}");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    for x in [20601, 20602, 20603, 20604, 20605] {
+        assert!(!taken(x) && points_read(x).is_empty() && image_captured(x).is_empty(), "{x}: read where it could not wait");
+    }
+    assert_eq!(points_read(20606), [(true, "screen-capture".to_string())]);
+    assert_eq!(h.tasks.len(), 0);
 }
 
 // ── cancel, disable, reload ──────────────────────────────────────────────────────────────────
@@ -1865,11 +1887,11 @@ fn picture(lua: &Lua, name: &str) -> (Rect, Vec<u8>, i64, u64, &'static str) {
 
 /// `host.screen.snapshot` in a handler waits for the `screen-capture` thread's picture: only its
 /// module is busy — its next key waits in its mailbox, and another module's key runs meanwhile —
-/// its charge is reserved at the call, and the handler goes on with what the call that does not
-/// wait returns: one value, a handle of the same rectangle, the same pixels and the same way of
-/// reading. Its `time` and `inputEpoch` are its picture's, taken on the thread.
+/// its charge is reserved at the call, and the handler goes on with one value: a handle of the
+/// region, the thread's picture of it and the way it was read. Its `time` and `inputEpoch` are its
+/// picture's, taken on the thread.
 #[test]
-fn a_snapshot_in_a_handler_waits_and_answers_what_the_call_that_does_not_wait_answers() {
+fn a_snapshot_in_a_handler_waits_and_answers_one_handle_of_its_picture() {
     let h = host();
     let lua = vm(&h, 1);
     let other = vm(&h, 2);
@@ -1878,7 +1900,6 @@ fn a_snapshot_in_a_handler_waits_and_answers_what_the_call_that_does_not_wait_an
         &lua,
         r##"
         order = {}
-        blocked = host.screen.snapshot({ region = { 20001, 5, 20011, 9 } })
         function shoot()
           order[#order + 1] = "asked"
           waited, why = host.screen.snapshot({ region = { 20001, 5, 20011, 9 } })
@@ -1906,59 +1927,48 @@ fn a_snapshot_in_a_handler_waits_and_answers_what_the_call_that_does_not_wait_an
         "{:?}",
         lua.load("return table.concat(order, ' | ')").eval::<String>()
     );
-    let (rect, pixels, _, epoch, via) = picture(&lua, "blocked");
     let (wrect, wpixels, wtime, wepoch, wvia) = picture(&lua, "waited");
-    assert_eq!((wrect, wvia), (rect, via), "the same rectangle, read the same way");
-    assert_eq!(wpixels, pixels, "the same pixels");
-    assert_eq!((epoch, wepoch), (7, 41), "the event loop's at the call, and the thread's once taken");
+    assert_eq!((wrect, wvia), (Rect::new(20001, 5, 10, 4), "gdi"), "the region, read the standard way");
+    assert_eq!(wpixels, crate::snapshot::test_frame(20001, 5, 10, 4).img.rgba, "the thread's pixels");
+    assert_eq!(wepoch, 41, "the thread's, once taken");
     assert!(wtime >= 0);
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
 }
 
-/// Where a handler cannot stop, `host.screen.snapshot` takes its picture on the event loop as it
-/// always did, and answers at once: outside every handler (the top level), where Luau cannot stop
-/// the handler (a function the host calls, a metamethod), in a coroutine of the module's own. The
-/// host says so once per module, call and place, and counts every call there for the summary at
-/// exit — a mistake, which still raises, included; in the handler's own coroutine it waits.
+/// Where a handler cannot stop, `host.screen.snapshot` raises the place's message, and nothing is
+/// taken: outside every handler (the top level), where Luau cannot stop the handler (a function the
+/// host calls, a metamethod), in a coroutine of the module's own. In the handler's own coroutine it
+/// waits.
 #[test]
-fn where_a_snapshot_cannot_wait_it_answers_at_once_and_is_said_once_per_place() {
+fn where_a_snapshot_cannot_wait_it_raises_and_takes_no_picture() {
     let h = host();
     let lua = vm(&h, 1);
     run(
         &lua,
         r#"
         local R = { region = { 20021, 5, 20031, 9 } }
-        okMistake = pcall(host.screen.snapshot, { region = { 0, 0, 10 } })
-        top = host.screen.snapshot(R)
-        top2 = host.screen.snapshot(R)
+        okTop, top = pcall(host.screen.snapshot, R)
         task.run(function()
           got = {}
-          got.host = hostCall(function() return host.screen.snapshot(R) end)
-          got.meta = setmetatable({}, { __index = function() return host.screen.snapshot(R) end }).x
-          got.own = coroutine.wrap(function() return host.screen.snapshot(R) end)()
-          got.waited = host.screen.snapshot(R)
+          got.okHost, got.host = pcall(hostCall, function() return host.screen.snapshot(R) end)
+          got.okMeta, got.meta = pcall(function() return setmetatable({}, { __index = function() return host.screen.snapshot(R) end }).x end)
+          got.okOwn, got.own = pcall(coroutine.wrap(function() return host.screen.snapshot(R) end))
+          got.waited = host.screen.snapshot({ region = { 20022, 5, 20032, 9 } })
         end)
         "#,
     );
-    assert!(yes(&lua, "return okMistake == false and got.waited == nil"), "the task's own call waits");
-    for case in [Case::Outside, Case::CannotWait, Case::OwnCoroutine] {
-        assert!(h.tasks.legacy_said("m1", "host.screen.snapshot", case), "{case:?} not said");
+    assert!(yes(&lua, "return okTop == false and got.okHost == false and got.okMeta == false and got.okOwn == false"));
+    assert!(yes(&lua, "return got.waited == nil"), "the task's own call waits");
+    for (name, case) in [("top", Case::Outside), ("got.host", Case::CannotWait), ("got.meta", Case::CannotWait), ("got.own", Case::OwnCoroutine)] {
+        let e: String = lua.load(format!("return tostring({name})")).eval().unwrap();
+        assert!(e.contains(&task::wait_message("host.screen.snapshot", case)), "{name}: {e}");
     }
     settle_snaps(&h);
-    for name in ["top", "top2"] {
-        assert_eq!(picture(&lua, name).3, 7, "{name}: taken on the event loop");
-    }
     let got: Table = lua.globals().get("got").unwrap();
-    for name in ["host", "meta", "own"] {
-        assert_eq!(picture_of(got.get(name).unwrap()).3, 7, "{name}: taken on the event loop");
-    }
     let (waited, _, _, epoch, _) = picture_of(got.get("waited").unwrap());
-    assert_eq!((waited, epoch), (Rect::new(20021, 5, 10, 4), 0), "taken on the capture thread");
-    let summary = h.tasks.legacy_summary();
-    assert_eq!(summary.len(), 1, "{summary:?}");
-    assert_eq!(summary[0].0, "screen");
-    assert!(summary[0].1.starts_with("[m1] host.screen.snapshot held the event loop 6 time(s), "), "{summary:?}");
+    assert_eq!((waited, epoch), (Rect::new(20022, 5, 10, 4), 0), "taken on the capture thread");
+    assert!(!taken(20021), "nothing taken where it could not wait");
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
 }
@@ -2185,12 +2195,12 @@ end
 "#;
 
 /// `host.screen.pixel` and `pixels` in a handler wait for the `screen-capture` thread, which reads
-/// the points as the event loop would — each as `pixel` reads one, or the list as `pixels` reads it
-/// — and only their module is busy: its next key waits in its mailbox, another module's key runs
-/// meanwhile. The handler goes on with exactly what the call that does not wait answers: one
-/// colour and nothing after it, the list, or `nil` and the reason; and a wait turns no epoch.
+/// the points — each as `pixel` reads one, or the list as `pixels` reads it — and only their module
+/// is busy: its next key waits in its mailbox, another module's key runs meanwhile. The handler goes
+/// on with one colour and nothing after it, the list, or `nil` and the reason; and a wait turns no
+/// epoch.
 #[test]
-fn a_pixel_in_a_handler_waits_and_answers_what_the_call_that_does_not_wait_answers() {
+fn a_pixel_in_a_handler_waits_and_answers_its_colours() {
     let h = host();
     let lua = vm(&h, 1);
     let other = vm(&h, 2);
@@ -2199,10 +2209,6 @@ fn a_pixel_in_a_handler_waits_and_answers_what_the_call_that_does_not_wait_answe
         &lua,
         r##"
         order = {}
-        blockedOne = host.screen.pixel(20201, 5)
-        blockedList = host.screen.pixels({ { 20201, 5 }, { 20202, 6 } })
-        blockedNone, blockedWhy = host.screen.pixel(5, 5)
-        blockedNoList, blockedListWhy = host.screen.pixels({ { 20203, 5 }, { 7, 7 } })
         function look()
           order[#order + 1] = "asked"
           before = epoch()
@@ -2218,7 +2224,6 @@ fn a_pixel_in_a_handler_waits_and_answers_what_the_call_that_does_not_wait_answe
         "##,
     );
     run(&other, "function key() ran = true end");
-    assert_eq!(points_read(20201), [(true, current_thread()), (false, current_thread())], "where it cannot wait, on the loop");
     hold(20201);
     assert_eq!(event(&h, &lua, "look", Vec::new(), true), mailbox::Delivered::Parked);
     assert_eq!(event(&h, &lua, "key", Vec::new(), true), mailbox::Delivered::Queued, "its keys wait behind it");
@@ -2234,26 +2239,28 @@ fn a_pixel_in_a_handler_waits_and_answers_what_the_call_that_does_not_wait_answe
         "{:?}",
         lua.load("return table.concat(order, ' | ')").eval::<String>()
     );
-    assert!(yes(&lua, "return same(one, blockedOne) and one.hex == '#E90532' and oneValues == 1"), "one colour, as on the loop");
-    assert!(yes(&lua, "return same(list, blockedList) and #list == 2"), "the list, as on the loop");
-    assert!(yes(&lua, "return none == nil and why == blockedWhy and why == 'no pixels here'"), "a failed read, as on the loop");
-    assert!(yes(&lua, "return noList == nil and listWhy == blockedListWhy"), "all or nothing, as on the loop");
+    assert!(yes(&lua, "return same(one, { r = 233, g = 5, b = 50, hex = '#E90532' }) and oneValues == 1"), "one colour");
+    assert!(
+        yes(&lua, "return same(list, { { r = 233, g = 5, b = 50, hex = '#E90532' }, { r = 234, g = 6, b = 50, hex = '#EA0632' } })"),
+        "the list, in order"
+    );
+    assert!(yes(&lua, "return none == nil and why == 'no pixels here'"), "a failed read");
+    assert!(yes(&lua, "return noList == nil and listWhy == 'no pixels here'"), "all or nothing");
     assert!(yes(&lua, "return before == after"), "a wait turns no epoch");
     let read = points_read(20201);
-    assert_eq!(read.len(), 5, "{read:?}");
-    assert_eq!(&read[2..], [(true, "screen-capture".into()), (true, "screen-capture".into()), (false, "screen-capture".into())]);
+    assert_eq!(read, [(true, "screen-capture".into()), (true, "screen-capture".into()), (false, "screen-capture".into())]);
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
 }
 
-/// The name of the test's own thread: where a call that cannot wait reads.
+/// The name of the test's own thread, which stands where the event loop stands.
 fn current_thread() -> String {
     std::thread::current().name().unwrap_or("?").to_string()
 }
 
 /// A `pixel` or `pixels` that touches no screen — a snapshot's points, a window point with no pixel
 /// this time, an empty list — is answered at once wherever it is called: in a handler without a
-/// wait, at the top level without a line or a count. A mistake raises in both.
+/// wait, at the top level without a raise. A mistake raises in both, as a mistake.
 #[test]
 fn a_pixel_that_touches_no_screen_is_answered_at_once_wherever_it_is_asked() {
     let h = host();
@@ -2290,55 +2297,48 @@ fn a_pixel_that_touches_no_screen_is_answered_at_once_wherever_it_is_asked() {
             "{got}"
         );
     }
-    for case in [Case::Outside, Case::CannotWait, Case::OwnCoroutine] {
-        assert!(!h.tasks.legacy_said("m1", "host.screen.pixel", case) && !h.tasks.legacy_said("m1", "host.screen.pixels", case));
-    }
-    assert!(h.tasks.legacy_summary().is_empty(), "nothing was read on the loop: {:?}", h.tasks.legacy_summary());
     assert!(h.snaps.test_ids_of(1).is_empty() && !h.snaps.has_pending(), "nothing asked of the thread");
     assert!(points_read(20211).is_empty() && points_read(20212).is_empty(), "nothing read for them");
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
 }
 
-/// Where a handler cannot stop, `pixel` and `pixels` read on the event loop as they always did, and
-/// answer at once: outside every handler, where Luau cannot stop the handler, in a coroutine of the
-/// module's own. Said once per module, call and place; every read there counted for the summary.
+/// Where a handler cannot stop, `pixel` and `pixels` of the screen raise the place's message, and
+/// nothing is read: outside every handler, where Luau cannot stop the handler, in a coroutine of the
+/// module's own. In the handler's own coroutine they wait.
 #[test]
-fn where_a_pixel_cannot_wait_it_reads_on_the_event_loop_and_is_said_once_per_place() {
+fn where_a_pixel_cannot_wait_it_raises_and_reads_nothing() {
     let h = host();
     let lua = vm(&h, 1);
     run(
         &lua,
         r#"
-        top = host.screen.pixel(20241, 5)
-        topList = host.screen.pixels({ { 20241, 5 } })
+        okTop, top = pcall(host.screen.pixel, 20241, 5)
+        okTopList, topList = pcall(host.screen.pixels, { { 20241, 5 } })
         task.run(function()
           got = {}
-          got.host = hostCall(function() return host.screen.pixel(20241, 5) end)
-          got.meta = setmetatable({}, { __index = function() return host.screen.pixel(20241, 5) end }).x
-          got.own = coroutine.wrap(function() return host.screen.pixels({ { 20241, 5 } }) end)()
+          got.okHost, got.host = pcall(hostCall, function() return host.screen.pixel(20241, 5) end)
+          got.okMeta, got.meta = pcall(function() return setmetatable({}, { __index = function() return host.screen.pixel(20241, 5) end }).x end)
+          got.okOwn, got.own = pcall(coroutine.wrap(function() return host.screen.pixels({ { 20241, 5 } }) end))
           got.waited = host.screen.pixel(20242, 5)
         end)
         "#,
     );
-    assert!(yes(&lua, "return top ~= nil and #topList == 1 and got.host ~= nil and got.meta ~= nil and #got.own == 1"));
+    assert!(yes(&lua, "return okTop == false and okTopList == false and got.okHost == false and got.okMeta == false and got.okOwn == false"));
     assert!(yes(&lua, "return got.waited == nil"), "the task's own call waits");
-    for (call, case) in [
-        ("host.screen.pixel", Case::Outside),
-        ("host.screen.pixel", Case::CannotWait),
-        ("host.screen.pixels", Case::Outside),
-        ("host.screen.pixels", Case::OwnCoroutine),
+    for (name, call, case) in [
+        ("top", "host.screen.pixel", Case::Outside),
+        ("topList", "host.screen.pixels", Case::Outside),
+        ("got.host", "host.screen.pixel", Case::CannotWait),
+        ("got.meta", "host.screen.pixel", Case::CannotWait),
+        ("got.own", "host.screen.pixels", Case::OwnCoroutine),
     ] {
-        assert!(h.tasks.legacy_said("m1", call, case), "{call} {case:?} not said");
+        let e: String = lua.load(format!("return tostring({name})")).eval().unwrap();
+        assert!(e.contains(&task::wait_message(call, case)), "{name}: {e}");
     }
-    assert!(!h.tasks.legacy_said("m1", "host.screen.pixel", Case::OwnCoroutine));
     settle_snaps(&h);
     assert!(yes(&lua, "return got.waited ~= nil and got.waited.hex == '#120532'"));
-    assert!(points_read(20241).iter().all(|(_, t)| *t == current_thread()), "{:?}", points_read(20241));
+    assert!(points_read(20241).is_empty(), "nothing read where it could not wait: {:?}", points_read(20241));
     assert_eq!(points_read(20242), [(true, "screen-capture".to_string())]);
-    let summary: Vec<String> = h.tasks.legacy_summary().into_iter().map(|(scope, line)| format!("{scope}: {line}")).collect();
-    assert_eq!(summary.len(), 2, "{summary:?}");
-    assert!(summary[0].starts_with("screen: [m1] host.screen.pixel held the event loop 3 time(s), "), "{summary:?}");
-    assert!(summary[1].starts_with("screen: [m1] host.screen.pixels held the event loop 2 time(s), "), "{summary:?}");
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
 }
@@ -2435,20 +2435,20 @@ fn a_key_queued_behind_a_polls_pixel_wait_makes_its_request_interactive() {
 }
 
 /// In a module that reads through desktop duplication, a pixel wait carries the module's first-read
-/// comparison to the capture thread, which makes it there; a pixel read where the call cannot wait
+/// comparison to the capture thread, which makes it there; a call that raised where it cannot wait
 /// makes none, and leaves it owed.
 #[test]
-fn a_pixel_wait_carries_the_first_read_comparison_and_the_loops_read_makes_none() {
+fn a_pixel_wait_carries_the_first_read_comparison_and_a_raise_leaves_it_owed() {
     let h = host();
     let dup = CaptureSource::Duplication { or_standard: true };
     let lua = vm(&h, 1);
     capture_source::record_for_a_test(&lua, "com.dup.pixel", dup);
-    run(&lua, "top = host.screen.pixel(20281, 5)");
+    run(&lua, "okTop = pcall(host.screen.pixel, 20281, 5)");
     assert!(compared("com.dup.pixel").is_empty(), "none on the event loop");
     assert_eq!(capture_source::compare_state(&lua), Some(Compare::Owed));
     run(&lua, "task.run(function() waited = host.screen.pixels({ { 20282, 5 }, { 20283, 6 } }) end)");
     settle_snaps(&h);
-    assert!(yes(&lua, "return top ~= nil and #waited == 2"));
+    assert!(yes(&lua, "return okTop == false and #waited == 2"));
     assert_eq!(compared("com.dup.pixel"), ["screen-capture"], "made once, on the capture thread");
     assert_eq!(capture_source::compare_state(&lua), Some(Compare::Done));
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
@@ -2795,13 +2795,12 @@ fn template_of(v: Value) -> crate::image_search::TestTemplate {
 /// `host.screen.profile`, `cells`, `matchCells`, `template{ capture }` and a snapshot's `crop` in a
 /// handler wait — the profile's picture on the `screen-capture` thread, the rest on the image
 /// worker — and only their module is busy meanwhile: its next key waits in its mailbox, another
-/// module's key runs. The handler goes on with exactly what the calls that do not wait answer, on
-/// the screen and on a snapshot: the profile's table, the grid, the match, the template's pixels
-/// and the crop's — or `nil` and the reason. A profile carries its picture's `time` and
-/// `inputEpoch` in both forms: the capture thread's for a wait, the event loop's at the call where
-/// it cannot wait, a snapshot's own on a snapshot. The waits turn no epoch.
+/// module's key runs. The handler goes on with what was read, on the screen and on a snapshot: the
+/// profile's table, the grid, the match, the template's pixels and the crop's — or `nil` and the
+/// reason. A profile carries its picture's `time` and `inputEpoch`: the capture thread's, or a
+/// snapshot's own on a snapshot. The waits turn no epoch.
 #[test]
-fn the_region_calls_in_a_handler_wait_and_answer_what_the_calls_that_do_not_wait_answer() {
+fn the_region_calls_in_a_handler_wait_and_answer_what_the_threads_read() {
     let h = host();
     let lua = vm(&h, 1);
     let other = vm(&h, 2);
@@ -2830,8 +2829,6 @@ fn the_region_calls_in_a_handler_wait_and_answer_what_the_calls_that_do_not_wait
           into.noTemplate = { host.screen.template({ capture = { 5, 5, 9, 9 } }) }
           into.noProfile = { host.screen.profile({ region = { 5, 5, 25, 25 } }) }
         end
-        blocked = {}
-        ask(blocked)
         order = {}
         function look()
           order[#order + 1] = "asked"
@@ -2845,8 +2842,6 @@ fn the_region_calls_in_a_handler_wait_and_answer_what_the_calls_that_do_not_wait
         "##,
     );
     run(&other, "function key() ran = true end");
-    let me = current_thread();
-    assert_eq!(image_captured(21001), [me.clone(), me.clone(), me.clone(), me.clone()], "where they cannot wait, on the loop");
     hold(21001);
     h.ocr.note_input_epoch(41);
     assert_eq!(event(&h, &lua, "look", Vec::new(), true), mailbox::Delivered::Parked);
@@ -2863,46 +2858,51 @@ fn the_region_calls_in_a_handler_wait_and_answer_what_the_calls_that_do_not_wait
         "{:?}",
         lua.load("return table.concat(order, ' | ')").eval::<String>()
     );
-    for name in ["profile", "snapProfile", "cells", "cellsValues", "match", "snapCells", "snapMatch", "notThere", "noTemplate"] {
-        assert!(yes(&lua, &format!("return alike(waited.{name}, blocked.{name})")), "{name}: not what the call that does not wait answers");
-    }
     assert!(
-        yes(&lua, "return #waited.profile == 1 and waited.profile[1].columns ~= nil and waited.cellsValues == 2 and waited.match[1].name ~= nil"),
-        "a table, the grid and nil after it, a match"
+        yes(
+            &lua,
+            "return #waited.profile == 1 and waited.profile[1].columns ~= nil and waited.profile[1].rows ~= nil \
+             and waited.profile[1].x == 21001 and waited.cellsValues == 2 and waited.cells[1] ~= nil and waited.cells[2] == nil \
+             and waited.match[1].name ~= nil and waited.snapCells[1] ~= nil and waited.snapMatch[1] ~= nil \
+             and waited.snapProfile[1].rows ~= nil and waited.snapProfile[1].columns == nil"
+        ),
+        "a table, the grid and nil after it, a match, on the screen and on a snapshot"
     );
     assert!(yes(&lua, "return waited.notThere[2] == 'no pixels here' and waited.noTemplate[2] == 'no pixels here'"));
     // A profile's picture is taken as a snapshot's is, so it fails as one fails here.
-    assert!(yes(&lua, "return waited.noProfile[1] == nil and waited.noProfile[2] == 'no snapshots here' and blocked.noProfile[2] == 'no pixels here'"));
+    assert!(yes(&lua, "return waited.noProfile[1] == nil and waited.noProfile[2] == 'no snapshots here'"));
     assert!(
-        yes(&lua, "return waited.profile[1].inputEpoch == 41 and blocked.profile[1].inputEpoch == 7 and type(waited.profile[1].time) == 'number'"),
-        "the capture thread's picture, and the event loop's at the call"
+        yes(&lua, "return waited.profile[1].inputEpoch == 41 and type(waited.profile[1].time) == 'number'"),
+        "the capture thread's picture"
     );
     assert!(
-        yes(&lua, "return waited.snapProfile[1].time == s.time and waited.snapProfile[1].inputEpoch == s.inputEpoch and blocked.snapProfile[1].time == s.time"),
+        yes(&lua, "return waited.snapProfile[1].time == s.time and waited.snapProfile[1].inputEpoch == s.inputEpoch"),
         "a snapshot's own moment"
     );
     let w: Table = lua.globals().get("waited").unwrap();
-    let b: Table = lua.globals().get("blocked").unwrap();
-    for name in ["template", "snapTemplate"] {
-        assert_eq!(template_of(w.get(name).unwrap()), template_of(b.get(name).unwrap()), "{name}: the same template");
+    for (name, (x, y, wd, ht)) in [("template", (21002, 6, 8, 6)), ("snapTemplate", (21004, 8, 5, 3))] {
+        let t = template_of(w.get(name).unwrap());
+        assert_eq!((t.0, t.1), (wd as u32, ht as u32), "{name}: the size of its capture");
+        assert_eq!(t.2, crate::snapshot::test_frame(x, y, wd, ht).img.rgba, "{name}: the pixels read for it");
     }
     assert_eq!(template_of(w.get("template").unwrap()).4.as_deref(), Some("cut"), "named as asked");
-    assert_eq!(picture_of(w.get("crop").unwrap()), picture_of(b.get("crop").unwrap()), "the same crop, of the same moment");
-    assert_eq!(&image_captured(21001)[4..], ["image-worker", "image-worker", "image-worker"], "in a handler, on the image worker");
+    let (crect, cpixels, ctime, cepoch, _) = picture_of(w.get("crop").unwrap());
+    let (_, _, stime, sepoch, _) = picture(&lua, "s");
+    assert_eq!((crect, ctime, cepoch), (Rect::new(21002, 6, 10, 10), stime, sepoch), "the crop, of its snapshot's moment");
+    assert_eq!(cpixels, crate::snapshot::test_frame(21002, 6, 10, 10).img.rgba, "its pixels copied");
+    assert_eq!(image_captured(21001), ["image-worker", "image-worker", "image-worker"], "in a handler, on the image worker");
     assert!(yes(&lua, "return before == after"), "a wait turns no epoch");
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
 }
 
-/// Where a handler cannot stop, the region calls read on the event loop as they always did and
-/// answer at once: outside every handler, where Luau cannot stop it, in a coroutine of the module's
-/// own. The host says so once per module, call and place, and counts every such call for the
-/// summary at exit; in the handler's own coroutine it waits. A call with nothing to read this time
-/// — a window region with no rectangle, an empty region, a crop or a template's capture outside its
-/// snapshot — and a template from bytes read nothing on the screen: they are answered at once
-/// wherever they are asked, neither said nor counted.
+/// Where a handler cannot stop, the region calls raise the place's message and read nothing:
+/// outside every handler, where Luau cannot stop it, in a coroutine of the module's own; in the
+/// handler's own coroutine they wait. A call with nothing to read this time — a window region with
+/// no rectangle, an empty region, a crop or a template's capture outside its snapshot — and a
+/// template from bytes read nothing: they are answered at once wherever they are asked.
 #[test]
-fn where_the_region_calls_cannot_wait_they_answer_at_once_and_are_said_once_per_place() {
+fn where_the_region_calls_cannot_wait_they_raise_unless_there_is_nothing_to_read() {
     let h = host();
     let lua = vm(&h, 1);
     let shot = crate::snapshot::test_handle(&lua, crate::snapshot::test_frame(21101, 5, 20, 20));
@@ -2919,16 +2919,16 @@ fn where_the_region_calls_cannot_wait_they_answer_at_once_and_are_said_once_per_
           { s:crop({ 0, 0, 5, 5 }) },
           { host.screen.template({ capture = { 0, 0, 5, 5 }, snapshot = s }) },
         }
-        top = { host.screen.cells(G) }
+        okTop, top = pcall(host.screen.cells, G)
         task.run(function()
           got = {}
           got.quiet = { host.screen.cells({ region = EMPTY, cols = 2, rows = 2, predicate = "r > b" }) }
           got.quietProfile = { host.screen.profile({ snapshot = s, region = { 0, 0, 9, 9 } }) }
           got.quietCrop = { s:crop({ 0, 0, 5, 5 }) }
-          got.host = hostCall(function() return host.screen.profile({ region = { 21101, 5, 21111, 15 } }) end)
-          got.meta = setmetatable({}, { __index = function() return host.screen.matchCells(G, { "00000000" }) end }).x
-          got.own = coroutine.wrap(function() return s:crop({ 21102, 6, 21104, 8 }) end)()
-          got.template = coroutine.wrap(function() return host.screen.template({ capture = { 21102, 6, 21104, 8 } }) end)()
+          got.okHost, got.host = pcall(hostCall, function() return host.screen.profile({ region = { 21101, 5, 21111, 15 } }) end)
+          got.okMeta, got.meta = pcall(function() return setmetatable({}, { __index = function() return host.screen.matchCells(G, { "00000000" }) end }).x end)
+          got.okOwn, got.own = pcall(coroutine.wrap(function() return s:crop({ 21102, 6, 21104, 8 }) end))
+          got.okTemplate, got.template = pcall(coroutine.wrap(function() return host.screen.template({ capture = { 21102, 6, 21104, 8 } }) end))
           got.waited = host.screen.cells(G)
         end)
         "#,
@@ -2941,28 +2941,25 @@ fn where_the_region_calls_cannot_wait_they_answer_at_once_and_are_said_once_per_
               and quiet[4][1] == nil and quiet[4][2] == "the region is not inside the snapshot"
               and quiet[5][1] == nil and quiet[5][2] == quiet[4][2]
               and got.quiet[2] == quiet[1][2] and got.quietProfile[2] == "the region does not overlap the snapshot"
-              and got.quietCrop[2] == quiet[4][2] and top[1] ~= nil and got.waited == nil"#
+              and got.quietCrop[2] == quiet[4][2] and got.waited == nil"#
         ),
         "nothing to read: at once, everywhere; the handler's own call waits"
     );
-    for (call, case) in [
-        ("host.screen.cells", Case::Outside),
-        ("host.screen.profile", Case::CannotWait),
-        ("host.screen.matchCells", Case::CannotWait),
-        ("Snapshot:crop", Case::OwnCoroutine),
-        ("host.screen.template", Case::OwnCoroutine),
+    assert!(yes(&lua, "return okTop == false and got.okHost == false and got.okMeta == false and got.okOwn == false and got.okTemplate == false"));
+    for (name, call, case) in [
+        ("top", "host.screen.cells", Case::Outside),
+        ("got.host", "host.screen.profile", Case::CannotWait),
+        ("got.meta", "host.screen.matchCells", Case::CannotWait),
+        ("got.own", "Snapshot:crop", Case::OwnCoroutine),
+        ("got.template", "host.screen.template", Case::OwnCoroutine),
     ] {
-        assert!(h.tasks.legacy_said("m1", call, case), "{call} {case:?} not said");
-    }
-    for (call, case) in [("host.screen.profile", Case::Outside), ("host.screen.template", Case::Outside), ("Snapshot:crop", Case::Outside)] {
-        assert!(!h.tasks.legacy_said("m1", call, case), "{call} {case:?}: nothing was read, and it was said");
+        let e: String = lua.load(format!("return tostring({name})")).eval().unwrap();
+        assert!(e.contains(&task::wait_message(call, case)), "{name}: {e}");
     }
     settle_images(&h);
-    assert!(yes(&lua, "return got.waited ~= nil and got.host ~= nil and got.meta ~= nil and got.own ~= nil and got.template ~= nil"));
-    let summary = h.tasks.legacy_summary();
-    assert_eq!(summary.len(), 5, "{summary:?}");
-    assert!(summary.iter().all(|(scope, line)| *scope == "screen" && line.contains(" held the event loop 1 time(s), ")), "{summary:?}");
-    assert!(summary.iter().any(|(_, line)| line.starts_with("[m1] Snapshot:crop held the event loop 1 time(s), ")), "{summary:?}");
+    assert!(yes(&lua, "return got.waited ~= nil"));
+    assert_eq!(image_captured(21101), ["image-worker"], "only the handler's own call was read");
+    assert!(image_captured(21102).is_empty(), "nothing captured for a template that raised");
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
 }
@@ -3099,12 +3096,12 @@ fn a_key_queued_behind_a_polls_profile_sends_its_reduction_ahead_of_the_polls() 
     assert_eq!(h.tasks.len(), 0);
 }
 
-/// `host.screen.profile` holds a picture of its own under the same limits whether it waits or not:
-/// corners past 40,000,000 pixels or past the room in the snapshot budget raise at the call in a
-/// handler and where it cannot wait, before anything is captured, and a window region past them is
-/// answered `nil` and the reason in both — where it cannot wait at once, and unsaid.
+/// `host.screen.profile` holds a picture of its own under the same limits whether it waits or takes
+/// a callback: corners past 40,000,000 pixels or past the room in the snapshot budget raise at the
+/// call, before anything is captured, and a window region past them is answered `nil` and the
+/// reason. Where it cannot wait each raises the place's message, nothing captured or held.
 #[test]
-fn a_profile_past_its_limits_answers_alike_whether_it_waits_or_not() {
+fn a_profile_past_its_limits_raises_or_answers_in_a_handler_and_raises_where_it_cannot_wait() {
     let h = host();
     let lua = vm(&h, 1);
     run(
@@ -3119,7 +3116,9 @@ fn a_profile_past_its_limits_answers_alike_whether_it_waits_or_not() {
           into.window = { host.screen.profile({ region = WINDOW }) }
         end
         top = {}
-        ask(top)
+        top.okHuge, top.huge = pcall(host.screen.profile, { region = HUGE })
+        top.okOver, top.over = pcall(host.screen.profile, { region = OVER })
+        top.okWindow = pcall(host.screen.profile, { region = WINDOW })
         task.run(function()
           waited = {}
           ask(waited)
@@ -3128,20 +3127,23 @@ fn a_profile_past_its_limits_answers_alike_whether_it_waits_or_not() {
     );
     settle_snaps(&h);
     assert!(yes(&lua, "return waited ~= nil and waited.window ~= nil"), "answered");
-    for form in ["top", "waited"] {
-        assert!(yes(&lua, &format!("return {form}.okHuge == false and {form}.okOver == false")), "{form}: corners past a limit raise");
-        let huge: String = lua.load(format!("return tostring({form}.huge)")).eval().unwrap();
-        assert!(huge.contains("host.screen.profile: opts.region: the region is 10000x5000, 50000000 pixels; the limit is 40000000"), "{form}: {huge}");
-        let over: String = lua.load(format!("return tostring({form}.over)")).eval().unwrap();
-        assert!(over.contains("host.screen.profile: this module's snapshots would hold"), "{form}: {over}");
-        assert!(
-            yes(&lua, &format!(r#"return {form}.window[1] == nil and {form}.window[2] == "at the window's current size the region is 10000x5000, 50000000 pixels; the limit is 40000000""#)),
-            "{form}: {:?}",
-            lua.load(format!("return tostring({form}.window[2])")).eval::<String>()
-        );
+    assert!(yes(&lua, "return waited.okHuge == false and waited.okOver == false"), "corners past a limit raise");
+    let huge: String = lua.load("return tostring(waited.huge)").eval().unwrap();
+    assert!(huge.contains("host.screen.profile: opts.region: the region is 10000x5000, 50000000 pixels; the limit is 40000000"), "{huge}");
+    let over: String = lua.load("return tostring(waited.over)").eval().unwrap();
+    assert!(over.contains("host.screen.profile: this module's snapshots would hold"), "{over}");
+    assert!(
+        yes(&lua, r#"return waited.window[1] == nil and waited.window[2] == "at the window's current size the region is 10000x5000, 50000000 pixels; the limit is 40000000""#),
+        "{:?}",
+        lua.load("return tostring(waited.window[2])").eval::<String>()
+    );
+    assert!(yes(&lua, "return top.okHuge == false and top.okOver == false and top.window == nil"), "the top level cannot wait");
+    let outside = task::wait_message("host.screen.profile", Case::Outside);
+    for name in ["top.huge", "top.over"] {
+        let e: String = lua.load(format!("return tostring({name})")).eval().unwrap();
+        assert!(e.contains(&outside), "{name}: {e}");
     }
     assert!(image_captured(21501).is_empty(), "nothing was captured");
-    assert!(!h.tasks.legacy_said("m1", "host.screen.profile", Case::Outside), "nothing was read, and it was said");
     assert_eq!(crate::snapshot::test_vm_bytes(&lua), 0, "nothing is held");
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
@@ -3186,13 +3188,12 @@ fn png(path: &std::path::Path) -> (u32, u32, Vec<u8>) {
 /// `host.screen.imageSearch` — of one template or a list — `imageSearchAll`, `save` and
 /// `saveMarked` in a handler wait while the image worker captures the region — or reads the
 /// snapshot — and matches, or marks, encodes and writes, and only their module is busy meanwhile:
-/// its next key waits in its mailbox, another module's key runs. The handler goes on with exactly
-/// what the calls that do not wait answer: a hit — of a list, the first template that matches, its
-/// `n` saying which — `nil` alone for none, `nil` and the reason; the list, an empty one, an empty
-/// one and the reason; `true` and the same picture written, or `false` and the reason. The waits
-/// turn no epoch.
+/// its next key waits in its mailbox, another module's key runs. The handler goes on with a hit —
+/// of a list, the first template that matches, its `n` saying which — `nil` alone for none, `nil`
+/// and the reason; the list, an empty one, an empty one and the reason; `true` and the picture read
+/// written, or `false` and the reason. The waits turn no epoch.
 #[test]
-fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_calls_that_do_not_wait_answer() {
+fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_image_worker_found() {
     let h = host();
     let lua = vm(&h, 1);
     let other = vm(&h, 2);
@@ -3231,8 +3232,6 @@ fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_calls_that_do_no
           into.snapSaved = { host.screen.save(DIR .. "/" .. tag .. "-snap.png", { snapshot = s, region = { 22000, 0, 22011, 9 } }) }
           into.unsaved = { host.screen.save(DIR .. "/" .. tag .. "-lost.png", LOST) }
         end
-        blocked = {}
-        ask(blocked, "blocked")
         order = {}
         function look()
           order[#order + 1] = "asked"
@@ -3246,9 +3245,6 @@ fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_calls_that_do_no
         "##,
     );
     run(&other, "function key() ran = true end");
-    let me = current_thread();
-    assert!(image_captured(22001).iter().all(|t| *t == me), "where they cannot wait, on the loop");
-    let on_loop = image_captured(22001).len();
     hold(22001);
     assert_eq!(event(&h, &lua, "look", Vec::new(), true), mailbox::Delivered::Parked);
     assert_eq!(event(&h, &lua, "key", Vec::new(), true), mailbox::Delivered::Queued, "its keys wait behind it");
@@ -3264,12 +3260,6 @@ fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_calls_that_do_no
         "{:?}",
         lua.load("return table.concat(order, ' | ')").eval::<String>()
     );
-    for name in [
-        "one", "oneValues", "none", "noneValues", "snapOne", "notThere", "list", "listNone", "listNoneValues", "listNotThere",
-        "listNotThereValues", "all", "allValues", "allNone", "snapAll", "allNotThere", "saved", "marked", "snapSaved", "unsaved",
-    ] {
-        assert!(yes(&lua, &format!("return alike(waited.{name}, blocked.{name})")), "{name}: not what the call that does not wait answers");
-    }
     assert!(
         yes(
             &lua,
@@ -3299,16 +3289,17 @@ fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_calls_that_do_no
         yes(&lua, r#"return #waited.saved == 1 and waited.saved[1] == true and waited.unsaved[1] == false and waited.unsaved[2] == "no pixels here""#),
         "true, or false and why"
     );
-    for shot in ["save", "marked", "snap"] {
-        let (b, w) = (png(&dir.join(format!("blocked-{shot}.png"))), png(&dir.join(format!("waited-{shot}.png"))));
-        assert_eq!(b, w, "{shot}: the same picture written");
+    assert!(yes(&lua, "return waited.marked[1] == true and waited.snapSaved[1] == true"));
+    for (shot, (x, y, w, ht)) in [("save", (22001, 5, 40, 30)), ("snap", (22001, 5, 10, 4))] {
+        let (pw, ph, pixels) = png(&dir.join(format!("waited-{shot}.png")));
+        assert_eq!((pw, ph), (w as u32, ht as u32), "{shot}: the region, and on a snapshot its part inside it");
+        assert_eq!(pixels, crate::snapshot::test_frame(x, y, w, ht).img.rgba, "{shot}: the picture read for it");
     }
-    assert_eq!((png(&dir.join("waited-save.png")).0, png(&dir.join("waited-snap.png")).1), (40, 4), "the region, and on a snapshot its part inside it");
     let marked = png(&dir.join("waited-marked.png"));
     let at = |x: u32, y: u32| marked.2[((y * marked.0 + x) * 4) as usize..][..4].to_vec();
     assert_eq!(at(9, 5), [255, 0, 255, 255], "a crosshair where its screen point falls");
     assert!(!dir.join("waited-lost.png").exists(), "nothing written for a shot with no picture");
-    let waited: Vec<String> = image_captured(22001)[on_loop..].to_vec();
+    let waited: Vec<String> = image_captured(22001);
     assert!(!waited.is_empty() && waited.iter().all(|t| t == "image-worker"), "in a handler, on the image worker: {waited:?}");
     assert!(yes(&lua, "return before == after"), "a wait turns no epoch");
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
@@ -3316,14 +3307,13 @@ fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_calls_that_do_no
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Where a handler cannot stop, the searches and the shots work on the event loop as they always
-/// did and answer at once: outside every handler, where Luau cannot stop it, in a coroutine of the
-/// module's own. The host says so once per module, call and place, and counts every such call for
-/// the summary at exit; in the handler's own coroutine they wait. One with nothing to read this time
-/// — a window region with no rectangle, a region with no part inside its snapshot — reads nothing:
-/// it is answered at once wherever it is asked, neither said nor counted.
+/// Where a handler cannot stop, the searches and the shots raise the place's message, and nothing
+/// is captured or written: outside every handler, where Luau cannot stop it, in a coroutine of the
+/// module's own; in the handler's own coroutine they wait. One with nothing to read this time — a
+/// window region with no rectangle, a region with no part inside its snapshot — reads nothing: it
+/// is answered at once wherever it is asked.
 #[test]
-fn where_the_searches_and_shots_cannot_wait_they_answer_at_once_and_are_said_once_per_place() {
+fn where_the_searches_and_shots_cannot_wait_they_raise_unless_there_is_nothing_to_read() {
     let h = host();
     let lua = vm(&h, 1);
     run(&lua, CUT);
@@ -3349,14 +3339,14 @@ fn where_the_searches_and_shots_cannot_wait_they_answer_at_once_and_are_said_onc
           }
         end
         top = quiet()
-        hit = host.screen.imageSearch(HIT, AREA)
+        okHit, hit = pcall(host.screen.imageSearch, HIT, AREA)
         task.run(function()
           got = {}
           got.quiet = quiet()
-          got.host = hostCall(function() return host.screen.imageSearch({ HIT }, AREA) end)
-          got.meta = setmetatable({}, { __index = function() return host.screen.imageSearchAll(HIT, AREA) end }).x
-          got.own = coroutine.wrap(function() return host.screen.save(DIR .. "/own.png", AREA) end)()
-          got.marked = coroutine.wrap(function() return host.screen.saveMarked(DIR .. "/marked.png", { region = AREA.region }) end)()
+          got.okHost, got.host = pcall(hostCall, function() return host.screen.imageSearch({ HIT }, AREA) end)
+          got.okMeta, got.meta = pcall(function() return setmetatable({}, { __index = function() return host.screen.imageSearchAll(HIT, AREA) end }).x end)
+          got.okOwn, got.own = pcall(coroutine.wrap(function() return host.screen.save(DIR .. "/own.png", AREA) end))
+          got.okMarked, got.marked = pcall(coroutine.wrap(function() return host.screen.saveMarked(DIR .. "/marked.png", { region = AREA.region }) end))
           got.waited = host.screen.imageSearch(HIT, AREA)
         end)
         "#,
@@ -3371,44 +3361,34 @@ fn where_the_searches_and_shots_cannot_wait_they_answer_at_once_and_are_said_onc
                   and #q[3][1] == 0 and q[3][2] == why and q[4][1] == false and q[4][2] == why
                   and q[5][1] == false and q[5][2] == off and q[6][1] == nil and q[6][2] == off
               end
-              return shaped(top) and shaped(got.quiet) and hit ~= nil and got.waited == nil"#
+              return shaped(top) and shaped(got.quiet) and got.waited == nil"#
         ),
         "nothing to read: at once, everywhere, in each call's own shape; the handler's own call waits"
     );
-    for (call, case) in [
-        ("host.screen.imageSearch", Case::Outside),
-        ("host.screen.imageSearch", Case::CannotWait),
-        ("host.screen.imageSearchAll", Case::CannotWait),
-        ("host.screen.save", Case::OwnCoroutine),
-        ("host.screen.saveMarked", Case::OwnCoroutine),
+    assert!(yes(&lua, "return okHit == false and got.okHost == false and got.okMeta == false and got.okOwn == false and got.okMarked == false"));
+    for (name, call, case) in [
+        ("hit", "host.screen.imageSearch", Case::Outside),
+        ("got.host", "host.screen.imageSearch", Case::CannotWait),
+        ("got.meta", "host.screen.imageSearchAll", Case::CannotWait),
+        ("got.own", "host.screen.save", Case::OwnCoroutine),
+        ("got.marked", "host.screen.saveMarked", Case::OwnCoroutine),
     ] {
-        assert!(h.tasks.legacy_said("m1", call, case), "{call} {case:?} not said");
-    }
-    for call in ["host.screen.imageSearchAll", "host.screen.save", "host.screen.saveMarked"] {
-        assert!(!h.tasks.legacy_said("m1", call, Case::Outside), "{call}: nothing was read, and it was said");
+        let e: String = lua.load(format!("return tostring({name})")).eval().unwrap();
+        assert!(e.contains(&task::wait_message(call, case)), "{name}: {e}");
     }
     settle_images(&h);
-    assert!(
-        yes(&lua, "return got.waited ~= nil and got.host ~= nil and #got.meta == 1 and got.own == true and got.marked == true"),
-        "answered"
-    );
-    let summary = h.tasks.legacy_summary();
-    assert_eq!(summary.len(), 4, "{summary:?}");
-    let times = |line: &str| if line.contains("host.screen.imageSearch ") { 2 } else { 1 };
-    assert!(
-        summary.iter().all(|(scope, line)| *scope == "screen" && line.contains(&format!(" held the event loop {} time(s), ", times(line)))),
-        "{summary:?}"
-    );
-    assert!(!dir.join("empty.png").exists() && !dir.join("off.png").exists() && dir.join("own.png").exists());
+    assert!(yes(&lua, "return got.waited ~= nil"), "answered");
+    assert_eq!(image_captured(22101), ["image-worker"], "only the handler's own call was read");
+    assert!(!dir.join("empty.png").exists() && !dir.join("off.png").exists() && !dir.join("own.png").exists() && !dir.join("marked.png").exists());
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A shot whose file cannot be written raises — at the caller's line in a handler, once the wait is
-/// over, as where it cannot wait — so a typo in a folder's name is not taken for a failed capture:
-/// `screen.save '<path>': <why>`, which a `pcall` around it returns, and the handler goes on. A shot
-/// of a snapshot raises the same way.
+/// over — so a typo in a folder's name is not taken for a failed capture: `screen.save '<path>':
+/// <why>`, which a `pcall` around it returns, and the handler goes on. A shot of a snapshot raises
+/// the same way. At the top level the shot cannot wait, and raises that before anything is written.
 #[test]
 fn a_shot_that_cannot_be_written_raises_at_the_call_that_waited() {
     let h = host();
@@ -3436,7 +3416,9 @@ fn a_shot_that_cannot_be_written_raises_at_the_call_that_waited() {
     assert!(yes(&lua, "return topOk == false and okLive == false and okSnap == false and wentOn == true"));
     // The path as the module wrote it, joined to the folder.
     let path = format!("{}/taken.png", dir.display());
-    for (name, call) in [("topWhy", "screen.save"), ("whyLive", "screen.save"), ("whySnap", "screen.saveMarked")] {
+    let top: String = lua.load("return tostring(topWhy)").eval().unwrap();
+    assert!(top.contains(&task::wait_message("host.screen.save", Case::Outside)), "{top}");
+    for (name, call) in [("whyLive", "screen.save"), ("whySnap", "screen.saveMarked")] {
         let got: String = lua.load(format!("return tostring({name})")).eval().unwrap();
         assert!(got.contains(&format!("{call} '{path}': ")), "{name}: {got}");
     }

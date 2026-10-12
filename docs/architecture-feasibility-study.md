@@ -17,8 +17,8 @@
 > - **There is no worker pool for scripts.** Module code and most host calls run on the one
 >   event-loop thread; `host.ocr.recognize` recognises on threads of its own, answering in a
 >   callback or to a handler that waits while only its own module waits, and the screen calls
->   do their work on a capture thread and one image worker the same way, holding the loop only
->   where a call without a callback cannot wait —
+>   do their work on a capture thread and one image worker the same way; where a call without a
+>   callback cannot wait it raises, and nothing holds the loop for it —
 >   [threads](module-runtime-and-lifecycle.md#threads).
 > - **A memory limit and a time limit** hold the Luau VMs: a module that runs its VM out of memory,
 >   or whose callback runs past 2 s of processor time or 10 s in all, is stopped until the next

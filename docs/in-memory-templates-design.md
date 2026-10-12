@@ -58,8 +58,8 @@ template of something that is no longer there. It is read through the module's c
 source, like `host.screen.save`; duplication answers with the most recently composed frame,
 which is still a read made now. That does not by itself cut it from the picture the module's
 searches see: in a module that declares `[screen] capture = "duplication"`, a `capture` made
-before duplication has opened — at load, where nothing opens it, or while the prewarm of a
-window trigger is still opening it — is read the standard way, or is `nil` under
+while duplication is still opening for longer than the read waits — the prewarm of a window
+trigger with a cold driver, say — is read the standard way, or is `nil` under
 `fallback = "none"`, and the template keeps that picture for the session. The API page says
 so; whether to make such a capture wait for, or refuse, the opening is open (TODO.md).
 

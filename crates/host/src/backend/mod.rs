@@ -906,12 +906,11 @@ pub type OcrShot = ();
 /// again and again: macOS then skips its flat-picture watch. A plain `fn`, so it is `Send`.
 pub type FramesFn = fn(&[(i32, i32, i32, i32)], CaptureSource, bool) -> Vec<Result<frame::Frame, String>>;
 
-/// The pixel waits' capture routine ([`OcrWorker::points`]): the colours at the points, in order,
-/// read from one source on the capture thread exactly as the event loop reads them — `single`,
-/// each point as [`Backend::pixel`] reads one (`GetPixel` on the Windows standard path), and
-/// otherwise all of them as [`Backend::pixels`] reads a list — so a waited `host.screen.pixel` or
-/// `pixels` answers what the call that cannot wait answers. All or nothing, with the reason. A
-/// plain `fn`, so it is `Send`.
+/// The pixel reads' capture routine ([`OcrWorker::points`]), for a handler that waits and for a
+/// callback: the colours at the points, in order, read from one source on the capture thread —
+/// `single`, each point as `host.screen.pixel` reads one (`GetPixel` on the Windows standard
+/// path), and otherwise all of them as `host.screen.pixels` reads a list, from as few captures as
+/// [`frame::plan_points`] allows. All or nothing, with the reason. A plain `fn`, so it is `Send`.
 pub type PointsFn = fn(&[(i32, i32)], CaptureSource, bool) -> Result<Vec<(u8, u8, u8)>, String>;
 
 /// Which of the two OCR threads is starting — see [`OcrWorker::init_thread`].
@@ -1598,31 +1597,22 @@ pub trait Backend {
     /// Size of the primary display in pixels.
     fn screen_size(&self) -> (i32, i32);
 
-    /// Color (r, g, b) of the pixel at screen coordinates, on the calling thread (the event loop):
-    /// `host.screen.pixel` where it cannot wait. One that waits is read on the capture thread by
-    /// [`OcrWorker::points`], the same way.
+    /// A pointer to the stateless screen-capture routine, so a worker thread can capture without
+    /// holding the (`Rc`, non-`Send`) backend: each region captured through the source, or why it
+    /// could not be — an error that begins with [`CAPTURE_FAILED`], which the module is told. Used
+    /// by the image worker; the `screen-capture` thread captures through [`OcrWorker::frames`] and
+    /// [`OcrWorker::points`]. No read of the screen is made on the calling thread of the backend: a
+    /// `host.screen` call that cannot wait raises (task.rs).
     ///
-    /// The Windows and macOS backends' `pixel`, `capture`, `frame` and `pixels` begin with the loop
-    /// guard's screen guard (`loop_guard::off_loop_screen`): on the event loop they are let be only
-    /// inside the scope of a call that could not wait (`task::legacy`), and anywhere else there
-    /// they are a bug — a panic in a debug build, a `[loop] screen capture on the event loop` line
-    /// in a release one. Their `capture_fn`, Windows' `compare_fn` (a Mac compares nothing), and
-    /// the capture thread's [`OcrWorker::frames`] and [`OcrWorker::points`] begin with the one no
-    /// scope lets be there (`loop_guard::off_loop_screen_always`). The stub backend reads nothing
-    /// and asks neither.
+    /// The Windows and macOS routines here, Windows' `compare_fn` (a Mac compares nothing), and the
+    /// capture thread's `frames` and `points` begin with the loop guard's screen guard
+    /// (`loop_guard::off_loop_screen`): on the event loop they are a bug — a panic in a debug build,
+    /// a `[loop] screen capture on the event loop` line in a release one. The stub backend reads
+    /// nothing and asks none.
     ///
-    /// `Err` only where the source can fail without a fallback — a Windows module that
-    /// declared `fallback = "none"` while duplication could not answer — with the reason, which
-    /// the module is told. The standard path always has an answer, and the other backends
-    /// always give one.
-    fn pixel(&self, x: i32, y: i32, src: CaptureSource) -> Result<(u8, u8, u8), String>;
-    /// Captures a screen region into an RGBA image, or says why it could not: an error that
-    /// begins with [`CAPTURE_FAILED`], which the module is told.
-    fn capture(&self, x: i32, y: i32, w: i32, h: i32, src: CaptureSource) -> Result<CapturedImage, String>;
-
-    /// A pointer to the stateless screen-capture routine, so a worker thread can
-    /// capture without holding the (`Rc`, non-`Send`) backend. Same result as
-    /// `capture` per region, callable off the main thread (used by the async image worker).
+    /// `Err` for a capture the standard path refused — an empty region, one too large — or, for a
+    /// Windows module that declared `fallback = "none"`, one duplication could not answer, with the
+    /// reason.
     fn capture_fn(&self) -> CaptureFn;
 
     /// The first-read comparison the image worker makes before it captures for a task that
@@ -1630,24 +1620,6 @@ pub trait Backend {
     /// default is a platform with one way of reading the screen, which has nothing to compare.
     fn compare_fn(&self) -> CompareFn {
         no_comparison
-    }
-
-    /// Captures `r` through `src` as a [`frame::Frame`], on the calling thread (the event loop):
-    /// the pixels as `capture` gives them, when they came back, which path answered, and on
-    /// macOS the backing-store image beside them. What `host.screen.snapshot` keeps. An error
-    /// begins with [`CAPTURE_FAILED`], as `capture`'s does, and is what the module is told.
-    fn frame(&self, r: crate::ocr::types::Rect, src: CaptureSource) -> Result<frame::Frame, String>;
-
-    /// The colours at `pts`, in order, read from as few captures as [`frame::plan_points`]
-    /// allows — never a point read of its own, so a point on no monitor reads black as a region
-    /// read gives it. All or nothing: one capture that fails fails the call, with its reason. On
-    /// the calling thread (the event loop): `host.screen.pixels` where it cannot wait; one that
-    /// waits is read on the capture thread by [`OcrWorker::points`], the same way.
-    ///
-    /// The default captures each planned rectangle through `capture`; a backend overrides it
-    /// where it can do better (Windows asks desktop duplication for every point in one request).
-    fn pixels(&self, pts: &[(i32, i32)], src: CaptureSource) -> Result<Vec<(u8, u8, u8)>, String> {
-        frame::read_points(pts, |r| self.capture(r.x, r.y, r.w, r.h, src))
     }
 
     /// The functions `host.ocr.recognize`'s two threads call — see [`OcrWorker`]. Taken once, when

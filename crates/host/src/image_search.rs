@@ -11,10 +11,10 @@
 //! picture (`Job::Template`), `crop` copies its part of the snapshot (`Job::Crop`), a search captures
 //! and matches (`Job::Search`, every match for `imageSearchAll`: `Mode::All`), and a shot captures —
 //! or cuts from its snapshot — marks, encodes and writes its picture (`Job::Save`, save.rs). Their
-//! answers are built on the event loop as the handler goes on, by the same functions that build them
-//! where the call cannot wait and runs on the loop ([`cells_values`], [`template_values`],
-//! [`search_values`], `save::save_values`), and that work on the loop is the worker's own
-//! ([`answer_on_loop`]), so the two answer alike.
+//! answers are built on the event loop as the handler goes on, by the same functions that build a
+//! callback's ([`cells_values`], [`template_values`], [`search_values`], `save::save_values`).
+//! Where such a call cannot wait it raises (`task::wait_message`), unless there is nothing to read
+//! this time, which is answered at once there too ([`now_plan`]).
 //!
 //! **The same task with a callback.** Given a callback — `imageSearch(template, opts, cb)`,
 //! `matchCells(opts, states, cb)`, and `imageSearchEach`, which has no other form — the call is the
@@ -910,23 +910,9 @@ fn answer(t: &ImageTask, frame: Option<Result<&CapturedImage, &str>>, found: Opt
     }
 }
 
-/// What the worker answers task `t` with, made on the event loop where its call cannot wait: its
-/// templates opened, through the worker's own cache; then, unless one cannot be, its region
-/// captured through `capture` — the event loop's capture, through the module's source and without
-/// the first-read comparison — unless it reads a snapshot, and the worker's own work on that
-/// picture ([`answer`]), so a call answers alike wherever it was made.
-pub(crate) fn answer_on_loop(t: &ImageTask, capture: impl FnOnce((i32, i32, i32, i32)) -> Result<CapturedImage, String>) -> Outcome {
-    let found = templates_of(t, &mut template_store::Opened::default());
-    let shot = match &found {
-        Some(Err(_)) => None,
-        _ => t.screen_key().map(|(region, _)| capture(region)),
-    };
-    answer(t, shot.as_ref().map(|r| r.as_ref().map_err(String::as_str)), found)
-}
-
 /// A shot's picture — the frame the batch captured for it, or the part of its snapshot it covers,
-/// copied — marked, encoded and written as the call does it on the event loop where it cannot wait
-/// (`save::write_shot`). A panic in it is answered, as a template's is.
+/// copied — marked, encoded and written (`save::write_shot`). A panic in it is answered, as a
+/// template's is.
 ///
 /// Not for a shot nobody waits for any more — ended ([`end_task`]) after the worker took it, its
 /// handler gone with its module or cancelled: asked before the copy and again once the PNG is
@@ -962,8 +948,8 @@ fn save_task(t: &ImageTask, job: &crate::save::SaveJob, frame: Option<Result<&Ca
     }
 }
 
-/// A snapshot's `crop`: the part of its picture the task's region covers, copied — the copy the
-/// call makes on the event loop where it cannot wait (`Frame::crop`). A panic in it is answered.
+/// A snapshot's `crop`: the part of its picture the task's region covers, copied (`Frame::crop`). A
+/// panic in it is answered.
 fn crop_task(t: &ImageTask) -> Result<Frame, String> {
     // Never the screen: a crop's task is sent with its snapshot.
     let Haystack::Frame { frame, region } = &t.hay else { return Err(CROP_FAILED.to_string()) };
@@ -978,8 +964,7 @@ fn crop_task(t: &ImageTask) -> Result<Frame, String> {
 }
 
 /// A `template{ capture }`'s picture — the frame the batch captured for it, or the part cut, whole,
-/// from its snapshot — made a template, as the call makes it on the event loop where it cannot
-/// wait ([`template_picture`]).
+/// from its snapshot — made a template ([`template_picture`]).
 fn template_task(t: &ImageTask, frame: Option<Result<&CapturedImage, &str>>) -> Result<(Arc<Decoded>, u32), String> {
     let got = match &t.hay {
         Haystack::Frame { frame, region } => frame.crop_image(*region).ok_or_else(|| snapshot::NOT_INSIDE.to_string()),
@@ -1019,8 +1004,7 @@ fn profile_task(t: &ImageTask, cols: bool, rows: bool, dark: u8) -> Result<Box<R
     let began = Instant::now();
     match logging::contain(|| profile::profile(&frame.img, area, cols, rows, dark)) {
         Ok(Some((columns, rows))) => Ok(Box::new(Reduced { columns, rows, rect: *region, took: began.elapsed() })),
-        // The picture holds fewer bytes than its own size says: read nothing, as the call on the
-        // event loop does.
+        // The picture holds fewer bytes than its own size says: read nothing.
         Ok(None) => Err(SHORT_CAPTURE.to_string()),
         Err(report) => {
             contained("a profile", "it was answered nil", &report);
@@ -1053,7 +1037,7 @@ fn cells_task(
 
 /// The cells of a picture — a capture of exactly the region, `w` x `h`, held to that size as it
 /// always was, or `sub` of a snapshot — and, when `rank`, their ranking against the matcher's
-/// states. The one reduction of the worker's and the event loop's cells reads alike.
+/// states.
 fn cells_of(
     matcher: &cells::Matcher,
     rank: bool,
@@ -1527,6 +1511,17 @@ pub(crate) fn start_plan<H: ReadHost>(
     crate::task::start_point(h, lua, scope, call, nonce, parse, |plan, task, prio| match plan {
         Plan::Now(values, _) => Ok(Started::Now(values)),
         Plan::Work { hay, job, answer } => Ok(Started::Waits(On::Image(submit_wait(h, lua, scope, task, prio, hay, job, stop, answer)))),
+    })
+}
+
+/// What a call of the image worker's answers where it cannot wait (`task::now_answer`): a plan's
+/// answer at once, when there is nothing to read this time; nothing for work, which the call raises
+/// for. A plan of work is let go unsent: what it reserved is given back, a first-read comparison it
+/// carried is owed again.
+pub(crate) fn now_plan(plan: Plan) -> MultiValue {
+    crate::task::now_answer(match plan {
+        Plan::Now(values, _) => Some(values),
+        Plan::Work { .. } => None,
     })
 }
 
@@ -2233,20 +2228,16 @@ struct Making<'a> {
     prepare: &'a dyn Fn(Arc<Prepared>),
 }
 
-/// Turns a checked spec into a handle, with the host's part (`making`) and the screen capture
+/// Turns a checked spec that captures nothing into a handle, with the host's part (`making`)
 /// passed in, so every rule here is testable without a backend.
 ///
 /// A spec from bytes or a file is checked here and its picture made on the image worker: the
 /// sizes and the byte count, or the file's PNG header, at the call, and the handle answered at
-/// once, its picture still to be made. `nil, reason` only for a capture that failed or had
-/// nothing to capture: that is a runtime condition the module has to handle, while every other
-/// refusal is a mistake in the code that wrote the spec, and raises.
-fn build_handle(
-    lua: &Lua,
-    spec: ParsedSpec,
-    making: &Making,
-    capture: impl FnOnce(i32, i32, i32, i32) -> Result<CapturedImage, String>,
-) -> mlua::Result<MultiValue> {
+/// once, its picture still to be made. `nil, reason` only for a capture that had nothing to
+/// capture: that is a runtime condition the module has to handle, while every other refusal is a
+/// mistake in the code that wrote the spec, and raises. A capture is the image worker's
+/// ([`template_plan`]).
+fn build_handle(lua: &Lua, spec: ParsedSpec, making: &Making) -> mlua::Result<MultiValue> {
     let budget = budget(lua);
     let mut name = spec.name;
     let (raw, w, h, charge) = match spec.source {
@@ -2270,16 +2261,8 @@ fn build_handle(
             let raw = if rgba { Raw::Rgba { w, h, bytes: data } } else { Raw::Rgb { w, h, bytes: data } };
             (raw, w, h, charge)
         }
-        Source::Capture { x, y, w, h, snapshot: snap } => {
-            let charge = reserve(lua, &budget, template::dense_bytes(w as u32, h as u32))?;
-            let got = match snap {
-                // Cut from the snapshot, whole or not at all: a template cut from a clipped
-                // rectangle would be a different template.
-                Some(frame) => frame.crop_image(geo::Rect::new(x, y, w, h)).ok_or_else(|| snapshot::NOT_INSIDE.to_string()),
-                None => capture(x, y, w, h),
-            };
-            return template_values(lua, Outcome::Template(got.and_then(template_picture)), name, charge);
-        }
+        // Never: a capture is planned as a task of the image worker.
+        Source::Capture { .. } => return with_reason(lua, Value::Nil, TEMPLATE_FAILED.to_string()),
     };
     let pic = Prepared::of(raw);
     (making.prepare)(pic.clone());
@@ -2288,8 +2271,8 @@ fn build_handle(
 }
 
 /// What `template{ capture }` answers of its picture made a template, or of why there is none —
-/// on the event loop and for a handler that waited alike: the handle, named and charged as asked,
-/// or `nil` and the reason, the charge given back.
+/// to a handler that waited and to a callback alike: the handle, named and charged as asked, or
+/// `nil` and the reason, the charge given back.
 fn template_values(lua: &Lua, outcome: Outcome, name: Option<String>, charge: Charge) -> mlua::Result<MultiValue> {
     match outcome {
         Outcome::Template(Ok((dec, count))) => {
@@ -2333,14 +2316,14 @@ const TEMPLATE_STOP: &str = "screen.template";
 fn template_plan(lua: &Lua, parsed: ParsedSpec, making: &Making) -> mlua::Result<Plan> {
     let ParsedSpec { name, source, key } = parsed;
     let Source::Capture { x, y, w, h: ht, snapshot: snap } = source else {
-        let now = build_handle(lua, ParsedSpec { name, source, key }, making, |_, _, _, _| Err(TEMPLATE_FAILED.to_string()))?;
+        let now = build_handle(lua, ParsedSpec { name, source, key }, making)?;
         return Ok(Plan::Now(now, Box::new(template_failed)));
     };
     let charge = reserve(lua, &budget(lua), template::dense_bytes(w as u32, ht as u32))?;
     let r = geo::Rect::new(x, y, w, ht);
     let hay = match snap {
-        // Cut from the snapshot, whole or not at all, as on the event loop: nothing to cut is
-        // answered at once.
+        // Cut from the snapshot, whole or not at all — a template cut from a clipped rectangle
+        // would be a different template: nothing to cut is answered at once.
         Some(frame) if !frame.contains(r) => {
             let now = template_values(lua, Outcome::Template(Err(snapshot::NOT_INSIDE.to_string())), name, charge)?;
             return Ok(Plan::Now(now, Box::new(template_failed)));
@@ -2356,9 +2339,8 @@ fn template_plan(lua: &Lua, parsed: ParsedSpec, making: &Making) -> mlua::Result
     Ok(Plan::Work { hay, job: Job::Template, answer })
 }
 
-/// A waited `host.screen.template`: the spec read as the call that does not wait reads it — a
-/// mistake raises at the call — and planned ([`template_plan`]): a `capture` waits for the image
-/// worker, anything else is answered at once.
+/// A waited `host.screen.template`: the spec read — a mistake raises at the call — and planned
+/// ([`template_plan`]): a `capture` waits for the image worker, anything else is answered at once.
 fn start_template<H: ReadHost>(
     h: &H,
     lua: &Lua,
@@ -2379,31 +2361,6 @@ fn submit_template<H: ReadHost>(h: &H, lua: &Lua, scope: usize, cb: Value, parse
     let key = parsed.key.take();
     let plan = template_plan(lua, parsed, making)?;
     submit_plan(h, lua, scope, cb, key, TEMPLATE_STOP, JobKind::Template, plan)
-}
-
-/// `host.screen.template` where it cannot wait: a `capture` made on the event loop through
-/// `capture`, or cut from its snapshot there, held there for that one call and said in the log
-/// (`task::legacy`); any other spec, and a `capture` not wholly inside its snapshot, which has
-/// nothing to cut, answered at once, unsaid — as a handler's call answers it.
-fn template_on_loop<H: ReadHost>(
-    h: &H,
-    lua: &Lua,
-    scope: usize,
-    why: &str,
-    parsed: ParsedSpec,
-    making: &Making,
-    capture: impl FnOnce(i32, i32, i32, i32) -> Result<CapturedImage, String>,
-) -> mlua::Result<MultiValue> {
-    let reads = match &parsed.source {
-        Source::Capture { snapshot: Some(frame), x, y, w, h: ht } => frame.contains(geo::Rect::new(*x, *y, *w, *ht)),
-        Source::Capture { snapshot: None, .. } => true,
-        _ => false,
-    };
-    if reads {
-        crate::task::legacy(h, lua, scope, FT, crate::loop_guard::Kind::Screen, why, || build_handle(lua, parsed, making, capture))
-    } else {
-        build_handle(lua, parsed, making, capture)
-    }
 }
 
 /// `template{ file }`'s path, resolved against `root` as a search's is, and the size its PNG
@@ -2436,9 +2393,10 @@ fn preparation(id: u64, p: &Arc<Prepared>) -> ImageTask {
 }
 
 /// `host.screen.template(spec, cb?) -> Template | nil, reason`. A `capture` waits in a handler for
-/// the image worker ([`start_template`]); where it cannot wait it captures on the event loop, said
-/// in the log ([`template_on_loop`]). Bytes and a file never wait: their picture is the worker's.
-/// With a callback nothing waits ([`submit_template`]).
+/// the image worker ([`start_template`]); where it cannot wait it raises, unless it has nothing to
+/// capture this time ([`now_plan`]). Bytes and a file never wait: their picture is the worker's,
+/// and they are answered at once wherever the call is made. With a callback nothing waits
+/// ([`submit_template`]).
 pub(crate) fn template(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, spec): (Table, Value)| {
@@ -2449,42 +2407,12 @@ pub(crate) fn template(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Resu
         start_template(&*sh, lua, idx, nonce, || spec_of(&spec, screen, false), &Making { file: &file, prepare: &prepare })
     })?;
     let sh = shared.clone();
-    let blocking = lua.create_function(move |lua, (why, spec): (String, Value)| {
+    let now = lua.create_function(move |lua, spec: Value| {
         host_call!("host.screen.template");
         let parsed = spec_of(&spec, sh.backend.screen_size(), false)?;
         let file = |path: &str| template_file(&sh.root(idx), path);
         let prepare = |p: Arc<Prepared>| queue_preparation(&*sh, p);
-        template_on_loop(
-            &*sh,
-            lua,
-            idx,
-            &why,
-            parsed,
-            &Making { file: &file, prepare: &prepare },
-            // A live read of the screen, every time, and counted like `pixel` and `profile`:
-            // it is a compositor frame on the event loop. Never to be served from a frame
-            // cache, now or once one exists — a template learned from a stale frame is a
-            // template of something that is no longer there (see
-            // docs/screen-frame-sharing-design.md on calibration paths).
-            //
-            // Through the module's own source, like `host.screen.save` and every other read.
-            // Desktop duplication answers with the most recently composed frame, which is still
-            // a read made now — but only once it has opened: a capture made before that (at
-            // load, where nothing opens it, or while a window trigger's prewarm still is) is
-            // read the standard way, or is `nil` and the reason under fallback = "none", and the
-            // template keeps that picture for the session. docs/api/screen.md says so; TODO.md
-            // holds the question of changing it. Where it could not wait it makes no first-read
-            // comparison, which is left to the module's next read, as `snapshot` there.
-            |x, y, w, h| {
-                let src = capture_source::vm_source(lua);
-                let t0 = Instant::now();
-                let cap = sh.backend.capture(x, y, w, h, src);
-                let mut obs = sh.observations();
-                obs.pixels += 1;
-                obs.pixel_us += t0.elapsed().as_micros();
-                cap
-            },
-        )
+        Ok(now_plan(template_plan(lua, parsed, &Making { file: &file, prepare: &prepare })?))
     })?;
     let sh = shared.clone();
     let submit = lua.create_function(move |lua, (spec, cb): (Value, Value)| {
@@ -2494,22 +2422,15 @@ pub(crate) fn template(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Resu
         let prepare = |p: Arc<Prepared>| queue_preparation(&*sh, p);
         submit_template(&*sh, lua, idx, cb, || spec_of(&spec, screen, true), &Making { file: &file, prepare: &prepare })
     })?;
-    crate::task::points(lua, idx, shared.clone())?.call((FT, start, blocking, submit, 2))
+    crate::task::points(lua, idx, shared.clone())?.call((FT, start, now, submit, 2))
 }
 
-/// `host.screen.template` as the host builds it, over `holder`, its wait the host's own
-/// ([`start_template`]) and a handle's picture made by the holder's image worker; where it cannot
-/// wait it captures through `capture`, as the event loop would, through the host's own tally, and
-/// a file's path is resolved against `root`: for the tests' holders, which have no backend. The
-/// primary screen is 1920x1080.
+/// `host.screen.template` as the host builds it, over `holder`, its wait and where it cannot wait
+/// the host's own ([`start_template`], [`now_plan`]) and a handle's picture made by the holder's
+/// image worker, and a file's path is resolved against `root`: for the tests' holders, which have
+/// no backend. The primary screen is 1920x1080.
 #[cfg(test)]
-pub(crate) fn test_template<H: ReadHost>(
-    lua: &Lua,
-    idx: usize,
-    holder: Rc<H>,
-    capture: CaptureFn,
-    root: PathBuf,
-) -> mlua::Result<Function> {
+pub(crate) fn test_template<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>, root: PathBuf) -> mlua::Result<Function> {
     let (h, r) = (holder.clone(), root.clone());
     let start = lua.create_function(move |lua, (nonce, spec): (Table, Value)| {
         let file = |path: &str| template_file(&r, path);
@@ -2517,13 +2438,11 @@ pub(crate) fn test_template<H: ReadHost>(
         start_template(&*h, lua, idx, nonce, || spec_of(&spec, (1920, 1080), false), &Making { file: &file, prepare: &prepare })
     })?;
     let (h, r) = (holder.clone(), root.clone());
-    let blocking = lua.create_function(move |lua, (why, spec): (String, Value)| {
+    let now = lua.create_function(move |lua, spec: Value| {
         let parsed = spec_of(&spec, (1920, 1080), false)?;
         let file = |path: &str| template_file(&r, path);
         let prepare = |p: Arc<Prepared>| queue_preparation(&*h, p);
-        template_on_loop(&*h, lua, idx, &why, parsed, &Making { file: &file, prepare: &prepare }, |x, y, w, hh| {
-            capture(&[(x, y, w, hh)], capture_source::vm_source(lua)).pop().unwrap_or_else(|| Err(crate::backend::CAPTURE_FAILED.to_string()))
-        })
+        Ok(now_plan(template_plan(lua, parsed, &Making { file: &file, prepare: &prepare })?))
     })?;
     let h = holder.clone();
     let submit = lua.create_function(move |lua, (spec, cb): (Value, Value)| {
@@ -2531,7 +2450,7 @@ pub(crate) fn test_template<H: ReadHost>(
         let prepare = |p: Arc<Prepared>| queue_preparation(&*h, p);
         submit_template(&*h, lua, idx, cb, || spec_of(&spec, (1920, 1080), true), &Making { file: &file, prepare: &prepare })
     })?;
-    crate::task::points(lua, idx, holder)?.call((FT, start, blocking, submit, 2))
+    crate::task::points(lua, idx, holder)?.call((FT, start, now, submit, 2))
 }
 
 // ── Template arguments ─────────────────────────────────────────────────────────────────
@@ -2628,12 +2547,6 @@ fn search_region(
 /// there is nothing of it to read (a window region with none this time, or no overlap).
 fn snapshot_region(opts: Option<&Table>, fname: &str, frame: &Frame) -> mlua::Result<Result<(i32, i32, i32, i32), String>> {
     Ok(snapshot::opts_region_in(opts, fname, frame)?.and_then(|r| snapshot::clip(frame, r)).map(|r| r.tuple()))
-}
-
-/// Captures `region` through this VM's source on the event loop, for a call that cannot wait:
-/// without the first-read comparison, which is left to the module's next read.
-fn live_capture(sh: &Shared, lua: &Lua, (x, y, w, h): (i32, i32, i32, i32)) -> Result<CapturedImage, String> {
-    sh.backend.capture(x, y, w, h, capture_source::vm_source(lua))
 }
 
 // ── host.screen.imageSearch and imageSearchAll ──────────────────────────────────────────────
@@ -2744,8 +2657,8 @@ pub(crate) fn search_ask(
     Ok(SearchAsk { templates, region, snap, tol: read_tol(o), scales, key })
 }
 
-/// What a search answers — on the event loop, for a handler that waited and to a callback alike,
-/// in the shape the call has always had. `imageSearch`: the hit, `nil` alone when it looked and
+/// What a search answers — to a handler that waited and to a callback alike, in the shape the call
+/// has always had. `imageSearch`: the hit, `nil` alone when it looked and
 /// found nothing, `nil` and the reason when it could not look. `imageSearchAll`: the list of hits,
 /// never `nil` — empty and alone when it found none, empty with the reason after it when it could
 /// not look. `names` is the name each template's hit reports.
@@ -2775,15 +2688,14 @@ fn search_values(lua: &Lua, kind: Search, outcome: Outcome, names: &[Option<Stri
     }
 }
 
-/// The work of a search of `region`: its templates — opened, and made, by whoever does the work —
+/// The work of a search of `region`: its templates — opened, and made, by the image worker —
 /// matched against the region of the screen — or of its snapshot — in order, the first that
-/// matches answering, or every match for `imageSearchAll`. A task for the worker (`carry`) takes the
-/// module's first-read comparison when it is owed; the event loop's own work makes none. The names
-/// stay on this side, for the answer.
-fn search_work(lua: &Lua, kind: Search, ask: SearchAsk, region: (i32, i32, i32, i32), carry: bool) -> (Haystack, Job, Vec<Option<String>>) {
+/// matches answering, or every match for `imageSearchAll`, the module's first-read comparison with
+/// it when it is owed. The names stay on this side, for the answer.
+fn search_work(lua: &Lua, kind: Search, ask: SearchAsk, region: (i32, i32, i32, i32)) -> (Haystack, Job, Vec<Option<String>>) {
     let SearchAsk { templates, snap, tol, scales, .. } = ask;
     let (entries, names): (Vec<_>, Vec<_>) = templates.into_iter().map(|(d, n)| ((d, None), n)).unzip();
-    let (hay, _) = haystack(lua, snap, Ok(region), carry);
+    let (hay, _) = haystack(lua, snap, Ok(region));
     (hay, Job::Search { entries, tol, scales, mode: kind.mode(), unresolved: None }, names)
 }
 
@@ -2794,39 +2706,15 @@ fn search_work(lua: &Lua, kind: Search, ask: SearchAsk, region: (i32, i32, i32, 
 fn search_plan(lua: &Lua, kind: Search, ask: SearchAsk) -> mlua::Result<Plan> {
     let region = match &ask.region {
         Ok(r) => *r,
-        // Nothing to look at this time: answered at once, as where it cannot wait.
+        // Nothing to look at this time: answered at once, wherever the call is made.
         Err(none) => {
             let otherwise: BuildAnswer = Box::new(move |lua, outcome| search_values(lua, kind, outcome, &[]));
             return Ok(Plan::Now(search_values(lua, kind, Outcome::Search(Err(none.clone())), &[])?, otherwise));
         }
     };
-    let (hay, job, names) = search_work(lua, kind, ask, region, true);
+    let (hay, job, names) = search_work(lua, kind, ask, region);
     let answer: BuildAnswer = Box::new(move |lua, outcome| search_values(lua, kind, outcome, &names));
     Ok(Plan::Work { hay, job, answer })
-}
-
-/// A search where it cannot wait (`why`, the shim's word for the place): answered at once, and not
-/// said, when there is nothing to look at this time; otherwise captured through `capture` — or read
-/// from its snapshot — and matched on the event loop by the worker's own matching
-/// ([`answer_on_loop`]), held there for that one call and said in the log (`task::legacy`).
-fn search_on_loop<H: ReadHost>(
-    h: &H,
-    lua: &Lua,
-    scope: usize,
-    kind: Search,
-    why: &str,
-    ask: SearchAsk,
-    capture: impl FnOnce((i32, i32, i32, i32)) -> Result<CapturedImage, String>,
-) -> mlua::Result<MultiValue> {
-    let region = match &ask.region {
-        Ok(r) => *r,
-        Err(none) => return search_values(lua, kind, Outcome::Search(Err(none.clone())), &[]),
-    };
-    let (hay, job, names) = search_work(lua, kind, ask, region, false);
-    let t = ImageTask { id: 0, hay, job, prio: crate::ocr::types::current_priority() };
-    crate::task::legacy(h, lua, scope, kind.name(), crate::loop_guard::Kind::Screen, why, || {
-        search_values(lua, kind, answer_on_loop(&t, capture), &names)
-    })
 }
 
 /// A search's callback form, `imageSearch(template | list, opts, cb)`: its arguments read as the
@@ -2854,8 +2742,8 @@ pub(crate) fn callback_arg(fname: &str, cb: Value, which: &str) -> mlua::Result<
 /// `host.screen.imageSearch(template | list, opts?, cb?) -> (Hit?, string?)`: `nil` alone when it
 /// looked and found nothing, `nil` and the reason when it could not look; given a list, the first
 /// template that matches answers, its `n` saying which. In a handler it waits while the image worker
-/// captures and matches ([`search_plan`]); where it cannot wait it does both on the event loop, said
-/// in the log ([`search_on_loop`]). With a callback it never waits ([`submit_search`]).
+/// captures and matches ([`search_plan`]); where it cannot wait it raises, unless there is nothing
+/// to look at this time ([`now_plan`]). With a callback it never waits ([`submit_search`]).
 ///
 /// A LIST is tried in order against the SAME captured frame, first hit wins: several renderings of
 /// one thing (a toggle's on/off pair, a dialog's close glyph as two plugin versions draw it). One
@@ -2871,11 +2759,10 @@ pub(crate) fn image_search(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::
         start_plan(&*sh, lua, idx, Search::One.name(), Search::One.stop(), nonce, parse)
     })?;
     let sh = shared.clone();
-    let blocking = lua.create_function(move |lua, (why, tv, opts): (String, Value, Value)| {
+    let now = lua.create_function(move |lua, (tv, opts): (Value, Value)| {
         host_call!("host.screen.imageSearch");
         let locate = |p: &str| locate_in(&sh.root(idx), p);
-        let ask = search_ask(Search::One, tv, opts, sh.backend.screen_size(), &locate, false)?;
-        search_on_loop(&*sh, lua, idx, Search::One, &why, ask, |r| live_capture(&sh, lua, r))
+        Ok(now_plan(search_plan(lua, Search::One, search_ask(Search::One, tv, opts, sh.backend.screen_size(), &locate, false)?)?))
     })?;
     let sh = shared.clone();
     let submit = lua.create_function(move |lua, (tv, opts, cb): (Value, Value, Value)| {
@@ -2883,7 +2770,7 @@ pub(crate) fn image_search(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::
         let locate = |p: &str| locate_in(&sh.root(idx), p);
         submit_search(&*sh, lua, idx, Search::One, cb, || search_ask(Search::One, tv, opts, sh.backend.screen_size(), &locate, true))
     })?;
-    crate::task::points(lua, idx, shared.clone())?.call((Search::One.name(), start, blocking, submit, 3))
+    crate::task::points(lua, idx, shared.clone())?.call((Search::One.name(), start, now, submit, 3))
 }
 
 /// `host.screen.imageSearchAll(template, opts?) -> ({ Hit }, string?)` — EVERY match of the
@@ -2897,8 +2784,7 @@ pub(crate) fn image_search(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::
 /// The list is never `nil`, as it never was: when the region could not be read it is empty
 /// and the reason comes as a SECOND value, so "no match" and "could not look" can be told
 /// apart by a caller that asks, and one that does not reads what it always did. It waits in a
-/// handler, and works on the event loop where it cannot wait, as `imageSearch` does; with a
-/// callback it never waits.
+/// handler, and raises where it cannot wait, as `imageSearch` does; with a callback it never waits.
 pub(crate) fn image_search_all(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, tv, opts): (Table, Value, Value)| {
@@ -2908,11 +2794,10 @@ pub(crate) fn image_search_all(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> ml
         start_plan(&*sh, lua, idx, Search::All.name(), Search::All.stop(), nonce, parse)
     })?;
     let sh = shared.clone();
-    let blocking = lua.create_function(move |lua, (why, tv, opts): (String, Value, Value)| {
+    let now = lua.create_function(move |lua, (tv, opts): (Value, Value)| {
         host_call!("host.screen.imageSearchAll");
         let locate = |p: &str| locate_in(&sh.root(idx), p);
-        let ask = search_ask(Search::All, tv, opts, sh.backend.screen_size(), &locate, false)?;
-        search_on_loop(&*sh, lua, idx, Search::All, &why, ask, |r| live_capture(&sh, lua, r))
+        Ok(now_plan(search_plan(lua, Search::All, search_ask(Search::All, tv, opts, sh.backend.screen_size(), &locate, false)?)?))
     })?;
     let sh = shared.clone();
     let submit = lua.create_function(move |lua, (tv, opts, cb): (Value, Value, Value)| {
@@ -2920,22 +2805,15 @@ pub(crate) fn image_search_all(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> ml
         let locate = |p: &str| locate_in(&sh.root(idx), p);
         submit_search(&*sh, lua, idx, Search::All, cb, || search_ask(Search::All, tv, opts, sh.backend.screen_size(), &locate, true))
     })?;
-    crate::task::points(lua, idx, shared.clone())?.call((Search::All.name(), start, blocking, submit, 3))
+    crate::task::points(lua, idx, shared.clone())?.call((Search::All.name(), start, now, submit, 3))
 }
 
-/// `imageSearch` and `imageSearchAll` as the host builds them, over `holder`, their waits the
-/// host's own ([`search_plan`]), and their callback forms ([`submit_search`]); where they
-/// cannot wait they capture through `capture`, as the event loop would, through the host's own
-/// tally, and every template path is resolved against `root`: for the tests' holders, which have no
-/// backend. The primary screen is 1920x1080.
+/// `imageSearch` and `imageSearchAll` as the host builds them, over `holder`, their waits and where
+/// they cannot wait the host's own ([`search_plan`], [`now_plan`]), and their callback forms
+/// ([`submit_search`]), and every template path is resolved against `root`: for the tests'
+/// holders, which have no backend. The primary screen is 1920x1080.
 #[cfg(test)]
-pub(crate) fn test_searches<H: ReadHost>(
-    lua: &Lua,
-    idx: usize,
-    holder: Rc<H>,
-    capture: CaptureFn,
-    root: PathBuf,
-) -> mlua::Result<[Function; 2]> {
+pub(crate) fn test_searches<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>, root: PathBuf) -> mlua::Result<[Function; 2]> {
     let build = |kind: Search| -> mlua::Result<Function> {
         let (h, r) = (holder.clone(), root.clone());
         let start = lua.create_function(move |lua, (nonce, tv, opts): (Table, Value, Value)| {
@@ -2943,20 +2821,17 @@ pub(crate) fn test_searches<H: ReadHost>(
             let parse = || search_plan(lua, kind, search_ask(kind, tv, opts, (1920, 1080), &locate, false)?);
             start_plan(&*h, lua, idx, kind.name(), kind.stop(), nonce, parse)
         })?;
-        let (h, r) = (holder.clone(), root.clone());
-        let blocking = lua.create_function(move |lua, (why, tv, opts): (String, Value, Value)| {
+        let r = root.clone();
+        let now = lua.create_function(move |lua, (tv, opts): (Value, Value)| {
             let locate = |p: &str| locate_in(&r, p);
-            let ask = search_ask(kind, tv, opts, (1920, 1080), &locate, false)?;
-            search_on_loop(&*h, lua, idx, kind, &why, ask, |(x, y, w, hh)| {
-                capture(&[(x, y, w, hh)], capture_source::vm_source(lua)).pop().unwrap_or_else(|| Err(crate::backend::CAPTURE_FAILED.to_string()))
-            })
+            Ok(now_plan(search_plan(lua, kind, search_ask(kind, tv, opts, (1920, 1080), &locate, false)?)?))
         })?;
         let (h, r) = (holder.clone(), root.clone());
         let submit = lua.create_function(move |lua, (tv, opts, cb): (Value, Value, Value)| {
             let locate = |p: &str| locate_in(&r, p);
             submit_search(&*h, lua, idx, kind, cb, || search_ask(kind, tv, opts, (1920, 1080), &locate, true))
         })?;
-        crate::task::points(lua, idx, holder.clone())?.call((kind.name(), start, blocking, submit, 3))
+        crate::task::points(lua, idx, holder.clone())?.call((kind.name(), start, now, submit, 3))
     };
     Ok([build(Search::One)?, build(Search::All)?])
 }
@@ -2965,15 +2840,9 @@ pub(crate) fn test_searches<H: ReadHost>(
 /// state: `region` of the snapshot when the call was given one (already cut to it or found
 /// inside it at the call), which is never captured and never asks the module's source; else
 /// `region` of the screen through this VM's source, with the VM's first-read comparison when it
-/// is owed and `carry` — a task for the worker, not the event loop's own work where a call cannot
-/// wait, which makes none. `region` may instead be why there is nothing to read this time,
-/// answered on the worker without a capture.
-pub(crate) fn haystack(
-    lua: &Lua,
-    snap: Option<Arc<Frame>>,
-    region: Result<(i32, i32, i32, i32), String>,
-    carry: bool,
-) -> (Haystack, Option<String>) {
+/// is owed. `region` may instead be why there is nothing to read this time, answered on the worker
+/// without a capture.
+pub(crate) fn haystack(lua: &Lua, snap: Option<Arc<Frame>>, region: Result<(i32, i32, i32, i32), String>) -> (Haystack, Option<String>) {
     match (snap, region) {
         (Some(frame), Ok(r)) => (Haystack::Frame { frame, region: geo::Rect::from_tuple(r) }, None),
         (Some(frame), Err(why)) => (Haystack::Frame { frame, region: geo::Rect::default() }, Some(why)),
@@ -2981,7 +2850,7 @@ pub(crate) fn haystack(
             Haystack::Screen {
                 region: r,
                 source: capture_source::vm_source(lua),
-                compare: if carry { capture_source::take_compare(lua, r) } else { None },
+                compare: capture_source::take_compare(lua, r),
             },
             None,
         ),
@@ -3010,8 +2879,7 @@ pub(crate) struct CellsAsk {
     pub(crate) key: Option<String>,
 }
 
-/// What a cells call answers — on the event loop, for a handler that waited and to a callback
-/// alike, two values as these calls always returned: `cells`' `{ cells, x, y, w, h }` or
+/// What a cells call answers — to a handler that waited and to a callback alike, two values as these calls always returned: `cells`' `{ cells, x, y, w, h }` or
 /// `matchCells`' match, then `nil`; or `nil` and the reason.
 fn cells_values(lua: &Lua, outcome: Outcome, r: ScreenRect, names: &[Option<String>]) -> mlua::Result<MultiValue> {
     let (first, second) = match outcome {
@@ -3037,7 +2905,7 @@ pub(crate) fn cells_plan(lua: &Lua, ask: CellsAsk) -> mlua::Result<Plan> {
             return Ok(Plan::Now(cells_values(lua, Outcome::Cells(Err(why)), NONE, &[])?, otherwise));
         }
     };
-    let (hay, _) = haystack(lua, ask.snapshot, Ok((r.x, r.y, r.w, r.h)), true);
+    let (hay, _) = haystack(lua, ask.snapshot, Ok((r.x, r.y, r.w, r.h)));
     let job = Job::Cells(Arc::new(CellsJob { matcher: Arc::new(ask.matcher), unresolved: None, rank: ask.rank }));
     let names = ask.names;
     let answer: BuildAnswer = Box::new(move |lua, outcome| cells_values(lua, outcome, r, &names));
@@ -3053,58 +2921,20 @@ pub(crate) fn cells_stop(rank: bool) -> &'static str {
     }
 }
 
-/// A cells call on the event loop, where it cannot wait: the region read where it lies in the
-/// snapshot, or captured through `capture`, reduced — and ranked for a match — by the worker's own
-/// reduction ([`cells_of`]), and answered as a waited call is ([`cells_values`]). With nothing to
-/// read this time it is answered at once and not said: `crate::cells_on_loop` decides.
-pub(crate) fn cells_now(
-    lua: &Lua,
-    ask: CellsAsk,
-    capture: impl FnOnce(ScreenRect) -> Result<CapturedImage, String>,
-) -> mlua::Result<MultiValue> {
-    let r = match ask.rect {
-        Ok(r) => r,
-        Err(why) => return cells_values(lua, Outcome::Cells(Err(why)), ScreenRect { x: 0, y: 0, w: 0, h: 0 }, &[]),
-    };
-    let got = match &ask.snapshot {
-        // `r` is inside the snapshot: the call's reading saw to it.
-        Some(frame) => match frame.area(geo::Rect::new(r.x, r.y, r.w, r.h)) {
-            Some(a) => {
-                let sub = cells::Sub { x: a.x, y: a.y, w: a.w, h: a.h };
-                cells_of(&ask.matcher, ask.rank, &frame.img, (r.w, r.h), Some(sub))
-            }
-            None => Err(snapshot::NOT_INSIDE.to_string()),
-        },
-        None => capture(r).and_then(|cap| cells_of(&ask.matcher, ask.rank, &cap, (r.w, r.h), None)),
-    };
-    cells_values(lua, Outcome::Cells(got), r, &ask.names)
-}
-
 /// `host.screen.cells` and `matchCells` as the host builds them (lib.rs, `cells_ask`), over
-/// `holder`, their waits the host's own ([`cells_plan`]), and their callback forms; where they
-/// cannot wait they capture through `capture`, as the event loop would, through the host's own
-/// tally: for the tests' holders, which have no backend. The pair, `cells` first.
+/// `holder`, their waits and where they cannot wait the host's own ([`cells_plan`], [`now_plan`]),
+/// and their callback forms: for the tests' holders, which have no backend. The pair, `cells`
+/// first.
 #[cfg(test)]
-pub(crate) fn test_cells<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>, capture: CaptureFn) -> mlua::Result<(Function, Function)> {
+pub(crate) fn test_cells<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>) -> mlua::Result<(Function, Function)> {
     let build = |call: &'static str, rank: bool| -> mlua::Result<Function> {
         let h = holder.clone();
         let start = lua.create_function(move |lua, (nonce, opts, states): (Table, Value, Value)| {
             let parse = || cells_plan(lua, crate::cells_ask(lua, call, opts, rank.then_some(states), false)?);
             start_plan(&*h, lua, idx, call, cells_stop(rank), nonce, parse)
         })?;
-        let h = holder.clone();
-        let blocking = lua.create_function(move |lua, (why, opts, states): (String, Value, Value)| {
-            let ask = crate::cells_ask(lua, call, opts, rank.then_some(states), false)?;
-            if ask.rect.is_err() {
-                return cells_now(lua, ask, |_| unreachable!("nothing to read"));
-            }
-            crate::task::legacy(&*h, lua, idx, call, crate::loop_guard::Kind::Screen, &why, || {
-                cells_now(lua, ask, |r| {
-                    capture(&[(r.x, r.y, r.w, r.h)], capture_source::vm_source(lua))
-                        .pop()
-                        .unwrap_or_else(|| Err(crate::backend::CAPTURE_FAILED.to_string()))
-                })
-            })
+        let now = lua.create_function(move |lua, (opts, states): (Value, Value)| {
+            Ok(now_plan(cells_plan(lua, crate::cells_ask(lua, call, opts, rank.then_some(states), false)?)?))
         })?;
         let points = crate::task::points(lua, idx, holder.clone())?;
         let h = holder.clone();
@@ -3115,7 +2945,7 @@ pub(crate) fn test_cells<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>, capt
                 let key = ask.key.take();
                 submit_plan(&*h, lua, idx, cb, key, cells_stop(false), JobKind::Cells, cells_plan(lua, ask)?)
             })?;
-            return points.call((call, start, blocking, submit, 2));
+            return points.call((call, start, now, submit, 2));
         }
         let submit = lua.create_function(move |lua, (opts, states, cb): (Value, Value, Value)| {
             let cb = callback_arg(call, cb, "third argument")?;
@@ -3124,7 +2954,7 @@ pub(crate) fn test_cells<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>, capt
             let plan = cells_plan(lua, ask)?;
             submit_plan(&*h, lua, idx, cb, key, cells_stop(true), JobKind::Cells, plan)
         })?;
-        points.call((call, start, blocking, submit, 3))
+        points.call((call, start, now, submit, 3))
     };
     Ok((build("host.screen.cells", false)?, build("host.screen.matchCells", true)?))
 }
@@ -3225,7 +3055,7 @@ pub(crate) fn image_search_each(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> m
                 submit_now(&*sh, lua, idx, cb, key, stop, JobKind::Search, each_values(lua, Outcome::Search(Err(why)), &[])?, otherwise)
             }
             Ok(r) => {
-                let (hay, _) = haystack(lua, snap, Ok(r), true);
+                let (hay, _) = haystack(lua, snap, Ok(r));
                 let job = Job::Search { entries, tol, scales, mode: Mode::Each, unresolved: None };
                 let answer: BuildAnswer = Box::new(move |lua, outcome| each_values(lua, outcome, &names));
                 submit_callback(&*sh, lua, idx, cb, key, stop, hay, job, answer)
@@ -3260,6 +3090,21 @@ mod tests {
     /// No file, and every handle's picture made at once.
     fn making() -> Making<'static> {
         Making { file: &no_file, prepare: &at_once }
+    }
+
+    /// `host.screen.template` of `s` as a handler's call answers it, the image worker's work done
+    /// here: a spec that captures nothing answered at once ([`template_plan`]), a capture read
+    /// through `capture` — or cut from its snapshot — and made a template as the worker makes it
+    /// ([`answer`]).
+    fn made(lua: &Lua, s: ParsedSpec, capture: impl FnOnce(i32, i32, i32, i32) -> Result<CapturedImage, String>) -> mlua::Result<MultiValue> {
+        match template_plan(lua, s, &making())? {
+            Plan::Now(values, _) => Ok(values),
+            Plan::Work { hay, job, answer: build } => {
+                let t = ImageTask { id: 0, hay, job, prio: crate::ocr::types::current_priority() };
+                let shot = t.screen_key().map(|((x, y, w, h), _)| capture(x, y, w, h));
+                build(lua, answer(&t, shot.as_ref().map(|r| r.as_ref().map_err(String::as_str)), None))
+            }
+        }
     }
 
     /// The picture of handle `v` and its count, made as the worker makes it.
@@ -3300,7 +3145,7 @@ mod tests {
     fn a_spec_names_its_mistakes() {
         let lua = Lua::new();
         let e = err_text(spec(&lua, "return { rgba = string.rep('\\0', 1436), w = 10, h = 36 }")
-            .and_then(|s| build_handle(&lua, s, &making(), |_, _, _, _| Err("screen capture failed".to_string()))));
+            .and_then(|s| build_handle(&lua, s, &making())));
         assert!(e.contains("host.screen.template") && e.contains("1436") && e.contains("1440"), "{e}");
 
         let e = err_text(spec(&lua, "return { rgba = 'x', rgb = 'y', w = 1, h = 1 }"));
@@ -3338,7 +3183,7 @@ mod tests {
         let lua = Lua::new();
         let win = "window = { client = { x = 100, y = 50, w = 200, h = 100 } }";
         let s = spec(&lua, &format!("return {{ capture = {{ {win}, fraction = {{ 0.5, 0.5, 1, 1 }} }}, name = 'w' }}")).unwrap();
-        let got = build_handle(&lua, s, &making(), |x, y, w, h| {
+        let got = made(&lua, s, |x, y, w, h| {
             assert_eq!((x, y, w, h), (200, 100, 100, 50), "the right lower quarter of the client area");
             Ok(opaque(w as u32, h as u32, [1, 2, 3]))
         })
@@ -3346,13 +3191,13 @@ mod tests {
         assert_eq!(got.len(), 1, "a handle alone");
         // A minimised window: nothing captured, `nil` and why.
         let s = spec(&lua, "return { capture = { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0, 1, 1 } } }").unwrap();
-        let got = build_handle(&lua, s, &making(), |_, _, _, _| panic!("nothing to capture")).unwrap().into_vec();
+        let got = made(&lua, s, |_, _, _, _| panic!("nothing to capture")).unwrap().into_vec();
         assert!(got[0].is_nil());
         assert_eq!(got[1].as_string().unwrap().to_string_lossy(), "the window's client area is empty (0x0)");
         // A window so large that the region is past a template's limit: the window's doing, so
         // answered, where corners past the limit are the module's mistake and raise.
         let s = spec(&lua, "return { capture = { window = { client = { x = 0, y = 0, w = 5000, h = 10 } }, fraction = { 0, 0, 1, 1 } } }").unwrap();
-        let got = build_handle(&lua, s, &making(), |_, _, _, _| panic!("nothing to capture")).unwrap().into_vec();
+        let got = made(&lua, s, |_, _, _, _| panic!("nothing to capture")).unwrap().into_vec();
         assert!(got[0].is_nil());
         assert_eq!(
             got[1].as_string().unwrap().to_string_lossy(),
@@ -3385,7 +3230,7 @@ mod tests {
             let s = spec(&lua, src).unwrap();
             let queued: RefCell<Vec<Arc<Prepared>>> = RefCell::new(Vec::new());
             let later = |p: Arc<Prepared>| queued.borrow_mut().push(p);
-            let got = build_handle(&lua, s, &Making { file: &no_file, prepare: &later }, |_, _, _, _| Err("screen capture failed".to_string())).unwrap();
+            let got = build_handle(&lua, s, &Making { file: &no_file, prepare: &later }).unwrap();
             assert_eq!(got.len(), 1, "a handle is the one value, as it always was");
             lua.globals().set("t", got.into_vec().remove(0)).unwrap();
             let read = || -> (u32, u32, String, Option<u32>, String) { lua.load("return t.w, t.h, t.name, t.count, tostring(t)").eval().unwrap() };
@@ -3401,13 +3246,13 @@ mod tests {
     fn a_failed_capture_is_nil_and_a_good_one_is_opaque() {
         let lua = Lua::new();
         let s = spec(&lua, "return { capture = { 10, 20, 14, 23 } }").unwrap();
-        let got = build_handle(&lua, s, &making(), |_, _, _, _| Err("screen capture failed".to_string())).unwrap().into_vec();
+        let got = made(&lua, s, |_, _, _, _| Err("screen capture failed".to_string())).unwrap().into_vec();
         assert!(got[0].is_nil(), "a failed capture answers nil");
         assert_eq!(got[1].as_string().map(|s| s.to_string_lossy()).as_deref(), Some("screen capture failed"), "and says why");
         assert_eq!(budget(&lua).get(), 0, "and gives its reservation back");
 
         let s = spec(&lua, "return { capture = { 10, 20, 14, 23 }, name = 'here' }").unwrap();
-        let v = build_handle(&lua, s, &making(), |x, y, w, h| {
+        let v = made(&lua, s, |x, y, w, h| {
             assert_eq!((x, y, w, h), (10, 20, 4, 3), "the region, read like every other");
             let mut c = opaque(4, 3, [9, 9, 9]);
             for px in c.rgba.chunks_exact_mut(4) {
@@ -3439,7 +3284,7 @@ mod tests {
         let later = |p: Arc<Prepared>| queued.borrow_mut().push(p);
         let making = Making { file: &file, prepare: &later };
         let s = spec(&lua, "return { file = 'images/x.png' }").unwrap();
-        let v = build_handle(&lua, s, &making, |_, _, _, _| Err("screen capture failed".to_string())).unwrap().into_vec().remove(0);
+        let v = build_handle(&lua, s, &making).unwrap().into_vec().remove(0);
         assert!(template_store::test_made_on(&path.display().to_string()).is_empty(), "nothing decoded at the call");
         lua.globals().set("t", v.clone()).unwrap();
         let (w, h, count): (u32, u32, Option<u32>) = lua.load("return t.w, t.h, t.count").eval().unwrap();
@@ -3452,14 +3297,14 @@ mod tests {
         assert_eq!(ud.borrow::<TemplateHandle>().unwrap().name.as_deref(), Some("images/x.png"), "unnamed, it is named by its path");
         assert_eq!(budget(&lua).get(), 0);
         let s = spec(&lua, "return { file = 'images/missing.png' }").unwrap();
-        let e = err_text(build_handle(&lua, s, &making, |_, _, _, _| Err("screen capture failed".to_string())));
+        let e = err_text(build_handle(&lua, s, &making));
         assert!(e.contains("cannot open template '") && e.contains("missing.png"), "{e}");
         // A file gone between the call and the making: the handle says why, and the next making
         // — a search's — tries again, and has the picture once the file is back.
         let back = root.join("images").join("back.png");
         image::RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 255])).save(&back).unwrap();
         let s = spec(&lua, "return { file = 'images/back.png' }").unwrap();
-        let v = build_handle(&lua, s, &making, |_, _, _, _| Err("screen capture failed".to_string())).unwrap().into_vec().remove(0);
+        let v = build_handle(&lua, s, &making).unwrap().into_vec().remove(0);
         lua.globals().set("b", v).unwrap();
         std::fs::remove_file(&back).unwrap();
         let _ = queued.borrow()[1].make();
@@ -3478,7 +3323,7 @@ mod tests {
     fn size_limits_come_before_the_budget() {
         let lua = Lua::new();
         let s = spec(&lua, "return { rgba = '', w = 4096, h = 4096 }").unwrap();
-        let e = err_text(build_handle(&lua, s, &making(), |_, _, _, _| Err("screen capture failed".to_string())));
+        let e = err_text(build_handle(&lua, s, &making()));
         assert!(e.contains("16777216 pixels") && e.contains("1048576"), "{e}");
         assert_eq!(budget(&lua).get(), 0);
     }
@@ -3494,7 +3339,7 @@ mod tests {
         let make = |lua: &Lua| {
             lua.create_function(|lua, t: Table| {
                 let s = parse_spec(&t, 100, 100, false)?;
-                build_handle(lua, s, &making(), |_, _, _, _| Err("screen capture failed".to_string()))
+                build_handle(lua, s, &making())
             })
             .unwrap()
         };
@@ -3519,7 +3364,7 @@ mod tests {
         let f = lua
             .create_function(|lua, t: Table| {
                 let s = parse_spec(&t, 100, 100, false)?;
-                build_handle(lua, s, &making(), |_, _, _, _| Err("screen capture failed".to_string()))
+                build_handle(lua, s, &making())
             })
             .unwrap();
         lua.globals().set("make", f).unwrap();
@@ -3799,7 +3644,7 @@ mod tests {
                 CaptureSource::Standard => Ok(two_dots_at(w, h)),
                 CaptureSource::Duplication { or_standard: true } => Ok(opaque(w as u32, h as u32, [50, 50, 50])),
                 CaptureSource::Duplication { or_standard: false } => {
-                    Err("screen capture failed: desktop duplication could not answer — it is still opening".to_string())
+                    Err("screen capture failed: desktop duplication could not answer — an earlier read has not come back yet".to_string())
                 }
             })
             .collect()
@@ -3821,7 +3666,7 @@ mod tests {
         assert_eq!(out[1].found(), Ok(vec![None]), "not the standard frame of the same region");
         assert_eq!(
             out[2].found(),
-            Err("screen capture failed: desktop duplication could not answer — it is still opening".to_string()),
+            Err("screen capture failed: desktop duplication could not answer — an earlier read has not come back yet".to_string()),
             "no picture under fallback = \"none\" is could-not-look, with the reason, not a miss"
         );
         assert!(out.iter().all(|r| r.batch == 3));
@@ -3984,7 +3829,7 @@ mod tests {
         assert_eq!(live, &vec![10, 0, 0, 0], "round(255 / 25)");
         assert_eq!(ranked.as_ref().expect("ranked").state, 0, "closer to all-zero than to all-255");
         assert_eq!(out[2].cells().as_ref().unwrap_err(), "the window's client area is empty (0x0)");
-        assert!(out[3].cells().as_ref().unwrap_err().contains("desktop duplication could not answer — it is still opening"));
+        assert!(out[3].cells().as_ref().unwrap_err().contains("desktop duplication could not answer — an earlier read has not come back yet"));
         // A capture the wrong size is named too.
         let short = |regions: &[(i32, i32, i32, i32)], _: CaptureSource| -> Vec<Result<CapturedImage, String>> {
             regions.iter().map(|_| Ok(opaque(3, 3, [0, 0, 0]))).collect()
@@ -4229,7 +4074,7 @@ mod tests {
         lua.globals().set("s", snapshot::test_handle(&lua, snapshot::test_frame(100, 50, 40, 30))).unwrap();
         let cut = |src: &str| {
             let s = spec(&lua, src).unwrap();
-            build_handle(&lua, s, &making(), |_, _, _, _| panic!("the screen was captured")).unwrap().into_vec()
+            made(&lua, s, |_, _, _, _| panic!("the screen was captured")).unwrap().into_vec()
         };
         let got = cut("return { capture = { 110, 60, 114, 63 }, snapshot = s, name = 'cut' }");
         let Value::UserData(ud) = &got[0] else { panic!("expected a handle") };
@@ -4510,7 +4355,7 @@ mod tests {
         let making = Making { file: &no_file, prepare: &later };
         for (name, w) in [("dropped", 9), ("kept", 11)] {
             let src = format!("return {{ rgb = string.rep('\\0', {w} * 13 * 3), w = {w}, h = 13, name = '{name}' }}");
-            let v = build_handle(&lua, spec(&lua, &src).unwrap(), &making, |_, _, _, _| Err("screen capture failed".to_string())).unwrap();
+            let v = build_handle(&lua, spec(&lua, &src).unwrap(), &making).unwrap();
             lua.globals().set(name, v.into_vec().remove(0)).unwrap();
         }
         lua.globals().set("dropped", Value::Nil).unwrap();

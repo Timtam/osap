@@ -10,7 +10,7 @@
 use std::cell::{Cell, RefCell};
 
 use super::{
-    Backend, CaptureFn, CaptureSource, CapturedImage, Captured, ControlInfo, ElementAsk, ElementOutcome,
+    Backend, CaptureFn, Captured, ControlInfo, ElementAsk, ElementOutcome,
     HostEvents, KeyboardNow, MouseButton, OwnerKeys, Stroke, WinInfo, CAPTURE_FAILED,
 };
 
@@ -113,21 +113,8 @@ impl Backend for StubBackend {
 
     // The source is accepted and ignored here, as on macOS: there is only one way of reading
     // nothing.
-    fn pixel(&self, _x: i32, _y: i32, _src: CaptureSource) -> Result<(u8, u8, u8), String> {
-        Ok((0, 0, 0))
-    }
-
-    fn capture(&self, _x: i32, _y: i32, _w: i32, _h: i32, _src: CaptureSource) -> Result<CapturedImage, String> {
-        Err(CAPTURE_FAILED.to_string())
-    }
-
     fn capture_fn(&self) -> CaptureFn {
         |regions, _| regions.iter().map(|_| Err(CAPTURE_FAILED.to_string())).collect()
-    }
-
-    // Nothing to keep. `pixels` is the trait's, which fails through `capture` above.
-    fn frame(&self, _r: crate::ocr::types::Rect, _src: CaptureSource) -> Result<super::frame::Frame, String> {
-        Err(CAPTURE_FAILED.to_string())
     }
 
     fn cursor_pos(&self) -> (i32, i32) {

@@ -239,10 +239,10 @@ jobs:
       # No text recognition and no screen capture on the event loop (crates/host/src/loop_guard.rs):
       # a release build writes `[loop] text recognition on the event loop` the first time a capture
       # for a read or a recognition runs on the loop's thread, where no call may make one, and
-      # `[loop] screen capture on the event loop` the first time the screen is captured there
-      # outside a `host.screen` call that could not wait. Not informational, unlike the probe above:
-      # either line is a bug in the host whatever the runner can capture. Both runs' logs, kept by
-      # the step above; a run without one has said so there.
+      # `[loop] screen capture on the event loop` the first time the screen is captured there, where
+      # nothing may capture since a `host.screen` call that cannot wait raises. Not informational,
+      # unlike the probe above: either line is a bug in the host whatever the runner can capture.
+      # Both runs' logs, kept by the step above; a run without one has said so there.
       - name: Nothing recognised text or captured the screen on the event loop
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -268,8 +268,8 @@ jobs:
       # The guard (crates/host/src/vm_guard.rs, stops.rs): the capture probe's callbacks are
       # short, and its reads wait in their timers' handlers, which counts on no clock — so a
       # `[guard] [<module>] stopped` line is a bug, in the host or in the probe. So is a call that
-      # could not wait and held the event loop instead (`could not wait here`, task.rs), and a
-      # `recognize` that raised, which is what it does where it cannot wait: the probe makes every
+      # raised because it could not wait (`cannot wait here` or `cannot wait in a coroutine`,
+      # task.rs, in the module's error line), and a `recognize` that raised: the probe makes every
       # call in a handler of its own, and a capture that failed is a reading, not a raise. A
       # reading the probe got "failed" is said: the runner may not have captured.
       - name: No module was stopped, and every call waited
@@ -285,9 +285,9 @@ jobs:
               Write-Host "::error::the guard stopped a module ($name run): $($stop.Line)"
               $found = $true
             }
-            $held = Select-String -Path $log -Pattern 'could not wait here' | Select-Object -First 1
-            if ($held) {
-              Write-Host "::error::a call could not wait and held the event loop ($name run): $($held.Line)"
+            $raised = Select-String -Path $log -Pattern 'cannot wait here|cannot wait in a coroutine' | Select-Object -First 1
+            if ($raised) {
+              Write-Host "::error::a call raised because it could not wait ($name run): $($raised.Line)"
               $found = $true
             }
             $threw = Select-String -Path $log -Pattern 'CAPTURE PROBE: (late )?recognize .*THREW' | Select-Object -First 1

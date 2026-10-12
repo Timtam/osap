@@ -16,9 +16,7 @@
 //! picture weakly: a handle the module has let go, with no search holding it, is gone with its
 //! bytes, and its task makes nothing.
 //!
-//! Where a search cannot wait it is made on the event loop, templates and all, through this same
-//! cache, as it was made before it waited — and a handle's picture the image worker is making at
-//! that moment is waited for there.
+//! The event loop opens no template: a search that cannot wait raises (task.rs).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -60,9 +58,9 @@ struct Cache {
     stamp: u64,
 }
 
-/// The image worker's decoded PNGs. A lock rather than the worker's own map because the event
-/// loop opens templates through it too, where a search cannot wait. Held only for a lookup or an
-/// insert, never for a decode.
+/// The image worker's decoded PNGs. A lock rather than the worker's own map because the threads of
+/// its matching pool open templates through it too, as they make a handle's picture from a file.
+/// Held only for a lookup or an insert, never for a decode.
 static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(Cache::default()));
 
 fn cache() -> std::sync::MutexGuard<'static, Cache> {

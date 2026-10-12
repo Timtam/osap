@@ -241,11 +241,12 @@ end
 -- stop the handler: one coroutine for a whole pass over them — a scan for the next control, a
 -- menu tick's questions — and each hook inline inside it. host.ocr.recognize without a callback
 -- finds itself "in a coroutine the module made" there, and raises; with a callback it is fine.
--- Nor does such a hook read the screen: a host.screen call that captures is to wait where it can,
--- and could not wait there. What a `when` needs of the screen is a PROBE of its overlay, which the
--- runtime reads in the handler before a scan, and the `when` answers from that reading (see
--- Overlay:probe, below O.memoByEpoch). A hook that yields there anyway is ended, with an error the
--- caller's guard logs — a menu test's alone (see _menuAsk); a `when`'s ends the scan it was in.
+-- Nor does such a hook read the screen: a host.screen call that captures waits where it can, and
+-- raises there, as host.ocr.recognize does. What a `when` needs of the screen is a PROBE of its
+-- overlay, which the runtime reads in the handler before a scan, and the `when` answers from that
+-- reading (see Overlay:probe, below O.memoByEpoch). A hook that yields there anyway is ended, with
+-- an error the caller's guard logs — a menu test's alone (see _menuAsk); a `when`'s ends the scan
+-- it was in.
 --
 -- The overlay's origin is resolved BEFORE a pass, outside it: a stored `identify` asked for a new
 -- control runs in the handler, where it may wait, and inside the pass the origin comes from the
@@ -5009,7 +5010,7 @@ end
 -- ── Probes: the pixels a `when` answers from ─────────────────────────────────
 -- A `when` is asked for every control on every scan, in the runtime's own coroutine, where the
 -- handler cannot wait (see "Where a hook runs"). It must not read the screen there: a host.screen
--- call that captures is to wait for its picture, and there it could not. Yet a plug-in's view is
+-- call that captures waits for its picture, and there it cannot — it raises. Yet a plug-in's view is
 -- often told by a pixel — Kontakt's classic view, ON:EAR's filled tiles, ReaHotkey's
 -- PixelGetColor in every visibility check. So the overlay holds those pixels as PROBES: the module
 -- declares the points, and the runtime reads every probe of the overlay that is due in one

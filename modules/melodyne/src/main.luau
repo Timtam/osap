@@ -595,10 +595,9 @@ local BOX_EDGE_CONTRAST = 20
 -- Read from the watcher's own pictures: every one of them holds both boxes' probes, and the
 -- watcher notes what they show here (rememberBoxes), eight times a second while the overlay is in
 -- front, at no cost of its own. NEVER from the screen here. This is a `when`, asked on every walk
--- of the Tab ring and as the overlay comes to the front, where a read of the screen holds the
--- event loop for a compositor frame and cannot wait for its picture; it used to read both points
--- live whenever the watcher's answer was half a second old — a menu open, the first moment of a
--- stay.
+-- of the Tab ring and as the overlay comes to the front, where a read of the screen cannot wait
+-- for its picture, and raises; it used to read both points live whenever the watcher's answer was
+-- half a second old — a menu open, the first moment of a stay.
 --
 -- DRAWN when there is no picture to go by: before the watcher's first in a stay — the Melodyne
 -- the overlay comes back to, or another of its windows, need not have the tool it left behind —

@@ -113,7 +113,8 @@ pub struct Area {
 }
 
 impl Area {
-    /// The whole of a `w` x `h` image.
+    /// The whole of a `w` x `h` image: for the tests, which read a whole picture.
+    #[cfg(test)]
     pub fn full(w: u32, h: u32) -> Area {
         Area { x: 0, y: 0, w, h }
     }
@@ -131,9 +132,8 @@ pub struct Frame {
     /// macOS: the backing-store image of the part of `rect` that was on the desktop.
     pub native: Option<NativeImage>,
     /// `host.inputEpoch()` once the capture had come back — what `s.inputEpoch` reports. 0 from
-    /// [`Frame::from_image`]; stamped by whoever took the picture: the event loop for
-    /// `host.screen.snapshot` where it cannot wait, the `screen-capture` thread for one given a
-    /// callback or waited for in a handler (`Round::run`).
+    /// [`Frame::from_image`]; stamped by the `screen-capture` thread that took the picture, for a
+    /// `host.screen.snapshot` given a callback or waited for in a handler (`Round::run`).
     /// A copy keeps it.
     pub input_epoch: u64,
 }

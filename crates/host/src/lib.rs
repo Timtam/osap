@@ -429,8 +429,7 @@ struct Shared {
     /// ...and what the event loop keeps for them: the callbacks waiting, the answers decided
     /// without the threads, the newest read per key (ocr/lua.rs).
     ocr_state: ocr::lua::OcrState,
-    /// The handlers, running and waiting, of every module, and what a blocking call held the event
-    /// loop for where it could not wait (task.rs).
+    /// The handlers, running and waiting, of every module (task.rs).
     tasks: task::Tasks,
     /// Each module's events that wait while it is busy (mailbox.rs).
     mail: mailbox::Mailboxes,
@@ -552,14 +551,6 @@ struct Observations {
     focus_chain: Option<Rc<Vec<backend::ControlInfo>>>,
     served: u32,
     asked: u32,
-    /// Screen pixel reads this epoch, and what they cost. NOT cached — a pixel is the one
-    /// observation whose whole purpose can be to change between two reads — but counted,
-    /// because each is a compositor frame and they were invisible.
-    pixels: u32,
-    pixel_us: u128,
-    /// `host.screen.profile` calls this epoch, those on a snapshot among them, and their time
-    /// split three ways ([`ProfileCost`]).
-    profile: ProfileCost,
     /// `host.screen.profile` answers given to a callback this epoch ([`ProfileCbCost`]).
     profile_cb: ProfileCbCost,
     /// Total time spent INSIDE these bindings this epoch, cache hits included. The
@@ -579,48 +570,6 @@ struct Observations {
     /// the conversions are free; it was a unit too coarse to see them, and it retired a
     /// correct hypothesis. Sub-millisecond costs need a sub-millisecond clock.
     binding_us: u128,
-}
-
-/// What `host.screen.profile` cost in one epoch, on the screen and on snapshots alike: a live
-/// profile is also one of the epoch's pixel reads, a snapshot's is not, and both run their
-/// reduction on the main thread. Microseconds.
-#[derive(Default)]
-struct ProfileCost {
-    calls: u32,
-    /// Of `calls`, those on a snapshot: their "capture" is the clip, no screen.
-    on_snapshot: u32,
-    capture_us: u128,
-    reduction_us: u128,
-    tables_us: u128,
-}
-
-impl ProfileCost {
-    /// One call: from its start to the picture, to the reduction's end, and to its tables' end.
-    fn add(&mut self, start: Instant, captured: Instant, reduced: Instant, end: Instant, snapshot: bool) {
-        self.calls += 1;
-        self.on_snapshot += u32::from(snapshot);
-        self.capture_us += captured.duration_since(start).as_micros();
-        self.reduction_us += reduced.duration_since(captured).as_micros();
-        self.tables_us += end.duration_since(reduced).as_micros();
-    }
-
-    /// The observe line's words for it, empty when there was no call:
-    /// `; profile ×2 94.0 ms = capture 18.1 + reduction 66.3 + tables 9.6 (1 on a snapshot)`.
-    fn clause(&self) -> String {
-        if self.calls == 0 {
-            return String::new();
-        }
-        let ms = |us: u128| us as f64 / 1000.0;
-        let snapshots = if self.on_snapshot > 0 { format!(" ({} on a snapshot)", self.on_snapshot) } else { String::new() };
-        format!(
-            "; profile ×{} {:.1} ms = capture {:.1} + reduction {:.1} + tables {:.1}{snapshots}",
-            self.calls,
-            ms(self.capture_us + self.reduction_us + self.tables_us),
-            ms(self.capture_us),
-            ms(self.reduction_us),
-            ms(self.tables_us)
-        )
-    }
 }
 
 /// What `host.screen.profile` with a callback cost in one epoch: the answers handed over, the event
@@ -664,22 +613,8 @@ impl ProfileCbCost {
 
 #[cfg(test)]
 mod profile_cost_tests {
-    use super::{ProfileCbCost, ProfileCost};
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn the_profile_cost_splits_into_capture_reduction_and_tables_and_counts_snapshots() {
-        let t0 = Instant::now();
-        let at = |us: u64| t0 + Duration::from_micros(us);
-        let mut c = ProfileCost::default();
-        assert_eq!(c.clause(), "", "no call, no words");
-        c.add(t0, at(18_100), at(84_400), at(92_000), false);
-        c.add(t0, at(0), at(2_000), at(2_000), true);
-        assert_eq!(
-            c.clause(),
-            "; profile ×2 94.0 ms = capture 18.1 + reduction 68.3 + tables 7.6 (1 on a snapshot)"
-        );
-    }
+    use super::ProfileCbCost;
+    use std::time::Duration;
 
     /// A profile with a callback is counted apart: only its tables are the event loop's.
     #[test]
@@ -715,9 +650,10 @@ impl Shared {
     /// the total is just the overlay count, a number the arbiter roster already prints,
     /// so the total no longer decides. What earns an epoch a line is the OS actually
     /// being interrogated (two or more distinct questions got past the cache), a rebuild
-    /// cost that a whole-millisecond clock can see, any pixel read — each one a
-    /// compositor frame — or any profile, a snapshot's included, whose reduction runs on the
-    /// event loop wherever its picture came from, or one given a callback, whose tables do.
+    /// cost that a whole-millisecond clock can see, or any profile given a callback, whose tables
+    /// are built on the event loop. The screen is never read on the event loop: the pixel reads
+    /// it counted, and the profiles reduced there, were the `host.screen` calls made where they
+    /// could not wait, which raise now.
     /// The total keeps only a sanity bound: one question per overlay is what an idle tick
     /// costs, and 251 was the most seen with every library loaded, so a thousand in one
     /// epoch is somebody asking in a loop, whatever the cache made of it.
@@ -733,8 +669,6 @@ impl Shared {
                 capture_source::duplication_clause(backend::take_duplication_counters());
             if reached_os >= 2
                 || obs.binding_us >= 1000
-                || obs.pixels > 0
-                || obs.profile.calls > 0
                 || obs.profile_cb.calls > 0
                 || obs.asked >= 1000
                 || !duplication.is_empty()
@@ -744,14 +678,11 @@ impl Shared {
                     &format!(
                         "epoch served {} of {} OS question(s) from cache ({} actually \
                          asked), {:.1} ms rebuilding Lua tables in window.controls and \
-                         window.focusChain, plus {} screen pixel read(s) costing {:.1} ms{}{}{duplication}",
+                         window.focusChain{}{duplication}",
                         obs.served,
                         obs.asked,
                         obs.asked - obs.served,
                         obs.binding_us as f64 / 1000.0,
-                        obs.pixels,
-                        obs.pixel_us as f64 / 1000.0,
-                        obs.profile.clause(),
                         obs.profile_cb.clause()
                     ),
                 );
@@ -765,9 +696,6 @@ impl Shared {
             obs.served = 0;
             obs.asked = 0;
             obs.binding_us = 0;
-            obs.pixels = 0;
-            obs.pixel_us = 0;
-            obs.profile = ProfileCost::default();
             obs.profile_cb = ProfileCbCost::default();
         }
         obs
@@ -977,12 +905,10 @@ impl Shared {
     /// Forgets the log's counts of module `idx`'s errors (and of its image searches ended past
     /// their limit), so their next occurrence is written in full: on disable/enable, on a reload,
     /// and when a failed hot-load is rolled back. Keyed by the module's id, as `error_repeats`
-    /// is, so it is asked while `ids` still holds it. Its line for a blocking call that held the
-    /// event loop is written again too (`Tasks::forget_legacy_said`).
+    /// is, so it is asked while `ids` still holds it.
     fn forget_error_repeats(&self, idx: usize) {
         if let Some(id) = self.ids.borrow().get(idx) {
             self.error_repeats.borrow_mut().forget_prefix(&format!("{id}\u{1}"));
-            self.tasks.forget_legacy_said(id);
         }
     }
 
@@ -5045,8 +4971,8 @@ impl Manager {
         // anything can read it. See `clock_origin`.
         clock_origin();
         // This thread loads the modules and then runs the event loop — the window's tick and the
-        // headless loop alike — so it is the loop no recogniser may run on, and no capture but
-        // that of a call that could not wait (loop_guard.rs).
+        // headless loop alike — so it is the loop no recogniser and no capture may run on
+        // (loop_guard.rs).
         loop_guard::mark_loop_thread();
         let backend = backend::platform();
         // `host.ocr.recognize`'s threads, first: the recognise thread publishes the language list
@@ -5870,11 +5796,8 @@ fn run_set(sources: module_set::Sources) -> Result<()> {
             }
         }
         let ran = manager.run();
-        // What the blocking calls held the event loop for where they could not wait, per module and
-        // call, once: the whole session's cost, beside the first line that said it as it happened.
-        manager.shared.log_legacy_summary();
-        // And what each module took of the event loop, from the guard's watchdog, which stops
-        // here; a mouse button a module still holds goes up.
+        // What each module took of the event loop, from the guard's watchdog, which stops here; a
+        // mouse button a module still holds goes up.
         manager.stop_guard();
         // The window loop has ended, so a second start from here on is told this copy is
         // quitting, and waits for the lock instead of handing its request to a window that
@@ -8029,18 +7952,16 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // host.screen.pixel(x, y, opts?) or pixel({ window = w, fraction = { x, y } }, opts?) ->
     // colour | nil, reason — and host.screen.pixels(points, opts?), many points from as few
     // captures as they allow. Both wait in a handler while the `screen-capture` thread reads the
-    // screen as the event loop would (task.rs, task_shim.luau), and where they cannot wait read on
-    // the event loop, said in the log; a snapshot's points are answered at once wherever they are
-    // asked. Timed and counted where they read on the event loop: a single pixel read is a GDI
-    // screen touch, measured at a fixed ~16.7 ms — one compositor frame, whatever the size — and
-    // sixty of them is a second. The rules are in snapshot.rs; registered HERE, by name, for
-    // check-docs.ps1 and tools/api-index.py, which read this file.
+    // screen (task.rs, task_shim.luau), and where they cannot wait they raise; a snapshot's points
+    // are answered at once wherever they are asked. A single pixel read is a GDI screen touch,
+    // measured at a fixed ~16.7 ms — one compositor frame, whatever the size — and sixty of them is
+    // a second, which is why none is made on the event loop. The rules are in snapshot.rs;
+    // registered HERE, by name, for check-docs.ps1 and tools/api-index.py, which read this file.
     screen.set("pixel", snapshot::pixel(lua, shared, idx)?)?;
     // host.screen.snapshot(opts, cb?) — one picture taken once and read by every call given
     // `{ snapshot = s }`. Without a callback it waits in a handler for the `screen-capture` thread's
-    // picture, and where it cannot wait takes its picture on the event loop, said in the log; with
-    // one it never waits, and the picture is taken on that thread at once, at a set time, or when
-    // the region changes.
+    // picture, and where it cannot wait it raises; with one it never waits, and the picture is taken
+    // on that thread at once, at a set time, or when the region changes.
     screen.set("snapshot", snapshot::snapshot(lua, shared, idx)?)?;
     screen.set("pixels", snapshot::pixels(lua, shared, idx)?)?;
     // host.screen.pending(key) — whether a call of this module given a callback and that key is
@@ -8064,9 +7985,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // ONE capture, reduced in Rust to a shape a module can reason about (snapshot.rs, `profile`,
     // has why). In a handler it waits: the capture on the `screen-capture` thread (none for a
     // snapshot), the reduction on the image worker, and only the answer's tables here; where it
-    // cannot wait it captures and reduces on the event loop, said in the log and counted as one
-    // screen touch in the observation log. host.screen.profile(opts, cb) — the same answer to a
-    // callback, which never waits, wherever it is asked.
+    // cannot wait it raises. host.screen.profile(opts, cb) — the same answer to a callback, which
+    // never waits, wherever it is asked.
     screen.set("profile", snapshot::profile(lua, shared, idx)?)?;
     // Snapshot:crop, which the Snapshot handle reaches as `s:crop(region)`: made once per VM, so
     // that it can wait (snapshot.rs, `install_crop`).
@@ -8074,8 +7994,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // The image-search bindings and template handles live in image_search.rs, with the rules
     // that belong to them: who a callback's answer is delivered to, what a module may hold in
     // handles, and what a panic on the worker turns into. `imageSearch` and `imageSearchAll` wait
-    // in a handler while the image worker captures and matches, and where they cannot wait do both
-    // on the event loop, said in the log; `imageSearch` given a callback never waits. Registered
+    // in a handler while the image worker captures and matches, and where they cannot wait they
+    // raise; `imageSearch` given a callback never waits. Registered
     // HERE, by name, because this file is what check-docs.ps1 and tools/api-index.py read to learn
     // what exists.
     screen.set("template", image_search::template(lua, shared, idx)?)?;
@@ -8084,8 +8004,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // host.screen.saveMarked(path, opts) — like save, but draws a crosshair (and an index
     // tick) at each point in `opts.marks` = { {x, y}, … } in SCREEN coordinates: the calibration
     // question in one picture. Both wait in a handler while the image worker captures, marks,
-    // encodes and writes, and where they cannot wait the event loop does, said in the log: the rules
-    // are in save.rs; registered HERE, by name, for check-docs.ps1 and tools/api-index.py.
+    // encodes and writes, and where they cannot wait they raise: the rules are in save.rs;
+    // registered HERE, by name, for check-docs.ps1 and tools/api-index.py.
     screen.set("saveMarked", save::save_marked(lua, shared, idx)?)?;
     // In image_search.rs too; see the note above imageSearch.
     screen.set("imageSearchAll", image_search::image_search_all(lua, shared, idx)?)?;
@@ -8118,8 +8038,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // cells(opts) -> { cells, x, y, w, h } | nil, reason, and matchCells(opts, states, cb?) ->
     // match | nil, reason: the region read once and reduced to cells, and for matchCells ranked
     // against the states in Rust. In a handler both wait while the image worker captures, reduces
-    // and ranks (image_search.rs, `cells_plan`), and where they cannot wait they do it on the event
-    // loop, said in the log (`cells_on_loop`); matchCells given a callback never waits. Every
+    // and ranks (image_search.rs, `cells_plan`), and where they cannot wait they raise
+    // (`image_search::now_plan`); matchCells given a callback never waits. Every
     // argument is checked before anything is read, so a bad state raises on the first call, not on
     // the first call whose region resolves.
     screen.set("cells", cells_fn(lua, shared, idx)?)?;
@@ -9873,8 +9793,8 @@ pub(crate) fn with_reason(lua: &Lua, first: mlua::Value, why: String) -> mlua::R
 
 /// `host.screen.cells(opts, cb?) -> ({ cells, x, y, w, h }?, string?)`: in a handler it waits while
 /// the image worker reads and reduces the region (`image_search::cells_plan`); where it cannot wait
-/// it does that on the event loop, said in the log ([`cells_on_loop`]). With a callback it never
-/// waits.
+/// it raises, unless there is nothing to read this time (`image_search::now_plan`). With a callback
+/// it never waits.
 fn cells_fn(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, opts): (Table, mlua::Value)| {
@@ -9882,11 +9802,9 @@ fn cells_fn(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function
         let parse = || image_search::cells_plan(lua, cells_ask(lua, CELLS, opts, None, false)?);
         image_search::start_plan(&*sh, lua, idx, CELLS, image_search::cells_stop(false), nonce, parse)
     })?;
-    let sh = shared.clone();
-    let blocking = lua.create_function(move |lua, (why, opts): (String, mlua::Value)| {
+    let now = lua.create_function(move |lua, opts: mlua::Value| {
         host_call!("host.screen.cells");
-        let ask = cells_ask(lua, CELLS, opts, None, false)?;
-        cells_on_loop(&sh, lua, idx, CELLS, &why, ask)
+        Ok(image_search::now_plan(image_search::cells_plan(lua, cells_ask(lua, CELLS, opts, None, false)?)?))
     })?;
     let sh = shared.clone();
     let submit = lua.create_function(move |lua, (opts, cb): (mlua::Value, mlua::Value)| {
@@ -9897,12 +9815,13 @@ fn cells_fn(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function
         let plan = image_search::cells_plan(lua, ask)?;
         image_search::submit_plan(&*sh, lua, idx, cb, key, image_search::cells_stop(false), image_search::JobKind::Cells, plan)
     })?;
-    task::points(lua, idx, shared.clone())?.call((CELLS, start, blocking, submit, 2))
+    task::points(lua, idx, shared.clone())?.call((CELLS, start, now, submit, 2))
 }
 
 /// `host.screen.matchCells(opts, states, cb?) -> (CellsMatch?, string?)`: `cells`, and the grid
-/// ranked against the states — on the image worker in a handler, on the event loop where it cannot
-/// wait. With a callback it never waits: the same task, its answer handed to `cb` on a later tick.
+/// ranked against the states — on the image worker in a handler; where it cannot wait it raises, as
+/// `cells` does. With a callback it never waits: the same task, its answer handed to `cb` on a later
+/// tick.
 fn match_cells_fn(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, opts, states): (Table, mlua::Value, mlua::Value)| {
@@ -9910,11 +9829,9 @@ fn match_cells_fn(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Fu
         let parse = || image_search::cells_plan(lua, cells_ask(lua, MATCH_CELLS, opts, Some(states), false)?);
         image_search::start_plan(&*sh, lua, idx, MATCH_CELLS, image_search::cells_stop(true), nonce, parse)
     })?;
-    let sh = shared.clone();
-    let blocking = lua.create_function(move |lua, (why, opts, states): (String, mlua::Value, mlua::Value)| {
+    let now = lua.create_function(move |lua, (opts, states): (mlua::Value, mlua::Value)| {
         host_call!("host.screen.matchCells");
-        let ask = cells_ask(lua, MATCH_CELLS, opts, Some(states), false)?;
-        cells_on_loop(&sh, lua, idx, MATCH_CELLS, &why, ask)
+        Ok(image_search::now_plan(image_search::cells_plan(lua, cells_ask(lua, MATCH_CELLS, opts, Some(states), false)?)?))
     })?;
     let sh = shared.clone();
     let submit = lua.create_function(move |lua, (opts, states, cb): (mlua::Value, mlua::Value, mlua::Value)| {
@@ -9925,38 +9842,7 @@ fn match_cells_fn(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Fu
         let plan = image_search::cells_plan(lua, ask)?;
         image_search::submit_plan(&*sh, lua, idx, cb, key, image_search::cells_stop(true), image_search::JobKind::Cells, plan)
     })?;
-    task::points(lua, idx, shared.clone())?.call((MATCH_CELLS, start, blocking, submit, 3))
-}
-
-/// A cells call `fname` where it cannot wait (`why`, the shim's word for the place): answered at
-/// once when there is nothing to read this time; otherwise read on the event loop — where the
-/// region lies in its snapshot, or captured through this VM's source without the first-read
-/// comparison, which is left to the module's next read — held there for that one call and said
-/// in the log (`task::legacy`). A live read is counted as one screen touch in the observation log
-/// and timed to the end of the reduction, as `profile` is: the capture is a fixed frame, and the
-/// part that grows with the region is what the log is there to show.
-fn cells_on_loop(
-    sh: &Shared,
-    lua: &Lua,
-    idx: usize,
-    fname: &'static str,
-    why: &str,
-    ask: image_search::CellsAsk,
-) -> mlua::Result<mlua::MultiValue> {
-    if ask.rect.is_err() {
-        return image_search::cells_now(lua, ask, |_| Err(backend::CAPTURE_FAILED.to_string()));
-    }
-    task::legacy(sh, lua, idx, fname, crate::loop_guard::Kind::Screen, why, || {
-        let t0 = Instant::now();
-        let live = ask.snapshot.is_none();
-        let out = image_search::cells_now(lua, ask, |r| sh.backend.capture(r.x, r.y, r.w, r.h, capture_source::vm_source(lua)));
-        if live {
-            let mut obs = sh.observations();
-            obs.pixels += 1;
-            obs.pixel_us += t0.elapsed().as_micros();
-        }
-        out
-    })
+    task::points(lua, idx, shared.clone())?.call((MATCH_CELLS, start, now, submit, 3))
 }
 
 #[cfg(test)]
@@ -10763,7 +10649,7 @@ mod ocr_wiring_tests {
         let form = profile.find("let submit = lua.create_function(").expect("the callback form");
         let handed = profile[form..].find("submit_profile(&*sh, lua, idx, Asker::Callback(cb), ").expect("files the request") + form;
         assert!(profile[handed..].find("Ok(())").is_some_and(|at| profile[handed..handed + at].lines().count() <= 2), "and returns at once");
-        assert!(profile.contains("crate::task::points(lua, idx, shared.clone())?.call((FPR, start, blocking, submit, 2))"), "the shim's callback form");
+        assert!(profile.contains("crate::task::points(lua, idx, shared.clone())?.call((FPR, start, now, submit, 2))"), "the shim's callback form");
         let start = body(SNAP, "pub(crate) fn start_profile<");
         assert!(start.contains("submit_profile(h, lua, scope, Asker::Handler(task), o, args, prio, Instant::now())?"), "the wait files the same request");
         let f = body(SNAP, "pub(crate) fn submit_profile<");
@@ -10789,15 +10675,16 @@ mod ocr_wiring_tests {
 
     /// Without a callback, `profile` refuses `key` and `at` (snapshot.rs, `callback_only`, tested
     /// there), where it waits and where it cannot: after its other options are read, and before
-    /// anything is filed, answered or captured. The callback form, the shim's to take first, reads
-    /// both.
+    /// anything is filed or answered — or the call raises for the place. The callback form, the
+    /// shim's to take first, reads both.
     #[test]
     fn a_profile_without_a_callback_refuses_key_and_at_before_it_answers() {
         let profile = body(SNAP, "pub(crate) fn profile(");
-        let blocking = &profile[profile.find("let blocking = lua.create_function(").expect("where it cannot wait")..];
-        let refused = blocking.find("callback_only(opts.as_ref(), FPR, &[\"key\", \"at\"], \"the second argument\")?;").expect("key and at refused");
-        assert!(blocking.find("profile_args(").unwrap() < refused, "before the other options are read");
-        assert!(refused < blocking.find("profile_now(").unwrap(), "after a reason was answered or a capture made");
+        assert!(profile.contains("profile_now(lua, opts, sh.backend.screen_size())"), "where it cannot wait");
+        let now = body(SNAP, "fn profile_now(");
+        let refused = now.find("callback_only(opts.as_ref(), FPR, &[\"key\", \"at\"], \"the second argument\")?;").expect("key and at refused");
+        assert!(now.find("profile_args(").unwrap() < refused, "after the other options are read");
+        assert!(refused < now.find("nothing_to_profile(").unwrap(), "before anything is answered");
         let start = body(SNAP, "pub(crate) fn start_profile<");
         let refused = start.find("callback_only(o, FPR, &[\"key\", \"at\"], \"the second argument\")?;").expect("key and at refused in a handler");
         assert!(refused < start.find("submit_profile(").unwrap(), "after the request was filed");
@@ -10837,7 +10724,6 @@ mod ocr_wiring_tests {
         assert!(text("recognize").contains("recognize.get::<Function>(\"recognize\")"));
         assert!(api.contains("let recognize = task::waits(lua, idx, shared.clone(), submit)?;"));
         assert!(api.contains("ocr::lua::read(&*sh, lua, idx, what, opts, cb)"), "the callback form");
-        assert!(!api.contains("task::legacy("), "a blocking call beside it");
     }
 
     /// Somebody waiting: every dispatch a person causes runs in the interactive lane, and an
@@ -10964,7 +10850,7 @@ mod ocr_wiring_tests {
     /// No binding opens a PNG, or makes a handle's picture, where it reads the module's arguments:
     /// every search — the callback forms among them — checks its paths through `locate_in`, the
     /// first time each is named, and `template{ file }` reads the header alone. A PNG is opened by
-    /// the worker's own work, which the event loop runs only where a call cannot wait.
+    /// the worker's own work, which never runs on the event loop.
     #[test]
     fn no_binding_opens_a_template_where_it_reads_its_arguments() {
         for f in ["pub(crate) fn image_search(", "pub(crate) fn image_search_all(", "pub(crate) fn image_search_each("] {
@@ -10983,10 +10869,10 @@ mod ocr_wiring_tests {
     }
 
     /// `pixel`'s options are read strictly, before anything is answered, and a read of a
-    /// snapshot touches no screen: no capture and no count in the observation line, in `pixel`,
-    /// `pixels`, `profile` and the cells calls. Their live reads: where they cannot wait on the event
-    /// loop through the module's source, without the first-read comparison, counted; in a handler
-    /// a request of the capture thread, which carries the comparison.
+    /// snapshot touches no screen: no capture and no count in the observation line. Their live
+    /// reads: in a handler a request of the capture thread, which carries the first-read comparison;
+    /// where they cannot wait nothing — the call raises — and the same for the region calls, whose
+    /// work goes to the image worker with the comparison whenever it reads the screen.
     #[test]
     fn pixel_opts_are_strict_and_a_snapshot_read_touches_no_screen() {
         let api = body(LIB, "fn install_host_api(");
@@ -10999,50 +10885,37 @@ mod ocr_wiring_tests {
         let branch = pixel.find("if let Some(frame) = snap {").expect("pixel's snapshot branch");
         let live = pixel.find("Ok((Reading::Live(vec![(x, y)]), key))").expect("pixel's live read");
         assert!(branch < live && !pixel.contains("observations()"), "a snapshot's pixel is counted as a screen read");
-        assert!(body(SNAP, "pub(crate) fn profile(").contains("if c.live {"), "a snapshot's profile is counted as a screen read");
-        assert!(body(LIB, "fn cells_on_loop(").contains("if live {"), "a snapshot's cells are counted as a screen read");
-        // The region calls where they cannot wait: the module's source, no comparison on the loop.
+        // The region calls where they cannot wait: answered at once with nothing to read, otherwise
+        // nothing — the call raises — and a plan of work let go unsent.
         assert!(text("cells").contains("cells_fn(lua, shared, idx)") && text("matchCells").contains("match_cells_fn(lua, shared, idx)"));
-        assert!(body(LIB, "fn cells_fn(").contains("cells_on_loop(&sh, lua, idx, CELLS, &why, ask)"));
-        assert!(body(LIB, "fn match_cells_fn(").contains("cells_on_loop(&sh, lua, idx, MATCH_CELLS, &why, ask)"));
-        for (file, f) in [
-            (LIB, "fn cells_on_loop("),
-            (SNAP, "pub(crate) fn profile("),
-            (IMAGES, "pub(crate) fn template("),
-            (IMAGES, "fn live_capture("),
-            (SAVE, "fn live_capture("),
-        ] {
-            let b = body(file, f);
-            assert!(b.contains("capture_source::vm_source(lua)") && !b.contains("read_source("), "`{f}` compares on the loop");
+        for f in ["fn cells_fn(", "fn match_cells_fn("] {
+            assert!(body(LIB, f).contains("Ok(image_search::now_plan(image_search::cells_plan(lua, cells_ask(lua, "), "`{f}`");
         }
-        // The searches and the shots: the loop's capture is `live_capture`'s, and the work it
-        // hands the worker's own matching makes no comparison either.
         for (file, f) in [
-            (IMAGES, "fn image_search("),
-            (IMAGES, "fn image_search_all("),
+            (IMAGES, "pub(crate) fn template("),
+            (IMAGES, "pub(crate) fn image_search("),
+            (IMAGES, "pub(crate) fn image_search_all("),
             (SAVE, "pub(crate) fn save("),
             (SAVE, "pub(crate) fn save_marked("),
         ] {
-            assert!(body(file, f).contains("|r| live_capture(&sh, lua, r)"), "`{f}`");
+            assert!(body(file, f).contains("now_plan("), "`{f}`");
         }
-        assert!(body(IMAGES, "fn search_on_loop<").contains("search_work(lua, kind, ask, region, false)"));
-        assert!(body(SAVE, "fn save_on_loop<").contains("save_work(lua, shot, ask, region, false)"));
-        assert!(body(IMAGES, "pub(crate) fn haystack(").contains("compare: if carry { capture_source::take_compare(lua, r) } else { None },"));
+        let now = body(IMAGES, "pub(crate) fn now_plan(");
+        assert!(now.contains("Plan::Now(values, _) => Some(values),") && now.contains("Plan::Work { .. } => None,"));
+        // Every task the image worker captures for carries the module's comparison when it is owed.
+        assert!(body(IMAGES, "pub(crate) fn haystack(").contains("compare: capture_source::take_compare(lua, r),"));
         // `pixel(x, y)` takes its options third and `pixel(point)` second.
         assert!(pixel.contains("_ => c,"), "pixel(x, y) reads its options from somewhere else");
         let read = body(SNAP, "pub(crate) fn pixels_args(");
         let snap = read.find("if let Some(frame) = snap {").expect("pixels' snapshot branch");
         let live = read.find("Ok((Reading::Live(at), key))").expect("pixels' live read");
         assert!(snap < live && !read.contains("observations()"));
-        // Where they cannot wait: the module's source, no comparison, one count per call.
-        let on_loop = body(SNAP, "fn read_on_loop(");
-        let src = on_loop.find("let src = capture_source::vm_source(lua);").expect("the module's source");
-        let one = on_loop.find("sh.backend.pixel(x, y, src)").expect("pixel's live read");
-        assert!(src < one && on_loop.contains("sh.backend.pixels(at, src)") && on_loop.contains("obs.pixels += 1;"));
-        assert!(!on_loop.contains("read_source("), "the read that could not wait makes the comparison on the loop");
+        // Where they cannot wait: a reading that touches no screen at once, a live one nothing.
+        let now = body(SNAP, "fn now_of(");
+        assert!(now.contains("Reading::Now(values, _) => Some(values),") && now.contains("Reading::Live(_) => None,"));
         for f in ["pub(crate) fn pixel(", "pub(crate) fn pixels("] {
             let b = body(SNAP, f);
-            assert!(b.contains("crate::task::legacy(&*sh, lua, idx,") && b.contains("read_on_loop(&sh, lua, "), "`{f}`");
+            assert!(b.contains("Ok(now_of(pixel") && !b.contains("backend."), "`{f}`");
         }
         // In a handler: the capture thread's request, which carries the comparison when it is owed.
         assert!(body(SNAP, "fn submit_points<").contains("compare: capture_source::take_compare(lua, region.tuple()),"));
@@ -11056,7 +10929,6 @@ mod ocr_wiring_tests {
         let binding = bindings(api, "screen").into_iter().find(|b| b.0 == "profile").expect("host.screen.profile").1;
         assert!(binding.contains("snapshot::profile(lua, shared, idx)"), "host.screen.profile");
         assert!(body(SNAP, "fn profile_answer(").contains("let t = crate::profile_table(lua, rect, columns, rows)?;"));
-        assert!(body(SNAP, "pub(crate) fn profile_on_loop(").contains("let out = profile_answer(lua, "), "host.screen.profile builds its answer elsewhere");
         // A callback's answer and a waited one's are built by the same function.
         assert!(body(SNAP, "fn call_args(").contains("profile_answer(&lua, r.rect.tuple(), r.columns, r.rows, job.moment)?"));
         assert!(body(SNAP, "fn waited_values(").contains("profile_answer(&lua, r.rect.tuple(), r.columns, r.rows, job.moment)?"));
@@ -11132,10 +11004,8 @@ mod ocr_wiring_tests {
         let snap = ask.find("snapshot::from_opts(").expect("a snapshot");
         assert!(check < snap, "save and saveMarked check their path only after reading a snapshot");
         assert!(!ask.contains("capture(") && !ask.contains("crop_image("), "save and saveMarked read a picture with their arguments");
-        for f in ["fn save_plan(", "fn save_on_loop<"] {
-            let b = body(SAVE, f);
-            assert!(b.find("let region = match &ask.region {").unwrap() < b.find("save_work(").unwrap(), "`{f}`");
-        }
+        let plan = body(SAVE, "fn save_plan(");
+        assert!(plan.find("let region = match &ask.region {").unwrap() < plan.find("save_work(").unwrap());
     }
 
     /// `pixel(x, y)` converts its numbers as it always has — a fraction cut toward zero, a
@@ -11177,12 +11047,12 @@ mod ocr_wiring_tests {
         let saved = body(SAVE, "pub(crate) fn save_values(");
         assert!(saved.contains("one_value(") && saved.contains("with_reason(lua, "), "save and saveMarked");
         assert!(!saved.contains("Value::Nil))"), "save and saveMarked answer two values where they answered one");
-        // `profile` builds its answers in snapshot.rs: on the event loop, and for a handler that waited.
-        for f in ["pub(crate) fn profile_on_loop(", "fn waited_values("] {
-            let t = body(SNAP, f);
-            assert!(t.contains("one_value(") && t.contains("with_reason("), "`{f}`");
-            assert!(!t.contains("Value::Nil))"), "`{f}` answers two values where it answered one");
-        }
+        // `profile` builds its answers in snapshot.rs: for a handler that waited, and with nothing to
+        // read, where there is the reason alone.
+        let t = body(SNAP, "fn waited_values(");
+        assert!(t.contains("one_value(") && t.contains("with_reason("), "waited_values");
+        assert!(!t.contains("Value::Nil))"), "waited_values answers two values where it answered one");
+        assert!(body(SNAP, "fn nothing_to_profile(").contains("with_reason(lua, Value::Nil, why).map(Some)"));
         // `pixel` builds its answers in snapshot.rs: at once, and from a live read wherever it ran.
         for f in ["pub(crate) fn pixel_args(", "fn live_values("] {
             let t = body(SNAP, f);
@@ -11239,9 +11109,8 @@ mod ocr_wiring_tests {
             assert!(purge[..deactivated].contains(drop), "`{drop}` is not done before it either");
         }
         assert!(body(LIB, "fn rollback_to(").contains("self.task_drop_from(n);"));
-        // The loop is the thread that builds the manager, and the summary is written at exit.
+        // The loop is the thread that builds the manager.
         assert!(body(LIB, "pub fn new() -> Result<Self>").contains("loop_guard::mark_loop_thread();"));
-        assert!(body(LIB, "fn run_set(sources: module_set::Sources) -> Result<()> {").contains("manager.shared.log_legacy_summary();"));
         // The overrun line counts the deliveries' callbacks, and names no task: no module starts one.
         assert!(LIB.contains(concat!("let ocr_n = shared.fire_ocr", "_results();")));
         assert!(LIB.contains(concat!("({} callback(s)), snapshot results ", "\\")));
@@ -11512,14 +11381,13 @@ mod ocr_wiring_tests {
         assert!(body(LIB, "fn drop_module(").contains(new_vm), "a dropped module's empty VM");
     }
 
-    /// The event loop reads the screen through the backend only for a `host.screen` call that could
-    /// not wait, inside that call's scope of the loop guard (`task::legacy` with `Kind::Screen`):
-    /// every source file of the crate is searched, its test code left out, for a call of the
-    /// backend's four reads of the screen on the calling thread, and each is in one of the functions
-    /// such a call reads through — whose way into the scope is checked too. Anywhere else the read
-    /// would be the bug the screen guard names when it runs (`loop_guard::off_loop_screen`).
+    /// The event loop never reads the screen through the backend: no read of the screen on the
+    /// calling thread is left in it, and every source file of the crate is searched, its test code
+    /// left out, for a call of one. A `host.screen` call that cannot wait raises (task.rs); the
+    /// threads that read for it capture through `capture_fn` and the `OcrWorker` functions, each
+    /// behind the loop guard's screen guard (loop_guard.rs holds where).
     #[test]
-    fn the_backend_reads_the_screen_only_inside_a_call_that_could_not_wait() {
+    fn the_backend_reads_the_screen_nowhere_on_the_event_loop() {
         let mut found: Vec<String> = Vec::new();
         for (name, src, tests) in production_sources() {
             for read in ["pixel(", "pixels(", "capture(", "frame("] {
@@ -11532,143 +11400,12 @@ mod ocr_wiring_tests {
                 }
             }
         }
-        found.sort();
-        assert_eq!(
-            found,
-            [
-                "image_search.rs: live_capture",
-                "image_search.rs: template",
-                "lib.rs: cells_on_loop",
-                "save.rs: live_capture",
-                "snapshot.rs: profile",
-                "snapshot.rs: read_on_loop",
-                "snapshot.rs: read_on_loop",
-                "snapshot.rs: snapshot",
-            ],
-            "the backend reads the screen somewhere new"
-        );
-        let screen = "crate::loop_guard::Kind::Screen";
-        let reads = concat!("backend", ".");
-        // Read in the scope itself: every such read of the function in the block its scope opens.
-        inside("cells_on_loop", body(LIB, "fn cells_on_loop("), &format!("task::legacy(sh, lua, idx, fname, {screen}, why, || {{"), &format!("{reads}capture("));
-        inside("snapshot", body(SNAP, "pub(crate) fn snapshot("), &format!("crate::task::legacy(&*sh, lua, idx, FS, {screen}, &why, || {{"), &format!("{reads}frame("));
-        for (f, name) in [("pub(crate) fn pixel(", "FP"), ("pub(crate) fn pixels(", "FPS")] {
-            inside(f, body(SNAP, f), &format!("crate::task::legacy(&*sh, lua, idx, {name}, {screen}, &why, || {{"), "read_on_loop(&sh, lua, ");
+        assert!(found.is_empty(), "the backend reads the screen on the calling thread: {found:?}");
+        const BACKEND: &str = include_str!("backend/mod.rs");
+        let backend = body(BACKEND, "pub trait Backend");
+        for gone in ["fn pixel(&self", "fn pixels(&self", "fn capture(&self", "fn frame(&self"] {
+            assert!(!backend.contains(gone), "the backend reads the screen on the calling thread again: {gone}");
         }
-        assert_eq!(SNAP.matches("read_on_loop(&sh, lua, ").count(), 2, "read_on_loop is called somewhere else");
-        // Read through the closure the call hands to the function whose scope reads it: named in
-        // the binding only where it is made and handed on, and in that function only as its
-        // parameter, in its scope and in a branch that reads nothing — so nothing calls it outside
-        // the scope.
-        let profile = body(SNAP, "pub(crate) fn profile(");
-        named_only_in_scope("profile", profile, None, &[
-            &format!("let capture = |x, y, w, h| sh.{reads}capture("),
-            "profile_now(&*sh, lua, idx, &why, args, sh.input_epoch.get(), capture, observe)",
-        ]);
-        let now = body(SNAP, "fn profile_now<");
-        let scope = format!("crate::task::legacy(h, lua, scope, FPR, {screen}, why, || {{");
-        inside("profile_now", now, &scope, "profile_on_loop(lua, args, input_epoch, capture)?");
-        let nothing = "return profile_on_loop(lua, args, input_epoch, capture).map(|(v, _)| v);";
-        assert!(now.contains(&format!("if nothing_to_profile(&args) {{\n        {nothing}\n    }}")), "profile_now reads before its scope");
-        named_only_in_scope("profile_now", now, Some(&scope), &["capture: impl FnOnce(i32, i32, i32, i32)", nothing]);
-        // The binding's closure is written in the call that hands it on, and is its one live read.
-        assert!(body(IMAGES, "pub(crate) fn template(").contains("template_on_loop(\n"), "template's capture goes somewhere else");
-        let on_loop = body(IMAGES, "fn template_on_loop<");
-        assert!(on_loop.contains("Source::Capture { snapshot: None, .. } => true,"), "a live capture outside the scope");
-        let scoped = format!("crate::task::legacy(h, lua, scope, FT, {screen}, why, || build_handle(lua, parsed, making, capture))");
-        let unread = "build_handle(lua, parsed, making, capture)";
-        assert!(on_loop.contains(&format!("if reads {{\n        {scoped}\n    }} else {{\n        {unread}\n    }}")), "template_on_loop reads outside its scope");
-        named_only_in_scope("template_on_loop", on_loop, None, &["capture: impl FnOnce(i32, i32, i32, i32)", &scoped, unread]);
-        for (file, src, f, call, name) in [
-            ("image_search.rs", IMAGES, "fn search_on_loop<", "search_on_loop(", "kind.name()"),
-            ("save.rs", SAVE, "fn save_on_loop<", "save_on_loop(", "shot.name()"),
-        ] {
-            // Every use of `live_capture` hands it to the function whose scope reads it.
-            let uses: Vec<&str> = src.lines().filter(|l| l.contains("live_capture(") && !l.contains("fn live_capture(")).collect();
-            assert!(!uses.is_empty() && uses.iter().all(|l| l.contains(call) && l.contains("|r| live_capture(&sh, lua, r)")), "{file}: {uses:?}");
-            let scope = format!("crate::task::legacy(h, lua, scope, {name}, {screen}, why, || {{");
-            inside(f, body(src, f), &scope, "answer_on_loop(&t, capture)");
-            named_only_in_scope(f, body(src, f), Some(&scope), &["capture: impl FnOnce((i32, i32, i32, i32))"]);
-        }
-    }
-
-    /// The block of `text` that `scope` — a call's scope, written up to the brace that opens its
-    /// closure — opens: from that brace to the one that closes it, string literals and line
-    /// comments passed over.
-    fn scope_block(what: &str, text: &str, scope: &str) -> std::ops::Range<usize> {
-        assert!(scope.ends_with('{'), "{what}: `{scope}` opens no block");
-        assert_eq!(text.matches(scope).count(), 1, "{what}: not one `{scope}`");
-        let open = text.find(scope).unwrap() + scope.len() - 1;
-        let b = text.as_bytes();
-        let (mut i, mut depth) = (open, 0usize);
-        while i < b.len() {
-            match b[i] {
-                b'"' => {
-                    i += 1;
-                    while i < b.len() && b[i] != b'"' {
-                        i += if b[i] == b'\\' { 2 } else { 1 };
-                    }
-                }
-                b'/' if b.get(i + 1) == Some(&b'/') => {
-                    while i < b.len() && b[i] != b'\n' {
-                        i += 1;
-                    }
-                }
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return open..i + 1;
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        panic!("{what}: `{scope}` is not closed");
-    }
-
-    /// A read after its scope's closure has closed is outside the scope, though it comes after the
-    /// scope's text; a brace in a string or a comment closes nothing.
-    #[test]
-    fn a_read_after_its_scope_closes_is_outside_it() {
-        let text = "fn f() {\n    legacy(|| {\n        let s = \"}\"; // }\n        read();\n    });\n    read();\n}\n";
-        let block = scope_block("f", text, "legacy(|| {");
-        let reads: Vec<bool> = text.match_indices("read(").map(|(i, _)| block.contains(&i)).collect();
-        assert_eq!(reads, [true, false], "the first read in the scope, the second after it");
-    }
-
-    /// Every `read` in `text` is made in the block `scope` opens, and there is one at least.
-    fn inside(what: &str, text: &str, scope: &str, read: &str) {
-        let block = scope_block(what, text, scope);
-        let at: Vec<usize> = text.match_indices(read).map(|(i, _)| i).collect();
-        assert!(!at.is_empty(), "{what}: no `{read}`");
-        assert!(at.iter().all(|i| block.contains(i)), "{what}: a `{read}` outside its scope");
-    }
-
-    /// `capture`, the name of the closure a call reads through, stands in `text` only in the block
-    /// `scope` opens and on the lines that hold one of `elsewhere`, once each. A method or a field
-    /// of that name (`.capture`) and a longer name are not it.
-    fn named_only_in_scope(what: &str, text: &str, scope: Option<&str>, elsewhere: &[&str]) {
-        let block = scope.map(|s| scope_block(what, text, s));
-        let word = |c: Option<char>| c.is_some_and(|c| c == '_' || c.is_alphanumeric());
-        let mut seen = vec![0usize; elsewhere.len()];
-        for (at, name) in text.match_indices("capture") {
-            let before = text[..at].chars().next_back();
-            if word(before) || before == Some('.') || word(text[at + name.len()..].chars().next()) {
-                continue;
-            }
-            if block.as_ref().is_some_and(|b| b.contains(&at)) {
-                continue;
-            }
-            let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
-            let line = text[start..].lines().next().unwrap_or("").trim();
-            match elsewhere.iter().position(|e| line.contains(e)) {
-                Some(k) => seen[k] += 1,
-                None => panic!("{what}: `capture` named outside its scope: {line}"),
-            }
-        }
-        assert!(seen.iter().all(|&n| n == 1), "{what}: {elsewhere:?} named {seen:?} times");
     }
 
     /// The calls into a VM's Lua that the guard watches: every handler stretch (task.rs), every
@@ -12233,9 +11970,7 @@ mod uptime_wiring_tests {
         assert!(err.contains("self.error_repeats.borrow_mut().note(&key, Instant::now())"), "{err}");
         assert!(err.contains("logging::Said::Counted => {}"));
         assert!(err.contains("logging::Said::Summary { count, over }"));
-        // Forgotten on toggle, on a reload, and for a rolled-back hot-load — with the lines of the
-        // blocking calls that held the event loop.
-        assert!(body(LIB, "fn forget_error_repeats(").contains("self.tasks.forget_legacy_said(id);"));
+        // Forgotten on toggle, on a reload, and for a rolled-back hot-load.
         assert!(body(LIB, "fn after_toggle(").contains("self.forget_error_repeats(idx);"));
         assert!(body(LIB, "fn purge_module(").contains("self.forget_error_repeats(idx);"));
         let rollback = body(LIB, "fn rollback_to(");

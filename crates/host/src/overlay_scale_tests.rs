@@ -80,7 +80,7 @@ rawset(T.host.screen, "pixel", function(x, y)
 end)
 rawset(T.host.element, "rawDump", function() return S.dump end)
 -- The calibration shot's pictures, with where their crosshairs are; a shot made where the host's
--- could not wait is noted, as the harness's is.
+-- could not wait raises, as the harness's does.
 rawset(T.host.screen, "saveMarked", function(path, opts)
   T.screenWait("host.screen.saveMarked")
   S.order[#S.order + 1] = "save"

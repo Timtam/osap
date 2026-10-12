@@ -151,8 +151,10 @@ local S = {
   shots = {},       -- { path, region, snapshot?, at } per saved picture
   snaps = 0,        -- host.screen.snapshot calls: a picture the handler waits for
   -- Every host.screen call that waits in the host, made where it could not wait — "<call> (<place>)",
-  -- in the shim's words — as the host would have logged it: a scenario fails at its end while this
-  -- is not empty (`finish`), unless it is about such a call (`S.mayNotWait`).
+  -- in the shim's words — noted before it raises (T.screenWait): the runtime's own pcall swallows
+  -- such a raise in a `when`, a menu test, a probe, `present`, `identify` or a graphical button's
+  -- `state`, each with a log line of its own or none, so a scenario fails at its end while this is
+  -- not empty (`finish`), unless it is about such a call (`S.mayNotWait`).
   couldNotWait = {},
   mayNotWait = false,
   asyncs = {},      -- host.screen.snapshot requests with a callback not answered yet
@@ -185,7 +187,8 @@ local S = {
   -- a menu test's — is found all the same.
   missing = {},
   -- A scenario about a hook that raises sets this; otherwise a `[overlay] '…': its <hook> raised:`
-  -- line fails it at its end (`finish`), since that is where a `recognize` that cannot wait shows.
+  -- line fails it at its end (`finish`), since that is where a `recognize` or a host.screen call
+  -- that cannot wait shows.
   hooksMayRaise = false,
   -- A scenario about a handler that raises sets this; otherwise an error a handler ended with —
   -- the log line and the dialog of the real host — fails it at its end (`finish`).
@@ -424,7 +427,7 @@ T.host = strict("host", {
   }),
   screen = strict("host.screen", {
     -- S.pixel. A read of the screen waits in the host's handler, answered at once here; where it
-    -- could not wait, the place is noted (T.screenWait). A snapshot's pixel touches no screen.
+    -- could not wait, it raises (T.screenWait). A snapshot's pixel touches no screen.
     pixel = function(a, b, c)
       local opts = if type(a) == "table" then b else c
       if not (type(opts) == "table" and opts.snapshot) then T.screenWait("host.screen.pixel") end
@@ -449,7 +452,7 @@ T.host = strict("host", {
       return out
     end,
     -- Written at once here; in the host a handler waits while the image worker writes it, and where
-    -- it could not wait, the place is noted (T.screenWait) — of a snapshot as well as of the screen.
+    -- it could not wait it raises (T.screenWait) — of a snapshot as well as of the screen.
     saveMarked = function(path, opts)
       T.screenWait("host.screen.saveMarked")
       S.order[#S.order + 1] = "save"
@@ -457,8 +460,8 @@ T.host = strict("host", {
       return true
     end,
     -- One picture, kept: in the host a handler waits for it, answered at once here; where it
-    -- could not wait, the place is noted (T.screenWait). Given a callback, it waits nowhere: taken
-    -- off the event loop at `at` (or at once) and answered on the tick after — see T.runDue.
+    -- could not wait, it raises (T.screenWait). Given a callback, it waits nowhere: taken off the
+    -- event loop at `at` (or at once) and answered on the tick after — see T.runDue.
     snapshot = function(opts, cb)
       if cb ~= nil then
         S.asyncs[#S.asyncs + 1] = { region = opts.region, at = opts.at or S.now, cb = cb, asked = S.now }
@@ -740,19 +743,23 @@ function T.answerWaits(answer)
     T.checkRead(what, opts)
     local where = T.whereNow()
     if where == "handler" and not coroutine.isyieldable() then where = "cannot-wait" end
-    if where ~= "handler" then error(T.waitMessage(where), 2) end
+    if where ~= "handler" then error(T.waitMessage("host.ocr.recognize", where), 2) end
     return answer(what, opts)
   end)
 end
 
 -- A host.screen call that waits in the host, as the scripted host plays it: answered at once, but
 -- where the host's could not wait — outside a handler, in a coroutine, at a place Luau cannot stop
--- — the place is noted in S.couldNotWait, in the shim's words (T.whereNow), as the host's log
--- would say it.
+-- — it raises the host's message for the place (T.whereNow), at the line of the code that called
+-- the fake: level 3, past the fake that calls this. The place is noted first, in S.couldNotWait,
+-- so a raise the runtime's own pcall swallows is found at the scenario's end all the same.
 function T.screenWait(call)
   local where = T.whereNow()
   if where == "handler" and not coroutine.isyieldable() then where = "cannot-wait" end
-  if where ~= "handler" then S.couldNotWait[#S.couldNotWait + 1] = call .. " (" .. where .. ")" end
+  if where ~= "handler" then
+    S.couldNotWait[#S.couldNotWait + 1] = call .. " (" .. where .. ")"
+    error(T.waitMessage(call, where), 3)
+  end
 end
 
 -- `fn(...)` run as the handler of a hotkey runs it — the runtime's calibration key, a control's
@@ -1026,11 +1033,12 @@ fn event_kind(kind: &str) -> mlua::Result<(bool, &'static str)> {
 /// `Queued`, `Dropped`); `T.later(kind, f, …)`, the same through the mailbox always, as the host
 /// delivers a setting changed in the dialog, to run in the next queued phase; `T.queued()`, the
 /// tick's queued phase; the tests' wait point `T.waitPoint(name)`, `T.release(name, value)` and
-/// `T.waiting(name)`; `T.pixelWait(blocking)`, a `host.screen.pixel` built as the host builds it,
-/// whose wait is that wait point under the call's name and which runs `blocking(why, …)` where it
-/// cannot wait; the tests' entry `T.task` and `T.settle()`, which hands the reads its handlers and
-/// tasks wait for their readings; and `host.ocr.recognize`, the host's own, with `T.submit` as its
-/// callback form, raising where it cannot wait.
+/// `T.waiting(name)`; `T.pixelWait()`, a `host.screen.pixel` built as the host builds it, whose wait
+/// is that wait point under the call's name and which raises the host's message where it cannot
+/// wait; `T.waitMessage(call, where)`, that message for a call and the shim's word for a place; the
+/// tests' entry `T.task` and `T.settle()`, which hands the reads its handlers and tasks wait for
+/// their readings; and `host.ocr.recognize`, the host's own, with `T.submit` as its callback form,
+/// raising where it cannot wait.
 pub(crate) fn harness(lua: &Lua) -> Table {
     let t: Table = lua.load(HARNESS).set_name("harness").eval().expect("the harness loads");
     let host_call = lua
@@ -1086,13 +1094,12 @@ pub(crate) fn harness(lua: &Lua) -> Table {
     let hh = h.clone();
     t.set(
         "pixelWait",
-        lua.create_function(move |lua, blocking: Function| task::test_point(lua, IDX, hh.clone(), "host.screen.pixel", blocking))
-            .unwrap(),
+        lua.create_function(move |lua, ()| task::test_point(lua, IDX, hh.clone(), "host.screen.pixel")).unwrap(),
     )
     .unwrap();
     t.set(
         "waitMessage",
-        lua.create_function(|_, why: String| Ok(task::wait_message(task::Case::of(&why)))).unwrap(),
+        lua.create_function(|_, (call, why): (String, String)| Ok(task::wait_message(&call, task::Case::of(&why)))).unwrap(),
     )
     .unwrap();
     t.set("task", task::table(lua, IDX, h.clone()).unwrap()).unwrap();
@@ -1127,13 +1134,13 @@ pub(crate) fn harness(lua: &Lua) -> Table {
 
 /// What every scenario ends on, whichever loader ran it: nothing was asked of the scripted host
 /// that it does not have — a raise that a `pcall` of the runtime swallowed included (`S.missing`) —
-/// no control's hook raised (`[overlay] '…': its text raised: …`) unless the scenario is about
-/// one (`S.hooksMayRaise`), no handler ended with an error — a key's, a timer's, the menu
-/// tick's — unless the scenario is about that (`S.tasksMayRaise`), and no `host.screen` call that
-/// waits in the host was made where it could not wait (`S.couldNotWait`) unless the scenario is
-/// about one (`S.mayNotWait`). A `recognize` without a callback in a hook that cannot wait raises
-/// there, as in the host, so this is where such a hook is found rather than as a value that went
-/// missing without a word; a `snapshot` there holds the event loop in the host, and is found here.
+/// no `host.screen` call that waits in the host was made where it could not wait (`S.couldNotWait`)
+/// unless the scenario is about one (`S.mayNotWait`), a raise the runtime swallowed included; no
+/// control's hook raised (`[overlay] '…': its text raised: …`) unless the scenario is about one
+/// (`S.hooksMayRaise`), and no handler ended with an error — a key's, a timer's, the menu tick's —
+/// unless the scenario is about that (`S.tasksMayRaise`). A `recognize` or a `host.screen` call
+/// without a callback where it cannot wait raises there, as in the host, so this is where such a
+/// hook is found rather than as a value that went missing without a word.
 pub(crate) fn finish(lua: &Lua) {
     if let Err(e) = end_checks(lua) {
         panic!("{e}");
@@ -1146,6 +1153,9 @@ fn end_checks(lua: &Lua) -> Result<(), String> {
         local S = T.S
         assert(#S.missing == 0, "the scripted host was asked for what it does not have: "
           .. table.concat(S.missing, ", "))
+        if not S.mayNotWait then
+          assert(#S.couldNotWait == 0, "a host.screen call could not wait: " .. table.concat(S.couldNotWait, ", "))
+        end
         if not S.hooksMayRaise then
           for _, l in ipairs(S.logs) do
             assert(not string.find(l, "^%[overlay%] '.-': its %a+ raised: "), "a hook raised: " .. l)
@@ -1153,9 +1163,6 @@ fn end_checks(lua: &Lua) -> Result<(), String> {
         end
         if not S.tasksMayRaise then
           assert(#S.taskErrors == 0, "a handler raised: " .. table.concat(S.taskErrors, " | "))
-        end
-        if not S.mayNotWait then
-          assert(#S.couldNotWait == 0, "a host.screen call could not wait: " .. table.concat(S.couldNotWait, ", "))
         end
     "#;
     lua.load(check).set_name("the end of the scenario").exec().map_err(|e| e.to_string())
@@ -1424,36 +1431,51 @@ fn a_test_that_raises_counts_as_not_seeing_a_menu() {
     "#);
 }
 
-/// A module's own pixel test: a synchronous colour check that answers at once. Declared cheap,
+/// A module's own pixel test: a colour check of a snapshot, which answers at once. Declared cheap,
 /// it runs on every tick with nothing pressed — in the tick's pass, a coroutine of the runtime's,
-/// where the host's `pixel` cannot wait: it reads on the event loop there, said in the log, every
-/// tick (a test asks with a callback instead; "Where a hook runs" in docs/api/overlay.md).
+/// where the host's `pixel` of the screen cannot wait: there it raises, so a test reads a snapshot
+/// a handler took — or asks with a callback — instead ("Where a hook runs" in docs/api/overlay.md).
+/// Here a test that reads the screen counts as not seeing a menu, and says it failed once; the
+/// runtime swallows the raise on every tick, and the scripted host notes each one.
 #[test]
 fn a_modules_own_pixel_test() {
     run(r#"
         local S = T.S
         S.mayNotWait = true
+        local shot = nil
         local lit = {
           name = "menu border",
           cheap = true,
           test = function(o, answer)
             local c = o:origin().client
-            local p = T.host.screen.pixel(c.x + 412, c.y + 140)
+            local p = shot and T.host.screen.pixel(c.x + 412, c.y + 140, { snapshot = shot })
             answer(p ~= nil and p.r > 200 and p.g > 200 and p.b > 200)
           end,
         }
-        local o = T.overlay({ lit })
+        local live = {
+          name = "screen border",
+          cheap = true,
+          test = function(o, answer)
+            local c = o:origin().client
+            answer(T.host.screen.pixel(c.x + 412, c.y + 140) ~= nil)
+          end,
+        }
+        local o = T.overlay({ lit, live })
         T.tick(8)
-        assert(S.pixels == 8, "cheap: asked on every tick, " .. S.pixels)
+        assert(T.open() == false)
+        assert(T.count("menu test 'screen border' failed") == 1, T.dump())
+        assert(S.pixels == 0, "the screen was never read in the pass: " .. S.pixels)
         S.pixel = { r = 240, g = 240, b = 240 }
+        assert(T.call("timer", function() shot = T.host.screen.snapshot({ region = { 0, 0, 2000, 2000 } }) end) == "Ran")
         T.tick(1)
         assert(T.open() == true)
         assert(T.count("test 'menu border' sees it, and no control of this overlay opened it") == 1, T.dump())
         S.pixel = { r = 20, g = 20, b = 20 }
+        assert(T.call("timer", function() shot = T.host.screen.snapshot({ region = { 0, 0, 2000, 2000 } }) end) == "Ran")
         T.tick(2)
         assert(T.open() == false)
         assert(#S.couldNotWait == 11 and S.couldNotWait[1] == "host.screen.pixel (foreign)",
-          table.concat(S.couldNotWait, ", "))
+          #S.couldNotWait .. ": " .. table.concat(S.couldNotWait, ", "))
     "#);
 }
 
@@ -3642,28 +3664,54 @@ fn a_key_pressed_while_the_scripted_module_is_busy_runs_on_the_next_tick() {
     "#);
 }
 
-/// The scripted host's `snapshot` answers at once, as a waited one is answered, and notes where
+/// The scripted host's `snapshot` answers at once, as a waited one is answered, and raises where
 /// the host's could not have waited — outside every handler, in a coroutine made inside one, where
-/// Luau cannot stop the handler — in the shim's words (`S.couldNotWait`). A scenario that leaves
-/// one there fails at its end, naming it, unless it says it is about one (`S.mayNotWait`).
+/// Luau cannot stop the handler — the host's message for each place, at the caller's line, and
+/// notes the place in the shim's words (`S.couldNotWait`). A scenario that leaves one there fails
+/// at its end, naming it, unless it says it is about one (`S.mayNotWait`): a raise the runtime's
+/// own pcall swallowed too — here a menu test's, which only counts as failed.
 #[test]
-fn a_snapshot_where_the_host_could_not_wait_is_noted_and_fails_the_scenario() {
+fn a_snapshot_where_the_host_could_not_wait_raises_and_fails_the_scenario() {
     run(r#"
         local S = T.S
         local R = { region = { 0, 0, 10, 10 } }
-        T.host.screen.snapshot(R)
+        local okTop, errTop = pcall(T.host.screen.snapshot, R)
         T.call("key", function()
           inHandler = T.host.screen.snapshot(R)
-          coroutine.wrap(function() T.host.screen.snapshot(R) end)()
-          local _ = setmetatable({}, { __index = function() return T.host.screen.snapshot(R) end }).y
+          okCo, errCo = pcall(coroutine.wrap(function() T.host.screen.snapshot(R) end))
+          okMeta, errMeta = pcall(function()
+            return setmetatable({}, { __index = function() return T.host.screen.snapshot(R) end }).y
+          end)
         end)
         assert(inHandler ~= nil, "answered in the handler")
+        assert(okTop == false and string.find(errTop, "host.screen.snapshot cannot wait here: this runs outside every event", 1, true), tostring(errTop))
+        assert(okCo == false and string.find(errCo, "host.screen.snapshot cannot wait in a coroutine the module made", 1, true), tostring(errCo))
+        assert(okMeta == false and string.find(errMeta, "host.screen.snapshot cannot wait here: this function runs inside one the host calls", 1, true), tostring(errMeta))
+        assert(S.snaps == 1, "only the handler's was taken: " .. S.snaps)
         local got = table.concat(S.couldNotWait, ", ")
         assert(got == "host.screen.snapshot (none), host.screen.snapshot (foreign), host.screen.snapshot (cannot-wait)", got)
         S.mayNotWait = true
     "#);
     let lua = scenario_vm("windows");
-    lua.load("T.host.screen.snapshot({ region = { 0, 0, 10, 10 } })").exec().expect("the scenario runs");
+    lua.load(r#"T.call("timer", function() coroutine.wrap(function() T.host.screen.snapshot({ region = { 0, 0, 10, 10 } }) end)() end)"#)
+        .exec()
+        .expect("the scenario runs");
     let failed = end_checks(&lua).expect_err("a snapshot that could not wait passed the scenario");
-    assert!(failed.contains("a host.screen call could not wait: host.screen.snapshot (none)"), "{failed}");
+    assert!(failed.contains("a host.screen call could not wait: host.screen.snapshot (foreign)"), "{failed}");
+    let lua = scenario_vm("windows");
+    lua.load(
+        r#"
+        T.overlay({ { name = "screen border", cheap = true, test = function(o, answer)
+          local c = o:origin().client
+          answer(T.host.screen.pixel(c.x + 412, c.y + 140) ~= nil)
+        end } })
+        T.tick(1)
+        assert(T.count("menu test 'screen border' failed") == 1, T.dump())
+        assert(#T.S.taskErrors == 0, "the runtime swallowed it")
+    "#,
+    )
+    .exec()
+    .expect("the scenario runs");
+    let failed = end_checks(&lua).expect_err("a menu test's pixel that could not wait passed the scenario");
+    assert!(failed.contains("a host.screen call could not wait: host.screen.pixel (foreign)"), "{failed}");
 }
