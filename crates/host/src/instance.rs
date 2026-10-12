@@ -314,6 +314,12 @@ pub fn take_show_request() -> bool {
 /// not wxWidgets' — a Mac's app page answering Command-Q (`backend/macos/page.rs`) — and again
 /// by a Quit that ended a modal dialog instead, since wx cannot end the window loop from inside
 /// one: the next tick in the loop outside it takes it (`quit` in gui.rs).
+///
+/// From the moment it is set a second start is told `quitting` ([`quit_asked`]), as it is once
+/// Quit is chosen. Until the tick takes it — up to a whole tick for a Command-Q, which AppKit can
+/// answer between two — the copy is on its way out all the same, and a second start told `shown`
+/// would have that tick show the module window just before it quits, and would itself end with
+/// nothing running.
 static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Asks the window to quit, as its Quit items do, once the pump or the dialog that asked has
@@ -333,7 +339,8 @@ pub fn quit_asked() -> bool {
     QUIT_REQUESTED.load(Ordering::SeqCst) || QUITTING.load(Ordering::SeqCst)
 }
 
-/// Set the moment Quit is chosen: from then on a second start is told `quitting`.
+/// Set the moment Quit is chosen: from then on a second start is told `quitting`, as it is while
+/// a quit is asked for and not taken yet ([`QUIT_REQUESTED`]).
 ///
 /// Global rather than a field of [`Primary`], because Quit is chosen in the window code, which
 /// does not hold the running copy's claim — and because the time between Quit and the end of
@@ -907,7 +914,7 @@ fn answer(conn: LocalSocketStream, quitting: &AtomicBool) {
     if reader.by_ref().take(MAX_LINE).read_line(&mut request).is_err() {
         return;
     }
-    let quitting = quitting.load(Ordering::SeqCst) || QUITTING.load(Ordering::SeqCst);
+    let quitting = quitting.load(Ordering::SeqCst) || quit_asked();
     let reply = reply_to(&request, quitting);
     if reply == ANSWER_SHOWN {
         request_show();
@@ -1305,6 +1312,9 @@ mod tests {
     /// and not again by the next tick.
     #[test]
     fn the_quit_request_is_taken_once() {
+        // The request is one flag for the process, and a second start is told `quitting` while
+        // it is set: held apart from the tests that expect `shown`.
+        let _flag = window_flag();
         request_quit();
         assert!(take_quit_request(), "the tick after the pump finds the request");
         assert!(!take_quit_request(), "and the next one does not");
@@ -1633,6 +1643,36 @@ mod tests {
         first.stop_serving();
         assert_eq!(contact(&names, Duration::from_secs(2)), Answer::Quitting);
         assert!(!take_show_request());
+    }
+
+    /// A quit asked for and not taken yet — the quit key in the pump, a Mac's app page's Command-Q
+    /// before the next tick — is already `quitting` to a second start, which then waits for this
+    /// copy to go instead of having the window shown by a tick that quits right after.
+    #[test]
+    fn a_quit_asked_for_is_quitting_to_a_second_start() {
+        let _flag = window_flag();
+        let names = test_names("asked");
+        let first = match claim_with(
+            &names,
+            |_| Some(FakeLock(false)),
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            Duration::from_secs(2),
+            false,
+        ) {
+            Claim::Primary(p) => p,
+            _ => panic!("the first copy should have the lock"),
+        };
+        let _ = take_show_request();
+        request_quit();
+        assert_eq!(contact(&names, Duration::from_secs(2)), Answer::Quitting);
+        assert!(!take_show_request(), "no window may be asked of a copy on its way out");
+        // Taken by the tick, whose `quit` says it is quitting from there on (`begin_quit`, not
+        // called here): the request itself is what the answer above came from.
+        assert!(take_quit_request());
+        assert_eq!(contact(&names, Duration::from_secs(2)), Answer::Shown);
+        assert!(take_show_request());
+        drop(first);
     }
 
     #[test]
