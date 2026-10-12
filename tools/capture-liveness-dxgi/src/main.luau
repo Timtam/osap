@@ -149,8 +149,9 @@ local function start(key, via)
     return
   end
   counting = true
-  -- Wakes the duplication now, so it has the countdown to open; the answer does not matter.
-  host.screen.pixel(0, 0)
+  -- Wakes the duplication now, so it has the countdown to open; the answer does not matter, so
+  -- the key does not wait for it: a callback that ignores it.
+  host.screen.pixel(0, 0, nil, function() end)
   say("Ten seconds. Bring the game to the front, then hands off.")
   host.timer.after(COUNTDOWN_MS, function()
     counting = false
