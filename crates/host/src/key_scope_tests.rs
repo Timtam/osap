@@ -45,6 +45,8 @@ struct Host {
     state: OcrState,
     snaps: crate::snapshot::SnapState,
     snap_bytes: Rc<Cell<usize>>,
+    /// No image worker: these tests make no image reads.
+    images: crate::image_search::ImageState,
     tasks: Tasks,
     mail: Mailboxes,
     gens: RefCell<HashMap<usize, u64>>,
@@ -79,6 +81,9 @@ impl ReadHost for Host {
     }
     fn snap_bytes(&self) -> &Rc<Cell<usize>> {
         &self.snap_bytes
+    }
+    fn images(&self) -> &crate::image_search::ImageState {
+        &self.images
     }
     fn tasks(&self) -> &Tasks {
         &self.tasks
@@ -146,6 +151,7 @@ fn host() -> Rc<Host> {
         state: OcrState::default(),
         snaps: crate::snapshot::SnapState::default(),
         snap_bytes: Rc::new(Cell::new(0)),
+        images: crate::image_search::ImageState::detached(),
         tasks: Tasks::default(),
         mail: Mailboxes::default(),
         gens: RefCell::new(HashMap::new()),

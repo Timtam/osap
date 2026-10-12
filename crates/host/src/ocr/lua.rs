@@ -68,6 +68,10 @@ pub(crate) trait ReadHost: 'static {
     /// that wait in `host.screen.snapshot` — and what their pictures are charged against.
     fn snap_state(&self) -> &crate::snapshot::SnapState;
     fn snap_bytes(&self) -> &Rc<Cell<usize>>;
+    /// The image worker's tasks waiting for their answers — a callback's, and those a handler
+    /// waits for in `cells`, `matchCells`, `template{ capture }` or a snapshot's `crop` — and the
+    /// way to it, which also reduces the profiles' pictures.
+    fn images(&self) -> &crate::image_search::ImageState;
     fn tasks(&self) -> &Tasks;
     /// module_idx → the generation of the VM it runs now (`image_search::register_vm`).
     fn vm_gens(&self) -> Ref<'_, HashMap<usize, u64>>;
@@ -93,6 +97,9 @@ impl ReadHost for Shared {
     }
     fn snap_bytes(&self) -> &Rc<Cell<usize>> {
         &self.snap_bytes
+    }
+    fn images(&self) -> &crate::image_search::ImageState {
+        &self.images
     }
     fn tasks(&self) -> &Tasks {
         &self.tasks

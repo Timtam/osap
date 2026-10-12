@@ -172,7 +172,7 @@ use anyhow::{Context, Result};
 use mlua::{Function, IntoLuaMulti, Lua, LuaSerdeExt, RegistryKey, Table};
 
 use backend::{Backend, ControlInfo, HostEvents, MouseButton, WinInfo};
-use image_search::{ImageResult, ImageTask, PendingImage};
+use image_search::{ImageResult, ImageTask};
 use mailbox::{Event, Opened};
 use module_manifest::LoadedModule;
 use template::Decoded;
@@ -404,16 +404,11 @@ struct Shared {
     /// sends a display change every few seconds, and the same three lines at each were most of
     /// the log.
     display_env_said: RefCell<Vec<(String, String)>>,
-    /// Async image search: queued template matches go to a worker thread; results
-    /// come back on the loop tick. Pending callbacks are keyed by request id and
-    /// touched only on the main thread.
-    image_tasks: std::sync::mpsc::Sender<ImageTask>,
-    image_results: std::sync::mpsc::Receiver<ImageResult>,
-    pending_image: RefCell<HashMap<u64, PendingImage>>,
-    /// Requests ended by a newer one of their module past `IMAGE_PER_OWNER`, with the reason
-    /// they are answered on the next tick (image_search.rs, `submit`).
-    ended_images: RefCell<Vec<(PendingImage, String)>>,
-    next_image_id: Cell<u64>,
+    /// The image worker: queued template matches, cells reads, profiles' reductions and the
+    /// waits of the region calls go to a worker thread; results come back on the loop tick. The
+    /// tasks waiting for them — a callback's or a handler's — are keyed by task number and
+    /// touched only on the main thread (image_search.rs, `ImageState`).
+    images: image_search::ImageState,
     /// What every module's snapshots hold between them, against the application's budget
     /// (snapshot.rs). Each VM keeps its own total in its app data beside this one.
     snap_bytes: Rc<Cell<usize>>,
@@ -5171,11 +5166,7 @@ impl Manager {
             captured_line: RefCell::new((None, String::new())),
             system_since: RefCell::new(system_events::Since::default()),
             display_env_said: RefCell::new(display_env),
-            image_tasks,
-            image_results,
-            pending_image: RefCell::new(HashMap::new()),
-            ended_images: RefCell::new(Vec::new()),
-            next_image_id: Cell::new(0),
+            images: image_search::ImageState::new(image_tasks, image_results),
             snap_bytes: Rc::new(Cell::new(0)),
             snap_state: snapshot::SnapState::default(),
             ocr,
@@ -5325,7 +5316,7 @@ impl Manager {
         // enough to say so — which is what makes it worth naming here. A module's own reasons
         // to be alive are not only the ones the OS delivers.
         let has_own_work = !self.shared.timers.is_empty()
-            || !self.shared.pending_image.borrow().is_empty()
+            || self.shared.images.has_pending()
             || self.shared.ocr_state.has_pending()
             || self.shared.snap_state.has_pending()
             || self.shared.pads.has_listeners()
@@ -8090,144 +8081,18 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         })?,
     )?;
     // host.screen.profile{ region = {x1,y1,x2,y2}, axes = "both"|"columns"|"rows" }
-    //   -> { x, y, w, h, columns = {min,max,mean,r,g,b}, rows = {…} }  |  nil
+    //   -> { x, y, w, h, columns = {min,max,mean,r,g,b}, rows = {…}, time, inputEpoch }  |  nil
     //
-    // ONE capture, reduced in Rust to a shape a module can reason about.
-    //
-    // The reason this exists is a measurement, not a preference. On this machine a BitBlt
-    // capture costs ~16.6 ms at 55x27 and ~16.7 ms at 1028x666, while GetPixel costs 16.7 ms
-    // for ONE pixel: the compositor serialises every screen touch to its vsync, so area is
-    // free and touching is what costs. A module that wants to know where an edge is therefore
-    // had only one honest option — probe a handful of points and hope they were the right ones
-    // — and the alternative, shipping a whole bitmap into Lua, would trade a cheap capture for
-    // an expensive marshal and a slow scan in a scripting language.
-    //
-    // So the reduction happens here. Per column and per row: the darkest pixel, the lightest,
-    // the mean, and the mean of each channel. That is enough to find a vertical line (a dark
-    // column in a light band), an edge (where the mean steps), the extent of a shape, and a
-    // patch of a different colour — which is the whole of what these overlays have ever needed
-    // to read out of a picture, and none of it is expressible with point probes.
-    //
-    // Counted as one screen touch in the observation log, because that is exactly what it is.
-    //
-    // host.screen.profile(opts, cb) — the same answer, off the event loop: the capture on the
-    // `screen-capture` thread (none for a snapshot), the reduction on the image worker, and only
-    // the answer's tables here, as `cb` runs (snapshot.rs, `profile_async`). Without a callback
-    // the call is what it always was, but for `key` and `at`, which raise there.
-    let sh = shared.clone();
-    screen.set(
-        "profile",
-        lua.create_function(move |lua, (opts, cb): (Option<Table>, mlua::Value)| {
-            host_call!("host.screen.profile");
-            const F: &str = "host.screen.profile";
-            let cb = match cb {
-                mlua::Value::Nil => None,
-                mlua::Value::Function(f) => Some(f),
-                other => {
-                    return Err(mlua::Error::external(format!(
-                        "{F}: the callback (second argument) must be a function, got {}",
-                        describe_value(&other)
-                    )))
-                }
-            };
-            // Every argument is read before anything is answered, so a mistake in `axes`
-            // raises whether or not there is anything to read this time. A snapshot first: a
-            // region left out is then the whole snapshot rather than the screen.
-            let snap = snapshot::from_opts(opts.as_ref(), F)?;
-            let region = match &snap {
-                Some(f) => snapshot::opts_region_in(opts.as_ref(), F, f)?,
-                None => opts_region(&*sh.backend, opts.as_ref(), F)?,
-            };
-            let axes = opts
-                .as_ref()
-                .and_then(|o| o.get::<String>("axes").ok())
-                .unwrap_or_else(|| "both".to_string());
-            // Refused, not silently widened. A typo would otherwise cost exactly the work the
-            // option exists to save, and say nothing about why.
-            let (want_cols, want_rows) = match axes.as_str() {
-                "both" => (true, true),
-                "columns" => (true, false),
-                "rows" => (false, true),
-                other => {
-                    return Err(mlua::Error::external(format!(
-                        "host.screen.profile: axes must be \"both\", \"columns\" or \"rows\", got \"{other}\""
-                    )))
-                }
-            };
-            // How many pixels in each column/row are darker than `dark`.
-            //
-            // The third statistic, and for finding a SHAPE it is the only one of the three that
-            // works. A mean over hundreds of rows dilutes a note-sized object to a couple of
-            // units; a minimum saturates, because in a busy picture almost every column already
-            // contains something black and cannot go blacker. A count does neither — it is
-            // proportional to how much of the column the object covers. Measured on a real
-            // Melodyne capture at threshold 190: background and grid lines about 19 rows, note
-            // blobs 29 to 57, a full-height cursor 470 to 516. Three classes, cleanly apart,
-            // where the other two channels saw one.
-            let dark_t: u8 = opts
-                .as_ref()
-                .and_then(|o| o.get::<u8>("dark").ok())
-                .unwrap_or(128);
-            if let Some(cb) = cb {
-                sh.profile_async(lua, idx, cb, opts.as_ref(), snap, region, (want_cols, want_rows), dark_t)?;
-                return Ok(mlua::MultiValue::new());
-            }
-            // `key` and `at` are the callback form's. Here they raise, before anything is
-            // answered, rather than being passed over.
-            snapshot::callback_only(opts.as_ref(), F, &["key", "at"])?;
-            let (rx, ry, rw, rh) = match region {
-                Ok(r) => (r.x, r.y, r.w, r.h),
-                Err(why) => return with_reason(lua, mlua::Value::Nil, why),
-            };
-            if rw <= 0 || rh <= 0 {
-                return with_reason(lua, mlua::Value::Nil, format!("{EMPTY_REGION} ({rw}x{rh})"));
-            }
-            let t0 = Instant::now();
-            // The picture: the part of the snapshot the region covers, or a capture made now.
-            let pic = match snap {
-                Some(frame) => match snapshot::clip(&frame, region::ScreenRect { x: rx, y: ry, w: rw, h: rh }) {
-                    Ok(rect) => snapshot::Picture::Snap { frame, rect },
-                    Err(why) => return with_reason(lua, mlua::Value::Nil, why),
-                },
-                None => match sh.backend.capture(rx, ry, rw, rh, capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh))) {
-                    Ok(img) => snapshot::Picture::Live { img, x: rx, y: ry },
-                    Err(why) => return with_reason(lua, mlua::Value::Nil, why),
-                },
-            };
-            let captured = Instant::now();
-            // The reduction reads only the area it is given, and nothing at all from a buffer
-            // shorter than its own size: a capture that came back short — a clipped region, a
-            // backend that rounded a dimension — would otherwise index past the end, and a panic
-            // inside a Lua binding is not a module error that gets reported: it is the process.
-            // Answering nil is what every other failure in this function does.
-            let area = pic.area();
-            let Some((columns, rows)) = profile::profile(pic.image(), area, want_cols, want_rows, dark_t) else {
-                return with_reason(lua, mlua::Value::Nil, SHORT_CAPTURE.to_string());
-            };
-            let reduced = Instant::now();
-            // The rectangle read: the region asked for, or, on a snapshot, its part inside it.
-            let (ox, oy) = match &pic {
-                snapshot::Picture::Snap { rect, .. } => (rect.x, rect.y),
-                snapshot::Picture::Live { .. } => (rx, ry),
-            };
-            let out = profile_table(lua, (ox, oy, area.w as i32, area.h as i32), columns, rows)?;
-            // Timed to HERE, not to the end of the capture. The capture is a fixed frame; the
-            // traversal and the six sequences are the only part that grows with the region, and
-            // leaving them outside the measurement would hide them from the one report this
-            // project uses to find event-loop stalls — while making this call look free. A
-            // snapshot's profile touched no screen and is not counted as a pixel read; its
-            // reduction runs here all the same, so the profile's own split counts both.
-            let end = Instant::now();
-            let mut obs = sh.observations();
-            if pic.is_live() {
-                obs.pixels += 1;
-                obs.pixel_us += end.duration_since(t0).as_micros();
-            }
-            obs.profile.add(t0, captured, reduced, end, !pic.is_live());
-            drop(obs);
-            one_value(mlua::Value::Table(out))
-        })?,
-    )?;
+    // ONE capture, reduced in Rust to a shape a module can reason about (snapshot.rs, `profile`,
+    // has why). In a handler it waits: the capture on the `screen-capture` thread (none for a
+    // snapshot), the reduction on the image worker, and only the answer's tables here; where it
+    // cannot wait it captures and reduces on the event loop, said in the log and counted as one
+    // screen touch in the observation log. host.screen.profile(opts, cb) — the same answer to a
+    // callback, which never waits, wherever it is asked.
+    screen.set("profile", snapshot::profile(lua, shared, idx)?)?;
+    // Snapshot:crop, which the Snapshot handle reaches as `s:crop(region)`: made once per VM, so
+    // that it can wait (snapshot.rs, `install_crop`).
+    snapshot::install_crop(lua, idx, shared.clone())?;
     // The image-search bindings and template handles live in image_search.rs, with the rules
     // that belong to them: who an async answer is delivered to, what a module may hold in
     // handles, and what a panic on the worker turns into. Registered HERE, by name, because
@@ -8348,57 +8213,14 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 .map_err(|e| predicate_error(F, "the predicate", &src, &e))
         })?,
     )?;
-    // cells(opts) -> { cells, x, y, w, h } | nil, reason. One capture on the event loop,
-    // counted like `profile`; for recording a state, not for a poll.
-    let sh = shared.clone();
-    screen.set(
-        "cells",
-        lua.create_function(move |lua, opts: mlua::Value| {
-            host_call!("host.screen.cells");
-            let call = read_cells_opts(lua, "host.screen.cells", opts)?;
-            let r = match call.rect {
-                Ok(r) => r,
-                Err(why) => return nil_because(lua, why),
-            };
-            let got = match &call.snapshot {
-                Some(frame) => cells_of_snapshot(frame, r, |img, sub| cells::of_sub(img, sub, &call.spec)),
-                None => read_cells_with(&sh, lua, r, |cap| cells::of_capture(cap, r.w, r.h, &call.spec)),
-            };
-            match got {
-                Ok(bytes) => Ok((mlua::Value::Table(cells_table(lua, &bytes, r)?), mlua::Value::Nil)),
-                Err(why) => nil_because(lua, why),
-            }
-        })?,
-    )?;
-    // matchCells(opts, states) -> match | nil, reason. The same capture, ranked against the
-    // states in Rust. Every argument is checked before anything is captured, so a bad state
-    // raises on the first call, not on the first call whose region resolves.
-    let sh = shared.clone();
-    screen.set(
-        "matchCells",
-        lua.create_function(move |lua, (opts, states): (mlua::Value, mlua::Value)| {
-            host_call!("host.screen.matchCells");
-            const F: &str = "host.screen.matchCells";
-            let call = read_cells_opts(lua, F, opts)?;
-            let st = read_states(F, states, call.spec.cells())?;
-            let r = match call.rect {
-                Ok(r) => r,
-                Err(why) => return nil_because(lua, why),
-            };
-            let matcher = cells::Matcher { item_of: cells::items_of(&st.names), spec: call.spec, states: st.bytes };
-            let got = match &call.snapshot {
-                Some(frame) => cells_of_snapshot(frame, r, |img, sub| matcher.answer_sub(img, sub)),
-                None => read_cells_with(&sh, lua, r, |cap| matcher.answer(cap, r.w, r.h)),
-            };
-            match got {
-                Ok((live, ranked)) => Ok((
-                    mlua::Value::Table(cells_match_table(lua, &live, r, &ranked, &st.names)?),
-                    mlua::Value::Nil,
-                )),
-                Err(why) => nil_because(lua, why),
-            }
-        })?,
-    )?;
+    // cells(opts) -> { cells, x, y, w, h } | nil, reason, and matchCells(opts, states) -> match |
+    // nil, reason: the region read once and reduced to cells, and for matchCells ranked against
+    // the states in Rust. In a handler both wait while the image worker captures, reduces and
+    // ranks (image_search.rs, `start_cells`), and where they cannot wait they do it on the event
+    // loop, said in the log (`cells_on_loop`). Every argument is checked before anything is read,
+    // so a bad state raises on the first call, not on the first call whose region resolves.
+    screen.set("cells", cells_fn(lua, shared, idx)?)?;
+    screen.set("matchCells", match_cells_fn(lua, shared, idx)?)?;
     // matchCellsAsync(opts, states, cb) — capture, reduction and ranking on the image worker,
     // `cb(match, nil)` or `cb(nil, reason)` on a later tick, with the ownership rules of
     // imageSearchAsync (image_search.rs).
@@ -9802,7 +9624,7 @@ pub(crate) fn region_arg(
 
 /// [`region_arg`] with the primary screen's size given, so every call's reading can be tested
 /// without a backend.
-fn region_arg_on(
+pub(crate) fn region_arg_on(
     screen: (i32, i32),
     v: &mlua::Value,
     fname: &str,
@@ -10110,17 +9932,30 @@ fn read_cells_opts(lua: &Lua, fname: &str, opts: mlua::Value) -> mlua::Result<Ce
     Ok(CellsCall { rect, spec, snapshot })
 }
 
-/// Reads the cells of `r` from a snapshot, where the region lies in it — no capture, not
-/// counted in the observation line. `r` is inside the snapshot (`read_cells_opts` saw to it).
-fn cells_of_snapshot<T>(
-    frame: &backend::frame::Frame,
-    r: region::ScreenRect,
-    reduce: impl FnOnce(&backend::CapturedImage, cells::Sub) -> std::result::Result<T, String>,
-) -> std::result::Result<T, String> {
-    match frame.area(ocr::types::Rect::new(r.x, r.y, r.w, r.h)) {
-        Some(a) => reduce(&frame.img, cells::Sub { x: a.x, y: a.y, w: a.w, h: a.h }),
-        None => Err(snapshot::NOT_INSIDE.to_string()),
-    }
+/// `host.screen.cells` and `host.screen.matchCells`, as their messages and log lines name them.
+const CELLS: &str = "host.screen.cells";
+const MATCH_CELLS: &str = "host.screen.matchCells";
+
+/// What a call of `cells` (`states` `None`) or `matchCells` asks, every argument read and checked
+/// — `opts`, then the states — before anything is read: the region, the grid and the states.
+pub(crate) fn cells_ask(
+    lua: &Lua,
+    fname: &str,
+    opts: mlua::Value,
+    states: Option<mlua::Value>,
+) -> mlua::Result<image_search::CellsAsk> {
+    let call = read_cells_opts(lua, fname, opts)?;
+    let (st, rank) = match states {
+        Some(v) => (read_states(fname, v, call.spec.cells())?, true),
+        None => (StatesIn { bytes: Vec::new(), names: Vec::new() }, false),
+    };
+    Ok(image_search::CellsAsk {
+        rect: call.rect,
+        matcher: cells::Matcher { item_of: cells::items_of(&st.names), spec: call.spec, states: st.bytes },
+        names: st.names,
+        rank,
+        snapshot: call.snapshot,
+    })
 }
 
 /// The states a match compares against, decoded, with their names.
@@ -10165,7 +10000,7 @@ fn read_states(fname: &str, v: mlua::Value, cells_per_state: usize) -> mlua::Res
 }
 
 /// `{ cells, x, y, w, h }`: the cells as hex and the rectangle actually read.
-fn cells_table(lua: &Lua, bytes: &[u8], r: region::ScreenRect) -> mlua::Result<Table> {
+pub(crate) fn cells_table(lua: &Lua, bytes: &[u8], r: region::ScreenRect) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("cells", cells::to_hex(bytes))?;
     t.set("x", r.x)?;
@@ -10197,13 +10032,6 @@ pub(crate) fn cells_match_table(
     Ok(t)
 }
 
-/// `nil, reason`: the answer of the cells calls when they could not look — two values always,
-/// as those calls have returned from the start. The reason is the backend's, in the words the
-/// log uses (see "Failure reasons" in docs/api/screen.md).
-pub(crate) fn nil_because(lua: &Lua, why: String) -> mlua::Result<(mlua::Value, mlua::Value)> {
-    Ok((mlua::Value::Nil, mlua::Value::String(lua.create_string(why)?)))
-}
-
 /// What one of the older screen calls — `pixel`, `profile`, `template`, the synchronous image
 /// searches, `save`, `saveMarked` — answers when it looked: exactly the one value it has always
 /// returned, and nothing after it, so `f(host.screen.pixel(x, y))` and
@@ -10219,26 +10047,70 @@ pub(crate) fn with_reason(lua: &Lua, first: mlua::Value, why: String) -> mlua::R
     Ok(mlua::MultiValue::from_vec(vec![first, mlua::Value::String(lua.create_string(why)?)]))
 }
 
-/// Captures `r` through this VM's source on the event loop and hands the picture to `reduce`,
-/// counted as one screen touch in the observation log and timed to the end of the reduction,
-/// as `profile` is: the capture is a fixed frame, and the part that grows with the region is
-/// what the log is there to show.
-fn read_cells_with<T>(
+/// `host.screen.cells(opts) -> ({ cells, x, y, w, h }?, string?)`: in a handler it waits while the
+/// image worker reads and reduces the region (`image_search::start_cells`); where it cannot wait it
+/// does that on the event loop, said in the log ([`cells_on_loop`]).
+fn cells_fn(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
+    let sh = shared.clone();
+    let start = lua.create_function(move |lua, (nonce, opts): (Table, mlua::Value)| {
+        host_call!("host.screen.cells");
+        image_search::start_cells(&*sh, lua, idx, CELLS, nonce, || cells_ask(lua, CELLS, opts, None))
+    })?;
+    let sh = shared.clone();
+    let blocking = lua.create_function(move |lua, (why, opts): (String, mlua::Value)| {
+        host_call!("host.screen.cells");
+        let ask = cells_ask(lua, CELLS, opts, None)?;
+        cells_on_loop(&sh, lua, idx, CELLS, &why, ask)
+    })?;
+    task::points(lua, idx, shared.clone())?.call((CELLS, start, blocking))
+}
+
+/// `host.screen.matchCells(opts, states) -> (CellsMatch?, string?)`: `cells`, and the grid ranked
+/// against the states — on the image worker in a handler, on the event loop where it cannot wait.
+fn match_cells_fn(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
+    let sh = shared.clone();
+    let start = lua.create_function(move |lua, (nonce, opts, states): (Table, mlua::Value, mlua::Value)| {
+        host_call!("host.screen.matchCells");
+        image_search::start_cells(&*sh, lua, idx, MATCH_CELLS, nonce, || cells_ask(lua, MATCH_CELLS, opts, Some(states)))
+    })?;
+    let sh = shared.clone();
+    let blocking = lua.create_function(move |lua, (why, opts, states): (String, mlua::Value, mlua::Value)| {
+        host_call!("host.screen.matchCells");
+        let ask = cells_ask(lua, MATCH_CELLS, opts, Some(states))?;
+        cells_on_loop(&sh, lua, idx, MATCH_CELLS, &why, ask)
+    })?;
+    task::points(lua, idx, shared.clone())?.call((MATCH_CELLS, start, blocking))
+}
+
+/// A cells call `fname` where it cannot wait (`why`, the shim's word for the place): answered at
+/// once when there is nothing to read this time; otherwise read on the event loop — where the
+/// region lies in its snapshot, or captured through this VM's source without the first-read
+/// comparison, which is left to the module's next read — held there for that one call and said
+/// in the log (`task::legacy`). A live read is counted as one screen touch in the observation log
+/// and timed to the end of the reduction, as `profile` is: the capture is a fixed frame, and the
+/// part that grows with the region is what the log is there to show.
+fn cells_on_loop(
     sh: &Shared,
     lua: &Lua,
-    r: region::ScreenRect,
-    reduce: impl FnOnce(&backend::CapturedImage) -> std::result::Result<T, String>,
-) -> std::result::Result<T, String> {
-    let src = capture_source::read_source(lua, &*sh.backend, (r.x, r.y, r.w, r.h));
-    let t0 = Instant::now();
-    let out = match sh.backend.capture(r.x, r.y, r.w, r.h, src) {
-        Ok(cap) => reduce(&cap),
-        Err(why) => Err(why),
-    };
-    let mut obs = sh.observations();
-    obs.pixels += 1;
-    obs.pixel_us += t0.elapsed().as_micros();
-    out
+    idx: usize,
+    fname: &'static str,
+    why: &str,
+    ask: image_search::CellsAsk,
+) -> mlua::Result<mlua::MultiValue> {
+    if ask.rect.is_err() {
+        return image_search::cells_now(lua, ask, |_| Err(backend::CAPTURE_FAILED.to_string()));
+    }
+    task::legacy(sh, lua, idx, fname, crate::loop_guard::Kind::Screen, why, || {
+        let t0 = Instant::now();
+        let live = ask.snapshot.is_none();
+        let out = image_search::cells_now(lua, ask, |r| sh.backend.capture(r.x, r.y, r.w, r.h, capture_source::vm_source(lua)));
+        if live {
+            let mut obs = sh.observations();
+            obs.pixels += 1;
+            obs.pixel_us += t0.elapsed().as_micros();
+        }
+        out
+    })
 }
 
 #[cfg(test)]
@@ -11018,7 +10890,7 @@ mod ocr_wiring_tests {
         assert!(lane < deliver, "the mailbox takes the priority the answer arrives with");
         assert!(body(SNAP, "pub(crate) fn snap_async(").contains("Asker::Callback(cb), current_priority(), now)"));
         assert!(body(SNAP, "pub(crate) fn submit_snap<").contains("ticket: SnapTicket { id, owner, prio },"));
-        assert!(body(SNAP, "pub(crate) fn fire_snapshot_results(").contains("fire_snaps(self, &|p, frame| self.reduce(p, frame));"));
+        assert!(body(SNAP, "pub(crate) fn fire_snapshot_results(").contains("fire_snaps(self);"));
         // The mailbox runs every event in the priority it arrived with.
         let run = body(MAILBOX, "fn run<H: MailHost>(");
         assert!(run.find("let _prio = enter_priority(prio);").expect("no priority scope") < run.find("h.open(").unwrap());
@@ -11026,34 +10898,40 @@ mod ocr_wiring_tests {
         assert!(enqueue.contains("let prio = current_priority();") && enqueue.contains("Queued { ev, prio }"));
     }
 
-    /// `host.screen.profile` given a callback does nothing on the event loop but read its
-    /// arguments and file the request: the capture is the `screen-capture` thread's (a snapshot's
-    /// picture is taken already), the reduction the image worker's, and the answer — its tables —
-    /// is a handler of its module, handed over in the lane it was asked from and counted in the
-    /// observation line. `snapshot.rs` and `image_search.rs` hold what each step does; this holds
-    /// that the steps are where they are.
+    /// `host.screen.profile` does nothing on the event loop but read its arguments, file the
+    /// request and build the answer's tables, with a callback and without one in a handler: the
+    /// capture is the `screen-capture` thread's (a snapshot's picture is taken already), the
+    /// reduction the image worker's, and the answer — its tables — a callback's handler of its
+    /// module, handed over in the lane it was asked from and counted in the observation line, or
+    /// the waiting handler's to go on with. `snapshot.rs` and `image_search.rs` hold what each step
+    /// does; this holds that the steps are where they are.
     #[test]
-    fn a_profile_with_a_callback_captures_and_reduces_off_the_event_loop() {
+    fn a_profile_captures_and_reduces_off_the_event_loop() {
         let api = body(LIB, "fn install_host_api(");
         let screen = bindings(api, "screen");
         let binding = screen.iter().find(|b| b.0 == "profile").expect("host.screen.profile").1;
-        let handed = binding.find("sh.profile_async(lua, idx, cb, ").expect("the callback form");
-        let returned = binding[handed..].find("return Ok(mlua::MultiValue::new());").expect("and returns at once") + handed;
-        assert!(returned < binding.find("sh.backend.capture(").unwrap(), "the callback form captures on the loop");
-        assert!(returned < binding.find("profile::profile(").unwrap(), "the callback form reduces on the loop");
-        let f = body(SNAP, "pub(crate) fn profile_async(");
-        assert!(!f.contains("profile::profile(") && !f.contains("backend.capture("), "profile_async captures or reduces");
-        assert!(f.contains("self.ocr.submit_snap(req);"), "a region's picture is the capture thread's");
-        assert!(f.contains("Some(frame) => self.reduce(p, frame),"), "a snapshot goes straight to the worker");
-        assert!(f.contains("prio: current_priority(),"));
+        assert!(binding.contains("snapshot::profile(lua, shared, idx)"), "host.screen.profile");
+        let profile = body(SNAP, "pub(crate) fn profile(");
+        let form = profile.find("let submit = lua.create_function(").expect("the callback form");
+        let handed = profile[form..].find("submit_profile(&*sh, lua, idx, Asker::Callback(cb), ").expect("files the request") + form;
+        assert!(profile[handed..].find("Ok(())").is_some_and(|at| profile[handed..handed + at].lines().count() <= 2), "and returns at once");
+        assert!(profile.contains("crate::task::points(lua, idx, shared.clone())?.call((FPR, start, blocking, submit, 2))"), "the shim's callback form");
+        let start = body(SNAP, "pub(crate) fn start_profile<");
+        assert!(start.contains("submit_profile(h, lua, scope, Asker::Handler(task), o, args, prio, Instant::now())?"), "the wait files the same request");
+        let f = body(SNAP, "pub(crate) fn submit_profile<");
+        assert!(!f.contains("profile::profile(") && !f.contains("backend.capture("), "submit_profile captures or reduces");
+        assert!(f.contains("h.ocr().submit_snap(req);"), "a region's picture is the capture thread's");
+        assert!(f.contains("Some(frame) => reduce(h, p, frame),"), "a snapshot goes straight to the worker");
+        assert!(f.contains("ticket: SnapTicket { id, owner, prio },"));
         let fire = body(SNAP, "pub(crate) fn fire_snaps<");
-        let on = fire.find("Answer::Picture { frame, .. } if p.profile.is_some() => reduce(p, frame),").expect("a profile's picture goes on");
+        let on = fire.find("Answer::Picture { frame, .. } if p.profile.is_some() => reduce(h, p, frame),").expect("a profile's picture goes on");
         assert!(on < fire.find("mailbox::deliver(").unwrap(), "before anything is delivered");
-        assert!(body(SNAP, "fn reduce(").contains("self.image_tasks.send(sent)"));
-        assert!(body(IMAGES, "pub(crate) fn fire_image_results(").contains("self.deliver_reduced(p, reduced);"));
-        let deliver = body(SNAP, "pub(crate) fn deliver_reduced(");
+        assert!(body(SNAP, "fn reduce<").contains("h.images().send(sent)"));
+        assert!(body(IMAGES, "pub(crate) fn fire_images<").contains("crate::snapshot::deliver_reduced(h, p, reduced, &mut bumped);"));
+        let deliver = body(SNAP, "pub(crate) fn deliver_reduced<");
+        let waited = deliver.find("resume_handler(h, task, p, answer);").expect("a handler's goes on");
         let lane = deliver.find("let _prio = enter_priority(p.prio);").expect("no priority scope");
-        assert!(lane < deliver.find("mailbox::deliver(self, idx, &lua, Event::Snapshot").expect("not through the mailbox"));
+        assert!(waited < lane && lane < deliver.find("mailbox::deliver(h, idx, &lua, Event::Snapshot").expect("not through the mailbox"));
         assert!(body(SNAP, "pub(crate) fn open_snapshot(").contains("self.observations().profile_cb.add("));
         assert!(body(IMAGES, "fn profile_task(").contains("let Haystack::Frame { frame, region } = &t.hay else"), "the worker captures for it");
         // host.screen.pending, beside them.
@@ -11062,16 +10940,20 @@ mod ocr_wiring_tests {
     }
 
     /// Without a callback, `profile` refuses `key` and `at` (snapshot.rs, `callback_only`, tested
-    /// there): once the callback form has gone its way, so that form still reads both, and before
-    /// anything is answered or captured.
+    /// there), where it waits and where it cannot: after its other options are read, and before
+    /// anything is filed, answered or captured. The callback form, the shim's to take first, reads
+    /// both.
     #[test]
     fn a_profile_without_a_callback_refuses_key_and_at_before_it_answers() {
-        let api = body(LIB, "fn install_host_api(");
-        let binding = bindings(api, "screen").into_iter().find(|b| b.0 == "profile").expect("host.screen.profile").1;
-        let refused = binding.find("snapshot::callback_only(opts.as_ref(), F, &[\"key\", \"at\"])?;").expect("key and at refused");
-        assert!(binding.find("return Ok(mlua::MultiValue::new());").expect("the callback form") < refused);
-        assert!(refused < binding.find("Err(why) => return with_reason(").unwrap(), "after a reason was answered");
-        assert!(refused < binding.find("sh.backend.capture(").unwrap(), "after a capture");
+        let profile = body(SNAP, "pub(crate) fn profile(");
+        let blocking = &profile[profile.find("let blocking = lua.create_function(").expect("where it cannot wait")..];
+        let refused = blocking.find("callback_only(opts.as_ref(), FPR, &[\"key\", \"at\"])?;").expect("key and at refused");
+        assert!(blocking.find("profile_args(").unwrap() < refused, "before the other options are read");
+        assert!(refused < blocking.find("profile_now(").unwrap(), "after a reason was answered or a capture made");
+        let start = body(SNAP, "pub(crate) fn start_profile<");
+        let refused = start.find("callback_only(o, FPR, &[\"key\", \"at\"])?;").expect("key and at refused in a handler");
+        assert!(refused < start.find("submit_profile(").unwrap(), "after the request was filed");
+        assert!(!body(SNAP, "pub(crate) fn submit_profile<").contains("callback_only("), "the callback form refuses them");
     }
 
     /// What `snapshotAsync` does with its charge: reserved by the region's form
@@ -11126,7 +11008,7 @@ mod ocr_wiring_tests {
             );
         }
         assert!(
-            body(IMAGES, "fn fire_image_results(").contains("let _prio = crate::ocr::types::enter_priority(p.prio);"),
+            body(IMAGES, "fn hand_over<").contains("let _prio = crate::ocr::types::enter_priority(p.prio);"),
             "an image search's callback does not run in the lane it was asked from"
         );
         // A controller combination held for its `holdMs` is fired from the tick, not from
@@ -11164,14 +11046,19 @@ mod ocr_wiring_tests {
         let api = body(LIB, "fn install_host_api(");
         let screen = bindings(api, "screen");
         let text = |name: &str| screen.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.screen.{name}")).1;
-        for name in ["profile", "save", "saveMarked"] {
+        for name in ["save", "saveMarked"] {
             assert!(text(name).contains("opts_region(&*sh.backend"), "host.screen.{name} reads its region another way");
         }
+        assert!(text("profile").contains("snapshot::profile(lua, shared, idx)"), "host.screen.profile");
+        assert!(body(SNAP, "pub(crate) fn profile_args(").contains("crate::region_arg_on(screen, &region_value, FPR, \"opts.region\")?"));
         assert!(text("pixel").contains("snapshot::pixel(lua, shared, idx)"), "host.screen.pixel");
         assert!(body(SNAP, "pub(crate) fn pixel_args(").contains("region_lua::read_point("), "host.screen.pixel has no window form");
-        for name in ["cells", "matchCells", "matchCellsAsync"] {
-            assert!(text(name).contains("read_cells_opts("), "host.screen.{name}");
+        assert!(text("cells").contains("cells_fn(lua, shared, idx)") && text("matchCells").contains("match_cells_fn(lua, shared, idx)"));
+        for f in ["fn cells_fn(", "fn match_cells_fn("] {
+            assert!(body(LIB, f).contains("cells_ask(lua, "), "`{f}`");
         }
+        assert!(body(LIB, "pub(crate) fn cells_ask(").contains("read_cells_opts(lua, fname, opts)?"));
+        assert!(text("matchCellsAsync").contains("read_cells_opts("), "host.screen.matchCellsAsync");
         assert!(body(LIB, "fn read_cells_opts(").contains("region_lua::read(&region_value"));
         // `recognize`, both its forms: the strict reader, under its name.
         assert!(body(OCR_LUA, "fn region(").contains("region_lua::read(v, what).map_err(bad)"));
@@ -11185,9 +11072,10 @@ mod ocr_wiring_tests {
         assert!(body(IMAGES, "fn parse_spec(").contains("region_lua::read_loose(&v, \"capture\""), "template{{ capture }}");
         assert!(body(IMAGES, "fn search_region(").contains("opts_region("));
         // Each call names ITSELF to the reader, so its mistakes are reported under its own name.
-        for name in ["profile", "save", "saveMarked"] {
+        for name in ["save", "saveMarked"] {
             assert!(text(name).contains(&format!("\"host.screen.{name}\"")), "host.screen.{name} reads its region under another name");
         }
+        assert!(SNAP.contains("const FPR: &str = \"host.screen.profile\";"), "host.screen.profile reads its region under another name");
         for (f, name) in [
             ("fn image_search(", "imageSearch"),
             ("fn image_search_multi(", "imageSearchMulti"),
@@ -11204,13 +11092,14 @@ mod ocr_wiring_tests {
         assert!(text("snapshot").contains("snapshot::snapshot(lua, shared, idx)"), "host.screen.snapshot");
         assert!(text("pixels").contains("snapshot::pixels(lua, shared, idx)"), "host.screen.pixels");
         assert!(body(SNAP, "fn read_opts(").contains("region_lua::read(&t.get::<Value>(\"region\")?, \"opts.region\")"));
-        assert!(body(SNAP, "fn crop(").contains("region_lua::read(v, \"the region\")"));
+        assert!(body(SNAP, "fn crop_args(").contains("region_lua::read(v, \"the region\")"));
         assert!(body(SNAP, "fn read_point_list(").contains("region_lua::read_point_any("));
         assert!(body(SNAP, "fn loose_region(").contains("region_lua::read_loose_within("));
         assert!(body(SNAP, "fn opts_region_in(").contains("loose_region("));
-        for name in ["profile", "save", "saveMarked"] {
+        for name in ["save", "saveMarked"] {
             assert!(text(name).contains("snapshot::opts_region_in("), "host.screen.{name} reads a snapshot's region another way");
         }
+        assert!(body(SNAP, "pub(crate) fn profile_args(").contains("opts_region_in(opts, FPR, f)?"), "host.screen.profile");
         for f in ["fn image_search(", "fn image_search_multi(", "fn image_search_async(", "fn image_search_each(", "fn image_search_all("] {
             assert!(body(IMAGES, f).contains("snapshot_region(opts.as_ref()"), "`{f}` reads a snapshot's region another way");
         }
@@ -11241,8 +11130,16 @@ mod ocr_wiring_tests {
         let branch = pixel.find("if let Some(frame) = snap {").expect("pixel's snapshot branch");
         let live = pixel.find("Ok(Reading::Live(vec![(x, y)]))").expect("pixel's live read");
         assert!(branch < live && !pixel.contains("observations()"), "a snapshot's pixel is counted as a screen read");
-        assert!(text("profile").contains("if pic.is_live() {"), "a snapshot's profile is counted as a screen read");
-        assert!(!body(LIB, "fn cells_of_snapshot<T>(").contains("observations()"));
+        assert!(body(SNAP, "pub(crate) fn profile(").contains("if c.live {"), "a snapshot's profile is counted as a screen read");
+        assert!(body(LIB, "fn cells_on_loop(").contains("if live {"), "a snapshot's cells are counted as a screen read");
+        // The region calls where they cannot wait: the module's source, no comparison on the loop.
+        assert!(text("cells").contains("cells_fn(lua, shared, idx)") && text("matchCells").contains("match_cells_fn(lua, shared, idx)"));
+        assert!(body(LIB, "fn cells_fn(").contains("cells_on_loop(&sh, lua, idx, CELLS, &why, ask)"));
+        assert!(body(LIB, "fn match_cells_fn(").contains("cells_on_loop(&sh, lua, idx, MATCH_CELLS, &why, ask)"));
+        for (file, f) in [(LIB, "fn cells_on_loop("), (SNAP, "pub(crate) fn profile("), (IMAGES, "pub(crate) fn template(")] {
+            let b = body(file, f);
+            assert!(b.contains("capture_source::vm_source(lua)") && !b.contains("read_source("), "`{f}` compares on the loop");
+        }
         // `pixel(x, y)` takes its options third and `pixel(point)` second.
         assert!(pixel.contains("_ => c,"), "pixel(x, y) reads its options from somewhere else");
         let read = body(SNAP, "pub(crate) fn pixels_args(");
@@ -11269,9 +11166,12 @@ mod ocr_wiring_tests {
     fn profile_sets_each_statistic_under_its_own_name() {
         let api = body(LIB, "fn install_host_api(");
         let binding = bindings(api, "screen").into_iter().find(|b| b.0 == "profile").expect("host.screen.profile").1;
-        assert!(binding.contains("let out = profile_table(lua, "), "host.screen.profile builds its answer elsewhere");
-        // A callback's answer is built by the same function.
-        assert!(body(SNAP, "fn call_args(").contains("crate::profile_table(&lua, r.rect.tuple(), r.columns, r.rows)?"));
+        assert!(binding.contains("snapshot::profile(lua, shared, idx)"), "host.screen.profile");
+        assert!(body(SNAP, "fn profile_answer(").contains("let t = crate::profile_table(lua, rect, columns, rows)?;"));
+        assert!(body(SNAP, "pub(crate) fn profile_on_loop(").contains("let out = profile_answer(lua, "), "host.screen.profile builds its answer elsewhere");
+        // A callback's answer and a waited one's are built by the same function.
+        assert!(body(SNAP, "fn call_args(").contains("profile_answer(&lua, r.rect.tuple(), r.columns, r.rows, job.moment)?"));
+        assert!(body(SNAP, "fn waited_values(").contains("profile_answer(&lua, r.rect.tuple(), r.columns, r.rows, job.moment)?"));
         let profile = body(LIB, "pub(crate) fn profile_table(");
         let mut at = 0;
         for k in ["min", "max", "dark", "mean", "r", "g", "b"] {
@@ -11389,10 +11289,16 @@ mod ocr_wiring_tests {
         let api = body(LIB, "fn install_host_api(");
         let screen = bindings(api, "screen");
         let text = |name: &str| screen.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.screen.{name}")).1;
-        for name in ["profile", "save", "saveMarked"] {
+        for name in ["save", "saveMarked"] {
             let t = text(name);
             assert!(t.contains("one_value(") && t.contains("with_reason(lua, "), "host.screen.{name}");
-            assert!(!t.contains("nil_because(") && !t.contains("mlua::Value::Nil))"), "host.screen.{name} answers two values where it answered one");
+            assert!(!t.contains("mlua::Value::Nil))"), "host.screen.{name} answers two values where it answered one");
+        }
+        // `profile` builds its answers in snapshot.rs: on the event loop, and for a handler that waited.
+        for f in ["pub(crate) fn profile_on_loop(", "fn waited_values("] {
+            let t = body(SNAP, f);
+            assert!(t.contains("one_value(") && t.contains("with_reason("), "`{f}`");
+            assert!(!t.contains("Value::Nil))"), "`{f}` answers two values where it answered one");
         }
         // `pixel` builds its answers in snapshot.rs: at once, and from a live read wherever it ran.
         for f in ["pub(crate) fn pixel_args(", "fn live_values("] {
@@ -11500,7 +11406,7 @@ mod ocr_wiring_tests {
             assert!(!f.contains("guard(||"), "`{sig}` still calls a callback itself");
         }
         assert!(body(GAMEPAD, "fn deliver_pad_events(").contains("mailbox::deliver(self, idx, &lua, Event::Pad"));
-        assert!(body(IMAGES, "pub(crate) fn fire_image_results(").matches("mailbox::deliver(self, owner, &lua, Event::Image").count() == 2);
+        assert!(body(IMAGES, "fn hand_over<").contains("mailbox::deliver(h, owner, &lua, Event::Image"));
         assert!(body(SNAP, "pub(crate) fn fire_snaps<").contains("mailbox::deliver(h, idx, &lua, Event::Snapshot"));
         assert!(body(OCR_LUA, "pub(crate) fn fire<H: MailHost>(h: &H)").contains("mailbox::deliver(h, idx, &lua, Event::Read"));
         assert!(body(TIMERS, "pub(crate) fn fire_due(").contains("deliver(Due::Once { token, idx, lua });"));
@@ -11984,11 +11890,15 @@ mod ocr_wiring_tests {
             "host.screen.snapshot",
             "host.screen.pixel",
             "host.screen.pixels",
+            "host.screen.profile",
             "host.screen.snapshotAsync",
             "snapshot:crop",
             "snapshot:release",
         ] {
             assert!(SNAP.contains(&format!("host_call!(\"{name}\")")), "{name}");
+        }
+        for name in ["cells", "matchCells"] {
+            assert!(LIB.contains(&format!("host_call!(\"host.screen.{name}\")")), "host.screen.{name}");
         }
         for name in ["host.gui.webview", "page:show", "page:prepare", "page:focus", "page:hide", "page:post", "page:isShown", "page:close"] {
             assert!(WEBVIEW_LUA.contains(&format!("host_call!(\"{name}\")")), "{name}");
@@ -12015,7 +11925,9 @@ mod ocr_wiring_tests {
                         continue;
                     }
                     let rest = &src[at + pat.len()..];
-                    let window = &rest[..rest.len().min(500)];
+                    // 500 bytes, cut back to a character's start: a comment may write a dash there.
+                    let end = (0..=rest.len().min(500)).rev().find(|&i| rest.is_char_boundary(i)).unwrap_or(0);
+                    let window = &rest[..end];
                     let next = window.find(pat).unwrap_or(window.len());
                     let first = &window[..next];
                     if !(first.contains("host_call!(") || first.contains("HostCall::enter(")) {
@@ -12073,6 +11985,11 @@ mod ocr_wiring_tests {
             "snapshot.rs: snapshot",
             "snapshot.rs: pixel",
             "snapshot.rs: pixels",
+            "snapshot.rs: profile",
+            "snapshot.rs: install_crop",
+            "image_search.rs: template",
+            "lib.rs: cells_fn",
+            "lib.rs: match_cells_fn",
         ];
         let expected: std::collections::BTreeSet<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(found, expected, "a call into a VM the guard does not know");
@@ -12290,11 +12207,11 @@ mod uptime_wiring_tests {
         assert!(line.contains("sink.rotate(&continued);"));
         // Image searches: the cap at submit, and the worker skipping what was ended.
         let submit = body(IMAGES, "fn submit(");
-        assert!(submit.contains("oldest_over_cap(&sh.pending_image.borrow(), owner, IMAGE_PER_OWNER)"));
-        assert!(submit.contains("sh.ended_images.borrow_mut().push((p, why));"));
+        assert!(submit.contains("oldest_over_cap(&sh.images.pending.borrow(), owner, IMAGE_PER_OWNER)"));
+        assert!(submit.contains("sh.images.ended.borrow_mut().push((p, why));"));
         assert!(submit.contains("logging::Said::Summary { count, over } =>"), "the summary is written");
-        assert!(body(IMAGES, "fn worker_loop(").contains("batch.retain(|t| !set.remove(&t.id));"));
-        assert!(body(IMAGES, "pub(crate) fn purge_pending_images(").contains("self.ended_images.borrow_mut()"));
+        assert!(body(IMAGES, "fn worker_loop(").contains("waiting.retain(|t| !set.remove(&t.id));"));
+        assert!(body(IMAGES, "pub(crate) fn purge_pending_images(").contains("self.images.ended.borrow_mut()"));
         // OCR keys: forgotten when their last read is answered or dropped.
         assert!(body(OCR_LUA, "pub(crate) fn fire<H: MailHost>(h: &H)").contains("st.settled(p.owner, p.key.as_deref());"));
         assert!(body(OCR_LUA, "pub(crate) fn open_read<H: ReadHost>(").contains("st.settled(p.owner, p.key.as_deref());"));

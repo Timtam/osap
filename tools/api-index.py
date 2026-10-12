@@ -398,9 +398,12 @@ CAPABILITIES = [
     '[`imageSearchEach`](screen.md#host-screen-imagesearcheach), '
     '[`snapshotAsync`](screen.md#host-screen-snapshotasync) and '
     '[`profile`](screen.md#profile-with-a-callback) given a callback runs on threads of the host\'s '
-    'own and answers in a callback — a text read without one answers the handler that waits '
-    'for it, and only its own module waits; the other screen calls hold the loop until they '
-    'return. Which call runs where: [Threads](../module-runtime-and-lifecycle.md#threads).',
+    'own and answers in a callback. Without one, a text read answers the handler that waits '
+    'for it, and so do [`snapshot`](screen.md#where-it-waits), `pixel`, `pixels`, `profile`, '
+    '`cells`, `matchCells`, `template{ capture }` and a snapshot\'s `crop`: only their own '
+    'module waits. The searches without a callback, `template` from a file, `save` and `saveMarked` '
+    'hold the loop until they return. Which call runs where: '
+    '[Threads](../module-runtime-and-lifecycle.md#threads).',
     '- **A manifest that names its target window.** `module.toml` has no window or process '
     'field; matching is Luau — see the [manifest](../module-package-format.md).',
     '',

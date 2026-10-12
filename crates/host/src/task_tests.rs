@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
-use crate::backend::{CaptureSource, Compare, OcrLine, OcrText, OcrWord, OcrWorker, Recognise};
+use crate::backend::{CaptureSource, CapturedImage, Compare, OcrLine, OcrText, OcrWord, OcrWorker, Recognise};
 use crate::capture_source;
 use crate::image_search::VmOwner;
 use crate::mailbox::{self, Event, MailHost, Mailboxes, Opened, Why};
@@ -42,7 +42,7 @@ use crate::ocr::lang::Languages;
 use crate::ocr::lua::{self as reads, Delivered, OcrState, ReadHost};
 use crate::ocr::sched::Owner;
 use crate::ocr::service::{Service, ShutdownHandle};
-use crate::ocr::snap_queue::{SnapKind, SnapReq, SnapTicket};
+use crate::ocr::snap_queue::{SnapId, SnapKind, SnapReq, SnapTicket};
 use crate::ocr::types::{current_priority, enter_priority, Priority, Rect};
 use crate::task::{self, Case, Tasks};
 use crate::timers::{self, Timers};
@@ -174,6 +174,34 @@ fn points_read(x: i32) -> Vec<(bool, String)> {
     locked(&POINTS_READ).iter().filter(|p| p.0 == x).map(|p| (p.1, p.2.clone())).collect()
 }
 
+/// Every region the image worker's fake capture read: its x, and the thread.
+static IMAGE_CAPTURED: Mutex<Vec<(i32, String)>> = Mutex::new(Vec::new());
+
+/// The image worker's capture (`image_search::spawn_image_worker`), and the event loop's where a
+/// call that waits for the worker cannot wait: from x = 20000 on, the picture a snapshot round has
+/// there (`snapshot::test_frame`); elsewhere none, and why. A capture of a held x waits until it is
+/// let go.
+fn fake_image_capture(regions: &[(i32, i32, i32, i32)], _: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+    let thread = std::thread::current().name().unwrap_or("?").to_string();
+    regions
+        .iter()
+        .map(|&(x, y, w, h)| {
+            wait_while_held(x, true);
+            locked(&IMAGE_CAPTURED).push((x, thread.clone()));
+            if x >= SNAP_X {
+                Ok(crate::snapshot::test_frame(x, y, w, h).img)
+            } else {
+                Err("no pixels here".to_string())
+            }
+        })
+        .collect()
+}
+
+/// The threads the image worker's fake capture read `x` on, in order.
+fn image_captured(x: i32) -> Vec<String> {
+    locked(&IMAGE_CAPTURED).iter().filter(|c| c.0 == x).map(|c| c.1.clone()).collect()
+}
+
 /// Whether the language list of the holder that holds it is still held back (`held_langs`).
 static LANGS_HELD: Mutex<bool> = Mutex::new(true);
 static LANGS_CV: Condvar = Condvar::new();
@@ -258,6 +286,8 @@ struct Host {
     state: OcrState,
     snaps: crate::snapshot::SnapState,
     snap_bytes: Rc<Cell<usize>>,
+    /// The image worker, a real one over the fake capture (`fake_image_capture`).
+    images: crate::image_search::ImageState,
     tasks: Tasks,
     mail: Mailboxes,
     timers: Timers,
@@ -289,6 +319,9 @@ impl ReadHost for Host {
     }
     fn snap_bytes(&self) -> &Rc<Cell<usize>> {
         &self.snap_bytes
+    }
+    fn images(&self) -> &crate::image_search::ImageState {
+        &self.images
     }
     fn tasks(&self) -> &Tasks {
         &self.tasks
@@ -357,6 +390,12 @@ fn holder((ocr, stop): (Service<Fake>, ShutdownHandle)) -> Rc<Host> {
         state: OcrState::default(),
         snaps: crate::snapshot::SnapState::default(),
         snap_bytes: Rc::new(Cell::new(0)),
+        images: {
+            let (tasks, task_rx) = std::sync::mpsc::channel();
+            let (result_tx, results) = std::sync::mpsc::channel();
+            crate::image_search::spawn_image_worker(fake_image_capture, crate::backend::no_comparison, task_rx, result_tx);
+            crate::image_search::ImageState::new(tasks, results)
+        },
         tasks: Tasks::default(),
         mail: Mailboxes::default(),
         timers: Timers::default(),
@@ -409,6 +448,20 @@ fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     let (pixel, pixels) = crate::snapshot::test_points(&lua, idx, h.clone(), fake_points).unwrap();
     screen.set("pixel", pixel).unwrap();
     screen.set("pixels", pixels).unwrap();
+    screen.set("profile", crate::snapshot::test_profile_fn(&lua, idx, h.clone(), fake_image_capture).unwrap()).unwrap();
+    let (cells, match_cells) = crate::image_search::test_cells(&lua, idx, h.clone(), fake_image_capture).unwrap();
+    screen.set("cells", cells).unwrap();
+    screen.set("matchCells", match_cells).unwrap();
+    let dot = std::sync::Arc::new(crate::template::Decoded::from_png_rgba(1, 1, vec![0, 0, 0, 255]));
+    screen.set("template", crate::image_search::test_template(&lua, idx, h.clone(), fake_image_capture, dot).unwrap()).unwrap();
+    crate::snapshot::install_crop(&lua, idx, h.clone()).unwrap();
+    let hh = h.clone();
+    screen
+        .set(
+            "pending",
+            lua.create_function(move |lua, key: Value| crate::snapshot::pending_in(&hh.snaps, &hh.gens.borrow(), lua, idx, &key)).unwrap(),
+        )
+        .unwrap();
     let hh = h.clone();
     screen
         .set(
@@ -1743,9 +1796,9 @@ fn pending_says_whether_a_read_or_a_wait_with_the_key_is_out() {
 // ── host.screen.snapshot waits ───────────────────────────────────────────────────────────────
 
 /// The snapshots' delivery, as the tick runs it: a handler that waited goes on, a callback's answer
-/// goes to its module's mailbox. No profile is asked in these tests.
+/// goes to its module's mailbox, and a profile's picture goes on to the image worker.
 fn fire_snaps(h: &Host) {
-    crate::snapshot::fire_snaps(h, &|_, _| panic!("no profile is asked in these tests"));
+    crate::snapshot::fire_snaps(h);
 }
 
 /// Turns of the loop — the snapshots only — until no snapshot request is waiting any more, 10 s at
@@ -2661,4 +2714,396 @@ fn example_a_poll_with_one_read_at_a_time() {
         "{:?}",
         lua.load("return table.concat(said, ' | ')").eval::<String>()
     );
+}
+
+// ── The calls that wait for the image worker ─────────────────────────────────────────────────
+
+/// Turns of the loop — the image worker's answers, then the snapshots' — until nothing waits for
+/// either any more, 10 s at most.
+fn settle_images(h: &Host) {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        crate::image_search::fire_images(h);
+        fire_snaps(h);
+        if !(h.images.has_pending() || h.snaps.has_pending()) || Instant::now() >= until {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Lua's `alike(a, b)`: two answers with the same keys and the same values all the way down, but
+/// for `time` and `inputEpoch`, which say where and when each was read.
+const ALIKE: &str = r#"
+function alike(a, b)
+  if type(a) ~= type(b) then return false end
+  if type(a) ~= "table" then return a == b end
+  for k, v in pairs(a) do
+    if k ~= "time" and k ~= "inputEpoch" and not alike(v, b[k]) then return false end
+  end
+  for k in pairs(b) do
+    if k ~= "time" and k ~= "inputEpoch" and a[k] == nil then return false end
+  end
+  return true
+end
+"#;
+
+/// The template in `v`: its size, pixels, `count` and name.
+fn template_of(v: Value) -> crate::image_search::TestTemplate {
+    crate::image_search::test_template_of(&v).expect("a template")
+}
+
+/// `host.screen.profile`, `cells`, `matchCells`, `template{ capture }` and a snapshot's `crop` in a
+/// handler wait — the profile's picture on the `screen-capture` thread, the rest on the image
+/// worker — and only their module is busy meanwhile: its next key waits in its mailbox, another
+/// module's key runs. The handler goes on with exactly what the calls that do not wait answer, on
+/// the screen and on a snapshot: the profile's table, the grid, the match, the template's pixels
+/// and the crop's — or `nil` and the reason. A profile carries its picture's `time` and
+/// `inputEpoch` in both forms: the capture thread's for a wait, the event loop's at the call where
+/// it cannot wait, a snapshot's own on a snapshot. The waits turn no epoch.
+#[test]
+fn the_region_calls_in_a_handler_wait_and_answer_what_the_calls_that_do_not_wait_answer() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let other = vm(&h, 2);
+    run(&lua, ALIKE);
+    let shot = crate::snapshot::test_handle(&lua, crate::snapshot::test_frame(21001, 5, 40, 30));
+    lua.globals().set("s", Value::UserData(shot)).unwrap();
+    run(
+        &lua,
+        r##"
+        local GRID = { region = { 21001, 5, 21041, 35 }, cols = 4, rows = 3, predicate = "r > b" }
+        local STATES = { { name = "none", cells = string.rep("00", 12) }, { name = "all", cells = string.rep("ff", 12) } }
+        local ON_SNAP = { region = { 21003, 7, 21023, 27 }, cols = 2, rows = 2, predicate = "r > b", snapshot = s }
+        local SNAP_STATES = { string.rep("00", 4), string.rep("ff", 4) }
+        function ask(into)
+          into.profile = { host.screen.profile({ region = { 21001, 5, 21041, 35 }, axes = "both" }) }
+          into.snapProfile = { host.screen.profile({ snapshot = s, region = { 21000, 0, 21011, 9 }, axes = "rows", dark = 60 }) }
+          into.cells = { host.screen.cells(GRID) }
+          into.cellsValues = select("#", host.screen.cells(GRID))
+          into.match = { host.screen.matchCells(GRID, STATES) }
+          into.snapCells = { host.screen.cells(ON_SNAP) }
+          into.snapMatch = { host.screen.matchCells(ON_SNAP, SNAP_STATES) }
+          into.template = host.screen.template({ name = "cut", capture = { 21002, 6, 21010, 12 } })
+          into.snapTemplate = host.screen.template({ capture = { 21004, 8, 21009, 11 }, snapshot = s })
+          into.crop = s:crop({ 21002, 6, 21012, 16 })
+          into.notThere = { host.screen.cells({ region = { 5, 5, 25, 25 }, cols = 2, rows = 2, predicate = "r > b" }) }
+          into.noTemplate = { host.screen.template({ capture = { 5, 5, 9, 9 } }) }
+          into.noProfile = { host.screen.profile({ region = { 5, 5, 25, 25 } }) }
+        end
+        blocked = {}
+        ask(blocked)
+        order = {}
+        function look()
+          order[#order + 1] = "asked"
+          before = epoch()
+          waited = {}
+          ask(waited)
+          after = epoch()
+          order[#order + 1] = "answered"
+        end
+        function key() order[#order + 1] = "key" end
+        "##,
+    );
+    run(&other, "function key() ran = true end");
+    let me = current_thread();
+    assert_eq!(image_captured(21001), [me.clone(), me.clone(), me.clone(), me.clone()], "where they cannot wait, on the loop");
+    hold(21001);
+    h.ocr.note_input_epoch(41);
+    assert_eq!(event(&h, &lua, "look", Vec::new(), true), mailbox::Delivered::Parked);
+    assert_eq!(event(&h, &lua, "key", Vec::new(), true), mailbox::Delivered::Queued, "its keys wait behind it");
+    let f: Function = other.globals().get("key").unwrap();
+    let ran = mailbox::deliver(&*h, 2, &other, Event::Call { f, args: MultiValue::new(), input: true, what: "key" });
+    assert_eq!(ran, mailbox::Delivered::Ran, "another module's key runs meanwhile");
+    assert!(yes(&lua, "return #order == 1 and waited.profile == nil"));
+    release(21001);
+    settle_images(&h);
+    mailbox::run_queued(&*h);
+    assert!(
+        yes(&lua, r#"return table.concat(order, " | ") == "asked | answered | key""#),
+        "{:?}",
+        lua.load("return table.concat(order, ' | ')").eval::<String>()
+    );
+    for name in ["profile", "snapProfile", "cells", "cellsValues", "match", "snapCells", "snapMatch", "notThere", "noTemplate"] {
+        assert!(yes(&lua, &format!("return alike(waited.{name}, blocked.{name})")), "{name}: not what the call that does not wait answers");
+    }
+    assert!(
+        yes(&lua, "return #waited.profile == 1 and waited.profile[1].columns ~= nil and waited.cellsValues == 2 and waited.match[1].name ~= nil"),
+        "a table, the grid and nil after it, a match"
+    );
+    assert!(yes(&lua, "return waited.notThere[2] == 'no pixels here' and waited.noTemplate[2] == 'no pixels here'"));
+    // A profile's picture is taken as a snapshot's is, so it fails as one fails here.
+    assert!(yes(&lua, "return waited.noProfile[1] == nil and waited.noProfile[2] == 'no snapshots here' and blocked.noProfile[2] == 'no pixels here'"));
+    assert!(
+        yes(&lua, "return waited.profile[1].inputEpoch == 41 and blocked.profile[1].inputEpoch == 7 and type(waited.profile[1].time) == 'number'"),
+        "the capture thread's picture, and the event loop's at the call"
+    );
+    assert!(
+        yes(&lua, "return waited.snapProfile[1].time == s.time and waited.snapProfile[1].inputEpoch == s.inputEpoch and blocked.snapProfile[1].time == s.time"),
+        "a snapshot's own moment"
+    );
+    let w: Table = lua.globals().get("waited").unwrap();
+    let b: Table = lua.globals().get("blocked").unwrap();
+    for name in ["template", "snapTemplate"] {
+        assert_eq!(template_of(w.get(name).unwrap()), template_of(b.get(name).unwrap()), "{name}: the same template");
+    }
+    assert_eq!(template_of(w.get("template").unwrap()).4.as_deref(), Some("cut"), "named as asked");
+    assert_eq!(picture_of(w.get("crop").unwrap()), picture_of(b.get("crop").unwrap()), "the same crop, of the same moment");
+    assert_eq!(&image_captured(21001)[4..], ["image-worker", "image-worker", "image-worker"], "in a handler, on the image worker");
+    assert!(yes(&lua, "return before == after"), "a wait turns no epoch");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// Where a handler cannot stop, the region calls read on the event loop as they always did and
+/// answer at once: outside every handler, where Luau cannot stop it, in a coroutine of the module's
+/// own. The host says so once per module, call and place, and counts every such call for the
+/// summary at exit; in the handler's own coroutine it waits. A call with nothing to read this time
+/// — a window region with no rectangle, an empty region, a crop or a template's capture outside its
+/// snapshot — and a template from bytes read nothing on the screen: they are answered at once
+/// wherever they are asked, neither said nor counted.
+#[test]
+fn where_the_region_calls_cannot_wait_they_answer_at_once_and_are_said_once_per_place() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let shot = crate::snapshot::test_handle(&lua, crate::snapshot::test_frame(21101, 5, 20, 20));
+    lua.globals().set("s", Value::UserData(shot)).unwrap();
+    run(
+        &lua,
+        r#"
+        local G = { region = { 21101, 5, 21111, 15 }, cols = 2, rows = 2, predicate = "r > b" }
+        local EMPTY = { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0, 1, 1 } }
+        quiet = {
+          { host.screen.cells({ region = EMPTY, cols = 2, rows = 2, predicate = "r > b" }) },
+          { host.screen.profile({ region = { 21101, 5, 21101, 15 } }) },
+          { host.screen.template({ rgb = "abc", w = 1, h = 1 }) },
+          { s:crop({ 0, 0, 5, 5 }) },
+          { host.screen.template({ capture = { 0, 0, 5, 5 }, snapshot = s }) },
+        }
+        top = { host.screen.cells(G) }
+        task.run(function()
+          got = {}
+          got.quiet = { host.screen.cells({ region = EMPTY, cols = 2, rows = 2, predicate = "r > b" }) }
+          got.quietProfile = { host.screen.profile({ snapshot = s, region = { 0, 0, 9, 9 } }) }
+          got.quietCrop = { s:crop({ 0, 0, 5, 5 }) }
+          got.host = hostCall(function() return host.screen.profile({ region = { 21101, 5, 21111, 15 } }) end)
+          got.meta = setmetatable({}, { __index = function() return host.screen.matchCells(G, { "00000000" }) end }).x
+          got.own = coroutine.wrap(function() return s:crop({ 21102, 6, 21104, 8 }) end)()
+          got.template = coroutine.wrap(function() return host.screen.template({ capture = { 21102, 6, 21104, 8 } }) end)()
+          got.waited = host.screen.cells(G)
+        end)
+        "#,
+    );
+    assert!(
+        yes(
+            &lua,
+            r#"return quiet[1][1] == nil and quiet[1][2] == "the window's client area is empty (0x0)"
+              and quiet[2][1] == nil and quiet[2][2] == "the region is empty (0x10)" and quiet[3][1] ~= nil
+              and quiet[4][1] == nil and quiet[4][2] == "the region is not inside the snapshot"
+              and quiet[5][1] == nil and quiet[5][2] == quiet[4][2]
+              and got.quiet[2] == quiet[1][2] and got.quietProfile[2] == "the region does not overlap the snapshot"
+              and got.quietCrop[2] == quiet[4][2] and top[1] ~= nil and got.waited == nil"#
+        ),
+        "nothing to read: at once, everywhere; the handler's own call waits"
+    );
+    for (call, case) in [
+        ("host.screen.cells", Case::Outside),
+        ("host.screen.profile", Case::CannotWait),
+        ("host.screen.matchCells", Case::CannotWait),
+        ("Snapshot:crop", Case::OwnCoroutine),
+        ("host.screen.template", Case::OwnCoroutine),
+    ] {
+        assert!(h.tasks.legacy_said("m1", call, case), "{call} {case:?} not said");
+    }
+    for (call, case) in [("host.screen.profile", Case::Outside), ("host.screen.template", Case::Outside), ("Snapshot:crop", Case::Outside)] {
+        assert!(!h.tasks.legacy_said("m1", call, case), "{call} {case:?}: nothing was read, and it was said");
+    }
+    settle_images(&h);
+    assert!(yes(&lua, "return got.waited ~= nil and got.host ~= nil and got.meta ~= nil and got.own ~= nil and got.template ~= nil"));
+    let summary = h.tasks.legacy_summary();
+    assert_eq!(summary.len(), 5, "{summary:?}");
+    assert!(summary.iter().all(|(scope, line)| *scope == "screen" && line.contains(" held the event loop 1 time(s), ")), "{summary:?}");
+    assert!(summary.iter().any(|(_, line)| line.starts_with("[m1] Snapshot:crop held the event loop 1 time(s), ")), "{summary:?}");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// `host.screen.profile` given a callback never waits, wherever it is called — at the top level, in
+/// a handler — and calls back with its table and the picture's moment. Without one, a `key` or an
+/// `at` raise in a handler as where it cannot wait, and `nil` as the second argument is the call
+/// without a callback, which waits.
+#[test]
+fn a_profile_with_a_callback_never_waits_and_one_without_refuses_key_and_at() {
+    let h = host();
+    let lua = vm(&h, 1);
+    run(
+        &lua,
+        r#"
+        host.screen.profile({ region = { 21201, 5, 21211, 15 }, axes = "columns", key = "k" }, function(p, why) top = p end)
+        pendingTop = host.screen.pending("k")
+        task.run(function()
+          host.screen.profile({ region = { 21202, 5, 21212, 15 }, axes = "columns" }, function(p) inTask = p end)
+          returned = true
+          okKey, keyWhy = pcall(host.screen.profile, { region = { 21202, 5, 21212, 15 }, key = "k" })
+          okAt, atWhy = pcall(host.screen.profile, { region = { 21202, 5, 21212, 15 }, at = 0 })
+          okNil, nilP = pcall(host.screen.profile, { region = { 21203, 5, 21213, 15 } }, nil)
+        end)
+        okTopKey, topKeyWhy = pcall(host.screen.profile, { key = "k" })
+        okCb, cbWhy = pcall(host.screen.profile, {}, 5)
+        "#,
+    );
+    assert!(yes(&lua, "return returned == true and pendingTop == true and top == nil and inTask == nil"), "returned at once, its answer to come");
+    assert!(yes(&lua, "return okKey == false and okAt == false and okTopKey == false and okCb == false and okNil == nil"));
+    for (name, want) in [
+        ("keyWhy", "host.screen.profile: opts.key is only taken with a callback (the second argument)"),
+        ("atWhy", "host.screen.profile: opts.at is only taken with a callback (the second argument)"),
+        ("topKeyWhy", "host.screen.profile: opts.key is only taken with a callback (the second argument)"),
+        ("cbWhy", "host.screen.profile: the callback (second argument) must be a function, got 5"),
+    ] {
+        let got: String = lua.load(format!("return tostring({name})")).eval().unwrap();
+        assert!(got.contains(want), "{name}: {got}");
+    }
+    settle_images(&h);
+    mailbox::run_queued(&*h);
+    assert!(
+        yes(&lua, "return top ~= nil and top.x == 21201 and #top.columns.min == 10 and type(top.time) == 'number' and top.inputEpoch ~= nil"),
+        "the callback's answer"
+    );
+    assert!(yes(&lua, "return inTask ~= nil and okNil == true and nilP ~= nil and nilP.columns ~= nil and nilP.inputEpoch ~= nil"));
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// A module disabled while its handler waits for the image worker: the handler never goes on, its
+/// task is withdrawn, and a crop's charge, reserved at the call, comes back at once — so nothing of
+/// it is answered later. A crop's charge is the copy's from the call, settled once it is made.
+#[test]
+fn an_image_wait_goes_with_its_module_and_a_crops_charge_comes_back() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let shot = crate::snapshot::test_handle(&lua, crate::snapshot::test_frame(21301, 5, 40, 30));
+    lua.globals().set("s", Value::UserData(shot)).unwrap();
+    run(
+        &lua,
+        "function crop() c = s:crop({ 21302, 6, 21322, 26 }); cropped = true end\n\
+         function look() g = host.screen.cells({ region = { 21301, 5, 21311, 15 }, cols = 1, rows = 1, predicate = 'r > b' }); looked = true end",
+    );
+    let base = crate::snapshot::test_vm_bytes(&lua);
+    assert_eq!(event(&h, &lua, "crop", Vec::new(), false), mailbox::Delivered::Parked);
+    assert!(crate::snapshot::test_vm_bytes(&lua) > base, "the copy's charge is reserved at the call");
+    assert!(h.images.has_pending());
+    disable(&h, 1);
+    assert_eq!(crate::snapshot::test_vm_bytes(&lua), base, "its charge is back at once");
+    assert!(!h.images.has_pending(), "its task is withdrawn");
+    assert_eq!(h.tasks.len(), 0);
+    settle_images(&h);
+    enable(&h, 1);
+    hold(21301);
+    assert_eq!(event(&h, &lua, "look", Vec::new(), false), mailbox::Delivered::Parked);
+    disable(&h, 1);
+    assert!(!h.images.has_pending(), "its task is withdrawn");
+    release(21301);
+    settle_images(&h);
+    enable(&h, 1);
+    settle_images(&h);
+    assert!(yes(&lua, "return cropped == nil and c == nil and looked == nil and g == nil"), "nothing of them went on");
+    // Answered: the charge is the copy's.
+    assert_eq!(event(&h, &lua, "crop", Vec::new(), false), mailbox::Delivered::Parked);
+    settle_images(&h);
+    assert!(yes(&lua, "return cropped == true and c.w == 20 and c.h == 20"));
+    assert_eq!(crate::snapshot::test_vm_bytes(&lua), base + 20 * 20 * 4, "settled to what the copy holds");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// Turns of the loop — the snapshots only — until profile request `id` has gone to the image
+/// worker, 10 s at most: the priority it went with.
+fn sent_prio(h: &Host, id: SnapId) -> Option<Priority> {
+    let until = Instant::now() + Duration::from_secs(10);
+    while h.snaps.test_sent_prio(id).is_none() && Instant::now() < until {
+        fire_snaps(h);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    h.snaps.test_sent_prio(id)
+}
+
+/// A poll's profile goes to the image worker as a poll's, behind the batch a key's read forms; a
+/// key queued behind the handler that waits for it while its picture is still to come raises its
+/// reduction too, as it raises its picture, so the key does not wait for the polls' batch.
+#[test]
+fn a_key_queued_behind_a_polls_profile_sends_its_reduction_ahead_of_the_polls() {
+    let h = host();
+    let lua = vm(&h, 1);
+    run(
+        &lua,
+        "function poll() p = host.screen.profile({ region = { 21401, 5, 21411, 15 }, axes = 'columns' }) end\n\
+         presses = 0\n\
+         function key() presses += 1 end",
+    );
+    assert_eq!(event(&h, &lua, "poll", Vec::new(), false), mailbox::Delivered::Parked);
+    let id = h.snaps.test_ids_of(1)[0];
+    assert_eq!(sent_prio(&h, id), Some(Priority::Background), "nobody waits on it");
+    settle_images(&h);
+    assert!(yes(&lua, "return p ~= nil and p.columns ~= nil"));
+    run(&lua, "p = nil");
+    assert_eq!(event(&h, &lua, "poll", Vec::new(), false), mailbox::Delivered::Parked);
+    let id = h.snaps.test_ids_of(1)[0];
+    {
+        let _key = enter_priority(Priority::Interactive);
+        assert_eq!(event(&h, &lua, "key", Vec::new(), true), mailbox::Delivered::Queued);
+    }
+    assert_eq!(sent_prio(&h, id), Some(Priority::Interactive), "a key waits behind it");
+    settle_images(&h);
+    mailbox::run_queued(&*h);
+    assert!(yes(&lua, "return p ~= nil and p.columns ~= nil and presses == 1"));
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// `host.screen.profile` holds a picture of its own under the same limits whether it waits or not:
+/// corners past 40,000,000 pixels or past the room in the snapshot budget raise at the call in a
+/// handler and where it cannot wait, before anything is captured, and a window region past them is
+/// answered `nil` and the reason in both — where it cannot wait at once, and unsaid.
+#[test]
+fn a_profile_past_its_limits_answers_alike_whether_it_waits_or_not() {
+    let h = host();
+    let lua = vm(&h, 1);
+    run(
+        &lua,
+        r#"
+        local HUGE = { 21501, 0, 31501, 5000 }
+        local OVER = { 21501, 0, 27501, 6000 }
+        local WINDOW = { window = { client = { x = 21501, y = 0, w = 10000, h = 5000 } }, fraction = { 0, 0, 1, 1 } }
+        local function ask(into)
+          into.okHuge, into.huge = pcall(host.screen.profile, { region = HUGE })
+          into.okOver, into.over = pcall(host.screen.profile, { region = OVER })
+          into.window = { host.screen.profile({ region = WINDOW }) }
+        end
+        top = {}
+        ask(top)
+        task.run(function()
+          waited = {}
+          ask(waited)
+        end)
+        "#,
+    );
+    settle_snaps(&h);
+    assert!(yes(&lua, "return waited ~= nil and waited.window ~= nil"), "answered");
+    for form in ["top", "waited"] {
+        assert!(yes(&lua, &format!("return {form}.okHuge == false and {form}.okOver == false")), "{form}: corners past a limit raise");
+        let huge: String = lua.load(format!("return tostring({form}.huge)")).eval().unwrap();
+        assert!(huge.contains("host.screen.profile: opts.region: the region is 10000x5000, 50000000 pixels; the limit is 40000000"), "{form}: {huge}");
+        let over: String = lua.load(format!("return tostring({form}.over)")).eval().unwrap();
+        assert!(over.contains("host.screen.profile: this module's snapshots would hold"), "{form}: {over}");
+        assert!(
+            yes(&lua, &format!(r#"return {form}.window[1] == nil and {form}.window[2] == "at the window's current size the region is 10000x5000, 50000000 pixels; the limit is 40000000""#)),
+            "{form}: {:?}",
+            lua.load(format!("return tostring({form}.window[2])")).eval::<String>()
+        );
+    }
+    assert!(image_captured(21501).is_empty(), "nothing was captured");
+    assert!(!h.tasks.legacy_said("m1", "host.screen.profile", Case::Outside), "nothing was read, and it was said");
+    assert_eq!(crate::snapshot::test_vm_bytes(&lua), 0, "nothing is held");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
 }

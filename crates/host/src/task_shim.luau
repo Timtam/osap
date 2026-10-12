@@ -8,7 +8,8 @@
 -- goes on. Where it cannot wait, `recognize` raises the message for that place at the caller's
 -- line; a host.screen call runs on the event loop instead (`blocking`), which the host logs.
 -- `recognize` with a callback — the last argument a function, or exactly two arguments of which
--- the second is one — asks the read service and returns at once (`submit`).
+-- the second is one — asks the read service and returns at once (`submit`), and so does a
+-- host.screen call given its callback (`profile(opts, cb)`), wherever either is made.
 --
 -- A Rust function cannot yield through mlua, so the wait is this file's `yield`: the host's
 -- `start` checks and queues what the call asks for, and the handler's coroutine then stops here
@@ -35,13 +36,16 @@
 --                             function the host calls and waits for, or one Luau cannot suspend
 --   OWN_COROUTINE             what it raises in a coroutine the module made
 --
--- point(name, start, blocking) builds a host.screen call that waits:
+-- point(name, start, blocking, submit?, at?) builds a host.screen call that waits:
 --   start(nonce, ...)         queues what the call asks for, as `recognize`'s start does, and
 --                             returns nothing; or, for a call that touches nothing it would wait
 --                             for (a pixel of a snapshot), returns true and its answer, which the
 --                             call returns at once
 --   blocking(why, ...)        the call made on the event loop, where it cannot wait: `why` is
 --                             where_'s word for the place, or "cannot-wait"
+--   submit(...)               for a call with a callback form, that form: taken wherever the call
+--                             is made when argument `at` is anything but nil, and never waits —
+--                             it checks the call, queues it and returns, and raises for a mistake
 return function(where_, disown, yield, isyieldable, rawequal, error, select, type, pack, unpack, WAIT, RESUMED)
   -- Where the calling coroutine is, as a wait asks it: "handler" only where Luau can stop it.
   local function place()
@@ -95,8 +99,12 @@ return function(where_, disown, yield, isyieldable, rawequal, error, select, typ
       end
     end,
 
-    point = function(name, start, blocking)
+    point = function(name, start, blocking, submit, at)
       return function(...)
+        if submit ~= nil and select("#", ...) >= at and select(at, ...) ~= nil then
+          local r = pack(submit(...))
+          return unpack(r, 1, r.n)
+        end
         local w = place()
         if w ~= "handler" then
           local r = pack(blocking(w, ...))

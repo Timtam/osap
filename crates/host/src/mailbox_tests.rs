@@ -61,6 +61,8 @@ struct Host {
     /// host's own `open_snapshot_in`).
     snaps: crate::snapshot::SnapState,
     snap_bytes: Rc<Cell<usize>>,
+    /// No image worker: the image searches here are filed and answered by hand.
+    image_state: crate::image_search::ImageState,
     /// The pages, as the host keeps them (`Event::Page`, handed on by the host's own
     /// `webview_lua::hand_on` and opened by its `open_event`).
     pages: webview_lua::Pages,
@@ -90,6 +92,9 @@ impl ReadHost for Host {
     }
     fn snap_bytes(&self) -> &Rc<Cell<usize>> {
         &self.snap_bytes
+    }
+    fn images(&self) -> &crate::image_search::ImageState {
+        &self.image_state
     }
     fn tasks(&self) -> &Tasks {
         &self.tasks
@@ -215,6 +220,7 @@ fn host() -> Rc<Host> {
         images: RefCell::new(HashMap::new()),
         snaps: crate::snapshot::SnapState::default(),
         snap_bytes: Rc::new(Cell::new(0)),
+        image_state: crate::image_search::ImageState::detached(),
         pages: webview_lua::Pages::default(),
         discarded: RefCell::new(Vec::new()),
         stopped: RefCell::new(BTreeSet::new()),

@@ -7653,19 +7653,41 @@ kind of place that says how long the first held the loop.
       looked for 8 rows up and down. A calibration shot of an analysis in a window of another size,
       and one of another pass (Percussive, Melodic), would say whether the centre and the caption
       hold; the log's `analysis found` line names the pass when it does.
+- [ ] **Melodyne's `bodyBetween` in callback form** (W2): its three row profiles of a move, made in
+      the note area's profile callback, wait now, about three ticks per judged step under Time,
+      and keep Melodyne's keys waiting meanwhile. Asked with callbacks, both pictures' profiles
+      at once and the gap's after them, a judged step would cost one round on the worker and keep
+      no key waiting. A module refinement, parked (the core application first).
+- [ ] **A key behind a poll's image wait raises nothing on the worker** (W2): a key queued behind a
+      handler that waits for the image worker makes the handler's later waits interactive, and a
+      profile's reduction whose picture is still to come (`SnapState::raise`, since the review of
+      W2), but a task it waits for that the worker has already keeps the priority it was sent with.
+      A priority the worker reads at its next batch (an atomic in the task) would let the key's
+      wait go before the polls; whether it matters is for session C's Melodyne check to say.
+- [ ] **`matchCells` checks and decodes its states on the event loop** (review of W2): in a
+      handler, as with `matchCellsAsync`, every state is read out of the VM, checked and decoded
+      from hex at the call, before the wait — 0.4 ms for 100 states of 360 cells, 4.4 ms for 1024,
+      29 ms at the limits (1024 states of 4096 cells) on a release build (screen.md's `matchCells`
+      cost). Copying the strings out of the VM is all the call has to do there: checking each
+      state's type and length at the call and decoding on the image worker would leave the event
+      loop the copy. A bad hex digit would then be found on the worker, so how it is answered — a
+      raise at the resume for a wait, and something for the callback form slice F gives
+      `matchCells` — is the question to settle first. (`template{ capture }`'s `count` is counted
+      on the worker since the same review.)
 - [ ] **What the note area costs the event loop now**: the capture is off it, and since
       `host.screen.profile` takes a callback (below) so is the reduction of its 910x522 profile;
-      the profile's tables, the comparison and `bodyBetween`'s small row profiles of a move are
-      not. The `[melodyne] note area: 100 frames, …` line says how much, and the `[observe]` line's
-      `profile with a callback` clause what the tables and the worker's reduction took: 46 ms a
-      frame in the debug build of 2026-10-05 (reduction 32, tables 4.3), where a debug test build
-      of 2026-10-09 put the reduction at 30-35 ms — the image worker's now — and the columns'
-      tables at 0.5-0.8 ms. One calibration stay on a release build gives the real figure. A
-      picture identical to the last profiled one is still not profiled (Melodyne 0.1.5, a change
-      wait against it); whether Melodyne's idle note area is byte-identical between frames is what
-      the line's count says. Open: skipping byte-equal rows in `change.rs`'s `differs` (24-28 ms
-      debug, 0.5 ms release for an unchanged 910x522 picture on the capture thread), and the
-      opt-level of Luau and the host in dev builds.
+      the profile's tables and the comparison are not, and since W2 `bodyBetween`'s small row
+      profiles of a move wait for the image worker instead (their callback form is above). The
+      `[melodyne] note area: 100 frames, …` line says how much, and the `[observe]` line's `profile
+      with a callback` clause what the tables and the worker's reduction took: 46 ms a frame in the
+      debug build of 2026-10-05 (reduction 32, tables 4.3), where a debug test build of 2026-10-09
+      put the reduction at 30-35 ms — the image worker's now — and the columns' tables at 0.5-0.8
+      ms. One calibration stay on a release build gives the real figure. A picture identical to the
+      last profiled one is still not profiled (Melodyne 0.1.5, a change wait against it); whether
+      Melodyne's idle note area is byte-identical between frames is what the line's count says.
+      Open: skipping byte-equal rows in `change.rs`'s `differs` (24-28 ms debug, 0.5 ms release for
+      an unchanged 910x522 picture on the capture thread), and the opt-level of Luau and the host
+      in dev builds.
 - [x] **`host.screen.profile` with a callback** (the maintainer's decision of 2026-10-09, in place
       of a separate `profileAsync`): `profile(opts, cb)` returns at once; a region's picture is
       taken on `screen-capture` as a plain or timed `snapshotAsync`'s is (`at`, the input barrier
@@ -8087,6 +8109,49 @@ kind of place that says how long the first held the loop.
       at once. Docs: screen.md (Where it waits, `pixel`, `pixels`, the top, the duplication and
       comparison paragraphs, Failure reasons), overlay.md (the hook table's column, probes' cost),
       ocr.md, timer.md, module-runtime-and-lifecycle.md.
+      Step W2, 2026-10-12 (wbr-final.md): the calls that work over a region wait in a handler.
+      `profile` without a callback is the callback form's request with the handler as its waiter
+      (`snapshot::submit_profile`, `Asker::Handler`): its picture on the `screen-capture` thread —
+      none for a snapshot — reduced on the image worker, one of the module's 16 requests, charged
+      from the call until the answer, and the handler going on with the table, which carries its
+      picture's `time` and `inputEpoch` in every form now (where it cannot wait, when the event
+      loop's capture came back, with the input epoch of the call; on a snapshot, the snapshot's).
+      `cells` and `matchCells` are cells tasks of the image worker (`Job::Cells` with or without
+      the ranking), `template{ capture }` a task that captures — or cuts from its snapshot — and
+      prepares the template (`Job::Template`, its charge reserved at the call), and a snapshot's
+      `crop` a task that copies (`Job::Crop`, its charge reserved at the call): a handler's waiter
+      on the worker (`ImageWaiter::Handler`, `task::On::Image`) whose answer is built by the
+      function that builds the call's answer on the event loop (`cells_values`, `template_values`,
+      `crop_values`, `profile_answer`). The worker's state is one holder,
+      `image_search::ImageState`, and its delivery generic over the holder (`fire_images`), so the
+      tests run it against a real worker. The worker takes, of the tasks waiting, those of the
+      highest priority as one batch (`next_batch`): a key's wait is not one more task in the
+      library polls' batch. A handler's wait is neither counted nor ended by the module's cap of 64
+      image searches: it waits for one at a time. `crop` is a field of the Snapshot handle now, the
+      VM's shim-built function (`install_crop`), since a userdata's method cannot wait. The shim's
+      `point` takes a callback form (`submit`, at argument `at`): `profile(opts, cb)` goes there
+      wherever it is made. Where they cannot wait the calls work on the event loop as before,
+      without the first-read comparison, with their line — `profile`'s names its callback form,
+      `matchCells`' `matchCellsAsync` — and the count; a call with nothing to read this time (no
+      rectangle, an empty region, a region outside its snapshot, a template from bytes or a file)
+      answers at once anywhere, unsaid. A live `profile`'s picture is held under the same limits in
+      both forms: corners past 40,000,000 pixels or the snapshot budget raise where it cannot wait
+      too, and a window region past them is answered there at once, unsaid. A key queued behind a
+      poll's live `profile` whose picture is still to come sends its reduction to the worker
+      interactive (`SnapState::raise`), and a template's `count` is counted on the worker. The
+      scripted host's Melodyne profile notes a body's row profile made where it could not wait.
+      Tested against the real shim, service and image worker with a fake capture (task_tests.rs):
+      each call waits and answers what the call that does not wait answers, live and on a snapshot,
+      the profile with its moment, the template's pixels and the crop's, its module alone busy and
+      the epoch unturned; each place it cannot wait said once and counted, nothing to read answered
+      at once and unsaid; the callback form of `profile` never waits and the form without one
+      refuses `key` and `at`; a disable withdraws the task and gives the crop's charge back at
+      once; a key's task queued behind three polls is a batch of its own (image_search.rs); a key
+      behind a poll's profile raises its reduction; a profile past its limits answers alike in both
+      forms. Each fails against the code from before. Docs: screen.md (the top, the image worker,
+      the duplication and comparison paragraphs, Failure reasons, Where it waits, `profile`, the
+      Snapshot handle's `crop`, Reading a snapshot, `template`, `cells`, `matchCells`),
+      module-runtime-and-lifecycle.md, overlay.md, ocr.md, timer.md, the index.
 - [ ] **NVDA check of step V1 (session B, with V2 and T2)** — nothing should sound different.
       Kontakt with a CSS library in REAPER: a hotspot toggle pressed (its state said after the
       press, as before); the snapshot camera and its dropdown with the bar shut and open (the bar
@@ -8200,6 +8265,14 @@ kind of place that says how long the first held the loop.
       snapshot's at 10,10 agree` lines in the macOS jobs, which the next CI run shows (a `DIFFER`
       is a warning, not a failure: point resolution against a picture drawn down); the probes of
       Kontakt 8 in a DAW, which wait for their capture now.
+- [ ] **Step W2 never ran on a Mac** (type-checked only): a handler's `host.screen.profile` taken
+      by ScreenCaptureKit on the `screen-capture` thread at the display's own resolution and drawn
+      down — so its colours may differ a little from those of a profile made where it cannot wait,
+      captured at point resolution — and reduced on the image worker; `cells`, `matchCells` and
+      `template{ capture }` captured on the image worker through `capture_many`, at point
+      resolution as the event loop captures; a snapshot's `crop` copied there, the kept picture at
+      the display's own resolution with it; the image worker's thread named `image-worker`. The
+      capture-liveness tools and the probe's `profile` wait in their timers' handlers now.
 - [ ] **NVDA check of step W1b (session C)** — nothing should sound different; announcements that
       read a pixel come about one tick later. Kontakt with a CSS library: Tab through the hotspot
       toggles and press one (its state said after the press); the header's status toggles: Tab,
@@ -8207,6 +8280,12 @@ kind of place that says how long the first held the loop.
       Down through the variants. Kontakt 8's view and editor after F10 and Alt+E (the probes).
       ON:EAR's switches if a device is at hand (Q3 = A). Bring the log: no `could not wait here`
       line should be there, and none of `[guard] … stopped`. The guard probe's TEST 8, 8b and 17.
+- [ ] **NVDA check of step W2 (session C)** — nothing should sound different. Melodyne: F-keys and
+      Tab under Pitch while the selection watcher polls, without a delay; the selection read-outs
+      as before; under Time, Ctrl+Right and Alt+Right say the same words, a little later (each
+      judged step waits for its body's three row profiles, about three ticks). Bring the log: no
+      `could not wait here` line, and the `[observe]` line's `profile` clause, which counts only
+      profiles made on the event loop now.
 - [ ] **W1a's remedies name `snapshotAsync`** (review of W1a): the `could not wait here` line and
       the timer's line offer `host.screen.snapshotAsync(opts, function(snap, why) … end)` as the
       form that waits for nothing, since `snapshot(opts, cb)` does not exist yet, and Q1 = A
@@ -8216,7 +8295,10 @@ kind of place that says how long the first held the loop.
       api-index.py, and the tests in task.rs that pin the lines. `pixel` and `pixels` (W1b) name
       no such form yet — their lines end at the place's remedy, and a poll that reads points is
       told to read them from a `snapshotAsync`'s picture; slice F gives them a trailing callback,
-      and `callback_form` and screen.md's two pixel lines and its timer line then name it.
+      and `callback_form` and screen.md's two pixel lines and its timer line then name it. Since
+      W2 `matchCells`' line names `matchCellsAsync`, which slice F folds into `matchCells(opts,
+      states, cb)` — `callback_form` then names that — and `cells`, `template{ capture }` and a
+      snapshot's `crop` name no such form; `profile`'s names its own callback form, which stays.
 - [x] **NVDA check of step 11.3 (session A), before it is committed** — nothing should sound
       different; what changed is that a click, a key or a focus no longer waits for a picture the
       module has out. Windows, at the reads' own speed: sforzando's "Instrument" (an `opensMenu`
@@ -8318,8 +8400,9 @@ Follow-ups this work found and did not take on:
       keep the count to what the docs say.
 - [ ] **The synchronous `host.screen` captures** (the maintainer's decision 3; wbr-final.md, W1a
       to W4 and 12b), and with them a `read` of a snapshot that was taken on the event loop.
-      `snapshot` waits in a handler since W1a, `pixel` and `pixels` since W1b; the region calls
-      (W2), the searches and `save` (W3) and template decoding (W3t) do not yet. A module's own
+      `snapshot` waits in a handler since W1a, `pixel` and `pixels` since W1b, and `profile`,
+      `cells`, `matchCells`, `template{ capture }` and a snapshot's `crop` since W2; the searches
+      and `save` (W3) and template decoding (W3t) do not yet. A module's own
       menu test that reads a pixel on every tick reads it on the event loop, said once — the
       scripted host's `a_modules_own_pixel_test` keeps one — until 12b makes it raise.
       Perhaps later `snapshotAsync` as a wait, which would let Avenger's preset step be written in
@@ -8334,8 +8417,10 @@ Follow-ups this work found and did not take on:
       bound. Since B1b+M a module waits for its reads, so a capture that never returns leaves it
       deaf — its keys wait behind the handler, and after 30 s the `has been busy` line says so —
       where it used to hold the whole application. Since W1a and W1b a handler's `snapshot`,
-      `pixel` and `pixels` wait for that thread as well, so every module that then asks it for a
-      picture or a pixel waits behind the hung one. Decide whether the hang clock covers the
+      `pixel` and `pixels` wait for that thread as well, and since W2 its `profile` (and its
+      `cells`, `matchCells` and `template{ capture }` the image worker's capture, which has no bound
+      either), so every module that then asks it for a picture or a pixel waits behind the hung
+      one. Decide whether the hang clock covers the
       capture too (wbr-final.md: the first follow-up after 12b).
 - [ ] **A handler that reads again at once after `"failed"`** (B1b+M): during a hang a read asked
       again fails at once and is handed over on the next turn, so a handler that reads in a loop

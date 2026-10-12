@@ -234,7 +234,10 @@ rawset(T.host.screen, "profile", function(opts, cb)
       assert(r.key ~= opts.key, "a profile under '" .. opts.key .. "' asked while one is out")
     end
   else
-    assert(cb == nil, "a body's rows are profiled on the event loop")
+    assert(cb == nil, "a body's rows are profiled in the handler, which waits for them")
+    -- In the host it waits for its reduction, answered at once here; where it could not wait,
+    -- the place is noted (T.screenWait).
+    T.screenWait("host.screen.profile")
   end
   -- As the host does: without a callback, `key` and then `at` raise.
   for _, k in ipairs(cb == nil and { "key", "at" } or {}) do

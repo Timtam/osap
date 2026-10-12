@@ -23,9 +23,14 @@
 --   * black                    -> the capture sees nothing of the game at all.
 -- The log gets one line per read (its fingerprint and how long the read took) and the verdict.
 --
--- Each read is one host.screen.profile over the window's content: one screen capture, reduced to
--- per-column statistics. The fingerprint is built from those statistics, so any visible change
--- in the window changes it, and the cost of a read is the cost of one capture.
+-- Each read is one host.screen.profile over the window's content, in the timer's handler, where
+-- it waits: one screen capture on the screen-capture thread, reduced to per-column statistics on
+-- the image worker. The fingerprint is built from those statistics, so any visible change in the
+-- window changes it. The time logged for a read is from asking to the answer: the capture, what
+-- is ahead of it on its thread, the reduction and the batch ahead of it on the worker, and two
+-- turns of the event loop. That is more than the capture alone, so it does not compare with a
+-- figure taken before the reads waited, when a read was the capture and the reduction on the
+-- event loop.
 --
 -- Two keys start it, and they reach this application by two different ways, so that pressing
 -- each once INSIDE the game also answers a second question: which way does the game leave open?
@@ -96,7 +101,7 @@ local function watch(via)
     if ms > slowest then slowest = ms end
     if not p then
       failed = failed + 1
-      line("read %d: FAILED after %d ms (%s)", n, ms, tostring(why))
+      line("read %d: FAILED after %d ms from asking to the answer (%s)", n, ms, tostring(why))
     else
       local fp, isBlack = fingerprint(p.columns)
       if isBlack then black = black + 1 end
@@ -104,7 +109,8 @@ local function watch(via)
         seen[fp] = true
         distinct = distinct + 1
       end
-      line("read %d: fingerprint %d%s, %d ms", n, fp, isBlack and " (black)" or "", ms)
+      line("read %d: fingerprint %d%s, %d ms from asking to the answer", n, fp,
+        isBlack and " (black)" or "", ms)
     end
     if n < READS then
       host.timer.after(EVERY_MS, read)
@@ -121,7 +127,8 @@ local function watch(via)
     else
       verdict = string.format("Live: %d different pictures in %d reads.", distinct, READS - failed)
     end
-    line("%s (%d distinct, %d black, %d failed; reads took %d ms on average, the slowest %d ms)",
+    line("%s (%d distinct, %d black, %d failed; reads took %d ms on average from asking to the "
+      .. "answer, the slowest %d ms)",
       verdict, distinct, black, failed, math.floor(total / READS), slowest)
     say(verdict)
   end

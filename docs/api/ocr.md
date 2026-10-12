@@ -195,7 +195,7 @@ end)
 
 A handler that has kept its module busy for 30 seconds or more with keys waiting behind it — one that reads again and again — is said once: `[com.example.game] has been busy for 31 s in a timer handler, waiting at com.example.game/src/main.luau:88; 4 key(s) wait behind it`.
 
-**A read's answer turns no epoch for the function that waited.** It goes on in the dispatch that asked, so the turn that hands it the reading leaves [`host.epoch()`](./timer.md#host-epoch) where it was; a callback's answer turns it, once for all that arrive together. [`host.screen.snapshot`](./screen.md#where-it-waits) waits in a handler the same way, for its picture, and `pixel` and `pixels` for their colours.
+**A read's answer turns no epoch for the function that waited.** It goes on in the dispatch that asked, so the turn that hands it the reading leaves [`host.epoch()`](./timer.md#host-epoch) where it was; a callback's answer turns it, once for all that arrive together. [`host.screen.snapshot`](./screen.md#where-it-waits) waits in a handler the same way, for its picture, `pixel` and `pixels` for their colours, and `profile`, `cells`, `matchCells`, `template{ capture }` and a snapshot's `crop` for their answers.
 
 **After a wait, the world may have moved.** While a handler waits, the user can bring another window to the front, and a click made after the read lands there. An overlay checks with [`O:here()`](./overlay.md#o-here) before the read and [`O:stillHere`](./overlay.md#o-here) after it; other code compares `host.window.active()` before and after.
 
@@ -217,7 +217,7 @@ On Windows the system recogniser is `Windows.Media.Ocr`, and the second recognis
 
 On a snapshot, each region's pixels are copied out of the snapshot on the recognise thread and recognised exactly as a live read's are, the small-text treatment and the second recogniser included.
 
-A new `Windows.Media.Ocr` engine is created for every region. The two OCR threads are named `screen-capture` and `ocr-recognise`; `screen-capture` also takes [`host.screen.snapshotAsync`](./screen.md#host-screen-snapshotasync)'s pictures and those of a `host.screen.profile` given a callback. At exit, a job stops before its next region, the exit waits up to a second for the two threads and then up to half a second for neural recognitions still running, and no neural recognition starts after that; no callback runs by then.
+A new `Windows.Media.Ocr` engine is created for every region. The two OCR threads are named `screen-capture` and `ocr-recognise`; `screen-capture` also takes [`host.screen.snapshotAsync`](./screen.md#host-screen-snapshotasync)'s pictures, those of a `host.screen.profile` and those a handler waits for in `host.screen.snapshot`, and reads the points a handler waits for in `pixel` and `pixels`. At exit, a job stops before its next region, the exit waits up to a second for the two threads and then up to half a second for neural recognitions still running, and no neural recognition starts after that; no callback runs by then.
 
 ### macOS
 

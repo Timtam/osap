@@ -1,8 +1,9 @@
 //! Handlers: every callback of a module runs as a coroutine of its VM — a handler — that can stop
 //! at a wait while the event loop goes on; and the waits it stops at: `host.ocr.recognize` without
 //! a callback, which raises where it cannot wait, and the `host.screen` calls that wait
-//! (`host.screen.snapshot`, `pixel`, `pixels`), which run on the event loop where they cannot, with
-//! a log line.
+//! (`host.screen.snapshot`, `pixel`, `pixels`, `profile`, `cells`, `matchCells`,
+//! `template{ capture }` and a snapshot's `crop`), which run on the event loop where they cannot,
+//! with a log line.
 //!
 //! **One handler per module at a time.** Every event a module hears — a hotkey, a captured key, a
 //! controller event, a timer, a window trigger, a focus change, the answer to a read, an image
@@ -18,7 +19,10 @@
 //! `host.screen.snapshot`: it asks the `screen-capture` thread for its picture (`snapshot.rs`), and
 //! the handler goes on with the handle; and so do `host.screen.pixel` and `pixels`, whose points
 //! that thread reads, unless they touch no screen — a snapshot's points — and answer at once
-//! ([`Started::Now`]).
+//! ([`Started::Now`]). The calls that work over a region wait for the image worker
+//! (`image_search.rs`): `profile` for its picture and then its reduction, `cells` and `matchCells`
+//! for their capture and their grid, `template{ capture }` for its picture, a snapshot's `crop` for
+//! its copy — each answered at once when there is nothing to read this time.
 //!
 //! **Why.** No text recognition may burden the event loop, and no `host.screen` call either.
 //! `recognize` used to photograph and recognise on the loop and return the reading; where it waits
@@ -187,8 +191,12 @@ pub(crate) fn wait_message(case: Case) -> &'static str {
 }
 
 /// The library a call belongs to — `ocr` for `host.ocr.recognize`, `screen` for
-/// `host.screen.pixel` — which names its page in docs/api and the scope of its log lines.
+/// `host.screen.pixel` and for a method of a Snapshot (`Snapshot:crop`) — which names its page in
+/// docs/api and the scope of its log lines.
 fn library_of(call: &str) -> &str {
+    if call.starts_with("Snapshot:") {
+        return "screen";
+    }
     call.strip_prefix("host.").and_then(|c| c.split('.').next()).unwrap_or(call)
 }
 
@@ -198,6 +206,8 @@ fn callback_form(call: &str) -> Option<&'static str> {
     match call {
         "host.ocr.recognize" => Some("host.ocr.recognize(what, opts, function(reading) … end)"),
         "host.screen.snapshot" => Some("host.screen.snapshotAsync(opts, function(snap, why) … end)"),
+        "host.screen.profile" => Some("host.screen.profile(opts, function(profile, why) … end)"),
+        "host.screen.matchCells" => Some("host.screen.matchCellsAsync(opts, states, function(match, why) … end)"),
         _ => None,
     }
 }
@@ -277,8 +287,11 @@ enum Kind {
 pub(crate) enum On {
     /// A read of the service.
     Read(TicketId),
-    /// A picture of the `screen-capture` thread (`snapshot.rs`).
+    /// A picture of the `screen-capture` thread (`snapshot.rs`) — and a profile's reduction after
+    /// it, which is the same request.
     Snap(SnapId),
+    /// A task of the image worker (`image_search.rs`), by its number.
+    Image(u64),
     /// The tests' own wait point, by name (`test_wait`): answered by `test_release`.
     #[cfg(test)]
     Test(String),
@@ -860,12 +873,13 @@ fn parked_on_its_wait(tasks: &Tasks, id: TaskId, lua: &Lua, values: &MultiValue)
     lua.registry_value::<Table>(&w.nonce).is_ok_and(|n| n.to_pointer() == b.to_pointer())
 }
 
-/// A wait given up: its read or its picture withdrawn — the picture's charge given back — its nonce
-/// let go.
+/// A wait given up: its read, its picture or its image worker's task withdrawn — a charge it made
+/// given back — its nonce let go.
 fn end_wait<H: ReadHost>(h: &H, lua: &Lua, w: Wait) {
     match w.on {
         On::Read(t) => reads::withdraw(h, t),
         On::Snap(s) => crate::snapshot::withdraw(h, s),
+        On::Image(t) => crate::image_search::withdraw(h, t),
         _ => {}
     }
     let _ = lua.remove_registry_value(w.nonce);
@@ -904,6 +918,17 @@ pub(crate) fn resume_snap<H: ReadHost>(
     answer: impl FnOnce() -> Result<MultiValue, String>,
 ) -> bool {
     resume_parked(h, id, |on| matches!(on, On::Snap(s) if *s == snap), answer)
+}
+
+/// Handler `id`'s task `image` of the image worker was answered: it goes on with what `answer`
+/// builds, by [`resume_snap`]'s rules. True when it went on.
+pub(crate) fn resume_image<H: ReadHost>(
+    h: &H,
+    id: TaskId,
+    image: u64,
+    answer: impl FnOnce() -> Result<MultiValue, String>,
+) -> bool {
+    resume_parked(h, id, |on| matches!(on, On::Image(t) if *t == image), answer)
 }
 
 /// Resumes handler `id`, parked on a wait `this` names, with what `answer` builds once the checks
@@ -982,8 +1007,11 @@ fn resume_parked<H: ReadHost>(
 /// after it (`raised`). A wait of a poll would otherwise hold the key behind it as long as the
 /// polls' lane takes. A read being recognised, or a picture being taken, already runs on as it
 /// started. The handler's own lane stays: what it arms after the wait — a timer, a read with a
-/// callback — is in the lane it began in, so a poll stays a poll. True when a handler that was
-/// parked in the background lane was raised.
+/// callback — is in the lane it began in, so a poll stays a poll. A profile whose picture is still
+/// to come goes to the image worker interactive too (`SnapState::raise`). A task of the image worker
+/// it waits for keeps the priority it was sent with, since the worker has taken it into its queue
+/// already; the handler's next waits are interactive. True when a handler that was parked in the
+/// background lane was raised.
 pub(crate) fn promote<H: ReadHost>(h: &H, owner: Owner) -> bool {
     let on = {
         let mut table = h.tasks().table.borrow_mut();
@@ -1005,6 +1033,7 @@ pub(crate) fn promote<H: ReadHost>(h: &H, owner: Owner) -> bool {
             h.ocr().promote(ticket);
         }
         Some(On::Snap(snap)) => {
+            h.snap_state().raise(snap);
             h.ocr().promote_snap(snap);
         }
         _ => {}
@@ -1264,8 +1293,10 @@ fn disown<H: ReadHost>(h: &H, lua: &Lua) {
 /// counted for the summary at exit. A call that raises — a mistake in its arguments, mostly —
 /// writes no line, so the first that answers still does.
 ///
-/// The `host.screen` calls that wait come here where they cannot (`host.screen.snapshot`, and
-/// `pixel` and `pixels` when they read the screen); `host.ocr.recognize` raises there instead.
+/// The `host.screen` calls that wait come here where they cannot (`host.screen.snapshot`, `pixel`
+/// and `pixels` when they read the screen, `profile`, `cells`, `matchCells`, `template{ capture }`
+/// and a snapshot's `crop` when there is something to read); `host.ocr.recognize` raises there
+/// instead.
 pub(crate) fn legacy<H: ReadHost, T>(
     h: &H,
     lua: &Lua,
@@ -1356,10 +1387,11 @@ pub(crate) fn waits<H: ReadHost>(lua: &Lua, scope: usize, holder: Rc<H>, submit:
     Ok(t)
 }
 
-/// The builder of VM `lua`'s `host.screen` calls that wait — `point(name, start, blocking)` of the
-/// shim loaded as `host.screen` — made on the first call and the same function after it. The call
-/// it builds waits in a handler, by `start(nonce, …)` ([`start_wait`]), and anywhere else is
-/// `blocking(why, …)`, which runs it on the event loop ([`legacy`]).
+/// The builder of VM `lua`'s `host.screen` calls that wait — `point(name, start, blocking, submit?,
+/// at?)` of the shim loaded as `host.screen` — made on the first call and the same function after
+/// it. The call it builds waits in a handler, by `start(nonce, …)` ([`start_wait`]), and anywhere
+/// else is `blocking(why, …)`, which runs it on the event loop ([`legacy`]); given `submit`, a call
+/// whose argument `at` is not `nil` is its callback form, `submit(…)`, wherever it is made.
 pub(crate) fn points<H: ReadHost>(lua: &Lua, scope: usize, holder: Rc<H>) -> mlua::Result<Function> {
     if let Ok(f) = lua.named_registry_value::<Function>(POINTS_KEY) {
         return Ok(f);
@@ -1562,13 +1594,25 @@ mod tests {
         assert!(outside.contains("(outside every event of the module: ") && outside.contains("; call it from a handler, such as host.timer.after(0, …), or use "));
         let own = legacy_line("m", "host.screen.snapshot", Case::OwnCoroutine, 1);
         assert!(own.contains("measure it in a handler and let the hook read what was measured (see \"Where a hook runs\" in docs/api/overlay.md)"), "{own}");
-        // A call without a form that waits for nothing names none: `pixel` and `pixels` for now,
-        // whose two lines screen.md shows word for word.
+        // A call without a form that waits for nothing names none: `pixel` and `pixels`, whose two
+        // lines screen.md shows word for word, `cells`, `template` and a snapshot's `crop`, whose
+        // page is screen.md as well, for now.
         for (call, case) in [("host.screen.pixels", Case::Outside), ("host.screen.pixel", Case::OwnCoroutine)] {
             let line = legacy_line("com.example.game", call, case, 17);
             assert!(!line.contains(", or use "), "{line}");
             assert!(SCREEN_MD.contains(&line), "docs/api/screen.md does not show this line word for word:\n{line}");
         }
+        for call in ["host.screen.cells", "host.screen.template", "Snapshot:crop"] {
+            let line = legacy_line("m", call, Case::Outside, 1);
+            assert!(!line.contains(", or use ") && line.ends_with("see \"Where it waits\" in docs/api/screen.md"), "{line}");
+        }
+        // `profile` names its callback form — its line screen.md shows word for word — and
+        // `matchCells` `matchCellsAsync`.
+        let profile = legacy_line("com.example.game", "host.screen.profile", Case::CannotWait, 21);
+        assert!(profile.contains(", or use host.screen.profile(opts, function(profile, why) … end); see"), "{profile}");
+        assert!(SCREEN_MD.contains(&profile), "docs/api/screen.md does not show this line word for word:\n{profile}");
+        assert!(legacy_line("m", "host.screen.matchCells", Case::Outside, 1)
+            .contains(", or use host.screen.matchCellsAsync(opts, states, function(match, why) … end); see"));
         assert!(legacy_line("m", "host.screen.save", Case::CannotWait, 1).contains(
             "host.screen.save could not wait here (a place Luau cannot suspend, or a function the host calls and waits \
              for) and held the event loop 1 ms instead; call it from the event's own function; see"
@@ -1599,6 +1643,7 @@ mod tests {
         }
         assert_eq!(library_of("host.ocr.recognize"), "ocr");
         assert_eq!(library_of("host.screen.pixel"), "screen");
+        assert_eq!(library_of("Snapshot:crop"), "screen", "a Snapshot's method is host.screen's");
         let keys = ["Tab".to_string(), "Tab".to_string(), "Down".to_string()];
         assert_eq!(
             timer_wait_line("m", 40, "host.ocr.recognize", "m/src/main.luau:12", &keys),

@@ -900,6 +900,8 @@ pub(crate) struct Scripted {
     state: OcrState,
     snaps: crate::snapshot::SnapState,
     snap_bytes: Rc<Cell<usize>>,
+    /// No image worker: the scripted host's screen is its own.
+    images: crate::image_search::ImageState,
     tasks: Tasks,
     mail: Mailboxes,
     gens: RefCell<HashMap<usize, u64>>,
@@ -935,6 +937,9 @@ impl ReadHost for Scripted {
     }
     fn snap_bytes(&self) -> &Rc<Cell<usize>> {
         &self.snap_bytes
+    }
+    fn images(&self) -> &crate::image_search::ImageState {
+        &self.images
     }
     fn tasks(&self) -> &Tasks {
         &self.tasks
@@ -1024,6 +1029,7 @@ pub(crate) fn harness(lua: &Lua) -> Table {
         state: OcrState::default(),
         snaps: crate::snapshot::SnapState::default(),
         snap_bytes: Rc::new(Cell::new(0)),
+        images: crate::image_search::ImageState::detached(),
         tasks: Tasks::default(),
         mail: Mailboxes::default(),
         gens: RefCell::new([(IDX, gen)].into_iter().collect()),

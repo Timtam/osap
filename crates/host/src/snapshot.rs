@@ -58,13 +58,18 @@
 //! this time and an empty list touch no screen, and are answered at once wherever the call is
 //! made ([`Reading::Now`]).
 //!
-//! **`host.screen.profile` with a callback** is one of these requests too, with a second stage:
-//! its picture is taken on the `screen-capture` thread as a plain or timed `snapshotAsync`'s is —
-//! or, given a snapshot, is that snapshot — and is then reduced on the image worker
-//! (`image_search.rs`, `Job::Profile`) while the request stays on the list, with its key, its
-//! share of the limits and its charge. Only the answer's tables are built on the event loop, as
-//! its callback runs. Its keys are its own (`Kind`): a profile never replaces a `snapshotAsync`,
-//! nor the other way round; `host.screen.pending(key)` asks about both.
+//! **`host.screen.profile`** is one of these requests too, with a second stage: its picture is
+//! taken on the `screen-capture` thread as a plain or timed `snapshotAsync`'s is — or, given a
+//! snapshot, is that snapshot — and is then reduced on the image worker (`image_search.rs`,
+//! `Job::Profile`) while the request stays on the list, with its key, its share of the limits and
+//! its charge. Only the answer's tables are built on the event loop: as its callback runs, or as
+//! the handler that waits in the call without one goes on ([`start_profile`]). Where that call
+//! cannot wait it captures and reduces on the event loop ([`profile_on_loop`]). Its keys are its
+//! own (`Kind`): a profile never replaces a `snapshotAsync`, nor the other way round;
+//! `host.screen.pending(key)` asks about both.
+//!
+//! **A snapshot's `crop`** waits too, for the image worker's copy of its part (`Job::Crop`), its
+//! charge reserved at the call; where it cannot wait it copies on the event loop ([`install_crop`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -77,7 +82,7 @@ use mlua::{Function, Lua, MetaMethod, MultiValue, RegistryKey, Table, UserData, 
 
 use crate::backend::frame::{self, Area, Frame, FrameVia};
 use crate::backend::CapturedImage;
-use crate::image_search::{self, Haystack, ImageTask, Job, Reduced};
+use crate::image_search::{self, Haystack, ImageTask, Job, Outcome, Reduced};
 use crate::mailbox::{self, Event, MailHost, Opened};
 use crate::ocr::lua::ReadHost;
 use crate::task::{Ctx, Started, TaskId};
@@ -360,6 +365,9 @@ impl UserData for SnapshotHandle {
         fields.add_field_method_get("inputEpoch", |_, s| Ok(s.input_epoch as i64));
         fields.add_field_method_get("via", |_, s| Ok(s.via.word()));
         fields.add_field_method_get("released", |_, s| Ok(s.frame.borrow().is_none()));
+        // `s:crop(region)`: the VM's own `crop`, built by the host's shim so that it can wait
+        // ([`install_crop`]) — a userdata's method is a Rust function, which cannot.
+        fields.add_field_function_get("crop", |lua, _| crop_function(lua));
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
@@ -367,10 +375,6 @@ impl UserData for SnapshotHandle {
             crate::vm_guard::host_call!("snapshot:release");
             s.release();
             Ok(())
-        });
-        methods.add_method("crop", |lua, s, region: Value| {
-            crate::vm_guard::host_call!("snapshot:crop");
-            crop(lua, s, &region)
         });
         methods.add_meta_method(MetaMethod::ToString, |_, s, ()| Ok(s.describe()));
     }
@@ -387,27 +391,123 @@ fn handle_value(lua: &Lua, frame: Frame, res: Reservation, input_epoch: u64, pro
     one_value(Value::UserData(lua.create_userdata(h)?))
 }
 
-/// `s:crop(region) -> (Snapshot?, string?)`: a snapshot of its own of a part of `s`, the pixels
-/// copied and charged anew, from the same moment. The region is read strictly, as
-/// `host.screen.snapshot`'s is, and must lie wholly inside `s`; the budget is [`reserve_for`]'s.
-fn crop(lua: &Lua, s: &SnapshotHandle, v: &Value) -> mlua::Result<MultiValue> {
-    const F: &str = "Snapshot:crop";
-    let frame = s.frame().ok_or_else(|| err(format!("{F}: {RELEASED}")))?;
-    let given = region_lua::read(v, "the region").map_err(|m| err(format!("{F}: {m}")))?;
+// ── Snapshot:crop ──────────────────────────────────────────────────────────────────────────
+
+/// `Snapshot:crop`, as its messages and log lines name it.
+const FC: &str = "Snapshot:crop";
+
+/// The named registry's entry for the VM's `crop` ([`install_crop`]). Luau has no
+/// `debug.getregistry`, so no module reaches it.
+const CROP_KEY: &str = "__snapshot_crop";
+
+/// What a crop asks, its arguments read: its answer at once — the region with no rectangle this
+/// time, not inside the snapshot, or a window region the budget has no room for — or the part to
+/// copy, its charge reserved.
+enum CropAsk {
+    Now(MultiValue),
+    Copy { frame: Arc<Frame>, r: Rect, res: Reservation, input_epoch: u64, process: Rc<Cell<usize>> },
+}
+
+/// `s:crop(region)`'s arguments, read strictly — the region as `host.screen.snapshot`'s is — and
+/// the charge for the copy reserved ([`reserve_for`]: corners the budget has no room for raise). A
+/// snapshot that was released, or a `crop` called on anything but a Snapshot, raises.
+fn crop_args(lua: &Lua, s: &Value, v: &Value) -> mlua::Result<CropAsk> {
+    let (frame, input_epoch, process) = {
+        let Value::UserData(ud) = s else {
+            return Err(err(format!("{FC}: call it on a Snapshot, s:crop(region), not on {}", describe_value(s))));
+        };
+        let s = ud.borrow::<SnapshotHandle>().map_err(|_| err(format!("{FC}: call it on a Snapshot, s:crop(region)")))?;
+        (s.frame().ok_or_else(|| err(format!("{FC}: {RELEASED}")))?, s.input_epoch, s.process.clone())
+    };
+    let given = region_lua::read(v, "the region").map_err(|m| err(format!("{FC}: {m}")))?;
     let r = match given.resolve() {
         Ok(r) => rect_of(r),
-        Err(u) => return with_reason(lua, Value::Nil, u.to_string()),
+        Err(u) => return Ok(CropAsk::Now(with_reason(lua, Value::Nil, u.to_string())?)),
     };
     if !frame.contains(r) {
-        return with_reason(lua, Value::Nil, NOT_INSIDE.to_string());
+        return Ok(CropAsk::Now(with_reason(lua, Value::Nil, NOT_INSIDE.to_string())?));
     }
-    let res = match reserve_for(lua, &s.process, estimate(r), F, &given)? {
+    let res = match reserve_for(lua, &process, estimate(r), FC, &given)? {
         Ok(res) => res,
-        Err(why) => return with_reason(lua, Value::Nil, why),
+        Err(why) => return Ok(CropAsk::Now(with_reason(lua, Value::Nil, why)?)),
     };
-    match frame.crop(r) {
-        Some(f) => handle_value(lua, f, res, s.input_epoch, &s.process),
-        None => with_reason(lua, Value::Nil, NOT_INSIDE.to_string()),
+    Ok(CropAsk::Copy { frame, r, res, input_epoch, process })
+}
+
+/// What a crop answers of its copy — on the event loop and for a handler that waited alike: a
+/// snapshot of its own, charged by the reservation settled to what it holds, with the source's
+/// moment; or `nil` and the reason, the charge given back.
+fn crop_values(lua: &Lua, outcome: Outcome, res: Reservation, input_epoch: u64, process: &Rc<Cell<usize>>) -> mlua::Result<MultiValue> {
+    match outcome {
+        Outcome::Crop(Ok(f)) => handle_value(lua, f, res, input_epoch, process),
+        Outcome::Crop(Err(why)) => with_reason(lua, Value::Nil, why),
+        // Never: the worker answers a crop's task with its copy.
+        _ => with_reason(lua, Value::Nil, image_search::CROP_FAILED.to_string()),
+    }
+}
+
+/// `s:crop(region) -> (Snapshot?, string?)` on the event loop: a snapshot of its own of a part of
+/// `s`, the pixels copied here and charged anew, from the same moment.
+fn crop_now(lua: &Lua, ask: CropAsk) -> mlua::Result<MultiValue> {
+    match ask {
+        CropAsk::Now(values) => Ok(values),
+        CropAsk::Copy { frame, r, res, input_epoch, process } => {
+            let got = frame.crop(r).ok_or_else(|| NOT_INSIDE.to_string());
+            crop_values(lua, Outcome::Crop(got), res, input_epoch, &process)
+        }
+    }
+}
+
+/// A waited `s:crop(region)`: its arguments read as the call that does not wait reads them — a
+/// mistake raises at the call — and answered at once when there is nothing to copy; otherwise a
+/// crop of the image worker filed for the handler that waits, its charge reserved at the call.
+fn start_crop<H: ReadHost>(h: &H, lua: &Lua, scope: usize, nonce: Table, s: Value, v: Value) -> mlua::Result<MultiValue> {
+    crate::task::start_point(h, lua, scope, FC, nonce, || crop_args(lua, &s, &v), |ask, task, prio| match ask {
+        CropAsk::Now(values) => Ok(Started::Now(values)),
+        CropAsk::Copy { frame, r, res, input_epoch, process } => {
+            let answer: image_search::BuildAnswer = Box::new(move |lua, outcome| crop_values(lua, outcome, res, input_epoch, &process));
+            let hay = Haystack::Frame { frame, region: r };
+            let id = image_search::submit_wait(h, lua, scope, task, prio, hay, Job::Crop, "screen.crop", answer);
+            Ok(Started::Waits(crate::task::On::Image(id)))
+        }
+    })
+}
+
+/// Makes the VM's `s:crop(region)` over `holder`, once: in a handler it waits while the image
+/// worker copies the part ([`start_crop`]); where it cannot wait it copies on the event loop, held
+/// there for that one call and said in the log (`task::legacy`) — a crop with nothing to copy is
+/// answered at once, unsaid, wherever it is asked. A code dependency's host, installed into the
+/// same VM, finds it made.
+pub(crate) fn install_crop<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>) -> mlua::Result<()> {
+    if matches!(lua.named_registry_value::<Value>(CROP_KEY)?, Value::Function(_)) {
+        return Ok(());
+    }
+    let h = holder.clone();
+    let start = lua.create_function(move |lua, (nonce, s, v): (Table, Value, Value)| {
+        host_call!("snapshot:crop");
+        start_crop(&*h, lua, idx, nonce, s, v)
+    })?;
+    let h = holder.clone();
+    let blocking = lua.create_function(move |lua, (why, s, v): (String, Value, Value)| {
+        host_call!("snapshot:crop");
+        match crop_args(lua, &s, &v)? {
+            CropAsk::Now(values) => Ok(values),
+            ask => crate::task::legacy(&*h, lua, idx, FC, crate::loop_guard::Kind::Screen, &why, || crop_now(lua, ask)),
+        }
+    })?;
+    let crop: Function = crate::task::points(lua, idx, holder)?.call((FC, start, blocking))?;
+    lua.set_named_registry_value(CROP_KEY, crop)
+}
+
+/// The VM's `crop` ([`install_crop`]); in a VM the host did not build — a test's — one that copies
+/// on the spot.
+fn crop_function(lua: &Lua) -> mlua::Result<Function> {
+    match lua.named_registry_value::<Value>(CROP_KEY)? {
+        Value::Function(f) => Ok(f),
+        _ => lua.create_function(|lua, (s, v): (Value, Value)| {
+            host_call!("snapshot:crop");
+            crop_now(lua, crop_args(lua, &s, &v)?)
+        }),
     }
 }
 
@@ -1227,7 +1327,8 @@ fn reservation_for(r: Rect, change: bool) -> usize {
 }
 
 /// Who waits for a request: the callback of `snapshotAsync` or of `profile`, or a handler stopped in
-/// `host.screen.snapshot`, resumed with what the call returns (`task.rs`).
+/// `host.screen.snapshot`, `pixel`, `pixels` or `profile`, resumed with what the call returns
+/// (`task.rs`).
 pub(crate) enum SnapWaiter {
     Callback(RegistryKey),
     Handler(TaskId),
@@ -1249,7 +1350,8 @@ pub(crate) struct PendingSnap {
     change: bool,
     cancel: Arc<AtomicBool>,
     asked: Instant,
-    /// `Some` for a `host.screen.profile` with a callback: what is done with the picture.
+    /// `Some` for a `host.screen.profile`, given a callback or waited for: what is done with the
+    /// picture.
     profile: Option<ProfileReq>,
     /// `Some` for the points a handler waits for in `host.screen.pixel` or `pixels`: no picture,
     /// their colours, built as that call's answer ([`waited_values`]).
@@ -1305,7 +1407,7 @@ impl PendingSnap {
     }
 }
 
-/// What a `host.screen.profile` with a callback asks of its picture, beside the request itself.
+/// What a `host.screen.profile` asks of its picture, beside the request itself.
 pub(crate) struct ProfileReq {
     cols: bool,
     rows: bool,
@@ -1332,7 +1434,8 @@ pub(crate) enum Answer {
     Colours(Vec<(u8, u8, u8)>),
 }
 
-/// Everything `snapshotAsync` — and `profile` with a callback — keeps on the event loop.
+/// Everything `snapshotAsync` — and `profile`, and the handlers that wait in `snapshot`, `pixel`,
+/// `pixels` and `profile` — keeps on the event loop.
 #[derive(Default)]
 pub(crate) struct SnapState {
     pending: RefCell<HashMap<SnapId, PendingSnap>>,
@@ -1565,9 +1668,18 @@ impl SnapState {
         pending.remove(&id)
     }
 
+    /// Request `id`'s handler was raised to the interactive lane (`task::promote`): a profile's
+    /// reduction not sent yet goes to the image worker as interactive, ahead of the polls' searches,
+    /// as its picture goes on the `screen-capture` thread. One sent already keeps its priority.
+    pub(crate) fn raise(&self, id: SnapId) {
+        if let Some(p) = self.pending.borrow_mut().get_mut(&id) {
+            p.prio = Priority::Interactive;
+        }
+    }
+
     /// A profile's picture, handed to the image worker as task `task`: the request back on the
     /// list — its key, its share of the limits and a disable still reach it — now charged what
-    /// the picture holds, and the task to send.
+    /// the picture holds, and the task to send at the request's priority, a raised one's included.
     fn to_worker(&self, mut p: PendingSnap, frame: Arc<Frame>, task: u64) -> ImageTask {
         if let Some(res) = &p.res {
             res.settle(frame.bytes());
@@ -1579,6 +1691,7 @@ impl SnapState {
             id: task,
             hay: Haystack::Frame { frame, region: job.rect },
             job: Job::Profile { cols: job.cols, rows: job.rows, dark: job.dark },
+            prio: p.prio,
         };
         self.pending.borrow_mut().insert(p.id, p);
         task
@@ -1628,15 +1741,7 @@ fn call_args(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> 
     if let Some(job) = &p.profile {
         p.res.take();
         let args = match answer {
-            Answer::Profile(r) => {
-                let t = crate::profile_table(&lua, r.rect.tuple(), r.columns, r.rows)?;
-                // The moment of the picture, as every other answer of a picture carries it.
-                if let Some((time, epoch)) = job.moment {
-                    t.set("time", time)?;
-                    t.set("inputEpoch", epoch as i64)?;
-                }
-                vec![Value::Table(t)]
-            }
+            Answer::Profile(r) => vec![Value::Table(profile_answer(&lua, r.rect.tuple(), r.columns, r.rows, job.moment)?)],
             Answer::Failed { why, .. } => vec![Value::Nil, Value::String(lua.create_string(why)?)],
             // Never: a profile's picture goes on to the image worker (`fire_snapshot_results`), and
             // a profile reads no points.
@@ -1670,10 +1775,20 @@ fn call_args(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> 
 /// `host.screen.snapshot` the handle, charged by the request's reservation settled to what the
 /// picture holds, or `nil` and the reason; no `info`. The charge goes either way. For
 /// `host.screen.pixel` or `pixels` the colour or the list, or `nil` and the reason, built as the
-/// call that cannot wait builds them ([`live_values`]).
+/// call that cannot wait builds them ([`live_values`]). For `host.screen.profile` its table, its
+/// picture's `time` and `inputEpoch` with it ([`profile_answer`]), or `nil` and the reason.
 fn waited_values(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> mlua::Result<MultiValue> {
     let lua = p.lua.clone();
     let res = p.res.take();
+    if let Some(job) = &p.profile {
+        return match answer {
+            Answer::Profile(r) => one_value(Value::Table(profile_answer(&lua, r.rect.tuple(), r.columns, r.rows, job.moment)?)),
+            Answer::Failed { why, .. } => with_reason(&lua, Value::Nil, why),
+            // Never: a profile's picture goes on to the image worker, and a profile reads no
+            // points.
+            Answer::Picture { .. } | Answer::Colours(_) => with_reason(&lua, Value::Nil, image_search::PROFILE_FAILED.to_string()),
+        };
+    }
     if let Some(call) = p.points {
         return match answer {
             Answer::Colours(c) => live_values(&lua, call, c.len(), Ok(c)),
@@ -2006,14 +2121,14 @@ fn note_crowding<H: ReadHost>(h: &H, idx: usize, why: &str) {
 }
 
 /// Delivers what the capture thread answered and what was decided without it: a handler that
-/// waited in `host.screen.snapshot`, `pixel` or `pixels` goes on with its answer at once
-/// (`task::resume_snap`), and a callback's answer is handed to its module's mailbox in the lane it
+/// waited in `host.screen.snapshot`, `pixel`, `pixels` or `profile` goes on with its answer at once
+/// ([`resume_handler`]), and a callback's answer is handed to its module's mailbox in the lane it
 /// was asked from, which decides whether it may still be delivered and judges its key when it runs
-/// ([`open_answer`]). A profile's picture is not the answer: it goes on to the image worker by
-/// `reduce`, and the answer comes from there. The epoch turns once, before the first callback's
+/// ([`open_answer`]). A profile's picture is not the answer: it goes on to the image worker
+/// ([`reduce`]), and the answer comes from there. The epoch turns once, before the first callback's
 /// answer is handed over: a handler that waited goes on with its own answer, which continues its
 /// dispatch and turns nothing. The host's tick and the tests' holders both run this.
-pub(crate) fn fire_snaps<H: MailHost>(h: &H, reduce: &dyn Fn(PendingSnap, Arc<Frame>)) {
+pub(crate) fn fire_snaps<H: MailHost>(h: &H) {
     let st = h.snap_state();
     let done = h.ocr().drain_snaps();
     if done.is_empty() && st.ready.borrow().is_empty() {
@@ -2042,33 +2157,14 @@ pub(crate) fn fire_snaps<H: MailHost>(h: &H, reduce: &dyn Fn(PendingSnap, Arc<Fr
     let mut due = Vec::with_capacity(answers.len());
     for (p, answer) in answers {
         match answer {
-            Answer::Picture { frame, .. } if p.profile.is_some() => reduce(p, frame),
+            Answer::Picture { frame, .. } if p.profile.is_some() => reduce(h, p, frame),
             answer => due.push((p, answer)),
         }
     }
     let mut turned = false;
     for (mut p, answer) in due {
         match p.waiter {
-            SnapWaiter::Handler(task) => {
-                // Built only once the handler is found still waiting for it: a picture nobody
-                // takes is let go here, charge and all, not left for the collector.
-                let (snap, lua) = (p.id, p.lua.clone());
-                // The call the handler waits in, as the stop names it.
-                let what = match p.points {
-                    Some(PointCall::Pixel) => "screen.pixel",
-                    Some(PointCall::Pixels) => "screen.pixels",
-                    None => "screen.snapshot",
-                };
-                st.forget_key(&p);
-                crate::task::resume_snap(h, task, snap, || {
-                    waited_values(&mut p, answer, h.snap_bytes()).map_err(|e| {
-                        // A VM that ran out of memory building it is stopped, and the stop
-                        // reports itself; the handler is not run in it again.
-                        crate::vm_guard::note_failure(&lua, crate::vm_guard::EntryKind::Handler, what, &e);
-                        e.to_string()
-                    })
-                });
-            }
+            SnapWaiter::Handler(task) => resume_handler(h, task, p, answer),
             SnapWaiter::Callback(_) => {
                 // One epoch for the drain's callbacks: every answer in it is a fresh look at the screen.
                 if !turned {
@@ -2084,6 +2180,64 @@ pub(crate) fn fire_snaps<H: MailHost>(h: &H, reduce: &dyn Fn(PendingSnap, Arc<Fr
             }
         }
     }
+}
+
+/// Handler `task`, waiting for request `p`, goes on with what its call returns for `answer`
+/// ([`waited_values`]) — built only once the handler is found still waiting for it: a picture
+/// nobody takes is let go here, charge and all, not left for the collector.
+fn resume_handler<H: ReadHost>(h: &H, task: TaskId, mut p: PendingSnap, answer: Answer) {
+    let (snap, lua) = (p.id, p.lua.clone());
+    // The call the handler waits in, as the stop names it.
+    let what = match (p.points, &p.profile) {
+        (Some(PointCall::Pixel), _) => "screen.pixel",
+        (Some(PointCall::Pixels), _) => "screen.pixels",
+        (None, Some(_)) => "screen.profile",
+        (None, None) => "screen.snapshot",
+    };
+    h.snap_state().forget_key(&p);
+    crate::task::resume_snap(h, task, snap, || {
+        waited_values(&mut p, answer, h.snap_bytes()).map_err(|e| {
+            // A VM that ran out of memory building it is stopped, and the stop reports itself;
+            // the handler is not run in it again.
+            crate::vm_guard::note_failure(&lua, crate::vm_guard::EntryKind::Handler, what, &e);
+            e.to_string()
+        })
+    });
+}
+
+/// A profile's picture, to the image worker ([`SnapState::to_worker`]). With the worker gone —
+/// the application closing — it is answered as failed on the next tick instead.
+fn reduce<H: ReadHost>(h: &H, p: PendingSnap, frame: Arc<Frame>) {
+    let st = h.snap_state();
+    let task = h.images().next_id();
+    let id = p.id;
+    let sent = st.to_worker(p, frame, task);
+    if !h.images().send(sent) {
+        st.end(id, image_search::PROFILE_FAILED.to_string());
+    }
+}
+
+/// A profile's reduction, as the image worker answered it ([`SnapState::reduced`]): a handler that
+/// waited in `profile` goes on with it at once, turning no epoch; a callback's answer is handed to
+/// its module's mailbox in the lane it was asked from, as a picture is ([`fire_snaps`]), the epoch
+/// turned before the drain's first callback (`bumped`). Driven by `image_search::fire_images`.
+pub(crate) fn deliver_reduced<H: MailHost>(h: &H, mut p: PendingSnap, reduced: Result<Box<Reduced>, String>, bumped: &mut bool) {
+    let answer = match reduced {
+        Ok(r) => Answer::Profile(r),
+        Err(why) => Answer::Failed { why, frames: 0, change: None, waited: Duration::ZERO },
+    };
+    if let SnapWaiter::Handler(task) = p.waiter {
+        resume_handler(h, task, p, answer);
+        return;
+    }
+    if !*bumped {
+        h.bump_epoch();
+        *bumped = true;
+    }
+    let _prio = enter_priority(p.prio);
+    h.snap_state().hand(&mut p);
+    let (idx, lua) = (p.owner.idx, p.lua.clone());
+    mailbox::deliver(h, idx, &lua, Event::Snapshot { p: Box::new(p), answer });
 }
 
 /// A handler's wait for request `id` given up — the handler was cancelled or ended, its module went,
@@ -2128,33 +2282,7 @@ impl Shared {
     /// Delivers what the capture thread answered and what was decided without it ([`fire_snaps`]).
     /// Driven by both ticks, after the text reads' results.
     pub(crate) fn fire_snapshot_results(&self) {
-        fire_snaps(self, &|p, frame| self.reduce(p, frame));
-    }
-
-    /// A profile's picture, to the image worker ([`SnapState::to_worker`]). With the worker gone —
-    /// the application closing — it is answered as failed on the next tick instead.
-    fn reduce(&self, p: PendingSnap, frame: Arc<Frame>) {
-        let task = self.next_image_id.get() + 1;
-        self.next_image_id.set(task);
-        let id = p.id;
-        let sent = self.snap_state.to_worker(p, frame, task);
-        if self.image_tasks.send(sent).is_err() {
-            self.snap_state.end(id, image_search::PROFILE_FAILED.to_string());
-        }
-    }
-
-    /// A profile's reduction, as the image worker answered it ([`SnapState::reduced`]): handed to
-    /// its module's mailbox in the lane it was asked from, as a picture is above. Driven by
-    /// `fire_image_results`, which turns the epoch once for its drain.
-    pub(crate) fn deliver_reduced(&self, mut p: PendingSnap, reduced: Result<Box<Reduced>, String>) {
-        let answer = match reduced {
-            Ok(r) => Answer::Profile(r),
-            Err(why) => Answer::Failed { why, frames: 0, change: None, waited: Duration::ZERO },
-        };
-        let _prio = enter_priority(p.prio);
-        self.snap_state.hand(&mut p);
-        let (idx, lua) = (p.owner.idx, p.lua.clone());
-        mailbox::deliver(self, idx, &lua, Event::Snapshot { p: Box::new(p), answer });
+        fire_snaps(self);
     }
 
     /// An answer as it runs ([`open_snapshot_in`]). A profile's tables are built here, on the event
@@ -2200,13 +2328,16 @@ impl Shared {
     }
 }
 
-// ── host.screen.profile with a callback ────────────────────────────────────────────────────
+// ── host.screen.profile ────────────────────────────────────────────────────────────────────
+
+/// `host.screen.profile`, as its messages and log lines name it.
+const FPR: &str = "host.screen.profile";
 
 /// `key` and `at` of `host.screen.profile` given a callback, read as `snapshotAsync` reads them —
 /// `at` only for a region to capture: a snapshot's picture is taken already. The call's other
-/// options are the binding's, read as without a callback.
+/// options are read as without a callback ([`profile_args`]).
 fn profile_opts(opts: Option<&Table>, now_ms: f64, on_snapshot: bool) -> mlua::Result<(Option<String>, Option<f64>)> {
-    const F: &str = "host.screen.profile";
+    const F: &str = FPR;
     let Some(t) = opts else { return Ok((None, None)) };
     let key = match t.get::<Value>("key")? {
         Value::Nil => None,
@@ -2251,134 +2382,478 @@ fn within_limit(r: Rect, window: bool, fname: &str, limit: i64) -> mlua::Result<
     }
 }
 
-impl Shared {
-    /// `host.screen.profile(opts, cb)`, called from the VM `lua` under the identity `scope`. The
-    /// binding has read the options as the call without a callback reads them — `snap` the
-    /// snapshot given, `region` the region resolved or why a window region has none, the axes and
-    /// `dark` — and this reads `key` and `at`, files the request and hands its picture on: a
-    /// region to the `screen-capture` thread, as a plain or timed `snapshotAsync` is taken, a
-    /// snapshot straight to the image worker. `cb` is called on a later tick, never from inside
-    /// this call; what a window does at run time, and a limit, is answered there too.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn profile_async(
-        &self,
-        lua: &Lua,
-        scope: usize,
-        cb: Function,
-        opts: Option<&Table>,
-        snap: Option<Arc<Frame>>,
-        region: Result<ScreenRect, String>,
-        (cols, rows): (bool, bool),
-        dark: u8,
-    ) -> mlua::Result<()> {
-        const F: &str = "host.screen.profile";
-        let now = Instant::now();
-        let now_ms = now.saturating_duration_since(crate::clock_origin()).as_secs_f64() * 1000.0;
-        let (key, at_ms) = profile_opts(opts, now_ms, snap.is_some())?;
-        // A window region's size is the window's at run time: past a limit it is answered, where
-        // corners raise.
-        let window = match opts.map(|o| o.get::<Value>("region")).transpose()? {
-            Some(Value::Table(t)) => region_lua::window_form(&t),
-            _ => false,
-        };
-        let mut rect = match region {
-            Err(why) => Err(why),
-            Ok(r) if r.w <= 0 || r.h <= 0 => Err(format!("{} ({}x{})", crate::EMPTY_REGION, r.w, r.h)),
-            Ok(r) => match &snap {
-                Some(frame) => clip(frame, r),
-                None => within_limit(rect_of(r), window, F, frame::MAX_FRAME_PIXELS)?,
-            },
-        };
-        let owner = crate::ocr::lua::owner_of(lua, &self.vm_gens.borrow(), scope);
-        // A picture of its own is charged from the call until the answer is handed over; a
-        // snapshot's pixels are the module's already.
-        let res = match (&snap, &rect) {
-            (None, Ok(r)) => match reserve_by_form(lua, &self.snap_bytes, estimate(*r), F, window, false)? {
+/// What a call of `host.screen.profile` asks, its options read ([`profile_args`]).
+pub(crate) struct ProfileArgs {
+    /// The snapshot to profile instead of the screen.
+    snap: Option<Arc<Frame>>,
+    /// The region, resolved — or why a window region has none this time.
+    region: Result<ScreenRect, String>,
+    cols: bool,
+    rows: bool,
+    /// The luminance threshold of the `dark` counts.
+    dark: u8,
+    /// Whether the region was a window's, whose size is the window's at run time: past a limit it
+    /// is answered, where corners raise.
+    window: bool,
+}
+
+/// `host.screen.profile`'s options as both its forms read them, every one before anything is
+/// answered, so a mistake in `axes` raises whether or not there is anything to read this time: a
+/// snapshot first — a region left out is then the whole snapshot rather than the screen, whose
+/// size `screen` is — the region, `axes` and `dark`. `key` and `at` are left to the form:
+/// [`profile_opts`] with a callback, [`callback_only`] without one.
+pub(crate) fn profile_args(opts: Option<&Table>, screen: (i32, i32)) -> mlua::Result<ProfileArgs> {
+    let snap = from_opts(opts, FPR)?;
+    let region_value = match opts {
+        Some(o) => o.get::<Value>("region")?,
+        None => Value::Nil,
+    };
+    let region = match &snap {
+        Some(f) => opts_region_in(opts, FPR, f)?,
+        None => crate::region_arg_on(screen, &region_value, FPR, "opts.region")?,
+    };
+    let axes = opts.and_then(|o| o.get::<String>("axes").ok()).unwrap_or_else(|| "both".to_string());
+    // Refused, not silently widened. A typo would otherwise cost exactly the work the option
+    // exists to save, and say nothing about why.
+    let (cols, rows) = match axes.as_str() {
+        "both" => (true, true),
+        "columns" => (true, false),
+        "rows" => (false, true),
+        other => {
+            return Err(err(format!("{FPR}: axes must be \"both\", \"columns\" or \"rows\", got \"{other}\"")));
+        }
+    };
+    // How many pixels in each column/row are darker than `dark`.
+    //
+    // The third statistic, and for finding a SHAPE it is the only one of the three that works. A
+    // mean over hundreds of rows dilutes a note-sized object to a couple of units; a minimum
+    // saturates, because in a busy picture almost every column already contains something black
+    // and cannot go blacker. A count does neither — it is proportional to how much of the column
+    // the object covers. Measured on a real Melodyne capture at threshold 190: background and grid
+    // lines about 19 rows, note blobs 29 to 57, a full-height cursor 470 to 516. Three classes,
+    // cleanly apart, where the other two channels saw one.
+    let dark = opts.and_then(|o| o.get::<u8>("dark").ok()).unwrap_or(128);
+    let window = match &region_value {
+        Value::Table(t) => region_lua::window_form(t),
+        _ => false,
+    };
+    Ok(ProfileArgs { snap, region, cols, rows, dark, window })
+}
+
+/// A profile's table — `x`, `y`, `w`, `h` and the axes asked for ([`crate::profile_table`]) — with
+/// `time` and `inputEpoch` of its picture when known: the one shape every form answers.
+fn profile_answer(
+    lua: &Lua,
+    rect: (i32, i32, i32, i32),
+    columns: Option<crate::profile::Axis>,
+    rows: Option<crate::profile::Axis>,
+    moment: Option<(i64, u64)>,
+) -> mlua::Result<Table> {
+    let t = crate::profile_table(lua, rect, columns, rows)?;
+    // The moment of the picture, as every other answer of a picture carries it.
+    if let Some((time, epoch)) = moment {
+        t.set("time", time)?;
+        t.set("inputEpoch", epoch as i64)?;
+    }
+    Ok(t)
+}
+
+/// What a profile made on the event loop spent, for the observation line: when it began, when its
+/// picture was there (on a snapshot, the clip), when it was reduced and when its tables were built,
+/// and whether the screen was read for it.
+pub(crate) struct LoopProfile {
+    pub(crate) t0: Instant,
+    pub(crate) captured: Instant,
+    pub(crate) reduced: Instant,
+    pub(crate) end: Instant,
+    pub(crate) live: bool,
+}
+
+/// Whether a profile of `args` has nothing to read this time — a window region with no
+/// rectangle, an empty region, a region outside its snapshot — and is answered without a picture.
+fn nothing_to_profile(args: &ProfileArgs) -> bool {
+    match (&args.region, &args.snap) {
+        (Err(_), _) => true,
+        (Ok(r), _) if r.w <= 0 || r.h <= 0 => true,
+        (Ok(r), Some(frame)) => clip(frame, *r).is_err(),
+        (Ok(_), None) => false,
+    }
+}
+
+/// `host.screen.profile` on the event loop, as it always ran there: the picture — the part of the
+/// snapshot the region covers, or a capture of the region through `capture` — reduced, and the
+/// table built with its `time` and `inputEpoch`: a snapshot's own, or when the capture came back
+/// and `input_epoch`, the event loop's at the call, as nothing is acted on while it captures. `nil`
+/// and the reason when there is nothing to profile. What it spent, for one that answered a table.
+pub(crate) fn profile_on_loop(
+    lua: &Lua,
+    args: ProfileArgs,
+    input_epoch: u64,
+    capture: impl FnOnce(i32, i32, i32, i32) -> Result<CapturedImage, String>,
+) -> mlua::Result<(MultiValue, Option<LoopProfile>)> {
+    let nil = |why: String| -> mlua::Result<(MultiValue, Option<LoopProfile>)> { Ok((with_reason(lua, Value::Nil, why)?, None)) };
+    let (rx, ry, rw, rh) = match args.region {
+        Ok(r) => (r.x, r.y, r.w, r.h),
+        Err(why) => return nil(why),
+    };
+    if rw <= 0 || rh <= 0 {
+        return nil(format!("{} ({rw}x{rh})", crate::EMPTY_REGION));
+    }
+    let t0 = Instant::now();
+    // The picture: the part of the snapshot the region covers, or a capture made now.
+    let pic = match args.snap {
+        Some(frame) => match clip(&frame, ScreenRect { x: rx, y: ry, w: rw, h: rh }) {
+            Ok(rect) => Picture::Snap { frame, rect },
+            Err(why) => return nil(why),
+        },
+        None => match capture(rx, ry, rw, rh) {
+            Ok(img) => Picture::Live { img, x: rx, y: ry },
+            Err(why) => return nil(why),
+        },
+    };
+    let captured = Instant::now();
+    let moment = match &pic {
+        Picture::Snap { frame, .. } => (millis_of(frame.taken), frame.input_epoch),
+        Picture::Live { .. } => (millis_of(captured), input_epoch),
+    };
+    // The reduction reads only the area it is given, and nothing at all from a buffer shorter
+    // than its own size: a capture that came back short — a clipped region, a backend that
+    // rounded a dimension — would otherwise index past the end, and a panic inside a Lua binding
+    // is not a module error that gets reported: it is the process. Answering nil is what every
+    // other failure in this function does.
+    let area = pic.area();
+    let Some((columns, rows)) = crate::profile::profile(pic.image(), area, args.cols, args.rows, args.dark) else {
+        return nil(crate::SHORT_CAPTURE.to_string());
+    };
+    let reduced = Instant::now();
+    // The rectangle read: the region asked for, or, on a snapshot, its part inside it.
+    let (ox, oy) = match &pic {
+        Picture::Snap { rect, .. } => (rect.x, rect.y),
+        Picture::Live { .. } => (rx, ry),
+    };
+    let out = profile_answer(lua, (ox, oy, area.w as i32, area.h as i32), columns, rows, Some(moment))?;
+    // Timed to HERE, not to the end of the capture. The capture is a fixed frame; the traversal
+    // and the six sequences are the only part that grows with the region, and leaving them outside
+    // the measurement would hide them from the one report this project uses to find event-loop
+    // stalls — while making this call look free.
+    let end = Instant::now();
+    Ok((one_value(Value::Table(out))?, Some(LoopProfile { t0, captured, reduced, end, live: pic.is_live() })))
+}
+
+/// `host.screen.profile` where it cannot wait (`why`): answered at once, and not said, when there
+/// is nothing to profile or a window region is past a limit; otherwise made on the event loop
+/// ([`profile_on_loop`]), held there for that one call and said in the log (`task::legacy`), and
+/// what it spent handed to `observe`.
+#[allow(clippy::too_many_arguments)]
+fn profile_now<H: ReadHost>(
+    h: &H,
+    lua: &Lua,
+    scope: usize,
+    why: &str,
+    args: ProfileArgs,
+    input_epoch: u64,
+    capture: impl FnOnce(i32, i32, i32, i32) -> Result<CapturedImage, String>,
+    observe: impl FnOnce(LoopProfile),
+) -> mlua::Result<MultiValue> {
+    if nothing_to_profile(&args) {
+        return profile_on_loop(lua, args, input_epoch, capture).map(|(v, _)| v);
+    }
+    // A picture of its own is held under the limits a wait's is ([`submit_profile`]), so that both
+    // forms answer alike: corners past them raise, and a window region past them is answered at
+    // once, unsaid, as nothing was read. Its charge is held while it is taken and reduced.
+    let _res = match (&args.snap, &args.region) {
+        (None, Ok(r)) => {
+            let r = match within_limit(rect_of(*r), args.window, FPR, frame::MAX_FRAME_PIXELS)? {
+                Ok(r) => r,
+                Err(why) => return with_reason(lua, Value::Nil, why),
+            };
+            match reserve_by_form(lua, h.snap_bytes(), estimate(r), FPR, args.window, false)? {
                 Ok(res) => Some(res),
                 Err(why) => {
-                    note_crowding(self, owner.idx, &why);
-                    rect = Err(why);
-                    None
+                    let owner = crate::ocr::lua::owner_of(lua, &h.vm_gens(), scope);
+                    note_crowding(h, owner.idx, &why);
+                    return with_reason(lua, Value::Nil, why);
                 }
-            },
-            _ => None,
-        };
-        let st = &self.snap_state;
-        let profile = ProfileReq {
-            cols,
-            rows,
-            dark,
-            rect: rect.clone().unwrap_or_default(),
-            on_snapshot: snap.is_some(),
-            task: None,
-            moment: None,
-        };
-        let p = PendingSnap {
-            id: st.next(),
-            lua: lua.clone(),
-            waiter: SnapWaiter::Callback(lua.create_registry_value(cb)?),
-            scope,
-            owner,
-            prio: current_priority(),
-            key: key.clone(),
-            res,
-            change: false,
-            cancel: Arc::new(AtomicBool::new(false)),
-            asked: now,
-            profile: Some(profile),
-            points: None,
-            handed: false,
-        };
-        // A newer request with the key is the newest whether or not it can be made.
-        let mut ended = key.as_deref().map_or(0, |k| st.supersede(owner, Kind::Profile, k));
-        st.note_key(&p);
-        let rect = match rect {
-            Ok(r) => r,
-            Err(why) => {
-                st.ready.borrow_mut().push((p, why));
-                if ended > 0 {
-                    self.ocr.wake_snaps();
-                }
-                return Ok(());
-            }
-        };
-        // One of the module's snapshot requests, under their limits, from the call until its
-        // answer is handed over.
-        let (crowded, refused) = st.make_room(owner, false);
-        ended += crowded.len();
-        if let Some(why) = crowded.first().or(refused.as_ref()) {
-            note_crowding(self, owner.idx, why);
-        }
-        if ended > 0 {
-            self.ocr.wake_snaps();
-        }
-        if let Some(why) = refused {
-            let mut p = p;
-            p.res = None;
-            st.ready.borrow_mut().push((p, why));
-            return Ok(());
-        }
-        match snap {
-            Some(frame) => self.reduce(p, frame),
-            None => {
-                let source = capture_source::vm_source(lua);
-                let compare = capture_source::take_compare(lua, rect.tuple());
-                let at = at_ms.map(|ms| instant_at(ms).max(now));
-                let req = SnapReq {
-                    ticket: SnapTicket { id: p.id, owner, prio: p.prio },
-                    region: rect,
-                    source,
-                    kind: at.map_or(SnapKind::Plain, SnapKind::At),
-                    asked: now,
-                    cancel: p.cancel.clone(),
-                    compare,
-                };
-                st.pending.borrow_mut().insert(p.id, p);
-                self.ocr.submit_snap(req);
             }
         }
-        Ok(())
+        _ => None,
+    };
+    crate::task::legacy(h, lua, scope, FPR, crate::loop_guard::Kind::Screen, why, || {
+        let (v, cost) = profile_on_loop(lua, args, input_epoch, capture)?;
+        if let Some(c) = cost {
+            observe(c);
+        }
+        Ok(v)
+    })
+}
+
+/// A waited `host.screen.profile`: its options read as the call that does not wait reads them —
+/// a mistake, a `key` or an `at` raise at the call — and answered at once when there is nothing to
+/// profile this time; otherwise a request filed for the handler that waits ([`submit_profile`]): its
+/// picture taken on the `screen-capture` thread, or its snapshot's, reduced on the image worker, and
+/// the handler going on with the table ([`waited_values`]).
+pub(crate) fn start_profile<H: ReadHost>(
+    h: &H,
+    lua: &Lua,
+    scope: usize,
+    nonce: Table,
+    opts: Option<Table>,
+    screen: (i32, i32),
+) -> mlua::Result<MultiValue> {
+    let o = opts.as_ref();
+    let parse = || {
+        let args = profile_args(o, screen)?;
+        // `key` and `at` are the callback form's: refused here, before anything is answered.
+        callback_only(o, FPR, &["key", "at"])?;
+        Ok(args)
+    };
+    crate::task::start_point(h, lua, scope, FPR, nonce, parse, |args, task, prio| {
+        // Nothing to read this time: answered at once, as where it cannot wait, with no picture.
+        if nothing_to_profile(&args) {
+            let (now, _) = profile_on_loop(lua, args, 0, |_, _, _, _| Err(crate::backend::CAPTURE_FAILED.to_string()))?;
+            return Ok(Started::Now(now));
+        }
+        let id = submit_profile(h, lua, scope, Asker::Handler(task), o, args, prio, Instant::now())?;
+        Ok(Started::Waits(crate::task::On::Snap(id)))
+    })
+}
+
+/// `opts` of `host.screen.profile`: `nil`, or a table.
+fn profile_opts_table(v: Value) -> mlua::Result<Option<Table>> {
+    match v {
+        Value::Nil => Ok(None),
+        Value::Table(t) => Ok(Some(t)),
+        other => Err(err(format!("{FPR}: opts must be a table, got {}", describe_value(&other)))),
     }
+}
+
+/// `host.screen.profile(opts?) -> (Profile?, string?)`, and with a callback
+/// `host.screen.profile(opts, cb)`. Without one it waits in a handler: its picture is taken on the
+/// `screen-capture` thread as a plain `snapshotAsync`'s is — none for a snapshot — reduced on the
+/// image worker, and only the table is built on the event loop as the handler goes on
+/// ([`start_profile`]). Where it cannot wait it captures and reduces on the event loop, said in the
+/// log and counted in the observation line ([`profile_now`]). With a callback it never waits, and
+/// files the request wherever it is called ([`submit_profile`]).
+///
+/// ONE capture, reduced in Rust to a shape a module can reason about. The reason this exists is a
+/// measurement, not a preference. On this machine a BitBlt capture costs ~16.6 ms at 55x27 and
+/// ~16.7 ms at 1028x666, while GetPixel costs 16.7 ms for ONE pixel: the compositor serialises
+/// every screen touch to its vsync, so area is free and touching is what costs. A module that
+/// wants to know where an edge is therefore had only one honest option — probe a handful of points
+/// and hope they were the right ones — and the alternative, shipping a whole bitmap into Lua, would
+/// trade a cheap capture for an expensive marshal and a slow scan in a scripting language.
+///
+/// So the reduction happens here. Per column and per row: the darkest pixel, the lightest, the
+/// mean, and the mean of each channel. That is enough to find a vertical line (a dark column in a
+/// light band), an edge (where the mean steps), the extent of a shape, and a patch of a different
+/// colour — which is the whole of what these overlays have ever needed to read out of a picture,
+/// and none of it is expressible with point probes.
+pub(crate) fn profile(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
+    let sh = shared.clone();
+    let start = lua.create_function(move |lua, (nonce, opts): (Table, Value)| {
+        host_call!("host.screen.profile");
+        start_profile(&*sh, lua, idx, nonce, profile_opts_table(opts)?, sh.backend.screen_size())
+    })?;
+    let sh = shared.clone();
+    let blocking = lua.create_function(move |lua, (why, opts): (String, Value)| {
+        host_call!("host.screen.profile");
+        let opts = profile_opts_table(opts)?;
+        let args = profile_args(opts.as_ref(), sh.backend.screen_size())?;
+        // `key` and `at` are the callback form's. Here they raise, before anything is answered,
+        // rather than being passed over.
+        callback_only(opts.as_ref(), FPR, &["key", "at"])?;
+        let capture = |x, y, w, h| sh.backend.capture(x, y, w, h, capture_source::vm_source(lua));
+        // Counted as one screen touch in the observation log, because that is exactly what it is;
+        // a snapshot's profile touched no screen and is not counted as a pixel read, but its
+        // reduction ran here all the same, so the profile's own split counts both.
+        let observe = |c: LoopProfile| {
+            let mut obs = sh.observations();
+            if c.live {
+                obs.pixels += 1;
+                obs.pixel_us += c.end.duration_since(c.t0).as_micros();
+            }
+            obs.profile.add(c.t0, c.captured, c.reduced, c.end, !c.live);
+        };
+        profile_now(&*sh, lua, idx, &why, args, sh.input_epoch.get(), capture, observe)
+    })?;
+    let sh = shared.clone();
+    let submit = lua.create_function(move |lua, (opts, cb): (Value, Value)| {
+        host_call!("host.screen.profile");
+        let cb = match cb {
+            Value::Function(f) => f,
+            other => return Err(err(format!("{FPR}: the callback (second argument) must be a function, got {}", describe_value(&other)))),
+        };
+        let opts = profile_opts_table(opts)?;
+        let args = profile_args(opts.as_ref(), sh.backend.screen_size())?;
+        submit_profile(&*sh, lua, idx, Asker::Callback(cb), opts.as_ref(), args, current_priority(), Instant::now())?;
+        Ok(())
+    })?;
+    crate::task::points(lua, idx, shared.clone())?.call((FPR, start, blocking, submit, 2))
+}
+
+/// `host.screen.profile` as the host builds it, over `holder` — its wait and its callback form the
+/// host's own ([`start_profile`], [`submit_profile`]) — capturing through `capture` where it cannot
+/// wait, as the event loop would, with input epoch 7, through the host's own tally: for the tests'
+/// holders, which have no backend. The primary screen is 1920x1080.
+#[cfg(test)]
+pub(crate) fn test_profile_fn<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>, capture: crate::backend::CaptureFn) -> mlua::Result<Function> {
+    let h = holder.clone();
+    let start = lua.create_function(move |lua, (nonce, opts): (Table, Value)| {
+        start_profile(&*h, lua, idx, nonce, profile_opts_table(opts)?, (1920, 1080))
+    })?;
+    let h = holder.clone();
+    let blocking = lua.create_function(move |lua, (why, opts): (String, Value)| {
+        let opts = profile_opts_table(opts)?;
+        let args = profile_args(opts.as_ref(), (1920, 1080))?;
+        callback_only(opts.as_ref(), FPR, &["key", "at"])?;
+        let one = |x, y, w, hh| {
+            capture(&[(x, y, w, hh)], capture_source::vm_source(lua)).pop().unwrap_or_else(|| Err(crate::backend::CAPTURE_FAILED.to_string()))
+        };
+        profile_now(&*h, lua, idx, &why, args, 7, one, |_| {})
+    })?;
+    let h = holder.clone();
+    let submit = lua.create_function(move |lua, (opts, cb): (Value, Value)| {
+        let cb = match cb {
+            Value::Function(f) => f,
+            other => return Err(err(format!("{FPR}: the callback (second argument) must be a function, got {}", describe_value(&other)))),
+        };
+        let opts = profile_opts_table(opts)?;
+        let args = profile_args(opts.as_ref(), (1920, 1080))?;
+        submit_profile(&*h, lua, idx, Asker::Callback(cb), opts.as_ref(), args, current_priority(), Instant::now())?;
+        Ok(())
+    })?;
+    crate::task::points(lua, idx, holder)?.call((FPR, start, blocking, submit, 2))
+}
+
+/// Files a `host.screen.profile` of the VM `lua`, called under the identity `scope`, for `asker`,
+/// at `prio`: its picture handed to the `screen-capture` thread — at once, or at `at` for a
+/// callback — as a plain or timed `snapshotAsync` is taken, or, given a snapshot, that snapshot
+/// straight to the image worker; it is reduced there ([`reduce`]), and only the answer's tables
+/// are built on the event loop. A callback reads `key` and `at` here ([`profile_opts`]); a handler's
+/// wait has refused them. What a window does at run time, and a limit, is answered on the next
+/// tick, never from inside the call. Its request's number.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn submit_profile<H: ReadHost>(
+    h: &H,
+    lua: &Lua,
+    scope: usize,
+    asker: Asker,
+    opts: Option<&Table>,
+    args: ProfileArgs,
+    prio: Priority,
+    now: Instant,
+) -> mlua::Result<SnapId> {
+    const F: &str = FPR;
+    let now_ms = now.saturating_duration_since(crate::clock_origin()).as_secs_f64() * 1000.0;
+    let (key, at_ms) = match &asker {
+        Asker::Callback(_) => profile_opts(opts, now_ms, args.snap.is_some())?,
+        Asker::Handler(_) => (None, None),
+    };
+    let ProfileArgs { snap, region, cols, rows, dark, window } = args;
+    // A window region's size is the window's at run time: past a limit it is answered, where
+    // corners raise.
+    let mut rect = match region {
+        Err(why) => Err(why),
+        Ok(r) if r.w <= 0 || r.h <= 0 => Err(format!("{} ({}x{})", crate::EMPTY_REGION, r.w, r.h)),
+        Ok(r) => match &snap {
+            Some(frame) => clip(frame, r),
+            None => within_limit(rect_of(r), window, F, frame::MAX_FRAME_PIXELS)?,
+        },
+    };
+    let owner = crate::ocr::lua::owner_of(lua, &h.vm_gens(), scope);
+    // A picture of its own is charged from the call until the answer is handed over; a
+    // snapshot's pixels are the module's already.
+    let res = match (&snap, &rect) {
+        (None, Ok(r)) => match reserve_by_form(lua, h.snap_bytes(), estimate(*r), F, window, false)? {
+            Ok(res) => Some(res),
+            Err(why) => {
+                note_crowding(h, owner.idx, &why);
+                rect = Err(why);
+                None
+            }
+        },
+        _ => None,
+    };
+    let waiter = match asker {
+        Asker::Callback(f) => SnapWaiter::Callback(lua.create_registry_value(f)?),
+        Asker::Handler(task) => SnapWaiter::Handler(task),
+    };
+    let st = h.snap_state();
+    let profile = ProfileReq {
+        cols,
+        rows,
+        dark,
+        rect: rect.clone().unwrap_or_default(),
+        on_snapshot: snap.is_some(),
+        task: None,
+        moment: None,
+    };
+    let p = PendingSnap {
+        id: st.next(),
+        lua: lua.clone(),
+        waiter,
+        scope,
+        owner,
+        prio,
+        key: key.clone(),
+        res,
+        change: false,
+        cancel: Arc::new(AtomicBool::new(false)),
+        asked: now,
+        profile: Some(profile),
+        points: None,
+        handed: false,
+    };
+    let id = p.id;
+    // A newer request with the key is the newest whether or not it can be made.
+    let mut ended = key.as_deref().map_or(0, |k| st.supersede(owner, Kind::Profile, k));
+    st.note_key(&p);
+    let rect = match rect {
+        Ok(r) => r,
+        Err(why) => {
+            st.ready.borrow_mut().push((p, why));
+            if ended > 0 {
+                h.ocr().wake_snaps();
+            }
+            return Ok(id);
+        }
+    };
+    // One of the module's snapshot requests, under their limits, from the call until its
+    // answer is handed over.
+    let (crowded, refused) = st.make_room(owner, false);
+    ended += crowded.len();
+    if let Some(why) = crowded.first().or(refused.as_ref()) {
+        note_crowding(h, owner.idx, why);
+    }
+    if ended > 0 {
+        h.ocr().wake_snaps();
+    }
+    if let Some(why) = refused {
+        let mut p = p;
+        p.res = None;
+        st.ready.borrow_mut().push((p, why));
+        return Ok(id);
+    }
+    match snap {
+        Some(frame) => reduce(h, p, frame),
+        None => {
+            let source = capture_source::vm_source(lua);
+            let compare = capture_source::take_compare(lua, rect.tuple());
+            let at = at_ms.map(|ms| instant_at(ms).max(now));
+            let req = SnapReq {
+                ticket: SnapTicket { id, owner, prio },
+                region: rect,
+                source,
+                kind: at.map_or(SnapKind::Plain, SnapKind::At),
+                asked: now,
+                cancel: p.cancel.clone(),
+                compare,
+            };
+            st.pending.borrow_mut().insert(id, p);
+            h.ocr().submit_snap(req);
+        }
+    }
+    Ok(id)
 }
 
 /// `host.screen.pending(key) -> boolean`: whether a `snapshotAsync` or a `profile` with a callback
@@ -2424,6 +2899,13 @@ pub(crate) fn test_handle(lua: &Lua, frame: Frame) -> mlua::AnyUserData {
     lua.create_userdata(SnapshotHandle::new(frame, res, 0, process)).unwrap()
 }
 
+/// What the VM `lua`'s snapshots hold against its budget, charges reserved for pictures and copies
+/// still to come included: for other modules' tests.
+#[cfg(test)]
+pub(crate) fn test_vm_bytes(lua: &Lua) -> usize {
+    vm_budget(lua).get()
+}
+
 /// A frame of `w` x `h` at `(x, y)` whose pixel at screen `(px, py)` is `(px, py, 50)`, for tests.
 #[cfg(test)]
 pub(crate) fn test_frame(x: i32, y: i32, w: i32, h: i32) -> Frame {
@@ -2455,6 +2937,13 @@ impl SnapState {
         let mut ids: Vec<SnapId> = self.pending.borrow().values().filter(|p| p.owner.idx == idx).map(|p| p.id).collect();
         ids.sort_unstable();
         ids
+    }
+
+    /// The priority profile request `id` was sent to the image worker with, once it was: for the
+    /// tests.
+    #[cfg(test)]
+    pub(crate) fn test_sent_prio(&self, id: SnapId) -> Option<Priority> {
+        self.pending.borrow().get(&id).filter(|p| p.profile.as_ref().is_some_and(|j| j.task.is_some())).map(|p| p.prio)
     }
 }
 
