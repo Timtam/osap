@@ -6893,6 +6893,17 @@ maintainer's German test instructions are a text of their own, not in the reposi
       plug-in's elements and an element's state with a callback (the state before the reads and
       again after the change wait); a dump that is not all of the tree is a log line of its own:
       `W10: the plug-in's elements are not all of its tree: …`.
+      - **First live results (2026-10-11 and 2026-10-12, ReaEQ only; the maintainer tested no other
+        plug-in for accessibility reasons):** the accessibility press does nothing on ReaEQ (no UIA
+        element to press). A posted click arrives, but on 2026-10-12 (build de50da6, log 1791816916)
+        REAPER brought the FX window to the front itself about 240 ms after the posted click
+        (`[html-probe] in front: 'FX: Track 1 "test"'`), so "post" is not quiet for ReaEQ. After that,
+        the first F7 from the page hid it and the FX window was in front, but the keyboard landed
+        nowhere the probe saw (no `W7: … the keyboard landed on …` line) and NVDA said nothing; the
+        maintainer needed F7 three times (back, page again, back) before NVDA was in ReaEQ. Find out
+        whether REAPER's activation on the posted click leaves its FX dialog's focus memory on a
+        window that is not focusable, and whether the way back can give the dialog its focus
+        (generic: the window's last focused child, as Windows restores it on activation).
       - **ReaEQ (REAPER's own, Win32/WDL):** a checkbox. "Nothing — only watch" first (does it
         change by itself?), then the round trip (the reference NVDA chatter), Posted click, Posted
         click pointer stays, The no-activate style, Accessibility press — each twice, so the
@@ -9283,6 +9294,11 @@ time limit; a module past either is stopped until the next start.
 
 ## The application's own keys, and what reload-all rereads (2026-10-10, from the maintainer)
 
+- [ ] **Say where a module was loaded from** (2026-10-12, from the maintainer's reload test: he
+      edited modules\ik-on-ear\module.toml in the main folder while the app ran the modules of a
+      worktree, and the reload found no error). The module manager's details, the module's
+      `loading module` log line and the reload-all report name the module's folder; the manager's
+      Installed list can show it on request. Generic, every platform.
 - [ ] **Kontakt's view toggle says nothing when the view has changed** (2026-10-10, the maintainer:
       the classic view is recognised again, but switching is silent). On Windows the toggle sends
       F10 and the overlay sees the new view only at the next key, when the ring changes without a
