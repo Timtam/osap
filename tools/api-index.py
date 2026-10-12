@@ -401,8 +401,10 @@ CAPABILITIES = [
     'own and answers in a callback. Without one, a text read answers the handler that waits '
     'for it, and so do [`snapshot`](screen.md#where-it-waits), `pixel`, `pixels`, `profile`, '
     '`cells`, `matchCells`, `template{ capture }`, a snapshot\'s `crop`, the searches without a '
-    'callback, `save` and `saveMarked`: only their own module waits. `template` from a file, and a '
-    'search\'s template file, are opened on the loop. Which call runs where: '
+    'callback, `save` and `saveMarked`: only their own module waits. `template` from bytes or a '
+    'file checks its arguments on the loop and answers at once, its picture made on the image '
+    'worker; a search checks a template path on the loop by its PNG header, the first time the '
+    'path is named, and the image worker opens it. Which call runs where: '
     '[Threads](../module-runtime-and-lifecycle.md#threads).',
     '- **A manifest that names its target window.** `module.toml` has no window or process '
     'field; matching is Luau — see the [manifest](../module-package-format.md).',

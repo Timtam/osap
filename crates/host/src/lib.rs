@@ -151,6 +151,9 @@ mod speech;
 /// the host does about it — see the file.
 mod system_events;
 mod template;
+/// What a search's templates are made of, made on the image worker: the PNG files by path and
+/// modification time, and a template handle's picture, prepared once — see the file.
+mod template_store;
 /// `host.timer`: pending timers, their tokens, and the firing rules — see the file.
 mod timers;
 /// `host.gamepad`: listeners, dispatch rules and bindings — see the file.
@@ -178,7 +181,6 @@ use backend::{Backend, ControlInfo, HostEvents, MouseButton, WinInfo};
 use image_search::{ImageResult, ImageTask};
 use mailbox::{Event, Opened};
 use module_manifest::LoadedModule;
-use template::Decoded;
 use vm_guard::host_call;
 
 const WINDOW_PRELUDE: &str = include_str!("window_prelude.luau");
@@ -450,17 +452,6 @@ struct Shared {
     /// not a fifth parallel vector: `populate_vm` overwrites the entry for its index, so a
     /// rollback has nothing here to keep aligned.
     vm_gens: RefCell<HashMap<usize, u64>>,
-    /// Decoded-template cache (path → (mtime, RGBA, last-used seq)); avoids re-reading +
-    /// re-decoding a PNG on every imageSearch / imageSearchAsync / imageSearchMulti call,
-    /// including the recurring landmark poll. Invalidated per-entry when the file's mtime
-    /// changes (a calibration re-capture), so a re-captured template is picked up live.
-    /// The seq is bumped on each access and used to evict the least-recently-used entry
-    /// once the cache exceeds TEMPLATE_CACHE_CAP — a safety valve against unbounded growth
-    /// (practically never hit: modules use a handful of fixed template paths). Main-thread
-    /// only (the worker holds an already-cloned Arc, never the map).
-    template_cache: RefCell<HashMap<PathBuf, (SystemTime, Arc<Decoded>, u64)>>,
-    /// Monotonic last-used stamp source for the template cache's LRU eviction.
-    template_seq: Cell<u64>,
     /// Set by `host.window.recheck()`; drained on the tick to fire a cross-VM overlay
     /// re-check (as an OS focus event would), for state changes an overlay itself caused.
     recheck_requested: Cell<bool>,
@@ -491,10 +482,6 @@ struct Shared {
 /// whose programs answer, each within its half second; what is not given back by then, the next
 /// start gives back.
 const GIVE_BACK_AT_EXIT: std::time::Duration = std::time::Duration::from_millis(2000);
-
-/// Max distinct template PNGs kept decoded in the cache before least-recently-used
-/// eviction. Far above any real module's fixed template count — purely a growth cap.
-const TEMPLATE_CACHE_CAP: usize = 64;
 
 /// Names a single OS observation that blocked the pump thread for a long time.
 ///
@@ -813,48 +800,6 @@ impl Shared {
         let id = self.next_id.get() + 1;
         self.next_id.set(id);
         id
-    }
-
-    /// Decodes a template PNG to RGBA, cached by path + mtime. Repeated searches of the
-    /// same template (the landmark poll, a toggle's on/off pair) reuse the decoded copy;
-    /// a re-captured template (changed mtime) is re-decoded, so calibration takes effect
-    /// without a restart. Returns a cheap `Arc` clone.
-    fn load_template(&self, path: &Path) -> mlua::Result<Arc<Decoded>> {
-        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        // Cache hit (same path, unchanged mtime): bump the LRU stamp and return.
-        if let Some(mt) = mtime {
-            let mut cache = self.template_cache.borrow_mut();
-            if let Some(entry) = cache.get_mut(path) {
-                if entry.0 == mt {
-                    let seq = self.template_seq.get() + 1;
-                    self.template_seq.set(seq);
-                    entry.2 = seq;
-                    return Ok(entry.1.clone());
-                }
-            }
-        }
-        // Miss, or the file changed on disk: (re)decode.
-        let img = image::open(path)
-            .map_err(|e| {
-                mlua::Error::external(format!("cannot open template '{}': {e}", path.display()))
-            })?
-            .to_rgba8();
-        let (dw, dh) = (img.width(), img.height());
-        let dec = Arc::new(Decoded::from_png_rgba(dw, dh, img.into_raw()));
-        if let Some(mt) = mtime {
-            let seq = self.template_seq.get() + 1;
-            self.template_seq.set(seq);
-            let mut cache = self.template_cache.borrow_mut();
-            cache.insert(path.to_path_buf(), (mt, dec.clone(), seq));
-            // Growth cap: drop the least-recently-used entry if over capacity.
-            if cache.len() > TEMPLATE_CACHE_CAP {
-                let lru = cache.iter().min_by_key(|(_, v)| v.2).map(|(k, _)| k.clone());
-                if let Some(k) = lru {
-                    cache.remove(&k);
-                }
-            }
-        }
-        Ok(dec)
     }
 
     /// Tells the user something ON THE APPLICATION'S OWN BEHALF — not a module's.
@@ -5182,8 +5127,6 @@ impl Manager {
             module_rows: RefCell::new(None),
             held_buttons: RefCell::new(BTreeMap::new()),
             vm_gens: RefCell::new(HashMap::new()),
-            template_cache: RefCell::new(HashMap::new()),
-            template_seq: Cell::new(0),
             recheck_requested: Cell::new(false),
             initial_pending: RefCell::new(Vec::new()),
             notify: RefCell::new(None),
@@ -10927,7 +10870,7 @@ mod ocr_wiring_tests {
             assert!(body(IMAGES, f).contains("search_region(sh.backend.screen_size(), opts.as_ref()"), "`{f}` reads opts.region another way");
         }
         for (f, kind) in [("fn image_search(", "One"), ("fn image_search_multi(", "Multi"), ("fn image_search_all(", "All")] {
-            assert!(body(IMAGES, f).contains(&format!("search_ask(Search::{kind}, tv, opts, sh.backend.screen_size(), &load)")), "`{f}`");
+            assert!(body(IMAGES, f).contains(&format!("search_ask(Search::{kind}, tv, opts, sh.backend.screen_size(), &locate)")), "`{f}`");
         }
         assert!(body(IMAGES, "pub(crate) fn search_ask(").contains("None => search_region(screen, o, fname)?,"), "the searches that wait");
         assert!(body(IMAGES, "fn image_search_each(").contains("region_arg(&*sh.backend, &r, F"), "a `within` read another way");
@@ -10972,6 +10915,33 @@ mod ocr_wiring_tests {
         assert!(text("snapshotAsync").contains("snapshot::snapshot_async(lua, shared, idx)"), "host.screen.snapshotAsync");
         assert!(body(SNAP, "pub(crate) fn parse_async(").contains("region_lua::read(&region_v, \"opts.region\")"));
         assert!(body(SNAP, "fn read_watch(").contains("region_lua::read(&item, &format!(\"{W}[{i}]\"))"));
+    }
+
+    /// No binding opens a PNG, or makes a handle's picture, where it reads the module's arguments:
+    /// every search — the callback forms among them — checks its paths through `locate_in`, the
+    /// first time each is named, and `template{ file }` reads the header alone. A PNG is opened by
+    /// the worker's own work, which the event loop runs only where a call cannot wait.
+    #[test]
+    fn no_binding_opens_a_template_where_it_reads_its_arguments() {
+        for f in [
+            "pub(crate) fn image_search(",
+            "pub(crate) fn image_search_multi(",
+            "pub(crate) fn image_search_all(",
+            "pub(crate) fn image_search_async(",
+            "pub(crate) fn image_search_each(",
+        ] {
+            let b = body(IMAGES, f);
+            assert!(b.contains("let locate = |p: &str| locate_in(&sh.root(idx), p);"), "`{f}` reads its paths another way");
+            assert!(!b.contains("template_store::open(") && !b.contains(".make()"), "`{f}` opens a template where it reads it");
+        }
+        for f in ["fn resolve_with(", "fn resolve_list(", "pub(crate) fn search_ask(", "fn build_handle(", "fn template_file(", "fn locate_in("] {
+            let b = body(IMAGES, f);
+            assert!(!b.contains("template_store::open(") && !b.contains(".make()") && !b.contains("image::open("), "`{f}`");
+        }
+        assert!(body(IMAGES, "fn template_file(").contains("template_store::header(&full)"));
+        assert!(body(IMAGES, "fn locate_in(").contains("template_store::locate(root.join(path))"));
+        assert!(body(IMAGES, "pub(crate) fn template(").contains("queue_preparation(&*sh, p)"), "a handle's picture is queued for the image worker at the call");
+        assert!(!LIB.contains(concat!("fn load_", "template(")), "the event loop's template cache is back");
     }
 
     /// `pixel`'s options are read strictly, before anything is answered, and a read of a

@@ -61,6 +61,17 @@ into the changelog with that release.
   callback goes raises, and so does anything after the callback. A window of the application
   itself (a page, the manager) is not asked about on Windows: every call answers `nil` and why. New:
   `host.element.pending(key)`, as `host.ocr.pending`.
+- **A `Template` from bytes or a file has its `count` once its picture is made** (2026-10-12,
+  step W3t). `host.screen.template{ rgba | rgb | file }` answers at once and the image worker makes
+  the picture: until then `t.count` is `nil` (it was always a number) and `tostring(t)` says
+  `preparing`. A `file` template's `w` and `h` are its PNG header's. And a template PNG whose header
+  reads but whose pixels do not decode, or that is gone since its path was first named, no longer
+  raises at the search: the search answers it as "could not look", `nil` and `cannot open template
+  '…': …` (`nil, nil, …` for `imageSearchMulti`, `{}, …` for `imageSearchAll`, the callback's
+  `nil, …` for `imageSearchAsync` and `imageSearchEach`). A path that is not there or not a PNG
+  when it is first named still raises. `template{ file }` with such a file no longer raises at the
+  call either: the handle is answered, and every search with it answers that reason and tries the
+  file again, so the handle has its picture once the file can be read.
 
 ## Implementation
 
@@ -8200,6 +8211,50 @@ kind of place that says how long the first held the loop.
       Failure reasons, Where it waits, Reading a snapshot, the Region form's example, `imageSearch`,
       `imageSearchAsync`, `save`, `saveMarked`, `imageSearchAll`, `imageSearchMulti`),
       module-runtime-and-lifecycle.md, module-manager.md, overlay.md, ocr.md, timer.md, the index.
+      Step W3t, 2026-10-12 (wbr-final.md): the templates are the image worker's. A search no
+      longer opens its PNG at the call (a look at the file's modification time on every call, the
+      landmark poll's included, and the decode the first time and after a re-capture), and
+      `template{ rgba | rgb | file }` no longer converts or decodes there. The call checks what it
+      can without that — a path's PNG header the first time the path is named
+      (`template_store::locate`, so a path that is not there or not a PNG still raises at the call,
+      wherever it sits in a list), a handle's sizes and byte count — and hands the worker a needle:
+      a path, or a handle's picture (`Prepared`). The worker opens a batch's templates before its
+      captures (`template_store::resolve`), each PNG once per batch, through the decode cache by
+      path and modification time that moved off `Shared` (`template_store::open`, 64 paths, least
+      recently used out first); a search whose template cannot be opened — a file gone since its
+      path was first named, a body that does not decode — is answered `nil, "cannot open template
+      '…': …"` (in each search's own shape) without a capture. A handle from bytes or a file is
+      answered at once, its 32 MiB charge taken from `w*h` at the call, and its picture made by a
+      task of its own queued then (`Job::Prepare`), or by the first search that needs it if that
+      comes sooner (a `OnceLock`: nobody makes it twice); until then `count` is `nil` and
+      `tostring` says `preparing`, and a file's `w` and `h` are its header's. The callback forms,
+      `imageSearchAsync` and `imageSearchEach`, read their paths the same way. Where a search cannot
+      wait it opens its templates on the event loop, through the same cache, inside its `legacy`
+      scope, until 12b. The slow-batch line counts the opening with the matching ("templates,
+      matching, reduction and shot writing"). After the review: the preparation holds the picture
+      weakly (`Job::Prepare(Weak<Prepared>)`), so a handle let go takes its bytes with it and its
+      task makes nothing — the budget's charge and the bytes go together; a file that cannot be
+      opened when a handle's picture is made is not kept (`Prepared::failed` says why for
+      `tostring`), and the next search tries again; a PNG whose decode panics is answered for its
+      own search, `internal error: the template could not be made`, not for the whole batch.
+      Tested (template_store.rs, image_search.rs,
+      task_tests.rs, a source test in lib.rs): a handler's PNG decoded and a handle's bytes made on
+      the worker's threads, never on the loop; a handle from bytes answered `preparing` while the
+      worker is busy and the handler's search with it finding what the bytes hold; a re-captured
+      PNG found by the next search, decoded again on the worker; a missing path raising at the call
+      in a handler and at the top level, a broken body answered by the search; a template that
+      cannot be opened answered without a capture in every mode; a preparation and a search in one
+      batch making the picture once; the paths of every binding read through `locate_in`; a
+      handle collected before its preparation leaving nothing to make; a file handle's failure
+      tried again and its picture made once the file is back; a decode that panics answered for
+      its own search alone. Each
+      fails against the code without the change (verified with the old behaviour put back: the work
+      at the call; the worker not making a pending handle; the cache ignoring the modification
+      time; the preparation holding the picture strongly; a decode outside the containment; a
+      file's failure kept). Docs: screen.md (the top, the image worker and its pool, Failure
+      reasons, Where it waits, `template`, `imageSearch`, `imageSearchAsync`, `imageSearchEach`,
+      `imageSearchAll`, `imageSearchMulti`), the index's "script host with threads",
+      module-runtime-and-lifecycle.md's Threads.
 - [ ] **NVDA check of step V1 (session B, with V2 and T2)** — nothing should sound different.
       Kontakt with a CSS library in REAPER: a hotspot toggle pressed (its state said after the
       press, as before); the snapshot camera and its dropdown with the bar shut and open (the bar
@@ -8326,6 +8381,10 @@ kind of place that says how long the first held the loop.
       through `capture_many` at point resolution, as the event loop captures, and a shot encoded and
       written on its matching pool; the capture probe's `save of the snapshot waited … ms` line in
       the macOS jobs, which the next CI run shows.
+- [ ] **Step W3t never ran on a Mac** (built by the macOS CI only; `check-macos.ps1` does not
+      borrow image_search.rs): a search's PNG decoded on the image worker and a handle's picture
+      made there; nothing in it is platform-specific, and the capture probe searches no template, so
+      the first sign is a library overlay that is found as before.
 - [ ] **NVDA check of step W1b (session C)** — nothing should sound different; announcements that
       read a pixel come about one tick later. Kontakt with a CSS library: Tab through the hotspot
       toggles and press one (its state said after the press); the header's status toggles: Tab,
@@ -8347,6 +8406,12 @@ kind of place that says how long the first held the loop.
       crosshairs where they were), the crop (Ctrl+Alt+Shift+T) and the count (Ctrl+Alt+Shift+V),
       each a little later; Avenger's calibration pictures if the plug-in is at hand (Q3 = A). Bring
       the log: no `could not wait here` line, and any `not going on after finding its thumb` lines.
+- [ ] **NVDA check of step W3t (session C)** — nothing should sound different. Arrival in a
+      Kontakt library still names it, and a library overlay found after a start or a calibration's
+      re-capture is found as quickly (its landmark templates are decoded on the image worker now).
+      With `calibrate` on: a calibration shot, then the overlay finding the control it shot. Bring
+      the log: no `cannot open template` line, and the `batch of … read(s) took` lines, whose second
+      figure counts the templates' opening now.
 - [ ] **W1a's remedies name `snapshotAsync`** (review of W1a): the `could not wait here` line and
       the timer's line offer `host.screen.snapshotAsync(opts, function(snap, why) … end)` as the
       form that waits for nothing, since `snapshot(opts, cb)` does not exist yet, and Q1 = A
@@ -8466,9 +8531,10 @@ Follow-ups this work found and did not take on:
       to W4 and 12b), and with them a `read` of a snapshot that was taken on the event loop.
       `snapshot` waits in a handler since W1a, `pixel` and `pixels` since W1b, `profile`,
       `cells`, `matchCells`, `template{ capture }` and a snapshot's `crop` since W2, and the three
-      searches, `save` and `saveMarked` since W3; template decoding (W3t) does not yet. A module's own
-      menu test that reads a pixel on every tick reads it on the event loop, said once — the
-      scripted host's `a_modules_own_pixel_test` keeps one — until 12b makes it raise.
+      searches, `save` and `saveMarked` since W3; the templates are opened on the image worker
+      since W3t, except a search's that cannot wait. A module's own menu test that reads a pixel
+      on every tick reads it on the event loop, said once — the scripted host's
+      `a_modules_own_pixel_test` keeps one — until 12b makes it raise.
       Perhaps later `snapshotAsync` as a wait, which would let Avenger's preset step be written in
       a line. Where such a wait cannot wait — in the runtime's coroutine for the hooks asked on
       every scan, in a coroutine of the module's own, where Luau cannot stop — it captures on the

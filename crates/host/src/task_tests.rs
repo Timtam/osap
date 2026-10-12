@@ -424,6 +424,21 @@ fn holder((ocr, stop): (Service<Fake>, ShutdownHandle)) -> Rc<Host> {
 /// VM generations, process-wide as the host's are.
 static NEXT_GEN: AtomicU64 = AtomicU64::new(1000);
 
+/// The folder the VMs' template paths are resolved against, made once a run: `dot.png` is one
+/// black pixel, which no picture of the fakes has. A test that writes PNGs of its own writes them
+/// under a name of its own here.
+fn templates_dir() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("host-task-tests-{}-templates", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::template_store::test_write_dot(&dir.join("dot.png"), [0, 0, 0], 0);
+        dir
+    })
+    .clone()
+}
+
 /// A fresh VM for module `idx` — a new generation of it, enabled — with the host's own
 /// `host.ocr.recognize`, `pending` and timer bindings over `h`, and for the tests: the machinery's test-only entry as the global
 /// `task`, `hostCall(f, …)`, a plain `Function::call` as the host makes when it calls Lua back (an
@@ -466,9 +481,8 @@ fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     let (cells, match_cells) = crate::image_search::test_cells(&lua, idx, h.clone(), fake_image_capture).unwrap();
     screen.set("cells", cells).unwrap();
     screen.set("matchCells", match_cells).unwrap();
-    let dot = std::sync::Arc::new(crate::template::Decoded::from_png_rgba(1, 1, vec![0, 0, 0, 255]));
-    screen.set("template", crate::image_search::test_template(&lua, idx, h.clone(), fake_image_capture, dot.clone()).unwrap()).unwrap();
-    let [search, multi, all] = crate::image_search::test_searches(&lua, idx, h.clone(), fake_image_capture, dot).unwrap();
+    screen.set("template", crate::image_search::test_template(&lua, idx, h.clone(), fake_image_capture, templates_dir()).unwrap()).unwrap();
+    let [search, multi, all] = crate::image_search::test_searches(&lua, idx, h.clone(), fake_image_capture, templates_dir()).unwrap();
     screen.set("imageSearch", search).unwrap();
     screen.set("imageSearchMulti", multi).unwrap();
     screen.set("imageSearchAll", all).unwrap();
@@ -3460,4 +3474,144 @@ fn a_shot_the_worker_has_when_its_module_goes_is_not_written() {
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── The templates are the image worker's ─────────────────────────────────────────────────────
+
+/// A 1x1 PNG at `name` in the VMs' template folder, of the pixel the fakes' pictures have at
+/// screen (x, y) — one of a kind in any picture narrower than 256 — whose modification time is
+/// `secs` from now.
+fn dot_at(name: &str, x: i32, y: i32, secs: u64) -> std::path::PathBuf {
+    let path = templates_dir().join(name);
+    crate::template_store::test_write_dot(&path, [(x % 256) as u8, (y % 256) as u8, 50], secs);
+    path
+}
+
+/// A handler's searches open their PNG, and make a handle's picture from its bytes, on the image
+/// worker's threads, never on the event loop: the template call answers at once with the bytes
+/// checked, a path is checked at the call by its header alone, and the handler goes on with the
+/// hits.
+#[test]
+fn a_handlers_templates_are_opened_and_made_off_the_event_loop() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let path = dot_at("handler-fresh.png", 22710, 9, 0);
+    run(
+        &lua,
+        r#"
+        local AREA = { region = { 22701, 5, 22741, 35 } }
+        function look()
+          local T = host.screen.template({ name = "grey", rgb = string.rep("\0", 7 * 3 * 3), w = 7, h = 3 })
+          hit = host.screen.imageSearch("handler-fresh.png", AREA)
+          multi = { host.screen.imageSearchMulti({ T, "handler-fresh.png" }, AREA) }
+          count = T.count
+        end
+        "#,
+    );
+    assert_eq!(event(&h, &lua, "look", Vec::new(), false), mailbox::Delivered::Parked);
+    settle_images(&h);
+    assert!(yes(&lua, "return hit ~= nil and hit.x == 22710 and hit.y == 9 and hit.name == 'handler-fresh.png'"), "the file's pixel");
+    assert!(yes(&lua, "return multi[1] == 2 and multi[2].x == 22710 and count == 21"), "the bytes matched nothing, the file did");
+    let me = current_thread();
+    let decoded = crate::template_store::test_made_on(&path.display().to_string());
+    assert_eq!(decoded, ["image-worker"], "the PNG decoded once, on the worker");
+    let made = crate::template_store::test_made_on("bytes 7x3");
+    assert!(made.len() == 1 && made[0] != me, "the bytes made into a picture once, off the loop: {made:?}");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// A search waits for a template whose picture is still to be made: a handle from bytes is answered
+/// at once — `count` nil, `preparing` — while the image worker is busy, and the search a handler
+/// then makes with it finds what the bytes hold once the worker gets to them.
+#[test]
+fn a_search_waits_for_a_template_still_to_be_made() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let other = vm(&h, 2);
+    run(&other, CUT);
+    run(&lua, "function busy() g = host.screen.cells({ region = { 22801, 5, 22811, 15 }, cols = 1, rows = 1, predicate = 'r > b' }) end");
+    hold(22801);
+    assert_eq!(event(&h, &lua, "busy", Vec::new(), false), mailbox::Delivered::Parked);
+    wait_image_capturing(22801);
+    run(
+        &other,
+        r#"
+        T = cut(22810, 8, 3, 2)
+        before = { count = T.count, text = tostring(T), w = T.w, h = T.h }
+        function look()
+          hit = host.screen.imageSearch(T, { region = { 22801, 5, 22841, 35 } })
+          after = T.count
+        end
+        "#,
+    );
+    assert!(
+        yes(&other, "return before.count == nil and before.text == 'Template(cut 3x2, preparing)' and before.w == 3 and before.h == 2"),
+        "{:?}",
+        other.load("return before.text").eval::<String>()
+    );
+    assert_eq!(event(&h, &other, "look", Vec::new(), false), mailbox::Delivered::Parked);
+    release(22801);
+    settle_images(&h);
+    mailbox::run_queued(&*h);
+    assert!(yes(&other, "return hit ~= nil and hit.x == 22810 and hit.y == 8 and hit.name == 'cut' and after == 6"));
+    assert!(yes(&lua, "return g ~= nil"));
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// A template captured again under the same path is what the next search in a handler finds: the
+/// image worker sees the new modification time and decodes the file again, on its own thread.
+#[test]
+fn a_png_captured_again_is_what_the_next_waited_search_finds() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let path = dot_at("moving.png", 22910, 8, 0);
+    run(&lua, "function look() hit = host.screen.imageSearch('moving.png', { region = { 22901, 5, 22941, 35 } }) end");
+    assert_eq!(event(&h, &lua, "look", Vec::new(), false), mailbox::Delivered::Parked);
+    settle_images(&h);
+    assert!(yes(&lua, "return hit ~= nil and hit.x == 22910 and hit.y == 8"));
+    dot_at("moving.png", 22920, 9, 10);
+    assert_eq!(event(&h, &lua, "look", Vec::new(), false), mailbox::Delivered::Parked);
+    settle_images(&h);
+    assert!(yes(&lua, "return hit ~= nil and hit.x == 22920 and hit.y == 9"), "the picture the file holds now");
+    assert_eq!(crate::template_store::test_made_on(&path.display().to_string()), ["image-worker", "image-worker"]);
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// A path that is not there raises at the call, in a handler as where it cannot wait; one whose
+/// body cannot be decoded passes the call's check and is answered by the search — `nil` and the
+/// reason — once the image worker has tried it.
+#[test]
+fn a_missing_path_raises_and_a_broken_png_is_the_searchs_answer() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let path = dot_at("broken.png", 23010, 8, 0);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let at = bytes.windows(4).position(|w| w == b"IDAT").expect("an IDAT chunk");
+    bytes.truncate(at + 4 + 2);
+    std::fs::write(&path, bytes).unwrap();
+    run(
+        &lua,
+        r#"
+        local AREA = { region = { 23001, 5, 23041, 35 } }
+        topOk, topWhy = pcall(host.screen.imageSearch, "nowhere.png", AREA)
+        function look()
+          okMissing, missingWhy = pcall(host.screen.imageSearch, "nowhere.png", AREA)
+          broken = { host.screen.imageSearch("broken.png", AREA) }
+        end
+        "#,
+    );
+    assert_eq!(event(&h, &lua, "look", Vec::new(), false), mailbox::Delivered::Parked);
+    settle_images(&h);
+    for name in ["topWhy", "missingWhy"] {
+        let got: String = lua.load(format!("return tostring({name})")).eval().unwrap();
+        assert!(got.contains("cannot open template '") && got.contains("nowhere.png"), "{name}: {got}");
+    }
+    let why: String = lua.load("return broken[2]").eval().unwrap();
+    assert!(yes(&lua, "return topOk == false and okMissing == false and broken[1] == nil"));
+    assert!(why.starts_with(&format!("cannot open template '{}': ", path.display())), "{why}");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
 }

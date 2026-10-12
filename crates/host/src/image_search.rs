@@ -20,6 +20,13 @@
 //! as one batch ([`next_batch`]): a key's wait is not batched with the library polls queued before
 //! it, and goes ahead of them.
 //!
+//! **The templates are the worker's too.** A search hands it its templates as needles — a path
+//! checked at the call, a handle's picture — and the worker opens the files and makes the pictures
+//! before it matches the batch (`template_store.rs`); a handle from bytes or a file has its
+//! picture made there by a task of its own (`Job::Prepare`), queued when the handle is made, which
+//! holds it weakly: a handle let go before the worker gets to it is gone with its bytes, and its
+//! task makes nothing.
+//!
 //! The matcher is `template.rs`; this file is everything around it that knows about Lua, about
 //! modules, or about threads. It lives outside `lib.rs` so that the part of the host every
 //! feature touches stays small, and so that the pieces with rules of their own — who a result
@@ -28,10 +35,11 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use mlua::{
@@ -52,6 +60,7 @@ use crate::ocr::types::{self as geo, Priority};
 use crate::region::{self, ScreenRect};
 use crate::snapshot;
 use crate::template::{self, Decoded, Rect};
+use crate::template_store::{self, Needle, Prepared, Raw};
 use crate::mailbox::{self, Event, MailHost, Opened};
 use crate::task::{Ctx, On, Started, TaskId};
 use crate::{
@@ -344,8 +353,9 @@ const HELD_CELLS: &str = "the module was disabled while the read waited";
 fn resend(task: &ImageTask) -> ImageTask {
     match &task.job {
         // A profile is never held: its request is snapshot.rs's, dropped with its module. Nor is a
-        // handler's wait — a crop, a template, a shot — which goes with its module's handler.
-        Job::Search { .. } | Job::Profile { .. } | Job::Crop | Job::Template | Job::Save(_) => task.clone(),
+        // handler's wait — a crop, a template, a shot — which goes with its module's handler, nor
+        // a handle's preparation, which nobody waits for.
+        Job::Search { .. } | Job::Profile { .. } | Job::Crop | Job::Template | Job::Save(_) | Job::Prepare(_) => task.clone(),
         Job::Cells(c) => ImageTask {
             job: Job::Cells(Arc::new(CellsJob {
                 matcher: c.matcher.clone(),
@@ -419,8 +429,9 @@ pub(crate) enum Job {
     /// Template search.
     Search {
         /// Each template with the part of the captured frame it may be found in (`None`: all
-        /// of it), in frame coordinates.
-        entries: Vec<(Arc<Decoded>, Option<Rect>)>,
+        /// of it), in frame coordinates. Opened, or made, by the worker before it matches
+        /// (`template_store::resolve`).
+        entries: Vec<(Needle, Option<Rect>)>,
         tol: u8,
         scales: Vec<f32>,
         mode: Mode,
@@ -447,6 +458,16 @@ pub(crate) enum Job {
     /// `host.screen.save` or `saveMarked` a handler waits for: the region captured — or the part of
     /// it inside the snapshot it carries, copied — marked, encoded and written (save.rs).
     Save(Arc<crate::save::SaveJob>),
+    /// A `host.screen.template` handle's picture, made from the bytes or the file it was given,
+    /// queued as the handle is made: nobody waits for it, and nothing is read for it. A search that
+    /// needs the picture first makes it itself.
+    ///
+    /// Held weakly. The handle's charge on its VM's budget goes with the handle, and so must the
+    /// bytes: a module that builds a template on every poll and lets it go would otherwise leave
+    /// its bytes queued here past the budget, for pictures nobody can use, ahead of every other
+    /// module's reads. So the bytes live only as long as the handle or a search that holds them,
+    /// and a task whose handle is gone makes nothing.
+    Prepare(Weak<Prepared>),
 }
 
 /// A cells call's work: `matchCellsAsync`'s, or a handler's `cells` or `matchCells`.
@@ -471,11 +492,13 @@ impl ImageTask {
     }
 
     /// The frame the worker captures for this task — its region and source — or `None` when
-    /// it captures nothing: a snapshot's task, and one answered with why there is nothing to read.
+    /// it captures nothing: a snapshot's task, one answered with why there is nothing to read, and
+    /// a handle's preparation.
     fn screen_key(&self) -> Option<capture_source::FrameKey> {
         let unresolved = match &self.job {
             Job::Search { unresolved, .. } => unresolved.is_some(),
             Job::Cells(c) => c.unresolved.is_some(),
+            Job::Prepare(_) => true,
             Job::Profile { .. } | Job::Crop | Job::Template | Job::Save(_) => false,
         };
         match &self.hay {
@@ -501,7 +524,7 @@ impl ImageTask {
             Job::Cells(_) => "cells",
             Job::Profile { .. } => "profile",
             Job::Crop => "crop",
-            Job::Template => "template",
+            Job::Template | Job::Prepare(_) => "template",
             Job::Save(s) => s.shot.short(),
         }
     }
@@ -535,6 +558,8 @@ pub(crate) enum Outcome {
     Template(Result<(Arc<Decoded>, u32), String>),
     /// A shot written, or why not: no picture to write, or a file that could not be written.
     Save(Result<(), crate::save::Unsaved>),
+    /// A handle's picture made — or why it could not be, which the handle keeps — for nobody.
+    Prepared,
 }
 
 /// A profile's reduction, as the worker hands it back: plain data, the Lua tables are built when
@@ -580,6 +605,8 @@ impl Outcome {
             Job::Crop => Outcome::Crop(Err(why)),
             Job::Template => Outcome::Template(Err(why)),
             Job::Save(_) => Outcome::Save(Err(crate::save::Unsaved::Unread(why))),
+            // The handle is left to the first search that needs its picture.
+            Job::Prepare(_) => Outcome::Prepared,
         }
     }
 }
@@ -592,7 +619,7 @@ fn failed_reason(job: &Job) -> &'static str {
         Job::Cells(_) => CELLS_FAILED,
         Job::Profile { .. } => PROFILE_FAILED,
         Job::Crop => CROP_FAILED,
-        Job::Template => TEMPLATE_FAILED,
+        Job::Template | Job::Prepare(_) => TEMPLATE_FAILED,
         Job::Save(_) => crate::save::SAVE_FAILED,
     }
 }
@@ -809,10 +836,23 @@ fn run_batch(batch: &[ImageTask], capture: CaptureFn) -> Vec<ImageResult> {
     // duplication regions of a batch go to the capture thread as one request — see
     // capture_source::capture_frames.
     let batch_len = batch.len() as u32;
+    // Every search's templates first, here on the worker, before the captures: each PNG of the
+    // batch opened once — a path two searches share is decoded once, the first time it is seen
+    // or after it changed — and each handle's picture made, if its own task has not made it yet.
+    // Their time is counted with the matching's.
+    let t0 = Instant::now();
+    let mut opened = template_store::Opened::default();
+    let found: Vec<Option<Templates>> = batch.iter().map(|t| templates_of(t, &mut opened)).collect();
+    let opening = t0.elapsed();
     // Only the tasks that read the screen get a frame: a cells task whose window had no client
-    // area is answered without one, and a snapshot's task reads the snapshot.
-    let reading: Vec<(usize, capture_source::FrameKey)> =
-        batch.iter().enumerate().filter_map(|(i, t)| t.screen_key().map(|k| (i, k))).collect();
+    // area is answered without one, a snapshot's task reads the snapshot, and a search whose
+    // templates cannot be opened is answered without a picture.
+    let reading: Vec<(usize, capture_source::FrameKey)> = batch
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !matches!(found[*i], Some(Err(_))))
+        .filter_map(|(i, t)| t.screen_key().map(|k| (i, k)))
+        .collect();
     let (keys, frame_of_reading) = capture_source::frame_keys(reading.iter().map(|(_, k)| *k));
     let frames: Vec<(Result<CapturedImage, String>, u32)> = capture_source::capture_frames(capture, &keys);
     let mut frame_of: Vec<Option<usize>> = vec![None; batch.len()];
@@ -829,9 +869,10 @@ fn run_batch(batch: &[ImageTask], capture: CaptureFn) -> Vec<ImageResult> {
     let t1 = Instant::now();
     let outcomes: Vec<Outcome> = plan
         .par_iter()
-        .map(|(t, idx)| answer(t, idx.map(|i| frames[i].0.as_ref().map_err(String::as_str))))
+        .zip(found.into_par_iter())
+        .map(|(&(t, idx), found)| answer(t, idx.map(|i| frames[i].0.as_ref().map_err(String::as_str)), found))
         .collect();
-    let match_ms = t1.elapsed().as_millis() as u32;
+    let match_ms = (opening + t1.elapsed()).as_millis() as u32;
     let capture_ms: u32 = frames.iter().map(|f| f.1).sum();
     plan.iter()
         .zip(outcomes)
@@ -877,30 +918,62 @@ fn picture<'a>(t: &'a ImageTask, shot: Option<Result<&'a CapturedImage, &'a str>
     }
 }
 
+/// A search's templates, each its picture, in order — or why one of them has none.
+type Templates = Result<Vec<Arc<Decoded>>, String>;
+
+/// The templates of task `t` when it is a search that looks — opened through `opened`, made if
+/// they are handles still to be made — and `None` for every other task.
+fn templates_of(t: &ImageTask, opened: &mut template_store::Opened) -> Option<Templates> {
+    match &t.job {
+        Job::Search { entries, unresolved: None, .. } => Some(template_store::resolve(entries.iter().map(|(n, _)| n), opened)),
+        _ => None,
+    }
+}
+
 /// One task against its picture: the frame the batch captured for it, or why the capture
 /// failed; `None` for a task that was not captured (an unresolved one, which carries its own
-/// reason, and a snapshot's, which reads the snapshot).
-fn answer(t: &ImageTask, frame: Option<Result<&CapturedImage, &str>>) -> Outcome {
+/// reason, a snapshot's, which reads the snapshot, and a search whose templates could not be
+/// opened). `found` is a search's templates as the batch opened them ([`templates_of`]); given
+/// `None`, a search opens them itself.
+fn answer(t: &ImageTask, frame: Option<Result<&CapturedImage, &str>>, found: Option<Templates>) -> Outcome {
     match &t.job {
         Job::Search { entries, tol, scales, mode, unresolved } => Outcome::Search(match unresolved {
             Some(why) => Err(why.clone()),
-            None => picture(t, frame).map(|pic| match_task(&pic, entries, *tol, scales, *mode)),
+            None => found
+                .unwrap_or_else(|| template_store::resolve(entries.iter().map(|(n, _)| n), &mut template_store::Opened::default()))
+                .and_then(|decs| {
+                    let paired: Vec<(Arc<Decoded>, Option<Rect>)> = decs.into_iter().zip(entries.iter().map(|(_, w)| *w)).collect();
+                    picture(t, frame).map(|pic| match_task(&pic, &paired, *tol, scales, *mode))
+                }),
         }),
         Job::Cells(job) => Outcome::Cells(cells_task(t, job, frame)),
         Job::Profile { cols, rows, dark } => Outcome::Profile(profile_task(t, *cols, *rows, *dark)),
         Job::Crop => Outcome::Crop(crop_task(t)),
         Job::Template => Outcome::Template(template_task(t, frame)),
         Job::Save(job) => Outcome::Save(save_task(t, job, frame)),
+        Job::Prepare(p) => {
+            // Kept by the handle — a failure from bytes included, which its searches answer; a
+            // file's is tried again by the next. Nothing to make for a handle that is gone.
+            if let Some(p) = p.upgrade() {
+                let _ = p.make();
+            }
+            Outcome::Prepared
+        }
     }
 }
 
 /// What the worker answers task `t` with, made on the event loop where its call cannot wait: its
-/// region captured through `capture` — the event loop's capture, through the module's source and
-/// without the first-read comparison — unless it reads a snapshot, and then the worker's own work
-/// on that picture ([`answer`]), so a call answers alike wherever it was made.
+/// templates opened, through the worker's own cache; then, unless one cannot be, its region
+/// captured through `capture` — the event loop's capture, through the module's source and without
+/// the first-read comparison — unless it reads a snapshot, and the worker's own work on that
+/// picture ([`answer`]), so a call answers alike wherever it was made.
 pub(crate) fn answer_on_loop(t: &ImageTask, capture: impl FnOnce((i32, i32, i32, i32)) -> Result<CapturedImage, String>) -> Outcome {
-    let shot = t.screen_key().map(|(region, _)| capture(region));
-    answer(t, shot.as_ref().map(|r| r.as_ref().map_err(String::as_str)))
+    let found = templates_of(t, &mut template_store::Opened::default());
+    let shot = match &found {
+        Some(Err(_)) => None,
+        _ => t.screen_key().map(|(region, _)| capture(region)),
+    };
+    answer(t, shot.as_ref().map(|r| r.as_ref().map_err(String::as_str)), found)
 }
 
 /// A shot's picture — the frame the batch captured for it, or the part of its snapshot it covers,
@@ -1110,7 +1183,8 @@ fn match_task(
 /// worker is caught.
 static CONTAINED: AtomicU64 = AtomicU64::new(0);
 
-fn contained(what: &str, answered: &str, report: &str) {
+/// Says, within that throttle, that `what` panicked on the image worker and how it was `answered`.
+pub(crate) fn contained(what: &str, answered: &str, report: &str) {
     let n = CONTAINED.fetch_add(1, Ordering::Relaxed) + 1;
     if n.is_power_of_two() {
         logging::line(
@@ -1226,11 +1300,15 @@ pub(crate) fn fire_images<H: MailHost>(h: &H) {
         // A shot's PNG encode and file write run on the pool with the matches, and every read of
         // its batch waits for them: they are in the second figure, and the line names them, so a
         // calibration shot that trips it is not read as a slow match.
+        //
+        // The templates the batch opened, and the pictures of handles it made, are in the second
+        // figure too: a PNG decoded for the first time, or again after a calibration captured it
+        // again, is the worker's work now.
         if res.first_of_batch && res.capture_ms + res.match_ms >= 50 {
             logging::line(
                 "image",
                 &format!(
-                    "batch of {} read(s) took {} ms (capture {}, matching, reduction and shot writing {} across {} thread-pool tasks)",
+                    "batch of {} read(s) took {} ms (capture {}, templates, matching, reduction and shot writing {} across {} thread-pool tasks)",
                     res.batch,
                     res.capture_ms + res.match_ms,
                     res.capture_ms,
@@ -1245,6 +1323,10 @@ pub(crate) fn fire_images<H: MailHost>(h: &H) {
             if let Some(p) = h.snap_state().reduced(res.id) {
                 crate::snapshot::deliver_reduced(h, p, reduced, &mut bumped);
             }
+            continue;
+        }
+        // A handle's preparation: its picture is in the handle, and nobody waits for it here.
+        if matches!(res.outcome, Outcome::Prepared) {
             continue;
         }
         let entry = im.pending.borrow_mut().remove(&res.id);
@@ -1481,21 +1563,22 @@ pub(crate) fn test_pending(lua: &Lua, gens: &HashMap<usize, u64>, id: u64, scope
 /// search — for other files' tests.
 #[cfg(test)]
 pub(crate) fn test_answer(t: &ImageTask) -> Outcome {
-    answer(t, None)
+    answer(t, None, None)
 }
 
 /// A template as the tests compare it: its width and height, its pixels as RGBA, `count` and name.
 #[cfg(test)]
 pub(crate) type TestTemplate = (u32, u32, Vec<u8>, u32, Option<String>);
 
-/// A template handle as the tests compare it; `None` for a value that is no template: for other
-/// files' tests.
+/// A template handle as the tests compare it, its picture made if it was still to be; `None` for
+/// a value that is no template, or one whose picture cannot be made: for other files' tests.
 #[cfg(test)]
 pub(crate) fn test_template_of(v: &Value) -> Option<TestTemplate> {
     let Value::UserData(ud) = v else { return None };
     let t = ud.borrow::<TemplateHandle>().ok()?;
-    let template::Body::Dense { rgba, .. } = &t.dec.body;
-    Some((t.dec.w, t.dec.h, rgba.clone(), t.count, t.name.clone()))
+    let (dec, count) = t.pic.make().ok()?;
+    let template::Body::Dense { rgba, .. } = &dec.body;
+    Some((dec.w, dec.h, rgba.clone(), count, t.name.clone()))
 }
 
 /// Whether task `id` was ended and the worker has not taken it off the list yet.
@@ -1537,12 +1620,12 @@ fn result_args(lua: &Lua, task: &ImageTask, names: &[Option<String>], outcome: O
             }
         }
         (_, Outcome::Cells(Err(why))) => vec![Value::Nil, reason(lua, why)],
-        // A search answered as cells, or the reverse, or a profile, a crop, a template or a shot
-        // here at all: cannot happen, as the worker answers each task by its own job, a profile is
-        // answered in snapshot.rs and a crop, a template or a shot only ever to a handler. Answered
-        // as "could not look" rather than unwrapped.
-        (Job::Cells(_) | Job::Profile { .. } | Job::Crop | Job::Template | Job::Save(_), Outcome::Search(_))
-        | (_, Outcome::Profile(_) | Outcome::Crop(_) | Outcome::Template(_) | Outcome::Save(_)) => {
+        // A search answered as cells, or the reverse, or a profile, a crop, a template, a shot or a
+        // preparation here at all: cannot happen, as the worker answers each task by its own job, a
+        // profile is answered in snapshot.rs, a crop, a template or a shot only ever to a handler,
+        // and a preparation to nobody. Answered as "could not look" rather than unwrapped.
+        (Job::Cells(_) | Job::Profile { .. } | Job::Crop | Job::Template | Job::Save(_) | Job::Prepare(_), Outcome::Search(_))
+        | (_, Outcome::Profile(_) | Outcome::Crop(_) | Outcome::Template(_) | Outcome::Save(_) | Outcome::Prepared) => {
             vec![Value::Nil, reason(lua, "internal error".to_string())]
         }
     };
@@ -1617,9 +1700,11 @@ fn hit_table(
 ///
 /// Luau's collector sees a handle as a few dozen bytes of userdata, not as the pixels behind
 /// it, so it has no reason to hurry: a module that built a template on every poll would grow
-/// the process without the collector ever noticing. The budget is what notices. A constant
-/// like `TEMPLATE_CACHE_CAP`, not a setting — no module needs anywhere near it, and a number
-/// nobody has a reason to change does not belong in front of the user.
+/// the process without the collector ever noticing. The budget is what notices — and a handle's
+/// bytes still to be made into its picture are held by nothing that outlives the handle and its
+/// searches (`Job::Prepare` holds them weakly), so what the budget gave back is gone. A constant
+/// like `template_store::CACHE_CAP`, not a setting — no module needs anywhere near it, and a
+/// number nobody has a reason to change does not belong in front of the user.
 const TEMPLATE_BUDGET_PER_VM: usize = 32 << 20;
 
 /// The running total for one Lua state, kept in its app data.
@@ -1682,28 +1767,61 @@ fn reserve(lua: &Lua, budget: &Rc<Cell<usize>>, bytes: usize) -> mlua::Result<Ch
 /// search wherever a path is.
 ///
 /// VM-local, like any Lua value. It never leaves the main thread — searches take a clone of
-/// `dec`, which is all the worker ever sees — so a handle collected while a search is in
+/// `pic`, which is all the worker ever sees — so a handle collected while a search is in
 /// flight is harmless.
 pub(crate) struct TemplateHandle {
-    dec: Arc<Decoded>,
+    /// Its picture: made already for a `capture`, made on the image worker for bytes and a file.
+    pic: Arc<Prepared>,
+    /// Its size as the call knew it: the bytes' `w` and `h`, the file's header, the capture's.
+    w: u32,
+    h: u32,
     name: Option<String>,
-    count: u32,
     _charge: Charge,
+}
+
+impl TemplateHandle {
+    /// Its size: the picture's once it is made — a file captured again between the call and its
+    /// decode has the size it was decoded at — and the call's until then.
+    fn size(&self) -> (u32, u32) {
+        match self.pic.get() {
+            Some(Ok((dec, _))) => (dec.w, dec.h),
+            _ => (self.w, self.h),
+        }
+    }
+
+    /// How many of its pixels a search compares, once its picture is made.
+    fn count(&self) -> Option<u32> {
+        match self.pic.get() {
+            Some(Ok((_, count))) => Some(*count),
+            _ => None,
+        }
+    }
 }
 
 impl UserData for TemplateHandle {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("w", |_, t| Ok(t.dec.w));
-        fields.add_field_method_get("h", |_, t| Ok(t.dec.h));
+        fields.add_field_method_get("w", |_, t| Ok(t.size().0));
+        fields.add_field_method_get("h", |_, t| Ok(t.size().1));
         fields.add_field_method_get("name", |_, t| Ok(t.name.clone()));
-        fields.add_field_method_get("count", |_, t| Ok(t.count));
+        fields.add_field_method_get("count", |_, t| Ok(t.count()));
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(MetaMethod::ToString, |_, t, ()| {
+            let (w, h) = t.size();
+            let state = match t.pic.get() {
+                Some(Ok((_, count))) => format!("{count} compared"),
+                Some(Err(why)) => format!("cannot be used: {why}"),
+                // A file that could not be opened the last time it was tried: the next search
+                // tries again.
+                None => match t.pic.failed() {
+                    Some(why) => format!("cannot be used: {why}"),
+                    None => "preparing".to_string(),
+                },
+            };
             Ok(match &t.name {
-                Some(n) => format!("Template({n} {}x{}, {} compared)", t.dec.w, t.dec.h, t.count),
-                None => format!("Template({}x{}, {} compared)", t.dec.w, t.dec.h, t.count),
+                Some(n) => format!("Template({n} {w}x{h}, {state})"),
+                None => format!("Template({w}x{h}, {state})"),
             })
         });
     }
@@ -1894,39 +2012,54 @@ fn parse_spec(spec: &Table, sw: i32, sh: i32) -> mlua::Result<ParsedSpec> {
     Ok(ParsedSpec { name, source })
 }
 
-/// Turns a checked spec into a handle, with the file loader and the screen capture passed in,
-/// so every rule here is testable without a backend.
+/// A `file` template's path, resolved, and the width and height its PNG header gives.
+type FileHeader = (PathBuf, u32, u32);
+
+/// What `host.screen.template` needs of the host for a spec that captures nothing: a `file`'s
+/// path resolved and its PNG header read ([`template_file`]), and a handle's picture queued for
+/// the image worker to make ([`queue_preparation`]). Passed in, so every rule here is testable
+/// without a backend or a worker.
+struct Making<'a> {
+    file: &'a dyn Fn(&str) -> mlua::Result<FileHeader>,
+    prepare: &'a dyn Fn(Arc<Prepared>),
+}
+
+/// Turns a checked spec into a handle, with the host's part (`making`) and the screen capture
+/// passed in, so every rule here is testable without a backend.
 ///
-/// `nil, reason` only for a capture that failed or had nothing to capture: that is a runtime
-/// condition the module has to handle, while every other refusal is a mistake in the code that
-/// wrote the spec, and raises.
+/// A spec from bytes or a file is checked here and its picture made on the image worker: the
+/// sizes and the byte count, or the file's PNG header, at the call, and the handle answered at
+/// once, its picture still to be made. `nil, reason` only for a capture that failed or had
+/// nothing to capture: that is a runtime condition the module has to handle, while every other
+/// refusal is a mistake in the code that wrote the spec, and raises.
 fn build_handle(
     lua: &Lua,
     spec: ParsedSpec,
-    load: impl FnOnce(&str) -> mlua::Result<Arc<Decoded>>,
+    making: &Making,
     capture: impl FnOnce(i32, i32, i32, i32) -> Result<CapturedImage, String>,
 ) -> mlua::Result<MultiValue> {
     let budget = budget(lua);
     let mut name = spec.name;
-    let (dec, charge) = match spec.source {
+    let (raw, w, h, charge) = match spec.source {
         Source::NotNow(why) => return with_reason(lua, Value::Nil, why),
-        // The cached decode itself, shared: the bytes are already held by the path cache, so
-        // the handle costs this VM nothing. It is therefore a SNAPSHOT — a re-captured PNG is
-        // picked up live only by a search that passes the path. Unnamed, it is named by its
-        // path as written, which is what a search given the path would report.
+        // The cache's decode itself, shared once it is made: the bytes are held by the image
+        // worker's cache, so the handle costs this VM nothing. It is therefore a SNAPSHOT — a
+        // re-captured PNG is picked up live only by a search that passes the path. Unnamed, it is
+        // named by its path as written, which is what a search given the path would report.
         Source::File(path) => {
-            let dec = load(&path)?;
+            let (full, w, h) = (making.file)(&path)?;
             name = name.or(Some(path));
-            (dec, Charge { bytes: 0, budget: budget.clone() })
+            (Raw::File(full), w, h, Charge { bytes: 0, budget: budget.clone() })
         }
         Source::Bytes { rgba, data, w, h } => {
             // The size limits first: a 4096x4096 spec must be told it is too large, not that
-            // it would overrun the budget.
+            // it would overrun the budget — and a wrong byte count before the budget too.
             template::check_size(w, h).map_err(spec_err)?;
+            let channels = if rgba { template::Channels::Rgba } else { template::Channels::Rgb };
+            template::check_bytes(w, h, data.len(), channels).map_err(spec_err)?;
             let charge = reserve(lua, &budget, template::dense_bytes(w, h))?;
-            let dec = if rgba { Decoded::from_rgba(w, h, data) } else { Decoded::from_rgb(w, h, &data) }
-                .map_err(spec_err)?;
-            (Arc::new(dec), charge)
+            let raw = if rgba { Raw::Rgba { w, h, bytes: data } } else { Raw::Rgb { w, h, bytes: data } };
+            (raw, w, h, charge)
         }
         Source::Capture { x, y, w, h, snapshot: snap } => {
             let charge = reserve(lua, &budget, template::dense_bytes(w as u32, h as u32))?;
@@ -1939,8 +2072,9 @@ fn build_handle(
             return template_values(lua, Outcome::Template(got.and_then(template_picture)), name, charge);
         }
     };
-    let count = dec.count();
-    let handle = TemplateHandle { dec, name, count, _charge: charge };
+    let pic = Prepared::of(raw);
+    (making.prepare)(pic.clone());
+    let handle = TemplateHandle { pic, w, h, name, _charge: charge };
     one_value(Value::UserData(lua.create_userdata(handle)?))
 }
 
@@ -1950,7 +2084,9 @@ fn build_handle(
 fn template_values(lua: &Lua, outcome: Outcome, name: Option<String>, charge: Charge) -> mlua::Result<MultiValue> {
     match outcome {
         Outcome::Template(Ok((dec, count))) => {
-            one_value(Value::UserData(lua.create_userdata(TemplateHandle { dec, name, count, _charge: charge })?))
+            let (w, h) = (dec.w, dec.h);
+            let handle = TemplateHandle { pic: Prepared::made(dec, count), w, h, name, _charge: charge };
+            one_value(Value::UserData(lua.create_userdata(handle)?))
         }
         Outcome::Template(Err(why)) => with_reason(lua, Value::Nil, why),
         // Never: the worker answers a template's task with a template.
@@ -1974,19 +2110,19 @@ fn spec_of(v: &Value, (sw, sh): (i32, i32)) -> mlua::Result<ParsedSpec> {
 /// of the image worker filed for the handler that waits: the region captured through the module's
 /// source, with the first-read comparison when it is owed, or cut from its snapshot; then made a
 /// template ([`template_values`]). A spec that captures nothing — bytes, a file, a window region
-/// with nothing to capture this time — is answered at once.
+/// with nothing to capture this time — is answered at once, a handle's picture left to the worker.
 fn start_template<H: ReadHost>(
     h: &H,
     lua: &Lua,
     scope: usize,
     nonce: Table,
     parse: impl FnOnce() -> mlua::Result<ParsedSpec>,
-    load: &dyn Fn(&str) -> mlua::Result<Arc<Decoded>>,
+    making: &Making,
 ) -> mlua::Result<MultiValue> {
     crate::task::start_point(h, lua, scope, FT, nonce, parse, |parsed, task, prio| {
         let ParsedSpec { name, source } = parsed;
         let Source::Capture { x, y, w, h: ht, snapshot: snap } = source else {
-            let now = build_handle(lua, ParsedSpec { name, source }, load, |_, _, _, _| Err(TEMPLATE_FAILED.to_string()))?;
+            let now = build_handle(lua, ParsedSpec { name, source }, making, |_, _, _, _| Err(TEMPLATE_FAILED.to_string()))?;
             return Ok(Started::Now(now));
         };
         let charge = reserve(lua, &budget(lua), template::dense_bytes(w as u32, ht as u32))?;
@@ -2013,14 +2149,14 @@ fn start_template<H: ReadHost>(
 /// `host.screen.template` where it cannot wait: a `capture` made on the event loop through
 /// `capture`, or cut from its snapshot there, held there for that one call and said in the log
 /// (`task::legacy`); any other spec, and a `capture` not wholly inside its snapshot, which has
-/// nothing to cut, built as it always was, unsaid — as a handler's call answers it at once.
+/// nothing to cut, answered at once, unsaid — as a handler's call answers it.
 fn template_on_loop<H: ReadHost>(
     h: &H,
     lua: &Lua,
     scope: usize,
     why: &str,
     parsed: ParsedSpec,
-    load: &dyn Fn(&str) -> mlua::Result<Arc<Decoded>>,
+    making: &Making,
     capture: impl FnOnce(i32, i32, i32, i32) -> Result<CapturedImage, String>,
 ) -> mlua::Result<MultiValue> {
     let reads = match &parsed.source {
@@ -2029,35 +2165,66 @@ fn template_on_loop<H: ReadHost>(
         _ => false,
     };
     if reads {
-        crate::task::legacy(h, lua, scope, FT, crate::loop_guard::Kind::Screen, why, || build_handle(lua, parsed, load, capture))
+        crate::task::legacy(h, lua, scope, FT, crate::loop_guard::Kind::Screen, why, || build_handle(lua, parsed, making, capture))
     } else {
-        build_handle(lua, parsed, load, capture)
+        build_handle(lua, parsed, making, capture)
     }
+}
+
+/// `template{ file }`'s path, resolved against `root` as a search's is, and the size its PNG
+/// header gives: read at every such call — a few bytes of the file, nothing decoded — so a path
+/// that is not there or not a PNG raises there.
+fn template_file(root: &Path, path: &str) -> mlua::Result<FileHeader> {
+    let full = root.join(path);
+    let (w, h) = template_store::header(&full).map_err(mlua::Error::external)?;
+    Ok((full, w, h))
+}
+
+/// A search's template path, resolved against `root` and checked the first time it is named
+/// (`template_store::locate`).
+fn locate_in(root: &Path, path: &str) -> mlua::Result<PathBuf> {
+    template_store::locate(root.join(path)).map_err(mlua::Error::external)
+}
+
+/// Queues the making of a handle's picture `p` on the image worker, ahead of every search that
+/// uses it. A worker that is gone — the application is closing — leaves it to the first search
+/// that needs it.
+fn queue_preparation<H: ReadHost>(h: &H, p: Arc<Prepared>) {
+    let im = h.images();
+    let _ = im.send(preparation(im.next_id(), &p));
+}
+
+/// The task that makes `p`, numbered `id`: it reads nothing, and holds `p` weakly (`Job::Prepare`).
+fn preparation(id: u64, p: &Arc<Prepared>) -> ImageTask {
+    let hay = Haystack::Screen { region: (0, 0, 0, 0), source: CaptureSource::Standard, compare: None };
+    ImageTask { id, hay, job: Job::Prepare(Arc::downgrade(p)), prio: crate::ocr::types::current_priority() }
 }
 
 /// `host.screen.template(spec) -> Template | nil, reason`. A `capture` waits in a handler for the
 /// image worker ([`start_template`]); where it cannot wait it captures on the event loop, said in
-/// the log ([`template_on_loop`]).
+/// the log ([`template_on_loop`]). Bytes and a file never wait: their picture is the worker's.
 pub(crate) fn template(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, spec): (Table, Value)| {
         host_call!("host.screen.template");
         let screen = sh.backend.screen_size();
-        let load = |path: &str| sh.load_template(&sh.root(idx).join(path));
-        start_template(&*sh, lua, idx, nonce, || spec_of(&spec, screen), &load)
+        let file = |path: &str| template_file(&sh.root(idx), path);
+        let prepare = |p: Arc<Prepared>| queue_preparation(&*sh, p);
+        start_template(&*sh, lua, idx, nonce, || spec_of(&spec, screen), &Making { file: &file, prepare: &prepare })
     })?;
     let sh = shared.clone();
     let blocking = lua.create_function(move |lua, (why, spec): (String, Value)| {
         host_call!("host.screen.template");
         let parsed = spec_of(&spec, sh.backend.screen_size())?;
-        let load = |path: &str| sh.load_template(&sh.root(idx).join(path));
+        let file = |path: &str| template_file(&sh.root(idx), path);
+        let prepare = |p: Arc<Prepared>| queue_preparation(&*sh, p);
         template_on_loop(
             &*sh,
             lua,
             idx,
             &why,
             parsed,
-            &load,
+            &Making { file: &file, prepare: &prepare },
             // A live read of the screen, every time, and counted like `pixel` and `profile`:
             // it is a compositor frame on the event loop. Never to be served from a frame
             // cache, now or once one exists — a template learned from a stale frame is a
@@ -2087,28 +2254,30 @@ pub(crate) fn template(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Resu
 }
 
 /// `host.screen.template` as the host builds it, over `holder`, its wait the host's own
-/// ([`start_template`]); where it cannot wait it captures through `capture`, as the event loop
-/// would, through the host's own tally, and every file is `file`: for the tests' holders, which
-/// have no backend. The primary screen is 1920x1080.
+/// ([`start_template`]) and a handle's picture made by the holder's image worker; where it cannot
+/// wait it captures through `capture`, as the event loop would, through the host's own tally, and
+/// a file's path is resolved against `root`: for the tests' holders, which have no backend. The
+/// primary screen is 1920x1080.
 #[cfg(test)]
 pub(crate) fn test_template<H: ReadHost>(
     lua: &Lua,
     idx: usize,
     holder: Rc<H>,
     capture: CaptureFn,
-    file: Arc<Decoded>,
+    root: PathBuf,
 ) -> mlua::Result<Function> {
-    let h = holder.clone();
-    let f = file.clone();
+    let (h, r) = (holder.clone(), root.clone());
     let start = lua.create_function(move |lua, (nonce, spec): (Table, Value)| {
-        let load = |_: &str| Ok(f.clone());
-        start_template(&*h, lua, idx, nonce, || spec_of(&spec, (1920, 1080)), &load)
+        let file = |path: &str| template_file(&r, path);
+        let prepare = |p: Arc<Prepared>| queue_preparation(&*h, p);
+        start_template(&*h, lua, idx, nonce, || spec_of(&spec, (1920, 1080)), &Making { file: &file, prepare: &prepare })
     })?;
     let h = holder.clone();
     let blocking = lua.create_function(move |lua, (why, spec): (String, Value)| {
         let parsed = spec_of(&spec, (1920, 1080))?;
-        let load = |_: &str| Ok(file.clone());
-        template_on_loop(&*h, lua, idx, &why, parsed, &load, |x, y, w, hh| {
+        let file = |path: &str| template_file(&root, path);
+        let prepare = |p: Arc<Prepared>| queue_preparation(&*h, p);
+        template_on_loop(&*h, lua, idx, &why, parsed, &Making { file: &file, prepare: &prepare }, |x, y, w, hh| {
             capture(&[(x, y, w, hh)], capture_source::vm_source(lua)).pop().unwrap_or_else(|| Err(crate::backend::CAPTURE_FAILED.to_string()))
         })
     })?;
@@ -2117,22 +2286,24 @@ pub(crate) fn test_template<H: ReadHost>(
 
 // ── Template arguments ─────────────────────────────────────────────────────────────────
 
-/// One template argument — a path or a handle — as its pixels and the name a hit reports.
+/// One template argument — a path or a handle — as the needle the image worker opens and the
+/// name a hit reports. A path is resolved and checked by `locate` ([`locate_in`]): nothing of it
+/// is read here but, the first time it is named, its header.
 ///
 /// A path's name is the string exactly as the caller wrote it, so a module can tell its hits
 /// apart without keeping a second list.
 fn resolve_with(
     v: &Value,
     what: &str,
-    load: &dyn Fn(&str) -> mlua::Result<Arc<Decoded>>,
-) -> mlua::Result<(Arc<Decoded>, Option<String>)> {
+    locate: &dyn Fn(&str) -> mlua::Result<PathBuf>,
+) -> mlua::Result<(Needle, Option<String>)> {
     match v {
         Value::String(s) => {
             let path = s.to_str()?.to_string();
-            Ok((load(&path)?, Some(path)))
+            Ok((Needle::File(locate(&path)?), Some(path)))
         }
         Value::UserData(ud) => match ud.borrow::<TemplateHandle>() {
-            Ok(h) => Ok((h.dec.clone(), h.name.clone())),
+            Ok(h) => Ok((Needle::Handle(h.pic.clone()), h.name.clone())),
             Err(_) => Err(mlua::Error::external(format!(
                 "{what}: expected a path or a Template, got a userdata of another kind"
             ))),
@@ -2144,7 +2315,7 @@ fn resolve_with(
     }
 }
 
-/// Every template in a list, resolved BEFORE anything is captured.
+/// Every template in a list, checked BEFORE anything is captured.
 ///
 /// `imageSearchMulti` used to open each file inside its loop, after the capture, so a bad
 /// path late in the list lay dormant until every earlier template happened to miss. Now a bad
@@ -2152,11 +2323,11 @@ fn resolve_with(
 fn resolve_list(
     list: &Table,
     what: &str,
-    load: &dyn Fn(&str) -> mlua::Result<Arc<Decoded>>,
-) -> mlua::Result<Vec<(Arc<Decoded>, Option<String>)>> {
+    locate: &dyn Fn(&str) -> mlua::Result<PathBuf>,
+) -> mlua::Result<Vec<(Needle, Option<String>)>> {
     let mut out = Vec::new();
     for v in list.clone().sequence_values::<Value>() {
-        out.push(resolve_with(&v?, what, load)?);
+        out.push(resolve_with(&v?, what, locate)?);
     }
     Ok(out)
 }
@@ -2269,7 +2440,7 @@ impl Search {
 /// What a search asks, its arguments read ([`search_ask`]).
 pub(crate) struct SearchAsk {
     /// Each template, in order — one but for `imageSearchMulti` — and the name its hit reports.
-    templates: Vec<(Arc<Decoded>, Option<String>)>,
+    templates: Vec<(Needle, Option<String>)>,
     /// Where to look — or why there is nothing to look at this time (a window region with no
     /// rectangle; on a snapshot, a region with no part inside it), answered at once.
     region: Result<(i32, i32, i32, i32), String>,
@@ -2281,16 +2452,17 @@ pub(crate) struct SearchAsk {
 
 /// A search's arguments, read as the call has always read them, before anything is captured: the
 /// types of the template list (`imageSearchMulti`) and of `opts`; then the templates — every path
-/// opened now, so a bad one raises wherever it sits in a list; then `opts.snapshot`, then
-/// `opts.region`, resolved now against a primary screen of `screen`'s size; then the tolerance and,
-/// but for `imageSearchAll`, which matches at the template's own size only, the scales. A mistake
-/// raises; a region with nothing to look at this time is answered.
+/// checked through `locate` the first time it is named, so a bad one raises wherever it sits in a
+/// list, and opened on the image worker; then `opts.snapshot`, then `opts.region`, resolved now
+/// against a primary screen of `screen`'s size; then the tolerance and, but for `imageSearchAll`,
+/// which matches at the template's own size only, the scales. A mistake raises; a region with
+/// nothing to look at this time is answered.
 pub(crate) fn search_ask(
     kind: Search,
     tv: Value,
     opts: Value,
     screen: (i32, i32),
-    load: &dyn Fn(&str) -> mlua::Result<Arc<Decoded>>,
+    locate: &dyn Fn(&str) -> mlua::Result<PathBuf>,
 ) -> mlua::Result<SearchAsk> {
     let fname = kind.name();
     let list = match (kind, &tv) {
@@ -2309,8 +2481,8 @@ pub(crate) fn search_ask(
         other => return Err(mlua::Error::external(format!("{fname}: opts must be a table, got {}", crate::describe_value(&other)))),
     };
     let templates = match list {
-        Some(list) => resolve_list(&list, kind.short(), load)?,
-        None => vec![resolve_with(&tv, kind.short(), load)?],
+        Some(list) => resolve_list(&list, kind.short(), locate)?,
+        None => vec![resolve_with(&tv, kind.short(), locate)?],
     };
     let o = opts.as_ref();
     let snap = snapshot::from_opts(o, fname)?;
@@ -2361,8 +2533,9 @@ fn search_values(lua: &Lua, kind: Search, outcome: Outcome, names: &[Option<Stri
     }
 }
 
-/// The work of a search of `region`: its templates matched against the region of the screen — or
-/// of its snapshot — as `imageSearchAsync` matches them, every match for `imageSearchAll`. A task
+/// The work of a search of `region`: its templates — opened, and made, by whoever does the work —
+/// matched against the region of the screen — or of its snapshot — as `imageSearchAsync` matches
+/// them, every match for `imageSearchAll`. A task
 /// for the worker (`carry`) takes the module's first-read comparison when it is owed; the event
 /// loop's own work makes none. The names stay on this side, for the answer.
 fn search_work(lua: &Lua, kind: Search, ask: SearchAsk, region: (i32, i32, i32, i32), carry: bool) -> (Haystack, Job, Vec<Option<String>>) {
@@ -2430,14 +2603,14 @@ pub(crate) fn image_search(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, tv, opts): (Table, Value, Value)| {
         host_call!("host.screen.imageSearch");
-        let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
-        start_search(&*sh, lua, idx, Search::One, nonce, || search_ask(Search::One, tv, opts, sh.backend.screen_size(), &load))
+        let locate = |p: &str| locate_in(&sh.root(idx), p);
+        start_search(&*sh, lua, idx, Search::One, nonce, || search_ask(Search::One, tv, opts, sh.backend.screen_size(), &locate))
     })?;
     let sh = shared.clone();
     let blocking = lua.create_function(move |lua, (why, tv, opts): (String, Value, Value)| {
         host_call!("host.screen.imageSearch");
-        let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
-        let ask = search_ask(Search::One, tv, opts, sh.backend.screen_size(), &load)?;
+        let locate = |p: &str| locate_in(&sh.root(idx), p);
+        let ask = search_ask(Search::One, tv, opts, sh.backend.screen_size(), &locate)?;
         search_on_loop(&*sh, lua, idx, Search::One, &why, ask, |r| live_capture(&sh, lua, r))
     })?;
     crate::task::points(lua, idx, shared.clone())?.call((Search::One.name(), start, blocking))
@@ -2455,14 +2628,14 @@ pub(crate) fn image_search_multi(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> 
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, tv, opts): (Table, Value, Value)| {
         host_call!("host.screen.imageSearchMulti");
-        let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
-        start_search(&*sh, lua, idx, Search::Multi, nonce, || search_ask(Search::Multi, tv, opts, sh.backend.screen_size(), &load))
+        let locate = |p: &str| locate_in(&sh.root(idx), p);
+        start_search(&*sh, lua, idx, Search::Multi, nonce, || search_ask(Search::Multi, tv, opts, sh.backend.screen_size(), &locate))
     })?;
     let sh = shared.clone();
     let blocking = lua.create_function(move |lua, (why, tv, opts): (String, Value, Value)| {
         host_call!("host.screen.imageSearchMulti");
-        let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
-        let ask = search_ask(Search::Multi, tv, opts, sh.backend.screen_size(), &load)?;
+        let locate = |p: &str| locate_in(&sh.root(idx), p);
+        let ask = search_ask(Search::Multi, tv, opts, sh.backend.screen_size(), &locate)?;
         search_on_loop(&*sh, lua, idx, Search::Multi, &why, ask, |r| live_capture(&sh, lua, r))
     })?;
     crate::task::points(lua, idx, shared.clone())?.call((Search::Multi.name(), start, blocking))
@@ -2484,14 +2657,14 @@ pub(crate) fn image_search_all(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> ml
     let sh = shared.clone();
     let start = lua.create_function(move |lua, (nonce, tv, opts): (Table, Value, Value)| {
         host_call!("host.screen.imageSearchAll");
-        let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
-        start_search(&*sh, lua, idx, Search::All, nonce, || search_ask(Search::All, tv, opts, sh.backend.screen_size(), &load))
+        let locate = |p: &str| locate_in(&sh.root(idx), p);
+        start_search(&*sh, lua, idx, Search::All, nonce, || search_ask(Search::All, tv, opts, sh.backend.screen_size(), &locate))
     })?;
     let sh = shared.clone();
     let blocking = lua.create_function(move |lua, (why, tv, opts): (String, Value, Value)| {
         host_call!("host.screen.imageSearchAll");
-        let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
-        let ask = search_ask(Search::All, tv, opts, sh.backend.screen_size(), &load)?;
+        let locate = |p: &str| locate_in(&sh.root(idx), p);
+        let ask = search_ask(Search::All, tv, opts, sh.backend.screen_size(), &locate)?;
         search_on_loop(&*sh, lua, idx, Search::All, &why, ask, |r| live_capture(&sh, lua, r))
     })?;
     crate::task::points(lua, idx, shared.clone())?.call((Search::All.name(), start, blocking))
@@ -2500,25 +2673,26 @@ pub(crate) fn image_search_all(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> ml
 /// `imageSearch`, `imageSearchMulti` and `imageSearchAll` as the host builds them, over `holder`,
 /// their waits the host's own ([`start_search`]); where they cannot wait they capture through
 /// `capture`, as the event loop would, through the host's own tally, and every template path is
-/// `file`: for the tests' holders, which have no backend. The primary screen is 1920x1080.
+/// resolved against `root`: for the tests' holders, which have no backend. The primary screen is
+/// 1920x1080.
 #[cfg(test)]
 pub(crate) fn test_searches<H: ReadHost>(
     lua: &Lua,
     idx: usize,
     holder: Rc<H>,
     capture: CaptureFn,
-    file: Arc<Decoded>,
+    root: PathBuf,
 ) -> mlua::Result<[Function; 3]> {
     let build = |kind: Search| -> mlua::Result<Function> {
-        let (h, f) = (holder.clone(), file.clone());
+        let (h, r) = (holder.clone(), root.clone());
         let start = lua.create_function(move |lua, (nonce, tv, opts): (Table, Value, Value)| {
-            let load = |_: &str| Ok(f.clone());
-            start_search(&*h, lua, idx, kind, nonce, || search_ask(kind, tv, opts, (1920, 1080), &load))
+            let locate = |p: &str| locate_in(&r, p);
+            start_search(&*h, lua, idx, kind, nonce, || search_ask(kind, tv, opts, (1920, 1080), &locate))
         })?;
-        let (h, f) = (holder.clone(), file.clone());
+        let (h, r) = (holder.clone(), root.clone());
         let blocking = lua.create_function(move |lua, (why, tv, opts): (String, Value, Value)| {
-            let load = |_: &str| Ok(f.clone());
-            let ask = search_ask(kind, tv, opts, (1920, 1080), &load)?;
+            let locate = |p: &str| locate_in(&r, p);
+            let ask = search_ask(kind, tv, opts, (1920, 1080), &locate)?;
             search_on_loop(&*h, lua, idx, kind, &why, ask, |(x, y, w, hh)| {
                 capture(&[(x, y, w, hh)], capture_source::vm_source(lua)).pop().unwrap_or_else(|| Err(crate::backend::CAPTURE_FAILED.to_string()))
             })
@@ -2568,7 +2742,7 @@ fn enqueue(
     scope: usize,
     cb: Function,
     region: Result<(i32, i32, i32, i32), String>,
-    entries: Vec<(Arc<Decoded>, Option<Rect>)>,
+    entries: Vec<(Needle, Option<Rect>)>,
     names: Vec<Option<String>>,
     opts: Option<&Table>,
     mode: Mode,
@@ -2783,8 +2957,8 @@ fn submit(
 /// `host.screen.imageSearchAsync(template | {template, …}, opts?, cb)` — offloads BOTH the
 /// region capture (the ~1-frame DWM-compositor cost) and the template match to the worker,
 /// calling cb(Hit) | cb(nil) | cb(nil, reason) on a later tick, so a detection poll (e.g. the
-/// 500 ms landmark poll) never blocks the event loop on either. Only path resolution and the
-/// region happen here, and the paths are cached.
+/// 500 ms landmark poll) never blocks the event loop on either. Only the paths are checked here,
+/// the first time each is named, and the region resolved: the worker opens the templates.
 ///
 /// Given a LIST, the templates are tried in order against the SAME captured frame and the
 /// first hit wins, with `n` reporting which one matched — for a thing with several
@@ -2794,10 +2968,10 @@ pub(crate) fn image_search_async(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> 
     let sh = shared.clone();
     lua.create_function(move |lua, (tv, opts, cb): (Value, Option<Table>, Function)| {
         host_call!("host.screen.imageSearchAsync");
-        let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
+        let locate = |p: &str| locate_in(&sh.root(idx), p);
         let list = match &tv {
-            Value::Table(list) => resolve_list(list, "imageSearchAsync", &load)?,
-            other => vec![resolve_with(other, "imageSearchAsync", &load)?],
+            Value::Table(list) => resolve_list(list, "imageSearchAsync", &locate)?,
+            other => vec![resolve_with(other, "imageSearchAsync", &locate)?],
         };
         if list.is_empty() {
             return Err(mlua::Error::external("imageSearchAsync: no template given".to_string()));
@@ -2827,7 +3001,7 @@ pub(crate) fn image_search_each(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> m
     lua.create_function(move |lua, (list, opts, cb): (Table, Option<Table>, Function)| {
         host_call!("host.screen.imageSearchEach");
         const F: &str = "host.screen.imageSearchEach";
-        let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
+        let locate = |p: &str| locate_in(&sh.root(idx), p);
         let snap = snapshot::from_opts(opts.as_ref(), F)?;
         let region = match &snap {
             Some(f) => snapshot_region(opts.as_ref(), F, f)?,
@@ -2850,7 +3024,7 @@ pub(crate) fn image_search_each(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> m
                             "{what} is a table without a template"
                         )));
                     }
-                    let (dec, own) = resolve_with(&tv, &what, &load)?;
+                    let (needle, own) = resolve_with(&tv, &what, &locate)?;
                     let within = match e.get::<Value>("within")? {
                         Value::Nil => None,
                         r @ Value::Table(_) => {
@@ -2883,12 +3057,12 @@ pub(crate) fn image_search_each(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> m
                             )))
                         }
                     };
-                    entries.push((dec, within));
+                    entries.push((needle, within));
                     names.push(name);
                 }
                 other => {
-                    let (dec, name) = resolve_with(&other, &format!("{F}: entries[{}]", i + 1), &load)?;
-                    entries.push((dec, None));
+                    let (needle, name) = resolve_with(&other, &format!("{F}: entries[{}]", i + 1), &locate)?;
+                    entries.push((needle, None));
                     names.push(name);
                 }
             }
@@ -2913,8 +3087,39 @@ mod tests {
         CapturedImage { w, h, rgba }
     }
 
-    fn no_file(p: &str) -> mlua::Result<Arc<Decoded>> {
+    fn no_file(p: &str) -> mlua::Result<FileHeader> {
         Err(mlua::Error::external(format!("no file {p} in a test")))
+    }
+
+    /// The image worker, as these tests stand in for it: a handle's picture made the moment it is
+    /// queued.
+    fn at_once(p: Arc<Prepared>) {
+        let _ = p.make();
+    }
+
+    /// No file, and every handle's picture made at once.
+    fn making() -> Making<'static> {
+        Making { file: &no_file, prepare: &at_once }
+    }
+
+    /// The picture of handle `v` and its count, made as the worker makes it.
+    fn picture_of(v: &Value) -> (Arc<Decoded>, u32) {
+        let Value::UserData(ud) = v else { panic!("expected a handle") };
+        let h = ud.borrow::<TemplateHandle>().unwrap();
+        h.pic.make().expect("a picture")
+    }
+
+    fn rgba_of(d: &Decoded) -> Vec<u8> {
+        let template::Body::Dense { rgba, .. } = &d.body;
+        rgba.clone()
+    }
+
+    /// A folder of the test's own, empty.
+    fn test_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("host-image-search-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
     }
 
     fn spec(lua: &Lua, src: &str) -> mlua::Result<ParsedSpec> {
@@ -2935,7 +3140,7 @@ mod tests {
     fn a_spec_names_its_mistakes() {
         let lua = Lua::new();
         let e = err_text(spec(&lua, "return { rgba = string.rep('\\0', 1436), w = 10, h = 36 }")
-            .and_then(|s| build_handle(&lua, s, no_file, |_, _, _, _| Err("screen capture failed".to_string()))));
+            .and_then(|s| build_handle(&lua, s, &making(), |_, _, _, _| Err("screen capture failed".to_string()))));
         assert!(e.contains("host.screen.template") && e.contains("1436") && e.contains("1440"), "{e}");
 
         let e = err_text(spec(&lua, "return { rgba = 'x', rgb = 'y', w = 1, h = 1 }"));
@@ -2973,7 +3178,7 @@ mod tests {
         let lua = Lua::new();
         let win = "window = { client = { x = 100, y = 50, w = 200, h = 100 } }";
         let s = spec(&lua, &format!("return {{ capture = {{ {win}, fraction = {{ 0.5, 0.5, 1, 1 }} }}, name = 'w' }}")).unwrap();
-        let got = build_handle(&lua, s, no_file, |x, y, w, h| {
+        let got = build_handle(&lua, s, &making(), |x, y, w, h| {
             assert_eq!((x, y, w, h), (200, 100, 100, 50), "the right lower quarter of the client area");
             Ok(opaque(w as u32, h as u32, [1, 2, 3]))
         })
@@ -2981,13 +3186,13 @@ mod tests {
         assert_eq!(got.len(), 1, "a handle alone");
         // A minimised window: nothing captured, `nil` and why.
         let s = spec(&lua, "return { capture = { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0, 1, 1 } } }").unwrap();
-        let got = build_handle(&lua, s, no_file, |_, _, _, _| panic!("nothing to capture")).unwrap().into_vec();
+        let got = build_handle(&lua, s, &making(), |_, _, _, _| panic!("nothing to capture")).unwrap().into_vec();
         assert!(got[0].is_nil());
         assert_eq!(got[1].as_string().unwrap().to_string_lossy(), "the window's client area is empty (0x0)");
         // A window so large that the region is past a template's limit: the window's doing, so
         // answered, where corners past the limit are the module's mistake and raise.
         let s = spec(&lua, "return { capture = { window = { client = { x = 0, y = 0, w = 5000, h = 10 } }, fraction = { 0, 0, 1, 1 } } }").unwrap();
-        let got = build_handle(&lua, s, no_file, |_, _, _, _| panic!("nothing to capture")).unwrap().into_vec();
+        let got = build_handle(&lua, s, &making(), |_, _, _, _| panic!("nothing to capture")).unwrap().into_vec();
         assert!(got[0].is_nil());
         assert_eq!(
             got[1].as_string().unwrap().to_string_lossy(),
@@ -3005,6 +3210,10 @@ mod tests {
         }
     }
 
+    /// A handle from bytes is answered at once, its picture still to be made: its size and name are
+    /// there, its `count` is `nil` and `tostring` says it is preparing. The picture is made off the
+    /// call — by the worker, queued as the handle is made — and then the handle has it, the bytes
+    /// of a string or a buffer alike, converted to RGBA there.
     #[test]
     fn strings_and_buffers_both_carry_bytes() {
         let lua = Lua::new();
@@ -3014,15 +3223,17 @@ mod tests {
              return { rgb = b, w = 2, h = 1, name = 'pair' }",
         ] {
             let s = spec(&lua, src).unwrap();
-            let got = build_handle(&lua, s, no_file, |_, _, _, _| Err("screen capture failed".to_string())).unwrap();
+            let queued: RefCell<Vec<Arc<Prepared>>> = RefCell::new(Vec::new());
+            let later = |p: Arc<Prepared>| queued.borrow_mut().push(p);
+            let got = build_handle(&lua, s, &Making { file: &no_file, prepare: &later }, |_, _, _, _| Err("screen capture failed".to_string())).unwrap();
             assert_eq!(got.len(), 1, "a handle is the one value, as it always was");
             lua.globals().set("t", got.into_vec().remove(0)).unwrap();
-            let (w, h, name, count, text): (u32, u32, String, u32, String) = lua
-                .load("return t.w, t.h, t.name, t.count, tostring(t)")
-                .eval()
-                .unwrap();
-            assert_eq!((w, h, name.as_str(), count), (2, 1, "pair", 2));
-            assert_eq!(text, "Template(pair 2x1, 2 compared)");
+            let read = || -> (u32, u32, String, Option<u32>, String) { lua.load("return t.w, t.h, t.name, t.count, tostring(t)").eval().unwrap() };
+            assert_eq!(read(), (2, 1, "pair".to_string(), None, "Template(pair 2x1, preparing)".to_string()), "nothing made at the call");
+            assert_eq!(queued.borrow().len(), 1, "its preparation queued");
+            let _ = queued.borrow()[0].make();
+            assert_eq!(read(), (2, 1, "pair".to_string(), Some(2), "Template(pair 2x1, 2 compared)".to_string()));
+            assert_eq!(rgba_of(&picture_of(&lua.globals().get("t").unwrap()).0), [1, 2, 3, 255, 4, 5, 6, 255]);
         }
     }
 
@@ -3030,13 +3241,13 @@ mod tests {
     fn a_failed_capture_is_nil_and_a_good_one_is_opaque() {
         let lua = Lua::new();
         let s = spec(&lua, "return { capture = { 10, 20, 14, 23 } }").unwrap();
-        let got = build_handle(&lua, s, no_file, |_, _, _, _| Err("screen capture failed".to_string())).unwrap().into_vec();
+        let got = build_handle(&lua, s, &making(), |_, _, _, _| Err("screen capture failed".to_string())).unwrap().into_vec();
         assert!(got[0].is_nil(), "a failed capture answers nil");
         assert_eq!(got[1].as_string().map(|s| s.to_string_lossy()).as_deref(), Some("screen capture failed"), "and says why");
         assert_eq!(budget(&lua).get(), 0, "and gives its reservation back");
 
         let s = spec(&lua, "return { capture = { 10, 20, 14, 23 }, name = 'here' }").unwrap();
-        let v = build_handle(&lua, s, no_file, |x, y, w, h| {
+        let v = build_handle(&lua, s, &making(), |x, y, w, h| {
             assert_eq!((x, y, w, h), (10, 20, 4, 3), "the region, read like every other");
             let mut c = opaque(4, 3, [9, 9, 9]);
             for px in c.rgba.chunks_exact_mut(4) {
@@ -3047,29 +3258,59 @@ mod tests {
         .unwrap()
         .into_vec()
         .remove(0);
+        let (dec, count) = picture_of(&v);
+        assert_eq!((dec.w, dec.h, count), (4, 3, 12), "every captured pixel is compared");
         let Value::UserData(ud) = v else { panic!("expected a handle") };
-        let h = ud.borrow::<TemplateHandle>().unwrap();
-        assert_eq!((h.dec.w, h.dec.h, h.count), (4, 3, 12), "every captured pixel is compared");
+        assert!(ud.borrow::<TemplateHandle>().unwrap().pic.get().is_some(), "made with the handle, not queued");
     }
 
+    /// A handle from a file: its size from the PNG's header at the call, nothing decoded there; its
+    /// picture the image worker's cache's decode, shared, so it costs the VM nothing. A path that
+    /// is not there raises at the call.
     #[test]
     fn a_file_handle_shares_the_cached_decode_and_costs_nothing() {
         let lua = Lua::new();
-        let cached = Arc::new(Decoded::from_png_rgba(3, 3, vec![5; 36]));
-        let c2 = cached.clone();
+        let root = test_dir("file-handle");
+        std::fs::create_dir_all(root.join("images")).unwrap();
+        let path = root.join("images").join("x.png");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([5, 6, 7, 255])).save(&path).unwrap();
+        let file = |p: &str| template_file(&root, p);
+        let queued: RefCell<Vec<Arc<Prepared>>> = RefCell::new(Vec::new());
+        let later = |p: Arc<Prepared>| queued.borrow_mut().push(p);
+        let making = Making { file: &file, prepare: &later };
         let s = spec(&lua, "return { file = 'images/x.png' }").unwrap();
-        let v = build_handle(&lua, s, move |p| {
-            assert_eq!(p, "images/x.png");
-            Ok(c2)
-        }, |_, _, _, _| Err("screen capture failed".to_string()))
-        .unwrap()
-        .into_vec()
-        .remove(0);
-        let Value::UserData(ud) = v else { panic!("expected a handle") };
-        let h = ud.borrow::<TemplateHandle>().unwrap();
-        assert!(Arc::ptr_eq(&h.dec, &cached));
-        assert_eq!(h.name.as_deref(), Some("images/x.png"), "unnamed, it is named by its path");
+        let v = build_handle(&lua, s, &making, |_, _, _, _| Err("screen capture failed".to_string())).unwrap().into_vec().remove(0);
+        assert!(template_store::test_made_on(&path.display().to_string()).is_empty(), "nothing decoded at the call");
+        lua.globals().set("t", v.clone()).unwrap();
+        let (w, h, count): (u32, u32, Option<u32>) = lua.load("return t.w, t.h, t.count").eval().unwrap();
+        assert_eq!((w, h, count), (3, 2, None), "its size from the header");
+        let _ = queued.borrow()[0].make();
+        let (dec, count) = picture_of(&v);
+        assert!(Arc::ptr_eq(&dec, &template_store::open(&path).unwrap()), "the cache's decode");
+        assert_eq!(count, 6);
+        let Value::UserData(ud) = &v else { panic!("expected a handle") };
+        assert_eq!(ud.borrow::<TemplateHandle>().unwrap().name.as_deref(), Some("images/x.png"), "unnamed, it is named by its path");
         assert_eq!(budget(&lua).get(), 0);
+        let s = spec(&lua, "return { file = 'images/missing.png' }").unwrap();
+        let e = err_text(build_handle(&lua, s, &making, |_, _, _, _| Err("screen capture failed".to_string())));
+        assert!(e.contains("cannot open template '") && e.contains("missing.png"), "{e}");
+        // A file gone between the call and the making: the handle says why, and the next making
+        // — a search's — tries again, and has the picture once the file is back.
+        let back = root.join("images").join("back.png");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 255])).save(&back).unwrap();
+        let s = spec(&lua, "return { file = 'images/back.png' }").unwrap();
+        let v = build_handle(&lua, s, &making, |_, _, _, _| Err("screen capture failed".to_string())).unwrap().into_vec().remove(0);
+        lua.globals().set("b", v).unwrap();
+        std::fs::remove_file(&back).unwrap();
+        let _ = queued.borrow()[1].make();
+        let (count, text): (Option<u32>, String) = lua.load("return b.count, tostring(b)").eval().unwrap();
+        assert_eq!(count, None);
+        assert!(text.starts_with("Template(images/back.png 3x2, cannot be used: cannot open template '"), "{text}");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 255])).save(&back).unwrap();
+        let _ = queued.borrow()[1].make();
+        let (count, text): (Option<u32>, String) = lua.load("return b.count, tostring(b)").eval().unwrap();
+        assert_eq!((count, text.as_str()), (Some(6), "Template(images/back.png 3x2, 6 compared)"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A spec that is too large is told so, before the budget is consulted.
@@ -3077,7 +3318,7 @@ mod tests {
     fn size_limits_come_before_the_budget() {
         let lua = Lua::new();
         let s = spec(&lua, "return { rgba = '', w = 4096, h = 4096 }").unwrap();
-        let e = err_text(build_handle(&lua, s, no_file, |_, _, _, _| Err("screen capture failed".to_string())));
+        let e = err_text(build_handle(&lua, s, &making(), |_, _, _, _| Err("screen capture failed".to_string())));
         assert!(e.contains("16777216 pixels") && e.contains("1048576"), "{e}");
         assert_eq!(budget(&lua).get(), 0);
     }
@@ -3093,7 +3334,7 @@ mod tests {
         let make = |lua: &Lua| {
             lua.create_function(|lua, t: Table| {
                 let s = parse_spec(&t, 100, 100)?;
-                build_handle(lua, s, no_file, |_, _, _, _| Err("screen capture failed".to_string()))
+                build_handle(lua, s, &making(), |_, _, _, _| Err("screen capture failed".to_string()))
             })
             .unwrap()
         };
@@ -3118,7 +3359,7 @@ mod tests {
         let f = lua
             .create_function(|lua, t: Table| {
                 let s = parse_spec(&t, 100, 100)?;
-                build_handle(lua, s, no_file, |_, _, _, _| Err("screen capture failed".to_string()))
+                build_handle(lua, s, &making(), |_, _, _, _| Err("screen capture failed".to_string()))
             })
             .unwrap();
         lua.globals().set("make", f).unwrap();
@@ -3311,7 +3552,7 @@ mod tests {
         let t = &again[0];
         assert_eq!(t.id, 20, "the same id, so the waiting callback gets the answer");
         assert!(!t.captures(), "nothing is captured for it");
-        match answer(t, None) {
+        match answer(t, None, None) {
             Outcome::Cells(Err(why)) => assert_eq!(why, HELD_CELLS),
             _ => panic!("a held cells read must be answered with the reason"),
         }
@@ -3355,7 +3596,7 @@ mod tests {
         ImageTask { id, hay: Haystack::Screen { region, source: CaptureSource::Standard, compare: None }, job, prio: Priority::Background }
     }
 
-    fn task(id: u64, region: (i32, i32, i32, i32), entries: Vec<(Arc<Decoded>, Option<Rect>)>, mode: Mode) -> ImageTask {
+    fn task(id: u64, region: (i32, i32, i32, i32), entries: Vec<(Needle, Option<Rect>)>, mode: Mode) -> ImageTask {
         ImageTask {
             id,
             hay: Haystack::Screen { region, source: CaptureSource::Standard, compare: None },
@@ -3377,8 +3618,9 @@ mod tests {
         }
     }
 
-    fn dot(rgb: [u8; 3]) -> Arc<Decoded> {
-        Arc::new(Decoded::from_png_rgba(1, 1, vec![rgb[0], rgb[1], rgb[2], 255]))
+    /// A handle's picture of one pixel of `rgb`, made already.
+    fn dot(rgb: [u8; 3]) -> Needle {
+        Needle::Handle(Prepared::made(Arc::new(Decoded::from_png_rgba(1, 1, vec![rgb[0], rgb[1], rgb[2], 255])), 1))
     }
 
     /// A frame of grey with one red and one green pixel, wherever it is asked for.
@@ -3872,16 +4114,14 @@ mod tests {
         lua.globals().set("s", snapshot::test_handle(&lua, snapshot::test_frame(100, 50, 40, 30))).unwrap();
         let cut = |src: &str| {
             let s = spec(&lua, src).unwrap();
-            build_handle(&lua, s, no_file, |_, _, _, _| panic!("the screen was captured")).unwrap().into_vec()
+            build_handle(&lua, s, &making(), |_, _, _, _| panic!("the screen was captured")).unwrap().into_vec()
         };
         let got = cut("return { capture = { 110, 60, 114, 63 }, snapshot = s, name = 'cut' }");
         let Value::UserData(ud) = &got[0] else { panic!("expected a handle") };
-        {
-            let h = ud.borrow::<TemplateHandle>().unwrap();
-            assert_eq!((h.dec.w, h.dec.h, h.name.as_deref()), (4, 3, Some("cut")));
-            let template::Body::Dense { rgba, .. } = &h.dec.body;
-            assert_eq!(&rgba[0..4], &[110, 60, 50, 255], "the snapshot's pixel at screen (110, 60)");
-        }
+        assert_eq!(ud.borrow::<TemplateHandle>().unwrap().name.as_deref(), Some("cut"));
+        let (dec, _) = picture_of(&got[0]);
+        assert_eq!((dec.w, dec.h), (4, 3));
+        assert_eq!(&rgba_of(&dec)[0..4], &[110, 60, 50, 255], "the snapshot's pixel at screen (110, 60)");
         let held = budget(&lua).get();
         assert_eq!(held, template::dense_bytes(4, 3));
         let past = cut("return { capture = { 130, 60, 150, 70 }, snapshot = s }");
@@ -3889,9 +4129,8 @@ mod tests {
         assert_eq!(past[1].as_string().unwrap().to_string_lossy(), snapshot::NOT_INSIDE, "not cut to fit: refused");
         assert_eq!(budget(&lua).get(), held, "and its reservation given back");
         let edges = cut("return { capture = { x1 = 120, y1 = 70 }, snapshot = s }");
-        let Value::UserData(ud) = &edges[0] else { panic!("expected a handle") };
-        let h = ud.borrow::<TemplateHandle>().unwrap();
-        assert_eq!((h.dec.w, h.dec.h), (20, 10), "to the snapshot's right and bottom edges");
+        let (dec, _) = picture_of(&edges[0]);
+        assert_eq!((dec.w, dec.h), (20, 10), "to the snapshot's right and bottom edges");
     }
 
     #[test]
@@ -4003,6 +4242,7 @@ mod tests {
             listed(&crate::cells::of_capture(&four, 4, 5, &spec).unwrap_err(), &["4", "4", "4", "5"]),
             listed(&size(5000, 10), &["5000", "10"]),
             listed(&size(2000, 1000), &["2000", "1000", "2000000"]),
+            listed(&template_store::cannot_open(Path::new("PATH"), "WHY"), &["PATH", "WHY"]),
         ] {
             assert!(DOC.contains(&format!("`{reason}`")), "docs/api/screen.md does not list the reason `{reason}`");
         }
@@ -4014,22 +4254,173 @@ mod tests {
         assert_eq!(within_frame((100, 100, 50, 50), (0, 0, 10, 10)).w, 0);
     }
 
+    /// A path is the needle of its file under the module's root, named as written, and nothing of
+    /// it is decoded where it is read — the reading of every search, `imageSearchAsync`'s and
+    /// `imageSearchEach`'s among them. A list is read whole before anything is captured, so a path
+    /// that is not there raises wherever it sits in it; a value that is no template raises too.
     #[test]
     fn a_path_names_itself_and_a_stranger_is_refused() {
         let lua = Lua::new();
-        let d = Arc::new(Decoded::from_png_rgba(1, 1, vec![0, 0, 0, 255]));
-        let d2 = d.clone();
-        let load = move |_: &str| Ok(d2.clone());
+        let root = test_dir("paths");
+        std::fs::create_dir_all(root.join("images")).unwrap();
+        for p in ["images/a.png", "b.png"] {
+            template_store::test_write_dot(&root.join(p), [0, 0, 0], 0);
+        }
+        let locate = |p: &str| locate_in(&root, p);
         let v = Value::String(lua.create_string("images/a.png").unwrap());
-        let (got, name) = resolve_with(&v, "imageSearch", &load).unwrap();
-        assert!(Arc::ptr_eq(&got, &d));
+        let (got, name) = resolve_with(&v, "imageSearch", &locate).unwrap();
+        assert!(matches!(&got, Needle::File(p) if *p == root.join("images/a.png")));
         assert_eq!(name.as_deref(), Some("images/a.png"));
-        let e = err_text(resolve_with(&Value::Integer(3), "imageSearch", &load));
+        let e = err_text(resolve_with(&Value::Integer(3), "imageSearch", &locate));
         assert!(e.contains("expected a path or a Template, got a number"), "{e}");
-        // A mixed list resolves completely, in order, before anything is captured.
-        let list: Table = lua.load("return { 'a.png', 'b.png' }").eval().unwrap();
-        assert_eq!(resolve_list(&list, "imageSearchMulti", &load).unwrap().len(), 2);
-        let bad: Table = lua.load("return { 'a.png', true }").eval().unwrap();
-        assert!(resolve_list(&bad, "imageSearchMulti", &load).is_err());
+        let list: Table = lua.load("return { 'images/a.png', 'b.png' }").eval().unwrap();
+        assert_eq!(resolve_list(&list, "imageSearchMulti", &locate).unwrap().len(), 2);
+        for p in ["images/a.png", "b.png"] {
+            assert!(template_store::test_made_on(&root.join(p).display().to_string()).is_empty(), "{p}: decoded where it was read");
+        }
+        let bad: Table = lua.load("return { 'b.png', true }").eval().unwrap();
+        assert!(resolve_list(&bad, "imageSearchMulti", &locate).is_err());
+        let missing: Table = lua.load("return { 'b.png', 'images/missing.png' }").eval().unwrap();
+        let e = err_text(resolve_list(&missing, "imageSearchMulti", &locate));
+        assert!(e.contains("cannot open template '") && e.contains("missing.png"), "{e}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The worker opens a search's PNG and makes a handle's picture still to be made, on its own
+    /// thread, before it matches: the search finds what the file and the bytes hold.
+    #[test]
+    fn the_worker_opens_a_searchs_templates_itself() {
+        let root = test_dir("worker-opens");
+        let path = root.join("red.png");
+        template_store::test_write_dot(&path, [255, 0, 0], 0);
+        let (task_tx, task_rx) = mpsc::channel();
+        let (res_tx, res_rx) = mpsc::channel();
+        spawn_image_worker(two_dots, crate::backend::no_comparison, task_rx, res_tx);
+        task_tx.send(task(1, (0, 0, 10, 10), vec![(Needle::File(path.clone()), None)], Mode::First)).unwrap();
+        // Red, then four wildcards: what is still to be made when the search comes.
+        let mut bytes = vec![0u8; 5 * 4];
+        bytes[..4].copy_from_slice(&[255, 0, 0, 255]);
+        let pending = Prepared::of(Raw::Rgba { w: 5, h: 1, bytes });
+        task_tx.send(task(2, (0, 0, 10, 10), vec![(Needle::Handle(pending.clone()), None)], Mode::First)).unwrap();
+        for id in [1, 2] {
+            let r = res_rx.recv_timeout(Duration::from_secs(10)).expect("an answer");
+            assert_eq!(r.id, id);
+            assert_eq!(r.found(), Ok(vec![Some(ScreenHit { x: 3, y: 2, w: if id == 1 { 1 } else { 5 }, h: 1, n: 1 })]), "{id}");
+        }
+        assert_eq!(template_store::test_made_on(&path.display().to_string()), ["image-worker"], "the PNG decoded once, on the worker");
+        assert_eq!(template_store::test_made_on("bytes 5x1"), ["image-worker"], "the bytes made into a picture there");
+        assert_eq!(pending.get().unwrap().as_ref().unwrap().1, 1, "and kept by the handle");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A template captured again — the same path, a new picture, a new modification time — is what
+    /// the next search on the worker finds.
+    #[test]
+    fn a_png_captured_again_is_what_the_next_search_finds() {
+        let root = test_dir("again");
+        let path = root.join("dot.png");
+        template_store::test_write_dot(&path, [255, 0, 0], 0);
+        let search = || run_batch(&[task(1, (0, 0, 10, 10), vec![(Needle::File(path.clone()), None)], Mode::First)], two_dots);
+        assert_eq!(search()[0].found(), Ok(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]), "the red dot");
+        template_store::test_write_dot(&path, [0, 255, 0], 10);
+        assert_eq!(search()[0].found(), Ok(vec![Some(ScreenHit { x: 8, y: 5, w: 1, h: 1, n: 1 })]), "the green one now");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A template that cannot be opened — its file gone since its path was checked, or a body that
+    /// cannot be decoded — is what its search answers, in each mode, as "could not look", and no
+    /// picture is captured for it; a search beside it in the batch reads as usual.
+    #[test]
+    fn a_template_that_cannot_be_opened_is_the_searchs_answer_without_a_capture() {
+        thread_local! {
+            static ASKED: std::cell::RefCell<Vec<(i32, i32, i32, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        fn record(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+            ASKED.with(|a| a.borrow_mut().extend(regions.iter().copied()));
+            two_dots(regions, src)
+        }
+        let root = test_dir("cannot-open");
+        let gone = Needle::File(root.join("gone.png"));
+        let red = || vec![(dot([255, 0, 0]), None)];
+        let out = run_batch(
+            &[
+                task(1, (5, 5, 10, 10), vec![(dot([255, 0, 0]), None), (gone.clone(), None)], Mode::First),
+                task(2, (5, 5, 10, 10), vec![(gone.clone(), None)], Mode::Each),
+                task(3, (5, 5, 10, 10), vec![(gone, None)], Mode::All),
+                task(4, (0, 0, 10, 10), red(), Mode::First),
+            ],
+            record,
+        );
+        assert_eq!(ASKED.with(|a| a.borrow().clone()), vec![(0, 0, 10, 10)], "only the search whose templates opened is captured");
+        let why = template_store::cannot_open(&root.join("gone.png"), "");
+        for r in &out[..3] {
+            let e = r.found().unwrap_err();
+            assert!(e.starts_with(&why), "{e}");
+        }
+        assert_eq!(out[3].found(), Ok(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A handle's preparation and a search that uses it in one batch make its picture once, and
+    /// read nothing for the preparation, which is answered to nobody.
+    #[test]
+    fn a_handles_preparation_beside_its_search_makes_it_once() {
+        let p = Prepared::of(Raw::Rgb { w: 1, h: 1, bytes: vec![0, 255, 0] });
+        let prepare = preparation(1, &p);
+        assert!(!prepare.captures());
+        let out = run_batch(&[prepare, task(2, (0, 0, 10, 10), vec![(Needle::Handle(p.clone()), None)], Mode::First)], two_dots);
+        assert!(matches!(out[0].outcome, Outcome::Prepared));
+        assert_eq!(out[1].found(), Ok(vec![Some(ScreenHit { x: 8, y: 5, w: 1, h: 1, n: 1 })]));
+        assert_eq!(p.get().unwrap().as_ref().unwrap().1, 1);
+    }
+
+    /// A handle's preparation holds its picture weakly: a handle the module has let go — collected,
+    /// no search holding it — is gone with its bytes while its task still waits, and the task makes
+    /// nothing; a handle still held is made as usual. So a module that builds a template on every
+    /// poll leaves no bytes queued past the budget it was given back.
+    #[test]
+    fn a_preparation_whose_handle_is_gone_makes_nothing() {
+        let lua = Lua::new();
+        let queued: RefCell<Vec<ImageTask>> = RefCell::new(Vec::new());
+        let later = |p: Arc<Prepared>| {
+            let id = queued.borrow().len() as u64 + 1;
+            queued.borrow_mut().push(preparation(id, &p));
+        };
+        let making = Making { file: &no_file, prepare: &later };
+        for (name, w) in [("dropped", 9), ("kept", 11)] {
+            let src = format!("return {{ rgb = string.rep('\\0', {w} * 13 * 3), w = {w}, h = 13, name = '{name}' }}");
+            let v = build_handle(&lua, spec(&lua, &src).unwrap(), &making, |_, _, _, _| Err("screen capture failed".to_string())).unwrap();
+            lua.globals().set(name, v.into_vec().remove(0)).unwrap();
+        }
+        lua.globals().set("dropped", Value::Nil).unwrap();
+        lua.gc_collect().unwrap();
+        lua.gc_collect().unwrap();
+        let tasks = queued.take();
+        let Job::Prepare(gone) = &tasks[0].job else { panic!("a preparation") };
+        assert!(gone.upgrade().is_none(), "the bytes went with the handle");
+        let out = run_batch(&tasks, two_dots);
+        assert!(out.iter().all(|r| matches!(r.outcome, Outcome::Prepared)));
+        assert!(template_store::test_made_on("bytes 9x13").is_empty(), "nothing made for a handle nobody holds");
+        assert_eq!(template_store::test_made_on("bytes 11x13").len(), 1, "the one still held is made");
+        assert_eq!(lua.load("return kept.count").eval::<Option<u32>>().unwrap(), Some(11 * 13));
+    }
+
+    /// A PNG whose decode panics is answered for its own search alone — the host's own failure,
+    /// with no capture for it — and the rest of its batch reads as usual.
+    #[test]
+    fn a_decode_that_panics_fails_its_own_search_alone() {
+        let root = test_dir("decode-panics");
+        let bad = root.join(template_store::TEST_PANICS);
+        template_store::test_write_dot(&bad, [255, 0, 0], 0);
+        let out = run_batch(
+            &[
+                task(1, (0, 0, 10, 10), vec![(Needle::File(bad), None)], Mode::First),
+                task(2, (0, 0, 10, 10), vec![(dot([255, 0, 0]), None)], Mode::First),
+            ],
+            two_dots,
+        );
+        assert_eq!(out[0].found(), Err(TEMPLATE_FAILED.to_string()));
+        assert_eq!(out[1].found(), Ok(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

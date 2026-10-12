@@ -119,9 +119,9 @@ pub(crate) struct Decoded {
 }
 
 impl Decoded {
-    /// A decoded PNG, exactly as `load_template` has always kept it: no size limit, and a
-    /// fully transparent image stays legal (it matches at the first position it is tried at,
-    /// as it always has).
+    /// A decoded PNG, exactly as the image worker's cache keeps it (`template_store::open`): no
+    /// size limit, and a fully transparent image stays legal (it matches at the first position it
+    /// is tried at, as it always has).
     pub(crate) fn from_png_rgba(w: u32, h: u32, rgba: Vec<u8>) -> Self {
         let probes = probe_order(w, h, &rgba);
         Decoded { w, h, body: Body::Dense { rgba, probes }, scaled: Mutex::new(Vec::new()) }
@@ -130,26 +130,15 @@ impl Decoded {
     /// RGBA bytes handed over by a module, with the handle limits applied.
     pub(crate) fn from_rgba(w: u32, h: u32, rgba: Vec<u8>) -> Result<Self, SpecError> {
         check_size(w, h)?;
-        let need = (w as usize) * (h as usize) * 4;
-        if rgba.len() != need {
-            return Err(SpecError(format!(
-                "rgba is {} bytes; {w}x{h} RGBA needs {need}",
-                rgba.len()
-            )));
-        }
+        check_bytes(w, h, rgba.len(), Channels::Rgba)?;
         Ok(Self::from_png_rgba(w, h, rgba))
     }
 
     /// RGB bytes handed over by a module: every pixel is compared, so each gets alpha 255.
     pub(crate) fn from_rgb(w: u32, h: u32, rgb: &[u8]) -> Result<Self, SpecError> {
         check_size(w, h)?;
+        check_bytes(w, h, rgb.len(), Channels::Rgb)?;
         let need = (w as usize) * (h as usize) * 3;
-        if rgb.len() != need {
-            return Err(SpecError(format!(
-                "rgb is {} bytes; {w}x{h} RGB needs {need}",
-                rgb.len()
-            )));
-        }
         let mut rgba = Vec::with_capacity(need / 3 * 4);
         for px in rgb.chunks_exact(3) {
             rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
@@ -281,6 +270,28 @@ impl Decoded {
 /// template exists, so the bytes are refused before they are allocated.
 pub(crate) fn dense_bytes(w: u32, h: u32) -> usize {
     std::mem::size_of::<Decoded>() + (w as usize) * (h as usize) * 4 + PROBES * 4
+}
+
+/// How a module's bytes hold a pixel: four bytes, R, G, B and A, or three without the A.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Channels {
+    Rgba,
+    Rgb,
+}
+
+/// Whether `len` bytes are exactly a `w` x `h` picture of `channels` — the check a handle from
+/// bytes makes at the call, before its conversion, which is the image worker's — worded with
+/// both numbers: `rgba is 1436 bytes; 10x36 RGBA needs 1440`.
+pub(crate) fn check_bytes(w: u32, h: u32, len: usize, channels: Channels) -> Result<(), SpecError> {
+    let (per, key, name) = match channels {
+        Channels::Rgba => (4, "rgba", "RGBA"),
+        Channels::Rgb => (3, "rgb", "RGB"),
+    };
+    let need = (w as usize) * (h as usize) * per;
+    if len != need {
+        return Err(SpecError(format!("{key} is {len} bytes; {w}x{h} {name} needs {need}")));
+    }
+    Ok(())
 }
 
 /// The handle limits, worded with both numbers so the author can see which one is wrong.
