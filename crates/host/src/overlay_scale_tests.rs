@@ -73,6 +73,7 @@ T.answerWaits(function(what)
   return { text = text, words = {}, skipped = false, status = text == "" and "none" or "text" }
 end)
 rawset(T.host.screen, "pixel", function(x, y)
+  T.screenWait("host.screen.pixel")
   S.pixels += 1
   S.pixelsAt[#S.pixelsAt + 1] = { x, y }
   return S.pixel
@@ -425,7 +426,7 @@ fn the_calibration_shot_of_a_scaled_overlay_says_its_factor_and_regions() {
           o:addHotspotButton({ label = "Undo", at = { 10, 20 } })
           o:addOCRButton({ label = "Preset", region = { 34, 7, 214, 22 }, readOnly = true })
         end)
-        assert(o:calibrationShot() == true)
+        assert(T.handled(o.calibrationShot, o) == true)
         local marks = S.shots[1].marks
         assert(marks[1][1] == 120 and marks[1][2] == 90, "the hotspot's crosshair")
         assert(marks[2][1] == 348 and marks[2][2] == 79, "the region's middle")
@@ -436,7 +437,7 @@ fn the_calibration_shot_of_a_scaled_overlay_says_its_factor_and_regions() {
           p:addOCRButton({ label = "Preset", region = { 34, 7, 214, 22 }, readOnly = true })
         end, false)
         local lines = #S.logs
-        assert(plain:calibrationShot() == true)
+        assert(T.handled(plain.calibrationShot, plain) == true)
         assert(T.logged("[calibrate]" .. string.format("  %2d %-24s screen (%d,%d)  pixel %s", 1, "Preset",
           224, 64, "20,20,20")), "the line as it always was: " .. T.dump())
         assert(T.count("region (", lines) == 0 and T.count("scale", lines) == 0, T.dump())
@@ -621,7 +622,7 @@ fn a_reveal_probe_and_a_captured_region_are_placed_through_the_scale() {
             offImage = "off.png", reveal = { at = { 50, 60 }, closedColor = { 0, 0, 0 } } })
         end)
         S.pixel = { r = 0, g = 0, b = 0 }
-        o:activate(1)
+        T.handled(o.activate, o, 1)
         local p = S.pixelsAt[#S.pixelsAt]
         assert(p[1] == 200 and p[2] == 170, "the probe at 100 + 2*50, 50 + 2*60: " .. p[1] .. "," .. p[2])
         assert(T.lastClick() == "200,170", "the shut panel opened at the probe: " .. T.lastClick())
@@ -744,7 +745,7 @@ fn on_ear_clicks_every_design_point_where_its_own_geometry_did() {
               for _, p in ipairs(pts) do
                 if not p.o.active then T.front(p.o) end
                 S.clicks, S.logs, S.speech, S.after = {}, {}, {}, {}
-                p.o:activate(p.i)
+                T.handled(p.o.activate, p.o, p.i)
                 local c = S.clicks[1]
                 local ex, ey = old(S.origin.client, p.c.at[1], p.c.at[2])
                 assert(c and c[1] == ex and c[2] == ey, ("%s at %d,%d %dx%d: clicked %s, the old "
@@ -762,7 +763,7 @@ fn on_ear_clicks_every_design_point_where_its_own_geometry_did() {
           for _, p in ipairs(pts) do
             if p.c.label == label then
               S.clicks = {}
-              p.o:activate(p.i)
+              T.handled(p.o.activate, p.o, p.i)
               return S.clicks[1][1] .. "," .. S.clicks[1][2]
             end
           end
@@ -870,7 +871,7 @@ fn on_ear_chooser_rows_are_clicked_in_the_windows_own_pixels() {
           { name = "Row 1", ctype = 50020, depth = 2, bounds = { x = 170, y = 160, w = 180, h = 16 } },
         }
         T.front(speakers)
-        speakers:activate(row)
+        T.handled(speakers.activate, speakers, row)
         assert(T.lastClick() == "340,168", "the row's left edge + 170, its middle: " .. T.lastClick())
     "##);
 }

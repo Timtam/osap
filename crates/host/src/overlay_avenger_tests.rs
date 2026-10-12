@@ -1465,7 +1465,7 @@ fn a_calibrating_run_draws_where_the_overlay_clicks_and_reads() {
         for _, m in ipairs(shot.marks) do marks[#marks + 1] = m[1] .. "," .. m[2] end
         T.ok(table.concat(marks, " ") == "132,106 450,106 469,106 517,106 586,106 132,106 517,106 586,106",
           table.concat(marks, " "))
-        T.ok(header:calibrationShot() == true)
+        T.ok(T.handled(header.calibrationShot, header) == true)
         T.ok(T.count("scale 1.6000 about (0,0), frame (-2,2)") == 1)
         T.ok(T.count(string.format("  %2d %-24s screen (%d,%d)  pixel %s", 1, "Preset", 296, 107, "20,20,20")
           .. "  region (152,95)-(440,119)") == 1)

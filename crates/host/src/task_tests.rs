@@ -8,11 +8,12 @@
 //! The holder below stands where the host's `Shared` stands — the service, the reads waiting on
 //! the event loop, the tasks, the timers, which VM each module runs and whether it is enabled —
 //! and each test builds module VMs over it with the host's own bindings: `host.ocr.recognize`, both
-//! forms, and `pending` (ocr/lua.rs and the shim), `host.screen.snapshot`, which waits, and
-//! `snapshotAsync` (snapshot.rs), and `host.timer` (timers.rs). The tick is `fire`: due timers,
-//! then the readings, as the loop runs them; the snapshots' delivery is `fire_snaps`. A snapshot
-//! taken where it cannot wait is a picture of its region made on the spot, input epoch 7; the
-//! capture thread's rounds have pictures from x = 20000 on.
+//! forms, and `pending` (ocr/lua.rs and the shim), `host.screen.snapshot`, `pixel` and `pixels`,
+//! which wait, and `snapshotAsync` (snapshot.rs), and `host.timer` (timers.rs). The tick is `fire`:
+//! due timers, then the readings, as the loop runs them; the snapshots' delivery — the pixel
+//! reads' with them — is `fire_snaps`. A snapshot taken where it cannot wait is a picture of its
+//! region made on the spot, input epoch 7; the capture thread's rounds have pictures from
+//! x = 20000 on, and a pixel read there, on either thread, the colour such a picture has.
 //!
 //! The fake recogniser reads every region as "x,y" — its corner — and can be held: a capture of
 //! a region whose x a test `hold`s waits until it lets go, a snapshot round's as well, and so does
@@ -144,8 +145,34 @@ fn fake_recognise(shot: &Fake, _: &[(i32, i32, i32, i32)], ctx: &Recognise) -> V
     })
 }
 
-/// Where the fake's snapshot rounds begin to have pictures (`worker`'s `frames`).
+/// Where the fake's snapshot rounds begin to have pictures (`worker`'s `frames`), and its pixel
+/// reads colours (`fake_points`).
 const SNAP_X: i32 = 20_000;
+
+/// Every point the fake read for `pixel` or `pixels`: its x, whether it was read as `pixel` reads
+/// one, and the thread.
+static POINTS_READ: Mutex<Vec<(i32, bool, String)>> = Mutex::new(Vec::new());
+
+/// The fake's pixel reads — the capture thread's for a handler that waits (`worker`'s `points`), the
+/// event loop's where the call cannot wait (`snapshot::test_points`): from x = 20000 on, the colour
+/// a snapshot round's picture has there, `(x, y, 50)`; elsewhere none, and why. A read of a held x
+/// waits until it is let go.
+fn fake_points(at: &[(i32, i32)], _: CaptureSource, single: bool) -> Result<Vec<(u8, u8, u8)>, String> {
+    for p in at {
+        wait_while_held(p.0, true);
+    }
+    let thread = std::thread::current().name().unwrap_or("?").to_string();
+    locked(&POINTS_READ).extend(at.iter().map(|p| (p.0, single, thread.clone())));
+    if at.iter().any(|p| p.0 < SNAP_X) {
+        return Err("no pixels here".to_string());
+    }
+    Ok(at.iter().map(|&(x, y)| (x as u8, y as u8, 50)).collect())
+}
+
+/// What the fake read at `x`: whether as `pixel` reads one, and on which thread.
+fn points_read(x: i32) -> Vec<(bool, String)> {
+    locked(&POINTS_READ).iter().filter(|p| p.0 == x).map(|p| (p.1, p.2.clone())).collect()
+}
 
 /// Whether the language list of the holder that holds it is still held back (`held_langs`).
 static LANGS_HELD: Mutex<bool> = Mutex::new(true);
@@ -208,6 +235,10 @@ pub(crate) fn worker() -> OcrWorker<Fake> {
                     }
                 })
                 .collect()
+        },
+        points: |at, src, single| {
+            crate::loop_guard::off_loop("the fake pixel read");
+            fake_points(at, src, single)
         },
         compare: fake_compare,
         display_of: |_, _| 0,
@@ -375,6 +406,9 @@ fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     host.set("ocr", ocr).unwrap();
     let screen = lua.create_table().unwrap();
     screen.set("snapshot", crate::snapshot::test_snapshot(&lua, idx, h.clone()).unwrap()).unwrap();
+    let (pixel, pixels) = crate::snapshot::test_points(&lua, idx, h.clone(), fake_points).unwrap();
+    screen.set("pixel", pixel).unwrap();
+    screen.set("pixels", pixels).unwrap();
     let hh = h.clone();
     screen
         .set(
@@ -2040,6 +2074,291 @@ fn a_wait_turns_no_epoch_and_a_callbacks_answer_turns_it_once() {
     settle(&h);
     assert_eq!(h.epoch.get(), start + 2, "the read callback's drain");
     assert!(yes(&lua, &format!("return inSnapshot == {} and inRead == {}", start + 1, start + 2)), "turned before the callback");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+}
+
+// ── host.screen.pixel and pixels wait ────────────────────────────────────────────────────────
+
+/// Lua's `same(a, b)`: two colours, or two lists of colours, with the same channels and `hex`.
+const SAME: &str = r#"
+function same(a, b)
+  if type(a) ~= "table" or type(b) ~= "table" then return false end
+  if a.hex ~= nil or b.hex ~= nil then
+    return a.r == b.r and a.g == b.g and a.b == b.b and a.hex == b.hex
+  end
+  if #a ~= #b then return false end
+  for i = 1, #a do if not same(a[i], b[i]) then return false end end
+  return true
+end
+"#;
+
+/// `host.screen.pixel` and `pixels` in a handler wait for the `screen-capture` thread, which reads
+/// the points as the event loop would — each as `pixel` reads one, or the list as `pixels` reads it
+/// — and only their module is busy: its next key waits in its mailbox, another module's key runs
+/// meanwhile. The handler goes on with exactly what the call that does not wait answers: one
+/// colour and nothing after it, the list, or `nil` and the reason; and a wait turns no epoch.
+#[test]
+fn a_pixel_in_a_handler_waits_and_answers_what_the_call_that_does_not_wait_answers() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let other = vm(&h, 2);
+    run(&lua, SAME);
+    run(
+        &lua,
+        r##"
+        order = {}
+        blockedOne = host.screen.pixel(20201, 5)
+        blockedList = host.screen.pixels({ { 20201, 5 }, { 20202, 6 } })
+        blockedNone, blockedWhy = host.screen.pixel(5, 5)
+        blockedNoList, blockedListWhy = host.screen.pixels({ { 20203, 5 }, { 7, 7 } })
+        function look()
+          order[#order + 1] = "asked"
+          before = epoch()
+          one = host.screen.pixel(20201, 5)
+          oneValues = select("#", host.screen.pixel(20201, 5))
+          list = host.screen.pixels({ { 20201, 5 }, { 20202, 6 } })
+          none, why = host.screen.pixel(5, 5)
+          noList, listWhy = host.screen.pixels({ { 20203, 5 }, { 7, 7 } })
+          after = epoch()
+          order[#order + 1] = "answered"
+        end
+        function key() order[#order + 1] = "key" end
+        "##,
+    );
+    run(&other, "function key() ran = true end");
+    assert_eq!(points_read(20201), [(true, current_thread()), (false, current_thread())], "where it cannot wait, on the loop");
+    hold(20201);
+    assert_eq!(event(&h, &lua, "look", Vec::new(), true), mailbox::Delivered::Parked);
+    assert_eq!(event(&h, &lua, "key", Vec::new(), true), mailbox::Delivered::Queued, "its keys wait behind it");
+    let f: Function = other.globals().get("key").unwrap();
+    let ran = mailbox::deliver(&*h, 2, &other, Event::Call { f, args: MultiValue::new(), input: true, what: "key" });
+    assert_eq!(ran, mailbox::Delivered::Ran, "another module's key runs meanwhile");
+    assert!(yes(&lua, "return #order == 1 and one == nil"));
+    release(20201);
+    settle_snaps(&h);
+    mailbox::run_queued(&*h);
+    assert!(
+        yes(&lua, r#"return table.concat(order, " | ") == "asked | answered | key""#),
+        "{:?}",
+        lua.load("return table.concat(order, ' | ')").eval::<String>()
+    );
+    assert!(yes(&lua, "return same(one, blockedOne) and one.hex == '#E90532' and oneValues == 1"), "one colour, as on the loop");
+    assert!(yes(&lua, "return same(list, blockedList) and #list == 2"), "the list, as on the loop");
+    assert!(yes(&lua, "return none == nil and why == blockedWhy and why == 'no pixels here'"), "a failed read, as on the loop");
+    assert!(yes(&lua, "return noList == nil and listWhy == blockedListWhy"), "all or nothing, as on the loop");
+    assert!(yes(&lua, "return before == after"), "a wait turns no epoch");
+    let read = points_read(20201);
+    assert_eq!(read.len(), 5, "{read:?}");
+    assert_eq!(&read[2..], [(true, "screen-capture".into()), (true, "screen-capture".into()), (false, "screen-capture".into())]);
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// The name of the test's own thread: where a call that cannot wait reads.
+fn current_thread() -> String {
+    std::thread::current().name().unwrap_or("?").to_string()
+}
+
+/// A `pixel` or `pixels` that touches no screen — a snapshot's points, a window point with no pixel
+/// this time, an empty list — is answered at once wherever it is called: in a handler without a
+/// wait, at the top level without a line or a count. A mistake raises in both.
+#[test]
+fn a_pixel_that_touches_no_screen_is_answered_at_once_wherever_it_is_asked() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let shot: Value = Value::UserData(crate::snapshot::test_handle(&lua, crate::snapshot::test_frame(20211, 5, 10, 10)));
+    lua.globals().set("s", shot).unwrap();
+    let code = r#"
+        local EMPTY = { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0.5, 0.5 } }
+        local got = {}
+        got.fromSnap = host.screen.pixel(20212, 6, { snapshot = s })
+        got.listFromSnap = host.screen.pixels({ { 20211, 5 }, { 20220, 14 } }, { snapshot = s })
+        got.outside, got.outsideWhy = host.screen.pixel(20230, 6, { snapshot = s })
+        got.minimised, got.minimisedWhy = host.screen.pixel(EMPTY)
+        got.emptyList = host.screen.pixels({})
+        got.mistake = pcall(host.screen.pixel, 1, 2, { snap = s })
+        got.listMistake = pcall(host.screen.pixels, { { 1.5, 2 } })
+        return got
+    "#;
+    run(&lua, &format!("function look() inHandler = (function() {code} end)() end"));
+    assert_eq!(event(&h, &lua, "look", Vec::new(), true), mailbox::Delivered::Ran, "nothing waited");
+    let top: Table = lua.load(format!("return (function() {code} end)()")).set_name("=mod.luau").eval().unwrap();
+    lua.globals().set("top", top).unwrap();
+    for got in ["inHandler", "top"] {
+        assert!(
+            yes(
+                &lua,
+                &format!(
+                    "local g = {got} return g.fromSnap.hex == '#F40632' and #g.listFromSnap == 2 and g.outside == nil \
+                     and g.outsideWhy == 'the point is not inside the snapshot' and g.minimised == nil \
+                     and g.minimisedWhy == \"the window's client area is empty (0x0)\" and #g.emptyList == 0 \
+                     and g.mistake == false and g.listMistake == false"
+                )
+            ),
+            "{got}"
+        );
+    }
+    for case in [Case::Outside, Case::CannotWait, Case::OwnCoroutine] {
+        assert!(!h.tasks.legacy_said("m1", "host.screen.pixel", case) && !h.tasks.legacy_said("m1", "host.screen.pixels", case));
+    }
+    assert!(h.tasks.legacy_summary().is_empty(), "nothing was read on the loop: {:?}", h.tasks.legacy_summary());
+    assert!(h.snaps.test_ids_of(1).is_empty() && !h.snaps.has_pending(), "nothing asked of the thread");
+    assert!(points_read(20211).is_empty() && points_read(20212).is_empty(), "nothing read for them");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+}
+
+/// Where a handler cannot stop, `pixel` and `pixels` read on the event loop as they always did, and
+/// answer at once: outside every handler, where Luau cannot stop the handler, in a coroutine of the
+/// module's own. Said once per module, call and place; every read there counted for the summary.
+#[test]
+fn where_a_pixel_cannot_wait_it_reads_on_the_event_loop_and_is_said_once_per_place() {
+    let h = host();
+    let lua = vm(&h, 1);
+    run(
+        &lua,
+        r#"
+        top = host.screen.pixel(20241, 5)
+        topList = host.screen.pixels({ { 20241, 5 } })
+        task.run(function()
+          got = {}
+          got.host = hostCall(function() return host.screen.pixel(20241, 5) end)
+          got.meta = setmetatable({}, { __index = function() return host.screen.pixel(20241, 5) end }).x
+          got.own = coroutine.wrap(function() return host.screen.pixels({ { 20241, 5 } }) end)()
+          got.waited = host.screen.pixel(20242, 5)
+        end)
+        "#,
+    );
+    assert!(yes(&lua, "return top ~= nil and #topList == 1 and got.host ~= nil and got.meta ~= nil and #got.own == 1"));
+    assert!(yes(&lua, "return got.waited == nil"), "the task's own call waits");
+    for (call, case) in [
+        ("host.screen.pixel", Case::Outside),
+        ("host.screen.pixel", Case::CannotWait),
+        ("host.screen.pixels", Case::Outside),
+        ("host.screen.pixels", Case::OwnCoroutine),
+    ] {
+        assert!(h.tasks.legacy_said("m1", call, case), "{call} {case:?} not said");
+    }
+    assert!(!h.tasks.legacy_said("m1", "host.screen.pixel", Case::OwnCoroutine));
+    settle_snaps(&h);
+    assert!(yes(&lua, "return got.waited ~= nil and got.waited.hex == '#120532'"));
+    assert!(points_read(20241).iter().all(|(_, t)| *t == current_thread()), "{:?}", points_read(20241));
+    assert_eq!(points_read(20242), [(true, "screen-capture".to_string())]);
+    let summary: Vec<String> = h.tasks.legacy_summary().into_iter().map(|(scope, line)| format!("{scope}: {line}")).collect();
+    assert_eq!(summary.len(), 2, "{summary:?}");
+    assert!(summary[0].starts_with("screen: [m1] host.screen.pixel held the event loop 3 time(s), "), "{summary:?}");
+    assert!(summary[1].starts_with("screen: [m1] host.screen.pixels held the event loop 2 time(s), "), "{summary:?}");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// A pixel wait is one of its module's requests, under the snapshot lane's limits: with the whole
+/// application's 64 waiting it is not read, and the handler goes on with `nil` and the reason on
+/// the next turn. A module disabled while its handler waits: the handler never goes on and its
+/// request is withdrawn. Module code that resumes the handler: the wait raises there, naming the
+/// call, and the request is withdrawn.
+#[test]
+fn a_pixel_wait_is_one_of_its_modules_requests_and_goes_with_it() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let askers: Vec<Lua> = (2..6).map(|i| vm(&h, i)).collect();
+    hold(20251);
+    for l in &askers {
+        run(
+            l,
+            "answered = 0\n\
+             for _ = 1, 16 do host.screen.snapshotAsync({ region = { 20251, 5, 20261, 9 } }, function() answered += 1 end) end",
+        );
+    }
+    run(&lua, "task.run(function() refused, why = host.screen.pixels({ { 20252, 5 } }); done = true end)");
+    assert!(yes(&lua, "return done == nil"), "it waits for its answer, a refusal too");
+    fire_snaps(&h);
+    assert!(yes(&lua, "return done == true and refused == nil"));
+    let why: String = lua.globals().get("why").unwrap();
+    assert_eq!(why, crate::snapshot::all_requests_refused());
+    release(20251);
+    settle_snaps(&h);
+    assert!(points_read(20252).is_empty(), "nothing read for it");
+
+    hold(20253);
+    run(&lua, "function look() c = host.screen.pixel(20253, 5); after = true end");
+    assert_eq!(event(&h, &lua, "look", Vec::new(), false), mailbox::Delivered::Parked);
+    assert_eq!(h.snaps.test_ids_of(1).len(), 1);
+    disable(&h, 1);
+    assert!(h.snaps.test_ids_of(1).is_empty(), "its request is withdrawn");
+    assert_eq!(h.tasks.len(), 0);
+    release(20253);
+    settle_snaps(&h);
+    enable(&h, 1);
+    settle_snaps(&h);
+    assert!(yes(&lua, "return after == nil and c == nil"), "nothing of it went on");
+
+    hold(20254);
+    run(
+        &lua,
+        r#"
+        id = task.run(function()
+          co = coroutine.running()
+          ok, err = pcall(host.screen.pixel, 20254, 5)
+          finished = true
+        end)
+        resumedBy = { coroutine.resume(co, "not the host") }
+        "#,
+    );
+    assert!(yes(&lua, "return ok == false and finished == true and task.alive(id) == false"));
+    let err: String = lua.load("return tostring(err)").eval().unwrap();
+    assert!(err.contains(&format!("host.screen.pixel{}", task::RESUMED)), "{err}");
+    assert!(h.snaps.test_ids_of(1).is_empty(), "its request withdrawn");
+    release(20254);
+    settle_snaps(&h);
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// A key queued behind a handler that waits for a poll's pixel read makes its request an
+/// interactive one while it waits for the capture thread, as it does a snapshot's or a read's.
+#[test]
+fn a_key_queued_behind_a_polls_pixel_wait_makes_its_request_interactive() {
+    let h = host();
+    let lua = vm(&h, 1);
+    let other = vm(&h, 2);
+    hold(9601);
+    run(&other, "host.ocr.recognize({ 9601, 5, 9631, 15 }, function(r) seen = r.text end)");
+    wait_capturing(9601);
+    run(&lua, "function poll() c = host.screen.pixels({ { 20271, 5 } }) end\npresses = 0\nfunction key() presses += 1 end");
+    assert_eq!(event(&h, &lua, "poll", Vec::new(), false), mailbox::Delivered::Parked);
+    let id = h.snaps.test_ids_of(1)[0];
+    assert_eq!(h.ocr.snap_waiting_prio(id), Some(Priority::Background), "a poll's, waiting behind the read");
+    {
+        let _key = enter_priority(Priority::Interactive);
+        assert_eq!(event(&h, &lua, "key", Vec::new(), true), mailbox::Delivered::Queued);
+    }
+    assert_eq!(h.ocr.snap_waiting_prio(id), Some(Priority::Interactive), "a key waits behind it");
+    release(9601);
+    settle(&h);
+    settle_snaps(&h);
+    mailbox::run_queued(&*h);
+    assert!(yes(&lua, "return c ~= nil and #c == 1 and presses == 1"));
+    assert!(yes(&other, "return seen == '9601,5'"));
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+}
+
+/// In a module that reads through desktop duplication, a pixel wait carries the module's first-read
+/// comparison to the capture thread, which makes it there; a pixel read where the call cannot wait
+/// makes none, and leaves it owed.
+#[test]
+fn a_pixel_wait_carries_the_first_read_comparison_and_the_loops_read_makes_none() {
+    let h = host();
+    let dup = CaptureSource::Duplication { or_standard: true };
+    let lua = vm(&h, 1);
+    capture_source::record_for_a_test(&lua, "com.dup.pixel", dup);
+    run(&lua, "top = host.screen.pixel(20281, 5)");
+    assert!(compared("com.dup.pixel").is_empty(), "none on the event loop");
+    assert_eq!(capture_source::compare_state(&lua), Some(Compare::Owed));
+    run(&lua, "task.run(function() waited = host.screen.pixels({ { 20282, 5 }, { 20283, 6 } }) end)");
+    settle_snaps(&h);
+    assert!(yes(&lua, "return top ~= nil and #waited == 2"));
+    assert_eq!(compared("com.dup.pixel"), ["screen-capture"], "made once, on the capture thread");
+    assert_eq!(capture_source::compare_state(&lua), Some(Compare::Done));
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
 }
 

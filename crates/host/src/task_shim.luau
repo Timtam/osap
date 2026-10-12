@@ -36,7 +36,10 @@
 --   OWN_COROUTINE             what it raises in a coroutine the module made
 --
 -- point(name, start, blocking) builds a host.screen call that waits:
---   start(nonce, ...)         queues what the call asks for, as `recognize`'s start does
+--   start(nonce, ...)         queues what the call asks for, as `recognize`'s start does, and
+--                             returns nothing; or, for a call that touches nothing it would wait
+--                             for (a pixel of a snapshot), returns true and its answer, which the
+--                             call returns at once
 --   blocking(why, ...)        the call made on the event loop, where it cannot wait: `why` is
 --                             where_'s word for the place, or "cannot-wait"
 return function(where_, disown, yield, isyieldable, rawequal, error, select, type, pack, unpack, WAIT, RESUMED)
@@ -56,7 +59,8 @@ return function(where_, disown, yield, isyieldable, rawequal, error, select, typ
   -- names the module's line.
   local function wait(name, start, ...)
     local nonce = {} -- a fresh table: no module code ever holds it
-    start(nonce, ...)
+    local now = pack(start(nonce, ...))
+    if now[1] then return unpack(now, 2, now.n) end -- answered without a wait
     local back = pack(yield(WAIT, nonce))
     if not rawequal(back[1], nonce) then
       -- Not the host: module code resumed this coroutine itself. It is no handler any more, and

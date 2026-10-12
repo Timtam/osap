@@ -807,6 +807,12 @@ jobs:
             echo "::error::a snapshot callback never came: $(grep 'CAPTURE PROBE: snapshot callbacks' automation-platform.log || echo 'no count at all')"
             exit 1
           fi
+          # A pixel a handler waits for is read at point resolution, a snapshot at the display's own
+          # and drawn down: the probe reads one point both ways. Said, not failed: a runner without
+          # the permission sees the wallpaper, and a point of it may be drawn down differently.
+          if grep -q "CAPTURE PROBE: live pixel and the snapshot's at .* DIFFER" automation-platform.log; then
+            echo "::warning::a live pixel and the same point of a snapshot differ: $(grep -m1 "CAPTURE PROBE: live pixel and the snapshot's" automation-platform.log)"
+          fi
           if ! grep -q "screen capture paths on this macOS:" automation-platform.log; then
             echo "::error::no capture ever reached capture.rs — the probe's reads were refused before asking the system"
             exit 1

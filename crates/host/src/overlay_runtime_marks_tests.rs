@@ -282,6 +282,7 @@ const DURING: &str = r##"
 local S = T.S
 local during = nil
 rawset(T.host.screen, "pixel", function()
+  T.screenWait("host.screen.pixel")
   S.pixels += 1
   if during then during() end
   return S.pixel
@@ -313,7 +314,7 @@ fn a_hotspot_toggle_clicks_nothing_once_another_window_came_to_the_front_during_
         end)
         local timers = #S.after
         T.during(T.elsewhere)
-        o:activate(3)
+        T.handled(o.activate, o, 3)
         assert(S.pixels == 1 and #S.clicks == 0, "a click in the other window: " .. T.dump())
         assert(#S.after == timers, "nothing waits to announce it")
         assert(T.count("[overlay] Synth: 'Mute' not clicking after reading its pixel — the overlay is on another "
@@ -321,14 +322,14 @@ fn a_hotspot_toggle_clicks_nothing_once_another_window_came_to_the_front_during_
         T.backHere()
         local owns = T.host.window.ownsPoint
         T.during(function() rawset(T.host.window, "ownsPoint", function() return false end) end)
-        o:activate(3)
+        T.handled(o.activate, o, 3)
         assert(S.pixels == 2 and #S.clicks == 0, "a click on the window drawn over it: " .. T.dump())
         assert(#S.after == timers, "nothing waits to announce it")
         assert(T.count("Synth: 'Mute' at (120,80) is inside our window's frame but another window is drawn there "
           .. "— not clicking") == 1, T.dump())
         rawset(T.host.window, "ownsPoint", owns)
         T.during(nil)
-        o:activate(3)
+        T.handled(o.activate, o, 3)
         assert(#S.clicks == 1 and S.clicks[1][1] == 120 and S.clicks[1][2] == 80, "clicked: " .. T.dump())
     "#);
 }
@@ -346,14 +347,14 @@ fn a_reveal_probe_opens_nothing_once_another_window_came_to_the_front_during_its
         end)
         local timers = #S.after
         T.during(T.elsewhere)
-        o:activate(3)
+        T.handled(o.activate, o, 3)
         assert(S.pixels == 1 and #S.clicks == 0, "a click in the other window: " .. T.dump())
         assert(#S.after == timers, "nothing waits to follow the probe's click")
         assert(T.count("[overlay] Synth: 'Reverb' not going on after reading its panel's probe — the overlay is "
           .. "on another window now") == 1, T.dump())
         T.during(nil)
         T.backHere()
-        o:activate(3)
+        T.handled(o.activate, o, 3)
         assert(#S.clicks == 1 and S.clicks[1][1] == 110 and S.clicks[1][2] == 62, "the probe clicked: " .. T.dump())
         assert(#S.after == timers + 1, "the toggle's click waits for the panel")
     "#);
@@ -377,20 +378,20 @@ fn a_reveal_probe_reading_open_lets_no_click_follow_once_another_window_came_to_
         -- Open, and another window in front by the time the probe is read: the toggle is not clicked.
         S.pixel = { r = 240, g = 240, b = 240 }
         T.during(T.elsewhere)
-        o:activate(3)
+        T.handled(o.activate, o, 3)
         assert(S.pixels == 1 and #S.clicks == 0, "a click in the other window: " .. T.dump())
         assert(#S.after == timers and T.count(after) == 1, T.dump())
         -- Not read at all: the same.
         S.pixel = nil
         T.backHere()
-        o:activate(3)
+        T.handled(o.activate, o, 3)
         assert(S.pixels == 2 and #S.clicks == 0, "a click in the other window: " .. T.dump())
         assert(#S.after == timers and T.count(after) == 2, T.dump())
         -- Open, nothing changed: the toggle's click, at once, and its state read waiting for the redraw.
         S.pixel = { r = 240, g = 240, b = 240 }
         T.during(nil)
         T.backHere()
-        o:activate(3)
+        T.handled(o.activate, o, 3)
         assert(#S.clicks == 1 and S.clicks[1][1] == 150 and S.clicks[1][2] == 100, "the toggle clicked: " .. T.dump())
         assert(#S.after == timers + 1, "the state read waits for the redraw")
     "#);
@@ -407,7 +408,7 @@ fn a_reveal_probes_toggle_clicks_nothing_once_the_overlay_left_the_front_while_i
           o:addGraphicalToggle({ label = "Reverb", region = { 40, 40, 60, 60 }, onImage = "C:/on.png",
             offImage = "C:/off.png", reveal = { at = { 10, 12 }, closedColor = { 20, 20, 20 } } })
         end)
-        o:activate(3)
+        T.handled(o.activate, o, 3)
         assert(#S.clicks == 1 and S.clicks[1][1] == 110 and S.clicks[1][2] == 62, "the probe clicked: " .. T.dump())
         o._lastActiveId = S.origin.id
         o:_deactivate()

@@ -422,11 +422,20 @@ T.host = strict("host", {
     end,
   }),
   screen = strict("host.screen", {
-    pixel = function() S.pixels += 1; return S.pixel end,
+    -- S.pixel. A read of the screen waits in the host's handler, answered at once here; where it
+    -- could not wait, the place is noted (T.screenWait). A snapshot's pixel touches no screen.
+    pixel = function(a, b, c)
+      local opts = if type(a) == "table" then b else c
+      if not (type(opts) == "table" and opts.snapshot) then T.screenWait("host.screen.pixel") end
+      S.pixels += 1
+      return S.pixel
+    end,
     -- S.pixel at every point, from one read; the points checked as the host checks them — a list
     -- of { x, y } in whole numbers — so a point the host would refuse is refused here too. All or
     -- nothing, as the host's: no S.pixel is no list, and the host's reason for a failed capture.
-    pixels = function(points)
+    -- Its wait as `pixel`'s.
+    pixels = function(points, opts)
+      if not (type(opts) == "table" and opts.snapshot) then T.screenWait("host.screen.pixels") end
       S.pixelLists += 1
       for i, p in ipairs(points) do
         assert(type(p) == "table" and #p == 2 and p[1] == math.floor(p[1]) and p[2] == math.floor(p[2]),
@@ -733,6 +742,15 @@ function T.screenWait(call)
   if where ~= "handler" then S.couldNotWait[#S.couldNotWait + 1] = call .. " (" .. where .. ")" end
 end
 
+-- `fn(...)` run as the handler of a hotkey runs it — the runtime's calibration key, a control's
+-- press — where a read of the screen waits in the host; what it returned. It must not wait here.
+function T.handled(fn, ...)
+  local args, out = table.pack(...), nil
+  local how = T.call("hotkey", function() out = table.pack(fn(table.unpack(args, 1, args.n))) end)
+  assert(how == "Ran", "the handler " .. how)
+  return table.unpack(out, 1, out.n)
+end
+
 -- One tick of the menu timer, 150 ms after the last, with any timer.after that came due first,
 -- and then — as the host's tick — the events that waited in the module's mailbox.
 function T.tick(n)
@@ -988,9 +1006,11 @@ fn event_kind(kind: &str) -> mlua::Result<(bool, &'static str)> {
 /// `Queued`, `Dropped`); `T.later(kind, f, …)`, the same through the mailbox always, as the host
 /// delivers a setting changed in the dialog, to run in the next queued phase; `T.queued()`, the
 /// tick's queued phase; the tests' wait point `T.waitPoint(name)`, `T.release(name, value)` and
-/// `T.waiting(name)`; the tests' entry `T.task` and `T.settle()`, which hands the reads its
-/// handlers and tasks wait for their readings; and `host.ocr.recognize`, the host's own, with
-/// `T.submit` as its callback form, raising where it cannot wait.
+/// `T.waiting(name)`; `T.pixelWait(blocking)`, a `host.screen.pixel` built as the host builds it,
+/// whose wait is that wait point under the call's name and which runs `blocking(why, …)` where it
+/// cannot wait; the tests' entry `T.task` and `T.settle()`, which hands the reads its handlers and
+/// tasks wait for their readings; and `host.ocr.recognize`, the host's own, with `T.submit` as its
+/// callback form, raising where it cannot wait.
 pub(crate) fn harness(lua: &Lua) -> Table {
     let t: Table = lua.load(HARNESS).set_name("harness").eval().expect("the harness loads");
     let host_call = lua
@@ -1042,6 +1062,13 @@ pub(crate) fn harness(lua: &Lua) -> Table {
     let hh = h.clone();
     t.set("waiting", lua.create_function(move |_, name: String| Ok(task::test_waiting(&*hh, &name))).unwrap()).unwrap();
     t.set("whereNow", task::test_where(lua, IDX, h.clone()).unwrap()).unwrap();
+    let hh = h.clone();
+    t.set(
+        "pixelWait",
+        lua.create_function(move |lua, blocking: Function| task::test_point(lua, IDX, hh.clone(), "host.screen.pixel", blocking))
+            .unwrap(),
+    )
+    .unwrap();
     t.set(
         "waitMessage",
         lua.create_function(|_, why: String| Ok(task::wait_message(task::Case::of(&why)))).unwrap(),
@@ -1377,11 +1404,14 @@ fn a_test_that_raises_counts_as_not_seeing_a_menu() {
 }
 
 /// A module's own pixel test: a synchronous colour check that answers at once. Declared cheap,
-/// it runs on every tick with nothing pressed.
+/// it runs on every tick with nothing pressed — in the tick's pass, a coroutine of the runtime's,
+/// where the host's `pixel` cannot wait: it reads on the event loop there, said in the log, every
+/// tick (a test asks with a callback instead; "Where a hook runs" in docs/api/overlay.md).
 #[test]
 fn a_modules_own_pixel_test() {
     run(r#"
         local S = T.S
+        S.mayNotWait = true
         local lit = {
           name = "menu border",
           cheap = true,
@@ -1401,6 +1431,8 @@ fn a_modules_own_pixel_test() {
         S.pixel = { r = 20, g = 20, b = 20 }
         T.tick(2)
         assert(T.open() == false)
+        assert(#S.couldNotWait == 11 and S.couldNotWait[1] == "host.screen.pixel (foreign)",
+          table.concat(S.couldNotWait, ", "))
     "#);
 }
 

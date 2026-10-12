@@ -153,6 +153,7 @@ function T.picture(x, y, shows)
 end
 
 rawset(T.host.screen, "pixel", function(x, y)
+  T.screenWait("host.screen.pixel")
   S.pixels += 1
   return T.screenAt(x, y)
 end)
@@ -166,7 +167,10 @@ rawset(T.host.screen, "pixels", function(points, opts)
   end
   local snap = opts and opts.snapshot
   assert(snap == nil or not snap.released, "host.screen.pixels: the snapshot was released")
-  if snap == nil then S.pixels += 1 end
+  if snap == nil then
+    T.screenWait("host.screen.pixels")
+    S.pixels += 1
+  end
   local out = {}
   for i, p in ipairs(points) do
     local x, y = p[1], p[2]

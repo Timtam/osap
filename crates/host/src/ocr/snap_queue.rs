@@ -9,10 +9,13 @@
 //! ([`choose`]). A stream of change-wait rounds a controller keeps asking for cannot starve a
 //! poll's text read beyond `AGING`, and a long text capture delays a due round by that one capture.
 //!
-//! **Three kinds of request.** A plain one is photographed as soon as the thread can; a timed one
+//! **Four kinds of request.** A plain one is photographed as soon as the thread can; a timed one
 //! (`at`) not before its moment; a change wait (`change`, `change.rs`) once per round from its
 //! start until it ends, rounds no closer than [`min_round`] from start to start and never later
-//! than its deadline.
+//! than its deadline. The fourth is no picture: the points a handler waits for in
+//! `host.screen.pixel` or `pixels`, read as soon as the thread can, in a round of their own and
+//! through the functions those calls read with on the event loop ([`SnapKind::Points`]), so that
+//! a waited colour is the one the event loop would have read.
 //!
 //! **A round** is the most urgent due request and the others that can share its picture
 //! ([`SnapLane::take`]). Through the standard path that is ONE capture: every due request whose
@@ -67,6 +70,10 @@ pub enum SnapKind {
     At(Instant),
     /// Pictures from `start` on, until the wait ends.
     Change { wait: Box<Wait>, start: Instant },
+    /// The colours at `at`, which a handler waits for in `host.screen.pixel` (`single`: each point
+    /// as `pixel` reads one) or `pixels`, as soon as the thread can read them — through the capture
+    /// thread's `points`, never a picture of a round: a round of their own ([`SnapLane::take`]).
+    Points { at: Vec<(i32, i32)>, single: bool },
 }
 
 /// One request, as the event loop hands it to the thread.
@@ -91,7 +98,7 @@ impl SnapReq {
 
     fn first_due(&self) -> Instant {
         match &self.kind {
-            SnapKind::Plain => self.asked,
+            SnapKind::Plain | SnapKind::Points { .. } => self.asked,
             SnapKind::At(t) => *t,
             SnapKind::Change { start, .. } => *start,
         }
@@ -99,6 +106,10 @@ impl SnapReq {
 
     fn is_wait(&self) -> bool {
         matches!(self.kind, SnapKind::Change { .. })
+    }
+
+    fn is_points(&self) -> bool {
+        matches!(self.kind, SnapKind::Points { .. })
     }
 
     /// Whether its next picture is meant to show the screen as it was at the call: a plain
@@ -109,7 +120,7 @@ impl SnapReq {
         self.first_due() <= self.asked
             && match &self.kind {
                 SnapKind::Change { wait, .. } => wait.baseline_due(),
-                SnapKind::Plain | SnapKind::At(_) => true,
+                SnapKind::Plain | SnapKind::At(_) | SnapKind::Points { .. } => true,
             }
     }
 }
@@ -125,6 +136,8 @@ pub struct ChangeInfo {
 pub enum SnapOutcome {
     /// Of exactly the request's region; `frames` pictures were taken for it.
     Picture { frame: Arc<Frame>, frames: u32, change: Option<ChangeInfo> },
+    /// A points request's colours, one per point, in order ([`SnapKind::Points`]).
+    Colours(Vec<(u8, u8, u8)>),
     Failed { why: String, frames: u32, change: Option<ChangeInfo> },
     /// Its flag was set: the event loop answers or drops it itself.
     Cancelled,
@@ -314,15 +327,28 @@ impl SnapLane {
     /// source that share its picture, in order of urgency (see the file's comment): through the
     /// standard path the ones inside the round's rectangle or within `UNION_MAX` pixels of union
     /// with it on the same display, one capture; through desktop duplication all of them. The
-    /// rest stay due and go next.
+    /// rest stay due and go next. A points request shares no picture: when it is the most urgent
+    /// it is a round of its own, read through the capture thread's `points` ([`Round::points`]),
+    /// and otherwise no round takes it.
     pub fn take(&mut self, now: Instant) -> Option<Round> {
         let key = |e: &Entry| (Self::class(e, now), e.due);
         let first = (0..self.waiting.len())
             .filter(|&i| Self::ready(&self.waiting[i], now))
             .min_by_key(|&i| key(&self.waiting[i]))?;
+        if self.waiting[first].req.is_points() {
+            let e = self.waiting.remove(first);
+            self.taking = vec![(e.req.ticket.owner.idx, e.req.shows_the_call())];
+            let source = e.req.source;
+            return Some(Round { source, rects: Vec::new(), poll: false, members: vec![(e.req, 0)], started: now });
+        }
         let source = self.waiting[first].req.source;
         let mut others: Vec<usize> = (0..self.waiting.len())
-            .filter(|&i| i != first && Self::ready(&self.waiting[i], now) && self.waiting[i].req.source == source)
+            .filter(|&i| {
+                i != first
+                    && Self::ready(&self.waiting[i], now)
+                    && self.waiting[i].req.source == source
+                    && !self.waiting[i].req.is_points()
+            })
             .collect();
         others.sort_by_key(|&i| key(&self.waiting[i]));
         let mut chosen = vec![first];
@@ -435,6 +461,41 @@ impl Round {
     /// The captures as the backend takes them.
     pub fn tuples(&self) -> Vec<(i32, i32, i32, i32)> {
         self.rects.iter().map(Rect::tuple).collect()
+    }
+
+    /// The points a points request's round reads, and whether each is read as `pixel` reads one;
+    /// `None` for a round of pictures.
+    pub fn points(&self) -> Option<(&[(i32, i32)], bool)> {
+        match self.members.as_slice() {
+            [(SnapReq { kind: SnapKind::Points { at, single }, .. }, _)] => Some((at.as_slice(), *single)),
+            _ => None,
+        }
+    }
+
+    /// A points round's answer, from what the capture thread's `points` gave: its colours, one per
+    /// point — a list of another length is a failed capture, never a short answer — or the reason
+    /// there are none. A round of pictures answers every request [`ROUND_FAILED`].
+    pub fn answer_points(self, colours: Result<Vec<(u8, u8, u8)>, String>) -> RoundDone {
+        let steps = self
+            .members
+            .into_iter()
+            .map(|(req, _)| {
+                let outcome = match (&req.kind, &colours) {
+                    (SnapKind::Points { at, .. }, Ok(c)) if c.len() == at.len() => SnapOutcome::Colours(c.clone()),
+                    (SnapKind::Points { .. }, Ok(_)) => {
+                        SnapOutcome::Failed { why: CAPTURE_FAILED.to_string(), frames: 0, change: None }
+                    }
+                    (SnapKind::Points { .. }, Err(why)) => SnapOutcome::Failed { why: why.clone(), frames: 0, change: None },
+                    _ => SnapOutcome::Failed {
+                        why: ROUND_FAILED.to_string(),
+                        frames: 0,
+                        change: req.is_wait().then(ChangeInfo::default),
+                    },
+                };
+                Step::Done { id: req.ticket.id, asked: req.asked, outcome, cancel: req.cancel.clone() }
+            })
+            .collect();
+        RoundDone { steps, source: self.source, started: self.started, panics: Vec::new() }
     }
 
     /// The first-read comparisons its requests carry, taken out of them: the capture thread makes
@@ -635,15 +696,78 @@ mod tests {
     }
 
     /// One turn of the thread: sweep, take a round if one is due, photograph it with `shoot`,
-    /// run it and finish it. The rectangles captured, and every answer.
+    /// run it and finish it — or, for a points round, read each point as `(x, y, 7)`, the way
+    /// `shoot` answers its region's first pixel: a failed read when `shoot` fails. The rectangles
+    /// captured, and every answer.
     fn turn(lane: &mut SnapLane, now: Instant, shoot: &dyn Fn(Rect) -> Result<Frame, String>) -> (Vec<Rect>, Vec<SnapDone>) {
         let mut out = lane.sweep_cancelled(now);
         let Some(round) = lane.take(now) else { return (Vec::new(), out) };
+        if let Some((at, _)) = round.points() {
+            let read = at.iter().map(|&(x, y)| shoot(Rect::new(x, y, 1, 1)).map(|_| (x as u8, y as u8, 7))).collect();
+            out.extend(lane.finish(round.answer_points(read), now));
+            return (Vec::new(), out);
+        }
         let rects = round.rects.clone();
         let frames = rects.iter().map(|r| shoot(*r)).collect();
         let done = round.run(frames, now, 0);
         out.extend(lane.finish(done, now));
         (rects, out)
+    }
+
+    fn points(at: &[(i32, i32)], single: bool) -> SnapKind {
+        SnapKind::Points { at: at.to_vec(), single }
+    }
+
+    /// A points request is a round of its own, read through the capture thread's `points`: never
+    /// one of the pictures of a round, whatever region it shares with them, and nothing taken with
+    /// it. It is due at the call, and goes by the lanes' order — a person's ahead of a poll's. Its
+    /// answer is its colours, one per point; a list of another length is a failed capture, never a
+    /// short answer; a failed read is its reason. It is a picture due at the call, as a plain one is.
+    #[test]
+    fn a_points_request_is_a_round_of_its_own() {
+        let t0 = Instant::now();
+        let r = Rect::new(0, 0, 20, 20);
+        let mut lane = SnapLane::default();
+        lane.submit(req(1, A, r, SnapKind::Plain, t0));
+        lane.submit(req(2, B, r, points(&[(3, 4), (5, 6)], false), t0));
+        assert!(lane.picture_due(B.idx), "due at the call");
+        let round = lane.take(t0).expect("due");
+        assert_eq!((round.ids(), round.points()), (vec![1], None), "the picture's round takes no points request");
+        lane.finish(round.run(vec![Ok(solid(r, 9, t0))], t0, 0), t0);
+        let round = lane.take(t0).expect("the points request");
+        assert_eq!(round.ids(), vec![2]);
+        assert!(round.rects.is_empty(), "nothing photographed for it");
+        assert_eq!(round.points(), Some((&[(3, 4), (5, 6)][..], false)));
+        assert!(lane.picture_due(B.idx), "being read is not read");
+        let out = lane.finish(round.answer_points(Ok(vec![(1, 2, 3), (4, 5, 6)])), t0);
+        assert!(matches!(&out[0].outcome, SnapOutcome::Colours(c) if c == &vec![(1, 2, 3), (4, 5, 6)]));
+        assert!(lane.is_empty() && !lane.picture_due(B.idx));
+
+        // A person's goes ahead of a poll's, and a single point is read as `pixel` reads one.
+        lane.submit(req(3, A, r, points(&[(1, 1)], false), t0));
+        let mut key = req(4, B, r, points(&[(2, 2)], true), t0 + MS);
+        key.ticket.prio = Priority::Interactive;
+        lane.submit(key);
+        let round = lane.take(t0 + MS).unwrap();
+        assert_eq!((round.ids(), round.points()), (vec![4], Some((&[(2, 2)][..], true))));
+        let out = lane.finish(round.answer_points(Ok(vec![(1, 1, 1), (2, 2, 2)])), t0 + MS);
+        assert!(
+            matches!(&out[0].outcome, SnapOutcome::Failed { why, frames: 0, change: None } if why == CAPTURE_FAILED),
+            "two colours for one point"
+        );
+        let round = lane.take(t0 + MS).unwrap();
+        let out = lane.finish(round.answer_points(Err("screen capture failed: it is still opening".into())), t0 + MS);
+        assert!(matches!(&out[0].outcome, SnapOutcome::Failed { why, .. } if why.ends_with("it is still opening")));
+
+        // Cancelled while it is read: answered so, as any request is.
+        let gone = req(5, A, r, points(&[(1, 1)], false), t0);
+        let flag = gone.cancel.clone();
+        lane.submit(gone);
+        let round = lane.take(t0).unwrap();
+        flag.store(true, Ordering::Release);
+        let out = lane.finish(round.answer_points(Ok(vec![(1, 1, 1)])), t0);
+        assert!(matches!(out[0].outcome, SnapOutcome::Cancelled));
+        assert!(lane.is_empty());
     }
 
     fn picture(d: &SnapDone) -> &Arc<Frame> {
@@ -1093,9 +1217,10 @@ mod tests {
             let now = t0 + ms * MS;
             if ms < 1000 && rnd(10) == 0 {
                 let r = Rect::new(rnd(4) as i32 * 20, 0, 10, 10);
-                let kind = match rnd(3) {
+                let kind = match rnd(4) {
                     0 => SnapKind::Plain,
                     1 => SnapKind::At(now + rnd(300) as u32 * MS),
+                    2 => points(&[(r.x, 0), (r.x + 5, 5)], rnd(2) == 0),
                     _ => wait_kind(r, 1 + rnd(600), rnd(100), now + rnd(100) as u32 * MS),
                 };
                 let mut q = req(next, if rnd(2) == 0 { A } else { B }, r, kind, now);

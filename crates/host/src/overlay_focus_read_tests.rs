@@ -606,7 +606,7 @@ fn an_answer_after_another_announcement_is_not_spoken() {
         end)
         T.tab(); T.tab(); T.tab()
         assert(o.focus == 1 and #S.reads == 1)
-        o:activate(3)
+        T.handled(o.activate, o, 3)
         for _ = 1, 10 do
           S.now += 120
           T.runDue()
@@ -790,7 +790,7 @@ fn a_calibration_shot_reads_nothing() {
         local S = T.S
         local o = T.fields()
         local said = #S.speech
-        assert(o:calibrationShot() == true)
+        assert(T.handled(o.calibrationShot, o) == true)
         assert(#S.reads == 0 and #S.speech == said, T.dump())
     "#);
 }

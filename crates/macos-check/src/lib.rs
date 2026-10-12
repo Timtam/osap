@@ -235,6 +235,12 @@ pub fn snapshot_lane_calls() {
     let _: fn(Round, &str, Instant) -> RoundDone = Round::fail;
     let _: fn(&Round) -> Vec<(i32, i32, i32, i32)> = Round::tuples;
     let _: fn(&mut Round) -> Vec<backend::CompareReq> = Round::take_compares;
+    // The points a handler waits for in `host.screen.pixel` or `pixels`: a round of their own, read
+    // through the capture thread's `points` (the macOS one is the backend's `capture::points`).
+    let _: fn(&Round) -> Option<(&[(i32, i32)], bool)> = Round::points;
+    let _: fn(Round, Result<Vec<(u8, u8, u8)>, String>) -> RoundDone = Round::answer_points;
+    let _ = |at: Vec<(i32, i32)>| snap_queue::SnapKind::Points { at, single: true };
+    let _: backend::PointsFn = |_, _, _| Ok(Vec::new());
     // The first-read comparison a request carries, which `capture_source.rs` hands out and the
     // capture thread and the image worker make.
     let _: fn(bool) -> backend::CompareSlot = backend::CompareSlot::new;

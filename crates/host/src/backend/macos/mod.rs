@@ -213,6 +213,8 @@ impl Backend for MacBackend {
             recognise: ocr::recognise_shot,
             languages: ocr::languages,
             frames: ocr::frames_for_round,
+            // The source is ignored, as for every read here.
+            points: |pts, _src, single| capture::points(pts, single),
             // One way of reading the screen here: nothing to compare.
             compare: super::no_comparison,
             display_of: capture::display_id_at,

@@ -70,7 +70,7 @@
 //! so the guard collects a VM whose last entry ended with less than an eighth of its limit free.
 //!
 //! **Naming the host call.** Every binding marks itself with [`host_call!`]: one atomic swap in and
-//! one store out, so the messages can say "in host.screen.pixel" when the time ran out inside it (G3
+//! one store out, so the messages can say "in host.element.find" when the time ran out inside it (G3
 //! will need the same marker to name a call that never returns).
 //!
 //! **Measuring.** The watchdog also charges the event loop's processor time, sampled at every look,
@@ -1722,7 +1722,7 @@ pub(crate) fn frame_place(lua: &Lua, f: &RawFrame) -> String {
     }
 }
 
-/// Notes the host call a binding runs, for the guard: the stop's messages say "in host.screen.pixel"
+/// Notes the host call a binding runs, for the guard: the stop's messages say "in host.element.find"
 /// when the time ran out inside it (and G3 will name a call that never returns). One atomic swap in,
 /// one store out; nothing when no guard is installed on the thread (the tests' VMs). The first
 /// statement of every closure Luau can call; `lib.rs`'s `every_binding_names_its_host_call` holds

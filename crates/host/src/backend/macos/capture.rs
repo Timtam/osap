@@ -948,6 +948,37 @@ pub fn pixels(pts: &[(i32, i32)]) -> Result<Vec<(u8, u8, u8)>, String> {
     })
 }
 
+/// The colours a handler waits for in `host.screen.pixel` (`single`) or `pixels`, read on the
+/// `screen-capture` thread (`OcrWorker::points`): every point at point resolution, as `pixels`
+/// reads them — `capture_rgba`, never `frame`'s capture at the display's own resolution, so a
+/// colour is what the event loop's read gives. Without `pixel()`'s tile, which is the event loop's
+/// alone. A single point that cannot be read is black, with `pixel()`'s line once a session, as
+/// `pixel()` answers it; a list fails as `pixels` fails.
+pub fn points(pts: &[(i32, i32)], single: bool) -> Result<Vec<(u8, u8, u8)>, String> {
+    crate::loop_guard::off_loop("a pixel read a handler waits for");
+    if !single {
+        return pixels(pts);
+    }
+    Ok(pts
+        .iter()
+        .map(|&(x, y)| match pixels(&[(x, y)]) {
+            Ok(c) if c.len() == 1 => c[0],
+            _ => {
+                if !FAILURE_REPORTED.swap(true, Ordering::Relaxed) {
+                    crate::logging::line(
+                        "macos",
+                        &format!(
+                            "could not read the screen at {x},{y} — pixel reads will report black until \
+                             this clears. Check the Screen Recording permission; this is logged once."
+                        ),
+                    );
+                }
+                (0, 0, 0)
+            }
+        })
+        .collect())
+}
+
 const PATH_SCK: u32 = 1;
 const PATH_WINDOW_LIST: u32 = 2;
 const PATH_DISPLAY: u32 = 4;

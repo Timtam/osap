@@ -3,8 +3,8 @@
 -- specificity 1; Guard probe takes it at 2, and then B's onDeactivate runs out of memory (TEST 3),
 -- or at 3, and then it loops (TEST 10). Its Ctrl+Alt+Win+6 loops in the library's code (TEST 13),
 -- its Ctrl+Alt+Shift+Win+6 loops in its own code, asking the library each time (TEST 16), and its
--- Ctrl+Alt+Shift+Win+7 has the library read a pixel over and over (TEST 17). Every loop ends by
--- itself after 30 seconds, every fill after 600 MB, saying so — on a build without the guard.
+-- Ctrl+Alt+Shift+Win+7 has the library read a pixel over and over, which waits (TEST 17). Every
+-- loop ends by itself after 30 seconds, every fill after 600 MB, saying so.
 
 local lib = host.require("com.tool.guard-probe-lib")
 local SLOT = "guard-probe"
@@ -72,6 +72,7 @@ return {
 
     host.hotkey.register("Ctrl+Alt+Shift+Win+7", function()
       lib.pixelForever()
+      host.speech.output("Guard probe B: thirty seconds of pixel reads, not stopped")
     end)
 
     host.log.info("[guard-probe-b] loaded with " .. lib.name() .. ": Ctrl+Alt+Win+6 and 9, Ctrl+Alt+Shift+Win+2, 6 and 7")

@@ -611,7 +611,7 @@ fn choose_menu_item_from_a_stepper() {
         assert(S.done[1] == "true:nil", tostring(S.done[1]))
         assert(S.speech[#S.speech].text == "Zoom, 85%, slider", T.said())
         -- The opener no control's `at` names is marked in the calibration shot once it has been used.
-        assert(o:calibrationShot() == true)
+        assert(T.handled(o.calibrationShot, o) == true)
         local marks = S.shots[#S.shots - 1].marks
         assert(#marks == 1 and marks[1][1] == 121 and marks[1][2] == 64, "the zoom field's crosshair")
         assert(T.count("[calibrate]" .. string.format("  %2d %-24s screen (%d,%d)  pixel %s  [menu opener]",

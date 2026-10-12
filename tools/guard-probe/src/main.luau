@@ -94,29 +94,39 @@
 --     a) Press Ctrl+Alt+Win+1.                   Expected: about 2 seconds of silence (nothing
 --        answers, the keyboard of the program in front works), then "Stopped Guard probe: its
 --        hotkey callback ran for 2 seconds of processor time without returning, at src/main.luau
---        line 241. Its keys go to the program in front again; it stays off until you turn it
+--        line 249. Its keys go to the program in front again; it stays off until you turn it
 --        on in the module manager." The error window opens: "What ran too long: Guard probe's
 --        hotkey callback. How long: 2.0 s of processor time … In a host call: no, it was running
---        Luau code. Where, innermost first: com.tool.guard-probe/src/main.luau:241: in function
+--        Luau code. Where, innermost first: com.tool.guard-probe/src/main.luau:249: in function
 --        'spin' …".
 --     b) Press Ctrl+Alt+Win+0.                   Expected: nothing — it is off.
 --     c) In the manager the row ends "— stopped: its hotkey callback ran too long, at
---        src/main.luau:241", unticked. Tick it.  Expected: the note goes.
+--        src/main.luau:249", unticked. Tick it.  Expected: the note goes.
 --     d) Press Ctrl+Alt+Win+0.                   Expected: "Guard probe is on".
 --        FAILS AS: "No stop: this build has no time limit" after 30 seconds, or the sentence
 --        naming another module.
 --
 --   TEST 7 — work in C between Luau's checks: string.upper of 4 MB, over and over.
---     Press Ctrl+Alt+Win+3, then tick it again.  Expected: as TEST 6, at line 248.
+--     Press Ctrl+Alt+Win+3, then tick it again.  Expected: as TEST 6, at line 256.
 --
---   TEST 8 — a loop over a host call: host.screen.pixel, which waits for the screen.
---     Press Ctrl+Alt+Win+7, then tick it again.  Expected: up to 10 seconds of silence — a capture
---        mostly waits for the display, which is not processor time, so the wall clock decides —
---        then "Stopped Guard probe: its hotkey callback ran for 10 seconds without returning, in
---        host.screen.pixel, at src/main.luau line 255. …". If the capture computes on this
---        machine, it may be "2 seconds of processor time" instead; either is right, the host call
---        is named in both. (Rarely the time runs out between two calls: then "in
---        host.screen.pixel" is missing.)
+--   TEST 8 — a loop of host calls that wait: host.screen.pixel, over and over for 30 seconds. Each
+--     read waits in the callback while the screen-capture thread takes it, and waiting counts on
+--     no clock: the loop is not stopped, and the other modules go on.
+--     a) Press Ctrl+Alt+Win+7.                   Expected: silence; nothing is stopped.
+--     b) Meanwhile press Ctrl+Alt+Shift+Win+0.   Expected: "Guard probe C is on", at once.
+--     c) Meanwhile press Ctrl+Alt+Win+0.         Expected: nothing yet — Guard probe is busy with
+--        its loop, and the key waits behind it.
+--     d) About 30 seconds after a).              Expected: "Thirty seconds of pixel reads, not
+--        stopped", then "Guard probe is on" for the key that waited.
+--        FAILS AS: "Stopped Guard probe: …" — a read that held the event loop instead of waiting;
+--        or Guard probe C silent at b).
+--
+--   TEST 8b — a loop over a host call that cannot wait: host.json.decode of a 4 MB string, work
+--     on the event loop.
+--     Press Ctrl+Alt+Shift+Win+8, then tick it again.  Expected: about 2 seconds of silence, then
+--        "Stopped Guard probe: its hotkey callback ran for 2 seconds of processor time without
+--        returning, in host.json.decode, at src/main.luau line 271. …". (Rarely the time runs out
+--        between two calls: then "in host.json.decode" is missing.)
 --
 --   TEST 9 — a long callback that ends is not stopped.
 --     Press Ctrl+Alt+Shift+Win+1.                Expected: one second of silence, then
@@ -183,7 +193,7 @@
 --     they set the thresholds, and show how long each module's load takes.
 --
 --   TEST 15 — a callback that yields in a loop is one callback: stopped like any other loop.
---     Press Ctrl+Alt+Shift+Win+5.                Expected: as TEST 6, at line 262.
+--     Press Ctrl+Alt+Shift+Win+5.                Expected: as TEST 6, at line 278.
 --        FAILS AS: the application not answering for 30 seconds, then "No stop: this build has
 --        no time limit" — every yield started the clocks afresh.
 --
@@ -197,16 +207,14 @@
 --     c) Tick Guard probe B.
 --        FAILS AS: "Stopped Guard probe library and 2 modules …".
 --
---   TEST 17 — a slow host call that a library's code makes stops only the module it ran for.
---     a) Press Ctrl+Alt+Shift+Win+7 (Guard probe B's key: the library reads a pixel over and over).
---        Expected: up to 10 seconds, then "Stopped Guard probe B: its hotkey callback ran for 10
---        seconds without returning, in host.screen.pixel, at Guard probe library's src/main.luau
---        line 31. Its keys go to the program in front again; it stays off until you turn
---        it on in the module manager." (Or "ran for 2 seconds of processor time", then ending "…;
---        more in the error window.")
---     b) Ctrl+Alt+Shift+Win+0.                   Expected: "Guard probe C is on".
---     c) Tick Guard probe B.
---        FAILS AS: the library and C stopped too.
+--   TEST 17 — a loop of waiting host calls in a library's code waits for the module it runs for.
+--     a) Press Ctrl+Alt+Shift+Win+7 (Guard probe B's key: the library reads a pixel over and over
+--        for 30 seconds, in B's callback). Expected: silence; nothing is stopped.
+--     b) Meanwhile press Ctrl+Alt+Shift+Win+0.   Expected: "Guard probe C is on", at once — C runs
+--        the same library's code, and B's waits are B's alone.
+--     c) About 30 seconds after a).              Expected: "Guard probe B: thirty seconds of pixel
+--        reads, not stopped".
+--        FAILS AS: "Stopped Guard probe B …", or the library and C stopped too.
 --
 --   TEST 18 — the application's own reload key, pressed during a stall, is not dropped.
 --     a) Press Ctrl+Alt+Win+1, and during the silence press Ctrl+Alt+Shift+Win+F5.
@@ -249,10 +257,18 @@ local function upperForever()
   host.speech.output("No stop: this build has no time limit")
 end
 
--- A loop over a host call that waits for the screen.
+-- A loop of host calls that wait: each pixel read waits in the callback while the screen-capture
+-- thread takes it, which counts on no clock, so the loop runs its 30 seconds.
 local function pixelForever()
   local started = os.clock()
   while os.clock() - started < 30 do local c = host.screen.pixel(0, 0) end
+  host.speech.output("Thirty seconds of pixel reads, not stopped")
+end
+
+-- A loop over a host call that cannot wait: decoding 4 MB of JSON is work on the event loop.
+local function decodeForever()
+  local text, started = '"' .. string.rep("a", 4 * 1024 * 1024) .. '"', os.clock()
+  while os.clock() - started < 30 do local s = host.json.decode(text) end
   host.speech.output("No stop: this build has no time limit")
 end
 
@@ -316,6 +332,10 @@ return {
       pixelForever()
     end)
 
+    host.hotkey.register("Ctrl+Alt+Shift+Win+8", function()
+      decodeForever()
+    end)
+
     host.hotkey.register("Ctrl+Alt+Win+8", function()
       local ok = pcall(fill)
       host.speech.output(ok and "It fit, which it should not" or "Caught it. Guard probe goes on.")
@@ -330,6 +350,6 @@ return {
       host.speech.output("finished")
     end)
 
-    host.log.info("[guard-probe] loaded: Ctrl+Alt+Win+0 to 8, Ctrl+Alt+Shift+Win+1, 4 and 5")
+    host.log.info("[guard-probe] loaded: Ctrl+Alt+Win+0 to 8, Ctrl+Alt+Shift+Win+1, 4, 5 and 8")
   end,
 }

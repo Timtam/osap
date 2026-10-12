@@ -2,9 +2,9 @@
 --
 -- In a timer's handler rather than at the top level: a handler is where a call can wait
 -- for what it asked, and a module's top level is not (see "Where it waits" in
--- docs/api/screen.md). Of the calls below, `snapshot` waits here for its picture while the
--- event loop goes on; `size`, `pixel` and `imageSearch` run on the event loop wherever they
--- are called.
+-- docs/api/screen.md). Of the calls below, `pixel` and `snapshot` wait here for the screen while
+-- the event loop goes on — a pixel of the snapshot touches no screen and answers at once —
+-- and `size` and `imageSearch` run on the event loop wherever they are called.
 
 host.timer.after(0, function()
   local size = host.screen.size()

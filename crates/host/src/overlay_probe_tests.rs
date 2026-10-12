@@ -37,6 +37,7 @@ rawset(T.host, "inputEpoch", function() return S.inputEpoch end)
 S.at = {}
 S.probeReads = {}
 rawset(T.host.screen, "pixels", function(points)
+  T.screenWait("host.screen.pixels")
   local _, inPass = T.O._passes()
   S.probeReads[#S.probeReads + 1] = { points = points, where = T.whereNow(),
     yieldable = coroutine.isyieldable(), inPass = inPass }

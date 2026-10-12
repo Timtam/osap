@@ -686,11 +686,26 @@ fn frames_with(
 /// captures the rectangles `frame::plan_points` plans for them — one `BitBlt` of the box they
 /// lie in when it is small, one per 2048x976 tile they reach otherwise; desktop duplication gets
 /// each of them as a 1x1 piece of ONE request, and when it cannot answer they are read the
-/// standard way or fail with the reason, as the module's `fallback` says.
-fn pixels_through(pts: &[(i32, i32)], src: CaptureSource) -> Result<Vec<(u8, u8, u8)>, String> {
-    pixels_with(pts, src, |rects| dxgi::capture(rects, Caller::Pump), off_every_monitor, |r| {
+/// standard way or fail with the reason, as the module's `fallback` says. `caller` is who waits
+/// for duplication: the event loop (`Caller::Pump`) where the call cannot wait, the capture thread
+/// (`Caller::Worker`, up to 250 ms) for a handler that waits.
+fn pixels_through(pts: &[(i32, i32)], src: CaptureSource, caller: Caller) -> Result<Vec<(u8, u8, u8)>, String> {
+    pixels_with(pts, src, |rects| dxgi::capture(rects, caller), off_every_monitor, |r| {
         capture_screen(r.x, r.y, r.w, r.h).ok_or_else(|| CAPTURE_FAILED.to_string())
     })
+}
+
+/// The pixel waits' capture (`OcrWorker::points`), on the capture thread: each point as
+/// [`pixel_through`] reads it for `host.screen.pixel` (`single`), or all of them as
+/// [`pixels_through`] reads them for `host.screen.pixels` — the event loop's own functions, waiting
+/// for desktop duplication as the capture thread's reads do, up to 250 ms.
+fn points_on_capture_thread(pts: &[(i32, i32)], src: CaptureSource, single: bool) -> Result<Vec<(u8, u8, u8)>, String> {
+    crate::loop_guard::off_loop("a pixel read a handler waits for");
+    if single {
+        pts.iter().map(|&(x, y)| pixel_through(x, y, src, Caller::Worker)).collect()
+    } else {
+        pixels_through(pts, src, Caller::Worker)
+    }
 }
 
 /// [`pixels_through`] with the engine, the monitor test and the standard capture passed in.
@@ -878,9 +893,9 @@ fn ensure_winrt() {
 }
 
 /// A pixel through `src`: `GetPixel` for the standard source, a 1x1 region of the duplicated
-/// picture otherwise. `Err` only when duplication could not answer and the module forbade
-/// the fallback: the reason, as [`unanswered`] words it for every other read.
-fn pixel_through(x: i32, y: i32, src: CaptureSource) -> Result<(u8, u8, u8), String> {
+/// picture otherwise, which `caller` waits for. `Err` only when duplication could not answer and
+/// the module forbade the fallback: the reason, as [`unanswered`] words it for every other read.
+fn pixel_through(x: i32, y: i32, src: CaptureSource, caller: Caller) -> Result<(u8, u8, u8), String> {
     let CaptureSource::Duplication { or_standard } = src else {
         return Ok(pixel_gdi(x, y));
     };
@@ -892,7 +907,7 @@ fn pixel_through(x: i32, y: i32, src: CaptureSource) -> Result<(u8, u8, u8), Str
     }
     // Its fallback is `GetPixel`, not a 1x1 blit, so a module that allows the standard way
     // gets exactly the answer it got before.
-    match dxgi::capture(&[(x, y, 1, 1)], Caller::Pump) {
+    match dxgi::capture(&[(x, y, 1, 1)], caller) {
         Ok(images) => images
             .first()
             .map(|c| (c.rgba[0], c.rgba[1], c.rgba[2]))
@@ -1379,7 +1394,7 @@ impl Backend for WindowsBackend {
     }
 
     fn pixel(&self, x: i32, y: i32, src: CaptureSource) -> Result<(u8, u8, u8), String> {
-        pixel_through(x, y, src)
+        pixel_through(x, y, src, Caller::Pump)
     }
 
     fn compare_capture_sources(&self, who: &str, read: (i32, i32, i32, i32)) -> bool {
@@ -1405,7 +1420,7 @@ impl Backend for WindowsBackend {
     }
 
     fn pixels(&self, pts: &[(i32, i32)], src: CaptureSource) -> Result<Vec<(u8, u8, u8)>, String> {
-        pixels_through(pts, src)
+        pixels_through(pts, src, Caller::Pump)
     }
 
     fn ocr_worker(&self) -> OcrWorker {
@@ -1418,6 +1433,7 @@ impl Backend for WindowsBackend {
             recognise: ocr_recognise,
             languages: ocr_languages,
             frames: frames_on_capture_thread,
+            points: points_on_capture_thread,
             compare: compare_on_worker,
             // One standard capture may span monitors here: `BitBlt` of the virtual screen.
             display_of: |_, _| 0,
@@ -5060,7 +5076,7 @@ mod capture_tests {
         let mut pts = quadrant_points(x, y, w, h);
         pts.extend(quadrant_points(x + 10, y + 5, w - 20, h - 10));
         let t = std::time::Instant::now();
-        let got = pixels_through(&pts, CaptureSource::Standard);
+        let got = pixels_through(&pts, CaptureSource::Standard, Caller::Pump);
         let one = t.elapsed();
         let t = std::time::Instant::now();
         let each: Vec<(u8, u8, u8)> = pts.iter().map(|&(px, py)| pixel_gdi(px, py)).collect();
@@ -5195,9 +5211,9 @@ mod capture_tests {
         assert_eq!(colorref_rgb(0x00FF_FFFF), (255, 255, 255));
         let (x, y) = (-30_000, -30_000);
         assert!(off_every_monitor(x, y));
-        let standard = pixel_through(x, y, CaptureSource::Standard);
-        assert_eq!(pixel_through(x, y, CaptureSource::Duplication { or_standard: false }), standard);
-        assert_eq!(pixel_through(x, y, CaptureSource::Duplication { or_standard: true }), standard);
+        let standard = pixel_through(x, y, CaptureSource::Standard, Caller::Pump);
+        assert_eq!(pixel_through(x, y, CaptureSource::Duplication { or_standard: false }, Caller::Pump), standard);
+        assert_eq!(pixel_through(x, y, CaptureSource::Duplication { or_standard: true }, Caller::Pump), standard);
     }
 
     /// What a module is told when duplication had no picture is part of the API: every reason

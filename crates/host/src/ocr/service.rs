@@ -21,10 +21,11 @@
 //! **One capture thread**, named `screen-capture`, for the text reads' pictures and for
 //! `host.screen.snapshotAsync`'s: a snapshot is the same act as the first half of a read. The
 //! snapshots wait in a lane of their own beside the reads' queue (`snap_queue.rs`) — plain ones,
-//! timed ones and the rounds of change waits — and the thread takes whichever of the two is more
-//! urgent by one rule (`snap_queue::choose`). A read of a snapshot the module holds is not
-//! photographed at all: it goes to the recogniser with the snapshot's pixels
-//! ([`Service::submit_on_frame`], `OcrWorker::shot_of`).
+//! timed ones and the rounds of change waits, and the points a handler waits for in
+//! `host.screen.pixel` or `pixels`, read through `OcrWorker::points` — and the thread takes
+//! whichever of the two is more urgent by one rule (`snap_queue::choose`). A read of a snapshot
+//! the module holds is not photographed at all: it goes to the recogniser with the snapshot's
+//! pixels ([`Service::submit_on_frame`], `OcrWorker::shot_of`).
 //!
 //! What stays as it was: the Windows neural recogniser still starts beside `Windows.Media.Ocr`
 //! for every small region, inside the recognise stage exactly as `recognize` runs it, and its
@@ -692,13 +693,18 @@ fn capture_for_read<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, 
     inner.recognise_cv.notify_one();
 }
 
-/// Snapshot rounds slower than `ROUND_SLOW` this session, for the log.
+/// Snapshot rounds of pictures slower than `ROUND_SLOW` this session, for the log.
 static SLOW_ROUNDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Points rounds slower than `ROUND_SLOW` this session, counted apart: a Mac's every pixel read,
+/// and a Windows one that waits for desktop duplication, can take that long, and would otherwise
+/// take the first and every hundredth line from a snapshot round that was slow.
+static SLOW_POINT_ROUNDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One round of the snapshot lane: the first-read comparisons its requests carry, its captures,
 /// then — outside the lock — its comparisons and cuts, then its answers. A panic in the capture
 /// is every capture of the round failing; one in the host's own code for a request answers that
-/// request (`Round::run`).
+/// request (`Round::run`). A points request's round reads its points through `worker.points`
+/// instead, and a panic there is its read failing.
 fn snapshot_round<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, mut round: Round, snaps: &Sender<SnapDone>) {
     for c in round.take_compares() {
         c.make(worker.compare);
@@ -706,13 +712,29 @@ fn snapshot_round<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, mu
     let began = Instant::now();
     let rects = round.tuples();
     let (source, poll) = (round.source, round.poll);
-    let done = match logging::contain(|| (worker.frames)(&rects, source, poll)) {
-        // The epoch as it stands now the pictures exist: input the host drives from here on
-        // turns it over after them.
-        Ok(frames) => round.run(frames, (inner.clock)(), inner.input_epoch.load(Ordering::SeqCst)),
-        Err(report) => {
-            contained("a snapshot capture", &report);
-            round.fail(CAPTURE_PANICKED, (inner.clock)())
+    let read = round.points().map(|(at, single)| {
+        let n = at.len();
+        match logging::contain(|| (worker.points)(at, source, single)) {
+            Ok(colours) => (n, colours),
+            Err(report) => {
+                contained("a pixel read", &report);
+                (n, Err(CAPTURE_PANICKED.to_string()))
+            }
+        }
+    });
+    let (what, slow, done) = match read {
+        Some((n, colours)) => (format!("a pixel read of {n} point(s)"), &SLOW_POINT_ROUNDS, round.answer_points(colours)),
+        None => {
+            let done = match logging::contain(|| (worker.frames)(&rects, source, poll)) {
+                // The epoch as it stands now the pictures exist: input the host drives from here on
+                // turns it over after them.
+                Ok(frames) => round.run(frames, (inner.clock)(), inner.input_epoch.load(Ordering::SeqCst)),
+                Err(report) => {
+                    contained("a snapshot capture", &report);
+                    round.fail(CAPTURE_PANICKED, (inner.clock)())
+                }
+            };
+            (format!("a snapshot round of {} capture(s)", rects.len()), &SLOW_ROUNDS, done)
         }
     };
     for report in &done.panics {
@@ -720,14 +742,13 @@ fn snapshot_round<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, mu
     }
     let took = began.elapsed();
     if took >= ROUND_SLOW {
-        let n = SLOW_ROUNDS.fetch_add(1, Ordering::Relaxed) + 1;
+        let n = slow.fetch_add(1, Ordering::Relaxed) + 1;
         if n == 1 || n % 100 == 0 {
             logging::line(
                 "snapshot",
                 &format!(
-                    "a snapshot round of {} capture(s) took {} ms, capture and comparison ({n} such round(s) so far \
-                     this session; said for the first and every hundredth)",
-                    rects.len(),
+                    "{what} took {} ms, capture and comparison ({n} such round(s) so far this session; said for the \
+                     first and every hundredth)",
                     took.as_millis()
                 ),
             );
@@ -1218,6 +1239,21 @@ mod tests {
         regions.iter().map(|&(x, y, w, h)| (x, y + 10_000, w, h)).collect()
     }
 
+    /// The threads the points at x = 4242 were read on.
+    static POINT_THREADS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    /// The points a handler waits for: `(x, y, 1)` each, read as `pixel` reads one, `(x, y, 0)` as
+    /// `pixels` reads a list. Panics at x = 668; notes its thread at x = 4242.
+    fn fake_points(at: &[(i32, i32)], _: CaptureSource, single: bool) -> Result<Vec<(u8, u8, u8)>, String> {
+        if at.iter().any(|p| p.0 == 668) {
+            panic!("{}inside the fake pixel read", crate::EXPECTED_PANIC);
+        }
+        if at.iter().any(|p| p.0 == 4242) {
+            locked(&POINT_THREADS).push(std::thread::current().name().unwrap_or("?").to_string());
+        }
+        Ok(at.iter().map(|&(x, y)| (x as u8, y as u8, u8::from(single))).collect())
+    }
+
     fn worker() -> OcrWorker<Fake> {
         OcrWorker {
             present: true,
@@ -1227,6 +1263,7 @@ mod tests {
             recognise: fake_recognise,
             languages: fake_langs,
             frames: fake_frames,
+            points: fake_points,
             compare: fake_compare,
             display_of: |_, _| 0,
             shot_of: fake_shot_of,
@@ -1821,6 +1858,35 @@ mod tests {
         assert_eq!(collect_snaps(&s, 1).len(), 1);
         assert!(locked(&SNAP_THREADS).iter().all(|n| n == "screen-capture"), "{:?}", locked(&SNAP_THREADS));
         assert!(!locked(&SNAP_THREADS).is_empty());
+        stop.shutdown(Duration::from_secs(2));
+    }
+
+    /// The points a handler waits for are read on the `screen-capture` thread through the worker's
+    /// `points`, each the way its call reads it there — a single point as `pixel`, a list as
+    /// `pixels` — and answered once, their colours in order. A panic in the read is its failure,
+    /// and the thread goes on.
+    #[test]
+    fn points_are_read_on_the_capture_thread_through_points() {
+        crate::quiet_expected_panics();
+        let (s, stop) = Service::spawn(worker());
+        let pts = |id, at: &[(i32, i32)], single| {
+            let region = crate::backend::frame::bbox(at).expect("points");
+            snap(id, region, SnapKind::Points { at: at.to_vec(), single }, Instant::now())
+        };
+        s.submit_snap(pts(1, &[(4242, 3), (300, 4)], false));
+        match &collect_snaps(&s, 1)[0].outcome {
+            SnapOutcome::Colours(c) => assert_eq!(c, &vec![(4242_i32 as u8, 3, 0), (300_i32 as u8, 4, 0)]),
+            _ => panic!("no colours"),
+        }
+        s.submit_snap(pts(2, &[(4242, 7)], true));
+        assert!(matches!(&collect_snaps(&s, 1)[0].outcome, SnapOutcome::Colours(c) if c == &vec![(4242_i32 as u8, 7, 1)]));
+        assert_eq!(*locked(&POINT_THREADS), ["screen-capture", "screen-capture"]);
+        s.submit_snap(pts(3, &[(668, 0)], true));
+        assert!(matches!(&collect_snaps(&s, 1)[0].outcome, SnapOutcome::Failed { why, .. } if why == CAPTURE_PANICKED));
+        s.submit_snap(pts(4, &[(20, 0)], true));
+        assert!(matches!(collect_snaps(&s, 1)[0].outcome, SnapOutcome::Colours(_)), "the capture thread still answers");
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(s.drain_snaps().is_empty(), "each once");
         stop.shutdown(Duration::from_secs(2));
     }
 

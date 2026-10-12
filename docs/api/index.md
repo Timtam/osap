@@ -411,6 +411,6 @@ The shapes and grammars the calls above are written in.
 | [`The page's side — platform.post and platform.onmessage`](gui#the-page-s-side) | The host puts a small script into every page before the page's own, and it gives the page one object, `platform` |
 | [`What a page is served, and what it may not do`](gui#what-a-page-is-served-and-what-it-may-not-do) | **Its own folder, and nothing else.** A page is served from a scheme of its module's own (`mod-<module id>-<hash>`, the hash… |
 | [`Where a hook runs`](overlay#where-a-hook-runs) | Every callback of a module runs as a handler of the host, one at a time per module, and the runtime calls an overlay's hooks inside them. |
-| [`Where it waits`](screen#where-it-waits) | **`snapshot` waits in a handler for its picture, and only its module waits meanwhile.** A handler is the function the host called for one of the module's events |
+| [`Where it waits`](screen#where-it-waits) | **`snapshot`, `pixel` and `pixels` wait in a handler for the screen, and only their module waits meanwhile.** A handler is the… |
 | [`Which picture a read sees`](screen#which-picture-a-read-sees) | Every call on this page, and `host.ocr.recognize`, reads the screen one way for the whole module, chosen in its manifest rather than per call. |
 | [`ocrLabel — reading a control's name off the screen`](overlay#ocrlabel) | Any hotspot or hotspot-toggle may carry `ocrLabel = {x1, y1, x2, y2}` (origin-relative) |

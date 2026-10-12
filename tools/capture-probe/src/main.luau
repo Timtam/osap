@@ -93,9 +93,22 @@ local function snapshotLines()
   local t1 = now()
   local okl, live, lwhy = pcall(host.screen.pixels, POINTS)
   if okl then
-    report("pixels of 3 points from the screen in %d ms: %s", now() - t1, live and "3 colours" or ("nil, " .. tostring(lwhy)))
+    report("pixels of 3 points from the screen waited %d ms (from asking to the answer): %s", now() - t1,
+      live and "3 colours" or ("nil, " .. tostring(lwhy)))
   else
     report("pixels from the screen THREW: %s", tostring(live))
+  end
+  -- One point read live — waited for, read as `pixel` reads it, at point resolution on a Mac — and
+  -- from the snapshot, which a Mac takes at the display's own resolution and draws down: whether
+  -- the two ways give the same colour. The region is the menu bar's corner, which does not move.
+  local okv, liveOne = pcall(host.screen.pixel, POINTS[1][1], POINTS[1][2])
+  local okt, snapOne = pcall(host.screen.pixel, POINTS[1][1], POINTS[1][2], { snapshot = snap })
+  if not (okv and okt) then
+    report("live pixel or the snapshot's THREW: %s", tostring(okv and snapOne or liveOne))
+  else
+    local same = liveOne ~= nil and snapOne ~= nil and liveOne.hex == snapOne.hex
+    report("live pixel and the snapshot's at %d,%d %s: %s and %s", POINTS[1][1], POINTS[1][2],
+      same and "agree" or "DIFFER", describe(liveOne), describe(snapOne))
   end
   local oks, fromSnap = pcall(host.screen.pixels, POINTS, { snapshot = snap })
   if not oks then
@@ -147,14 +160,23 @@ local function afterSnapshots(k)
   host.timer.after(100, look)
 end
 
--- After the loop has turned once, so the capture is asked from the pump exactly as an overlay
--- would ask it, not from inside module loading.
+-- Six points far enough apart to be one capture of their box, asked in one `pixels` wait.
+local SIX = { { 10, 10 }, { 60, 20 }, { 110, 30 }, { 160, 40 }, { 199, 50 }, { 5, 59 } }
+
+-- After the loop has turned once, so the capture is asked from a handler exactly as an overlay
+-- would ask it, not from inside module loading. Every read below waits in this timer's handler
+-- while the `screen-capture` thread takes it; its time is from asking to the answer.
 host.timer.after(1500, function()
   report("asking from the pump thread")
 
   local t0 = now()
   local ok, px = pcall(host.screen.pixel, 10, 10)
-  report("pixel(10,10) %s in %d ms: %s", ok and "returned" or "THREW", now() - t0, describe(px))
+  report("pixel(10,10) %s %d ms (from asking to the answer): %s", ok and "waited" or "THREW", now() - t0, describe(px))
+
+  local t6 = now()
+  local ok6, six, why6 = pcall(host.screen.pixels, SIX)
+  report("pixels of 6 points %s %d ms (from asking to the answer): %s", ok6 and "waited" or "THREW", now() - t6,
+    not ok6 and tostring(six) or (six and "6 colours" or ("nil, " .. tostring(why6))))
 
   -- Without a callback, in this timer's handler: the handler waits for the reading, and the
   -- time is the wait. A capture that failed is a reading with status "failed", not a raise.
@@ -173,7 +195,7 @@ host.timer.after(1500, function()
   -- first one pays whatever ScreenCaptureKit costs to start.
   local t2 = now()
   local ok3, px2 = pcall(host.screen.pixel, 600, 400)
-  report("pixel(600,400) %s in %d ms: %s", ok3 and "returned" or "THREW", now() - t2, describe(px2))
+  report("pixel(600,400) %s %d ms (from asking to the answer): %s", ok3 and "waited" or "THREW", now() - t2, describe(px2))
 
   snapshotLines()
 
@@ -189,7 +211,7 @@ host.timer.after(1500, function()
     host.timer.after(5000, function()
       local t3 = now()
       local ok4, px3 = pcall(host.screen.pixel, 10, 10)
-      report("late pixel(10,10) %s in %d ms: %s", ok4 and "returned" or "THREW", now() - t3, describe(px3))
+      report("late pixel(10,10) %s %d ms (from asking to the answer): %s", ok4 and "waited" or "THREW", now() - t3, describe(px3))
       local t4 = now()
       local ok5, res2 = pcall(host.ocr.recognize, { region = { 0, 0, 200, 60 } })
       local how = "THREW"
@@ -197,7 +219,9 @@ host.timer.after(1500, function()
         how = res2.status == "failed" and ("answered a failed reading (" .. tostring(res2.error) .. ")") or "returned"
       end
       report("late recognize 200x60 %s in %d ms", how, now() - t4)
-      -- One more turn of the loop, so the observation line counting these reads is written.
+      -- One more read half a second on, and the line the Windows job waits for before it stops
+      -- the process. These reads wait on the capture thread, so the observation line no longer
+      -- counts them; the first-read comparison's `[capture]` line says duplication answered.
       host.timer.after(500, function()
         pcall(host.screen.pixel, 600, 400)
         report("late reads done")

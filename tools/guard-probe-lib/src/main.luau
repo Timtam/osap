@@ -1,8 +1,8 @@
 -- Guard probe library — part of tools/guard-probe (see the test list there). A code module: its
 -- code runs in the VM of every module that depends on it — Guard probe B's and Guard probe C's —
 -- so it adds its 256 MiB to their limit, and a loop in its own code stops all three (TEST 13).
--- A loop in B's code that calls ready() is B's (TEST 16), and pixelForever's slow host calls are
--- one window's matter, not the library's: they stop only B (TEST 17).
+-- A loop in B's code that calls ready() is B's (TEST 16), and pixelForever's reads wait in the
+-- callback of the module they run for, B's alone, which counts on no clock (TEST 17).
 
 local M = {}
 
@@ -24,8 +24,8 @@ function M.spin()
   return n
 end
 
--- A loop over a host call that waits for the screen, made by the library for the module that
--- calls it.
+-- A loop of host calls that wait for the screen, made by the library for the module that calls
+-- it: 30 seconds of pixel reads, each waiting in that module's callback.
 function M.pixelForever()
   local started = os.clock()
   while os.clock() - started < 30 do local c = host.screen.pixel(0, 0) end

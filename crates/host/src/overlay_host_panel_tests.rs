@@ -1621,6 +1621,7 @@ function T.kontakt8()
   S.at = { [T.VIEW_AT] = T.PLAY, [T.EDIT_AT] = T.RACK }
   S.viewReads = {}
   rawset(T.host.screen, "pixels", function(points)
+    T.screenWait("host.screen.pixels")
     local _, inPass = T.O._passes()
     S.viewReads[#S.viewReads + 1] = { n = #points, where = T.whereNow(),
       yieldable = coroutine.isyieldable(), inPass = inPass }

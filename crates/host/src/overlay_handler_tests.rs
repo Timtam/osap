@@ -213,6 +213,45 @@ fn a_recognize_in_a_text_reached_through_focus_next_waits_as_the_handler() {
     "#);
 }
 
+/// A `text` that reads a pixel, reached through Tab: `host.screen.pixel`, built as the host builds
+/// it, waits there — the Tab's handler parks until the colour comes, and the sentence says it. A
+/// `when` that reads one runs in the scan's pass, where it cannot wait: it reads on the event loop
+/// at once, which the host's log says ("a coroutine the module made"), and nothing parks.
+#[test]
+fn a_text_that_reads_a_pixel_parks_its_handler_and_a_when_cannot_wait() {
+    run(r##"
+        local S = T.S
+        local loop = {}
+        rawset(T.host.screen, "pixel", T.pixelWait(function(why)
+          loop[#loop + 1] = why
+          return S.pixel
+        end))
+        local peek = false
+        local o = T.fields(function(o)
+          o:addStaticText({ label = "Lamp", text = function()
+            local c = T.host.screen.pixel(10, 20)
+            return c and c.hex
+          end })
+          o:addStaticText({ label = "Peek", when = function()
+            if not peek then return false end
+            return T.host.screen.pixel(10, 20).hex == "#090909"
+          end })
+        end)
+        o.focus = 2
+        assert(T.key("Tab") == "Parked", "the Tab's handler waits for the pixel")
+        assert(o.focus == 3 and T.waiting("host.screen.pixel"))
+        assert(T.release("host.screen.pixel", { r = 255, g = 0, b = 0, hex = "#FF0000" }))
+        assert(T.last().text == "Lamp, #FF0000", T.last().text)
+        assert(#loop == 0, "nothing read on the event loop")
+
+        peek, S.pixel = true, { r = 9, g = 9, b = 9, hex = "#090909" }
+        assert(T.key("Tab") == "Ran", "nothing waited: " .. T.dump())
+        assert(o.focus == 4, "Peek shown, from the pixel read at once: " .. o.focus)
+        assert(#loop == 1 and loop[1] == "foreign", table.concat(loop, ", "))
+        assert(not T.waiting("host.screen.pixel"))
+    "##);
+}
+
 /// A `when` that reads with `recognize` runs in the scan's pass, a coroutine of the runtime's own:
 /// there it cannot wait, even where a handler could — the case the host calls "a coroutine the
 /// module made" — and the control is hidden, with the line every failing `when` has.

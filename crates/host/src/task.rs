@@ -1,7 +1,8 @@
 //! Handlers: every callback of a module runs as a coroutine of its VM — a handler — that can stop
 //! at a wait while the event loop goes on; and the waits it stops at: `host.ocr.recognize` without
 //! a callback, which raises where it cannot wait, and the `host.screen` calls that wait
-//! (`host.screen.snapshot`), which run on the event loop where they cannot, with a log line.
+//! (`host.screen.snapshot`, `pixel`, `pixels`), which run on the event loop where they cannot, with
+//! a log line.
 //!
 //! **One handler per module at a time.** Every event a module hears — a hotkey, a captured key, a
 //! controller event, a timer, a window trigger, a focus change, the answer to a read, an image
@@ -15,7 +16,9 @@
 //! coroutine, asks the read service and stops the handler until the reading comes: its module is
 //! busy meanwhile, and nothing else is. With a callback it is the read that never waits. So does
 //! `host.screen.snapshot`: it asks the `screen-capture` thread for its picture (`snapshot.rs`), and
-//! the handler goes on with the handle.
+//! the handler goes on with the handle; and so do `host.screen.pixel` and `pixels`, whose points
+//! that thread reads, unless they touch no screen — a snapshot's points — and answer at once
+//! ([`Started::Now`]).
 //!
 //! **Why.** No text recognition may burden the event loop, and no `host.screen` call either.
 //! `recognize` used to photograph and recognise on the loop and return the reading; where it waits
@@ -1162,6 +1165,32 @@ pub(crate) fn start_wait<H: ReadHost, A>(
     parse: impl FnOnce() -> mlua::Result<A>,
     submit: impl FnOnce(A, TaskId, Priority) -> mlua::Result<On>,
 ) -> mlua::Result<()> {
+    let waits = |args: A, id: TaskId, prio: Priority| submit(args, id, prio).map(Started::Waits);
+    start_point(h, lua, scope, call, nonce, parse, waits).map(|_| ())
+}
+
+/// What a wait point's `start` made of a call: a wait for what it asks ([`On`]), or its answer
+/// at once — a `host.screen.pixel` or `pixels` of a snapshot, a window point with no pixel this
+/// time, an empty list: a call that touches nothing a handler would wait for.
+pub(crate) enum Started {
+    Waits(On),
+    Now(MultiValue),
+}
+
+/// [`start_wait`], for a call that may also be answered at once: `submit` says which. What the
+/// shim's `start` returns: nothing when the handler is to wait — the wait is registered — or
+/// `true` and the answer, which the shim returns without waiting. The checks are `start_wait`'s,
+/// and a handler that is to end — its module not enabled, or cancelled while it ran — ends at the
+/// call whichever it would have been.
+pub(crate) fn start_point<H: ReadHost, A>(
+    h: &H,
+    lua: &Lua,
+    scope: usize,
+    call: &'static str,
+    nonce: Table,
+    parse: impl FnOnce() -> mlua::Result<A>,
+    submit: impl FnOnce(A, TaskId, Priority) -> mlua::Result<Started>,
+) -> mlua::Result<MultiValue> {
     let me = owner(h, lua, scope);
     let calling = lua.current_thread().to_pointer() as usize;
     let tasks = h.tasks();
@@ -1171,7 +1200,6 @@ pub(crate) fn start_wait<H: ReadHost, A>(
     // which could raise, and a `pcall` around the wait would then run on in a module that is gone.
     let gone = tasks.table.borrow().get(&first).is_some_and(|t| t.gone);
     let args = if gone { None } else { Some(parse()?) };
-    let place = caller_place(lua);
     // Reading the arguments can run module code (a metamethod), which may have registered a wait
     // or ended the handler: everything is checked again, and the wait registered only now.
     let id = in_place(tasks, me, calling).ok_or_else(misplaced)?;
@@ -1183,9 +1211,17 @@ pub(crate) fn start_wait<H: ReadHost, A>(
         .map(|t| (t.ending, if t.raised { Priority::Interactive } else { t.prio }))
         .unwrap_or((true, Priority::Background));
     let on = match args {
-        Some(args) if !ending && h.module_enabled(me.idx) => submit(args, id, prio)?,
+        Some(args) if !ending && h.module_enabled(me.idx) => match submit(args, id, prio)? {
+            Started::Waits(on) => on,
+            Started::Now(mut values) => {
+                values.push_front(Value::Boolean(true));
+                return Ok(values);
+            }
+        },
         _ => On::Void,
     };
+    // Asked of Luau's stack, which filing the wait has not touched.
+    let place = caller_place(lua);
     let nonce = lua.create_registry_value(nonce)?;
     match tasks.table.borrow_mut().get_mut(&id) {
         Some(t) => {
@@ -1197,7 +1233,7 @@ pub(crate) fn start_wait<H: ReadHost, A>(
             let _ = lua.remove_registry_value(nonce);
         }
     }
-    Ok(())
+    Ok(MultiValue::new())
 }
 
 /// `recognize`'s `start`: the read a wait asks for ([`start_wait`]).
@@ -1228,8 +1264,8 @@ fn disown<H: ReadHost>(h: &H, lua: &Lua) {
 /// counted for the summary at exit. A call that raises — a mistake in its arguments, mostly —
 /// writes no line, so the first that answers still does.
 ///
-/// The `host.screen` calls that wait come here where they cannot (`host.screen.snapshot`);
-/// `host.ocr.recognize` raises there instead.
+/// The `host.screen` calls that wait come here where they cannot (`host.screen.snapshot`, and
+/// `pixel` and `pixels` when they read the screen); `host.ocr.recognize` raises there instead.
 pub(crate) fn legacy<H: ReadHost, T>(
     h: &H,
     lua: &Lua,
@@ -1383,6 +1419,25 @@ pub(crate) fn test_wait<H: ReadHost>(lua: &Lua, scope: usize, holder: Rc<H>) -> 
     ))
 }
 
+/// A `host.screen` call `call` built as the host builds one ([`points`]), whose wait is the tests'
+/// own wait point of the same name — answered by [`test_release`] — and which runs
+/// `blocking(why, …)` where it cannot wait: for the scripted host, whose screen has no capture
+/// thread, so a scenario can show where such a call waits.
+#[cfg(test)]
+pub(crate) fn test_point<H: ReadHost>(
+    lua: &Lua,
+    scope: usize,
+    holder: Rc<H>,
+    call: &'static str,
+    blocking: Function,
+) -> mlua::Result<Function> {
+    let h = holder.clone();
+    let start = lua.create_function(move |lua, (nonce, _args): (Table, MultiValue)| {
+        start_wait(&*h, lua, scope, call, nonce, || Ok(()), |(), _, _| Ok(On::Test(call.to_string())))
+    })?;
+    points(lua, scope, holder)?.call((call, start, blocking))
+}
+
 /// The shim's `where_` for the tests' own stand-ins of `recognize`: `whereNow()` answers what the
 /// shim asks before it waits ("handler", "foreign" or "none"), so a fake that answers a wait at once
 /// can refuse it where the real one could not wait (`T.answerWaits` in overlay_menu_tests.rs).
@@ -1478,6 +1533,8 @@ mod tests {
         assert!(OCR_MD.contains(&read), "docs/api/ocr.md does not show this line word for word:\n{read}");
         let snap = timer_wait_line("com.example.game", 63, "host.screen.snapshot", "com.example.game/src/main.luau:41", &keys);
         assert!(SCREEN_MD.contains(&snap), "docs/api/screen.md does not show this line word for word:\n{snap}");
+        let points = timer_wait_line("com.example.game", 24, "host.screen.pixels", "com.example.game/src/main.luau:30", &keys[..2]);
+        assert!(SCREEN_MD.contains(&points), "docs/api/screen.md does not show this line word for word:\n{points}");
     }
 
     /// A blocking call's line names the module, the call, the place it could not wait and the time
@@ -1505,7 +1562,13 @@ mod tests {
         assert!(outside.contains("(outside every event of the module: ") && outside.contains("; call it from a handler, such as host.timer.after(0, …), or use "));
         let own = legacy_line("m", "host.screen.snapshot", Case::OwnCoroutine, 1);
         assert!(own.contains("measure it in a handler and let the hook read what was measured (see \"Where a hook runs\" in docs/api/overlay.md)"), "{own}");
-        // A call without a form that waits for nothing names none.
+        // A call without a form that waits for nothing names none: `pixel` and `pixels` for now,
+        // whose two lines screen.md shows word for word.
+        for (call, case) in [("host.screen.pixels", Case::Outside), ("host.screen.pixel", Case::OwnCoroutine)] {
+            let line = legacy_line("com.example.game", call, case, 17);
+            assert!(!line.contains(", or use "), "{line}");
+            assert!(SCREEN_MD.contains(&line), "docs/api/screen.md does not show this line word for word:\n{line}");
+        }
         assert!(legacy_line("m", "host.screen.save", Case::CannotWait, 1).contains(
             "host.screen.save could not wait here (a place Luau cannot suspend, or a function the host calls and waits \
              for) and held the event loop 1 ms instead; call it from the event's own function; see"

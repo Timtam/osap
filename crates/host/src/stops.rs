@@ -439,7 +439,7 @@ fn ran(clock: Clock, form: Form) -> String {
     }
 }
 
-/// ", in host.screen.pixel" — the host call the time ran out in.
+/// ", in host.element.find" — the host call the time ran out in.
 fn in_call(trip: &Trip) -> String {
     trip.call.map_or(String::new(), |c| format!(", in {c}"))
 }
@@ -820,7 +820,7 @@ pub(crate) fn off_member_line(id: &str, trip: &Trip) -> String {
 }
 
 /// The note in the manager's row of module `idx`: "stopped: its hotkey callback needed more than
-/// 256 MiB of memory", "stopped: its hotkey callback ran too long, in host.screen.pixel, at
+/// 256 MiB of memory", "stopped: its hotkey callback ran too long, in host.element.find, at
 /// src/main.luau:40", "stopped with Guard probe library: its code ran too long in Guard probe B's
 /// hotkey callback, at src/main.luau:9" — the callback, the host call and the place, as the
 /// sentence names them.

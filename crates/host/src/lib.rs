@@ -8056,84 +8056,21 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
 
     // host.screen.pixel / .size / .imageSearch
     let screen = lua.create_table()?;
-    let sh = shared.clone();
-    screen.set(
-        "pixel",
-        // pixel(x, y, opts?) or pixel({ window = w, fraction = { x, y } }, opts?) -> colour | nil, reason
-        lua.create_function(move |lua, (a, b, c): (mlua::Value, mlua::Value, mlua::Value)| {
-            host_call!("host.screen.pixel");
-            const F: &str = "host.screen.pixel";
-            // The options come after the point: third after two numbers, second after a table.
-            let opts = match &a {
-                mlua::Value::Table(_) => {
-                    if !c.is_nil() {
-                        return Err(mlua::Error::external(format!(
-                            "{F}: takes (x, y, opts?) or (point, opts?) with point {{ window = w, fraction = {{ x, y }} }}, not a point, {} and {}",
-                            describe_value(&b),
-                            describe_value(&c)
-                        )));
-                    }
-                    &b
-                }
-                _ => &c,
-            };
-            // Read before anything is answered, like every argument: a mistake in the options
-            // raises whether or not there is a pixel to read this time.
-            let snap = snapshot::strict_opts(opts, F)?;
-            let (x, y) = match &a {
-                // The window form: the region form's start formula, resolved against the client
-                // area the table carries. A minimised window has no pixel: `nil, reason`.
-                mlua::Value::Table(_) => {
-                    let (client, fx, fy) =
-                        region_lua::read_point(&a, "point").map_err(|m| mlua::Error::external(format!("{F}: {m}")))?;
-                    match region::resolve_point(client, fx, fy) {
-                        Ok(p) => p,
-                        Err(u) => return with_reason(lua, mlua::Value::Nil, u.to_string()),
-                    }
-                }
-                // Screen coordinates, converted as they always were (see `pixel_coords`).
-                _ => pixel_coords(lua, &a, &b)?,
-            };
-            // From a snapshot: its pixel, no screen touched and nothing counted — or `nil` and
-            // why when the point is not in it.
-            if let Some(frame) = snap {
-                return match frame.sample(x, y) {
-                    Some(px) => one_value(mlua::Value::Table(snapshot::colour_table(lua, px)?)),
-                    None => with_reason(lua, mlua::Value::Nil, snapshot::POINT_NOT_INSIDE.to_string()),
-                };
-            }
-            // The source first, outside the timing below: in a module that reads through
-            // desktop duplication, the first read also compares the two sources, once.
-            let src = capture_source::read_source(lua, &*sh.backend, (x, y, 1, 1));
-            // Timed and counted: a single pixel read is a GDI screen touch, and this project
-            // has already measured one at a fixed ~16.7 ms — one compositor frame, whatever
-            // the size. Sixty of them is a second, and nothing in the log said they were
-            // happening.
-            let t0 = Instant::now();
-            let px = sh.backend.pixel(x, y, src);
-            {
-                let mut obs = sh.observations();
-                obs.pixels += 1;
-                obs.pixel_us += t0.elapsed().as_micros();
-            }
-            // nil only for a module that declared `fallback = "none"` while desktop
-            // duplication could not answer: no colour is better than the frozen one. The
-            // reason says why, in the words the log uses.
-            let px = match px {
-                Ok(c) => c,
-                Err(why) => return with_reason(lua, mlua::Value::Nil, why),
-            };
-            one_value(mlua::Value::Table(snapshot::colour_table(lua, px)?))
-        })?,
-    )?;
-    // host.screen.snapshot(opts) / host.screen.pixels(points, opts?) — one picture taken once and
-    // read by every call given `{ snapshot = s }`, and many points from as few captures as they
-    // allow. The rules are in snapshot.rs; registered HERE, by name, for check-docs.ps1 and
-    // tools/api-index.py, which read this file. `snapshot` waits in a handler for the
-    // `screen-capture` thread's picture (task.rs, task_shim.luau), and where it cannot wait takes
-    // its picture on the event loop, said in the log.
+    // host.screen.pixel(x, y, opts?) or pixel({ window = w, fraction = { x, y } }, opts?) ->
+    // colour | nil, reason — and host.screen.pixels(points, opts?), many points from as few
+    // captures as they allow. Both wait in a handler while the `screen-capture` thread reads the
+    // screen as the event loop would (task.rs, task_shim.luau), and where they cannot wait read on
+    // the event loop, said in the log; a snapshot's points are answered at once wherever they are
+    // asked. Timed and counted where they read on the event loop: a single pixel read is a GDI
+    // screen touch, measured at a fixed ~16.7 ms — one compositor frame, whatever the size — and
+    // sixty of them is a second. The rules are in snapshot.rs; registered HERE, by name, for
+    // check-docs.ps1 and tools/api-index.py, which read this file.
+    screen.set("pixel", snapshot::pixel(lua, shared, idx)?)?;
+    // host.screen.snapshot(opts) — one picture taken once and read by every call given
+    // `{ snapshot = s }`. It waits in a handler for the `screen-capture` thread's picture, and where
+    // it cannot wait takes its picture on the event loop, said in the log.
     screen.set("snapshot", snapshot::snapshot(lua, shared, idx)?)?;
-    screen.set("pixels", snapshot::pixels(lua, shared)?)?;
+    screen.set("pixels", snapshot::pixels(lua, shared, idx)?)?;
     // host.screen.snapshotAsync(opts, cb) — the picture taken on the `screen-capture` thread that
     // host.ocr.recognize photographs on: at once, at a set time, or when the region changes.
     screen.set("snapshotAsync", snapshot::snapshot_async(lua, shared, idx)?)?;
@@ -9891,7 +9828,7 @@ pub(crate) fn opts_region(
 /// `pixel(x, y)`'s screen coordinates, converted exactly as they always were (a fraction cut
 /// toward zero, a numeral string accepted). What does not convert is not a number, or one
 /// outside the 32-bit range every coordinate lives in (`1e10`), and raises naming it.
-fn pixel_coords(lua: &Lua, x: &mlua::Value, y: &mlua::Value) -> mlua::Result<(i32, i32)> {
+pub(crate) fn pixel_coords(lua: &Lua, x: &mlua::Value, y: &mlua::Value) -> mlua::Result<(i32, i32)> {
     let coord = |v: &mlua::Value, name: &str| {
         <i32 as mlua::FromLua>::from_lua(v.clone(), lua).map_err(|_| {
             mlua::Error::external(format!(
@@ -11230,7 +11167,8 @@ mod ocr_wiring_tests {
         for name in ["profile", "save", "saveMarked"] {
             assert!(text(name).contains("opts_region(&*sh.backend"), "host.screen.{name} reads its region another way");
         }
-        assert!(text("pixel").contains("region_lua::read_point("), "host.screen.pixel has no window form");
+        assert!(text("pixel").contains("snapshot::pixel(lua, shared, idx)"), "host.screen.pixel");
+        assert!(body(SNAP, "pub(crate) fn pixel_args(").contains("region_lua::read_point("), "host.screen.pixel has no window form");
         for name in ["cells", "matchCells", "matchCellsAsync"] {
             assert!(text(name).contains("read_cells_opts("), "host.screen.{name}");
         }
@@ -11264,7 +11202,7 @@ mod ocr_wiring_tests {
         // through the one point reader, and every call given a snapshot reads its region through
         // the same loose reader with the snapshot's edges as the defaults.
         assert!(text("snapshot").contains("snapshot::snapshot(lua, shared, idx)"), "host.screen.snapshot");
-        assert!(text("pixels").contains("snapshot::pixels(lua, shared)"), "host.screen.pixels");
+        assert!(text("pixels").contains("snapshot::pixels(lua, shared, idx)"), "host.screen.pixels");
         assert!(body(SNAP, "fn read_opts(").contains("region_lua::read(&t.get::<Value>(\"region\")?, \"opts.region\")"));
         assert!(body(SNAP, "fn crop(").contains("region_lua::read(v, \"the region\")"));
         assert!(body(SNAP, "fn read_point_list(").contains("region_lua::read_point_any("));
@@ -11288,32 +11226,41 @@ mod ocr_wiring_tests {
 
     /// `pixel`'s options are read strictly, before anything is answered, and a read of a
     /// snapshot touches no screen: no capture and no count in the observation line, in `pixel`,
-    /// `pixels`, `profile` and the cells calls.
+    /// `pixels`, `profile` and the cells calls. Their live reads: where they cannot wait on the event
+    /// loop through the module's source, without the first-read comparison, counted; in a handler
+    /// a request of the capture thread, which carries the comparison.
     #[test]
     fn pixel_opts_are_strict_and_a_snapshot_read_touches_no_screen() {
         let api = body(LIB, "fn install_host_api(");
         let screen = bindings(api, "screen");
         let text = |name: &str| screen.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.screen.{name}")).1;
-        let pixel = text("pixel");
-        let opts = pixel.find("let snap = snapshot::strict_opts(opts, F)?;").expect("pixel reads its options strictly");
-        let answered = pixel.find("return with_reason(").expect("pixel answers nil and why");
+        let pixel = body(SNAP, "pub(crate) fn pixel_args(");
+        let opts = pixel.find("let snap = strict_opts(opts, F)?;").expect("pixel reads its options strictly");
+        let answered = pixel.find("return Ok(Reading::Now(with_reason(").expect("pixel answers nil and why");
         assert!(opts < answered, "pixel reads its options after it may already have answered");
         let branch = pixel.find("if let Some(frame) = snap {").expect("pixel's snapshot branch");
-        let live = pixel.find("sh.backend.pixel(").expect("pixel's live read");
-        assert!(branch < live && !pixel[branch..live].contains("observations()"), "a snapshot's pixel is counted as a screen read");
+        let live = pixel.find("Ok(Reading::Live(vec![(x, y)]))").expect("pixel's live read");
+        assert!(branch < live && !pixel.contains("observations()"), "a snapshot's pixel is counted as a screen read");
         assert!(text("profile").contains("if pic.is_live() {"), "a snapshot's profile is counted as a screen read");
         assert!(!body(LIB, "fn cells_of_snapshot<T>(").contains("observations()"));
-        // `pixel(x, y)` takes its options third and `pixel(point)` second; without them the call
-        // reaches the live read as it always did: the source for the one pixel, then the backend.
-        assert!(pixel.contains("_ => &c,"), "pixel(x, y) reads its options from somewhere else");
-        let live = &pixel[branch..];
-        let src = live.find("capture_source::read_source(lua, &*sh.backend, (x, y, 1, 1));").expect("pixel's source, for its one pixel");
-        let read = live.find("sh.backend.pixel(x, y, src);").expect("pixel's live read");
-        assert!(src < read, "pixel reads before it knows its source");
-        let read = body(SNAP, "fn read_pixels(");
-        let snap = read.find("else if let Some(frame) = snap {").expect("pixels' snapshot branch");
-        let live = read.find("match live(&at)").expect("pixels' live read");
+        // `pixel(x, y)` takes its options third and `pixel(point)` second.
+        assert!(pixel.contains("_ => c,"), "pixel(x, y) reads its options from somewhere else");
+        let read = body(SNAP, "pub(crate) fn pixels_args(");
+        let snap = read.find("if let Some(frame) = snap {").expect("pixels' snapshot branch");
+        let live = read.find("Ok(Reading::Live(at))").expect("pixels' live read");
         assert!(snap < live && !read.contains("observations()"));
+        // Where they cannot wait: the module's source, no comparison, one count per call.
+        let on_loop = body(SNAP, "fn read_on_loop(");
+        let src = on_loop.find("let src = capture_source::vm_source(lua);").expect("the module's source");
+        let one = on_loop.find("sh.backend.pixel(x, y, src)").expect("pixel's live read");
+        assert!(src < one && on_loop.contains("sh.backend.pixels(at, src)") && on_loop.contains("obs.pixels += 1;"));
+        assert!(!on_loop.contains("read_source("), "the read that could not wait makes the comparison on the loop");
+        for f in ["pub(crate) fn pixel(", "pub(crate) fn pixels("] {
+            let b = body(SNAP, f);
+            assert!(b.contains("crate::task::legacy(&*sh, lua, idx,") && b.contains("read_on_loop(&sh, lua, "), "`{f}`");
+        }
+        // In a handler: the capture thread's request, which carries the comparison when it is owed.
+        assert!(body(SNAP, "fn submit_points<").contains("compare: capture_source::take_compare(lua, region.tuple()),"));
     }
 
     /// `host.screen.profile` puts each statistic under its own name, in the order the reference
@@ -11423,9 +11370,8 @@ mod ocr_wiring_tests {
             let e = pixel_coords(&lua, &v(x), &v(y)).expect_err(x).to_string();
             assert!(e.contains("host.screen.pixel: ") && e.contains(want), "({x}, {y}): {e}");
         }
-        let api = body(LIB, "fn install_host_api(");
-        let pixel = bindings(api, "screen").into_iter().find(|b| b.0 == "pixel").expect("host.screen.pixel").1;
-        assert!(pixel.contains("pixel_coords(lua, &a, &b)"), "host.screen.pixel reads its numbers another way");
+        let pixel = body(SNAP, "pub(crate) fn pixel_args(");
+        assert!(pixel.contains("crate::pixel_coords(lua, a, b)?"), "host.screen.pixel reads its numbers another way");
     }
 
     /// The older calls answer as they always did when they look — ONE value, nothing after it —
@@ -11443,10 +11389,16 @@ mod ocr_wiring_tests {
         let api = body(LIB, "fn install_host_api(");
         let screen = bindings(api, "screen");
         let text = |name: &str| screen.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.screen.{name}")).1;
-        for name in ["pixel", "profile", "save", "saveMarked"] {
+        for name in ["profile", "save", "saveMarked"] {
             let t = text(name);
             assert!(t.contains("one_value(") && t.contains("with_reason(lua, "), "host.screen.{name}");
             assert!(!t.contains("nil_because(") && !t.contains("mlua::Value::Nil))"), "host.screen.{name} answers two values where it answered one");
+        }
+        // `pixel` builds its answers in snapshot.rs: at once, and from a live read wherever it ran.
+        for f in ["pub(crate) fn pixel_args(", "fn live_values("] {
+            let t = body(SNAP, f);
+            assert!(t.contains("one_value(") && t.contains("with_reason(lua, "), "`{f}`");
+            assert!(!t.contains("nil_because(") && !t.contains("Value::Nil))"), "`{f}` answers two values where it answered one");
         }
         for f in ["fn image_search(", "fn image_search_all(", "fn build_handle("] {
             let t = body(IMAGES, f);
@@ -11884,19 +11836,23 @@ mod ocr_wiring_tests {
     }
 
     /// The guard probe's test list cites the lines its loops are on — the line a stop is heard at —
-    /// and every loop of the probe is one of them; every loop and every fill ends by itself, so a
-    /// build without the guard never hangs on a probe key; and the run line builds first.
+    /// and every loop of the probe that is stopped is one of them; a loop of pixel reads, which
+    /// wait and so are never stopped, is not; every loop and every fill ends by itself, so a build
+    /// without the guard never hangs on a probe key; and the run line builds first.
     #[test]
     fn the_guard_probes_lines_are_its_loops() {
         let main = include_str!("../../../tools/guard-probe/src/main.luau");
         let others = [include_str!("../../../tools/guard-probe-b/src/main.luau"), include_str!("../../../tools/guard-probe-lib/src/main.luau")];
-        let loops = |src: &str| -> Vec<usize> {
+        let waits = |l: &str| l.contains("host.screen.pixel(");
+        let loops_where = |src: &str, waiting: bool| -> Vec<usize> {
             src.lines()
                 .enumerate()
                 .filter(|(_, l)| !l.trim_start().starts_with("--") && l.contains("while os.clock() - started < 30 do"))
+                .filter(|(_, l)| waits(l) == waiting)
                 .map(|(i, _)| i + 1)
                 .collect()
         };
+        let loops = |src: &str| loops_where(src, false);
         let header: String = main.lines().take_while(|l| l.starts_with("--")).collect::<Vec<_>>().join("\n").replace("\n--", "");
         let numbers_after = |marker: &str| -> Vec<usize> {
             header
@@ -11918,6 +11874,11 @@ mod ocr_wiring_tests {
         }
         for n in &all {
             assert!(cited.contains(n), "the guard probe's loop at line {n} is not in its test list");
+        }
+        let waiting: Vec<usize> = std::iter::once(main).chain(others).flat_map(|src| loops_where(src, true)).collect();
+        assert_eq!(waiting.len(), 2, "TEST 8's loop and TEST 17's, of pixel reads that wait");
+        for n in &waiting {
+            assert!(!all.contains(n) && !cited.contains(n), "the guard probe expects a stop at its waiting loop at line {n}");
         }
         for src in std::iter::once(main).chain(others) {
             let code: Vec<&str> = src.lines().filter(|l| !l.trim_start().starts_with("--")).collect();
@@ -12019,7 +11980,14 @@ mod ocr_wiring_tests {
         for name in ["template", "imageSearch", "imageSearchMulti", "imageSearchAsync", "imageSearchEach", "imageSearchAll"] {
             assert!(IMAGES.contains(&format!("host_call!(\"host.screen.{name}\")")), "host.screen.{name}");
         }
-        for name in ["host.screen.snapshot", "host.screen.pixels", "host.screen.snapshotAsync", "snapshot:crop", "snapshot:release"] {
+        for name in [
+            "host.screen.snapshot",
+            "host.screen.pixel",
+            "host.screen.pixels",
+            "host.screen.snapshotAsync",
+            "snapshot:crop",
+            "snapshot:release",
+        ] {
             assert!(SNAP.contains(&format!("host_call!(\"{name}\")")), "{name}");
         }
         for name in ["host.gui.webview", "page:show", "page:prepare", "page:focus", "page:hide", "page:post", "page:isShown", "page:close"] {
@@ -12103,6 +12071,8 @@ mod ocr_wiring_tests {
             "task.rs: shim",
             "task.rs: waits",
             "snapshot.rs: snapshot",
+            "snapshot.rs: pixel",
+            "snapshot.rs: pixels",
         ];
         let expected: std::collections::BTreeSet<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(found, expected, "a call into a VM the guard does not know");

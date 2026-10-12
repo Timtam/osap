@@ -626,6 +626,14 @@ pub type OcrShot = ();
 /// again and again: macOS then skips its flat-picture watch. A plain `fn`, so it is `Send`.
 pub type FramesFn = fn(&[(i32, i32, i32, i32)], CaptureSource, bool) -> Vec<Result<frame::Frame, String>>;
 
+/// The pixel waits' capture routine ([`OcrWorker::points`]): the colours at the points, in order,
+/// read from one source on the capture thread exactly as the event loop reads them — `single`,
+/// each point as [`Backend::pixel`] reads one (`GetPixel` on the Windows standard path), and
+/// otherwise all of them as [`Backend::pixels`] reads a list — so a waited `host.screen.pixel` or
+/// `pixels` answers what the call that cannot wait answers. All or nothing, with the reason. A
+/// plain `fn`, so it is `Send`.
+pub type PointsFn = fn(&[(i32, i32)], CaptureSource, bool) -> Result<Vec<(u8, u8, u8)>, String>;
+
 /// Which of the two OCR threads is starting — see [`OcrWorker::init_thread`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OcrThread {
@@ -711,6 +719,10 @@ pub struct OcrWorker<S = OcrShot> {
     /// Photographs a snapshot round, on the capture thread: `host.screen.snapshotAsync`'s
     /// pictures and change waits share the thread with the text reads' captures.
     pub frames: FramesFn,
+    /// Reads the points a handler waits for in `host.screen.pixel` or `pixels`, on the capture
+    /// thread, through the functions those calls read with on the event loop ([`PointsFn`]) —
+    /// never through `frames`, whose pictures on a Mac are taken at the display's own resolution.
+    pub points: PointsFn,
     /// Makes a module's first-read comparison, on the capture thread, before the capture of the
     /// read or the snapshot that carries it ([`CompareReq`]).
     pub compare: CompareFn,
@@ -734,7 +746,9 @@ impl<S> Copy for OcrWorker<S> {}
 
 impl OcrWorker {
     /// The worker of a platform without a recogniser: nothing is captured, every region fails,
-    /// and so does every snapshot the capture thread would take.
+    /// and so does every snapshot the capture thread would take. Its points are answered as the
+    /// one such platform answers them on the event loop (`stub.rs`): a single point black, a list
+    /// a failed capture.
     pub fn none() -> OcrWorker {
         OcrWorker {
             present: false,
@@ -744,6 +758,7 @@ impl OcrWorker {
             recognise: |_, regions, _| regions.iter().map(|_| Err(NO_RECOGNISER.to_string())).collect(),
             languages: crate::ocr::lang::Languages::default,
             frames: |regions, _, _| regions.iter().map(|_| Err(CAPTURE_FAILED.to_string())).collect(),
+            points: |pts, _, single| if single { Ok(vec![(0, 0, 0); pts.len()]) } else { Err(CAPTURE_FAILED.to_string()) },
             compare: no_comparison,
             display_of: |_, _| 0,
             shot_of: |_, _| OcrShot::default(),
@@ -1303,7 +1318,9 @@ pub trait Backend {
     /// Size of the primary display in pixels.
     fn screen_size(&self) -> (i32, i32);
 
-    /// Color (r, g, b) of the pixel at screen coordinates.
+    /// Color (r, g, b) of the pixel at screen coordinates, on the calling thread (the event loop):
+    /// `host.screen.pixel` where it cannot wait. One that waits is read on the capture thread by
+    /// [`OcrWorker::points`], the same way.
     ///
     /// `Err` only where the source can fail without a fallback — a Windows module that
     /// declared `fallback = "none"` while duplication could not answer — with the reason, which
@@ -1334,7 +1351,9 @@ pub trait Backend {
 
     /// The colours at `pts`, in order, read from as few captures as [`frame::plan_points`]
     /// allows — never a point read of its own, so a point on no monitor reads black as a region
-    /// read gives it. All or nothing: one capture that fails fails the call, with its reason.
+    /// read gives it. All or nothing: one capture that fails fails the call, with its reason. On
+    /// the calling thread (the event loop): `host.screen.pixels` where it cannot wait; one that
+    /// waits is read on the capture thread by [`OcrWorker::points`], the same way.
     ///
     /// The default captures each planned rectangle through `capture`; a backend overrides it
     /// where it can do better (Windows asks desktop duplication for every point in one request).

@@ -572,24 +572,24 @@ fn the_messages_are_the_documented_ones() {
     found(&note);
 
     // The wall clock, in a host call.
-    let mut t = time_trip(game_vm(0), "hotkey", ("com.example.game", "src/main.luau", 71), &["[C]: in function 'pixel'"]);
+    let mut t = time_trip(game_vm(0), "hotkey", ("com.example.game", "src/main.luau", 71), &["[C]: in function 'find'"]);
     t.cause = Cause::Time { clock: Clock::Wall, cpu: Duration::from_millis(700), wall: Duration::from_millis(10020) };
-    t.call = Some("host.screen.pixel");
+    t.call = Some("host.element.find");
     let wall = event(t);
     let said = stops::sentence(&wall);
     assert_eq!(
         said,
-        "Stopped Game helper: its hotkey callback ran for 10 seconds without returning, in host.screen.pixel, at \
+        "Stopped Game helper: its hotkey callback ran for 10 seconds without returning, in host.element.find, at \
          src/main.luau line 71. Its keys go to the program in front again; it stays off until you turn it on in the \
          module manager."
     );
     found(&said);
     assert!(stops::dialog_text(&wall, &[]).contains(
         "How long: 0.7 s of processor time, 10.0 s in all. A callback may take 2 s of processor time or 10 s in all.\n\
-         In a host call: host.screen.pixel \u{2014} the time ran out in it, or it had just returned.\n"
+         In a host call: host.element.find \u{2014} the time ran out in it, or it had just returned.\n"
     ));
     let note = stops::row_note(&wall, 0);
-    assert_eq!(note, "stopped: its hotkey callback ran too long, in host.screen.pixel, at src/main.luau:71");
+    assert_eq!(note, "stopped: its hotkey callback ran too long, in host.element.find, at src/main.luau:71");
     found(&note);
 
     // Inside another module's callback.

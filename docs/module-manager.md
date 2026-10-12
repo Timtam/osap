@@ -151,7 +151,7 @@ the time ran out in, and the place:
 
 ```
 Game helper  v1.2.0   (com.example.game) — stopped: its hotkey callback ran too long, at src/main.luau:40
-Game helper  v1.2.0   (com.example.game) — stopped: its hotkey callback ran too long, in host.screen.pixel, at src/main.luau:71
+Game helper  v1.2.0   (com.example.game) — stopped: its hotkey callback ran too long, in host.element.find, at src/main.luau:71
 Game helper  v1.2.0   (com.example.game) — stopped: its hotkey callback needed more than 256 MiB of memory
 Synth overlay  v1.0.0   (com.example.synth) — stopped: its hotkey callback ran too long, in host.screen.imageSearchMulti, at Overlay kit's src/main.luau:1595
 Overlay kit  v1.0.0   (com.example.kit) — stopped: its code ran too long in Synth overlay's hotkey callback, at src/main.luau:9

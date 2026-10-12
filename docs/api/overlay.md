@@ -38,7 +38,7 @@ An `"overlay"` entry under `[capabilities] require` is a leftover from when the 
 
 Every callback of a module runs as a [handler](../module-runtime-and-lifecycle.md#handlers) of the host, one at a time per module, and the runtime calls an overlay's hooks inside them. A hook runs in one of three places, and the place decides what it may do:
 
-| Hook | Runs | May it wait for a read? |
+| Hook | Runs | May it wait for a read or a capture? |
 |---|---|---|
 | a control's `text`; a tab control's `current` and `verticalName` | in the handler of the key, timer or window event that announces the control | yes |
 | a control's `onActivate`; a stepper's `onStep` | in the handler of the key or hotkey that pressed it | yes |
@@ -48,11 +48,11 @@ Every callback of a module runs as a [handler](../module-runtime-and-lifecycle.m
 | the overlay's own [`onActivate` and `onDeactivate`](#o-onactivate) | on a `slot`, in the arbiter's call, a plain call; without one, in the handler of whatever looked at the overlay again — a window or focus event, a `pollMatch` poll, the runtime's own timers (the first evaluation of a binding, the check 250 ms after it came to the front), the menu tick | no: on a slot nothing can wait there, and either way the overlay is half way into or out of the front |
 | a [library](#o-gate)'s `gate` | in the handler of whatever looked at the overlay again, outside any scan | yes, but a read with a callback keeps the module's keys free |
 
-**"Wait for a read"** is [`host.ocr.recognize`](ocr.md#host-ocr-recognize) without a callback: where the table says yes, it stops the handler until the reading comes, and only the overlay's module waits — its next key runs after it ([Where it waits](ocr.md#where-it-waits)). With a callback it waits nowhere, and is fine in every row. What the rows that say no rule out: a `when` is asked for every control on every Tab and a menu test on every tick, and a module that waited there would be busy all the time.
+**"Wait for a read"** is [`host.ocr.recognize`](ocr.md#host-ocr-recognize) without a callback, and **"a capture"** a [`host.screen.snapshot`](screen.md#host-screen-snapshot), [`pixel`](screen.md#host-screen-pixel) or [`pixels`](screen.md#host-screen-pixels) of the screen: where the table says yes, it stops the handler until the reading, the picture or the colours come, and only the overlay's module waits — its next key runs after it ([Where it waits](ocr.md#where-it-waits), and for the screen [its own](screen.md#where-it-waits)). With a callback a read waits nowhere, and is fine in every row; so is a `pixel` or `pixels` of a snapshot, which reads no screen. What the rows that say no rule out: a `when` is asked for every control on every Tab and a menu test on every tick, and a module that waited there would be busy all the time.
 
 **Where it may wait**, the overlay checks afterwards that what it was doing still stands. A sentence notes where the overlay is before its control's first hook runs — in front, in which stay, on which window, the focus and the control, the keys of its own, the announcements, the menus opened — and after each of `text`, `current` and `verticalName` it asks whether that still holds, as [`O:stillHere`](#o-here) does with `focus`, `keys` and `said`, and a menu opened since (a menu that was open before the hook does not count against it). When it no longer holds, nothing of the sentence is said, the log says `[read] '<label>' not spoken after its text: <why>` (`after its current`, `after its verticalName`) in `stillHere`'s words, and an OCR button's click is not made: `[read] '<label>': not clicking — <why>`. Without a wait nothing changes between the two, and the sentence is said as it always was. A module's own `onActivate` or `onStep` that reads and then acts — as VPS Avenger's preset steps read the name, then click — takes [`O:here()`](#o-here) before the read and asks `O:stillHere` after it, before it acts: the runtime cannot check that for it. The runtime does the same around its own reads of a pixel before a click: a [hotspot toggle](#o-addhotspottoggle)'s press, and a [graphical toggle](#o-addgraphicaltoggle)'s `reveal` probe.
 
-**Where it must not wait**, the hooks run in a coroutine the runtime makes: one for a whole scan — every `when` of a Tab's search for the next control, every claimant of a shared hotkey, every test a menu tick asks — and each hook inline inside it; a hook asked on its own, such as the `when` of the control Return presses, has one to itself. That is one coroutine per scan or per lone hook. To the host it is a coroutine the module made: `host.ocr.recognize` without a callback does not wait there, and raises — the hook then raises with it ([Where it waits](ocr.md#where-it-waits)). Nor does such a hook read the screen itself: a `host.screen` call there that captures — a pixel, a snapshot, a search without a callback — takes its picture on the event loop and holds every module while it does, on every scan; a `snapshot`, which waits in a handler, says in the log that it could not wait there ([Where it waits](screen.md#where-it-waits)). What a `when` needs of the screen is declared as a [probe](#o-probe): the runtime reads it in the handler before the scan, one capture for all the overlay's probes and only after something acted (or at every Tab: for a probe declared so, and while a change the module [expects](#o-expectchange) has not been read), and the `when` answers from that reading. A call with a callback — [`host.ocr.recognize`](ocr.md#host-ocr-recognize), [`snapshotAsync`](screen.md#host-screen-snapshotasync), [`imageSearchAsync`](screen.md#host-screen-imagesearchasync) — asks and returns at once, and is fine there. A `coroutine.yield` of the hook's own is ended with the error `a hook asked on every scan yielded; it must return at once`: a `when` asked on its own then hides its control, as a `when` that raises does; inside a scan the yield reaches past that guard, and the scan — and with it the key that started it — ends with that error. A menu test that yields has failed, as one that raises has: the tick goes on, the tests after it are asked on the next tick, and the test itself is asked in a coroutine of its own from then on, where it fails alone.
+**Where it must not wait**, the hooks run in a coroutine the runtime makes: one for a whole scan — every `when` of a Tab's search for the next control, every claimant of a shared hotkey, every test a menu tick asks — and each hook inline inside it; a hook asked on its own, such as the `when` of the control Return presses, has one to itself. That is one coroutine per scan or per lone hook. To the host it is a coroutine the module made: `host.ocr.recognize` without a callback does not wait there, and raises — the hook then raises with it ([Where it waits](ocr.md#where-it-waits)). Nor does such a hook read the screen itself: a `host.screen` call there that captures — a pixel, a snapshot, a search without a callback — takes its picture on the event loop and holds every module while it does, on every scan; a `snapshot`, `pixel` or `pixels`, which wait in a handler, say in the log that they could not wait there ([Where it waits](screen.md#where-it-waits)). What a `when` needs of the screen is declared as a [probe](#o-probe): the runtime reads it in the handler before the scan, one capture for all the overlay's probes and only after something acted (or at every Tab: for a probe declared so, and while a change the module [expects](#o-expectchange) has not been read), and the `when` answers from that reading. A call with a callback — [`host.ocr.recognize`](ocr.md#host-ocr-recognize), [`snapshotAsync`](screen.md#host-screen-snapshotasync), [`imageSearchAsync`](screen.md#host-screen-imagesearchasync) — asks and returns at once, and is fine there. A `coroutine.yield` of the hook's own is ended with the error `a hook asked on every scan yielded; it must return at once`: a `when` asked on its own then hides its control, as a `when` that raises does; inside a scan the yield reaches past that guard, and the scan — and with it the key that started it — ends with that error. A menu test that yields has failed, as one that raises has: the tick goes on, the tests after it are asked on the next tick, and the test itself is asked in a coroutine of its own from then on, where it fails alone.
 
 **The overlay's own origin is resolved before every such coroutine**, outside it, so a stored `identify` asked for it runs in the handler. One reached inside the coroutine all the same — another overlay's origin asked by a `when`, say, after a plug-in made its control anew — is not asked there: that evaluation finds no control (not counted towards the eight of [`attachEmbedded`](#o-attachembedded)), nothing of it is kept for the [epoch](timer.md#host-epoch), and the overlay looks again on its module's next turn, once per epoch, through a recheck of its own. Logged once per control: `attachEmbedded: [<class>] id=<id>, identify is not asked inside a scan of the overlay's hooks — '<overlay>' looks again on its next turn`.
 
@@ -229,7 +229,7 @@ So a Tab after an act reads once, and Tabs in a row read nothing (an `everyEpoch
 
 **What raises**, at the call: a probe declared after the overlay is bound (`overlay '<label>': probe must be called BEFORE binding it — the binding is what starts it`), a name that is not a non-empty string or is already one of the overlay's probes, `points` that is neither a list of `{x, y}` nor a function, `opts` that is not a table, an option other than `read`, `rawOrigin` and `everyEpoch`, and a `read` that is not a function.
 
-**Cost.** Declaring one costs nothing. A scan with nothing due works out each probe's points — its function called, or its list placed — and compares a key. A scan with probes due adds one `host.screen.pixels` over all their points, on the event loop: one capture of the box around them when they lie within 2,000,000 pixels of each other (see [its Cost](screen.md#host-screen-pixels)).
+**Cost.** Declaring one costs nothing. A scan with nothing due works out each probe's points — its function called, or its list placed — and compares a key. A scan with probes due adds one `host.screen.pixels` over all their points, which the handler [waits](screen.md#where-it-waits) for while the `screen-capture` thread reads them — the module's keys queue behind it, the event loop goes on: one capture of the box around them when they lie within 2,000,000 pixels of each other (see [its Cost](screen.md#host-screen-pixels)).
 
 ```luau
 -- Kontakt 8's view, from one pixel below its top bar, measured from the right edge: 26 in the
@@ -262,11 +262,11 @@ ov:addCustomButton({
 
 ### Windows
 
-Read through `host.screen.pixels`: a `BitBlt` of the box around the points through the standard path, about one compositor frame (16.7 ms) for points close together; under a declared `capture = "duplication"` a 1×1 piece of one duplication request each, up to 60 ms ([`host.screen.pixels`](screen.md#host-screen-pixels)). Coordinates are device pixels.
+Read through `host.screen.pixels`: a `BitBlt` of the box around the points through the standard path, about one compositor frame (16.7 ms) for points close together; under a declared `capture = "duplication"` a 1×1 piece of one duplication request each, which the `screen-capture` thread waits for up to 250 ms ([`host.screen.pixels`](screen.md#host-screen-pixels)). Coordinates are device pixels.
 
 ### macOS
 
-Read through `host.screen.pixels`: one capture of the box at point resolution, afresh on every call, with colours downsampled from a Retina display, so a `read` compares with a tolerance. Coordinates are points. Without the Screen Recording permission the colours are the wallpaper's: a `read` that recognises only the plug-in's own colours answers `nil`, and the last value stands.
+Read through `host.screen.pixels`: one capture of the box at point resolution on the `screen-capture` thread — one ScreenCaptureKit capture, measured at 36 to 91 ms — afresh on every call, with colours downsampled from a Retina display, so a `read` compares with a tolerance. Coordinates are points. Without the Screen Recording permission the colours are the wallpaper's: a `read` that recognises only the plug-in's own colours answers `nil`, and the last value stands.
 
 ## O\:expectChange(name, ...) {#o-expectchange}
 
@@ -280,7 +280,7 @@ Says that what the module is about to do will change what the [probes](#o-probe)
 
 **What raises**, at the call: no name (`overlay '<label>': expectChange takes the names of one or more of its probes`), a name that is not a string (`overlay '<label>': expectChange takes probe names, got <type>`), and a name that is not one of the overlay's probes (`overlay '<label>': expectChange: no probe named '<name>'`).
 
-**Cost.** The call costs a look at the overlay's origin and a table. Each key while the change is not read costs one [`host.screen.pixels`](screen.md#host-screen-pixels) over the points of the overlay's due probes, as a probe's read does, on the event loop until those reads wait: usually one or two keys after the act. Once the change is read, Tabs in a row cost nothing again.
+**Cost.** The call costs a look at the overlay's origin and a table. Each key while the change is not read costs one [`host.screen.pixels`](screen.md#host-screen-pixels) over the points of the overlay's due probes, as a probe's read does — a wait of the key's handler, not of the event loop: usually one or two keys after the act. Once the change is read, Tabs in a row cost nothing again.
 
 ```luau
 -- Kontakt 8's view toggle: F10, which Kontakt may draw after the next key has come.
@@ -1194,15 +1194,22 @@ kk:attachEmbedded(spec, { slot = SLOT,
   menus = { O.menuTests.nativePopup, O.menuTests.accessibility, O.menuTests.newWindow } })
 
 -- A module's own test, one pixel: a plug-in whose list, while it is open, has a white border
--- at content point (412, 140) — the kind of point read off the menu shots. A pixel read costs
--- one compositor frame (~16.7 ms on Windows), so it is not declared cheap: every tick after a
--- press and while the list is open, once in eight ticks otherwise.
+-- at content point (412, 140) — the kind of point read off the menu shots. A test must not wait,
+-- so it has that point photographed off the event loop and answers from the callback, reading
+-- the pixel of the picture. Each ask is a capture on the screen-capture thread (~16.7 ms on
+-- Windows), so it is not declared cheap: every tick after a press and while the list is open,
+-- once in eight ticks otherwise.
 local list = {
   name = "preset list",
   test = function(o, answer)
     local c = o:origin().client
-    local p = host.screen.pixel(c.x + 412, c.y + 140)
-    answer(p ~= nil and p.r > 200 and p.g > 200 and p.b > 200)
+    local x, y = c.x + 412, c.y + 140
+    host.screen.snapshotAsync({ region = { x, y, x + 1, y + 1 } }, function(s)
+      if not s then answer(false) return end   -- no picture this time
+      local p = host.screen.pixel(x, y, { snapshot = s })   -- of the picture: at once
+      s:release()
+      answer(p ~= nil and p.r > 200 and p.g > 200 and p.b > 200)
+    end)
   end,
 }
 
