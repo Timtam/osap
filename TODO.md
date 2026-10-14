@@ -27,6 +27,62 @@ Architecture and feasibility foundation: [docs/architecture-feasibility-study.md
       click parameter of W10, host.element.press, the macOS page) keep the current style so the
       conversion catches everything in one sweep.
 
+## The first Mac test of the Avenger page (2026-10-14)
+
+The first Mac test of the Avenger page (build 97d668c, an M2 Max on macOS 26.6.1, Logic, one
+1920x1080 display at 1.00, two sessions in one log). The tester's three observations each had
+another cause than the one guessed, and the log showed three more faults. In the order to work on
+them:
+
+- [ ] **2a. An overlay must not leave the plug-in after a click into it (macOS, every plug-in).**
+      Right after every click into Avenger, the ring's own included, the log says `[deactivate] 'VPS
+      Avenger' — in front now: 'Inst 1'`: the same window. After a click into a plug-in's own drawn
+      view, Logic reports the keyboard on the window itself (`AXWindow/AXDialog`) or on nothing, and
+      the runtime takes that as having left the panel (inferred from the trips' arrival lines; the
+      deactivation does not say why, see 2c). The fix: while the same plug-in window stays in front,
+      a focus on the window itself or on nothing keeps the stay. The same cause ends the ring's Load
+      and Initialize on a Mac (`not chosen — the overlay left the front first`); the page's trips
+      are unaffected, since a trip holds its place.
+- [ ] **2b. An undecided `identify` is asked again when its read answers.** The panel's `identify`
+      reads by OCR with a callback and first answers "could not tell yet"; the answer is picked up
+      only at the next recheck, which only a window event brings. The tester moved the plug-in
+      window with Control-Fn-arrows after every click for exactly that event (it looked like a
+      matter of the window's place; the log shows the identification working at the same place). The
+      runtime asks again on its own once the read is in.
+- [ ] **2c. Every deactivation logs its reason** (which test failed: the focus outside the panel,
+      the identity, a gate, another overlay's claim), so the next Mac log answers 2a directly.
+- [ ] **4. A preset step waits for a settled name.** `O:watch` on the name stops at the first
+      change, which is Avenger's loading display: seven of ten steps read names such as
+      `cYanmaGentaYellowb`, `PY` or `M`, and the page said them. The name counts once two reads
+      agree, or it is in the catalog; otherwise the watch goes on to its bound.
+- [ ] **1a. Screen Recording judged by a real capture, not by `CGPreflightScreenCaptureAccess`.** In
+      the first session the preflight said "not granted" throughout while every capture held Logic
+      and Avenger (OCR read the header, Avenger was identified). The Permissions page and the start
+      announcement believed the preflight. A capture holding another application's window counts as
+      granted.
+- [ ] **1b. Input Monitoring is optional, not blocking.** It read "denied" while the event tap
+      captured the overlay's keys with Accessibility alone (macOS 26.6). The page, its head count
+      and the start announcement ("cannot work yet: … Input Monitoring") treat it as optional.
+- [ ] **1c. The Permissions page reads the states again** when its window or tab comes forward, not
+      only at its build and at Re-check now.
+- [ ] **1d. App translocation is not the cause** (the second session ran translocated too, with
+      every permission granted), but it shows that the `xattr` step was skipped: the tester guide
+      makes that step harder to miss. A signing identity in CI, so a new build keeps the
+      permissions, stays the maintainer's task.
+- [ ] **3. Previous and next preset are unavailable on Init Preset.** Avenger steps no preset from
+      its blank preset; the tool has no handling for it (it clicks and waits for a change that never
+      comes, `AC/actions.py` `_step_preset`). Where the preset read is Init Preset
+      (`R.isInitPreset`): on the page `aria-disabled` on both buttons (they stay in the Tab order)
+      with the reason in their help, in the ring the controls report themselves unavailable, and a
+      press clicks nothing and says why. A fix beyond the tool, under the maintainer's "defects
+      fixed" decision.
+- [ ] **5. Avenger's own popups on a Mac.** The page's Size never saw the zoom list: `'Zoom' not
+      chosen — no menu test saw a menu within 8000 ms`, twice. Avenger draws its popups itself, and
+      no menu test of the module sees them on a Mac. Needs pictures of each popup kind from the
+      Avenger developer (GM1), then a picture-based menu test.
+- [ ] **6. Then a new package for the tester:** Load, Initialize and Size again (ring and page), the
+      names after Next and Previous, and the Permissions page.
+
 ## For the first release's changelog
 
 There is no CHANGELOG file yet. What the first release has to name — API removed or changed so
