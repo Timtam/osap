@@ -127,6 +127,7 @@ end
 
 -- Every button here is clicked by a posted click (clickAt), the pointer left alone, and says
 -- itself afterwards: once what it reads has changed, or after 900 ms with what it reads then.
+-- `opts.also(o)` adds what else the press changed, after a comma.
 local function button(label, at, read, opts)
   ov:addCustomButton({
     label = label,
@@ -138,7 +139,11 @@ local function button(label, at, read, opts)
       if was == "dimmed" then return say(was) end
       clickAt(o, at[1], at[2])
       if opts and opts.opensMenu then return end
-      o:watch({ read = read, was = was, within = 900, onDone = say, onGiveUp = say })
+      local function sayNow(now)
+        local also = now and opts and opts.also and opts.also(o)
+        say(also and now .. ", " .. also or now)
+      end
+      o:watch({ read = read, was = was, within = 900, onDone = sayNow, onGiveUp = sayNow })
     end,
   })
 end
@@ -173,11 +178,31 @@ end
 button("Scale", { 540, 475 }, scaleName, { opensMenu = true })
 
 -- The root: flat, sharp and A to G, the chosen one lit as Group Octaves is.
-button("Flat", { 590, 475 }, lit({ 580, 467 }, "on", "off"))
-button("Sharp", { 626, 475 }, lit({ 616, 467 }, "on", "off"))
-for i, n in ipairs({ "A", "B", "C", "D", "E", "F", "G" }) do
-  local x = 330 + (i - 1) * 49
-  button("Root " .. n, { x, 515 }, lit({ x - 16, 515 }, "selected", "not selected"))
+local FLAT, SHARP = { 580, 467 }, { 616, 467 }
+local LETTERS = { "A", "B", "C", "D", "E", "F", "G" }
+local function letterAt(i) return { 330 + (i - 1) * 49 - 16, 515 } end
+
+-- The root as it is lit now, "B flat", in one read; nil with no letter lit.
+local function rootName(o)
+  local pts = {}
+  for i, p in ipairs({ FLAT, SHARP }) do pts[i] = screenPoint(o, p[1], p[2]) end
+  for i = 1, #LETTERS do pts[2 + i] = screenPoint(o, letterAt(i)[1], letterAt(i)[2]) end
+  if #pts < 2 + #LETTERS then return nil end
+  local c = host.screen.pixels(pts)
+  if not c then return nil end
+  for i, letter in ipairs(LETTERS) do
+    if near(c[2 + i], MAGENTA) then
+      return "root " .. letter .. (near(c[1], MAGENTA) and " flat" or near(c[2], MAGENTA) and " sharp" or "")
+    end
+  end
+  return nil
+end
+
+button("Flat", { 590, 475 }, lit(FLAT, "on", "off"), { also = rootName })
+button("Sharp", { 626, 475 }, lit(SHARP, "on", "off"), { also = rootName })
+for i, n in ipairs(LETTERS) do
+  local p = letterAt(i)
+  button("Root " .. n, { p[1] + 16, 515 }, lit(p, "selected", "not selected"))
 end
 
 -- Says the scale's name afterwards: the edited mark, " *", goes from it.
