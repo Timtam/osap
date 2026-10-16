@@ -1482,6 +1482,148 @@ fn window_owner(number: u32) -> Option<(i32, i32)> {
     None
 }
 
+/// Who owns a window number, and its rectangle. From the on-screen list, as [`window_owner`];
+/// `None` for a number the list does not carry, which is a window not on screen.
+fn window_listed(number: u32) -> Option<(i32, CGRect)> {
+    let list = CGWindowListCopyWindowInfo(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
+    )?;
+    // SAFETY: CGWindowListCopyWindowInfo is documented to return an array of dictionaries.
+    let typed: &CFArray<CFDictionary> = unsafe { list.cast_unchecked::<CFDictionary>() };
+    for i in 0..typed.len().min(512) {
+        let Some(dict) = typed.get(i) else { continue };
+        if dict_i64(&dict, unsafe { kCGWindowNumber }).unwrap_or(0) as u32 != number {
+            continue;
+        }
+        let pid = dict_i64(&dict, unsafe { kCGWindowOwnerPID }).unwrap_or(0) as i32;
+        return Some((pid, dict_rect(&dict)?));
+    }
+    None
+}
+
+/// The window a posted click is for (`input::post_click`), as the window server has it.
+pub(super) struct PostTarget {
+    /// The process the events are handed to.
+    pub pid: i32,
+    /// The window server's number of the window the point is in: the window's own, or, for
+    /// something inside a window, that window's. AppKit gives the events to the window it names.
+    pub number: u32,
+    /// That window's rectangle in the window server's list, which the place in the window the
+    /// events carry is measured from.
+    pub bounds: super::post_click::Frame,
+}
+
+fn frame_of(r: CGRect) -> super::post_click::Frame {
+    super::post_click::Frame { x: r.origin.x, y: r.origin.y, w: r.size.width, h: r.size.height }
+}
+
+/// What `host.input.click`'s `window` asks of a posted click on a Mac, and what the click then
+/// needs: the window — an id from `host.window`, a control's included, or a window of ours — still
+/// there and paired with the window server's number, on screen, the point in it and, for a
+/// window, in its content rather than on its title bar or border, and nothing else drawn over the
+/// point. `Err` with the refusal: [`GONE`](crate::backend::GONE),
+/// [`OUTSIDE`](crate::backend::OUTSIDE), [`FRAME`](crate::backend::FRAME),
+/// [`COVERED`](crate::backend::COVERED), or one of the Mac's own in `post_click.rs`.
+///
+/// What it asks: the window's number, paired once per window (`window_id`, which reads the window
+/// server's list itself the first time); that list of windows on screen, once; the hit test the `window` of every click asks
+/// (`number_owns_point`, with its rule: only a window known to be drawn over the point refuses);
+/// and, of the window's program, a control's rectangle — two attribute reads — or, for a window
+/// whose content has not been worked out yet, its snapshot and the children walk `content_rect`
+/// makes, a read of the children and a snapshot of each. Worked out once per window, usually by
+/// `win_info` before the id ever reached a module; but `content_rect` remembers no failure to
+/// measure, so a window whose content could not be measured is walked again on every click. Each
+/// read is bounded as every accessibility read is ([`MESSAGING_TIMEOUT`]) and none is asked of a
+/// program that did not answer a moment ago (`is_busy`, also asked between the snapshot and the
+/// walk, as `win_info` asks it); but a snapshot that times out falls back to its seven single reads,
+/// so a program that stops answering at this click can hold the event loop for several seconds
+/// once, and is refused at once after it. A window of ours is AppKit's, asked nothing through
+/// accessibility.
+///
+/// Main thread only, as the hit test is; the event loop is.
+pub(super) fn post_target(handle: isize, x: i32, y: i32) -> Result<PostTarget, String> {
+    use super::post_click::{place, NOT_ANSWERING, NOT_ON_SCREEN, NOT_PAIRED};
+    use crate::backend::{COVERED, GONE};
+    if objc2::MainThreadMarker::new().is_none() {
+        return Err("a posted click is made on the event loop's thread only".to_string());
+    }
+    // Who is asked, and the window the point has to be in.
+    enum Of {
+        /// A window of ours: its content rectangle, AppKit's.
+        Own(super::post_click::Frame),
+        /// Another program's window, by its handle.
+        Window(handles::Entry),
+        /// Something inside another program's window, by its own handle.
+        Control(handles::Entry),
+    }
+    let (pid, number, of) = match crate::backend::own_number(handle) {
+        Some(n) => {
+            super::own::kind_of(n).ok_or_else(|| GONE.to_string())?;
+            let w = super::own::info(handle, false).ok_or_else(|| NOT_ON_SCREEN.to_string())?;
+            let content = super::post_click::Frame {
+                x: f64::from(w.client_x),
+                y: f64::from(w.client_y),
+                w: f64::from(w.client_w),
+                h: f64::from(w.client_h),
+            };
+            (std::process::id() as i32, n, Of::Own(content))
+        }
+        None => {
+            let entry = handles::get(handle).ok_or_else(|| GONE.to_string())?;
+            let window = if entry.owner == handle { handle } else { entry.owner };
+            if window == 0 {
+                return Err(NOT_PAIRED.to_string());
+            }
+            if skip_busy(entry.pid, "posted click") {
+                return Err(NOT_ANSWERING.to_string());
+            }
+            let number = window_id(window);
+            if number == 0 {
+                return Err(NOT_PAIRED.to_string());
+            }
+            let pid = entry.pid;
+            (pid, number, if window == handle { Of::Window(entry) } else { Of::Control(entry) })
+        }
+    };
+    let (owner, bounds) = window_listed(number).ok_or_else(|| NOT_ON_SCREEN.to_string())?;
+    // A number the window server gave another program's window since: the window paired with it
+    // has gone.
+    if owner != pid {
+        return Err(GONE.to_string());
+    }
+    // A read of the program's that came back with nothing: it did not answer, or the element went.
+    let unread = || if is_busy(pid) { NOT_ANSWERING.to_string() } else { GONE.to_string() };
+    let (frame, content) = match &of {
+        Of::Own(content) => (frame_of(bounds), Some(*content)),
+        Of::Window(entry) => {
+            let inset = INSET_BY_HANDLE.with(|c| c.borrow().get(&handle).copied());
+            let content = match inset {
+                Some(d) => apply_inset(bounds, d),
+                None => {
+                    let snap = snapshot(&entry.element);
+                    // The snapshot may have been the read that timed out; the walk would pay it
+                    // again for every child (`win_info` stops here for the same reason).
+                    if skip_busy(pid, "posted click") {
+                        return Err(NOT_ANSWERING.to_string());
+                    }
+                    if snap.rect.is_none() {
+                        return Err(unread());
+                    }
+                    content_rect(&entry.element, &snap, bounds, handle)
+                }
+            };
+            (frame_of(bounds), Some(frame_of(content)))
+        }
+        Of::Control(entry) => (frame_of(element_rect_cg(&entry.element).ok_or_else(unread)?), None),
+    };
+    place(x, y, frame, content).map_err(str::to_string)?;
+    if number_owns_point(number, x, y, &format!("window {handle}")) == Some(false) {
+        return Err(COVERED.to_string());
+    }
+    Ok(PostTarget { pid, number, bounds: frame_of(bounds) })
+}
+
 /// VoiceOver's process, by bundle id — its cursor ring and caption panel are windows, and
 /// a press must never be refused on their account.
 fn is_voiceover(pid: i32) -> bool {

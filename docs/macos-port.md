@@ -233,6 +233,7 @@ real one has not run yet.
 | `screen_size`, `pixel`, `capture` | `CGDisplayBounds`, `CGDisplayCreateImageForRect` |
 | `ocr` | Vision `VNRecognizeTextRequest` (per-word boxes via `boundingBox(for:)`) |
 | mouse + `key_send` + `type_text` | `CGEvent` synthesis posted to `kCGHIDEventTap` |
+| `mouse_click_posted` (`host.input.click{ via = "post" }`) | `CGEvent`s handed to the window's process with `CGEventPostToPid`, carrying the window's number and the private `CGEventSetWindowLocation` place in it |
 | `register_hotkey` | Carbon `RegisterEventHotKey` — no permission, cannot be silently disabled |
 | `set_captured_keys` (capture **and suppress**) | `CGEventTap` with a re-enable watchdog |
 | `watch_foreground` | `NSWorkspaceDidActivateApplicationNotification` + `AXObserver` |

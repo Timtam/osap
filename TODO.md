@@ -7114,7 +7114,8 @@ maintainer's German test instructions are a text of their own, not in the reposi
       a series — go into the log. What to listen for, above the measurements: does NVDA stay in the
       page (the quiet ways), or does it announce the focus leaving and coming back (the round trip)?
       The guide for the session (not in the repository): the scratchpad's `html-probe-tests-r5.md`.
-      W10 came with revision 5; revision 7 (2026-10-12) has it beside the Mac's 6, and asks the
+      W10 came with revision 5; revision 8 (2026-10-16) offers it on a Mac as well (MW21);
+      revision 7 (2026-10-12) has it beside the Mac's 6, and asks the
       plug-in's elements and an element's state with a callback (the state before the reads and
       again after the change wait); a dump that is not all of the tree is a log line of its own:
       `W10: the plug-in's elements are not all of its tree: …`.
@@ -7177,12 +7178,12 @@ maintainer's German test instructions are a text of their own, not in the reposi
       lost → that way for that class, its holding and giving back as the log shows it; "pointer
       stays" losing clicks in JUCE → the experimental `move` option goes; Press arriving without a
       front change → it is the first choice where a plug-in exposes its controls.
-- [ ] **Posted clicks on a Mac: `host.input.click{ via = "post" }` (2026-10-16, from the
+- [x] **Posted clicks on a Mac: `host.input.click{ via = "post" }` (2026-10-16, from the
       maintainer).** A user of the platform needed them for a plug-in, built them in a copy of their
       own and had them working, but cannot hand the change back; the maintainer asked for them to be
-      built here. Today `via = "post"` (and `"noactivate"`) answer `false, "not supported on this
-      platform yet"` on a Mac (docs/api/input.md), so a module there takes the round trip for every
-      click.
+      built here. Until then `via = "post"` (and `"noactivate"`) answered `false, "not supported on
+      this platform yet"` on a Mac (docs/api/input.md), so a module there took the round trip for
+      every click.
 
       To build, with the Windows way's meaning: `window` required, the click made only where the
       point is in that window and nothing is drawn over it, nothing brought to the front, the
@@ -7203,6 +7204,57 @@ maintainer's German test instructions are a text of their own, not in the reposi
       posted ways, as an MW question for the tester (Avenger in Logic: does a posted click on ◀
       arrive without Logic coming forward, and is a JUCE plug-in's click lost without the pointer?);
       and, once that holds, the page's trips may click by posting where a module chooses it.
+
+      **Built (2026-10-16), blind**, with the Windows way's meaning: `input::post_click` and
+      `ax::post_target` in backend/macos, the arithmetic and the refusals in `post_click.rs` (tested
+      on Windows), the private setter in `ffi.rs`; docs/api/input.md's macOS block says it all. The
+      move, the press and the release are `CGEvent`s handed to the window's process with
+      `CGEventPostToPid`, each carrying the window's number — in the two public fields and in the
+      private field 51 (`kCGSEventWindowIDField`, WebKit's `CoreGraphicsTestSPI.h`) — and its place
+      in the window from the window's top-left corner, set with the private
+      `CGEventSetWindowLocation` (looked up with `dlsym`; without it a posted click is refused); the
+      flags cleared as on every Mac click, the events marked `POST` in `kCGEventSourceUserData` (the
+      second mark the host sets: only the keys passed on carried one, `PASS`, before); with
+      `move` the pointer warped first and the mouse joined to it again at once. Refused: first
+      the permission (`CGPreflightPostEventAccess`; the window server drops posted events in
+      silence without it), then the window gone, not paired with a window number, not on screen,
+      the program not answering, the point outside the window or on its frame, something drawn over
+      it (the cover rule every Mac click has); one `[input] posted click for window …: into window
+      number … of process … (…) at x,y from the window's top-left corner …` line per click. Why the
+      fields: a bare `CGEventPostToPid` is dropped (no window number), the numbers alone were taken
+      and ignored by Finder and VS Code, and the numbers with the place took 54 clicks of 54 in
+      AppKit, SwiftUI and WKWebView test windows left in the background (callstack/agent-device PR
+      3245, lahfir/agent-desktop PR 227, TomiXRM/kagi issue 542; trycua/cua's driver and the clicker
+      Lakr233/bgclick-rev-skill takes apart set the same). `"noactivate"` stays "not supported on
+      this platform yet". CI: `page-check` posts into its own tool page on the four Mac runners —
+      one press at the point asked for and one click, with the pointer moved and with it left, a
+      `skipped` notice where the runner may not post events — and, as data, two clicks into the page
+      without the keyboard (AppKit's first-mouse rule, and whether the front moved). The HTML probe
+      (revision 8) offers W10 on a Mac, its target key Command-Shift-F4 (MW21).
+
+      **What stays for a Mac:** the first CI run — does the click land at the place asked for (a
+      mirrored height would say the window location is AppKit's bottom-left after all, as WebKit's
+      test runner reads it), may the runners post events at all, and what the page's web view, which
+      refuses the first mouse, does with a second click while the application stays in the
+      background (`posted_unkeyed`; the prior art saw such clicks dropped, so the docs promise
+      nothing of it); MW21 with the Avenger developer, and with it whether the mouse stalls after a
+      click with the pointer moved: the host joins mouse and pointer again after the warp
+      (`CGAssociateMouseAndMouseCursorPosition`), which Apple describes for an application in the
+      foreground, and posts mostly while it is not — if the mouse stalls there, zeroing the local
+      events suppression interval of a combined-session-state source
+      (`CGEventSourceSetLocalEventsSuppressionInterval`, the public per-source remedy) is the one to
+      try, left out until then because it changes how long the user's own input is held off after
+      every event the host posts, and the write-up that uses it sets it on a source it releases at
+      once, so it may hold for more than this application; then, where it holds, the page's trips clicking by posting where a module chooses
+      it. Found while building it: a JUCE view's mouse-down asks for its application's activation
+      whenever that is not the active one (`redirectMouseDown` → `Process::makeForegroundProcess`,
+      `[NSApp activateIgnoringOtherApps: YES]`, in juce_NSViewComponentPeer_mac.mm and
+      juce_Threads_mac.mm), so a JUCE plug-in may bring its DAW forward on a posted click by itself,
+      as REAPER did on Windows — whether macOS 14 and later grants a request with no real click
+      behind it is what MW21 hears. And the Mac's check for `window` with `via = "input"` pairs a
+      control's id with a window number only where the control's frame is its window's
+      (`ax::window_id` matches frames, and logs each miss), so for most controls it cannot refuse;
+      `post_target` asks with the window the control lies in. To decide: the same for `"input"`.
 - [x] **A page in a window like any program's: `window = "app"`** (the maintainer's decision after
       W6, 2026-10-11 — modules are to be flexible, and a whole interface in HTML, CSS and JS is not
       far-fetched). `host.gui.webview{ …, window = "tool" | "app" }`, the tool page by default; what
@@ -7531,15 +7583,16 @@ maintainer's German test instructions are a text of their own, not in the reposi
       that page shown with the keyboard over it, and then hidden, does to the front. gui.md's
       option and its Windows and macOS blocks say what it does; what only a Mac shows is MW1b,
       and MW6 and MW18 in this model.
-- [ ] **The Mac's page tests, MW1–MW20** (the plan of 2026-10-11; numbered MW because the DXGI
+- [ ] **The Mac's page tests, MW1–MW21** (the plan of 2026-10-11; numbered MW because the DXGI
       section has M1–M19 of its own, and in place of the M1–M13 asked of the Mac's page before):
       what only a Mac answers of the page window above, which `host.gui.webview` shows its pages
       in since 2026-10-11. Who answers what, in this order: the tester with VoiceOver, at most about
       40 minutes on one Mac; the VPS Avenger module's developer, sighted, with Logic; CI; the log.
       The tester's briefing is a text of its own, not in the repository, and names the stop point:
       wherever the time ends. The answers go here, not into the reference.
-      The probe on a Mac (`tools/html-probe`, revision 7, 2026-10-12: revision 6 with Windows' W10
-      beside it, which a Mac neither registers a key for nor shows) is the tester's instrument:
+      The probe on a Mac (`tools/html-probe`, revision 8, 2026-10-16: revision 6 with W10 beside it,
+      offered on a Mac since revision 8 with the posted clicks, its target key Command-Shift-F4 —
+      MW21) is the tester's instrument:
       Command-Shift-F7 the page beside the plug-in window in front, with the keyboard, and pressed
       in a page back to the plug-in; Command-Shift-F8 the same page described `activates = false`
       (`HTML probe without activation`), the other pages left as they are; Command-Shift-F11 the
@@ -7667,6 +7720,23 @@ maintainer's German test instructions are a text of their own, not in the reposi
           page …`, or `… STILL DRAWN OVER it …`).
         - **MW7:** does Tab reach every button of a page with the system's "Keyboard navigation"
           off (wry sets WebKit's `tabFocusesLinks`)?
+        - **MW21** (posted clicks, built 2026-10-16; the probe's W10, revision 8): Avenger in
+          Logic, the tool page shown beside the plug-in window with the keyboard (Command-Shift-F7).
+          The pointer on ◀ with the Avenger overlay, Command-Shift-F4 (`W10: target remembered …`),
+          then on the page the Way "Posted click" x20, "Posted click, pointer stays" x20, and "Round
+          trip" x5 to compare. Does a posted click on ◀ arrive — the preset changes: `picture:
+          changed`, the text read after — and does Logic stay where it is, the page keeping the
+          keyboard (`front: the page throughout`, no `[keys] the workspace named …` line for Logic)?
+          A JUCE plug-in asks for its DAW's activation on a press while the DAW is not the active
+          application, so a Logic that comes forward says macOS granted that. Is a JUCE plug-in's
+          click lost without the pointer (the two counts side by side)? The `[input] posted click …`
+          lines say which window number each went to and where in it, and the start block's `hid
+          post events` line whether the application may post at all (refused clicks say `this
+          application may not post events …`). After a posted click with the pointer moved, does
+          the mouse move the pointer at once, or stall for about a quarter of a second (the
+          application is not the active one then; see the item on posted clicks)? Then, if there is
+          one: an Audio Unit Logic runs out
+          of process — an Intel one under Rosetta on Apple silicon — does it take a posted click?
       - **CI** (`page-check`, no Mac session; docs/building-on-macos.md): the activation mechanics
         and both ways of handing the front back, the keys, message counts and order, the policy and
         the rule list, the Library folders, the policy switch, timings; a page's clipboard, the

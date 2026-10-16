@@ -1267,7 +1267,9 @@ jobs:
   # one not, messages both ways and in order, its own file fetched and nothing outside, no
   # navigation away, `window.close()` doing nothing, and — while it has the keyboard — the Edit
   # keys, Return on a button, Command-Q and Command-H doing nothing in a tool page, Command-W hiding
-  # it.
+  # it, and a click posted into its button as `host.input.click`'s `via = "post"` posts one,
+  # landing where it was asked for (`skipped` where the runner does not let the application post
+  # events: a notice, neither a pass nor a failure).
   #
   # Why: whether `activateIgnoringOtherApps:` still takes the front on 14 and later is disputed,
   # and which way of handing it back works decides how the application does it (TODO.md, MW5); and
@@ -1354,6 +1356,10 @@ jobs:
             echo "::error::page-check did not reach its end on $LEG ($(ended "$status"))"
             exit 1
           fi
+          # A check the runner cannot make — posting events without the privilege — is said, not passed.
+          { grep '^PAGE CHECK: check .*: skipped' "$out" || true; } | while IFS= read -r line; do
+            echo "::notice::page-check on $LEG: ${line#PAGE CHECK: }"
+          done
           if [ "$status" = 3 ] || grep -q '^PAGE CHECK: check .*: FAILED' "$out"; then
             grep '^PAGE CHECK: check .*: FAILED' "$out" | while IFS= read -r line; do
               echo "::error::page-check on $LEG: ${line#PAGE CHECK: }"

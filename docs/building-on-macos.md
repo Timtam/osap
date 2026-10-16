@@ -429,6 +429,13 @@ Each of these is a line `check …: ok` or `check …: FAILED` with what was see
   Return on its button gives one message, Command-Q, Command-H and Option-Command-H do nothing, and
   Command-W hides the page. Where the page does not get the keyboard on a Mac, the keys are not
   checked, and a line says so. These keys set the pasteboard;
+- shown with the keyboard, before its keys: a click posted into its button the way
+  `host.input.click` with `via = "post"` makes one (`input::post_click`) — handed to the
+  application's own process with the page window's number and the place in it — gets one press, at
+  the point asked for, and one click, and leaves the pointer on the point; and again with `move =
+  false`, the pointer put elsewhere in the page first, which leaves it there. On a runner where the
+  application may not post events (`CGPreflightPostEventAccess`), or where the window server names
+  another window over the button, the line says `skipped`, which is neither a pass nor a failure;
 - a tool page described `activates = false` — the experimental panel that takes the keyboard
   without activating the application — built and loaded with no activation asked for, and shown
   with the keyboard with none asked for either, its show answered `true` exactly when its window
@@ -443,7 +450,10 @@ Each of these is a line `check …: ok` or `check …: FAILED` with what was see
   gets its other one.
 
 The rest is data: WebKit's version, the build's and the load's times, the round trip with the page
-off screen and on it, what the page says of itself (`isSecureContext`, `navigator.clipboard`,
+off screen and on it, two clicks posted into the tool page shown without the keyboard while the
+application in front is another — what the page saw of each, and whether the front, this
+application's activation and the page window's key state changed (the first may make the window key
+without reaching the page: its web view does not take the first mouse) — what the page says of itself (`isSecureContext`, `navigator.clipboard`,
 `RTCPeerConnection`), the classes AppKit made the first responder while it was shown, an
 application page's Dock claim, Command-M and Command-Q, where the keyboard went with the
 non-activating page and which application AppKit and the workspace then call the active one, the

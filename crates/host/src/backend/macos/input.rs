@@ -23,12 +23,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation,
-    CGEventType, CGMouseButton, CGPreflightPostEventAccess, CGScrollEventUnit,
+    CGAssociateMouseAndMouseCursorPosition, CGError, CGEvent, CGEventField, CGEventFlags, CGEventSource,
+    CGEventSourceStateID, CGEventTapLocation, CGEventType, CGMouseButton, CGPreflightPostEventAccess,
+    CGScrollEventUnit, CGWarpMouseCursorPosition,
 };
 
-use super::keys;
+use super::{keys, post_click};
 use crate::backend::MouseButton;
+
+/// The event field AppKit's own mouse events carry their window's number in, and reads it from:
+/// 51, `kCGSEventWindowIDField` — private, named in no SDK header; WebKit's
+/// `Tools/TestRunnerShared/spi/CoreGraphicsTestSPI.h` declares it for its test runner's events, and
+/// every pid-routed clicker that works sets it (`post_click.rs`).
+const WINDOW_ID_FIELD: CGEventField = CGEventField(51);
 
 /// The session state every question about "what is held right now" is asked against.
 ///
@@ -282,6 +289,88 @@ pub fn mouse_click(x: i32, y: i32, button: MouseButton) {
     post_mouse(CGEventType::MouseMoved, x, y, CGMouseButton::Left, None);
     post_mouse(down, x, y, cg, Some(1));
     post_mouse(up, x, y, cg, Some(1));
+}
+
+/// `host.input.click`'s `via = "post"`: the move, the press and the release at (x, y) handed to the
+/// process of `window` with `CGEventPostToPid`, each carrying the window's number and the place in
+/// the window, so that AppKit gives them to that window while its application stays where it is
+/// (`post_click.rs` says what that rests on). `Ok` with the log line once they are posted — not
+/// that the program did anything with them, which nothing answers; `Err` with the refusal, and then
+/// nothing was posted and the pointer was not moved.
+///
+/// In this order: whether this application may post events at all — `CGEventPostToPid` returns
+/// nothing, and without the privilege the window server drops the events in silence, so that is
+/// asked first, of the privacy database, and refused rather than answered `true`; the window
+/// (`ax::post_target`); every event built and marked before the first is posted, so one that
+/// cannot be built, or a macOS without `CGEventSetWindowLocation`, posts nothing; the pointer
+/// warped to the point with `move_pointer`; then the three posts, back to back. Never sleeps, and
+/// never waits for the program: a post is a message into its event stream.
+///
+/// The modifier flags are cleared, as on every click here (`post_mouse`): a Control held from the
+/// hotkey that asked for the click would make it a secondary click.
+pub fn post_click(window: isize, x: i32, y: i32, button: MouseButton, move_pointer: bool) -> Result<String, String> {
+    note_post_access_once();
+    if !CGPreflightPostEventAccess() {
+        return Err(post_click::NO_POST_ACCESS.to_string());
+    }
+    let target = super::ax::post_target(window, x, y)?;
+    let at = post_click::window_location(x, y, target.bounds);
+    let point = CGPoint::new(f64::from(x), f64::from(y));
+    let number = i64::from(target.number);
+    let (down, up, _) = button_events(&button);
+    let cg = cg_button(&button);
+    let src = source();
+    let mut built = Vec::with_capacity(3);
+    for (etype, b, clicks) in [(CGEventType::MouseMoved, CGMouseButton::Left, None), (down, cg, Some(1)), (up, cg, Some(1))] {
+        let Some(event) = CGEvent::new_mouse_event(src.as_deref(), etype, point, b) else {
+            return Err(format!("CGEventCreateMouseEvent(type {}) returned NULL; nothing was posted", etype.0));
+        };
+        CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+        let set = |field: CGEventField, value: i64| CGEvent::set_integer_value_field(Some(&event), field, value);
+        if let Some(n) = clicks {
+            set(CGEventField::MouseEventClickState, n);
+        }
+        // The window, three times: the private field AppKit reads it from, and the two public ones
+        // the window server fills in for a real click.
+        set(WINDOW_ID_FIELD, number);
+        set(CGEventField::MouseEventWindowUnderMousePointer, number);
+        set(CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent, number);
+        set(CGEventField::EventTargetUnixProcessID, i64::from(target.pid));
+        set(CGEventField::EventSourceUserData, post_click::POSTED_CLICK_MARK);
+        // Last: the place in the window, which nothing set after it may move.
+        if !super::ffi::set_window_location(&event, CGPoint::new(at.0, at.1)) {
+            return Err(post_click::NO_WINDOW_LOCATION.to_string());
+        }
+        built.push(event);
+    }
+    let moved = if move_pointer { warp(point) } else { Ok(false) };
+    for event in &built {
+        CGEvent::post_to_pid(target.pid as libc::pid_t, Some(event));
+    }
+    crate::logging::trace("macos", || {
+        format!("post_click {x},{y} {} to pid {} window number {}", button_name(&button), target.pid, target.number)
+    });
+    Ok(post_click::line(window, target.number, target.pid, &super::ax::exe_for_pid(target.pid), at, (x, y), moved))
+}
+
+/// The pointer put at `point` for a posted click, so that a program asking where the pointer is
+/// while it handles the click — `[NSEvent mouseLocation]` — finds it on the point. A warp posts no
+/// event of its own (`CGWarpMouseCursorPosition`: "moves the mouse cursor without generating
+/// events"); and after one, macOS holds the mouse's own movement off the pointer for about a
+/// quarter of a second, which `CGAssociateMouseAndMouseCursorPosition` ends at once (the remedy SDL,
+/// GLFW and Wine apply after their warps). Apple's header describes that call for an application
+/// in the foreground, and a posted click is mostly made while this one is not — a page described
+/// `activates = false`, an overlay's key with the DAW in front — where whether the user's hand gets
+/// the pointer back at once is not measured (TODO.md, MW21). `Ok(true)` when it was warped, `Err`
+/// with the system's code when not.
+fn warp(point: CGPoint) -> Result<bool, i32> {
+    let e = CGWarpMouseCursorPosition(point);
+    let _ = CGAssociateMouseAndMouseCursorPosition(true);
+    if e == CGError::Success {
+        Ok(true)
+    } else {
+        Err(e.0)
+    }
 }
 
 pub fn mouse_drag(x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton) {

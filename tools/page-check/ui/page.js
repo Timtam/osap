@@ -14,6 +14,10 @@ button.addEventListener("click", () => {
   clicks += 1;
   platform.post("clicked " + clicks);
 });
+// Every press, where it is in the page: a posted click is checked by the place it lands at.
+document.addEventListener("mousedown", (event) => {
+  platform.post("down " + Math.round(event.clientX) + " " + Math.round(event.clientY) + " " + event.button);
+});
 document.addEventListener("copy", () => platform.post("copied"));
 field.addEventListener("input", () => platform.post("value " + field.value));
 
@@ -48,6 +52,11 @@ const commands = {
   "focus-field": () => {
     field.focus();
     platform.post("focused " + (document.activeElement === field ? "field" : "other"));
+  },
+  // Where the button is in the page, in CSS pixels, which are points at the web view's own zoom.
+  "button-rect": () => {
+    const r = button.getBoundingClientRect();
+    platform.post("button-rect " + [r.left, r.top, r.width, r.height].join(" "));
   },
   "focus-button": () => {
     button.focus();

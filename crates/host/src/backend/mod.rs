@@ -186,6 +186,12 @@ mod macos_handle_table;
 #[path = "macos/enrol.rs"]
 mod macos_enrol;
 
+/// And the posted click's arithmetic: which refusal a point gets, and where in the window the
+/// event says it is — the number a click into another program's window lands by.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/post_click.rs"]
+mod macos_post_click;
+
 /// Where a permission stands, for something that has to SHOW it rather than log it.
 ///
 /// `Missing` and `Unknown` are constructed on macOS only, which is the whole point of the
@@ -1131,11 +1137,26 @@ pub enum MouseButton {
 }
 
 /// What a way of acting answers on a platform that does not have it yet: `host.input.click`'s
-/// `via = "post"` and `via = "noactivate"`, and `host.element.press`, on a Mac for now.
+/// `via = "noactivate"` and `host.element.press`, on a Mac for now.
 pub const NOT_YET: &str = "not supported on this platform yet";
 
 /// What a click for a `window` is refused with when another window is drawn over its point.
 pub const COVERED: &str = "something else is drawn over the point";
+
+/// What a click for a `window` is refused with when that window is not there any more.
+// Said by the Windows and the Mac backends; the stub has no window to refuse.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub const GONE: &str = "the window is gone";
+
+/// What a click for a `window` is refused with when the point lies outside the window.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub const OUTSIDE: &str = "the point is not in the window";
+
+/// A posted click is a click in a window's client area: on its frame or title bar a real click is
+/// something else — another message on Windows, a move or a zoom of the window on a Mac — which
+/// nothing posts.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub const FRAME: &str = "the point is on the window's frame, not in its client area";
 
 /// A piece of work a backend hands the host for a thread of the host's own, because it may wait
 /// for another program — a window's style changed across processes — and so must never run on
@@ -1522,12 +1543,14 @@ pub trait Backend {
         }
     }
 
-    /// `host.input.click`'s `via = "post"`: the click posted as messages to the window a real
-    /// click at (x, y) reaches, when that is `window` or a window inside it — in that window's own
-    /// client coordinates, with the pointer moved there first unless `move_pointer` is false.
-    /// Nothing comes to the front. On the event loop: it never waits for the other program. `Ok`
-    /// says it was posted, not that the program did anything with it. The default is a platform
-    /// without it, [`NOT_YET`].
+    /// `host.input.click`'s `via = "post"`: the click posted to the window a real click at (x, y)
+    /// reaches, when that is `window` or a window inside it — as messages to that window in its own
+    /// client coordinates on Windows, as events handed to its process with the window's number and
+    /// the place in it on a Mac — with the pointer moved there first unless `move_pointer` is false.
+    /// Nothing comes to the front. On the event loop: it never waits for the program to take the
+    /// click (on a Mac the window's place may be an accessibility read, bounded as every one is).
+    /// `Ok` says it was posted, not that the program did anything with it; one line in the log
+    /// either way. The default is a platform without it, [`NOT_YET`].
     fn mouse_click_posted(
         &self,
         _window: isize,
