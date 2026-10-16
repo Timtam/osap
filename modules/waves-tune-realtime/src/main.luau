@@ -34,6 +34,16 @@ local function screenPoint(o, x, y)
   return nil
 end
 
+-- Every point of a list on screen, or nil when any of them cannot be placed.
+local function screenPoints(o, list)
+  local pts = {}
+  for i, p in ipairs(list) do
+    pts[i] = screenPoint(o, p[1], p[2])
+    if not pts[i] then return nil end
+  end
+  return pts
+end
+
 -- The rule from the square around the marker, read whole: the plug-in draws the marker a pixel
 -- or two off depending on where its window sits, so no single pixel can be trusted. The marker is
 -- about 11x13: magenta for illegal and the two arrows, light grey (114) for bypass, none at all
@@ -42,19 +52,16 @@ end
 -- Plus Group Octaves' pixel, which says whether a step reaches every octave.
 local BOX_X, BOX_Y = 6, 7
 local function readRule(o, x)
-  local pts, offs = {}, {}
+  local list, offs = {}, {}
   for dy = -BOX_Y, BOX_Y do
     for dx = -BOX_X, BOX_X do
-      local p = screenPoint(o, x + dx, MARKER_Y + dy)
-      if not p then return nil end
-      table.insert(pts, p)
+      table.insert(list, { x + dx, MARKER_Y + dy })
       table.insert(offs, { dx = dx, dy = dy })
     end
   end
-  local g = screenPoint(o, GROUP_OCTAVES[1], GROUP_OCTAVES[2])
-  if not g then return nil end
-  table.insert(pts, g)
-  local c = host.screen.pixels(pts)
+  table.insert(list, GROUP_OCTAVES)
+  local pts = screenPoints(o, list)
+  local c = pts and host.screen.pixels(pts)
   if not c then return nil end
 
   local magenta, grey, whites = 0, 0, {}
@@ -180,15 +187,15 @@ button("Scale", { 540, 475 }, scaleName, { opensMenu = true })
 -- The root: flat, sharp and A to G, the chosen one lit as Group Octaves is.
 local FLAT, SHARP = { 580, 467 }, { 616, 467 }
 local LETTERS = { "A", "B", "C", "D", "E", "F", "G" }
-local function letterAt(i) return { 330 + (i - 1) * 49 - 16, 515 } end
+local function letterX(i) return 330 + (i - 1) * 49 end
+local function letterLit(i) return { letterX(i) - 16, 515 } end
 
 -- The root as it is lit now, "B flat", in one read; nil with no letter lit.
 local function rootName(o)
-  local pts = {}
-  for i, p in ipairs({ FLAT, SHARP }) do pts[i] = screenPoint(o, p[1], p[2]) end
-  for i = 1, #LETTERS do pts[2 + i] = screenPoint(o, letterAt(i)[1], letterAt(i)[2]) end
-  if #pts < 2 + #LETTERS then return nil end
-  local c = host.screen.pixels(pts)
+  local list = { FLAT, SHARP }
+  for i = 1, #LETTERS do list[2 + i] = letterLit(i) end
+  local pts = screenPoints(o, list)
+  local c = pts and host.screen.pixels(pts)
   if not c then return nil end
   for i, letter in ipairs(LETTERS) do
     if near(c[2 + i], MAGENTA) then
@@ -201,8 +208,7 @@ end
 button("Flat", { 590, 475 }, lit(FLAT, "on", "off"), { also = rootName })
 button("Sharp", { 626, 475 }, lit(SHARP, "on", "off"), { also = rootName })
 for i, n in ipairs(LETTERS) do
-  local p = letterAt(i)
-  button("Root " .. n, { p[1] + 16, 515 }, lit(p, "selected", "not selected"))
+  button("Root " .. n, { letterX(i), 515 }, lit(letterLit(i), "selected", "not selected"))
 end
 
 -- Says the scale's name afterwards: the edited mark, " *", goes from it.
