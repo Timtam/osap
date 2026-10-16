@@ -98,24 +98,32 @@ local function clickAt(o, x, y)
   if p then host.input.click(p[1], p[2], { window = o:hwnd(), via = "post", move = false }) end
 end
 
+-- nil is a reading that could not be made: nothing to say.
+local function say(text) if text then host.speech.output(text, { interrupt = true }) end end
+
 local NOTES = { "C", "C sharp", "D", "D sharp", "E", "F", "F sharp", "G", "G sharp", "A", "A sharp", "B" }
 for i, name in ipairs(NOTES) do
   local x = markerX(i - 1)
   local note = ov:addStepper({
     label = name,
     text = function(o) return readRule(o, x) or "unknown" end,
-    -- Right is one click; Left is the rest of the round.
+    -- Right is one click; Left is the rest of the round. Only the new rule is said, not the note
+    -- again: `false` tells the runtime to announce nothing, and this watch says the rule once it
+    -- has changed, unless the focus moved or a later key came meanwhile, which says its own.
     onStep = function(dir, o)
+      local was, mark = readRule(o, x), o:here()
       for _ = 1, dir > 0 and 1 or #RULES - 1 do clickAt(o, x, MARKER_Y) end
+      local function sayIfHere(now)
+        if o:stillHere(mark, { focus = true, keys = true }) then say(now) end
+      end
+      o:watch({ read = function() return readRule(o, x) end, was = was, within = 600, onDone = sayIfHere, onGiveUp = sayIfHere })
+      return false
     end,
   })
   -- Space stays the DAW's, to play and hear a change: the runtime captures Space on every control
   -- not marked `editable`, and that flag is all it reads. addStepper has no option for it.
   note.editable = true
 end
-
--- nil is a reading that could not be made: nothing to say.
-local function say(text) if text then host.speech.output(text, { interrupt = true }) end end
 
 -- Every button here is clicked by a posted click (clickAt), the pointer left alone, and says
 -- itself afterwards: once what it reads has changed, or after 900 ms with what it reads then.
