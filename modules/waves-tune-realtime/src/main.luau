@@ -27,6 +27,13 @@ local function near(c, ref)
 end
 local function white(c) return c.r > 200 and c.g > 200 and c.b > 200 end
 
+-- An authored point on screen in whole pixels, or nil while the overlay has no origin.
+local function screenPoint(o, x, y)
+  local sx, sy = o:toScreen(x, y)
+  if sx then return { math.floor(sx), math.floor(sy) } end
+  return nil
+end
+
 -- The rule from the square around the marker, read whole: the plug-in draws the marker a pixel
 -- or two off depending on where its window sits, so no single pixel can be trusted. The marker is
 -- about 11x13: magenta for illegal and the two arrows, light grey (114) for bypass, none at all
@@ -38,15 +45,15 @@ local function readRule(o, x)
   local pts, offs = {}, {}
   for dy = -BOX_Y, BOX_Y do
     for dx = -BOX_X, BOX_X do
-      local sx, sy = o:toScreen(x + dx, MARKER_Y + dy)
-      if not sx then return nil end
-      table.insert(pts, { math.floor(sx), math.floor(sy) })
+      local p = screenPoint(o, x + dx, MARKER_Y + dy)
+      if not p then return nil end
+      table.insert(pts, p)
       table.insert(offs, { dx = dx, dy = dy })
     end
   end
-  local gx, gy = o:toScreen(GROUP_OCTAVES[1], GROUP_OCTAVES[2])
-  if not gx then return nil end
-  table.insert(pts, { math.floor(gx), math.floor(gy) })
+  local g = screenPoint(o, GROUP_OCTAVES[1], GROUP_OCTAVES[2])
+  if not g then return nil end
+  table.insert(pts, g)
   local c = host.screen.pixels(pts)
   if not c then return nil end
 
@@ -87,8 +94,8 @@ end
 -- screen reader may speak over the announcement. Measured: Waves takes posted clicks, and four in
 -- a row with no gap between them count as four.
 local function clickAt(o, x, y)
-  local sx, sy = o:toScreen(x, y)
-  if sx then host.input.click(math.floor(sx), math.floor(sy), { window = o:hwnd(), via = "post", move = false }) end
+  local p = screenPoint(o, x, y)
+  if p then host.input.click(p[1], p[2], { window = o:hwnd(), via = "post", move = false }) end
 end
 
 local NOTES = { "C", "C sharp", "D", "D sharp", "E", "F", "F sharp", "G", "G sharp", "A", "A sharp", "B" }
@@ -107,12 +114,13 @@ for i, name in ipairs(NOTES) do
   note.editable = true
 end
 
-local function say(text) host.speech.output(text, { interrupt = true }) end
+-- nil is a reading that could not be made: nothing to say.
+local function say(text) if text then host.speech.output(text, { interrupt = true }) end end
 
 -- Every button here is clicked by a posted click (clickAt), the pointer left alone, and says
 -- itself afterwards: once what it reads has changed, or after 900 ms with what it reads then.
 local function button(label, at, read, opts)
-  return ov:addCustomButton({
+  ov:addCustomButton({
     label = label,
     editable = true, -- Space stays the DAW's (see the notes above); Return activates
     opensMenu = opts and opts.opensMenu,
@@ -122,7 +130,7 @@ local function button(label, at, read, opts)
       if was == "dimmed" then return say(was) end
       clickAt(o, at[1], at[2])
       if opts and opts.opensMenu then return end
-      o:watch({ read = read, was = was, within = 900, onDone = say, onGiveUp = function(now) say(now or "") end })
+      o:watch({ read = read, was = was, within = 900, onDone = say, onGiveUp = say })
     end,
   })
 end
@@ -131,9 +139,9 @@ end
 -- grey is dimmed — a button that does nothing now, as Sharp with B as the root (no B sharp).
 local function lit(p, on, off)
   return function(o)
-    local sx, sy = o:toScreen(p[1], p[2])
-    if not sx then return nil end
-    local c = host.screen.pixel(math.floor(sx), math.floor(sy))
+    local at = screenPoint(o, p[1], p[2])
+    if not at then return nil end
+    local c = host.screen.pixel(at[1], at[2])
     if not c then return nil end
     if near(c, MAGENTA) then return on end
     if near(c, { 0, 0, 0 }) then return off end
