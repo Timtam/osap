@@ -45,6 +45,10 @@ mod ax;
 mod backoff;
 mod budget;
 mod capture;
+/// `automation-platform capture-check`: the screen captured the ways the host captures it, and
+/// which path answered — with `--older-functions`, the older two alone. See the file.
+/// `pub(super)` for `backend::capture_check`.
+pub(super) mod capture_check;
 mod enrol;
 mod ffi;
 /// The front handed to another application's window, asked now and focused when the workspace

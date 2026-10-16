@@ -151,6 +151,14 @@ fn main() -> Result<()> {
         drop(std::panic::take_hook());
         std::process::exit(host::page_check(&args[1..]));
     }
+    // And one for the screen captures on a Mac: which way answered each, and with
+    // `--older-functions` the older capture functions alone, which every runner CI has would
+    // otherwise never call. Only this subcommand keeps ScreenCaptureKit out; a run of the
+    // application never does. A terminal tool too, so the default panic hook, and no log.
+    if args.first().map(String::as_str) == Some("capture-check") {
+        drop(std::panic::take_hook());
+        std::process::exit(host::capture_check(&args[1..]));
+    }
     match args.first().map(String::as_str) {
         Some("search") => cmd_search(args.get(1).map(String::as_str).unwrap_or("")),
         Some("install") => cmd_install(args.get(1).map(String::as_str)),

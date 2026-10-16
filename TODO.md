@@ -83,6 +83,24 @@ them:
 - [ ] **6. Then a new package for the tester:** Load, Initialize and Size again (ring and page), the
       names after Next and Previous, and the Permissions page.
 
+## CI without macos-14 (2026-10-16)
+
+- [x] **macos-14 dropped, its capture coverage moved to a forced leg.** GitHub retires the macos-14
+      runner at the start of November 2026, so `page-check` and `newer-macos` no longer run on it.
+      It was the one runner without ScreenCaptureKit's rectangle capture (macOS 15.2), and so the
+      only CI that called `CGWindowListCreateImage` and `CGDisplayCreateImageForRect`, the path of
+      every Mac from 12.3 to 15.1. In its place `newer-macos` has a leg on macos-15 running
+      `capture-check --older-functions`, a switch of that subcommand alone that keeps
+      ScreenCaptureKit out of its process: it fails unless the three ways of capturing (one pixel a
+      point, the display's own resolution, a snapshot) all come back whole from an older function
+      and none from ScreenCaptureKit (docs/building-on-macos.md, `capture-check`). The
+      `--paddle-probe` that ran on 14 runs on that leg.
+- [ ] **What only a real Mac below 15.2 still covers:** the older functions as that system answers
+      them (the leg runs them on 15, where they are obsoleted but still exported), the module run
+      with the capture probe on it, ONNX Runtime and Vision there, and `page-check` on 14. The
+      next session on the tester's Mac mini (14.5) says it from the log (`screen captures are
+      coming from CGWindowListCreateImage`).
+
 ## For the first release's changelog
 
 There is no CHANGELOG file yet. What the first release has to name — API removed or changed so
@@ -693,7 +711,7 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       and the fast level's first passes, pauses, a second language; `--paddle` and
       `--paddle-probe`, on Windows too. CI fetches and checks the dylib, refuses an executable that
       links it, runs two short runs without it and with the wrong half on macos-15, probes it on
-      macOS 14 and 26, and runs `--paddle` on Windows. Step b (warm-up, turns) waits for the Air's
+      macOS 15 and 26 (14 until 2026-10-16), and runs `--paddle` on Windows. Step b (warm-up, turns) waits for the Air's
       numbers below; step c (reading on Intel Macs with it) was built on 2026-10-03, below.
 - [x] **The Mac reads with the neural recogniser, by Windows' rule** (2026-10-03, the maintainer's
       decisions of that day; built and type-checked for both Apple targets, nothing of it run on a

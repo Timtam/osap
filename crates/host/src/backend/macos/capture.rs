@@ -70,6 +70,10 @@ use objc2_core_graphics::{
 // the next probe brought forward by a wake or a display change) rather than stalling every
 // capture after it. The probe that asks it again is not waited for where an older function can
 // answer the read (`sck_probe`).
+//
+// Every Mac from 12.3 to 15.1 captures through the older two alone, and CI has no runner below
+// 15.2 any more: there `automation-platform capture-check --older-functions` keeps
+// ScreenCaptureKit out of its own process (`OLDER_ONLY`), and nothing else ever does.
 
 use super::backoff::{Attempt, Backoff};
 use crate::backend::frame::{Frame, FrameVia};
@@ -117,6 +121,11 @@ static SCK_BACKOFF: Mutex<Backoff> =
 const SCK_BACKOFF_FIRST: Duration = Duration::from_secs(30);
 const SCK_BACKOFF_CAP: Duration = Duration::from_secs(600);
 static NO_CAPTURE_REPORTED: AtomicBool = AtomicBool::new(false);
+/// ScreenCaptureKit's rectangle capture is not asked for the rest of this process, as if this
+/// macOS had none: set by `capture-check --older-functions` (`capture_check.rs`) and by nothing
+/// else, so the application's own run never sets it. A runner of 15.2 and later then captures
+/// through the older functions, as every Mac from 12.3 to 15.1 does.
+static OLDER_ONLY: AtomicBool = AtomicBool::new(false);
 
 /// How long a ScreenCaptureKit capture may take before it is given up on.
 ///
@@ -150,6 +159,12 @@ pub(super) fn clear_sck_backoff(why: &str) {
             ),
         );
     }
+}
+
+/// Keeps ScreenCaptureKit's rectangle capture out of this process, for `capture-check
+/// --older-functions` alone: see [`OLDER_ONLY`].
+pub(super) fn ask_older_functions_only() {
+    OLDER_ONLY.store(true, Ordering::Relaxed);
 }
 
 /// Whether an older capture function exists on this macOS to answer a read ScreenCaptureKit
@@ -486,7 +501,8 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {
     );
     report_capture_paths();
 
-    let attempt = if sck_rect_capture_available() {
+    // Not asked at all where `capture-check --older-functions` keeps it out (`OLDER_ONLY`).
+    let attempt = if sck_rect_capture_available() && !OLDER_ONLY.load(Ordering::Relaxed) {
         sck_backoff().attempt(Instant::now())
     } else {
         Attempt::Skip
@@ -532,7 +548,7 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {
         match outcome {
             SckOutcome::Image(image) => {
                 if let Some(scale) = uniform_scale(&image, w, h) {
-                    note_path_used(PATH_SCK, "ScreenCaptureKit captureImageInRect");
+                    note_path_used(PATH_SCK);
                     return Some(Grabbed { image, scale, via: FrameVia::ScreenCaptureKit });
                 }
                 crate::logging::trace("macos", || {
@@ -599,7 +615,7 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {
             // SAFETY: a +1 reference from a Create function, owned from here on.
             let image = unsafe { CFRetained::from_raw(p) };
             if let Some(scale) = uniform_scale(&image, w, h) {
-                note_path_used(PATH_WINDOW_LIST, "CGWindowListCreateImage (looked up at run time)");
+                note_path_used(PATH_WINDOW_LIST);
                 return Some(Grabbed { image, scale, via: FrameVia::CoreGraphics });
             }
             crate::logging::trace("macos", || {
@@ -648,7 +664,7 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {
              coordinates are wrong on the second monitor only, this line is why.",
         );
     }
-    note_path_used(PATH_DISPLAY, "CGDisplayCreateImageForRect (looked up at run time)");
+    note_path_used(PATH_DISPLAY);
     Some(Grabbed { image, scale, via: FrameVia::CoreGraphics })
 }
 
@@ -814,11 +830,28 @@ const PATH_SCK: u32 = 1;
 const PATH_WINDOW_LIST: u32 = 2;
 const PATH_DISPLAY: u32 = 4;
 
+/// Each path's bit in `PATH_USED`, whether it is one of the two older functions, and its name.
+const PATHS: [(u32, bool, &str); 3] = [
+    (PATH_SCK, false, "ScreenCaptureKit captureImageInRect"),
+    (PATH_WINDOW_LIST, true, "CGWindowListCreateImage (looked up at run time)"),
+    (PATH_DISPLAY, true, "CGDisplayCreateImageForRect (looked up at run time)"),
+];
+
 /// Names the path that delivered an image, the first time each one does.
-fn note_path_used(bit: u32, name: &str) {
+fn note_path_used(bit: u32) {
     if PATH_USED.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+        let name = PATHS.iter().find(|p| p.0 == bit).map_or("?", |p| p.2);
         crate::logging::line("macos", &format!("screen captures are coming from {name}"));
     }
+}
+
+/// The paths that delivered an image since the last call, each as whether it is one of the older
+/// functions and its name, and forgotten — for `capture-check`, which asks after each of its
+/// captures which path answered it. A path forgotten here would be named in the log again; that
+/// process never opens the log.
+pub(super) fn take_paths_used() -> Vec<(bool, &'static str)> {
+    let used = PATH_USED.swap(0, Ordering::Relaxed);
+    PATHS.iter().filter(|p| used & p.0 != 0).map(|p| (p.1, p.2)).collect()
 }
 
 /// Which of the three capture paths this macOS has, said once. The line a remote session needs
@@ -828,17 +861,19 @@ fn report_capture_paths() {
     if PATHS_REPORTED.swap(true, Ordering::Relaxed) {
         return;
     }
+    crate::logging::line("macos", &paths_line());
+}
+
+/// That line's words, which `capture-check` prints as well.
+pub(super) fn paths_line() -> String {
     let has = |b: bool| if b { "present" } else { "absent" };
-    crate::logging::line(
-        "macos",
-        &format!(
-            "screen capture paths on this macOS: ScreenCaptureKit captureImageInRect {}, \
-             CGWindowListCreateImage {}, CGDisplayCreateImageForRect {}",
-            has(sck_rect_capture_available()),
-            has(window_list_create_image().is_some()),
-            has(display_create_image_for_rect().is_some()),
-        ),
-    );
+    format!(
+        "screen capture paths on this macOS: ScreenCaptureKit captureImageInRect {}, \
+         CGWindowListCreateImage {}, CGDisplayCreateImageForRect {}",
+        has(sck_rect_capture_available()),
+        has(window_list_create_image().is_some()),
+        has(display_create_image_for_rect().is_some()),
+    )
 }
 
 /// Whether `+[SCScreenshotManager captureImageInRect:completionHandler:]` exists here.
@@ -1095,7 +1130,8 @@ fn uniform_scale(image: &CGImage, w: i32, h: i32) -> Option<f64> {
 ///
 /// Drawing into a destination of the requested point size is also where the Retina
 /// downsample happens, and why there is no separate resampling step to get wrong.
-fn image_to_rgba(
+/// `pub(super)` for `capture-check`, which draws a text read's capture at its own size.
+pub(super) fn image_to_rgba(
     image: &CGImage,
     dw: i32,
     dh: i32,

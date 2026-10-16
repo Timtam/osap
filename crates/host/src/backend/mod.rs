@@ -109,6 +109,14 @@ pub(crate) fn page_check(args: &[String]) -> i32 {
     macos::page_check::run(args)
 }
 
+/// `automation-platform capture-check`, which captures the screen the ways the host does and says
+/// which path answered — see `macos::capture_check` — and returns the exit code. For `lib.rs`,
+/// and so that `crates/macos-check` can name it.
+#[cfg(target_os = "macos")]
+pub(crate) fn capture_check(args: &[String]) -> i32 {
+    macos::capture_check::run(args)
+}
+
 /// `automation-platform ocr-bench --paddle` on Windows: the neural recogniser measured alone on
 /// the bench's pictures, beside what `Windows.Media.Ocr` reads and what Windows answers — see
 /// `paddle_ocr::bench`; and `--paddle-probe`, whether it loads and reads. For

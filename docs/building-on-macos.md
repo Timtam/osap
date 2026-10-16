@@ -369,7 +369,7 @@ library promises 13.3); it prints each slice's `minos`, and warns when one is no
 application keeps as its floor. `package-macos.sh` refuses an executable that links ONNX Runtime
 (`otool -L`: the application only ever opens it) before it packages anything; after the upload
 the job asks the bundle again, and refuses one without the library or the model. A zip larger
-than 80 MB is a warning. The `newer-macos` job asks `ocr-bench --paddle-probe` on macOS 14 and
+than 80 MB is a warning. The `newer-macos` job asks `ocr-bench --paddle-probe` on macOS 15 and
 26, where "not available" is an error, and so is an `ok` from a probe that then ends by a signal
 or with another status than 0; it refuses a download whose signature does not verify
 (`codesign --verify --deep --strict`) in a last step of its own, so that its other steps still
@@ -468,12 +468,57 @@ checks failed. Exit status 0 when it ran to the end and no check failed, 3 when 
 and a check failed.
 
 **In CI**, the `page-check` job of `.github/workflows/macos-build.yml` runs it from the downloaded
-zip on all four Mac runners — `macos-14`, `macos-15`, `macos-15-intel` and `macos-26` — after
+zip on all three Mac runners — `macos-15`, `macos-15-intel` and `macos-26` — after
 starting TextEdit, bounded to five minutes. Its lines go to the run's summary page, and each leg's
 whole output is kept as the artifact `page-check-<runner>.txt`. What it measures of the front
 depends on the runner's desktop, so those answers are data and never fail the leg; a `check` line
 that says `FAILED` fails it, and so does a check that did not reach its end or ended with any status
 but 0 after its last line.
+
+## Checking which way it captures the screen {#capture-check}
+
+`capture-check` captures 200x60 points at the top left of the main display, the menu bar's
+corner, the three ways the application captures the screen, and says for each what came back
+and which capture path answered it (`crates/host/src/backend/macos/capture_check.rs`):
+
+```bash
+AutomationPlatform.app/Contents/MacOS/automation-platform capture-check
+AutomationPlatform.app/Contents/MacOS/automation-platform capture-check --older-functions
+```
+
+The three ways: at one pixel a point, as a region read and a pixel read take it; at the
+display's own resolution, as a text read takes it; and as a snapshot. The paths are the ones the
+application's log names in `screen capture paths on this macOS`: ScreenCaptureKit's rectangle
+capture (`captureImageInRect`, macOS 15.2 and later) first, then `CGWindowListCreateImage` and
+`CGDisplayCreateImageForRect`, which are looked up at run time. With `--older-functions` the
+rectangle capture is not asked, as on a Mac from 12.3 to 15.1, which has none: a line
+`forced: …` says so, and so does each capture's line. Only this subcommand
+keeps ScreenCaptureKit out; the application's own run never does.
+
+It opens no window, loads no module, speaks nothing and leaves the application's log alone;
+every line it prints starts with `CAPTURE CHECK:`. Each capture is a line `check …: ok` or
+`check …: FAILED`, with the picture's size in pixels, its colours counted, the time it took and
+the path that answered. A capture that gave nothing back fails, and so does one of a single
+colour over the whole picture, as an empty image is; with `--older-functions`, so does one that
+ScreenCaptureKit answered, or that no older function did. What the system reports of the Screen
+Recording permission is a line of data: without the permission a capture shows the desktop with
+other applications' windows removed, and still passes. Exit status 0 when every check passed, 3
+when one failed, 1 when it could not run, 2 for a wrong argument; on Windows it only says that it
+runs on macOS.
+
+**In CI**, the `newer-macos` job of `.github/workflows/macos-build.yml` runs it from the
+downloaded zip: on `macos-26` as the application captures, and on `macos-15` with
+`--older-functions`, the leg named `older-functions`. That leg is what CI has of the path a Mac
+below 15.2 takes: `macos-14`, the last runner without the rectangle capture, was dropped from the
+workflow because GitHub retires it in November 2026, and the two older functions are still there
+at run time on 15 and 26. The leg fails unless the check says it was forced and all three
+captures are `ok` and answered by `CGWindowListCreateImage` or `CGDisplayCreateImageForRect`, none
+by ScreenCaptureKit; it captures and asks `ocr-bench --paddle-probe`, and leaves the module run to
+the build job, which makes it on `macos-15` already. On `macos-26` a `FAILED` line fails the
+step, and which path answered each capture is a note of the run. On either leg a check that did
+not reach its end, or ended with any status but 0, fails, and the lines go to the run's summary
+page. What no runner shows is a macOS below 15.2 itself — whether the two functions answer there
+as they do on 15 — and only a real Mac says that.
 
 ## Checking macOS code from a Windows machine
 

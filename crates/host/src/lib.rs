@@ -5706,6 +5706,28 @@ pub fn page_check(args: &[String]) -> i32 {
     }
 }
 
+/// `automation-platform capture-check [--older-functions]`: the screen captured on a Mac the ways
+/// the host captures it, and which path answered each; with `--older-functions`, ScreenCaptureKit
+/// kept out of this process, for CI's runners that all have it (`backend/macos/capture_check.rs`).
+/// No window, no module, no speech, and the log is not opened. Returns the exit code: 0 when every
+/// check passed, 3 when one failed, 1 when it could not run, 2 for a wrong argument or on another
+/// platform, where it only says that it runs on macOS.
+pub fn capture_check(args: &[String]) -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        backend::capture_check(args)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = args;
+        println!(
+            "capture-check captures the screen the ways the application does on a Mac and says which way answered; it \
+             runs on macOS only."
+        );
+        2
+    }
+}
+
 /// Convenience entry: load each directory as a module and run them together.
 pub fn run(dirs: &[String]) -> Result<()> {
     run_set(module_set::Sources::Folders(dirs.iter().map(PathBuf::from).collect()))

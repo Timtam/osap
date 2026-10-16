@@ -1292,7 +1292,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-15, macos-15-intel, macos-26]
+        os: [macos-15, macos-15-intel, macos-26]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
@@ -1393,16 +1393,25 @@ jobs:
   # newer system. A separate job, so a red result here is a finding about that macOS rather than
   # a reason the download was not made.
   #
-  # And on macOS 14, for the opposite reason: it is the one system here WITHOUT ScreenCaptureKit's
-  # rectangle capture (that arrived in 15.2), so it is where every capture goes through the two
-  # older functions looked up by name. Every other runner answers from ScreenCaptureKit and never
-  # calls them — and the Mac mini the tester uses runs 14.5.
+  # And once on macOS 15, for the opposite reason: with ScreenCaptureKit kept out. A Mac from
+  # 12.3 to 15.1 has no rectangle capture (it arrived in 15.2), so every capture there goes
+  # through the two older functions looked up by name — the Mac mini the tester uses runs 14.5 —
+  # while every runner here has it and never calls them. macos-14 was the last runner without it,
+  # and GitHub retires it in November 2026; the two functions are still there at run time on 15
+  # and 26, so `capture-check --older-functions` asks them alone, a switch of that subcommand and
+  # of nothing the application runs. That leg captures and asks for the neural recogniser; the
+  # module run is not repeated there, since the build job's capture probe runs on macos-15 already.
+  # What no runner shows any more is a system below 15.2 itself: that is a real Mac's to say.
   newer-macos:
     needs: build
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-26]
+        os: [macos-26]
+        # The leg with the older capture functions forced; its name in the run says so.
+        include:
+          - os: macos-15
+            capture: older-functions
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -1461,8 +1470,10 @@ jobs:
             cat dist/AutomationPlatform/build-info.txt
           fi
 
+      # Not on the leg with the older functions forced: the build job loads, captures and speaks
+      # on macos-15 already, through ScreenCaptureKit.
       - name: Load, capture and speak, on the newer macOS
-        if: ${{ !cancelled() && steps.unpack.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.unpack.outcome == 'success' && matrix.capture != 'older-functions' }}
         env:
           COMMIT: ${{ inputs.commit }}
         run: |
@@ -1592,11 +1603,85 @@ jobs:
           grep -q "SPEECH PROBE: still alive after speaking" automation-platform.log \
             || { echo "::error::the speech probe did not report back on the newer macOS"; exit 1; }
 
+      # The screen captured by `capture-check` (crates/host/src/backend/macos/capture_check.rs):
+      # 200x60 points at the main display's top left, the capture probe's region, the three ways the
+      # host captures it — one pixel a point, the display's own resolution as a text read takes it,
+      # and a snapshot — each a `check` line, `ok` or `FAILED` (nothing back, or one colour over the
+      # whole picture, as an empty image is), with the path that answered. On macos-26 as the
+      # application captures, where which path answered is data. On the forced leg with
+      # `--older-functions`: the check has to say it was forced, and all three captures have to be
+      # `ok` and answered by CGWindowListCreateImage or CGDisplayCreateImageForRect, none by
+      # ScreenCaptureKit — read here from the lines themselves as well as from the check's own
+      # verdict, so that a switch that stopped working goes red instead of passing on
+      # ScreenCaptureKit's pictures. Its lines go to the run's summary page.
+      - name: The screen captured, ${{ matrix.capture == 'older-functions' && 'with the older functions forced' || 'as the application captures it' }}
+        if: ${{ !cancelled() && steps.unpack.outcome == 'success' }}
+        env:
+          OLDER: ${{ matrix.capture == 'older-functions' }}
+        run: |
+          cd dist/AutomationPlatform
+          ended() { if [ "$1" -gt 128 ]; then echo "died of signal $(( $1 - 128 ))"; else echo "ended with status $1"; fi; }
+          if [ "$OLDER" = true ]; then
+            args=(--older-functions)
+            on="macOS $(sw_vers -productVersion), with the older capture functions forced"
+          else
+            args=()
+            on="macOS $(sw_vers -productVersion), as the application captures"
+          fi
+          out=capture-check.txt
+          status=0
+          # Bounded by perl's alarm, as page-check is: macOS has no `timeout`. A capture waits for
+          # ScreenCaptureKit 1.5 s at the most; a minute covers all three many times over.
+          perl -e 'alarm shift; exec @ARGV' 60 \
+            ./AutomationPlatform.app/Contents/MacOS/automation-platform capture-check "${args[@]}" > "$out" 2>&1 || status=$?
+          cat "$out"
+          {
+            echo "### capture-check on $on"
+            echo
+            echo '```'
+            grep '^CAPTURE CHECK:' "$out" || echo "(no line)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if ! grep -q '^CAPTURE CHECK: done' "$out"; then
+            echo "::error::capture-check did not reach its end on $on ($(ended "$status"))"
+            exit 1
+          fi
+          fail=0
+          if grep -q '^CAPTURE CHECK: check .*: FAILED' "$out"; then
+            grep '^CAPTURE CHECK: check .*: FAILED' "$out" | while IFS= read -r line; do
+              echo "::error::capture-check on $on: ${line#CAPTURE CHECK: }"
+            done
+            fail=1
+          elif [ "$status" != 0 ]; then
+            echo "::error::capture-check reached its end on $on and then $(ended "$status")"
+            fail=1
+          fi
+          if [ "$OLDER" = true ]; then
+            if ! grep -q '^CAPTURE CHECK: forced:' "$out"; then
+              echo "::error::capture-check --older-functions did not say that it forced them, on $on"
+              fail=1
+            fi
+            if grep -q '^CAPTURE CHECK: check .*answered by [^,]*ScreenCaptureKit' "$out"; then
+              echo "::error::ScreenCaptureKit answered a capture although --older-functions keeps it out, on $on: $(grep -m1 '^CAPTURE CHECK: check .*answered by [^,]*ScreenCaptureKit' "$out")"
+              fail=1
+            fi
+            older=$(grep -cE '^CAPTURE CHECK: check .*: ok, .*answered by CG(WindowListCreateImage|DisplayCreateImageForRect)' "$out" || true)
+            if [ "$older" != 3 ]; then
+              echo "::error::only $older of the three captures came back whole from an older capture function, on $on"
+              fail=1
+            fi
+          fi
+          # Which path answered each, as the run's notes.
+          sed -n 's/^CAPTURE CHECK: check //p' "$out" | while IFS= read -r line; do
+            echo "::notice::capture-check on $on: $line"
+          done
+          exit $fail
+
       # Whether the neural recogniser's library loads on this macOS: `ocr-bench --paddle-probe`
       # makes it from the bundle and reads one picture, and says `ok` or `not available` with the
       # reason, in one line (no window, no permission, no file). Microsoft builds ONNX Runtime 1.22
-      # for macOS 13.3, so on both of these — 14, the oldest runner there is, and 26, the newest —
-      # "not available" is an error: a finding about that macOS, as everything in this job is. So
+      # for macOS 13.3, so on both of these — 15, the oldest runner there is now, and 26, the newest
+      # — "not available" is an error: a finding about that macOS, as everything in this job is. So
       # is an `ok` from a process that then ends by a signal or with another status than 0.
       # Below 13.3 the application does not open it, and Vision reads alone; no runner is that
       # old, and whether 13.3 to 13.x loads it is not seen either (TODO.md).

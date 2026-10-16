@@ -387,6 +387,11 @@ pub fn page_check_calls() -> fn(&[String]) -> i32 {
     backend::page_check
 }
 
+/// `automation-platform capture-check`, named for the same reason: `lib.rs` calls it.
+pub fn capture_check_calls() -> fn(&[String]) -> i32 {
+    backend::capture_check
+}
+
 /// The neural text recogniser's start and end, which `lib.rs` calls around a session: its warm-up
 /// (on a Mac, after Vision's), the exit's call that stops that warm-up waiting, the shadow's
 /// counts at exit, the exit's wait for recognitions still running, ONNX Runtime's release before
