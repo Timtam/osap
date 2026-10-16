@@ -7177,6 +7177,32 @@ maintainer's German test instructions are a text of their own, not in the reposi
       lost → that way for that class, its holding and giving back as the log shows it; "pointer
       stays" losing clicks in JUCE → the experimental `move` option goes; Press arriving without a
       front change → it is the first choice where a plug-in exposes its controls.
+- [ ] **Posted clicks on a Mac: `host.input.click{ via = "post" }` (2026-10-16, from the
+      maintainer).** A user of the platform needed them for a plug-in, built them in a copy of their
+      own and had them working, but cannot hand the change back; the maintainer asked for them to be
+      built here. Today `via = "post"` (and `"noactivate"`) answer `false, "not supported on this
+      platform yet"` on a Mac (docs/api/input.md), so a module there takes the round trip for every
+      click.
+
+      To build, with the Windows way's meaning: `window` required, the click made only where the
+      point is in that window and nothing is drawn over it, nothing brought to the front, the
+      application in front keeping the keyboard. The likely way (to be checked against Apple's
+      documentation and a real Mac before anything is promised): the move, the press and the release
+      as `CGEvent`s posted to the window's process with `CGEventPostToPid`, with the target window's
+      number in the mouse fields (`kCGMouseEventWindowUnderMousePointer` and
+      `…ThatCanHandleThisEvent`), so AppKit delivers them to that window while its application is
+      not active; the events marked as the host's own (`kCGEventSourceUserData`), as every event the
+      host posts is. `move` as on Windows: the pointer warped to the point first by default
+      (`CGWarpMouseCursorPosition`), left where it is with `move = false`. The refusals and the one
+      `[input]` line per posted click as on Windows, naming the process and window it went to. The
+      permission it needs (Accessibility, the `hid post events` line of the start block) checked and
+      said. `"noactivate"` stays unsupported on a Mac: it is a Windows window style.
+
+      Then: input.md's macOS block for `post` rewritten (what the program sees, what is not for it:
+      menus, text fields, drags, as on Windows); the HTML probe's W10 offered on a Mac with its
+      posted ways, as an MW question for the tester (Avenger in Logic: does a posted click on ◀
+      arrive without Logic coming forward, and is a JUCE plug-in's click lost without the pointer?);
+      and, once that holds, the page's trips may click by posting where a module chooses it.
 - [x] **A page in a window like any program's: `window = "app"`** (the maintainer's decision after
       W6, 2026-10-11 — modules are to be flexible, and a whole interface in HTML, CSS and JS is not
       far-fetched). `host.gui.webview{ …, window = "tool" | "app" }`, the tool page by default; what
