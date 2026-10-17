@@ -26,6 +26,7 @@
 local T = host.include("src/tables/strip.luau")
 local OSC = host.include("src/tables/osc.luau")
 local Open = host.include("src/read/open.luau")
+local Knob = host.include("src/read/knob.luau")
 
 local A = {}
 
@@ -311,8 +312,9 @@ function A.reset_osc_control(args, label)
       if vb.selectedType ~= "osc" then return nil, "the selected tab cannot be read now" end
       return { at = p, double = true, button = OSC.RIGHT_BUTTON[key] and "right" or nil }
     end,
-    -- The knob's ring: the reader looks within 18 of the project's pixels (9 points at 50 %).
-    watch = function() return { box(p, { 24, 24 }) } end,
+    -- The knob's picture (Knob.BOX): the reader looks within 18 of the project's pixels (9 points
+    -- at 50 %).
+    watch = function() return { box(p, Knob.BOX.osc) } end,
     same = function(vb, va)
       local a = valueOf(va)
       return a ~= nil and a == valueOf(vb)

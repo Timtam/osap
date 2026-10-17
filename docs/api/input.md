@@ -12,7 +12,7 @@ All of it is blind clicking at screen coordinates, and **nothing here asks what 
 
 Dragging is deliberately not a press, a warp and a release: the movement is paced over sixteen injected steps and blocks the calling thread for about sixty milliseconds on Windows, because a control that reads the *speed* of a gesture answers an instantaneous jump with an enormous change.
 
-**Acting does not wait for a read.** Every call on this page but `cursorPos` acts at once — a click with `via = "noactivate"` is handed at once to the thread that makes it — also while the calling module has a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) or a [`host.screen`](./screen.md#with-a-callback) call given a callback still out — and so does [`host.window.focus`](./window.md#host-window-focus). A picture that is not taken yet when the input is made may show the screen after it. So a module that reads a field and then clicks it clicks once the read is answered: after the call returns in a handler, where it [waits](./ocr.md#where-it-waits), or in its callback. Whether an input could be in a picture is what the picture's `inputEpoch` says, against [`host.inputEpoch()`](./timer.md#host-inputepoch) as it stood before the input — except after a [`post`](#host-input-post), which does not turn it over, and after a `host.window.focus`, which turns it over only once the window has come forward: after those two, compare the picture's `time` with `host.now()` noted after the act ([`host.inputEpoch`](./timer.md#host-inputepoch)).
+**Acting does not wait for a read.** Every call on this page but `cursorPos` and `held` acts at once — a click with `via = "noactivate"` is handed at once to the thread that makes it — also while the calling module has a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) or a [`host.screen`](./screen.md#with-a-callback) call given a callback still out — and so does [`host.window.focus`](./window.md#host-window-focus). A picture that is not taken yet when the input is made may show the screen after it. So a module that reads a field and then clicks it clicks once the read is answered: after the call returns in a handler, where it [waits](./ocr.md#where-it-waits), or in its callback. Whether an input could be in a picture is what the picture's `inputEpoch` says, against [`host.inputEpoch()`](./timer.md#host-inputepoch) as it stood before the input — except after a [`post`](#host-input-post), which does not turn it over, and after a `host.window.focus`, which turns it over only once the window has come forward: after those two, compare the picture's `time` with `host.now()` noted after the act ([`host.inputEpoch`](./timer.md#host-inputepoch)).
 
 When a module acts while the capture thread has yet to take a picture it asked for that is meant to show the screen as it was at the call, the log says so, once a session per module, naming the call that acted. Those pictures are a text read's, but not one of a snapshot, whose picture is the snapshot's; a plain `snapshot`'s or `profile`'s with a callback — and the points of a `pixel` or `pixels` given one, read on that thread too —, and a timed one's whose `at` had already passed at the call; and the first picture of a change wait, which is its baseline, unless the wait has a `from` that holds every watched region:
 
@@ -67,15 +67,27 @@ Both arguments are integers. Returns `nil`.
 host.input.move(960, 540)
 ```
 
+While a button is held, a move is a **drag**: a knob or a slider that holds the press follows the pointer. That is how a press, a glide and a release are composed from [`mouseDown`](#host-input-mousedown), moves and [`mouseUp`](#host-input-mouseup) — one move per step the module decides, each sent at once and not paced.
+
+```luau
+-- A knob turned by holding its press: down, a few points up, let go where the moves left it.
+local x, y = 1276, 852
+host.input.mouseDown(x, y)
+for step = 1, 5 do host.input.move(x, y - step) end
+host.input.mouseUp(x, y - 5)
+```
+
 ### Windows
 
-The pointer is placed, and nothing is told that it moved. A control watching for motion while its button is held can miss the move entirely.
+Without a button held, the pointer is **placed** (`SetCursorPos`): no event goes through the system's input, so no low-level hook or raw input sees it. A control that holds a press and follows the pointer sat still through such placements — ON:EAR's Width slider, measured — which is why a move with a button held is motion instead.
+
+While a button is held — one a module pressed with `mouseDown` and has not let go of, or one down on the desktop (the high bit of `GetAsyncKeyState`: the user's own hand on the mouse) — the move is **one injected absolute motion event** instead: `SendInput` with `MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_ABSOLUTE`, the point placed over the whole virtual desktop at the middle of its pixel's share of the 0–65,535 axis, so that it lands on that pixel on any monitor; a point off the desktop goes to its nearest edge, where the system keeps the pointer. The event carries no button: the system puts the held button into the window's `WM_MOUSEMOVE` (`MK_LBUTTON`, `MK_RBUTTON`) itself, as for a hand on the mouse, so a control holding the press sees motion it follows. Absolute rather than relative, because a relative move goes through the pointer's speed and "Enhance pointer precision" and lands somewhere else. One event per call, not paced and not marked against coalescing — `drag` paces — costing one `SendInput`. A low-level mouse hook sees it as injected motion, which a placement never was.
 
 ### macOS
 
-A real move event is posted — or a **drag** event when a button is currently held, which is also what the implicit move inside `mouseDown` and `mouseUp` does.
+A real move event is posted — or a **drag** event of the held button when one is currently held, which is also what the implicit move inside `mouseDown` and `mouseUp` does.
 
-So the press-then-glide-then-release gesture, composed from `mouseDown`, a timer and `mouseUp`, is a genuine drag here and can be an invisible warp on Windows: a slider that follows the pointer on a Mac may not move at all there. Where the movement itself is the point, use `host.input.drag`, which paces it on both.
+So the press-then-glide-then-release gesture, composed from `mouseDown`, moves and `mouseUp`, is a genuine drag on both platforms: a control that follows the pointer while its button is held follows it on a Mac and on Windows alike. Where the pace of the movement matters — a control that reads the *speed* of a drag — use `host.input.drag`, which paces it on both.
 
 ## host.input.click(x, y, opts?, cb?) {#host-input-click}
 
@@ -167,13 +179,13 @@ host.input.drag(100, 100, 400, 300)
 host.input.drag(100, 100, 400, 300, { button = "middle" })
 ```
 
-A drag is not a press, a warp and a release. On Windows the pointer is moved with injected move events rather than `SetCursorPos`, interpolated over sixteen steps with a few milliseconds between them, because two kinds of control tell the difference: one that watches for motion while its button is held sees injected events and can miss a warp entirely, and one that reads the *speed* of a drag answers an instantaneous jump with an enormous change. macOS posts a drag event between press and release, which it has always done. The pacing blocks the calling thread for about sixty milliseconds, which is only ever paid when somebody deliberately drags something.
+A drag is not a press, a warp and a release. On Windows the pointer is moved with injected move events rather than `SetCursorPos` — over the virtual desktop, on any monitor — interpolated over sixteen steps with a few milliseconds between them, because two kinds of control tell the difference: one that watches for motion while its button is held sees injected events and can miss a warp entirely, and one that reads the *speed* of a drag answers an instantaneous jump with an enormous change. macOS posts a drag event between press and release, which it has always done. The pacing blocks the calling thread for about sixty milliseconds, which is only ever paid when somebody deliberately drags something.
 
 If a control needs a sustained press before it will react at all, use `mouseDown`/`mouseUp` with a timer instead — that is why those exist separately.
 
 ### Windows
 
-The pointer is moved with injected move events rather than `SetCursorPos`, interpolated over sixteen steps a few milliseconds apart. The pacing blocks the calling thread for about sixty milliseconds, paid only when something is deliberately dragged.
+The pointer is moved with injected absolute move events over the virtual desktop — the event a [`move`](#host-input-move) with a button held sends, so a drag lands where it is asked to on any monitor — rather than `SetCursorPos`, interpolated over sixteen steps a few milliseconds apart. The pacing blocks the calling thread for about sixty milliseconds, paid only when something is deliberately dragged.
 
 ### macOS
 
@@ -260,9 +272,9 @@ Each character is posted as a keyboard event pair with key code 0 and the charac
 
 Presses a mouse button at `(x, y)` and **leaves it down**. This is the half of a gesture that `click` and `drag` cannot express, because both of those press and release in the same breath: a control that only reveals itself while the button is *sustained* — the flyout of extra tools behind Melodyne's tool icon is the case that prompted this API, a gesture that later turned out to be undocumented and was replaced by a key — never appears for either of them. It is split into two calls rather than offered as a timed variant deliberately: holding, gliding and settling is the better part of a second, and a call that slept for that long would sleep in the event pump, stopping speech, hotkeys and detection with it. Split, the caller composes the gesture out of `host.timer` callbacks and the pump keeps running between the parts. There is no screen read here and nothing is asked about what is under the point, so the call itself is cheap.
 
-While your module runs, nothing releases the button for you. A held button belongs to the whole desktop, not to your module, so **every** continuation must end in a `mouseUp` — including the ones that give up because the overlay moved to another window mid-gesture. Pin the window handle before the press and re-check it in each callback, exactly as the timed sequences elsewhere in the runtime do; `opts.button` must match on the way up as it did on the way down. A `mouseUp`, `click` or `drag` of the same button ends the hold.
+While your module runs, nothing releases the button for you. A held button belongs to the whole desktop, not to your module, so **every** continuation must end in a `mouseUp` — including the ones that give up because the overlay moved to another window mid-gesture. Pin the window handle before the press and re-check it in each callback, exactly as the timed sequences elsewhere in the runtime do; `opts.button` must match on the way up as it did on the way down. A `mouseUp`, a `drag` or a `click` through the system's input of the same button ends the hold; a posted click (`via = "post"`) does not.
 
-The host releases a button your module holds only when the module stops running: when it is disabled, reloaded, [stopped by the host](../module-runtime-and-lifecycle.md#limits) (a callback that ran too long or out of memory), when its load is rolled back, and when the application ends. It releases it where the pointer is at that moment, so the pointer does not move, and writes a line such as `[input] [com.tool.guard-probe] released the left mouse button it had pressed with host.input.mouseDown: it was stopped by the host`. The release is the desktop's, like the press: it lets go of the button for whatever program is under the pointer.
+The host releases a button your module holds only when the module stops running: when it is disabled, reloaded, [stopped by the host](../module-runtime-and-lifecycle.md#limits) (a callback that ran too long or out of memory), when its load is rolled back, and when the application ends. It releases it where the pointer is at that moment, so the pointer does not move, and writes a line such as `[input] [com.tool.guard-probe] released the left mouse button it had pressed with host.input.mouseDown: it was stopped by the host`. The release is the desktop's, like the press: it lets go of the button for whatever program is under the pointer. A module that goes on after such a release — enabled again, with a gesture's end still to come — asks [`host.input.held()`](#host-input-held) which buttons are still its own before it lets go.
 
 ```luau
 -- Press the tool icon and hold it, so a flyout that only exists while the button is down has
@@ -284,7 +296,7 @@ end)
 
 ### Windows
 
-The pointer is placed with `SetCursorPos` and then the button-down event is sent. As with `host.input.move`, the placement is not motion: nothing is told the pointer arrived, so a control that highlights or hit-tests on movement is pressed without ever having been hovered.
+The pointer is placed with `SetCursorPos` and then the button-down event is sent. As with `host.input.move` without a button held, the placement is no input: no low-level hook or raw input sees the pointer arrive. The press is noted, so the moves after it are motion ([`move`](#host-input-move)) until its `mouseUp`, a `drag` of the same button, or a `click` of it through the system's input (`via = "input"` or `"noactivate"`); a posted click (`via = "post"`) goes past the system's input and leaves the note.
 
 ### macOS
 
@@ -321,11 +333,39 @@ glide()
 
 ### Windows
 
-`SetCursorPos` and then the button-up event. Because the intermediate `host.input.move` calls are warps rather than motion, a control that follows the pointer only while it sees movement can sit still through the whole glide and receive a release it has no path to. Where the movement itself is the point, `host.input.drag` paces it.
+The motion event a `host.input.move` with a button held sends, to `(x, y)`, then the button-up event — no `SetCursorPos`. So press, glide and release are one drag on Windows as on a Mac: a control that followed the pointer through the moves gets the release where it is. The host's own release at a disable is the same, at the pointer's place: motion of no distance, then the up. Where the pace of the movement matters, `host.input.drag` paces it.
 
 ### macOS
 
 The move before the release is posted as a **drag** event, because the backend sees a button still held. That is what makes "press here, glide there, let go" a genuine drag on this platform: the control has followed the pointer the whole way and the release lands on the entry it was over.
+
+## host.input.held() {#host-input-held}
+
+**Signature:** `host.input.held() -> { "left" | "right" | "middle" }`
+
+Lists the mouse buttons **this module** pressed with [`mouseDown`](#host-input-mousedown) and has not let go of. They come in the order it pressed them, `{}` for none — never `nil` — in a new table at every call. It is the host's own record: a `mouseUp` or a `drag` of a button takes it off, as does a `click` of it through the system's input (`via = "input"` or `"noactivate"`), though not a posted one (`via = "post"`), which leaves the button held; and the host empties it as it lets go of the module's buttons itself — when the module is disabled, reloaded, [stopped by the host](../module-runtime-and-lifecycle.md#limits) or its load is rolled back ([`mouseDown`](#host-input-mousedown)).
+
+It is **not the desktop's state**, and asks the system nothing: a button the user holds is not in it, nor another module's, and a button the user let go of with the real mouse while the module held it stays in it until the module's `mouseUp`. It acts on nothing — no input is made, and [`host.inputEpoch()`](./timer.md#host-inputepoch) stays as it was. It takes no arguments and costs a look at a table, on the event loop.
+
+What it is for: a held gesture whose end the module can learn of **after a disable and an enable** — a trip's hand-over tells its `onEnd` then ([`trip:handOver`](./overlay.md#trip-handover)). The host let go of the button at the disable; a `mouseUp` after it would release a button nobody holds, over whatever lies under the pointer. So the end lets go once, and only where the record still has the button:
+
+```luau
+-- Every end of a held gesture calls this; once is enough, and after a disable the host has let go.
+local down = true
+local function letGo(x, y)
+  if not down then return end
+  down = false
+  if table.find(host.input.held(), "right") then host.input.mouseUp(x, y, { button = "right" }) end
+end
+```
+
+### Windows
+
+The host's record, as above: the system is not asked, so a button down on the desktop that this module did not press is not listed. (What a `move` asks besides the desktop's state is the backend's own note of its presses, which is not this.)
+
+### macOS
+
+The host's record, as on Windows: the session's button state is not asked.
 
 ## host.input.post(id, key) {#host-input-post}
 

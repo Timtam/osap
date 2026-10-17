@@ -260,8 +260,8 @@ fn actions_are_answered_not_available_yet_and_only_while_the_page_has_the_keyboa
         T.pageMsg({ action = "open_expansion", args = {}, focused = true })
         T.ok(T.lastPost().kind == "error" and T.lastPost().text == "Opening an expansion is not available in this module yet",
           tostring(T.lastPost().text))
-        T.pageMsg({ action = "osc_control", args = { control = "volume" }, focused = true })
-        T.ok(T.lastPost().text == "An oscillator's control is not available in this module yet", T.lastPost().text)
+        T.pageMsg({ action = "drumkit_control", args = { control = "volume" }, focused = true })
+        T.ok(T.lastPost().text == "A drum slot's Volume, Pan or Pitch is not available in this module yet", T.lastPost().text)
         T.pageMsg({ action = "bogus", args = {} })
         T.ok(T.lastPost().text == "bogus is not available in this module yet", T.lastPost().text)
         T.ok(T.count("[avenger] [page] 'bogus' is no action of the page's") == 1, T.dump())

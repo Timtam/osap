@@ -278,6 +278,27 @@ function Act.run(o, spec, done, trip)
   if not click.double then watchFromNow() end
 end
 
+-- Part `part` read before an action of a trip's own that is no click of Act.run's — a rename's
+-- double-click (src/handover.luau), a knob's press (src/amount.luau) — as Act.run reads one: its
+-- picture waited for, its pixels (and with `text` its words) asked of it, the picture let go. The
+-- values and their keys, or nil, nil and the page's error; `log(fmt, …)` the caller's log.
+function Act.partBefore(pl, part, text, log)
+  local region = Open.partRegion(pl, part)
+  if not region then return nil, nil, "that part of VPS Avenger is not on the screen" end
+  local okS, snap, why = pcall(host.screen.snapshot, { region = region })
+  if not (okS and snap) then
+    log("'%s': nothing clicked — no picture of it: %s", part, tostring(okS and why or snap))
+    return nil, nil, "VPS Avenger cannot be read now"
+  end
+  local okR, v, keys = pcall(Open.part, snap, part, { pl = pl, text = text, preset = R.lastName() })
+  snap:release()
+  if not okR then
+    log("'%s': nothing clicked — the read before failed: %s", part, tostring(v))
+    return nil, nil, "reading VPS Avenger failed"
+  end
+  return v, keys
+end
+
 -- What main.luau hands over: its clicks, its reads of the name and its tidying up after a popup.
 function Act.start(ring)
   R = ring

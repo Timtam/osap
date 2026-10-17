@@ -82,24 +82,9 @@ local function textIn(pl, snap, rect)
   return t ~= "" and t or nil
 end
 
--- Part `part` read before the click, as src/act.luau reads one: its picture waited for, its pixels
--- (and with `text` its words) asked of it. The values and their keys, or nil, nil and the page's
--- error.
+-- Part `part` read before the double-click, as src/act.luau reads one (Act.partBefore).
 local function partBefore(pl, part, text)
-  local region = Open.partRegion(pl, part)
-  if not region then return nil, nil, "that part of VPS Avenger is not on the screen" end
-  local okS, snap, why = pcall(host.screen.snapshot, { region = region })
-  if not (okS and snap) then
-    log("'%s': nothing clicked — no picture of it: %s", part, tostring(okS and why or snap))
-    return nil, nil, "VPS Avenger cannot be read now"
-  end
-  local okR, v, keys = pcall(Open.part, snap, part, { pl = pl, text = text, preset = E.ring.lastName() })
-  snap:release()
-  if not okR then
-    log("'%s': nothing clicked — the read before failed: %s", part, tostring(v))
-    return nil, nil, "reading VPS Avenger failed"
-  end
-  return v, keys
+  return Act.partBefore(pl, part, text, log)
 end
 
 -- ── A rename in Avenger's own editor ─────────────────────────────────────────

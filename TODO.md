@@ -7282,8 +7282,108 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       browse as Return does, where the tool's mode took Return alone; an overlay of the same module
       outside the page's group, in front in the plug-in's window during a hand-over, loses its own
       capture of an end key to it (a module holds one capture per key; VPS Avenger has none such).
-- [ ] **The next stages**: the knobs turned, the drums and the browser, and the page's own Settings
-      section.
+- [x] **The knobs turned from the page** (the plan's slice 7, module 0.6.0, on the runtime 0.9.0's
+      hand-over of the keys and HG1, built 2026-10-17). `macro_amount`, `osc_control` and
+      `osc_filter_control` (`src/amount.luau`): for an oscillator's knob or the filter's band the
+      strip read first — nothing pressed on the Drums or the Trig tab, the error said beside the
+      tool's focus (`osc-tab-detail-group`); a picture of the knob's box, held as the baseline; the
+      keyboard handed over (`"keys"`: PageUp, PageDown, Return and Escape CAPTURED, so none of them
+      reaches Avenger or the DAW — the tool's monitor only observed, and Return moved Logic's
+      playhead); then the press at the tool's point, held (the right button for Pan and Random
+      Pitch), and the tool's sentence #6, #7 or #8 behind the screen reader ("amount" where the tool
+      said "ammount", the control's key with a space where it said "fine_tune"). Each PageUp or
+      PageDown is one move of one table point times the factor — up or left, down or right — within
+      106 points of the press (the filter's x from 368 to 509); a key at the limit moves there again
+      and plays Slider.wav behind the `sounds` setting, whose label says so now. Return lets go at
+      once and the knob is READ off a picture once Avenger has drawn what the keys did — one change
+      wait from the picture before the press, at most 2 s, "unchanged" said at its bound — and the
+      page comes back on the knob's button; with nothing moved, a plain picture read at once. A
+      give-up while it is read posts the knob as not read: noted so before the change wait, which
+      the read overwrites. Escape lets go and reads nothing: the knob posted as not read where it
+      moved. The filter's band has no reader (the tool read none): Return claims nothing. Every end
+      lets go of the button exactly once — its own keys at once, and the page key, another window,
+      the page closed, the window gone or a hook that raised first thing in `onEnd`; after a disable
+      the host has let go, and the end after the enable asks `host.input.held()` (HG1b) and sends
+      nothing more. The knob reader reads one knob off its own small picture (`Knob.read`,
+      `Knob.BOX`, a few hundred points), and the page key's read reads the third knob's ring once
+      for Fine Tune and Random Pitch both, where the tool captured it twice. Not ported: the 50 ms
+      sleep per key, the 0.12 s after Return, the five-minute fallback, the Windows driver's warps.
+      Tested in the scripted host, whose `host.input` now records a held press, its moves and its
+      release, and whose disable lets go as the host does: 20 tests, 31 scenarios
+      (avenger_amount_tests.rs); a mutation round of 18 on the module, all caught, and after the
+      review one of 16, all caught but four — an end told while the plug-in is not in front, the
+      user gone while the knob is pictured before the press (the hand-over refuses then all the
+      same), the "unchanged" words said only where the page does not come back, and the focus after
+      a strip with no tab read: none of them has a scenario yet.
+- [ ] **What the Mac tester confirms for slice 7** (P3, with Avenger in Logic, Calibrate ticked):
+      the page opened with the page key, then each step below; afterwards the log and the
+      calibration folder's `amount-<knob>-<before|after>-<zoom>pct.png`:
+      1. Macro 1's Amount, PageUp five times, then Return: sentence #6 with the knob's name, Logic's
+         playhead still on Return, and the page back on the Amount button with the value read. The
+         log: `[page] … hands the keyboard over (keys): PageUp, PageDown, Return, Escape captured for
+         the module in window id …`; `[avenger] [amount] 'macro 1': pressed (x,y) with the left
+         button; PageUp moves up, …`; `… 'macro 1': Return — the left button released at (x,y) after
+         5 moves (net -5, 0 at the limit), the last N ms before`; `… 'macro 1': read <name> N percent
+         (<name> M percent before) — changed …`;
+      2. the same with Escape: the page back with the Amount "not read", Avenger's knob where the
+         keys left it;
+      3. PageUp held until Slider.wav sounds, a few PageDowns, then Return: the value at the top, then
+         a little below it;
+      4. OSC Volume, PageDown five times, then Return;
+      5. Pan, with the right button: whether Avenger takes a right-button drag on Level as Pan;
+      6. Transpose, Fine Tune and Random or Alternate Pitch (the right button on the third knob), each
+         PageUp three times, then Return;
+      7. Low-Pass and High-Pass: PageUp and PageDown move the handle, Slider.wav at the ends, nothing
+         read;
+      8. the page key while holding: "… stopped by the page key …" in the page, and Avenger's knob no
+         longer following the pointer;
+      9. by ear: where VoiceOver lands after the press, and whether it says anything while the keys
+         move the knob.
+      The module's developer: GM4, the knob's angle against Avenger's own value display, and the
+      units per point at 50, 100 and 200 % (the log's before and after against the net steps); GM7,
+      whether the reader's rings hold at his display, from the pictures; and whether Avenger draws a
+      value box over a knob while it is dragged.
+- [ ] **Slice 7 on Windows** (there is no Avenger tester there): HG1 has met no JUCE knob with a
+      held press yet — a verification patch on a JUCE plug-in the maintainer has (ON:EAR's Width or
+      Kontakt's knobs: a trip-less `mouseDown`, ten `move`s, `mouseUp`, the value read), applied
+      only when he asks for it; and NVDA's mouse tracking may now hear the injected motion — a
+      placement went past the low-level hook, motion does not — and say what lies under the pointer
+      while a drag leaves Avenger's window: listen for it.
+- [ ] **Residuals of slice 7**: a move whose repaint comes after the 50 ms settle that follows
+      Return is not read (the log's "the last N ms before" says how close they came); travel past
+      the screen's edge is cut by the system, so an end of the range may be out of reach at large
+      zooms (480 + 106 runs past Avenger's bottom edge at every zoom); a button the user presses or
+      lets go of with the real mouse during the hold is not known to the gesture, and Return then
+      sends an up of no press; a step at 80 % is 1 or 2 pixels (1.6 on average, no error carried);
+      the filter's handles are not read; a value box Avenger may draw over a knob while it is
+      dragged is read as the knob (GM4's pictures show it); and the keys are the DAW's again while
+      the knob is read after Return — the runtime gives the captures back before `onEnd` (RG2's
+      design), so a second Return during the change wait, which runs its full 2 s where the knob
+      was at its end stop already and shows no change, reaches the DAW and moves Logic's playhead;
+      closing it takes a general option of the runtime's for `kind = "keys"`, the captures kept
+      until `trip:done`.
+- [ ] **A give-up after an Act.run click** (src/act.luau, slice 5's clicks, the resets among
+      them): a give-up during the change wait after the click — the page key, another window —
+      leaves the page showing the part as read before the click, since `movedOn` does nothing for
+      a trip and Act.run has no not-read form of what each action changes. The knobs' amount
+      notes its knob as not read before its wait (src/amount.luau, `notRead`); the same for
+      Act.run needs each spec to name the fields its click may change.
+- [ ] **The ring's knobs turned**: the ring's Level, Pan, Transpose, Fine tune, Random pitch and
+      Macro 1 to 3 say the value read and reset on Return; turning them from the ring does not fit
+      its idiom. A hand-over is a trip's, and a trip needs the page; the ring's way of moving a value
+      by keys is `O:addStepper`, a step an action — on Avenger's knob a press, a move and a release
+      each, and a second press at the same point within the double-click time is a double-click to
+      a JUCE plug-in, which RESETS the knob (`O:afterIdle` coalesces a run of presses, but a second
+      run soon after still lands within that time; the tool held ONE press for the whole
+      adjustment). So one of: (a) a general runtime piece, a held stepper — `addStepper{ hold = { at,
+      button } }` pressing at the first step, one move a step with the value read after each,
+      released on Return, Escape, the focus leaving the control, the overlay leaving the front or a
+      disable (`host.input.held()`), which needs a hook for a control losing the focus that the
+      runtime does not have; or (b) a measurement on the tester's Mac first: whether two separate
+      press-move-release gestures at Avenger's knob within half a second reset it — if not, the
+      stepper with `afterIdle` (ON:EAR's Width idiom) is enough. (b) first: one step in his session.
+- [ ] **The next stages**: the drums and the browser, the ring's knobs turned (above), and the
+      page's own Settings section.
 
 ## HTML pages, stage 1: `host.gui.webview` and the Windows probe (2026-09-28)
 
@@ -7949,6 +8049,24 @@ maintainer's German test instructions are a text of their own, not in the reposi
         answers only through one. **Not measured:** whether Return and Escape reach a plug-in's text
         field through the flag in Logic (the tap) and in REAPER (the hook, REAPER's "Send all
         keyboard input to plug-in") — VPS Avenger's slice 6 above has the lines that answer it.
+      - [x] **HG1 — a held press's moves are motion on Windows** (the VPS Avenger port's plan, built
+        2026-10-17 with its slice 7, not run live): `host.input.move` while a button is held — one a
+        module pressed with `mouseDown`, or one down on the desktop — sends one injected absolute
+        motion event over the virtual desktop (`SendInput` with `MOUSEEVENTF_MOVE |
+        MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_ABSOLUTE`, the point at the middle of its pixel's share
+        of the axis) where it placed the pointer with `SetCursorPos`, so a control that holds the
+        press sees a drag; `mouseUp` is that motion, then the up, with no placement; `drag`'s steps
+        are the same events, over the virtual desktop where they were normalised over the primary
+        display. macOS posted the held button's Dragged event already, and is unchanged. And HG1b,
+        `host.input.held()`: the buttons the module holds by the host's record, which a disable
+        empties, so a held gesture ended after a disable and an enable lets go once.
+        docs/api/input.md; tests of the events built and the decisions, never sent
+        (backend/windows.rs, `pointer_motion_tests`), and of `held` (lib.rs); a mutation round of 9,
+        all caught, and after the review five more — two of the axis's arithmetic, the backend's
+        note changed as the button went, the desktop's three buttons asked, the virtual desktop's
+        four metrics — all caught. **Not measured:** whether a JUCE knob follows the motion, and
+        what a screen reader's mouse tracking makes of it — VPS Avenger's "Slice 7 on Windows"
+        above.
 - [ ] **Stage 3 — the real `host.gui.webview`**: `prepare()` called on an overlay's first
       activation (the call and the asynchronous environment are there since 2026-09-28), a build
       that does not wait at all (above), the page kept off the internet (above), the placement

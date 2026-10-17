@@ -20,6 +20,7 @@
 -- in this window, for words (a name, the tab shown for the page's focus) and never a decision.
 
 local M = host.include("src/tables/macros.luau")
+local Knob = host.include("src/read/knob.luau")
 
 local A = {}
 
@@ -218,8 +219,9 @@ function A.reset_macro_amount(args, label, known)
     part = "macros",
     macroCount = known and known.macroCount,
     decide = function() return { at = p, double = true } end,
-    -- The knob's ring: the reader looks within 28 of the project's pixels (14 points at 50 %).
-    watch = function() return { box(p, { 32, 32 }) } end,
+    -- The knob's picture (Knob.BOX): the reader looks within 28 of the project's pixels (14 points
+    -- at 50 %).
+    watch = function() return { box(p, Knob.BOX.macro) } end,
     same = function(vb, va)
       local a = va.macroAmounts and va.macroAmounts[i]
       return a ~= nil and a == (vb.macroAmounts and vb.macroAmounts[i])

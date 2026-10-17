@@ -7,7 +7,8 @@
 --   Add oscillator        Return adds one, none at eight
 --   Level, Pan, Transpose, Fine tune, Random pitch   the selected oscillator's knobs as read;
 --                         Return resets the knob with a double-click (the right button for Pan and
---                         Random Pitch). Turning them is the knobs' stage (the plan's slice 7)
+--                         Random Pitch). Turning them is the page's (the plan's slice 7,
+--                         src/amount.luau); the ring's is TODO.md's ("The ring's knobs turned")
 --   Macro tab             a stepper over the macro tabs: the tab read as shown, of how many
 --   Add macro tab, Delete last macro tab
 --   Macro 1 to 3          a knob's name and amount as read; Return resets it

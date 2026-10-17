@@ -551,6 +551,8 @@ fn hold_and_click(who: &Identity, front: isize, owner: usize, x: i32, y: i32, bu
         super::windows::send_mouse_event(down, 0);
         super::windows::send_mouse_event(up, 0);
     }
+    // Its release lets go of a button pressed before it, as every click's (windows.rs, PRESSED).
+    super::windows::note_button(button, false);
     logging::line("input", &format!("clicked window {} ('{}') at {x},{y} without activating it", who.hwnd, who.class));
     Ok(())
 }

@@ -272,6 +272,13 @@ S.changeWaits = {}
 S.changeWaitsAsked = 0
 S.onSnapshotWait = nil
 S.sent = {} -- every host.input.send, in order
+-- A press held, its moves and its release (src/amount.luau): every one in S.input, in order —
+-- { "down", x, y, button = b }, { "move", x, y }, { "up", x, y, button = b } — and the buttons the
+-- module holds as the host keeps them (host.input.held), which a disable empties as the host lets
+-- go of them (S.hostReleases, T.disable). S.onMove(n), when set, runs at the n-th move: Avenger
+-- answering it; S.moveRaises, a message, raises at the next move.
+S.input, S.heldButtons, S.hostReleases, S.moves = {}, {}, {}, 0
+S.onMove, S.moveRaises = nil, nil
 -- Every snapshot handle the scripted host has handed out that the module has not released yet
 -- (T.held): a picture held past its action holds the module's budget.
 S.live = {}
@@ -868,12 +875,46 @@ end
 function T.avenger()
   local made = T.collect()
   T.modules("modules/vps-avenger/")
+  local function point(call, x, y)
+    assert(type(x) == "number" and type(y) == "number" and x == math.floor(x) and y == math.floor(y),
+      call .. ": a point in whole pixels, got " .. tostring(x) .. "," .. tostring(y))
+  end
+  local function button(opts)
+    local b = opts and opts.button or "left"
+    assert(b == "left" or b == "right" or b == "middle", "a button: " .. tostring(b))
+    return b
+  end
   rawset(T.host, "input", T.strict("host.input", {
     click = function(x, y, opts)
       S.clicks[#S.clicks + 1] = { x, y, button = opts and opts.button }
       if S.onClick then S.onClick(#S.clicks) end
     end,
     send = function(combo) S.sent[#S.sent + 1] = combo end,
+    mouseDown = function(x, y, opts)
+      point("host.input.mouseDown", x, y)
+      local b = button(opts)
+      S.input[#S.input + 1] = { "down", x, y, button = b }
+      if not table.find(S.heldButtons, b) then S.heldButtons[#S.heldButtons + 1] = b end
+    end,
+    move = function(x, y)
+      point("host.input.move", x, y)
+      if S.moveRaises then
+        local why = S.moveRaises
+        S.moveRaises = nil
+        error(why, 0)
+      end
+      S.input[#S.input + 1] = { "move", x, y }
+      S.moves += 1
+      if S.onMove then S.onMove(S.moves) end
+    end,
+    mouseUp = function(x, y, opts)
+      point("host.input.mouseUp", x, y)
+      local b = button(opts)
+      S.input[#S.input + 1] = { "up", x, y, button = b }
+      local i = table.find(S.heldButtons, b)
+      if i then table.remove(S.heldButtons, i) end
+    end,
+    held = function() return table.clone(S.heldButtons) end,
   }))
   local AH = setmetatable({}, { __index = T.host })
   AH.path = function(p) return "C:/modules/vps-avenger/" .. p end
@@ -898,6 +939,49 @@ function T.avenger()
   T.runDue()
   return made[1], made[2]
 end
+
+-- The module disabled, as the host disables it (lib.rs, after_toggle): its page out of sight, its
+-- timers, its pictures and reads out dropped (the pictures it holds stay its own), its captures out
+-- of the hook (S.disabled), its scope and flag forgotten, its claims let go — and every mouse button
+-- it holds let go of by the host, where the pointer is, with the host's line (S.hostReleases).
+function T.disable()
+  T.page().shown = false
+  S.after, S.asyncs, S.reads = {}, {}, {}
+  T.dropScreen()
+  S.changeWaits = {}
+  S.disabled = true
+  S.scopedTo = false
+  S.menuOpen[#S.menuOpen + 1] = false
+  for _, c in ipairs(T.claims) do
+    c.matching = false
+    if c.active then
+      c.active = false
+      T.hostCall(c.off)
+    end
+  end
+  for _, b in ipairs(S.heldButtons) do
+    S.hostReleases[#S.hostReleases + 1] = b
+    S.logs[#S.logs + 1] = "[input] [com.platform.vps-avenger] released the " .. b
+      .. " mouse button it had pressed with host.input.mouseDown: it was disabled"
+  end
+  S.heldButtons = {}
+end
+-- Enabled again: its captures back in every window, with no flag (docs/api/keys.md, scope).
+function T.enable()
+  S.disabled = false
+  S.scopedTo = false
+end
+-- S.input's entries of `kind` ("down", "move", "up"), from entry `from` on; and how many times a
+-- button was let go of, by the module and by the host.
+function T.inputs(kind, from)
+  local out = {}
+  for i = (from or 0) + 1, #S.input do
+    if S.input[i][1] == kind then out[#out + 1] = S.input[i] end
+  end
+  return out
+end
+function T.ups() return #T.inputs("up") + #S.hostReleases end
+function T.xy(e) return e and (e[2] .. "," .. e[3]) or "none" end
 
 -- A reading of `words` (each { text, x, y, w, h, approx? }), as host.ocr.recognize hands one back.
 function T.reading(words, lines)

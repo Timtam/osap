@@ -1,12 +1,13 @@
 id = "com.platform.vps-avenger"
 name = "VPS Avenger"
-version = "0.5.0"
+version = "0.6.0"
 license = "GPL-3.0-or-later"
 # The runtime's page support (O:addPage, O:inPlugin) came with version 0.6; `identify`'s `again`
 # and O:watch's count of readings, which the header's read and the name after ◀ and ▶ use, with 0.7;
 # the drawn menu test, which sees Avenger's popups painted inside its editor, and O.doubleClick's
 # button, which the resets of Pan and Random Pitch use, with 0.8; a trip's hand-over of the
-# keyboard, which the renames and Browse Presets use (src/handover.luau), with 0.9.
+# keyboard, which the renames and Browse Presets use (src/handover.luau), with 0.9 — its `keys`
+# kind the knobs turned from the page too (src/amount.luau).
 dependencies = ["com.platform.overlay >= 0.9", "com.platform.daw-hosts"]
 # The catalog of Avenger's expansions (modules/vps-avenger-presets), when it is installed:
 # the preset's expansion, category, oscillators and macros, and the neighbour ◀ and ▶ lead to,
@@ -28,20 +29,25 @@ optional_dependencies = ["com.platform.vps-avenger-presets"]
 #           (or Escape, for a right click's) to close a popup a choice left open, and the warning
 #           box's YES the page answers; the oscillator strip's and the macros' clicks, right clicks
 #           and double-clicks (src/act.luau); for a rename, the double-click that opens Avenger's
-#           editor on a name field, and the click that selects an OSC tab before it (src/handover.luau)
-#   speech  the new preset name, the refusals of its own clicks, and why the page key opened nothing
+#           editor on a name field, and the click that selects an OSC tab before it (src/handover.luau);
+#           for a knob turned from the page, its press held, one move per key and the release
+#           (src/amount.luau)
+#   speech  the new preset name, the refusals of its own clicks, why the page key opened nothing,
+#           and the tool's sentences for a knob's amount (src/amount.luau)
 #   log     what was read, and where
 #   screen  the screen's size, before a choice that opens Avenger's warning box; for the page, one
 #           picture of Avenger and its grids, profiles and points (src/read); for an action of the
 #           strip's or the macros', a picture of its part before the click and a change wait after
 #           it (src/act.luau); for a rename, the field's pictures, the change waits that see
 #           Avenger's editor open and closed, and the profiles of its edges (src/read/editor.luau);
-#           the calibration pictures of the header, the warning box, the page's reads and the
-#           editor, in a calibrating run only
+#           for a knob turned, its picture before the press and the change wait after Return, its
+#           points read (src/amount.luau); the calibration pictures of the header, the warning box,
+#           the page's reads, the editor and the knobs, in a calibrating run only
 #   path    where those pictures are written
 #   gui     the page: the avenger_control project's panel, beside Avenger (src/page.luau, ui/);
 #           its key is the overlay runtime's (O:addPage)
 #   settings  the page's: its key, the expansions list, its sounds, the Mac page mode, and the
 #           Drum SQ watcher's cadence
-#   sound   Open.wav and Close.wav as the page comes and goes (sounds/, the project's)
+#   sound   Open.wav and Close.wav as the page comes and goes, and Slider.wav at a knob's limit
+#           (sounds/, the project's)
 require = ["window", "ocr", "input", "speech", "log", "screen", "path", "gui", "settings", "sound"]

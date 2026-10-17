@@ -26,6 +26,10 @@ been published and has no licence of its own.
       the tool's actions on the oscillator strip and the macros (its actions.py and clicker), by
       its names, arguments, points, menu rows and focus targets, each made to read back what it
       changed rather than assume it.
+  src/amount.luau
+      the tool's amount mode (its actions.py, clicker and panel): its points, travel and buttons
+      for the macro knobs, the oscillator's knobs and the 2-band filter, its sentences, and
+      Slider.wav at the limit.
   sounds/Open.wav, sounds/Close.wav, sounds/Slider.wav
       the tool's sounds for the page opening and closing and for a knob at its limit.
 

@@ -1722,6 +1722,8 @@ pub trait Backend {
 
     /// Current mouse cursor position (screen coordinates).
     fn cursor_pos(&self) -> (i32, i32);
+    /// The pointer to (x, y); moves as motion while a button is held, where the platform tells
+    /// the two apart (Windows: an injected motion event against a placement, `windows.rs`).
     fn mouse_move(&self, x: i32, y: i32);
     fn mouse_click(&self, x: i32, y: i32, button: MouseButton);
     fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton);

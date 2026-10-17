@@ -34,6 +34,16 @@
 --   browse_expansion_presets   the tool's sentence, Return let through to Avenger's browser, then
 --                              the name read until it settles
 --
+-- and the knobs turned (the plan's slice 7), each a press held through a hand-over of the keys
+-- (src/amount.luau): the knob pressed and held, the tool's sentence said; PageUp and PageDown one
+-- move each, captured — none of them reaches Avenger or the DAW; Return lets go and the knob is
+-- READ, Escape lets go and reads nothing:
+--
+--   macro_amount {index}       a macro knob's amount
+--   osc_control {control}      the selected oscillator's Volume, Pan, Transpose, Fine Tune or Random
+--                              Pitch — nothing pressed on the Drums or the Trig tab
+--   osc_filter_control {control}   Low-Pass or High-Pass, along x: no reader, Return claims nothing
+--
 -- Nothing is taken for done: every answer is what was read after the click, and a read that did
 -- not come is said as that — after a click or choice that may have changed the preset, with the
 -- preset posted as not read (go). After every trip the page gets its state — the preset heading
@@ -53,6 +63,7 @@ local Act = host.include("src/act.luau")
 local Osc = host.include("src/actions/osc.luau")
 local Macros = host.include("src/actions/macros.luau")
 local Hv = host.include("src/handover.luau")
+local Am = host.include("src/amount.luau")
 
 local A = {}
 
@@ -448,12 +459,29 @@ A.HANDLERS.browse_expansion_presets = function(o)
   go(o, "browse_expansion_presets", function(w, trip, forget) Hv.browse(w, trip, forget) end)
 end
 
+-- ── The knobs turned ─────────────────────────────────────────────────────────
+-- Each a trip whose act presses the knob and hands the keys over (src/amount.luau), its spec built
+-- at once: a knob or a band the page cannot have meant is refused with no trip, as above.
+local function amount(action, build)
+  return function(o, args)
+    local w = E.plugin()
+    local spec, why = build(args, E.LABELS[action], S.values(w and w.id))
+    if not spec then return refuse(action, why) end
+    go(o, action, function(m, trip) Am.run(m, trip, spec) end)
+  end
+end
+A.HANDLERS.macro_amount = amount("macro_amount", Am.macro)
+A.HANDLERS.osc_control = amount("osc_control", Am.osc)
+A.HANDLERS.osc_filter_control = amount("osc_filter_control", Am.filter)
+
 -- What page.luau hands over: { header, DB, ring, zoomOf, LABELS, post, roster, plugin = () -> the
--- window the page was shown beside, postState = (id) -> (), closedWords = () -> the sentence }.
+-- window the page was shown beside, postState = (id) -> (), closedWords = () -> the sentence,
+-- sound = (name) -> (), the page's sounds behind its setting }.
 function A.start(env)
   E, R = env, env.ring
   Act.start(env.ring)
   Hv.start({ ring = env.ring, named = named, plugin = env.plugin })
+  Am.start({ ring = env.ring, plugin = env.plugin, sound = env.sound })
 end
 
 return A

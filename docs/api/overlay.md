@@ -1867,6 +1867,51 @@ host.screen.snapshot({ region = region }, function(before)
 end)
 ```
 
+And `"keys"`: a knob the plug-in turns only while its button is held, pressed and held through the hand-over — PageUp and PageDown a point each, Return letting go and reading it, Escape letting go — every end letting go once, and not where the host let go already at a disable ([`host.input.held`](input.md#host-input-held)):
+
+```luau
+-- In a trip's act. KNOB is the knob's middle and its box, in the overlay's coordinates; readKnob is
+-- the module's own reader of a picture of it.
+local KNOB, BOX = { 120, 80 }, { 104, 64, 136, 96 }
+local x, y = o:toScreen(KNOB[1], KNOB[2])
+if not x then return trip:done({ error = "the knob cannot be placed now" }) end
+local dy, down = 0, false
+local function letGo()
+  if not down then return end
+  down = false
+  if table.find(host.input.held(), "left") then host.input.mouseUp(x, y + dy) end
+end
+local handed, why = trip:handOver({
+  kind = "keys",
+  keys = { "PageUp", "PageDown", "Return", "Escape" }, -- captured: none of them reaches the plug-in
+  onKey = function(_, _, key)
+    if key == "Return" or key == "Escape" then
+      letGo()
+      return true -- the end: onEnd(…, "ended", …) on the next turn
+    end
+    dy += key == "PageUp" and -1 or 1
+    host.input.move(x, y + dy) -- with the button held, a drag
+    return false
+  end,
+  onEnd = function(o2, t2, how, info)
+    letGo() -- first, on every end
+    if how ~= "ended" or not t2:inFront() then return end -- onGiveUp posts the rest
+    if info.key == "Escape" then return t2:done({}) end
+    host.screen.snapshot({ region = o2:toScreenRect(BOX, { whole = true }) }, function(snap)
+      if not t2:inFront() then return snap and snap:release() end
+      t2:done({ value = snap and readKnob(snap) or nil })
+      if snap then snap:release() end
+    end)
+  end,
+})
+if not handed then
+  if why ~= "not in front" then trip:done({ error = "the keyboard: " .. why }) end
+  return
+end
+host.input.mouseDown(x, y) -- after the hand-over, so that one refused leaves no button down
+down = true
+```
+
 ### Windows
 
 The scope is the window in front at the call, the plug-in's FX window or the DAW window it is docked in, and the low-level hook lets a captured end key through to it while the flag counts, records it, and logs once per reason and window `captured Return (vk 0x0d/m0) was let through to the application: … a menu declared open with host.keys.menuOpen(true) by a module scoped to the window in front` ([`capture`](keys.md#host-keys-capture), its Windows block); the keypad's Enter is recorded as `"Return"`. A screen reader's hook after the host's sees the key as usual. Whether a DAW hands Return to a plug-in's text field or takes it for itself — REAPER has a per-FX "Send all keyboard input to plug-in" — is the DAW's; it has not been measured with an overlay (TODO.md, VPS Avenger).

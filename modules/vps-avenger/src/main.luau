@@ -24,16 +24,17 @@
 -- Solo, Add oscillator, the selected oscillator's knobs reset, the macro tab, its knobs reset and
 -- its buttons — each saying what was read, and clicked as the page's trips click them (act.luau)
 --
--- at every zoom from 50 to 200 %, in every DAW daw-hosts has an entry for. Turning knobs, the drums
--- and the browser are later stages (TODO.md, "VPS Avenger"). Plug-in only: the project supports
--- no standalone Avenger, and neither does this module yet (TODO.md).
+-- at every zoom from 50 to 200 %, in every DAW daw-hosts has an entry for. Turning knobs from the
+-- ring, the drums and the browser are later stages (TODO.md, "VPS Avenger"). Plug-in only: the
+-- project supports no standalone Avenger, and neither does this module yet (TODO.md).
 --
 -- And the project's panel as a page of this module's own (page.luau, ui/), on the overlay
 -- runtime's page support (O:addPage): its key on an identified Avenger reads Avenger off one
 -- picture (read/open.luau) and shows the page beside it; the header's actions are trips into
 -- Avenger made with this file's own clicks, reads and choices (actions.luau), the renames and
--- Browse Presets hand-overs of the keyboard to Avenger (handover.luau); the page's other actions
--- come in later stages, and say so until then.
+-- Browse Presets hand-overs of the keyboard to Avenger (handover.luau), and the knobs turned with
+-- a press held through a hand-over of the keys (amount.luau); the page's other actions come in
+-- later stages, and say so until then.
 --
 -- Coordinates are written as the project wrote them, at 50 % from Avenger's corner; the overlay
 -- scales them by the zoom READ off Avenger's zoom field (header.luau), and puts Avenger's corner
@@ -761,6 +762,7 @@ Page.start({
   DB = DB,
   ring = {
     clickAt = clickAt,
+    pointOf = pointOf,
     nameNow = nameNow,
     lastName = function() return names.last end,
     noteName = noted,

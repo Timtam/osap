@@ -64,6 +64,10 @@ mod avenger_osc_macros_tests;
 /// and closed, the keyboard handed over, and the name read back, from the page.
 #[cfg(test)]
 mod avenger_rename_tests;
+/// VPS Avenger's knobs turned from the page (the plan's slice 7): the press held through a
+/// hand-over of the keys, one move per key, the release on every end, and the knob read after.
+#[cfg(test)]
+mod avenger_amount_tests;
 /// The HTML page probe (tools/html-probe) against the same scripted host, with a scripted page:
 /// its keys, its report, W3's round trip, W7's landing and the automatic show.
 #[cfg(test)]
@@ -8168,7 +8172,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     host.set("epoch", lua.create_function(move |_, ()| { host_call!("host.epoch"); Ok(sh.epoch.get()) })?)?;
 
-    // host.input: cursorPos / move / click / drag / scroll / send / text
+    // host.input: cursorPos / move / click / post / mouseDown / mouseUp / held / drag / scroll / send / text
     let input = lua.create_table()?;
     let sh = shared.clone();
     input.set(
@@ -8304,6 +8308,19 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             sh.backend.mouse_up(x, y, button);
             sh.let_go_button(idx, button);
             Ok(())
+        })?,
+    )?;
+    // host.input.held() -> { "left" | "right" | "middle" } — the buttons this module pressed with
+    // mouseDown and has not let go of, in the order pressed: the host's record, which a disable, a
+    // reload, a rollback and a stop empty as they let go (`release_held_buttons`). It acts on
+    // nothing and asks the system nothing, so a held gesture ended after a disable and an enable
+    // lets go of its button once, not a second time.
+    let sh = shared.clone();
+    input.set(
+        "held",
+        lua.create_function(move |lua, ()| {
+            host_call!("host.input.held");
+            lua.create_sequence_from(held_names(&sh.held_buttons.borrow(), idx))
         })?,
     )?;
     let sh = shared.clone();
@@ -9389,6 +9406,12 @@ fn button_name(button: MouseButton) -> &'static str {
         MouseButton::Right => "right",
         MouseButton::Middle => "middle",
     }
+}
+
+/// `host.input.held()`'s answer: the names of the buttons module `idx` holds in `held` (the host's
+/// record, `Shared::held_buttons`), in the order pressed.
+fn held_names(held: &BTreeMap<usize, Vec<MouseButton>>, idx: usize) -> Vec<&'static str> {
+    held.get(&idx).map(|v| v.iter().map(|b| button_name(*b)).collect()).unwrap_or_default()
 }
 
 fn button_from(opts: Option<&Table>) -> MouseButton {
@@ -10584,7 +10607,7 @@ mod ocr_wiring_tests {
     #[test]
     fn every_acting_call_notes_acting_and_waits_for_no_picture() {
         const ACTING: [&str; 9] = ["move", "click", "post", "mouseDown", "mouseUp", "drag", "scroll", "send", "text"];
-        const READ_ONLY: [&str; 1] = ["cursorPos"];
+        const READ_ONLY: [&str; 2] = ["cursorPos", "held"];
         let api = body(LIB, "fn install_host_api(");
         let input = bindings(api, "input");
         assert_eq!(input.len(), ACTING.len() + READ_ONLY.len(), "{:?}", input.iter().map(|b| b.0).collect::<Vec<_>>());
@@ -10594,6 +10617,8 @@ mod ocr_wiring_tests {
                 assert!(text.contains(&call), "host.input.{name} does not note acting");
             } else {
                 assert!(READ_ONLY.contains(&name), "host.input.{name} is new: does it act (ACTING) or only read?");
+                // A read acts on nothing: no note, and the input epoch stays.
+                assert!(!text.contains("note_acting") && !text.contains("bump_input_epoch"), "host.input.{name} acts");
             }
         }
         let focus = bindings(api, "win").into_iter().find(|b| b.0 == "focus").expect("host.window.focus");
@@ -11671,6 +11696,8 @@ mod ocr_wiring_tests {
         let input = bindings(api, "input");
         let held = |name: &str| input.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.input.{name}")).1;
         assert!(held("mouseDown").contains("sh.hold_button(idx, button);"));
+        // `held` answers the same record, for the module asking.
+        assert!(held("held").contains("held_names(&sh.held_buttons.borrow(), idx)"));
         for name in ["mouseUp", "click", "drag"] {
             assert!(held(name).contains("sh.let_go_button(idx, button);"), "host.input.{name} does not let go of its button");
         }
@@ -11682,6 +11709,24 @@ mod ocr_wiring_tests {
         assert!(populate.contains("vm_guard::name_chunk(lua, &dep_name, dep_id, dep_rel);"));
         assert!(populate.contains("vm_guard::name_chunk(lua, &entry.display().to_string(), id, &module.manifest.entry);"));
         assert!(body(LIB, "fn install_include(").contains("vm_guard::name_chunk(lua, &key, &owner,"));
+    }
+
+    /// `host.input.held()` answers the asking module's own buttons from the host's record, in the
+    /// order it pressed them — none of another module's — and nothing once the record is emptied, as
+    /// `release_held_buttons` empties it at a disable.
+    #[test]
+    fn held_names_are_the_module_s_own_in_the_order_pressed() {
+        use super::held_names;
+        use crate::backend::MouseButton;
+        let mut held = std::collections::BTreeMap::new();
+        assert!(held_names(&held, 2).is_empty());
+        held.insert(2, vec![MouseButton::Left, MouseButton::Right]);
+        held.insert(3, vec![MouseButton::Middle]);
+        assert_eq!(held_names(&held, 2), ["left", "right"]);
+        assert_eq!(held_names(&held, 3), ["middle"]);
+        assert!(held_names(&held, 4).is_empty());
+        held.remove(&2);
+        assert!(held_names(&held, 2).is_empty());
     }
 
     /// Every closure Luau can call in production code marks itself with `host_call!` — so the stop's
