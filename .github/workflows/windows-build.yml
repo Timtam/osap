@@ -34,6 +34,10 @@ on:
         description: 'the seven-character commit in that name, which the package README names as its build'
         required: true
         type: string
+      ocr-bench:
+        description: 'whether this run measures text recognition (ocr-bench --paddle), as build.yml decided it'
+        required: true
+        type: boolean
 
 permissions:
   contents: read
@@ -370,7 +374,14 @@ jobs:
       # detector, so what it makes of ink that is not text is in the output too. Ten minutes at
       # most, against the 20 seconds or so it takes: the job has no limit of its own but
       # GitHub's six hours, and nothing else would end a run that hangs.
+      #
+      # Only in a run that measures text recognition, as the macOS job's `ocr-bench` legs, and as
+      # build.yml decides it (its `ocr` job, with the list of what the measurements run): a push
+      # that changed something on that list, or a run started by hand with its `ocr-bench` box
+      # ticked. The maintainer's choice of 2026-10-18, for faster builds; until then this step ran
+      # on every build. Its upload below goes with it.
       - name: The neural recogniser, measured
+        if: inputs.ocr-bench
         shell: pwsh
         timeout-minutes: 10
         env:
@@ -394,7 +405,7 @@ jobs:
           $global:LASTEXITCODE = 0
 
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: always() && inputs.ocr-bench
         with:
           # The file as it is, named after itself (`archive: false`), as the macOS job keeps its
           # benchmark's output.

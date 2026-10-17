@@ -334,13 +334,18 @@ machines say as much about the machines as about the settings.
 **In CI**, the `ocr-bench` job of `.github/workflows/macos-build.yml` runs the full benchmark
 from the downloaded zip, with `--pictures ocr-pictures`, on the `macos-15` and `macos-26` runners
 (arm64 virtual machines) and on `macos-15-intel`, the one runner that executes the x86_64 slice.
-It runs when the run built the executable, and in every run started by hand, for at most 45
-minutes a leg. The job's log has every line, the run's summary page the tables and the closing
-lines (each of them also as an annotation of the run), and each leg's whole output is kept as the
-artifact `ocr-bench-<runner>.txt`, with the runner image on its last line. A leg fails when the
-benchmark did not finish, when the neural recogniser did not load although the bundle carries
-it, and when a process that loaded it read and then ended by a signal or with a status other
-than 0: the run itself after its report, one of its children (the report says `died of signal 6
+It runs only in a run that measures text recognition: a push that changed something the
+measurements run — the list, with the reason for each entry, is the `ocr` job of
+`.github/workflows/build.yml`, and a push whose commits cannot be compared measures — or a run
+started by hand with its `ocr-bench` box ticked (off by default; since 2026-10-18, before which
+every build with Rust changes measured). On a push it also needs the run to have built the
+executable rather than reused one. At most 45 minutes a leg. The job's log has every line, the
+run's summary page the tables and the closing lines (each of them also as an annotation of the
+run), and each leg's whole output is kept as the artifact `ocr-bench-<runner>.txt`, with the
+runner image on its last line. A leg fails when the benchmark did not finish, when the neural
+recogniser did not load although the bundle carries it, and when a process that loaded it read
+and then ended by a signal or with a status other than 0: the run itself after its report, one
+of its children (the report says `died of signal 6
 at exit after reading`, or `hung at exit after reading` for one the two-minute limit ended, apart
 from a recogniser that did not load; a child of the neural recogniser's first passes fails the
 leg too when a signal ended it before its answer, where a Vision probe that dies is one of the
@@ -373,8 +378,8 @@ than 80 MB is a warning. The `newer-macos` job asks `ocr-bench --paddle-probe` o
 26, where "not available" is an error, and so is an `ok` from a probe that then ends by a signal
 or with another status than 0; it refuses a download whose signature does not verify
 (`codesign --verify --deep --strict`) in a last step of its own, so that its other steps still
-run. On Windows, the build job runs `ocr-bench --paddle` over the drawn pictures and the real
-captures, for at most ten minutes, and keeps the output as
+run. On Windows, in the same runs that measure, the build job runs `ocr-bench --paddle` over the
+drawn pictures and the real captures, for at most ten minutes, and keeps the output as
 `automation-platform-<version>-<commit>-ocr-bench-windows-paddle.txt`; a picture that must be read
 and that the recogniser reads wrong is a warning there.
 

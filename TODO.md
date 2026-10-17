@@ -8737,6 +8737,17 @@ that is built; what the application reads and says is unchanged.
 - [x] **When the CI job runs** (the maintainer, 2026-10-01): on every build with Rust changes.
       That is the job's `if:` line as built: every run that built the executable, and every run
       started by hand. A run that reuses an earlier executable measures nothing new and skips it.
+- [x] **When the CI job runs, again** (the maintainer, 2026-10-18): only when something the
+      measurements run has changed, for faster builds; the Windows step `ocr-bench --paddle` goes
+      with it. build.yml's `ocr` job decides once per run and hands both platforms an `ocr-bench`
+      input: on a push, whether the push's commits (before..after) changed a path on its list,
+      the one place it is written down, each entry with its reason, or the entries of the crates
+      named there in Cargo.lock or a Cargo.toml; a push it cannot compare (a new branch, a force
+      push, a before the clone lacks) measures. A run started by hand measures only with its
+      `ocr-bench` box ticked, off by default. The run's log and summary say which, and why. On a
+      push the macOS legs still skip a reused executable. Of the last 300 commits, each as a push of
+      its own, 114 would have measured, 44 of them only for `backend/mod.rs` or
+      `backend/windows.rs`, whole files of which the bench runs a few functions.
 - [x] **Read** (2026-10-02, CI run 36972644006): every leg finished, in 226 to 408 s. No CI Mac
       offers Vision a Neural Engine. On the Intel runner one accurate pass over a small field
       costs 262 to 312 ms, the fast level 12 to 14 ms and it reads the fields and the line right,

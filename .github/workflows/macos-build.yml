@@ -30,6 +30,10 @@ on:
         description: 'the seven-character commit in that name, which the package README names as its build'
         required: true
         type: string
+      ocr-bench:
+        description: 'whether this run measures text recognition (the ocr-bench job), as build.yml decided it'
+        required: true
+        type: boolean
 
 # `actions: read` is for looking up an earlier run and downloading its build; see "Reuse the
 # last build" below. `build.yml` grants the same two to this call; asking here for more than
@@ -963,12 +967,17 @@ jobs:
   # took seven: the benchmark grew from ten
   # pictures to forty-one and from one way of reading to twelve, its sections are estimated at 20 to
   # 30 minutes on the Intel runner, and the first run of this size is what its rounds are set by.
-  # Only for an executable this run built, because a reused one measured again shows runner noise
-  # and nothing else, and in any run started by hand: on every build with Rust changes, the
-  # maintainer's choice (TODO.md, "Text recognition on the Mac, measured").
+  # Only in a run that measures text recognition, as build.yml decides it (its `ocr` job, with
+  # the list of what the measurements run and why each entry is on it): a push that changed
+  # something on that list, or a run started by hand with its `ocr-bench` box ticked. The
+  # maintainer's choice of 2026-10-18, for faster builds; until then it was every build with
+  # Rust changes and every run started by hand (TODO.md, "Text recognition on the Mac,
+  # measured"). And on a push only for an executable this run built, because a reused one
+  # measured again shows runner noise and nothing else; a run started by hand that asks for it
+  # measures a reused one too.
   ocr-bench:
     needs: build
-    if: needs.build.outputs.reused != 'true' || github.event_name == 'workflow_dispatch'
+    if: inputs.ocr-bench && (needs.build.outputs.reused != 'true' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
       matrix:

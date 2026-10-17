@@ -5,14 +5,14 @@
 # downloads for one version had to be found by matching commits between them, and sometimes
 # there was no pair at all, because one path filter fired and the other did not. Now this file
 # is the only thing a push triggers. It calls the two platform workflows as jobs of THIS run:
-# both start once the naming job below has finished (a small Linux job that reads two files),
-# and neither waits for the other.
+# both start once the naming job and the OCR decision below have finished (two small Linux jobs,
+# side by side), and neither waits for the other.
 #
 # Called rather than copied into one file. Each platform's file is mostly the explanation of why
 # its steps exist, and that stays next to the steps, in `windows-build.yml` and
-# `macos-build.yml`. What the two now share is here: the trigger, the permissions and the name
-# the downloads carry. Neither file triggers on its own any more. A manual run is this
-# workflow's "Run workflow" button, and it builds both.
+# `macos-build.yml`. What the two now share is here: the trigger, the permissions, the name
+# the downloads carry and whether the run measures text recognition. Neither file triggers on
+# its own any more. A manual run is this workflow's "Run workflow" button, and it builds both.
 name: Build
 
 # Whenever anything either platform builds, loads or packages changes. This is the union of the
@@ -54,6 +54,13 @@ on:
       - '.github/workflows/windows-build.yml'
       - '.github/workflows/macos-build.yml'
   workflow_dispatch:
+    # Off unless ticked: a run started by hand measures text recognition only when asked to. See
+    # the `ocr` job below.
+    inputs:
+      ocr-bench:
+        description: 'Measure text recognition: the macOS ocr-bench legs and the Windows ocr-bench --paddle step'
+        type: boolean
+        default: false
 
 # No concurrency group, on purpose: every push runs to the end, so every commit that builds gets
 # both downloads, even when the next push lands while it is still building. The macOS workflow used
@@ -151,17 +158,201 @@ jobs:
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "this run's downloads: $prefix-windows and $prefix-macos.zip, both build $commit"
 
+  # Whether this run measures text recognition: the macOS job `ocr-bench`, three Macs for up to
+  # 45 minutes each, and the Windows build's `ocr-bench --paddle` step. Decided once, here, and
+  # handed to both platforms as their `ocr-bench` input, so that the two cannot disagree.
+  #
+  # Until 2026-10-18 the Macs measured on every build with Rust changes and in every run started
+  # by hand, and Windows on every build. Since then (the maintainer's choice: faster builds) a
+  # run measures only when something the measurements run has changed, and a run started by hand
+  # only when its `ocr-bench` box is ticked. A push is judged by its own commits, before..after,
+  # against the list below. When they cannot be compared — a new branch, a force push, a `before`
+  # this clone does not have, git failing — the run measures, and says why: a skip is only ever
+  # because nothing on the list changed.
+  #
+  # The macOS job keeps its own rule beside this one: on a push it measures only an executable
+  # it built, never one reused from an earlier run (macos-build.yml, the `ocr-bench` job).
+  ocr:
+    name: Decide on the OCR measurements
+    runs-on: ubuntu-latest
+    outputs:
+      measure: ${{ steps.decide.outputs.measure }}
+    steps:
+      # Every commit, so that the push's `before` is there to compare with, and no file's content:
+      # a sparse checkout fetches without blobs, and the only ones read, Cargo's, are fetched when
+      # `git show` asks for them. The one file checked out is there because a checkout needs one.
+      - uses: actions/checkout@v4
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 0
+          sparse-checkout: Cargo.toml
+          sparse-checkout-cone-mode: false
+
+      - name: Decide
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          ASKED: ${{ inputs.ocr-bench }}
+          BEFORE: ${{ github.event.before }}
+          CREATED: ${{ github.event.created }}
+          FORCED: ${{ github.event.forced }}
+        run: |
+          set -u
+          # What the two measurements run, the only place this is written down. A change to a
+          # file under any of these measures. Left out on purpose: the screen capture paths, since
+          # both read pictures and capture nothing; lib.rs's `ocr_bench`, which only forwards to
+          # the backend's; and the small helpers outside OCR they call: build_info.rs (the
+          # header), portable.rs (the output file's folder) and the sysctl reads in
+          # backend/macos/perm.rs (the machine).
+          measured=(
+            # The bench's pictures, statistics and report (ocr/bench.rs), and the reading it
+            # measures as the application's own: the ladder, the policy, the crop, the merge, the
+            # plan, the costs and the neural recogniser's pre-processing.
+            crates/host/src/ocr
+            # Vision, the Mac's recogniser, and the Vision half of the bench, a child of ocr.rs.
+            crates/host/src/backend/macos/ocr.rs
+            crates/host/src/backend/macos/ocr
+            # The neural recogniser on both platforms, and the half of the bench that is
+            # `--paddle` and `--paddle-probe`.
+            crates/host/src/backend/paddle_ocr.rs
+            crates/host/src/backend/paddle_ocr
+            # Windows.Media.Ocr, which `--paddle` reads beside the neural recogniser
+            # (`bench_system_read`, `recognize_image`, `run_ocr`, `tighten`). The whole Windows
+            # backend's file, since a path cannot name a function: most changes to it are not the
+            # recogniser's, and measure all the same.
+            crates/host/src/backend/windows.rs
+            # The subcommand's way in on both platforms (`ocr_bench`, `ocr_bench_paddle`), and
+            # its way out: `release_ocr` and `end_now` decide how a process of the bench ends, and
+            # so whether a leg goes red. The whole file again, for the same reason.
+            crates/host/src/backend/mod.rs
+            # `ocr-bench`, main's first subcommand, and the `exit` it ends by.
+            crates/app/src/main.rs
+            # The drawn pictures built into the executable, and the real plug-in captures with
+            # their manifest, which both platforms read from the repository's copy.
+            crates/host/bench-data/ocr
+            # The neural recogniser's model and dictionary, built into the executable.
+            crates/host/models
+            # The ONNX Runtime the Mac's bundle carries, which the bench loads there.
+            tools/onnxruntime-mac.txt
+            # What puts that library, the model, `ocr-pictures` and the tester's
+            # measure-text-recognition.command (which the macOS job runs with --help) into the
+            # download the Macs measure.
+            package-macos.sh
+            # The two measurements' own steps.
+            .github/workflows/macos-build.yml
+            .github/workflows/windows-build.yml
+          )
+          # And the crates they are built from, by name. A change to one's entry in Cargo.lock
+          # (its version, source or checksum) or in any Cargo.toml's dependencies measures; any
+          # other dependency's does not. So does any change to the workspace's [profile] tables,
+          # which decide how the measured executable is compiled.
+          packages=(
+            ort ort-sys          # the neural recogniser's binding, and the ONNX Runtime Windows downloads with it
+            ndarray              # its tensors
+            image png            # the pictures, decoded
+            objc2-vision         # Vision
+            objc2-core-ml        # the compute devices Vision is asked about
+            objc2-core-graphics  # the CGImage Vision is handed
+            windows              # Windows.Media.Ocr, and the bitmap it is handed
+          )
+
+          decide() {
+            echo "measure=$1" >> "$GITHUB_OUTPUT"
+            echo "OCR measurements: $2"
+            echo "OCR measurements: $2" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          if [ "$EVENT" = workflow_dispatch ]; then
+            if [ "$ASKED" = true ]; then
+              decide true "measuring: asked by hand"
+            else
+              decide false "not measuring: not asked (a run started by hand measures only with its ocr-bench box ticked)"
+            fi
+            exit 0
+          fi
+          # Nothing else starts this workflow today; whatever does one day has no push to compare.
+          cannot() { decide true "measuring: could not compare ($1)"; exit 0; }
+          [ "$EVENT" = push ] || cannot "started by $EVENT, not a push"
+          case "$BEFORE" in
+            *[!0]*) ;;
+            *) cannot "the push has no before: a new branch" ;;
+          esac
+          [ "$CREATED" != true ] || cannot "the push created the branch"
+          [ "$FORCED" != true ] || cannot "a force push: its before is not the after's past"
+          git cat-file -e "$BEFORE^{commit}" 2>/dev/null || cannot "the push's before, $BEFORE, is not in this clone"
+          git merge-base --is-ancestor "$BEFORE" "$GITHUB_SHA" || cannot "the push's before, $BEFORE, is not an ancestor of $GITHUB_SHA"
+          range="${BEFORE:0:7}..${GITHUB_SHA:0:7}"
+
+          # `--no-renames`, so that a file moved off the list counts by its old path as well.
+          paths=$(git diff --name-only --no-renames "$BEFORE" "$GITHUB_SHA" -- "${measured[@]}") \
+            || cannot "git diff failed on $range"
+          cargo=$(git diff --name-only --no-renames "$BEFORE" "$GITHUB_SHA" -- Cargo.lock Cargo.toml 'crates/*/Cargo.toml') \
+            || cannot "git diff failed on $range"
+          crates=""
+          if [ -n "$cargo" ]; then
+            # One line per Cargo file whose entries for the crates above differ, naming them.
+            # A file that does not parse fails this, and the run measures.
+            crates=$(python3 - "$BEFORE" "$GITHUB_SHA" "${packages[*]}" $cargo <<'PY'
+          import json, subprocess, sys, tomllib
+
+          before, after, names, files = sys.argv[1], sys.argv[2], set(sys.argv[3].split()), sys.argv[4:]
+
+          def load(commit, path):
+              shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True)
+              # Absent on one side: added or deleted by the push.
+              return tomllib.loads(shown.stdout.decode("utf-8")) if shown.returncode == 0 else {}
+
+          def entries(path, doc):
+              if path == "Cargo.lock":
+                  return {(p["name"], p.get("version"), p.get("source"), p.get("checksum"))
+                          for p in doc.get("package", []) if p["name"] in names}
+              kinds = ("dependencies", "dev-dependencies", "build-dependencies")
+              tables = [(k, doc.get(k, {})) for k in kinds]
+              tables += [(f"target.{t}.{k}", v.get(k, {})) for t, v in doc.get("target", {}).items() for k in kinds]
+              tables.append(("workspace.dependencies", doc.get("workspace", {}).get("dependencies", {})))
+              found = {("profile", json.dumps(doc.get("profile", {}), sort_keys=True))}
+              for table, deps in tables:
+                  for key, spec in deps.items():
+                      name = spec.get("package", key) if isinstance(spec, dict) else key
+                      if name in names:
+                          found.add((table, name, json.dumps(spec, sort_keys=True)))
+              return found
+
+          for path in files:
+              differ = entries(path, load(before, path)) ^ entries(path, load(after, path))
+              if path == "Cargo.lock":
+                  which = sorted({e[0] for e in differ})
+              else:
+                  which = sorted({"[profile]" if e[0] == "profile" else e[1] for e in differ})
+              if which:
+                  print(f"{path} ({', '.join(which)})")
+          PY
+            ) || cannot "Cargo's files could not be compared on $range"
+          fi
+
+          hits=$(printf '%s\n%s\n' "$paths" "$crates" | sed '/^$/d')
+          if [ -z "$hits" ]; then
+            decide false "not measuring: none of the measured paths changed in $range"
+          else
+            n=$(printf '%s\n' "$hits" | wc -l)
+            more=""
+            [ "$n" -gt 1 ] && more=" and $((n - 1)) more"
+            decide true "measuring: $(printf '%s\n' "$hits" | head -n1)$more changed in $range"
+            printf '%s\n' "$hits" | sed 's/^/  /'
+          fi
+
   windows:
     name: Windows
-    needs: version
+    needs: [version, ocr]
     uses: ./.github/workflows/windows-build.yml
     with:
       artifact-prefix: ${{ needs.version.outputs.prefix }}
       commit: ${{ needs.version.outputs.commit }}
+      ocr-bench: ${{ needs.ocr.outputs.measure == 'true' }}
 
   macos:
     name: macOS
-    needs: version
+    needs: [version, ocr]
     uses: ./.github/workflows/macos-build.yml
     # `actions: read` is for finding an earlier run of THIS workflow and downloading its macOS
     # build; see "Reuse the last build" in macos-build.yml. The called workflow asks for the
@@ -172,3 +363,4 @@ jobs:
     with:
       artifact-prefix: ${{ needs.version.outputs.prefix }}
       commit: ${{ needs.version.outputs.commit }}
+      ocr-bench: ${{ needs.ocr.outputs.measure == 'true' }}
