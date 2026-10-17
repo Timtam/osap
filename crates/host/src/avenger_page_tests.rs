@@ -1494,35 +1494,38 @@ fn data_actions() -> Vec<String> {
 /// aria-disabled button as to any other.
 #[test]
 fn back_and_next_carry_aria_disabled_and_stay_in_the_tab_order() {
+    // The files as checked out: a Windows checkout may end their lines with CR LF.
+    let html = INDEX_HTML.replace("\r\n", "\n");
+    let js = PANEL_JS.replace("\r\n", "\n");
     for id in ["prev-preset-button", "next-preset-button"] {
-        let at = INDEX_HTML.find(&format!("id=\"{id}\"")).unwrap_or_else(|| panic!("index.html has {id}"));
-        let start = INDEX_HTML[..at].rfind('<').unwrap();
-        let end = at + INDEX_HTML[at..].find('>').unwrap();
-        let tag = &INDEX_HTML[start..=end];
+        let at = html.find(&format!("id=\"{id}\"")).unwrap_or_else(|| panic!("index.html has {id}"));
+        let start = html[..at].rfind('<').unwrap();
+        let end = at + html[at..].find('>').unwrap();
+        let tag = &html[start..=end];
         assert!(tag.starts_with("<button type=\"button\""), "{id} is a button: {tag}");
         assert!(tag.contains("aria-disabled=\"false\"") && tag.contains("title=\""), "{id}: {tag}");
         for gone in [" disabled", "tabindex", " hidden", "aria-hidden"] {
             assert!(!tag.contains(gone), "{id} has '{gone}': {tag}");
         }
-        assert!(PANEL_JS.contains(&format!("'{id}'")), "panel.js does not update {id}");
+        assert!(js.contains(&format!("'{id}'")), "panel.js does not update {id}");
     }
-    let start = PANEL_JS.find("function updatePresetSteps(reason) {").expect("panel.js has updatePresetSteps");
-    let body = &PANEL_JS[start..start + PANEL_JS[start..].find("\n  }\n").expect("it ends")];
+    let start = js.find("function updatePresetSteps(reason) {").expect("panel.js has updatePresetSteps");
+    let body = &js[start..start + js[start..].find("\n  }\n").expect("it ends")];
     assert!(body.contains("button.setAttribute('aria-disabled', reason ? 'true' : 'false');"), "{body}");
     assert!(body.contains("button.title = reason ? `${help}, unavailable: ${reason}.` : help;"), "{body}");
     for gone in [".disabled", "tabIndex", "tabindex", "hidden", "removeAttribute"] {
         assert!(!body.contains(gone), "updatePresetSteps has '{gone}': {body}");
     }
-    let apply = PANEL_JS.find("function applyState(s) {").expect("panel.js has applyState");
-    let apply_end = apply + PANEL_JS[apply..].find("\n  }\n").expect("applyState ends");
-    let call = PANEL_JS.find("updatePresetSteps(readText(s.preset_steps_unavailable));").expect("the state's reason");
+    let apply = js.find("function applyState(s) {").expect("panel.js has applyState");
+    let apply_end = apply + js[apply..].find("\n  }\n").expect("applyState ends");
+    let call = js.find("updatePresetSteps(readText(s.preset_steps_unavailable));").expect("the state's reason");
     assert!(call > apply && call < apply_end, "updatePresetSteps is called in applyState, at every state");
     assert!(
-        !PANEL_JS.contains("getAttribute('aria-disabled')") && !PANEL_JS.contains("ariaDisabled"),
+        !js.contains("getAttribute('aria-disabled')") && !js.contains("ariaDisabled"),
         "the script reads aria-disabled somewhere, and could drop a press"
     );
-    let restore = PANEL_JS.find("function restoreFocus() {").expect("panel.js has restoreFocus");
-    let restore_body = &PANEL_JS[restore..restore + PANEL_JS[restore..].find("\n  }\n").unwrap()];
+    let restore = js.find("function restoreFocus() {").expect("panel.js has restoreFocus");
+    let restore_body = &js[restore..restore + js[restore..].find("\n  }\n").unwrap()];
     assert!(!restore_body.contains("aria-disabled"), "restoreFocus passes over an aria-disabled button");
 }
 
