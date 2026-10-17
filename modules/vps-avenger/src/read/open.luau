@@ -387,7 +387,12 @@ local STRIP_KEYS = { "oscCount", "oscMute", "oscSolo", "selectedType", "selected
 -- The picture's rectangle for part `name` with placer `pl`, cut at the primary display's edge as the
 -- key's picture is (pictureRegion), and to the plug-in's panel; nil when nothing of it is on screen.
 function Open.partRegion(pl, name)
-  local r = pl:rect(Open.PARTS[name].rect)
+  return Open.region(pl, Open.PARTS[name].rect)
+end
+
+-- The same for any table rectangle `rect` (the renames' fields, read/editor.luau).
+function Open.region(pl, rect)
+  local r = pl:rect(rect)
   if not r then return nil end
   local c = pl.origin.client
   r = { math.max(r[1], math.floor(c.x)), math.max(r[2], math.floor(c.y)), math.min(r[3], math.ceil(c.x + c.w)),

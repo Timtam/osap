@@ -144,6 +144,12 @@ local overlaysCounted = 0
 --   pages.stayWatch(a)         the stay is held, and `a` is in front (watchStay)
 --   pages.isPage(o, w)         whether window `w` is the page of o's group (_recheck, for its reason)
 --   pages.why(o)               why o's group is away, for a log line
+--   pages.keysHeld()           whether a trip's hand-over holds the module's flag and scope: the
+--                              runtime's other writers of them leave them alone (_deactivate,
+--                              applyMenuState, _menuFlagLeft, _menuHold)
+--   pages.handOverTick()       the menu tick hands a hand-over the keys let through to the plug-in
+-- And one the page section asks of the Menus section: pages.ensureTick(), the menu tick started for
+-- a hand-over where no overlay of the VM has menu tests (set beside _watchMenus).
 local pages = {}
 
 -- Whether overlay `o` holds no keys at all because its group is away — its page in front, or a trip
@@ -325,10 +331,13 @@ end
 -- trip's `act`, and the `fn` of its afterMenu and afterDialog, on the module's next turn after the
 -- arrival (host.timer.after(0)) — the arbiter's call that sees the arrival only schedules them;
 -- `after` and `onGiveUp` on the next turn after `done` or the end, or in the page key's handler;
--- `onShown` and `onBack` in the handler that showed or hid the page. Every one under pcall, logged
--- `[page] '<overlay>': <hook> failed: <message>`: an act or a continuation that raises gives the trip
--- up ("failed"), an `after` or `onGiveUp` that raises does not stop the page from coming back. The
--- arbiter's calls stay plain calls: _activate and _deactivate only record and schedule for a page.
+-- `onShown` and `onBack` in the handler that showed or hid the page; a hand-over's `onKey` in its
+-- key's handler, its `ends` on the module's next turn after the arrival that follows its end key, and
+-- its `onEnd` in that turn's handler, or where the give-up or the back step runs. Every one under
+-- pcall, logged `[page] '<overlay>': <hook> failed: <message>`: an act or a continuation that raises
+-- gives the trip up ("failed"), an `after` or `onGiveUp` that raises does not stop the page from
+-- coming back. The arbiter's calls stay plain calls: _activate and _deactivate only record and
+-- schedule for a page.
 local passDepth = 0
 local passesMade = 0
 
@@ -4471,12 +4480,15 @@ function Overlay:_deactivate()
   self:_unregisterHotkeys()
   -- The scope and the flag are the module's (see anotherActive): the last overlay to leave sets
   -- them back. While another is still in front, its pin stands, and the flag is what the ones in
-  -- front say — this one's no longer counts.
-  if anotherActive(self) then
-    self:_menuFlagLeft()
-  else
-    host.keys.scope(false)
-    host.keys.menuOpen(false)
+  -- front say — this one's no longer counts. While a trip's hand-over holds the module's flag and
+  -- scope, they are its; it sets them back at its end.
+  if not pages.keysHeld() then
+    if anotherActive(self) then
+      self:_menuFlagLeft()
+    else
+      host.keys.scope(false)
+      host.keys.menuOpen(false)
+    end
   end
   -- The menu state belongs to this stay in front: every test's word and any answer still
   -- outstanding are dropped, and the tests forget the press they were comparing against (see
@@ -7380,7 +7392,9 @@ local function applyMenuState()
   for _, o in ipairs(menuWatched) do
     if o.active and not heldOnMenu(o) and not o.away then inFront = true end
   end
-  if inFront then host.keys.menuOpen(open) end
+  -- While a trip's hand-over holds the module's flag and scope, they are its; it sets them back at
+  -- its end.
+  if inFront and not pages.keysHeld() then host.keys.menuOpen(open) end
   for _, o in ipairs(menuWatched) do
     if o.active and not heldOnMenu(o) and not o.away then o:_suspendControlHotkeys(open) end
   end
@@ -7390,6 +7404,9 @@ end
 -- the ones in front say now. Not `false` outright — a menu still open over another of them would
 -- lose its keys to the captures — nor left as it was, which may be the leaver's own `true`.
 function Overlay:_menuFlagLeft()
+  -- While a trip's hand-over holds the module's flag and scope, they are its; it sets them back at
+  -- its end.
+  if pages.keysHeld() then return end
   host.keys.menuOpen(anyMenuOpen())
 end
 
@@ -7634,6 +7651,10 @@ end
 
 local function menuTickBody()
   menuTick += 1
+  -- A trip's hand-over first, with or without an overlay of menu tests in front: the keys let
+  -- through to the plug-in are its, and are not logged here as a menu's (see "Handing the keyboard
+  -- over").
+  pages.handOverTick()
   local anyActive = false
   for _, o in ipairs(menuWatched) do
     if o.active then
@@ -7730,13 +7751,18 @@ function Overlay:_watchMenus(tests)
     end
   end
   if not known then menuWatched[#menuWatched + 1] = self end
-  if not menuTimer then
-    menuTimer = true
-    -- Disable-safe recurring poll (survives a disable/enable cycle, unlike a Lua
-    -- self-rescheduling host.timer.after).
-    host.timer.every(MENU_TICK_MS, menuTickFn)
-  end
+  pages.ensureTick()
   return self
+end
+
+-- The VM's one menu tick, started once: by the first overlay with menu tests, or by a trip's first
+-- hand-over (see "Handing the keyboard over"), which the tick hands the keys let through to the
+-- plug-in. Disable-safe recurring poll (survives a disable/enable cycle, unlike a Lua
+-- self-rescheduling host.timer.after).
+function pages.ensureTick()
+  if menuTimer then return end
+  menuTimer = true
+  host.timer.every(MENU_TICK_MS, menuTickFn)
 end
 
 -- A control with `opensMenu` is being activated, before it acts: the tests run on every tick
@@ -8428,7 +8454,9 @@ function Overlay:_menuHold()
         -- capture whose module's scope is the window in front.
         self:_unregisterHotkeys()
         self._hotkeysSuspended = true
-        host.keys.menuOpen(false)
+        -- While a trip's hand-over holds the module's flag and scope, they are its; it sets them
+        -- back at its end.
+        if not pages.keysHeld() then host.keys.menuOpen(false) end
         -- The menu's own window: the one the hold starts over, the first for this press (a hold
         -- that ends takes the press with it). Only it can have the step after the hold (see
         -- _menuRefocus) — not a dialog the menu leads to, which the hold moves on to below.
@@ -8606,6 +8634,10 @@ end
 -- a hook that raised — and the page key. THE PAGE KEY is the user's way out of anything: in the page
 -- it goes back to W, during a trip it gives the trip up and brings the page, on a way back that has
 -- not reached W it brings the page again.
+--
+-- A HAND-OVER (trip:handOver) is a wait of the trip's in which the user works in the plug-in itself,
+-- the page left where the trip left it and the group quiet: the trip holds the keys that end it, and
+-- lets them through to the plug-in (see "Handing the keyboard over").
 --
 -- Nothing here reads the screen or waits: the module's hooks do, in handlers of their own.
 do
@@ -9125,6 +9157,10 @@ function pg.arrive(P, t)
       return pg.giveUp(P, t, "failed")
     end
     pg.runHook(P, t, "act", t.spec.act, o, t)
+  elseif wait.kind == "handover" then
+    pg.plog(P, "trip '%s': back in the plug-in after %s %s%s", t.label, tostring(wait.key),
+      wait.flag and "went through" or "was pressed", macId)
+    pg.handOverArrived(P, t, wait, o)
   else
     pg.plog(P, "trip '%s': back in the plug-in after the %s%s", t.label, wait.kind, macId)
     pg.runHook(P, t, wait.kind == "menu" and "afterMenu" or "afterDialog", wait.fn, o, t, true)
@@ -9212,6 +9248,8 @@ function pg.giveUpRest(P, t)
   P.trip = nil
   if P.away then P.stage = "page" end
   local why = t.why
+  -- A hand-over's `onEnd` first, once: its keys went back at the give-up itself.
+  pg.handOverTell(P, t, t.overlay)
   local _, v = pg.hookCall(P, "onGiveUp", t.spec.onGiveUp, P.owner, why)
   local words = pg.wordsAfter(v)
   if why == "page closed" or not pg.shownNow(P) then
@@ -9249,6 +9287,9 @@ function pg.giveUp(P, t, why, now)
   else
     pg.plog(P, "trip '%s' given up — %s, after %d ms in %s", t.label, why, host.now() - t.started, tostring(t.stage))
   end
+  -- A hand-over's keys back at once, whatever ended it: "key" is "page key" to its `onEnd`, which
+  -- cannot take it for an end key.
+  pg.handOverRelease(P, t, why == "key" and "page key" or why)
   t.live = false
   t.stage = "ending"
   t.why = why
@@ -9263,6 +9304,8 @@ end
 -- comes back by the rule. `after`'s words are said only when it does not.
 function pg.backStep(P, t)
   if P.trip ~= t then return end
+  -- A hand-over `done` ended: its `onEnd` before `after`, once.
+  pg.handOverTell(P, t, t.overlay)
   local _, v = pg.hookCall(P, "after", t.spec.after, P.owner, t.result)
   P.trip = nil
   if P.away then P.stage = "page" end
@@ -9291,6 +9334,11 @@ function pg.mayWait(t, what, fn)
     error(("trip '%s': %s while a %s wait is pending — one wait at a time"):format(tostring(t.label), what,
       tostring(t.wait.kind)), 3)
   end
+  -- Its end asked of the module (`ends`): the hand-over still holds the keys.
+  local h = rawget(t, "_handOver")
+  if t.live and h and not h.released then
+    error(("trip '%s': %s while its hand-over is under way — one wait at a time"):format(tostring(t.label), what), 3)
+  end
   if not (t.live and P.trip == t and t.stage == "acting") then
     error(("trip '%s': %s is for the trip's act and its continuations, while it is acting (it is %s)")
       :format(tostring(t.label), what, t.live and tostring(t.stage) or "over"), 3)
@@ -9318,14 +9366,16 @@ function Trip:inFront()
 end
 
 -- The work is over: the back step runs on the module's next turn, so this may be called from
--- anywhere — a read's callback, chooseMenuItem's onDone, a plain call. A pending wait is dropped. A
--- second call, or one after the trip ended, is logged and ignored.
+-- anywhere — a read's callback, chooseMenuItem's onDone, a plain call. A pending wait is dropped,
+-- and a hand-over's keys go back now (its `onEnd` hears "done" in the back step). A second call,
+-- or one after the trip ended, is logged and ignored.
 function Trip:done(result)
   local P = rawget(self, "_P")
   if not self.live or P.trip ~= self then
     pg.plog(P, "trip '%s': done after the trip ended — ignored", tostring(self.label))
     return
   end
+  pg.handOverRelease(P, self, "done")
   self.live = false
   self.result = result
   self.wait = nil
@@ -9477,6 +9527,12 @@ function pg.tripEvent(P, t, a, class)
     if pg.arrivable(t) then pg.outrankedSoon(P, t) end
     return
   end
+  local h = rawget(t, "_handOver")
+  if class == "app" and h and not h.released and not h.appSaid then
+    h.appSaid = true
+    pg.plog(P, "trip '%s': a window of %s came forward during the hand-over — not an end", t.label,
+      tostring(a.app and (a.app.name or a.app.exe) or "the plug-in's application"))
+  end
   local w = t.wait
   if t.stage == "waiting" and w and w.kind == "dialog" and not w.seen then pg.dialogSoon(P, t, w, a) end
   if host.os.current == "macos" and a.title == P.held.window.title and a.id ~= P.held.window.id
@@ -9559,6 +9615,355 @@ end
 -- The VM's page trigger, registered once at its first O:addPage: every window and focus event.
 function pg.pageEvent()
   for _, P in ipairs(pageRecords) do pg.eventFor(P) end
+end
+
+-- ── Handing the keyboard over ──
+
+-- A HAND-OVER (trip:handOver) is a wait of the trip's in which the user works in the plug-in
+-- itself: types into its own text field, chooses in its own browser, or presses keys the module
+-- answers one by one. The page stays where the trip left it — behind W, and not hidden, since a
+-- page not shown during a trip is the page closed (pg.eventFor) — the group stays away and quiet,
+-- and nothing is said. What it holds, by kind:
+--
+--   typing   the end keys, Return and Escape unless `keys` names others, and the module's flag
+--   browse   the same with Return alone: Escape and every other key are the plug-in's
+--   keys     the keys `keys` names, captured for the module's `onKey`, and no flag
+--
+-- WHY TWO CAPTURES AND A FLAG. While a module's menu flag counts for the window in front, the host
+-- lets every captured key through to it, and records it, with every unmodified Return and Escape,
+-- for host.keys.passedThrough; and a flag counts only while its module holds a capture, for the
+-- window its captures are scoped to (docs/api/keys.md). So the captures make the flag count, the
+-- scope pinned to W keeps it to W, and what reaches the plug-in through it is recorded. A key the
+-- hook takes after all — the flag did not count for the window in front — comes to the capture's
+-- callback instead: no event, since it never reached the plug-in; the flag and the scope are set
+-- again, and the user is told to press it again.
+--
+-- THE EVENT comes from the record, which the menu tick drains (pages.handOverTick) — the VM's one
+-- 150 ms timer, started for a hand-over where no overlay has menu tests (pages.ensureTick): it
+-- delivers keys, and decides nothing by time. The first end key in it is the event, and the END
+-- is looked at as a wait's arrival: on the module's next turn, W in front, a group overlay on the
+-- held control, by the module's `ends`, which answers `answer(true)` (over) or anything else (it
+-- goes on) — at once, or from a read's callback. The keys stay held meanwhile, and an end key that
+-- comes then is the next event if the answer is no. Over, `onEnd(o, trip, "ended", info)` runs in
+-- that handler with the trip acting: the module reads, and calls trip:done. For `keys`, the event
+-- is `onKey` answering true, and there is no `ends`.
+--
+-- EVERY OTHER END of the trip ends the hand-over as well — the page key, a window of another
+-- application, the page closed (a disable among them, seen at the first tick, event or stale key
+-- after the enable), W gone, outranked, a hook that raised, `done` — and the keys go back at that
+-- moment, in one function of plain calls (pg.handOverRelease), with `onEnd` told once, where the
+-- give-up's rest or the back step runs (pg.handOverTell). While a hand-over holds the module's flag
+-- and scope, the runtime's other writers of them leave them alone (pages.keysHeld). NOTHING BOUNDS
+-- A HAND-OVER: the user's way back is the page key.
+
+-- The kinds: their end keys when `keys` names none, and whether the flag is set.
+pg.HAND_OVER = {
+  typing = { keys = { "Return", "Escape" }, flag = true },
+  browse = { keys = { "Return" }, flag = true },
+  keys = { flag = false },
+}
+pg.HAND_OVER_FIELDS = { kind = true, keys = true, onKey = true, ends = true, onEnd = true }
+
+-- `pg.handing`: the VM's hand-over that holds the module's keys, or nil — one per VM, since the
+-- flag, the scope and the record are the module's.
+function pages.keysHeld()
+  return pg.handing ~= nil
+end
+
+-- A key's name as the host spells it, for a record's key against the end keys.
+function pg.keyName(k)
+  local ok, n = pcall(host.keys.normalize, k)
+  return ok and n or k
+end
+
+-- What a hook of hand-over `w` is handed: the end key — nil on any end but its own, for `onEnd`
+-- (`told`) — every key the record held while it held its keys (for `keys`, every key `onKey` was
+-- handed), and the milliseconds since it began.
+function pg.handOverInfo(w, told)
+  return { key = (not told or w.how == "ended") and w.key or nil, passed = table.clone(w.passed),
+    ms = (w.endedAt or host.now()) - w.started }
+end
+
+-- The event: the end is looked at where the trip can next arrive — at once when a group overlay is
+-- active on W in front, at the next look otherwise — and another module's overlay holding the slot
+-- on W ends the trip as "outranked" rather than never.
+function pg.handOverSeen(P, t, w, key, how)
+  w.seen, w.key = true, key
+  pg.plog(P, "trip '%s': %s %s — the hand-over's end is looked at", t.label, key, how)
+  pg.tripLook(P)
+  local a = host.window.active()
+  if a and a.id == P.held.window.id and not pg.heldActive(P) then pg.outrankedSoon(P, t) end
+end
+
+-- A key of the record's: kept for `info.passed`; the first end key is the event, one while the end
+-- is asked is kept for a "no", and any other key went to the plug-in as the user meant it.
+function pg.handOverPassed(P, t, w, key)
+  w.passed[#w.passed + 1] = key
+  if not w.endKeys[pg.keyName(key)] then
+    pg.plog(P, "trip '%s': %s went through to the plug-in — not an end", t.label, key)
+  elseif w.checking then
+    w.later = w.later or key
+    pg.plog(P, "trip '%s': %s went through to the plug-in while its end is asked — kept", t.label, key)
+  elseif w.seen then
+    pg.plog(P, "trip '%s': %s went through to the plug-in again — its end is looked at already", t.label, key)
+  else
+    pg.handOverSeen(P, t, w, key, "went through to the plug-in")
+  end
+end
+
+-- The menu tick's part, before anything else of it (menuTickBody): the page not shown ends the
+-- trip — a disable is seen here first after the enable — and the record is drained, VM-wide, into
+-- the hand-over that holds the flag.
+function pages.handOverTick()
+  local w = pg.handing
+  if not w then return end
+  local P, t = w.P, w.t
+  if not pg.shownNow(P) then
+    pg.plog(P, "the page is not shown any more — trip '%s' ends with its hand-over", t.label)
+    return pg.giveUp(P, t, "page closed")
+  end
+  if not w.flag then return end
+  local ok, passed = pcall(host.keys.passedThrough)
+  if not (ok and type(passed) == "table") then return end
+  for _, k in ipairs(passed) do
+    if w.released then return end
+    pg.handOverPassed(P, t, w, tostring(k.key))
+  end
+end
+
+-- The callback of capture `key` of hand-over `w`, a handler of the module's. Of `keys`: the
+-- module's `onKey`, with W in front (afresh); `true` is the event. Of `typing` and `browse`: the
+-- key was TAKEN, not let through — the flag did not count for the window in front — so it is no
+-- event: with W in front the scope and the flag are set again, and the user is told it did not
+-- reach the plug-in. A capture of a hand-over that has ended is released; one that comes with the
+-- page not shown — a disable and an enable bring the captures back in every window, with no flag —
+-- ends the trip, "page closed".
+function pg.handOverKey(P, t, w, key)
+  return function(mods)
+    if w.released or P.trip ~= t or not t.live then
+      local tok = w.tokenOf[key]
+      if tok then pcall(host.keys.release, tok) end
+      pg.plog(P, "trip '%s': %s came to a capture of a hand-over that has ended — released", tostring(t.label), key)
+      return
+    end
+    if not pg.shownNow(P) then
+      pg.plog(P, "trip '%s': %s was taken by the hand-over's capture with the page not shown — the module was "
+        .. "disabled and enabled again; the trip ends", t.label, key)
+      return pg.giveUp(P, t, "page closed", true)
+    end
+    local f = pg.frontNow()
+    local inW = f ~= nil and f.id == P.held.window.id
+    if not w.flag then
+      if not inW then
+        pg.plog(P, "trip '%s': %s pressed with %s in front — not handed to the module", t.label, key, pg.frontLine())
+      elseif w.seen then
+        pg.plog(P, "trip '%s': %s pressed while the hand-over's end is looked at — not handed to the module", t.label, key)
+      else
+        w.passed[#w.passed + 1] = key
+        local ok, v = pcall(w.onKey, t.overlay, t, key, mods)
+        if not ok then
+          pg.plog(P, "onKey failed: %s", tostring(v))
+          if P.trip == t and t.live then pg.giveUp(P, t, "failed") end
+        elseif v == true and not (w.released or w.seen) and P.trip == t and t.live then
+          pg.handOverSeen(P, t, w, key, "ended it, the module's onKey says")
+        end
+      end
+      return
+    end
+    pg.plog(P, "trip '%s': %s was taken, not let through — the menu flag did not count for the window in front "
+      .. "(%s, the scope window id %s)%s", t.label, key, pg.frontLine(), tostring(P.held.window.id),
+      inW and "; pinned again" or "")
+    if inW then
+      host.keys.scope(true)
+      host.keys.menuOpen(true)
+      pg.say(t.label .. ": " .. key .. " did not reach the plug-in; press it again.", false)
+    end
+  end
+end
+
+-- Over: the keys back, then `onEnd(o, trip, "ended", info)` in this handler, the trip acting. One
+-- that raises gives the trip up, "failed", and is not told again.
+function pg.handOverOver(P, t, w, o)
+  pg.handOverRelease(P, t, "ended")
+  if not pg.handOverTell(P, t, o) and P.trip == t and t.live then pg.giveUp(P, t, "failed") end
+end
+
+-- The trip has arrived after the event (pg.arrive: acting now). Without `ends` it is over; with
+-- it, `ends(o, trip, info, answer)` is asked, the keys still held — an end key that comes meanwhile
+-- is kept for a "no". An answer after the trip ended, or a second one, changes nothing.
+function pg.handOverArrived(P, t, w, o)
+  w.checking = true
+  if not w.ends then return pg.handOverOver(P, t, w, o) end
+  local asked = {}
+  w.asking = asked
+  local function answer(over)
+    if w.asking ~= asked then
+      pg.plog(P, "trip '%s': its hand-over's end answered again, or after it ended — ignored", tostring(t.label))
+      return
+    end
+    w.asking = nil
+    if w.released or P.trip ~= t or not t.live then return end
+    if over == true then return pg.handOverOver(P, t, w, t.overlay) end
+    w.checking, w.seen, w.key = false, false, nil
+    t.wait, t.stage = w, "waiting"
+    pg.plog(P, "trip '%s': its module says the hand-over goes on", t.label)
+    local later = w.later
+    w.later = nil
+    if later then pg.handOverSeen(P, t, w, later, "went through to the plug-in while its end was asked") end
+  end
+  local ok, err = pcall(w.ends, o, t, pg.handOverInfo(w), answer)
+  if not ok then
+    w.asking = nil
+    pg.plog(P, "ends failed: %s", tostring(err))
+    if P.trip == t and t.live then pg.giveUp(P, t, "failed") end
+  end
+end
+
+-- The hand-over's keys back, at once and once, in plain calls — from a give-up's first part (before
+-- the trip is no longer live), from `done`, at its own end; in the arbiter's call or a trigger
+-- alike: the captures released, the flag what the VM's overlays not away say (false while away),
+-- the scope as _deactivate leaves it — every window, unless an overlay of the VM's not away is in
+-- front, whose pin stands — and what the record still holds dropped.
+function pg.handOverRelease(P, t, how)
+  local w = rawget(t, "_handOver")
+  if not w or w.released then return end
+  w.released = true
+  w.how = w.how or how
+  w.endedAt = host.now()
+  w.asking = nil
+  if pg.handing == w then pg.handing = nil end
+  for _, tok in ipairs(w.tokens) do pcall(host.keys.release, tok) end
+  local flag = anyMenuOpen()
+  if w.flag then host.keys.menuOpen(flag) end
+  local pinned = anotherActive(nil)
+  if not pinned then host.keys.scope(false) end
+  if t.wait == w then t.wait = nil end
+  local after = ""
+  if w.flag then
+    local ok, rest = pcall(host.keys.passedThrough)
+    if ok and type(rest) == "table" and #rest > 0 then
+      local names = {}
+      for _, k in ipairs(rest) do names[#names + 1] = tostring(k.key) end
+      after = "; went through after the end: " .. table.concat(names, ", ")
+    end
+  end
+  pg.plog(P, "trip '%s': the hand-over ends — %s, after %d ms; %s released%s, the scope %s%s", t.label, w.how,
+    w.endedAt - w.started, table.concat(w.keys, ", "), w.flag and (", the menu flag " .. tostring(flag)) or "",
+    pinned and "left to the overlay in front" or "every window", after)
+end
+
+-- `onEnd(o, trip, how, info)` once in the VM's life, after the release: `told` is set before the
+-- call, so a second path finds it told. One that raises is logged, and answers false.
+function pg.handOverTell(P, t, o)
+  local w = rawget(t, "_handOver")
+  if not (w and w.released) or w.told then return true end
+  w.told = true
+  local ok, err = pcall(w.onEnd, o, t, w.how, pg.handOverInfo(w, true))
+  if not ok then pg.plog(P, "onEnd failed: %s", tostring(err)) end
+  return ok
+end
+
+-- trip:handOver(spec) -> true | false, why. See the sub-section's head, and docs/api/overlay.md.
+-- Raises at the module's line for a spec it cannot hold, and where a wait could not start
+-- (pg.mayWait). In this order, then: the record from before dropped, the scope pinned to W, the
+-- keys captured, the flag set, the tick started.
+function Trip:handOver(spec)
+  local P = rawget(self, "_P")
+  local who = ("trip '%s': handOver"):format(tostring(self.label))
+  if type(spec) ~= "table" then
+    error(("%s takes { kind, keys?, onKey?, ends?, onEnd }, got %s"):format(who, type(spec)), 2)
+  end
+  for k in pairs(spec) do
+    if not pg.HAND_OVER_FIELDS[k] then
+      error(("%s has no field '%s' (it has kind, keys, onKey, ends and onEnd)"):format(who, tostring(k)), 2)
+    end
+  end
+  local kind = pg.HAND_OVER[spec.kind]
+  if not kind then
+    error(("%s's kind must be \"typing\", \"browse\" or \"keys\", got %s"):format(who, tostring(spec.kind)), 2)
+  end
+  if type(spec.onEnd) ~= "function" then
+    error(("%s needs `onEnd`, a function(overlay, trip, how, info), got %s"):format(who, type(spec.onEnd)), 2)
+  end
+  if spec.kind == "keys" then
+    if spec.keys == nil then error(("%s of kind \"keys\" needs `keys`, the keys its onKey is handed"):format(who), 2) end
+    if type(spec.onKey) ~= "function" then
+      error(("%s of kind \"keys\" needs `onKey`, a function(overlay, trip, key, mods), got %s"):format(who, type(spec.onKey)), 2)
+    end
+    if spec.ends ~= nil then error(("%s of kind \"keys\" takes no `ends`: its onKey says when it is over"):format(who), 2) end
+  else
+    if spec.onKey ~= nil then
+      error(("%s of kind \"%s\" takes no `onKey`: its keys go to the plug-in"):format(who, spec.kind), 2)
+    end
+    if spec.ends ~= nil and type(spec.ends) ~= "function" then
+      error(("%s's `ends` must be a function(overlay, trip, info, answer), got %s"):format(who, type(spec.ends)), 2)
+    end
+  end
+  local keys = spec.keys or kind.keys
+  local count = 0
+  if type(keys) == "table" then
+    for _ in pairs(keys) do count += 1 end
+  end
+  if type(keys) ~= "table" or count < 1 or count > 8 or count ~= #keys then
+    error(("%s's `keys` must be a list of 1 to 8 key specs"):format(who), 2)
+  end
+  local names, seen = {}, {}
+  for i, k in ipairs(keys) do
+    local name = type(k) == "string" and host.keys.normalize(k) or nil
+    if not name then error(("%s's key %s is no key spec"):format(who, tostring(k)), 2) end
+    if seen[name] then error(("%s names one key twice: %s and %s"):format(who, seen[name], k), 2) end
+    seen[name], names[i] = k, name
+  end
+  pg.mayWait(self, "handOver", spec.onEnd)
+  local busy = pg.handing
+  if busy then
+    pg.plog(P, "trip '%s': handOver — trip '%s' of this module holds the module's keys; nothing handed over",
+      self.label, tostring(busy.t.label))
+    return false, "busy"
+  end
+  if not self:inFront() then return false, "not in front" end
+  local W = P.held.window
+  -- What the record holds from before is no end of this one: a Return that reached a menu earlier.
+  local okB, before = pcall(host.keys.passedThrough)
+  if okB and type(before) == "table" and #before > 0 then
+    local list = {}
+    for _, k in ipairs(before) do list[#list + 1] = tostring(k.key) end
+    pg.plog(P, "trip '%s': went through before the hand-over, not its end: %s", self.label, table.concat(list, ", "))
+  end
+  -- Pinned before the keys are taken, as in _activate: a capture made first would take its key in
+  -- every window until the pin, the hook running on a thread of its own.
+  host.keys.scope(true)
+  local w = { kind = "handover", type = spec.kind, P = P, t = self, keys = table.clone(keys), endKeys = {},
+    flag = kind.flag, tokens = {}, tokenOf = {}, passed = {}, seen = false, started = host.now(),
+    ends = spec.ends, onKey = spec.onKey, onEnd = spec.onEnd }
+  for _, name in ipairs(names) do w.endKeys[name] = true end
+  for _, k in ipairs(keys) do
+    local ok, tok = pcall(host.keys.capture, k, pg.handOverKey(P, self, w, k))
+    if not ok then
+      for _, held in ipairs(w.tokens) do pcall(host.keys.release, held) end
+      -- On a Mac a capture that raised stays registered with its token lost (keys.md): where nothing
+      -- else of the VM is in front holding keys, every capture of the module goes.
+      if not anotherActive(nil) then
+        pcall(host.keys.releaseAll)
+        host.keys.scope(false)
+      end
+      pg.plog(P, "trip '%s': the keyboard is not handed over — capturing %s raised: %s", self.label, k, tostring(tok))
+      return false, "refused: " .. tostring(tok)
+    end
+    w.tokens[#w.tokens + 1] = tok
+    w.tokenOf[k] = tok
+  end
+  if kind.flag then host.keys.menuOpen(true) end
+  pages.ensureTick()
+  self._handOver = w
+  pg.handing = w
+  self.wait = w
+  self.stage = "waiting"
+  pg.plog(P, "trip '%s' hands the keyboard over (%s): %s %s window id %s, the module's scope pinned there; it ends "
+    .. "on %s, the page key or another application — nothing bounds it", self.label, spec.kind,
+    table.concat(keys, ", "), kind.flag and "let through to" or "captured for the module in", tostring(W.id),
+    kind.flag and (#keys > 1 and "one of them" or "it") or "its onKey")
+  return true
 end
 
 -- ── The page key, and the page's own events ──

@@ -257,8 +257,8 @@ fn actions_are_answered_not_available_yet_and_only_while_the_page_has_the_keyboa
         T.openPage()
         T.ok(S.front == T.PAGE_WIN, "in front")
         local clicks = #S.clicks
-        T.pageMsg({ action = "start_rename", args = {}, focused = true })
-        T.ok(T.lastPost().kind == "error" and T.lastPost().text == "Renaming the preset is not available in this module yet",
+        T.pageMsg({ action = "open_expansion", args = {}, focused = true })
+        T.ok(T.lastPost().kind == "error" and T.lastPost().text == "Opening an expansion is not available in this module yet",
           tostring(T.lastPost().text))
         T.pageMsg({ action = "osc_control", args = { control = "volume" }, focused = true })
         T.ok(T.lastPost().text == "An oscillator's control is not available in this module yet", T.lastPost().text)

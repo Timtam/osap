@@ -274,6 +274,11 @@ T.host = strict("host", {
     describe = function(spec) return spec end,
     check = function() return { reasons = {} } end,
     capture = function(spec, fn)
+      -- S.captureRaises: the message a capture raises with (a Mac without the Accessibility grant),
+      -- for every spec, or for the specs a table names.
+      local raises = S.captureRaises
+      if type(raises) == "table" then raises = raises[spec] end
+      if raises then error(raises, 0) end
       local id = nextId()
       S.captured[spec] = fn
       S.holding[spec] = id
@@ -284,6 +289,10 @@ T.host = strict("host", {
       local spec = S.tokens[id]
       if spec and S.holding[spec] == id then S.holding[spec] = nil end
       S.tokens[id] = nil
+    end,
+    releaseAll = function()
+      S.releasedAll = (S.releasedAll or 0) + 1
+      S.holding, S.tokens = {}, {}
     end,
     -- The window the hook scopes captured keys to (the one in front at the call), or false.
     scope = function(on) S.scopedTo = on and S.front and S.front.id or false end,
@@ -782,9 +791,37 @@ function T.tick(n)
   for _ = 1, n or 1 do
     S.now += 150
     T.runDue()
-    if S.every then T.call("timer", S.every) end
+    -- A disabled module's timers do not run (S.disabled, overlay_page_tests.rs: T.disable).
+    if S.every and not S.disabled then T.call("timer", S.every) end
     T.queued()
   end
+end
+
+-- A key typed in the window in front, as the hook decides it (docs/api/keys.md): while the module's
+-- flag counts there — its last menuOpen true, a capture held, its scope that window or every window
+-- — an unmodified Return or Escape goes through to the application and is recorded for
+-- passedThrough, captured or not, and so is any other key it captures; otherwise a capture of it,
+-- scoped there or everywhere, takes it, and its callback runs through the mailbox as a captured
+-- key's does (`T.call("key", …)`); otherwise it reaches the application unrecorded. A disabled
+-- module's captures are out of the hook. `mods` as a capture's callback gets them (default none).
+-- What became of the key: "passed", "taken" or "application".
+function T.typed(key, mods)
+  mods = mods or { shift = false, ctrl = false, alt = false, win = false }
+  local plain = not (mods.shift or mods.ctrl or mods.alt or mods.win)
+  local front = S.front and S.front.id
+  local inScope = not S.scopedTo or S.scopedTo == front
+  local captured = S.holding[key] ~= nil and plain and not S.disabled
+  local flag = S.menuOpen[#S.menuOpen] == true and next(S.holding) ~= nil and inScope and not S.disabled
+  if flag and (captured or (plain and (key == "Return" or key == "Escape"))) then
+    if #S.passed < 32 then S.passed[#S.passed + 1] = { vk = 0, mask = 0, key = key } end
+    return "passed"
+  end
+  if captured and inScope then
+    S.epoch += 1
+    T.call("key", S.captured[key], mods)
+    return "taken"
+  end
+  return "application"
 end
 
 -- For scenarios about something else than the focus read itself: the runtime's announcement

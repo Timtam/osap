@@ -329,5 +329,7 @@ end
 
 -- The tab read as selected, in words (the ring's Oscillator stepper says it).
 A.tabWords = tabWords
+-- The count the dots read, and an index within it (the OSC tab's rename, src/handover.luau).
+A.counted = counted
 
 return A

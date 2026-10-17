@@ -22,7 +22,17 @@
 --
 -- and the oscillator strip's and the macros' (the plan's slice 5), each through src/act.luau with
 -- its spec from src/actions/osc.luau or src/actions/macros.luau, which the ring's controls share:
--- the part read, the click, its change watched for, the part read again (`viaAct` below).
+-- the part read, the click, its change watched for, the part read again (`viaAct` below);
+--
+-- and the renames and Browse Presets (the plan's slice 6), hand-overs of the keyboard to Avenger's
+-- own editor and browser (src/handover.luau):
+--
+--   start_rename               the preset's name double-clicked, Avenger's editor seen open, the
+--   rename_osc {index}         user's typing Avenger's until Return or Escape and the field seen
+--   rename_macro {index}       closed again; then the name READ off a picture — never recorded
+--                              from the keys
+--   browse_expansion_presets   the tool's sentence, Return let through to Avenger's browser, then
+--                              the name read until it settles
 --
 -- Nothing is taken for done: every answer is what was read after the click, and a read that did
 -- not come is said as that — after a click or choice that may have changed the preset, with the
@@ -42,6 +52,7 @@ local Reads = host.include("src/read/open.luau")
 local Act = host.include("src/act.luau")
 local Osc = host.include("src/actions/osc.luau")
 local Macros = host.include("src/actions/macros.luau")
+local Hv = host.include("src/handover.luau")
 
 local A = {}
 
@@ -402,11 +413,47 @@ for _, name in ipairs({ "select_macro_tab", "add_macro_tab", "delete_macro_tab",
   A.HANDLERS[name] = viaAct(name, Macros[name])
 end
 
+-- ── The renames and Browse Presets ───────────────────────────────────────────
+-- Each a trip whose act hands the keyboard over (src/handover.luau). An index the page cannot have
+-- meant is refused at once, with no trip, as a builder's refusal is (viaAct); an OSC tab past the
+-- count is refused in Avenger, once the dots are read.
+local function refuse(action, why)
+  local label = E.LABELS[action]
+  log(string.format("'%s' not sent to VPS Avenger: %s", label, why))
+  E.post({ kind = "error", text = label .. ": " .. why })
+end
+
+local function whole(v)
+  local n = tonumber(v)
+  return n and n == math.floor(n) and n or nil
+end
+
+A.HANDLERS.start_rename = function(o)
+  go(o, "start_rename", function(w, trip, forget) Hv.renamePreset(w, trip, forget) end)
+end
+
+A.HANDLERS.rename_osc = function(o, args)
+  local i = whole(args.index)
+  if not (i and i >= 1) then return refuse("rename_osc", "no oscillator tab was named") end
+  go(o, "rename_osc", function(w, trip) Hv.renameOsc(w, trip, i) end)
+end
+
+A.HANDLERS.rename_macro = function(o, args)
+  local i = whole(args.index)
+  if not (i and i >= 1 and i <= 5) then return refuse("rename_macro", "no macro field was named") end
+  go(o, "rename_macro", function(w, trip) Hv.renameMacro(w, trip, i) end)
+end
+
+A.HANDLERS.browse_expansion_presets = function(o)
+  go(o, "browse_expansion_presets", function(w, trip, forget) Hv.browse(w, trip, forget) end)
+end
+
 -- What page.luau hands over: { header, DB, ring, zoomOf, LABELS, post, roster, plugin = () -> the
 -- window the page was shown beside, postState = (id) -> (), closedWords = () -> the sentence }.
 function A.start(env)
   E, R = env, env.ring
   Act.start(env.ring)
+  Hv.start({ ring = env.ring, named = named, plugin = env.plugin })
 end
 
 return A

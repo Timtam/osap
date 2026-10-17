@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 183 entries.
+Every call the platform offers a module, in one place. 184 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -110,6 +110,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O:toScreen(x, y, opts?) / O:toScreenRect(r, opts?)`](overlay#o-toscreen) | Where an authored point, or an authored rectangle `{x1, y1, x2, y2}`, lands on screen now |
 | [`O:typingWhen(fn)`](overlay#o-typingwhen) | `fn() -> boolean`. |
 | [`O:watch(spec)`](overlay#o-watch) | Waits for something to **change**, rather than for a length of time. |
+| [`trip:handOver(spec) — handing the keyboard to the plug-in`](overlay#trip-handover) | A wait of a trip in which the user works in the plug-in **itself** |
 
 ## host.window
 

@@ -58,7 +58,9 @@ use super::overlay_menu_tests::{finish, harness, RUNTIME};
 /// The helpers, added on top of the host-panel ones.
 const AV: &str = r##"
 local S = T.S
+-- Every click, in order; S.onClick(n), when set, runs at the n-th: Avenger answering it at once.
 S.clicks = {}
+S.onClick = nil
 S.owns = true
 S.ownsAsked = {}
 S.marked = {}
@@ -260,6 +262,10 @@ S.snapHeld = 0
 -- The change waits out (host.screen.snapshot with `change`): each answered on the turn after the
 -- picture has changed from its baseline — another S.picture than `from`'s, which T.paintAvenger or
 -- T.repaint makes — with `changed = true`, or at its timeout with what is there, `changed = false`.
+-- Each keeps its options (`minPixels`, `settle`, `tolerance`, `watch`) for a scenario to look at;
+-- with S.honourMinPixels a changed picture counts only where at least `minPixels` of the watched
+-- pixels (the region without `watch`) differ from the baseline by more than `tolerance`
+-- (T.paintDiff), as the host counts them; `settle` is not played: a change stands still at once.
 -- S.onSnapshotWait, when set, runs inside a picture a handler waits for, before it is answered:
 -- the user going elsewhere meanwhile.
 S.changeWaits = {}
@@ -316,7 +322,8 @@ do
       end
       S.changeWaitsAsked += 1
       S.changeWaits[#S.changeWaits + 1] = { region = r, cb = cb, asked = S.now, timeout = c.timeout or 500,
-        base = c.from and c.from.picture or S.picture, watch = c.watch }
+        base = c.from and c.from.picture or S.picture, watch = c.watch, minPixels = c.minPixels or 4,
+        settle = c.settle or 0, tolerance = c.tolerance or 16 }
       return
     end
     if cb == nil then
@@ -339,6 +346,15 @@ do
     while i <= #S.changeWaits do
       local w = S.changeWaits[i]
       local changed = S.picture ~= w.base
+      if changed and S.honourMinPixels then
+        local n = 0
+        for _, g in ipairs(w.watch or { w.region }) do
+          local c = { math.max(g[1], w.region[1]), math.max(g[2], w.region[2]), math.min(g[3], w.region[3]),
+            math.min(g[4], w.region[4]) }
+          if c[3] > c[1] and c[4] > c[2] then n += T.paintDiff(w.base, S.picture, c, w.tolerance) end
+        end
+        changed = n >= w.minPixels
+      end
       if changed or S.now >= w.asked + w.timeout then
         table.remove(S.changeWaits, i)
         due[#due + 1] = { w = w, changed = changed }
@@ -382,6 +398,9 @@ end
 --   fav                FAV lit
 --   lasting            { x1, y1, x2, y2 } at 50 %: a panel a click drew that outlasts its popup
 --   popup              { x1, y1, x2, y2 } at 50 %: Avenger's popup over it all, painted inside it
+--   editor             { x1, y1, x2, y2, fill = colour?, outline = colour?, selection = colour? } at
+--                      50 %: Avenger's text editor open over a name field, light by default, over
+--                      everything but a popup
 -- A pointer is a light ray out from the knob's middle, at the angle its value puts it: 135°
 -- (down and left) for nothing, 270° more clockwise for everything.
 function T.paintAvenger(cx, cy, k, spec)
@@ -471,6 +490,14 @@ function T.paintAvenger(cx, cy, k, spec)
   if spec.lasting then
     local q = spec.lasting
     rect(q[1], q[2], q[3], q[4], { 60, 60, 66 })
+  end
+  -- Avenger's editor over a name field (`editor`): its outline half a point outside the field, its
+  -- fill, and its selection inside.
+  if spec.editor then
+    local q = spec.editor
+    if q.outline then rect(q[1] - 0.5, q[2] - 0.5, q[3] + 0.5, q[4] + 0.5, q.outline) end
+    rect(q[1], q[2], q[3], q[4], q.fill or { 235, 235, 235 })
+    if q.selection then rect(q[1] + 2, q[2] + 2, q[3] - 2, q[4] - 2, q.selection) end
   end
   -- Avenger's popup over it, painted inside its window: { x1, y1, x2, y2 } at 50 % (`popup`).
   if spec.popup then
@@ -844,6 +871,7 @@ function T.avenger()
   rawset(T.host, "input", T.strict("host.input", {
     click = function(x, y, opts)
       S.clicks[#S.clicks + 1] = { x, y, button = opts and opts.button }
+      if S.onClick then S.onClick(#S.clicks) end
     end,
     send = function(combo) S.sent[#S.sent + 1] = combo end,
   }))
@@ -1110,6 +1138,7 @@ pub(crate) fn run_on(os: &str, scenario: &str) {
     t.set("paintCells", lua.create_function(paint_cells).unwrap()).unwrap();
     t.set("paintProfile", lua.create_function(paint_profile).unwrap()).unwrap();
     t.set("paintPixels", lua.create_function(paint_pixels).unwrap()).unwrap();
+    t.set("paintDiff", lua.create_function(paint_diff).unwrap()).unwrap();
     t.set(
         "predicateCanonical",
         lua.create_function(|_, src: String| {
@@ -1296,6 +1325,23 @@ fn paint_pixels(lua: &Lua, (p, points): (Table, Table)) -> mlua::Result<Table> {
         out.raw_push(col)?;
     }
     Ok(out)
+}
+
+/// `T.paintDiff(a, b, region, tolerance)`: how many pixels of `region` differ between pictures `a`
+/// and `b` by more than `tolerance` in a channel, as a change wait counts them.
+fn paint_diff(_: &Lua, (a, b, region, tolerance): (Table, Table, Table, u8)) -> mlua::Result<u32> {
+    let (x, y, w, h) = area_of(&region)?;
+    let (pa, pb) = (picture_of(&a)?, picture_of(&b)?);
+    let mut n = 0;
+    for j in 0..i64::from(h) {
+        for i in 0..i64::from(w) {
+            let (ca, cb) = (pa.at(x + i, y + j), pb.at(x + i, y + j));
+            if ca.iter().zip(cb.iter()).any(|(p, q)| p.abs_diff(*q) > tolerance) {
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
 }
 
 pub(crate) fn run_mac(scenario: &str) {

@@ -48,7 +48,11 @@ name = "Overlay runtime"
 # choice is followed only by the test that placed its item, and an item clicked on a callback's
 # answer counts as clicked between two ticks; and O.doubleClick takes `opts.button` and a callback
 # after the second click. A module that uses either depends on "com.platform.overlay >= 0.8".
-version = "0.8.0"
+# 0.9.0 hands the keyboard to the plug-in inside a trip: trip:handOver{ kind = "typing" | "browse" |
+# "keys" } holds the end keys and lets them through to the plug-in, or captures named keys for the
+# module, ends on its key and the module's `ends`, on the page key or a window change, and calls
+# `onEnd` once on every path. A module that uses it depends on "com.platform.overlay >= 0.9".
+version = "0.9.0"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

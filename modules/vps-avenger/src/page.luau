@@ -15,10 +15,11 @@
 --                 SQ, the macros; what the preset database gives is marked so; everything else
 --                 "not read"; and ◀ and ▶ unavailable where the preset read is Init Preset
 --   the actions   the header's, the oscillator strip's and the macros' are trips into Avenger
---                 (actions.luau, act.luau); Initialize's No clicks nothing, as it is meant to; every
---                 other action the page sends is answered "<label> is not available in this module
---                 yet" in its error region, until the stage that builds it (the plan's slices 6 to
---                 10)
+--                 (actions.luau, act.luau), and the renames and Browse Presets trips that hand the
+--                 keyboard to Avenger (handover.luau); Initialize's No clicks nothing, as it is meant
+--                 to; every other action the page sends is answered "<label> is not available in this
+--                 module yet" in its error region, until the stage that builds it (the plan's slices 7
+--                 to 10)
 --
 -- A message counts only while the page has the keyboard (host.window.foreground), so a press that
 -- reaches the module after the user went elsewhere does nothing; and one trip at a time, which the
@@ -143,11 +144,11 @@ end
 -- yet". Explicit, so that a name the page sends and nobody listed is a test's failure rather than
 -- an answer nobody chose.
 P.NOT_BUILT = {
-  "start_rename", "set_expansion_view",
-  "open_expansion", "close_expansion", "browse_expansion_presets", "select_all_expansion_presets",
+  "set_expansion_view",
+  "open_expansion", "close_expansion", "select_all_expansion_presets",
   "select_expansion_category", "go_to_loaded_preset_category", "select_expansion_preset",
   "load_expansion_preset", "mark_expansion_preset_favorite", "toggle_expansion_favorite_view",
-  "rename_osc", "rename_macro", "macro_amount",
+  "macro_amount",
   "osc_control", "osc_filter_control", "toggle_drum_pattern",
   "select_drum_mode", "previous_drumkit", "next_drumkit", "select_drumkit_part", "drumkit_column",
   "toggle_drumkit_button", "drumkit_control", "reset_drumkit_control", "drumkit_menu_item",

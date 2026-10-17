@@ -7201,8 +7201,89 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       - the `[avenger] [act] '<label>': changed — …` or `unchanged — …` line of each action, and
         `the picture changed and what this action changes did not … — looking on` where a hover
         was drawn first.
-- [ ] **The next stages**: the hand-overs, the knobs turned, the drums and the browser, and the
-      page's own Settings section.
+- [x] **The renames and Browse Presets** (the plan's slice 6, module 0.5.0, on the runtime 0.9.0's
+      hand-over, built 2026-10-17). `start_rename`, `rename_osc` and `rename_macro`
+      (`src/handover.luau`): a picture of the field, then the double-click at the tool's point —
+      the preset's name at (123, 14), an OSC tab where the dots' count puts it (a tab the strip
+      does not read as selected selected first, as the tool clicks it first: one click, its change
+      waited for and the selection read, and only then the field's picture — the tab's selection
+      lies across it, and a double-click that selected the tab showed the open wait a change that
+      is no editor), a macro knob's or button's field; Avenger's editor seen open by a change wait
+      from that picture
+      (`src/read/editor.luau`: a change over a tenth of the field and a 2-point margin round it,
+      standing still for 50 ms; never seen, "VPS Avenger's editor did not open; nothing was
+      renamed", and nothing handed over); the field's edges read off the two pictures, the
+      pictures let go; the keyboard handed over (`"typing"`: Return and Escape go through to
+      Avenger), nothing said (the tool's #21; the page's Rename button carries the help). After
+      Return or Escape the edges are read against the two references: closed, or unsure, ends it;
+      still open, Avenger's repaint is waited for, and then "VPS Avenger's editor is still open:
+      Return keeps the name, Escape cancels." is said behind the screen reader and the keyboard
+      stays Avenger's. Then the name is READ off a picture, never recorded from the keys: the
+      preset's — kept with the database's place after Escape or when roughly the same as before
+      (the tool's `_names_roughly_same`), otherwise the user's own, posted with no expansion and
+      never snapped; the OSC tab's with the strip read again, nothing written to the database (the
+      tool's `set_osc_name`); the macro field's with the macro panel read again (the tool knew it
+      only from the keys recorded). The page's focus goes to the field's Rename button
+      (`rename-preset-button`, `osc-rename-<i>`, `macro-<t>-slot-<s>-rename`).
+      `browse_expansion_presets`: no click, the tool's sentence #12 behind the screen reader, the
+      keyboard handed over with Return alone (`"browse"`: Escape and the arrows are Avenger's
+      browser's), then the name read until two readings agree or it is a catalog name, posted with
+      the database's place, the focus on Browse Presets. The page key or another window ends any of
+      them with the preset posted as not read. Not ported: the key recorder, the second's grace,
+      the quarter-second sleeps and the polls, the five-minute fallback, the priming click, the
+      Windows panel's preset read after every kind of rename, the dead rename dialog. Tested in the
+      scripted host, whose painted picture now shows Avenger's editor and whose change waits keep
+      their options (and count the changed pixels where a scenario asks): 19 tests, 27 scenarios
+      (avenger_rename_tests.rs); a mutation round of 10, all caught, and the review's round of 11,
+      whose survivors — the OSC tab's selection taken for the editor, the Escape branch, the name
+      read first, a refused hand-over, a name not read back — have tests now.
+- [ ] **What the Mac tester confirms for slice 6** (P3, with Avenger in Logic, Calibrate ticked):
+      rename the preset from the page (Rename), type a new name and press Return; once more, and
+      press Escape; then an OSC tab's name and a macro knob's and a macro button's (their Rename
+      buttons), each once with Return and once with Escape; then Browse Presets: choose a preset in
+      Avenger's browser with the arrows and press Return. Each time, what VoiceOver said and whether
+      the page came back with the name Avenger shows, and the log lines:
+      - U1, whether Return and Escape reach Avenger's editor through the tap in Logic's plug-in
+        window: `[page] … hands the keyboard over …`, then `[page] … Return went through to the
+        plug-in` against `[page] … Return was taken, not let through …`;
+      - U2, whether our double-click (two clicks of click state 1) opens the editor:
+        `[avenger] [editor] '<field>': open — …` against `… not open — …`; for an OSC tab that
+        is not the one selected (rename OSC 2 with OSC 1 selected), the selection first:
+        `[avenger] [rename] 'osc 2': the strip reads OSC 1 selected — OSC 2 is selected first`,
+        then `[avenger] [act] 'Renaming OSC 2': changed — OSC 2 selected`, then the double-click;
+      - U3 (GM5), what the editor looks like: `[avenger] [editor] '<field>': closed | open | unsure
+        — the edges … from the picture before, … from the editor open …`, and the pictures;
+      - U4, whether Escape cancels: `[avenger] [rename] '<field>': Escape — read '<old name>'`;
+      - U5, whether Return in Avenger's browser loads the preset chosen: `[avenger] [browse] the
+        name at the start '<a>', after Return '<b>' (read n times)`;
+      - U8, where the keyboard is after the double-click (a later, better test of "open"):
+        `[avenger] [rename] '<field>': the keyboard after the double-click: <class or role>`;
+      - by ear: with the page key pressed in the open editor, what Avenger keeps (U6 — JUCE commits a
+        name when its editor loses the keyboard; the next page open reads it); where VoiceOver lands
+        after Return before the page comes back, and whether it says anything there (U7).
+      Send the calibration folder's `editor-<preset|osc|macro>-<before|open|end>-<zoom>pct.png`:
+      they settle the editor's thresholds (`read/editor.luau`), which are starting values.
+- [ ] **Slice 6 on Windows** (there is no Avenger tester there): W1, whether REAPER hands Return to
+      a JUCE text field in a floating FX window or takes it for itself — REAPER's per-FX "Send all
+      keyboard input to plug-in" — answered by U1's lines; a verification patch on ON:EAR's JUCE
+      search field (a trip, a click into the field, a typing hand-over, Return, the field read
+      back), applied only when the maintainer asks for it. W2, NVDA has nothing to announce when
+      Avenger's editor opens (Avenger publishes no element): the rename stays silent as the tool's
+      is, the page's Rename button carrying the help — the maintainer's call (Q1) whether to say
+      "Type the new name, then press Return." on both platforms instead.
+- [ ] **Residuals of slice 6**: a hover drawn over more than a tenth of a name field, standing
+      still, would be taken for the editor, and the user's typing would then reach Avenger without
+      a field — and in Logic, Logic's key commands (the tool has the same exposure, and checks
+      nothing; GM5's pictures show whether Avenger draws such a hover); the closed decision is a
+      starting value, and "unsure" goes on to the read, so a misjudged close posts what the field
+      shows; Tab in Avenger's editor commits it (JUCE) and ends nothing — the hand-over then waits
+      for a Return Avenger may pass on to the DAW, or for the page key; a key pressed in the moment
+      after an enable is taken by a stale capture and lost (logged); the keypad's Enter ends a
+      browse as Return does, where the tool's mode took Return alone; an overlay of the same module
+      outside the page's group, in front in the plug-in's window during a hand-over, loses its own
+      capture of an end key to it (a module holds one capture per key; VPS Avenger has none such).
+- [ ] **The next stages**: the knobs turned, the drums and the browser, and the page's own Settings
+      section.
 
 ## HTML pages, stage 1: `host.gui.webview` and the Windows probe (2026-09-28)
 
@@ -7846,6 +7927,28 @@ maintainer's German test instructions are a text of their own, not in the reposi
         arrival, before the act (`[page] … primed at x,y …`), never on the way back. P2's developer
         tries the answer by editing Logic's entry in place; set it in the repository only once GM2
         has measured it.
+      - [x] **RG2 — a trip's hand-over** (the VPS Avenger port's plan, built 2026-10-17, overlay
+        runtime 0.9.0, not run live): `trip:handOver{ kind = "typing" | "browse" | "keys", keys?,
+        onKey?, ends?, onEnd }`, a wait of the trip's that holds only the keys that end it — the
+        module's flag set and its scope pinned to the plug-in's window, so they go through to the
+        plug-in and are recorded (`host.keys.passedThrough`), drained by the VM's menu tick, which a
+        hand-over now starts where no overlay has menu tests. The first end key is the event; the
+        end is then asked of the module's `ends(o, trip, info, answer)` on the next turn with the
+        plug-in in front, the keys still held meanwhile. `"keys"` captures named keys for the
+        module's `onKey` and writes no flag (the knobs' slice). `onEnd` is told exactly once on every
+        end of the trip, the keys back at that moment in one function; the runtime's other writers
+        of the flag and the scope leave them alone meanwhile; a key the hook took after all is pinned
+        again and said; a disable and an enable end it at the first tick, event or key; nothing
+        bounds it. docs/api/overlay.md (`trip:handOver`), keys.md, Step 10 of
+        docs/building-a-page.md; 29 tests, 57 scripted scenarios (overlay_handover_tests.rs); the
+        build's mutation round of 16 and the review's of 13, whose survivors (the `_menuHold` guard,
+        the scope left pinned at the release, the drain at the release, `onKey`'s two refusals) have
+        tests now; `"busy"` is a guard for events that cross, and has none. Against the port's plan: a method of the trip, not of the
+        overlay; the page left where the trip left it, not hidden, since a page not shown during a
+        trip is the page closed; `ends` answers through a callback, because the change wait it needs
+        answers only through one. **Not measured:** whether Return and Escape reach a plug-in's text
+        field through the flag in Logic (the tap) and in REAPER (the hook, REAPER's "Send all
+        keyboard input to plug-in") — VPS Avenger's slice 6 above has the lines that answer it.
 - [ ] **Stage 3 — the real `host.gui.webview`**: `prepare()` called on an overlay's first
       activation (the call and the asynchronous environment are there since 2026-09-28), a build
       that does not wait at all (above), the page kept off the internet (above), the placement

@@ -53,6 +53,9 @@ Every callback of a module runs as a [handler](../module-runtime-and-lifecycle.m
 | a page's `onMessage`, `onReady` and `onClose` | as the page's own events, handlers of the module (a message and `onClose("user")` in the interactive lane) | yes |
 | a [trip](#o-inplugin)'s `act`, and the `fn` of its `afterMenu` and `afterDialog` | on the module's next turn after the arrival ([`host.timer.after(0)`](timer.md#host-timer-after)); the arbiter's call that sees the arrival only schedules it | yes |
 | a trip's `after` and `onGiveUp` | on the module's next turn after `done` or the end, or in the page key's handler | yes |
+| a [hand-over](#trip-handover)'s `onKey` | in the handler of the key it captured, the plug-in's window in front | yes |
+| a hand-over's `ends` | on the module's next turn after the arrival that follows its end key ([`host.timer.after(0)`](timer.md#host-timer-after)), as a wait's `fn` | yes — it answers through its `answer`, at once or from a read's callback |
+| a hand-over's `onEnd` | after its own end: where `ends` answered `true` — the arrival's handler, or a read's callback — or, after an `onKey` that answered `true` and with no `ends`, in the arrival's handler on the module's next turn; after any other end, where the trip's `onGiveUp` or `after` runs, just before it; never after a `handOver` that answered false | yes |
 | a page's `onShown` and `onBack` | in the handler that showed or hid the page | yes |
 
 **"Wait for a read"** is [`host.ocr.recognize`](ocr.md#host-ocr-recognize) without a callback, and **"a capture"** a [`host.screen.snapshot`](screen.md#host-screen-snapshot), [`pixel`](screen.md#host-screen-pixel) or [`pixels`](screen.md#host-screen-pixels) of the screen, or a [`profile`](screen.md#host-screen-profile), [`cells`](screen.md#host-screen-cells), [`matchCells`](screen.md#host-screen-matchcells), [`template{ capture }`](screen.md#host-screen-template), snapshot's `crop`, [`imageSearch`](screen.md#host-screen-imagesearch), [`imageSearchAll`](screen.md#host-screen-imagesearchall), [`save`](screen.md#host-screen-save) or [`saveMarked`](screen.md#host-screen-savemarked) without a callback: where the table says yes, it stops the handler until the reading, the picture, the colours or the region's answer come, and only the overlay's module waits — its next key runs after it ([Where it waits](ocr.md#where-it-waits), and for the screen [its own](screen.md#where-it-waits)). With a callback a read waits nowhere, and is fine in every row; so is a `pixel` or `pixels` of a snapshot, which reads no screen. What the rows that say no rule out: a `when` is asked for every control on every Tab and a menu test on every tick, and a module that waited there would be busy all the time.
@@ -1686,7 +1689,8 @@ A foreground event of the page that never came is made up for before `"nothing h
 - `trip:done(result)` — the work is over: the back step runs on the module's next turn, so `done` may be called from anywhere — a read's callback, `chooseMenuItem`'s `onDone`, a plain call. A pending wait is dropped. A second call, or one after the trip ended, is logged and ignored.
 - `trip:afterMenu(fn) -> true | (false, why)` — "the menu my next click opens, then `fn`". A press of a control with `opensMenu` on `trip.overlay`, so called **before** the click: its [menu tests](#o-menutests) run on every tick and `newWindow` takes its list. `false, "inactive"` or `"refused"` (a calibrating run's picture) and nothing is to be clicked. `fn(o, trip, true)` runs as a handler once a test of the group has seen a menu, then seen it closed, and the trip is on the plug-in again; `fn(o, trip, false)` when no test saw a menu within `MENU_LOOK_MS` (8 seconds). Once a menu was seen, nothing bounds the wait: the user's time in a menu is theirs.
 - `trip:afterDialog(fn)` — "the dialog that comes next, then the plug-in again, then `fn`". From the call on, a window of the plug-in's application other than its window that comes forward is the dialog — decided on the module's turn after its event, once every overlay of the VM has looked at it — unless it is the window a menu was held over for the trip's last press or a menu still counts open over the group. `fn(o, trip, true)` once the plug-in's window is in front again with the trip arrived; `fn(o, trip, false)` when no dialog came within 8 seconds. Once a dialog was seen, nothing bounds the wait. Each dialog is logged with its pid and title.
-- **One wait at a time.** `afterMenu` and `afterDialog` raise, naming the caller's line, while another wait is pending, while the trip is not acting (before its arrival, during a wait, after `done` or its end) — they are for `act`, the waits' functions and their callbacks — and `afterMenu` on an overlay with no menu tests.
+- [`trip:handOver(spec)`](#trip-handover) — the keyboard handed to the plug-in itself — the user types into its own text field or chooses in its own browser — until the key that ends it, the module's word that it is over, or any end of the trip; since version 0.9 of the runtime.
+- **One wait at a time.** `afterMenu`, `afterDialog` and `handOver` raise, naming the caller's line, while another wait or a hand-over is pending, while the trip is not acting (before its arrival, during a wait, after `done` or its end) — they are for `act`, the waits' functions and their callbacks — and `afterMenu` on an overlay with no menu tests.
 
 **The ends.** The page's window and focus events decide, and `trip:inFront()` decides on the module's own check:
 
@@ -1701,7 +1705,7 @@ A foreground event of the page that never came is made up for before `"nothing h
 | the plug-in's window in front and another module's overlay at least as specific holding the slot — decided on the turn after its event | on the way, or a wait whose condition holds | `"outranked"` |
 | `act`, a wait's `fn` or the prime raised | acting | `"failed"` |
 
-**Not ends:** another window of the plug-in's application on the way (Logic's main window first, REAPER's main window); a sibling overlay of the group taking the slot (a dialog-layer box, quiet, and `trip.overlay` names it); a popup the menu tests see, over which the overlay holds its place with no keys; the dialog a wait is for; any other window of the plug-in's application while acting — the act's next `trip:inFront()` decides. An act whose callbacks never come — a module's bug, a [watch](#o-watch) whose overlay left — is ended by the page key alone: `[page] '<overlay>': trip '<label>' given up at the key after N ms in <stage>`.
+**Not ends:** another window of the plug-in's application on the way (Logic's main window first, REAPER's main window); a sibling overlay of the group taking the slot (a dialog-layer box, quiet, and `trip.overlay` names it); a popup the menu tests see, over which the overlay holds its place with no keys; the dialog a wait is for; any other window of the plug-in's application while acting — the act's next `trip:inFront()` decides. A [hand-over](#trip-handover) ends with the trip on every end above, its keys back at that moment and its `onEnd` told. An act whose callbacks never come — a module's bug, a [watch](#o-watch) whose overlay left — is ended by the page key alone: `[page] '<overlay>': trip '<label>' given up at the key after N ms in <stage>`.
 
 **Gone.** Windows: the plug-in's window is not listed for its process ([`host.window.list`](window.md#host-window-list): closed, or hidden), or — with it in front — the held control is not among its controls (the plug-in unloaded). macOS: only while the plug-in's application is the active one — a DAW may hide its plug-in windows while it is not — the window in front with another title, or another window of its application in front and the plug-in's window not listed; and a focus declined with nothing of the application listed any more (it quit). Checked at the start, at the way back, and at every window event of a trip that names the plug-in's window or its application.
 
@@ -1760,6 +1764,116 @@ The trip asks for the plug-in's **control**, never its FX window: [`host.window.
 ### macOS
 
 The trip asks for the plug-in's window (the panel's id is its window's), and the [stay](#o-attachembedded-macos) is held across it: no `identify` within a trip, nor between trips while the page is up. A window of the DAW's with the plug-in window's title that comes forward under another id is logged, and the trip waits for the held id (`… came forward as id Y, not the held id X — waiting for X`). With `activates = false` (gui.md) whether the plug-in's window raises a foreground event at all is unmeasured; without one, the trip ends by its bound. A sandboxed DAW's open panel may belong to another process, which ends a dialog wait as `"another application"`: the log names the pid.
+
+## trip\:handOver(spec) — handing the keyboard to the plug-in {#trip-handover}
+
+**Signature:** `trip:handOver(spec: { kind: "typing" | "browse" | "keys", keys: { string }?, onKey: ((overlay, trip, key: string, mods) -> boolean?)?, ends: ((overlay, trip, info, answer: (over: boolean) -> ()) -> ())?, onEnd: (overlay, trip, how: string, info) -> () }) -> true | (false, why)`, where `info = { key: string?, passed: { string }, ms: number }`
+
+A wait of a [trip](#o-inplugin) in which the user works in the plug-in **itself**: types a new name into its own text field, chooses in its own preset browser, or presses keys the module answers one by one. The runtime holds only the keys that end it, and while it holds them the plug-in has the rest of the keyboard; nothing is recorded of what the user types. The page stays where the trip left it — behind the plug-in, not hidden — the group stays [away](#o-away) and quiet, and nothing is said. Since version 0.9 of the runtime: a module that calls it depends on `"com.platform.overlay >= 0.9"`.
+
+| kind | What it holds | `keys` | `onKey` | `ends` | Its own end |
+|---|---|---|---|---|---|
+| `"typing"` | the end keys, captured, and the module's [menu flag](keys.md#host-keys-menuopen) set, so they **go through** to the plug-in | the end keys; default `{ "Return", "Escape" }` | not taken | optional | an end key gone through, then `ends` answering true |
+| `"browse"` | the same | default `{ "Return" }` — Escape and every other key are the plug-in's | not taken | optional | the same |
+| `"keys"` | the keys named, captured for `onKey`; no flag | **required**, the keys `onKey` is handed | **required** | not taken | `onKey` answering true |
+
+Called from `act`, a wait's function or one of their callbacks, while the trip is acting, with the plug-in's window in front.
+
+**It raises**, naming the caller's line: a `spec` that is not a table or has a field it does not have; a `kind` that is none of the three; an `onEnd` that is not a function; `keys` that is not a list of 1 to 8 key specs, names a key [`host.keys.normalize`](keys.md#host-keys-normalize) cannot read, or one key twice; `onKey` missing for `"keys"` or given for another kind; `ends` given for `"keys"`, or not a function; and, as `afterMenu` does, a wait or a hand-over of this trip pending — `ends` asking for another one included — or the trip not acting.
+
+**It answers** `true` once the keys are held, or:
+
+| why | when | what a module does |
+|---|---|---|
+| `"not in front"` | [`trip:inFront()`](#o-inplugin) answered false at the call — which has given the trip up already | returns |
+| `"busy"` | a hand-over of another page of this VM still holds the module's keys: one at a time per VM, since the flag, the scope and the record are the module's. Another page of the VM comes to the front only after that trip has ended (`"another application"`), so this is a guard for events that cross, not a state a module reaches in order | ends the trip with an error |
+| `"refused: <message>"` | a [`host.keys.capture`](keys.md#host-keys-capture) raised — on a Mac without the Accessibility grant | ends the trip with an error; nothing is held |
+
+**At the call**, in this order: what [`host.keys.passedThrough`](keys.md#host-keys-passedthrough) holds from before is drained and dropped, logged — a Return that reached a menu earlier is no end of this one; the module's [scope](keys.md#host-keys-scope) is pinned to the plug-in's window; the keys are captured; for `"typing"` and `"browse"` the flag is set; the VM's menu tick is started if no overlay with menu tests has started it; one line is logged: `[page] '<overlay>': trip '<label>' hands the keyboard over (typing): Return, Escape let through to window id X, the module's scope pinned there; it ends on one of them, the page key or another application — nothing bounds it`. A capture that raises releases what was captured — and, with nothing else of the VM in front, every capture of the module, since on a Mac a capture that raised stays registered ([`capture`](keys.md#host-keys-capture), its macOS block) — sets the scope back as the end does, and writes no flag.
+
+**Why two captures and a flag.** While a module's menu flag counts for the window in front the hook lets every captured key through to it and records it for `passedThrough`, together with every unmodified Return and Escape; and a flag counts only while its module holds a capture, for the window its captures are scoped to ([`menuOpen`](keys.md#host-keys-menuopen)). The captures make the flag count, the scope keeps it to the plug-in's window, and what goes through is recorded — which is how the runtime knows the user pressed Return in the plug-in's own field without taking the key from it.
+
+**The event.** The record is drained by the VM's menu tick (every 150 ms), which hands the keys it holds to the hand-over and decides nothing by time. The first end key is the event: logged (`… Return went through to the plug-in — the hand-over's end is looked at`), and the end is looked at where the trip can arrive — on the module's next turn, the plug-in's window in front (afresh) and an overlay of the group on the held control, as a wait's arrival. A key that is not an end key is logged as gone through, and is no end. For `"keys"` the event is `onKey` answering `true`; it is asked for each captured key, as a handler, with the plug-in's window in front, and a key pressed with another window in front, or after the event, is not handed to it.
+
+**A key taken after all.** When a `"typing"` or `"browse"` end key reaches its capture's callback instead — the flag did not count for the window in front, because something cleared it — it never reached the plug-in, so it is no event: the log says so (`… Return was taken, not let through — the menu flag did not count for the window in front (…)`), the scope and the flag are set again with the plug-in's window in front, and `"<label>: Return did not reach the plug-in; press it again."` is said behind the screen reader.
+
+**`ends(o, trip, info, answer)`** — the module's word on whether the event ended the work: its field closed again, its browser done. It runs as a handler where a read may wait, and answers by calling `answer(true)` (over) or `answer(false)` (it goes on), at once or from a read's callback; a second answer, or one after the trip ended, is logged and ignored. Without `ends` the event is the end. Meanwhile the keys stay held: an end key that comes while `ends` is asked is kept, and is the next event at once if the answer is no. An `ends` that raises gives the trip up, `"failed"`. An `ends` that never answers is a stuck act: the page key ends it.
+
+**`onEnd(o, trip, how, info)`** — told **exactly once**, on every end of a hand-over that answered `true`, after the keys are back; a `handOver` that answered false held nothing, and its `onEnd` is never called:
+
+| how | when | where it runs |
+|---|---|---|
+| `"ended"` | `ends` answered true, or `onKey` did, or — with no `ends` — the event came (`info.key` the end key) | the trip acting: in the handler or the callback that answered `ends` — the arrival's own, or a read's callback — and after `onKey`, or with no `ends`, in the arrival's handler on the module's next turn; the module reads, then calls `trip:done(result)` |
+| `"page key"` | the page key, in every state of the hand-over — the trip's `"key"` | in the key's handler, before `onGiveUp`; then the page is shown |
+| `"another application"` | a window of another application, or one of this application's that is not the page | on the next turn, before `onGiveUp`; the page is not shown over it |
+| `"page closed"` | its close box, its failure, the module's `page:close()` or `O:pageAgain()`, a disable — seen at the first tick, event or captured key after the enable | before `onGiveUp`: where it was seen — the page's close, `O:pageAgain()`, a window or focus event, a captured key — and on the module's next turn when the menu tick saw it first |
+| `"gone"` | the plug-in's window gone ([the trip's rule](#o-inplugin)) | on the next turn, before `onGiveUp` |
+| `"outranked"` | an end key with another module's overlay at least as specific holding the slot | on the next turn, before `onGiveUp` |
+| `"not in front"` or `"another application"` | `trip:inFront()` false inside a hook or a callback of the module's | on the next turn, before `onGiveUp` |
+| `"failed"` | `ends` or `onKey` raised, or `onEnd` raised on `"ended"` — which is then not told again | on the next turn, before `onGiveUp` |
+| `"done"` | the module's own `trip:done` while the hand-over holds | in the back step's handler, before `after` |
+
+`info.key` is the end key on `"ended"` and nil on every other end; `info.passed` every key the record held while the hand-over held its keys, in order — for `"keys"`, every key `onKey` was handed; `info.ms` the time since the call. An `onEnd` that raises is logged, `[page] '<overlay>': onEnd failed: <message>`.
+
+**Keys back on every path, at once.** Whatever ends the trip, the hand-over's keys go back in that moment — in the give-up's own handler, in `done`, at its own end; plain calls only, so in the arbiter's call and a trigger alike: the captures released, the flag what the VM's overlays not away say (false while away), the scope every window again unless an overlay of the module that is not away is in front, whose pin stands, and what the record still holds dropped (logged `… went through after the end: …`). One line says it: `[page] '<overlay>': trip '<label>': the hand-over ends — <how>, after N ms; Return, Escape released, the menu flag false, the scope every window`. While a hand-over holds the module's flag and scope, the runtime writes neither of them anywhere else: an overlay leaving the front, the menu tick's state, a hold over a menu's window leave them as the hand-over set them.
+
+**Not ends:** a window of the plug-in's own application — Logic's main window, REAPER's, a dialog of the DAW's — logged once per hand-over (`… a window of <app> came forward during the hand-over — not an end`); the page itself coming forward; a sibling overlay of the group taking the slot; a key that is not an end key; and **time**: nothing bounds a hand-over. The user's way back is the page key.
+
+**Disable, enable, reload.** A disable takes the module's captures out of the hook and forgets its scope and flag ([`scope`](keys.md#host-keys-scope)), and hides the page; the hand-over's own record still says it holds. Enabled again, the captures are back in every window, with no flag, and the **first** of the menu tick (within 150 ms), a window or focus event, or a captured key ends the trip, `"page closed"`, and releases them: at most the one key pressed in that moment is taken, and the log names it. A reload ends the VM, and the host drops its captures, its scope and its flag with it; no `onEnd` runs then, as no code of the VM's runs any more.
+
+**Cost.** The captures — two for `"typing"` — the flag, one tick of the VM's one 150 ms timer, which drains the record, and nothing read of the screen: what the module's own hooks read is theirs. Everything on the event loop, in the module's handlers.
+
+```luau
+-- In a trip's act: a field the plug-in edits in place on a double-click, renamed by the user and
+-- read back. FIELD is the field's rectangle, in the overlay's coordinates.
+local FIELD = { 34, 7, 214, 22 }
+local region = o:toScreenRect(FIELD, { whole = true })
+host.screen.snapshot({ region = region }, function(before)
+  if not trip:inFront() then return before and before:release() end
+  if not before then return trip:done({ error = "the field cannot be read now" }) end
+  local x, y = o:toScreen(123, 14)
+  O.doubleClick(x, y, nil, function()
+    -- The plug-in's editor, seen open: a box over a tenth of the field that stands still.
+    local open = { from = before, timeout = 2000, settle = 50, minPixels = 400 }
+    host.screen.snapshot({ region = region, change = open }, function(editor, _, seen)
+      before:release()
+      if not trip:inFront() then return editor and editor:release() end
+      if not (editor and seen.changed and seen.settled) then
+        if editor then editor:release() end
+        return trip:done({ error = "the editor did not open" })
+      end
+      editor:release()
+      local handed, why = trip:handOver({
+        kind = "typing", -- Return keeps the name, Escape the old one: both go through to the plug-in
+        ends = function(o2, t2, info, answer)
+          -- Over once the field no longer shows the editor (fieldClosed: the module's own read).
+          host.screen.snapshot({ region = region }, function(now)
+            if not t2:inFront() then return now and now:release() end
+            answer(now ~= nil and fieldClosed(now))
+            if now then now:release() end
+          end)
+        end,
+        onEnd = function(o2, t2, how, info)
+          if how ~= "ended" then return end -- onGiveUp posts the rest
+          if not t2:inFront() then return end
+          host.ocr.recognize(region, {}, function(r)
+            t2:done({ name = r.status == "text" and r.text or nil, cancelled = info.key == "Escape" })
+          end)
+        end,
+      })
+      if not handed and why ~= "not in front" then trip:done({ error = "the keyboard: " .. why }) end
+    end)
+  end)
+end)
+```
+
+### Windows
+
+The scope is the window in front at the call, the plug-in's FX window or the DAW window it is docked in, and the low-level hook lets a captured end key through to it while the flag counts, records it, and logs once per reason and window `captured Return (vk 0x0d/m0) was let through to the application: … a menu declared open with host.keys.menuOpen(true) by a module scoped to the window in front` ([`capture`](keys.md#host-keys-capture), its Windows block); the keypad's Enter is recorded as `"Return"`. A screen reader's hook after the host's sees the key as usual. Whether a DAW hands Return to a plug-in's text field or takes it for itself — REAPER has a per-FX "Send all keyboard input to plug-in" — is the DAW's; it has not been measured with an overlay (TODO.md, VPS Avenger).
+
+### macOS
+
+The scope is the frontmost application's window in front, read by accessibility at the call, and the event tap lets the end key through unmodified and records it, the keypad's Enter as `"Return"`. VoiceOver's own chords never reach the tap. Whether a plug-in's text field in Logic gets Return and Escape through the tap is not measured yet (TODO.md, VPS Avenger); the log's `went through` against `was taken` lines answer it. Without the Accessibility grant `capture` raises, and the hand-over answers `"refused: …"`.
 
 ## O.away {#o-away}
 

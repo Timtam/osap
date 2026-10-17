@@ -60,6 +60,10 @@ mod avenger_page_tests;
 /// plan's slice 5), from the page and the ring.
 #[cfg(test)]
 mod avenger_osc_macros_tests;
+/// VPS Avenger's renames and Browse Presets (the plan's slice 6): Avenger's own editor seen open
+/// and closed, the keyboard handed over, and the name read back, from the page.
+#[cfg(test)]
+mod avenger_rename_tests;
 /// The HTML page probe (tools/html-probe) against the same scripted host, with a scripted page:
 /// its keys, its report, W3's round trip, W7's landing and the automatic show.
 #[cfg(test)]
@@ -94,6 +98,11 @@ mod overlay_own_window_tests;
 /// scripted page.
 #[cfg(test)]
 mod overlay_page_tests;
+/// A trip's hand-over (runtime 0.9.0): trip:handOver, its keys let through to the plug-in and
+/// recorded, its end asked of the module, and every other end of the trip giving its keys back,
+/// against the same scripted host with a scripted page.
+#[cfg(test)]
+mod overlay_handover_tests;
 /// Tasks and their two waits against a real Luau VM and a real read service over a fake
 /// recogniser.
 #[cfg(test)]

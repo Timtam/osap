@@ -31,8 +31,9 @@
 -- And the project's panel as a page of this module's own (page.luau, ui/), on the overlay
 -- runtime's page support (O:addPage): its key on an identified Avenger reads Avenger off one
 -- picture (read/open.luau) and shows the page beside it; the header's actions are trips into
--- Avenger made with this file's own clicks, reads and choices (actions.luau); the page's other
--- actions come in later stages, and say so until then.
+-- Avenger made with this file's own clicks, reads and choices (actions.luau), the renames and
+-- Browse Presets hand-overs of the keyboard to Avenger (handover.luau); the page's other actions
+-- come in later stages, and say so until then.
 --
 -- Coordinates are written as the project wrote them, at 50 % from Avenger's corner; the overlay
 -- scales them by the zoom READ off Avenger's zoom field (header.luau), and puts Avenger's corner
@@ -430,6 +431,22 @@ local function watchName(o, was, onEnd, label)
   })
 end
 
+-- For Browse Presets (src/handover.luau): the name read until it settles, with nothing to differ
+-- from — the user chose in Avenger's own browser, and it may be the preset that was there — up to
+-- NAME_WITHIN, and `onEnd(now, n)` once: the name, read `n` times in a row, or nil (none, or one
+-- that never settled), as watchName's bound leaves it.
+local function nameSettles(o, onEnd, label)
+  names.gen += 1
+  local gen = names.gen
+  o:watch({
+    read = function(w) return nameAfter(w, gen) end,
+    done = function(now, _, n) return settledName(now, n) end,
+    within = NAME_WITHIN,
+    onDone = function(now, _, n) onEnd(now, n) end,
+    onGiveUp = function(now, _, n) onEnd(keptAtBound(label or "the page", now, nil, n), n) end,
+  })
+end
+
 -- ── Preset info ──────────────────────────────────────────────────────────────
 -- Only with the preset database: the project's Info. Pressed, it reads the name as a step does
 -- before its click — the press waits for it, one read per press — and says what the database has on
@@ -750,6 +767,7 @@ Page.start({
     unseen = unseen,
     atInit = function() return names.init == true end,
     watchName = watchName,
+    settledName = nameSettles,
     menuItemAt = menuItemAt,
     zoomEntry = zoomEntry,
     closeLeftOpen = closeLeftOpen,

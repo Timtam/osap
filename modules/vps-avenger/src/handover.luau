@@ -1,0 +1,462 @@
+-- The page's renames and Browse Presets (the plan's slice 6): the avenger_control tool's rename and
+-- return modes, as hand-overs of the overlay runtime's (trip:handOver, docs/api/overlay.md). The
+-- user works in Avenger's own editor or browser, and what Avenger shows after it is READ: this
+-- module records, sends and types no key (the maintainer's decision of 2026-10-12).
+--
+--   start_rename      the field double-clicked where the tool double-clicks it — the preset's name,
+--   rename_osc        the OSC tab, the macro knob's or button's field — and Avenger's editor seen
+--   rename_macro      open in a picture of the field (read/editor.luau); the keyboard handed over,
+--                     nothing said — the tool says nothing either, and the screen reader hears the
+--                     editor (VoiceOver: "text, editing") — until Return or Escape has gone through
+--                     to it and the field reads closed again; then the name read off a picture: the
+--                     preset's, the OSC tab's (with the strip), the macro field's (with the macro
+--                     panel). After Escape the old name is read again. A name the user typed is
+--                     posted as read: the preset's is never snapped to the database's (the tool's
+--                     skip_db_snap), and nothing is written to the database (the tool's set_osc_name)
+--   browse_expansion_presets   the tool's sentence, the keyboard handed over with Return alone,
+--                     and once Return has gone through, the name read until it settles
+--
+-- What the tool did that is not ported: it recorded the keys typed to know the new name (its
+-- panel.py) — the macro fields' only source of their names there — ignored Return for a second
+-- after the editor opened, slept a quarter of a second after it, and fell back after five minutes;
+-- here the name is read off the screen, the editor's close is a reading, and the page key is the
+-- user's way back. Its OSC tab got a click of its own before the double-click: kept where the strip
+-- reads another tab selected, its sleep a change wait. Its preset's name got a priming click: not
+-- kept, since the trip brought Avenger's window forward (a DAW that drops the first click gets the
+-- runtime's `prime`, from its daw-hosts entry). Its Windows panel read the preset's name after
+-- every kind of rename; here each kind reads its own field. Its rename dialog was dead code, and is
+-- left out of the page.
+
+local G = host.include("src/geometry.luau")
+local H = host.include("src/header.luau")
+local S = host.include("src/state.luau")
+local R = host.include("src/read/ocr.luau")
+local P = host.include("src/read/picture.luau")
+local Open = host.include("src/read/open.luau")
+local Ed = host.include("src/read/editor.luau")
+local T = host.include("src/tables/strip.luau")
+local M = host.include("src/tables/macros.luau")
+local Osc = host.include("src/actions/osc.luau")
+local Act = host.include("src/act.luau")
+
+local Hv = {}
+
+local E = nil -- what actions.luau hands over (Hv.start)
+
+-- The tool's sentence for its return mode (#12): the page's title is "Avenger Control".
+Hv.BROWSE = "Browse presets in Avenger. To return to Avenger Control, press Return."
+-- The page's words, in its error region but the one said while the user is in Avenger.
+Hv.NOT_OPEN = "VPS Avenger's editor did not open; nothing was renamed"
+Hv.STILL_OPEN = "VPS Avenger's editor is still open: Return keeps the name, Escape cancels."
+Hv.NOT_READ = "the new name cannot be read now"
+Hv.NO_KEYBOARD = "the keyboard cannot be handed to VPS Avenger now"
+
+local function log(fmt, ...)
+  host.log.info(("[avenger] [rename] " .. fmt):format(...))
+end
+
+-- Every picture `held` keeps, let go: one held past its action holds the module's budget.
+local function release(held)
+  for k, s in pairs(held) do
+    s:release()
+    held[k] = nil
+  end
+end
+
+-- The overlay's placer now — its origin, factor and zoom (read/picture.luau) — or nil.
+local function placer(o)
+  local origin = o:origin()
+  local k = origin and H.factor(origin)
+  if not (origin and k) then return nil end
+  return P.placer(origin, k, (H.zoom(origin)))
+end
+
+-- The text of table rectangle `rect` in snapshot `snap`, tidied, or nil: the name read back, in a
+-- handler, where the read waits.
+local function textIn(pl, snap, rect)
+  local r = pl:rect(rect)
+  if not r then return nil end
+  local ok, res = pcall(host.ocr.recognize, { name = "the field renamed", region = r }, { snapshot = snap, lang = H.lang() })
+  if not (ok and type(res) == "table" and res.status == "text") then return nil end
+  local t = R.tidy(res.text)
+  return t ~= "" and t or nil
+end
+
+-- Part `part` read before the click, as src/act.luau reads one: its picture waited for, its pixels
+-- (and with `text` its words) asked of it. The values and their keys, or nil, nil and the page's
+-- error.
+local function partBefore(pl, part, text)
+  local region = Open.partRegion(pl, part)
+  if not region then return nil, nil, "that part of VPS Avenger is not on the screen" end
+  local okS, snap, why = pcall(host.screen.snapshot, { region = region })
+  if not (okS and snap) then
+    log("'%s': nothing clicked — no picture of it: %s", part, tostring(okS and why or snap))
+    return nil, nil, "VPS Avenger cannot be read now"
+  end
+  local okR, v, keys = pcall(Open.part, snap, part, { pl = pl, text = text, preset = E.ring.lastName() })
+  snap:release()
+  if not okR then
+    log("'%s': nothing clicked — the read before failed: %s", part, tostring(v))
+    return nil, nil, "reading VPS Avenger failed"
+  end
+  return v, keys
+end
+
+-- ── A rename in Avenger's own editor ─────────────────────────────────────────
+-- One flow for the three, in a trip's act, where reads wait:
+--   1. a picture of the field (with a callback), then — the trip still in front — the double-click
+--      at its point (main.luau's doubleAt);
+--   2. after the second click, a change wait on the field from that picture: the editor open, or
+--      "did not open" in the error region and the trip over, nothing handed over;
+--   3. its edges read off the two pictures (read/editor.luau), the pictures let go, and the
+--      keyboard handed over (`typing`: Return and Escape go through to Avenger and end it);
+--   4. `ends`: a picture of the part read after; its field closed, or unsure, is the end — the read
+--      decides — and still open, a change wait from it for Avenger's repaint; still open after that,
+--      said, and the hand-over goes on;
+--   5. `onEnd`, on its own end: the name read off that picture (F.read), and the trip done with it.
+--      On any other end, the pictures go, and the trip's give-up says the rest (actions.luau, go).
+-- `F`: kind ("preset", "osc", "macro": the log's, and the calibration pictures'), label (the
+-- double-click's words), pl (the placer of the read before), at and field (the field's point and
+-- rectangle, in table points at 50 %), after (the part read after, Open.PARTS' name, or nil for the
+-- field's own picture), first (called before the double-click, or nil), part (the part as last
+-- read before the double-click, { keys, values }, posted with a trip over before the hand-over, or
+-- nil), and read(o, trip, now, pl, info) -> the trip's result, `now` the picture after (nil: none)
+-- and `info` the hand-over's, its `key` Return or Escape.
+function Hv.rename(o, trip, F)
+  -- The trip over before the hand-over, with the part as last read (F.part) for the page.
+  local function over(result)
+    result.part = result.part or F.part
+    return trip:done(result)
+  end
+  local pl = F.pl
+  local at = Ed.place(pl, F.field)
+  local afterRegion = at and (F.after and Open.partRegion(pl, F.after) or at.picture)
+  if not afterRegion then
+    log("'%s': nothing clicked — the field is not on the screen", F.kind)
+    return over({ error = "that part of VPS Avenger is not on the screen" })
+  end
+  local held = {}   -- the pictures held: before, open, now
+  local refs = nil  -- the field's edges before the double-click and with the editor open
+
+  -- The field in picture `snap`: "closed", "open" or "unsure" — unsure without references, and the
+  -- read after decides.
+  local function verdict(snap)
+    if not refs then
+      log("'%s': its edges cannot be compared (not read with the editor open) — taken as closed: the read "
+        .. "decides", F.kind)
+      return "unsure"
+    end
+    local now, why = Ed.edges(snap, at)
+    if not now then
+      log("'%s': its edges cannot be compared (%s) — taken as closed: the read decides", F.kind, tostring(why))
+      return "unsure"
+    end
+    local v = Ed.classify(F.kind, now, refs.before, refs.open)
+    if v == "unsure" then log("'%s': taken as closed: the read decides", F.kind) end
+    return v
+  end
+
+  local function ends(_, t2, info, answer)
+    local asked = pcall(host.screen.snapshot, { region = afterRegion }, function(snap, why)
+      if not t2:inFront() then
+        if snap then snap:release() end
+        return
+      end
+      if not snap then
+        log("'%s': no picture after %s (%s) — the read decides", F.kind, tostring(info.key), tostring(why))
+        return answer(true)
+      end
+      if held.now then held.now:release() end
+      held.now = snap
+      if verdict(snap) ~= "open" then return answer(true) end
+      -- Avenger may not have repainted yet: its repaint is waited for, from the picture that shows
+      -- the editor.
+      local waited = pcall(host.screen.snapshot, { region = afterRegion, change = Ed.wait(snap, at) },
+        function(again, why2)
+          if not t2:inFront() then
+            if again then again:release() end
+            return
+          end
+          if not again then
+            log("'%s': no picture after the editor's wait (%s) — the read decides", F.kind, tostring(why2))
+            return answer(true)
+          end
+          if verdict(again) ~= "open" then
+            held.now:release()
+            held.now = again
+            return answer(true)
+          end
+          -- Neither picture is held while the user types on.
+          again:release()
+          release(held)
+          log("'%s': the editor is still open after %s — the keyboard stays VPS Avenger's", F.kind, tostring(info.key))
+          host.speech.output(Hv.STILL_OPEN, { interrupt = false })
+          answer(false)
+        end)
+      if not waited then answer(true) end
+    end)
+    if not asked then answer(true) end
+  end
+
+  local function onEnd(o2, t2, how, info)
+    if how ~= "ended" or not t2:inFront() then return release(held) end
+    Ed.shot(F.kind, "end", held.now, at, pl.zoom)
+    local okR, result = pcall(F.read, o2, t2, held.now, pl, info)
+    release(held)
+    if not (okR and type(result) == "table") then
+      log("'%s': the read after failed: %s", F.kind, tostring(result))
+      result = { error = "reading VPS Avenger failed" }
+    end
+    t2:done(result)
+  end
+
+  -- The editor seen open, or not: the double-click's change wait from the field's picture before it.
+  local function afterDouble()
+    local asked, err = pcall(host.screen.snapshot, { region = at.picture, change = Ed.wait(held.before, at) },
+      function(snap, why, info)
+        if not trip:inFront() then
+          if snap then snap:release() end
+          return release(held)
+        end
+        local open = Ed.isOpen(snap, info)
+        Ed.logOpen(F.kind, open, info, why)
+        if not open then
+          if snap then snap:release() end
+          release(held)
+          return over({ error = Hv.NOT_OPEN })
+        end
+        held.open = snap
+        -- Where the keyboard is in the platform's words: a later, better test of "open" (U8).
+        local okC, chain = pcall(host.window.focusChain)
+        local first = okC and type(chain) == "table" and chain[1] or nil
+        log("'%s': the keyboard after the double-click: %s", F.kind,
+          first and tostring(first.class or first.role) or "nothing the platform reports")
+        Ed.shot(F.kind, "before", held.before, at, pl.zoom)
+        Ed.shot(F.kind, "open", held.open, at, pl.zoom)
+        local before, whyB = Ed.edges(held.before, at)
+        local opened, whyO = Ed.edges(held.open, at)
+        if before and opened then
+          refs = { before = before, open = opened }
+        else
+          log("'%s': the field's edges cannot be read: %s", F.kind, tostring(whyB or whyO))
+        end
+        -- The edges are what is kept: no picture is held while the user types.
+        release(held)
+        if not trip:inFront() then return end
+        local handed, whyH = trip:handOver({ kind = "typing", ends = ends, onEnd = onEnd })
+        if handed or whyH == "not in front" then return end
+        log("'%s': the keyboard was not handed over (%s); VPS Avenger's editor is open", F.kind, tostring(whyH))
+        over({ error = Hv.NO_KEYBOARD .. "; its editor is still open" })
+      end)
+    if not asked then
+      release(held)
+      log("'%s': no change wait after the double-click: %s", F.kind, tostring(err))
+      over({ error = Hv.NOT_OPEN })
+    end
+  end
+
+  local asked, err = pcall(host.screen.snapshot, { region = at.picture }, function(snap, why)
+    if not snap then
+      log("'%s': nothing clicked — no picture of the field: %s", F.kind, tostring(why))
+      return over({ error = "VPS Avenger cannot be read now" })
+    end
+    held.before = snap
+    if not trip:inFront() then return release(held) end
+    if F.first then F.first() end
+    local clicked, said = E.ring.doubleAt(o, F.label, F.at, nil, true, afterDouble)
+    if not clicked then
+      release(held)
+      return over({ sentence = said })
+    end
+  end)
+  if not asked then
+    log("'%s': nothing clicked — no picture of the field: %s", F.kind, tostring(err))
+    over({ error = "VPS Avenger cannot be read now" })
+  end
+end
+
+-- start_rename: the name read before (as ◀ and ▶ read it), then the shared flow at the tool's point;
+-- the database's position forgotten before the double-click (the tool's _clear_anchor). After it, a
+-- name roughly the same as before (the tool's _names_roughly_same), and the old one after Escape,
+-- keeps the database's place; another is the user's own, posted as read with no expansion.
+function Hv.renamePreset(o, trip, forget)
+  local was = E.ring.nameNow(o) or E.ring.lastName()
+  if not trip:inFront() then return end
+  local pl = placer(o)
+  if not pl then return trip:done({ error = "VPS Avenger's size cannot be told now" }) end
+  Hv.rename(o, trip, {
+    kind = "preset", label = "Renaming the preset", pl = pl, at = G.NAME, field = G.NAME_REGION,
+    first = function() forget("renaming from the page") end,
+    read = function(_, _, now, pl2, info)
+      local text = now and textIn(pl2, now, G.NAME_REGION)
+      if not text then
+        log("'preset': %s — nothing read", tostring(info.key))
+        return { error = Hv.NOT_READ }
+      end
+      local name = R.presetName(text)
+      E.ring.noteName(name)
+      local kept = info.key == "Escape" or (was ~= nil and R.roughlySame(name, was))
+      log("'preset': %s — read '%s'%s", tostring(info.key), name,
+        kept and (", the name before ('" .. tostring(was) .. "') kept") or ", the user's own")
+      if kept then return { set = E.named(name), focus = "rename-preset-button" } end
+      return { set = { preset = name, expansion = false }, focus = "rename-preset-button" }
+    end,
+  })
+end
+
+-- The shared flow on OSC tab `i` of `n`, `before` the strip as last read before the double-click.
+local function renameTab(o, trip, i, n, pl, label, before)
+  local span = T.tabSpan(i, n, T.NAME_TOP, T.NAME_BOTTOM)
+  Hv.rename(o, trip, {
+    kind = "osc", label = label, pl = pl, at = { T.tabX(i, n), T.TAB_Y }, field = span, after = "strip",
+    part = before,
+    read = function(_, _, now, pl2, info)
+      if not now then return { part = before, error = Hv.NOT_READ } end
+      local va, keys = Open.part(now, "strip", { pl = pl2, preset = E.ring.lastName() })
+      local name = textIn(pl2, now, span)
+      log("'osc %d': %s — %s", i, tostring(info.key), name and ("read '" .. name .. "'") or "nothing read")
+      local part = { keys = keys, values = va }
+      if not name then return { part = part, error = Hv.NOT_READ } end
+      local w = E.plugin()
+      local known = S.values(w and w.id) or {}
+      local names, snapped = {}, {}
+      for j = 1, va.oscCount or n do
+        names[j] = known.oscNames and known.oscNames[j]
+        snapped[j] = known.oscSnapped and known.oscSnapped[j]
+      end
+      names[i], snapped[i] = name, false
+      va.oscNames, va.oscSnapped = names, snapped
+      keys[#keys + 1] = "oscNames"
+      keys[#keys + 1] = "oscSnapped"
+      return { part = part, focus = "osc-rename-" .. i }
+    end,
+  })
+end
+
+-- rename_osc {index}: the strip read first — the count from the dots places the tab, and a tab past
+-- it, or no count, is refused with nothing clicked (osc.luau's `counted`). A tab the strip does not
+-- read as the one selected is selected first, as the tool clicks it before its double-click: one
+-- click, and its change waited for and the selection read again (src/act.luau, select_osc_tab's
+-- spec on the strip) in the place of the tool's 0.12 s — the tab's selection lies across the field's
+-- picture, and a double-click that selected it would show the open wait a change that is no editor.
+-- Then the shared flow on the tab, its picture before taken once the selection has been seen. After
+-- it the strip is read again and the tab's name off the same picture: posted as read, never
+-- snapped, the other tabs' names as last read.
+function Hv.renameOsc(o, trip, i)
+  local pl = placer(o)
+  if not pl then return trip:done({ error = "VPS Avenger's size cannot be told now" }) end
+  local vb, keysB, err = partBefore(pl, "strip")
+  if not trip:inFront() then return end
+  if not vb then return trip:done({ error = err }) end
+  local n, why = Osc.counted(vb, i)
+  if not n then
+    log("'osc %d': nothing clicked — %s", i, why)
+    return trip:done({ part = { keys = keysB, values = vb }, error = why })
+  end
+  local label = "Renaming OSC " .. i
+  if vb.selectedType == "osc" and vb.selectedIndex == i then
+    return renameTab(o, trip, i, n, pl, label, { keys = keysB, values = vb })
+  end
+  local sel = Osc.select_osc_tab({ index = i }, label)
+  sel.part = "strip"
+  local decide, clicked = sel.decide, false
+  sel.decide = function(v)
+    local click, refusal = decide(v)
+    clicked = click ~= nil
+    return click, refusal
+  end
+  log("'osc %d': the strip reads %s selected — OSC %d is selected first", i, Osc.tabWords(vb) or "no tab", i)
+  Act.run(o, sel, function(result)
+    if not trip:inFront() then return end
+    -- Nothing clicked: refused, as the double-click would have been.
+    if not clicked or result.sentence then
+      return trip:done({ part = result.part, error = result.error, sentence = result.sentence })
+    end
+    local va = result.part and result.part.values
+    log("'osc %d': after its selection — %s; the double-click next", i,
+      tostring(result.said or result.note or result.error))
+    renameTab(o, trip, i, va and Osc.counted(va, i) or n, pl, label, result.part)
+  end, trip)
+end
+
+-- rename_macro {index}: the macro panel read first with its words — the tab shown and its five
+-- names — then the shared flow on field `index` (1 to 3 the knobs', 4 and 5 the buttons'; the tool's
+-- _macro_field_name). After it the panel is read again and the field's name off the same picture,
+-- posted as read; the page's focus back on the field's Rename button where the tab shown was read.
+function Hv.renameMacro(o, trip, index)
+  local field = M.FIELD_ORDER[index]
+  local pl = placer(o)
+  if not pl then return trip:done({ error = "VPS Avenger's size cannot be told now" }) end
+  local vb, keysB, err = partBefore(pl, "macros", true)
+  if not trip:inFront() then return end
+  if not vb then return trip:done({ error = err }) end
+  local before = { keys = keysB, values = vb }
+  local focus = vb.macroSelected and string.format("macro-%d-slot-%d-rename", vb.macroSelected, index) or nil
+  Hv.rename(o, trip, {
+    kind = "macro", label = "Renaming macro field " .. index, pl = pl, at = M.FIELDS[field],
+    field = M.FIELD_NAMES[field], after = "macros", part = before,
+    read = function(_, _, now, pl2, info)
+      if not now then return { part = before, error = Hv.NOT_READ } end
+      local va, keys = Open.part(now, "macros", { pl = pl2, macroCount = vb.macroCount })
+      local name = textIn(pl2, now, M.FIELD_NAMES[field])
+      log("'macro %s': %s — %s", field, tostring(info.key), name and ("read '" .. name .. "'") or "nothing read")
+      local labels, snapped = {}, {}
+      for j = 1, 5 do
+        labels[j] = vb.macroLabels and vb.macroLabels[j]
+        snapped[j] = vb.macroSnapped and vb.macroSnapped[j]
+      end
+      if name then labels[index], snapped[index] = name, false end
+      va.macroCount, va.macroLabels, va.macroSnapped = vb.macroCount, labels, snapped
+      for _, k in ipairs({ "macroCount", "macroLabels", "macroSnapped" }) do keys[#keys + 1] = k end
+      local part = { keys = keys, values = va }
+      if not name then return { part = part, error = Hv.NOT_READ } end
+      return { part = part, focus = focus }
+    end,
+  })
+end
+
+-- ── Browse Presets ───────────────────────────────────────────────────────────
+-- A trip with no click: the preset may change while the user browses, so the database's position is
+-- forgotten first and a give-up posts the preset as not read (actions.luau, go). The name as it
+-- stands is read once with a callback, for the log only (U5); the keyboard is handed over with
+-- Return alone — Escape and the arrows are Avenger's browser's — and the tool's sentence said
+-- behind the screen reader. Once Return has gone through, the name is read until two readings agree
+-- or it is a catalog name (main.luau), in the place of the tool's quarter-second sleep, and posted
+-- with the database's place, as the tool snaps it.
+function Hv.browse(o, trip, forget)
+  forget("browsing presets in VPS Avenger")
+  if not trip:inFront() then return end
+  local start = {}
+  local r = o:toScreenRect(G.NAME_REGION)
+  if r then
+    pcall(host.ocr.recognize, r, { lang = H.lang(), key = "vps-avenger browse" }, function(res)
+      if res.status == "text" then start.name = R.tidy(res.text) end
+    end)
+  end
+  local handed, why = trip:handOver({
+    kind = "browse",
+    onEnd = function(o2, t2, how)
+      if how ~= "ended" or not t2:inFront() then return end
+      E.ring.settledName(o2, function(name, n)
+        host.log.info(string.format("[avenger] [browse] the name at the start %s, after Return %s (read %d times)",
+          start.name and ("'" .. start.name .. "'") or "not read", name and ("'" .. name .. "'") or "not read", n or 0))
+        if name == nil then return t2:done({ error = "the preset name cannot be read now" }) end
+        t2:done({ set = E.named(name), focus = "browse-expansion-presets-button" })
+      end, "Browse Presets")
+    end,
+  })
+  if handed then
+    host.speech.output(Hv.BROWSE, { interrupt = false })
+    return
+  end
+  if why == "not in front" then return end
+  trip:done({ error = Hv.NO_KEYBOARD })
+end
+
+-- What actions.luau hands over: { ring = main.luau's helpers, named = (name) -> the state's fields
+-- with the database's place, plugin = () -> the window the page was shown beside }.
+function Hv.start(env)
+  E = env
+end
+
+return Hv

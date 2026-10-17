@@ -34,7 +34,8 @@ use super::overlay_host_panel_tests::{run_with_helpers, SPECIFICITY_ARBITER};
 use super::page_example_tests::PAGE_WEBVIEW;
 
 /// The helpers, on top of the host-panel ones, the scripted page and the specificity arbiter.
-const PG: &str = r##"
+/// Shared with `overlay_handover_tests.rs`.
+pub(crate) const PG: &str = r##"
 local S = T.S
 local H = T.host
 T.KEY = "Ctrl+Shift+Alt+F1"
@@ -249,10 +250,15 @@ function T.trip(over)
 end
 
 -- The module disabled, as the host disables it: its pages hidden, its one-shot timers and pending
--- reads dropped, its overlays out of their slots. Enabled again: nothing happens until the next event.
+-- reads dropped, its overlays out of their slots, its captures out of the hook (T.typed) and its
+-- scope and flag forgotten — the flag as a `false` in S.menuOpen — and its recurring timers not run
+-- (T.tick). Enabled again (T.enable): nothing happens until the next event or tick.
 function T.disable()
   S.pg.shown = false
   S.after, S.asyncs, S.reads = {}, {}, {}
+  S.disabled = true
+  S.scopedTo = false
+  S.menuOpen[#S.menuOpen + 1] = false
   for _, c in ipairs(T.claims) do
     c.matching = false
     if c.active then
@@ -260,6 +266,11 @@ function T.disable()
       T.hostCall(c.off)
     end
   end
+end
+-- Enabled again: its captures are back, in every window and with no menu (docs/api/keys.md, scope).
+function T.enable()
+  S.disabled = false
+  S.scopedTo = false
 end
 
 -- A claim of another module on the synth's slot at `spec`, made to match or not.
@@ -872,6 +883,7 @@ fn a_disable_while_away_and_enable_recovers_at_the_next_event() {
         T.openPage()
         T.trip()
         T.disable()
+        T.enable()
         T.show(T.W, T.IN)
         T.ok(#S.giveUps == 1 and S.giveUps[1] == "page closed", "the trip ends: " .. tostring(S.giveUps[1]))
         T.ok(T.last() == "Next preset: the page was closed; nothing more was done.", T.last())
@@ -891,6 +903,7 @@ fn a_disable_while_away_and_enable_recovers_at_the_next_event() {
         T.runDue()
         T.ok(S.acts == 1 and #S.reads == 1, "acting, a read out")
         T.disable()
+        T.enable()
         T.show(T.W, T.IN)
         T.ok(#S.giveUps == 1 and S.giveUps[1] == "page closed", "the trip ends")
         T.ok(ov.active and not ov.away and T.holds("Return"), "keys back")
@@ -903,6 +916,7 @@ fn a_disable_while_away_and_enable_recovers_at_the_next_event() {
         local ov = T.synth()
         T.openPage()
         T.disable()
+        T.enable()
         T.show(T.OTHER)
         T.ok(not ov.away, "away ends at the next event")
         T.runDue()
