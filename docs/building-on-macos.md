@@ -418,7 +418,8 @@ Each of these is a line `check …: ok` or `check …: FAILED` with what was see
   own files, kept in the folder `WebKitRules` beside the application;
 - a tool page is built, without the build asking for the front — counted in `NSApplication`
   itself: for the rest of the run, its two activation calls go through a counter first — and its
-  document loads;
+  document loads, within 20 s for this first page, which starts WebKit's own processes, and within
+  five seconds for every later one;
 - the page's own script runs and an inline one does not (the host's policy);
 - a message makes the round trip, and twenty come back as twenty, in order;
 - the page fetches its own file, and a fetch of `https://example.com` is blocked;

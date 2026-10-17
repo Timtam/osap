@@ -112,6 +112,11 @@ make here says skipped. Exit status 0 when it ran to the end and no check failed
 /// of the application's.
 const SECTION: Duration = Duration::from_secs(5);
 
+/// How long the run's first page may take to load: it starts WebKit's own processes, which on a
+/// cold Intel runner took longer than a section (run 39035233368: every later page there loaded
+/// in 0.3 to 1 s). A bound on the test as `SECTION` is; the time it took is printed either way.
+const FIRST_LOAD: Duration = Duration::from_secs(20);
+
 /// How long the event loop runs after a change that announces nothing — the activation policy, and
 /// the launch — before what it did is read.
 const SETTLE: Duration = Duration::from_millis(500);
@@ -936,7 +941,20 @@ fn build_page(
 
 /// The page loaded: its document's own report, waited for.
 fn wait_loaded(app: &NSApplication, tally: &mut Tally, page: u64, from: usize, t0: Instant, name: &str) -> bool {
-    let ended = wait_page(app, from, t0 + SECTION, |e| match e {
+    wait_loaded_within(app, tally, page, from, t0, name, SECTION)
+}
+
+/// `wait_loaded` with a bound of its own, for the run's first page (`FIRST_LOAD`).
+fn wait_loaded_within(
+    app: &NSApplication,
+    tally: &mut Tally,
+    page: u64,
+    from: usize,
+    t0: Instant,
+    name: &str,
+    bound: Duration,
+) -> bool {
+    let ended = wait_page(app, from, t0 + bound, |e| match e {
         PageEvent::Loaded { page: p, .. } | PageEvent::LoadFailed { page: p, .. } | PageEvent::Closed { page: p, .. } => *p == page,
         PageEvent::Message { .. } => false,
     });
@@ -944,7 +962,7 @@ fn wait_loaded(app: &NSApplication, tally: &mut Tally, page: u64, from: usize, t
         Some((at, PageEvent::Loaded { .. })) => Ok(format!("after {:.0} ms", at.saturating_duration_since(t0).as_secs_f64() * 1000.0)),
         Some((_, PageEvent::LoadFailed { why, .. })) => Err(format!("its document did not load: {why}")),
         Some((_, PageEvent::Closed { why, .. })) => Err(format!("the page was closed ({why}) before it loaded")),
-        _ => Err(format!("not within {} s", SECTION.as_secs())),
+        _ => Err(format!("not within {} s", bound.as_secs())),
     };
     let ok = result.is_ok();
     tally.check(&format!("the {name} page loads"), result);
@@ -986,7 +1004,7 @@ fn web_view(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally) {
     let from = inbox_mark();
     let t0 = Instant::now();
     if let Some(tool) = build_page(tally, &rules, &root, WindowKind::Tool, true, "tool", 1, counting) {
-        if wait_loaded(app, tally, 1, from, t0, "tool") {
+        if wait_loaded_within(app, tally, 1, from, t0, "tool", FIRST_LOAD) {
             tool_page(app, mtm, tally, &tool, from, t0);
         }
         drop(tool);
