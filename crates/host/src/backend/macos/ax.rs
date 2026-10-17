@@ -2681,6 +2681,40 @@ pub fn window_controls(hwnd: isize) -> Vec<ControlInfo> {
     out
 }
 
+thread_local! {
+    /// The applications, and what they answered, that a read of the focused element has been
+    /// said for (`note_focus_unreadable`).
+    static FOCUS_UNREADABLE: RefCell<HashSet<(String, &'static str)>> = RefCell::new(HashSet::new());
+}
+
+/// The frontmost application (`front`) answered the system-wide read of the focused element with
+/// `what` — an error other than the busy and the permission ones, which `note_error` says itself,
+/// or no element and no front window — so the chain is empty. Said once per application and
+/// answer for the session: the first Mac test of VPS Avenger's page (2026-10-14) had an empty chain
+/// after every click into Avenger in Logic, and the log could not say which of these it was, since
+/// both were trace lines.
+fn note_focus_unreadable(front: Option<i32>, what: &'static str) {
+    let app = front
+        .map(exe_for_pid)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "the frontmost application".to_string());
+    let first = FOCUS_UNREADABLE.with(|s| s.borrow_mut().insert((app.clone(), what)));
+    if first {
+        let answered = if what.starts_with("no ") {
+            what.to_string()
+        } else {
+            format!("{what} reading AXFocusedUIElement")
+        };
+        crate::logging::line(
+            "macos",
+            &format!(
+                "accessibility answered {answered} in {app} — where the keyboard is cannot be read \
+                 there (the focus chain is empty)"
+            ),
+        );
+    }
+}
+
 /// The focused element first, its ancestors after it, the window last.
 ///
 /// The question it answers is whether the keyboard focus is inside a plugin's surface or on
@@ -2731,13 +2765,21 @@ pub fn window_focus_chain() -> Vec<ControlInfo> {
         }
         Ok(None) => match frontmost_window_element() {
             Some((w, p)) => (Some(w), p),
-            None => (None, 0),
+            None => {
+                // Not while the application is quarantined as busy: that is no answer from it.
+                if !front.is_some_and(is_busy) {
+                    note_focus_unreadable(front, "no focused element and no front window");
+                }
+                (None, 0)
+            }
         },
         Err(err) => {
             if err == AXError::CannotComplete {
                 if let Some(p) = front {
                     note_busy(p);
                 }
+            } else if !matches!(err, AXError::APIDisabled | AXError::NotImplemented) {
+                note_focus_unreadable(front, err_name(err));
             }
             crate::logging::trace("macos", || {
                 "focus chain: the focused element could not be read; answering empty".to_string()

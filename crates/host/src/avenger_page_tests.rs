@@ -1016,6 +1016,56 @@ fn previous_and_next_from_the_page_click_watch_the_name_and_say_unchanged() {
     "##);
 }
 
+/// ▶ from the page reads Avenger's loading display first (the tester's log: "cYanmaGentaYellowb"
+/// after "AR Catch Me", posted to the page as the preset), each read handed to two of the watch's
+/// looks, as on a Mac: the name counts once two readings agree or the catalog has it, so the state
+/// posted is the name, and the loading display is never posted.
+#[test]
+fn previous_and_next_from_the_page_post_a_settled_name() {
+    run_mac(r##"
+        local S = T.S
+        local _, _, W = T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.nameIs("LD Lead 1")
+        T.openPage()
+        T.event()
+        T.tripFrom({ action = "next_preset", args = {}, focused = true }, W)
+        local answers = { "cYanmaGentaYellowb", "LD Lead 2" }
+        T.slowNameReads(function(i) return answers[math.min(i, #answers)] end)
+        T.ok(T.lastPost("state").state.preset == "LD Lead 2", tostring(T.lastPost("state").state.preset))
+        for _, p in ipairs(T.page().posts) do
+          T.ok(not (p.kind == "state" and p.state and p.state.preset == "cYanmaGentaYellowb"),
+            "the loading display posted as the preset")
+        end
+        T.ok(T.count("— LD Lead 1 -> LD Lead 2 (2 readings alike)") == 1, T.dump())
+    "##);
+}
+
+/// ▶ from the page with Avenger's loading display read once by the watch's bound, and nothing
+/// after it: the name never settled, so the page gets the error, not the text — no state with it
+/// as the preset.
+#[test]
+fn a_name_read_once_by_the_watchs_bound_is_not_posted_from_the_page() {
+    run_mac(r##"
+        local S = T.S
+        local _, _, W = T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.nameIs("LD Lead 1")
+        T.openPage()
+        T.event()
+        T.tripFrom({ action = "next_preset", args = {}, focused = true }, W)
+        T.slowNameReads(function(i) return i == 1 and "cYanmaGentaYellowb" or nil end)
+        T.ok(T.lastPost("error").text == "Next preset: the preset name cannot be read now",
+          tostring(T.lastPost("error").text))
+        for _, p in ipairs(T.page().posts) do
+          T.ok(not (p.kind == "state" and p.state and p.state.preset == "cYanmaGentaYellowb"),
+            "the loading display posted as the preset")
+        end
+        T.ok(T.count("[avenger] 'Next preset': 'cYanmaGentaYellowb' was read once and is no catalog name "
+          .. "— not taken") == 1, T.dump())
+    "##);
+}
+
 /// One trip at a time: ▶ pressed twice in the page before Avenger's window has come — the page
 /// still has the keyboard — starts one trip; the second message is dropped, and the runtime logs
 /// it. One click, one name.

@@ -1,9 +1,10 @@
 id = "com.platform.vps-avenger"
 name = "VPS Avenger"
-version = "0.3.0"
+version = "0.3.1"
 license = "GPL-3.0-or-later"
-# The runtime's page support (O:addPage, O:inPlugin) came with version 0.6.
-dependencies = ["com.platform.overlay >= 0.6", "com.platform.daw-hosts"]
+# The runtime's page support (O:addPage, O:inPlugin) came with version 0.6; `identify`'s `again`
+# and O:watch's count of readings, which the header's read and the name after ◀ and ▶ use, with 0.7.
+dependencies = ["com.platform.overlay >= 0.7", "com.platform.daw-hosts"]
 # The catalog of Avenger's expansions (modules/vps-avenger-presets), when it is installed:
 # the preset's expansion, category, oscillators and macros, and the neighbour ◀ and ▶ lead to,
 # said marked as the database's (src/presets.luau). Without it the module is what it was.
@@ -15,7 +16,8 @@ optional_dependencies = ["com.platform.vps-avenger-presets"]
 
 [capabilities]
 # What this module's own code calls; the overlay runtime's calls are covered by its own manifest.
-#   window  ownsPoint before a click of its own, recheck once a read has decided, the window's title
+#   window  ownsPoint before a click of its own, recheck once the warning box's read has decided,
+#           the window's title
 #   ocr     Avenger's header (identity and zoom), the preset's name, the warning box; for the
 #           page, the words of one picture of Avenger (src/read/open.luau)
 #   input   the clicks on ◀ and ▶, UNDO and the redo list's right click, an opener clicked again

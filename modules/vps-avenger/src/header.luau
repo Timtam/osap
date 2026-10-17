@@ -27,8 +27,9 @@
 -- Mac a read that finds nothing takes a quarter of a second, a wait for it would hold this
 -- module's keys, and `identify` is asked in every plug-in window of every DAW the keyboard comes
 -- into. So `identify` answers nil —
--- "could not tell yet" — until the answer lands, and then asks every overlay to look again
--- (host.window.recheck), exactly as sforzando's wordmark and Kontakt 7's top row do. A read that
+-- "could not tell yet" — until the answer lands, and then asks the overlays of its binding to look
+-- again, with the function the runtime hands `identify` for it (`again`, docs/api/overlay.md,
+-- attachEmbedded), as sforzando's wordmark does. A read that
 -- saw nothing (blank, none, failed) is no answer and is asked again, and so is one that is only
 -- half an answer: one of MENU and UNDO read and not the other, captions read only with boxes the
 -- recogniser guessed, or Avenger's captions with no factor that fits them. Text without Avenger's
@@ -469,6 +470,13 @@ local function measured(ctrl, h, k, cx, cy)
   return line
 end
 
+-- A verdict read for `st` is in: the overlays of the binding look again, through the `again` the
+-- runtime handed `identify` for this state (H.identify). A read this state started without one —
+-- none so far, since `identify` is asked first — asks every module's overlays instead.
+local function lookAgain(st)
+  if st.again then st.again() else host.window.recheck() end
+end
+
 local function answered(ctrl, st, token, band, cx, cy, title, r)
   if states[st.key] ~= st or st.reading ~= token then return end
   st.reading = nil
@@ -495,7 +503,7 @@ local function answered(ctrl, st, token, band, cx, cy, title, r)
       if lastAvenger == st.id then lastAvenger = nil end
       sayOnce("no", winKey, "[avenger] %s: not VPS Avenger — %s in the header band at %s: \"%s\"",
         where, tostring(why), area, forLog(r.text))
-      host.window.recheck()
+      lookAgain(st)
     elseif undecided then
       -- Half an answer is no answer: read again, up to READS_MAX, and the runtime's own bound on
       -- "could not tell yet" after that.
@@ -510,7 +518,7 @@ local function answered(ctrl, st, token, band, cx, cy, title, r)
         takeZoom(st, nil, nil, nil)
         host.log.info(string.format("[avenger] %s: not VPS Avenger after all — %s in %d reads in a row "
           .. "since the stay was carried over: \"%s\"", where, tostring(why), st.misses, forLog(r.text)))
-        host.window.recheck()
+        lookAgain(st)
       else
         host.log.info(string.format("[avenger] %s: the header is not read where it was (%s): \"%s\" — "
           .. "read again", where, tostring(why), forLog(r.text)))
@@ -562,7 +570,7 @@ local function answered(ctrl, st, token, band, cx, cy, title, r)
       undecided and "VPS Avenger" or "the header again", field, what, line))
     headerShot(ctrl, band, k, zoom, h)
   end
-  if undecided then host.window.recheck() end
+  if undecided then lookAgain(st) end
 end
 
 -- Starts a read of `ctrl`'s header for `st`, unless one is out or there is nothing to learn.
@@ -636,10 +644,12 @@ end
 
 -- ── What the overlay asks ────────────────────────────────────────────────────
 
--- The binding's `identify`: true, false, or nil while the header's read is out.
-function H.identify(ctrl)
+-- The binding's `identify`: true, false, or nil while the header's read is out. `again` is the
+-- runtime's: called when the read's answer is in (lookAgain).
+function H.identify(ctrl, again)
   if not (ctrl and ctrl.id and ctrl.client) then return false end
   local st = stateFor(ctrl)
+  if again then st.again = again end
   if st.verdict ~= nil then return st.verdict end
   if carried(ctrl, st) then return true end
   request(ctrl, st)

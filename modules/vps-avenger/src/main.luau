@@ -167,7 +167,7 @@ local NAME_WITHIN = 2000
 -- `pending`: the press whose watch is still out, or nil once it has ended (or the overlay has
 -- left the front, which ends a watch without a word). Only the database's rule asks it: a press
 -- made while it is set may read the name from before that press's click (presets.luau).
-local names = { gen = 0, reading = false, text = nil, textGen = -1, last = nil, pending = nil }
+local names = { gen = 0, reading = false, text = nil, textGen = -1, seq = 0, last = nil, pending = nil }
 
 local function tidy(text)
   local t = string.gsub(text or "", "%s+", " ")
@@ -197,7 +197,11 @@ local function nameNow(o)
   return t
 end
 
--- The last name read for press `gen`, and a new read started when none is out.
+-- The last name read for press `gen` and which reading it came from (`names.seq`, counted up for
+-- every name a read's answer brings), and a new read started when none is out. The watch looks
+-- more often than a read answers — every 100 ms against 130 to 200 for a read on a Mac — so the
+-- same answer is handed to several looks, and the reading's number is what tells the watch it is
+-- the same one (O:watch counts readings, not looks).
 local function nameAfter(o, gen)
   if gen ~= names.gen then return nil end
   if not names.reading then
@@ -211,12 +215,33 @@ local function nameAfter(o, gen)
         if t ~= "" then
           t = asName(t)
           names.text, names.textGen, names.last = t, gen, t
+          names.seq += 1
         end
       end)
       if not ok then names.reading = false end
     end
   end
-  return names.textGen == gen and names.text or nil
+  if names.textGen ~= gen then return nil end
+  return names.text, names.seq
+end
+
+-- A name the watch read after a click counts once it settles: read twice in a row, or — with
+-- the preset database — a catalog name as it stands (presets.luau, DB.catalogName), which counts
+-- at its first reading. Avenger shows a loading display while it loads a preset, and a read of it
+-- comes out as some other text each time ("cYanmaGentaYellowb", "PY", "M": the first Mac test of
+-- the page, 2026-10-14, where the first reading that differed was said as the preset in seven of
+-- ten steps), so two readings alike are the name. A loading display read alike twice in a row would
+-- still pass; that log had none. `n` is O:watch's count of readings in a row.
+local function settledName(now, n)
+  return n >= 2 or DB.catalogName(now)
+end
+
+-- What the watch's bound leaves of reading `now`, read `n` times in a row, after `before`: nil for
+-- a name that changed and never settled — said as not read, not as the preset — and `now` otherwise.
+local function keptAtBound(label, now, before, n)
+  if now == nil or now == before or settledName(now, n) then return now end
+  host.log.info(string.format("[avenger] '%s': '%s' was read once and is no catalog name — not taken", label, now))
+  return nil
 end
 
 -- With the database: what DB.after says for the watch's outcome, or nil for what the module says
@@ -273,14 +298,20 @@ local function presetStep(ov, label, at, dir)
       o:watch({
         read = function(w) return nameAfter(w, gen) end,
         was = was,
-        done = function(now, before) return before ~= nil and now ~= before end,
+        done = function(now, before, n) return before ~= nil and now ~= before and settledName(now, n) end,
         within = NAME_WITHIN,
         onDone = function(now)
           settled(gen)
           host.speech.output(decided(step, gen, now, false) or now, { interrupt = true })
         end,
-        onGiveUp = function(now, before)
+        onGiveUp = function(now, before, n)
           settled(gen)
+          -- Overtaken by a later press, whose own watch says the name: this one has read nothing
+          -- since (nameAfter), and a word of its own at its bound would come after that name and
+          -- say it cannot be read — ▶ ▶ within half a second on a Mac, where two readings alike
+          -- keep a watch open longer.
+          if gen ~= names.gen then return end
+          now = keptAtBound(label, now, before, n)
           local said = decided(step, gen, now, now ~= nil and now == before)
           if said then
             host.speech.output(said, { interrupt = true })
@@ -298,19 +329,20 @@ local function presetStep(ov, label, at, dir)
 end
 
 -- For a trip of the page's (actions.luau): the name after a click of the module's own, watched as
--- a step's is — read again and again until it differs from `was`, up to NAME_WITHIN — and
--- `onEnd(now, before, changed)` once, with the last name read (nil: none). The watch ends
--- unreported where the overlay leaves (O:watch); the trip's own ends cover that.
-local function watchName(o, was, onEnd)
+-- a step's is — read again and again until it differs from `was` and has settled, up to
+-- NAME_WITHIN — and `onEnd(now, before, changed)` once, with the last name read (nil: none, or one
+-- that never settled). The watch ends unreported where the overlay leaves (O:watch); the trip's own
+-- ends cover that. `label` names the action in the log.
+local function watchName(o, was, onEnd, label)
   names.gen += 1
   local gen = names.gen
   o:watch({
     read = function(w) return nameAfter(w, gen) end,
     was = was,
-    done = function(now, before) return before ~= nil and now ~= before end,
+    done = function(now, before, n) return before ~= nil and now ~= before and settledName(now, n) end,
     within = NAME_WITHIN,
     onDone = function(now, before) onEnd(now, before, true) end,
-    onGiveUp = function(now, before) onEnd(now, before, false) end,
+    onGiveUp = function(now, before, n) onEnd(keptAtBound(label or "the page", now, before, n), before, false) end,
   })
 end
 

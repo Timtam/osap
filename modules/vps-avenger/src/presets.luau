@@ -547,6 +547,20 @@ function DB.after(step, now, unchanged)
   return said
 end
 
+-- Whether `text`, a name read off the screen, is a catalog name as it stands or ignoring case
+-- (SNAPPING's 1 and 2) — never by similarity, so that Avenger's loading display read as
+-- "cYanmaGentaYellowb" is not taken for a name — for the watch after ◀ and ▶ (main.luau), which
+-- takes such a name at its first reading and waits for two readings alike otherwise. False without
+-- the database or a readable index, and for Avenger's blank preset; the anchor is not touched. Two
+-- table lookups once the index is built, which the step's DB.before and the page's `named` do.
+function DB.catalogName(text)
+  if not (P and type(text) == "string") then return false end
+  local t = tidy(text)
+  if t == "" or R.isInitPreset(t) then return false end
+  if not catalog() then return false end
+  return cat.exact[t] ~= nil or cat.byFold[folded(t)] ~= nil
+end
+
 -- The expansions of roster `name`, in the catalog's order, for the page's list of expansions:
 -- "Factory Standard", the ones every owner of Avenger has, or "Complete", every expansion the
 -- catalog lists. The catalog's list, never Avenger's own — the page marks it as the database's —

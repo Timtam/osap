@@ -689,6 +689,27 @@ function T.nameReads(name, ms)
   end
 end
 
+-- The same, with the reads as slow as on a Mac, where one takes longer than the watch's 100 ms
+-- between looks: each read is answered a tick after the one it was asked in, so every answer is
+-- handed to two looks, as the tester's log has it. `answer(i)` gives the i-th read's answer: a
+-- name, or nil for nothing read.
+function T.slowNameReads(answer, ms)
+  local i = 0
+  for _ = 1, math.floor((ms or 3750) / 150) do
+    T.run(150)
+    local r = T.lastRead("vps-avenger name")
+    if r and not r.answered then
+      if r.waited then
+        i += 1
+        local name = answer(i)
+        T.answer(r, name and T.nameRead(name) or { status = "none", text = "", words = {} })
+      else
+        r.waited = true
+      end
+    end
+  end
+end
+
 -- Loads daw-hosts and the module as the host loads them, and hands back its two overlays: the
 -- header and the warning box. The module gets a host of its own whose `host.path` is its own
 -- folder, as the host scopes a module's identity; the runtime's pictures stay in the runtime's
@@ -1178,8 +1199,11 @@ fn avenger_is_recognised_by_its_header_in_a_reaper_floating_window() {
         T.event()
         T.ok(#S.reads == 1, "one read per stay, not one per evaluation: " .. #S.reads)
         T.answer(r, T.header(98, 84, 1.6, 80))
-        T.ok(S.rechecks == 1, "the answer asks the overlays to look again")
-        T.event()
+        -- The answer asks the overlays of the binding to look again on the module's next turn,
+        -- through the function the runtime hands `identify`: no window event is needed, and no
+        -- round of every module's overlays is asked for.
+        T.ok(S.rechecks == 0 and not header.active, "the answer asks nobody else to look again")
+        T.runDue()
         T.ok(header.active and not box.active)
         T.ok(T.count("[avenger] 'VST3i: VPS Avenger - Track 1' (1394x898): VPS Avenger, the zoom field "
           .. "reads 80 % — zoom 80 % (read), factor 1.6000, display factor 1.00. MENU read at (517,106), UNDO "
@@ -1243,6 +1267,267 @@ fn avenger_is_recognised_in_a_logic_window_titled_inst_1_and_another_plugin_is_n
     "##);
 }
 
+// ---------------------------------------------------------------------------------------------
+// The first Mac test of the Avenger page (2026-10-14): Logic at 80 %, the keyboard on nothing
+// after every click into Avenger's own view.
+// ---------------------------------------------------------------------------------------------
+
+/// The header's read lands after a click into Avenger's view, with the keyboard on nothing anybody
+/// can read: the stay goes on in the same window, and the read's answer asks the overlays to look
+/// again through the function the runtime handed `identify` — no window event, no round of every
+/// module's overlays — so the header comes up on the module's next turn.
+#[test]
+fn a_header_read_that_lands_after_the_keyboard_went_unreadable_brings_the_overlay_up() {
+    run_mac(r##"
+        local S = T.S
+        local L = T.logic(80)
+        S.listed = { L }
+        T.at(L)
+        local header = T.avenger()
+        local r = T.lastRead("vps-avenger header")
+        T.ok(r and not header.active, "nothing before the header is read: " .. T.dump())
+        T.show(L, {})
+        T.answer(r, T.header(0, 120, 1.6, 80))
+        T.ok(not header.active, "on the next turn, not inside the answer")
+        T.runDue()
+        T.ok(header.active, "up with the keyboard on nothing: " .. T.dump())
+        T.ok(S.rechecks == 0, "asked again through identify's own function: " .. S.rechecks)
+        T.ok(T.count("[overlay] 'VPS Avenger': where the keyboard is in 'Inst 1' cannot be read (an empty "
+          .. "focus chain) — the stay goes on there") == 1, T.dump())
+    "##);
+}
+
+/// Logic at 80 %, the tester's sequence: a click into Avenger that is not the module's (l.772 of the
+/// log; whose it was, the log does not say), then the ring's ◀ with Logic reporting the keyboard on
+/// nothing after its click (l.2160-2167):
+/// the header stays in front — no `[deactivate]`, the database's position not forgotten, no second
+/// header read — and the watch ends by saying the new name.
+#[test]
+fn in_logic_the_ring_stays_up_after_its_own_click_with_the_keyboard_on_nothing() {
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local L = T.logic(80)
+        S.listed = { L }
+        T.at(L)
+        local header = T.avenger()
+        T.answer(T.lastRead("vps-avenger header"), T.header(0, 120, 1.6, 80))
+        T.event()
+        T.ok(header.active, T.dump())
+        -- The name's box at 80 % from Avenger's corner (0, 120): (34, 7)-(214, 22) x 1.6.
+        S.ocr = function(g) return T.region(g) == "54,131,342,155" and "LD Lead 2" or "" end
+        T.run(400)
+        local headerRead = T.lastRead("vps-avenger header")
+        T.show(L, {})
+        T.ok(header.active, "a click not of the module's: " .. T.dump())
+        local said = #S.speech
+        T.pressAt(header, 2)
+        T.ok(T.clickAt() == "352,142", "◀ where the log has it: " .. T.clickAt())
+        T.show(L, {})
+        T.ok(header.active and T.count("[deactivate]") == 0, "still in front after its click: " .. T.dump())
+        for _ = 1, 25 do
+          T.run(150)
+          local r = T.lastRead("vps-avenger name")
+          if r and not r.answered then T.answer(r, T.nameRead("LD Lead 1")) end
+        end
+        T.ok(T.lastSaid() == "LD Lead 1" and #S.speech == said + 1, T.said(said + 1))
+        T.ok(header.active and T.count("[deactivate]") == 0 and T.count("forgotten: the overlay left the front") == 0, T.dump())
+        T.ok(T.lastRead("vps-avenger header") == headerRead, "no second header read")
+    "##);
+}
+
+/// The ring's Load and Initialize in Logic, Logic reporting the keyboard on nothing after MENU's
+/// click (l.2228-2233 and l.2667-2672 of the log): each item is chosen in Avenger's popup, and
+/// Initialize goes on to look for the warning box.
+#[test]
+fn in_logic_load_and_initialize_from_the_ring_are_chosen_after_logic_reports_nothing() {
+    run_mac(r##"
+        local S = T.S
+        local L = T.logic(80)
+        S.listed = { L }
+        T.at(L)
+        local header = T.avenger()
+        T.answer(T.lastRead("vps-avenger header"), T.header(0, 120, 1.6, 80))
+        T.event()
+        T.run(400)
+        T.ok(header.active, T.dump())
+        -- MENU: 262 x 1.6 = 419.2 -> 419, 120 + 14 x 1.6 = 142.4 -> 142. Its popup (245, 20) from the
+        -- corner in 50 % units: (392, 152), 192 x 96; Load's row 120 + 32 x 1.6 = 171.2 -> 171, across
+        -- its middle 392 + 96 = 488.
+        T.pressAt(header, 4)
+        T.ok(T.clickAt() == "419,142", T.clickAt())
+        T.show(L, {})
+        T.ok(header.active, T.dump())
+        T.popup(300, 392, 152, 192, 96)
+        T.tick(1)
+        T.ok(T.clickAt() == "488,171", T.clickAt())
+        T.closePopups()
+        T.tick(2)
+        T.ok(T.count("[menu item] 'VPS Avenger': 'Load preset' chosen — clicked 1 time(s) at (488,171)") == 1, T.dump())
+        -- Initialize's row: 120 + 68 x 1.6 = 228.8 -> 229.
+        T.pressAt(header, 7)
+        T.show(L, {})
+        T.popup(301, 392, 152, 192, 96)
+        T.tick(1)
+        T.ok(T.clickAt() == "488,229", T.clickAt())
+        T.closePopups()
+        T.tick(2)
+        T.ok(T.count("[avenger] 'Initialize preset' chosen: Avenger's warning box is looked for, up to 8 reads") == 1, T.dump())
+        T.ok(T.count("not chosen — the overlay left the front first") == 0 and T.count("[deactivate]") == 0, T.dump())
+    "##);
+}
+
+// ---------------------------------------------------------------------------------------------
+// A step's name, settled: two readings alike, or a catalog name.
+// ---------------------------------------------------------------------------------------------
+
+/// O:watch counts READINGS, not looks: a `read` that hands back the reading it answers from as its
+/// second value is a new reading only when that changes, and `done` sees each reading once, with
+/// how many in a row have read the same value; a look that reads nothing neither counts nor breaks
+/// the run, and the count reaches `onDone`, `onGiveUp` and the `[watch]` line. A `read` without a
+/// second value makes every look a reading, as before.
+#[test]
+fn o_watch_counts_readings_not_looks() {
+    run(r##"
+        local S = T.S
+        local o = T.overlay(nil, "Watched")
+        local seen, done, gaveUp = {}, nil, nil
+        S.v, S.id = nil, nil
+        o:watch({
+          read = function() return S.v, S.id end,
+          was = "a",
+          done = function(now, _, n) seen[#seen + 1] = now .. ":" .. n; return n >= 2 end,
+          within = 2000,
+          onDone = function(now, was, n) done = { now, was, n } end,
+          onGiveUp = function() gaveUp = true end,
+        })
+        S.v, S.id = "b", 1
+        T.tick(3)
+        T.ok(table.concat(seen, ",") == "b:1", "one reading, however many looks: " .. table.concat(seen, ","))
+        S.v, S.id = nil, nil
+        T.tick(2)
+        S.v, S.id = "b", 2
+        T.tick(1)
+        T.ok(table.concat(seen, ",") == "b:1,b:2", table.concat(seen, ","))
+        T.ok(done and done[1] == "b" and done[2] == "a" and done[3] == 2 and not gaveUp, T.dump())
+        T.ok(T.count("[watch] Watched: changed after") == 1 and T.count("— a -> b (2 readings alike)") == 1, T.dump())
+        -- Another value in between breaks the run.
+        seen, done = {}, nil
+        o:watch({
+          read = function() return S.v, S.id end,
+          was = "a",
+          done = function(now, _, n) seen[#seen + 1] = now .. ":" .. n; return false end,
+          within = 600,
+          onGiveUp = function(now, was, n) gaveUp = { now, was, n } end,
+        })
+        S.v, S.id = "c", 3
+        T.tick(1)
+        S.v, S.id = "d", 4
+        T.tick(1)
+        S.v, S.id = "c", 5
+        T.tick(4)
+        T.ok(table.concat(seen, ",") == "c:1,d:1,c:1", table.concat(seen, ","))
+        T.ok(type(gaveUp) == "table" and gaveUp[1] == "c" and gaveUp[3] == 1, T.dump())
+        T.ok(T.count("[watch] Watched: gave up after") == 1, T.dump())
+        -- Nothing read at the end: n is 0.
+        S.v, S.id = nil, nil
+        o:watch({ read = function() return S.v, S.id end, was = "a", within = 300,
+          onGiveUp = function(now, _, n) gaveUp = { now, n } end })
+        T.tick(4)
+        T.ok(gaveUp[1] == nil and gaveUp[2] == 0, T.dump())
+        -- Without a reading of its own, every look is one.
+        seen = {}
+        S.v = "e"
+        o:watch({ read = function() return S.v end, was = "a",
+          done = function(_, _, n) seen[#seen + 1] = n; return n >= 3 end })
+        T.tick(4)
+        T.ok(table.concat(seen, ",") == "1,2,3", table.concat(seen, ","))
+        T.ok(T.count("— a -> e (3 readings alike)") == 1, T.dump())
+    "##);
+}
+
+/// ◀ or ▶ reads Avenger's loading display first, which is no name — the tester's log has
+/// "cYanmaGentaYellowb", "PY" and "M" said for three of the page's ▶ (l.1797, l.1823 and l.1850),
+/// composed here into one step — and each read is handed to two of the watch's looks, as on a Mac:
+/// without the database the name counts once two READINGS agree, so the step says "AR Detroit
+/// 303" and never what was read on the way.
+#[test]
+fn a_step_says_the_name_once_two_reads_agree_and_not_avengers_loading_display() {
+    run_mac(r##"
+        local S = T.S
+        local header = T.avengerAt80("AR Catch Me")
+        local said = #S.speech
+        T.pressAt(header, 3)
+        local answers = { "cYanmaGentaYellowb", "PY", "M", "AR Detroit 303" }
+        T.slowNameReads(function(i) return answers[math.min(i, #answers)] end)
+        T.ok(#S.speech == said + 1 and T.lastSaid() == "AR Detroit 303", T.said(said + 1))
+        T.ok(T.count("[watch] VPS Avenger: changed after") == 1
+          and T.count("— AR Catch Me -> AR Detroit 303 (2 readings alike)") == 1, T.dump())
+    "##);
+}
+
+/// With the preset database a name the catalog has counts at its first reading — the step says
+/// it then — and a reading the catalog does not have ("M") waits for a second one.
+#[test]
+fn with_the_database_a_catalog_name_counts_at_its_first_read() {
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local header = T.avengerAt80("LD Lead 1")
+        local said = #S.speech
+        T.pressAt(header, 3)
+        local answers = { "M", "LD Lead 2" }
+        T.slowNameReads(function(i) return answers[math.min(i, #answers)] end)
+        T.ok(#S.speech == said + 1 and T.lastSaid() == "LD Lead 2", T.said(said + 1))
+        T.ok(T.count("— LD Lead 1 -> LD Lead 2") == 1 and T.count("(2 readings alike)") == 0,
+          "at its first reading: " .. T.dump())
+    "##);
+}
+
+/// A reading that changed, was read once by the watch's bound and is no catalog name is not taken:
+/// "the preset name cannot be read now" without the database, the neighbour with it, marked.
+#[test]
+fn a_name_read_once_by_the_watchs_bound_is_not_taken() {
+    for db in [false, true] {
+        let scenario = r##"
+            local S = T.S
+            if @DB@ then T.presets() end
+            local header = T.avengerAt80(@DB@ and "LD Lead 1" or "AR Catch Me")
+            local said = #S.speech
+            T.pressAt(header, 3)
+            T.slowNameReads(function(i) return i == 1 and "cYanmaGentaYellowb" or nil end)
+            local want = @DB@ and "LD Lead 2, from the database" or "the preset name cannot be read now"
+            T.ok(#S.speech == said + 1 and T.lastSaid() == want, T.said(said + 1))
+            T.ok(T.count("[avenger] 'Next preset': 'cYanmaGentaYellowb' was read once and is no catalog "
+              .. "name — not taken") == 1, T.dump())
+        "##;
+        run_mac(&scenario.replace("@DB@", if db { "true" } else { "false" }));
+    }
+}
+
+/// ▶ ▶ within half a second on a Mac: the first step's name read once, then the second press. The
+/// first step's watch, overtaken, reads nothing more and says nothing at its bound; the second says
+/// the name, and it is the last thing said — not "the preset name cannot be read now" after it.
+#[test]
+fn a_step_overtaken_by_a_second_press_leaves_the_last_word_to_it() {
+    run_mac(r##"
+        local S = T.S
+        local header = T.avengerAt80("AR Band Pass Slide")
+        local said = #S.speech
+        T.pressAt(header, 3)
+        T.run(150)
+        T.answer(T.lastRead("vps-avenger name"), T.nameRead("AR Deep Arp"))
+        T.run(150)
+        T.ok(#S.speech == said, "read once, not said yet: " .. T.said(said + 1))
+        T.nameIs("AR Deep Arp")
+        T.pressAt(header, 3)
+        T.nameReads("BA Deep Sub")
+        T.ok(T.said(said + 1) == "BA Deep Sub", T.said(said + 1))
+        T.ok(T.count("[watch] VPS Avenger: gave up after") == 1 and T.count("[watch] VPS Avenger: changed after") == 1,
+          "the first watch ran out, unsaid: " .. T.dump())
+    "##);
+}
+
 /// On Windows Avenger is its own JUCE child window, matched by the shape of JUCE's class and
 /// identified by the same header read; its corner is the child's, with no DAW difference added —
 /// the log line gives the offsets with the panel's (-2, +2) as well, so one Windows session says
@@ -1262,7 +1547,10 @@ fn on_windows_avenger_is_its_juce_child_and_a_display_factor_is_learned_from_the
         T.ok(r and T.region(r.region) == "248,60,1189,137", r and T.region(r.region))
         T.ok(not header.active)
         T.answer(r, T.header(248, 60, 2.4, 80))
-        T.event()
+        -- Picked up through the `again` the runtime hands `identify` on the pattern's path too: on
+        -- the module's next turn, with no window event and no round of every module's overlays.
+        T.ok(S.rechecks == 0 and not header.active, "asked again through identify's own function: " .. S.rechecks)
+        T.runDue()
         T.ok(header.active and header:origin().id == 70)
         T.ok(T.count("attachEmbedded: matched control [JUCE_1a05739a091] id=70, identify=true") == 1)
         T.ok(T.count("zoom 80 % (read), factor 2.4000, display factor 1.50") == 1)
@@ -1522,8 +1810,13 @@ fn previous_and_next_say_the_new_name_once_it_is_on_screen() {
         T.ok(r2 ~= r1, "read again")
         T.answer(r2, name("BA  Deep Sub"))
         T.run(150)
+        T.ok(#S.speech == said, "a name read once is not said yet: " .. T.said(said + 1))
+        local r3 = T.lastRead("vps-avenger name")
+        T.ok(r3 ~= r2, "read again")
+        T.answer(r3, name("BA Deep Sub"))
+        T.run(150)
         T.ok(T.lastSaid() == "BA Deep Sub", T.said())
-        T.ok(T.count("[watch] VPS Avenger: changed after") == 1)
+        T.ok(T.count("[watch] VPS Avenger: changed after") == 1 and T.count("-> BA Deep Sub (2 readings alike)") == 1, T.dump())
         -- ◀ at the first preset: the name stays, and is said as it is when the watch gives up.
         S.ocr = function(g) return T.region(g) == "152,95,440,119" and "BA Deep Sub" or "" end
         T.pressAt(header, 2)
@@ -1582,6 +1875,9 @@ fn a_name_before_the_click_that_cannot_be_read_is_not_taken_for_a_change() {
         T.answer(T.lastRead("vps-avenger name"), name("BA Deep Sub"))
         T.run(150)
         T.ok(#S.speech == said, "the last name, not redrawn yet, is not said")
+        T.answer(T.lastRead("vps-avenger name"), name("CH Chord Stack"))
+        T.run(150)
+        T.ok(#S.speech == said, "a name read once is not said yet: " .. T.said(said + 1))
         T.answer(T.lastRead("vps-avenger name"), name("CH Chord Stack"))
         T.run(150)
         T.ok(T.lastSaid() == "CH Chord Stack", T.said(said + 1))

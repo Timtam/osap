@@ -37,8 +37,13 @@ name = "Overlay runtime"
 # overlay a page: O:addPage, O:inPlugin and its trip, o.away, O:pageBack, O:pageKey and
 # O:pageAgain. While the page is in front or a trip is under way, the overlay holds no keys and
 # its onActivate and onDeactivate wait. A module that uses either depends on
-# "com.platform.overlay >= 0.5.6" or ">= 0.6".
-version = "0.6.0"
+# "com.platform.overlay >= 0.5.6" or ">= 0.6". 0.7.0 hands a stored `identify` a second argument,
+# `again`, which asks the overlays of its binding to look again on the module's next turn, and
+# counts readings in O:watch: a `read` may name the reading its value came from, and `done`,
+# `onDone` and `onGiveUp` get how many in a row read the same; a module that uses either depends on
+# "com.platform.overlay >= 0.7". On a Mac an empty focus chain keeps a stay in its window and begins
+# none, and every `[deactivate]` line says which test failed.
+version = "0.7.0"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

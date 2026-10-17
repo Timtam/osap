@@ -115,6 +115,7 @@ local overlaysCounted = 0
 --   pages.joining(o, slot)     o is being bound on `slot` (_join): the page key's and the group's checks
 --   pages.stayHeld(win)        whether a page holds the stay in window `win` (endStay, watchStay)
 --   pages.stayWatch(a)         the stay is held, and `a` is in front (watchStay)
+--   pages.isPage(o, w)         whether window `w` is the page of o's group (_recheck, for its reason)
 --   pages.why(o)               why o's group is away, for a log line
 local pages = {}
 
@@ -4007,17 +4008,40 @@ function Overlay:afterIdle(key, ms, fn)
   end)
 end
 
+-- Waits for something to change rather than for a length of time (docs/api/overlay.md, O:watch).
+--
+-- READINGS, NOT LOOKS. `read` may hand back, as a second value, the reading its value came from —
+-- anything compared with `==`, typically a number its read's callback counts up. A look that hands
+-- back the same reading as the last one read is no new reading, and `done` is asked only on a new
+-- one, with how many readings in a row have read that value (`n`, 1 the first time). Without a
+-- second value every look is a reading, as it always was: right for a read that waits (a pixel,
+-- a text read without a callback). A look that reads nothing (nil) is no reading: it neither
+-- counts nor breaks the run. What a plug-in shows can pass through other values on its way — VPS
+-- Avenger's loading display before the preset's name (the first Mac test of its page, 2026-10-14,
+-- where the watch stopped at the first change, and the page said "cYanmaGentaYellowb" for a
+-- preset) — and `n` lets a `done` wait for a value read twice. The runtime counts, the module
+-- decides; `within` stays the bound on looking.
 function Overlay:watch(spec)
   if type(spec.read) ~= "function" or not host.timer then return end
   local was = spec.was
+  -- The reading the last look that read something came from (READINGS, NOT LOOKS, above).
+  local lastId = nil
   if was == nil then
-    local ok, v = pcall(spec.read, self)
+    local ok, v, id = pcall(spec.read, self)
     was = ok and v or nil
+    lastId = ok and id or nil
   end
   local done = spec.done or function(now) return now ~= nil and now ~= was end
   local every = spec.every or 100
   local left = spec.within or 900
   local pinned = self:hwnd()
+  -- The readings in a row that read the same value: `run.n` of them, of `run.value`.
+  local run = { value = nil, n = 0 }
+  -- How many readings in a row have read `now`: 0 for nothing read.
+  local function nOf(now)
+    if now ~= nil and now == run.value then return run.n end
+    return 0
+  end
   -- What this cost and how it ended, in one line at each exit.
   --
   -- Without it the two ways of ending are indistinguishable afterwards, and they mean opposite
@@ -4033,34 +4057,42 @@ function Overlay:watch(spec)
   -- drained by the GUI toolkit's own tick, and on a platform where that tick is slower a "900
   -- ms" watch is quietly something else.
   local t0 = (host.now and host.now()) or 0
-  local function report(finished, now)
+  local function report(finished, now, n)
     if not host.log then return end
     host.log.info(string.format(
-      "[watch] %s: %s after %d ms — %s -> %s",
+      "[watch] %s: %s after %d ms — %s -> %s%s",
       tostring(self.label),
       finished and "changed" or "gave up",
       ((host.now and host.now()) or 0) - t0,
-      tostring(was), tostring(now)
+      tostring(was), tostring(now),
+      n > 1 and string.format(" (%d readings alike)", n) or ""
     ))
   end
   local function look()
     if not self.active or self:hwnd() ~= pinned then return end
-    local ok, now = pcall(spec.read, self)
-    if not ok then now = nil end
+    local ok, now, id = pcall(spec.read, self)
+    if not ok then now, id = nil, nil end
     local finished = false
-    if now ~= nil then
-      local okd, v = pcall(done, now, was)
+    if now ~= nil and (id == nil or id ~= lastId) then
+      lastId = id
+      if run.n > 0 and now == run.value then
+        run.n += 1
+      else
+        run.value, run.n = now, 1
+      end
+      local okd, v = pcall(done, now, was, run.n)
       finished = okd and v == true
     end
     if finished then
-      report(true, now)
-      if spec.onDone then pcall(spec.onDone, now, was) end
+      report(true, now, run.n)
+      if spec.onDone then pcall(spec.onDone, now, was, run.n) end
       return
     end
     left -= every
     if left <= 0 then
-      report(false, now)
-      if spec.onGiveUp then pcall(spec.onGiveUp, now, was) end
+      local n = nOf(now)
+      report(false, now, n)
+      if spec.onGiveUp then pcall(spec.onGiveUp, now, was, n) end
       return
     end
     host.timer.after(every, look)
@@ -4314,8 +4346,69 @@ function Overlay:_refocusIfHidden()
   return true
 end
 
+-- ── Why an overlay left the front ────────────────────────────────────────────
+-- Every `[deactivate]` line says which test failed: the first Mac test of VPS Avenger's page
+-- (2026-10-14) left the overlay after every click into Avenger with the same window in front, and
+-- nothing in the log said why. Each test answers its "no" with a REASON, kept by _recheck in
+-- `self._why` and said only by _deactivate. A recheck runs at every event for every overlay
+-- (Kontakt's 66 were the cost story), so a reason is a constant phrase, or a format and the values
+-- already in hand — the title, the focused element — packed as they are and formatted only when a
+-- line says it. Nothing is asked of the host for it, but for the arbiter's choice (arbiterWhy),
+-- which lists the slot's claims once, when the line is written.
+local function because(fmt, ...)
+  if select("#", ...) == 0 then return fmt end
+  return table.pack(fmt, ...)
+end
+
+-- Two reasons as one: both are said, the first first. Either may be nil.
+local function whyJoin(a, b)
+  if a == nil then return b end
+  if b == nil then return a end
+  return { join = { a, b } }
+end
+
+local NO_MATCH = "nothing it is bound to matches"
+
+-- A reason as words: every value through tostring, into a format of %s alone.
+local function whyText(r)
+  if r == nil then return NO_MATCH end
+  if type(r) ~= "table" then return tostring(r) end
+  if r.join then return whyText(r.join[1]) .. "; " .. whyText(r.join[2]) end
+  local args = table.create(r.n - 1)
+  for i = 2, r.n do args[i - 1] = tostring(r[i]) end
+  local ok, s = pcall(string.format, r[1], table.unpack(args, 1, r.n - 1))
+  return ok and s or tostring(r[1])
+end
+
+-- Why the arbiter called an overlay off whose last report said it matches: the claim it chose, as
+-- host.arbiter.participants lists it — the active one, which the host marks before it calls the
+-- old one off. With none active (the slot left with no winner) nothing was chosen, and the line says
+-- only that the arbiter called it off: the most specific claim that matches could be the overlay's
+-- own.
+local function arbiterWhy(self)
+  local ok, roster = pcall(host.arbiter.participants, self._slot)
+  local pick = nil
+  if ok and type(roster) == "table" then
+    for _, p in ipairs(roster) do
+      if p.active == true then
+        pick = p
+        break
+      end
+    end
+  end
+  if pick then
+    return because("another claim on slot '%s' was chosen: %s at specificity %s", self._slot,
+      pick.module, pick.specificity)
+  end
+  return because("the arbiter called it off on slot '%s' while it still matched", self._slot)
+end
+
 function Overlay:_deactivate()
   if not self.active then return end
+  -- Why, before anything changes: what the last evaluation found (_recheck), or, where that said it
+  -- matches, the arbiter's choice of another claim.
+  local why = self._why
+  if why == nil and self._slot then why = arbiterWhy(self) end
   -- Leaving for its page, which took the front from it: its group goes away, before anything is
   -- let go of, so that its module is not told (see "An overlay's page").
   pages.leaving(self)
@@ -4342,9 +4435,9 @@ function Overlay:_deactivate()
         tostring(fg.pid), tostring(fg.shown))
     end
   end
-  host.log.info(string.format("[deactivate] '%s' — in front now: '%s' (%s)%s",
+  host.log.info(string.format("[deactivate] '%s' — in front now: '%s' (%s)%s; %s",
     tostring(self.label), tostring(a and a.title or "nothing"),
-    tostring(a and a.app and a.app.exe or "?"), f))
+    tostring(a and a.app and a.app.exe or "?"), f, whyText(why)))
   -- Its keys go FIRST, while the scope still pins them to the window it is leaving: unpinned
   -- first, they would take a key pressed in the window that came forward — the hook runs on a
   -- thread of its own — and the key would then be dropped, its capture released.
@@ -4451,6 +4544,8 @@ function Overlay:_recheck()
   if a then
     self.activeCtx = false
     self._ctxSince = nil
+    self._why = pages.isPage(self, a) and "its page is in front"
+      or because("one of this application's own windows is in front ('%s')", a.title)
     if self._menu then self:_menuNotHeld(a) end
     if self._slot then
       host.arbiter.setMatching(self._slot, self._claim, false)
@@ -4466,12 +4561,16 @@ function Overlay:_recheck()
   if self:_outranked() then return end
   local t0 = host.now and host.now() or nil
   local matched = false
+  -- Why no context matched, every context's reason (see "Why an overlay left the front").
+  local why = nil
   for _, ctx in ipairs(self.contexts) do
-    if ctx.match() then
+    local m, w = ctx.match()
+    if m then
       self.activeCtx = ctx
       matched = true
       break
     end
+    why = whyJoin(why, w)
   end
   local tCtx = t0 and host.now() or nil
   if not matched then self.activeCtx = false end
@@ -4482,6 +4581,7 @@ function Overlay:_recheck()
     if matched then
       self:_menuHoldEnds()
     elseif self.active then
+      local hadHold = self._menu.hold ~= nil
       local h = self:_menuHold()
       -- The hold ended with the keyboard still in the menu's own window, not shown, and the
       -- window of the press was brought back (see _menuRefocus): the ordinary path decides, on
@@ -4489,6 +4589,7 @@ function Overlay:_recheck()
       if h == "refocused" then return self:_recheck() end
       held = h == "menu"
       matched = held
+      if hadHold and not held then why = whyJoin("its place over its menu's window is no longer held", why) end
     end
   end
   -- Stamped BEFORE the gate, because the two answer different questions: a context match
@@ -4509,8 +4610,14 @@ function Overlay:_recheck()
   -- front: what the plug-in has loaded is not what that window shows.
   if matched and self._gate and not held then
     matched = self._gate(self:origin()) == true
-    if not matched then self.activeCtx = false end
+    if not matched then
+      self.activeCtx = false
+      why = self._landmarkImage ~= nil and "its landmark is not seen" or "its gate says no"
+    end
   end
+  -- Before the report: the arbiter calls an overlay off inside it. nil is "it matches", which leaves
+  -- the arbiter's choice as the reason.
+  self._why = (not matched) and (why or NO_MATCH) or nil
   if t0 then
     local total = host.now() - t0
     if total >= (inPoll and RECHECK_SLOW_POLL_MS or RECHECK_SLOW_MS) then
@@ -5516,6 +5623,9 @@ local entryOfControl = setmetatable({}, { __mode = "k" })
 -- A panel's identity verdict per spec, for the same reason and with the same weak keys: see
 -- panelIdentity in attachEmbedded.
 local panelVerdicts = setmetatable({}, { __mode = "k" })
+-- Per spec, the overlays of this VM bound to it and the one `again` its stored `identify` is
+-- handed (see "Asking again" in attachEmbedded). Weak keys, as above.
+local againOf = setmetatable({}, { __mode = "k" })
 
 -- Attaches the overlay according to `b`, with `opts` overriding the binding's own.
 function Overlay:bind(b, opts)
@@ -5537,9 +5647,12 @@ end
 -- focused; coordinates are relative to that window's client area.
 function Overlay:attach(matcher, opts)
   self.contexts[#self.contexts + 1] = {
+    -- True, or false and why (see "Why an overlay left the front").
     match = function()
       local a = host.window.active()
-      return a ~= nil and host.window.test(matcher, a)
+      if a == nil then return false, "no window is in front" end
+      if host.window.test(matcher, a) then return true end
+      return false, because("'%s' is not a window its binding matches", a.title)
     end,
     origin = function() return host.window.active() end,
     -- The origin a page's trip holds (see "An overlay's page"): the held window itself, in front.
@@ -5637,16 +5750,19 @@ local function hostPanelOf(entry, win)
   }
 end
 
--- Where the keyboard is, against panel `b` of window `active`: "inside", "outside" or
--- "unknown". This is the Win32 chrome gate's question asked geometrically, because the chrome
--- classes are Win32 vocabulary and mean nothing on a Mac. The window itself as the focused
--- element — all a view that publishes nothing leaves on the chain — is inside, which is the rule
--- sforzando's own macOS binding settled on before this runtime asked it for everyone; a focused
--- element whose centre lies outside the panel is the DAW's own chrome (REAPER's FX list, its
--- preset popup, Logic's header); and an EMPTY chain is the backend saying it could not read
--- where the keyboard is. Unknown, not inside: the reading daw-hosts' focus key makes too, and an
--- overlay that took it as "inside" would start capturing Tab and Return on a guess while the
--- keyboard may well be in the FX list.
+-- Where the keyboard is, against panel `b` of window `active`: "inside", "outside", "unread" or
+-- "unknown", and for every answer but "inside" why (see "Why an overlay left the front"). This is
+-- the Win32 chrome gate's question asked geometrically, because the chrome classes are Win32
+-- vocabulary and mean nothing on a Mac. The window itself as the focused element — all a view
+-- that publishes nothing leaves on the chain — is inside, which is the rule sforzando's own macOS
+-- binding settled on before this runtime asked it for everyone; a focused element whose centre
+-- lies outside the panel is the DAW's own chrome (REAPER's FX list, its preset popup, Logic's
+-- header); and an EMPTY chain is the backend saying it could not read where the keyboard is:
+-- "unread". Not inside: the reading daw-hosts' focus key makes too, and an overlay that took it as
+-- "inside" would start capturing Tab and Return on a guess while the keyboard may well be in the
+-- FX list. But not outside either, and so it keeps a stay in its window and begins none (the stay,
+-- below): Logic answers the read so whenever a plug-in's own drawn view has the keyboard, after
+-- every click into it (the first Mac test of VPS Avenger's page, 2026-10-14).
 --
 -- A chain that does not END in `active` is unknown as well, which is daw-hosts' reading again.
 -- The two are separate questions to the system — the window in front is the frontmost
@@ -5663,13 +5779,23 @@ local function chainKnown(active, chain)
 end
 
 local function keyboardIn(active, chain, b)
-  if not chainKnown(active, chain) then return "unknown" end
+  if chain == nil or chain[1] == nil then
+    return "unread", because("where the keyboard is in '%s' cannot be read (an empty focus chain)", active.title)
+  end
+  if not chainKnown(active, chain) then
+    return "unknown", because("the focus chain ends in another window than '%s'", active.title)
+  end
   local focused = chain[1]
   if focused.id == active.id then return "inside" end
-  if not (focused.bounds and b) then return "unknown" end
+  if not (focused.bounds and b) then
+    return "unknown", because("the focused element [%s] has no rectangle", focused.class)
+  end
   local fx = focused.bounds.x + focused.bounds.w / 2
   local fy = focused.bounds.y + focused.bounds.h / 2
-  if fx < b.x or fx > b.x + b.w or fy < b.y or fy > b.y + b.h then return "outside" end
+  if fx < b.x or fx > b.x + b.w or fy < b.y or fy > b.y + b.h then
+    return "outside", because("the keyboard is on [%s] at %s,%s, outside the plug-in's panel (the DAW's own "
+      .. "controls)", focused.class, fx, fy)
+  end
   return "inside"
 end
 
@@ -5687,10 +5813,25 @@ end
 -- whether a visit there is always observed on a Mac is a Mac session's question (below). So a
 -- panel's verdict is kept for a STAY: the keyboard inside one window's panel, from the
 -- evaluation that first finds it there to the first observation that it is anywhere else — on
--- the DAW's chrome, in another window, nowhere anybody can read (an empty chain, or one that is
--- another window's) — or that the window's title or size changed (a REAPER window retitled for
--- another track). The next time the keyboard is inside, `identify` is asked again, once, and its
--- answer kept for that stay. Changing plug-in costs one identify; staying in one costs none.
+-- the DAW's chrome, in another window, on a chain that is another window's or an element without
+-- a place — or that the window's title or size changed (a REAPER window retitled for another
+-- track). The next time the keyboard is inside, `identify` is asked again, once, and its answer
+-- kept for that stay. Changing plug-in costs one identify; staying in one costs none.
+--
+-- An EMPTY chain with the same window in front is no observation of anywhere else: it keeps the
+-- stay, and the panel the stay began with stands for the DAW's, its verdict kept, as the control
+-- a module's function last found in the stay stands for the function's, which is not asked then.
+-- It never begins one, which would bring an overlay up on a reading nobody took, and it finds no
+-- control a function had not found in the stay before. On a Mac that is what the system
+-- answers while a view that publishes nothing has the keyboard — after a click into a plug-in's
+-- own drawn view, the user's or a module's, in Logic every time (the first Mac test of VPS
+-- Avenger's page, 2026-10-14, where each such click took the overlay down and ended a pending
+-- choice of its menu) — and after Logic gives the window back on a page's way back. A visit to the
+-- DAW's chrome is still seen: Logic's and REAPER's controls publish their elements, a move there
+-- raises a focus notification, and the round after it reads an element outside the panel. The one
+-- such visit it does not see is one made while the DAW is in the host's busy quarantine, which
+-- answers an empty chain too: the overlay then holds its keys over the DAW's controls until the
+-- next round that can read the chain.
 --
 -- What the rule cannot see, said so nobody reads the stay as more than it is:
 --   * A switch made with the keyboard still inside the plug-in — no DAW measured so far has a
@@ -5754,15 +5895,32 @@ local function stayIn(active, panel)
   return stay.n
 end
 
+-- The panel of the stay in progress, in window `a` — the one the stay is in: where the panel lay
+-- when it began, from the window's content origin as it is now. What an evaluation takes for the
+-- DAW's panel when the chain says nothing (pluginControl), without asking the DAW's origin.
+local function stayPanel(a)
+  local x, y = a.client.x + stay.dx, a.client.y + stay.dy
+  local w, h = a.client.x + a.client.w - x, a.client.y + a.client.h - y
+  if w <= 0 or h <= 0 then return nil end
+  return {
+    id = a.id,
+    app = a.app,
+    class = HOST_PANEL,
+    bounds = { x = x, y = y, w = w, h = h },
+    client = { x = x, y = y, w = w, h = h },
+    stay = stay.n,
+  }
+end
+
 local function watchStay()
   if stay.win == nil then return end
   local a = host.window.active()
   -- Held by a page: what the window in front means for it is the page's to say.
   if pages.stayHeld(stay.win) then return pages.stayWatch(a) end
   if not inStayWindow(a) then return endStay() end
-  local x, y = a.client.x + stay.dx, a.client.y + stay.dy
-  local b = { x = x, y = y, w = a.client.x + a.client.w - x, h = a.client.y + a.client.h - y }
-  if keyboardIn(a, host.window.focusChain(), b) ~= "inside" then endStay() end
+  local p = stayPanel(a)
+  local where = keyboardIn(a, host.window.focusChain(), p and p.bounds)
+  if where ~= "inside" and where ~= "unread" then endStay() end
 end
 
 -- Registered once per VM, by the first binding that can take a panel or has a function for the
@@ -5972,6 +6130,42 @@ function Overlay:attachEmbedded(spec, opts)
       recheckOnNextTurn(self)
     end
   end
+  -- ASKING AGAIN. A stored `identify` is handed a second argument, `again`: a function that asks
+  -- every overlay of this VM bound to this spec to look again, on the module's next turn — one
+  -- evaluation each however often it is called in a turn, and the same function every time. An
+  -- `identify` whose read answers later (an OCR read with a callback: VPS Avenger's header,
+  -- sforzando's wordmark) calls it when its answer is in, so the verdict is picked up then, not at
+  -- whatever window event comes next — which on a Mac, in a view that publishes nothing, may be
+  -- none. `host.window.recheck` did that before, as a round of every module's overlays. No timer
+  -- decides anything: `after(0)` is "run this as an event of my module", and the evaluation asks
+  -- `identify` again, which answers from what its read found. Each nil it answers still counts
+  -- towards IDENTIFY_UNDECIDED_MAX, so an `identify` that calls `again` after every read that saw
+  -- nothing is bounded too. Not handed to an `identify` asked at every evaluation, which answers at
+  -- once anyway. One evaluation per epoch, as notNow's recheck: a flag the timer cleared would
+  -- stick wherever the timer never comes due — a module unticked before it did keeps its VM, and
+  -- the host drops a disabled module's timers — and every `again` after it would do nothing.
+  local ag = againOf[spec]
+  if not ag then
+    local made = { overlays = setmetatable({}, { __mode = "k" }), dueAt = nil }
+    made.fn = function()
+      local e = host.epoch and host.epoch() or -1
+      if made.dueAt == e then return end
+      made.dueAt = e
+      host.timer.after(0, function()
+        local list = {}
+        for o in pairs(made.overlays) do
+          if o._bound then list[#list + 1] = o end
+        end
+        table.sort(list, function(x, y) return x._made < y._made end)
+        for _, o in ipairs(list) do o:_recheck() end
+      end)
+    end
+    againOf[spec] = made
+    ag = made
+  end
+  ag.overlays[self] = true
+  local again = ag.fn
+
   -- An `identify` asked at every evaluation: true, false — or false when it raised.
   local function askedEveryTime(c)
     local okCall, verdict = pcall(noWait, identify, c)
@@ -5982,8 +6176,8 @@ function Overlay:attachEmbedded(spec, opts)
     return verdict == true
   end
 
-  -- The module's own control among the window's children, by pattern, or nil. Unchanged from
-  -- before the panel existed, and on Windows the whole story.
+  -- The module's own control among the window's children, by pattern, or nil and why. Unchanged
+  -- from before the panel existed, and on Windows the whole story.
   local function ownByPattern(focusChain)
     -- Enumerate the active (plugin host) window's child controls — like
     -- ReaHotkey's WinGetControls — with the keyboard-focus chain as a fallback.
@@ -5994,21 +6188,25 @@ function Overlay:attachEmbedded(spec, opts)
     for _, c in ipairs(focusChain) do
       candidates[#candidates + 1] = c
     end
+    local why = nil
     for _, c in ipairs(candidates) do
       if string.match(c.class, own) then
         if not identify then return c end
         local ok
         if cacheId then
           ok = idCache.get(c.id)
+          if ok == false then why = because("identify says control [%s] id=%s is not the plug-in", c.class, c.id) end
           if ok == nil and passDepth > 0 then
             -- Inside a pass: not asked there (above).
             notNow(c)
             ok = false
+            why = "identify is not asked inside a scan of the overlay's hooks"
           elseif ok == nil then
-            local okCall, verdict = pcall(identify, c)
+            local okCall, verdict = pcall(identify, c, again)
             if not okCall then
               identifyRaised(c, verdict, "could not tell yet, and not counted")
               ok = false
+              why = because("identify raised about control [%s] id=%s", c.class, c.id)
             elseif verdict ~= nil then
               ok = verdict == true
               idCache.set(c.id, ok)
@@ -6018,11 +6216,14 @@ function Overlay:attachEmbedded(spec, opts)
                   "attachEmbedded: matched control [%s] id=%d, identify=%s", c.class, c.id, tostring(ok)
                 ))
               end
+              if not ok then why = because("identify says control [%s] id=%s is not the plug-in", c.class, c.id) end
             else
               -- Not now; asked again at the next recheck — up to IDENTIFY_UNDECIDED_MAX in a row.
               ok = false
               local n = (idUndecided.get(c.id) or 0) + 1
               idUndecided.set(c.id, n)
+              why = because("identify could not tell yet about control [%s] id=%s (%s of %s)", c.class, c.id, n,
+                IDENTIFY_UNDECIDED_MAX)
               if n >= IDENTIFY_UNDECIDED_MAX then
                 idCache.set(c.id, false)
                 if host.log then
@@ -6043,11 +6244,12 @@ function Overlay:attachEmbedded(spec, opts)
           end
         else
           ok = askedEveryTime(c) -- relational spec: re-evaluate every recheck
+          if not ok then why = because("identify says control [%s] id=%s is not the plug-in", c.class, c.id) end
         end
         if ok then return c end
       end
     end
-    return nil
+    return nil, why or because("no control matches '%s'", own)
   end
 
   -- The panel's verdict for the stay in progress (see "the stay", above): one slot per SPEC —
@@ -6066,37 +6268,44 @@ function Overlay:attachEmbedded(spec, opts)
   -- panels could not say whose `identify` answered.
   local pv = panelVerdicts[spec]
   if not pv then
-    pv = { held = nil, undecided = { stay = -1, n = 0 }, said = nil }
+    pv = { held = nil, undecided = { stay = -1, n = 0 }, said = nil, answered = nil }
     panelVerdicts[spec] = pv
   end
-  local function panelIdentity(c, active)
-    local rect = string.format("%d,%d %dx%d", c.client.x - active.client.x,
+  -- Control `c`'s place in window `active`, from its content origin.
+  local function placeIn(c, active)
+    return string.format("%d,%d %dx%d", c.client.x - active.client.x,
       c.client.y - active.client.y, c.client.w, c.client.h)
+  end
+  -- True, or false and why.
+  local function panelIdentity(c, active)
+    local rect = placeIn(c, active)
     local s = c.stay
     local held = pv.held
-    if held and held.stay == s and held.rect == rect then return held.value end
+    if held and held.stay == s and held.rect == rect then return held.value, held.why end
     -- Inside a pass: not asked there; and one that raised is no verdict, not counted (above).
     if passDepth > 0 then
       notNow(c)
-      return false
+      return false, "identify is not asked inside a scan of the overlay's hooks"
     end
     local label = tostring(self.label or "overlay")
-    local okCall, verdict = pcall(identify, c)
+    local okCall, verdict = pcall(identify, c, again)
     if not okCall then
       identifyRaised(c, verdict, "could not tell yet, and not counted")
-      return false
+      return false, "identify raised"
     end
     if verdict == nil then
       if pv.undecided.stay ~= s then pv.undecided = { stay = s, n = 0 } end
       local n = pv.undecided.n + 1
       pv.undecided.n = n
       if n >= IDENTIFY_UNDECIDED_MAX then
-        pv.held = { stay = s, rect = rect, value = false }
+        pv.held = { stay = s, rect = rect, value = false,
+          why = because("identify could not tell %s times: no for this stay", n) }
         host.log.info(string.format(
           "attachEmbedded: [%s] panel of '%s' id=%s, identify could not tell %d times in a row, so "
             .. "it is taken as no until the keyboard next leaves the panel — '%s'",
           c.class, tostring(active.title), tostring(active.id), n, label
         ))
+        return false, pv.held.why
       elseif n == 1 then
         host.log.info(string.format(
           "attachEmbedded: [%s] panel of '%s' id=%s, identify could not tell yet — asked again at "
@@ -6104,9 +6313,10 @@ function Overlay:attachEmbedded(spec, opts)
           c.class, tostring(active.title), tostring(active.id), IDENTIFY_UNDECIDED_MAX, label
         ))
       end
-      return false
+      return false, because("identify could not tell yet (%s of %s)", n, IDENTIFY_UNDECIDED_MAX)
     end
-    pv.held = { stay = s, rect = rect, value = verdict == true }
+    pv.held = { stay = s, rect = rect, value = verdict == true,
+      why = verdict ~= true and "identify says the panel shows another plug-in" or nil }
     -- The line a Mac session reads to see where the panel came out and whether the plug-in was
     -- recognised in it. Said when the verdict for this window and place differs from the one
     -- said last, so going back and forth between the FX list and one plug-in says it once.
@@ -6118,14 +6328,42 @@ function Overlay:attachEmbedded(spec, opts)
         c.class, tostring(active.title), tostring(active.id), rect, tostring(pv.held.value), label
       ))
     end
-    return pv.held.value
+    return pv.held.value, pv.held.why
   end
 
+  -- What a `control` function answered in the stay in progress, for a round that cannot read the
+  -- chain (pluginControl), in which the function is not asked. On a Mac an empty chain is also the
+  -- host's busy quarantine, where `host.element` answers nothing: a function that looks for its
+  -- plug-in's elements would answer no there, and count that against the plug-in for the rest of
+  -- the stay (Kontakt's misses, MISSES_MAX of them, are "not this version" until the keyboard
+  -- leaves). Per spec beside the panel's verdict, for the same reason, and kept as that is, for the
+  -- stay and the panel's place; `false` for no control, or one the keyboard was not in. Kept from
+  -- the window's content origin, so it moves with the window, as the stay does.
+  local function holdAnswer(active, panel, c)
+    if not (panel and panel.stay) then return end
+    pv.answered = { stay = panel.stay, rect = placeIn(panel, active), x = active.client.x,
+      y = active.client.y, c = c or false }
+  end
+  local function moved(r, dx, dy)
+    return r and { x = r.x + dx, y = r.y + dy, w = r.w, h = r.h } or nil
+  end
+  local function answeredIn(active, panel)
+    local k = pv.answered
+    if not (k and k.c and k.stay == panel.stay and k.rect == placeIn(panel, active)) then return nil end
+    local dx, dy = active.client.x - k.x, active.client.y - k.y
+    if dx == 0 and dy == 0 then return k.c end
+    local c = table.clone(k.c)
+    c.bounds, c.client = moved(k.c.bounds, dx, dy), moved(k.c.client, dx, dy)
+    return c
+  end
+
+  -- The plug-in's control in the window in front, or nil and why (see "Why an overlay left the
+  -- front").
   local function pluginControl()
     local active = host.window.active()
     if not active then
       if panels then endStay() end
-      return nil
+      return nil, "no window is in front"
     end
     -- Another window in front than the one a stay is in: whatever this binding makes of it,
     -- the keyboard is not in that panel any more.
@@ -6137,7 +6375,7 @@ function Overlay:attachEmbedded(spec, opts)
         break
       end
     end
-    if not entry then return nil end
+    if not entry then return nil, because("'%s' is not a plug-in window of the binding's hosts", active.title) end
     -- The entry the control was found through, for the place a page holds (see entryOfControl).
     local function kept(c)
       if c then entryOfControl[c] = entry end
@@ -6158,44 +6396,70 @@ function Overlay:attachEmbedded(spec, opts)
         for _, pat in ipairs(chrome) do
           if string.match(focused.class, pat) then
             if panels then endStay() end
-            return nil
+            return nil, because("the keyboard is on the DAW's own control [%s]", focused.class)
           end
         end
       end
     end
     if type(own) == "string" then
-      local c = ownByPattern(focusChain)
-      if c or not panelFallback then return kept(c) end
+      local c, why = ownByPattern(focusChain)
+      if c or not panelFallback then return kept(c), why end
     end
     -- (b), or a function's answer: the panel. The chrome gate above cannot help here — it
     -- matches Win32 classes — so the same question is asked geometrically (keyboardIn), first
     -- of the DAW's panel, which is what the stay is about, and then of whatever a module's
     -- function made of it.
     --
-    -- With the keyboard nowhere anybody can say — an empty chain, or another window's — the
-    -- answer is no, and it is given BEFORE the origin is asked for. On a Mac an empty chain is
-    -- the host's busy quarantine, in which `host.window.controls` answers nothing too: an
-    -- origin function that reads the window's surfaces would answer its fallback then, and the
-    -- memo above would keep that for the window's life at that size.
-    if not chainKnown(active, focusChain) then
-      endStay()
-      return nil
-    end
-    local panel = hostPanelOf(entry, active)
-    if not panel and not originFnOf(entry) and not noOriginSaid[entry] then
-      noOriginSaid[entry] = true
-      host.log.info(string.format(
-        "[overlay] '%s' is a plug-in window of %s, whose daw-hosts entry gives no pluginOrigin on "
-          .. "%s — no plug-in panel there, so no binding without a control of its own comes up in it",
-        tostring(active.title), tostring(entry.daw or "a DAW"), host.os.current
-      ))
-    end
-    if panel then
-      if keyboardIn(active, focusChain, panel.bounds) ~= "inside" then
+    -- With the keyboard on a chain that is another window's the answer is no, and it is given
+    -- BEFORE the origin is asked for. So is it with an EMPTY chain — nobody could read where the
+    -- keyboard is — unless a stay is in progress in this window, which that keeps (the stay,
+    -- above): the panel is then the stay's own, and the origin is not asked either. On a Mac an
+    -- empty chain is also the host's busy quarantine, in which `host.window.controls` answers
+    -- nothing too: an origin function that reads the window's surfaces would answer its fallback
+    -- then, and the memo above would keep that for the window's life at that size.
+    local unread = focusChain[1] == nil
+    if unread then
+      if not inStayWindow(active) then
         endStay()
-        return nil
+        return nil, because("where the keyboard is in '%s' cannot be read (an empty focus chain), and no "
+          .. "stay is in progress there", active.title)
       end
-      panel.stay = stayIn(active, panel)
+    elseif not chainKnown(active, focusChain) then
+      endStay()
+      return nil, because("the focus chain ends in another window than '%s'", active.title)
+    end
+    local panel
+    if unread then
+      -- Only for a binding whose entry gives a panel here: one that has none never began a stay.
+      panel = originFnOf(entry) and stayPanel(active) or nil
+      if not panel then
+        return nil, because("where the keyboard is in '%s' cannot be read (an empty focus chain), and the "
+          .. "DAW's entry gives this binding no plug-in panel there", active.title)
+      end
+      -- One line per stay, so a Mac log shows the rule at work.
+      if stay.unreadSaid ~= stay.n then
+        stay.unreadSaid = stay.n
+        host.log.info(string.format("[overlay] '%s': where the keyboard is in '%s' cannot be read (an empty "
+          .. "focus chain) — the stay goes on there", tostring(self.label or "overlay"), tostring(active.title)))
+      end
+    else
+      panel = hostPanelOf(entry, active)
+      if not panel and not originFnOf(entry) and not noOriginSaid[entry] then
+        noOriginSaid[entry] = true
+        host.log.info(string.format(
+          "[overlay] '%s' is a plug-in window of %s, whose daw-hosts entry gives no pluginOrigin on "
+            .. "%s — no plug-in panel there, so no binding without a control of its own comes up in it",
+          tostring(active.title), tostring(entry.daw or "a DAW"), host.os.current
+        ))
+      end
+      if panel then
+        local where, why = keyboardIn(active, focusChain, panel.bounds)
+        if where ~= "inside" then
+          endStay()
+          return nil, why
+        end
+        panel.stay = stayIn(active, panel)
+      end
     end
     local c = panel
     -- What a function returns is gated as well, so the keyboard has to be inside BOTH: the
@@ -6206,24 +6470,40 @@ function Overlay:attachEmbedded(spec, opts)
     -- no longer end on a visit to Logic's header or REAPER's list, which is the rule's whole
     -- point. A DAW origin that far off is a wrong entry, and the line Kontakt logs for its
     -- corner ("… puts Kontakt's corner dx,dy from the DAW's plug-in origin") is what shows it.
+    -- With the chain empty there is nothing to test it against, and the function is not asked:
+    -- what it answered last in the stay is the answer (holdAnswer, above).
     if type(own) == "function" then
-      c = own(active, panel)
-      if c and c ~= panel then
-        if keyboardIn(active, focusChain, c.bounds) ~= "inside" then return nil end
-        if panel then c.stay = panel.stay end
+      if unread then
+        c = answeredIn(active, panel)
+        if not c then
+          return nil, because("where the keyboard is in '%s' cannot be read (an empty focus chain), and the "
+            .. "module's control function has found no control with the keyboard in it in this stay", active.title)
+        end
+      else
+        c = own(active, panel)
+        if c and c ~= panel then
+          if keyboardIn(active, focusChain, c.bounds) ~= "inside" then
+            holdAnswer(active, panel, nil)
+            return nil, "the keyboard is outside what the module's control function returned"
+          end
+          if panel then c.stay = panel.stay end
+        end
+        holdAnswer(active, panel, c)
+        if not c then return nil, "the module's control function found no control" end
       end
     end
-    if not c then return nil end
+    if not c then return nil, because("the DAW's entry gives no plug-in panel in '%s'", active.title) end
     if not identify then return kept(c) end
     -- A function's control where the DAW gives no panel, and a relational identify: asked at
     -- every evaluation, as a function's control always was. A relational verdict can change
     -- inside one stay (a Kontakt loaded into a Komplete Kontrol through its own browser), so
     -- the stay does not pin it either. Asked at every evaluation, so it must not read.
     if not (cacheId and panel) then
-      if not askedEveryTime(c) then return nil end
+      if not askedEveryTime(c) then return nil, "identify, asked at every evaluation, says no" end
       return kept(c)
     end
-    if not panelIdentity(c, active) then return nil end
+    local ok, why = panelIdentity(c, active)
+    if not ok then return nil, why end
     return kept(c)
   end
   -- The match also requires spec.present(control) when given — a per-call check,
@@ -6261,6 +6541,8 @@ function Overlay:attachEmbedded(spec, opts)
   -- An answer made without asking a stored `identify` — reached inside a pass, where it is not
   -- asked (see "Where `identify` runs", above) — is not kept: the next question outside a pass
   -- in the same epoch resolves again and asks it, rather than finding "no control" kept.
+  --
+  -- The control, or nil and why it is none (pluginControl), the why kept with it for the epoch.
   local function origin(opts)
     local e = host.epoch and host.epoch() or -1
     local memo = originMemo[spec]
@@ -6268,13 +6550,13 @@ function Overlay:attachEmbedded(spec, opts)
       memo = { epoch = -1, value = nil }
       originMemo[spec] = memo
     end
-    if not (opts and opts.fresh) and e == memo.epoch then return memo.value end
+    if not (opts and opts.fresh) and e == memo.epoch then return memo.value, memo.why end
     deferred = false
-    local c = pluginControl()
-    if deferred then return c end
-    memo.value = c
+    local c, why = pluginControl()
+    if deferred then return c, why end
+    memo.value, memo.why = c, why
     memo.epoch = e
-    return memo.value
+    return c, why
   end
   -- The match asks the same question ("is the plugin focused?") and so shares the memo:
   -- a recheck plus the activation and coordinate work that follows it resolve once
@@ -6299,10 +6581,12 @@ function Overlay:attachEmbedded(spec, opts)
     end
     return true
   end
+  -- True, or false and why (see "Why an overlay left the front").
   local function matched()
-    local c = origin()
-    if not c then return false end
-    return presentIn(c)
+    local c, why = origin()
+    if not c then return false, why end
+    if not presentIn(c) then return false, "its binding's present says no" end
+    return true
   end
   -- The control a page's trip holds (see "An overlay's page"), in window `win` with `held` the place
   -- the page key noted: the control pluginControl would find there, without the chrome gate, the
@@ -8262,8 +8546,8 @@ function pg.heldContextOf(P, base)
   ctx.origin = function() return pg.heldControl(P, base) end
   ctx.match = function()
     local c = pg.heldControl(P, base)
-    if not c then return false end
-    if base.present then return base.present(c) == true end
+    if not c then return false, "the plug-in's window held for the trip is not in front" end
+    if base.present and base.present(c) ~= true then return false, "its binding's present says no" end
     return true
   end
   return ctx
@@ -9134,6 +9418,13 @@ end
 
 function pages.stayHeld(win)
   return pg.stayHolder(win) ~= nil
+end
+
+function pages.isPage(o, w)
+  local P = pages.of(o)
+  if not (P and w) then return false end
+  local id = pg.pageWindowOf(P)
+  return id ~= nil and w.id == id
 end
 
 -- The stay held by a page (§3.3), and `a` in front: the page, W, or a window of W's application on

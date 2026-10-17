@@ -133,14 +133,16 @@ local function nameBefore(o)
 end
 
 -- The name watched after a click, then the trip done with it: `unchanged` says a name that has not
--- changed by the watch's bound ("unchanged" in the page), as ◀ and ▶ say it.
-local function thenName(o, trip, was, unchanged)
+-- changed by the watch's bound ("unchanged" in the page), as ◀ and ▶ say it. A name that changed
+-- counts once it has settled (main.luau, watchName): one that never did is "cannot be read now",
+-- never posted as the preset.
+local function thenName(o, trip, was, unchanged, label)
   R.watchName(o, was, function(now, before, changed)
     if now == nil then return trip:done({ error = "the preset name cannot be read now" }) end
     local note = nil
     if unchanged and not changed and before ~= nil and now == before then note = "unchanged, " .. now end
     trip:done({ set = named(now), note = note })
-  end)
+  end, label)
 end
 
 -- ◀ and ▶, and UNDO: a click, then the name.
@@ -153,7 +155,7 @@ local function click(action, ringLabel, at, unchanged)
       if not ok then return trip:done({ sentence = said }) end
       -- A step or an undo the database's position does not follow from the page.
       E.DB.forget("the page's " .. ringLabel)
-      thenName(w, trip, was, unchanged)
+      thenName(w, trip, was, unchanged, ringLabel)
     end)
   end
 end
@@ -197,7 +199,7 @@ local function fileItem(action, ringLabel, item)
           R.watchName(o2, was, function(now)
             if now == nil then return t2:done({ error = "the preset name cannot be read now" }) end
             t2:done({ set = named(now), note = (not seen) and "no file dialog was seen" or nil })
-          end)
+          end, ringLabel)
         end)
       end)
     end)

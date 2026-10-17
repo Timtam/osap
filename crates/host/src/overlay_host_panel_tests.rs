@@ -236,9 +236,11 @@ function T.region(r) return table.concat({ r[1], r[2], r[3], r[4] }, ",") end
 /// most specific is active, and the one it replaces is deactivated first. (The harness's own
 /// activates every matching claim, which two overlays on one slot cannot live with, and answers
 /// specificity 0, so nothing is ever outranked with it.) Called back through `Function::call`, as
-/// the host calls them (`T.hostCall`). A claim is listed as `T.claimModule`'s when it registers
-/// (default `com.platform.overlay`). Shared by `overlay_avenger_tests.rs` and
-/// `overlay_page_tests.rs`; `T.claims` are its claims, for a scenario to look at.
+/// the host calls them (`T.hostCall`), and in the host's order: the new winner is marked active
+/// before the claim it replaces is called off, then called on. A claim is listed as
+/// `T.claimModule`'s when it registers (default `com.platform.overlay`). Shared by
+/// `overlay_avenger_tests.rs` and `overlay_page_tests.rs`; `T.claims` are its claims, for a
+/// scenario to look at.
 pub(crate) const SPECIFICITY_ARBITER: &str = r##"
 local claims = {}
 T.claims = claims
@@ -247,16 +249,19 @@ local function settle(slot)
   for i, c in ipairs(claims) do
     if c.slot == slot and c.matching and (not best or c.spec > claims[best].spec) then best = i end
   end
+  local off, on = {}, nil
   for i, c in ipairs(claims) do
     if c.slot == slot and c.active and i ~= best then
       c.active = false
-      T.hostCall(c.off)
+      off[#off + 1] = c
     end
   end
   if best and not claims[best].active then
     claims[best].active = true
-    T.hostCall(claims[best].on)
+    on = claims[best]
   end
+  for _, c in ipairs(off) do T.hostCall(c.off) end
+  if on then T.hostCall(on.on) end
 end
 rawset(T.host, "arbiter", T.strict("host.arbiter", {
   register = function(slot, specificity, on, off)
@@ -280,10 +285,14 @@ rawset(T.host, "arbiter", T.strict("host.arbiter", {
     end
     return nil
   end,
+  -- As the host lists them: each claim's module, specificity, and whether it matches and is the
+  -- slot's active one.
   participants = function(slot)
     local out = {}
     for _, c in ipairs(claims) do
-      if c.slot == slot then out[#out + 1] = { module = c.module } end
+      if c.slot == slot then
+        out[#out + 1] = { module = c.module, specificity = c.spec, matching = c.matching, active = c.active }
+      end
     end
     return out
   end,
@@ -483,7 +492,7 @@ fn neither_the_module_nor_the_host_gives_a_control_the_binding_is_inert_and_says
 /// The Win32 chrome classes mean nothing on a Mac, so the panel's gate is geometric: a focused
 /// element outside the panel is the DAW's chrome and the overlay stays out; the window itself —
 /// all a view that publishes nothing leaves on the chain — and an element inside the panel are
-/// inside; an empty chain is nobody knowing, and not inside.
+/// inside; an empty chain is nobody knowing: it keeps a stay in its window, and begins none.
 #[test]
 fn the_keyboard_on_the_daws_own_controls_keeps_the_overlay_out() {
     run_mac(r##"
@@ -504,7 +513,84 @@ fn the_keyboard_on_the_daws_own_controls_keeps_the_overlay_out() {
         T.show(T.CHAIN, { T.CHAIN })
         assert(o.active)
         T.show(T.CHAIN, {})
-        assert(not o.active, "an empty chain is not inside: " .. T.dump())
+        assert(o.active, "an empty chain in the stay's window keeps the stay: " .. T.dump())
+        T.show(T.CHAIN, { T.FXLIST, T.CHAIN })
+        assert(not o.active, "on the FX list again")
+        T.show(T.CHAIN, {})
+        assert(not o.active, "an empty chain begins no stay: " .. T.dump())
+    "##);
+}
+
+/// A click into a plug-in's own drawn view, in Logic: the system answers the focus read with
+/// nothing (the tester's log of 2026-10-14, after every click into VPS Avenger). The same window in
+/// front with an empty chain keeps the stay — no identify, one line per stay saying so — and never
+/// begins one: after a visit to Logic's header, and in a window resized meanwhile. The window
+/// itself on the chain is inside, as it always was. (That the DAW's origin is not asked on an
+/// empty chain cannot be seen from here: the runtime keeps it per window and size, and a stay
+/// needs the same size; `an_empty_chain_asks_no_origin` covers the round with no stay.)
+#[test]
+fn an_empty_chain_keeps_the_stay_in_its_window_and_never_begins_one() {
+    run_mac(r##"
+        local S = T.S
+        local LOGIC = { daw = "Logic Pro", macos = { app = { bundleId = "com.apple.logic10" } },
+          pluginOrigin = { macos = function() return { 2, 88 } end } }
+        T.at(T.LOGIC)
+        local asked = 0
+        local o = T.bind({ hosts = { LOGIC }, control = { windows = "x" },
+          identify = function() asked += 1; return true end }, "Mine")
+        assert(o.active and asked == 1, T.dump())
+        T.show(T.LOGIC, {})
+        assert(o.active and asked == 1, "the stay goes on: " .. T.dump())
+        local line = "[overlay] 'Mine': where the keyboard is in 'Inst 1' cannot be read (an empty focus "
+          .. "chain) — the stay goes on there"
+        assert(T.count(line) == 1, T.dump())
+        T.show(T.LOGIC, {})
+        assert(o.active and T.count(line) == 1, "said once per stay: " .. T.dump())
+        T.show(T.LOGIC, { T.LOGIC })
+        assert(o.active and asked == 1)
+        -- Logic's header: the DAW's own controls, and the stay ends.
+        local headerButton = { id = 22, class = "AXButton//", bounds = { x = 220, y = 70, w = 20, h = 20 } }
+        T.show(T.LOGIC, { headerButton, T.LOGIC })
+        assert(not o.active)
+        T.show(T.LOGIC, {})
+        assert(not o.active and asked == 1, "nothing read begins no stay: " .. T.dump())
+        T.show(T.LOGIC, { T.LOGIC })
+        assert(o.active and asked == 2, T.dump())
+        T.show(T.LOGIC, {})
+        assert(o.active and T.count(line) == 2, "said in the new stay: " .. T.dump())
+        -- Resized: another stay, which an empty chain does not begin either.
+        T.LOGIC.client.h, T.LOGIC.bounds.h = 700, 700
+        T.show(T.LOGIC, {})
+        assert(not o.active and asked == 2, T.dump())
+        T.show(T.LOGIC, { T.LOGIC })
+        assert(o.active and asked == 3, T.dump())
+    "##);
+}
+
+/// The VM's own watcher keeps the stay on an empty chain too: an overlay outranked on its slot,
+/// which skips its rechecks, finds its verdict when the slot comes back after the keyboard went
+/// unreadable in the same window.
+#[test]
+fn an_empty_chain_does_not_end_the_stay_while_the_overlay_is_outranked() {
+    run_mac(r##"
+        local S = T.S
+        local foreign = false
+        local winner = T.host.arbiter.winner
+        rawset(T.host.arbiter, "winner", function(slot)
+          if foreign then return 999 end
+          return winner(slot)
+        end)
+        rawset(T.host.arbiter, "winnerSpecificity", function() return foreign and 100 or 0 end)
+        T.at(T.CHAIN)
+        local asked = 0
+        local o = T.bind({ control = { windows = "x" },
+          identify = function() asked += 1; return true end }, "Mine", { slot = "com.test.plugin" })
+        assert(o.active and asked == 1, T.dump())
+        foreign = true
+        T.show(T.CHAIN, {})
+        foreign = false
+        T.show(T.CHAIN, { T.CHAIN })
+        assert(o.active and asked == 1, "the stay went on: " .. asked .. "\n" .. T.dump())
     "##);
 }
 
@@ -647,6 +733,50 @@ fn could_not_tell_yet_is_asked_again_and_the_next_stay_asks_afresh() {
         T.show(T.CHAIN, { T.FXLIST, T.CHAIN })
         T.show(T.CHAIN, { T.CHAIN })
         assert(asked == 9 and o.active, T.dump())
+    "##);
+}
+
+/// A stored `identify` is handed a function as its second argument, the same one every time, that
+/// asks the overlays of its binding to look again on the module's next turn: an `identify` whose
+/// read answers later says so through it, with no window event and no round of every module's
+/// overlays. Two calls in one turn are one evaluation; one made after the keyboard left brings
+/// nothing up there.
+#[test]
+fn an_identify_that_cannot_tell_yet_asks_again_through_the_function_it_is_handed() {
+    run_mac(r##"
+        local S = T.S
+        T.at(T.CHAIN)
+        local answer, calls, again = nil, 0, nil
+        local o = T.bind({ control = { windows = "x" },
+          identify = function(_, a) calls += 1; again = a; return answer end }, "Mine")
+        assert(not o.active and calls == 1 and type(again) == "function", T.dump())
+        local first = again
+        answer = true
+        local timers = #S.after
+        again()
+        again()
+        assert(#S.after == timers + 1, "two calls in one turn, one evaluation asked for: " .. (#S.after - timers))
+        assert(not o.active and calls == 1, "on the module's next turn, not inside the call")
+        T.runDue()
+        assert(o.active and calls == 2 and S.rechecks == 0, "one evaluation, and no round of every module's: "
+          .. calls .. ", " .. S.rechecks .. "\n" .. T.dump())
+        assert(again == first, "the same function every time")
+        -- One the host drops — the module unticked before it came due — leaves nothing stuck: a
+        -- call in a later turn asks again.
+        timers = #S.after
+        again()
+        assert(#S.after == timers + 1, T.dump())
+        table.remove(S.after)
+        S.epoch += 1
+        again()
+        assert(#S.after == timers + 1, "asked again after an evaluation that never came: " .. (#S.after - timers))
+        T.runDue()
+        assert(o.active and calls == 2, T.dump())
+        T.show(T.OTHER)
+        assert(not o.active)
+        again()
+        T.runDue()
+        assert(not o.active and calls == 2, T.dump())
     "##);
 }
 
@@ -895,8 +1025,9 @@ fn sforzando_binds_in_a_logic_window_titled_inst_1_and_in_a_reaper_floating_wind
         T.event()
         assert(#S.reads == 1, "one read per stay, not one per evaluation")
         answer(S.reads[1])
-        assert(S.rechecks == 1, "the answer asks the overlays to look again")
-        T.event()
+        assert(S.rechecks == 0 and not ov.active, "the answer asks the overlays of its binding, on the "
+          .. "module's next turn, through the function the runtime hands identify")
+        T.runDue()
         assert(ov.active, T.dump())
         local c = ov:origin()
         assert(c.class == "host-panel" and c.client.x == 100 and c.client.y == 82, T.dump())
@@ -1364,6 +1495,62 @@ fn the_keyboard_has_to_be_inside_what_a_function_returned_too() {
     "##);
 }
 
+/// A `control` function's control on an empty chain in the stay's window: the overlay stays up on
+/// the control the function last found in the stay, moved with the window, and neither the
+/// function nor `identify` is asked — on a Mac an empty chain is also the host's busy quarantine,
+/// in which a function that looks for its plug-in's elements finds none. Where the function found
+/// no control in the stay, or one the keyboard was not in, an empty chain brings nothing up.
+#[test]
+fn a_control_functions_control_stays_up_on_an_empty_chain_and_the_function_is_not_asked() {
+    run_mac(r##"
+        local S = T.S
+        T.at(T.CHAIN)
+        local asked, fnAsks, found = 0, 0, true
+        local o = T.bind({ control = { windows = "x", macos = function(active, panel)
+            fnAsks += 1
+            if not (panel and found) then return nil end
+            local x, y = panel.client.x + 100, panel.client.y
+            local w, h = active.client.x + active.client.w - x, active.client.y + active.client.h - y
+            return { id = active.id, app = active.app, class = "right",
+              bounds = { x = x, y = y, w = w, h = h }, client = { x = x, y = y, w = w, h = h } }
+          end }, identify = function() asked += 1; return true end }, "Mine")
+        assert(o.active and asked == 1, T.dump())
+        local asks = fnAsks
+        T.show(T.CHAIN, {})
+        assert(o.active and asked == 1 and fnAsks == asks, "up, nothing asked: " .. fnAsks - asks .. "\n" .. T.dump())
+        local c = o:origin()
+        assert(c and c.class == "right" and c.client.x == 340 and c.client.y == 112, T.dump())
+        -- The window moved, the keyboard still unreadable: the stay goes on, and the control with it.
+        T.CHAIN.client.x, T.CHAIN.bounds.x = 50, 50
+        T.show(T.CHAIN, {})
+        c = o:origin()
+        assert(o.active and fnAsks == asks and asked == 1 and c and c.client.x == 390 and c.bounds.x == 390, T.dump())
+        T.CHAIN.client.x, T.CHAIN.bounds.x = 0, 0
+        -- Readable again: the function is asked, and the stay's verdict stands.
+        T.show(T.CHAIN, { T.CHAIN })
+        assert(o.active and fnAsks > asks and asked == 1, T.dump())
+        -- The keyboard between the DAW's panel and the function's control, then unreadable: down.
+        local between = { id = 15, class = "AXButton//", bounds = { x = 260, y = 200, w = 20, h = 20 } }
+        T.show(T.CHAIN, { between, T.CHAIN })
+        assert(not o.active, T.dump())
+        asks = fnAsks
+        T.show(T.CHAIN, {})
+        assert(not o.active and fnAsks == asks, "nothing brought up: " .. T.dump())
+        T.show(T.CHAIN, { T.CHAIN })
+        assert(o.active and asked == 1, T.dump())
+        -- The function finds nothing in the stay: an empty chain brings nothing up either.
+        found = false
+        T.event()
+        assert(not o.active and T.count("(REAPER); the module's control function found no control") == 1, T.dump())
+        asks = fnAsks
+        T.show(T.CHAIN, {})
+        assert(not o.active and fnAsks == asks, "not asked on an empty chain: " .. T.dump())
+        found = true
+        T.show(T.CHAIN, { T.CHAIN })
+        assert(o.active and asked == 1, T.dump())
+    "##);
+}
+
 /// A chain that does not end in the window in front describes some other window, and an element
 /// without a rectangle is nowhere: neither is inside, and the first ends the stay.
 #[test]
@@ -1396,6 +1583,87 @@ fn an_empty_chain_asks_no_origin() {
         assert(not o.active and S.originAsks == 0, "asked " .. S.originAsks)
         T.show(T.CHAIN, { T.CHAIN })
         assert(o.active and S.originAsks == 1, T.dump())
+    "##);
+}
+
+/// Every `[deactivate]` line says which test failed, after what is in front: on a Mac the keyboard
+/// on the DAW's own controls, a window that is no plug-in window of the binding's hosts, `identify`
+/// saying the panel shows another plug-in, a focused element without a rectangle, a chain that is
+/// another window's, the keyboard unreadable where no stay is in progress, and `present`; on
+/// Windows the DAW's chrome class and a gate.
+#[test]
+fn every_deactivation_says_which_test_failed() {
+    run_mac(r##"
+        local S = T.S
+        T.at(T.CHAIN)
+        local shown, present = "mine", true
+        local o = T.bind({ control = { windows = "x" }, identify = function() return shown == "mine" end,
+          present = function() return present end }, "Mine")
+        assert(o.active, T.dump())
+        local front = "[deactivate] 'Mine' — in front now: 'FX: Track 1 \"Track 1\"' (REAPER); "
+        local function left(why, n)
+          assert(not o.active, "still in front, waiting for: " .. why)
+          assert(T.count(front .. why) == (n or 1), "no line '" .. front .. why .. "'\n" .. T.dump())
+          T.show(T.CHAIN, { T.CHAIN })
+          assert(o.active, "back: " .. T.dump())
+        end
+        T.show(T.CHAIN, { T.FXLIST, T.CHAIN })
+        left("the keyboard is on [AXTable//] at 119,390, outside the plug-in's panel (the DAW's own controls)")
+        T.show(T.OTHER)
+        assert(T.count("[deactivate] 'Mine' — in front now: 'Browser' (chrome.exe); 'Browser' is not a "
+          .. "plug-in window of the binding's hosts") == 1, T.dump())
+        T.show(T.CHAIN, { T.CHAIN })
+        T.show(T.CHAIN, { { id = 16, class = "AXButton//" }, T.CHAIN })
+        left("the focused element [AXButton//] has no rectangle")
+        local foreign = { id = 5100, class = "AXButton//", bounds = { x = 400, y = 300, w = 20, h = 20 } }
+        T.show(T.CHAIN, { foreign, T.OTHER })
+        left("the focus chain ends in another window than 'FX: Track 1 \"Track 1\"'")
+        present = false
+        T.event()
+        present = true
+        left("its binding's present says no")
+        -- Resized with the keyboard unreadable: the stay is over, and none begins.
+        T.CHAIN.client.w, T.CHAIN.bounds.w = 1200, 1200
+        T.show(T.CHAIN, {})
+        left("where the keyboard is in 'FX: Track 1 \"Track 1\"' cannot be read (an empty focus chain), "
+          .. "and no stay is in progress there")
+        -- Retitled with the keyboard inside, another plug-in shown: a new stay, and identify says no.
+        shown = "ReaEQ"
+        T.CHAIN.title = 'FX: Track 2 "Track 2"'
+        T.event()
+        assert(not o.active and T.count("[deactivate] 'Mine' — in front now: 'FX: Track 2 \"Track 2\"' "
+          .. "(REAPER); identify says the panel shows another plug-in") == 1, T.dump())
+    "##);
+    run(r##"
+        local S = T.S
+        S.front, S.controls, S.chain = T.FX, { T.LIST, T.WRAP, T.KK }, { T.KK, T.WRAP, T.FX }
+        T.turn()
+        local o = T.bind({ hosts = { T.REAPER_WIN }, control = { windows = "Qt%d+.-QWindowIcon" },
+          identify = function() return true end }, "Mine")
+        assert(o.active, T.dump())
+        T.show(T.FX, { T.LIST, T.FX })
+        assert(not o.active and T.count("[deactivate] 'Mine' — in front now: 'FX: Track 1 \"test\"' (reaper.exe); "
+          .. "the keyboard is on the DAW's own control [SysListView32]") == 1, T.dump())
+        S.gate = true
+        local g = T.O.new("Gated")
+        g:addCustomButton({ label = "OK", onActivate = function() end })
+        g:gate(function() return S.gate end)
+        g:attach({ windows = { class = "#32770" } })
+        T.runDue()
+        assert(g.active, T.dump())
+        S.gate = false
+        T.event()
+        assert(not g.active and T.count("[deactivate] 'Gated' — in front now: 'FX: Track 1 \"test\"' (reaper.exe); "
+          .. "its gate says no") == 1, T.dump())
+        S.gate = true
+        T.show(T.OTHER)
+        assert(T.count("[deactivate] 'Gated' — in front now: 'Browser' (chrome.exe); 'Browser' is not a window "
+          .. "its binding matches") == 0, "not in front, nothing to leave")
+        T.show(T.FX)
+        assert(g.active)
+        T.show(T.OTHER)
+        assert(T.count("[deactivate] 'Gated' — in front now: 'Browser' (chrome.exe); 'Browser' is not a window "
+          .. "its binding matches") == 1, T.dump())
     "##);
 }
 

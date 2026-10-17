@@ -111,7 +111,8 @@ local WORDMARK = host.os.pick {
 -- nothing is found — which is exactly the common case, another plug-in's graphics — so a wait for
 -- it would hold the module's first key after coming into any plug-in. So it is asked with a
 -- callback, and `identify` answers nil ("could not tell yet") until the answer lands, then asks
--- every overlay to look again; `false` would be kept for the stay.
+-- the overlays of its binding to look again, with the function the runtime hands `identify` for it
+-- (`again`, docs/api/overlay.md, attachEmbedded); `false` would be kept for the stay.
 --
 -- Only a read that READ something is a verdict: text without the wordmark is another plug-in.
 -- Nothing read — "blank", "none", a read that failed or was pushed out — is not a "no": a view
@@ -121,7 +122,7 @@ local WORDMARK = host.os.pick {
 --
 -- One answer at a time — one window is in front at a time — for one window, panel size and stay.
 local wordmark = { key = nil, value = nil, reading = false }
-local function wordmarkOnPanel(ctrl)
+local function wordmarkOnPanel(ctrl, again)
   local key = string.format("%s|%dx%d|%s", tostring(ctrl.id), ctrl.client.w, ctrl.client.h, tostring(ctrl.stay))
   if wordmark.key ~= key then wordmark.key, wordmark.value, wordmark.reading = key, nil, false end
   if wordmark.value ~= nil then return wordmark.value end
@@ -135,7 +136,7 @@ local function wordmarkOnPanel(ctrl)
       wordmark.reading = false
       if r.status ~= "text" then return end
       wordmark.value = string.find(string.lower(r.text or ""), "sforzando", 1, true) ~= nil
-      host.window.recheck()
+      again()
     end)
   return nil
 end
@@ -172,7 +173,7 @@ ov:attachEmbedded({
   -- on a Mac any plug-in at all, so this is asked of both, and kept: per control on Windows, per
   -- stay inside the panel on a Mac (another plug-in selected in the same FX chain window is
   -- asked about afresh — see the runtime's "stay").
-  identify = function(ctrl)
+  identify = function(ctrl, again)
     -- UIA (as ReaHotkey): sforzando's GUI is a Pane named "PlogueXMLGUI". On a Mac nothing
     -- of sforzando's is published, and this asks the whole plug-in window for nothing.
     if host.element and host.element.find(ctrl.id, "PlogueXMLGUI", host.element.type.Pane) then
@@ -182,7 +183,7 @@ ov:attachEmbedded({
     -- on the DAW's panel (above), and on a control of its own as the answer itself — a small
     -- region, read in English as the wordmark is written, once per control handle; the handler
     -- that asked waits for the reading, and nothing else does.
-    if ctrl.stay ~= nil then return wordmarkOnPanel(ctrl) end
+    if ctrl.stay ~= nil then return wordmarkOnPanel(ctrl, again) end
     local ox, oy = ctrl.client.x, ctrl.client.y
     local r = host.ocr.recognize({ ox + WORDMARK[1], oy + WORDMARK[2], ox + WORDMARK[3], oy + WORDMARK[4] },
       { lang = "en" })

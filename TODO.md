@@ -34,7 +34,7 @@ The first Mac test of the Avenger page (build 97d668c, an M2 Max on macOS 26.6.1
 another cause than the one guessed, and the log showed three more faults. In the order to work on
 them:
 
-- [ ] **2a. An overlay must not leave the plug-in after a click into it (macOS, every plug-in).**
+- [x] **2a. An overlay must not leave the plug-in after a click into it (macOS, every plug-in).**
       Right after every click into Avenger, the ring's own included, the log says `[deactivate] 'VPS
       Avenger' — in front now: 'Inst 1'`: the same window. After a click into a plug-in's own drawn
       view, Logic reports the keyboard on the window itself (`AXWindow/AXDialog`) or on nothing, and
@@ -43,18 +43,79 @@ them:
       a focus on the window itself or on nothing keeps the stay. The same cause ends the ring's Load
       and Initialize on a Mac (`not chosen — the overlay left the front first`); the page's trips
       are unaffected, since a trip holds its place.
-- [ ] **2b. An undecided `identify` is asked again when its read answers.** The panel's `identify`
+      **Built (runtime 0.7.0, 2026-10-17).** The guess was half right, the code showed: the
+      window itself on the chain was already "inside"; an EMPTY chain ended the stay, in the VM's
+      stay watcher and in every panel binding's evaluation. Now an empty chain with the same window in
+      front (same id, title and client size) keeps the stay — the panel the stay began with stands
+      for the DAW's, its origin is not asked, the verdict is kept, and a module's `control`
+      function is not asked either: the control it last found in the stay stands for it, so a
+      function that counts its misses (Kontakt's) counts none in the host's busy quarantine — and
+      never begins one; a chain
+      that is another window's, an element without a rectangle, an element outside the panel,
+      another window in front, a resize or a retitle still end it, and the page's hold is
+      unchanged. General, for every panel binding in every VM (sforzando's too). The way back from
+      the page into Logic with the keyboard on nothing comes back in the stay as well (l.1926-1939
+      of the log, which the TODO did not list). Pinned in overlay_host_panel_tests.rs
+      (`an_empty_chain_keeps_the_stay_in_its_window_and_never_begins_one`, the outranked variant),
+      overlay_avenger_tests.rs (the ring's ◀ and Load / Initialize in Logic at 80 % after Logic
+      reports nothing) and overlay_page_tests.rs (the way back, a trip landing on nothing).
+      Residual, in docs/api/overlay.md: a visit to the DAW's chrome made while the DAW is in the
+      host's busy quarantine reads empty too and keeps the stay until the next readable round.
+      **The Mac tester confirms:** after every click into Avenger (◀, ▶, MENU, a click of their
+      own) the log has `[overlay] 'VPS Avenger': where the keyboard is in 'Inst 1' cannot be read
+      (an empty focus chain) — the stay goes on there` once per stay and no `[deactivate]`; the
+      overlay keeps its keys without moving the window; Load and Initialize from the ring are chosen
+      (`[menu item] 'VPS Avenger': 'Load preset' chosen — …`); Tab or VoiceOver onto Logic's header
+      still takes the overlay out (a `[deactivate]` naming the header's element); and the new host
+      line `[macos] accessibility answered <error> reading AXFocusedUIElement in Logic Pro …` (or
+      `… no focused element and no front window …`) says which answer Logic gives.
+- [x] **2b. An undecided `identify` is asked again when its read answers.** The panel's `identify`
       reads by OCR with a callback and first answers "could not tell yet"; the answer is picked up
       only at the next recheck, which only a window event brings. The tester moved the plug-in
       window with Control-Fn-arrows after every click for exactly that event (it looked like a
       matter of the window's place; the log shows the identification working at the same place). The
       runtime asks again on its own once the read is in.
-- [ ] **2c. Every deactivation logs its reason** (which test failed: the focus outside the panel,
+      **Built (runtime 0.7.0, 2026-10-17).** The log showed the module already asking
+      (`host.window.recheck` from the header's read): every identification whose read landed with
+      the keyboard in the panel came up in the same second, and the moves were needed because of
+      2a — after each click the stay ended and nothing began a new one until a readable round. What
+      remained general is built: a stored `identify` is handed a second argument, `again`, which
+      asks the overlays of its binding in this VM to look again on the module's next turn (once per
+      turn, the same function every time, each nil still counted towards the 8) instead of a round
+      of every module's overlays. VPS Avenger's header read (0.3.1) and sforzando's wordmark read
+      (0.2.2) call it. With 2a, a read that lands after the keyboard went unreadable brings the
+      overlay up (`a_header_read_that_lands_after_the_keyboard_went_unreadable_brings_the_overlay_up`).
+      **The Mac tester confirms:** Avenger comes up in Logic without moving the window, within a
+      moment of `identify could not tell yet`, and again after a visit to Logic's header and back.
+- [x] **2c. Every deactivation logs its reason** (which test failed: the focus outside the panel,
       the identity, a gate, another overlay's claim), so the next Mac log answers 2a directly.
-- [ ] **4. A preset step waits for a settled name.** `O:watch` on the name stops at the first
+      **Built (runtime 0.7.0, 2026-10-17).** `[deactivate] '<label>' — in front now: '<title>'
+      (<app>); <reason>`: this application's own window or the overlay's page, a window binding's
+      window, the plug-in window not of the binding's hosts, the DAW's chrome class (Windows), the
+      pattern or a control function finding nothing, where the keyboard is on the panel (outside,
+      no rectangle, another window's chain, an empty chain with no stay), `identify`'s answer,
+      `present`, the gate or landmark, the menu hold ending, a trip's held place, and the claim the
+      arbiter chose (docs/api/overlay.md, "Leaving the front"). The reasons are values in hand,
+      formatted only for the line. On the host's side (macOS), one line per application and answer
+      when the focused-element read fails with an error other than the busy and the permission ones,
+      or answers no element and no front window (docs/api/window.md, focusChain). **The Mac tester
+      confirms:** every `[deactivate]` of the next log carries a reason.
+- [x] **4. A preset step waits for a settled name.** `O:watch` on the name stops at the first
       change, which is Avenger's loading display: seven of ten steps read names such as
       `cYanmaGentaYellowb`, `PY` or `M`, and the page said them. The name counts once two reads
       agree, or it is in the catalog; otherwise the watch goes on to its bound.
+      **Built (runtime 0.7.0, VPS Avenger 0.3.1, 2026-10-17).** In the runtime, general: O:watch
+      counts READINGS, not looks — a `read` may name the reading its value came from as a second
+      value, and `done`, `onDone` and `onGiveUp` get `n`, how many readings in a row read the value
+      (`[watch] … (2 readings alike)`); a read without it counts every look, as before. The module
+      numbers its name reads, and a step's watch (the ring's ◀ and ▶, the page's ◀, ▶, UNDO, Load
+      and Save as) is done when the name changed and was read twice alike or is a catalog name as it
+      stands or ignoring case (`DB.catalogName`, never by similarity). At the bound a name read once
+      that is no catalog name is not taken: "the preset name cannot be read now", or the database's
+      neighbour, marked; the page gets the error, not the text. Residual: a loading display read
+      alike twice in a row would pass (none was in the log). **The Mac tester confirms:** after ◀
+      and ▶, ring and page, the names said and posted are presets, never `cYanma…`, `PY` or `M`,
+      and the `[watch]` lines say `(2 readings alike)` or end on a catalog name.
 - [ ] **1a. Screen Recording judged by a real capture, not by `CGPreflightScreenCaptureAccess`.** In
       the first session the preflight said "not granted" throughout while every capture held Logic
       and Avenger (OCR read the header, Avenger was identified). The Permissions page and the start
@@ -81,7 +142,34 @@ them:
       no menu test of the module sees them on a Mac. Needs pictures of each popup kind from the
       Avenger developer (GM1), then a picture-based menu test.
 - [ ] **6. Then a new package for the tester:** Load, Initialize and Size again (ring and page), the
-      names after Next and Previous, and the Permissions page.
+      names after Next and Previous, and the Permissions page. With 2a, 2b, 2c and 4 built, the
+      package also asks for what each of them says the Mac tester confirms above, and no window
+      moves between steps.
+- [ ] **7. Follow-ups of 2a (not built).** (a) The host's busy quarantine: when a focus read is
+      skipped or fails for it, arm one focus round for when it ends (`BUSY_PENALTY`, ax.rs), as
+      `arm_recheck_ladder` (queue.rs) places its last rungs past it — a bound on looking, so the
+      visit to the DAW's chrome that 2a's residual leaves unseen is read once the DAW answers.
+      (b) daw-hosts' focus key on an empty chain after focusing a Logic plug-in window says "could
+      not tell" and does nothing (l.2102-2106): it could at least ask the overlays to look again.
+      (c) An overlay never begins on an unreadable chain, so a reload with the keyboard already in
+      Avenger's view comes up only at the first readable round (l.1946-2140). (d) Kontakt's
+      `control` functions read with callbacks too (kontakt detect.luau) and still call
+      `host.window.recheck`; they could take `again` as a third argument. (e) l.2321: the first
+      page trip's ◀ after the page opened gave up unchanged, possibly a swallowed first click
+      (item 3 or 6 material). (f) A popup of Avenger's that becomes Logic's focused window (not
+      seen in this log: the overlay left before any popup) ends the stay, as any other window in
+      front does, and an empty chain when Logic's window comes back begins none: the overlay would
+      then be back only at the next readable round. The next log says whether that happens
+      (`[deactivate] … its place over its menu's window is no longer held; …`). (g) A `control`
+      function is not asked on an empty chain (the review of 2026-10-17): a function whose own read
+      with a callback lands while the chain is empty (Kontakt 7's header by OCR, clicked into before
+      it landed) comes up only at the next readable round; if a Mac log shows that, the round's
+      state could be handed to the function so it answers from what it holds without looking.
+      (h) The ring's Zoom step in Logic resizes the window, which ends the stay, and an empty chain
+      after it begins none: the overlay is back only at the next readable round, as in (f). (i) A
+      header read that answers nothing, half an answer or no factor does not call `again` (on
+      purpose: re-asking at once would spend the 8 nils), so after a click with the chain empty it
+      waits for the next evaluation.
 
 ## CI without macos-14 (2026-10-16)
 
