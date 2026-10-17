@@ -3,9 +3,9 @@ name = "Waves Tune Real-Time"
 version = "0.1.0"
 license = "GPL-3.0-or-later"
 dependencies = ["com.platform.overlay >= 0.2", "com.platform.daw-hosts"]
-# Measured on Windows only: identify reads the wordmark on a control of its own, which a Mac does
-# not give a plug-in (see sforzando's panel read for what a Mac would need).
-supported_os = ["windows"]
+# No supported_os: the About box is closed on both systems. The overlay itself is measured on
+# Windows only: identify reads the wordmark on a control of its own, which a Mac does not give a
+# plug-in (see sforzando's panel read for what a Mac would need), so on a Mac it never attaches.
 
 [capabilities]
-require = ["ocr", "screen", "input", "window", "speech"]
+require = ["ocr", "screen", "input", "window", "speech", "timer"]

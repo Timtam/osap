@@ -214,6 +214,33 @@ end
 -- Says the scale's name afterwards: the edited mark, " *", goes from it.
 button("Reset Scale", { 720, 475 }, scaleName)
 
+-- The About box: Waves shows it on the plug-in's first run (seen on a Mac, 2026-10-17), and the
+-- W at the plug-in's top left opens it. It has nothing to press, for a screen reader or a key,
+-- Escape included, and while it is open the DAW will not quit. A click anywhere on it closes it
+-- (measured on Windows, posted onto its logo), so it is closed as soon as it comes forward. On a
+-- Mac it opens inside a DAW already in front, which only a focus change reports.
+local ABOUT = { title = { prefix = "About Waves Tune Real-Time" } }
+local ABOUT_LOGO = { 150, 150 } -- from its client's top-left: inside the logo on both systems
+local closing = nil
+
+local function closeAbout(w)
+  if not w or w.id == closing or not host.window.test(ABOUT, w) then return end
+  closing = w.id
+  local made, why = host.input.click(w.client.x + ABOUT_LOGO[1], w.client.y + ABOUT_LOGO[2],
+    { window = w.id, via = "post", move = false })
+  if not made then
+    closing = nil
+    return say("Waves About box is open, and could not be closed: " .. why)
+  end
+  host.timer.after(600, function()
+    local still = host.window.find({ title = ABOUT.title, app = { pid = w.app.pid } })
+    say(still and "Waves About box is open, and did not close" or "Waves About box closed")
+    closing = nil
+  end)
+end
+host.window.onTrigger(ABOUT, { initial = true }, closeAbout)
+host.window.onFocus(function() closeAbout(host.window.active()) end)
+
 -- "WAVES TUNE REAL-TIME" under the pitch meter, read at x 442 to 597, y 212 to 221.
 local WORDMARK = { 430, 205, 610, 228 }
 
