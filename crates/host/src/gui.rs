@@ -222,6 +222,38 @@ fn show_manager(frame: &Frame) {
     set_tray_label(frame.is_shown());
 }
 
+/// Why the Permissions page reads the permissions again, and so what it says about what it found
+/// (`backend::grants`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Look {
+    /// The page was just built: it says nothing, the start's announcement speaks for it.
+    Built,
+    /// It came forward — its tab selected, its window activated, the application made active:
+    /// what changed since the last look, and nothing when nothing did.
+    Forward,
+    /// Re-check now: the count, and what changed or that nothing did — the press asked.
+    Recheck,
+}
+
+/// Sets a label's text where it differs, and says whether it did: a label set to what it already
+/// says is still a change to the control, and a look that finds nothing new should touch nothing.
+/// The text goes in [`as_written`]; the label hands back what it was given, so the two compare.
+fn relabel(label: &StaticText, text: &str) -> bool {
+    let text = as_written(text);
+    if label.get_label() == text {
+        return false;
+    }
+    label.set_label(&text);
+    true
+}
+
+/// `text` for a static label that is to show it as written. wxWidgets takes a single `&` in a
+/// label for the mark of a keyboard mnemonic and leaves it out of what is shown and read —
+/// "Screen & System Audio Recording" would be read without its "and" — so each is doubled.
+fn as_written(text: &str) -> String {
+    text.replace('&', "&&")
+}
+
 /// The single-instance lock: wxWidgets' `wxSingleInstanceChecker`, named by `crate::instance`.
 ///
 /// Here because this is the file that talks to wxdragon; `instance.rs` only sees the [`Lock`]
@@ -1014,6 +1046,9 @@ pub fn run_gui(
         // page be compiled and clicked on the machine it was written on. Windows needs no such
         // grants, so it gets no page.
         let mut perm_page: Option<usize> = None;
+        // How the page reads the permissions again, for the tick, which hears this application
+        // become the active one. Set with the page.
+        let mut perm_look: Option<Rc<dyn Fn(Look)>> = None;
         // Shared with the permission buttons, which say what a press did when it left the pane
         // shut, and still called once below for the startup announcement.
         let announce: std::rc::Rc<dyn Fn(&str)> = std::rc::Rc::new(announce);
@@ -1023,9 +1058,33 @@ pub fn run_gui(
             let ps = BoxSizer::builder(Orientation::Vertical).build();
             let head = StaticText::builder(&perm_tab).with_label("").build();
             ps.add(&head, 0, SizerFlag::Left | SizerFlag::All, 8);
-            // One label per permission, rebuilt in place by `refresh`. Built once and
-            // relabelled rather than destroyed and recreated, because a screen reader's focus
-            // is inside these controls when the Re-check button is pressed.
+            // A translocated copy, said right under the head and built once: it cannot change
+            // while the process runs. What it costs, and the one Terminal line that ends it in a
+            // read-only field of its own, to be selected and copied — the application never runs
+            // it (portable.rs). Labelled by the text before it: a text field has no label of its
+            // own, and its name is read on Windows only.
+            let moved = crate::portable::translocation();
+            if let (Some(said), Some(line)) = (moved.spoken(), moved.terminal_line()) {
+                ps.add(
+                    &StaticText::builder(&perm_tab).with_label(&as_written(&said)).build(),
+                    0,
+                    SizerFlag::Left | SizerFlag::All,
+                    8,
+                );
+                ps.add(
+                    &StaticText::builder(&perm_tab).with_label("The Terminal line, to copy:").build(),
+                    0,
+                    SizerFlag::Left | SizerFlag::Top,
+                    8,
+                );
+                let field = TextCtrl::builder(&perm_tab).with_style(TextCtrlStyle::ReadOnly).build();
+                field.set_value(&line);
+                field.set_name("The Terminal line, to copy"); // SetLabel() asserts on a TextCtrl
+                ps.add(&field, 0, SizerFlag::All | SizerFlag::Expand, 8);
+            }
+            // One label per permission, rebuilt in place by `look`. Built once and relabelled
+            // rather than destroyed and recreated, because a screen reader's focus is inside
+            // these controls when the Re-check button is pressed or the window comes back.
             let mut lines = Vec::new();
             for p in crate::backend::permissions() {
                 let line = StaticText::builder(&perm_tab).with_label("").build();
@@ -1073,49 +1132,89 @@ pub fn run_gui(
             ps.add(
                 &StaticText::builder(&perm_tab)
                     .with_label(
-                        "Accessibility takes effect at once: grant it, then press Re-check \
-                         now. Screen Recording does not: after granting it, quit the \
-                         application and open it again, because macOS hands that one only \
-                         to a process that started after the grant. If Input Monitoring still \
-                         reads as missing after Re-check now, quit and open the application \
-                         again as well. The Screen Recording and Input Monitoring buttons ask \
-                         macOS first, one way per press, and open the settings once nothing is \
-                         left to ask.",
+                        "This page reads the permissions again whenever it comes forward, and \
+                         says what changed. Accessibility takes effect at once. Screen Recording \
+                         is judged by what the captures show: if it still reads NOT granted after \
+                         granting it, quit the application and open it again, because older macOS \
+                         hands that one only to a process that started after the grant. If Input \
+                         Monitoring still reads as missing after granting it, quit and open the \
+                         application again as well. The Screen Recording and Input Monitoring \
+                         buttons ask macOS first, one way per press, and open the settings once \
+                         nothing is left to ask.",
                     )
                     .build(),
                 0,
                 SizerFlag::Left | SizerFlag::All,
                 8,
             );
-            let refresh = {
-                let (head, lines) = (head.clone(), lines.clone());
-                move || {
+            // Reads the permissions and relabels the page in place — only the labels whose text
+            // changed, so that a look that finds nothing new touches no control. What a look
+            // says is `Look`'s: nothing when the page is built, what changed when it comes
+            // forward, the count and what changed (or that nothing did) for Re-check now. Said,
+            // because a line relabelled away from a screen reader's focus is read out by nobody.
+            let look: Rc<dyn Fn(Look)> = {
+                let (head, lines, announce) = (head, lines.clone(), announce.clone());
+                let shown = Rc::new(RefCell::new(Vec::new()));
+                Rc::new(move |look: Look| {
                     let all = crate::backend::permissions();
-                    let done = all
-                        .iter()
-                        .filter(|p| p.state == crate::backend::Grant::Granted)
-                        .count();
-                    head.set_label(&format!(
-                        "{done} of {} granted. None of these can be granted by the \
-                         application itself.",
-                        all.len()
-                    ));
+                    relabel(&head, &crate::backend::grants::head(&all));
                     for (line, p) in lines.iter().zip(all.iter()) {
-                        line.set_label(&format!("{} — {}. {}", p.name, p.state.word(), p.without));
+                        relabel(line, &crate::backend::grants::line(p));
                     }
+                    let mut said = match look {
+                        Look::Built => Vec::new(),
+                        Look::Forward => crate::backend::grants::changes(&shown.borrow(), &all),
+                        Look::Recheck => vec![crate::backend::grants::rechecked(&shown.borrow(), &all)],
+                    };
                     if let (Some(line), Some(text)) = (&vo_line, crate::speech::voiceover_applescript_page()) {
-                        line.set_label(&text);
+                        if relabel(line, &text) && look != Look::Built {
+                            said.push(text);
+                        }
                     }
-                }
+                    *shown.borrow_mut() = crate::backend::grants::shown(&all);
+                    if !said.is_empty() {
+                        announce(&said.join(" "));
+                    }
+                })
             };
-            refresh();
-            recheck.on_click(move |_| refresh());
+            look(Look::Built);
+            {
+                let look = look.clone();
+                recheck.on_click(move |_| look(Look::Recheck));
+            }
             perm_tab.set_sizer(ps, false);
             notebook.add_page(&perm_tab, "Permissions", false, None);
             // Its index, taken rather than counted: pages are added in one place today and
             // that is exactly the kind of thing a later page inserted above would break
             // silently, sending somebody to the wrong tab.
-            perm_page = Some(notebook.get_page_count().saturating_sub(1));
+            let page = notebook.get_page_count().saturating_sub(1);
+            perm_page = Some(page);
+            // The page reads the permissions again whenever it comes forward, not only when it is
+            // built and at Re-check now: a grant is made in System Settings, with this window
+            // behind it, and the way back is one of these three. Its tab selected — after the
+            // start's own selection too, which finds nothing changed. The window activated with
+            // the page selected. And this application become the active one (the tick, below),
+            // which AppKit says also when the window was not the one to come forward. Each only
+            // while the page is the one shown, so that what changed is said where it can be read.
+            {
+                let look = look.clone();
+                notebook.on_page_changed(move |event| {
+                    if event.get_selection() == Some(page as i32) {
+                        look(Look::Forward);
+                    }
+                });
+            }
+            {
+                let look = look.clone();
+                frame.on_activate(move |event| {
+                    if let WindowEventData::Activate(a) = &event {
+                        if a.is_active() && notebook.selection() == page as i32 {
+                            look(Look::Forward);
+                        }
+                    }
+                });
+            }
+            perm_look = Some(look);
         }
 
         sizer.add(&notebook, 1, SizerFlag::All | SizerFlag::Expand, 0);
@@ -1741,49 +1840,31 @@ pub fn run_gui(
         // is there. So when something that gates everything is missing, the window comes to
         // them, on the right page, and says why it appeared.
         //
-        // Only `Missing`, never `Unknown`: Input Monitoring often cannot answer, and putting
-        // a window in front of a blind user to send them and fix what may not be broken is
-        // worse than staying quiet. And only the three that gate everything — Automation is
-        // asked for by the switch that wants it, and interrupting a launch over a voice
-        // setting nobody turned on would be pestering.
-        let missing: Vec<&'static str> = crate::backend::permissions()
-            .iter()
-            .filter(|p| p.blocking && p.state == crate::backend::Grant::Missing)
-            .map(|p| p.name)
-            .collect();
-        if missing.is_empty() {
-            announce(hint);
-        } else {
+        // Only `Missing`, never `Unknown`, and only what the application needs: Screen Recording
+        // judged by evidence rather than by the system's check, which said "not granted" for a
+        // whole session of captures that held other applications; Input Monitoring only once
+        // captured keys were seen not to arrive, which at the start they cannot have been; and
+        // never Automation, which is asked for by the switch that wants it — interrupting a
+        // launch over a voice setting nobody turned on would be pestering. Putting a window in
+        // front of a blind user to send them to fix what may not be broken is worse than
+        // staying quiet (backend/grants.rs).
+        //
+        // A translocated copy is said after everything else, with the Terminal line that ends
+        // it; it brings the window forward only when no module loaded because of it.
+        let moved = crate::portable::translocation();
+        let start = crate::backend::grants::start(
+            &crate::backend::permissions(),
+            hint,
+            moved.spoken().as_deref(),
+            moved.loads_nothing(),
+        );
+        if start.open_page {
             if let Some(page) = perm_page {
                 notebook.set_selection(page);
             }
             show_manager(&frame);
-            // The order matters and the tester found out how: on macOS 14.5 this application
-            // did not appear in the Screen Recording list at all until Accessibility had
-            // been granted, after which it was there. It is also the order the application
-            // asks in now — Screen Recording the moment Accessibility is granted, so that the
-            // two system dialogs never stand on top of each other (backend/macos/perm.rs).
-            // Said here, because the person setting this up is looking for a switch that is
-            // not on the pane yet.
-            let order = if missing.contains(&"Accessibility") && missing.len() > 1 {
-                " Grant Accessibility first: Screen Recording is asked for as soon as it is, \
-                 and asking is what normally puts this application into the Screen Recording \
-                 list. On newer macOS that list is called Screen and System Audio Recording."
-            } else if missing.contains(&"Screen Recording") {
-                // Accessibility is granted, so the request goes out on the first tick, right
-                // after this: its dialog is the next thing on screen.
-                " macOS may ask for Screen Recording in a dialog of its own in a moment; its \
-                 button that opens the settings leads to the list."
-            } else {
-                ""
-            };
-            announce(&format!(
-                "Automation Platform cannot work yet: {} {} not been granted. The Permissions \
-                 page is open, and lists what to do.{order}",
-                missing.join(" and "),
-                if missing.len() == 1 { "has" } else { "have" }
-            ));
         }
+        announce(&start.text);
         std::mem::forget(taskbar); // keep the icon + its handlers alive
 
         // wxWidgets owns the loop now, so this recurring tick is how our OS events
@@ -1844,6 +1925,17 @@ pub fn run_gui(
                 if crate::instance::take_quit_request() {
                     quit();
                     return;
+                }
+                // This application became the active one since the last tick (AppKit's notice,
+                // kept by the backend): the Permissions page reads the permissions again, while it
+                // is the page shown — the way back from System Settings after a grant. Taken
+                // either way, so that an activation with the page hidden is not answered later.
+                if crate::backend::take_became_active() {
+                    if let (Some(look), Some(page)) = (&perm_look, perm_page) {
+                        if frame.is_shown() && notebook.selection() == page as i32 {
+                            look(Look::Forward);
+                        }
+                    }
                 }
                 // Only ever unticks: the speech pump switched Personal Voice off after macOS did
                 // not grant it, and the box and the stored value follow here. Ticking is the

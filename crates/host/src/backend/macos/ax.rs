@@ -2479,8 +2479,8 @@ pub(super) fn window_id(handle: isize) -> u32 {
     found
 }
 
-#[allow(dead_code)]
-fn dict_i64(dict: &CFDictionary, key: &CFString) -> Option<i64> {
+/// A number in a window-list entry. `pub(super)` for `perm::screen_recording`'s look at the list.
+pub(super) fn dict_i64(dict: &CFDictionary, key: &CFString) -> Option<i64> {
     let ptr: *const c_void = (key as *const CFString).cast();
     let v = unsafe { dict.value(ptr) };
     if v.is_null() {
@@ -2489,6 +2489,19 @@ fn dict_i64(dict: &CFDictionary, key: &CFString) -> Option<i64> {
     // SAFETY: the value is borrowed from the dictionary, which outlives this call.
     let num: &CFType = unsafe { &*(v as *const CFType) };
     num.downcast_ref::<CFNumber>()?.as_i64()
+}
+
+/// Whether a window-list entry holds a string under `key` — for `kCGWindowName`, whose PRESENCE is
+/// what Screen Recording governs (`perm::screen_recording`). The text is never read.
+pub(super) fn dict_has_string(dict: &CFDictionary, key: &CFString) -> bool {
+    let ptr: *const c_void = (key as *const CFString).cast();
+    let v = unsafe { dict.value(ptr) };
+    if v.is_null() {
+        return false;
+    }
+    // SAFETY: the value is borrowed from the dictionary, which outlives this call.
+    let any: &CFType = unsafe { &*(v as *const CFType) };
+    any.downcast_ref::<CFString>().is_some()
 }
 
 #[allow(dead_code)]

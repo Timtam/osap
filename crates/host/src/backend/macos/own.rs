@@ -45,8 +45,8 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSRunningApplication, NSWindow, NSWindowDidBecomeKeyNotification,
-    NSWindowDidResignKeyNotification, NSWindowStyleMask,
+    NSAccessibility, NSApplication, NSApplicationDidBecomeActiveNotification, NSRunningApplication,
+    NSWindow, NSWindowDidBecomeKeyNotification, NSWindowDidResignKeyNotification, NSWindowStyleMask,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter};
 
@@ -68,6 +68,10 @@ static KEY_NONACTIVATING: AtomicBool = AtomicBool::new(false);
 /// That window's title, for the event tap's line about a key it let through to it. Written at the
 /// tick when the key window changes; read by the tap with `try_lock`, never waited for.
 static KEY_TITLE: Mutex<String> = Mutex::new(String::new());
+
+/// AppKit said this application became the active one, and nobody has asked since
+/// ([`take_became_active`]).
+static BECAME_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     /// The numbers of the windows that are pages' ([`note_page`]).
@@ -125,6 +129,20 @@ pub(crate) fn start() {
         // process.
         core::mem::forget(token);
     }
+    // This application becoming the active one, for the Permissions page, which reads the
+    // permissions again then (`gui.rs`): one store, taken at the tick.
+    let block = RcBlock::new(|_: NonNull<NSNotification>| BECAME_ACTIVE.store(true, Ordering::Relaxed));
+    // SAFETY: a framework-owned constant that lives for the process; the block is copied by the
+    // centre and, with no queue, runs on the posting thread.
+    let token = unsafe {
+        centre.addObserverForName_object_queue_usingBlock(
+            Some(NSApplicationDidBecomeActiveNotification),
+            None,
+            None,
+            &block,
+        )
+    };
+    core::mem::forget(token);
     STARTED.store(true, Ordering::SeqCst);
     crate::logging::line(
         "macos",
@@ -133,6 +151,12 @@ pub(crate) fn start() {
          and read again at every tick",
     );
     refresh();
+}
+
+/// Whether AppKit said this application became the active one since this was last asked — the
+/// moment the Permissions page reads the permissions again (`gui.rs`). One consumer: the tick.
+pub(crate) fn take_became_active() -> bool {
+    BECAME_ACTIVE.swap(false, Ordering::Relaxed)
 }
 
 /// A window of this process became the key window, or stopped being it. Stores, and nothing else:

@@ -423,14 +423,16 @@ behave as if the application is broken, so please do them all.
    dialog of its own. The application writes its log and its settings NEXT TO the .app,
    and reads its modules from the "modules" folder beside it, so keep the folder together.
 
-2. Remove the download quarantine flag, or macOS will refuse to open the app:
+2. DO NOT SKIP THIS ONE, even if macOS offers to open the app anyway. In Terminal, in
+   this folder, remove the download quarantine flag:
        xattr -dr com.apple.quarantine "$APP_NAME.app"
    If you have already opened it without this step (with Open on the right-click
    menu, or Open Anyway in System Settings), macOS runs a read-only copy of it from a
    hidden folder, a new one at every launch. The application then asks macOS where
-   the original is and uses this folder all the same, and its log's "translocated"
-   line says whether that worked. Do this step anyway, then quit the application and
-   open it again.
+   the original is and uses this folder all the same — and it SAYS so when it starts,
+   and on its Permissions page, with the Terminal line to run (the page has it in a
+   field to copy). Do this step anyway, then quit the application and open it again;
+   the next start no longer says it.
 
 3. Open $APP_NAME.app. It is a menu-bar application, not a window — with VoiceOver,
    press VO-M twice to reach the menu-bar extras. On a fresh copy it does not stay
@@ -439,7 +441,8 @@ behave as if the application is broken, so please do them all.
 
 4. Grant the permissions in System Settings > Privacy & Security. None of them can be
    granted by the application itself, and the Permissions page lists all four with
-   what each one costs while it is missing:
+   what each one costs while it is missing. It counts only the two the application
+   needs, reads them again whenever it comes forward, and says what changed:
      - Accessibility      — without it, nothing can be read or clicked. GRANT THIS
                             FIRST: the application asks for Screen Recording as soon
                             as it is granted, and asking is what normally puts it
@@ -451,15 +454,17 @@ behave as if the application is broken, so please do them all.
                             still not there, press + under the list, choose
                             $APP_NAME.app and switch it on (on Monterey, unlock the
                             padlock first).
-     - Input Monitoring   — only if the overlay's own keys reach the plugin instead of
-                            the overlay: whether it is needed next to Accessibility is
-                            not known yet. Its button on the Permissions page asks.
+     - Input Monitoring   — optional: only if the overlay's own keys reach the plugin
+                            instead of the overlay. On macOS 26.6 they did not need it.
+                            The page says when the application sees keys not arriving,
+                            and its button there asks.
      - Automation         — only asked for when you tick "Speak through VoiceOver"
                             in Application settings; leave it alone otherwise.
-   Accessibility takes effect at once: press "Re-check now" on the Permissions page.
-   After granting Screen Recording, QUIT AND REOPEN the application: macOS hands that one
-   only to a process that started after it was granted. If Re-check still shows Input
-   Monitoring missing after granting it, quit and reopen as well.
+   Accessibility takes effect at once: come back to the Permissions page. Screen
+   Recording is judged by what the captures show: if the page still reads it NOT granted
+   after you granted it, QUIT AND REOPEN the application — older macOS hands that one
+   only to a process that started after it was granted. If Input Monitoring still reads
+   missing after granting it, quit and reopen as well.
 
 5. To record a plugin window for us: put it in front and press
        Command-Shift-F9

@@ -18,6 +18,11 @@ pub mod gamepad;
 /// of one uses. Pure; see the file.
 pub mod frame;
 
+/// What the Permissions page and the start announcement say about the [`Permission`]s — words
+/// only, with no window in them. Pure; see the file. Public, as [`Permission`] is, because
+/// `crates/macos-check` borrows this file and has no page to use them.
+pub mod grants;
+
 #[cfg(windows)]
 mod windows;
 /// A landing of the keyboard on a control (HW1), for a page that gives the front back
@@ -67,6 +72,15 @@ pub(crate) use macos::app::{
 /// Re-exported for the same reason: `gui.rs` calls it as wxWidgets hands over.
 #[cfg(target_os = "macos")]
 pub(crate) use macos::own::start as start_own_windows;
+/// Whether this application became the active one since this was last asked — see `macos::own`.
+/// For the Permissions page, which reads the permissions again then.
+#[cfg(target_os = "macos")]
+pub(crate) use macos::own::take_became_active;
+/// No permissions page anywhere else, and so nothing to read again.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn take_became_active() -> bool {
+    false
+}
 /// `host.gui.webview`'s window on a Mac — see `macos::page` — with the interface `webview_win.rs`
 /// has, which `webview_lua.rs` uses as it uses that one; `crates/macos-check` names it, so the two
 /// cannot drift apart unseen on Windows, and `page-check` builds pages with it too.
@@ -194,6 +208,13 @@ mod macos_handle_table;
 #[path = "macos/enrol.rs"]
 mod macos_enrol;
 
+/// And whether Screen Recording is granted and Input Monitoring needed, judged by the evidence of
+/// the run rather than by the system's checks alone — the verdicts the Permissions page and the
+/// start announcement give a blind tester, and the words for each.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/evidence.rs"]
+mod macos_evidence;
+
 /// And the posted click's arithmetic: which refusal a point gets, and where in the window the
 /// event says it is — the number a click into another program's window lands by.
 #[cfg(all(test, not(target_os = "macos")))]
@@ -243,17 +264,22 @@ pub struct Permission {
     pub state: Grant,
     /// What stops working without it — the sentence that makes it worth granting.
     pub without: &'static str,
+    /// What decided `state` (and `blocking`), where more than the system's own check was
+    /// weighed: a sentence, said on the page before `without` and in the start announcement
+    /// while it is missing. `None` where the system's check is the whole answer.
+    pub judged: Option<String>,
     /// The settings-pane URL, for the button beside it.
     pub anchor: &'static str,
     /// Whether the button beside it goes through `ask_for`, which may ask the system instead of
     /// opening the pane, or only opens the pane.
     pub can_ask: bool,
     /// Whether nothing works without it — and therefore whether its absence is worth putting
-    /// a window in front of somebody who did not ask for one.
+    /// a window in front of somebody who did not ask for one, and counts in the page's head.
     ///
-    /// Three of the four gate everything. The fourth only affects which voice speaks, is
-    /// asked for by the switch that wants it, and interrupting a launch over it would be
-    /// pestering somebody about a feature they never turned on.
+    /// Accessibility and Screen Recording gate everything. Automation only affects which voice
+    /// speaks, is asked for by the switch that wants it, and interrupting a launch over it would
+    /// be pestering somebody about a feature they never turned on. Input Monitoring is optional
+    /// until the run shows captured keys not reaching the overlay (`macos/evidence.rs`).
     pub blocking: bool,
 }
 
@@ -4672,5 +4698,118 @@ mod pass_on_tests {
         assert!(now.contains("let_through: super::tap::let_through(),"));
         // A hotkey press carries the count the tap had when Carbon handed it over.
         assert!(body(QUEUE, "pub fn push_hotkey(").contains("push((id, super::tap::let_through()))"));
+    }
+}
+
+/// The permissions as the Mac judges them by the evidence of the run (`macos/evidence.rs`, the
+/// rules; `backend/grants.rs`, the words), held where they are wired: only a Mac runs these files,
+/// and `gui.rs`'s half reaches the macOS CI job alone. The rules are executed above, in
+/// `macos_evidence`; these say every caller asks them.
+#[cfg(test)]
+mod permission_evidence_wiring_tests {
+    const PERM: &str = include_str!("macos/perm.rs");
+    const CAPTURE: &str = include_str!("macos/capture.rs");
+    const OCR: &str = include_str!("macos/ocr.rs");
+    const TAP: &str = include_str!("macos/tap.rs");
+    const HOTKEY: &str = include_str!("macos/hotkey.rs");
+    const OWN: &str = include_str!("macos/own.rs");
+    const GUI: &str = include_str!("../gui.rs");
+
+    /// The body of the function `sig` in `src`, to its closing brace at the start of a line.
+    fn body<'a>(src: &'a str, sig: &str) -> &'a str {
+        let at = src.find(sig).unwrap_or_else(|| panic!("{sig}"));
+        let end = src[at..].find("\n}\n").unwrap();
+        &src[at..at + end]
+    }
+
+    fn at(f: &str, what: &str) -> usize {
+        f.find(what).unwrap_or_else(|| panic!("no `{what}`"))
+    }
+
+    #[test]
+    fn screen_recording_is_judged_everywhere_and_preflighted_in_one_place() {
+        // The system's check is asked in the verdict and nowhere else: not by the page, the
+        // start's block, the requests, the captures or the text recognition.
+        assert_eq!(PERM.matches("CGPreflightScreenCaptureAccess()").count(), 1);
+        let judged = body(PERM, "pub(super) fn screen_recording() -> ScreenVerdict {");
+        assert!(judged.contains("CGPreflightScreenCaptureAccess(),"));
+        assert!(judged.contains("super::capture::seen(),") && judged.contains("other_window_names,"));
+        for (src, name) in [(CAPTURE, "capture.rs"), (OCR, "ocr.rs")] {
+            assert!(!src.contains("CGPreflightScreenCaptureAccess()"), "{name}");
+            assert!(src.contains("super::perm::screen_recording()"), "{name}");
+        }
+        for sig in ["pub fn permissions() -> Vec<Permission> {", "pub fn request_screen_recording_once() {", "fn ask_for_screen_recording(trigger: Trigger) -> Asked {", "pub fn environment_report() -> Vec<(String, String)> {"] {
+            assert!(body(PERM, sig).contains("screen_recording()"), "{sig}");
+        }
+        // The window list is looked at for whether a name is there, never for what it says.
+        let names = body(PERM, "fn other_window_names() -> Names {");
+        assert!(names.contains("dict_has_string(&dict, name)"));
+        assert!(!names.contains("to_string"));
+    }
+
+    #[test]
+    fn screencapturekit_s_answers_are_kept_and_the_first_capture_is_judged_after_it() {
+        let grab = body(CAPTURE, "fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {");
+        let asked = at(grab, "let outcome = sck_capture(rect);");
+        assert!(asked < at(grab, "SckOutcome::Image(_) => note_seen(Seen::Picture),"));
+        assert!(asked < at(grab, "SckOutcome::Error { declined: true, .. } => note_refused(),"));
+        let probe = body(CAPTURE, "fn sck_probe(");
+        assert!(probe.contains("note_seen(Seen::Picture)") && probe.contains("note_refused()"));
+        // A refusal keeps what the window names said as it came, so that names read later
+        // overrule only one that came while they were hidden.
+        assert!(body(CAPTURE, "fn note_refused() {")
+            .contains("super::evidence::after_refusal(seen(), super::perm::other_window_names)"));
+        assert!(!CAPTURE.contains("note_seen(Seen::Declined"));
+        assert!(body(PERM, "fn capture_requests(").contains("super::capture::note_shareable_content(&sck);"));
+        for sig in ["fn capture_rgba(", "pub fn frame("] {
+            let f = body(CAPTURE, sig);
+            assert!(at(f, "grab(vx, vy, vw, vh,") < at(f, "first_capture_judged();"), "{sig}");
+        }
+    }
+
+    #[test]
+    fn input_monitoring_is_needed_only_by_what_the_keys_showed() {
+        let perms = body(PERM, "pub fn permissions() -> Vec<Permission> {");
+        assert!(perms.contains("blocking: super::evidence::listen_needed(listen == Listen::Granted, keys),"));
+        // A shortcut is the witness: Carbon's handler tells the tap, after queueing the press.
+        let handler = body(HOTKEY, "unsafe extern \"C\" fn hotkey_handler(");
+        assert!(at(handler, "queue::push_hotkey(") < at(handler, "super::tap::note_shortcut();"));
+        let note = body(TAP, "pub(super) fn note_shortcut() {");
+        assert!(at(note, "ON_SINCE_MS.load(") < at(note, "secure_input()") && at(note, "secure_input()") < at(note, "DEAF.store(true"));
+        // A tap the system switched off in a stall missed the key without being deaf.
+        assert!(at(note, "CGEvent::tap_is_enabled(") < at(note, "DEAF.store(true"));
+        // Every switching on starts the second again: the install, both re-enables, a re-creation.
+        assert_eq!(TAP.matches("note_on();").count(), 4);
+        let callback = body(TAP, "unsafe extern \"C-unwind\" fn tap_callback(");
+        assert!(at(callback, "CGEvent::tap_enable(unsafe { &*port }, true);") < at(callback, "note_on();"));
+        // The tap counts the keyboard reaching it with the presses, not with its own posts.
+        assert!(at(callback, "PRESSED.fetch_add(1, Ordering::Relaxed);") < at(callback, "CALLED.store(true, Ordering::Relaxed);"));
+        assert!(body(TAP, "fn create_and_attach(").contains("REFUSED_TRUSTED.store(trusted, Ordering::Relaxed);"));
+    }
+
+    #[test]
+    fn the_page_reads_the_permissions_again_when_it_comes_forward() {
+        let start = body(OWN, "pub(crate) fn start() {");
+        assert!(start.contains("NSApplicationDidBecomeActiveNotification"));
+        assert!(start.contains("BECAME_ACTIVE.store(true, Ordering::Relaxed)"));
+        assert!(body(OWN, "pub(crate) fn take_became_active() -> bool {").contains("BECAME_ACTIVE.swap(false"));
+        // Its tab selected, its window activated, this application made active — each a look
+        // that says what changed; Re-check now says the count as well.
+        for trigger in [
+            "notebook.on_page_changed(move |event| {",
+            "frame.on_activate(move |event| {",
+            "if crate::backend::take_became_active() {",
+        ] {
+            let from = at(GUI, trigger);
+            assert!(GUI[from..from + 400].contains("look(Look::Forward);"), "{trigger}");
+        }
+        assert!(GUI.contains("recheck.on_click(move |_| look(Look::Recheck));"));
+        // Relabelled in place, and only where the text changed.
+        assert!(GUI.contains("relabel(&head, &crate::backend::grants::head(&all));"));
+        assert!(GUI.contains("relabel(line, &crate::backend::grants::line(p));"));
+        // The start counts and names through the same words, and says a translocated copy.
+        let start = at(GUI, "let start = crate::backend::grants::start(");
+        assert!(GUI[start..start + 300].contains("moved.spoken().as_deref(),"));
+        assert!(!GUI.contains("p.blocking && p.state == crate::backend::Grant::Missing"), "the start's own count is gone");
     }
 }

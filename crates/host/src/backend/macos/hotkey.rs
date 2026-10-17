@@ -404,5 +404,8 @@ unsafe extern "C" fn hotkey_handler(
     // The id went out as a `u32` and comes back as one; host ids are small and positive
     // (allocated by a counter that starts at 1), so the round trip is exact.
     queue::push_hotkey(hot_key_id.id as i32);
+    // Its key passed the event tap's place first: whether the tap saw it is Input Monitoring's
+    // evidence. A few relaxed loads once anything is known.
+    super::tap::note_shortcut();
     noErr
 }

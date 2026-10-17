@@ -650,6 +650,14 @@ The same happens when they answer "not translocated" for an `.app` that runs fro
 `AppTranslocation`: the path is not overruled by an answer that contradicts it. Removing the flag
 is the clean way in every case; the line repeats how.
 
+The log is not the only place that says it. The start announcement ends with it, and the
+Permissions page says it under its head: that the application runs from a read-only copy, what
+that costs, and the one Terminal line that ends it — `xattr -dr com.apple.quarantine` and the
+original's whole path, or, with the original not found, the `.app`'s name to be run in its
+folder — with the line in a read-only field to copy. With the original not found the page also
+comes forward at the start. The application never runs the line itself
+([macos-permissions.md](macos-permissions.md#a-translocated-copy) has the words).
+
 **An `.app` moved out of its folder** — dragged into Applications on its own, say — reads the
 `modules` folder beside it in its new place, where there is none. The header's `modules folder`
 line names the folder it looked in and says `does not exist`, and the `no modules to load` line

@@ -126,6 +126,63 @@ impl Translocation {
             )),
         }
     }
+
+    /// The one Terminal line that ends it: the quarantine flag taken off the original `.app`, by
+    /// its whole path where the original was found, and by its name — typed in the folder it is
+    /// in — where it was not. `None` when this launch is not translocated. The application never
+    /// runs it: the flag is the user's download's, and so is the decision.
+    pub fn terminal_line(&self) -> Option<String> {
+        let app = match self {
+            Translocation::Resolved { original, .. } => original.to_string_lossy().into_owned(),
+            Translocation::Unresolved { running, .. } => running
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "AutomationPlatform.app".to_string()),
+            Translocation::NotAsked | Translocation::No | Translocation::Unknown { .. } => return None,
+        };
+        Some(format!("xattr -dr com.apple.quarantine {}", shell_word(&app)))
+    }
+
+    /// What a person hears about it, at the start and on the Permissions page: that the
+    /// application runs from a copy, what that costs, and the line that ends it. `None` when this
+    /// launch is not translocated. Written for somebody listening, so no path but the line's.
+    pub fn spoken(&self) -> Option<String> {
+        let line = self.terminal_line()?;
+        Some(match self {
+            Translocation::Unresolved { .. } => format!(
+                "Automation Platform runs from a read-only copy that macOS made because the \
+                 download's quarantine flag is still set, and where the original is could not be \
+                 found: so no module loads, settings are not saved, and the log is not beside the \
+                 application. To end it, quit Automation Platform, open Terminal in the folder the \
+                 application is in, then run this line and open the application again: {line}"
+            ),
+            _ => format!(
+                "Automation Platform runs from a read-only copy that macOS made because the \
+                 download's quarantine flag is still set. It costs a new hidden copy at every \
+                 start, and the application finds its modules, settings and log only through two \
+                 functions of macOS that are not public. To end it, quit Automation Platform, then \
+                 run this line in Terminal and open the application again: {line}"
+            ),
+        })
+    }
+
+    /// Whether this launch loads no module because of it: translocated, and the original not found.
+    pub fn loads_nothing(&self) -> bool {
+        matches!(self, Translocation::Unresolved { .. })
+    }
+}
+
+/// A path as one word of a shell line: as it is when every character is one a shell leaves alone,
+/// and in single quotes otherwise — spoken, the quotes are two more words to listen to, so only
+/// where a space or the like needs them.
+fn shell_word(s: &str) -> String {
+    let plain = !s.is_empty()
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+' | ',' | ':' | '@'));
+    if plain {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
 }
 
 /// The system's answer about one `.app`: what [`place`] decides from. Only macOS gives the
@@ -606,6 +663,50 @@ mod tests {
         let p = place(Path::new(INSIDE), asked(Asked::NotApplicable));
         assert_eq!(p.dir, PathBuf::from("/Users/t/Desktop"));
         assert_eq!(p.translocation.report(), None);
+    }
+
+    #[test]
+    fn a_translocated_launch_is_told_with_the_one_line_that_ends_it() {
+        let p = place(Path::new(RUNNING_EXE_DIR), asked(Asked::Original(ORIGINAL.into())));
+        let line = p.translocation.terminal_line().unwrap();
+        assert_eq!(line, format!("xattr -dr com.apple.quarantine {ORIGINAL}"));
+        let said = p.translocation.spoken().unwrap();
+        assert!(said.contains("read-only copy") && said.contains("new hidden copy at every start"), "{said}");
+        // The line is last, so nothing after it can be taken for part of it, and no other path
+        // is read out.
+        assert!(said.ends_with(&line), "{said}");
+        assert!(!said.contains(RUNNING), "{said}");
+        assert!(!p.translocation.loads_nothing());
+
+        // Not found: by the .app's name, in its folder, and nothing loads.
+        let p = place(Path::new(RUNNING_EXE_DIR), asked(Asked::NoOriginal("ENOENT".into())));
+        assert_eq!(
+            p.translocation.terminal_line().as_deref(),
+            Some("xattr -dr com.apple.quarantine AutomationPlatform.app")
+        );
+        let said = p.translocation.spoken().unwrap();
+        assert!(said.contains("no module loads") && said.contains("in the folder the application is in"), "{said}");
+        assert!(p.translocation.loads_nothing());
+
+        // Nothing to say, or to run, where it did not happen.
+        for t in [
+            Translocation::NotAsked,
+            Translocation::No,
+            Translocation::Unknown { why: "no symbol".into() },
+        ] {
+            assert_eq!(t.terminal_line(), None, "{t:?}");
+            assert_eq!(t.spoken(), None, "{t:?}");
+            assert!(!t.loads_nothing(), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn a_path_is_quoted_only_where_a_shell_needs_it() {
+        assert_eq!(shell_word("/Users/t/AutomationPlatform/AutomationPlatform.app"), "/Users/t/AutomationPlatform/AutomationPlatform.app");
+        assert_eq!(shell_word("/Users/t/Automation Platform/A.app"), "'/Users/t/Automation Platform/A.app'");
+        assert_eq!(shell_word("/Users/t/it's/A.app"), r"'/Users/t/it'\''s/A.app'");
+        assert_eq!(shell_word("/Users/t/$HOME/A.app"), "'/Users/t/$HOME/A.app'");
+        assert_eq!(shell_word(""), "''");
     }
 
     #[test]

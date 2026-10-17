@@ -50,6 +50,9 @@ mod capture;
 /// `pub(super)` for `backend::capture_check`.
 pub(super) mod capture_check;
 mod enrol;
+/// Whether Screen Recording is granted and Input Monitoring needed, judged by what this run has
+/// seen. Pure; see the file.
+mod evidence;
 mod ffi;
 /// The front handed to another application's window, asked now and focused when the workspace
 /// announces the activation — see the file.

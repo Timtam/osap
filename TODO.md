@@ -116,20 +116,81 @@ them:
       alike twice in a row would pass (none was in the log). **The Mac tester confirms:** after ◀
       and ▶, ring and page, the names said and posted are presets, never `cYanma…`, `PY` or `M`,
       and the `[watch]` lines say `(2 readings alike)` or end on a catalog name.
-- [ ] **1a. Screen Recording judged by a real capture, not by `CGPreflightScreenCaptureAccess`.** In
+- [x] **1a. Screen Recording judged by a real capture, not by `CGPreflightScreenCaptureAccess`.** In
       the first session the preflight said "not granted" throughout while every capture held Logic
       and Avenger (OCR read the header, Avenger was identified). The Permissions page and the start
       announcement believed the preflight. A capture holding another application's window counts as
       granted.
-- [ ] **1b. Input Monitoring is optional, not blocking.** It read "denied" while the event tap
+      **Built (2026-10-17).** One judgement everywhere (`perm::screen_recording`, rules in
+      `macos/evidence.rs`, unit-tested on Windows): ScreenCaptureKit's last answer first — a capture
+      that came back with a picture, or the request's shareable content, is granted; a refusal with
+      -3801 is missing — then the preflight where it says granted, then other applications' window
+      NAMES in `CGWindowListCopyWindowInfo` (only whether `kCGWindowName` is there, layer-0 windows
+      of other processes; Apple DTS on the forums says macOS gives them only with Screen Recording).
+      Names read after a refusal overrule it only when they were hidden as it came (read once, at
+      the first refusal after another answer): a grant made in System Settings shows before the
+      next capture, and a permission switched off while the names are shown stays NOT granted.
+      Nothing of it prompts. The page's line, the head, the start announcement (which adds
+      the "Judged by …" sentence while it is missing), the `[env]` line, the automatic request, the
+      button and the capture log all ask it and name what decided; the first capture of a session
+      is judged after it is made and logged either way. Residual (docs/macos-permissions.md): a
+      macOS that leaked window names would read granted before the first capture, uncorrected on
+      12.3-15.1, whose captures go through the older functions. **The Mac tester confirms:** with
+      Screen Recording granted while the application runs, the page reads it granted without a
+      restart (`Judged by …` says which), and the log's `screen recording: granted at the first
+      capture of the session, judged by a capture: ScreenCaptureKit returned a picture`; that no
+      dialog appears from opening or re-reading the page; what the page says before any capture
+      with it granted and with it off (window names shown or hidden on macOS 26); and, with it
+      switched off, that a capture through ScreenCaptureKit is refused rather than answered with
+      the wallpaper (`ScreenCaptureKit refused a … capture …` once, the page then reading `NOT
+      granted. Judged by a capture: macOS refused it as not permitted.`) — the premise of the
+      first rule, not yet seen on a Mac.
+- [x] **1b. Input Monitoring is optional, not blocking.** It read "denied" while the event tap
       captured the overlay's keys with Accessibility alone (macOS 26.6). The page, its head count
       and the start announcement ("cannot work yet: … Input Monitoring") treat it as optional.
-- [ ] **1c. The Permissions page reads the states again** when its window or tab comes forward, not
+      **Built (2026-10-17).** Its line reads `Input Monitoring — <state>, optional.` with what the
+      run has shown and what it would be for; the head counts only what is needed (`Granted: 2 of
+      the 2 permissions this application needs. Optional: Input Monitoring and Automation, for
+      VoiceOver.`). It counts as needed only on evidence (`tap::keys_seen`): the tap refused with
+      Accessibility granted, or a Carbon shortcut of the application's arriving while the tap, on
+      for over a second (installed, re-enabled or created again), on at that moment and not under
+      secure input (`IsSecureEventInputEnabled`, looked up by name), has seen no key-down at all —
+      logged once; a stall that gets the tap switched off concludes nothing. A key seen afterwards
+      makes it optional again; with Input Monitoring granted and keys still not arriving, the line
+      says to quit and reopen if it was granted while the application ran. Not caught: Input
+      Monitoring withdrawn after the tap has seen keys.
+      **The Mac tester confirms:** the start says nothing of Input Monitoring with it denied, the
+      page reads it optional with `Keys an overlay took have reached it in this run.` after an
+      overlay key, and no `counted as needed` line appears in the log.
+- [x] **1c. The Permissions page reads the states again** when its window or tab comes forward, not
       only at its build and at Re-check now.
-- [ ] **1d. App translocation is not the cause** (the second session ran translocated too, with
+      **Built (2026-10-17).** It reads them when its tab is selected, when the window is activated
+      with the page shown, and when the application becomes the active one with the page shown
+      (AppKit's notice, kept by `own.rs`, taken at the tick); each relabels in place only the lines
+      whose text changed, and says what changed once (`Screen Recording: now granted.`, `Input
+      Monitoring is needed now.`, or a line's new reason where its state and need stayed: `Input
+      Monitoring: Keys an overlay took have reached it in this run.`), nothing when nothing did.
+      Re-check now says the count and the changes, or `Nothing has changed.` An `&` in a label is
+      doubled so that wxWidgets shows it rather than taking it for a mnemonic mark. The words are
+      `backend/grants.rs`, tested on Windows.
+      **The Mac tester confirms:** granting Accessibility and Screen Recording in System Settings
+      and coming back to the page (closing System Settings, or Command-Tab with the Dock-icon
+      setting on) is said without a press, and VoiceOver reads the new lines, "Screen & System
+      Audio Recording" with its "and".
+- [x] **1d. App translocation is not the cause** (the second session ran translocated too, with
       every permission granted), but it shows that the `xattr` step was skipped: the tester guide
       makes that step harder to miss. A signing identity in CI, so a new build keeps the
       permissions, stays the maintainer's task.
+      **Built (2026-10-17).** The application says it, not only the log: the start announcement
+      ends with it and the Permissions page has it under its head — that it runs from a read-only
+      copy, what that costs, and the one Terminal line (`xattr -dr com.apple.quarantine` and the
+      original's path, single-quoted only where a shell needs it; with the original not found, the
+      `.app`'s name to run in its folder), the line also in a read-only field to copy. With the
+      original not found the page comes forward at the start. Nothing is changed by the
+      application (`portable::Translocation::spoken`, tested). README.txt's step 2 says not to skip
+      it and that the application now says so. **The Mac tester confirms:** a launch with the flag
+      still set ends its start announcement with the sentence and the line, the page reads it and
+      the field holds the line, and after running it no later start says it.
 - [ ] **3. Previous and next preset are unavailable on Init Preset.** Avenger steps no preset from
       its blank preset; the tool has no handling for it (it clicks and waits for a change that never
       comes, `AC/actions.py` `_step_preset`). Where the preset read is Init Preset

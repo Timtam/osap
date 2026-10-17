@@ -11,7 +11,12 @@
 //! send us a log file and nothing else. Every value is therefore one short greppable line
 //! rather than a sentence, and every state that is *wrong* is followed by a `… fix` line
 //! saying which pane to open and whether the application has to be restarted afterwards
-//! (Screen Recording yes, Accessibility no — both measured).
+//! (Accessibility no; Screen Recording only while it is still judged missing — both measured).
+//!
+//! Screen Recording and Input Monitoring are judged by what the run has seen, not by the
+//! system's checks alone (`evidence.rs` has the rules and why): the startup block, the
+//! Permissions page, its count and the start announcement all ask [`screen_recording`] and
+//! `tap::keys_seen`, and say what decided.
 
 use std::cell::Cell;
 use std::ffi::CString;
@@ -28,16 +33,18 @@ use objc2_foundation::NSAppleEventDescriptor;
 use objc2_application_services::{
     kAXTrustedCheckOptionPrompt, AXIsProcessTrusted, AXIsProcessTrustedWithOptions,
 };
-use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString};
+use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFRetained, CFString};
 use objc2_core_graphics::{
-    CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMode, CGError,
-    CGGetActiveDisplayList, CGMainDisplayID, CGPreflightScreenCaptureAccess,
-    CGRequestListenEventAccess, CGRequestScreenCaptureAccess,
+    kCGWindowLayer, kCGWindowName, kCGWindowOwnerPID, CGDirectDisplayID, CGDisplayBounds,
+    CGDisplayCopyDisplayMode, CGDisplayMode, CGError, CGGetActiveDisplayList, CGMainDisplayID,
+    CGPreflightScreenCaptureAccess, CGRequestListenEventAccess, CGRequestScreenCaptureAccess,
+    CGWindowListCopyWindowInfo, CGWindowListOption,
 };
 use objc2_foundation::{MainThreadMarker, NSProcessInfo, NSString};
 use objc2_io_kit::{IOHIDAccessType, IOHIDCheckAccess, IOHIDRequestAccess, IOHIDRequestType};
 
 use super::enrol::{Listen, ListenStep, Rung, ScreenStep};
+use super::evidence::{Listed, Names, ScreenVerdict};
 
 /// The one fact about macOS permissions that costs everybody an hour the first time, and
 /// which a blind tester has no way of discovering: the switch takes effect for the *next*
@@ -49,9 +56,16 @@ use super::enrol::{Listen, ListenStep, Rung, ScreenStep};
 /// switch (focus notifications from System Settings, then Finder), no restart involved —
 /// while Screen Recording, still "not granted" after the grant, read "granted" only in the
 /// next launch. Telling the tester to quit after every grant cost him a launch each time.
-const RESTART_NOTE: &str =
-    "then quit this application completely and open it again — macOS only hands this \
-     permission to a process that started after the grant";
+///
+/// Narrowed after the first Avenger test (macOS 26.6, 2026-10-14): there, captures through
+/// ScreenCaptureKit held other applications right after a grant made while the application ran,
+/// with the system's check still answering "not granted" — which is what the 14.5 measurement
+/// read as well. The Permissions page judges by the captures now (`evidence.rs`), so the restart
+/// is for when it still reads NOT granted.
+pub(super) const RESTART_NOTE: &str =
+    "then, if the Permissions page still reads it NOT granted, quit this application completely \
+     and open it again — older macOS hands this permission only to a process that started after \
+     the grant";
 
 /// Accessibility, measured on macOS 14.5: it reaches the running process.
 const ACCESSIBILITY_NOTE: &str =
@@ -59,8 +73,8 @@ const ACCESSIBILITY_NOTE: &str =
      'Re-check now' on the Permissions page confirms it";
 
 /// Input Monitoring has not been measured either way — whether a grant reaches the running
-/// process, or whether this application needs it at all next to Accessibility (TODO.md) — so
-/// the restart is the fallback, not the rule.
+/// process — so the restart is the fallback, not the rule. Whether this application needs it at
+/// all next to Accessibility was measured once, on macOS 26.6: it did not (`evidence.rs`).
 const INPUT_MONITORING_NOTE: &str =
     "and if it still reads as missing after 'Re-check now', quit this application completely \
      and open it again";
@@ -215,8 +229,14 @@ pub fn request_accessibility_once() {
 pub fn request_screen_recording_once() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        if CGPreflightScreenCaptureAccess() {
-            crate::logging::line("macos", "screen recording: granted");
+        // Judged, not preflighted: a request made while the permission is there would be one
+        // more chance of a dialog for nothing.
+        let verdict = screen_recording();
+        if verdict.granted {
+            crate::logging::line(
+                "macos",
+                &format!("screen recording: granted, judged by {}", verdict.short()),
+            );
             return;
         }
         let trusted = is_trusted(false);
@@ -308,9 +328,16 @@ fn ask_for_screen_recording(trigger: Trigger) -> Asked {
     // main thread, which is the one the activity is kept on.
     SCREEN_RECORDING_WAITING.store(false, Ordering::SeqCst);
     super::activity::want(super::activity::SETUP, false);
-    if CGPreflightScreenCaptureAccess() {
+    let verdict = screen_recording();
+    if verdict.granted {
         if button {
-            crate::logging::line("macos", "screen recording: granted; only the pane is opened");
+            crate::logging::line(
+                "macos",
+                &format!(
+                    "screen recording: granted, judged by {}; only the pane is opened",
+                    verdict.short()
+                ),
+            );
         }
         return Asked::PANE;
     }
@@ -438,6 +465,7 @@ fn capture_requests(macos_major: u64, pause_first: bool, fallback: String) {
         }
         let sck = super::capture::ask_for_shareable_content(SHAREABLE_CONTENT_WAIT);
         crate::logging::line("macos", &super::enrol::sck_line(&sck));
+        super::capture::note_shareable_content(&sck);
         if let Some(why) = super::enrol::legacy_reason(&sck, macos_major) {
             // ScreenCaptureKit answers in milliseconds even while a dialog it raised is still on
             // screen, so the next request would otherwise arrive on top of it.
@@ -586,25 +614,29 @@ use crate::backend::{Asked, Grant, Permission};
 /// application, before they start.
 ///
 /// Nothing here prompts. Every check is the quiet form, so the list can be built whenever the
-/// window is opened without putting a dialog on screen behind a screen reader's back.
+/// window is opened without putting a dialog on screen behind a screen reader's back — the
+/// window list [`screen_recording`] may look at included.
+///
+/// Screen Recording and Input Monitoring are judged by the evidence of the run, not by the
+/// system's checks alone (`evidence.rs`), and say what decided in `judged`.
 pub fn permissions() -> Vec<Permission> {
+    let screen = screen_recording();
+    let listen = listen_state();
+    let keys = super::tap::keys_seen();
     vec![
         Permission {
             name: "Accessibility",
             state: if is_trusted(false) { Grant::Granted } else { Grant::Missing },
             without: "Nothing can be read or clicked. Every window and control comes back \
                       empty, and no overlay ever activates.",
+            judged: None,
             anchor: ACCESSIBILITY_PANE,
             can_ask: true,
             blocking: true,
         },
         Permission {
             name: "Screen Recording",
-            state: if CGPreflightScreenCaptureAccess() {
-                Grant::Granted
-            } else {
-                Grant::Missing
-            },
+            state: if screen.granted { Grant::Granted } else { Grant::Missing },
             without: "Captures do not fail. They come back as a picture of the desktop with \
                       every other application removed, so image search finds nothing and OCR \
                       reads nothing, for ever, without an error. This is the dangerous one. \
@@ -613,26 +645,28 @@ pub fn permissions() -> Vec<Permission> {
                       too, one way per press, and opens the list once nothing is left to ask; \
                       there, the + button adds AutomationPlatform.app by hand. From macOS 15 \
                       on, System Settings calls that list Screen & System Audio Recording.",
+            judged: Some(screen.judged().to_string()),
             anchor: SCREEN_RECORDING_PANE,
             can_ask: true,
             blocking: true,
         },
         Permission {
             name: "Input Monitoring",
-            state: match listen_state() {
+            state: match listen {
                 Listen::Granted => Grant::Granted,
                 Listen::Denied => Grant::Missing,
                 Listen::Unknown => Grant::Unknown,
             },
-            without: "If it is needed and missing, keys an overlay has claimed reach the plugin \
-                      instead of the overlay. Whether this application needs it next to \
-                      Accessibility is not known yet, so it is not asked for at start. If \
-                      claimed keys do reach the plugin while Accessibility is granted, the \
-                      button below asks macOS for it, one way per press, and opens the list \
-                      once nothing is left to ask.",
+            without: "It is for the keys an overlay takes away from the plug-in, such as Tab \
+                      and the arrows inside an overlay, should Accessibility alone not bring \
+                      them to the overlay; on macOS 26.6 Accessibility alone did. So it is not \
+                      asked for at start, and it counts as needed only once a key is seen not \
+                      to arrive. The button below asks macOS for it, one way per press, and \
+                      opens the list once nothing is left to ask.",
+            judged: Some(keys.judged(listen == Listen::Granted).to_string()),
             anchor: INPUT_MONITORING_PANE,
             can_ask: true,
-            blocking: true,
+            blocking: super::evidence::listen_needed(listen == Listen::Granted, keys),
         },
         Permission {
             name: "Automation, for VoiceOver",
@@ -648,11 +682,56 @@ pub fn permissions() -> Vec<Permission> {
                       looks on and the overlay goes on speaking in its own voice — macOS \
                       refuses the Apple Event silently. Ticking the setting is what asks for \
                       it. VoiceOver's own AppleScript setting, below, is needed as well.",
+            judged: None,
             anchor: AUTOMATION_PANE,
             can_ask: true,
             blocking: false,
         },
     ]
+}
+
+/// Screen Recording as judged by the evidence of this run (`evidence::screen_verdict`), never by
+/// `CGPreflightScreenCaptureAccess` alone: ScreenCaptureKit's last answer to a capture or to the
+/// request's question first, then that check where it says granted, then the window names.
+///
+/// Puts nothing on screen. The check and the window list are questions, and ScreenCaptureKit's
+/// answer was to a capture something else made — a module's read, or a request the user asked
+/// for. Any thread: the check and the window list are Core Graphics' window-server queries, and
+/// the answer kept is an atomic. Costs the check, and the window list only when neither of the
+/// others has decided — a few milliseconds, which is why the page and the start ask, and a
+/// capture only once and on an alarm (`capture.rs`).
+pub(super) fn screen_recording() -> ScreenVerdict {
+    super::evidence::screen_verdict(
+        CGPreflightScreenCaptureAccess(),
+        super::capture::seen(),
+        other_window_names,
+    )
+}
+
+/// What the window server's on-screen list says about other applications' window names. Only
+/// whether each entry carries `kCGWindowName` is looked at, never what it says. Any thread: the
+/// judgement asks it, and so does a refusal on the thread that heard it (`capture::note_refused`).
+pub(super) fn other_window_names() -> Names {
+    let Some(list) = CGWindowListCopyWindowInfo(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
+    ) else {
+        return Names::NoWindows;
+    };
+    // SAFETY: CGWindowListCopyWindowInfo is documented to return an array of dictionaries.
+    let typed: &CFArray<CFDictionary> = unsafe { list.cast_unchecked::<CFDictionary>() };
+    let mut windows = Vec::new();
+    for i in 0..typed.len().min(512) {
+        let Some(dict) = typed.get(i) else { continue };
+        // SAFETY: framework-owned constants that live for the process.
+        let (pid, layer, name) = unsafe { (kCGWindowOwnerPID, kCGWindowLayer, kCGWindowName) };
+        windows.push(Listed {
+            pid: super::ax::dict_i64(&dict, pid).unwrap_or(-1),
+            layer: super::ax::dict_i64(&dict, layer).unwrap_or(-1),
+            named: super::ax::dict_has_string(&dict, name),
+        });
+    }
+    super::evidence::names(&windows, i64::from(std::process::id()))
 }
 
 /// Opens a settings pane, and says whether macOS took it.
@@ -701,11 +780,12 @@ pub fn ask_for(name: &str) -> Asked {
 /// Asks for Input Monitoring from its button, one way per press — `enrol::listen_step` decides
 /// which, from Accessibility, the state `IOHIDCheckAccess` reads, and how far this run has got.
 ///
-/// **Only from the button, never at start.** Whether this application needs it next to
-/// Accessibility has not been measured (TODO.md): the key tap is created active, the kind
+/// **Only from the button, never at start.** This application does not need it next to
+/// Accessibility as far as anything has shown: the key tap is created active, the kind
 /// Accessibility governs, and captured keys were seen suppressed on a Mac this application had
-/// never asked for Input Monitoring. The button is for the case where keys an overlay has claimed
-/// still reach the application underneath.
+/// never asked for Input Monitoring, and on macOS 26.6 with it denied. The button is for the case
+/// where keys an overlay has claimed still reach the application underneath — which the run may
+/// show (`tap::keys_seen`), and the Permissions page then counts it as needed.
 ///
 /// The first way is `CGRequestListenEventAccess` (macOS 10.15, "potentially prompting" in its
 /// header); the second, `IOHIDRequestAccess` for listening, which another project measured
@@ -716,6 +796,15 @@ pub fn ask_for(name: &str) -> Asked {
 fn ask_for_input_monitoring() -> Asked {
     let trusted = is_trusted(false);
     let before = listen_state();
+    // What the run has shown so far, beside what the press does: whether it was needed at all is
+    // the question the next log answers.
+    crate::logging::line(
+        "macos",
+        &format!(
+            "input monitoring: its button pressed; the key capture so far: {}",
+            super::tap::keys_seen().word()
+        ),
+    );
     let done = Rung::from_u8(INPUT_MONITORING_RUNG.load(Ordering::SeqCst));
     let step = super::enrol::listen_step(trusted, before, done);
     let pane_only = |why: &str| {
@@ -1101,18 +1190,22 @@ pub fn environment_report() -> Vec<(String, String)> {
 
     // The dangerous one. Absence is not an error anywhere in the capture path: the picture
     // comes back, it just shows the desktop wallpaper with every other application's window
-    // missing, so image search reports "no match" and OCR reports "no text" forever.
-    if CGPreflightScreenCaptureAccess() {
-        push("screen recording", "granted".into());
+    // missing, so image search reports "no match" and OCR reports "no text" forever. Judged by
+    // the evidence there is at start — the system's check and the window names; the first
+    // capture's own answer follows in a `screen recording: … at the first capture` line.
+    let screen = screen_recording();
+    if screen.granted {
+        push("screen recording", format!("granted, judged by {}", screen.short()));
     } else {
         push(
             "screen recording",
-            "reported as NOT granted — if that is right, a capture comes back as the \
-             desktop with other applications' windows removed, so every image search and \
-             every OCR read fails silently. This check has been caught answering 'no' for \
-             an application that could capture perfectly well, so read the capture lines \
-             further down before acting on it."
-                .into(),
+            format!(
+                "NOT granted, judged by {} — if that is right, a capture comes back as the \
+                 desktop with other applications' windows removed, so every image search and \
+                 every OCR read fails silently. The first capture is judged again by what \
+                 ScreenCaptureKit answers it, in a line further down.",
+                screen.short()
+            ),
         );
         push(
             "screen recording fix",
@@ -1125,17 +1218,19 @@ pub fn environment_report() -> Vec<(String, String)> {
     }
 
     // Input Monitoring's own state: `IOHIDCheckAccess` for listening. Reported, not asked for:
-    // whether this application needs it next to Accessibility has not been measured (TODO.md),
-    // and `unknown` is simply the state of an application that has never asked. It is listed
-    // because it is the switch to try if keys an overlay has claimed reach the application
-    // underneath while Accessibility is granted.
+    // the tap took the overlay's keys with Accessibility alone on macOS 26.6 while this read
+    // "denied" (`evidence.rs`), and `unknown` is simply the state of an application that has
+    // never asked. It is listed because it is the switch to try if keys an overlay has claimed
+    // reach the application underneath while Accessibility is granted — which the Permissions
+    // page counts as needed once the run shows it.
     match listen_state() {
         Listen::Granted => push("input monitoring", "granted".into()),
         Listen::Denied => {
             push(
                 "input monitoring",
-                "NOT granted — refused in a dialog, or switched off in the list. If keys an \
-                 overlay has claimed reach the application underneath, this is the switch to try."
+                "NOT granted, optional — refused in a dialog, or switched off in the list. \
+                 Needed only if keys an overlay has claimed do not reach it; then this is the \
+                 switch to try."
                     .into(),
             );
             push("input monitoring symptom", INPUT_MONITORING_SYMPTOM.into());
@@ -1150,7 +1245,8 @@ pub fn environment_report() -> Vec<(String, String)> {
         Listen::Unknown => {
             push(
                 "input monitoring",
-                "unknown — macOS has not been asked (the Permissions page's button asks)".into(),
+                "unknown, optional — macOS has not been asked (the Permissions page's button asks)"
+                    .into(),
             );
             push("input monitoring symptom", INPUT_MONITORING_SYMPTOM.into());
         }

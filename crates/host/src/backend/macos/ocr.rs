@@ -53,7 +53,7 @@ use objc2_core_foundation::{CFData, CFRetained, CGFloat, CGPoint, CGRect, CGSize
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorRenderingIntent, CGColorSpace,
     CGContext, CGDataProvider, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
-    CGInterpolationQuality, CGPreflightScreenCaptureAccess,
+    CGInterpolationQuality,
 };
 use objc2_foundation::{NSArray, NSDictionary, NSIndexSet, NSLocale, NSRange, NSString};
 use objc2_vision::{
@@ -1457,14 +1457,14 @@ fn report_capture_failure(x: i32, y: i32, w: i32, h: i32) {
     }
 }
 
-/// Whether this application may read the screen — asked of the system once, then remembered.
+/// Whether this application may read the screen — judged once per thread (`perm::screen_recording`,
+/// by the captures' own answers before the system's check), then remembered.
 ///
-/// Asked once because the callers are polls: a region that reads as blank sixteen times a
-/// second must not become sixteen TCC queries a second on the thread that also owns the
-/// keyboard tap. Remembering it is safe in the direction that matters, since a Screen
-/// Recording grant made while the application is running does not take effect until it is
-/// restarted anyway. Logs the missing case itself, because every caller wants to say the
-/// same sentence.
+/// Judged once because the callers are polls: a region that reads as blank sixteen times a
+/// second must not become sixteen TCC queries and window-list reads a second. Remembering it
+/// costs only this log line's accuracy: it decides nothing but whether a failed capture is said
+/// to have happened with the permission granted. Logs the missing case itself, because every
+/// caller wants to say the same sentence.
 fn screen_capture_permitted() -> bool {
     thread_local! {
         static ALLOWED: RefCell<Option<bool>> = const { RefCell::new(None) };
@@ -1474,12 +1474,16 @@ fn screen_capture_permitted() -> bool {
         if let Some(known) = *cell {
             return known;
         }
-        let allowed = CGPreflightScreenCaptureAccess();
+        let allowed = super::perm::screen_recording().granted;
         *cell = Some(allowed);
         if !allowed {
             crate::logging::line(
                 "macos",
-                "ocr: nothing can be read off the screen — grant this application Screen Recording (Screen & System Audio Recording from macOS 15) in System Settings, Privacy & Security, then restart it",
+                &format!(
+                    "ocr: nothing can be read off the screen — grant this application Screen Recording (Screen & System Audio Recording from macOS 15) in {}, {}",
+                    super::perm::privacy_pane(),
+                    super::perm::RESTART_NOTE
+                ),
             );
         } else {
             crate::logging::trace("macos", || {
