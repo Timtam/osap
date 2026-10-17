@@ -5,7 +5,8 @@
 -- clicks:
 --
 --   prev_preset, next_preset   ◀ or ▶, then the name watched until it changes (O:watch), and
---                              "unchanged" said when it has not by the watch's bound
+--                              "unchanged" said when it has not by the watch's bound; on Init
+--                              Preset nothing is sent, and the error region says why
 --   pick_load_preset,          MENU's item chosen in Avenger's own menu (O:chooseMenuItem), then
 --   pick_save_preset_as        the file dialog that comes next: the trip waits for it, and for
 --                              Avenger in front again (trip:afterDialog), then watches the name
@@ -20,10 +21,11 @@
 --                              ring's stepper takes the one beside — then the zoom field read
 --
 -- Nothing is taken for done: every answer is what was read after the click, and a read that did
--- not come is said as that. After every trip the page gets its state — the preset heading from the
--- name read — then the error, or the focus back where the user was; the words `after` returns are
--- said only when the page does not come back. Errors are sentences of the module's own, in the
--- error region; the log has the rest, and no raised message reaches the page.
+-- not come is said as that — after a click or choice that may have changed the preset, with the
+-- preset posted as not read (go). After every trip the page gets its state — the preset heading
+-- from the name read — then the error, or the focus back where the user was; the words `after`
+-- returns are said only when the page does not come back. Errors are sentences of the module's
+-- own, in the error region; the log has the rest, and no raised message reaches the page.
 --
 -- The trip's own checks are the runtime's: one at a time, only from the page with the keyboard,
 -- and `trip:inFront()` after every wait, before a click or a read — false has ended the trip.
@@ -102,17 +104,34 @@ local function named(name)
   return { preset = name or false, expansion = expansion }
 end
 
--- Action `action` as a trip from overlay `o`: `act(o, trip)` in Avenger, `trip:done(result)` its
--- end (`report`'s result).
+-- Action `action` as a trip from overlay `o`: `act(o, trip, forget)` in Avenger,
+-- `trip:done(result)` its end (`report`'s result). `forget(why, own)` where the trip's click or
+-- choice may have changed the preset: the database's position is forgotten (DB.forget's `why` and
+-- `own`), and the ring's latest name read (main.luau, "◀ and ▶ on Init Preset"); and from then on
+-- a trip that ends without the name read after it — a watch that read nothing, a give-up — posts
+-- the preset as not read, so the page claims nothing of a preset it has not seen since.
 local function go(o, action, act)
   local label = E.LABELS[action]
+  local touched = false
+  local function forget(why, own)
+    touched = true
+    E.DB.forget(why, own)
+    R.unseen()
+  end
+  local function back(result)
+    if touched and not result.values and not (result.set and result.set.preset ~= nil) then
+      result.set = result.set or {}
+      result.set.preset, result.set.expansion = false, false
+    end
+    return report(label, result)
+  end
   local started, why = o:inPlugin({
     label = label,
-    act = act,
-    after = function(_, result) return report(label, result) end,
+    act = function(w, trip) return act(w, trip, forget) end,
+    after = function(_, result) return back(result) end,
     onGiveUp = function(_, why2)
-      if why2 == "gone" then return report(label, { sentence = E.closedWords() }) end
-      return report(label, { error = GIVEN_UP[why2] or ("nothing more was done (" .. tostring(why2) .. ")") })
+      if why2 == "gone" then return back({ sentence = E.closedWords() }) end
+      return back({ error = GIVEN_UP[why2] or ("nothing more was done (" .. tostring(why2) .. ")") })
     end,
   })
   -- "busy" and "not in front" are the runtime's to log: a message while a trip is out, or one that
@@ -145,24 +164,42 @@ local function thenName(o, trip, was, unchanged, label)
   end, label)
 end
 
--- ◀ and ▶, and UNDO: a click, then the name.
-local function click(action, ringLabel, at, unchanged)
+-- ◀ and ▶, and UNDO: a click, then the name. ◀ and ▶ (`steps`) only where the preset read is not
+-- Init Preset, which VPS Avenger steps no preset from (main.luau, "◀ and ▶ on Init Preset"): where
+-- the page's state has it, nothing is sent to Avenger — no trip — and the error region says why;
+-- where the name read in Avenger before the click is it (or, read as nothing, the latest one read
+-- was), nothing is clicked, and the page comes back with that name and why.
+local function click(action, ringLabel, at, unchanged, steps)
   return function(o)
-    go(o, action, function(w, trip)
+    if steps then
+      local w = E.plugin()
+      local why = S.stepsUnavailable(w and w.id)
+      if why then
+        log(string.format("'%s': the page's preset is Init Preset — nothing sent to VPS Avenger", ringLabel))
+        E.post({ kind = "error", text = E.LABELS[action] .. ": " .. why })
+        return
+      end
+    end
+    go(o, action, function(w, trip, forget)
       local was = nameBefore(w)
       if not trip:inFront() then return end
+      if steps and R.atInit() then
+        log(string.format("'%s': the name read in VPS Avenger is Init Preset — nothing clicked", ringLabel))
+        return trip:done({ set = named(was), error = S.AT_INIT })
+      end
       local ok, said = R.clickAt(w, ringLabel, at, nil, true)
       if not ok then return trip:done({ sentence = said }) end
       -- A step or an undo the database's position does not follow from the page.
-      E.DB.forget("the page's " .. ringLabel)
+      forget("the page's " .. ringLabel)
       thenName(w, trip, was, unchanged, ringLabel)
     end)
   end
 end
 
 -- MENU's item `item` (`ringLabel` as the ring names it), then `andThen(o, trip, was)` once the
--- choice has been taken; the popup closed again when a choice was given up with it left open.
-local function menuChoice(w, trip, ringLabel, item, andThen)
+-- choice has been taken, `forget` (go) told first; the popup closed again when a choice was given
+-- up with it left open.
+local function menuChoice(w, trip, forget, ringLabel, item, andThen)
   local was = nameBefore(w)
   if not trip:inFront() then return end
   local pick = {}
@@ -176,7 +213,7 @@ local function menuChoice(w, trip, ringLabel, item, andThen)
         return trip:done({ error = notChosen(why) })
       end
       -- Every item may load, rename or blank the preset: the database's position is not Avenger's.
-      E.DB.forget(ringLabel .. " chosen from the page", R.OWN_NAME[ringLabel])
+      forget(ringLabel .. " chosen from the page", R.OWN_NAME[ringLabel])
       andThen(m, trip, was)
     end,
   })
@@ -192,8 +229,8 @@ end
 -- the name read all the same.
 local function fileItem(action, ringLabel, item)
   return function(o)
-    go(o, action, function(w, trip)
-      menuChoice(w, trip, ringLabel, item, function(m, t, was)
+    go(o, action, function(w, trip, forget)
+      menuChoice(w, trip, forget, ringLabel, item, function(m, t, was)
         t:afterDialog(function(o2, t2, seen)
           if not seen then log(string.format("'%s': no file dialog came within the bound", ringLabel)) end
           R.watchName(o2, was, function(now)
@@ -207,8 +244,8 @@ local function fileItem(action, ringLabel, item)
 end
 
 A.HANDLERS = {
-  prev_preset = click("prev_preset", "Previous preset", G.PREV, true),
-  next_preset = click("next_preset", "Next preset", G.NEXT, true),
+  prev_preset = click("prev_preset", "Previous preset", G.PREV, true, true),
+  next_preset = click("next_preset", "Next preset", G.NEXT, true, true),
   undo = click("undo", "Undo", G.UNDO, false),
   pick_load_preset = fileItem("pick_load_preset", "Load preset", G.LOAD),
   pick_save_preset_as = fileItem("pick_save_preset_as", "Save preset as", G.SAVE_AS),
@@ -219,13 +256,13 @@ A.HANDLERS = {
 -- YES where it was read (D.answer), and once it has gone, everything read again in the last read's
 -- answer, a handler where the reads wait.
 A.HANDLERS.pick_initialize_preset = function(o)
-  go(o, "pick_initialize_preset", function(w, trip)
+  go(o, "pick_initialize_preset", function(w, trip, forget)
     local r, zoom = R.boxOffScreen(w)
     if r then
       return trip:done({ error = "Avenger's warning box would open off the screen"
         .. (zoom and (" at " .. zoom .. " percent") or "") .. "; zoom out first" })
     end
-    menuChoice(w, trip, "Initialize preset", G.INITIALIZE, function(m, t)
+    menuChoice(w, trip, forget, "Initialize preset", G.INITIALIZE, function(m, t)
       D.answer(m, t, "Initialize preset", function(ok, why)
         if not ok then return t:done({ error = why }) end
         if not t:inFront() then return end
@@ -236,6 +273,7 @@ A.HANDLERS.pick_initialize_preset = function(o)
           log("Initialize Preset: VPS Avenger was not read again — " .. tostring(okR and whyNot or values))
           return t:done({ error = "VPS Avenger cannot be read again now" })
         end
+        if values.preset then R.noteName(values.preset) end
         t:done({ values = values })
       end)
     end)
@@ -246,7 +284,7 @@ end
 -- the list BEFORE the click (it counts as the press), the user chooses in it, and once they see it
 -- closed, the name.
 A.HANDLERS.redo_menu = function(o)
-  go(o, "redo_menu", function(w, trip)
+  go(o, "redo_menu", function(w, trip, forget)
     local was = nameBefore(w)
     if not trip:inFront() then return end
     local ok, why = trip:afterMenu(function(o2, t2, seen)
@@ -258,7 +296,7 @@ A.HANDLERS.redo_menu = function(o)
     if not clicked then return trip:done({ sentence = said }) end
     H.popup(w:origin())
     -- What the list redoes is chosen in the list.
-    E.DB.forget("the redo list opened from the page")
+    forget("the redo list opened from the page")
   end)
 end
 

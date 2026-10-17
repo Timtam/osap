@@ -49,11 +49,10 @@
 -- THE ANCHOR is the position of the preset Avenger shows, as far as this module knows: set by
 -- every name read that is placed (the Preset info's read, and the reads before and after ◀ and
 -- ▶), cleared by a name read that is not in the catalog, and moved by a step as below. Forgotten
--- (DB.forget) whenever the preset may have changed some other way: a MENU item chosen, the redo
--- list opened, the overlay leaving the front. Not after Undo, which is the runtime's hotspot and
--- tells this module nothing (TODO.md). A read that fails keeps the anchor, and that is where a
--- stale one shows — an Undo's, or the database's N taken for the position after a step whose
--- read-back failed (below): a step whose name before the click cannot be read takes its N from
+-- (DB.forget) whenever the preset may have changed some other way: a MENU item chosen, Undo, the
+-- redo list opened, the overlay leaving the front. A read that fails keeps the anchor, and that is
+-- where a stale one shows — the database's N taken for the position after a step whose read-back
+-- failed (below): a step whose name before the click cannot be read takes its N from
 -- the anchor, and Preset info whose read fails speaks from it. Everything taken from it is
 -- marked, and the next name read replaces it.
 --
@@ -435,8 +434,8 @@ end
 
 -- The preset may have changed in a way this module does not read: the anchor goes. `own`: true
 -- when Avenger most likely shows the user's own file now (Load preset, Save preset as — SNAPPING),
--- false when it does not (Initialize preset), nil to leave that as it was (the redo list, the
--- overlay leaving the front, Save preset, which keeps the name).
+-- false when it does not (Initialize preset), nil to leave that as it was (Undo, the redo list,
+-- the overlay leaving the front, Save preset, which keeps the name).
 function DB.forget(why, own)
   if anchor and cat then
     host.log.info(string.format("[avenger] the database's position (%s) is forgotten: %s", where(anchor), why))

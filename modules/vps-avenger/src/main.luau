@@ -8,7 +8,8 @@
 --   Preset             the preset's name, read; the first stop, so it is what arriving says
 --   Previous / Next    ◀ and ▶, and then the NEW name — once it is on screen, read (O:watch);
 --                      with the preset database installed, the database's neighbour as well,
---                      marked, when the read fails or disagrees (presets.luau)
+--                      marked, when the read fails or disagrees (presets.luau); unavailable
+--                      where the name read is Init Preset, which Avenger steps no preset from
 --   Preset info        only with the preset database: the preset's expansion, category,
 --                      oscillator tabs and macro names, each marked as the database's
 --   Load, Save,        MENU's four items, each chosen in Avenger's own menu once a menu test sees
@@ -77,9 +78,10 @@ end
 
 -- ── A click of the module's own ──────────────────────────────────────────────
 -- ◀ and ▶ are clicked by a custom button rather than a hotspot, because what matters is what the
--- click DID — the name after it — and only the module's own code can watch for that; the redo
--- list's right click, because the module has to know that it opened a popup (header.luau,
--- `carried`). The checks a hotspot's click gets from the runtime are made here the same way: the
+-- click DID — the name after it — and only the module's own code can watch for that; UNDO's,
+-- because an undo may change the preset, and only the module's own code can forget then what it
+-- read of it; the redo list's right click, because the module has to know that it opened a popup
+-- (header.luau, `carried`). The checks a hotspot's click gets from the runtime are made here the same way: the
 -- point placed through the overlay's frame and scale (nothing clicked without a factor), inside the
 -- plug-in, and not under another window (host.window.ownsPoint: "a module only needs it directly
 -- when it clicks a coordinate itself", docs/api/window.md). Each refusal is said, as the runtime
@@ -167,7 +169,36 @@ local NAME_WITHIN = 2000
 -- `pending`: the press whose watch is still out, or nil once it has ended (or the overlay has
 -- left the front, which ends a watch without a word). Only the database's rule asks it: a press
 -- made while it is set may read the name from before that press's click (presets.luau).
-local names = { gen = 0, reading = false, text = nil, textGen = -1, seq = 0, last = nil, pending = nil }
+-- `init`: whether the latest name read is Init Preset (below), or nil for not known.
+local names = { gen = 0, reading = false, text = nil, textGen = -1, seq = 0, last = nil, pending = nil, init = nil }
+
+-- ── ◀ and ▶ on Init Preset ───────────────────────────────────────────────────
+-- Avenger steps no preset from its blank preset: ◀ and ▶ change nothing there, and the
+-- avenger_control project's tool has no case for it — it clicks and waits for a change that never
+-- comes (its actions.py, _step_preset). So where the name read is Init Preset the two say they are
+-- unavailable, the runtime's way for a custom button (its `text`, announced with the label, as
+-- ON:EAR's panel buttons say what blocks them), and a press clicks nothing and says why — the
+-- first Mac test of the page, 2026-10-14 (TODO.md, item 3). Decided by the latest read, never by
+-- a time: the press's own read of the name, or, when that reads nothing, the latest name this
+-- module read (`names.init`) — by a press, a watch, the Preset read-out or the page. That claim is
+-- forgotten where the preset may have changed with nothing read after it — a choice from MENU,
+-- Undo, the redo list, the overlay leaving the front, and the same clicks and choices made by a
+-- trip of the page's (actions.luau) — where the preset database's position is forgotten too;
+-- until a read, ◀ and ▶ claim nothing, and a press reads. The page says it in its own words
+-- (state.luau).
+local AT_INIT = "Avenger steps no preset from Init Preset — load a preset first"
+
+-- Name `t`, as read: the last one read, and whether it is Init Preset. `t` as it came.
+local function noted(t)
+  names.last = t
+  names.init = t == R.INIT_PRESET
+  return t
+end
+
+-- The preset may have changed, and nothing has read it since.
+local function unseen()
+  names.init = nil
+end
 
 local function tidy(text)
   local t = string.gsub(text or "", "%s+", " ")
@@ -192,9 +223,7 @@ local function nameNow(o)
   local ok, res = pcall(host.ocr.recognize, r, { lang = H.lang() })
   local t = ok and res and tidy(res.text) or ""
   if t == "" then return nil end
-  t = asName(t)
-  names.last = t
-  return t
+  return noted(asName(t))
 end
 
 -- The last name read for press `gen` and which reading it came from (`names.seq`, counted up for
@@ -213,8 +242,8 @@ local function nameAfter(o, gen)
         if gen ~= names.gen or res.status ~= "text" then return end
         local t = tidy(res.text)
         if t ~= "" then
-          t = asName(t)
-          names.text, names.textGen, names.last = t, gen, t
+          t = noted(asName(t))
+          names.text, names.textGen = t, gen
           names.seq += 1
         end
       end)
@@ -276,9 +305,17 @@ end
 local function presetStep(ov, label, at, dir)
   ov:addCustomButton({
     label = label,
+    -- What the latest read says, at once: announcing reads nothing.
+    text = function() return names.init and "unavailable on Init Preset" or nil end,
     onActivate = function(o)
       local here, read = nameBefore(o, label)
       if not here then return end
+      if names.init then
+        host.log.info(string.format("[avenger] '%s': %s Init Preset, which Avenger steps no preset from — "
+          .. "nothing clicked", label, read and "the name reads" or "the name read last was"))
+        host.speech.output(label .. ": " .. AT_INIT, { interrupt = true })
+        return
+      end
       local was = read or names.last
       if not clickAt(o, label, at) then return end
       -- The name read before the click places the preset the step starts from; worked out once
@@ -458,8 +495,9 @@ local function menuEntry(ov, label, item, arms)
         onDone = function(w, chosen, why)
           if chosen then
             -- Every item may load, rename, overwrite or blank the preset: the database's position
-            -- is not Avenger's any more.
+            -- is not Avenger's any more, nor the latest name read.
             DB.forget(label .. " chosen", OWN_NAME[label])
+            unseen()
             if arms then D.arm(id, label) end
             return
           end
@@ -588,9 +626,14 @@ end
 local header = placed(O.new("VPS Avenger"))
 -- The first stop: arriving says the preset. Read, never clicked: pressing it reads it again. An
 -- empty read is the recogniser's failure — Avenger always shows a name — and is said as that; a
--- reading of the blank preset the project knows for a misread is said as "Init Preset" (`value`).
+-- reading of the blank preset the project knows for a misread is said as "Init Preset" (`value`),
+-- and kept as the latest name read while the overlay is in front, for ◀ and ▶.
 header:addOCRButton({ label = "Preset", region = G.NAME_REGION, readOnly = true, fallback = "cannot be read now",
-  value = function(_, text) return (R.presetName(text)) end })
+  value = function(o, text)
+    local name = R.presetName(text)
+    if o.active then noted(name) end
+    return name
+  end })
 presetStep(header, "Previous preset", G.PREV, -1)
 presetStep(header, "Next preset", G.NEXT, 1)
 if DB.present then presetInfo(header) end
@@ -598,12 +641,23 @@ menuEntry(header, "Load preset", G.LOAD, false)
 menuEntry(header, "Save preset", G.SAVE, true)
 menuEntry(header, "Save preset as", G.SAVE_AS, false)
 menuEntry(header, "Initialize preset", G.INITIALIZE, true)
-header:addHotspotButton({ label = "Undo", at = G.UNDO })
+-- UNDO, clicked as a hotspot clicks and said as one says its click; an undo may take the preset
+-- back — after Initialize, to the one before — so what this module read of it is forgotten.
+header:addCustomButton({
+  label = "Undo",
+  onActivate = function(o)
+    if not clickAt(o, "Undo", G.UNDO) then return end
+    DB.forget("Undo")
+    unseen()
+    host.speech.output("Undo, activated", { interrupt = true })
+  end,
+})
 -- The redo list is Avenger's own popup, which the project found VoiceOver could step through with
 -- the arrow keys: opened with a right click on UNDO, and while a menu test sees it the keys are the
 -- list's (`opensMenu`: the runtime's press, which newWindow compares against, comes before the
 -- click). Whether NVDA reads it, and whether VoiceOver does from here, is a session's question
--- (TODO.md). UNDO's crosshair in a calibration shot is Undo's, the same point.
+-- (TODO.md). UNDO's crosshair in the header picture of a calibrating run (header.luau) is both
+-- controls' point.
 header:addCustomButton({
   label = "Redo list",
   opensMenu = true,
@@ -612,6 +666,7 @@ header:addCustomButton({
       H.popup(o:origin())
       -- What the list redoes is chosen in the list, which this module does not read.
       DB.forget("the redo list opened")
+      unseen()
       host.speech.output("Redo list, activated", { interrupt = true })
     end
   end,
@@ -624,6 +679,7 @@ header:onDeactivate(function()
   -- A watch out now ends without a word (O:watch looks only while the overlay is up).
   names.pending = nil
   DB.forget("the overlay left the front")
+  unseen()
 end)
 -- ── The page ─────────────────────────────────────────────────────────────────
 -- Its key, its settings and its description (page.luau), added before the header is bound, as
@@ -638,6 +694,9 @@ Page.start({
     clickAt = clickAt,
     nameNow = nameNow,
     lastName = function() return names.last end,
+    noteName = noted,
+    unseen = unseen,
+    atInit = function() return names.init == true end,
     watchName = watchName,
     menuItemAt = menuItemAt,
     zoomEntry = zoomEntry,

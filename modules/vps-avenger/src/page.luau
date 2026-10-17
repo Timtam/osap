@@ -13,7 +13,7 @@
 --   the state     only what was read (state.luau): the preset's name, the zoom, the browser, the
 --                 oscillator strip and the selected oscillator's knobs, the central tab and DRUM
 --                 SQ, the macros; what the preset database gives is marked so; everything else
---                 "not read"
+--                 "not read"; and ◀ and ▶ unavailable where the preset read is Init Preset
 --   the actions   the header's are trips into Avenger (actions.luau); Initialize's No clicks
 --                 nothing, as it is meant to; every other action the page sends is answered
 --                 "<label> is not available in this module yet" in its error region, until the
@@ -285,6 +285,8 @@ local function open(o)
     return false
   end
   S.read(win.id, values)
+  -- The latest name read, for the ring's ◀ and ▶ as well (main.luau, "◀ and ▶ on Init Preset").
+  if values.preset then E.ring.noteName(values.preset) end
   host.log.info(string.format("[avenger] [page] read for the page: the preset %s, the zoom %s",
     values.preset and ("'" .. values.preset .. "'") or "not read", values.zoom and (values.zoom .. " %") or "not read"))
   plugin, keyAt = win, t0

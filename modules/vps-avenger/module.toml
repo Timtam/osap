@@ -1,6 +1,6 @@
 id = "com.platform.vps-avenger"
 name = "VPS Avenger"
-version = "0.3.1"
+version = "0.3.2"
 license = "GPL-3.0-or-later"
 # The runtime's page support (O:addPage, O:inPlugin) came with version 0.6; `identify`'s `again`
 # and O:watch's count of readings, which the header's read and the name after ◀ and ▶ use, with 0.7.

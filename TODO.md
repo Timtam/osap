@@ -191,13 +191,55 @@ them:
       it and that the application now says so. **The Mac tester confirms:** a launch with the flag
       still set ends its start announcement with the sentence and the line, the page reads it and
       the field holds the line, and after running it no later start says it.
-- [ ] **3. Previous and next preset are unavailable on Init Preset.** Avenger steps no preset from
+- [x] **3. Previous and next preset are unavailable on Init Preset.** Avenger steps no preset from
       its blank preset; the tool has no handling for it (it clicks and waits for a change that never
       comes, `AC/actions.py` `_step_preset`). Where the preset read is Init Preset
       (`R.isInitPreset`): on the page `aria-disabled` on both buttons (they stay in the Tab order)
       with the reason in their help, in the ring the controls report themselves unavailable, and a
       press clicks nothing and says why. A fix beyond the tool, under the maintainer's "defects
       fixed" decision.
+      **Built (VPS Avenger 0.3.2, 2026-10-17).** Decided by the latest name read, never by a time.
+      In the ring, ◀ and ▶ say "unavailable on Init Preset" after their label — the runtime's way
+      for a custom button, its `text`, as ON:EAR's panel buttons say what blocks them — where the
+      latest name read (a press's, a watch's, the Preset read-out's or the page's) is Init Preset,
+      any reading `R.isInitPreset` takes for it included; a press reads the name first and on Init
+      Preset (or, read as nothing, where the latest read was) clicks nothing, watches nothing and
+      says "<label>: Avenger steps no preset from Init Preset — load a preset first". The claim is
+      forgotten where the preset may have changed with nothing read since — a MENU choice, Undo (now
+      a button of the module's own, clicked as the hotspot was, which also forgets the database's
+      position), the redo list, the overlay leaving the front, and the same clicks and choices made
+      from the page — as the database's position is; a press then reads again. In the page, the
+      state carries `preset_steps_unavailable` (the reason) where the preset read is Init Preset;
+      Back and Next are then `aria-disabled="true"` (never `disabled`: in the Tab order, focusable,
+      the focus restored to them), their title, which is their help and their description, "Load the
+      previous preset, unavailable: VPS Avenger steps no preset from Init Preset; load a preset
+      first.", drawn dimmed. A press sends nothing to Avenger (no trip) and the error region says
+      "<label>: VPS Avenger steps no preset from Init Preset; load a preset first", the focus left
+      on the button; a trip whose own read in Avenger finds Init Preset clicks nothing and brings
+      the page back with that name and why. A trip from the page that may have changed the preset
+      (UNDO, the redo list, Load, Save as, Initialize) and reads no name after it — its reads give
+      nothing, or it is given up — posts the preset as not read, so the page offers Back and Next
+      again and their trip's own read decides. Available again with the next read of a preset: a
+      press's own, the name after Load or UNDO, the page key's reads. Pinned in
+      overlay_avenger_tests.rs
+      (`previous_and_next_are_unavailable_on_init_preset_and_a_press_clicks_nothing`,
+      `undo_the_redo_list_and_a_late_read_out_answer_leave_no_claim_of_init_preset`) and
+      avenger_page_tests.rs (`previous_and_next_from_the_page_send_nothing_on_init_preset`,
+      `the_ring_and_the_page_go_by_the_same_latest_read_of_init_preset`,
+      `back_and_next_carry_aria_disabled_and_stay_in_the_tab_order`).
+      **The Mac tester confirms:** on Init Preset in the ring, once the Preset read-out has been
+      heard, Tab onto ◀ and ▶ says "Previous preset, unavailable on Init Preset, button" (and Next's
+      the same), Return there clicks nothing in Avenger and says why, and the log has `[avenger]
+      'Next preset': the name reads Init Preset, which Avenger steps no preset from — nothing
+      clicked`; in the page VoiceOver says Back and Next are dimmed and reads the reason as their
+      help (VO-Shift-H, or after its delay), both are reached as the Rename button beside them is
+      (Tab with Keyboard navigation on in the Mac's settings, otherwise Option-Tab) and with
+      VO-arrows, and pressing either brings no Avenger window forward while VoiceOver speaks the
+      error region's sentence (the log: `[avenger] [page] 'Next preset': the page's preset is Init
+      Preset — nothing sent to VPS Avenger`); after Load, and after UNDO following Initialize, from
+      the ring and from the page, ◀ and ▶ step again — in the ring Tab onto them no longer says
+      "unavailable" right after Undo — and the page's Back and Next are no longer dimmed once it
+      shows the new name, or the heading says the preset is not read.
 - [ ] **5. Avenger's own popups on a Mac.** The page's Size never saw the zoom list: `'Zoom' not
       chosen — no menu test saw a menu within 8000 ms`, twice. Avenger draws its popups itself, and
       no menu test of the module sees them on a Mac. Needs pictures of each popup kind from the

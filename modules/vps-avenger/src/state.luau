@@ -21,10 +21,24 @@
 
 local S = {}
 
+local R = host.include("src/read/ocr.luau")
+
 -- One table per plug-in window, by its id: { values = { key -> value }, at = when they were read
 -- (host.now) }. At most WINDOWS_MAX, the oldest dropped: one window is in front at a time.
 local WINDOWS_MAX = 8
 local byWindow, order = {}, {}
+
+-- Why the page's ◀ and ▶ cannot step: VPS Avenger steps no preset from its blank preset, which
+-- the tool did not know (main.luau, "◀ and ▶ on Init Preset"). The state says it
+-- (`preset_steps_unavailable`, a key of the port's) where the preset read is Init Preset, and the
+-- page's buttons are then aria-disabled with it in their help (ui/panel.js); a press is answered
+-- with it in the error region (actions.luau).
+S.AT_INIT = "VPS Avenger steps no preset from Init Preset; load a preset first"
+
+local function stepsWhy(v)
+  if v.preset ~= nil and R.isInitPreset(v.preset) then return S.AT_INIT end
+  return nil
+end
 
 local function forWindow(id)
   local st = byWindow[id]
@@ -58,6 +72,13 @@ end
 function S.at(id)
   local st = id and byWindow[id] or nil
   return st and st.at
+end
+
+-- Why ◀ and ▶ cannot step from the preset read in window `id` (S.AT_INIT), or nil: they can, or
+-- nothing was read there.
+function S.stepsUnavailable(id)
+  local st = id and byWindow[id] or nil
+  return st and stepsWhy(st.values) or nil
 end
 
 -- A list of `n` entries from `src`, holes where nothing was read: the page reads a hole as "not
@@ -160,6 +181,7 @@ function S.snapshot(id, roster, opts)
   local v = st and st.values or {}
   local out = {
     preset = v.preset,
+    preset_steps_unavailable = stepsWhy(v),
     zoom = v.zoom,
     expansion_view = v.expansionView,
     expansion_open = v.expansionOpen,

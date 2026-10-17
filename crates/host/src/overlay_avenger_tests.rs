@@ -36,6 +36,11 @@
 //! cannot be read changes nothing but Preset info's answer; a name read is placed in the catalog
 //! the tool's way; ◀ and ▶ say what was read and add the database's neighbour, marked, when the
 //! read failed or disagrees; and the position is forgotten when the preset may have changed.
+//!
+//! And for the first Mac test of the page (2026-10-14): ◀ and ▶ are unavailable where the name read
+//! is Init Preset, which Avenger steps no preset from — said as Tab reaches them, and a press
+//! clicks nothing and says why — until a read of a preset, and claim nothing where the preset may
+//! have changed with nothing read since (Undo, a button of the module's own, among them).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1754,7 +1759,7 @@ fn every_click_lands_where_the_table_puts_it_at_50_80_and_200_percent() {
           T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, k, zoom))
           T.event()
           T.ok(header.active, zoom .. " %: active")
-          S.ocr = function() return "Init Preset" end
+          S.ocr = function() return "BA Deep Sub" end
           local e = expected[zoom]
           T.pressAt(header, 2)
           T.ok(T.clickAt() == e[1], zoom .. " % previous: " .. T.clickAt())
@@ -1793,7 +1798,7 @@ fn previous_and_next_say_the_new_name_once_it_is_on_screen() {
         local header = T.avenger()
         T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
         T.event()
-        S.ocr = function(g) return T.region(g) == "152,95,440,119" and "Init Preset" or "" end
+        S.ocr = function(g) return T.region(g) == "152,95,440,119" and "AR Catch Me" or "" end
         T.run(400)
         local function name(text) return { status = "text", text = text, words = {} } end
         local said = #S.speech
@@ -1803,7 +1808,7 @@ fn previous_and_next_say_the_new_name_once_it_is_on_screen() {
         T.run(150)
         local r1 = T.lastRead("vps-avenger name")
         T.ok(r1 and T.region(r1.region) == "152,95,440,119", "the name's box, off the event loop")
-        T.answer(r1, name("Init Preset"))
+        T.answer(r1, name("AR Catch Me"))
         T.run(150)
         T.ok(#S.speech == said, "the old name, not redrawn yet, is not said: " .. T.said(said + 1))
         local r2 = T.lastRead("vps-avenger name")
@@ -2385,9 +2390,9 @@ fn initialize_and_save_are_refused_where_their_box_would_lie_off_the_screen() {
 
 /// In a calibrating run the header is photographed at each zoom and size it is read at: crosshairs
 /// where the overlay clicks the zoom field, ◀, ▶, MENU and UNDO, then on the words read — the
-/// origin question in one picture. The runtime's own shot marks the hotspots and the name's box at
-/// the scaled places, and the warning box is photographed with YES and NO read and as the table has
-/// them. The module's pictures go to its own folder, the runtime's to the runtime's.
+/// origin question in one picture. The runtime's own shot marks the name's box at the scaled place,
+/// and the warning box is photographed with YES and NO read and as the table has them. The
+/// module's pictures go to its own folder, the runtime's to the runtime's.
 #[test]
 fn a_calibrating_run_draws_where_the_overlay_clicks_and_reads() {
     run_mac(r##"
@@ -2411,9 +2416,9 @@ fn a_calibrating_run_draws_where_the_overlay_clicks_and_reads() {
         T.ok(T.count("scale 1.6000 about (0,0), frame (-2,2)") == 1)
         T.ok(T.count(string.format("  %2d %-24s screen (%d,%d)  pixel %s", 1, "Preset", 296, 107, "20,20,20")
           .. "  region (152,95)-(440,119)") == 1)
-        -- Undo's crosshair is the redo list's point as well; the controls the module clicks itself
-        -- are in the header picture above.
-        T.ok(T.count(string.format("  %2d %-24s screen (%d,%d)  pixel %s", 2, "Undo", 586, 106, "20,20,20")) == 1)
+        -- The controls the module clicks itself — Undo and the redo list among them, at UNDO — are in
+        -- the header picture above, not in the runtime's.
+        T.ok(T.count(string.format("  -- %-24s no position", "Undo")) == 1, T.dump())
         T.ok(T.count("-> C:/modules/overlay-runtime/calibration/VPS-Avenger.png") == 1, "the runtime's shot in the runtime's folder")
         -- The warning box, after Initialize.
         T.choose(header, 7, 490, 116, 192, 96)
@@ -2876,6 +2881,143 @@ fn a_step_whose_window_left_the_front_during_its_name_read_clicks_nothing() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// ◀ and ▶ on Init Preset (the first Mac test of the page, 2026-10-14: TODO.md, item 3).
+// ---------------------------------------------------------------------------------------------
+
+/// Avenger steps no preset from its blank preset, and the avenger_control project's tool clicked
+/// and waited for a change that never came. Where the latest name read is Init Preset — here the
+/// Preset read-out's, on arrival — ◀ and ▶ say they are unavailable as Tab reaches them (their
+/// `text`), and a press reads the name, clicks nothing, watches nothing and says why; a press whose
+/// read gets nothing goes by the latest name read. The press's own read of a real name — a preset
+/// loaded some other way — makes the step work again, and from then on neither says it is
+/// unavailable. A choice from MENU and the overlay leaving the front forget the claim, since the
+/// preset may have changed with nothing read since: Tab onto ▶ claims nothing, and its press reads
+/// again — Init Preset still, after a Load whose file dialog was cancelled.
+#[test]
+fn previous_and_next_are_unavailable_on_init_preset_and_a_press_clicks_nothing() {
+    run_mac(r##"
+        local S = T.S
+        local refused = function(label)
+          return label .. ": Avenger steps no preset from Init Preset — load a preset first"
+        end
+        local header, _, W = T.avengerAt80("Init Preset")
+        -- A Tab from the control labelled `from`, and the label it lands on, announced.
+        local function tabFrom(from)
+          for i, c in ipairs(header.controls) do
+            if c.label == from then header.focus = i end
+          end
+          T.tab()
+          return header.controls[header.focus].label
+        end
+        T.ok(T.lastSaid() == "Preset, Init Preset", T.said())
+        T.ok(tabFrom("Preset") == "Previous preset"
+          and T.lastSaid() == "Previous preset, unavailable on Init Preset, button", T.said())
+        T.ok(tabFrom("Previous preset") == "Next preset"
+          and T.lastSaid() == "Next preset, unavailable on Init Preset, button", T.said())
+        local clicks, reads = #S.clicks, #S.reads
+        T.pressAt(header, 2)
+        T.ok(T.lastSaid() == refused("Previous preset"), T.said())
+        T.pressAt(header, 3)
+        T.ok(T.lastSaid() == refused("Next preset"), T.said())
+        T.run(600)
+        T.ok(#S.clicks == clicks and #S.reads == reads, "nothing clicked, nothing watched")
+        T.ok(T.count("[avenger] 'Next preset': the name reads Init Preset, which Avenger steps no preset from — "
+          .. "nothing clicked") == 1, T.dump())
+        -- A read that gets nothing: the latest name read stands.
+        T.nameIs(nil)
+        T.pressAt(header, 3)
+        T.ok(#S.clicks == clicks and T.lastSaid() == refused("Next preset"), T.said())
+        T.ok(T.count("[avenger] 'Next preset': the name read last was Init Preset") == 1, T.dump())
+        -- A preset loaded some other way: the press's own read says so, and the step works again.
+        T.nameIs("LD Lead 1")
+        T.pressAt(header, 3)
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "469,106", "▶ clicked: " .. T.clickAt())
+        T.nameReads("LD Lead 2")
+        T.ok(T.lastSaid() == "LD Lead 2", T.said())
+        T.ok(tabFrom("Preset") == "Previous preset" and T.lastSaid() == "Previous preset, button", T.said())
+        T.ok(tabFrom("Previous preset") == "Next preset" and T.lastSaid() == "Next preset, button", T.said())
+        -- Back on Init Preset, read by a press; then Load chosen from MENU, its file dialog cancelled:
+        -- nothing read since, so nothing claimed, and the next press reads it again.
+        T.nameIs("Init Preset")
+        T.pressAt(header, 3)
+        T.ok(T.lastSaid() == refused("Next preset"), T.said())
+        T.choose(header, 4, 490, 116, 192, 96)
+        T.ok(T.count("[menu item] 'VPS Avenger': 'Load preset' chosen") == 1, T.dump())
+        T.ok(tabFrom("Previous preset") == "Next preset" and T.lastSaid() == "Next preset, button", T.said())
+        clicks = #S.clicks
+        T.pressAt(header, 3)
+        T.ok(#S.clicks == clicks and T.lastSaid() == refused("Next preset"), T.said())
+        T.ok(tabFrom("Preset") == "Previous preset"
+          and T.lastSaid() == "Previous preset, unavailable on Init Preset, button", T.said())
+        -- Away and back: the claim does not outlive the stay it was read in.
+        T.show(T.OTHER)
+        T.ok(not header.active, T.dump())
+        T.show(W)
+        T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
+        T.event()
+        T.run(400)
+        T.ok(header.active, T.dump())
+        T.ok(tabFrom("Preset") == "Previous preset" and T.lastSaid() == "Previous preset, button", T.said())
+    "##);
+}
+
+/// Where the preset may have changed with nothing read since, the claim of Init Preset is
+/// forgotten, as the database's position is: after Undo — UNDO clicked where a hotspot would click
+/// it, and said as one says its click — and after the redo list. And the Preset read-out's answer
+/// that comes once the overlay has left the front is no read of the stay it was asked in: it
+/// claims nothing for the next one.
+#[test]
+fn undo_the_redo_list_and_a_late_read_out_answer_leave_no_claim_of_init_preset() {
+    run_mac(r##"
+        local S = T.S
+        local header, _, W = T.avengerAt80("Init Preset")
+        local function tabFrom(from)
+          for i, c in ipairs(header.controls) do
+            if c.label == from then header.focus = i end
+          end
+          T.tab()
+          return header.controls[header.focus].label
+        end
+        -- What Tab onto ◀ says.
+        local function previous()
+          T.ok(tabFrom("Preset") == "Previous preset", "Tab from Preset")
+          return T.lastSaid()
+        end
+        T.ok(previous() == "Previous preset, unavailable on Init Preset, button", T.said())
+        local clicks = #S.clicks
+        T.pressAt(header, 8)
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "586,106" and S.clicks[#S.clicks].button == nil,
+          "UNDO: " .. T.clickAt())
+        T.ok(T.lastSaid() == "Undo, activated" and T.count("[avenger] 'Undo': clicking (586,106)") == 1, T.said())
+        T.ok(previous() == "Previous preset, button", T.said())
+        -- Init Preset read again by a press, then the redo list opened and closed.
+        T.pressAt(header, 3)
+        T.ok(previous() == "Previous preset, unavailable on Init Preset, button", T.said())
+        T.pressAt(header, 9)
+        T.ok(T.clickAt() == "586,106" and S.clicks[#S.clicks].button == "right", "UNDO, right: " .. T.clickAt())
+        T.ok(T.lastSaid() == "Redo list, activated", T.said())
+        T.popup(320, 586, 110, 150, 200)
+        T.tick(1)
+        T.closePopups()
+        T.tick(2)
+        T.ok(previous() == "Previous preset, button", T.said())
+        -- Tab onto Preset asks its read; the overlay leaves the front before the answer, which
+        -- reads Init Preset. Back, with the name unreadable, nothing is claimed.
+        T.ok(tabFrom("Zoom") == "Preset", "Tab from Zoom")
+        T.show(T.OTHER)
+        T.runDue()
+        T.ok(not header.active, T.dump())
+        T.nameIs(nil)
+        T.show(W)
+        T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
+        T.event()
+        T.run(400)
+        T.ok(header.active and T.lastSaid() == "Preset, cannot be read now", T.said())
+        T.ok(previous() == "Previous preset, button", T.said())
+    "##);
+}
+
+// ---------------------------------------------------------------------------------------------
 // From the avenger_control project into stage 1 (the port's plan, slice 0): its reading of what
 // a recogniser makes of the blank preset, and Ableton Live on a Mac as a daw-hosts entry.
 // ---------------------------------------------------------------------------------------------
@@ -2912,8 +3054,9 @@ fn the_projects_readings_of_the_blank_preset_are_taken_for_it() {
 
 /// In the ring: the Preset read-out says a reading of the blank preset as "Init Preset" — its
 /// `[read]` line keeps what was read — and ◀ and ▶ read the name the same way, before the click
-/// and after it: "hit Presst" before and "lnit Preset" after is the same preset, unchanged. The
-/// log says each reading taken so.
+/// and after it: "hit Presst" before is Init Preset, which Avenger steps no preset from, so ▶
+/// clicks nothing; "lnit Preset" read after a click is said as Init Preset. The log says each
+/// reading taken so.
 #[test]
 fn the_ring_says_a_reading_of_the_blank_preset_as_init_preset() {
     run_mac(r##"
@@ -2921,16 +3064,19 @@ fn the_ring_says_a_reading_of_the_blank_preset_as_init_preset() {
         local header = T.avengerAt80("hit Presst")
         T.ok(T.lastSaid() == "Preset, Init Preset", T.said())
         T.ok(T.count("[read] 'Preset' = \"hit Presst\", said as \"Init Preset\" (region 34,7 180x15") == 1, T.dump())
-        T.ok(T.step(header, 3, "hit Presst", "lnit Preset") == "Init Preset, unchanged", T.said())
+        local clicks = #S.clicks
+        T.ok(T.step(header, 3, "hit Presst", nil) == "Next preset: Avenger steps no preset from Init Preset — load a "
+          .. "preset first", T.said())
+        T.ok(#S.clicks == clicks, "nothing clicked")
         T.ok(T.count("[avenger] the name read 'hit Presst' is taken as Avenger's blank preset, Init Preset") >= 1, T.dump())
+        T.ok(T.step(header, 3, "BA Deep Sub", "lnit Preset") == "Init Preset", T.said())
         T.ok(T.count("[avenger] the name read 'lnit Preset' is taken as Avenger's blank preset, Init Preset") >= 1, T.dump())
-        T.ok(T.step(header, 3, "hit Presst", "BA Deep Sub") == "BA Deep Sub", T.said())
     "##);
 }
 
 /// With the preset database, a reading of the blank preset is Avenger's blank preset, which is in
 /// no expansion: Preset info says "Init Preset, not in the database", the log says why, and a step
-/// from it has no neighbour.
+/// from it clicks nothing and asks the database for no neighbour.
 #[test]
 fn the_preset_database_takes_a_reading_of_the_blank_preset_for_no_catalog_name() {
     run_mac(r##"
@@ -2939,8 +3085,10 @@ fn the_preset_database_takes_a_reading_of_the_blank_preset_for_no_catalog_name()
         local header = T.avengerAt80("hit Presst")
         T.ok(T.info(header, "hit Presst") == "Init Preset, not in the database", T.said())
         T.ok(T.count("[avenger] 'Preset info': read 'Init Preset' — Avenger's blank preset") == 1, T.dump())
-        T.ok(T.step(header, 3, "Init Presst", "BA Deep Sub") == "BA Deep Sub", T.said())
-        T.ok(T.count("the database's neighbour: none, the position is not known") >= 1, T.dump())
+        local clicks = #S.clicks
+        T.ok(T.step(header, 3, "Init Presst", "BA Deep Sub") == "Next preset: Avenger steps no preset from Init "
+          .. "Preset — load a preset first", T.said())
+        T.ok(#S.clicks == clicks and T.count("the database's neighbour") == 0, T.dump())
     "##);
 }
 
