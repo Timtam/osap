@@ -1,5 +1,7 @@
 -- DRUM SQ, read off the page's picture while it is the central tab: whether PATTERN CHAIN and AUTO
--- FOLLOW are on, which of the patterns B, C and D are on, and which pattern is selected.
+-- FOLLOW are on, which of the patterns B, C and D are on, and which pattern is selected; and where
+-- an action names them, its LENGTH and SPEED as text, which the project never read (it wrote the
+-- length it dragged to, and no speed).
 --
 -- SOURCE: the avenger_control project's detect_central_drum_sq_pattern_states and
 -- detect_central_drum_sq_selected_pattern (its clicker/__init__.py), and its check that the
@@ -10,6 +12,7 @@
 local P = host.include("src/read/picture.luau")
 local C = host.include("src/tables/centre.luau")
 local S = host.include("src/read/strip.luau")
+local R = host.include("src/read/ocr.luau")
 
 local Q = {}
 
@@ -70,8 +73,59 @@ local function sumOf(prof, x1, x2)
   return m * cols * prof.h, cols * prof.h
 end
 
--- DRUM SQ's state into `v.drumSq`, when the central tab read is DRUM SQ.
-function Q.decide(pl, got, v, log, marks)
+-- DRUM SQ's LENGTH and SPEED, read as text where an action names them (read/open.luau's
+-- `fields`): their keys, and their names in the text read.
+Q.FIELDS = { sq_length = "sq length", sq_speed = "sq speed" }
+Q.FIELD_KEYS = { sq_length = "sqLength", sq_speed = "sqSpeed" }
+
+-- The length a field's text says, in steps: a number with "beat" beside it, times four; else a
+-- number that is a length in steps, 4 to 64 in fours. What the field shows is not known (TODO.md,
+-- D10), so a reading that is neither is no length.
+function Q.lengthOf(text)
+  local t = string.lower(R.tidy(text))
+  local beats = string.match(t, "(%d+)%s*beat")
+  if beats then
+    local n = tonumber(beats) * 4
+    if n >= 4 and n <= 64 then return n end
+    return nil
+  end
+  for d in string.gmatch(t, "%d+") do
+    local n = tonumber(d)
+    if n >= 4 and n <= 64 and n % 4 == 0 then return n end
+  end
+  return nil
+end
+
+-- The fields asked (`fields`, Q.FIELDS' keys) off the text read (`byName`): `v.sqLength` in steps,
+-- `v.sqSpeed` as the page's key ("1_8"), each nil where it was not read. Only where DRUM SQ is the
+-- central tab read.
+function Q.fields(byName, v, log, fields)
+  local words = {}
+  for _, key in ipairs(fields) do
+    local r = byName and byName[Q.FIELDS[key]]
+    local t = r and r.status == "text" and R.tidy(r.text) or ""
+    local value, how = nil, nil
+    if t ~= "" then
+      if key == "sq_length" then
+        value = Q.lengthOf(t)
+      else
+        local ratio
+        value, ratio = R.noteValue(t, C.VALUE_WORDS.sq_speed)
+        how = string.format(" (%.2f alike)", ratio or 0)
+      end
+    end
+    v[Q.FIELD_KEYS[key]] = value
+    words[#words + 1] = string.format("%s %s%s", Q.FIELDS[key], t ~= "" and ("'" .. R.forLog(t) .. "' -> "
+      .. tostring(value or "not taken")) or (r and r.status or "not answered"), how or "")
+  end
+  log("drum sq: " .. table.concat(words, "; "))
+end
+
+-- DRUM SQ's state into `v.drumSq`, when the central tab read is DRUM SQ. With `opts.onlyOn`, the
+-- selected pattern is looked for only among A and the patterns this picture reads on — the
+-- project's restriction for its watcher (its dispatcher's detect_central_drum_sq_selected_pattern
+-- with the patterns enabled), from this read rather than from memory (src/watch.luau).
+function Q.decide(pl, got, v, log, marks, opts)
   local ga, gb, band = got["sq active"], got["sq bright"], got["sq band"]
   local function mark(p) local x, y = pl:point(p[1], p[2]); marks[#marks + 1] = { x = x, y = y } end
   local function meanOf(p, size, adjust)
@@ -126,11 +180,18 @@ function Q.decide(pl, got, v, log, marks)
     end
     mark(at)
   end
+  -- With `onlyOn`, A and the patterns read on in this picture; otherwise all four.
+  local allowed = { a = true, b = true, c = true, d = true }
+  if opts and opts.onlyOn then
+    allowed = { a = true, b = states[1] == true, c = states[2] == true, d = states[3] == true }
+  end
   -- Highest first, and of two alike the one first in A to D, as the project's stable sort has it.
   local function ranked(values, wanted)
     local out = {}
     for i, key in ipairs(C.SQ_PATTERN_ORDER) do
-      if values[key] ~= nil and active[key] == wanted then out[#out + 1] = { key = key, v = values[key], i = i } end
+      if values[key] ~= nil and active[key] == wanted and allowed[key] then
+        out[#out + 1] = { key = key, v = values[key], i = i }
+      end
     end
     table.sort(out, function(x, y)
       if x.v ~= y.v then return x.v > y.v end
@@ -155,9 +216,10 @@ function Q.decide(pl, got, v, log, marks)
   v.drumSq = { states = states, selected = selected }
   if chainMean then v.drumSq.chain = chainMean >= CHAIN_MEAN end
   if followMean then v.drumSq.follow = followMean >= FOLLOW_MEAN end
-  log(string.format("drum sq: PATTERN CHAIN mean %s (on from %d), AUTO FOLLOW %s (on from %d); %s; selected: %s "
+  log(string.format("drum sq: PATTERN CHAIN mean %s (on from %d), AUTO FOLLOW %s (on from %d); %s; selected%s: %s "
     .. "— %s by %.1f", chainMean and string.format("%.1f", chainMean) or "not read", CHAIN_MEAN,
     followMean and string.format("%.1f", followMean) or "not read", FOLLOW_MEAN, table.concat(stateWords, "; "),
+    (opts and opts.onlyOn) and " among A and the patterns read on" or "",
     #words > 0 and table.concat(words, "; ") or "not read", selected or "none", confidence))
 end
 

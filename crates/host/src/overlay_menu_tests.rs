@@ -175,6 +175,8 @@ local S = {
   epoch = 0,
   every = nil,
   after = {},
+  timers = {},      -- token -> { kind, ms?, entry? }: what host.timer.cancel can take back
+  timerSeq = 0,
   -- The Tab pass-through (overlay_passthrough_tests.rs): the plug-in's own focus ring as
   -- host.element.focusStep walks it, and every host.ocr.recognize with a callback asked.
   ring = nil,       -- { { name, bounds? }, … }: the stops focusStep steps through
@@ -254,17 +256,46 @@ T.host = strict("host", {
   end }),
   timer = strict("host.timer", {
     -- The menu tick every 150 ms, one per VM; any other interval is a pollMatch poll (joinPoll),
-    -- one per interval, run by T.poll. Each runs as an event of the module (`T.call`).
+    -- one per interval, run by T.poll. Each runs as an event of the module (`T.call`). Both kinds
+    -- answer a token, which `cancel` takes back as the host's does (docs/api/timer.md): true for a
+    -- timer still pending, false for anything else.
     every = function(ms, fn)
+      S.timerSeq += 1
       if ms == 150 then
         assert(S.every == nil, "one menu timer per VM")
         S.every = fn
+        S.timers[S.timerSeq] = { kind = "tick" }
       else
         assert(S.polls[ms] == nil, "one poll timer per interval")
         S.polls[ms] = fn
+        S.timers[S.timerSeq] = { kind = "poll", ms = ms }
       end
+      return S.timerSeq
     end,
-    after = function(ms, fn) S.after[#S.after + 1] = { at = S.now + ms, fn = fn } end,
+    after = function(ms, fn)
+      local a = { at = S.now + ms, fn = fn }
+      S.after[#S.after + 1] = a
+      S.timerSeq += 1
+      S.timers[S.timerSeq] = { kind = "after", entry = a }
+      return S.timerSeq
+    end,
+    cancel = function(token)
+      local t = token ~= nil and S.timers[token] or nil
+      if not t then return false end
+      S.timers[token] = nil
+      if t.kind == "tick" then
+        S.every = nil
+        return true
+      end
+      if t.kind == "poll" then
+        S.polls[t.ms] = nil
+        return true
+      end
+      local i = table.find(S.after, t.entry)
+      if not i then return false end
+      table.remove(S.after, i)
+      return true
+    end,
   }),
   keys = strict("host.keys", {
     nativeMenuOpen = function() S.nativeAsks += 1; return S.native end,

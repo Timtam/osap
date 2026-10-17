@@ -30,8 +30,19 @@
 -- One whose item counts as chosen at its click (`retries = 0`, a macro button's tick) has its
 -- change waited for from the picture before the right click all the same: Avenger acts on the
 -- click after it has gone out, and a picture taken at once would show the buttons from before.
+-- An item that opens a submenu (`menu.submenu`, a drum slot's Copy Sample to) is chosen in it by the
+-- runtime (O:chooseMenuItem's `submenu`); one that opens a file dialog (`menu.dialog`, Save Drumkit
+-- as) waits for the dialog, which is the user's (trip:afterDialog), in the place of the change wait,
+-- and with `dialog = "read"` (DRUM SQ's sequence menu) reads the part once more after it. A menu
+-- opened with the LEFT button (`menu.button`: the sample editor's Grid, Play Mode, an EQ band's
+-- type, Loop-Stretch, DRUM SQ's SPEED) is a field with its popup attached, as the zoom field's is:
+-- a failed choice that leaves it open is closed by clicking that field again, a right click's with
+-- Escape (main.luau, closeLeftOpen). `fields` names what the part reads as text besides, where it is
+-- shown (read/open.luau): a menu's field, DRUM SQ's LENGTH and SPEED, the envelope's name.
 -- Nothing is ever flipped from memory: the tool turned a macro button's state over when its read
--- was unsure; here an unsure read is "cannot be read now".
+-- was unsure; here an unsure read is "cannot be read now". And where nothing reads what the action
+-- changes — a drum knob's reset — `same` is left out, and the change wait's own verdict on the
+-- watched boxes is the answer: "changed" or, at its bound, "unchanged", with no looking on.
 
 local H = host.include("src/header.luau")
 local P = host.include("src/read/picture.luau")
@@ -57,6 +68,9 @@ local NOT_CHOSEN = {
   covered = "something else is covering the menu; nothing was chosen",
   refused = "the menu could not be clicked; nothing was chosen",
   untaken = "the menu did not take the choice",
+  ["no submenu"] = "its submenu did not open; nothing was chosen in it",
+  ["unfit submenu"] = "no submenu it can be chosen in was seen; nothing was chosen in it",
+  unfollowed = "its submenu cannot be followed now; nothing was chosen",
   inactive = "VPS Avenger is not in front; nothing was chosen",
   ["no tests"] = "the menu cannot be seen here; nothing was chosen",
   busy = "the last choice is still being made",
@@ -90,16 +104,24 @@ end
 --   label     the action's words, in the log and as the menu's label
 --   part      Open.PARTS' name, read before the click and after it
 --   text, textAfter   the part's text read before the click, after it
+--   fields    the fields read as text before and after the click, where they are shown (Open.part)
 --   decide(vb) -> click | nil, why, focus?   from the read before; nil refuses with `why`, and
 --             `focus` the page's element the refusal leaves the focus on. A click is
 --             { at = {x, y}, button = "right"?, double = true?, menu = { item = {x, y},
---             retries = n?, read = false? }? }, points at 50 % from Avenger's corner — a menu's
---             `read = false`: nothing to read after it
+--             button = "left"?, retries = n?, read = false?, submenu = { x, below, row, first }?,
+--             dialog = true | "read"? }? }, points at 50 % from Avenger's corner — a menu's
+--             `button`: its opener's, the right one unless it says "left"; `read = false`: nothing
+--             to read after it; `submenu`: the item opens a submenu, its item chosen there, at x
+--             from Avenger's corner and `below` from the submenu's own top (popups.luau,
+--             Pp.submenuRow); `dialog`: the item opens a file dialog, waited for in a trip, nothing
+--             read after it — with "read", the part read once more when Avenger is in front again
 --   macroCount   the macro tabs counted before, where the part's text is not read (the tab shown)
 --   watch(vb, click) -> { rect }?   the boxes the change is looked for in (default: the part)
---   same(vb, va) -> boolean   nothing this action changes changed
+--   same(vb, va) -> boolean?   nothing this action changes changed; nil — or no `same` — where
+--             nothing read says it: the change wait's verdict decides
 --   answer(vb, va, how) -> result   how: "changed", "unchanged" (at the bound), "chosen" (a menu
---             that changes nothing shown) or "unread" (no picture after the click)
+--             that changes nothing shown, or a file dialog seen), "no dialog" (none within the
+--             runtime's bound) or "unread" (no picture after the click)
 -- `done(result)`: { part = { keys, values }?, error = a reason?, sentence = a whole sentence (a
 -- click refused, as the ring's clicks say it)?, note = a reason?, focus = an id of the page's?, said =
 -- the ring's words? } — `part` is filled in with the last read when the answer has none — or nil:
@@ -138,7 +160,8 @@ function Act.run(o, spec, done, trip)
     log("nothing clicked — no picture of %s: %s", corners(region), tostring(okS and whyS or snap))
     return done({ error = "VPS Avenger cannot be read now" })
   end
-  local readOpts = { pl = pl, text = spec.text, preset = R.lastName(), macroCount = spec.macroCount }
+  local readOpts = { pl = pl, text = spec.text, preset = R.lastName(), macroCount = spec.macroCount,
+    fields = spec.fields }
   local okB, vb, keysB = pcall(Open.part, snap, spec.part, readOpts)
   if not okB then
     snap:release()
@@ -163,7 +186,7 @@ function Act.run(o, spec, done, trip)
   end
 
   local afterOpts = { pl = pl, text = spec.textAfter, preset = readOpts.preset,
-    macroCount = vb.macroCount or spec.macroCount }
+    macroCount = vb.macroCount or spec.macroCount, fields = spec.fields }
   local deadline = nil
   local last = nil -- { keys, values } of the latest read after the click
 
@@ -216,7 +239,14 @@ function Act.run(o, spec, done, trip)
       end
       last = { keys = keys, values = va }
       local changed = info and info.changed == true
-      local okSame, same = pcall(spec.same, vb, va)
+      -- Nothing read says whether what the action changes changed: the change wait's verdict.
+      local okSame, same = true, nil
+      if spec.same then okSame, same = pcall(spec.same, vb, va) end
+      if okSame and same == nil then
+        s:release()
+        snap:release()
+        return finish(changed and "changed" or "unchanged")
+      end
       same = okSame and same == true
       if same and changed and host.now() < deadline then
         log("the picture changed and what this action changes did not, %d ms after the click — looking on "
@@ -241,21 +271,59 @@ function Act.run(o, spec, done, trip)
   end
 
   if click.menu then
+    local menu = click.menu
+    -- A file dialog after the choice is waited for in a trip (trip:afterDialog): none without one.
+    if menu.dialog and not trip then
+      snap:release()
+      log("nothing clicked — its file dialog is waited for only in a trip of the page's")
+      return done({ part = before, error = "that is chosen from the page" })
+    end
     local pick = {}
+    local left = menu.button == "left"
     local opened = o:chooseMenuItem({
       label = label,
       at = click.at,
-      button = "right",
-      menuItem = Pp.row(label, click.menu.item, pick),
-      retries = click.menu.retries,
+      button = left and "left" or "right",
+      menuItem = Pp.row(label, menu.item, pick),
+      submenu = menu.submenu and { menuItem = Pp.submenuRow(label, menu.submenu) } or nil,
+      retries = menu.retries,
       onDone = function(m, chosen, why)
         if not chosen then
-          -- A right click's popup: closed with Escape, not a click on its opener (main.luau).
-          if why ~= "busy" then R.closeLeftOpen(m, pick, why, label, nil) end
+          -- A right click's popup is closed with Escape, a left opener's by clicking the opener
+          -- again (main.luau).
+          if why ~= "busy" then R.closeLeftOpen(m, pick, why, label, left and click.at or nil) end
           snap:release()
           return done({ part = before, error = Act.notChosen(why) })
         end
-        if click.menu.read == false then
+        if menu.dialog then
+          snap:release()
+          -- The dialog is the user's: the trip goes on once Avenger is in front again, and with
+          -- "read" the part is read once more there, for what the dialog did to it.
+          return trip:afterDialog(function(_, t2, seen)
+            log("%s", seen and "its file dialog came and went" or "no file dialog came within the bound")
+            if menu.dialog == "read" then
+              local okS, s, whyS2 = pcall(host.screen.snapshot, { region = region })
+              if not t2:inFront() then
+                if okS and s then s:release() end
+                return
+              end
+              if okS and s then
+                local okR, va, keys = pcall(Open.part, s, spec.part, afterOpts)
+                s:release()
+                if okR then
+                  last = { keys = keys, values = va }
+                else
+                  log("the read after the dialog failed: %s", tostring(va))
+                end
+                if not t2:inFront() then return end
+              else
+                log("no picture after the dialog: %s", tostring(okS and whyS2 or s))
+              end
+            end
+            finish(seen and "chosen" or "no dialog")
+          end)
+        end
+        if menu.read == false then
           snap:release()
           return finish("chosen")
         end
@@ -280,9 +348,10 @@ end
 
 -- Part `part` read before an action of a trip's own that is no click of Act.run's — a rename's
 -- double-click (src/handover.luau), a knob's press (src/amount.luau) — as Act.run reads one: its
--- picture waited for, its pixels (and with `text` its words) asked of it, the picture let go. The
--- values and their keys, or nil, nil and the page's error; `log(fmt, …)` the caller's log.
-function Act.partBefore(pl, part, text, log)
+-- picture waited for, its pixels (and with `text` its words, with `fields` those fields where they
+-- are shown) asked of it, the picture let go. The values and their keys, or nil, nil and the page's
+-- error; `log(fmt, …)` the caller's log.
+function Act.partBefore(pl, part, text, log, fields)
   local region = Open.partRegion(pl, part)
   if not region then return nil, nil, "that part of VPS Avenger is not on the screen" end
   local okS, snap, why = pcall(host.screen.snapshot, { region = region })
@@ -290,7 +359,7 @@ function Act.partBefore(pl, part, text, log)
     log("'%s': nothing clicked — no picture of it: %s", part, tostring(okS and why or snap))
     return nil, nil, "VPS Avenger cannot be read now"
   end
-  local okR, v, keys = pcall(Open.part, snap, part, { pl = pl, text = text, preset = R.lastName() })
+  local okR, v, keys = pcall(Open.part, snap, part, { pl = pl, text = text, preset = R.lastName(), fields = fields })
   snap:release()
   if not okR then
     log("'%s': nothing clicked — the read before failed: %s", part, tostring(v))

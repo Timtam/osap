@@ -39,6 +39,16 @@ T.PART_Y_STEP = 15.5
 T.MENU_X = 323
 T.SUBMENU_X = 393
 T.SUBMENU_Y_STEP = 11.5
+-- The project clicks target t at its item's row plus (t − 1) × 11.5: right only for a submenu that
+-- opens DOWNWARD, its first row beside its item. JUCE puts a submenu's top at its item's only for an
+-- item in the upper half of the plug-in; in the lower half it puts the submenu's BOTTOM at the
+-- item's, so the submenu opens upward, and it pushes it inside at the edges (juce_PopupMenu.cpp,
+-- calculateWindowPos, read in its source) — on a Mac, where Avenger paints its popups inside
+-- itself, Copy Slot to on slot 10 opens upward. So a target is placed from the submenu's own top:
+-- its first row's middle this far below it, the project's place where the submenu opens downward —
+-- its top at its item's top, less JUCE's border, taken as nothing here: half a row above the item's
+-- middle. A starting value, which the submenu's calibration picture settles (`-submenu-item.png`).
+T.SUBMENU_FIRST_ROW = T.SUBMENU_Y_STEP / 2
 T.MENU_Y_OFFSET = {
   lock_all = 6,
   unlock_all = 18,
@@ -67,6 +77,38 @@ T.COLUMN_X = {
   pitch = 518,
   routing = 595,
 }
+
+-- ── Where a slot's state shows (this module's, worked out from the points above) ──
+-- STARTING VALUES worked out from the project's points, as popups.luau's regions are — nobody has
+-- seen them on an Avenger; the page's reads log what they find and a calibrating run pictures it
+-- (read/open.luau, `drums-<zoom>pct.png`).
+-- A slot's Mute, Solo, Lock and Loop are read in a box 13 by 8 round their point: the project's
+-- OSC_BUTTON_STATE, which its detect_drumkit_button_state reads a slot's button in.
+T.BUTTON_STATE = { 13, 8 }
+-- Half a slot's row, either way of its point.
+T.SLOT_HALF = T.PART_Y_STEP / 2
+-- The name column: from just inside the panel's left (244) to just before Loop's box (325 − 13/2).
+T.NAME_COLUMN = { 248, 318 }
+-- The rows of a slot's band above and below its name, its background only: from 4.5 to 7.75 points
+-- from the row's middle, each way.
+T.NAME_ROWS = { 4.5, 7.75 }
+-- The table from the first row's top to the last row's bottom.
+T.TABLE_TOP = T.PART_FIRST_Y - T.SLOT_HALF
+T.TABLE_BOTTOM = T.PART_FIRST_Y + 11 * T.PART_Y_STEP + T.SLOT_HALF
+
+-- The items of a slot's menu in its order, with the page's words for them (ui/panel.js); the four
+-- that open a submenu of the twelve slots.
+T.MENU_ITEMS = {
+  { "lock_all", "Lock All" },
+  { "unlock_all", "Unlock All" },
+  { "save_drumkit_as", "Save Drumkit as" },
+  { "copy_sample_to", "Copy Sample to" },
+  { "swap_sample_with", "Swap Sample with" },
+  { "copy_slot_to", "Copy Slot to" },
+  { "swap_slot_with", "Swap Slot with" },
+  { "remove_sample", "Remove Sample" },
+}
+T.SUBMENU_ITEMS = { copy_sample_to = true, swap_sample_with = true, copy_slot_to = true, swap_slot_with = true }
 
 -- The slots' names in Avenger's factory drumkit, top to bottom.
 T.PART_LABELS = {
@@ -106,11 +148,43 @@ function T.menuItemPoint(index, item)
   return { T.MENU_X, T.PART_FIRST_Y + (slot(index) - 1) * T.PART_Y_STEP + dy }
 end
 
--- Target `target` of item `item`'s submenu (drumkit_submenu_item_point), or nil.
-function T.submenuItemPoint(index, item, target)
-  local p = T.menuItemPoint(index, item)
+-- Target `target` of a slot menu's submenu: { x from Avenger's corner, y below the submenu's own
+-- top } — the project's drumkit_submenu_item_point, counted from the submenu rather than from its
+-- item (above).
+function T.submenuTarget(target)
+  return { T.SUBMENU_X, T.SUBMENU_FIRST_ROW + (slot(target) - 1) * T.SUBMENU_Y_STEP }
+end
+
+-- The middle of slot `index`'s row.
+function T.rowY(index)
+  return T.PART_FIRST_Y + (slot(index) - 1) * T.PART_Y_STEP
+end
+
+-- Slot `index`'s name as a rectangle: the name column, 7 above and below the row's middle — the
+-- text read, and Browse's watched box.
+function T.nameRect(index)
+  local y = T.rowY(index)
+  return { T.NAME_COLUMN[1], y - 7, T.NAME_COLUMN[2], y + 7 }
+end
+
+-- Slot `index`'s whole row, from the name column to Pitch's knob.
+function T.rowRect(index)
+  local y = T.rowY(index)
+  return { T.NAME_COLUMN[1], y - T.SLOT_HALF, T.COLUMN_X.pitch + 8, y + T.SLOT_HALF }
+end
+
+-- A drum knob's box, the knob's point ± (8, 7.75): a calibrating run's picture of it, and a
+-- reset's watched box.
+function T.knobBox(index, control)
+  local p = T.columnPoint(index, control)
   if not p then return nil end
-  return { T.SUBMENU_X, p[2] + (slot(target) - 1) * T.SUBMENU_Y_STEP }
+  return { p[1] - 8, p[2] - T.SLOT_HALF, p[1] + 8, p[2] + T.SLOT_HALF }
+end
+
+-- A column's box down the whole table, `w` across round its x.
+function T.columnRect(column, w)
+  local x = T.COLUMN_X[column]
+  return { x - w / 2, T.TABLE_TOP, x + w / 2, T.TABLE_BOTTOM }
 end
 
 return T

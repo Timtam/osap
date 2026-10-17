@@ -7,6 +7,12 @@
 --                                button), Transpose, or its third knob (Fine Tune, and Random or
 --                                Alternate Pitch with the right button)
 --   osc_filter_control {control} the 2-band filter's Low-Pass or High-Pass handle, along x
+--   drumkit_control {index, control}   a drum slot's Volume, Pan or Pitch, on its row; nothing
+--                                pressed off the Drums tab; no reader, Return claims nothing
+--   sample_editor_control {control}   one of the sample editor's eight knobs; nothing pressed
+--                                unless the sample editor is shown; no reader
+--   central_drum_sq_control {control}   VEL AMOUNT or SHUFFLE; nothing pressed unless DRUM SQ is
+--                                the central tab; no reader
 --
 -- Each is the same gesture, its spec built here: the oscillator strip read first where the action
 -- needs an oscillator selected (nothing pressed on the Drums or the Trig tab, which have none: the
@@ -35,8 +41,11 @@
 -- minutes; it read the knob after Return without waiting for anything; and its Windows driver
 -- dragged by warping the pointer, which a held knob does not follow — this host moves it as motion
 -- while the button is held (docs/api/input.md, move). Its sentence #6 said "ammount", and #7 the
--- control's key ("fine_tune"): here "amount", and the key with a space. Slice 8 adds the drums',
--- the sample editor's and DRUM SQ's knobs (the tool's sentences #9 to #11) as specs of their own.
+-- control's key ("fine_tune"): here "amount", and the key with a space. Its #9, a drum slot's
+-- knob, named the slot by its factory name even where its own state had another: here the slot's
+-- name as last read, and the factory name where none was. Its #10, the sample editor's knob, named
+-- the slot it took as selected from its last click: here the slot read as selected before the
+-- press, by its name as last read. Its #11, VEL AMOUNT's and SHUFFLE's, is as it was.
 
 local O = host.require("com.platform.overlay")
 local H = host.include("src/header.luau")
@@ -46,7 +55,12 @@ local Open = host.include("src/read/open.luau")
 local Knob = host.include("src/read/knob.luau")
 local OSC = host.include("src/tables/osc.luau")
 local M = host.include("src/tables/macros.luau")
+local D = host.include("src/tables/drums.luau")
 local Osc = host.include("src/actions/osc.luau")
+local Drums = host.include("src/actions/drums.luau")
+local Sa = host.include("src/actions/sample.luau")
+local Sq = host.include("src/actions/drumsq.luau")
+local C = host.include("src/tables/centre.luau")
 local Act = host.include("src/act.luau")
 
 local Am = {}
@@ -96,7 +110,9 @@ end
 --   at            the press, a table point at 50 %
 --   button        "right" for Pan and Random Pitch (the tool's OSC_CONTROL_RIGHT_BUTTON), else nil
 --   axis, lo, hi  "y" or "x", and the travel in table points
---   strip         the oscillator strip read first: nothing pressed unless an oscillator is selected
+--   strip         a part read first — `before`, Open.PARTS' name, the oscillator strip unless it
+--                 says, with its `fields` — and nothing pressed where `refuse(vb)` answers why (and
+--                 the page's focus); by default unless an oscillator is selected
 --   knob, box     Knob.read's `which` and its picture's table rectangle; nil for no reader
 --   band          a calibrating run's picture where there is no reader
 --   sentence(vb)  the tool's sentence; focus(vb) the page's element after it
@@ -207,6 +223,68 @@ function Am.filter(args, label, known)
   }
 end
 
+-- A drum slot's knob: Volume, Pan or Pitch on its row, with the left button for all three (the
+-- tool's), refused before anything is pressed unless the strip shows the Drums tab selected. No
+-- reader reads a drum knob — the tool read none, the page shows none — so Return claims nothing,
+-- as the filter's does; a calibrating run pictures the knob's box (D.knobBox).
+function Am.drum(args, label, known)
+  local i = Drums.slotArg(args.index)
+  if not i then return nil, "no drum slot was named" end
+  local key = args.control
+  if not (type(key) == "string" and Drums.CONTROL_WORDS[key]) then return nil, tostring(key) .. " is no control of a drum slot's" end
+  local at = D.columnPoint(i, key)
+  return {
+    label = label, name = "drum " .. i .. " " .. key, at = at, axis = "y", lo = at[2] - OSC.LIMIT,
+    hi = at[2] + OSC.LIMIT, strip = true, refuse = Drums.refusal, band = D.knobBox(i, key),
+    -- The tool's #9, with the slot's name as last read.
+    sentence = function()
+      return "Please press Page Up or Down to set " .. key .. " for " .. Drums.slotName(nil, known, i)
+        .. ". To Confirm, press Return."
+    end,
+    focus = function() return "drumkit-" .. key .. "-" .. i end,
+    merge = function(before) return before end,
+  }
+end
+
+-- One of the sample editor's eight knobs, with the left button (the tool's), refused before anything
+-- is pressed unless the sample editor is shown (Sa.refusal) — its knobs are those of the slot read
+-- as selected. No reader, as for a drum slot's knob.
+function Am.sample(args, label, known)
+  local c, why = Sa.controlKey(args.control)
+  if not c then return nil, why end
+  local at = C.EDITOR_CONTROLS[c]
+  local word = Sa.CONTROL_WORDS[c]
+  return {
+    label = label, name = "sample " .. c, at = at, axis = "y", lo = at[2] - OSC.LIMIT, hi = at[2] + OSC.LIMIT,
+    strip = true, before = "editor", fields = { "browser" }, refuse = Sa.refusal, band = C.editorKnobBox(c),
+    -- The tool's #10, with the slot read as selected by its name as last read.
+    sentence = function(vb)
+      local i = vb and vb.kitSelected
+      local slot = i and Drums.slotName(vb, known, i) or "the selected slot"
+      return "Please press Page Up or Down to set " .. word .. " for " .. slot .. ". To Confirm, press Return."
+    end,
+    focus = function() return "sample-editor-" .. c end,
+    merge = function(before) return before end,
+  }
+end
+
+-- VEL AMOUNT or SHUFFLE, with the left button, refused before anything is pressed unless DRUM SQ
+-- reads as the central tab (Sq.refusal). No reader.
+function Am.drumSq(args, label)
+  local c, why = Sq.controlKey(args.control)
+  if not c then return nil, why end
+  local at = C.SQ_CONTROLS[c]
+  local word = Sq.CONTROL_WORDS[c]
+  return {
+    label = label, name = "drum sq " .. c, at = at, axis = "y", lo = at[2] - OSC.LIMIT, hi = at[2] + OSC.LIMIT,
+    strip = true, before = "drumsq", refuse = Sq.refusal, band = C.sqKnobBox(c),
+    -- The tool's #11.
+    sentence = function() return "Please press Page Up or Down to set " .. word .. ". To Confirm, press Return." end,
+    focus = function() return "central-drum-sq-" .. (string.gsub(c, "_", "-")) end,
+    merge = function(before) return before end,
+  }
+end
+
 -- ── Calibration ──────────────────────────────────────────────────────────────
 
 -- The pictures written this session, by name.
@@ -244,15 +322,16 @@ function Am.run(o, trip, spec)
   end
   local pl = P.placer(origin, k, (H.zoom(origin)))
 
-  -- 1. The strip, where the action needs an oscillator selected: nothing pressed otherwise.
+  -- 1. The strip (or the spec's part), where the action needs an oscillator selected or another
+  -- part shown: nothing pressed otherwise.
   local vb, before = nil, nil
   if spec.strip then
     local keysB, err
-    vb, keysB, err = Act.partBefore(pl, "strip", nil, log)
+    vb, keysB, err = Act.partBefore(pl, spec.before or "strip", nil, log, spec.fields)
     if not trip:inFront() then return end
     if not vb then return trip:done({ error = err }) end
     before = { keys = keysB, values = vb }
-    local why, focus = oscRefusal(vb)
+    local why, focus = (spec.refuse or oscRefusal)(vb)
     if why then
       log("nothing pressed — %s", why)
       return trip:done({ part = before, error = why, focus = focus })

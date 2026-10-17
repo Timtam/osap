@@ -15,19 +15,28 @@
 -- The values are read/open.luau's, all of them at the page key: the preset's name and the zoom,
 -- the browser's view, an open expansion and FAV; the oscillator strip — the count, the names, the
 -- tab selected, Mute and Solo, on the Drums tab its switches and mode, and the selected
--- oscillator's knobs; the central tab with the Drums tab, and DRUM SQ on it; the macro tabs, the
--- tab shown, its names, buttons and knobs. What the page shows and nothing reads yet — the drum
--- slots, the sample editor, DRUM SQ's length — is left out, and the page says so.
+-- oscillator's knobs; the central tab with the Drums tab, and DRUM SQ on it; on the Drums tab the
+-- drumkit table — every slot's Mute, Solo, Lock and Loop, the slot selected and the slots' names
+-- (read/drums.luau) — and with EDITOR the sample editor's tab shown, the editor or the browser in
+-- its place and the tab's switch for the slot selected (read/sample.luau); DRUM SQ's length where an
+-- action or the page key read it; the macro tabs, the tab shown, its names, buttons and knobs. A
+-- value read that the page has no place for — a menu's field, DRUM SQ's speed, the envelope's
+-- preset name — stays in the values, for the module's answers and the ring. A slot's name not read
+-- is a hole, which the page shows as the slot's factory name: the slot's role in the kit, as the
+-- tool always showed it.
 
 local S = {}
 
 local R = host.include("src/read/ocr.luau")
 
 -- One table per plug-in window, by its id: { values = { key -> value }, at = when they were read
--- (host.now), facts = { key -> value } }. At most WINDOWS_MAX, the oldest dropped: one window is in
--- front at a time. `facts` are what an action of this session did that no read can show — the OSC
--- tab Copy was chosen for (`oscCopied`, its name as read, or "OSC <i>"), which the page's Paste
--- follows: Avenger's own clipboard cannot be read. A read of the whole of Avenger keeps them.
+-- (host.now), partAt = when a part of them was last read again, facts = { key -> value } }. At most
+-- WINDOWS_MAX, the oldest dropped: one window is in front at a time. `facts` are what an action of
+-- this session did that no read can show — the OSC tab Copy was chosen for (`oscCopied`, its name
+-- as read, or "OSC <i>"), which the page's Paste follows: Avenger's own clipboard cannot be read;
+-- and the DRUM SQ pattern a COPY of the pattern menu was taken for (`sqCopied`, { pattern, part }),
+-- which its PASTE items follow (`drum_sq_pattern_copied`, a key of the port's). A read of the whole
+-- of Avenger keeps them.
 local WINDOWS_MAX = 8
 local byWindow, order = {}, {}
 
@@ -53,11 +62,23 @@ local function forWindow(id)
   return st
 end
 
+-- The sample editor's switch (read/sample.luau, `editorOn`) is the selected slot's, and its read
+-- does not say which slot that is: it is kept with the slot read as selected once the read is in —
+-- read in the same picture where the part reads the drumkit table (`editor`, the page key), the one
+-- read last where it does not (`central`) — and posted only while that slot still reads selected
+-- (oscPanel). A later read of the table that finds another slot selected leaves it unposted, never
+-- shown as the new slot's.
+local function ownSlot(values)
+  local on = values.editorOn
+  if on then values.editorOn = { tab = on.tab, on = on.on, slot = values.kitSelected } end
+end
+
 -- Window `id`'s values as read just now: `values` replaces what was read there before, keys
 -- absent from it included — a value a read did not find is not kept from an earlier read.
 function S.read(id, values)
   local st = forWindow(id)
   st.values = values
+  ownSlot(values)
   st.at = host.now()
 end
 
@@ -77,6 +98,8 @@ end
 function S.part(id, keys, values)
   local st = forWindow(id)
   for _, k in ipairs(keys) do st.values[k] = values[k] end
+  if table.find(keys, "editorOn") then ownSlot(st.values) end
+  st.partAt = host.now()
 end
 
 -- A fact of this session in window `id` (above): `value`, or nil to forget it.
@@ -97,6 +120,14 @@ function S.at(id)
   return st and st.at
 end
 
+-- When anything was last read in window `id`, all of it or a part (host.now), or nil.
+function S.readAt(id)
+  local st = id and byWindow[id] or nil
+  if not st then return nil end
+  if st.at and st.partAt then return math.max(st.at, st.partAt) end
+  return st.at or st.partAt
+end
+
 -- Why ◀ and ▶ cannot step from the preset read in window `id` (S.AT_INIT), or nil: they can, or
 -- nothing was read there.
 function S.stepsUnavailable(id)
@@ -115,6 +146,24 @@ local function list(src, n)
   return out
 end
 
+-- The twelve drum slots' list from `src` (as `list`): as it is, or keyed by each slot's number as
+-- text ("12") where JSON cannot carry it as a list. The page is posted its state as host.json.encode
+-- writes it, which refuses a list whose largest index is above 10 and more than twice its entries
+-- (docs/api/json.md): slot 11 or 12 read with five or fewer of the others. The page reads either
+-- (ui/panel.js, readSlots).
+local function slots(src)
+  local out = list(src, 12)
+  local count, top = 0, 0
+  for i in pairs(out) do
+    count += 1
+    top = math.max(top, i)
+  end
+  if top <= 10 or top <= 2 * count then return out end
+  local keyed = {}
+  for i, x in pairs(out) do keyed[tostring(i)] = x end
+  return keyed
+end
+
 -- Whether any entry of the first `n` of `marks` is true.
 local function anyOf(marks, n)
   for i = 1, n or 0 do
@@ -123,8 +172,9 @@ local function anyOf(marks, n)
   return false
 end
 
--- osc_panel: the tool's keys for the strip, the selected oscillator's knobs, the Drums tab, the
--- central tab and DRUM SQ; and `copied`, the OSC tab a Copy of this session was chosen for.
+-- osc_panel: the tool's keys for the strip, the selected oscillator's knobs, the Drums tab and its
+-- drumkit table, the central tab and DRUM SQ; and `copied`, the OSC tab a Copy of this session was
+-- chosen for.
 local function oscPanel(v, facts)
   local n = v.oscCount
   local out = {
@@ -174,6 +224,25 @@ local function oscPanel(v, facts)
     out.drum_sq_pattern_selected = sq.selected
     out.drum_sq_pattern_states = list(sq.states, 3)
   end
+  out.drum_sq_length_steps = v.sqLength
+  if facts and facts.sqCopied then out.drum_sq_pattern_copied = true end
+  -- The sample editor: its tab and view as read, and the tab's switch where the slot it was read
+  -- for still reads selected (ownSlot) — the page shows each tab's switch from a list of twelve, by
+  -- the selected slot; the other tabs' lists left out, as what is not shown is not read.
+  out.sample_editor_tab = v.editorTab
+  out.sample_editor_view = v.editorView
+  local on = v.editorOn
+  if on and on.slot ~= nil and on.slot == v.kitSelected then
+    out["sample_editor_" .. on.tab .. "_states"] = slots({ [on.slot] = on.on })
+  end
+  -- The drumkit table: twelve slots, a hole where a value was not read, and a key left out where
+  -- its part was not read.
+  out.drumkit_part_selected = v.kitSelected and tostring(v.kitSelected) or nil
+  if v.kitNames then out.drumkit_part_labels = slots(v.kitNames) end
+  if v.kitMute then out.drumkit_mute_states = slots(v.kitMute) end
+  if v.kitSolo then out.drumkit_solo_states = slots(v.kitSolo) end
+  if v.kitLock then out.drumkit_lock_states = slots(v.kitLock) end
+  if v.kitLoop then out.drumkit_loop_states = slots(v.kitLoop) end
   return out
 end
 

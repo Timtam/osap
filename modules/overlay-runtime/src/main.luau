@@ -6797,6 +6797,12 @@ O.menuTests.nativePopup = {
 -- Cost: one window list of one process per question while it is comparing (local and cheap on
 -- both platforms — see host.window.windowsOf), nothing at all otherwise. A menu painted inside
 -- the plug-in's own window is invisible to it: the window list does not change.
+--
+-- A SUBMENU (see "Choosing an item", Submenus): before the item that opens one is clicked, its
+-- `chained` hook takes the window list again — the menu's window is in it now — and from then on
+-- the largest window that is not in that list is the submenu, answered as a menu is; while there
+-- is none, the menu's own window, as it stands, while it is listed; and with both gone, false, and
+-- it stops comparing. One window list, as on every tick.
 do
   -- The process of the overlay's plug-in right now, or nil when it cannot be told.
   local function processOf(o)
@@ -6818,6 +6824,21 @@ do
 
   local watching = setmetatable({}, { __mode = "k" })
 
+  -- Window `win` as the test answers it.
+  local function asMenu(win)
+    -- `window`: the same window as a host.window id, which host.window.ownsPoint takes. On
+    -- Windows the window manager's id IS the HWND every host.window call names; on macOS
+    -- windowsOf lists the window server's CGWindowID, a different numbering, so there is
+    -- none to give — `id` is asked about there, with ownsPoint's `listed` option.
+    return {
+      kind = "window",
+      id = win.id,
+      window = (host.os.current == "windows") and win.id or nil,
+      layer = win.layer, class = win.class,
+      x = win.x, y = win.y, w = win.w, h = win.h,
+    }
+  end
+
   O.menuTests.newWindow = {
     name = "newWindow",
     cheap = true,
@@ -6832,6 +6853,16 @@ do
     forget = function(o)
       watching[o] = nil
     end,
+    -- The item about to be clicked opens a submenu (see above): a fresh list, the menu's window
+    -- in it.
+    chained = function(o, press, menu, done)
+      local w = watching[o]
+      if not w then return done(false, "it is not comparing") end
+      w.before, w.parent, w.seen, w.chain = windowsOf(w.pid), menu.id, false, true
+      host.log.info(("[menu] '%s': newWindow: follows the submenu of '%s' — a window that appears from "
+        .. "now on, its menu the window %s"):format(tostring(o.label), tostring(press.label), tostring(menu.id)))
+      done(true)
+    end,
     test = function(o, answer)
       local w = watching[o]
       if not w then return answer(false) end
@@ -6840,9 +6871,10 @@ do
       -- can draw a popup's shadow as windows of their own, strips a few pixels wide around it
       -- (JUCE does on Windows) — and of two the same size, the one the list names first, which
       -- on both platforms is the one in front.
-      local menu = nil
+      local menu, parent = nil, nil
       for _, win in ipairs(host.window.windowsOf(w.pid)) do
         local id = win.id
+        if w.chain and id == w.parent then parent = win end
         if not w.before[id] then
           if not w.said[id] then
             w.said[id] = true
@@ -6858,22 +6890,16 @@ do
       end
       if menu then
         w.seen = true
-        -- `window`: the same window as a host.window id, which host.window.ownsPoint takes. On
-        -- Windows the window manager's id IS the HWND every host.window call names; on macOS
-        -- windowsOf lists the window server's CGWindowID, a different numbering, so there is
-        -- none to give — `id` is asked about there, with ownsPoint's `listed` option.
-        return answer({
-          kind = "window",
-          id = menu.id,
-          window = (host.os.current == "windows") and menu.id or nil,
-          layer = menu.layer, class = menu.class,
-          x = menu.x, y = menu.y, w = menu.w, h = menu.h,
-        })
+        return answer(asMenu(menu))
       end
-      if w.seen then
+      -- Following a submenu: the menu it opens from, while it is there.
+      if parent then return answer(asMenu(parent)) end
+      if w.seen or w.chain then
         -- Every window that appeared has gone: the menu this press opened has closed, and this
         -- test has nothing more to say until the next press.
-        host.log.info(("[menu] '%s': newWindow: the window that appeared has gone"):format(tostring(o.label)))
+        host.log.info(("[menu] '%s': newWindow: %s"):format(tostring(o.label), not w.chain
+          and "the window that appeared has gone" or (w.seen and "the menu and its submenu have gone"
+            or "the menu has gone, and no submenu was seen")))
         watching[o] = nil
       end
       answer(false)
@@ -7023,6 +7049,31 @@ end
 -- plug-in there is a popup to it too, which the item's check then refuses as covered (the host's
 -- hit test names that window). Without Screen Recording on a Mac every picture is the wallpaper,
 -- which never changes: the log says nothing has changed.
+--
+-- A SUBMENU (see "Choosing an item", Submenus). Before the item that opens one is clicked, the
+-- `chained` hook — in the pass that placed the item, where nothing waits — asks the module's
+-- `region` again, with the press's `parent`, the menu's rectangle: the rectangle the submenu is
+-- drawn in, which should leave the menu out. Two profiles are taken of it then, with callbacks: of
+-- that rectangle, and of the menu's own rectangle as the test answered it; once both are in, the
+-- test follows the two, and the item is clicked. From then on, each tick:
+--   * the submenu's rectangle is compared as a press's is — SEEN when a filled change reads alike
+--     twice, still there and gone by the same rules — and its rectangle answered while it is seen;
+--   * the menu itself is still there by its ROWS ONLY: gone once the rows whose fill changed since
+--     the profile before the item's click come to the smallest popup's height in pixels AND fewer
+--     than DRAWN_STILL of its rows read as they did. Not by its columns: the pointer on the item
+--     highlights its row, which moves the mean of every column of the menu — one band of a popup's
+--     rows, at the contrast of a highlight, past DRAWN_MEAN — and would read the menu as gone. One
+--     band of rows is fewer than the smallest popup's height; a menu that closes changes nearly all
+--     of them. Its rectangle is answered while no submenu is seen and it is still there — after a
+--     submenu that came and went too, which is a submenu closed with its menu left open;
+--   * both gone: `false`, and it stops comparing until the next press.
+-- No submenu seen within MENU_LOOK_MS of the item's click: the submenu is not looked for any more,
+-- logged, and the menu is followed alone until it goes — its word is the menu's, which a module
+-- closes with a key while it counts open. A reading that cannot be taken keeps the word.
+-- Cost of following: two captures with callbacks before the item's click (on a Mac 36 to 91 ms
+-- off the event loop; about 16.7 ms each on Windows' standard path), then two captures a tick
+-- while it compares, and in Luau at most 1024 comparisons for the submenu and 256 for the menu's
+-- rows; one capture a tick once the submenu is no longer looked for.
 do
   local DRAWN_MEAN, DRAWN_CHANNEL, DRAWN_EXTREME = 6, 10, 40
   local DRAWN_ALIKE, DRAWN_STILL = 0.9, 0.7
@@ -7142,32 +7193,48 @@ do
       host.log.info(("[menu] '%s': %s: " .. fmt):format(tostring(o.label), name, ...))
     end
 
-    -- The rectangle and the picture before the click, in the press's handler; nil and why.
-    local function before(o, press)
+    -- The rectangle the module names for `press` and the smallest popup there; nil and why.
+    -- `what` names the press in the reason.
+    local function regionOf(o, press, what)
       local ok, r, min = pcall(spec.region, o, press)
       if not ok then return nil, "its region function raised: " .. tostring(r) end
       if type(r) ~= "table" or type(r[1]) ~= "number" or type(r[2]) ~= "number" or type(r[3]) ~= "number"
         or type(r[4]) ~= "number" then
-        return nil, "no rectangle for '" .. tostring(press.label) .. "'"
+        return nil, "no rectangle for " .. what
       end
       local rect = { math.floor(r[1]), math.floor(r[2]), math.ceil(r[3]), math.ceil(r[4]) }
       if rect[3] - rect[1] < 2 or rect[4] - rect[2] < 2 then
-        return nil, ("an empty rectangle for '%s'"):format(tostring(press.label))
+        return nil, "an empty rectangle for " .. what
       end
-      local took, p, why = pcall(host.screen.profile, { region = rect, axes = "both" })
-      if not took then return nil, "the picture before the press cannot be taken here: " .. tostring(p) end
-      if not p then return nil, "the picture before the press could not be taken: " .. tostring(why) end
       local mw, mh = spec.minW or 12, spec.minH or 12
       if type(min) == "table" then
         mw = tonumber(min.w or min[1]) or mw
         mh = tonumber(min.h or min[2]) or mh
       end
+      return rect, mw, mh
+    end
+
+    -- What a rectangle is compared by, from profile `p` of it taken before the click: a press's arm,
+    -- or a submenu's (`chained`).
+    local function armOf(rect, p, mw, mh)
       local cols, colStep = linesOf(p.w)
       local rows, rowStep = linesOf(p.h)
       return { region = rect, base = p, minW = mw, minH = mh, cols = cols, rows = rows, colStep = colStep,
-        rowStep = rowStep }
+        rowStep = rowStep, readings = 0, quiet = 0, said = 0 }
     end
 
+    -- The rectangle and the picture before the click, in the press's handler; nil and why.
+    local function before(o, press)
+      local rect, mw, mh = regionOf(o, press, "'" .. tostring(press.label) .. "'")
+      if not rect then return nil, mw end
+      local took, p, why = pcall(host.screen.profile, { region = rect, axes = "both" })
+      if not took then return nil, "the picture before the press cannot be taken here: " .. tostring(p) end
+      if not p then return nil, "the picture before the press could not be taken: " .. tostring(why) end
+      return armOf(rect, p, mw, mh)
+    end
+
+    -- Reading `p` of arm `w`: the popup's rectangle while it is seen, false while none is, or
+    -- "gone" once the one seen has gone — the caller stops comparing it then.
     local function judge(o, w, p)
       w.readings += 1
       local n = w.readings
@@ -7187,11 +7254,11 @@ do
         end
         local share = lines > 0 and same / lines or 0
         if (cols < w.minW or rows < w.minH) and share >= DRAWN_STILL then return s.rect end
-        log(o, "the popup %s has gone at reading %d (%d columns and %d rows not as they were, a popup at "
-          .. "least %gx%g; %d of its %d lines as they were) — not comparing until the next press",
-          rectWords(s.rect), n, cols, rows, w.minW, w.minH, same, lines)
-        armed[o] = nil
-        return false
+        log(o, "the %s %s has gone at reading %d (%d columns and %d rows not as they were, a popup at "
+          .. "least %gx%g; %d of its %d lines as they were) — %s", w.sub and "submenu" or "popup",
+          rectWords(s.rect), n, cols, rows, w.minW, w.minH, same, lines,
+          w.sub and "its menu is followed" or "not comparing until the next press")
+        return "gone"
       end
       local ch = changeOf(w.base, p, w.cols, w.rows)
       if not ch then
@@ -7224,12 +7291,90 @@ do
       local c = w.candidate
       if c and near(c.rect, r) and alikeShare(c.profile, p, w.cols, w.rows) >= DRAWN_ALIKE then
         w.seen = { rect = r, profile = p, fillCols = ch.fillCols, fillRows = ch.fillRows }
-        log(o, "a popup %s, alike at readings %d and %d", rectWords(r), c.n, n)
+        log(o, "a %s %s, alike at readings %d and %d", w.sub and "submenu" or "popup", rectWords(r), c.n, n)
         return r
       end
       if not (c and near(c.rect, r)) then note("not alike yet") end
       w.candidate = { rect = r, profile = p, n = n }
       return false
+    end
+
+    -- Whether the menu a submenu opens from is still there, by its rows (see above), in reading `p`
+    -- of it; and the pixels of its rows that changed, the rows that read as they did, of how many.
+    local function parentStill(par, p)
+      local changed, same, lines = 0, 0, 0
+      for _, i in ipairs(par.rows) do
+        lines += 1
+        if lineDiffers(p.rows, par.base.rows, i) == 2 then changed += par.rowStep else same += 1 end
+      end
+      local share = lines > 0 and same / lines or 0
+      return not (changed >= par.minH and share < DRAWN_STILL), changed, same, lines
+    end
+
+    -- A tick's question while a submenu is followed: chain arm `c` (made by `chained`), both its
+    -- readings with callbacks, decided once both are in.
+    local function chainTest(o, c, answer)
+      local ch, par = c.child, c.parent
+      if not (ch.seen or ch.gone or ch.given) and host.now() >= ch.untilMs then
+        ch.given = true
+        log(o, "no submenu of '%s' within %d ms — its menu is followed alone", c.label, MENU_LOOK_MS)
+      end
+      local looking = not (ch.gone or ch.given)
+      local function unread(why)
+        if not c.saidUnread then
+          c.saidUnread = true
+          log(o, "a reading of the submenu of '%s' could not be taken: %s", c.label, tostring(why))
+        end
+        -- Not read: the word stands as it was.
+        answer(c.last or false)
+      end
+      local got, out, failed = {}, looking and 2 or 1, false
+      local function settle()
+        local v = nil
+        if looking then
+          local r = judge(o, ch, got.child)
+          if r == "gone" then ch.gone = true elseif r then v = r end
+        end
+        if not v then
+          local still, changed, same, lines = parentStill(par, got.parent)
+          if still then
+            v = par.rect
+          else
+            log(o, "%s (%d pixels of its rows not as they were; %d of its %d rows as they were) — not comparing "
+              .. "until the next press", ch.seen and "the submenu and its menu have gone"
+              or ("the menu of '" .. c.label .. "' has gone before a submenu was seen"), changed, same, lines)
+            armed[o] = nil
+            v = false
+          end
+        end
+        c.last = v
+        answer(v)
+      end
+      local function one(which, region, base)
+        local asked, err = pcall(host.screen.profile, { region = region, axes = "both", key = c.key .. " " .. which },
+          function(p, why)
+            if failed then return end
+            -- A reading for a press that is over: nothing of it counts.
+            if armed[o] ~= c then
+              failed = true
+              return answer(false)
+            end
+            if not (p and comparable(p, base)) then
+              failed = true
+              return unread(p and "a picture of another size" or why)
+            end
+            got[which] = p
+            out -= 1
+            if out == 0 then settle() end
+          end)
+        if not asked then
+          failed = true
+          unread(err)
+        end
+      end
+      if looking then one("child", ch.region, ch.base) end
+      local pr = par.rect
+      if not failed then one("parent", { pr.x, pr.y, pr.x + pr.w, pr.y + pr.h }, par.base) end
     end
 
     return {
@@ -7258,9 +7403,50 @@ do
       forget = function(o)
         armed[o] = nil
       end,
+      -- The item about to be clicked opens a submenu (see above): the submenu's rectangle and the
+      -- menu's, pictured with callbacks; `done(true)` once both are in and the test follows them.
+      chained = function(o, press, menu, done)
+        local w = armed[o]
+        if not (w and w.seen and not w.chain) then return done(false, "it has not seen the menu the item is in") end
+        local rect, mw, mh = regionOf(o, press, "the submenu of '" .. tostring(press.label) .. "'")
+        if not rect then return done(false, mw) end
+        local pr = { math.floor(menu.x), math.floor(menu.y), math.ceil(menu.x + menu.w), math.ceil(menu.y + menu.h) }
+        local got, out, failed = {}, 2, false
+        local function fail(why)
+          if failed then return end
+          failed = true
+          done(false, why)
+        end
+        local function one(which, region)
+          local what = which == "child" and "submenu's rectangle" or "menu"
+          local asked, err = pcall(host.screen.profile, { region = region, axes = "both", key = w.key .. " " .. which },
+            function(p, why)
+              if failed then return end
+              if armed[o] ~= w then return fail("its press is over") end
+              if not p then return fail(("the picture of the %s could not be taken: %s"):format(what, tostring(why))) end
+              got[which] = p
+              out -= 1
+              if out > 0 then return end
+              local child = armOf(rect, got.child, mw, mh)
+              child.sub, child.label = true, "the submenu of '" .. w.label .. "'"
+              child.untilMs = host.now() + MENU_LOOK_MS
+              local prows, prowStep = linesOf(got.parent.h)
+              armed[o] = { chain = true, from = w, label = w.label, key = w.key, child = child,
+                parent = { rect = { x = pr[1], y = pr[2], w = pr[3] - pr[1], h = pr[4] - pr[2] }, base = got.parent,
+                  rows = prows, rowStep = prowStep, minH = w.minH } }
+              log(o, "follows the submenu of '%s': looked for in %d,%d-%d,%d, its menu at %d,%d %dx%d", w.label,
+                rect[1], rect[2], rect[3], rect[4], pr[1], pr[2], pr[3] - pr[1], pr[4] - pr[2])
+              done(true)
+            end)
+          if not asked then fail(("the picture of the %s cannot be asked: %s"):format(what, tostring(err))) end
+        end
+        one("child", rect)
+        if not failed then one("parent", pr) end
+      end,
       test = function(o, answer)
         local w = armed[o]
         if not w then return answer(false) end
+        if w.chain then return chainTest(o, w, answer) end
         if not w.seen and host.now() >= w.untilMs then
           log(o, "no popup of '%s' within %d ms — not comparing until the next press", w.label, MENU_LOOK_MS)
           armed[o] = nil
@@ -7276,10 +7462,17 @@ do
         end
         local asked, err = pcall(host.screen.profile, { region = w.region, axes = "both", key = w.key },
           function(p, why)
-            -- A reading for a press that is over: nothing of it counts.
-            if armed[o] ~= w then return answer(false) end
+            -- A reading for a press that is over: nothing of it counts. One asked before the arm
+            -- became a submenu's (`chained`) keeps the word, the menu it follows.
+            local now = armed[o]
+            if now ~= w then return answer(now ~= nil and now.from == w and w.seen and w.seen.rect or false) end
             if not (p and comparable(p, w.base)) then return unread(p and "a picture of another size" or why) end
-            answer(judge(o, w, p))
+            local v = judge(o, w, p)
+            if v == "gone" then
+              armed[o] = nil
+              v = false
+            end
+            answer(v)
           end)
         if not asked then unread(err) end
       end,
@@ -7295,7 +7488,7 @@ local MENU_TESTS_HELP = "name the menu tests instead: O.menuTests.nativePopup (a
   .. "function(o, answer) of the module's own — see docs/api/overlay.md, 'Menus'"
 
 -- `menus` as the runtime keeps it: one record per test, `{ name, cheap, test, before?, pressed?,
--- forget? }` plus its word and its outstanding question (see resetMenuTest), fresh per overlay.
+-- forget?, chained? }` plus its word and its outstanding question (see resetMenuTest), fresh per overlay.
 -- Raises for anything that is not a list of tests, naming the overlay — at bind time, where the
 -- mistake is, rather than as a menu that silently keeps the keys.
 local function menuTestsOf(self, list)
@@ -7313,7 +7506,7 @@ local function menuTestsOf(self, list)
     if type(t) == "function" then
       out[i] = { name = "test " .. i, cheap = false, test = t }
     elseif type(t) == "table" and type(t.test) == "function" then
-      for _, hook in ipairs({ "before", "pressed", "forget" }) do
+      for _, hook in ipairs({ "before", "pressed", "forget", "chained" }) do
         if t[hook] ~= nil and type(t[hook]) ~= "function" then
           error(("overlay '%s': menu test %d's `%s` must be a function(o), got %s")
             :format(who, i, hook, type(t[hook])), 0)
@@ -7326,6 +7519,7 @@ local function menuTestsOf(self, list)
         before = t.before,
         pressed = t.pressed,
         forget = t.forget,
+        chained = t.chained,
       }
     else
       error(("overlay '%s': menu test %d is a %s, not a function(o, answer) or a table with "
@@ -7939,6 +8133,38 @@ end
 --   * the menu is still there after the last click on the item — said: it did not take it.
 -- A second press of the same control while its item is still waiting for its menu is not a new
 -- press: the opener is not clicked again (see ownKey), and the log says so.
+--
+-- SUBMENUS (O:chooseMenuItem's `submenu = { menuItem }`): the item is a menu's item that opens
+-- another popup — Avenger's Copy Sample to and its twelve slots — and the choice is made in that.
+--   * Placed as any item (step 2 and 3), it is not clicked at once: the test that placed it is told
+--     first, through its `chained(o, press, menu, done)` hook, with the item's point and the menu as
+--     `press.parent`, so that it can follow a popup that opens from the menu (newWindow takes the
+--     window list again, drawn pictures the submenu's rectangle and the menu); the item is clicked
+--     once `done(true)` comes, after the checks of a click made after a wait. While it is awaited
+--     the test's answers count for nothing; `done(false, why)`, and a hook that raises or yields,
+--     place nothing — the item is not clicked, "unplaced". A test with no hook goes on at once.
+--   * The item is clicked ONCE. It counts as taken when the test that placed it answers a NEW popup
+--     — a rectangle not inside the menu's own, give or take two pixels — and then the submenu's
+--     item is placed in that popup by `submenu.menuItem`, at the opener's factor, and chosen as
+--     any item is (step 4 and 5, `retries` its own). The menu itself still answered is waited
+--     through, and never clicked again: a toolkit that ignored the click opens a submenu on its
+--     item's hover as well (JUCE does), and a second click while the submenu is drawing could
+--     close and open it under a reading.
+--   * The bound starts again at the item's click: no submenu within MENU_LOOK_MS of it, or the
+--     menu closed first, is "no submenu" — said, logged, and told to onDone; a new popup seen that
+--     the submenu's item could not be chosen in (its menuItem answered `false` for every one, or
+--     the item fell outside) is "unfit submenu". The test still getting ready at the bound, before
+--     the item's click, is "unfollowed".
+--   * A toolkit puts a submenu where it fits, as it puts a menu: JUCE beside its item, its top at
+--     the item's for an item in the upper half of its parent area and its BOTTOM at the item's in
+--     the lower half (calculateWindowPos, read in its source), pushed inside at the edges, which
+--     opens a submenu upward from an item low in the plug-in. So a submenu's item is placed
+--     from the submenu's own corner, as a table `menuItem` is — not from the item that opened it.
+--   * The menu answered alone after the submenu's item was clicked — the submenu closed and its
+--     menu left open — is "untaken": a toolkit closes the whole of a menu and its submenus on a
+--     choice (JUCE's dismissMenu walks up to the first menu), so a menu left means the click chose
+--     nothing.
+-- Not for a hotspot's `menuItem`: the method only.
 local PICK_LOG = "[menu item] '%s': '%s' "
 
 -- The rectangle a menu test's answer gives, or nil.
@@ -7958,6 +8184,14 @@ local function sameMenu(m, was)
   return m.x == was.x and m.y == was.y and m.w == was.w and m.h == was.h
 end
 
+-- Whether answer `m` is menu `was` still, the one a submenu's item was clicked in (see Submenus):
+-- the same menu, or a rectangle inside it, each edge within two pixels — never a new popup.
+local function inMenu(m, was)
+  if sameMenu(m, was) then return true end
+  if m.id ~= nil and was.id ~= nil and m.id ~= was.id then return false end
+  return m.x >= was.x - 2 and m.y >= was.y - 2 and m.x + m.w <= was.x + was.w + 2 and m.y + m.h <= was.y + was.h + 2
+end
+
 -- Control `c`'s opener has just been clicked: its item is chosen when a test sees the menu.
 -- `onDone(overlay, chosen, why)` is O:chooseMenuItem's, `retries` its count (default
 -- MENU_ITEM_RETRIES). The factor the opener was placed with is kept for the item (step 2).
@@ -7972,9 +8206,12 @@ function Overlay:_armPick(c, onDone, retries)
     k = k,
     retries = retries or MENU_ITEM_RETRIES,
     shoot = self._pressShot == true,
+    sub = c.submenu, -- { menuItem }: the item opens a submenu, and the choice is made in it (Submenus)
     noWhere = nil, -- the test that saw the menu without saying where it is
     outside = nil, -- where the item fell, outside the menu that was seen
     other = nil,   -- a window the `menuItem` function said is not its menu
+    chaining = nil, -- the test that placed a submenu's item is preparing to follow it (Submenus)
+    parent = nil,  -- once a submenu's item is clicked: { x, y, menu, by, tick, seen }
     clicked = nil, -- once the item is clicked: { x, y, menu, tick, clicks, by (the test record that placed it) }
     keyPending = nil, -- one of the overlay's own keys is running (see ownKey)
   }
@@ -8006,10 +8243,14 @@ end
 -- The pick is over. `why` is one of:
 --   press / key / left / moved — the user or the world moved on first: logged only;
 --   due / closed — no answer placed the item in time, or the menu closed: said, in the words of
---                  what was seen;
+--                  what was seen; after a submenu's item was clicked and before its submenu was
+--                  chosen in, "no submenu" or "unfit submenu" (Submenus) — onDone hears that; at
+--                  the bound while the test that placed a submenu's item gets ready to follow it,
+--                  "unfollowed";
 --   unplaced / covered — the item could not be placed, or something is drawn over it: said;
 --   refused — refuseOutside has said it already: logged only;
---   untaken — the menu was still there after the last click on the item: said.
+--   untaken — the menu was still there after the last click on the item, or a submenu's menu
+--             alone after a click in the submenu (`detail` says so): said.
 -- Once the item has been clicked, every other ending — the menu closed, another window in its
 -- place ("taken"), the overlay left the front or moved on — is the item CHOSEN: onDone(true).
 function Overlay:_pickEnd(why, detail)
@@ -8018,6 +8259,45 @@ function Overlay:_pickEnd(why, detail)
   self._pick = nil
   local label = tostring(p.c.label or "That control")
   local k = p.clicked
+  -- A submenu's item clicked, and nothing chosen in its submenu by the bound or the menu's close: a
+  -- new popup seen that the submenu's item could not be chosen in — its menuItem took none of them,
+  -- or the item fell outside — is "unfit submenu"; no new popup at all is "no submenu".
+  if p.parent and not k and (why == "due" or why == "closed") then
+    local said, logged, ended
+    if p.other then
+      ended = "unfit submenu"
+      said = label .. ": no submenu it can be chosen in was seen, nothing was chosen in it"
+      logged = "its submenu's menuItem function took no popup seen after the item's click (the last at "
+        .. p.other .. ")"
+    elseif p.outside then
+      ended = "unfit submenu"
+      said = label .. " is not where it should be in its submenu, nothing was chosen in it"
+      logged = "the submenu's item, at " .. p.outside .. ", is outside the submenu that was seen"
+    else
+      ended = "no submenu"
+      said = label .. ": its submenu did not open, nothing was chosen in it"
+      logged = why == "due" and ("no submenu was seen within %d ms of the item's click"):format(MENU_LOOK_MS)
+        or "the menu closed after the item's click, and no submenu was seen"
+    end
+    host.log.info((PICK_LOG .. "not chosen — %s"):format(tostring(self.label), tostring(p.c.label), logged))
+    host.speech.output(said, { interrupt = true })
+    return self:_pickDone(p, false, ended)
+  end
+  -- The item placed, and its test still getting ready to follow its submenu (`chained`): nothing
+  -- was clicked in the menu that was seen. At the bound "unfollowed"; a menu that closed meanwhile
+  -- closed before anything was chosen, as any menu that closes first.
+  if p.chaining and why == "due" then
+    host.log.info((PICK_LOG .. "not chosen — the bound came while its test was getting ready to follow its "
+      .. "submenu; nothing was clicked in it"):format(tostring(self.label), tostring(p.c.label)))
+    host.speech.output(label .. ": its submenu cannot be followed now, nothing was chosen", { interrupt = true })
+    return self:_pickDone(p, false, "unfollowed")
+  end
+  if p.chaining and why == "closed" then
+    host.log.info((PICK_LOG .. "not chosen — the menu closed while its test was getting ready to follow its "
+      .. "submenu; nothing was clicked in it"):format(tostring(self.label), tostring(p.c.label)))
+    host.speech.output(label .. ": the menu closed before anything was chosen", { interrupt = true })
+    return self:_pickDone(p, false, "closed")
+  end
   if k and why ~= "untaken" and why ~= "covered" and why ~= "refused" then
     local how
     if why == "closed" then
@@ -8072,7 +8352,9 @@ function Overlay:_pickEnd(why, detail)
     logged = "not chosen — " .. tostring(detail)
   elseif why == "untaken" then
     said = label .. ": the menu did not take the choice"
-    logged = ("not chosen — the menu was still there after %d click(s) on the item at (%d,%d)")
+    logged = detail and ("not chosen — " .. tostring(detail) .. (" after %d click(s) on the item at (%d,%d)")
+      :format(k and k.clicks or 0, k and k.x or 0, k and k.y or 0))
+      or ("not chosen — the menu was still there after %d click(s) on the item at (%d,%d)")
       :format(k and k.clicks or 0, k and k.x or 0, k and k.y or 0)
   else
     logged = "not chosen — " .. tostring(detail or why)
@@ -8107,40 +8389,25 @@ function Overlay:_pickCovered(c, m, x, y)
   return nil, "drawn inside the plug-in, checked like any click of the overlay"
 end
 
--- Test `t` sees a menu and answered `value`: the item is chosen in it, if the answer says where
--- it is and the item lies inside; once the item is clicked, the answer says whether the menu took
--- it (step 5) — the answer of the test that placed the item, and only that one: two tests can see
--- the same popup (newWindow its window, drawn the area it covers) and answer rectangles a little
--- apart, which would read as another window in its place, the choice taken a tick early and the
--- clicks again for a click the popup ignored lost.
-function Overlay:_pickSeen(t, value, late)
+-- Item `item` of control `c` (its `menuItem`, or a submenu's) placed in menu `m`, which test `t`
+-- answered: x, y, the offset it came to and how what is drawn there was asked — or nil when it is
+-- not to be clicked on this answer: the pick has ended (moved, unplaced, covered, refused), or the
+-- answer is not its menu, or the item fell outside it, which a later answer may change (step 2, 3).
+function Overlay:_pickPlace(t, m, item)
   local p = self._pick
   local c = p.c
-  local m = menuRectOf(value)
-  if p.clicked then
-    -- The test itself, not its name: two tests on a list may share one (two `drawn` without a name).
-    if p.clicked.by ~= t then return end
-    return self:_pickFollow(t, m, late)
+  if not self.active or self:hwnd() ~= p.pinned then
+    self:_pickEnd("moved")
+    return nil
   end
-  -- The menu item shot is being taken, and the item is clicked once it is in (_pickShot).
-  if p.shooting then return end
-  if not m then
-    -- nativePopup and the accessibility tests say only "a menu is open": nowhere to place an
-    -- item. Another test on the list may say where; this one's word is noted once.
-    if p.noWhere == nil then
-      p.noWhere = t.name
-      host.log.info((PICK_LOG .. "— test '%s' sees a menu but does not say where it is; waiting for "
-        .. "one that does"):format(tostring(self.label), tostring(c.label), t.name))
-    end
-    return
-  end
-  if not self.active or self:hwnd() ~= p.pinned then return self:_pickEnd("moved") end
   local where = ("%d,%d %dx%d"):format(m.x, m.y, m.w, m.h)
-  local item = c.menuItem
   local x, y
   if type(item) == "function" then
     local ok, v, vwhy = pcall(item, self, m, p.k)
-    if not ok then return self:_pickEnd("unplaced", "its menuItem function raised: " .. tostring(v)) end
+    if not ok then
+      self:_pickEnd("unplaced", "its menuItem function raised: " .. tostring(v))
+      return nil
+    end
     if v == false then
       -- Not this window: something else that appeared (a tooltip). The next answer is looked at.
       if p.other ~= where then
@@ -8149,10 +8416,11 @@ function Overlay:_pickSeen(t, value, late)
           .. "says is not its menu%s; waiting for the next answer"):format(tostring(self.label),
           tostring(c.label), t.name, where, vwhy ~= nil and (" (" .. tostring(vwhy) .. ")") or ""))
       end
-      return
+      return nil
     end
     if type(v) ~= "table" or type(v[1]) ~= "number" or type(v[2]) ~= "number" then
-      return self:_pickEnd("unplaced", "its menuItem answered " .. tostring(v) .. ", not {dx, dy}")
+      self:_pickEnd("unplaced", "its menuItem answered " .. tostring(v) .. ", not {dx, dy}")
+      return nil
     end
     -- Screen pixels from the menu's corner: not scaled again. Rounded once in a scaled overlay,
     -- the plain sum in one without, as every point there is.
@@ -8164,7 +8432,10 @@ function Overlay:_pickSeen(t, value, late)
     end
   elseif scaledFor(self, c) then
     -- An authored distance, at the factor the opener was placed with.
-    if not p.k then return self:_pickEnd("unplaced", "no factor was known at the press") end
+    if not p.k then
+      self:_pickEnd("unplaced", "no factor was known at the press")
+      return nil
+    end
     x, y = math.floor(m.x + p.k * item[1] + 0.5), math.floor(m.y + p.k * item[2] + 0.5)
   else
     x, y = m.x + item[1], m.y + item[2]
@@ -8179,17 +8450,60 @@ function Overlay:_pickSeen(t, value, late)
         .. "outside it; not clicking"):format(tostring(self.label), tostring(c.label), t.name, where,
         tostring(item[1]), tostring(item[2]), at))
     end
-    return
+    return nil
   end
   local covered, checked = self:_pickCovered(c, m, x, y)
-  if covered == "refused" then return self:_pickEnd("refused", "refused, and said") end
-  if covered then return self:_pickEnd("covered", covered) end
+  if covered == "refused" then
+    self:_pickEnd("refused", "refused, and said")
+    return nil
+  end
+  if covered then
+    self:_pickEnd("covered", covered)
+    return nil
+  end
+  return x, y, item, checked
+end
+
+-- Test `t` sees a menu and answered `value`: the item is chosen in it, if the answer says where
+-- it is and the item lies inside; once the item is clicked, the answer says whether the menu took
+-- it (step 5) — the answer of the test that placed the item, and only that one: two tests can see
+-- the same popup (newWindow its window, drawn the area it covers) and answer rectangles a little
+-- apart, which would read as another window in its place, the choice taken a tick early and the
+-- clicks again for a click the popup ignored lost. A submenu's item clicked, the answers go to
+-- _pickSub until a new popup is seen (Submenus).
+function Overlay:_pickSeen(t, value, late)
+  local p = self._pick
+  local c = p.c
+  local m = menuRectOf(value)
+  if p.clicked then
+    -- The test itself, not its name: two tests on a list may share one (two `drawn` without a name).
+    if p.clicked.by ~= t then return end
+    return self:_pickFollow(t, m, late)
+  end
+  -- The menu item shot is being taken, or the test is preparing to follow a submenu, and the item
+  -- is clicked once that is in (_pickShot, _pickChain).
+  if p.shooting or p.chaining then return end
+  if p.parent then return self:_pickSub(t, m, late) end
+  if not m then
+    -- nativePopup and the accessibility tests say only "a menu is open": nowhere to place an
+    -- item. Another test on the list may say where; this one's word is noted once.
+    if p.noWhere == nil then
+      p.noWhere = t.name
+      host.log.info((PICK_LOG .. "— test '%s' sees a menu but does not say where it is; waiting for "
+        .. "one that does"):format(tostring(self.label), tostring(c.label), t.name))
+    end
+    return
+  end
+  local x, y, item, checked = self:_pickPlace(t, m, c.menuItem)
+  if not x then return end
+  local where = ("%d,%d %dx%d"):format(m.x, m.y, m.w, m.h)
   -- `between`: clicked between two ticks, in the item shot's answer or a test's callback (`late`:
   -- drawn's reading) — the next tick is then the click's own, as a pass's tick is for a click made
   -- in it, so the menu has a whole tick to take it before a test's answer can count against it
   -- (_pickFollow): a reading asked right after the click is of the popup the plug-in has not
   -- closed yet, and clicking again there would click the plug-in under it once it has.
   local function choose(how, between)
+    if p.sub then return self:_pickChain(t, m, x, y, item, how, between) end
     host.log.info((PICK_LOG .. "— test '%s' sees the menu at %s%s (%s); choosing item (%s,%s) at "
       .. "(%d,%d)"):format(tostring(self.label), tostring(c.label), t.name, where,
       m.kind == "window" and (" (window id " .. tostring(m.id) .. ")") or "", how,
@@ -8204,10 +8518,17 @@ function Overlay:_pickSeen(t, value, late)
     p.clicked = { x = x, y = y, menu = m, tick = menuTick + (between and 1 or 0), clicks = 1, by = t }
   end
   if not p.shoot then return choose(checked, late) end
-  -- In a calibrating run, the menu with a crosshair on the item, before the click takes it away:
-  -- its picture is asked off the event loop, and the item is clicked once it is in — if the pick
-  -- still waits for it, the overlay is still on its window and nothing covers the item, the checks
-  -- a click made again after a tick gets (_pickFollow).
+  self:_pickShoot(t, m, x, y, choose)
+end
+
+-- In a calibrating run, the menu with a crosshair on the item, before the click takes it away: its
+-- picture is asked off the event loop, and `choose(how, true)` runs once it is in — if the pick
+-- still waits for it, the overlay is still on its window and nothing covers the item, the checks a
+-- click made again after a tick gets (_pickFollow). `suffix`: the picture's name, "-menu-item" or a
+-- submenu's "-submenu-item".
+function Overlay:_pickShoot(t, m, x, y, choose, suffix)
+  local p = self._pick
+  local c = p.c
   p.shooting = true
   self:_pickShot(c, m, x, y, function(write)
     -- Written on a later pass, the click made or not: a PNG keeps the module waiting for hundreds
@@ -8221,24 +8542,137 @@ function Overlay:_pickSeen(t, value, late)
     if again == "refused" then return self:_pickEnd("refused", "refused, and said") end
     if again then return self:_pickEnd("covered", again) end
     choose(how, true)
-  end)
+  end, suffix)
+end
+
+-- The item at (x, y) of menu `m`, which test `t` placed, opens a submenu (Submenus): the test is
+-- told first through its `chained` hook, and the item clicked once its `done(true)` has come.
+-- `how` is how what is drawn at the item was asked, `between` whether this runs between two ticks.
+function Overlay:_pickChain(t, m, x, y, item, how, between)
+  local p = self._pick
+  local c = p.c
+  p.chaining = true
+  local where = ("%d,%d %dx%d"):format(m.x, m.y, m.w, m.h)
+  local press = { label = c.label, x = x, y = y, button = "left", parent = { x = m.x, y = m.y, w = m.w, h = m.h } }
+  host.log.info((PICK_LOG .. "— test '%s' sees the menu at %s%s; item (%s,%s) at (%d,%d) opens a submenu — %s")
+    :format(tostring(self.label), tostring(c.label), t.name, where,
+      m.kind == "window" and (" (window id " .. tostring(m.id) .. ")") or "", tostring(item[1]), tostring(item[2]), x, y,
+      t.chained and "the test is told first" or "the test has no `chained`: its next answer that is not this menu is the submenu"))
+  local inHook, early, said = true, nil, false
+  local function done(ok, why)
+    if said then
+      host.log.info((PICK_LOG .. "— test '%s' answered `chained` twice; the second answer is ignored")
+        :format(tostring(self.label), tostring(c.label), t.name))
+      return
+    end
+    said = true
+    -- Inside the hook: taken up once it has returned, outside its coroutine.
+    if inHook then
+      early = { ok = ok, why = why }
+      return
+    end
+    -- From a callback: the menu tick's work, a little later (asMenuTick), as a test's answer is.
+    asMenuTick(self._pickChained, self, p, t, m, x, y, item, how, between, ok, why, true)
+  end
+  if t.chained then
+    -- Guarded, and in a coroutine of its own: a hook that raises or waits fails alone.
+    local ran, err = pcall(ownPass, t.chained, self, press, m, done)
+    if not ran and not said then
+      said = true
+      early = { ok = false, why = tostring(err) }
+    end
+  else
+    said = true
+    early = { ok = true }
+  end
+  inHook = false
+  if early then return self:_pickChained(p, t, m, x, y, item, how, between, early.ok, early.why, false) end
+end
+
+-- `chained`'s answer for pick `p`: the item clicked, once, or the pick over (Submenus). `late`: the
+-- answer came from a callback, after a wait — the overlay and what is drawn at the item asked again.
+function Overlay:_pickChained(p, t, m, x, y, item, how, between, ok, why, late)
+  -- The pick ended meanwhile (the user moved on, another press): nothing more.
+  if self._pick ~= p then
+    host.log.info((PICK_LOG .. "— test '%s' is ready to follow the submenu, and the choice is over; "
+      .. "nothing clicked"):format(tostring(self.label), tostring(p.c.label), t.name))
+    return
+  end
+  p.chaining = nil
+  if ok ~= true then
+    return self:_pickEnd("unplaced", ("test '%s' cannot follow its submenu: %s"):format(t.name, tostring(why)))
+  end
+  if late then
+    if not self.active or self:hwnd() ~= p.pinned then return self:_pickEnd("moved") end
+    local again, how2 = self:_pickCovered(p.c, m, x, y)
+    if again == "refused" then return self:_pickEnd("refused", "refused, and said") end
+    if again then return self:_pickEnd("covered", again) end
+    how = how2
+  end
+  host.log.info((PICK_LOG .. "— clicking item (%s,%s) at (%d,%d) once (%s); its submenu is chosen in "
+    .. "once test '%s' sees a new popup, for up to %d ms"):format(tostring(self.label), tostring(p.c.label),
+    tostring(item[1]), tostring(item[2]), x, y, how, t.name, MENU_LOOK_MS))
+  host.input.click(x, y)
+  -- Stage 2: the item clicked, its submenu awaited. Its own placing starts afresh.
+  p.parent = { x = x, y = y, menu = m, by = t, tick = menuTick + ((between or late) and 1 or 0) }
+  p.untilMs = host.now() + MENU_LOOK_MS
+  p.outside, p.other, p.noWhere = nil, nil, nil
+end
+
+-- An answer while a submenu's item waits for its submenu (Submenus): only the answers of the test
+-- that placed the item; its menu still there is waited through, and anything else is the submenu,
+-- its item placed and clicked in it.
+function Overlay:_pickSub(t, m, late)
+  local p = self._pick
+  local par = p.parent
+  if par.by ~= t or not m then return end
+  if inMenu(m, par.menu) then return end
+  local c = p.c
+  local where = ("%d,%d %dx%d"):format(m.x, m.y, m.w, m.h)
+  if par.seen ~= where then
+    par.seen = where
+    host.log.info((PICK_LOG .. "— test '%s' sees a new popup at %s%s after the item's click: the item is "
+      .. "taken, and its submenu is chosen in"):format(tostring(self.label), tostring(c.label), t.name, where,
+      m.kind == "window" and (" (window id " .. tostring(m.id) .. ")") or ""))
+  end
+  local x, y, item, checked = self:_pickPlace(t, m, p.sub.menuItem)
+  if not x then return end
+  local function choose(how, between)
+    host.log.info((PICK_LOG .. "— choosing the submenu's item (%s,%s) at (%d,%d) (%s)"):format(tostring(self.label),
+      tostring(c.label), tostring(item[1]), tostring(item[2]), x, y, how))
+    host.input.click(x, y)
+    if p.retries <= 0 then
+      self._pick = nil
+      self:_pickDone(p, true, nil)
+      return
+    end
+    p.clicked = { x = x, y = y, menu = m, tick = menuTick + (between and 1 or 0), clicks = 1, by = t }
+  end
+  if not p.shoot then return choose(checked, late) end
+  self:_pickShoot(t, m, x, y, choose, "-submenu-item")
 end
 
 -- An answer after the item's click, `m` its rectangle or nil (step 5). The same menu, on a
 -- question asked on a tick after the last click, is a click the menu did not take: clicked again,
 -- after the same checks, while the pick has retries left, and "untaken" after that. Another window
--- in its place is the item taken. An answer that does not say where says nothing either way.
+-- in its place is the item taken. An answer that does not say where says nothing either way. After
+-- a submenu's item, its menu answered alone on such a tick is the click untaken (Submenus).
 -- `late`: the answer came from a callback, so a click made again on it is between two ticks.
 function Overlay:_pickFollow(t, m, late)
   local p = self._pick
   local k = p.clicked
   if not m then return end
+  -- Asked on the click's own tick or before it: the menu cannot have had the click yet.
+  local after = (t.lastAsked or -1) > k.tick
+  if p.parent and inMenu(m, p.parent.menu) then
+    if not after then return end
+    return self:_pickEnd("untaken", "the submenu has closed and its parent menu is still there")
+  end
   if not sameMenu(m, k.menu) then
     return self:_pickEnd("taken", ("test '%s' sees another window in its place, at %d,%d %dx%d")
       :format(t.name, m.x, m.y, m.w, m.h))
   end
-  -- Asked on the click's own tick or before it: the menu cannot have had the click yet.
-  if (t.lastAsked or -1) <= k.tick then return end
+  if not after then return end
   if k.clicks > p.retries then return self:_pickEnd("untaken") end
   if not self.active or self:hwnd() ~= p.pinned then return self:_pickEnd("moved") end
   local covered = self:_pickCovered(p.c, m, k.x, k.y)
@@ -8256,10 +8690,12 @@ end
 -- Opens a menu and chooses an item in it, for a module's own code — a stepper whose step is a
 -- choice from the plug-in's list (Avenger's zoom). `spec` is what a hotspot with `menuItem` takes:
 -- `label`, `at` (a table or a function of the overlay), `fromRight`, `rawOrigin`, `button`,
--- `menuItem`, `retries`, and `onDone(overlay, chosen, why)`. Returns whether the opener was
--- clicked. A spec that cannot work — no `at`, a `menuItem` that is neither {dx, dy} nor a
--- function, a `button` the click does not know, a `retries` that is not a whole number from 0 —
--- raises here, at the call, rather than after the menu has opened.
+-- `menuItem`, `retries`, and `onDone(overlay, chosen, why)`; and `submenu = { menuItem }`, an
+-- item that opens a submenu, chosen in it (Submenus), which a hotspot does not take. Returns
+-- whether the opener was clicked. A spec that cannot work — no `at`, a `menuItem` that is neither
+-- {dx, dy} nor a function, a `submenu` whose `menuItem` is neither, a `button` the click does not
+-- know, a `retries` that is not a whole number from 0 — raises here, at the call, rather than
+-- after the menu has opened.
 function Overlay:chooseMenuItem(spec)
   local who = tostring(self.label)
   if type(spec) ~= "table" or (type(spec.at) ~= "table" and type(spec.at) ~= "function")
@@ -8272,6 +8708,16 @@ function Overlay:chooseMenuItem(spec)
     and type(mi[2]) == "number") then
     error(("overlay '%s': chooseMenuItem's `menuItem` must be {dx, dy} or a function(overlay, menu, "
       .. "factor), got %s"):format(who, type(mi)), 2)
+  end
+  local sub = spec.submenu
+  if sub ~= nil then
+    local smi = type(sub) == "table" and sub.menuItem or nil
+    if type(smi) ~= "function" and not (type(smi) == "table" and type(smi[1]) == "number"
+      and type(smi[2]) == "number") then
+      error(("overlay '%s': chooseMenuItem's `submenu` must be { menuItem = {dx, dy} or a function(overlay, "
+        .. "menu, factor) }, got %s"):format(who, type(sub) == "table" and ("a menuItem that is a " .. type(smi))
+        or type(sub)), 2)
+    end
   end
   local b = spec.button
   if b ~= nil and b ~= "left" and b ~= "right" and b ~= "middle" then
@@ -8307,8 +8753,8 @@ function Overlay:chooseMenuItem(spec)
     self._pickControls[label] = c
   end
   if self:_pickRepeat(c) then return fail("busy") end
-  c.at, c.fromRight, c.rawOrigin, c.button, c.menuItem =
-    spec.at, spec.fromRight, spec.rawOrigin, spec.button, spec.menuItem
+  c.at, c.fromRight, c.rawOrigin, c.button, c.menuItem, c.submenu =
+    spec.at, spec.fromRight, spec.rawOrigin, spec.button, spec.menuItem, sub
   local px, py, why = hotspotPoint(self, c)
   if not px then
     unplaced(self, c, why or "its `at` answered nil")
@@ -11020,15 +11466,17 @@ end
 -- The capture is asked for here — one snapshot with a callback, since the menu tick's pass that sees the menu
 -- cannot wait for a picture — and `andThen(write)` runs in its answer, or at once when it cannot be
 -- asked: the caller clicks the item there, after the picture, and runs `write`, which writes the
--- PNG, on a later pass.
-function Overlay:_pickShot(c, m, x, y, andThen)
+-- PNG, on a later pass. A submenu's item (`suffix` "-submenu-item") is pictured the same way, in its
+-- submenu, as `<overlay>-<control>-submenu-item.png`.
+function Overlay:_pickShot(c, m, x, y, andThen, suffix)
   local who, what = tostring(self.label), tostring(c and c.label or "control")
+  suffix = suffix or "-menu-item"
   local pad = 12
   local region = { m.x - pad, m.y - pad, m.x + m.w + pad, m.y + m.h + pad }
-  local stem = shotPath(who .. "-" .. what, "-menu-item")
+  local stem = shotPath(who .. "-" .. what, suffix)
   local function writer(snap, why)
     return function()
-      local path = host.path("calibration/" .. stem .. "-menu-item.png")
+      local path = host.path("calibration/" .. stem .. suffix .. ".png")
       local ok = false
       if snap then
         local okc, saved, reason = pcall(host.screen.saveMarked, path,
@@ -11036,8 +11484,9 @@ function Overlay:_pickShot(c, m, x, y, andThen)
         ok, why = okc and saved == true, okc and reason or saved
         pcall(snap.release, snap)
       end
-      host.log.info(("[calibrate] '%s' '%s': menu item shot, (%d,%d)-(%d,%d), the item marked at "
-        .. "(%d,%d) -> %s (%s)"):format(who, what, region[1], region[2], region[3], region[4], x, y,
+      host.log.info(("[calibrate] '%s' '%s': %s shot, (%d,%d)-(%d,%d), the item marked at "
+        .. "(%d,%d) -> %s (%s)"):format(who, what, suffix == "-menu-item" and "menu item" or "submenu item",
+        region[1], region[2], region[3], region[4], x, y,
         path, ok and "true" or ("false: " .. tostring(why or "no reason given"))))
     end
   end

@@ -109,6 +109,88 @@ function T.browserItemPoint(index)
   return { T.BROWSER_ITEM_X, T.BROWSER_ITEM_FIRST_Y + (i - 1) * T.BROWSER_ITEM_Y_STEP }
 end
 
+-- ── Where the sample editor's and DRUM SQ's values are read ───────────────────
+-- Worked out from the project's points, as popups.luau's regions are: STARTING VALUES nobody has
+-- seen, which the calibration pictures `sample-<zoom>pct.png` and `sq-controls-<zoom>pct.png`
+-- settle (TODO.md, D6 and D7). The project read none of these: it clicked the editor's tab, its
+-- switches, its menus and DRUM SQ's fields and took what it clicked for what was there.
+--
+-- The editor's four tabs, each read in a box TAB_SIZE round its point, as the central tabs are:
+-- from SAMPLE's left to EQ's right.
+T.EDITOR_TAB_ORDER = { "sample", "amp", "pitch", "eq" }
+T.EDITOR_TABS_ROW = { 246, 255, 627, 265 }
+-- Both switches' state boxes, ENABLE_STATE_SIZE round their points: one grid for the two.
+T.SWITCHES = { 251, 367, 256, 374 }
+-- A menu's field, which shows the value it was set to: a box VALUE_BOX round its opener, the
+-- tool's point; Loop-Stretch's cut on the left at the panel's edge, 244. Read as text, its name in
+-- the text read the key's with spaces ("play mode", "sq length").
+T.VALUE_BOX = { 40, 10 }
+T.VALUES = {
+  play_mode = T.PLAY_MODE,
+  grid = { 321, 372 },
+  eq1_type = { 429, 370 },
+  eq2_type = { 612, 370 },
+  loop_stretch = T.LOOP_STRETCH,
+  sq_length = { 491, 416 },
+  sq_speed = { 593, 416 },
+}
+-- A typed field (PANEL's start to eq2_q): a box FIELD_BOX round its point, the picture a rename's
+-- flow sees Avenger's editor open in; the EQ's lie 41 to 45 apart.
+T.FIELD_BOX = { 36, 10 }
+-- The envelope's Preset field, between Menu (501) and Back (579), where its preset's name would be
+-- drawn; the envelope above the fields' row; DRUM SQ's steps between its patterns and its knobs;
+-- the sample browser's first three rows (277, 287, 297).
+T.ENVELOPE_NAME = { 514, 256, 564, 266 }
+T.ENVELOPE_AREA = { 246, 266, 627, 364 }
+T.SQ_STEPS = { 246, 266, 627, 404 }
+T.BROWSER_HEAD = { 252, 272, 338, 302 }
+-- What the sample browser's rows say: the page's thirteen (ui/panel.js), its vocabulary.
+T.BROWSER_WORDS = { "Crash", "Open Hi-Hat", "Ride", "Closed Hi-Hat 2", "Percussion 2", "Closed Hi-Hat 1",
+  "Percussion 1", "Snare 2", "Clap", "Snare 1", "Rimshot", "Bassdrum", "Drum Loops" }
+-- What the menus' fields may read, by the page's keys: its words for them.
+T.VALUE_WORDS = {
+  play_mode = { monophone = "Monophone", polyphone = "Polyphone" },
+  grid = { ["1_16"] = "1/16", ["1_8"] = "1/8", ["1_4"] = "1/4", ["1_16t"] = "1/16T", ["1_8t"] = "1/8T",
+    ["1_4t"] = "1/4T" },
+  eq_type = { peak = "Peak", low_shelf = "Low-Shelf", high_shelf = "High-Shelf", low_pass = "Low-Pass",
+    high_pass = "High-Pass" },
+  loop_stretch = { off = "Off", turntable = "Turntable", stretch = "Stretch" },
+  sq_speed = { ["1_16"] = "1/16", ["1_8"] = "1/8", ["1_16t"] = "1/16T", ["1_8t"] = "1/8T", ["1_32"] = "1/32",
+    ["1_4"] = "1/4", ["1_32t"] = "1/32T", ["1_4t"] = "1/4T" },
+}
+T.VALUE_WORDS.eq1_type, T.VALUE_WORDS.eq2_type = T.VALUE_WORDS.eq_type, T.VALUE_WORDS.eq_type
+-- A knob's box, for its reset's change wait and a calibrating run's pictures.
+T.EDITOR_KNOB_BOX = { 20, 20 }
+T.SQ_KNOB_BOX = { 20, 20 }
+-- LENGTH: the project's points per four steps when it drags it, and what it takes its double-click
+-- to set — 64, from which it drags down (its clicker).
+T.SQ_LENGTH_STEP = 6.6
+T.SQ_LENGTH_RESET = 64
+
+local function boxAt(p, size)
+  return { p[1] - size[1] / 2, p[2] - size[2] / 2, p[1] + size[1] / 2, p[2] + size[2] / 2 }
+end
+
+-- A menu's field, by its key in T.VALUES.
+function T.valueRect(key)
+  local r = boxAt(T.VALUES[key], T.VALUE_BOX)
+  if key == "loop_stretch" then r[1] = math.max(r[1], 244) end
+  return r
+end
+
+-- A typed field's box, by its key in T.PANEL.
+function T.fieldRect(key)
+  return boxAt(T.PANEL[key], T.FIELD_BOX)
+end
+
+function T.editorKnobBox(c)
+  return boxAt(T.EDITOR_CONTROLS[c], T.EDITOR_KNOB_BOX)
+end
+
+function T.sqKnobBox(c)
+  return boxAt(T.SQ_CONTROLS[c], T.SQ_KNOB_BOX)
+end
+
 -- ── DRUM SQ ──────────────────────────────────────────────────────────────────
 -- VEL AMOUNT and SHUFFLE, dragged and reset at y 416; LENGTH and SPEED beside them.
 T.SQ_CONTROLS = {

@@ -193,4 +193,31 @@ function R.snap(read, expected)
   return read, false, r
 end
 
+-- Which of `words` (key -> the words a field shows) reading `read` is, case and spacing aside: the
+-- key of the most alike, when it is R.SNAP_RATIO alike or more — a menu's field ("1l8" is 1/8's), a
+-- speed. The key and the ratio; nil and the best ratio for the log otherwise.
+function R.oneOf(read, words)
+  local a = string.lower((string.gsub(R.tidy(read), " ", "")))
+  if a == "" then return nil, 0 end
+  local best, ratio = nil, 0
+  for key, w in pairs(words) do
+    local r = R.ratio(a, string.lower((string.gsub(w, " ", ""))))
+    if r > ratio or (r == ratio and best ~= nil and key < best) then best, ratio = key, r end
+  end
+  if best and ratio >= R.SNAP_RATIO then return best, ratio end
+  return nil, ratio
+end
+
+-- A note value read — "1/8", "1/16T" — as a key of `words` ("1_8", "1_16t"): its slash read as
+-- l, I, | or nothing, its T in either case; else R.oneOf's. The key and how it was taken, or nil.
+function R.noteValue(read, words)
+  local s = string.gsub(R.tidy(read), " ", "")
+  local digits, t = string.match(s, "^1[/lI|\\]?(%d+)([tT]?)$")
+  if digits then
+    local key = "1_" .. digits .. string.lower(t)
+    if words[key] then return key, 1 end
+  end
+  return R.oneOf(read, words)
+end
+
 return R

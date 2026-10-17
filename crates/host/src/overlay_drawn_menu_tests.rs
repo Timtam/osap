@@ -19,7 +19,7 @@
 use super::overlay_menu_tests::run_with;
 
 /// The helpers, added to the harness's `T`.
-const DR: &str = r##"
+pub(super) const DR: &str = r##"
 local S = T.S
 S.clicks = {}
 S.owns = true

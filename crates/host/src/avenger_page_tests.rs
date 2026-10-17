@@ -260,8 +260,8 @@ fn actions_are_answered_not_available_yet_and_only_while_the_page_has_the_keyboa
         T.pageMsg({ action = "open_expansion", args = {}, focused = true })
         T.ok(T.lastPost().kind == "error" and T.lastPost().text == "Opening an expansion is not available in this module yet",
           tostring(T.lastPost().text))
-        T.pageMsg({ action = "drumkit_control", args = { control = "volume" }, focused = true })
-        T.ok(T.lastPost().text == "A drum slot's Volume, Pan or Pitch is not available in this module yet", T.lastPost().text)
+        T.pageMsg({ action = "set_expansion_view", args = { view = "favorites" }, focused = true })
+        T.ok(T.lastPost().text == "Expansion View is not available in this module yet", T.lastPost().text)
         T.pageMsg({ action = "bogus", args = {} })
         T.ok(T.lastPost().text == "bogus is not available in this module yet", T.lastPost().text)
         T.ok(T.count("[avenger] [page] 'bogus' is no action of the page's") == 1, T.dump())
@@ -361,7 +361,7 @@ fn the_reads_of_one_picture_give_the_tools_state_keys() {
         local snaps, from, asked = S.snaps, #S.pageOrder, S.cellsAsked + S.profilesAsked
         T.pageKey()
         T.ok(S.snaps == snaps + 1, "one picture, in the key's handler")
-        T.ok(#S.screenOut == 0 and S.cellsAsked + S.profilesAsked == asked + 19,
+        T.ok(#S.screenOut == 0 and S.cellsAsked + S.profilesAsked == asked + 26,
           "every question waited for in the key's handler: " .. (S.cellsAsked + S.profilesAsked - asked))
         T.ok(T.pageSince(from) == "post state,post error,post focus,show,sound sounds/Open.wav", T.pageSince(from))
         asked = S.cellsAsked + S.profilesAsked
@@ -399,7 +399,7 @@ fn the_reads_of_one_picture_give_the_tools_state_keys() {
           "[avenger] [read] strip: the tabs' bottom strips, darkest selected:", "OSC 1 Mute 100.0 % red",
           "[avenger] [read] macros: button 1 highlight ", "ON; button 2 highlight 0.0 %", "[avenger] [read] oscillator: Level ",
           "[avenger] [read] expansion: FAV ", "[avenger] [read] words: preset 'LD Lead 1'",
-          "[avenger] [read] 19 questions of one picture; the picture ", "[avenger] [page] shown beside" }) do
+          "[avenger] [read] 26 questions of one picture; the picture ", "[avenger] [page] shown beside" }) do
           T.ok(T.count(line) == 1, "the log: " .. line)
         end
     "##.replace("@WORDS@", WORDS));
@@ -655,9 +655,9 @@ fn one_press_at_a_time_and_a_page_is_not_shown_after_the_user_moved_on() {
 }
 
 /// In a calibrating run, the open writes one marked picture per part read and zoom, of the picture
-/// the reads were answered from — strip, macros, knob, centre and drumsq, each `-<zoom>pct.png` —
-/// with a crosshair on every point read, written with callbacks; a second open at the same zoom
-/// writes none, and without calibration none is written.
+/// the reads were answered from — strip, macros, knob, centre, drumsq, drums, sample and
+/// sq-controls, each `-<zoom>pct.png` — with a crosshair on every point read, written with
+/// callbacks; a second open at the same zoom writes none, and without calibration none is written.
 #[test]
 fn a_calibrating_run_writes_a_marked_picture_per_part_and_zoom() {
     run_mac(r##"
@@ -690,20 +690,21 @@ fn a_calibrating_run_writes_a_marked_picture_per_part_and_zoom() {
           T.ok(m.snapshot ~= nil and #m.marks > 0, m.path)
           names[#names + 1] = string.match(m.path, "calibration/(.+)$")
         end
-        T.ok(table.concat(names, " ") == "strip-80pct.png macros-80pct.png knob-80pct.png centre-80pct.png drumsq-80pct.png",
-          table.concat(names, " "))
+        T.ok(table.concat(names, " ") == "strip-80pct.png macros-80pct.png knob-80pct.png centre-80pct.png drumsq-80pct.png "
+          .. "drums-80pct.png sample-80pct.png sq-controls-80pct.png", table.concat(names, " "))
         T.ok(T.count("[avenger] [calibrate] strip picture, (") == 1 and T.count("[avenger] [calibrate] drumsq picture") == 1,
           T.dump())
         back()
         T.openPage()
         T.tick()
-        T.ok(#pictures() == 5, "the same zoom again: none")
+        T.ok(#pictures() == 8, "the same zoom again: none")
     "##);
 }
 
 /// The turns of Luau's loops and calls each read of the open may spend at 200 % (T.interrupts),
 /// by the reader's file and function: the most either scenario below spent when measured on
-/// 2026-10-12, plus a margin of READ_MARGIN — fewer turns than the pixels of the smallest box any
+/// 2026-10-12 (the drumkit table's on 2026-10-17: its 48 boxes, of 52 by 32 pixels each, 79,872 in
+/// all), plus a margin of READ_MARGIN — fewer turns than the pixels of the smallest box any
 /// read looks at there (AUTO FOLLOW's, 44 by 32 pixels; the lock and the pattern switch, 40 by 40;
 /// a Mute, 52 by 32; FAV, 100 by 40), so that a loop in Luau over any box's pixels, at least one
 /// turn a pixel, is more than its read may spend. A read not listed may spend READ_MARGIN.
@@ -713,6 +714,7 @@ const READ_TURNS: &[(&str, u64)] = &[
     ("strip decide", 9258),
     ("centre decide", 721),
     ("drumsq decide", 18957),
+    ("drums decide", 22064),
     ("macros selected", 611),
     ("macros buttons", 995),
     ("expansion favorite", 2133),
@@ -740,6 +742,7 @@ local function counted()
   count("strip", { "count", "decide", "namesFromWords" })
   count("centre", { "decide" })
   count("drumsq", { "decide" })
+  count("drums", { "decide" })
   count("macros", { "selected", "buttons", "labels", "count" })
   count("expansion", { "favorite", "fromArea", "parseView" })
   count("knob", { "macro", "osc", "oscMiddles" })
@@ -764,8 +767,9 @@ fn read_turns() -> String {
 
 /// No loop over pixels on the event loop: at 200 % — the largest Avenger, whose macro knob alone
 /// spans 280 by 280 pixels (78,400 of them) — the whole open, from the key to the show, turns
-/// Luau's loops and calls about 35,000 times with an oscillator selected and 48,000 with the Drums
-/// tab and DRUM SQ, whose switches only that reads: each under a bound with a margin for small
+/// Luau's loops and calls about 34,000 times with an oscillator selected and 72,000 with the Drums
+/// tab, DRUM SQ and the drumkit table, whose switches and slots only that reads: each under a bound
+/// with a margin for small
 /// changes that a loop over the strip's dots band (about 32,700 pixels at 200 %) or the macro
 /// buttons (about 21,000) passes; and each read spends at most what READ_TURNS lets it, which a
 /// loop over its smallest box passes. The points it reads are a few hundred at a time, and the
@@ -822,7 +826,9 @@ fn the_open_reads_loop_over_no_pixels_in_luau() {
         .replace("@CHECK@", check)
         .replace("@LIMIT@", limit)
     };
-    // Measured 2026-10-12: 34,873 turns, of 12 grids of 4400 cells, 7 profiles and 1552 points.
+    // Measured 2026-10-12: 34,873 turns, of 12 grids of 4400 cells, 7 profiles and 1552 points; on
+    // 2026-10-17, with the drumkit table's grids asked too, 33,731 of 16 grids of 9236 cells, 8 profiles
+    // and 1356 points.
     run(&scenario(
         r#"{ osc = 8, selected = "osc", index = 5, mute = { [8] = true }, solo = { [1] = true }, trigSolo = true,
           macroShown = 3, buttons = { true, true }, amounts = { 30, 60, 90 }, volume = 50, transpose = -24, fine = 0 }"#,
@@ -833,7 +839,9 @@ fn the_open_reads_loop_over_no_pixels_in_luau() {
             tostring(o.fine_tune_values[5])))"#,
         "40000",
     ));
-    // Measured 2026-10-12: 47,999 turns, of 12 grids of 4400 cells, 7 profiles and 1028 points.
+    // Measured 2026-10-12: 47,999 turns, of 12 grids of 4400 cells, 7 profiles and 1028 points; on
+    // 2026-10-17, with the drumkit table read — its 48 boxes, the selection and the names — 71,569 of 16
+    // grids of 9236 cells, 8 profiles and 1028 points.
     run(&scenario(
         r#"{ osc = 8, selected = "drums", pattern = true, lock = true, mode = "sq", central = "drum_sq",
           sq = { chain = true, follow = false, on = { b = true }, selected = "a" }, macroShown = 3,
@@ -841,7 +849,7 @@ fn the_open_reads_loop_over_no_pixels_in_luau() {
         r#"T.ok(o.selected_type == "drums" and o.drum_pattern == true and o.drum_lock == true and o.drum_mode == "sq"
           and o.central_panel_tab == "drum_sq" and o.drum_sq_pattern_chain == true and o.drum_sq_pattern_selected == "a"
           and o.drum_sq_pattern_states[1] == true, "the Drums tab and DRUM SQ at 200 %")"#,
-        "53000",
+        "77000",
     ));
 }
 
@@ -1527,6 +1535,56 @@ fn back_and_next_carry_aria_disabled_and_stay_in_the_tab_order() {
     let restore = js.find("function restoreFocus() {").expect("panel.js has restoreFocus");
     let restore_body = &js[restore..restore + js[restore..].find("\n  }\n").unwrap()];
     assert!(!restore_body.contains("aria-disabled"), "restoreFocus passes over an aria-disabled button");
+}
+
+/// The page claims nothing of DRUM SQ at a click (the plan's slice 8, its other half, the page edits
+/// E1 to E4): a pattern SELECTED, PASTE offered and LENGTH shown come from the state alone — each is
+/// set in applyState and nowhere else, so no click of a select button, of the pattern menu's COPY or
+/// of the length list sets it, and the select buttons carry no click listener of their own beside
+/// the one that sends their action. And the twelve slots' lists, which the module keys by the slot's
+/// number where JSON could not carry them as a list (state.luau), are read through one reader that
+/// takes either.
+#[test]
+fn the_page_claims_nothing_of_drum_sq_at_a_click_and_reads_the_slot_lists_either_way() {
+    let js = PANEL_JS.replace("\r\n", "\n");
+    let apply = js.find("function applyState(s) {").expect("panel.js has applyState");
+    let apply_end = apply + js[apply..].find("\n  }\n").expect("applyState ends");
+    for (set, declared) in [
+        ("centralDrumSqPattern = ", "let centralDrumSqPattern = null;"),
+        ("centralDrumSqPatternCopied = ", "let centralDrumSqPatternCopied = false;"),
+        ("setCentralDrumSqLengthSteps(", "function setCentralDrumSqLengthSteps(value) {"),
+    ] {
+        let decl = js.find(declared).unwrap_or_else(|| panic!("panel.js has '{declared}'"));
+        let sets: Vec<usize> = js
+            .match_indices(set)
+            .map(|(i, _)| i)
+            .filter(|i| !(decl..decl + declared.len()).contains(i))
+            .collect();
+        assert!(!sets.is_empty(), "panel.js sets '{set}' from the state");
+        for at in sets {
+            let line = &js[at..at + js[at..].find('\n').unwrap_or(js.len() - at)];
+            assert!(at > apply && at < apply_end, "'{set}' outside applyState: {line}");
+        }
+    }
+    assert!(js.contains("centralDrumSqPatternCopied = oscPanel.drum_sq_pattern_copied === true;"), "PASTE from the state");
+    let select = js.find("function appendPatternSelectButton(key) {").expect("panel.js has the select buttons");
+    let select_body = &js[select..select + js[select..].find("\n    }\n").expect("it ends")];
+    assert!(!select_body.contains("addEventListener"), "a select button sets something at its click: {select_body}");
+
+    let reader = js.find("const readSlots = (v, read) => {").expect("panel.js has readSlots");
+    let reader_body = &js[reader..reader + js[reader..].find("\n  };\n").expect("it ends")];
+    for part in ["if (Array.isArray(v)) return v.map(read);", "parseInt(key, 10)", "i >= 1 && i <= 12"] {
+        assert!(reader_body.contains(part), "readSlots has no '{part}': {reader_body}");
+    }
+    for key in [
+        "drumkit_part_labels", "drumkit_mute_states", "drumkit_solo_states", "drumkit_lock_states",
+        "drumkit_loop_states", "sample_editor_amp_states", "sample_editor_pitch_states", "sample_editor_eq_states",
+    ] {
+        assert!(
+            js.contains(&format!("{key}: readSlots(s.osc_panel.{key}, ")),
+            "panel.js reads {key} other than through readSlots"
+        );
+    }
 }
 
 /// The page's list against what it sends: every name the script quotes as an action and every

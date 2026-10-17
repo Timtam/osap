@@ -110,10 +110,11 @@ function P.columns(name, rect, pred)
   return { name = name, kind = "cells", rect = rect, cols = math.min(256, w), rows = 1, pred = pred }
 end
 
--- A column profile of `rect`.
-function P.profile(name, rect)
+-- A column profile of `rect` — of its rows as well with `axes` "both" (the drumkit's name column,
+-- read/drums.luau).
+function P.profile(name, rect, axes)
   if not rect then return nil end
-  return { name = name, kind = "profile", rect = rect }
+  return { name = name, kind = "profile", rect = rect, axes = axes }
 end
 
 -- ── The answers ──────────────────────────────────────────────────────────────
@@ -232,6 +233,19 @@ function P.bandMean(prof, x1, x2)
   if to < from then return nil end
   local sum = 0
   for i = from, to do sum += (cols.r[i] + cols.g[i] + cols.b[i]) / 3 end
+  return sum / (to - from + 1), to - from + 1
+end
+
+-- The same over a profile's ROWS between screen y1 and y2 (a profile asked with `axes` "both"),
+-- and how many rows that is; nil outside it.
+function P.rowMean(prof, y1, y2)
+  local rows = prof and prof.rows
+  if not rows then return nil end
+  local from = math.max(y1, prof.y) - prof.y + 1
+  local to = math.min(y2, prof.y + prof.h) - prof.y
+  if to < from then return nil end
+  local sum = 0
+  for i = from, to do sum += (rows.r[i] + rows.g[i] + rows.b[i]) / 3 end
   return sum / (to - from + 1), to - from + 1
 end
 

@@ -52,7 +52,11 @@ name = "Overlay runtime"
 # "keys" } holds the end keys and lets them through to the plug-in, or captures named keys for the
 # module, ends on its key and the module's `ends`, on the page key or a window change, and calls
 # `onEnd` once on every path. A module that uses it depends on "com.platform.overlay >= 0.9".
-version = "0.9.0"
+# 0.10.0 chooses in a submenu: O:chooseMenuItem's `submenu = { menuItem }` clicks the item that opens
+# it once, after the test that placed it got ready through its new `chained` hook (newWindow and drawn
+# have one), takes it as taken when that test answers a new popup, and chooses the submenu's item in
+# that; `why` "no submenu" when none came. A module that uses it depends on "com.platform.overlay >= 0.10".
+version = "0.10.0"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

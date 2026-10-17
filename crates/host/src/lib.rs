@@ -47,6 +47,10 @@ mod overlay_menu_item_tests;
 /// A popup painted inside the plug-in, seen by `O.menuTests.drawn`; and `O.doubleClick`'s button.
 #[cfg(test)]
 mod overlay_drawn_menu_tests;
+/// A menu item that opens a submenu, chosen in it (`O:chooseMenuItem`'s `submenu`): newWindow and
+/// drawn following it through their `chained` hook.
+#[cfg(test)]
+mod overlay_submenu_tests;
 /// VPS Avenger's module loaded against the same scripted host: its header read, its zoom and
 /// scale, its clicks, its menus and its warning box.
 #[cfg(test)]
@@ -68,6 +72,19 @@ mod avenger_rename_tests;
 /// hand-over of the keys, one move per key, the release on every end, and the knob read after.
 #[cfg(test)]
 mod avenger_amount_tests;
+/// VPS Avenger's Drums tab (the plan's slice 8, its drums): nothing clicked off the Drums tab, the
+/// drumkit table read after every click, a slot menu's submenu, Browse and a slot's knobs.
+#[cfg(test)]
+mod avenger_drums_tests;
+/// VPS Avenger's sample editor (the plan's slice 8, its other half): nothing clicked off the editor
+/// or off a control's own tab, its menus opened with the left button, its fields and browser handed
+/// over, everything read after.
+#[cfg(test)]
+mod avenger_sample_tests;
+/// VPS Avenger's DRUM SQ (the plan's slice 8, its other half): nothing clicked off DRUM SQ, the
+/// pattern menu's COPY as a fact, LENGTH dragged from what it reads, the watcher and the ring's group.
+#[cfg(test)]
+mod avenger_drumsq_tests;
 /// The HTML page probe (tools/html-probe) against the same scripted host, with a scripted page:
 /// its keys, its report, W3's round trip, W7's landing and the automatic show.
 #[cfg(test)]

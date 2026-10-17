@@ -5,13 +5,17 @@
 --      in a trip's continuation after Initialize: one snapshot of the plug-in's panel
 --      (host.screen.snapshot, waited for).
 --   2. Every question of the avenger_control project's classifiers (read/strip, centre, drumsq,
---      macros, expansion) asked of that picture, each waited for in turn: the runtime shows the
---      page once `open` has returned, so the answers have to be in by then. Each is the image
---      worker's work on the picture already taken, and one event-loop turn to hand it over.
+--      drums, sample, macros, expansion) asked of that picture, each waited for in turn: the runtime
+--      shows the page once `open` has returned, so the answers have to be in by then. Each is the
+--      image worker's work on the picture already taken, and one event-loop turn to hand it over.
 --   3. Then ONE text read of the same picture, with a named region for each thing to read — the
 --      preset's name, the browser's view, the OSC tabs' names (one region per tab, the count from
 --      the dots), the macro tabs' captions and the five names of the tab shown, the central tabs'
---      captions — and the knob reader over a few hundred points of the picture (read/knob.luau).
+--      captions, and with the Drums tab selected the twelve drum slots' names, DRUM SQ's LENGTH where
+--      it is the central tab and the sample browser's rows where EDITOR shows no tab of the editor's
+--      (the strip, the central tab and the editor's pixels decided before the text read when the
+--      dots gave the count) — and the knob reader over a few hundred points of the picture
+--      (read/knob.luau).
 --      Only when the browser's caption reads no view, a second text read of the browser's area, to
 --      tell an open expansion — the one region the project read only then, and the largest by
 --      far, too slow on an Intel Mac to read every time.
@@ -44,22 +48,46 @@ local DrumSq = host.include("src/read/drumsq.luau")
 local Macros = host.include("src/read/macros.luau")
 local Expansion = host.include("src/read/expansion.luau")
 local Knob = host.include("src/read/knob.luau")
+local Dr = host.include("src/read/drums.luau")
+local Sm = host.include("src/read/sample.luau")
+local C = host.include("src/tables/centre.luau")
 
 local Open = {}
 
 -- The parts of Avenger a calibrating run photographs, at 50 % from its corner: the strip with the
--- Drums tab's switches, the macro panel, the oscillator's knobs, the central tabs and DRUM SQ's
--- row. One picture of each per zoom in a session, of the picture the reads were answered from.
+-- Drums tab's switches, the macro panel, the oscillator's knobs, the central tabs, DRUM SQ's row,
+-- the drumkit table, the sample editor ("sample": the renames' pictures are "editor-…") and
+-- DRUM SQ's controls. One picture of each per zoom in a session, of the picture the reads were
+-- answered from.
 Open.PICTURES = {
   strip = { 230, 18, 640, 145 },
   macros = { 700, 425, 871, 535 },
   knob = { 320, 46, 372, 182 },
   centre = { 240, 236, 400, 252 },
   drumsq = { 330, 250, 490, 268 },
+  drums = { 230, 40, 640, 232 },
+  sample = { 240, 252, 630, 420 },
+  ["sq-controls"] = { 430, 405, 620, 428 },
 }
-Open.PICTURE_ORDER = { "strip", "macros", "knob", "centre", "drumsq" }
+Open.PICTURE_ORDER = { "strip", "macros", "knob", "centre", "drumsq", "drums", "sample", "sq-controls" }
 
 local log = function(s) host.log.info("[avenger] [read] " .. s) end
+
+-- Where the sample editor's and DRUM SQ's controls are, marked in their calibration pictures
+-- whether or not they were read: the editor's tabs, switches, fields and knobs; LENGTH, SPEED and
+-- DRUM SQ's knobs.
+local function middles(pl, marks)
+  local function mark(list, p) local x, y = pl:point(p[1], p[2]); list[#list + 1] = { x = x, y = y } end
+  local editor, sq = marks.sample, marks["sq-controls"]
+  for _, key in ipairs(C.EDITOR_TAB_ORDER) do mark(editor, C.EDITOR_TABS[key]) end
+  mark(editor, C.ENABLE_STATE)
+  mark(editor, C.EQ_ENABLE_STATE)
+  for _, key in ipairs({ "play_mode", "grid", "eq1_type", "eq2_type", "loop_stretch" }) do mark(editor, C.VALUES[key]) end
+  for _, key in ipairs({ "volume", "pitch", "pan", "spike", "delay", "lowpass", "highpass", "rate" }) do
+    mark(editor, C.EDITOR_CONTROLS[key])
+  end
+  for _, p in ipairs({ C.SQ_CONTROLS.vel_amount, C.SQ_LENGTH, C.SQ_CONTROLS.shuffle, C.SQ_SPEED }) do mark(sq, p) end
+end
 
 -- What the user is told when the key's reads show no page, by why. "The user moved on" is not
 -- said: the user is somewhere else by then, and hears that place.
@@ -120,10 +148,25 @@ end
 local function decide(ctx)
   local pl, snap, got, opts = ctx.pl, ctx.snap, ctx.got, ctx.opts
   local v = { zoom = opts.zoom }
-  local marks = { strip = {}, macros = {}, knob = {}, centre = {}, drumsq = {}, expansion = {} }
+  local marks = { strip = {}, macros = {}, knob = {}, centre = {}, drumsq = {}, expansion = {}, drums = {},
+    sample = {}, ["sq-controls"] = {} }
 
-  -- How many oscillators the dots say, which places the tabs' names.
+  -- How many oscillators the dots say, which places the tabs' names. With a count from the dots the
+  -- strip is decided before the text read, which then asks the drum slots' names when it reads the
+  -- Drums tab selected; a count from the text keeps the strip's decision after it.
   local count = Strip.count(pl, got, log)
+  local early = count ~= nil
+  if early then Strip.decide(pl, snap, got, count, v, log, marks.strip) end
+  -- The central tab, DRUM SQ and the sample editor's pixels, on the Drums tab; decided before the
+  -- text read when the strip was, which then asks DRUM SQ's LENGTH where it reads DRUM SQ and the
+  -- sample browser's rows where it reads EDITOR with no tab of the editor's.
+  local function centre()
+    Centre.decide(pl, got, v, log, marks.centre)
+    if v.central == "drum_sq" then DrumSq.decide(pl, got, v, log, marks.drumsq) end
+    if Sm.shown(v) then Sm.decidePixels(pl, got, v, log, marks.sample) end
+  end
+  local centreEarly = early and v.selectedType == "drums"
+  if centreEarly then centre() end
 
   -- The one text read, of the picture.
   local entries = {}
@@ -141,6 +184,17 @@ local function decide(ctx)
   else
     local r = pl:rect(T.AREA)
     if r then entries[#entries + 1] = { name = "strip", region = r } end
+  end
+  local slotNames = early and v.selectedType == "drums"
+  if slotNames then Dr.entries(pl, entries) end
+  local lengthAsked = centreEarly and v.central == "drum_sq"
+  if lengthAsked then
+    local r = pl:rect(C.valueRect("sq_length"))
+    if r then entries[#entries + 1] = { name = DrumSq.FIELDS.sq_length, region = r } end
+  end
+  if centreEarly and Sm.applies("browser", v) then
+    local r = pl:rect(Sm.fieldRect("browser"))
+    if r then entries[#entries + 1] = { name = "browser", region = r } end
   end
   local byName = {}
   if #entries > 0 then
@@ -188,13 +242,22 @@ local function decide(ctx)
   end
   v.oscCount = count
   if count then oscNames(texts, count, place and place.osc, v) end
-  Strip.decide(pl, snap, got, count, v, log, marks.strip)
+  if not early then
+    Strip.decide(pl, snap, got, count, v, log, marks.strip)
+    if v.selectedType == "drums" then log("drums: the slots' names are not read — the strip's count came from its text") end
+  end
   local central = textOf("central tabs")
   if central then log("centre: the captions read '" .. central .. "'") end
   if v.selectedType == "drums" then
-    Centre.decide(pl, got, v, log, marks.centre)
-    if v.central == "drum_sq" then DrumSq.decide(pl, got, v, log, marks.drumsq) end
+    if not centreEarly then
+      centre()
+      log("centre: DRUM SQ's LENGTH and the sample browser's rows are not read — the strip's count came from its text")
+    end
+    Dr.decide(pl, got, slotNames and byName or nil, v, log, marks.drums)
+    if Sm.shown(v) then Sm.decideText(byName, v, log, nil) end
+    if lengthAsked then DrumSq.fields(byName, v, log, { "sq_length" }) end
   end
+  middles(pl, marks)
 
   -- The macros: the count, the tab shown, its names, its buttons, its knobs.
   local counted = Macros.count(byName, v)
@@ -321,6 +384,8 @@ function Open.read(o, opts)
   Strip.ask(ctx.pl, all)
   Centre.ask(ctx.pl, all)
   DrumSq.ask(ctx.pl, all)
+  Dr.ask(ctx.pl, all)
+  Sm.ask(ctx.pl, all)
   Macros.ask(ctx.pl, all)
   Expansion.ask(ctx.pl, all)
   -- Each asked of what the picture holds of it, and waited for; guarded, so that every answer is
@@ -334,7 +399,7 @@ function Open.read(o, opts)
         ok, value, reason = pcall(host.screen.cells, { region = req.rect, cols = req.cols, rows = req.rows,
           predicate = req.pred, snapshot = snap })
       else
-        ok, value, reason = pcall(host.screen.profile, { region = req.rect, axes = "columns", snapshot = snap })
+        ok, value, reason = pcall(host.screen.profile, { region = req.rect, axes = req.axes or "columns", snapshot = snap })
       end
       if not ok then
         ctx.got.why[req.name] = tostring(value)
@@ -368,13 +433,32 @@ end
 --   strip    the OSC tabs, Drums and Trig: the count, the tab selected, every Mute and Solo, the
 --            Drums tab's switches and mode (read/strip.luau)
 --   knobs    the strip, and the selected oscillator's knobs (read/knob.luau)
---   tab      the strip, the knobs, and with the Drums tab the central tab and DRUM SQ
+--   tab      the strip, the knobs, and with the Drums tab the central tab, DRUM SQ and the drumkit
+--            table, its names not among the part's text
+--   drums    the strip, and with the Drums tab the drumkit table (read/drums.luau): every slot's
+--            Mute, Solo, Lock and Loop and the slot selected; the twelve names read with `text`
+--            (`kitNames`)
+--   editor   the strip, the central tab, the drumkit table (its names with `text`), and with the
+--            Drums tab and EDITOR the sample editor (read/sample.luau): its tab shown, the editor
+--            or the sample browser in its place, the tab's switch
+--   central  the strip, and the central tab and DRUM SQ with any tab selected (`anyTab`), the
+--            sample editor where it reads the Drums tab and EDITOR: what a choice of central tab
+--            reads after its click (src/actions/drums.luau)
+--   drumsq   the central tab and DRUM SQ with any tab of the strip selected, and no strip — the
+--            page shows DRUM SQ whatever the strip shows (src/actions/drumsq.luau)
 --   macros   the macro panel: the tab shown, its buttons and its knobs' amounts; the tabs counted
 --            and the five names read with `text`
+-- `fields` (Open.part's opts) names what is read as text besides: the sample editor's menus' fields,
+-- the envelope's preset name and the browser's rows (read/sample.luau), DRUM SQ's LENGTH and SPEED
+-- (read/drumsq.luau) — each asked only where the pixels read before the text read say it is shown.
 Open.PARTS = {
   strip = { rect = { 230, 18, 640, 145 }, strip = true },
   knobs = { rect = { 230, 18, 640, 182 }, strip = true, knobs = true },
-  tab = { rect = { 230, 18, 640, 268 }, strip = true, knobs = true, centre = true },
+  tab = { rect = { 230, 18, 640, 268 }, strip = true, knobs = true, centre = true, drums = true },
+  drums = { rect = { 230, 18, 640, 232 }, strip = true, drums = true, kitNames = true },
+  editor = { rect = { 230, 18, 640, 425 }, strip = true, centre = true, drums = true, kitNames = true, editor = true },
+  central = { rect = { 230, 18, 640, 425 }, strip = true, centre = true, anyTab = true, editor = true },
+  drumsq = { rect = { 236, 236, 640, 430 }, centre = true, anyTab = true },
   macros = { rect = { 700, 425, 871, 535 }, macros = true },
 }
 
@@ -405,9 +489,13 @@ end
 -- Reads part `name` off snapshot `snap` (of Open.partRegion's rectangle), in a handler where its
 -- questions wait. `opts`: { pl = the placer the picture was taken with, text = read the part's text
 -- too, macroCount = the macro tabs counted before, for a part read without its text, preset = the
--- preset's name last read, whose tabs' names in the database are the names' vocabulary }. Answers
--- the values read (state.luau's), and the keys the part read — a key of the list missing from the
--- values was not found. Nothing clicks; nothing but the snapshot is read.
+-- preset's name last read, whose tabs' names in the database are the names' vocabulary, fields = a
+-- list of the fields to read as text where they are shown (above) }. Answers the values read
+-- (state.luau's), and the keys the part read — a key of the list missing from the values was not
+-- found. Nothing clicks; nothing but the snapshot is read. The strip, the central tab, DRUM SQ and
+-- the sample editor's pixels are decided before the part's text is read, so that the text read asks
+-- the slots' names only where the strip reads the Drums tab selected, and a field only where it is
+-- shown.
 function Open.part(snap, name, opts)
   local part = Open.PARTS[name]
   local pl = opts.pl
@@ -418,6 +506,8 @@ function Open.part(snap, name, opts)
     Centre.ask(pl, all)
     DrumSq.ask(pl, all)
   end
+  if part.drums then Dr.ask(pl, all) end
+  if part.editor then Sm.ask(pl, all) end
   if part.macros then Macros.ask(pl, all) end
   local got = { why = {} }
   for _, req in ipairs(all) do
@@ -427,7 +517,7 @@ function Open.part(snap, name, opts)
         ok, value, reason = pcall(host.screen.cells, { region = req.rect, cols = req.cols, rows = req.rows,
           predicate = req.pred, snapshot = snap })
       else
-        ok, value, reason = pcall(host.screen.profile, { region = req.rect, axes = "columns", snapshot = snap })
+        ok, value, reason = pcall(host.screen.profile, { region = req.rect, axes = req.axes or "columns", snapshot = snap })
       end
       if not ok then
         got.why[req.name] = tostring(value)
@@ -448,17 +538,59 @@ function Open.part(snap, name, opts)
   end
   local v, keys = {}, {}
   local function read(list) for _, k in ipairs(list) do keys[#keys + 1] = k end end
-  local marks = { strip = {}, macros = {}, knob = {}, centre = {}, drumsq = {} }
+  local marks = { strip = {}, macros = {}, knob = {}, centre = {}, drumsq = {}, drums = {}, editor = {} }
   local count = nil
   if part.strip then
     read(STRIP_KEYS)
     count = Strip.count(pl, got, log)
     v.oscCount = count
+    Strip.decide(pl, snap, got, count, v, log, marks.strip)
   end
-  -- The one text read of the part's picture, where it is asked.
+  if part.centre then
+    read({ "central", "drumSq" })
+    if v.selectedType == "drums" or part.anyTab then
+      Centre.decide(pl, got, v, log, marks.centre)
+      if v.central == "drum_sq" then DrumSq.decide(pl, got, v, log, marks.drumsq) end
+    end
+  end
+  if part.editor then
+    read(Sm.KEYS)
+    if Sm.shown(v) then Sm.decidePixels(pl, got, v, log, marks.editor) end
+  end
+  local kit = part.drums and v.selectedType == "drums"
+  local names = opts.text and part.kitNames
+
+  -- The fields asked, each only where what was just read shows it: the editor's on their tab,
+  -- DRUM SQ's where it is the central tab. Those not asked, in one log line.
+  local editorFields, sqFields, skipped = {}, {}, {}
+  local askedEditor = false
+  for _, key in ipairs(opts.fields or {}) do
+    if DrumSq.FIELDS[key] then
+      if part.centre then
+        read({ DrumSq.FIELD_KEYS[key] })
+        if v.central == "drum_sq" then
+          sqFields[#sqFields + 1] = key
+        else
+          skipped[#skipped + 1] = string.format("'%s' not asked — DRUM SQ is not the central tab read", key)
+        end
+      end
+    elseif part.editor then
+      if key ~= "browser" then askedEditor = true end
+      local fine, why = Sm.applies(key, v)
+      if fine then
+        editorFields[#editorFields + 1] = key
+      else
+        skipped[#skipped + 1] = string.format("'%s' not asked — %s", key, why)
+      end
+    end
+  end
+  if askedEditor then read(Sm.FIELD_KEYS) end
+  if #skipped > 0 then log("fields: " .. table.concat(skipped, "; ")) end
+
+  -- The one text read of the part's picture, where anything of it is asked.
   local byName = {}
+  local entries = {}
   if opts.text then
-    local entries = {}
     if part.strip and count then
       for i = 1, count do
         local r = pl:rect(T.tabSpan(i, count, T.NAME_TOP, T.NAME_BOTTOM))
@@ -466,10 +598,19 @@ function Open.part(snap, name, opts)
       end
     end
     if part.macros then Macros.entries(pl, entries) end
-    if #entries > 0 then
-      local _, names = host.ocr.recognize(entries, { snapshot = snap, lang = H.lang() })
-      byName = names or {}
-    end
+    if kit and names then Dr.entries(pl, entries) end
+  end
+  for _, key in ipairs(editorFields) do
+    local r = pl:rect(Sm.fieldRect(key))
+    if r then entries[#entries + 1] = { name = Sm.regionName(key), region = r } end
+  end
+  for _, key in ipairs(sqFields) do
+    local r = pl:rect(C.valueRect(key))
+    if r then entries[#entries + 1] = { name = DrumSq.FIELDS[key], region = r } end
+  end
+  if #entries > 0 then
+    local _, answers = host.ocr.recognize(entries, { snapshot = snap, lang = H.lang() })
+    byName = answers or {}
   end
   if part.strip then
     if opts.text and count then
@@ -481,7 +622,6 @@ function Open.part(snap, name, opts)
       end
       oscNames(texts, count, place and place.osc, v)
     end
-    Strip.decide(pl, snap, got, count, v, log, marks.strip)
   end
   if part.knobs then
     read({ "osc" })
@@ -490,13 +630,19 @@ function Open.part(snap, name, opts)
       log("oscillator: " .. Knob.osc(pl, snap, v.osc, marks.knob))
     end
   end
-  if part.centre then
-    read({ "central", "drumSq" })
-    if v.selectedType == "drums" then
-      Centre.decide(pl, got, v, log, marks.centre)
-      if v.central == "drum_sq" then DrumSq.decide(pl, got, v, log, marks.drumsq) end
-    end
+  if part.drums then
+    read(Dr.KEYS)
+    if names then read(Dr.NAME_KEYS) end
+    if kit then Dr.decide(pl, got, names and byName or nil, v, log, marks.drums) end
   end
+  if part.editor and Sm.shown(v) then
+    local fields = {}
+    for _, key in ipairs(editorFields) do
+      if key ~= "browser" then fields[#fields + 1] = key end
+    end
+    Sm.decideText(byName, v, log, askedEditor and fields or nil)
+  end
+  if #sqFields > 0 then DrumSq.fields(byName, v, log, sqFields) end
   if part.macros then
     read({ "macroSelected", "macroButtons", "macroAmounts" })
     local counted = nil

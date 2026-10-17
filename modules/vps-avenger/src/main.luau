@@ -22,11 +22,14 @@
 --
 -- and after it the oscillator strip and the macros (ring.luau): the tab selected, its Mute and
 -- Solo, Add oscillator, the selected oscillator's knobs reset, the macro tab, its knobs reset and
--- its buttons — each saying what was read, and clicked as the page's trips click them (act.luau)
+-- its buttons — and on the Drums tab its pattern, mode and lock, the slot selected and its Mute and
+-- Solo, and the central tab, with DRUM SQ's patterns once DRUM SQ reads as the central tab — each
+-- saying what was read, and clicked as the page's trips click them (act.luau)
 --
 -- at every zoom from 50 to 200 %, in every DAW daw-hosts has an entry for. Turning knobs from the
--- ring, the drums and the browser are later stages (TODO.md, "VPS Avenger"). Plug-in only: the
--- project supports no standalone Avenger, and neither does this module yet (TODO.md).
+-- ring and the browser are later stages (TODO.md, "VPS Avenger"); the sample editor is the page's
+-- only. Plug-in only: the project supports no standalone Avenger, and neither does this module yet
+-- (TODO.md).
 --
 -- And the project's panel as a page of this module's own (page.luau, ui/), on the overlay
 -- runtime's page support (O:addPage): its key on an identified Avenger reads Avenger off one
@@ -34,7 +37,8 @@
 -- Avenger made with this file's own clicks, reads and choices (actions.luau), the renames and
 -- Browse Presets hand-overs of the keyboard to Avenger (handover.luau), and the knobs turned with
 -- a press held through a hand-over of the keys (amount.luau); the page's other actions come in
--- later stages, and say so until then.
+-- later stages, and say so until then. While the page is hidden, DRUM SQ's watcher says the pattern
+-- AUTO FOLLOW moves to (watch.luau).
 --
 -- Coordinates are written as the project wrote them, at 50 % from Avenger's corner; the overlay
 -- scales them by the zoom READ off Avenger's zoom field (header.luau), and puts Avenger's corner
@@ -168,8 +172,12 @@ end
 --     Which of the two Avenger's right clicks open is not known; Escape is right for both.
 -- Quiet: the runtime has said what went wrong, and the menu tests say whether the popup has gone
 -- (`[menu] … the menu has closed`). Whether either closes Avenger's popups is not measured
--- (TODO.md).
-local CLOSE_AFTER = { unplaced = true, covered = true, untaken = true, due = true, refused = true }
+-- (TODO.md). A submenu that did not open ("no submenu", a drum slot's Copy Sample to), one its
+-- target could not be chosen in ("unfit submenu") and one the drawn test could not get ready to
+-- follow ("unfollowed") leave the menu up: Escape too, which JUCE takes for the whole of a menu and
+-- its submenus (its dismissMenu walks up to the first menu; read in its source, not measured).
+local CLOSE_AFTER = { unplaced = true, covered = true, untaken = true, due = true, refused = true,
+  ["no submenu"] = true, ["unfit submenu"] = true, unfollowed = true }
 
 local function closeLeftOpen(w, pick, why, label, opener)
   if not (pick.seen and CLOSE_AFTER[why] and w:menuOpen()) then return end
@@ -775,6 +783,10 @@ Page.start({
     closeLeftOpen = closeLeftOpen,
     doubleAt = doubleAt,
     forgetRing = Ring.forget,
+    -- For the DRUM SQ watcher (src/watch.luau): the ring's action out, its values, its merge.
+    ringBusy = Ring.busy,
+    ringValues = Ring.values,
+    ringSeen = Ring.seen,
     boxOffScreen = boxOffScreen,
     OWN_NAME = OWN_NAME,
     ZOOM_SETTLE = ZOOM_SETTLE,

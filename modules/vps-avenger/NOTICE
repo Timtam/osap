@@ -28,8 +28,23 @@ been published and has no licence of its own.
       changed rather than assume it.
   src/amount.luau
       the tool's amount mode (its actions.py, clicker and panel): its points, travel and buttons
-      for the macro knobs, the oscillator's knobs and the 2-band filter, its sentences, and
-      Slider.wav at the limit.
+      for the macro knobs, the oscillator's knobs, the 2-band filter and a drum slot's knobs, its
+      sentences, and Slider.wav at the limit.
+  src/actions/drums.luau, src/read/drums.luau, src/handover.luau (a drum slot's Browse)
+      the tool's actions on the Drums tab (its actions.py and clicker): their names, arguments,
+      points, menu rows, submenu targets, focus targets and its sentences #9 and #13, each made to
+      read back what it changed; its test for a slot's lit button. The rule that reads which slot is
+      selected is this module's own.
+  src/actions/sample.luau, src/actions/drumsq.luau, src/handover.luau (a row of the sample
+  browser, a field of the sample editor, the envelope's Menu and Preset)
+      the tool's actions on the sample editor and DRUM SQ (its actions.py and clicker): their
+      names, arguments, points, menu rows, focus targets and its sentences #10 and #11, LENGTH's
+      steps and its points per four steps, each made to read back what it changed.
+  src/read/sample.luau
+      the tool's blue test, box and threshold for the sample editor's switches; the editor's tab
+      read by its rule for the central tab.
+  src/watch.luau
+      the tool's DRUM SQ watcher: the pattern AUTO FOLLOW moves to, said while the page is hidden.
   sounds/Open.wav, sounds/Close.wav, sounds/Slider.wav
       the tool's sounds for the page opening and closing and for a knob at its limit.
 

@@ -65,10 +65,14 @@ S.owns = true
 S.ownsAsked = {}
 S.marked = {}
 
--- The ring's controls of the oscillator strip and the macros, after Zoom (src/ring.luau).
-T.RING_LABELS = "Oscillator|Mute|Solo|Add oscillator|Level|Pan|Transpose|Fine tune|Random pitch|Macro tab|"
-  .. "Add macro tab|Delete last macro tab|Macro 1|Macro 2|Macro 3|Macro button 1|Macro button 2"
-T.RING_CONTROLS = 17
+-- The ring's controls of the oscillator strip, the Drums tab and the macros, after Zoom
+-- (src/ring.luau): the Drums tab's group shown only while the strip reads the Drums tab, and DRUM
+-- SQ's in it only while the central tab reads DRUM SQ.
+T.RING_LABELS = "Oscillator|Mute|Solo|Add oscillator|Drum pattern|Drum mode|Drum lock|Drum slot|Slot mute|"
+  .. "Slot solo|Central tab|Pattern chain|Auto follow|Pattern|Pattern B|Pattern C|Pattern D|Level|Pan|"
+  .. "Transpose|Fine tune|Random pitch|Macro tab|Add macro tab|Delete last macro tab|Macro 1|Macro 2|Macro 3|"
+  .. "Macro button 1|Macro button 2"
+T.RING_CONTROLS = 30
 
 -- The arbiter is the shared one with the rule a module with a dialog layer needs
 -- (`overlay_host_panel_tests::SPECIFICITY_ARBITER`), its claims Avenger's.
@@ -227,13 +231,14 @@ do
 end
 
 -- The answers of the page's grids, profiles and pictures, on the next turn, the epoch turned over
--- first, each as an event of the module.
+-- first, each as an event of the module — unless S.holdScreenOut, which keeps them out (pending)
+-- until a scenario lets them go.
 do
   local runDue = T.runDue
   T.runDue = function()
     runDue()
     local out = S.screenOut
-    if #out == 0 then return end
+    if #out == 0 or S.holdScreenOut then return end
     S.screenOut = {}
     if S.turnsAtAnswers == false then S.turnsAtAnswers = T.interrupts() end
     S.epoch += 1
@@ -339,11 +344,16 @@ do
       if s and S.onSnapshotWait then S.onSnapshotWait(opts) end
       return s, why
     end
-    -- A plain picture with a callback: of the picture as it is when it is answered.
-    return snapshot(opts, function(s, why, info)
+    -- A plain picture with a callback: of the picture as it is when it is answered; with a key,
+    -- out (host.screen.pending) until its callback runs, or a disable drops it (T.disable).
+    local key = opts and opts.key
+    if key then S.out[key] = (S.out[key] or 0) + 1 end
+    snapshot(opts, function(s, why, info)
+      if key then S.out[key] -= 1 end
       if s then s.picture = S.picture end
       cb(s, why, info)
     end)
+    S.asyncs[#S.asyncs].key = key
   end)
   local runDue = T.runDue
   T.runDue = function()
@@ -404,10 +414,21 @@ end
 --   volume, transpose, fine   the selected oscillator's knobs' pointers
 --   fav                FAV lit
 --   lasting            { x1, y1, x2, y2 } at 50 %: a panel a click drew that outlasts its popup
+--   slots = { selected, lighter, mute, solo, lock, loop }   the drumkit table: the selected slot's
+--                      name cell (and `lighter`'s) lighter, the slots' buttons lit red ({ [i] = true })
 --   popup              { x1, y1, x2, y2 } at 50 %: Avenger's popup over it all, painted inside it
+--   submenu            { x1, y1, x2, y2 } at 50 %: a popup of its own, painted after `popup`
 --   editor             { x1, y1, x2, y2, fill = colour?, outline = colour?, selection = colour? } at
 --                      50 %: Avenger's text editor open over a name field, light by default, over
 --                      everything but a popup
+--   sampleTab          the sample editor's tab whose bottom strip is dark (as `central`), over the
+--                      editor's grey tab row: "sample", "amp", "pitch" or "eq"
+--   sampleOn           the shown tab's switch lit blue, the tool's blue (EQ's box on "eq")
+--   fields             { key = shade }: a field's box (tables/centre.luau's valueRect, or the
+--                      envelope's name with "envelope_name") in grey `shade`, so that another shade
+--                      is a change the change wait sees there
+--   steps              a shade: DRUM SQ's step area in it
+--   sqDark             DRUM SQ's patterns' row painted black over `sq`: too dark to be DRUM SQ's
 -- A pointer is a light ray out from the knob's middle, at the angle its value puts it: 135°
 -- (down and left) for nothing, 270° more clockwise for everything.
 function T.paintAvenger(cx, cy, k, spec)
@@ -468,11 +489,13 @@ function T.paintAvenger(cx, cy, k, spec)
     for _, key in ipairs({ "b", "c", "d" }) do
       box(CE.SQ_PATTERNS[key], 30, 8, sq.on and sq.on[key] and RED or { 40, 40, 40 })
     end
+    -- The selected pattern outlined, its inside red where it is on.
     if sq.selected then
       box(CE.SQ_PATTERNS[sq.selected], 30, 9, LIT)
-      box(CE.SQ_PATTERNS[sq.selected], 28, 7, { 30, 30, 30 })
+      box(CE.SQ_PATTERNS[sq.selected], 28, 7, sq.on and sq.on[sq.selected] and RED or { 30, 30, 30 })
     end
   end
+  if spec.sqDark then rect(330, 250, 490, 268, { 5, 5, 5 }) end
   -- The macros: the tabs' band and the one shown, the buttons, the knobs' pointers.
   rect(MA.TAB_SPANS[1][1], 429, MA.TAB_SPANS[4][3], 443, GREY)
   if spec.macroShown then
@@ -498,6 +521,40 @@ function T.paintAvenger(cx, cy, k, spec)
     local q = spec.lasting
     rect(q[1], q[2], q[3], q[4], { 60, 60, 66 })
   end
+  -- The sample editor: its tab row, the shown tab's dark bottom strip, its switch; and the fields.
+  if spec.steps then
+    local q = CE.SQ_STEPS
+    rect(q[1], q[2], q[3], q[4], { spec.steps, spec.steps, spec.steps })
+  end
+  if spec.sampleTab then
+    local q = CE.EDITOR_TABS_ROW
+    rect(q[1], q[2], q[3], q[4], GREY)
+    local p = CE.EDITOR_TABS[spec.sampleTab]
+    rect(p[1] - 18, 261, p[1] + 18, 265, DARK)
+    if spec.sampleOn then
+      box(spec.sampleTab == "eq" and CE.EQ_ENABLE_STATE or CE.ENABLE_STATE, 5, 5, { 120, 160, 210 })
+    end
+  end
+  for key, shade in pairs(spec.fields or {}) do
+    local q = key == "envelope_name" and CE.ENVELOPE_NAME or CE.valueRect(key)
+    rect(q[1], q[2], q[3], q[4], { shade, shade, shade })
+  end
+  -- The drumkit table (`slots`): the selected slot's name cell lighter than the others', and each
+  -- slot's Mute, Solo, Lock and Loop lit red; `lighter` lists more slots drawn as the selected one.
+  local slots = spec.slots
+  if slots then
+    local function light(i)
+      local y = DR.rowY(i)
+      rect(DR.NAME_COLUMN[1], y - DR.SLOT_HALF, DR.NAME_COLUMN[2], y + DR.SLOT_HALF, { 90, 90, 90 })
+    end
+    if slots.selected then light(slots.selected) end
+    for _, i in ipairs(slots.lighter or {}) do light(i) end
+    for _, col in ipairs({ "mute", "solo", "lock", "loop" }) do
+      for i, on in pairs(slots[col] or {}) do
+        if on then box(DR.columnPoint(i, col), 13, 8, RED) end
+      end
+    end
+  end
   -- Avenger's editor over a name field (`editor`): its outline half a point outside the field, its
   -- fill, and its selection inside.
   if spec.editor then
@@ -507,11 +564,13 @@ function T.paintAvenger(cx, cy, k, spec)
     if q.selection then rect(q[1] + 2, q[2] + 2, q[3] - 2, q[4] - 2, q.selection) end
   end
   -- Avenger's popup over it, painted inside its window: { x1, y1, x2, y2 } at 50 % (`popup`).
-  if spec.popup then
-    local q = spec.popup
+  local function popup(q)
     rect(q[1], q[2], q[3], q[4], { 70, 70, 76 })
     for row = q[2] + 4, q[4] - 6, 11.5 do rect(q[1] + 4, row, q[3] - 8, row + 3, { 210, 210, 210 }) end
   end
+  if spec.popup then popup(spec.popup) end
+  -- A submenu of it, painted the same way, after it (`submenu`).
+  if spec.submenu then popup(spec.submenu) end
   S.picture = { bg = { 40, 40, 40 }, shapes = shapes }
   S.painted = { cx = cx, cy = cy, k = k, spec = spec }
 end
@@ -651,6 +710,7 @@ S.pages = {}        -- every page described, in order: { opts, shows, hides, pos
 S.pageAnswers = {}  -- what the next shows answer, in turn: { ok, why }; then "not ready yet" until loaded
 S.pageLoaded = false
 S.pageOrder = {}    -- "post <kind>", "show", "hide", "focus <id>", "sound <path>", in order
+S.postRaises = nil  -- a message: the next page:post raises it, as the host's does for what it cannot write
 S.settings, S.settingDefs, S.settingCbs = {}, {}, {}
 S.pageKeys, S.pageKeyIds = {}, {}  -- spec -> callback; id -> spec, while registered
 S.badKeys = {}      -- spec -> the reasons host.keys.check gives for a key the platform cannot hold
@@ -691,6 +751,15 @@ function T.pageHost(AH)
     end
     function p.post(self, v)
       assert(self == p, "page:post is a method")
+      -- Written as the host writes it, by its own encoder, raising where it raises: a value JSON
+      -- cannot hold (a list too sparse, a function) is refused, as the module's page meets it.
+      if S.postRaises then
+        local why = S.postRaises
+        S.postRaises = nil
+        error("page:post: " .. why, 0)
+      end
+      local written, why = pcall(T.jsonEncode, v)
+      if not written then error((string.gsub(tostring(why), "host%.json%.encode", "page:post", 1)), 0) end
       if v.kind == "state" and S.turnsAtState == false then S.turnsAtState = T.interrupts() end
       st.posts[#st.posts + 1] = v
       S.pageOrder[#S.pageOrder + 1] = "post " .. tostring(v.kind)
@@ -915,6 +984,15 @@ function T.avenger()
       if i then table.remove(S.heldButtons, i) end
     end,
     held = function() return table.clone(S.heldButtons) end,
+    -- A drag, as the host makes one (docs/api/input.md): recorded as { "drag", x1, y1, x2, y2,
+    -- button = b }; S.onDrag(n), when set, runs at the n-th: Avenger answering it.
+    drag = function(x1, y1, x2, y2, opts)
+      point("host.input.drag", x1, y1)
+      point("host.input.drag", x2, y2)
+      S.input[#S.input + 1] = { "drag", x1, y1, x2, y2, button = button(opts) }
+      S.drags = (S.drags or 0) + 1
+      if S.onDrag then S.onDrag(S.drags) end
+    end,
   }))
   local AH = setmetatable({}, { __index = T.host })
   AH.path = function(p) return "C:/modules/vps-avenger/" .. p end
@@ -946,6 +1024,9 @@ end
 -- it holds let go of by the host, where the pointer is, with the host's line (S.hostReleases).
 function T.disable()
   T.page().shown = false
+  for _, r in ipairs(S.asyncs) do
+    if r.key then S.out[r.key] -= 1 end
+  end
   S.after, S.asyncs, S.reads = {}, {}, {}
   T.dropScreen()
   S.changeWaits = {}
@@ -1216,8 +1297,10 @@ pub(crate) fn run_on(os: &str, scenario: &str) {
         })
         .unwrap();
     t.set("source", source).unwrap();
-    // The host's own JSON decoder, for the preset database's reader (T.presets).
+    // The host's own JSON decoder, for the preset database's reader (T.presets), and its encoder,
+    // which page:post writes with.
     t.set("jsonDecode", lua.create_function(crate::json::decode).unwrap()).unwrap();
+    t.set("jsonEncode", lua.create_function(crate::json::encode).unwrap()).unwrap();
     // The page's picture (T.paint…, AV): painted from shapes and reduced by the host's own code.
     t.set("paintCells", lua.create_function(paint_cells).unwrap()).unwrap();
     t.set("paintProfile", lua.create_function(paint_profile).unwrap()).unwrap();
@@ -1249,6 +1332,19 @@ pub(crate) fn run_on(os: &str, scenario: &str) {
         }
     }
     if let Err(e) = lua.load(scenario).set_name("scenario").exec() {
+        panic!("{e}");
+    }
+    // A message page:post refused is logged by the module (page.luau) and never reaches the page:
+    // no scenario ends with one, unless it says it may.
+    let refused = r#"
+        local S = T.S
+        if not S.postsMayFail then
+          for _, l in ipairs(S.logs) do
+            assert(not string.find(l, "message could not be posted", 1, true), "a post was refused: " .. l)
+          end
+        end
+    "#;
+    if let Err(e) = lua.load(refused).set_name("the end of the scenario").exec() {
         panic!("{e}");
     }
     finish(&lua);

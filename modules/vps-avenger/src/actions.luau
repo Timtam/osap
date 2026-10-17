@@ -44,6 +44,35 @@
 --                              Pitch — nothing pressed on the Drums or the Trig tab
 --   osc_filter_control {control}   Low-Pass or High-Pass, along x: no reader, Return claims nothing
 --
+-- and the Drums tab (the plan's slice 8, its drums), each through src/act.luau with its spec from
+-- src/actions/drums.luau — nothing clicked unless the strip reads the Drums tab selected — but two:
+-- a slot's knob turned (drumkit_control, src/amount.luau, Am.drum) and a slot's Browse (a hand-over
+-- of the keyboard to Avenger's sample browser, src/handover.luau, Hv.browseSlot):
+--
+--   toggle_drum_pattern, select_drum_mode {mode}, previous_drumkit, next_drumkit,
+--   select_drumkit_part {index}, toggle_drumkit_button {index, button},
+--   drumkit_menu_item {index, item, target_index?}, drumkit_column {index, column},
+--   drumkit_control {index, control}, reset_drumkit_control {index, control},
+--   select_central_tab {tab}
+--
+-- and the sample editor and DRUM SQ (the plan's slice 8, its other half), each through src/act.luau
+-- with its spec from src/actions/sample.luau or src/actions/drumsq.luau — nothing clicked in the
+-- sample editor unless the Drums tab, EDITOR and the editor's own tab read shown, nothing in DRUM SQ
+-- unless it reads as the central tab — but these: the knobs turned (sample_editor_control,
+-- central_drum_sq_control: src/amount.luau, Am.sample and Am.drumSq), the hand-overs of the keyboard
+-- to Avenger (sample_editor_field, sample_browser_focus, and sample_editor_panel_button's Menu and
+-- Preset: src/handover.luau), and LENGTH, a double-click and a drag of its own
+-- (src/actions/drumsq.luau, Sq.length):
+--
+--   select_sample_editor_tab {tab}, toggle_sample_editor_enable {tab}, sample_editor_play_mode {item},
+--   sample_editor_grid {item}, sample_editor_eq_type {band, item}, sample_editor_loop_stretch {item},
+--   sample_editor_panel_button {button}, sample_editor_field {field}, sample_browser_focus {index},
+--   sample_editor_control {control}, reset_sample_editor_control {control},
+--   central_drum_sq_pattern_player, central_drum_sq_auto_follow, select_central_drum_sq_pattern
+--   {pattern}, toggle_central_drum_sq_pattern {pattern}, central_drum_sq_pattern_menu_item {item},
+--   central_drum_sq_speed {item}, central_drum_sq_sequence_menu_item {item}, central_drum_sq_length
+--   {steps}, central_drum_sq_control {control}, reset_central_drum_sq_control {control}
+--
 -- Nothing is taken for done: every answer is what was read after the click, and a read that did
 -- not come is said as that — after a click or choice that may have changed the preset, with the
 -- preset posted as not read (go). After every trip the page gets its state — the preset heading
@@ -62,6 +91,10 @@ local Reads = host.include("src/read/open.luau")
 local Act = host.include("src/act.luau")
 local Osc = host.include("src/actions/osc.luau")
 local Macros = host.include("src/actions/macros.luau")
+local Drums = host.include("src/actions/drums.luau")
+local Sa = host.include("src/actions/sample.luau")
+local Sq = host.include("src/actions/drumsq.luau")
+local C = host.include("src/tables/centre.luau")
 local Hv = host.include("src/handover.luau")
 local Am = host.include("src/amount.luau")
 
@@ -474,6 +507,69 @@ A.HANDLERS.macro_amount = amount("macro_amount", Am.macro)
 A.HANDLERS.osc_control = amount("osc_control", Am.osc)
 A.HANDLERS.osc_filter_control = amount("osc_filter_control", Am.filter)
 
+-- ── The Drums tab ────────────────────────────────────────────────────────────
+for _, name in ipairs({ "toggle_drum_pattern", "select_drum_mode", "previous_drumkit", "next_drumkit",
+  "select_drumkit_part", "toggle_drumkit_button", "drumkit_menu_item", "reset_drumkit_control",
+  "select_central_tab" }) do
+  A.HANDLERS[name] = viaAct(name, Drums[name])
+end
+A.HANDLERS.drumkit_control = amount("drumkit_control", Am.drum)
+-- A slot's Back, Next and Edit Sample through src/act.luau; its Browse a hand-over.
+do
+  local columns = viaAct("drumkit_column", Drums.drumkit_column)
+  A.HANDLERS.drumkit_column = function(o, args)
+    local i, column = Drums.columnArgs(args)
+    if not i then return refuse("drumkit_column", column) end
+    if column ~= "browse" then return columns(o, args) end
+    go(o, "drumkit_column", function(w, trip) Hv.browseSlot(w, trip, i, E.LABELS.drumkit_column) end)
+  end
+end
+
+-- ── The sample editor ────────────────────────────────────────────────────────
+for _, name in ipairs({ "select_sample_editor_tab", "toggle_sample_editor_enable", "sample_editor_play_mode",
+  "sample_editor_grid", "sample_editor_eq_type", "sample_editor_loop_stretch", "reset_sample_editor_control" }) do
+  A.HANDLERS[name] = viaAct(name, Sa[name])
+end
+A.HANDLERS.sample_editor_control = amount("sample_editor_control", Am.sample)
+-- The envelope's Back and Next through src/act.luau; its Menu and Preset a hand-over.
+do
+  local steps = viaAct("sample_editor_panel_button", Sa.sample_editor_panel_button)
+  A.HANDLERS.sample_editor_panel_button = function(o, args)
+    local button, why = Sa.panelArg(args)
+    if not button then return refuse("sample_editor_panel_button", why) end
+    if button == "back" or button == "next" then return steps(o, args) end
+    go(o, "sample_editor_panel_button", function(w, trip)
+      Hv.browseEnvelope(w, trip, button, E.LABELS.sample_editor_panel_button)
+    end)
+  end
+end
+A.HANDLERS.sample_editor_field = function(o, args)
+  local field, why = Sa.fieldArg(args)
+  if not field then return refuse("sample_editor_field", why) end
+  go(o, "sample_editor_field", function(w, trip) Hv.renameSample(w, trip, field, E.LABELS.sample_editor_field) end)
+end
+-- A row from 1 to 13: the tool clamped any other to them.
+A.HANDLERS.sample_browser_focus = function(o, args)
+  local i = whole(args.index)
+  if not (i and i >= 1 and i <= C.BROWSER_ITEM_COUNT) then
+    return refuse("sample_browser_focus", "no row of the sample browser was named")
+  end
+  go(o, "sample_browser_focus", function(w, trip) Hv.browseSample(w, trip, i, E.LABELS.sample_browser_focus) end)
+end
+
+-- ── DRUM SQ ──────────────────────────────────────────────────────────────────
+for _, name in ipairs({ "central_drum_sq_pattern_player", "central_drum_sq_auto_follow",
+  "select_central_drum_sq_pattern", "toggle_central_drum_sq_pattern", "central_drum_sq_pattern_menu_item",
+  "central_drum_sq_speed", "central_drum_sq_sequence_menu_item", "reset_central_drum_sq_control" }) do
+  A.HANDLERS[name] = viaAct(name, Sq[name])
+end
+A.HANDLERS.central_drum_sq_control = amount("central_drum_sq_control", Am.drumSq)
+A.HANDLERS.central_drum_sq_length = function(o, args)
+  local steps, why = Sq.lengthArg(args)
+  if not steps then return refuse("central_drum_sq_length", why) end
+  go(o, "central_drum_sq_length", function(w, trip) Sq.length(w, trip, steps, E.LABELS.central_drum_sq_length) end)
+end
+
 -- What page.luau hands over: { header, DB, ring, zoomOf, LABELS, post, roster, plugin = () -> the
 -- window the page was shown beside, postState = (id) -> (), closedWords = () -> the sentence,
 -- sound = (name) -> (), the page's sounds behind its setting }.
@@ -482,6 +578,7 @@ function A.start(env)
   Act.start(env.ring)
   Hv.start({ ring = env.ring, named = named, plugin = env.plugin })
   Am.start({ ring = env.ring, plugin = env.plugin, sound = env.sound })
+  Sq.start({ ring = env.ring, plugin = env.plugin })
 end
 
 return A

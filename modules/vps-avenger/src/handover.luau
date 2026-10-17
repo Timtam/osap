@@ -15,6 +15,19 @@
 --                     skip_db_snap), and nothing is written to the database (the tool's set_osc_name)
 --   browse_expansion_presets   the tool's sentence, the keyboard handed over with Return alone,
 --                     and once Return has gone through, the name read until it settles
+--   drumkit_column {index, column = "browse"}   a drum slot's Browse (the plan's slice 8): the
+--                     strip read first, nothing clicked off the Drums tab; the keyboard handed over
+--                     with Return alone, Browse clicked, the tool's sentence #13; once Return has
+--                     gone through, a change wait on the slot's name from its picture before the
+--                     click, and the slot's name read and compared with the one read off that picture
+--   sample_browser_focus {index}   a row of the sample browser (the plan's slice 8, its other half),
+--                     as a slot's Browse: the sample editor's part read first, nothing clicked unless
+--                     it shows the browser and a slot read as selected, which the row loads into
+--   sample_editor_panel_button {button = menu | preset}   the envelope's Menu and Preset on Amp or
+--                     Pitch: the keyboard handed over with Return alone, nothing said (the tool said
+--                     nothing); after Return the envelope's name read
+--   sample_editor_field {field}   a field of the sample editor, as a rename: double-clicked on its
+--                     own tab only, Avenger's editor seen open and closed, its value read back
 --
 -- What the tool did that is not ported: it recorded the keys typed to know the new name (its
 -- panel.py) — the macro fields' only source of their names there — ignored Return for a second
@@ -36,7 +49,11 @@ local Open = host.include("src/read/open.luau")
 local Ed = host.include("src/read/editor.luau")
 local T = host.include("src/tables/strip.luau")
 local M = host.include("src/tables/macros.luau")
+local D = host.include("src/tables/drums.luau")
 local Osc = host.include("src/actions/osc.luau")
+local Drums = host.include("src/actions/drums.luau")
+local Sa = host.include("src/actions/sample.luau")
+local C = host.include("src/tables/centre.luau")
 local Act = host.include("src/act.luau")
 
 local Hv = {}
@@ -45,6 +62,8 @@ local E = nil -- what actions.luau hands over (Hv.start)
 
 -- The tool's sentence for its return mode (#12): the page's title is "Avenger Control".
 Hv.BROWSE = "Browse presets in Avenger. To return to Avenger Control, press Return."
+-- The tool's sentence for a drum slot's Browse (#13).
+Hv.BROWSE_SLOT = "Use the Avenger browser. To return to Avenger Control, press Return."
 -- The page's words, in its error region but the one said while the user is in Avenger.
 Hv.NOT_OPEN = "VPS Avenger's editor did not open; nothing was renamed"
 Hv.STILL_OPEN = "VPS Avenger's editor is still open: Return keeps the name, Escape cancels."
@@ -83,8 +102,8 @@ local function textIn(pl, snap, rect)
 end
 
 -- Part `part` read before the double-click, as src/act.luau reads one (Act.partBefore).
-local function partBefore(pl, part, text)
-  return Act.partBefore(pl, part, text, log)
+local function partBefore(pl, part, text, fields)
+  return Act.partBefore(pl, part, text, log, fields)
 end
 
 -- ── A rename in Avenger's own editor ─────────────────────────────────────────
@@ -436,6 +455,315 @@ function Hv.browse(o, trip, forget)
   end
   if why == "not in front" then return end
   trip:done({ error = Hv.NO_KEYBOARD })
+end
+
+-- ── A drum slot's Browse, and a row of the sample browser ────────────────────
+-- A trip whose act opens Avenger's sample browser on slot `i`, or one of its rows, and hands the
+-- keyboard over, as Browse Presets does — Return alone held, Escape and the arrows the browser's —
+-- and once Return has gone through, reads the slot's name. In order:
+--   1. a part read first, and nothing clicked where it refuses: the strip off the Drums tab
+--      (Drums.refusal) for a slot's Browse; the sample editor's part for a row, unless it shows the
+--      sample browser and a slot read as selected, which the row loads into (Sa.browserRefusal);
+--   2. the slot's name pictured and HELD through the hand-over — one row of the name column, as
+--      the knobs' hand-over holds the knob's box (src/amount.luau): the baseline of the one change
+--      wait after Return — and its text read off that picture with a callback, while the user
+--      browses (one region, nothing waits for it);
+--   3. the hand-over, before the click, so that a hand-over refused clicks nothing;
+--   4. the click at the tool's point — Browse (345, the slot's row), or the row (294, 277 + 10 per
+--      row) — and the slot's name noted as not read in the state, which a give-up then posts, and
+--      the read after Return overwrites;
+--   5. the tool's sentence #13, behind the screen reader;
+--   6. Return through: a change wait on the name from the held picture, then the part read with its
+--      text — the drumkit table, and for a row the sample editor with it, whose view Avenger may
+--      change once a sample is loaded — and the slot's name said as read, "unchanged" where it reads
+--      as it read before. By the names, as Back and Next decide: the name's box holds the band the
+--      selected slot is drawn in (read/drums.luau), and the tool took every click in a slot's row
+--      for its selection, so Browse on a slot not selected repaints the box whatever is chosen.
+--      Only where either name was not read do the pixels decide: "unchanged" where Avenger drew no
+--      change. Every picture is let go on every path.
+-- No change wait sees the browser open, as the rename's does: whether a second Browse closes an
+-- open browser is not known, so a change in the central area would not say "open". Where none
+-- opened the hand-over is harmless: Return goes to Avenger and ends it. The log says what was
+-- clicked, and the developer's pictures say what Avenger does (TODO.md, D3).
+--
+-- Steps 2 to 6 for slot `F.i`: `F` = { i, label (the click's words), at (the click, at 50 %), focus
+-- (the page's element after it), before ({ keys, values } as read in step 1), after (the part read
+-- after Return), fields (its fields, or nil), pl, log(fmt, …) }.
+local function browseName(o, trip, F)
+  local i, pl, slog, before = F.i, F.pl, F.log, F.before
+  local role = D.PART_LABELS[i]
+  local region = Open.region(pl, D.nameRect(i))
+  if not region then
+    slog("nothing clicked — the slot's name is not on the screen")
+    return trip:done({ part = before, error = "that part of VPS Avenger is not on the screen" })
+  end
+  local okS, snap, whyS = pcall(host.screen.snapshot, { region = region })
+  if not (okS and snap) then
+    slog("nothing clicked — no picture of its name: %s", tostring(okS and whyS or snap))
+    return trip:done({ part = before, error = "VPS Avenger cannot be read now" })
+  end
+  local held = { before = snap }
+  if not trip:inFront() then return release(held) end
+  -- The name before, off the held picture, answered while the user browses: the read keeps the
+  -- pixels it needs whatever becomes of the picture.
+  local start = {}
+  pcall(host.ocr.recognize, { name = "slot " .. i, region = region }, { snapshot = snap, lang = H.lang(),
+    key = "vps-avenger browse slot" }, function(res)
+    local t = type(res) == "table" and res.status == "text" and R.tidy(res.text) or ""
+    if t ~= "" then start.name = t end
+    start.answered = true
+  end)
+
+  -- The slot's name read after Return, off a picture of the part read after, and the trip done
+  -- with it; `changed` the change wait's verdict on the name's box, which decides only where a name
+  -- is missing.
+  local function readAfter(t2, changed)
+    local partRegion = Open.partRegion(pl, F.after)
+    local okP, pic = false, nil
+    if partRegion then okP, pic = pcall(host.screen.snapshot, { region = partRegion }) end
+    if not t2:inFront() then
+      if okP and pic then pic:release() end
+      return
+    end
+    if not (okP and pic) then
+      slog("no picture after Return: %s", tostring(pic))
+      return t2:done({ part = before, error = role .. "'s name cannot be read now" })
+    end
+    local okR, va, keys = pcall(Open.part, pic, F.after, { pl = pl, text = true, preset = E.ring.lastName(),
+      fields = F.fields })
+    pic:release()
+    if not okR then
+      slog("the read after Return failed: %s", tostring(va))
+      return t2:done({ part = before, error = "reading VPS Avenger failed" })
+    end
+    local part = { keys = keys, values = va }
+    local name = va.kitNames and va.kitNames[i]
+    local was = start.name
+    if name and was then changed = name ~= was end
+    slog("after Return — %s, %s by %s (before: %s)", name and ("'" .. name .. "'") or "no name read",
+      changed and "changed" or "unchanged", (name and was) and "the names" or "the pixels",
+      was and ("'" .. was .. "'") or (start.answered and "no name read" or "not answered yet"))
+    if not name then return t2:done({ part = part, error = role .. "'s name cannot be read now" }) end
+    if not changed then return t2:done({ part = part, note = "unchanged, " .. role .. " reads " .. name }) end
+    t2:done({ part = part, said = role .. " reads " .. name, focus = F.focus })
+  end
+
+  local function onEnd(_, t2, how)
+    if how ~= "ended" or not t2:inFront() then return release(held) end
+    local asked, errW = pcall(host.screen.snapshot, { region = region, change = { from = held.before,
+      timeout = Act.CHANGE_WITHIN, tolerance = 16, minPixels = 4, settle = 50 } }, function(s, _, info)
+      release(held)
+      if s then s:release() end
+      if not t2:inFront() then return end
+      readAfter(t2, type(info) == "table" and info.changed == true)
+    end)
+    if not asked then
+      release(held)
+      slog("no change wait after Return: %s", tostring(errW))
+      readAfter(t2, false)
+    end
+  end
+
+  local handed, whyH = trip:handOver({ kind = "browse", onEnd = onEnd })
+  if not handed then
+    release(held)
+    if whyH == "not in front" then return end
+    slog("nothing clicked — the keyboard was not handed over (%s)", tostring(whyH))
+    return trip:done({ part = before, error = Hv.NO_KEYBOARD })
+  end
+  local clicked, said = E.ring.clickAt(o, F.label, F.at, nil, true)
+  -- Refused: done ends the hand-over, and onEnd lets the picture go.
+  if not clicked then return trip:done({ part = before, sentence = said }) end
+  -- What the browser does to the slot's name, not read yet: posted as not read by a give-up.
+  local w = E.plugin()
+  if w then
+    local known = S.values(w.id) or {}
+    local names = {}
+    for j = 1, #D.PART_LABELS do names[j] = known.kitNames and known.kitNames[j] end
+    names[i] = nil
+    S.part(w.id, { "kitNames" }, { kitNames = names })
+  end
+  host.speech.output(Hv.BROWSE_SLOT, { interrupt = false })
+end
+
+-- drumkit_column {index, column = "browse"}: slot `i`'s Browse.
+function Hv.browseSlot(o, trip, i, label)
+  local function slog(fmt, ...)
+    host.log.info(("[avenger] [browse] 'slot %d': " .. fmt):format(i, ...))
+  end
+  local pl = placer(o)
+  if not pl then return trip:done({ error = "VPS Avenger's size cannot be told now" }) end
+  local vb, keysB, err = Act.partBefore(pl, "strip", nil, function(fmt, ...) slog(fmt, ...) end)
+  if not trip:inFront() then return end
+  if not vb then return trip:done({ error = err }) end
+  local before = { keys = keysB, values = vb }
+  local why, focus = Drums.refusal(vb)
+  if why then
+    slog("nothing clicked — %s", why)
+    return trip:done({ part = before, error = why, focus = focus })
+  end
+  browseName(o, trip, { i = i, label = label, at = D.columnPoint(i, "browse"), focus = "drumkit-browse-" .. i,
+    before = before, after = "drums", pl = pl, log = slog })
+end
+
+-- sample_browser_focus {index}: row `index` of the sample browser, which loads into the slot read as
+-- selected — the tool clamped the row and took the browser for shown.
+function Hv.browseSample(o, trip, index, label)
+  local function slog(fmt, ...)
+    host.log.info(("[avenger] [browse] 'sample browser row %d': " .. fmt):format(index, ...))
+  end
+  local pl = placer(o)
+  if not pl then return trip:done({ error = "VPS Avenger's size cannot be told now" }) end
+  local fields = { "browser" }
+  local vb, keysB, err = Act.partBefore(pl, "editor", nil, function(fmt, ...) slog(fmt, ...) end, fields)
+  if not trip:inFront() then return end
+  if not vb then return trip:done({ error = err }) end
+  local before = { keys = keysB, values = vb }
+  local why, focus = Sa.browserRefusal(vb)
+  if why then
+    slog("nothing clicked — %s", why)
+    return trip:done({ part = before, error = why, focus = focus })
+  end
+  browseName(o, trip, { i = vb.kitSelected, label = label, at = C.browserItemPoint(index),
+    focus = "sample-browser-item-" .. index, before = before, after = "editor", fields = fields, pl = pl, log = slog })
+end
+
+-- ── The envelope's Menu and Preset ───────────────────────────────────────────
+-- sample_editor_panel_button {button = menu | preset} on the Amp or the Pitch tab: the tool's return
+-- mode, with no sentence of its own (it said none). The editor's part read first, with the
+-- envelope's name, and nothing clicked unless Amp or Pitch is shown (Sa.envelopeRefusal); the
+-- envelope pictured and HELD — its Preset field and the envelope above the fields — the baseline of
+-- the change wait after Return; the keyboard handed over with Return alone, Avenger's popup or
+-- preset list the user's; the button clicked. Once Return has gone through — its end looked at with
+-- the plug-in in front, so a Save dialog Menu led to is waited past (trip:handOver) — the change
+-- wait from the held picture, and the part read again with the envelope's name: the answer as Back
+-- and Next's (actions/sample.luau, Sa.envelopeAnswer).
+function Hv.browseEnvelope(o, trip, button, label)
+  local function slog(fmt, ...)
+    host.log.info(("[avenger] [browse] 'envelope %s': " .. fmt):format(button, ...))
+  end
+  local pl = placer(o)
+  if not pl then return trip:done({ error = "VPS Avenger's size cannot be told now" }) end
+  local fields = { "browser", "envelope_name" }
+  local vb, keysB, err = Act.partBefore(pl, "editor", nil, function(fmt, ...) slog(fmt, ...) end, fields)
+  if not trip:inFront() then return end
+  if not vb then return trip:done({ error = err }) end
+  local before = { keys = keysB, values = vb }
+  local why, focus = Sa.envelopeRefusal(vb)
+  if why then
+    slog("nothing clicked — %s", why)
+    return trip:done({ part = before, error = why, focus = focus })
+  end
+  local n, a = C.ENVELOPE_NAME, C.ENVELOPE_AREA
+  local region = Open.region(pl, { math.min(n[1], a[1]), math.min(n[2], a[2]), math.max(n[3], a[3]), math.max(n[4], a[4]) })
+  local partRegion = Open.partRegion(pl, "editor")
+  if not (region and partRegion) then
+    slog("nothing clicked — the envelope is not on the screen")
+    return trip:done({ part = before, error = "that part of VPS Avenger is not on the screen" })
+  end
+  local okS, snap, whyS = pcall(host.screen.snapshot, { region = region })
+  if not (okS and snap) then
+    slog("nothing clicked — no picture of the envelope: %s", tostring(okS and whyS or snap))
+    return trip:done({ part = before, error = "VPS Avenger cannot be read now" })
+  end
+  local held = { before = snap }
+  if not trip:inFront() then return release(held) end
+  local focusAfter = "sample-editor-" .. tostring(vb.editorTab) .. "-" .. button
+
+  local function readAfter(t2, changed)
+    local okP, pic = pcall(host.screen.snapshot, { region = partRegion })
+    if not t2:inFront() then
+      if okP and pic then pic:release() end
+      return
+    end
+    if not (okP and pic) then
+      slog("no picture after Return: %s", tostring(pic))
+      return t2:done({ part = before, error = "the " .. Sa.envelopeWords(vb) .. " cannot be read now" })
+    end
+    local okR, va, keys = pcall(Open.part, pic, "editor", { pl = pl, preset = E.ring.lastName(), fields = fields })
+    pic:release()
+    if not okR then
+      slog("the read after Return failed: %s", tostring(va))
+      return t2:done({ part = before, error = "reading VPS Avenger failed" })
+    end
+    -- The names decide where both were read, as Back and Next's `same`; the pixels otherwise.
+    local was = vb.editorFields and vb.editorFields.envelope_name
+    local now = va.editorFields and va.editorFields.envelope_name
+    if was and now then changed = was ~= now end
+    slog("after Return — %s, %s (before: %s)", now and ("'" .. now .. "'") or "no name read",
+      changed and "changed" or "unchanged", was and ("'" .. was .. "'") or "no name read")
+    local result = Sa.envelopeAnswer(vb, va, changed and "changed" or "unchanged", focusAfter)
+    result.part = { keys = keys, values = va }
+    t2:done(result)
+  end
+
+  local function onEnd(_, t2, how)
+    if how ~= "ended" or not t2:inFront() then
+      release(held)
+      -- What the user did in Avenger's popup or list is not read: the envelope's name posted so.
+      if how ~= "ended" then
+        local w = E.plugin()
+        if w then S.part(w.id, { "editorFields" }, {}) end
+      end
+      return
+    end
+    local asked, errW = pcall(host.screen.snapshot, { region = region, change = { from = held.before,
+      timeout = Act.CHANGE_WITHIN, tolerance = 16, minPixels = 4, settle = 50 } }, function(s, _, info)
+      release(held)
+      if s then s:release() end
+      if not t2:inFront() then return end
+      readAfter(t2, type(info) == "table" and info.changed == true)
+    end)
+    if not asked then
+      release(held)
+      slog("no change wait after Return: %s", tostring(errW))
+      readAfter(t2, false)
+    end
+  end
+
+  local handed, whyH = trip:handOver({ kind = "browse", onEnd = onEnd })
+  if not handed then
+    release(held)
+    if whyH == "not in front" then return end
+    slog("nothing clicked — the keyboard was not handed over (%s)", tostring(whyH))
+    return trip:done({ part = before, error = Hv.NO_KEYBOARD })
+  end
+  local clicked, said = E.ring.clickAt(o, label, C.PANEL[button], nil, true)
+  if not clicked then return trip:done({ part = before, sentence = said }) end
+end
+
+-- ── A field of the sample editor typed into ──────────────────────────────────
+-- sample_editor_field {field}: the editor's part read first, and nothing clicked unless the field's
+-- own tab is shown (Sa.fieldRefusal) — Gain and Range share a point, as Start and the EQ's first
+-- band lie apart only on their tabs; then the shared flow of a rename on the field (Hv.rename), its
+-- picture the field's box: the double-click where the tool double-clicks it, Avenger's editor seen
+-- open, the keyboard handed over with nothing said, the field seen closed, and its value READ off
+-- that picture, never recorded from the keys.
+function Hv.renameSample(o, trip, field, label)
+  local pl = placer(o)
+  if not pl then return trip:done({ error = "VPS Avenger's size cannot be told now" }) end
+  local vb, keysB, err = partBefore(pl, "editor", nil, { "browser" })
+  if not trip:inFront() then return end
+  if not vb then return trip:done({ error = err }) end
+  local before = { keys = keysB, values = vb }
+  local why, focus = Sa.fieldRefusal(vb, field)
+  if why then
+    log("'sample %s': nothing clicked — %s", field, why)
+    return trip:done({ part = before, error = why, focus = focus })
+  end
+  local words = Sa.FIELD_WORDS[field]
+  local rect = C.fieldRect(field)
+  local focusAfter = Sa.fieldFocus(field, vb)
+  Hv.rename(o, trip, {
+    kind = "sample", label = label, pl = pl, at = C.PANEL[field], field = rect, part = before,
+    read = function(_, _, now, pl2, info)
+      local text = now and textIn(pl2, now, rect)
+      log("'sample %s': %s — %s", field, tostring(info.key), text and ("read '" .. text .. "'") or "nothing read")
+      if not text then return { part = before, error = words .. " cannot be read now" } end
+      if info.key == "Escape" then return { part = before, note = "Escape: " .. words .. " reads " .. text, focus = focusAfter } end
+      return { part = before, said = words .. " reads " .. text, focus = focusAfter }
+    end,
+  })
 end
 
 -- What actions.luau hands over: { ring = main.luau's helpers, named = (name) -> the state's fields

@@ -12,15 +12,21 @@
 --   the gate      anywhere else the key says why it opens nothing, as the tool's sentence does
 --   the state     only what was read (state.luau): the preset's name, the zoom, the browser, the
 --                 oscillator strip and the selected oscillator's knobs, the central tab and DRUM
---                 SQ, the macros; what the preset database gives is marked so; everything else
---                 "not read"; and ◀ and ▶ unavailable where the preset read is Init Preset
---   the actions   the header's, the oscillator strip's and the macros' are trips into Avenger
---                 (actions.luau, act.luau), the renames and Browse Presets trips that hand the
+--                 SQ with its length, the drumkit table, the sample editor's tab, view and switch,
+--                 the macros; what the preset database gives is marked so; everything else "not
+--                 read"; ◀ and ▶ unavailable where the preset read is Init Preset; and PASTE of
+--                 DRUM SQ's pattern menu offered once a COPY of this session was taken
+--   the actions   the header's, the oscillator strip's, the macros', the Drums tab's, the sample
+--                 editor's and DRUM SQ's are trips into Avenger (actions.luau, act.luau), the
+--                 renames, Browse Presets, a drum slot's Browse, a row of the sample browser, a field
+--                 of the sample editor and its envelope's Menu and Preset trips that hand the
 --                 keyboard to Avenger (handover.luau), and the knobs turned with a press held through
 --                 a hand-over of the keys (amount.luau); Initialize's No clicks nothing, as it is
 --                 meant to; every other action the page sends is answered "<label> is not available
---                 in this module yet" in its error region, until the stage that builds it (the plan's
---                 slices 8 to 10)
+--                 in this module yet" in its error region, until the stage that builds it (the
+--                 plan's slices 9 and 10)
+--   the watcher   while the page is hidden, DRUM SQ's selected pattern said as AUTO FOLLOW moves it
+--                 (watch.luau), paced by the `drumSqCadence` setting
 --
 -- A message counts only while the page has the keyboard (host.window.foreground), so a press that
 -- reaches the module after the user went elsewhere does nothing; and one trip at a time, which the
@@ -34,8 +40,8 @@
 local P = {}
 
 -- ── Settings ─────────────────────────────────────────────────────────────────
--- Five, in the module's settings dialog (the plan's §2.9). Only the first four act in this stage;
--- the Drum SQ watcher that `drumSqCadence` paces comes later.
+-- Five, in the module's settings dialog (the plan's §2.9): the page key, the expansions list, the
+-- sounds, the Mac page mode, and how often DRUM SQ's watcher takes its picture (watch.luau).
 local KEY_DEFAULT = host.os.pick({
   macos = "Ctrl+Shift+Win+F1", -- Command is Ctrl and Control is Win in a key spec on a Mac
   windows = "Ctrl+Shift+Alt+F1",
@@ -149,22 +155,13 @@ P.NOT_BUILT = {
   "open_expansion", "close_expansion", "select_all_expansion_presets",
   "select_expansion_category", "go_to_loaded_preset_category", "select_expansion_preset",
   "load_expansion_preset", "mark_expansion_preset_favorite", "toggle_expansion_favorite_view",
-  "toggle_drum_pattern", "select_drum_mode", "previous_drumkit", "next_drumkit", "select_drumkit_part", "drumkit_column",
-  "toggle_drumkit_button", "drumkit_control", "reset_drumkit_control", "drumkit_menu_item",
-  "select_central_tab", "sample_browser_focus", "select_sample_editor_tab", "sample_editor_field",
-  "sample_editor_play_mode", "sample_editor_panel_button", "toggle_sample_editor_enable",
-  "sample_editor_grid", "sample_editor_eq_type", "sample_editor_loop_stretch",
-  "sample_editor_control", "reset_sample_editor_control", "central_drum_sq_sequence_menu_item",
-  "central_drum_sq_pattern_player", "central_drum_sq_auto_follow",
-  "select_central_drum_sq_pattern", "toggle_central_drum_sq_pattern",
-  "central_drum_sq_pattern_menu_item", "central_drum_sq_control", "reset_central_drum_sq_control",
-  "central_drum_sq_length", "central_drum_sq_speed",
 }
 
 -- ── The page ─────────────────────────────────────────────────────────────────
 local E = nil -- what main.luau hands over (P.start)
 local S = host.include("src/state.luau")
 local Reads = host.include("src/read/open.luau")
+local Watch = host.include("src/watch.luau")
 
 local ready = false -- this page object's document has loaded
 local plugin = nil -- the plug-in window the page was last shown beside, as a window table
@@ -177,9 +174,17 @@ local spec = nil -- what O:addPage was given: its `notHere` follows the key (P.s
 -- their age. Forgotten when the page is described again, fails, or reloads itself.
 local given = nil
 
+-- A message to the page. page:post writes it as host.json.encode does, and raises for what JSON
+-- cannot hold: that is logged, and the key's show or the trip's answer goes on without it rather
+-- than failing whole.
 local function post(value)
   local page = E.header.page
-  if page then page:post(value) end
+  if not page then return end
+  local ok, why = pcall(function() page:post(value) end)
+  if not ok then
+    host.log.info(string.format("[avenger] [page] a '%s' message could not be posted: %s", tostring(value.kind),
+      tostring(why)))
+  end
 end
 
 local function inFront(id)
@@ -511,6 +516,16 @@ function P.start(env)
     postState = postState,
     closedWords = closedWords,
     sound = sound,
+  })
+  -- DRUM SQ's watcher, once its cadence is defined: on the header overlay, quiet while the page is
+  -- shown.
+  Watch.start({
+    header = env.header,
+    page = function() return env.header.page end,
+    ringBusy = env.ring.ringBusy,
+    ringValues = env.ring.ringValues,
+    ringSeen = env.ring.ringSeen,
+    S = S,
   })
   host.log.info("[avenger] [page] " .. keyWords() .. " shows the Avenger Control page beside an identified VPS Avenger")
 end

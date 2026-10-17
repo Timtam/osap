@@ -7382,8 +7382,255 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       runtime does not have; or (b) a measurement on the tester's Mac first: whether two separate
       press-move-release gestures at Avenger's knob within half a second reset it — if not, the
       stepper with `afterIdle` (ON:EAR's Width idiom) is enough. (b) first: one step in his session.
-- [ ] **The next stages**: the drums and the browser, the ring's knobs turned (above), and the
-      page's own Settings section.
+- [x] **The drums** (the plan's slice 8, half A; module 0.7.0 on the runtime 0.10.0's RG3, built
+      2026-10-17, not run live). The eleven actions of the Drums tab, each a trip
+      (`src/actions/drums.luau`, through `src/act.luau`), and NOTHING clicked unless the strip read
+      before shows the Drums tab selected — the tool clicked the drum points whatever was shown, over
+      an oscillator's knobs and filter: the refusal clicks nothing and leaves the focus on the Drums
+      tab. `toggle_drum_pattern`, `select_drum_mode` (DRUMKIT, LOCK, SEQUENCE: the mode or the lock
+      read after, where the tool wrote the mode before it read), `previous_drumkit` and
+      `next_drumkit` (the twelve slots' names read before and after as text, the ones that changed
+      posted and up to three said — the tool reset the names to the factory ones on Back and kept
+      the old kit's on Next; in SEQUENCE mode without the lock "the slots read as before; the
+      sequence is not read"), `select_drumkit_part` (the slot read as selected after, which the tool
+      took from its last click), `toggle_drumkit_button` (every slot's Mute, Solo, Lock and Loop read
+      after by the tool's own test for a lit button — a Solo that mutes the others shows so, one that
+      does not shows that; the tool wrote every other slot muted and flipped Loop from memory),
+      `drumkit_menu_item` (the slot's menu with the right button, its item at the tool's row in the
+      painted popup; Lock All and Unlock All with every lock read, Copy and Swap with the target chosen
+      in their submenu through RG3 and both rows' names read, Remove Sample with the name read, Save
+      Drumkit as waiting for its file dialog — the tool wrote twelve locks and moved names in memory,
+      and clicked the submenu 0.08 s after the item whether anything had opened or not; a popup a
+      failed choice left open, "no submenu" among them, closed with Escape while it counts open),
+      `drumkit_column` (Back and Next with the slot's name read, Edit Sample with the selection and the
+      central tab read; Browse a hand-over of the keyboard with Return alone, the tool's sentence #13,
+      the slot's name read after Return off a change wait from its picture held through it, and noted
+      as not read meanwhile, so a give-up posts it so), `drumkit_control` (the slot's Volume, Pan or
+      Pitch pressed and held through the keys as slice 7's knobs, `src/amount.luau`'s `Am.drum`, the
+      tool's sentence #9 with the slot's name as last read where the tool named the factory one;
+      nothing read after), `reset_drumkit_control` (a double-click; the change wait's verdict on the
+      knob's box said, no value claimed: nothing reads a drum knob) and `select_central_tab` (the
+      central tab read after its click with any tab of the strip selected, DRUM SQ's states with it
+      where it shows DRUM SQ; the tool never read the tab after its click). The drumkit table read
+      (`src/read/drums.luau`): two grids of two-point cells for the 48 buttons, the selected slot by a
+      rule of the module's own — ONE row of the name column's background that stands out from the
+      median of the twelve by 8 or more, the next by at most half that, otherwise "not read" — and
+      the twelve names as named regions of the part's one text read, asked only where the strip's
+      dots gave the count and read the Drums tab selected (so the page key reads them in its one
+      text read on the Drums tab, and the ring never); the strip is decided before the text read now.
+      "The kit name by OCR" of the port's plan has nothing to read: the tool places no kit name and
+      its page shows none — the slots' names are what Back and Next change (D1 asks the developer).
+      The slots' values are `kitMute`, `kitSolo`, `kitLock`, `kitLoop`, `kitSelected` and `kitNames`
+      in the module's state, as `drumLock` was the strip's LOCK already. `Act.run`'s small general
+      changes: a `same` left out or answering nil leaves the answer to the change wait's verdict;
+      `menu.submenu` and `menu.dialog`; `Am.run` asks a spec's `refuse`. The ring's Drums group after
+      Add oscillator, shown only once the strip read in this stay shows the Drums tab: Drum pattern,
+      Drum mode, Drum lock, Drum slot (by the factory names: the ring reads no text of the table),
+      Slot mute, Slot solo, Central tab. Tested in the scripted host, whose painted Avenger has the
+      drumkit table (`slots`) and a submenu over its popup (`submenu`): 18 tests, 19 scenarios
+      (avenger_drums_tests.rs), and the page tests' bounds measured again (the open reads 71,569
+      turns on the Drums tab at 200 %, the table's read 22,064 of them); a mutation round of 26 — nine on RG3, seventeen on the module — all caught, two of them only after a fix: the Loop flip as first written changed nothing (a mutation of a name the answer did not have), and the selection's margin of 8 had no scenario until one with no row standing out was added.
+      The review after it found five defects, fixed the same day: a submenu JUCE opens UPWARD — for
+      an item in the lower half of the plug-in it puts the submenu's bottom at the item's
+      (calculateWindowPos), so on a Mac Copy Sample to on slot 12, Swap Sample with on 11-12, Copy
+      Slot to on 10-12 and Swap Slot with on 9-12 — had its target at the tool's point, the item's
+      row plus the target's, which swapped slot 10 with slot 12 for "slot 1" and reported it; the
+      target is now counted from the submenu's own top (`Pp.submenuRow`, the first row 5.75 below
+      it, a starting value — D3); a submenu seen that the target could not be chosen in was said as
+      one that did not open (now "unfit submenu", runtime and page); a chain still getting ready at
+      the bound was shown as "no menu was seen" (now "unfollowed"); one OCR dropout made the
+      drumkit's Back and Next report a change (a slot read once is no change now); and Browse said
+      "changed" when only the selection repainted the name's box (it decides by the name read off
+      the held picture and after Return, the pixels only where a name is missing). Seven tests more
+      (ten scenarios; `overlay_submenu_tests.rs` has 20 tests now, `avenger_drums_tests.rs` 20) and
+      four extended, and a mutation round of 19 on the fixes and the review's survivors — all
+      caught, one (a slot read once taken as alike) only after a scenario with the picture changed
+      was added.
+- [ ] **What the Mac tester confirms for slice 8's drums** (P4, with Avenger in Logic, Calibrate
+      ticked, the Drums tab chosen from the page; afterwards the log and the calibration folder):
+      1. the page key on the Drums tab: the slots' names, Mute, Solo, Lock, Loop and SELECTED as
+         Avenger shows them — the log's `[avenger] [read] drums: slot 1 Mute …` with every slot's
+         shares, `drums: the name column's background … — selected: …` with the twelve means, and
+         `drums: the slots' names …`; the picture `drums-<zoom>pct.png`;
+      2. Pattern, DRUMKIT, SEQUENCE and LOCK, once each: the page back with what Avenger shows;
+      3. Next drumkit, then Back: the slots' names change in the page;
+      4. slot 3 chosen, then its Mute, then its Solo: whether the other slots' Mute read as Avenger
+         shows them;
+      5. slot 2's menu, Lock All and then Unlock All;
+      6. slot 2's menu, Copy Sample to slot 5: the submenu must open and slot 5 be chosen in it; then
+         Swap Sample with slot 5. The log: `[menu item] … opens a submenu — the test is told first`,
+         `[menu] … drawn: follows the submenu of 'A drum slot's menu': looked for in …`, `… sees a new
+         popup at … after the item's click: the item is taken`, `[avenger] 'A drum slot's menu': the
+         submenu at … its first row … from its item's row` (about 0: it opened downward), `… chosen —
+         clicked 1 time(s) …`; and the calibration folder's `-menu-item` and `-submenu-item`
+         pictures; then slot 10's menu, Swap Slot with slot 1 and then slot 12, on a kit Undo can
+         restore: the submenu should open UPWARD (its first row about -126 from its item's row) and
+         exactly slots 1 and 12 be swapped with slot 10 — the `-submenu-item` picture shows where the
+         cross lay;
+      7. Remove Sample on a slot that Undo can restore, then Undo;
+      8. Browse on slot 3: sentence #13 heard, a sample chosen in Avenger's browser, Return; the
+         page back with slot 3's new name; and what Return did in the browser; then Browse on slot 3
+         again with another slot selected, nothing chosen, Return: "unchanged" (the log's `after
+         Return — '…', unchanged by the names`);
+      9. slot 3's Volume: PageUp five times, then Return — Logic's playhead does not move, and the
+         page is back on Volume; then Reset Volume;
+      10. the central tabs: DRUM SQ, then EDITOR, then ARP, each said as selected;
+      11. the ring: Tab into the Drums group; Drum pattern, Drum mode Right and Left, Drum slot Right,
+          Slot mute.
+- [ ] **For the Avenger developer, slice 8's drums**: D1, whether Avenger shows a kit's or a
+      sequence's name anywhere; D2, how the selected slot is drawn — the rule takes one row whose
+      background stands out (the log's twelve means and `drums-<zoom>pct.png`); D3, the slot menu's
+      and its submenu's pictures (`-menu-item.png`, `-submenu-item.png`, from step 6 above), whether
+      a second Browse closes an open sample browser, and what Return does in it, and where a
+      submenu's first row lies below its top (5.75 at 50 % is the starting value); D4, whether Loop
+      lights as Mute does (it is read by the same test); D5, whether a drum knob shows a value worth
+      reading.
+- [ ] **Residuals of slice 8's drums**: the selection rule is the module's own, with starting
+      values (D2); Loop is read by Mute's test (D4); a hover over a slot's button after its click
+      can read as BRIGHT, the tool's own risk; drawn reading a submenu as gone by the pointer's
+      highlight after its item's click — the single-level popup's risk, now on the submenu too;
+      no second click on a submenu's item that opens it (a toolkit that opens submenus only on a
+      click and ignores the first one gets "no submenu" said); a submenu's target counted from its
+      top with a first row 5.75 below it and rows 11.5 apart, the tool's numbers for a submenu that
+      opens downward — off by half a row or more, the wrong slot is chosen, which the
+      `-submenu-item` picture and Undo show (D3); Escape taken
+      as closing a JUCE menu and its submenus together (read in JUCE's source, not measured); the
+      slots' names at 50 % by OCR; the submenu's region is right of its menu (Pp.SUBMENU), so a
+      submenu JUCE flips to the left of a menu near Avenger's right edge is not seen by drawn; Back
+      and Next in SEQUENCE mode read no sequence; a slot's menu opens with the right button only (the
+      sample editor's and SPEED's open with the left, slice 8's other half); the page's help text for
+      the drumkit's Back and Next is the tool's.
+- [x] **The sample editor and DRUM SQ** (the plan's slice 8, half B; module 0.7.0 on the runtime
+      0.10.0, built 2026-10-17, not run live). Twenty-one actions, each a trip, and NOTHING clicked
+      unless the read before shows its place — the tool clicked the editor and DRUM SQ whatever was
+      shown, and wrote the strip's tab, the view, the editor's tab and the selected slot after every
+      editor action unread. The sample editor (`src/actions/sample.luau`, through `src/act.luau`):
+      clicked only with the Drums tab, EDITOR as the central tab and the editor shown (not the
+      sample browser), each control only on its own tab — Gain and Range share a point, Play Mode
+      lies beside Amp's Strength; `select_sample_editor_tab` and `toggle_sample_editor_enable` read
+      the tab and the switch after (the tool flipped the switch in memory); `sample_editor_play_mode`,
+      `sample_editor_grid`, `sample_editor_eq_type` and `sample_editor_loop_stretch` open their popup
+      with the LEFT button on their field (`menu.button`), the drawn test looking below the field
+      (`Pp.BELOW_OPENER`), and read the field before and after as text — Loop-Stretch's slot's Loop
+      read after it, which the tool wrote from the item; a popup a failed choice leaves open is closed
+      by clicking its field again, never with Escape; the envelope's Back and Next read its preset's
+      name; `reset_sample_editor_control` the change wait's verdict. Hand-overs (`src/handover.luau`):
+      `sample_editor_field` as a rename (the value read back, the page's ids where the tool's EQ
+      focus was no element of the page), `sample_browser_focus` as a slot's Browse (#13, the selected
+      slot's name read after Return; `Hv.browseName` shared with it), the envelope's Menu and Preset
+      with Return alone and no sentence; `sample_editor_control` pressed and held (`Am.sample`, #10
+      with the slot read as selected). The reader `src/read/sample.luau`: the editor's tab by the
+      tool's central-tab rule over its four tabs, the view, the tool's blue test for the switch, the
+      fields as text where they apply (`Open.part`'s `fields`). DRUM SQ (`src/actions/drumsq.luau`):
+      clicked only where DRUM SQ reads as the central tab, any strip tab; PATTERN CHAIN, AUTO FOLLOW,
+      a pattern selected (the tool wrote the selection) and B, C or D turned on or off with the right
+      button read after; the pattern menu's COPY kept as a fact of the session, set only once
+      Avenger's menu took it (`sqCopied`, posted as `drum_sq_pattern_copied`, which the page's PASTE
+      items follow — the tool's page set it at the click), PASTE and CLEAR answered by the change wait
+      on the steps; SPEED opened with the left button and its field read; the sequence menu's file
+      dialog waited for and DRUM SQ read after it (`menu.dialog = "read"`); LENGTH double-clicked, read,
+      dragged with `host.input.drag` from what it reads — up or down — and read again (the tool wrote
+      the length asked and dragged down from the 64 it assumed; that 64 is kept only where nothing
+      reads); `central_drum_sq_control` (`Am.drumSq`, #11) and its reset. The page key reads the
+      editor's tab, view and switch, and LENGTH where DRUM SQ shows. DRUM SQ's watcher
+      (`src/watch.luau`): one `host.timer.every` at the `drumSqCadence` setting (100 to 1000 ms,
+      250), skipped while its picture or a question is pending, looking only while the header overlay
+      is up and not away, the page not shown, no menu open and no ring action out; armed by the
+      newest read showing DRUM SQ with PATTERN CHAIN and AUTO FOLLOW on (again from a newer one, so
+      the pattern the page chose is not said), disarmed by its own read; one picture of the central
+      tabs' and the patterns' rows a turn, seven questions with callbacks, the selection ranked only
+      among A and the patterns read on, the letter said only when it changes, with interrupt. The
+      ring's DRUM SQ group in the Drums group: Pattern chain, Auto follow, Pattern (a stepper over A
+      and the patterns read on), Pattern B to D. The page's four claims at a click removed
+      (`ui/panel.js`): no SELECTED pattern and no LENGTH before Avenger is read, PASTE from the
+      state, no flag at COPY's click. Tested in the scripted host, whose painted Avenger has the
+      editor's tabs, switch and fields and DRUM SQ's steps, and whose timers answer tokens and
+      `cancel`, and records `host.input.drag`: 15 tests in `avenger_sample_tests.rs` and 20 in
+      `avenger_drumsq_tests.rs`, every one ending with no picture held; a mutation round of 41, 39 caught (one only when run
+      against the scenario that counts the watcher's seven keyed questions) and two that change nothing
+      the scripted host can tell: the watcher's `away` guard, which the page's own shown guard covers in
+      every state the host plays, and its explicit disarm, which its own read written into the ring
+      repeats on the next turn. The adversarial review's four bugs, fixed the same day: the twelve
+      slots' lists — the drumkit table's and the editor's switch — are posted keyed by the slot's
+      number as text where JSON cannot carry them as a list (slot 11 or 12 read with five or fewer of
+      the others: page:post raised, and the page key opened nothing), the page reading either
+      (`readSlots`), and a post the host refuses is logged instead of raised; the editor's switch is
+      kept with the slot it was read for and posted only while that slot reads selected (it was shown
+      as the next slot's); the watcher armed with no pattern read takes the first one it reads without
+      a word; LENGTH, where no read follows its double-click or its drag, is posted as not read rather
+      than as read before. The scripted page now writes every post with the host's own encoder, and a
+      scenario ending with a refused post fails. Six new tests — the keyed lists and a refused post,
+      the switch's slot, LENGTH posted as not read, the watcher armed with no pattern, its look-again
+      checks, and the page's edits E1 to E4 as a markup test — and checks added to six others: the
+      envelope's Menu and Preset off their tabs and its name forgotten at a give-up, Speed's tab and
+      its focus on Pitch, Loop-Stretch's Loop as the change, the view after a browser row's Return,
+      LENGTH's "unchanged"; a second mutation round of 21, the review's ten survivors and the fixes
+      undone, all caught.
+- [ ] **What the Mac tester confirms for slice 8's sample editor and DRUM SQ** (P4, with Avenger in
+      Logic, Calibrate ticked, the Drums tab and EDITOR chosen from the page; afterwards the log and
+      the calibration folder):
+      1. the page key on the Drums tab with EDITOR: the editor's tab (SELECTED) and Amp's switch as
+         Avenger shows them — the log's `[avenger] [read] editor: the tabs' bottom strips …` and
+         `editor: Amp's switch …`; the picture `sample-<zoom>pct.png`;
+      2. Sample, Amp, Pitch and EQ from the page, each said as selected; Amp ON and OFF, then EQ;
+      3. Play Mode Polyphone and back; on Amp, Grid 1/8 and back; on EQ, band 1's type Low-Shelf and
+         back; Loop-Stretch Turntable and back to Off: each popup must open and take its item — the
+         log's `[menu] … drawn: armed on '<label>' in …` (below the field), `[menu item] … chosen` and
+         `[avenger] [act] '<label>': …`, and the `-menu-item.png` pictures; note what the page says;
+      4. Start double-clicked from the page, a value typed, Return; End, Escape: what Avenger keeps;
+      5. on Amp, the envelope's Next and Back; Preset, one chosen in Avenger with the arrows, Return;
+         then Menu, Escape, Return;
+      6. slot 3's Browse (the browser shows), then a row (Ride) from the page: #13 heard, a sample
+         chosen, Return, the page back with slot 3's new name;
+      7. the sample editor's Volume, PageUp five times, Return; then Reset Volume;
+      8. DRUM SQ from the page: PATTERN CHAIN, AUTO FOLLOW, B on, B selected, SPEED 1/8, LENGTH 16
+         BEATS and then 4 BEATS, VEL AMOUNT PageUp three times and Return, Reset SHUFFLE — the log's
+         `[avenger] [length] …`, the picture `sq-controls-<zoom>pct.png`;
+      9. the pattern menu: COPY on A (PASTE now offered in the page), B selected, PASTE; CLEAR on B,
+         then Undo;
+      10. SEQUENCE MENU, EXPORT TO MIDI: the dialog; cancel it; the page back only after it;
+      11. the watcher: PATTERN CHAIN and AUTO FOLLOW on, B and C on, the page closed with its key, a
+          sequence playing in Logic: the letters heard as the pattern changes, also with Tab in the
+          ring meanwhile; the page opened: the letters stop; closed: they resume — the log's
+          `[avenger] [watch] armed …`, `pattern C (B before) …`, the minute summary, the picture
+          `drumsq-watch-<zoom>pct.png`;
+      12. the ring: Tab into the DRUM SQ group; Pattern chain, Auto follow, Pattern Right, Pattern C;
+      13. Bassdrum (slot 12) selected, EDITOR and Amp shown, the page key: the page opens, and Amp's
+          switch is said for Bassdrum; then Crash (slot 1) chosen from the page: Amp's switch "not
+          read" until the editor is read again (Amp chosen from the page).
+- [ ] **For the Avenger developer, slice 8's sample editor and DRUM SQ**: D6, how the editor's
+      selected tab is drawn (the tool's central-tab rule is applied to it, the log's four means), how
+      Amp's, Pitch's and EQ's switches light (the tool's blue test), how the browser view looks
+      (`sample-<zoom>pct.png`); D7, what each field shows, text or a shape — Play Mode, Grid, an EQ
+      type, Loop-Stretch, SPEED, LENGTH, the envelope's Preset field — and their boxes
+      (`tables/centre.luau`) against the pictures; D8, where the editor's and SPEED's popups open (below
+      their field?), the `-menu-item.png` pictures; D9, whether the pattern menu greys PASTE before a
+      COPY, and whether the copied pattern is per instance; D10, what a double-click on LENGTH sets (64?),
+      whether 6.6 points per four steps holds, and whether one Dragged event moves LENGTH on a Mac (the
+      tool posted many, `host.input.drag` posts one there); D11, the watcher's CPU in Activity Monitor at
+      250 ms and at 100 ms, with the minute summaries; D12, whether the editor's and DRUM SQ's knobs show
+      a value worth reading.
+- [ ] **Residuals of slice 8's sample editor and DRUM SQ**: the editor-tab rule, the switches' blue and
+      the browser's words are starting values (D6) — a browser view whose tab row reads a tab is taken
+      for the editor; the browser is told by any of its thirteen words in its first rows; the fields'
+      boxes and the region below a left opener are starting values (D7, D8), and an EQ type drawn as a
+      shape is never read, only seen changed; LENGTH's text, the double-click's 64, the 6.6 points and
+      one Dragged event on a Mac (D10); a playing sequence animates DRUM SQ's steps under the pattern
+      and sequence menus' popups, and drawn takes only a change that stands still — a popup beside a
+      moving playhead is unmeasured; the watcher stays quiet while the page is shown beside Avenger,
+      speaks while the user is in the ring, ranks only patterns read on and is armed only by a read in
+      this window; PASTE is the module's fact, not Avenger's (D9); the knobs read nothing after Return
+      (D12); Escape after a typed field reads back what Avenger shows, which may not be the old value,
+      and "did not open" says "nothing was renamed" (the renames' words); `host.input.drag` holds the
+      event loop for about 60 ms on Windows; the sample editor is the page's only, the ring has none of
+      it; the calibration picture of the editor is `sample-<zoom>pct.png`, since `editor-…` are the
+      renames'; the editor's switch read by a choice of central tab, whose read does not see the
+      drumkit table, is taken for the slot read selected last, and a slot chosen from the page or the
+      ring reads the table but not the editor, so the switch says "not read" until the editor is read
+      again (the slot's actions could read the editor's part where EDITOR shows); a twelve-slot list
+      posted keyed by the slot is a second shape of the same key, which only the page reads.
+- [ ] **The next stages**: the browser, the ring's knobs turned (above), and the page's own Settings
+      section.
 
 ## HTML pages, stage 1: `host.gui.webview` and the Windows probe (2026-09-28)
 
@@ -8067,6 +8314,35 @@ maintainer's German test instructions are a text of their own, not in the reposi
         four metrics — all caught. **Not measured:** whether a JUCE knob follows the motion, and
         what a screen reader's mouse tracking makes of it — VPS Avenger's "Slice 7 on Windows"
         above.
+      - [x] **RG3 — a menu item's submenu** (the VPS Avenger port's plan, built 2026-10-17 with its
+        slice 8's drums, overlay runtime 0.10.0, not run live): `O:chooseMenuItem{ …, submenu =
+        { menuItem } }`. The item that opens the submenu is placed as any item and, before its
+        click, the test that placed it is told through its new `chained(o, press, menu, done)` hook
+        (`press.parent` the menu's rectangle): `newWindow` takes the window list again, `drawn` two
+        profiles with callbacks of the submenu's rectangle (its `region` asked with `press.parent`)
+        and of the menu; the item is clicked ONCE on `done(true)` — never again, since a toolkit
+        opens a submenu on its item's hover too — and counts as taken when that test answers a NEW
+        popup, not the menu nor a rectangle inside it; the submenu's item is placed in it by
+        `submenu.menuItem` at the opener's factor and chosen as any item, `retries` its own. New
+        `why` "no submenu" — no new popup within 8 s of the item's click, or the menu closed first —
+        said; the menu answered alone after the submenu's item was clicked is "untaken". `drawn`
+        judges the menu by its rows only while it follows a submenu (a highlighted item's row moves
+        every column's mean), answers the submenu while seen and the menu while there, and past its
+        8 s looks for the submenu no longer and follows the menu alone, so a module can still close
+        it with Escape. docs/api/overlay.md (`O:chooseMenuItem` step 7, `O.menuTests`, "Following a
+        submenu"); 15 tests, 18 scripted scenarios (overlay_submenu_tests.rs). Against the port's
+        plan: the hook runs in a coroutine of its own (a yield fails it alone, not the test that
+        answered); `drawn` keeps following the menu past its bound instead of disarming, so the
+        menu still counts open when the pick says "no submenu"; a reading asked before the arm
+        became the submenu's keeps the menu's word instead of counting a miss; and the user's own
+        key cannot end a chain that is getting ready, since the keys are the menu's while it counts
+        open — the leaving and another press do (tested). After its review: `why` "unfit submenu"
+        (a new popup seen that `submenu.menuItem` took none of, or the item fell outside), and
+        "unfollowed" (the hook still getting ready at the bound; the menu closing then is "closed",
+        said as such), each with its words and its row in the table; the docs say to place a
+        submenu's item from the submenu's own corner, since JUCE opens it upward from an item in
+        the lower half of its area. **Not measured:** everything on a real JUCE submenu — VPS
+        Avenger's slice 8 steps above.
 - [ ] **Stage 3 — the real `host.gui.webview`**: `prepare()` called on an overlay's first
       activation (the call and the asynchronous environment are there since 2026-09-28), a build
       that does not wait at all (above), the page kept off the internet (above), the placement

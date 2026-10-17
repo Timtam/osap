@@ -12,7 +12,9 @@
 //     retries on timers;
 //   * the defects of the port's plan: the spelling, the disclosures a re-render closed, and the
 //     central tabs this page cannot reach yet, which now say so;
-//   * Back and Next say they are unavailable where VPS Avenger steps no preset (on Init Preset).
+//   * Back and Next say they are unavailable where VPS Avenger steps no preset (on Init Preset);
+//   * DRUM SQ claims nothing at a click: no pattern SELECTED and no LENGTH before Avenger is read,
+//     and its PASTE items offered from the module's word that a COPY was taken in Avenger's menu.
 // Text goes into the page as text (textContent), never as HTML.
 (() => {
   'use strict';
@@ -67,6 +69,20 @@
     return Number.isFinite(n) ? n : null;
   };
   const readText = (v) => (v == null ? null : String(v));
+  // The twelve drum slots' list as the module posts it: a JSON list, or an object keyed by each
+  // slot's number ("12") where few slots were read and slot 11 or 12 among them, which a JSON list
+  // cannot carry; each entry through `read`, a hole as null. Neither, or an object with no slot (an
+  // empty list, which JSON writes as {}): null.
+  const readSlots = (v, read) => {
+    if (Array.isArray(v)) return v.map(read);
+    if (!v || typeof v !== 'object') return null;
+    const out = [];
+    Object.keys(v).forEach((key) => {
+      const i = parseInt(key, 10);
+      if (String(i) === key && i >= 1 && i <= 12) out[i - 1] = v[key];
+    });
+    return out.length ? Array.from(out, (x) => read(x == null ? null : x)) : null;
+  };
   const ALL_PRESET_CATEGORY = '__all__';
   let currentExpansions = [];
   let currentExpansionsFromDatabase = false;
@@ -397,28 +413,27 @@
         drum_lock: readFlag(s.osc_panel.drum_lock),
         drum_mode: s.osc_panel.drum_mode ? String(s.osc_panel.drum_mode) : null,
         drumkit_part_selected: s.osc_panel.drumkit_part_selected ? String(s.osc_panel.drumkit_part_selected) : '',
-        drumkit_part_labels: Array.isArray(s.osc_panel.drumkit_part_labels)
-          ? s.osc_panel.drumkit_part_labels.map((label) => String(label || ''))
-          : [
-              'Crash', 'Open Hi-Hat', 'Ride', 'Closed Hi-Hat 2',
-              'Percussion 2', 'Closed Hi-Hat 1', 'Percussion 1', 'Snare 2',
-              'Clap', 'Snare 1', 'Rimshot', 'Bassdrum'
-            ],
-        drumkit_mute_states: Array.isArray(s.osc_panel.drumkit_mute_states) ? s.osc_panel.drumkit_mute_states.map(readFlag) : [],
-        drumkit_solo_states: Array.isArray(s.osc_panel.drumkit_solo_states) ? s.osc_panel.drumkit_solo_states.map(readFlag) : [],
-        drumkit_lock_states: Array.isArray(s.osc_panel.drumkit_lock_states) ? s.osc_panel.drumkit_lock_states.map(readFlag) : [],
-        drumkit_loop_states: Array.isArray(s.osc_panel.drumkit_loop_states) ? s.osc_panel.drumkit_loop_states.map(readFlag) : [],
+        drumkit_part_labels: readSlots(s.osc_panel.drumkit_part_labels, (label) => String(label || '')) || [
+          'Crash', 'Open Hi-Hat', 'Ride', 'Closed Hi-Hat 2',
+          'Percussion 2', 'Closed Hi-Hat 1', 'Percussion 1', 'Snare 2',
+          'Clap', 'Snare 1', 'Rimshot', 'Bassdrum'
+        ],
+        drumkit_mute_states: readSlots(s.osc_panel.drumkit_mute_states, readFlag) || [],
+        drumkit_solo_states: readSlots(s.osc_panel.drumkit_solo_states, readFlag) || [],
+        drumkit_lock_states: readSlots(s.osc_panel.drumkit_lock_states, readFlag) || [],
+        drumkit_loop_states: readSlots(s.osc_panel.drumkit_loop_states, readFlag) || [],
         sample_editor_tab: s.osc_panel.sample_editor_tab ? String(s.osc_panel.sample_editor_tab) : null,
         sample_editor_view: s.osc_panel.sample_editor_view ? String(s.osc_panel.sample_editor_view) : 'editor',
-        sample_editor_amp_states: Array.isArray(s.osc_panel.sample_editor_amp_states) ? s.osc_panel.sample_editor_amp_states.map(readFlag) : [],
-        sample_editor_pitch_states: Array.isArray(s.osc_panel.sample_editor_pitch_states) ? s.osc_panel.sample_editor_pitch_states.map(readFlag) : [],
-        sample_editor_eq_states: Array.isArray(s.osc_panel.sample_editor_eq_states) ? s.osc_panel.sample_editor_eq_states.map(readFlag) : [],
+        sample_editor_amp_states: readSlots(s.osc_panel.sample_editor_amp_states, readFlag) || [],
+        sample_editor_pitch_states: readSlots(s.osc_panel.sample_editor_pitch_states, readFlag) || [],
+        sample_editor_eq_states: readSlots(s.osc_panel.sample_editor_eq_states, readFlag) || [],
         central_panel_tab: s.osc_panel.central_panel_tab ? String(s.osc_panel.central_panel_tab) : null,
         drum_sq_auto_follow: readFlag(s.osc_panel.drum_sq_auto_follow),
         drum_sq_pattern_chain: readFlag(s.osc_panel.drum_sq_pattern_chain),
         drum_sq_pattern_selected: s.osc_panel.drum_sq_pattern_selected ? String(s.osc_panel.drum_sq_pattern_selected) : null,
         drum_sq_pattern_states: Array.isArray(s.osc_panel.drum_sq_pattern_states) ? s.osc_panel.drum_sq_pattern_states.map(readFlag).slice(0, 3) : [],
         drum_sq_length_steps: readInt(s.osc_panel.drum_sq_length_steps),
+        drum_sq_pattern_copied: readFlag(s.osc_panel.drum_sq_pattern_copied),
         trig_mute: readFlag(s.osc_panel.trig_mute),
         trig_solo: readFlag(s.osc_panel.trig_solo)
       };
@@ -440,6 +455,9 @@
         d: readFlag(drumSqPatternStates[2])
       };
       setCentralDrumSqLengthSteps(oscPanel.drum_sq_length_steps);
+      // PASTE follows the module's word that a COPY of this session was taken in Avenger's menu,
+      // never the page's own click.
+      centralDrumSqPatternCopied = oscPanel.drum_sq_pattern_copied === true;
       renderOscPanel();
     }
     if (s.macro_panel && typeof s.macro_panel === 'object') {
@@ -1815,11 +1833,7 @@
         `central-drum-sq-pattern-${key}`
       );
       btn.title = `Select Pattern ${label}.`;
-      btn.addEventListener('click', () => {
-        centralDrumSqPattern = key;
-        renderCentralDrumSq();
-        requestAnimationFrame(() => focusElementById(`central-drum-sq-pattern-${key}`));
-      });
+      // SELECTED only from what is read: the state the action brings back renders it.
       cell.appendChild(btn);
       patternRow.appendChild(cell);
     }
@@ -1888,9 +1902,6 @@
         openDisclosures.delete(patternMenuId);
         patternMenuButton.setAttribute('aria-expanded', 'false');
         patternMenu.hidden = true;
-        if (key === 'copy' || key === 'copy_first_half' || key === 'copy_second_half') {
-          centralDrumSqPatternCopied = true;
-        }
         trackFocus(patternMenuButton);
         perform('central_drum_sq_pattern_menu_item', { item: key });
         renderCentralDrumSq();
@@ -1989,13 +2000,10 @@
       }
       itemButton.addEventListener('click', () => {
         lengthMenuButtonSafeClose();
-        setCentralDrumSqLengthSteps(steps);
+        // The LENGTH shown is the one read: the state the action brings back sets it.
         trackFocus(lengthButton);
         perform('central_drum_sq_length', { steps: steps });
-        requestAnimationFrame(() => {
-          setCentralDrumSqLengthSteps(steps);
-          focusElementById('central-drum-sq-length');
-        });
+        requestAnimationFrame(() => focusElementById('central-drum-sq-length'));
       });
       lengthMenu.appendChild(itemButton);
     }
