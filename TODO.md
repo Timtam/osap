@@ -34,7 +34,7 @@ The first Mac test of the Avenger page (build 97d668c, an M2 Max on macOS 26.6.1
 another cause than the one guessed, and the log showed three more faults. In the order to work on
 them:
 
-- [ ] **2a. An overlay must not leave the plug-in after a click into it (macOS, every plug-in).**
+- [x] **2a. An overlay must not leave the plug-in after a click into it (macOS, every plug-in).**
       Right after every click into Avenger, the ring's own included, the log says `[deactivate] 'VPS
       Avenger' — in front now: 'Inst 1'`: the same window. After a click into a plug-in's own drawn
       view, Logic reports the keyboard on the window itself (`AXWindow/AXDialog`) or on nothing, and
@@ -43,45 +43,326 @@ them:
       a focus on the window itself or on nothing keeps the stay. The same cause ends the ring's Load
       and Initialize on a Mac (`not chosen — the overlay left the front first`); the page's trips
       are unaffected, since a trip holds its place.
-- [ ] **2b. An undecided `identify` is asked again when its read answers.** The panel's `identify`
+      **Built (runtime 0.7.0, 2026-10-17).** The guess was half right, the code showed: the
+      window itself on the chain was already "inside"; an EMPTY chain ended the stay, in the VM's
+      stay watcher and in every panel binding's evaluation. Now an empty chain with the same window in
+      front (same id, title and client size) keeps the stay — the panel the stay began with stands
+      for the DAW's, its origin is not asked, the verdict is kept, and a module's `control`
+      function is not asked either: the control it last found in the stay stands for it, so a
+      function that counts its misses (Kontakt's) counts none in the host's busy quarantine — and
+      never begins one; a chain
+      that is another window's, an element without a rectangle, an element outside the panel,
+      another window in front, a resize or a retitle still end it, and the page's hold is
+      unchanged. General, for every panel binding in every VM (sforzando's too). The way back from
+      the page into Logic with the keyboard on nothing comes back in the stay as well (l.1926-1939
+      of the log, which the TODO did not list). Pinned in overlay_host_panel_tests.rs
+      (`an_empty_chain_keeps_the_stay_in_its_window_and_never_begins_one`, the outranked variant),
+      overlay_avenger_tests.rs (the ring's ◀ and Load / Initialize in Logic at 80 % after Logic
+      reports nothing) and overlay_page_tests.rs (the way back, a trip landing on nothing).
+      Residual, in docs/api/overlay.md: a visit to the DAW's chrome made while the DAW is in the
+      host's busy quarantine reads empty too and keeps the stay until the next readable round.
+      **The Mac tester confirms:** after every click into Avenger (◀, ▶, MENU, a click of their
+      own) the log has `[overlay] 'VPS Avenger': where the keyboard is in 'Inst 1' cannot be read
+      (an empty focus chain) — the stay goes on there` once per stay and no `[deactivate]`; the
+      overlay keeps its keys without moving the window; Load and Initialize from the ring are chosen
+      (`[menu item] 'VPS Avenger': 'Load preset' chosen — …`); Tab or VoiceOver onto Logic's header
+      still takes the overlay out (a `[deactivate]` naming the header's element); and the new host
+      line `[macos] accessibility answered <error> reading AXFocusedUIElement in Logic Pro …` (or
+      `… no focused element and no front window …`) says which answer Logic gives.
+- [x] **2b. An undecided `identify` is asked again when its read answers.** The panel's `identify`
       reads by OCR with a callback and first answers "could not tell yet"; the answer is picked up
       only at the next recheck, which only a window event brings. The tester moved the plug-in
       window with Control-Fn-arrows after every click for exactly that event (it looked like a
       matter of the window's place; the log shows the identification working at the same place). The
       runtime asks again on its own once the read is in.
-- [ ] **2c. Every deactivation logs its reason** (which test failed: the focus outside the panel,
+      **Built (runtime 0.7.0, 2026-10-17).** The log showed the module already asking
+      (`host.window.recheck` from the header's read): every identification whose read landed with
+      the keyboard in the panel came up in the same second, and the moves were needed because of
+      2a — after each click the stay ended and nothing began a new one until a readable round. What
+      remained general is built: a stored `identify` is handed a second argument, `again`, which
+      asks the overlays of its binding in this VM to look again on the module's next turn (once per
+      turn, the same function every time, each nil still counted towards the 8) instead of a round
+      of every module's overlays. VPS Avenger's header read (0.3.1) and sforzando's wordmark read
+      (0.2.2) call it. With 2a, a read that lands after the keyboard went unreadable brings the
+      overlay up (`a_header_read_that_lands_after_the_keyboard_went_unreadable_brings_the_overlay_up`).
+      **The Mac tester confirms:** Avenger comes up in Logic without moving the window, within a
+      moment of `identify could not tell yet`, and again after a visit to Logic's header and back.
+- [x] **2c. Every deactivation logs its reason** (which test failed: the focus outside the panel,
       the identity, a gate, another overlay's claim), so the next Mac log answers 2a directly.
-- [ ] **4. A preset step waits for a settled name.** `O:watch` on the name stops at the first
+      **Built (runtime 0.7.0, 2026-10-17).** `[deactivate] '<label>' — in front now: '<title>'
+      (<app>); <reason>`: this application's own window or the overlay's page, a window binding's
+      window, the plug-in window not of the binding's hosts, the DAW's chrome class (Windows), the
+      pattern or a control function finding nothing, where the keyboard is on the panel (outside,
+      no rectangle, another window's chain, an empty chain with no stay), `identify`'s answer,
+      `present`, the gate or landmark, the menu hold ending, a trip's held place, and the claim the
+      arbiter chose (docs/api/overlay.md, "Leaving the front"). The reasons are values in hand,
+      formatted only for the line. On the host's side (macOS), one line per application and answer
+      when the focused-element read fails with an error other than the busy and the permission ones,
+      or answers no element and no front window (docs/api/window.md, focusChain). **The Mac tester
+      confirms:** every `[deactivate]` of the next log carries a reason.
+- [x] **4. A preset step waits for a settled name.** `O:watch` on the name stops at the first
       change, which is Avenger's loading display: seven of ten steps read names such as
       `cYanmaGentaYellowb`, `PY` or `M`, and the page said them. The name counts once two reads
       agree, or it is in the catalog; otherwise the watch goes on to its bound.
-- [ ] **1a. Screen Recording judged by a real capture, not by `CGPreflightScreenCaptureAccess`.** In
+      **Built (runtime 0.7.0, VPS Avenger 0.3.1, 2026-10-17).** In the runtime, general: O:watch
+      counts READINGS, not looks — a `read` may name the reading its value came from as a second
+      value, and `done`, `onDone` and `onGiveUp` get `n`, how many readings in a row read the value
+      (`[watch] … (2 readings alike)`); a read without it counts every look, as before. The module
+      numbers its name reads, and a step's watch (the ring's ◀ and ▶, the page's ◀, ▶, UNDO, Load
+      and Save as) is done when the name changed and was read twice alike or is a catalog name as it
+      stands or ignoring case (`DB.catalogName`, never by similarity). At the bound a name read once
+      that is no catalog name is not taken: "the preset name cannot be read now", or the database's
+      neighbour, marked; the page gets the error, not the text. Residual: a loading display read
+      alike twice in a row would pass (none was in the log). **The Mac tester confirms:** after ◀
+      and ▶, ring and page, the names said and posted are presets, never `cYanma…`, `PY` or `M`,
+      and the `[watch]` lines say `(2 readings alike)` or end on a catalog name.
+- [x] **1a. Screen Recording judged by a real capture, not by `CGPreflightScreenCaptureAccess`.** In
       the first session the preflight said "not granted" throughout while every capture held Logic
       and Avenger (OCR read the header, Avenger was identified). The Permissions page and the start
       announcement believed the preflight. A capture holding another application's window counts as
       granted.
-- [ ] **1b. Input Monitoring is optional, not blocking.** It read "denied" while the event tap
+      **Built (2026-10-17).** One judgement everywhere (`perm::screen_recording`, rules in
+      `macos/evidence.rs`, unit-tested on Windows): ScreenCaptureKit's last answer first — a capture
+      that came back with a picture, or the request's shareable content, is granted; a refusal with
+      -3801 is missing — then the preflight where it says granted, then other applications' window
+      NAMES in `CGWindowListCopyWindowInfo` (only whether `kCGWindowName` is there, layer-0 windows
+      of other processes; Apple DTS on the forums says macOS gives them only with Screen Recording).
+      Names read after a refusal overrule it only when they were hidden as it came (read once, at
+      the first refusal after another answer): a grant made in System Settings shows before the
+      next capture, and a permission switched off while the names are shown stays NOT granted.
+      Nothing of it prompts. The page's line, the head, the start announcement (which adds
+      the "Judged by …" sentence while it is missing), the `[env]` line, the automatic request, the
+      button and the capture log all ask it and name what decided; the first capture of a session
+      is judged after it is made and logged either way. Residual (docs/macos-permissions.md): a
+      macOS that leaked window names would read granted before the first capture, uncorrected on
+      12.3-15.1, whose captures go through the older functions. **The Mac tester confirms:** with
+      Screen Recording granted while the application runs, the page reads it granted without a
+      restart (`Judged by …` says which), and the log's `screen recording: granted at the first
+      capture of the session, judged by a capture: ScreenCaptureKit returned a picture`; that no
+      dialog appears from opening or re-reading the page; what the page says before any capture
+      with it granted and with it off (window names shown or hidden on macOS 26); and, with it
+      switched off, that a capture through ScreenCaptureKit is refused rather than answered with
+      the wallpaper (`ScreenCaptureKit refused a … capture …` once, the page then reading `NOT
+      granted. Judged by a capture: macOS refused it as not permitted.`) — the premise of the
+      first rule, not yet seen on a Mac.
+- [x] **1b. Input Monitoring is optional, not blocking.** It read "denied" while the event tap
       captured the overlay's keys with Accessibility alone (macOS 26.6). The page, its head count
       and the start announcement ("cannot work yet: … Input Monitoring") treat it as optional.
-- [ ] **1c. The Permissions page reads the states again** when its window or tab comes forward, not
+      **Built (2026-10-17).** Its line reads `Input Monitoring — <state>, optional.` with what the
+      run has shown and what it would be for; the head counts only what is needed (`Granted: 2 of
+      the 2 permissions this application needs. Optional: Input Monitoring and Automation, for
+      VoiceOver.`). It counts as needed only on evidence (`tap::keys_seen`): the tap refused with
+      Accessibility granted, or a Carbon shortcut of the application's arriving while the tap, on
+      for over a second (installed, re-enabled or created again), on at that moment and not under
+      secure input (`IsSecureEventInputEnabled`, looked up by name), has seen no key-down at all —
+      logged once; a stall that gets the tap switched off concludes nothing. A key seen afterwards
+      makes it optional again; with Input Monitoring granted and keys still not arriving, the line
+      says to quit and reopen if it was granted while the application ran. Not caught: Input
+      Monitoring withdrawn after the tap has seen keys.
+      **The Mac tester confirms:** the start says nothing of Input Monitoring with it denied, the
+      page reads it optional with `Keys an overlay took have reached it in this run.` after an
+      overlay key, and no `counted as needed` line appears in the log.
+- [x] **1c. The Permissions page reads the states again** when its window or tab comes forward, not
       only at its build and at Re-check now.
-- [ ] **1d. App translocation is not the cause** (the second session ran translocated too, with
+      **Built (2026-10-17).** It reads them when its tab is selected, when the window is activated
+      with the page shown, and when the application becomes the active one with the page shown
+      (AppKit's notice, kept by `own.rs`, taken at the tick); each relabels in place only the lines
+      whose text changed, and says what changed once (`Screen Recording: now granted.`, `Input
+      Monitoring is needed now.`, or a line's new reason where its state and need stayed: `Input
+      Monitoring: Keys an overlay took have reached it in this run.`), nothing when nothing did.
+      Re-check now says the count and the changes, or `Nothing has changed.` An `&` in a label is
+      doubled so that wxWidgets shows it rather than taking it for a mnemonic mark. The words are
+      `backend/grants.rs`, tested on Windows.
+      **The Mac tester confirms:** granting Accessibility and Screen Recording in System Settings
+      and coming back to the page (closing System Settings, or Command-Tab with the Dock-icon
+      setting on) is said without a press, and VoiceOver reads the new lines, "Screen & System
+      Audio Recording" with its "and".
+- [x] **1d. App translocation is not the cause** (the second session ran translocated too, with
       every permission granted), but it shows that the `xattr` step was skipped: the tester guide
       makes that step harder to miss. A signing identity in CI, so a new build keeps the
       permissions, stays the maintainer's task.
-- [ ] **3. Previous and next preset are unavailable on Init Preset.** Avenger steps no preset from
+      **Built (2026-10-17).** The application says it, not only the log: the start announcement
+      ends with it and the Permissions page has it under its head — that it runs from a read-only
+      copy, what that costs, and the one Terminal line (`xattr -dr com.apple.quarantine` and the
+      original's path, single-quoted only where a shell needs it; with the original not found, the
+      `.app`'s name to run in its folder), the line also in a read-only field to copy. With the
+      original not found the page comes forward at the start. Nothing is changed by the
+      application (`portable::Translocation::spoken`, tested). README.txt's step 2 says not to skip
+      it and that the application now says so. **The Mac tester confirms:** a launch with the flag
+      still set ends its start announcement with the sentence and the line, the page reads it and
+      the field holds the line, and after running it no later start says it.
+- [x] **3. Previous and next preset are unavailable on Init Preset.** Avenger steps no preset from
       its blank preset; the tool has no handling for it (it clicks and waits for a change that never
       comes, `AC/actions.py` `_step_preset`). Where the preset read is Init Preset
       (`R.isInitPreset`): on the page `aria-disabled` on both buttons (they stay in the Tab order)
       with the reason in their help, in the ring the controls report themselves unavailable, and a
       press clicks nothing and says why. A fix beyond the tool, under the maintainer's "defects
       fixed" decision.
-- [ ] **5. Avenger's own popups on a Mac.** The page's Size never saw the zoom list: `'Zoom' not
+      **Built (VPS Avenger 0.3.2, 2026-10-17).** Decided by the latest name read, never by a time.
+      In the ring, ◀ and ▶ say "unavailable on Init Preset" after their label — the runtime's way
+      for a custom button, its `text`, as ON:EAR's panel buttons say what blocks them — where the
+      latest name read (a press's, a watch's, the Preset read-out's or the page's) is Init Preset,
+      any reading `R.isInitPreset` takes for it included; a press reads the name first and on Init
+      Preset (or, read as nothing, where the latest read was) clicks nothing, watches nothing and
+      says "<label>: Avenger steps no preset from Init Preset — load a preset first". The claim is
+      forgotten where the preset may have changed with nothing read since — a MENU choice, Undo (now
+      a button of the module's own, clicked as the hotspot was, which also forgets the database's
+      position), the redo list, the overlay leaving the front, and the same clicks and choices made
+      from the page — as the database's position is; a press then reads again. In the page, the
+      state carries `preset_steps_unavailable` (the reason) where the preset read is Init Preset;
+      Back and Next are then `aria-disabled="true"` (never `disabled`: in the Tab order, focusable,
+      the focus restored to them), their title, which is their help and their description, "Load the
+      previous preset, unavailable: VPS Avenger steps no preset from Init Preset; load a preset
+      first.", drawn dimmed. A press sends nothing to Avenger (no trip) and the error region says
+      "<label>: VPS Avenger steps no preset from Init Preset; load a preset first", the focus left
+      on the button; a trip whose own read in Avenger finds Init Preset clicks nothing and brings
+      the page back with that name and why. A trip from the page that may have changed the preset
+      (UNDO, the redo list, Load, Save as, Initialize) and reads no name after it — its reads give
+      nothing, or it is given up — posts the preset as not read, so the page offers Back and Next
+      again and their trip's own read decides. Available again with the next read of a preset: a
+      press's own, the name after Load or UNDO, the page key's reads. Pinned in
+      overlay_avenger_tests.rs
+      (`previous_and_next_are_unavailable_on_init_preset_and_a_press_clicks_nothing`,
+      `undo_the_redo_list_and_a_late_read_out_answer_leave_no_claim_of_init_preset`) and
+      avenger_page_tests.rs (`previous_and_next_from_the_page_send_nothing_on_init_preset`,
+      `the_ring_and_the_page_go_by_the_same_latest_read_of_init_preset`,
+      `back_and_next_carry_aria_disabled_and_stay_in_the_tab_order`).
+      **The Mac tester confirms:** on Init Preset in the ring, once the Preset read-out has been
+      heard, Tab onto ◀ and ▶ says "Previous preset, unavailable on Init Preset, button" (and Next's
+      the same), Return there clicks nothing in Avenger and says why, and the log has `[avenger]
+      'Next preset': the name reads Init Preset, which Avenger steps no preset from — nothing
+      clicked`; in the page VoiceOver says Back and Next are dimmed and reads the reason as their
+      help (VO-Shift-H, or after its delay), both are reached as the Rename button beside them is
+      (Tab with Keyboard navigation on in the Mac's settings, otherwise Option-Tab) and with
+      VO-arrows, and pressing either brings no Avenger window forward while VoiceOver speaks the
+      error region's sentence (the log: `[avenger] [page] 'Next preset': the page's preset is Init
+      Preset — nothing sent to VPS Avenger`); after Load, and after UNDO following Initialize, from
+      the ring and from the page, ◀ and ▶ step again — in the ring Tab onto them no longer says
+      "unavailable" right after Undo — and the page's Back and Next are no longer dimmed once it
+      shows the new name, or the heading says the preset is not read.
+- [x] **5. Avenger's own popups on a Mac.** The page's Size never saw the zoom list: `'Zoom' not
       chosen — no menu test saw a menu within 8000 ms`, twice. Avenger draws its popups itself, and
       no menu test of the module sees them on a Mac. Needs pictures of each popup kind from the
       Avenger developer (GM1), then a picture-based menu test.
+      **Built (runtime 0.8.0, VPS Avenger 0.4.0, 2026-10-17); the next log confirms.** Why no test
+      saw it, from the log and the code: the module listed only `newWindow`, which logs every new
+      window of the plug-in's process — and the log has no `[menu]` line at all, while the same
+      window server list paired Logic's plug-in window by frame and owner, and the host's
+      AXMenuOpened observer, which saw Logic's own menus, said nothing after either click. So the
+      list was neither a window of Logic nor a Cocoa menu: in current JUCE a popup given a parent
+      component is painted as a child of the plug-in's editor, with no window and no notification;
+      the tool's numbers fit that (every popup row from Avenger's corner, the macro button menu
+      pushed back inside Avenger's right edge). The log cannot exclude a second reading — no popup
+      opened at all: nothing pictured the screen after the clicks (not a calibrating run). The
+      window list cannot see such a popup, so the fix is a picture test that needs no template, in
+      the runtime and general: `O.menuTests.drawn{ region }` (docs/api/overlay.md, O.menuTests).
+      At each press the module names the rectangle its popup is painted in (src/popups.luau: the
+      zoom list, MENU's popup, the redo list, and round a right click's point, at 50 % from
+      Avenger's corner, cut to Avenger); the test profiles it in the press's handler before the
+      click (a menu test's new `before` hook), then with a callback on each tick, and compares rows
+      and columns in Luau (at most 256 each): a filled area that changed since the press and reads
+      the same twice in a row is the popup, answered as a rectangle drawn inside the plug-in; a
+      flash, an animation and an outline (VoiceOver's cursor) are none; a highlighted row keeps
+      it; it is gone once a popup's worth of its lines each way, or most of its lines, no longer
+      read as at the sighting — so a tab the same right click selected under the region does not
+      keep it open — and its going disarms the test until the next press. A choice is followed only
+      by the test that placed its item (the test itself, not its name), and an item clicked on a
+      callback's answer counts as clicked between two ticks, so a reading taken right after the
+      click never clicks it again. A right click's item is clicked at the tool's own x, kept inside
+      the area seen; a window whose rows do not reach the item's (a tooltip newWindow saw first) is
+      passed over for the next answer. The binding lists `newWindow` and `drawn`. No picture from the developer is needed to build it; his pictures
+      settle the regions and the starting values (below, GM1). Pinned in
+      overlay_drawn_menu_tests.rs and avenger_osc_macros_tests.rs (Size from the page, MENU from
+      the ring, the redo list holding a trip). Residuals: a static filled change in a region that is
+      not the popup would be taken for it (its item is placed inside that area only, and the
+      action's read-back catches a wrong choice); on a popup of two rows the highlight after the
+      click can read as gone (the reset modes keep their retries, the button menu has none); a
+      popup that differs from what lies under it in fewer lines than the smallest popup, beside a
+      lasting change that outweighs it, would still count as open until the next press; an
+      animation inside a region delays "alike". A right click's popup a choice left open (not
+      taken, covered) is closed with Escape, not a click on its opener: JUCE dismisses a popup
+      opened at a point on any click outside it and lets the click through (juce_Component.cpp) —
+      onto the tab, the button or the field — and only swallows one on the component a popup was
+      opened from; which of the two Avenger's right clicks open, and whether Escape reaches the
+      popup in Logic, are not measured.
+      **The Mac tester confirms** (with Calibrate ticked in the settings dialog, from the ring and
+      the page):
+      - Size and the ring's Zoom, MENU's Load and Initialize, and an OSC tab's menu each log
+        `[menu] 'VPS Avenger': drawn: armed on '<label>' in …`, then `drawn: a popup WxH at x,y,
+        alike at readings n and n+1`, `[menu item] … — test 'drawn' sees the menu at …`, `… chosen
+        — clicked 1 time(s) at …` and `drawn: the popup … has gone`; the `…-menu-item.png`
+        pictures show the item's crosshair on its row;
+      - the redo list, which the user chooses in, so no item is clicked and no `[menu item]` line
+        comes: `drawn: armed on 'Redo list'` (the ring) or `'Redo'` (the page), `drawn: a popup …`,
+        `[menu] 'VPS Avenger': a menu is open — test 'drawn' sees it` and, once it has closed,
+        `[menu] 'VPS Avenger': the menu has closed`; from the page also `trip 'Redo': its menu is
+        seen` and `trip 'Redo': its menu has closed`, then the name read;
+      - where instead the log says `drawn: nothing has changed in … after 20 readings`, no popup
+        opened, and the pictures `calibration/VPS-Avenger-<label>-menu-before.png` (the label with
+        `-` for what is not a letter or digit), `-menu-after-600.png` and `-menu-after-1500.png`
+        say what happened. A `newWindow: a window appeared …` line would contradict the reading
+        above: the popups would be windows after all.
+- [ ] **5b. The Avenger developer's pictures of every popup kind (GM1)**, sighted, in Logic: for
+      each, PNGs of Avenger's whole window at 80 % and 50 % — before the click, the popup open with
+      the pointer where it was clicked, the pointer on the second item (its highlight) — and the
+      items' texts top to bottom: MENU's popup; the zoom list (and once at 200 %: does it still fit
+      below the field?); the redo list after six or more undo steps; an OSC tab's menu with one and
+      with three oscillators (is Delete shown or disabled with one?); the Drums and the Trig tab's
+      menus; macro tab 1's menu with one and with three tabs (what does Delete delete?); macro knob
+      3's menu (does it shift left at Avenger's right edge?); macro button 2's menu (are ticks
+      shown, does a click close it?); and whether any popup ever reaches outside Avenger's window
+      (a popup with a parent component cannot). They settle popups.luau's regions and smallest
+      popups, the drawn test's change thresholds, the items' rows from the popup's corner, and
+      whether a tick item keeps its menu open (the `retries` of the button menu and reset modes).
 - [ ] **6. Then a new package for the tester:** Load, Initialize and Size again (ring and page), the
-      names after Next and Previous, and the Permissions page.
+      names after Next and Previous, and the Permissions page. With 2a, 2b, 2c and 4 built, the
+      package also asks for what each of them says the Mac tester confirms above, and no window
+      moves between steps. With 5 built: Size, Load, Initialize and the redo list from the ring and
+      from the page with Calibrate ticked, and the log and the calibration folder sent back; with
+      slice 5, its own steps ("What the Mac tester confirms for slice 5", VPS Avenger's page).
+- [ ] **7. Follow-ups of 2a (not built).** (a) The host's busy quarantine: when a focus read is
+      skipped or fails for it, arm one focus round for when it ends (`BUSY_PENALTY`, ax.rs), as
+      `arm_recheck_ladder` (queue.rs) places its last rungs past it — a bound on looking, so the
+      visit to the DAW's chrome that 2a's residual leaves unseen is read once the DAW answers.
+      (b) daw-hosts' focus key on an empty chain after focusing a Logic plug-in window says "could
+      not tell" and does nothing (l.2102-2106): it could at least ask the overlays to look again.
+      (c) An overlay never begins on an unreadable chain, so a reload with the keyboard already in
+      Avenger's view comes up only at the first readable round (l.1946-2140). (d) Kontakt's
+      `control` functions read with callbacks too (kontakt detect.luau) and still call
+      `host.window.recheck`; they could take `again` as a third argument. (e) l.2321: the first
+      page trip's ◀ after the page opened gave up unchanged, possibly a swallowed first click
+      (item 3 or 6 material). (f) A popup of Avenger's that becomes Logic's focused window (not
+      seen in this log: the overlay left before any popup) ends the stay, as any other window in
+      front does, and an empty chain when Logic's window comes back begins none: the overlay would
+      then be back only at the next readable round. The next log says whether that happens
+      (`[deactivate] … its place over its menu's window is no longer held; …`). (g) A `control`
+      function is not asked on an empty chain (the review of 2026-10-17): a function whose own read
+      with a callback lands while the chain is empty (Kontakt 7's header by OCR, clicked into before
+      it landed) comes up only at the next readable round; if a Mac log shows that, the round's
+      state could be handed to the function so it answers from what it holds without looking.
+      (h) The ring's Zoom step in Logic resizes the window, which ends the stay, and an empty chain
+      after it begins none: the overlay is back only at the next readable round, as in (f). (i) A
+      header read that answers nothing, half an answer or no factor does not call `again` (on
+      purpose: re-asking at once would spend the 8 nils), so after a click with the chain empty it
+      waits for the next evaluation.
+
+## CI without macos-14 (2026-10-16)
+
+- [x] **macos-14 dropped, its capture coverage moved to a forced leg.** GitHub retires the macos-14
+      runner at the start of November 2026, so `page-check` and `newer-macos` no longer run on it.
+      It was the one runner without ScreenCaptureKit's rectangle capture (macOS 15.2), and so the
+      only CI that called `CGWindowListCreateImage` and `CGDisplayCreateImageForRect`, the path of
+      every Mac from 12.3 to 15.1. In its place `newer-macos` has a leg on macos-15 running
+      `capture-check --older-functions`, a switch of that subcommand alone that keeps
+      ScreenCaptureKit out of its process: it fails unless the three ways of capturing (one pixel a
+      point, the display's own resolution, a snapshot) all come back whole from an older function
+      and none from ScreenCaptureKit (docs/building-on-macos.md, `capture-check`). The
+      `--paddle-probe` that ran on 14 runs on that leg.
+- [ ] **What only a real Mac below 15.2 still covers:** the older functions as that system answers
+      them (the leg runs them on 15, where they are obsoleted but still exported), the module run
+      with the capture probe on it, ONNX Runtime and Vision there, and `page-check` on 14. The
+      next session on the tester's Mac mini (14.5) says it from the log (`screen captures are
+      coming from CGWindowListCreateImage`).
 
 ## For the first release's changelog
 
@@ -693,7 +974,7 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       and the fast level's first passes, pauses, a second language; `--paddle` and
       `--paddle-probe`, on Windows too. CI fetches and checks the dylib, refuses an executable that
       links it, runs two short runs without it and with the wrong half on macos-15, probes it on
-      macOS 14 and 26, and runs `--paddle` on Windows. Step b (warm-up, turns) waits for the Air's
+      macOS 15 and 26 (14 until 2026-10-16), and runs `--paddle` on Windows. Step b (warm-up, turns) waits for the Air's
       numbers below; step c (reading on Intel Macs with it) was built on 2026-10-03, below.
 - [x] **The Mac reads with the neural recogniser, by Windows' rule** (2026-10-03, the maintainer's
       decisions of that day; built and type-checked for both Apple targets, nothing of it run on a
@@ -6857,8 +7138,252 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
         (`[avenger] [read] … questions of one picture; … the questions N ms`), against slice 2's;
       - with `pageLeavesDawActive`, whether a trip arrives at all (the plug-in window's foreground
         event with the page described `activates = false` is unmeasured).
-- [ ] **The next stages**: the strip, the hand-overs, the knobs, the drums and the browser, and
-      the page's own Settings section.
+- [x] **The oscillator strip and the macros by clicks** (the plan's slice 5, module 0.4.0, on the
+      runtime 0.8.0, built 2026-10-17). Twenty-one actions of the page's — `select_osc_tab`,
+      `add_osc`, `select_drums_tab`, `select_trig_tab`, Mute and Solo of an OSC tab, Drums and Trig,
+      `osc_menu_item`, `drums_menu_item`, `trig_menu_item`, `select_macro_tab`, `add_macro_tab`,
+      `delete_macro_tab`, `toggle_macro_button`, `macro_reset_mode`, `macro_button_menu_item`,
+      `reset_macro_amount`, `reset_osc_control` — each a trip through one action layer
+      (`src/act.luau`) with its spec in `src/actions/osc.luau` or `src/actions/macros.luau`, which
+      the ring shares: one picture of the part acted on (`read/open.luau`, `Open.part`: the strip,
+      the knobs, the central tab, the macro panel), the click placed from that read or refused
+      without one (no count read, an index past the count, an eighth oscillator, a fifth macro
+      tab, the only macro tab deleted, Delete with one oscillator, an oscillator's knob while Drums
+      or Trig is selected — the tool clicked there all the same), then a change wait from that
+      picture (at most 2 s, a hover redraw looked past) and the part read again: what was read is
+      what the page shows, "unchanged" said at the bound, never a state flipped from memory (the
+      tool turned a macro button over when unsure). The tabs' and buttons' menus with the right
+      button through `O:chooseMenuItem`, their items at the tool's rows and x (`Popups.row`); a
+      popup a choice left open closed with Escape; a reset mode, which Avenger shows only in its
+      menu, said only as chosen; a button menu's tick item clicked once, then both buttons' change
+      waited for from the picture before the right click and both read (Special Switch may turn
+      the other off); Paste and Initialize read the tabs' names before the click and after it, so
+      "nothing VPS Avenger shows changed" is said only where nothing did; an OSC tab's Copy noted
+      for the session (`osc_panel.copied`), so the page offers Paste; the resets a double-click,
+      with the right button for Pan and Random Pitch (the runtime's `O.doubleClick` gained
+      `opts.button` and a callback after the second click, RG4). The page lands where the tool's
+      focus went (`osc-tab-<n>`, `osc-menu-<i>`, `macro-tab-<i>`, `macro-delete-last`, the macro
+      slots' buttons, `osc-reset-<control>`), the refusals at a limit too (`osc-tab-8` at eight
+      oscillators, `macro-tab-4` at four macro tabs, `macro-tab-1` for the only one), their sentence
+      in the error region beside it. The ring has new
+      controls after Zoom (`src/ring.luau`): Oscillator (a stepper over the tabs), Mute and Solo of
+      the selected tab, Add oscillator, Level, Pan, Transpose, Fine tune and Random pitch (Return
+      resets), Macro tab (a stepper), Add macro tab, Delete last macro tab, Macro 1 to 3 (Return
+      resets) and Macro button 1 and 2 (Return clicks) — each saying what was read of its part in
+      this stay, read when first announced or pressed (the overlay's onActivate may not wait for a
+      read), again after each of its actions, and forgotten when the overlay leaves the front, the
+      preset may have changed, or a trip of the page's ran. The tabs' menus, reset modes and button
+      menus stay the page's (Q5-2). Tested in the scripted host, whose painted picture now answers
+      change waits and repaints after a click: every action from the page at 80 % on a Mac, a
+      sample on Windows at 150 % display scaling; of the ring, the Oscillator and Macro tab
+      steppers, Mute, Level, Delete last macro tab and Macro button 1, one action at a time, and
+      its reads forgotten after a trip of the page, ▶ and UNDO (the other ring controls run the same
+      specs, untested from the ring); a trip given up before its click and mid-action, no picture
+      held after an action, and bounds on the Luau work of a part read and of a drawn reading at
+      200 %.
+- [ ] **What the Mac tester confirms for slice 5** (P3, with Avenger in Logic, Calibrate ticked):
+      - an OSC tab, Drums and Trig from the page and with the ring's Oscillator stepper: the click
+        lands on the tab, and the page (or the ring) says the tab read as selected after it;
+      - Mute and Solo of an OSC tab and of Drums: the LED's state after the click, ON then OFF;
+      - Add OSC up to the count shown, the new tab's name read;
+      - an OSC tab's menu: Copy, then Paste offered; Initialize; Delete of the last tab — and the
+        `drawn` lines of item 5 for the right click's popup, with its place in the log's
+        `[avenger] '…': the popup at (x,y) WxH from Avenger's corner in 50 % units`;
+      - a macro tab chosen, one added, the last deleted; a macro button clicked (its state read
+        after), a reset mode chosen, a button menu's item chosen once and both buttons read once
+        they have changed (at most 2 s after the item);
+      - where a right click's popup did not take its item, the log's `[avenger] '<label>': its popup
+        was left open (untaken) — pressing Escape to close it`, and whether `[menu] … the menu has
+        closed` follows (Escape reached the popup) or the popup stays up;
+      - Volume reset with Return in the ring and from the page, and Pan's reset (two right clicks):
+        the value read after — whether Avenger takes our two clicks for a double-click on a Mac
+        (each click carries click state 1; JUCE counts clicks itself);
+      - the `[avenger] [act] '<label>': changed — …` or `unchanged — …` line of each action, and
+        `the picture changed and what this action changes did not … — looking on` where a hover
+        was drawn first.
+- [x] **The renames and Browse Presets** (the plan's slice 6, module 0.5.0, on the runtime 0.9.0's
+      hand-over, built 2026-10-17). `start_rename`, `rename_osc` and `rename_macro`
+      (`src/handover.luau`): a picture of the field, then the double-click at the tool's point —
+      the preset's name at (123, 14), an OSC tab where the dots' count puts it (a tab the strip
+      does not read as selected selected first, as the tool clicks it first: one click, its change
+      waited for and the selection read, and only then the field's picture — the tab's selection
+      lies across it, and a double-click that selected the tab showed the open wait a change that
+      is no editor), a macro knob's or button's field; Avenger's editor seen open by a change wait
+      from that picture
+      (`src/read/editor.luau`: a change over a tenth of the field and a 2-point margin round it,
+      standing still for 50 ms; never seen, "VPS Avenger's editor did not open; nothing was
+      renamed", and nothing handed over); the field's edges read off the two pictures, the
+      pictures let go; the keyboard handed over (`"typing"`: Return and Escape go through to
+      Avenger), nothing said (the tool's #21; the page's Rename button carries the help). After
+      Return or Escape the edges are read against the two references: closed, or unsure, ends it;
+      still open, Avenger's repaint is waited for, and then "VPS Avenger's editor is still open:
+      Return keeps the name, Escape cancels." is said behind the screen reader and the keyboard
+      stays Avenger's. Then the name is READ off a picture, never recorded from the keys: the
+      preset's — kept with the database's place after Escape or when roughly the same as before
+      (the tool's `_names_roughly_same`), otherwise the user's own, posted with no expansion and
+      never snapped; the OSC tab's with the strip read again, nothing written to the database (the
+      tool's `set_osc_name`); the macro field's with the macro panel read again (the tool knew it
+      only from the keys recorded). The page's focus goes to the field's Rename button
+      (`rename-preset-button`, `osc-rename-<i>`, `macro-<t>-slot-<s>-rename`).
+      `browse_expansion_presets`: no click, the tool's sentence #12 behind the screen reader, the
+      keyboard handed over with Return alone (`"browse"`: Escape and the arrows are Avenger's
+      browser's), then the name read until two readings agree or it is a catalog name, posted with
+      the database's place, the focus on Browse Presets. The page key or another window ends any of
+      them with the preset posted as not read. Not ported: the key recorder, the second's grace,
+      the quarter-second sleeps and the polls, the five-minute fallback, the priming click, the
+      Windows panel's preset read after every kind of rename, the dead rename dialog. Tested in the
+      scripted host, whose painted picture now shows Avenger's editor and whose change waits keep
+      their options (and count the changed pixels where a scenario asks): 19 tests, 27 scenarios
+      (avenger_rename_tests.rs); a mutation round of 10, all caught, and the review's round of 11,
+      whose survivors — the OSC tab's selection taken for the editor, the Escape branch, the name
+      read first, a refused hand-over, a name not read back — have tests now.
+- [ ] **What the Mac tester confirms for slice 6** (P3, with Avenger in Logic, Calibrate ticked):
+      rename the preset from the page (Rename), type a new name and press Return; once more, and
+      press Escape; then an OSC tab's name and a macro knob's and a macro button's (their Rename
+      buttons), each once with Return and once with Escape; then Browse Presets: choose a preset in
+      Avenger's browser with the arrows and press Return. Each time, what VoiceOver said and whether
+      the page came back with the name Avenger shows, and the log lines:
+      - U1, whether Return and Escape reach Avenger's editor through the tap in Logic's plug-in
+        window: `[page] … hands the keyboard over …`, then `[page] … Return went through to the
+        plug-in` against `[page] … Return was taken, not let through …`;
+      - U2, whether our double-click (two clicks of click state 1) opens the editor:
+        `[avenger] [editor] '<field>': open — …` against `… not open — …`; for an OSC tab that
+        is not the one selected (rename OSC 2 with OSC 1 selected), the selection first:
+        `[avenger] [rename] 'osc 2': the strip reads OSC 1 selected — OSC 2 is selected first`,
+        then `[avenger] [act] 'Renaming OSC 2': changed — OSC 2 selected`, then the double-click;
+      - U3 (GM5), what the editor looks like: `[avenger] [editor] '<field>': closed | open | unsure
+        — the edges … from the picture before, … from the editor open …`, and the pictures;
+      - U4, whether Escape cancels: `[avenger] [rename] '<field>': Escape — read '<old name>'`;
+      - U5, whether Return in Avenger's browser loads the preset chosen: `[avenger] [browse] the
+        name at the start '<a>', after Return '<b>' (read n times)`;
+      - U8, where the keyboard is after the double-click (a later, better test of "open"):
+        `[avenger] [rename] '<field>': the keyboard after the double-click: <class or role>`;
+      - by ear: with the page key pressed in the open editor, what Avenger keeps (U6 — JUCE commits a
+        name when its editor loses the keyboard; the next page open reads it); where VoiceOver lands
+        after Return before the page comes back, and whether it says anything there (U7).
+      Send the calibration folder's `editor-<preset|osc|macro>-<before|open|end>-<zoom>pct.png`:
+      they settle the editor's thresholds (`read/editor.luau`), which are starting values.
+- [ ] **Slice 6 on Windows** (there is no Avenger tester there): W1, whether REAPER hands Return to
+      a JUCE text field in a floating FX window or takes it for itself — REAPER's per-FX "Send all
+      keyboard input to plug-in" — answered by U1's lines; a verification patch on ON:EAR's JUCE
+      search field (a trip, a click into the field, a typing hand-over, Return, the field read
+      back), applied only when the maintainer asks for it. W2, NVDA has nothing to announce when
+      Avenger's editor opens (Avenger publishes no element): the rename stays silent as the tool's
+      is, the page's Rename button carrying the help — the maintainer's call (Q1) whether to say
+      "Type the new name, then press Return." on both platforms instead.
+- [ ] **Residuals of slice 6**: a hover drawn over more than a tenth of a name field, standing
+      still, would be taken for the editor, and the user's typing would then reach Avenger without
+      a field — and in Logic, Logic's key commands (the tool has the same exposure, and checks
+      nothing; GM5's pictures show whether Avenger draws such a hover); the closed decision is a
+      starting value, and "unsure" goes on to the read, so a misjudged close posts what the field
+      shows; Tab in Avenger's editor commits it (JUCE) and ends nothing — the hand-over then waits
+      for a Return Avenger may pass on to the DAW, or for the page key; a key pressed in the moment
+      after an enable is taken by a stale capture and lost (logged); the keypad's Enter ends a
+      browse as Return does, where the tool's mode took Return alone; an overlay of the same module
+      outside the page's group, in front in the plug-in's window during a hand-over, loses its own
+      capture of an end key to it (a module holds one capture per key; VPS Avenger has none such).
+- [x] **The knobs turned from the page** (the plan's slice 7, module 0.6.0, on the runtime 0.9.0's
+      hand-over of the keys and HG1, built 2026-10-17). `macro_amount`, `osc_control` and
+      `osc_filter_control` (`src/amount.luau`): for an oscillator's knob or the filter's band the
+      strip read first — nothing pressed on the Drums or the Trig tab, the error said beside the
+      tool's focus (`osc-tab-detail-group`); a picture of the knob's box, held as the baseline; the
+      keyboard handed over (`"keys"`: PageUp, PageDown, Return and Escape CAPTURED, so none of them
+      reaches Avenger or the DAW — the tool's monitor only observed, and Return moved Logic's
+      playhead); then the press at the tool's point, held (the right button for Pan and Random
+      Pitch), and the tool's sentence #6, #7 or #8 behind the screen reader ("amount" where the tool
+      said "ammount", the control's key with a space where it said "fine_tune"). Each PageUp or
+      PageDown is one move of one table point times the factor — up or left, down or right — within
+      106 points of the press (the filter's x from 368 to 509); a key at the limit moves there again
+      and plays Slider.wav behind the `sounds` setting, whose label says so now. Return lets go at
+      once and the knob is READ off a picture once Avenger has drawn what the keys did — one change
+      wait from the picture before the press, at most 2 s, "unchanged" said at its bound — and the
+      page comes back on the knob's button; with nothing moved, a plain picture read at once. A
+      give-up while it is read posts the knob as not read: noted so before the change wait, which
+      the read overwrites. Escape lets go and reads nothing: the knob posted as not read where it
+      moved. The filter's band has no reader (the tool read none): Return claims nothing. Every end
+      lets go of the button exactly once — its own keys at once, and the page key, another window,
+      the page closed, the window gone or a hook that raised first thing in `onEnd`; after a disable
+      the host has let go, and the end after the enable asks `host.input.held()` (HG1b) and sends
+      nothing more. The knob reader reads one knob off its own small picture (`Knob.read`,
+      `Knob.BOX`, a few hundred points), and the page key's read reads the third knob's ring once
+      for Fine Tune and Random Pitch both, where the tool captured it twice. Not ported: the 50 ms
+      sleep per key, the 0.12 s after Return, the five-minute fallback, the Windows driver's warps.
+      Tested in the scripted host, whose `host.input` now records a held press, its moves and its
+      release, and whose disable lets go as the host does: 20 tests, 31 scenarios
+      (avenger_amount_tests.rs); a mutation round of 18 on the module, all caught, and after the
+      review one of 16, all caught but four — an end told while the plug-in is not in front, the
+      user gone while the knob is pictured before the press (the hand-over refuses then all the
+      same), the "unchanged" words said only where the page does not come back, and the focus after
+      a strip with no tab read: none of them has a scenario yet.
+- [ ] **What the Mac tester confirms for slice 7** (P3, with Avenger in Logic, Calibrate ticked):
+      the page opened with the page key, then each step below; afterwards the log and the
+      calibration folder's `amount-<knob>-<before|after>-<zoom>pct.png`:
+      1. Macro 1's Amount, PageUp five times, then Return: sentence #6 with the knob's name, Logic's
+         playhead still on Return, and the page back on the Amount button with the value read. The
+         log: `[page] … hands the keyboard over (keys): PageUp, PageDown, Return, Escape captured for
+         the module in window id …`; `[avenger] [amount] 'macro 1': pressed (x,y) with the left
+         button; PageUp moves up, …`; `… 'macro 1': Return — the left button released at (x,y) after
+         5 moves (net -5, 0 at the limit), the last N ms before`; `… 'macro 1': read <name> N percent
+         (<name> M percent before) — changed …`;
+      2. the same with Escape: the page back with the Amount "not read", Avenger's knob where the
+         keys left it;
+      3. PageUp held until Slider.wav sounds, a few PageDowns, then Return: the value at the top, then
+         a little below it;
+      4. OSC Volume, PageDown five times, then Return;
+      5. Pan, with the right button: whether Avenger takes a right-button drag on Level as Pan;
+      6. Transpose, Fine Tune and Random or Alternate Pitch (the right button on the third knob), each
+         PageUp three times, then Return;
+      7. Low-Pass and High-Pass: PageUp and PageDown move the handle, Slider.wav at the ends, nothing
+         read;
+      8. the page key while holding: "… stopped by the page key …" in the page, and Avenger's knob no
+         longer following the pointer;
+      9. by ear: where VoiceOver lands after the press, and whether it says anything while the keys
+         move the knob.
+      The module's developer: GM4, the knob's angle against Avenger's own value display, and the
+      units per point at 50, 100 and 200 % (the log's before and after against the net steps); GM7,
+      whether the reader's rings hold at his display, from the pictures; and whether Avenger draws a
+      value box over a knob while it is dragged.
+- [ ] **Slice 7 on Windows** (there is no Avenger tester there): HG1 has met no JUCE knob with a
+      held press yet — a verification patch on a JUCE plug-in the maintainer has (ON:EAR's Width or
+      Kontakt's knobs: a trip-less `mouseDown`, ten `move`s, `mouseUp`, the value read), applied
+      only when he asks for it; and NVDA's mouse tracking may now hear the injected motion — a
+      placement went past the low-level hook, motion does not — and say what lies under the pointer
+      while a drag leaves Avenger's window: listen for it.
+- [ ] **Residuals of slice 7**: a move whose repaint comes after the 50 ms settle that follows
+      Return is not read (the log's "the last N ms before" says how close they came); travel past
+      the screen's edge is cut by the system, so an end of the range may be out of reach at large
+      zooms (480 + 106 runs past Avenger's bottom edge at every zoom); a button the user presses or
+      lets go of with the real mouse during the hold is not known to the gesture, and Return then
+      sends an up of no press; a step at 80 % is 1 or 2 pixels (1.6 on average, no error carried);
+      the filter's handles are not read; a value box Avenger may draw over a knob while it is
+      dragged is read as the knob (GM4's pictures show it); and the keys are the DAW's again while
+      the knob is read after Return — the runtime gives the captures back before `onEnd` (RG2's
+      design), so a second Return during the change wait, which runs its full 2 s where the knob
+      was at its end stop already and shows no change, reaches the DAW and moves Logic's playhead;
+      closing it takes a general option of the runtime's for `kind = "keys"`, the captures kept
+      until `trip:done`.
+- [ ] **A give-up after an Act.run click** (src/act.luau, slice 5's clicks, the resets among
+      them): a give-up during the change wait after the click — the page key, another window —
+      leaves the page showing the part as read before the click, since `movedOn` does nothing for
+      a trip and Act.run has no not-read form of what each action changes. The knobs' amount
+      notes its knob as not read before its wait (src/amount.luau, `notRead`); the same for
+      Act.run needs each spec to name the fields its click may change.
+- [ ] **The ring's knobs turned**: the ring's Level, Pan, Transpose, Fine tune, Random pitch and
+      Macro 1 to 3 say the value read and reset on Return; turning them from the ring does not fit
+      its idiom. A hand-over is a trip's, and a trip needs the page; the ring's way of moving a value
+      by keys is `O:addStepper`, a step an action — on Avenger's knob a press, a move and a release
+      each, and a second press at the same point within the double-click time is a double-click to
+      a JUCE plug-in, which RESETS the knob (`O:afterIdle` coalesces a run of presses, but a second
+      run soon after still lands within that time; the tool held ONE press for the whole
+      adjustment). So one of: (a) a general runtime piece, a held stepper — `addStepper{ hold = { at,
+      button } }` pressing at the first step, one move a step with the value read after each,
+      released on Return, Escape, the focus leaving the control, the overlay leaving the front or a
+      disable (`host.input.held()`), which needs a hook for a control losing the focus that the
+      runtime does not have; or (b) a measurement on the tester's Mac first: whether two separate
+      press-move-release gestures at Avenger's knob within half a second reset it — if not, the
+      stepper with `afterIdle` (ON:EAR's Width idiom) is enough. (b) first: one step in his session.
+- [ ] **The next stages**: the drums and the browser, the ring's knobs turned (above), and the
+      page's own Settings section.
 
 ## HTML pages, stage 1: `host.gui.webview` and the Windows probe (2026-09-28)
 
@@ -7114,7 +7639,8 @@ maintainer's German test instructions are a text of their own, not in the reposi
       a series — go into the log. What to listen for, above the measurements: does NVDA stay in the
       page (the quiet ways), or does it announce the focus leaving and coming back (the round trip)?
       The guide for the session (not in the repository): the scratchpad's `html-probe-tests-r5.md`.
-      W10 came with revision 5; revision 7 (2026-10-12) has it beside the Mac's 6, and asks the
+      W10 came with revision 5; revision 8 (2026-10-16) offers it on a Mac as well (MW21);
+      revision 7 (2026-10-12) has it beside the Mac's 6, and asks the
       plug-in's elements and an element's state with a callback (the state before the reads and
       again after the change wait); a dump that is not all of the tree is a log line of its own:
       `W10: the plug-in's elements are not all of its tree: …`.
@@ -7177,6 +7703,83 @@ maintainer's German test instructions are a text of their own, not in the reposi
       lost → that way for that class, its holding and giving back as the log shows it; "pointer
       stays" losing clicks in JUCE → the experimental `move` option goes; Press arriving without a
       front change → it is the first choice where a plug-in exposes its controls.
+- [x] **Posted clicks on a Mac: `host.input.click{ via = "post" }` (2026-10-16, from the
+      maintainer).** A user of the platform needed them for a plug-in, built them in a copy of their
+      own and had them working, but cannot hand the change back; the maintainer asked for them to be
+      built here. Until then `via = "post"` (and `"noactivate"`) answered `false, "not supported on
+      this platform yet"` on a Mac (docs/api/input.md), so a module there took the round trip for
+      every click.
+
+      To build, with the Windows way's meaning: `window` required, the click made only where the
+      point is in that window and nothing is drawn over it, nothing brought to the front, the
+      application in front keeping the keyboard. The likely way (to be checked against Apple's
+      documentation and a real Mac before anything is promised): the move, the press and the release
+      as `CGEvent`s posted to the window's process with `CGEventPostToPid`, with the target window's
+      number in the mouse fields (`kCGMouseEventWindowUnderMousePointer` and
+      `…ThatCanHandleThisEvent`), so AppKit delivers them to that window while its application is
+      not active; the events marked as the host's own (`kCGEventSourceUserData`), as every event the
+      host posts is. `move` as on Windows: the pointer warped to the point first by default
+      (`CGWarpMouseCursorPosition`), left where it is with `move = false`. The refusals and the one
+      `[input]` line per posted click as on Windows, naming the process and window it went to. The
+      permission it needs (Accessibility, the `hid post events` line of the start block) checked and
+      said. `"noactivate"` stays unsupported on a Mac: it is a Windows window style.
+
+      Then: input.md's macOS block for `post` rewritten (what the program sees, what is not for it:
+      menus, text fields, drags, as on Windows); the HTML probe's W10 offered on a Mac with its
+      posted ways, as an MW question for the tester (Avenger in Logic: does a posted click on ◀
+      arrive without Logic coming forward, and is a JUCE plug-in's click lost without the pointer?);
+      and, once that holds, the page's trips may click by posting where a module chooses it.
+
+      **Built (2026-10-16), blind**, with the Windows way's meaning: `input::post_click` and
+      `ax::post_target` in backend/macos, the arithmetic and the refusals in `post_click.rs` (tested
+      on Windows), the private setter in `ffi.rs`; docs/api/input.md's macOS block says it all. The
+      move, the press and the release are `CGEvent`s handed to the window's process with
+      `CGEventPostToPid`, each carrying the window's number — in the two public fields and in the
+      private field 51 (`kCGSEventWindowIDField`, WebKit's `CoreGraphicsTestSPI.h`) — and its place
+      in the window from the window's top-left corner, set with the private
+      `CGEventSetWindowLocation` (looked up with `dlsym`; without it a posted click is refused); the
+      flags cleared as on every Mac click, the events marked `POST` in `kCGEventSourceUserData` (the
+      second mark the host sets: only the keys passed on carried one, `PASS`, before); with
+      `move` the pointer warped first and the mouse joined to it again at once. Refused: first
+      the permission (`CGPreflightPostEventAccess`; the window server drops posted events in
+      silence without it), then the window gone, not paired with a window number, not on screen,
+      the program not answering, the point outside the window or on its frame, something drawn over
+      it (the cover rule every Mac click has); one `[input] posted click for window …: into window
+      number … of process … (…) at x,y from the window's top-left corner …` line per click. Why the
+      fields: a bare `CGEventPostToPid` is dropped (no window number), the numbers alone were taken
+      and ignored by Finder and VS Code, and the numbers with the place took 54 clicks of 54 in
+      AppKit, SwiftUI and WKWebView test windows left in the background (callstack/agent-device PR
+      3245, lahfir/agent-desktop PR 227, TomiXRM/kagi issue 542; trycua/cua's driver and the clicker
+      Lakr233/bgclick-rev-skill takes apart set the same). `"noactivate"` stays "not supported on
+      this platform yet". CI: `page-check` posts into its own tool page on the four Mac runners —
+      one press at the point asked for and one click, with the pointer moved and with it left, a
+      `skipped` notice where the runner may not post events — and, as data, two clicks into the page
+      without the keyboard (AppKit's first-mouse rule, and whether the front moved). The HTML probe
+      (revision 8) offers W10 on a Mac, its target key Command-Shift-F4 (MW21).
+
+      **What stays for a Mac:** the first CI run — does the click land at the place asked for (a
+      mirrored height would say the window location is AppKit's bottom-left after all, as WebKit's
+      test runner reads it), may the runners post events at all, and what the page's web view, which
+      refuses the first mouse, does with a second click while the application stays in the
+      background (`posted_unkeyed`; the prior art saw such clicks dropped, so the docs promise
+      nothing of it); MW21 with the Avenger developer, and with it whether the mouse stalls after a
+      click with the pointer moved: the host joins mouse and pointer again after the warp
+      (`CGAssociateMouseAndMouseCursorPosition`), which Apple describes for an application in the
+      foreground, and posts mostly while it is not — if the mouse stalls there, zeroing the local
+      events suppression interval of a combined-session-state source
+      (`CGEventSourceSetLocalEventsSuppressionInterval`, the public per-source remedy) is the one to
+      try, left out until then because it changes how long the user's own input is held off after
+      every event the host posts, and the write-up that uses it sets it on a source it releases at
+      once, so it may hold for more than this application; then, where it holds, the page's trips clicking by posting where a module chooses
+      it. Found while building it: a JUCE view's mouse-down asks for its application's activation
+      whenever that is not the active one (`redirectMouseDown` → `Process::makeForegroundProcess`,
+      `[NSApp activateIgnoringOtherApps: YES]`, in juce_NSViewComponentPeer_mac.mm and
+      juce_Threads_mac.mm), so a JUCE plug-in may bring its DAW forward on a posted click by itself,
+      as REAPER did on Windows — whether macOS 14 and later grants a request with no real click
+      behind it is what MW21 hears. And the Mac's check for `window` with `via = "input"` pairs a
+      control's id with a window number only where the control's frame is its window's
+      (`ax::window_id` matches frames, and logs each miss), so for most controls it cannot refuse;
+      `post_target` asks with the window the control lies in. To decide: the same for `"input"`.
 - [x] **A page in a window like any program's: `window = "app"`** (the maintainer's decision after
       W6, 2026-10-11 — modules are to be flexible, and a whole interface in HTML, CSS and JS is not
       far-fetched). `host.gui.webview{ …, window = "tool" | "app" }`, the tool page by default; what
@@ -7424,6 +8027,46 @@ maintainer's German test instructions are a text of their own, not in the reposi
         arrival, before the act (`[page] … primed at x,y …`), never on the way back. P2's developer
         tries the answer by editing Logic's entry in place; set it in the repository only once GM2
         has measured it.
+      - [x] **RG2 — a trip's hand-over** (the VPS Avenger port's plan, built 2026-10-17, overlay
+        runtime 0.9.0, not run live): `trip:handOver{ kind = "typing" | "browse" | "keys", keys?,
+        onKey?, ends?, onEnd }`, a wait of the trip's that holds only the keys that end it — the
+        module's flag set and its scope pinned to the plug-in's window, so they go through to the
+        plug-in and are recorded (`host.keys.passedThrough`), drained by the VM's menu tick, which a
+        hand-over now starts where no overlay has menu tests. The first end key is the event; the
+        end is then asked of the module's `ends(o, trip, info, answer)` on the next turn with the
+        plug-in in front, the keys still held meanwhile. `"keys"` captures named keys for the
+        module's `onKey` and writes no flag (the knobs' slice). `onEnd` is told exactly once on every
+        end of the trip, the keys back at that moment in one function; the runtime's other writers
+        of the flag and the scope leave them alone meanwhile; a key the hook took after all is pinned
+        again and said; a disable and an enable end it at the first tick, event or key; nothing
+        bounds it. docs/api/overlay.md (`trip:handOver`), keys.md, Step 10 of
+        docs/building-a-page.md; 29 tests, 57 scripted scenarios (overlay_handover_tests.rs); the
+        build's mutation round of 16 and the review's of 13, whose survivors (the `_menuHold` guard,
+        the scope left pinned at the release, the drain at the release, `onKey`'s two refusals) have
+        tests now; `"busy"` is a guard for events that cross, and has none. Against the port's plan: a method of the trip, not of the
+        overlay; the page left where the trip left it, not hidden, since a page not shown during a
+        trip is the page closed; `ends` answers through a callback, because the change wait it needs
+        answers only through one. **Not measured:** whether Return and Escape reach a plug-in's text
+        field through the flag in Logic (the tap) and in REAPER (the hook, REAPER's "Send all
+        keyboard input to plug-in") — VPS Avenger's slice 6 above has the lines that answer it.
+      - [x] **HG1 — a held press's moves are motion on Windows** (the VPS Avenger port's plan, built
+        2026-10-17 with its slice 7, not run live): `host.input.move` while a button is held — one a
+        module pressed with `mouseDown`, or one down on the desktop — sends one injected absolute
+        motion event over the virtual desktop (`SendInput` with `MOUSEEVENTF_MOVE |
+        MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_ABSOLUTE`, the point at the middle of its pixel's share
+        of the axis) where it placed the pointer with `SetCursorPos`, so a control that holds the
+        press sees a drag; `mouseUp` is that motion, then the up, with no placement; `drag`'s steps
+        are the same events, over the virtual desktop where they were normalised over the primary
+        display. macOS posted the held button's Dragged event already, and is unchanged. And HG1b,
+        `host.input.held()`: the buttons the module holds by the host's record, which a disable
+        empties, so a held gesture ended after a disable and an enable lets go once.
+        docs/api/input.md; tests of the events built and the decisions, never sent
+        (backend/windows.rs, `pointer_motion_tests`), and of `held` (lib.rs); a mutation round of 9,
+        all caught, and after the review five more — two of the axis's arithmetic, the backend's
+        note changed as the button went, the desktop's three buttons asked, the virtual desktop's
+        four metrics — all caught. **Not measured:** whether a JUCE knob follows the motion, and
+        what a screen reader's mouse tracking makes of it — VPS Avenger's "Slice 7 on Windows"
+        above.
 - [ ] **Stage 3 — the real `host.gui.webview`**: `prepare()` called on an overlay's first
       activation (the call and the asynchronous environment are there since 2026-09-28), a build
       that does not wait at all (above), the page kept off the internet (above), the placement
@@ -7505,15 +8148,16 @@ maintainer's German test instructions are a text of their own, not in the reposi
       that page shown with the keyboard over it, and then hidden, does to the front. gui.md's
       option and its Windows and macOS blocks say what it does; what only a Mac shows is MW1b,
       and MW6 and MW18 in this model.
-- [ ] **The Mac's page tests, MW1–MW20** (the plan of 2026-10-11; numbered MW because the DXGI
+- [ ] **The Mac's page tests, MW1–MW21** (the plan of 2026-10-11; numbered MW because the DXGI
       section has M1–M19 of its own, and in place of the M1–M13 asked of the Mac's page before):
       what only a Mac answers of the page window above, which `host.gui.webview` shows its pages
       in since 2026-10-11. Who answers what, in this order: the tester with VoiceOver, at most about
       40 minutes on one Mac; the VPS Avenger module's developer, sighted, with Logic; CI; the log.
       The tester's briefing is a text of its own, not in the repository, and names the stop point:
       wherever the time ends. The answers go here, not into the reference.
-      The probe on a Mac (`tools/html-probe`, revision 7, 2026-10-12: revision 6 with Windows' W10
-      beside it, which a Mac neither registers a key for nor shows) is the tester's instrument:
+      The probe on a Mac (`tools/html-probe`, revision 8, 2026-10-16: revision 6 with W10 beside it,
+      offered on a Mac since revision 8 with the posted clicks, its target key Command-Shift-F4 —
+      MW21) is the tester's instrument:
       Command-Shift-F7 the page beside the plug-in window in front, with the keyboard, and pressed
       in a page back to the plug-in; Command-Shift-F8 the same page described `activates = false`
       (`HTML probe without activation`), the other pages left as they are; Command-Shift-F11 the
@@ -7641,6 +8285,23 @@ maintainer's German test instructions are a text of their own, not in the reposi
           page …`, or `… STILL DRAWN OVER it …`).
         - **MW7:** does Tab reach every button of a page with the system's "Keyboard navigation"
           off (wry sets WebKit's `tabFocusesLinks`)?
+        - **MW21** (posted clicks, built 2026-10-16; the probe's W10, revision 8): Avenger in
+          Logic, the tool page shown beside the plug-in window with the keyboard (Command-Shift-F7).
+          The pointer on ◀ with the Avenger overlay, Command-Shift-F4 (`W10: target remembered …`),
+          then on the page the Way "Posted click" x20, "Posted click, pointer stays" x20, and "Round
+          trip" x5 to compare. Does a posted click on ◀ arrive — the preset changes: `picture:
+          changed`, the text read after — and does Logic stay where it is, the page keeping the
+          keyboard (`front: the page throughout`, no `[keys] the workspace named …` line for Logic)?
+          A JUCE plug-in asks for its DAW's activation on a press while the DAW is not the active
+          application, so a Logic that comes forward says macOS granted that. Is a JUCE plug-in's
+          click lost without the pointer (the two counts side by side)? The `[input] posted click …`
+          lines say which window number each went to and where in it, and the start block's `hid
+          post events` line whether the application may post at all (refused clicks say `this
+          application may not post events …`). After a posted click with the pointer moved, does
+          the mouse move the pointer at once, or stall for about a quarter of a second (the
+          application is not the active one then; see the item on posted clicks)? Then, if there is
+          one: an Audio Unit Logic runs out
+          of process — an Intel one under Rosetta on Apple silicon — does it take a posted click?
       - **CI** (`page-check`, no Mac session; docs/building-on-macos.md): the activation mechanics
         and both ways of handing the front back, the keys, message counts and order, the policy and
         the rule list, the Library folders, the policy switch, timings; a page's clipboard, the

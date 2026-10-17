@@ -3,8 +3,8 @@ name = "HTML page probe"
 version = "0.1.0"
 license = "GPL-3.0-or-later"
 # The page on both platforms, as host.gui.webview shows it there: WebView2 on Windows, the
-# system's WebKit on a Mac. The questions this probe asks are W1–W10 on Windows and MW1–MW19 on a
-# Mac, in TODO.md.
+# system's WebKit on a Mac. The questions this probe asks are W1–W10 on Windows and MW1–MW21 on a
+# Mac, W10 there too, in TODO.md.
 supported_os = ["windows", "macos"]
 # The plug-in windows it shows its page beside are the ones daw-hosts knows, in every DAW there.
 dependencies = ["com.platform.daw-hosts"]
@@ -13,15 +13,14 @@ dependencies = ["com.platform.daw-hosts"]
 # `gui` for the page. `input` for test W3's round trip, ONE click each time: onto the plug-in
 # window's own background, clear of every control in it — never its title bar, where two clicks
 # maximise the window — and none at all where it has no such spot; on a Mac onto its title bar,
-# away from the last one (MW4). And on Windows for W10: one click an attempt in each of its ways of
-# clicking (the round trip, posted, posted with the pointer left where it is, the no-activate
+# away from the last one (MW4). And for W10: one click an attempt in each of its ways of clicking
+# (the round trip, posted, posted with the pointer left where it is, and on Windows the no-activate
 # style), up to 20 attempts a run, the pointer moved onto the target first for the ways that move
-# it, and the pointer's position read for the target F10 remembers. `element`
+# it, and the pointer's position read for the target its key remembers. `element`
 # for W10's element dump and accessibility press; `ocr` for W10's reads of the plug-in near the
 # target before and after; `screen` for the pictures — W3's after its click, whose answer brings
 # the page back, as an overlay reads after its own click, and W10's baseline and change wait.
 # `settings` for the switch that shows the page by itself (test W2 c), off by default. `keys` for
 # the Mac's one captured key (MW2, MW16). A manifest lists one set for every platform, so the
-# probe declares `keys` on Windows too, where it captures nothing, and W10's `element` and `ocr`
-# on a Mac, where W10 is not offered.
+# probe declares `keys` on Windows too, where it captures nothing.
 require = ["gui", "window", "hotkey", "speech", "log", "input", "element", "ocr", "screen", "settings", "keys"]

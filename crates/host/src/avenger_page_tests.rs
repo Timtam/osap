@@ -23,15 +23,18 @@
 //! of the open and of each read, which a loop over any box's pixels passes.
 //!
 //! And the header's actions (slice 4, `src/actions.luau`), each a trip from a scripted page message
-//! as the ring's scenarios play Avenger: ◀ and ▶ with the name watched and "unchanged" said, Load
+//! as the ring's scenarios play Avenger: ◀ and ▶ with the name watched and "unchanged" said — and
+//! on Init Preset, which Avenger steps no preset from, nothing sent and why said — Load
 //! with Escape in its file dialog, Save as, Initialize's Yes — its warning box read before YES is
 //! clicked where it was read, then everything read again — and No, which clicks nothing; UNDO, the
-//! redo list ended by its menu's close, any size from the zoom list; and a second message while a
-//! trip is out, dropped.
+//! redo list ended by its menu's close, any size from the zoom list; a trip that may have changed
+//! the preset and read no name after it, which posts the preset as not read; and a second message
+//! while a trip is out, dropped.
 //!
 //! And the protocol, with no JS run: every action name `ui/panel.js` sends and every `data-action`
 //! of `ui/index.html` is on the page's own list, `ACTIONS`, and every name on it has a handler in
-//! the module or is on its explicit list of actions not built yet.
+//! the module or is on its explicit list of actions not built yet; and Back and Next carry
+//! aria-disabled, set from the state, and stay in the Tab order.
 
 use super::overlay_avenger_tests::{run, run_mac};
 
@@ -254,11 +257,11 @@ fn actions_are_answered_not_available_yet_and_only_while_the_page_has_the_keyboa
         T.openPage()
         T.ok(S.front == T.PAGE_WIN, "in front")
         local clicks = #S.clicks
-        T.pageMsg({ action = "start_rename", args = {}, focused = true })
-        T.ok(T.lastPost().kind == "error" and T.lastPost().text == "Renaming the preset is not available in this module yet",
+        T.pageMsg({ action = "open_expansion", args = {}, focused = true })
+        T.ok(T.lastPost().kind == "error" and T.lastPost().text == "Opening an expansion is not available in this module yet",
           tostring(T.lastPost().text))
-        T.pageMsg({ action = "osc_control", args = { control = "volume" }, focused = true })
-        T.ok(T.lastPost().text == "An oscillator's control is not available in this module yet", T.lastPost().text)
+        T.pageMsg({ action = "drumkit_control", args = { control = "volume" }, focused = true })
+        T.ok(T.lastPost().text == "A drum slot's Volume, Pan or Pitch is not available in this module yet", T.lastPost().text)
         T.pageMsg({ action = "bogus", args = {} })
         T.ok(T.lastPost().text == "bogus is not available in this module yet", T.lastPost().text)
         T.ok(T.count("[avenger] [page] 'bogus' is no action of the page's") == 1, T.dump())
@@ -1016,6 +1019,56 @@ fn previous_and_next_from_the_page_click_watch_the_name_and_say_unchanged() {
     "##);
 }
 
+/// ▶ from the page reads Avenger's loading display first (the tester's log: "cYanmaGentaYellowb"
+/// after "AR Catch Me", posted to the page as the preset), each read handed to two of the watch's
+/// looks, as on a Mac: the name counts once two readings agree or the catalog has it, so the state
+/// posted is the name, and the loading display is never posted.
+#[test]
+fn previous_and_next_from_the_page_post_a_settled_name() {
+    run_mac(r##"
+        local S = T.S
+        local _, _, W = T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.nameIs("LD Lead 1")
+        T.openPage()
+        T.event()
+        T.tripFrom({ action = "next_preset", args = {}, focused = true }, W)
+        local answers = { "cYanmaGentaYellowb", "LD Lead 2" }
+        T.slowNameReads(function(i) return answers[math.min(i, #answers)] end)
+        T.ok(T.lastPost("state").state.preset == "LD Lead 2", tostring(T.lastPost("state").state.preset))
+        for _, p in ipairs(T.page().posts) do
+          T.ok(not (p.kind == "state" and p.state and p.state.preset == "cYanmaGentaYellowb"),
+            "the loading display posted as the preset")
+        end
+        T.ok(T.count("— LD Lead 1 -> LD Lead 2 (2 readings alike)") == 1, T.dump())
+    "##);
+}
+
+/// ▶ from the page with Avenger's loading display read once by the watch's bound, and nothing
+/// after it: the name never settled, so the page gets the error, not the text — no state with it
+/// as the preset.
+#[test]
+fn a_name_read_once_by_the_watchs_bound_is_not_posted_from_the_page() {
+    run_mac(r##"
+        local S = T.S
+        local _, _, W = T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.nameIs("LD Lead 1")
+        T.openPage()
+        T.event()
+        T.tripFrom({ action = "next_preset", args = {}, focused = true }, W)
+        T.slowNameReads(function(i) return i == 1 and "cYanmaGentaYellowb" or nil end)
+        T.ok(T.lastPost("error").text == "Next preset: the preset name cannot be read now",
+          tostring(T.lastPost("error").text))
+        for _, p in ipairs(T.page().posts) do
+          T.ok(not (p.kind == "state" and p.state and p.state.preset == "cYanmaGentaYellowb"),
+            "the loading display posted as the preset")
+        end
+        T.ok(T.count("[avenger] 'Next preset': 'cYanmaGentaYellowb' was read once and is no catalog name "
+          .. "— not taken") == 1, T.dump())
+    "##);
+}
+
 /// One trip at a time: ▶ pressed twice in the page before Avenger's window has come — the page
 /// still has the keyboard — starts one trip; the second message is dropped, and the runtime logs
 /// it. One click, one name.
@@ -1177,6 +1230,162 @@ fn undo_and_the_redo_list_from_the_page_read_the_name_after() {
     "##);
 }
 
+/// ◀ and ▶ in the page on Init Preset, which VPS Avenger steps no preset from (TODO.md, the first
+/// Mac test of the page, item 3): the state read at the key says the steps are unavailable, with
+/// the reason the page puts in their help, and a press sends nothing to Avenger — no trip, no
+/// click — and says why in the error region, the page in front and the focus left where it is. The
+/// page's next refresh with a preset read makes them available again, and ▶ goes into Avenger as
+/// before. A trip whose own read in Avenger finds Init Preset — Avenger initialized some other way
+/// meanwhile — clicks nothing and brings the page back with that name and why; UNDO from the page,
+/// a preset read after it, makes them available again.
+#[test]
+fn previous_and_next_from_the_page_send_nothing_on_init_preset() {
+    run_mac(r##"
+        local S = T.S
+        local WHY = "VPS Avenger steps no preset from Init Preset; load a preset first"
+        local header, _, W = T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.openPage()
+        local st = T.lastPost("state").state
+        T.ok(st.preset == "Init Preset" and st.preset_steps_unavailable == WHY, tostring(st.preset_steps_unavailable))
+        T.event()
+        local clicks, focuses = #S.clicks, #S.focusCalls
+        for _, a in ipairs({ { "prev_preset", "Previous preset" }, { "next_preset", "Next preset" } }) do
+          local n = #T.page().posts
+          T.pageMsg({ action = a[1], args = {}, focused = true })
+          T.ok(#T.page().posts == n + 1 and T.lastPost().kind == "error" and T.lastPost().text == a[2] .. ": " .. WHY
+            and T.lastPost().focus == nil, tostring(T.lastPost().text))
+        end
+        T.runDue()
+        T.ok(#S.clicks == clicks and #S.focusCalls == focuses and S.front == T.PAGE_WIN, "nothing sent to Avenger")
+        T.ok(T.count("[avenger] [page] 'Next preset': the page's preset is Init Preset — nothing sent to VPS Avenger")
+          == 1, T.dump())
+        -- The page's next refresh: back to Avenger, a preset loaded there, and the key again.
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageKey()
+        T.event()
+        T.ok(header.active, "the header again")
+        T.nameIs("LD Lead 1")
+        T.openPage()
+        st = T.lastPost("state").state
+        T.ok(st.preset == "LD Lead 1" and st.preset_steps_unavailable == nil, tostring(st.preset_steps_unavailable))
+        T.event()
+        T.tripFrom({ action = "next_preset", args = {}, focused = true }, W)
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "469,106", "▶: " .. T.clickAt())
+        T.nameReads("LD Lead 2")
+        T.ok(T.lastPost("state").state.preset == "LD Lead 2" and T.lastPost("error").text == "", "stepped")
+        -- Avenger initialized meanwhile, not through the page: the trip's own read before the click.
+        T.event()
+        T.nameIs("Init Preset")
+        clicks = #S.clicks
+        T.tripFrom({ action = "prev_preset", args = {}, focused = true }, W)
+        T.runDue()
+        T.ok(#S.clicks == clicks, "nothing clicked: " .. T.clickAt())
+        st = T.lastPost("state").state
+        T.ok(st.preset == "Init Preset" and st.preset_steps_unavailable == WHY and S.front == T.PAGE_WIN,
+          tostring(st.preset) .. " " .. tostring(st.preset_steps_unavailable))
+        T.ok(T.lastPost("error").text == "Previous preset: " .. WHY and T.lastPost("error").focus == true,
+          tostring(T.lastPost("error").text))
+        T.ok(T.count("[avenger] [page] 'Previous preset': the name read in VPS Avenger is Init Preset — nothing "
+          .. "clicked") == 1, T.dump())
+        -- UNDO from the page: a preset read after it, and the steps are available again.
+        T.event()
+        T.tripFrom({ action = "undo", args = {}, focused = true }, W)
+        T.nameReads("LD Lead 2")
+        st = T.lastPost("state").state
+        T.ok(st.preset == "LD Lead 2" and st.preset_steps_unavailable == nil, tostring(st.preset))
+    "##);
+}
+
+/// The ring and the page go by the same latest read. The page key's read of a preset — loaded some
+/// other way while the ring claimed Init Preset — makes the ring's ◀ and ▶ available again, said
+/// as the page key brings Avenger back; the page's Initialize, read again after it, makes them
+/// unavailable. A trip that may have changed the preset and reads no name after it — UNDO whose
+/// reads give nothing, the redo list given up when another window came to the front — posts the
+/// preset as not read, so the page offers ◀ and ▶ again, and forgets the ring's claim as well: the
+/// next trip's read decides, and one that reads nothing claims nothing.
+#[test]
+fn the_ring_and_the_page_go_by_the_same_latest_read_of_init_preset() {
+    run_mac(r##"
+        local S = T.S
+        local WHY = "VPS Avenger steps no preset from Init Preset; load a preset first"
+        local header, _, W = T.avengerAt80("Init Preset")
+        -- The focus on ▶, which says it is unavailable.
+        header.focus = 2
+        T.tab()
+        T.ok(T.lastSaid() == "Next preset, unavailable on Init Preset, button", T.said())
+        -- Back to Avenger from the page, with the page key: what the arrival says.
+        local function back()
+          S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+          T.pageKey()
+          T.event()
+          T.run(400)
+          T.ok(header.active and S.front == W, "the header again")
+          return T.lastSaid()
+        end
+        T.pageReady()
+        T.nameIs("LD Lead 1")
+        T.openPage()
+        T.ok(T.lastPost("state").state.preset_steps_unavailable == nil, "a preset read at the key")
+        T.event()
+        T.ok(back() == "Next preset, button", T.said())
+        -- Initialize from the page: Init Preset read again after it.
+        T.openPage()
+        T.event()
+        T.tripFrom({ action = "pick_initialize_preset", args = {}, focused = true }, W)
+        T.popup(300, 490, 116, 192, 96)
+        T.tick(1)
+        T.closePopups()
+        T.tick(2)
+        T.answer(T.lastRead("vps-avenger page box"), T.boxReading("Are you sure?"))
+        T.words({ preset = "Init Preset" })
+        T.answer(T.lastRead("vps-avenger page box"), T.noBox())
+        T.answer(T.lastRead("vps-avenger page box"), T.noBox())
+        T.runDue()
+        T.ok(S.front == T.PAGE_WIN and T.lastPost("state").state.preset_steps_unavailable == WHY, "Init Preset")
+        T.event()
+        T.ok(back() == "Next preset, unavailable on Init Preset, button", T.said())
+        -- UNDO from the page, and nothing read after it.
+        T.nameIs("Init Preset")
+        T.openPage()
+        T.event()
+        T.tripFrom({ action = "undo", args = {}, focused = true }, W)
+        T.ok(T.clickAt() == "586,106", "UNDO: " .. T.clickAt())
+        T.nameReads(nil)
+        local st = T.lastPost("state").state
+        T.ok(st.preset == nil and st.preset_steps_unavailable == nil and S.front == T.PAGE_WIN,
+          tostring(st.preset) .. " " .. tostring(st.preset_steps_unavailable))
+        T.ok(T.lastPost("error").text == "Undo: the preset name cannot be read now", tostring(T.lastPost("error").text))
+        T.event()
+        -- ▶ is offered again, and the ring's claim is gone with it: a trip whose own read gets
+        -- nothing claims nothing, and clicks.
+        T.nameIs(nil)
+        local clicks = #S.clicks
+        T.tripFrom({ action = "next_preset", args = {}, focused = true }, W)
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "469,106", "▶: " .. T.clickAt())
+        T.nameReads("LD Lead 2")
+        T.ok(T.lastPost("state").state.preset == "LD Lead 2", tostring(T.lastPost("state").state.preset))
+        T.event()
+        -- Init Preset again, read at the key; the redo list given up while it is up.
+        T.ok(back() == "Next preset, button", T.said())
+        T.nameIs("Init Preset")
+        T.openPage()
+        T.ok(T.lastPost("state").state.preset_steps_unavailable == WHY, "Init Preset at the key")
+        T.event()
+        T.tripFrom({ action = "redo_menu", args = {}, focused = true }, W)
+        T.ok(S.clicks[#S.clicks].button == "right", "UNDO, right: " .. T.clickAt())
+        T.popup(320, 586, 110, 150, 200)
+        T.tick(1)
+        T.show(T.OTHER)
+        T.runDue()
+        st = T.lastPost("state").state
+        T.ok(st.preset == nil and st.preset_steps_unavailable == nil,
+          tostring(st.preset) .. " " .. tostring(st.preset_steps_unavailable))
+        T.ok(T.lastPost("error").text == "Redo: another window came to the front; nothing more was done",
+          tostring(T.lastPost("error").text))
+    "##);
+}
+
 /// Size from the page: the zoom list opened and the entry for the size asked chosen — 100 %, four
 /// entries below 80 %, where the ring's stepper takes only the one beside — then the zoom field
 /// read until it shows the new zoom, which the page's state then has.
@@ -1274,6 +1483,50 @@ fn data_actions() -> Vec<String> {
             rest[..rest.find('"').expect("the attribute ends")].to_string()
         })
         .collect()
+}
+
+/// Back and Next in the page's markup and script (TODO.md, the first Mac test of the page, item 3):
+/// plain buttons that carry aria-disabled — "false" until a state says otherwise — with their help,
+/// and nothing that takes them out of the Tab order or hides them; the script sets aria-disabled and
+/// their help (the title, which is also their description) from the state's
+/// `preset_steps_unavailable` at every state, never `disabled`; it reads aria-disabled nowhere, so a
+/// press is still sent to the module, which answers it; and the focus goes back to an
+/// aria-disabled button as to any other.
+#[test]
+fn back_and_next_carry_aria_disabled_and_stay_in_the_tab_order() {
+    // The files as checked out: a Windows checkout may end their lines with CR LF.
+    let html = INDEX_HTML.replace("\r\n", "\n");
+    let js = PANEL_JS.replace("\r\n", "\n");
+    for id in ["prev-preset-button", "next-preset-button"] {
+        let at = html.find(&format!("id=\"{id}\"")).unwrap_or_else(|| panic!("index.html has {id}"));
+        let start = html[..at].rfind('<').unwrap();
+        let end = at + html[at..].find('>').unwrap();
+        let tag = &html[start..=end];
+        assert!(tag.starts_with("<button type=\"button\""), "{id} is a button: {tag}");
+        assert!(tag.contains("aria-disabled=\"false\"") && tag.contains("title=\""), "{id}: {tag}");
+        for gone in [" disabled", "tabindex", " hidden", "aria-hidden"] {
+            assert!(!tag.contains(gone), "{id} has '{gone}': {tag}");
+        }
+        assert!(js.contains(&format!("'{id}'")), "panel.js does not update {id}");
+    }
+    let start = js.find("function updatePresetSteps(reason) {").expect("panel.js has updatePresetSteps");
+    let body = &js[start..start + js[start..].find("\n  }\n").expect("it ends")];
+    assert!(body.contains("button.setAttribute('aria-disabled', reason ? 'true' : 'false');"), "{body}");
+    assert!(body.contains("button.title = reason ? `${help}, unavailable: ${reason}.` : help;"), "{body}");
+    for gone in [".disabled", "tabIndex", "tabindex", "hidden", "removeAttribute"] {
+        assert!(!body.contains(gone), "updatePresetSteps has '{gone}': {body}");
+    }
+    let apply = js.find("function applyState(s) {").expect("panel.js has applyState");
+    let apply_end = apply + js[apply..].find("\n  }\n").expect("applyState ends");
+    let call = js.find("updatePresetSteps(readText(s.preset_steps_unavailable));").expect("the state's reason");
+    assert!(call > apply && call < apply_end, "updatePresetSteps is called in applyState, at every state");
+    assert!(
+        !js.contains("getAttribute('aria-disabled')") && !js.contains("ariaDisabled"),
+        "the script reads aria-disabled somewhere, and could drop a press"
+    );
+    let restore = js.find("function restoreFocus() {").expect("panel.js has restoreFocus");
+    let restore_body = &js[restore..restore + js[restore..].find("\n  }\n").unwrap()];
+    assert!(!restore_body.contains("aria-disabled"), "restoreFocus passes over an aria-disabled button");
 }
 
 /// The page's list against what it sends: every name the script quotes as an action and every

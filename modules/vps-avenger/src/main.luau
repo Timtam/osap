@@ -8,7 +8,8 @@
 --   Preset             the preset's name, read; the first stop, so it is what arriving says
 --   Previous / Next    ◀ and ▶, and then the NEW name — once it is on screen, read (O:watch);
 --                      with the preset database installed, the database's neighbour as well,
---                      marked, when the read fails or disagrees (presets.luau)
+--                      marked, when the read fails or disagrees (presets.luau); unavailable
+--                      where the name read is Init Preset, which Avenger steps no preset from
 --   Preset info        only with the preset database: the preset's expansion, category,
 --                      oscillator tabs and macro names, each marked as the database's
 --   Load, Save,        MENU's four items, each chosen in Avenger's own menu once a menu test sees
@@ -19,15 +20,21 @@
 --   Zoom               a stepper over Avenger's zoom list: the entry beside the current one is
 --                      chosen, and what the zoom field then reads is what is said
 --
--- at every zoom from 50 to 200 %, in every DAW daw-hosts has an entry for. Knob values, macros,
--- oscillators, drums and the browser are later stages (TODO.md, "VPS Avenger"). Plug-in only: the
+-- and after it the oscillator strip and the macros (ring.luau): the tab selected, its Mute and
+-- Solo, Add oscillator, the selected oscillator's knobs reset, the macro tab, its knobs reset and
+-- its buttons — each saying what was read, and clicked as the page's trips click them (act.luau)
+--
+-- at every zoom from 50 to 200 %, in every DAW daw-hosts has an entry for. Turning knobs from the
+-- ring, the drums and the browser are later stages (TODO.md, "VPS Avenger"). Plug-in only: the
 -- project supports no standalone Avenger, and neither does this module yet (TODO.md).
 --
 -- And the project's panel as a page of this module's own (page.luau, ui/), on the overlay
 -- runtime's page support (O:addPage): its key on an identified Avenger reads Avenger off one
 -- picture (read/open.luau) and shows the page beside it; the header's actions are trips into
--- Avenger made with this file's own clicks, reads and choices (actions.luau); the page's other
--- actions come in later stages, and say so until then.
+-- Avenger made with this file's own clicks, reads and choices (actions.luau), the renames and
+-- Browse Presets hand-overs of the keyboard to Avenger (handover.luau), and the knobs turned with
+-- a press held through a hand-over of the keys (amount.luau); the page's other actions come in
+-- later stages, and say so until then.
 --
 -- Coordinates are written as the project wrote them, at 50 % from Avenger's corner; the overlay
 -- scales them by the zoom READ off Avenger's zoom field (header.luau), and puts Avenger's corner
@@ -43,6 +50,9 @@ local DB = host.include("src/presets.luau")
 -- The project's reading of what a recogniser makes of Avenger's text.
 local R = host.include("src/read/ocr.luau")
 local Page = host.include("src/page.luau")
+local Ring = host.include("src/ring.luau")
+-- Where Avenger's popups are painted, for the drawn menu test (below, the binding).
+local Popups = host.include("src/popups.luau")
 
 -- The arbiter slot the header and the warning box share: the box, at the dialog layer, takes the
 -- keyboard from the header while it is up.
@@ -77,9 +87,10 @@ end
 
 -- ── A click of the module's own ──────────────────────────────────────────────
 -- ◀ and ▶ are clicked by a custom button rather than a hotspot, because what matters is what the
--- click DID — the name after it — and only the module's own code can watch for that; the redo
--- list's right click, because the module has to know that it opened a popup (header.luau,
--- `carried`). The checks a hotspot's click gets from the runtime are made here the same way: the
+-- click DID — the name after it — and only the module's own code can watch for that; UNDO's,
+-- because an undo may change the preset, and only the module's own code can forget then what it
+-- read of it; the redo list's right click, because the module has to know that it opened a popup
+-- (header.luau, `carried`). The checks a hotspot's click gets from the runtime are made here the same way: the
 -- point placed through the overlay's frame and scale (nothing clicked without a factor), inside the
 -- plug-in, and not under another window (host.window.ownsPoint: "a module only needs it directly
 -- when it clicks a coordinate itself", docs/api/window.md). Each refusal is said, as the runtime
@@ -87,10 +98,12 @@ end
 -- already said, and for a trip of the page's, which shows the refusal in the page instead (it is
 -- handed back with the `false`). A click from a hotkey would inherit held modifiers on Windows;
 -- these controls have none, and Return and Space arrive with none.
-local function clickAt(o, label, at, button, quiet)
+-- Where table point `at` lies on screen, checked as above: x and y, or nil and what was said (or
+-- would have been, `quiet`).
+local function pointOf(o, label, at, quiet)
   local function refuse(said)
     if not quiet then host.speech.output(said, { interrupt = true }) end
-    return false, said
+    return nil, said
   end
   local x, y = o:toScreen(at[1], at[2])
   if not x then
@@ -108,6 +121,12 @@ local function clickAt(o, label, at, button, quiet)
     host.log.info(string.format("[avenger] '%s' at (%d,%d): another window is drawn there — not clicking", label, x, y))
     return refuse("something else is covering " .. label)
   end
+  return x, y
+end
+
+local function clickAt(o, label, at, button, quiet)
+  local x, y = pointOf(o, label, at, quiet)
+  if not x then return false, y end
   host.log.info(string.format("[avenger] '%s': clicking (%d,%d)%s", label, x, y,
     button and (" with the " .. button .. " button") or ""))
   if button then
@@ -118,20 +137,48 @@ local function clickAt(o, label, at, button, quiet)
   return true
 end
 
+-- A double-click of the module's own, placed and checked as clickAt's click is (the oscillator's
+-- and the macro knobs' resets, src/act.luau): both clicks with `button` (O.doubleClick), and
+-- `after()`, as a handler, once the second has gone out — where the change is watched for from.
+local function doubleAt(o, label, at, button, quiet, after)
+  local x, y = pointOf(o, label, at, quiet)
+  if not x then return false, y end
+  host.log.info(string.format("[avenger] '%s': double-clicking (%d,%d)%s", label, x, y,
+    button and (" with the " .. button .. " button") or ""))
+  O.doubleClick(x, y, button and { button = button } or nil, after)
+  return true
+end
+
 -- ── A popup left open ────────────────────────────────────────────────────────
--- A choice the runtime gave up on AFTER the popup was seen — it could not be placed, something
--- covers the item, the item fell outside it, or the popup did not take the click — leaves
--- Avenger's popup open, and while a menu test sees it the keys are the popup's: the Zoom control's
--- Left and Right would go to the list, and the user was only told the choice failed. So it is
--- closed the way the project closes the zoom list, by clicking its opener again — a JUCE popup is
--- modal, and a click outside it dismisses it — and only while the menu still counts as open, so
--- that a popup already gone is not opened again. Quiet: the runtime has said what went wrong, and
--- the menu tests say whether the popup has gone (`[menu] … the menu has closed`). Whether that
--- click closes MENU's popup as it closes the zoom list is not measured (TODO.md).
+-- A choice the runtime gave up on AFTER its popup was seen (`pick.seen`, set by the item's
+-- placing) — it could not be placed, something covers the item, the item fell outside it, or the
+-- popup did not take the click — leaves Avenger's popup open, and while a menu test sees it the
+-- keys are the popup's: the Zoom control's Left and Right would go to the list, and the user was
+-- only told the choice failed. So it is closed, and only while the menu still counts as open, so
+-- that a popup already gone is not opened again:
+--   * MENU's and the zoom field's (`opener`): the way the project closes the zoom list, by
+--     clicking the opener again. JUCE's popup is modal, and a click on the component it was
+--     opened from dismisses it later and goes no further (juce_PopupMenu.cpp, MenuWindow::
+--     inputAttemptWhenModal);
+--   * a right click's (no `opener`): with Escape, which the modal popup takes (its keyPressed
+--     dismisses it). Not with a click: a popup opened at a point rather than from a component is
+--     dismissed by a click anywhere outside it AND the click goes on (juce_Component.cpp: "If
+--     processing the input attempt has exited the modal loop, we'll allow the event to be
+--     delivered") — on the tab it selects, the button it toggles, the field it edits, unread.
+--     Which of the two Avenger's right clicks open is not known; Escape is right for both.
+-- Quiet: the runtime has said what went wrong, and the menu tests say whether the popup has gone
+-- (`[menu] … the menu has closed`). Whether either closes Avenger's popups is not measured
+-- (TODO.md).
 local CLOSE_AFTER = { unplaced = true, covered = true, untaken = true, due = true, refused = true }
 
 local function closeLeftOpen(w, pick, why, label, opener)
   if not (pick.seen and CLOSE_AFTER[why] and w:menuOpen()) then return end
+  if opener == nil then
+    host.log.info(string.format("[avenger] '%s': its popup was left open (%s) — pressing Escape to close it",
+      label, tostring(why)))
+    host.input.send("Escape")
+    return
+  end
   host.log.info(string.format("[avenger] '%s': its popup was left open (%s) — clicking its opener "
     .. "again to close it", label, tostring(why)))
   clickAt(w, label, opener, nil, true)
@@ -167,7 +214,38 @@ local NAME_WITHIN = 2000
 -- `pending`: the press whose watch is still out, or nil once it has ended (or the overlay has
 -- left the front, which ends a watch without a word). Only the database's rule asks it: a press
 -- made while it is set may read the name from before that press's click (presets.luau).
-local names = { gen = 0, reading = false, text = nil, textGen = -1, last = nil, pending = nil }
+-- `init`: whether the latest name read is Init Preset (below), or nil for not known.
+local names = { gen = 0, reading = false, text = nil, textGen = -1, seq = 0, last = nil, pending = nil, init = nil }
+
+-- ── ◀ and ▶ on Init Preset ───────────────────────────────────────────────────
+-- Avenger steps no preset from its blank preset: ◀ and ▶ change nothing there, and the
+-- avenger_control project's tool has no case for it — it clicks and waits for a change that never
+-- comes (its actions.py, _step_preset). So where the name read is Init Preset the two say they are
+-- unavailable, the runtime's way for a custom button (its `text`, announced with the label, as
+-- ON:EAR's panel buttons say what blocks them), and a press clicks nothing and says why — the
+-- first Mac test of the page, 2026-10-14 (TODO.md, item 3). Decided by the latest read, never by
+-- a time: the press's own read of the name, or, when that reads nothing, the latest name this
+-- module read (`names.init`) — by a press, a watch, the Preset read-out or the page. That claim is
+-- forgotten where the preset may have changed with nothing read after it — a choice from MENU,
+-- Undo, the redo list, the overlay leaving the front, and the same clicks and choices made by a
+-- trip of the page's (actions.luau) — where the preset database's position is forgotten too;
+-- until a read, ◀ and ▶ claim nothing, and a press reads. The page says it in its own words
+-- (state.luau).
+local AT_INIT = "Avenger steps no preset from Init Preset — load a preset first"
+
+-- Name `t`, as read: the last one read, and whether it is Init Preset. `t` as it came.
+local function noted(t)
+  names.last = t
+  names.init = t == R.INIT_PRESET
+  return t
+end
+
+-- The preset may have changed, and nothing has read it since: and with it everything the ring
+-- read of the oscillators and the macros (ring.luau).
+local function unseen()
+  names.init = nil
+  Ring.forget()
+end
 
 local function tidy(text)
   local t = string.gsub(text or "", "%s+", " ")
@@ -192,12 +270,14 @@ local function nameNow(o)
   local ok, res = pcall(host.ocr.recognize, r, { lang = H.lang() })
   local t = ok and res and tidy(res.text) or ""
   if t == "" then return nil end
-  t = asName(t)
-  names.last = t
-  return t
+  return noted(asName(t))
 end
 
--- The last name read for press `gen`, and a new read started when none is out.
+-- The last name read for press `gen` and which reading it came from (`names.seq`, counted up for
+-- every name a read's answer brings), and a new read started when none is out. The watch looks
+-- more often than a read answers — every 100 ms against 130 to 200 for a read on a Mac — so the
+-- same answer is handed to several looks, and the reading's number is what tells the watch it is
+-- the same one (O:watch counts readings, not looks).
 local function nameAfter(o, gen)
   if gen ~= names.gen then return nil end
   if not names.reading then
@@ -209,14 +289,35 @@ local function nameAfter(o, gen)
         if gen ~= names.gen or res.status ~= "text" then return end
         local t = tidy(res.text)
         if t ~= "" then
-          t = asName(t)
-          names.text, names.textGen, names.last = t, gen, t
+          t = noted(asName(t))
+          names.text, names.textGen = t, gen
+          names.seq += 1
         end
       end)
       if not ok then names.reading = false end
     end
   end
-  return names.textGen == gen and names.text or nil
+  if names.textGen ~= gen then return nil end
+  return names.text, names.seq
+end
+
+-- A name the watch read after a click counts once it settles: read twice in a row, or — with
+-- the preset database — a catalog name as it stands (presets.luau, DB.catalogName), which counts
+-- at its first reading. Avenger shows a loading display while it loads a preset, and a read of it
+-- comes out as some other text each time ("cYanmaGentaYellowb", "PY", "M": the first Mac test of
+-- the page, 2026-10-14, where the first reading that differed was said as the preset in seven of
+-- ten steps), so two readings alike are the name. A loading display read alike twice in a row would
+-- still pass; that log had none. `n` is O:watch's count of readings in a row.
+local function settledName(now, n)
+  return n >= 2 or DB.catalogName(now)
+end
+
+-- What the watch's bound leaves of reading `now`, read `n` times in a row, after `before`: nil for
+-- a name that changed and never settled — said as not read, not as the preset — and `now` otherwise.
+local function keptAtBound(label, now, before, n)
+  if now == nil or now == before or settledName(now, n) then return now end
+  host.log.info(string.format("[avenger] '%s': '%s' was read once and is no catalog name — not taken", label, now))
+  return nil
 end
 
 -- With the database: what DB.after says for the watch's outcome, or nil for what the module says
@@ -251,11 +352,21 @@ end
 local function presetStep(ov, label, at, dir)
   ov:addCustomButton({
     label = label,
+    -- What the latest read says, at once: announcing reads nothing.
+    text = function() return names.init and "unavailable on Init Preset" or nil end,
     onActivate = function(o)
       local here, read = nameBefore(o, label)
       if not here then return end
+      if names.init then
+        host.log.info(string.format("[avenger] '%s': %s Init Preset, which Avenger steps no preset from — "
+          .. "nothing clicked", label, read and "the name reads" or "the name read last was"))
+        host.speech.output(label .. ": " .. AT_INIT, { interrupt = true })
+        return
+      end
       local was = read or names.last
       if not clickAt(o, label, at) then return end
+      -- Another preset: what the ring read of its oscillators and macros is not Avenger's any more.
+      Ring.forget()
       -- The name read before the click places the preset the step starts from; worked out once
       -- the click is sent, so that the first use's index load never holds the click back.
       local step = nil
@@ -273,14 +384,20 @@ local function presetStep(ov, label, at, dir)
       o:watch({
         read = function(w) return nameAfter(w, gen) end,
         was = was,
-        done = function(now, before) return before ~= nil and now ~= before end,
+        done = function(now, before, n) return before ~= nil and now ~= before and settledName(now, n) end,
         within = NAME_WITHIN,
         onDone = function(now)
           settled(gen)
           host.speech.output(decided(step, gen, now, false) or now, { interrupt = true })
         end,
-        onGiveUp = function(now, before)
+        onGiveUp = function(now, before, n)
           settled(gen)
+          -- Overtaken by a later press, whose own watch says the name: this one has read nothing
+          -- since (nameAfter), and a word of its own at its bound would come after that name and
+          -- say it cannot be read — ▶ ▶ within half a second on a Mac, where two readings alike
+          -- keep a watch open longer.
+          if gen ~= names.gen then return end
+          now = keptAtBound(label, now, before, n)
           local said = decided(step, gen, now, now ~= nil and now == before)
           if said then
             host.speech.output(said, { interrupt = true })
@@ -298,19 +415,36 @@ local function presetStep(ov, label, at, dir)
 end
 
 -- For a trip of the page's (actions.luau): the name after a click of the module's own, watched as
--- a step's is — read again and again until it differs from `was`, up to NAME_WITHIN — and
--- `onEnd(now, before, changed)` once, with the last name read (nil: none). The watch ends
--- unreported where the overlay leaves (O:watch); the trip's own ends cover that.
-local function watchName(o, was, onEnd)
+-- a step's is — read again and again until it differs from `was` and has settled, up to
+-- NAME_WITHIN — and `onEnd(now, before, changed)` once, with the last name read (nil: none, or one
+-- that never settled). The watch ends unreported where the overlay leaves (O:watch); the trip's own
+-- ends cover that. `label` names the action in the log.
+local function watchName(o, was, onEnd, label)
   names.gen += 1
   local gen = names.gen
   o:watch({
     read = function(w) return nameAfter(w, gen) end,
     was = was,
-    done = function(now, before) return before ~= nil and now ~= before end,
+    done = function(now, before, n) return before ~= nil and now ~= before and settledName(now, n) end,
     within = NAME_WITHIN,
     onDone = function(now, before) onEnd(now, before, true) end,
-    onGiveUp = function(now, before) onEnd(now, before, false) end,
+    onGiveUp = function(now, before, n) onEnd(keptAtBound(label or "the page", now, before, n), before, false) end,
+  })
+end
+
+-- For Browse Presets (src/handover.luau): the name read until it settles, with nothing to differ
+-- from — the user chose in Avenger's own browser, and it may be the preset that was there — up to
+-- NAME_WITHIN, and `onEnd(now, n)` once: the name, read `n` times in a row, or nil (none, or one
+-- that never settled), as watchName's bound leaves it.
+local function nameSettles(o, onEnd, label)
+  names.gen += 1
+  local gen = names.gen
+  o:watch({
+    read = function(w) return nameAfter(w, gen) end,
+    done = function(now, _, n) return settledName(now, n) end,
+    within = NAME_WITHIN,
+    onDone = function(now, _, n) onEnd(now, n) end,
+    onGiveUp = function(now, _, n) onEnd(keptAtBound(label or "the page", now, nil, n), n) end,
   })
 end
 
@@ -337,9 +471,10 @@ local function presetInfo(ov)
 end
 
 -- ── MENU's items ─────────────────────────────────────────────────────────────
--- Chosen in Avenger's own menu, which JUCE draws as a popup window of its own: MENU is clicked,
--- and the item once the menu test (newWindow, below) sees the popup and says where it is — never
--- after a wait — and the choice counts once the popup has taken it (O:chooseMenuItem).
+-- Chosen in Avenger's own menu, a popup JUCE draws itself — painted inside Avenger's editor in
+-- Logic, most likely a window of its own elsewhere (popups.luau): MENU is clicked, and the item
+-- once a menu test (below, the binding) sees the popup and says where it is — never after a wait
+-- — and the choice counts once the popup has taken it (O:chooseMenuItem).
 --
 -- The item is placed from Avenger's corner, where the project's figures are, across the middle of
 -- the popup's own width, in screen pixels at the factor MENU was clicked at (the runtime hands it
@@ -426,8 +561,9 @@ local function menuEntry(ov, label, item, arms)
         onDone = function(w, chosen, why)
           if chosen then
             -- Every item may load, rename, overwrite or blank the preset: the database's position
-            -- is not Avenger's any more.
+            -- is not Avenger's any more, nor the latest name read.
             DB.forget(label .. " chosen", OWN_NAME[label])
+            unseen()
             if arms then D.arm(id, label) end
             return
           end
@@ -556,9 +692,14 @@ end
 local header = placed(O.new("VPS Avenger"))
 -- The first stop: arriving says the preset. Read, never clicked: pressing it reads it again. An
 -- empty read is the recogniser's failure — Avenger always shows a name — and is said as that; a
--- reading of the blank preset the project knows for a misread is said as "Init Preset" (`value`).
+-- reading of the blank preset the project knows for a misread is said as "Init Preset" (`value`),
+-- and kept as the latest name read while the overlay is in front, for ◀ and ▶.
 header:addOCRButton({ label = "Preset", region = G.NAME_REGION, readOnly = true, fallback = "cannot be read now",
-  value = function(_, text) return (R.presetName(text)) end })
+  value = function(o, text)
+    local name = R.presetName(text)
+    if o.active then noted(name) end
+    return name
+  end })
 presetStep(header, "Previous preset", G.PREV, -1)
 presetStep(header, "Next preset", G.NEXT, 1)
 if DB.present then presetInfo(header) end
@@ -566,12 +707,25 @@ menuEntry(header, "Load preset", G.LOAD, false)
 menuEntry(header, "Save preset", G.SAVE, true)
 menuEntry(header, "Save preset as", G.SAVE_AS, false)
 menuEntry(header, "Initialize preset", G.INITIALIZE, true)
-header:addHotspotButton({ label = "Undo", at = G.UNDO })
+-- UNDO, clicked as a hotspot clicks and said as one says its click; an undo may take the preset
+-- back — after Initialize, to the one before — so what this module read of it is forgotten.
+header:addCustomButton({
+  label = "Undo",
+  onActivate = function(o)
+    if not clickAt(o, "Undo", G.UNDO) then return end
+    DB.forget("Undo")
+    unseen()
+    host.speech.output("Undo, activated", { interrupt = true })
+  end,
+})
 -- The redo list is Avenger's own popup, which the project found VoiceOver could step through with
 -- the arrow keys: opened with a right click on UNDO, and while a menu test sees it the keys are the
--- list's (`opensMenu`: the runtime's press, which newWindow compares against, comes before the
--- click). Whether NVDA reads it, and whether VoiceOver does from here, is a session's question
--- (TODO.md). UNDO's crosshair in a calibration shot is Undo's, the same point.
+-- list's (`opensMenu`: the runtime's press, which the menu tests compare against — newWindow's
+-- window list, drawn's picture of the list's rectangle — comes before the click). Whether NVDA
+-- reads it, and whether VoiceOver does from here — a list painted inside Avenger publishes no
+-- element, so most likely not — is a session's question
+-- (TODO.md). UNDO's crosshair in the header picture of a calibrating run (header.luau) is both
+-- controls' point.
 header:addCustomButton({
   label = "Redo list",
   opensMenu = true,
@@ -580,11 +734,14 @@ header:addCustomButton({
       H.popup(o:origin())
       -- What the list redoes is chosen in the list, which this module does not read.
       DB.forget("the redo list opened")
+      unseen()
       host.speech.output("Redo list, activated", { interrupt = true })
     end
   end,
 })
 zoomStepper(header)
+-- The oscillator strip and the macros, after Zoom (ring.luau).
+Ring.build(header, { lastName = function() return names.last end })
 -- Away from the overlay, the preset can be changed in ways it does not see — the DAW's own
 -- preset menu, a file dialog, another project: the database's position goes with it.
 header:onDeactivate(function()
@@ -592,6 +749,7 @@ header:onDeactivate(function()
   -- A watch out now ends without a word (O:watch looks only while the overlay is up).
   names.pending = nil
   DB.forget("the overlay left the front")
+  unseen()
 end)
 -- ── The page ─────────────────────────────────────────────────────────────────
 -- Its key, its settings and its description (page.luau), added before the header is bound, as
@@ -604,24 +762,36 @@ Page.start({
   DB = DB,
   ring = {
     clickAt = clickAt,
+    pointOf = pointOf,
     nameNow = nameNow,
     lastName = function() return names.last end,
+    noteName = noted,
+    unseen = unseen,
+    atInit = function() return names.init == true end,
     watchName = watchName,
+    settledName = nameSettles,
     menuItemAt = menuItemAt,
     zoomEntry = zoomEntry,
     closeLeftOpen = closeLeftOpen,
+    doubleAt = doubleAt,
+    forgetRing = Ring.forget,
     boxOffScreen = boxOffScreen,
     OWN_NAME = OWN_NAME,
     ZOOM_SETTLE = ZOOM_SETTLE,
   },
 })
 
--- `newWindow`: Avenger's popups — MENU, the zoom list, the redo list — are JUCE windows of the
--- DAW's process (the process Avenger runs in; a DAW that runs plug-ins apart is the popup's owner
--- then, unmeasured), which is what this test sees, and says where, so an item can be chosen in
--- one. Not `nativePopup`: JUCE draws its menus itself rather than as the system's, and a test that
--- says only "a menu is open" places no item.
-header:bind(BINDING, { specificity = O.layer.base, menus = { O.menuTests.newWindow } })
+-- Avenger's popups — MENU, the zoom list, the redo list, the tabs', knobs' and buttons' menus — are
+-- drawn by JUCE itself, and two tests see them, each saying where so an item can be chosen in one:
+-- `drawn`, a popup painted inside Avenger's editor where popups.luau says it is drawn — what the
+-- first Mac test of the page found in Logic, where no window of the process came for the zoom list
+-- (TODO.md, item 5) — and `newWindow`, a popup that is a window of the DAW's process (JUCE's other
+-- case, and most likely Windows'; a DAW that runs plug-ins apart is the popup's owner then,
+-- unmeasured). A choice is followed by the test that placed its item. Not `nativePopup`: JUCE
+-- draws its menus itself rather than as the system's, and a test that says only "a menu is open"
+-- places no item.
+header:bind(BINDING, { specificity = O.layer.base,
+  menus = { O.menuTests.newWindow, O.menuTests.drawn(Popups.spec) } })
 
 -- ── The warning box ──────────────────────────────────────────────────────────
 -- Its own overlay on the same slot and binding, at the dialog layer: the box's text, YES and NO.

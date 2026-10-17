@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 183 entries.
+Every call the platform offers a module, in one place. 185 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -71,7 +71,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O.away`](overlay#o-away) | Whether the overlay's group is **away** |
 | [`O.calibrating()`](overlay#o-calibrating) | Whether calibration is switched on |
 | [`O.contentSize(origin)`](overlay#o-contentsize) | The width and height of an origin's **content**, which is what coordinates are measured against |
-| [`O.doubleClick(x, y)`](overlay#o-doubleclick) | Two clicks at the same point, far enough apart in time to **be** a double-click. |
+| [`O.doubleClick(x, y, opts?, cb?)`](overlay#o-doubleclick) | Two clicks at the same point, far enough apart in time to **be** a double-click. |
 | [`O.layer`](overlay#o-layer) | The specificity ladder within a slot, named |
 | [`O.memoByEpoch(fn)`](overlay#o-memobyepoch) | Memoizes `fn` for the current epoch only |
 | [`O.memoByOrigin(fn, opts?)`](overlay#o-memobyorigin) | Memoizes a per-window property that does not change while that window exists |
@@ -110,6 +110,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O:toScreen(x, y, opts?) / O:toScreenRect(r, opts?)`](overlay#o-toscreen) | Where an authored point, or an authored rectangle `{x1, y1, x2, y2}`, lands on screen now |
 | [`O:typingWhen(fn)`](overlay#o-typingwhen) | `fn() -> boolean`. |
 | [`O:watch(spec)`](overlay#o-watch) | Waits for something to **change**, rather than for a length of time. |
+| [`trip:handOver(spec) — handing the keyboard to the plug-in`](overlay#trip-handover) | A wait of a trip in which the user works in the plug-in **itself** |
 
 ## host.window
 
@@ -196,6 +197,7 @@ Synthesising mouse and keyboard input.
 | [`host.input.click(x, y, opts?, cb?)`](input#host-input-click) | Clicks at `(x, y)`, through the system's input or, experimentally, without bringing the window it clicks to the front. |
 | [`host.input.cursorPos()`](input#host-input-cursorpos) | Returns the current mouse cursor position in screen coordinates. |
 | [`host.input.drag(x1, y1, x2, y2, opts?)`](input#host-input-drag) | Presses the mouse button at `(x1, y1)`, drags to `(x2, y2)`, and releases — with real, paced movement in between. |
+| [`host.input.held()`](input#host-input-held) | Lists the mouse buttons **this module** pressed with `mouseDown` and has not let go of. |
 | [`host.input.mouseDown(x, y, opts?)`](input#host-input-mousedown) | Presses a mouse button at `(x, y)` and **leaves it down**. |
 | [`host.input.mouseUp(x, y, opts?)`](input#host-input-mouseup) | Releases a mouse button at `(x, y)`, ending a press begun with `mouseDown`. |
 | [`host.input.move(x, y)`](input#host-input-move) | Moves the mouse cursor to the given screen coordinates. |

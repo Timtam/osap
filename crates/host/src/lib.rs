@@ -44,6 +44,9 @@ mod overlay_scale_tests;
 /// Choosing an item from a plug-in's own popup menu, once a menu test sees it.
 #[cfg(test)]
 mod overlay_menu_item_tests;
+/// A popup painted inside the plug-in, seen by `O.menuTests.drawn`; and `O.doubleClick`'s button.
+#[cfg(test)]
+mod overlay_drawn_menu_tests;
 /// VPS Avenger's module loaded against the same scripted host: its header read, its zoom and
 /// scale, its clicks, its menus and its warning box.
 #[cfg(test)]
@@ -53,6 +56,18 @@ mod overlay_avenger_tests;
 /// against what it sends and against the module.
 #[cfg(test)]
 mod avenger_page_tests;
+/// VPS Avenger's popups painted inside it, and the oscillator strip and the macros by clicks (the
+/// plan's slice 5), from the page and the ring.
+#[cfg(test)]
+mod avenger_osc_macros_tests;
+/// VPS Avenger's renames and Browse Presets (the plan's slice 6): Avenger's own editor seen open
+/// and closed, the keyboard handed over, and the name read back, from the page.
+#[cfg(test)]
+mod avenger_rename_tests;
+/// VPS Avenger's knobs turned from the page (the plan's slice 7): the press held through a
+/// hand-over of the keys, one move per key, the release on every end, and the knob read after.
+#[cfg(test)]
+mod avenger_amount_tests;
 /// The HTML page probe (tools/html-probe) against the same scripted host, with a scripted page:
 /// its keys, its report, W3's round trip, W7's landing and the automatic show.
 #[cfg(test)]
@@ -87,6 +102,11 @@ mod overlay_own_window_tests;
 /// scripted page.
 #[cfg(test)]
 mod overlay_page_tests;
+/// A trip's hand-over (runtime 0.9.0): trip:handOver, its keys let through to the plug-in and
+/// recorded, its end asked of the module, and every other end of the trip giving its keys back,
+/// against the same scripted host with a scripted page.
+#[cfg(test)]
+mod overlay_handover_tests;
 /// Tasks and their two waits against a real Luau VM and a real read service over a fake
 /// recogniser.
 #[cfg(test)]
@@ -5706,6 +5726,28 @@ pub fn page_check(args: &[String]) -> i32 {
     }
 }
 
+/// `automation-platform capture-check [--older-functions]`: the screen captured on a Mac the ways
+/// the host captures it, and which path answered each; with `--older-functions`, ScreenCaptureKit
+/// kept out of this process, for CI's runners that all have it (`backend/macos/capture_check.rs`).
+/// No window, no module, no speech, and the log is not opened. Returns the exit code: 0 when every
+/// check passed, 3 when one failed, 1 when it could not run, 2 for a wrong argument or on another
+/// platform, where it only says that it runs on macOS.
+pub fn capture_check(args: &[String]) -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        backend::capture_check(args)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = args;
+        println!(
+            "capture-check captures the screen the ways the application does on a Mac and says which way answered; it \
+             runs on macOS only."
+        );
+        2
+    }
+}
+
 /// Convenience entry: load each directory as a module and run them together.
 pub fn run(dirs: &[String]) -> Result<()> {
     run_set(module_set::Sources::Folders(dirs.iter().map(PathBuf::from).collect()))
@@ -8130,7 +8172,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     host.set("epoch", lua.create_function(move |_, ()| { host_call!("host.epoch"); Ok(sh.epoch.get()) })?)?;
 
-    // host.input: cursorPos / move / click / drag / scroll / send / text
+    // host.input: cursorPos / move / click / post / mouseDown / mouseUp / held / drag / scroll / send / text
     let input = lua.create_table()?;
     let sh = shared.clone();
     input.set(
@@ -8266,6 +8308,19 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             sh.backend.mouse_up(x, y, button);
             sh.let_go_button(idx, button);
             Ok(())
+        })?,
+    )?;
+    // host.input.held() -> { "left" | "right" | "middle" } — the buttons this module pressed with
+    // mouseDown and has not let go of, in the order pressed: the host's record, which a disable, a
+    // reload, a rollback and a stop empty as they let go (`release_held_buttons`). It acts on
+    // nothing and asks the system nothing, so a held gesture ended after a disable and an enable
+    // lets go of its button once, not a second time.
+    let sh = shared.clone();
+    input.set(
+        "held",
+        lua.create_function(move |lua, ()| {
+            host_call!("host.input.held");
+            lua.create_sequence_from(held_names(&sh.held_buttons.borrow(), idx))
         })?,
     )?;
     let sh = shared.clone();
@@ -9351,6 +9406,12 @@ fn button_name(button: MouseButton) -> &'static str {
         MouseButton::Right => "right",
         MouseButton::Middle => "middle",
     }
+}
+
+/// `host.input.held()`'s answer: the names of the buttons module `idx` holds in `held` (the host's
+/// record, `Shared::held_buttons`), in the order pressed.
+fn held_names(held: &BTreeMap<usize, Vec<MouseButton>>, idx: usize) -> Vec<&'static str> {
+    held.get(&idx).map(|v| v.iter().map(|b| button_name(*b)).collect()).unwrap_or_default()
 }
 
 fn button_from(opts: Option<&Table>) -> MouseButton {
@@ -10546,7 +10607,7 @@ mod ocr_wiring_tests {
     #[test]
     fn every_acting_call_notes_acting_and_waits_for_no_picture() {
         const ACTING: [&str; 9] = ["move", "click", "post", "mouseDown", "mouseUp", "drag", "scroll", "send", "text"];
-        const READ_ONLY: [&str; 1] = ["cursorPos"];
+        const READ_ONLY: [&str; 2] = ["cursorPos", "held"];
         let api = body(LIB, "fn install_host_api(");
         let input = bindings(api, "input");
         assert_eq!(input.len(), ACTING.len() + READ_ONLY.len(), "{:?}", input.iter().map(|b| b.0).collect::<Vec<_>>());
@@ -10556,6 +10617,8 @@ mod ocr_wiring_tests {
                 assert!(text.contains(&call), "host.input.{name} does not note acting");
             } else {
                 assert!(READ_ONLY.contains(&name), "host.input.{name} is new: does it act (ACTING) or only read?");
+                // A read acts on nothing: no note, and the input epoch stays.
+                assert!(!text.contains("note_acting") && !text.contains("bump_input_epoch"), "host.input.{name} acts");
             }
         }
         let focus = bindings(api, "win").into_iter().find(|b| b.0 == "focus").expect("host.window.focus");
@@ -11633,6 +11696,8 @@ mod ocr_wiring_tests {
         let input = bindings(api, "input");
         let held = |name: &str| input.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.input.{name}")).1;
         assert!(held("mouseDown").contains("sh.hold_button(idx, button);"));
+        // `held` answers the same record, for the module asking.
+        assert!(held("held").contains("held_names(&sh.held_buttons.borrow(), idx)"));
         for name in ["mouseUp", "click", "drag"] {
             assert!(held(name).contains("sh.let_go_button(idx, button);"), "host.input.{name} does not let go of its button");
         }
@@ -11644,6 +11709,24 @@ mod ocr_wiring_tests {
         assert!(populate.contains("vm_guard::name_chunk(lua, &dep_name, dep_id, dep_rel);"));
         assert!(populate.contains("vm_guard::name_chunk(lua, &entry.display().to_string(), id, &module.manifest.entry);"));
         assert!(body(LIB, "fn install_include(").contains("vm_guard::name_chunk(lua, &key, &owner,"));
+    }
+
+    /// `host.input.held()` answers the asking module's own buttons from the host's record, in the
+    /// order it pressed them — none of another module's — and nothing once the record is emptied, as
+    /// `release_held_buttons` empties it at a disable.
+    #[test]
+    fn held_names_are_the_module_s_own_in_the_order_pressed() {
+        use super::held_names;
+        use crate::backend::MouseButton;
+        let mut held = std::collections::BTreeMap::new();
+        assert!(held_names(&held, 2).is_empty());
+        held.insert(2, vec![MouseButton::Left, MouseButton::Right]);
+        held.insert(3, vec![MouseButton::Middle]);
+        assert_eq!(held_names(&held, 2), ["left", "right"]);
+        assert_eq!(held_names(&held, 3), ["middle"]);
+        assert!(held_names(&held, 4).is_empty());
+        held.remove(&2);
+        assert!(held_names(&held, 2).is_empty());
     }
 
     /// Every closure Luau can call in production code marks itself with `host_call!` — so the stop's

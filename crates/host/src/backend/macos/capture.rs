@@ -25,13 +25,16 @@
 //! picture of the desktop wallpaper with every other application's window removed. Nothing
 //! errors, nothing is empty, and the only symptom is that image search and OCR stop
 //! matching. A blind tester would report "it does not find anything" forever. So the
-//! permission is preflighted the first time anything is captured and again when several
-//! captures in a row come back a single flat colour, and either way the log says so in
-//! words the user can act on — once, not per call.
+//! permission is judged once the first capture has been made and again when several captures
+//! in a row come back a single flat colour, and either way the log says so in words the user
+//! can act on — once, not per call. Judged, not preflighted: `CGPreflightScreenCaptureAccess`
+//! has answered "not granted" for whole sessions in which every capture held other
+//! applications, so ScreenCaptureKit's own answer to a capture is kept here ([`SEEN`]) and
+//! counts first (`evidence.rs`, `perm::screen_recording`).
 
 use core::ffi::{c_void, CStr};
 use core::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU8, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -45,7 +48,7 @@ use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGDirectDisplayID,
     CGDisplayBounds, CGError, CGGetDisplaysWithPoint, CGImage, CGImageAlphaInfo,
     CGImageByteOrderInfo, CGGetActiveDisplayList, CGInterpolationQuality, CGMainDisplayID,
-    CGPreflightScreenCaptureAccess, CGWindowImageOption, CGWindowListOption,
+    CGWindowImageOption, CGWindowListOption,
 };
 
 // WHERE A CAPTURE COMES FROM, in order: ScreenCaptureKit, then the two older functions —
@@ -70,8 +73,13 @@ use objc2_core_graphics::{
 // the next probe brought forward by a wake or a display change) rather than stalling every
 // capture after it. The probe that asks it again is not waited for where an older function can
 // answer the read (`sck_probe`).
+//
+// Every Mac from 12.3 to 15.1 captures through the older two alone, and CI has no runner below
+// 15.2 any more: there `automation-platform capture-check --older-functions` keeps
+// ScreenCaptureKit out of its own process (`OLDER_ONLY`), and nothing else ever does.
 
 use super::backoff::{Attempt, Backoff};
+use super::evidence::Seen;
 use crate::backend::frame::{Frame, FrameVia};
 use crate::backend::{CapturedImage, CAPTURE_FAILED};
 use crate::ocr::types::Rect;
@@ -89,6 +97,10 @@ const MAX_POINTS: i64 = 40_000_000;
 
 static PERMISSION_PREFLIGHTED: AtomicBool = AtomicBool::new(false);
 static PERMISSION_WARNED: AtomicBool = AtomicBool::new(false);
+/// What ScreenCaptureKit last answered this process — an `evidence::Seen`, as a number: the
+/// evidence Screen Recording is judged by first (`perm::screen_recording`). Written from the
+/// framework's queues and the capturing threads, one relaxed store per answer; the last one stands.
+static SEEN: AtomicU8 = AtomicU8::new(0);
 static FLAT_WARNED: AtomicBool = AtomicBool::new(false);
 static FLAT_RUN: AtomicU32 = AtomicU32::new(0);
 static FIRST_CAPTURE_REPORTED: AtomicBool = AtomicBool::new(false);
@@ -117,6 +129,11 @@ static SCK_BACKOFF: Mutex<Backoff> =
 const SCK_BACKOFF_FIRST: Duration = Duration::from_secs(30);
 const SCK_BACKOFF_CAP: Duration = Duration::from_secs(600);
 static NO_CAPTURE_REPORTED: AtomicBool = AtomicBool::new(false);
+/// ScreenCaptureKit's rectangle capture is not asked for the rest of this process, as if this
+/// macOS had none: set by `capture-check --older-functions` (`capture_check.rs`) and by nothing
+/// else, so the application's own run never sets it. A runner of 15.2 and later then captures
+/// through the older functions, as every Mac from 12.3 to 15.1 does.
+static OLDER_ONLY: AtomicBool = AtomicBool::new(false);
 
 /// How long a ScreenCaptureKit capture may take before it is given up on.
 ///
@@ -150,6 +167,12 @@ pub(super) fn clear_sck_backoff(why: &str) {
             ),
         );
     }
+}
+
+/// Keeps ScreenCaptureKit's rectangle capture out of this process, for `capture-check
+/// --older-functions` alone: see [`OLDER_ONLY`].
+pub(super) fn ask_older_functions_only() {
+    OLDER_ONLY.store(true, Ordering::Relaxed);
 }
 
 /// Whether an older capture function exists on this macOS to answer a read ScreenCaptureKit
@@ -392,10 +415,6 @@ pub fn display_id_at(x: i32, y: i32) -> u32 {
 
 /// A region of the screen as exactly `w * h` pixels of tightly packed top-down RGBA.
 fn capture_rgba(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
-    if !PERMISSION_PREFLIGHTED.swap(true, Ordering::Relaxed) {
-        check_screen_recording("first capture of the session");
-    }
-
     let started = Instant::now();
     // Around the whole round trip, because the image worker's thread has no pool of its own.
     // Core Graphics is a C API and the objects here are all owned outright, but it uses
@@ -410,11 +429,13 @@ fn capture_rgba(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
     // instead of on it. The part that exists is drawn at its true position and true size;
     // the rest stays the black that a Windows capture of off-screen area also produces.
     let (vx, vy, vw, vh) = on_screen_part(x, y, w, h)?;
-    let (rgba, scale) = objc2::rc::autoreleasepool(|_| {
+    let got = objc2::rc::autoreleasepool(|_| {
         let g = grab(vx, vy, vw, vh, false)?;
         let rgba = image_to_rgba(&g.image, w, h, vx - x, vy - y, vw, vh)?;
         Some((rgba, g.scale))
-    })?;
+    });
+    first_capture_judged();
+    let (rgba, scale) = got?;
     if (vx, vy, vw, vh) != (x, y, w, h) && !CLIPPED_REPORTED.swap(true, Ordering::Relaxed) {
         crate::logging::line(
             "macos",
@@ -486,7 +507,8 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {
     );
     report_capture_paths();
 
-    let attempt = if sck_rect_capture_available() {
+    // Not asked at all where `capture-check --older-functions` keeps it out (`OLDER_ONLY`).
+    let attempt = if sck_rect_capture_available() && !OLDER_ONLY.load(Ordering::Relaxed) {
         sck_backoff().attempt(Instant::now())
     } else {
         Attempt::Skip
@@ -519,6 +541,12 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {
     };
     if waits {
         let outcome = sck_capture(rect);
+        // Whatever the region turns out to be, a picture or a refusal is the permission's answer.
+        match &outcome {
+            SckOutcome::Image(_) => note_seen(Seen::Picture),
+            SckOutcome::Error { declined: true, .. } => note_refused(),
+            _ => {}
+        }
         // An answer within the deadline — a picture or an error — ends a back-off: what it
         // guards against is the wait, and this one did not wait.
         let ended = !matches!(outcome, SckOutcome::TimedOut) && sck_backoff().answered();
@@ -532,7 +560,7 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {
         match outcome {
             SckOutcome::Image(image) => {
                 if let Some(scale) = uniform_scale(&image, w, h) {
-                    note_path_used(PATH_SCK, "ScreenCaptureKit captureImageInRect");
+                    note_path_used(PATH_SCK);
                     return Some(Grabbed { image, scale, via: FrameVia::ScreenCaptureKit });
                 }
                 crate::logging::trace("macos", || {
@@ -544,7 +572,7 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {
                     )
                 });
             }
-            SckOutcome::Error(why) => {
+            SckOutcome::Error { why, .. } => {
                 if !SCK_ERROR_REPORTED.swap(true, Ordering::Relaxed) {
                     crate::logging::line(
                         "macos",
@@ -599,7 +627,7 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {
             // SAFETY: a +1 reference from a Create function, owned from here on.
             let image = unsafe { CFRetained::from_raw(p) };
             if let Some(scale) = uniform_scale(&image, w, h) {
-                note_path_used(PATH_WINDOW_LIST, "CGWindowListCreateImage (looked up at run time)");
+                note_path_used(PATH_WINDOW_LIST);
                 return Some(Grabbed { image, scale, via: FrameVia::CoreGraphics });
             }
             crate::logging::trace("macos", || {
@@ -648,7 +676,7 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {
              coordinates are wrong on the second monitor only, this line is why.",
         );
     }
-    note_path_used(PATH_DISPLAY, "CGDisplayCreateImageForRect (looked up at run time)");
+    note_path_used(PATH_DISPLAY);
     Some(Grabbed { image, scale, via: FrameVia::CoreGraphics })
 }
 
@@ -736,9 +764,6 @@ pub fn frame(x: i32, y: i32, w: i32, h: i32, poll: bool) -> Result<Frame, String
     if w <= 0 || h <= 0 || w as i64 * h as i64 > MAX_POINTS {
         return Err(failed());
     }
-    if !PERMISSION_PREFLIGHTED.swap(true, Ordering::Relaxed) {
-        check_screen_recording("first capture of the session");
-    }
     let (vx, vy, vw, vh) = on_screen_part(x, y, w, h).ok_or_else(failed)?;
     let started = Instant::now();
     let got = objc2::rc::autoreleasepool(|_| {
@@ -746,6 +771,7 @@ pub fn frame(x: i32, y: i32, w: i32, h: i32, poll: bool) -> Result<Frame, String
         let rgba = image_to_rgba(&g.image, w, h, vx - x, vy - y, vw, vh)?;
         Some((g, rgba))
     });
+    first_capture_judged();
     let (g, rgba) = got.ok_or_else(failed)?;
     if !poll {
         watch_for_blank(&rgba, w, h);
@@ -814,11 +840,28 @@ const PATH_SCK: u32 = 1;
 const PATH_WINDOW_LIST: u32 = 2;
 const PATH_DISPLAY: u32 = 4;
 
+/// Each path's bit in `PATH_USED`, whether it is one of the two older functions, and its name.
+const PATHS: [(u32, bool, &str); 3] = [
+    (PATH_SCK, false, "ScreenCaptureKit captureImageInRect"),
+    (PATH_WINDOW_LIST, true, "CGWindowListCreateImage (looked up at run time)"),
+    (PATH_DISPLAY, true, "CGDisplayCreateImageForRect (looked up at run time)"),
+];
+
 /// Names the path that delivered an image, the first time each one does.
-fn note_path_used(bit: u32, name: &str) {
+fn note_path_used(bit: u32) {
     if PATH_USED.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+        let name = PATHS.iter().find(|p| p.0 == bit).map_or("?", |p| p.2);
         crate::logging::line("macos", &format!("screen captures are coming from {name}"));
     }
+}
+
+/// The paths that delivered an image since the last call, each as whether it is one of the older
+/// functions and its name, and forgotten — for `capture-check`, which asks after each of its
+/// captures which path answered it. A path forgotten here would be named in the log again; that
+/// process never opens the log.
+pub(super) fn take_paths_used() -> Vec<(bool, &'static str)> {
+    let used = PATH_USED.swap(0, Ordering::Relaxed);
+    PATHS.iter().filter(|p| used & p.0 != 0).map(|p| (p.1, p.2)).collect()
 }
 
 /// Which of the three capture paths this macOS has, said once. The line a remote session needs
@@ -828,17 +871,19 @@ fn report_capture_paths() {
     if PATHS_REPORTED.swap(true, Ordering::Relaxed) {
         return;
     }
+    crate::logging::line("macos", &paths_line());
+}
+
+/// That line's words, which `capture-check` prints as well.
+pub(super) fn paths_line() -> String {
     let has = |b: bool| if b { "present" } else { "absent" };
-    crate::logging::line(
-        "macos",
-        &format!(
-            "screen capture paths on this macOS: ScreenCaptureKit captureImageInRect {}, \
-             CGWindowListCreateImage {}, CGDisplayCreateImageForRect {}",
-            has(sck_rect_capture_available()),
-            has(window_list_create_image().is_some()),
-            has(display_create_image_for_rect().is_some()),
-        ),
-    );
+    format!(
+        "screen capture paths on this macOS: ScreenCaptureKit captureImageInRect {}, \
+         CGWindowListCreateImage {}, CGDisplayCreateImageForRect {}",
+        has(sck_rect_capture_available()),
+        has(window_list_create_image().is_some()),
+        has(display_create_image_for_rect().is_some()),
+    )
 }
 
 /// Whether `+[SCScreenshotManager captureImageInRect:completionHandler:]` exists here.
@@ -859,13 +904,48 @@ fn sck_rect_capture_available() -> bool {
 
 enum SckOutcome {
     Image(CFRetained<CGImage>),
-    Error(String),
+    /// `declined`: the error is `SCStreamErrorUserDeclined`, the permission's refusal.
+    Error { why: String, declined: bool },
     TimedOut,
+}
+
+/// Whether a ScreenCaptureKit error is its refusal for want of the permission.
+fn declined(e: &NSError) -> bool {
+    e.code() == super::enrol::SCK_USER_DECLINED && e.domain().to_string().contains("ScreenCaptureKit")
+}
+
+/// Keeps ScreenCaptureKit's latest answer as the evidence Screen Recording is judged by.
+fn note_seen(seen: Seen) {
+    SEEN.store(seen as u8, Ordering::Relaxed);
+}
+
+/// Keeps ScreenCaptureKit's refusal for want of the permission, with what other applications'
+/// window names said as it came (`evidence::after_refusal`): a look at the window list — a few
+/// milliseconds, on whichever thread heard the refusal — at the first refusal after another
+/// answer, and nothing at the refusals after it.
+fn note_refused() {
+    note_seen(super::evidence::after_refusal(seen(), super::perm::other_window_names));
+}
+
+/// What ScreenCaptureKit last answered this process: a picture, the list of what can be captured, a
+/// refusal for want of the permission, or nothing that says anything yet.
+pub(super) fn seen() -> Seen {
+    Seen::from_u8(SEEN.load(Ordering::Relaxed))
+}
+
+/// The request thread's ScreenCaptureKit answer, kept beside the captures' as evidence.
+pub(super) fn note_shareable_content(answer: &super::enrol::SckAnswer) {
+    use super::enrol::{SckAnswer, SCK_USER_DECLINED};
+    match answer {
+        SckAnswer::Content { .. } => note_seen(Seen::Content),
+        SckAnswer::Refused { code, .. } if *code == SCK_USER_DECLINED => note_refused(),
+        _ => {}
+    }
 }
 
 /// One rectangle through ScreenCaptureKit, turned back into a straight answer.
 fn sck_capture(rect: CGRect) -> SckOutcome {
-    let (tx, rx) = channel::<Result<CFRetained<CGImage>, String>>();
+    let (tx, rx) = channel::<Result<CFRetained<CGImage>, (String, bool)>>();
     // Called once, on a queue of the framework's. The image belongs to the framework for the
     // duration of the call, so it is retained before it crosses to the waiting thread; if that
     // thread has already given up, the send fails and the retained image is released with it.
@@ -873,12 +953,11 @@ fn sck_capture(rect: CGRect) -> SckOutcome {
         let outcome = match NonNull::new(image) {
             // SAFETY: a live image for the duration of this call (Get rule).
             Some(p) => Ok(unsafe { CFRetained::retain(p) }),
-            None => Err(
-                // SAFETY: nil or a live error for the duration of this call.
-                unsafe { error.as_ref() }
-                    .map(|e| e.localizedDescription().to_string())
-                    .unwrap_or_else(|| "no image and no error was returned".to_string()),
-            ),
+            // SAFETY: nil or a live error for the duration of this call.
+            None => Err(match unsafe { error.as_ref() } {
+                Some(e) => (e.localizedDescription().to_string(), declined(e)),
+                None => ("no image and no error was returned".to_string(), false),
+            }),
         };
         let _ = tx.send(outcome);
     });
@@ -887,7 +966,7 @@ fn sck_capture(rect: CGRect) -> SckOutcome {
     unsafe { SCScreenshotManager::captureImageInRect_completionHandler(rect, Some(&*handler)) };
     match rx.recv_timeout(SCK_TIMEOUT) {
         Ok(Ok(image)) => SckOutcome::Image(image),
-        Ok(Err(why)) => SckOutcome::Error(why),
+        Ok(Err((why, declined))) => SckOutcome::Error { why, declined },
         Err(_) => SckOutcome::TimedOut,
     }
 }
@@ -897,11 +976,20 @@ fn sck_capture(rect: CGRect) -> SckOutcome {
 /// a picture or an error, either way an answer — to the back-off, which counts it only within
 /// the deadline; a probe that never answers is written off by the next capture's
 /// `Backoff::attempt` at twice the deadline. The picture is not kept: the read this probe rode
-/// on is answered by the older functions. At most one probe is out at a time, and one that is
+/// on is answered by the older functions; that one came, or a refusal for want of the permission,
+/// is kept as evidence ([`SEEN`]). At most one probe is out at a time, and one that is
 /// never answered leaves its handler with the framework — one small block per probe, at most
 /// one every ten minutes once the back-off has reached its cap.
 fn sck_probe(rect: CGRect, since: Instant) {
-    let handler = block2::RcBlock::new(move |_image: *mut CGImage, _error: *mut NSError| {
+    let handler = block2::RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
+        // The picture is not kept, but whether one came is the permission's answer all the same.
+        // SAFETY: nil or a live error for the duration of this call; only read.
+        let refused = image.is_null() && unsafe { error.as_ref() }.is_some_and(declined);
+        if !image.is_null() {
+            note_seen(Seen::Picture);
+        } else if refused {
+            note_refused();
+        }
         // Taken out of the guard before the line is written, as everywhere else.
         let ended = sck_backoff().probe_answered(since, Instant::now());
         if ended {
@@ -914,7 +1002,7 @@ fn sck_probe(rect: CGRect, since: Instant) {
     });
     // SAFETY: availability was checked by `sck_rect_capture_available` before this is called;
     // the block outlives the call because the framework copies it; the image and the error are
-    // the framework's for the duration of the handler and are not touched.
+    // the framework's for the duration of the handler and are only looked at there.
     unsafe { SCScreenshotManager::captureImageInRect_completionHandler(rect, Some(&*handler)) };
 }
 
@@ -1095,7 +1183,8 @@ fn uniform_scale(image: &CGImage, w: i32, h: i32) -> Option<f64> {
 ///
 /// Drawing into a destination of the requested point size is also where the Retina
 /// downsample happens, and why there is no separate resampling step to get wrong.
-fn image_to_rgba(
+/// `pub(super)` for `capture-check`, which draws a text read's capture at its own size.
+pub(super) fn image_to_rgba(
     image: &CGImage,
     dw: i32,
     dh: i32,
@@ -1211,45 +1300,74 @@ fn looks_flat(rgba: &[u8]) -> bool {
     true
 }
 
-/// Preflight Screen Recording and, if it is missing, say so in the log in words the user can
-/// act on. Returns whether it is granted. The warning is written once per session however
-/// many times this is asked, because the caller that notices is in the capture path.
+/// Judges Screen Recording once the session's first capture has been made — after it, so that
+/// ScreenCaptureKit's answer to it is part of the evidence — whether it succeeded or not, and says
+/// the verdict either way: it is the line that answers the startup block's.
+fn first_capture_judged() {
+    if PERMISSION_PREFLIGHTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let verdict = super::perm::screen_recording();
+    if verdict.granted {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "screen recording: granted at the first capture of the session, judged by {}",
+                verdict.short()
+            ),
+        );
+    } else {
+        warn_screen_recording(verdict, "first capture of the session");
+    }
+}
+
+/// Judge Screen Recording (`perm::screen_recording`) and, if it is missing, say so in the log in
+/// words the user can act on. Returns whether it is granted. The warning is written once per
+/// session however many times this is asked, because the caller that notices is in the capture
+/// path.
 fn check_screen_recording(reason: &str) -> bool {
-    if CGPreflightScreenCaptureAccess() {
+    let verdict = super::perm::screen_recording();
+    if verdict.granted {
         crate::logging::trace("macos", || {
-            format!("screen recording permission is granted ({reason})")
+            format!("screen recording permission is granted ({reason}), judged by {}", verdict.short())
         });
         return true;
     }
+    warn_screen_recording(verdict, reason);
+    false
+}
+
+/// The once-per-session line for Screen Recording judged missing.
+fn warn_screen_recording(verdict: super::evidence::ScreenVerdict, reason: &str) {
     if !PERMISSION_WARNED.swap(true, Ordering::Relaxed) {
-        // Stated as a report rather than a verdict, because this check has been caught
-        // being wrong. Measured on macOS 12.7.6 with the application added to the Screen
-        // Recording list by hand: the preflight answered "not granted" at startup and again
-        // at the first capture, while the capture itself came back with the plugin's real
-        // window in it — OCR read fifty-three words of its interface out of the very frame
-        // this line was complaining about.
+        // Stated as a report rather than a verdict, because the system's check this used to be
+        // has been caught being wrong. Measured on macOS 12.7.6 with the application added to the
+        // Screen Recording list by hand: the preflight answered "not granted" at startup and again
+        // at the first capture, while the capture itself came back with the plugin's real window
+        // in it — OCR read fifty-three words of its interface out of the very frame this line was
+        // complaining about. On a Mac with ScreenCaptureKit's rectangle capture (macOS 15.2) the
+        // capture's own answer decides now; on an older one the window names and that check do.
         //
         // So the wording matters. Shouting that a permission is missing, at somebody who
         // cannot see the screen and cannot check, sends them to fix something that is not
         // broken; and a silent wrong answer here is exactly what this message exists to
-        // prevent. The honest form says what was asked, what the answer was, and what it
-        // would look like if the answer were right.
+        // prevent. The honest form says what decided, and what it would look like if the
+        // answer were right.
         crate::logging::line(
             "macos",
             &format!(
-                "screen recording: the system reports this application as NOT permitted \
-                 ({reason}). If that is true, captures come back showing the desktop with \
-                 other applications' windows removed — image search and OCR then never \
-                 match and nothing else looks wrong. If image search and OCR are working, \
-                 the report is wrong and there is nothing to do; this check has been \
-                 observed answering 'no' for an application that could capture perfectly \
-                 well. Grant it in {} > Screen Recording (called Screen & System Audio \
-                 Recording from macOS 15) and restart the application.",
-                super::perm::privacy_pane()
+                "screen recording: NOT granted, judged by {} ({reason}). If that is true, \
+                 captures come back showing the desktop with other applications' windows \
+                 removed — image search and OCR then never match and nothing else looks wrong. \
+                 If image search and OCR are working, the judgement is wrong and there is \
+                 nothing to do. Grant it in {} > Screen Recording (called Screen & System Audio \
+                 Recording from macOS 15), {}.",
+                verdict.short(),
+                super::perm::privacy_pane(),
+                super::perm::RESTART_NOTE
             ),
         );
     }
-    false
 }
 
 #[cfg(test)]

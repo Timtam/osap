@@ -25,7 +25,11 @@
 //! keyboard under a main menu with what wxWidgets' Apple menu has, whose items only count:
 //! Command-A and Command-C copying its field's text, Command-V pasting, Return on its button giving
 //! one message, Command-Q, Command-H and Option-Command-H doing nothing, and Command-W hiding it —
-//! the keys made in-process and sent through the application as the window server's would be. Then
+//! the keys made in-process and sent through the application as the window server's would be —
+//! and before the keys a click posted into its button as `host.input.click`'s `via = "post"` posts
+//! one (`posted_clicks`), checked by where the page says it was pressed, or `skipped` on a runner
+//! where this application may not post events; and, before it gets the keyboard, two such clicks as
+//! data (`posted_unkeyed`). Then
 //! a tool page described `activates = false` (`nonactivating_page`): no activation asked for by its
 //! build or by its show with the keyboard, the show answered `true` exactly when its window is key
 //! at the call, the same keys while it has the keyboard, and, where the workspace still names the
@@ -75,11 +79,13 @@ use objc2_foundation::{
     NSBundle, NSDate, NSDefaultRunLoopMode, NSError, NSNotification, NSNotificationCenter, NSOperationQueue, NSPoint,
     NSProcessInfo, NSRect, NSSize, NSString, NSURL,
 };
+use objc2_core_foundation::CGPoint;
+use objc2_core_graphics::{CGPreflightPostEventAccess, CGWarpMouseCursorPosition};
 use objc2_web_kit::{WKContentRuleList, WKContentRuleListStore};
 
 use super::front::{self, Ended, Handed};
 use super::page::{self, EnvNow};
-use crate::backend::Handing;
+use crate::backend::{Handing, MouseButton, COVERED};
 use crate::webview::{self, PageEvent, WindowKind};
 
 const USAGE: &str = "\
@@ -93,16 +99,23 @@ panel is shown. Then builds pages with the page window host.gui.webview uses and
 host promises of them: the rule list, also on its own, the page's own script and no inline one,
 messages both ways, its own file and nothing outside, no navigation away, and the keys in a page
 with the keyboard (Command-A, C and V in a field, Return on a button, Command-Q and Command-H doing
-nothing in a tool page, Command-W hiding it), also in a tool page described activates = false,
-which must ask for no activation and answer its show at the call, and which it shows beside another
-tool page as well; it sets the pasteboard while it does. Opens windows of its own for
-some seconds, loads no module and writes nothing to the application's log; every line it prints
-starts with PAGE CHECK:, and a check that fails says FAILED. Exit status 0 when it ran to the end
-and no check failed, 3 when one failed, 1 when it could not run, 2 for a wrong argument.";
+nothing in a tool page, Command-W hiding it, and a click posted into its button as host.input.click
+with via = \"post\" posts one, landing where it was asked for), also in a tool page described
+activates = false, which must ask for no activation and answer its show at the call, and which it
+shows beside another tool page as well; it sets the pasteboard and moves the pointer while it does.
+Opens windows of its own for some seconds, loads no module and writes nothing to the application's
+log; every line it prints starts with PAGE CHECK:, and a check that fails says FAILED, one it cannot
+make here says skipped. Exit status 0 when it ran to the end and no check failed, 3 when one failed,
+1 when it could not run, 2 for a wrong argument.";
 
 /// How long a section waits for the notices it measures: a bound on the test, never a decision
 /// of the application's.
 const SECTION: Duration = Duration::from_secs(5);
+
+/// How long the run's first page may take to load: it starts WebKit's own processes, which on a
+/// cold Intel runner took longer than a section (run 39035233368: every later page there loaded
+/// in 0.3 to 1 s). A bound on the test as `SECTION` is; the time it took is printed either way.
+const FIRST_LOAD: Duration = Duration::from_secs(20);
 
 /// How long the event loop runs after a change that announces nothing — the activation policy, and
 /// the launch — before what it did is read.
@@ -928,7 +941,20 @@ fn build_page(
 
 /// The page loaded: its document's own report, waited for.
 fn wait_loaded(app: &NSApplication, tally: &mut Tally, page: u64, from: usize, t0: Instant, name: &str) -> bool {
-    let ended = wait_page(app, from, t0 + SECTION, |e| match e {
+    wait_loaded_within(app, tally, page, from, t0, name, SECTION)
+}
+
+/// `wait_loaded` with a bound of its own, for the run's first page (`FIRST_LOAD`).
+fn wait_loaded_within(
+    app: &NSApplication,
+    tally: &mut Tally,
+    page: u64,
+    from: usize,
+    t0: Instant,
+    name: &str,
+    bound: Duration,
+) -> bool {
+    let ended = wait_page(app, from, t0 + bound, |e| match e {
         PageEvent::Loaded { page: p, .. } | PageEvent::LoadFailed { page: p, .. } | PageEvent::Closed { page: p, .. } => *p == page,
         PageEvent::Message { .. } => false,
     });
@@ -936,7 +962,7 @@ fn wait_loaded(app: &NSApplication, tally: &mut Tally, page: u64, from: usize, t
         Some((at, PageEvent::Loaded { .. })) => Ok(format!("after {:.0} ms", at.saturating_duration_since(t0).as_secs_f64() * 1000.0)),
         Some((_, PageEvent::LoadFailed { why, .. })) => Err(format!("its document did not load: {why}")),
         Some((_, PageEvent::Closed { why, .. })) => Err(format!("the page was closed ({why}) before it loaded")),
-        _ => Err(format!("not within {} s", SECTION.as_secs())),
+        _ => Err(format!("not within {} s", bound.as_secs())),
     };
     let ok = result.is_ok();
     tally.check(&format!("the {name} page loads"), result);
@@ -978,7 +1004,7 @@ fn web_view(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally) {
     let from = inbox_mark();
     let t0 = Instant::now();
     if let Some(tool) = build_page(tally, &rules, &root, WindowKind::Tool, true, "tool", 1, counting) {
-        if wait_loaded(app, tally, 1, from, t0, "tool") {
+        if wait_loaded_within(app, tally, 1, from, t0, "tool", FIRST_LOAD) {
             tool_page(app, mtm, tally, &tool, from, t0);
         }
         drop(tool);
@@ -1171,6 +1197,9 @@ fn tool_page(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally, tool
         },
     );
 
+    // A posted click while the page does not have the keyboard: data.
+    posted_unkeyed(app, tool, 1);
+
     // With the keyboard: the page shown as a key would show it, beside nothing.
     let counter = install_menu(app, mtm);
     let window = tool.window();
@@ -1195,9 +1224,10 @@ fn tool_page(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally, tool
         on_screen.map(|d| format!("{:.0} ms", d.as_secs_f64() * 1000.0)).unwrap_or_else(|| "no echo".to_string())
     ));
     if window.isKeyWindow() {
+        posted_clicks(app, tally, tool, 1);
         keys(app, tally, tool, 1, "");
     } else {
-        say("web view | the keys are not checked: the page did not get the keyboard on this Mac");
+        say("web view | the keys and the posted clicks are not checked: the page did not get the keyboard on this Mac");
     }
     say(&format!("web view | first responders while shown: {}", {
         let r = tool.responders();
@@ -1205,6 +1235,199 @@ fn tool_page(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally, tool
     }));
     app.setMainMenu(None);
     drop(counter);
+}
+
+/// Where to click page `n`'s button, as the page measures it: the middle of its rectangle as a
+/// point on the screen, from the top-left of the primary display, and the same point in the page —
+/// its `clientX` and `clientY`. The web view fills the window's content, so the page's origin is the
+/// content's top-left corner; a page that says it was pressed elsewhere says that this is wrong, or
+/// that the click landed elsewhere, and the line names both points.
+fn button_point(app: &NSApplication, tool: &page::Native, n: u64) -> Option<((i32, i32), (i32, i32))> {
+    let m = ask(app, tool, n, "button-rect", "button-rect ")?;
+    let v: Vec<f64> = m.trim_start_matches("button-rect ").split(' ').filter_map(|s| s.parse().ok()).collect();
+    let [left, top, w, h] = v[..] else { return None };
+    let (cx, cy) = content_top_left(tool.window())?;
+    let (px, py) = ((left + w / 2.0).floor(), (top + h / 2.0).floor());
+    Some((((cx + px).floor() as i32, (cy + py).floor() as i32), (px as i32, py as i32)))
+}
+
+/// The top-left corner of `window`'s content on the screen, in points from the top-left of the
+/// primary display, as the host's coordinates are: AppKit's frame flipped against that display's
+/// height, as the host flips it (`capture::screen_size`).
+fn content_top_left(window: &NSWindow) -> Option<(f64, f64)> {
+    let (_, primary) = super::capture::screen_size();
+    if primary <= 0 {
+        return None;
+    }
+    let c = window.contentRectForFrameRect(window.frame());
+    Some((c.origin.x, f64::from(primary) - (c.origin.y + c.size.height)))
+}
+
+/// The presses page `n` said it saw since `from`, as `(x, y)` in the page.
+fn presses(n: u64, from: usize) -> Vec<(i32, i32)> {
+    messages(n, from)
+        .iter()
+        .filter_map(|m| {
+            let mut v = m.strip_prefix("down ")?.split(' ').filter_map(|s| s.parse::<i32>().ok());
+            Some((v.next()?, v.next()?))
+        })
+        .collect()
+}
+
+/// `host.input.click` with `via = "post"` into the tool page while it has the keyboard, through the
+/// application's own path (`input::post_click` and `ax::post_target`, as the backend's
+/// `mouse_click_posted` makes it): the page's button gets one press, at the point asked for, and
+/// one click — with the pointer moved there first, and again with it left where it was put
+/// beforehand — and the pointer is on the point, or where it was. The page's own window, so the hit
+/// test answers the page, and the click carries the window's number and its place in it as one
+/// into another program's window does. On a runner where this application may not post events, a
+/// `skipped` line, which is neither a pass nor a failure; and where the window server names another
+/// window over the page's button after all, the same.
+fn posted_clicks(app: &NSApplication, tally: &mut Tally, tool: &page::Native, n: u64) {
+    const NAME: &str = "a posted click reaches the page's button at the point";
+    if !CGPreflightPostEventAccess() {
+        say(&format!(
+            "check {NAME}: skipped — post-event access is not granted on this runner (CGPreflightPostEventAccess \
+             answered no), so nothing can be posted; neither a pass nor a failure"
+        ));
+        return;
+    }
+    let Some((screen, inside)) = button_point(app, tool, n) else {
+        tally.check(NAME, Err("the page did not say where its button is".to_string()));
+        return;
+    };
+    // Where the pointer is put before the posted click that leaves it: inside the page, clear of
+    // the button — a few points in from its content's top-left corner.
+    let aside = content_top_left(tool.window()).map(|(x, y)| CGPoint::new(x + 4.0, y + 4.0));
+    let near = |p: (i32, i32), q: (i32, i32)| (p.0 - q.0).abs() <= 1 && (p.1 - q.1).abs() <= 1;
+    for (move_pointer, which) in [(true, ""), (false, ", with the pointer left where it is")] {
+        let name = format!("{NAME}{which}");
+        if let (false, Some(aside)) = (move_pointer, aside) {
+            let _ = CGWarpMouseCursorPosition(aside);
+            pump(app, Duration::from_millis(20));
+        }
+        let before = super::input::cursor_pos();
+        let from = inbox_mark();
+        let t = Instant::now();
+        let line = match super::input::post_click(tool.hwnd(), screen.0, screen.1, MouseButton::Left, move_pointer) {
+            Ok(line) => line,
+            Err(why) if why == COVERED => {
+                say(&format!(
+                    "check {name}: skipped — the window server names another window over the page's button on this \
+                     runner; neither a pass nor a failure"
+                ));
+                continue;
+            }
+            Err(why) => {
+                tally.check(&name, Err(format!("refused: {why}")));
+                continue;
+            }
+        };
+        say(&format!("web view | {line}"));
+        let clicked = wait_message(app, n, from, t + SECTION, |m| m.starts_with("clicked "));
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        // Anything still on its way after the click: a second press would be a click made twice.
+        let echoed = round_trip(app, tool, n, if move_pointer { 70 } else { 71 }).is_some();
+        let pressed = presses(n, from);
+        let clicks = messages(n, from).iter().filter(|m| m.starts_with("clicked ")).count();
+        tally.check(
+            &name,
+            match (clicked, pressed.as_slice()) {
+                (Some(_), [p]) if clicks == 1 && echoed && near(*p, inside) => {
+                    Ok(format!("pressed at {},{} in the page, clicked {ms:.0} ms after the call", p.0, p.1))
+                }
+                _ => Err(format!(
+                    "asked at {},{} on the screen, {},{} in the page; the page saw {} press(es) at {:?} and {clicks} click(s), \
+                     the echo after them {}",
+                    screen.0,
+                    screen.1,
+                    inside.0,
+                    inside.1,
+                    pressed.len(),
+                    pressed,
+                    if echoed { "answered" } else { "unanswered" }
+                )),
+            },
+        );
+        let after = super::input::cursor_pos();
+        let (want, said) = if move_pointer { (screen, "on the point") } else { (before, "where it was") };
+        tally.check(
+            &format!("a posted click{which} leaves the pointer {said}"),
+            if near(after, want) {
+                Ok(String::new())
+            } else {
+                Err(format!("the pointer is at {},{}; before the click it was at {},{}", after.0, after.1, before.0, before.1))
+            },
+        );
+    }
+}
+
+/// A posted click into the tool page shown without the keyboard, twice, while another application
+/// is in front where the runner has one: what the page saw of each, and what the front, this
+/// application's activation and the page window's key state did — data, no check. A plug-in window
+/// a page in front clicks into is in this state: not the key window, its application not the
+/// active one. The web view refuses the first mouse (`with_accept_first_mouse(false)`, `page.rs`),
+/// and AppKit makes a window that is not the key window key with such a press rather than handing
+/// the press to the view, so the first may be taken for that; whether the second then lands while
+/// the application stays in the background is not known (the prior art saw such clicks dropped),
+/// and this records it. Whether either brings this application forward is the other half of the
+/// answer. The page is hidden again after.
+fn posted_unkeyed(app: &NSApplication, tool: &page::Native, n: u64) {
+    if !CGPreflightPostEventAccess() {
+        say("web view | posted clicks into the page without the keyboard: not tried — post-event access is not granted on this runner");
+        return;
+    }
+    tool.put(None, None);
+    if tool.show(false).is_err() {
+        say("web view | posted clicks into the page without the keyboard: not tried — the page could not be shown");
+        return;
+    }
+    settle(app);
+    let window = tool.window();
+    let Some((screen, inside)) = button_point(app, tool, n) else {
+        say("web view | posted clicks into the page without the keyboard: not tried — the page did not say where its button is");
+        tool.hide();
+        settle(app);
+        return;
+    };
+    for attempt in 1..=2 {
+        let front = frontmost();
+        let (active, key) = (app.isActive(), window.isKeyWindow());
+        let from = inbox_mark();
+        let t = Instant::now();
+        let posted = super::input::post_click(tool.hwnd(), screen.0, screen.1, MouseButton::Left, true);
+        let clicked = wait_message(app, n, from, t + Duration::from_secs(2), |m| m.starts_with("clicked "));
+        settle(app);
+        let pressed = presses(n, from);
+        say(&format!(
+            "web view | a posted click into the tool page shown without the keyboard, {attempt} of 2, at {},{} in the page: {}; \
+             the page saw {} press(es) at {:?} and {}; frontmost {} → {}; this application active {} → {}; the page's window key \
+             {} → {}",
+            inside.0,
+            inside.1,
+            match &posted {
+                Ok(_) => "posted".to_string(),
+                Err(why) => format!("refused: {why}"),
+            },
+            pressed.len(),
+            pressed,
+            match clicked {
+                Some((at, _)) => format!("a click {:.0} ms after the call", at.saturating_duration_since(t).as_secs_f64() * 1000.0),
+                None => "no click".to_string(),
+            },
+            describe(front),
+            describe(frontmost()),
+            yes(active),
+            yes(app.isActive()),
+            yes(key),
+            yes(window.isKeyWindow())
+        ));
+        if posted.is_err() {
+            break;
+        }
+    }
+    tool.hide();
+    settle(app);
 }
 
 /// A tool page's keys, sent while it has the keyboard: the Edit keys in its field, Return on its

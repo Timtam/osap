@@ -13,11 +13,14 @@
 --   the state     only what was read (state.luau): the preset's name, the zoom, the browser, the
 --                 oscillator strip and the selected oscillator's knobs, the central tab and DRUM
 --                 SQ, the macros; what the preset database gives is marked so; everything else
---                 "not read"
---   the actions   the header's are trips into Avenger (actions.luau); Initialize's No clicks
---                 nothing, as it is meant to; every other action the page sends is answered
---                 "<label> is not available in this module yet" in its error region, until the
---                 stage that builds it (the plan's slices 5 to 10)
+--                 "not read"; and ◀ and ▶ unavailable where the preset read is Init Preset
+--   the actions   the header's, the oscillator strip's and the macros' are trips into Avenger
+--                 (actions.luau, act.luau), the renames and Browse Presets trips that hand the
+--                 keyboard to Avenger (handover.luau), and the knobs turned with a press held through
+--                 a hand-over of the keys (amount.luau); Initialize's No clicks nothing, as it is
+--                 meant to; every other action the page sends is answered "<label> is not available
+--                 in this module yet" in its error region, until the stage that builds it (the plan's
+--                 slices 8 to 10)
 --
 -- A message counts only while the page has the keyboard (host.window.foreground), so a press that
 -- reaches the module after the user went elsewhere does nothing; and one trip at a time, which the
@@ -127,7 +130,7 @@ P.LABELS = {
   central_drum_sq_speed = "The DRUM SQ speed",
 }
 
--- The actions this module has a handler for: the header's trips (actions.luau), and
+-- The actions this module has a handler for: the trips (actions.luau), and
 -- `cancel_initialize_preset`, Initialize's No in the page's own dialog, which clicks nothing in
 -- Avenger (the maintainer's decision: the tool clicked MENU, Initialize and NO, three clicks that
 -- change nothing): the page closes its dialog, and nothing is left to do here but say so in the
@@ -142,17 +145,11 @@ end
 -- yet". Explicit, so that a name the page sends and nobody listed is a test's failure rather than
 -- an answer nobody chose.
 P.NOT_BUILT = {
-  "start_rename", "set_expansion_view",
-  "open_expansion", "close_expansion", "browse_expansion_presets", "select_all_expansion_presets",
+  "set_expansion_view",
+  "open_expansion", "close_expansion", "select_all_expansion_presets",
   "select_expansion_category", "go_to_loaded_preset_category", "select_expansion_preset",
   "load_expansion_preset", "mark_expansion_preset_favorite", "toggle_expansion_favorite_view",
-  "select_osc_tab", "add_osc", "select_drums_tab", "select_trig_tab", "toggle_osc_mute",
-  "toggle_drums_mute", "toggle_trig_mute", "toggle_osc_solo", "toggle_drums_solo",
-  "toggle_trig_solo", "osc_menu_item", "drums_menu_item", "trig_menu_item", "rename_osc",
-  "select_macro_tab", "add_macro_tab", "delete_macro_tab", "rename_macro", "macro_amount",
-  "reset_macro_amount", "toggle_macro_button", "macro_reset_mode", "macro_button_menu_item",
-  "osc_control", "reset_osc_control", "osc_filter_control", "toggle_drum_pattern",
-  "select_drum_mode", "previous_drumkit", "next_drumkit", "select_drumkit_part", "drumkit_column",
+  "toggle_drum_pattern", "select_drum_mode", "previous_drumkit", "next_drumkit", "select_drumkit_part", "drumkit_column",
   "toggle_drumkit_button", "drumkit_control", "reset_drumkit_control", "drumkit_menu_item",
   "select_central_tab", "sample_browser_focus", "select_sample_editor_tab", "sample_editor_field",
   "sample_editor_play_mode", "sample_editor_panel_button", "toggle_sample_editor_enable",
@@ -285,6 +282,8 @@ local function open(o)
     return false
   end
   S.read(win.id, values)
+  -- The latest name read, for the ring's ◀ and ▶ as well (main.luau, "◀ and ▶ on Init Preset").
+  if values.preset then E.ring.noteName(values.preset) end
   host.log.info(string.format("[avenger] [page] read for the page: the preset %s, the zoom %s",
     values.preset and ("'" .. values.preset .. "'") or "not read", values.zoom and (values.zoom .. " %") or "not read"))
   plugin, keyAt = win, t0
@@ -441,7 +440,8 @@ function P.start(env)
     label = "Expansions list (from the preset database)", oneOf = P.ROSTERS })
   local stored = host.settings.define("pageKey", KEY_DEFAULT, {
     label = "Key that shows the Avenger Control page and goes back to the plug-in" })
-  host.settings.define("sounds", true, { label = "Sounds when the page opens and closes" })
+  host.settings.define("sounds", true, {
+    label = "Sounds when the page opens and closes, and at a knob's limit" })
   host.settings.define("pageLeavesDawActive", false, {
     label = "On a Mac, the page leaves the DAW the active application (experimental)" })
   host.settings.define("drumSqCadence", 250, {
@@ -510,6 +510,7 @@ function P.start(env)
     plugin = function() return plugin end,
     postState = postState,
     closedWords = closedWords,
+    sound = sound,
   })
   host.log.info("[avenger] [page] " .. keyWords() .. " shows the Avenger Control page beside an identified VPS Avenger")
 end

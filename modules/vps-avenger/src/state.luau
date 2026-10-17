@@ -21,15 +21,32 @@
 
 local S = {}
 
+local R = host.include("src/read/ocr.luau")
+
 -- One table per plug-in window, by its id: { values = { key -> value }, at = when they were read
--- (host.now) }. At most WINDOWS_MAX, the oldest dropped: one window is in front at a time.
+-- (host.now), facts = { key -> value } }. At most WINDOWS_MAX, the oldest dropped: one window is in
+-- front at a time. `facts` are what an action of this session did that no read can show — the OSC
+-- tab Copy was chosen for (`oscCopied`, its name as read, or "OSC <i>"), which the page's Paste
+-- follows: Avenger's own clipboard cannot be read. A read of the whole of Avenger keeps them.
 local WINDOWS_MAX = 8
 local byWindow, order = {}, {}
+
+-- Why the page's ◀ and ▶ cannot step: VPS Avenger steps no preset from its blank preset, which
+-- the tool did not know (main.luau, "◀ and ▶ on Init Preset"). The state says it
+-- (`preset_steps_unavailable`, a key of the port's) where the preset read is Init Preset, and the
+-- page's buttons are then aria-disabled with it in their help (ui/panel.js); a press is answered
+-- with it in the error region (actions.luau).
+S.AT_INIT = "VPS Avenger steps no preset from Init Preset; load a preset first"
+
+local function stepsWhy(v)
+  if v.preset ~= nil and R.isInitPreset(v.preset) then return S.AT_INIT end
+  return nil
+end
 
 local function forWindow(id)
   local st = byWindow[id]
   if st then return st end
-  st = { values = {}, at = nil }
+  st = { values = {}, at = nil, facts = {} }
   byWindow[id] = st
   order[#order + 1] = id
   if #order > WINDOWS_MAX then byWindow[table.remove(order, 1)] = nil end
@@ -54,10 +71,37 @@ function S.set(id, fields)
   end
 end
 
+-- What an action read again of one part of Avenger in window `id` (read/open.luau, Open.part): each
+-- of `keys` replaced by its value in `values`, nil included — what the part's read did not find is
+-- not kept from an earlier read — and the rest as it was read, with its time.
+function S.part(id, keys, values)
+  local st = forWindow(id)
+  for _, k in ipairs(keys) do st.values[k] = values[k] end
+end
+
+-- A fact of this session in window `id` (above): `value`, or nil to forget it.
+function S.note(id, key, value)
+  forWindow(id).facts[key] = value
+end
+
+-- What was last read in window `id`, as it stands (nil: nothing yet) — for words, never changed
+-- through this.
+function S.values(id)
+  local st = id and byWindow[id] or nil
+  return st and st.values
+end
+
 -- When window `id`'s values were read (host.now), or nil: nothing read there yet.
 function S.at(id)
   local st = id and byWindow[id] or nil
   return st and st.at
+end
+
+-- Why ◀ and ▶ cannot step from the preset read in window `id` (S.AT_INIT), or nil: they can, or
+-- nothing was read there.
+function S.stepsUnavailable(id)
+  local st = id and byWindow[id] or nil
+  return st and stepsWhy(st.values) or nil
 end
 
 -- A list of `n` entries from `src`, holes where nothing was read: the page reads a hole as "not
@@ -80,11 +124,12 @@ local function anyOf(marks, n)
 end
 
 -- osc_panel: the tool's keys for the strip, the selected oscillator's knobs, the Drums tab, the
--- central tab and DRUM SQ.
-local function oscPanel(v)
+-- central tab and DRUM SQ; and `copied`, the OSC tab a Copy of this session was chosen for.
+local function oscPanel(v, facts)
   local n = v.oscCount
   local out = {
     count = n,
+    copied = facts and facts.oscCopied or nil,
     names = list(v.oscNames, n),
     mute_states = list(v.oscMute, n),
     solo_states = list(v.oscSolo, n),
@@ -160,12 +205,13 @@ function S.snapshot(id, roster, opts)
   local v = st and st.values or {}
   local out = {
     preset = v.preset,
+    preset_steps_unavailable = stepsWhy(v),
     zoom = v.zoom,
     expansion_view = v.expansionView,
     expansion_open = v.expansionOpen,
     selected_expansion = v.selectedExpansion,
     expansion_favorite_view = v.favoriteView,
-    osc_panel = oscPanel(v),
+    osc_panel = oscPanel(v, st and st.facts),
     macro_panel = macroPanel(v),
   }
   if v.expansion then

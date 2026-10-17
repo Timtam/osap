@@ -1,6 +1,6 @@
 -- HTML page probe (dev tool, Windows and macOS): the maintainer's NVDA test of `host.gui.webview`,
 -- stage 1 of the HTML plan of 2026-09-28, and the Mac tester's VoiceOver test of the same pages on
--- a Mac (stage 4). It answers the questions W1–W10 and MW1–MW19 in TODO.md — whether the screen
+-- a Mac (stage 4). It answers the questions W1–W10 and MW1–MW21 in TODO.md — whether the screen
 -- reader finds its way into a page shown beside a plug-in window, which way of pressing a key
 -- gives the page the front, what a click into the plug-in and back costs, which keys reach the
 -- page — for a person who cannot see the screen: everything it observes goes into the log, and
@@ -37,23 +37,27 @@
 --                      region updated (MW16). Pressed in a page it must not fire — no capture
 --                      applies while a window of this application has the keyboard (MW16) — and
 --                      the page gets it as a key instead.
+--   Command-Shift-F4   W10's target, as Windows' F10 (below): the pointer's point in the plug-in
+--                      window remembered — put the pointer on the control first, with VoiceOver's
+--                      "move the mouse to the VoiceOver cursor" (VO-Command-F5) or a module's
+--                      overlay.
 -- And one setting, off by default: the tool page comes up by itself when a plug-in window comes
 -- to the front from another window (W2 c) — never the application window, which is reached as any
 -- program's window is.
 --
--- W10, on Windows (clicking without the round trip, from the page): the page's "Read the
--- plug-in's elements" lists what UIA has of the plug-in; then a way — nothing (only watch), the
--- round trip, a posted click, a posted click with the pointer left where it is, the no-activate
--- style, an accessibility press — and 1, 10 or 20 times; "Try it". Each attempt puts the pointer
--- on the target first for the ways that move it, reads the plug-in near the target before and
--- after, takes a baseline picture, acts, waits for the picture to change, and says what happened
--- without cutting NVDA off: whether another window came forward, whether the pixels at the
--- target changed, the text before and after, and the element's state where it is readable. The
--- round trip goes as W3's, each step on the event that ends the one before. F7 or F8 gives a run
--- up. Not on a Mac, where its ways of acting without the round trip answer "not supported on
--- this platform yet" and the window probe holds Command-Shift-F10: there F10 is not registered,
--- and the page, whose W10 part is hidden until it is told as it loads that W10 is offered, keeps
--- it hidden, so the Mac's page is revision 6's.
+-- W10 (clicking without the round trip, from the page): the page's "Read the plug-in's elements"
+-- lists what the accessibility tree has of the plug-in (UIA on Windows, AX on a Mac); then a way —
+-- nothing (only watch), the round trip, a posted click, a posted click with the pointer left where
+-- it is, and on Windows the no-activate style and an accessibility press — and 1, 10 or 20 times;
+-- "Try it". Each attempt puts the pointer on the target first for the ways that move it, reads the
+-- plug-in near the target before and after, takes a baseline picture, acts, waits for the picture
+-- to change, and says what happened without cutting the screen reader off: whether another window
+-- came forward, whether the pixels at the target changed, the text before and after, and the
+-- element's state where it is readable. The round trip goes as W3's, each step on the event that
+-- ends the one before. F7 or F8 gives a run up. On a Mac (MW21) the page offers the ways a Mac has
+-- — the no-activate style is a Windows window style, and `host.element.press` answers "not
+-- supported on this platform yet" there — and its target key is Command-Shift-F4, the window probe
+-- holding Command-Shift-F10.
 --
 -- Two pages from the same files: the tool page of W1–W9, in no list of windows, and the same page
 -- in an application window (`window = "app"`), in Alt+Tab and on the taskbar, for W6 again — the
@@ -93,17 +97,27 @@ local daw = host.require("com.platform.daw-hosts")
 -- (host.input.click's via = "post"/"noactivate" and host.element.press), measured from the page
 -- (2026-10-11). 6: the probe on a Mac, for MW1–MW19 (2026-10-12), made the same day on another
 -- line of work. 7: the two together, where those lines met (2026-10-12): W10 on Windows, the
--- Mac's keys and its page without activation on a Mac.
-local REVISION = 7
+-- Mac's keys and its page without activation on a Mac. 8: W10 on a Mac as well, with the posted
+-- clicks a Mac has now (2026-10-16, MW21).
+local REVISION = 8
 
 -- The keys, each platform's (above). F8 is Windows' own delivery there (W2 b) and the page
--- without activation on a Mac (MW1b). W10's target key is Windows' alone, as W10 is (above), and
--- the captured key a Mac's alone.
+-- without activation on a Mac (MW1b). W10's target key is F10 on Windows and F4 on a Mac, where
+-- the window probe holds F10; the captured key is a Mac's alone.
 local KEY_SHOW = host.os.pick({ windows = "Ctrl+Shift+Win+Alt+F7", macos = "Cmd+Shift+F7" })
 local KEY_SHOW_FG = host.os.pick({ windows = "Ctrl+Shift+Win+Alt+F8", macos = "Cmd+Shift+F8" })
 local KEY_REPORT = host.os.pick({ windows = "Ctrl+Shift+Win+Alt+F9", macos = "Cmd+Shift+F11" })
-local KEY_TARGET = host.os.pick({ windows = "Ctrl+Shift+Win+Alt+F10" })
+local KEY_TARGET = host.os.pick({ windows = "Ctrl+Shift+Win+Alt+F10", macos = "Cmd+Shift+F4" })
 local KEY_UNFOCUSED = host.os.pick({ macos = "Cmd+Shift+F12" })
+
+-- W10's ways on this platform, as the page's Way select offers them (its options with these
+-- values; the others are taken out as it loads): on a Mac the posted clicks and the round trip,
+-- not the no-activate style, a Windows window style, nor the accessibility press, which a Mac does
+-- not have yet.
+local W10_WAYS = host.os.pick({
+  windows = { "watch", "round", "post", "post-stay", "noactivate", "press" },
+  macos = { "watch", "round", "post", "post-stay" },
+})
 
 -- How a show key's press arrives, in the results' words: on Windows F7's is matched in the
 -- keyboard hook and F8's left to Windows (W2); on a Mac every hotkey is the system's own, and F8
@@ -943,8 +957,8 @@ local function w10Attempt()
   end)
 end
 
--- F10: remember the pointer's point in the plug-in window in front (or the one remembered), as an
--- offset into its client area, and say so. The pointer is put there by the tools the maintainer
+-- The target key (F10 on Windows, F4 on a Mac): remember the pointer's point in the plug-in window
+-- in front (or the one remembered), as an offset into its client area, and say so. The pointer is put there by the tools the maintainer
 -- already has — NVDA's "move mouse to navigator object", a module's overlay.
 local function rememberTarget()
   pressedAt = host.now()
@@ -956,7 +970,7 @@ local function rememberTarget()
   end
   if not plugin then
     say("No plug-in window is in front.")
-    log("W10: F10 pressed, but no plug-in window is in front or remembered")
+    log("W10: %s pressed, but no plug-in window is in front or remembered", host.keys.describe(KEY_TARGET, { style = "short" }))
     return
   end
   local c = plugin.client
@@ -1021,10 +1035,19 @@ end
 -- The page's "Read the plug-in's elements": the remembered plug-in window's dump, listed for the
 -- page `rec` (listElements). Asked with a callback, so the event loop never waits for the plug-in's
 -- answer; a dump that is not all of the tree says why in the log.
+-- Said when a W10 request finds no plug-in window remembered: the target key by its function key,
+-- as the report names F7.
+local function noTarget()
+  say(string.format(
+    "No plug-in window remembered. Press %s with the pointer on the control first.",
+    host.os.pick({ windows = "F10", macos = "F4" })
+  ))
+end
+
 local function readElements(rec)
   local p = refreshed(plugin)
   if not p then
-    say("No plug-in window remembered. Press F10 with the pointer on the control first.")
+    noTarget()
     return
   end
   host.element.dump(p.id, function(nodes, why)
@@ -1043,7 +1066,7 @@ local function tryW10(m)
     return
   end
   if not refreshed(plugin) then
-    say("No plug-in window remembered. Press F10 with the pointer on the control first.")
+    noTarget()
     return
   end
   local reps = tonumber(m["repeat"]) or 1
@@ -1188,12 +1211,9 @@ local function onMessage(rec, m)
       switchWindow()
     end
   elseif kind == "w10" then
-    -- `do` and `repeat` are keywords, so the page's fields are read by name. Windows' alone: on a
-    -- Mac the page keeps its W10 part hidden ("loaded", below), and a request that came all the
-    -- same is logged, not run.
-    if not KEY_TARGET then
-      log("page: a W10 request '%s', and W10 is not offered on this platform", tostring(m["do"]))
-    elseif m["do"] == "read" then
+    -- `do` and `repeat` are keywords, so the page's fields are read by name. A way this platform's
+    -- page does not offer still runs, and answers what the host answers for it here.
+    if m["do"] == "read" then
       readElements(rec)
     elseif m["do"] == "try" then
       tryW10(m)
@@ -1201,9 +1221,15 @@ local function onMessage(rec, m)
       log("page: an unknown W10 request '%s'", tostring(m["do"]))
     end
   elseif kind == "loaded" then
-    -- Which page it is, for the label of its switch button, and whether W10 is offered here: the
-    -- page's W10 part is hidden until this says it is, so on a Mac it stays hidden.
-    rec.page:post({ kind = "window", window = rec.kind, w10 = KEY_TARGET ~= nil })
+    -- Which page it is, for the label of its switch button; and W10's part, hidden until this
+    -- says it is offered, with this platform's ways and the name of its target key.
+    rec.page:post({
+      kind = "window",
+      window = rec.kind,
+      w10 = true,
+      ways = W10_WAYS,
+      targetKey = host.keys.describe(KEY_TARGET),
+    })
     log(
       "page: document loaded, has the focus: %s; code built from a string %s; RTCPeerConnection is %s; "
         .. "navigator.clipboard.writeText is %s",
@@ -1437,13 +1463,27 @@ host.hotkey.register(KEY_REPORT, function()
   landing = nil
 end)
 
-if KEY_TARGET then
-  host.hotkey.register(KEY_TARGET, function()
-    rememberTarget()
-  end)
-end
+host.hotkey.register(KEY_TARGET, function()
+  rememberTarget()
+end)
 
 -- ── The windows: W2 c, W3, W7 ─────────────────────────────────────────────────
+
+-- W10's round trip: the plug-in window it asked for is in front — the click now, and then the
+-- change wait (w10Act). `id` is the window in front; `how` says how that was told, for the log. A
+-- foreground change tells it, and on a Mac, where the DAW is the active application already, a
+-- focus event alone (as for W3, onFocus below). Whether it clicked.
+local function w10Arrived(id, how)
+  local fw = w10.run and w10.run.forward
+  if not (fw and id == fw.id) then
+    return false
+  end
+  w10.run.forward = nil
+  host.input.click(fw.x, fw.y)
+  log("W10: the plug-in window %s %d ms after it was asked; clicked at %d,%d", how, host.now() - fw.t0, fw.x, fw.y)
+  fw.done(true, nil)
+  return true
+end
 
 -- Every foreground change, with how long after the last press it came — what W2 and W3 read the
 -- order of events from. W3's plug-in window arriving goes on with its round trip; W7's has its
@@ -1470,14 +1510,7 @@ host.window.onTrigger({}, function(w)
     if not ours then
       w10.run.otherFront = true
     end
-    -- W10's round trip: the plug-in window it asked for is in front — the click now, and then the
-    -- change wait (w10Act).
-    local fw = w10.run.forward
-    if fw and w.id == fw.id then
-      w10.run.forward = nil
-      host.input.click(fw.x, fw.y)
-      log("W10: the plug-in window came to the front %d ms after it was asked; clicked at %d,%d", host.now() - fw.t0, fw.x, fw.y)
-      fw.done(true, nil)
+    if w10Arrived(w.id, "came to the front") then
       return
     end
   end
@@ -1527,12 +1560,19 @@ end)
 
 -- The keyboard moving inside a window: W7's landing, when the window's foreground event came
 -- before its control had the keyboard. The first focus event after an answer ends the watch.
--- And W3's plug-in window come to the front with no foreground event to say so: on a Mac only an
--- application's activation is one, so a window of the application that is the active one already
--- — REAPER's, the page described `activates = false` having had the keyboard only lent — is told
--- by a focus event alone, as is the plug-in window focused after its application's activation
--- named another of its windows first. W3 goes on once the plug-in window has the keyboard.
+-- And a round trip's plug-in window, W3's or W10's, come to the front with no foreground event to
+-- say so: on a Mac only an application's activation is one, so a window of the application that is
+-- the active one already — REAPER's, the page described `activates = false` having had the keyboard
+-- only lent — is told by a focus event alone, as is the plug-in window focused after its
+-- application's activation named another of its windows first. The trip goes on once the plug-in
+-- window has the keyboard.
 host.window.onFocus(function()
+  if w10.run and w10.run.forward then
+    local f = host.window.foreground()
+    if f and w10Arrived(f.id, "has the keyboard, told by a focus event,") then
+      return
+    end
+  end
   if w3 and w3.stage == "forward" then
     local f = host.window.foreground()
     if f and f.id == w3.plugin.id then
@@ -1571,7 +1611,7 @@ log(
   host.keys.describe(KEY_SHOW_FG, { style = "short" }),
   START.f8,
   host.keys.describe(KEY_REPORT, { style = "short" }),
-  KEY_TARGET and string.format(", %s remembers the pointer's point in the plug-in for W10", host.keys.describe(KEY_TARGET, { style = "short" })) or "",
+  string.format(", %s remembers the pointer's point in the plug-in for W10", host.keys.describe(KEY_TARGET, { style = "short" })),
   START.lists,
   host.settings.get(AUTO) and "on" or "off",
   KEY_UNFOCUSED and string.format(START.captured, host.keys.describe(KEY_UNFOCUSED, { style = "short" })) or ""

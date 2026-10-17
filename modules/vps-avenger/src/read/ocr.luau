@@ -86,6 +86,18 @@ function R.isInitPreset(text)
   return false
 end
 
+-- Whether two names are roughly the same: the project's _names_roughly_same (its actions.py) —
+-- lower case (ASCII only), runs of space as one, and 0.88 alike or more. Nothing is the same as
+-- nothing: an empty name on either side is not.
+R.SAME_RATIO = 0.88
+
+function R.roughlySame(a, b)
+  local x, y = string.lower(R.tidy(a)), string.lower(R.tidy(b))
+  if x == "" or y == "" then return false end
+  if x == y then return true end
+  return R.ratio(x, y) >= R.SAME_RATIO
+end
+
 -- `text` as a preset's name: "Init Preset" for a reading of it (R.isInitPreset), and whether it
 -- was taken so; any other text as it is.
 function R.presetName(text)

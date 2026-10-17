@@ -369,7 +369,7 @@ library promises 13.3); it prints each slice's `minos`, and warns when one is no
 application keeps as its floor. `package-macos.sh` refuses an executable that links ONNX Runtime
 (`otool -L`: the application only ever opens it) before it packages anything; after the upload
 the job asks the bundle again, and refuses one without the library or the model. A zip larger
-than 80 MB is a warning. The `newer-macos` job asks `ocr-bench --paddle-probe` on macOS 14 and
+than 80 MB is a warning. The `newer-macos` job asks `ocr-bench --paddle-probe` on macOS 15 and
 26, where "not available" is an error, and so is an `ok` from a probe that then ends by a signal
 or with another status than 0; it refuses a download whose signature does not verify
 (`codesign --verify --deep --strict`) in a last step of its own, so that its other steps still
@@ -418,7 +418,8 @@ Each of these is a line `check …: ok` or `check …: FAILED` with what was see
   own files, kept in the folder `WebKitRules` beside the application;
 - a tool page is built, without the build asking for the front — counted in `NSApplication`
   itself: for the rest of the run, its two activation calls go through a counter first — and its
-  document loads;
+  document loads, within 20 s for this first page, which starts WebKit's own processes, and within
+  five seconds for every later one;
 - the page's own script runs and an inline one does not (the host's policy);
 - a message makes the round trip, and twenty come back as twenty, in order;
 - the page fetches its own file, and a fetch of `https://example.com` is blocked;
@@ -429,6 +430,13 @@ Each of these is a line `check …: ok` or `check …: FAILED` with what was see
   Return on its button gives one message, Command-Q, Command-H and Option-Command-H do nothing, and
   Command-W hides the page. Where the page does not get the keyboard on a Mac, the keys are not
   checked, and a line says so. These keys set the pasteboard;
+- shown with the keyboard, before its keys: a click posted into its button the way
+  `host.input.click` with `via = "post"` makes one (`input::post_click`) — handed to the
+  application's own process with the page window's number and the place in it — gets one press, at
+  the point asked for, and one click, and leaves the pointer on the point; and again with `move =
+  false`, the pointer put elsewhere in the page first, which leaves it there. On a runner where the
+  application may not post events (`CGPreflightPostEventAccess`), or where the window server names
+  another window over the button, the line says `skipped`, which is neither a pass nor a failure;
 - a tool page described `activates = false` — the experimental panel that takes the keyboard
   without activating the application — built and loaded with no activation asked for, and shown
   with the keyboard with none asked for either, its show answered `true` exactly when its window
@@ -443,7 +451,10 @@ Each of these is a line `check …: ok` or `check …: FAILED` with what was see
   gets its other one.
 
 The rest is data: WebKit's version, the build's and the load's times, the round trip with the page
-off screen and on it, what the page says of itself (`isSecureContext`, `navigator.clipboard`,
+off screen and on it, two clicks posted into the tool page shown without the keyboard while the
+application in front is another — what the page saw of each, and whether the front, this
+application's activation and the page window's key state changed (the first may make the window key
+without reaching the page: its web view does not take the first mouse) — what the page says of itself (`isSecureContext`, `navigator.clipboard`,
 `RTCPeerConnection`), the classes AppKit made the first responder while it was shown, an
 application page's Dock claim, Command-M and Command-Q, where the keyboard went with the
 non-activating page and which application AppKit and the workspace then call the active one, the
@@ -458,12 +469,57 @@ checks failed. Exit status 0 when it ran to the end and no check failed, 3 when 
 and a check failed.
 
 **In CI**, the `page-check` job of `.github/workflows/macos-build.yml` runs it from the downloaded
-zip on all four Mac runners — `macos-14`, `macos-15`, `macos-15-intel` and `macos-26` — after
+zip on all three Mac runners — `macos-15`, `macos-15-intel` and `macos-26` — after
 starting TextEdit, bounded to five minutes. Its lines go to the run's summary page, and each leg's
 whole output is kept as the artifact `page-check-<runner>.txt`. What it measures of the front
 depends on the runner's desktop, so those answers are data and never fail the leg; a `check` line
 that says `FAILED` fails it, and so does a check that did not reach its end or ended with any status
 but 0 after its last line.
+
+## Checking which way it captures the screen {#capture-check}
+
+`capture-check` captures 200x60 points at the top left of the main display, the menu bar's
+corner, the three ways the application captures the screen, and says for each what came back
+and which capture path answered it (`crates/host/src/backend/macos/capture_check.rs`):
+
+```bash
+AutomationPlatform.app/Contents/MacOS/automation-platform capture-check
+AutomationPlatform.app/Contents/MacOS/automation-platform capture-check --older-functions
+```
+
+The three ways: at one pixel a point, as a region read and a pixel read take it; at the
+display's own resolution, as a text read takes it; and as a snapshot. The paths are the ones the
+application's log names in `screen capture paths on this macOS`: ScreenCaptureKit's rectangle
+capture (`captureImageInRect`, macOS 15.2 and later) first, then `CGWindowListCreateImage` and
+`CGDisplayCreateImageForRect`, which are looked up at run time. With `--older-functions` the
+rectangle capture is not asked, as on a Mac from 12.3 to 15.1, which has none: a line
+`forced: …` says so, and so does each capture's line. Only this subcommand
+keeps ScreenCaptureKit out; the application's own run never does.
+
+It opens no window, loads no module, speaks nothing and leaves the application's log alone;
+every line it prints starts with `CAPTURE CHECK:`. Each capture is a line `check …: ok` or
+`check …: FAILED`, with the picture's size in pixels, its colours counted, the time it took and
+the path that answered. A capture that gave nothing back fails, and so does one of a single
+colour over the whole picture, as an empty image is; with `--older-functions`, so does one that
+ScreenCaptureKit answered, or that no older function did. What the system reports of the Screen
+Recording permission is a line of data: without the permission a capture shows the desktop with
+other applications' windows removed, and still passes. Exit status 0 when every check passed, 3
+when one failed, 1 when it could not run, 2 for a wrong argument; on Windows it only says that it
+runs on macOS.
+
+**In CI**, the `newer-macos` job of `.github/workflows/macos-build.yml` runs it from the
+downloaded zip: on `macos-26` as the application captures, and on `macos-15` with
+`--older-functions`, the leg named `older-functions`. That leg is what CI has of the path a Mac
+below 15.2 takes: `macos-14`, the last runner without the rectangle capture, was dropped from the
+workflow because GitHub retires it in November 2026, and the two older functions are still there
+at run time on 15 and 26. The leg fails unless the check says it was forced and all three
+captures are `ok` and answered by `CGWindowListCreateImage` or `CGDisplayCreateImageForRect`, none
+by ScreenCaptureKit; it captures and asks `ocr-bench --paddle-probe`, and leaves the module run to
+the build job, which makes it on `macos-15` already. On `macos-26` a `FAILED` line fails the
+step, and which path answered each capture is a note of the run. On either leg a check that did
+not reach its end, or ended with any status but 0, fails, and the lines go to the run's summary
+page. What no runner shows is a macOS below 15.2 itself — whether the two functions answer there
+as they do on 15 — and only a real Mac says that.
 
 ## Checking macOS code from a Windows machine
 
@@ -594,6 +650,14 @@ uses the folder around the copy: no module loads, settings changes are not saved
 The same happens when they answer "not translocated" for an `.app` that runs from under
 `AppTranslocation`: the path is not overruled by an answer that contradicts it. Removing the flag
 is the clean way in every case; the line repeats how.
+
+The log is not the only place that says it. The start announcement ends with it, and the
+Permissions page says it under its head: that the application runs from a read-only copy, what
+that costs, and the one Terminal line that ends it — `xattr -dr com.apple.quarantine` and the
+original's whole path, or, with the original not found, the `.app`'s name to be run in its
+folder — with the line in a read-only field to copy. With the original not found the page also
+comes forward at the start. The application never runs the line itself
+([macos-permissions.md](macos-permissions.md#a-translocated-copy) has the words).
 
 **An `.app` moved out of its folder** — dragged into Applications on its own, say — reads the
 `modules` folder beside it in its new place, where there is none. The header's `modules folder`

@@ -36,6 +36,11 @@
 //! cannot be read changes nothing but Preset info's answer; a name read is placed in the catalog
 //! the tool's way; ◀ and ▶ say what was read and add the database's neighbour, marked, when the
 //! read failed or disagrees; and the position is forgotten when the preset may have changed.
+//!
+//! And for the first Mac test of the page (2026-10-14): ◀ and ▶ are unavailable where the name read
+//! is Init Preset, which Avenger steps no preset from — said as Tab reaches them, and a press
+//! clicks nothing and says why — until a read of a preset, and claim nothing where the preset may
+//! have changed with nothing read since (Undo, a button of the module's own, among them).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -53,10 +58,17 @@ use super::overlay_menu_tests::{finish, harness, RUNTIME};
 /// The helpers, added on top of the host-panel ones.
 const AV: &str = r##"
 local S = T.S
+-- Every click, in order; S.onClick(n), when set, runs at the n-th: Avenger answering it at once.
 S.clicks = {}
+S.onClick = nil
 S.owns = true
 S.ownsAsked = {}
 S.marked = {}
+
+-- The ring's controls of the oscillator strip and the macros, after Zoom (src/ring.luau).
+T.RING_LABELS = "Oscillator|Mute|Solo|Add oscillator|Level|Pan|Transpose|Fine tune|Random pitch|Macro tab|"
+  .. "Add macro tab|Delete last macro tab|Macro 1|Macro 2|Macro 3|Macro button 1|Macro button 2"
+T.RING_CONTROLS = 17
 
 -- The arbiter is the shared one with the rule a module with a dialog layer needs
 -- (`overlay_host_panel_tests::SPECIFICITY_ARBITER`), its claims Avenger's.
@@ -154,7 +166,7 @@ rawset(T.host.screen, "cells", function(opts, cb)
   local r = opts.region
   local answer = { cb = cb, key = opts.key }
   if within(r, snap) then
-    answer.value = { cells = T.paintCells(S.picture, r, opts.cols, opts.rows, opts.predicate),
+    answer.value = { cells = T.paintCells(snap.picture or S.picture, r, opts.cols, opts.rows, opts.predicate),
       x = r[1], y = r[2], w = r[3] - r[1], h = r[4] - r[2] }
   else
     answer.why = "the region is not inside the snapshot"
@@ -164,20 +176,30 @@ rawset(T.host.screen, "cells", function(opts, cb)
   S.screenOut[#S.screenOut + 1] = answer
 end)
 
+S.screenProfiles = 0 -- profiles of the screen, not of a snapshot: the drawn menu test's
 rawset(T.host.screen, "profile", function(opts, cb)
   if cb == nil then T.screenWait("host.screen.profile") end
   for k in pairs(opts) do
     assert(k == "region" or k == "axes" or k == "snapshot" or k == "key" or k == "dark",
       "host.screen.profile: opts has a key '" .. tostring(k) .. "'")
   end
-  assert(opts.axes == "columns", "the scripted host profiles columns")
+  assert(opts.axes == "columns" or opts.axes == "both", "the scripted host profiles columns, or both axes")
   whole(opts.region, "host.screen.profile")
-  local snap = heldSnapshot(opts.snapshot, "host.screen.profile")
-  S.profilesAsked += 1
   local r = opts.region
   local answer = { cb = cb, key = opts.key }
+  if opts.snapshot == nil then
+    -- The screen as it is now: S.picture.
+    S.screenProfiles += 1
+    answer.value = T.paintProfile(S.picture, r, opts.axes == "both")
+    if cb == nil then return answer.value end
+    if opts.key then S.out[opts.key] = (S.out[opts.key] or 0) + 1 end
+    S.screenOut[#S.screenOut + 1] = answer
+    return
+  end
+  local snap = heldSnapshot(opts.snapshot, "host.screen.profile")
+  S.profilesAsked += 1
   if within(r, snap) then
-    answer.value = T.paintProfile(S.picture, r)
+    answer.value = T.paintProfile(snap.picture or S.picture, r, opts.axes == "both")
   else
     answer.why = "the region does not overlap the snapshot"
   end
@@ -200,7 +222,7 @@ do
       if p[1] < g[1] or p[2] < g[2] or p[1] >= g[3] or p[2] >= g[4] then return nil, "the point is not inside the snapshot" end
     end
     S.pointLists[#S.pointLists + 1] = #points
-    return T.paintPixels(S.picture, points)
+    return T.paintPixels(snap.picture or S.picture, points)
   end)
 end
 
@@ -237,6 +259,47 @@ end
 -- sentence. S.snapFails is the reason a capture that fails answers. (The primary screen is
 -- S.screenSize, 2560 x 1440 unless a scenario says: overlay_host_panel_tests.rs, T.modules.)
 S.snapHeld = 0
+-- The change waits out (host.screen.snapshot with `change`): each answered on the turn after the
+-- picture has changed from its baseline — another S.picture than `from`'s, which T.paintAvenger or
+-- T.repaint makes — with `changed = true`, or at its timeout with what is there, `changed = false`.
+-- Each keeps its options (`minPixels`, `settle`, `tolerance`, `watch`) for a scenario to look at;
+-- with S.honourMinPixels a changed picture counts only where at least `minPixels` of the watched
+-- pixels (the region without `watch`) differ from the baseline by more than `tolerance`
+-- (T.paintDiff), as the host counts them; `settle` is not played: a change stands still at once.
+-- S.onSnapshotWait, when set, runs inside a picture a handler waits for, before it is answered:
+-- the user going elsewhere meanwhile.
+S.changeWaits = {}
+S.changeWaitsAsked = 0
+S.onSnapshotWait = nil
+S.sent = {} -- every host.input.send, in order
+-- A press held, its moves and its release (src/amount.luau): every one in S.input, in order —
+-- { "down", x, y, button = b }, { "move", x, y }, { "up", x, y, button = b } — and the buttons the
+-- module holds as the host keeps them (host.input.held), which a disable empties as the host lets
+-- go of them (S.hostReleases, T.disable). S.onMove(n), when set, runs at the n-th move: Avenger
+-- answering it; S.moveRaises, a message, raises at the next move.
+S.input, S.heldButtons, S.hostReleases, S.moves = {}, {}, {}, 0
+S.onMove, S.moveRaises = nil, nil
+-- Every snapshot handle the scripted host has handed out that the module has not released yet
+-- (T.held): a picture held past its action holds the module's budget.
+S.live = {}
+do
+  local snap = T.snap
+  T.snap = function(region)
+    local s = snap(region)
+    S.live[s] = true
+    local release = s.release
+    s.release = function(h)
+      S.live[h] = nil
+      return release(h)
+    end
+    return s
+  end
+end
+function T.held()
+  local n = 0
+  for _ in pairs(S.live) do n += 1 end
+  return n
+end
 do
   local snapshot = rawget(T.host.screen, "snapshot")
   rawset(T.host.screen, "snapshot", function(opts, cb)
@@ -250,8 +313,78 @@ do
       end
       if S.snapFails then return nil, S.snapFails end
     end
-    return snapshot(opts, cb)
+    if cb ~= nil and opts.change ~= nil then
+      local c = opts.change
+      whole(r, "host.screen.snapshot")
+      for k in pairs(c) do
+        assert(k == "from" or k == "watch" or k == "timeout" or k == "tolerance" or k == "minPixels" or k == "settle",
+          "host.screen.snapshot: opts.change has a key '" .. tostring(k) .. "'")
+      end
+      assert(c.timeout == nil or (c.timeout >= 1 and c.timeout <= 2000 and c.timeout == math.floor(c.timeout)),
+        "opts.change.timeout must be a whole number from 1 to 2000, got " .. tostring(c.timeout))
+      assert(c.from == nil or not c.from.released, "a released snapshot as a change wait's baseline")
+      for _, w in ipairs(c.watch or {}) do
+        whole(w, "a watched region")
+        assert(w[1] < r[3] and w[3] > r[1] and w[2] < r[4] and w[4] > r[2], "a watch region does not overlap the region")
+      end
+      S.changeWaitsAsked += 1
+      S.changeWaits[#S.changeWaits + 1] = { region = r, cb = cb, asked = S.now, timeout = c.timeout or 500,
+        base = c.from and c.from.picture or S.picture, watch = c.watch, minPixels = c.minPixels or 4,
+        settle = c.settle or 0, tolerance = c.tolerance or 16 }
+      return
+    end
+    if cb == nil then
+      local s, why = snapshot(opts, cb)
+      if s then s.picture = S.picture end
+      if s and S.onSnapshotWait then S.onSnapshotWait(opts) end
+      return s, why
+    end
+    -- A plain picture with a callback: of the picture as it is when it is answered.
+    return snapshot(opts, function(s, why, info)
+      if s then s.picture = S.picture end
+      cb(s, why, info)
+    end)
   end)
+  local runDue = T.runDue
+  T.runDue = function()
+    runDue()
+    local due = {}
+    local i = 1
+    while i <= #S.changeWaits do
+      local w = S.changeWaits[i]
+      local changed = S.picture ~= w.base
+      if changed and S.honourMinPixels then
+        local n = 0
+        for _, g in ipairs(w.watch or { w.region }) do
+          local c = { math.max(g[1], w.region[1]), math.max(g[2], w.region[2]), math.min(g[3], w.region[3]),
+            math.min(g[4], w.region[4]) }
+          if c[3] > c[1] and c[4] > c[2] then n += T.paintDiff(w.base, S.picture, c, w.tolerance) end
+        end
+        changed = n >= w.minPixels
+      end
+      if changed or S.now >= w.asked + w.timeout then
+        table.remove(S.changeWaits, i)
+        due[#due + 1] = { w = w, changed = changed }
+      else
+        i += 1
+      end
+    end
+    if #due == 0 then return end
+    S.epoch += 1
+    for _, d in ipairs(due) do
+      local s = T.snap(d.w.region)
+      s.picture = S.picture
+      T.call("answer", d.w.cb, s, nil, { time = S.now, waited = S.now - d.w.asked, frames = 1,
+        changed = d.changed, settled = d.changed, rebased = false })
+    end
+  end
+end
+
+-- Avenger redrawn as `spec` says (T.paintAvenger's), after a click: a new picture, which a change
+-- wait sees on its next turn. The same spec again is a picture that changed in nothing a read
+-- tells — a hover drawn and gone.
+function T.repaint(spec)
+  T.paintAvenger(S.painted.cx, S.painted.cy, S.painted.k, spec)
 end
 
 -- Avenger as a picture shows it, for the page's reads: shapes at the points of the module's own
@@ -270,6 +403,11 @@ end
 --   buttons = { on, on }, amounts = { a, a, a }   the macro buttons lit, the knobs' pointers
 --   volume, transpose, fine   the selected oscillator's knobs' pointers
 --   fav                FAV lit
+--   lasting            { x1, y1, x2, y2 } at 50 %: a panel a click drew that outlasts its popup
+--   popup              { x1, y1, x2, y2 } at 50 %: Avenger's popup over it all, painted inside it
+--   editor             { x1, y1, x2, y2, fill = colour?, outline = colour?, selection = colour? } at
+--                      50 %: Avenger's text editor open over a name field, light by default, over
+--                      everything but a popup
 -- A pointer is a light ray out from the knob's middle, at the angle its value puts it: 135°
 -- (down and left) for nothing, 270° more clockwise for everything.
 function T.paintAvenger(cx, cy, k, spec)
@@ -356,7 +494,26 @@ function T.paintAvenger(cx, cy, k, spec)
   if spec.transpose then semitones({ 346, 114 }, spec.transpose) end
   if spec.fine then semitones({ 346, 160 }, spec.fine / 100 * 48) end
   if spec.fav then box(EX.FAVORITE_VIEW, 25, 10, { 220, 220, 220 }) end
+  if spec.lasting then
+    local q = spec.lasting
+    rect(q[1], q[2], q[3], q[4], { 60, 60, 66 })
+  end
+  -- Avenger's editor over a name field (`editor`): its outline half a point outside the field, its
+  -- fill, and its selection inside.
+  if spec.editor then
+    local q = spec.editor
+    if q.outline then rect(q[1] - 0.5, q[2] - 0.5, q[3] + 0.5, q[4] + 0.5, q.outline) end
+    rect(q[1], q[2], q[3], q[4], q.fill or { 235, 235, 235 })
+    if q.selection then rect(q[1] + 2, q[2] + 2, q[3] - 2, q[4] - 2, q.selection) end
+  end
+  -- Avenger's popup over it, painted inside its window: { x1, y1, x2, y2 } at 50 % (`popup`).
+  if spec.popup then
+    local q = spec.popup
+    rect(q[1], q[2], q[3], q[4], { 70, 70, 76 })
+    for row = q[2] + 4, q[4] - 6, 11.5 do rect(q[1] + 4, row, q[3] - 8, row + 3, { 210, 210, 210 }) end
+  end
   S.picture = { bg = { 40, 40, 40 }, shapes = shapes }
+  S.painted = { cx = cx, cy = cy, k = k, spec = spec }
 end
 
 -- What the page's text read reads: `words`, by the region's name (read/open.luau's names).
@@ -689,6 +846,27 @@ function T.nameReads(name, ms)
   end
 end
 
+-- The same, with the reads as slow as on a Mac, where one takes longer than the watch's 100 ms
+-- between looks: each read is answered a tick after the one it was asked in, so every answer is
+-- handed to two looks, as the tester's log has it. `answer(i)` gives the i-th read's answer: a
+-- name, or nil for nothing read.
+function T.slowNameReads(answer, ms)
+  local i = 0
+  for _ = 1, math.floor((ms or 3750) / 150) do
+    T.run(150)
+    local r = T.lastRead("vps-avenger name")
+    if r and not r.answered then
+      if r.waited then
+        i += 1
+        local name = answer(i)
+        T.answer(r, name and T.nameRead(name) or { status = "none", text = "", words = {} })
+      else
+        r.waited = true
+      end
+    end
+  end
+end
+
 -- Loads daw-hosts and the module as the host loads them, and hands back its two overlays: the
 -- header and the warning box. The module gets a host of its own whose `host.path` is its own
 -- folder, as the host scopes a module's identity; the runtime's pictures stay in the runtime's
@@ -697,11 +875,46 @@ end
 function T.avenger()
   local made = T.collect()
   T.modules("modules/vps-avenger/")
+  local function point(call, x, y)
+    assert(type(x) == "number" and type(y) == "number" and x == math.floor(x) and y == math.floor(y),
+      call .. ": a point in whole pixels, got " .. tostring(x) .. "," .. tostring(y))
+  end
+  local function button(opts)
+    local b = opts and opts.button or "left"
+    assert(b == "left" or b == "right" or b == "middle", "a button: " .. tostring(b))
+    return b
+  end
   rawset(T.host, "input", T.strict("host.input", {
     click = function(x, y, opts)
       S.clicks[#S.clicks + 1] = { x, y, button = opts and opts.button }
+      if S.onClick then S.onClick(#S.clicks) end
     end,
-    send = function() end,
+    send = function(combo) S.sent[#S.sent + 1] = combo end,
+    mouseDown = function(x, y, opts)
+      point("host.input.mouseDown", x, y)
+      local b = button(opts)
+      S.input[#S.input + 1] = { "down", x, y, button = b }
+      if not table.find(S.heldButtons, b) then S.heldButtons[#S.heldButtons + 1] = b end
+    end,
+    move = function(x, y)
+      point("host.input.move", x, y)
+      if S.moveRaises then
+        local why = S.moveRaises
+        S.moveRaises = nil
+        error(why, 0)
+      end
+      S.input[#S.input + 1] = { "move", x, y }
+      S.moves += 1
+      if S.onMove then S.onMove(S.moves) end
+    end,
+    mouseUp = function(x, y, opts)
+      point("host.input.mouseUp", x, y)
+      local b = button(opts)
+      S.input[#S.input + 1] = { "up", x, y, button = b }
+      local i = table.find(S.heldButtons, b)
+      if i then table.remove(S.heldButtons, i) end
+    end,
+    held = function() return table.clone(S.heldButtons) end,
   }))
   local AH = setmetatable({}, { __index = T.host })
   AH.path = function(p) return "C:/modules/vps-avenger/" .. p end
@@ -726,6 +939,49 @@ function T.avenger()
   T.runDue()
   return made[1], made[2]
 end
+
+-- The module disabled, as the host disables it (lib.rs, after_toggle): its page out of sight, its
+-- timers, its pictures and reads out dropped (the pictures it holds stay its own), its captures out
+-- of the hook (S.disabled), its scope and flag forgotten, its claims let go — and every mouse button
+-- it holds let go of by the host, where the pointer is, with the host's line (S.hostReleases).
+function T.disable()
+  T.page().shown = false
+  S.after, S.asyncs, S.reads = {}, {}, {}
+  T.dropScreen()
+  S.changeWaits = {}
+  S.disabled = true
+  S.scopedTo = false
+  S.menuOpen[#S.menuOpen + 1] = false
+  for _, c in ipairs(T.claims) do
+    c.matching = false
+    if c.active then
+      c.active = false
+      T.hostCall(c.off)
+    end
+  end
+  for _, b in ipairs(S.heldButtons) do
+    S.hostReleases[#S.hostReleases + 1] = b
+    S.logs[#S.logs + 1] = "[input] [com.platform.vps-avenger] released the " .. b
+      .. " mouse button it had pressed with host.input.mouseDown: it was disabled"
+  end
+  S.heldButtons = {}
+end
+-- Enabled again: its captures back in every window, with no flag (docs/api/keys.md, scope).
+function T.enable()
+  S.disabled = false
+  S.scopedTo = false
+end
+-- S.input's entries of `kind` ("down", "move", "up"), from entry `from` on; and how many times a
+-- button was let go of, by the module and by the host.
+function T.inputs(kind, from)
+  local out = {}
+  for i = (from or 0) + 1, #S.input do
+    if S.input[i][1] == kind then out[#out + 1] = S.input[i] end
+  end
+  return out
+end
+function T.ups() return #T.inputs("up") + #S.hostReleases end
+function T.xy(e) return e and (e[2] .. "," .. e[3]) or "none" end
 
 -- A reading of `words` (each { text, x, y, w, h, approx? }), as host.ocr.recognize hands one back.
 function T.reading(words, lines)
@@ -966,6 +1222,7 @@ pub(crate) fn run_on(os: &str, scenario: &str) {
     t.set("paintCells", lua.create_function(paint_cells).unwrap()).unwrap();
     t.set("paintProfile", lua.create_function(paint_profile).unwrap()).unwrap();
     t.set("paintPixels", lua.create_function(paint_pixels).unwrap()).unwrap();
+    t.set("paintDiff", lua.create_function(paint_diff).unwrap()).unwrap();
     t.set(
         "predicateCanonical",
         lua.create_function(|_, src: String| {
@@ -1106,27 +1363,34 @@ fn paint_cells(_: &Lua, (p, region, cols, rows, pred): (Table, Table, u32, u32, 
     Ok(to_hex(&cells))
 }
 
-/// `T.paintProfile(picture, region)`: the column profile host.screen.profile answers for it.
-fn paint_profile(lua: &Lua, (p, region): (Table, Table)) -> mlua::Result<Table> {
+/// `T.paintProfile(picture, region, rows)`: the profile host.screen.profile answers for it — its
+/// columns, and its rows as well with `rows` (`axes = "both"`).
+fn paint_profile(lua: &Lua, (p, region, rows): (Table, Table, Option<bool>)) -> mlua::Result<Table> {
     let (x, y, w, h) = area_of(&region)?;
     let img = picture_of(&p)?.image(x, y, w, h);
-    let (cols, _) = crate::profile::profile(&img, Area { x: 0, y: 0, w, h }, true, false, 128)
+    let rows = rows.unwrap_or(false);
+    let (cols, rws) = crate::profile::profile(&img, Area { x: 0, y: 0, w, h }, true, rows, 128)
         .ok_or_else(|| mlua::Error::external("the profile could not be made"))?;
-    let cols = cols.ok_or_else(|| mlua::Error::external("no columns"))?;
-    let axis = lua.create_table()?;
-    axis.set("min", cols.min)?;
-    axis.set("max", cols.max)?;
-    axis.set("dark", cols.dark)?;
-    axis.set("mean", cols.mean)?;
-    axis.set("r", cols.r)?;
-    axis.set("g", cols.g)?;
-    axis.set("b", cols.b)?;
+    let axis = |a: crate::profile::Axis| -> mlua::Result<Table> {
+        let t = lua.create_table()?;
+        t.set("min", a.min)?;
+        t.set("max", a.max)?;
+        t.set("dark", a.dark)?;
+        t.set("mean", a.mean)?;
+        t.set("r", a.r)?;
+        t.set("g", a.g)?;
+        t.set("b", a.b)?;
+        Ok(t)
+    };
     let out = lua.create_table()?;
     out.set("x", x)?;
     out.set("y", y)?;
     out.set("w", w)?;
     out.set("h", h)?;
-    out.set("columns", axis)?;
+    out.set("columns", axis(cols.ok_or_else(|| mlua::Error::external("no columns"))?)?)?;
+    if rows {
+        out.set("rows", axis(rws.ok_or_else(|| mlua::Error::external("no rows"))?)?)?;
+    }
     Ok(out)
 }
 
@@ -1145,6 +1409,23 @@ fn paint_pixels(lua: &Lua, (p, points): (Table, Table)) -> mlua::Result<Table> {
         out.raw_push(col)?;
     }
     Ok(out)
+}
+
+/// `T.paintDiff(a, b, region, tolerance)`: how many pixels of `region` differ between pictures `a`
+/// and `b` by more than `tolerance` in a channel, as a change wait counts them.
+fn paint_diff(_: &Lua, (a, b, region, tolerance): (Table, Table, Table, u8)) -> mlua::Result<u32> {
+    let (x, y, w, h) = area_of(&region)?;
+    let (pa, pb) = (picture_of(&a)?, picture_of(&b)?);
+    let mut n = 0;
+    for j in 0..i64::from(h) {
+        for i in 0..i64::from(w) {
+            let (ca, cb) = (pa.at(x + i, y + j), pb.at(x + i, y + j));
+            if ca.iter().zip(cb.iter()).any(|(p, q)| p.abs_diff(*q) > tolerance) {
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
 }
 
 pub(crate) fn run_mac(scenario: &str) {
@@ -1178,8 +1459,11 @@ fn avenger_is_recognised_by_its_header_in_a_reaper_floating_window() {
         T.event()
         T.ok(#S.reads == 1, "one read per stay, not one per evaluation: " .. #S.reads)
         T.answer(r, T.header(98, 84, 1.6, 80))
-        T.ok(S.rechecks == 1, "the answer asks the overlays to look again")
-        T.event()
+        -- The answer asks the overlays of the binding to look again on the module's next turn,
+        -- through the function the runtime hands `identify`: no window event is needed, and no
+        -- round of every module's overlays is asked for.
+        T.ok(S.rechecks == 0 and not header.active, "the answer asks nobody else to look again")
+        T.runDue()
         T.ok(header.active and not box.active)
         T.ok(T.count("[avenger] 'VST3i: VPS Avenger - Track 1' (1394x898): VPS Avenger, the zoom field "
           .. "reads 80 % — zoom 80 % (read), factor 1.6000, display factor 1.00. MENU read at (517,106), UNDO "
@@ -1243,6 +1527,267 @@ fn avenger_is_recognised_in_a_logic_window_titled_inst_1_and_another_plugin_is_n
     "##);
 }
 
+// ---------------------------------------------------------------------------------------------
+// The first Mac test of the Avenger page (2026-10-14): Logic at 80 %, the keyboard on nothing
+// after every click into Avenger's own view.
+// ---------------------------------------------------------------------------------------------
+
+/// The header's read lands after a click into Avenger's view, with the keyboard on nothing anybody
+/// can read: the stay goes on in the same window, and the read's answer asks the overlays to look
+/// again through the function the runtime handed `identify` — no window event, no round of every
+/// module's overlays — so the header comes up on the module's next turn.
+#[test]
+fn a_header_read_that_lands_after_the_keyboard_went_unreadable_brings_the_overlay_up() {
+    run_mac(r##"
+        local S = T.S
+        local L = T.logic(80)
+        S.listed = { L }
+        T.at(L)
+        local header = T.avenger()
+        local r = T.lastRead("vps-avenger header")
+        T.ok(r and not header.active, "nothing before the header is read: " .. T.dump())
+        T.show(L, {})
+        T.answer(r, T.header(0, 120, 1.6, 80))
+        T.ok(not header.active, "on the next turn, not inside the answer")
+        T.runDue()
+        T.ok(header.active, "up with the keyboard on nothing: " .. T.dump())
+        T.ok(S.rechecks == 0, "asked again through identify's own function: " .. S.rechecks)
+        T.ok(T.count("[overlay] 'VPS Avenger': where the keyboard is in 'Inst 1' cannot be read (an empty "
+          .. "focus chain) — the stay goes on there") == 1, T.dump())
+    "##);
+}
+
+/// Logic at 80 %, the tester's sequence: a click into Avenger that is not the module's (l.772 of the
+/// log; whose it was, the log does not say), then the ring's ◀ with Logic reporting the keyboard on
+/// nothing after its click (l.2160-2167):
+/// the header stays in front — no `[deactivate]`, the database's position not forgotten, no second
+/// header read — and the watch ends by saying the new name.
+#[test]
+fn in_logic_the_ring_stays_up_after_its_own_click_with_the_keyboard_on_nothing() {
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local L = T.logic(80)
+        S.listed = { L }
+        T.at(L)
+        local header = T.avenger()
+        T.answer(T.lastRead("vps-avenger header"), T.header(0, 120, 1.6, 80))
+        T.event()
+        T.ok(header.active, T.dump())
+        -- The name's box at 80 % from Avenger's corner (0, 120): (34, 7)-(214, 22) x 1.6.
+        S.ocr = function(g) return T.region(g) == "54,131,342,155" and "LD Lead 2" or "" end
+        T.run(400)
+        local headerRead = T.lastRead("vps-avenger header")
+        T.show(L, {})
+        T.ok(header.active, "a click not of the module's: " .. T.dump())
+        local said = #S.speech
+        T.pressAt(header, 2)
+        T.ok(T.clickAt() == "352,142", "◀ where the log has it: " .. T.clickAt())
+        T.show(L, {})
+        T.ok(header.active and T.count("[deactivate]") == 0, "still in front after its click: " .. T.dump())
+        for _ = 1, 25 do
+          T.run(150)
+          local r = T.lastRead("vps-avenger name")
+          if r and not r.answered then T.answer(r, T.nameRead("LD Lead 1")) end
+        end
+        T.ok(T.lastSaid() == "LD Lead 1" and #S.speech == said + 1, T.said(said + 1))
+        T.ok(header.active and T.count("[deactivate]") == 0 and T.count("forgotten: the overlay left the front") == 0, T.dump())
+        T.ok(T.lastRead("vps-avenger header") == headerRead, "no second header read")
+    "##);
+}
+
+/// The ring's Load and Initialize in Logic, Logic reporting the keyboard on nothing after MENU's
+/// click (l.2228-2233 and l.2667-2672 of the log): each item is chosen in Avenger's popup, and
+/// Initialize goes on to look for the warning box.
+#[test]
+fn in_logic_load_and_initialize_from_the_ring_are_chosen_after_logic_reports_nothing() {
+    run_mac(r##"
+        local S = T.S
+        local L = T.logic(80)
+        S.listed = { L }
+        T.at(L)
+        local header = T.avenger()
+        T.answer(T.lastRead("vps-avenger header"), T.header(0, 120, 1.6, 80))
+        T.event()
+        T.run(400)
+        T.ok(header.active, T.dump())
+        -- MENU: 262 x 1.6 = 419.2 -> 419, 120 + 14 x 1.6 = 142.4 -> 142. Its popup (245, 20) from the
+        -- corner in 50 % units: (392, 152), 192 x 96; Load's row 120 + 32 x 1.6 = 171.2 -> 171, across
+        -- its middle 392 + 96 = 488.
+        T.pressAt(header, 4)
+        T.ok(T.clickAt() == "419,142", T.clickAt())
+        T.show(L, {})
+        T.ok(header.active, T.dump())
+        T.popup(300, 392, 152, 192, 96)
+        T.tick(1)
+        T.ok(T.clickAt() == "488,171", T.clickAt())
+        T.closePopups()
+        T.tick(2)
+        T.ok(T.count("[menu item] 'VPS Avenger': 'Load preset' chosen — clicked 1 time(s) at (488,171)") == 1, T.dump())
+        -- Initialize's row: 120 + 68 x 1.6 = 228.8 -> 229.
+        T.pressAt(header, 7)
+        T.show(L, {})
+        T.popup(301, 392, 152, 192, 96)
+        T.tick(1)
+        T.ok(T.clickAt() == "488,229", T.clickAt())
+        T.closePopups()
+        T.tick(2)
+        T.ok(T.count("[avenger] 'Initialize preset' chosen: Avenger's warning box is looked for, up to 8 reads") == 1, T.dump())
+        T.ok(T.count("not chosen — the overlay left the front first") == 0 and T.count("[deactivate]") == 0, T.dump())
+    "##);
+}
+
+// ---------------------------------------------------------------------------------------------
+// A step's name, settled: two readings alike, or a catalog name.
+// ---------------------------------------------------------------------------------------------
+
+/// O:watch counts READINGS, not looks: a `read` that hands back the reading it answers from as its
+/// second value is a new reading only when that changes, and `done` sees each reading once, with
+/// how many in a row have read the same value; a look that reads nothing neither counts nor breaks
+/// the run, and the count reaches `onDone`, `onGiveUp` and the `[watch]` line. A `read` without a
+/// second value makes every look a reading, as before.
+#[test]
+fn o_watch_counts_readings_not_looks() {
+    run(r##"
+        local S = T.S
+        local o = T.overlay(nil, "Watched")
+        local seen, done, gaveUp = {}, nil, nil
+        S.v, S.id = nil, nil
+        o:watch({
+          read = function() return S.v, S.id end,
+          was = "a",
+          done = function(now, _, n) seen[#seen + 1] = now .. ":" .. n; return n >= 2 end,
+          within = 2000,
+          onDone = function(now, was, n) done = { now, was, n } end,
+          onGiveUp = function() gaveUp = true end,
+        })
+        S.v, S.id = "b", 1
+        T.tick(3)
+        T.ok(table.concat(seen, ",") == "b:1", "one reading, however many looks: " .. table.concat(seen, ","))
+        S.v, S.id = nil, nil
+        T.tick(2)
+        S.v, S.id = "b", 2
+        T.tick(1)
+        T.ok(table.concat(seen, ",") == "b:1,b:2", table.concat(seen, ","))
+        T.ok(done and done[1] == "b" and done[2] == "a" and done[3] == 2 and not gaveUp, T.dump())
+        T.ok(T.count("[watch] Watched: changed after") == 1 and T.count("— a -> b (2 readings alike)") == 1, T.dump())
+        -- Another value in between breaks the run.
+        seen, done = {}, nil
+        o:watch({
+          read = function() return S.v, S.id end,
+          was = "a",
+          done = function(now, _, n) seen[#seen + 1] = now .. ":" .. n; return false end,
+          within = 600,
+          onGiveUp = function(now, was, n) gaveUp = { now, was, n } end,
+        })
+        S.v, S.id = "c", 3
+        T.tick(1)
+        S.v, S.id = "d", 4
+        T.tick(1)
+        S.v, S.id = "c", 5
+        T.tick(4)
+        T.ok(table.concat(seen, ",") == "c:1,d:1,c:1", table.concat(seen, ","))
+        T.ok(type(gaveUp) == "table" and gaveUp[1] == "c" and gaveUp[3] == 1, T.dump())
+        T.ok(T.count("[watch] Watched: gave up after") == 1, T.dump())
+        -- Nothing read at the end: n is 0.
+        S.v, S.id = nil, nil
+        o:watch({ read = function() return S.v, S.id end, was = "a", within = 300,
+          onGiveUp = function(now, _, n) gaveUp = { now, n } end })
+        T.tick(4)
+        T.ok(gaveUp[1] == nil and gaveUp[2] == 0, T.dump())
+        -- Without a reading of its own, every look is one.
+        seen = {}
+        S.v = "e"
+        o:watch({ read = function() return S.v end, was = "a",
+          done = function(_, _, n) seen[#seen + 1] = n; return n >= 3 end })
+        T.tick(4)
+        T.ok(table.concat(seen, ",") == "1,2,3", table.concat(seen, ","))
+        T.ok(T.count("— a -> e (3 readings alike)") == 1, T.dump())
+    "##);
+}
+
+/// ◀ or ▶ reads Avenger's loading display first, which is no name — the tester's log has
+/// "cYanmaGentaYellowb", "PY" and "M" said for three of the page's ▶ (l.1797, l.1823 and l.1850),
+/// composed here into one step — and each read is handed to two of the watch's looks, as on a Mac:
+/// without the database the name counts once two READINGS agree, so the step says "AR Detroit
+/// 303" and never what was read on the way.
+#[test]
+fn a_step_says_the_name_once_two_reads_agree_and_not_avengers_loading_display() {
+    run_mac(r##"
+        local S = T.S
+        local header = T.avengerAt80("AR Catch Me")
+        local said = #S.speech
+        T.pressAt(header, 3)
+        local answers = { "cYanmaGentaYellowb", "PY", "M", "AR Detroit 303" }
+        T.slowNameReads(function(i) return answers[math.min(i, #answers)] end)
+        T.ok(#S.speech == said + 1 and T.lastSaid() == "AR Detroit 303", T.said(said + 1))
+        T.ok(T.count("[watch] VPS Avenger: changed after") == 1
+          and T.count("— AR Catch Me -> AR Detroit 303 (2 readings alike)") == 1, T.dump())
+    "##);
+}
+
+/// With the preset database a name the catalog has counts at its first reading — the step says
+/// it then — and a reading the catalog does not have ("M") waits for a second one.
+#[test]
+fn with_the_database_a_catalog_name_counts_at_its_first_read() {
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local header = T.avengerAt80("LD Lead 1")
+        local said = #S.speech
+        T.pressAt(header, 3)
+        local answers = { "M", "LD Lead 2" }
+        T.slowNameReads(function(i) return answers[math.min(i, #answers)] end)
+        T.ok(#S.speech == said + 1 and T.lastSaid() == "LD Lead 2", T.said(said + 1))
+        T.ok(T.count("— LD Lead 1 -> LD Lead 2") == 1 and T.count("(2 readings alike)") == 0,
+          "at its first reading: " .. T.dump())
+    "##);
+}
+
+/// A reading that changed, was read once by the watch's bound and is no catalog name is not taken:
+/// "the preset name cannot be read now" without the database, the neighbour with it, marked.
+#[test]
+fn a_name_read_once_by_the_watchs_bound_is_not_taken() {
+    for db in [false, true] {
+        let scenario = r##"
+            local S = T.S
+            if @DB@ then T.presets() end
+            local header = T.avengerAt80(@DB@ and "LD Lead 1" or "AR Catch Me")
+            local said = #S.speech
+            T.pressAt(header, 3)
+            T.slowNameReads(function(i) return i == 1 and "cYanmaGentaYellowb" or nil end)
+            local want = @DB@ and "LD Lead 2, from the database" or "the preset name cannot be read now"
+            T.ok(#S.speech == said + 1 and T.lastSaid() == want, T.said(said + 1))
+            T.ok(T.count("[avenger] 'Next preset': 'cYanmaGentaYellowb' was read once and is no catalog "
+              .. "name — not taken") == 1, T.dump())
+        "##;
+        run_mac(&scenario.replace("@DB@", if db { "true" } else { "false" }));
+    }
+}
+
+/// ▶ ▶ within half a second on a Mac: the first step's name read once, then the second press. The
+/// first step's watch, overtaken, reads nothing more and says nothing at its bound; the second says
+/// the name, and it is the last thing said — not "the preset name cannot be read now" after it.
+#[test]
+fn a_step_overtaken_by_a_second_press_leaves_the_last_word_to_it() {
+    run_mac(r##"
+        local S = T.S
+        local header = T.avengerAt80("AR Band Pass Slide")
+        local said = #S.speech
+        T.pressAt(header, 3)
+        T.run(150)
+        T.answer(T.lastRead("vps-avenger name"), T.nameRead("AR Deep Arp"))
+        T.run(150)
+        T.ok(#S.speech == said, "read once, not said yet: " .. T.said(said + 1))
+        T.nameIs("AR Deep Arp")
+        T.pressAt(header, 3)
+        T.nameReads("BA Deep Sub")
+        T.ok(T.said(said + 1) == "BA Deep Sub", T.said(said + 1))
+        T.ok(T.count("[watch] VPS Avenger: gave up after") == 1 and T.count("[watch] VPS Avenger: changed after") == 1,
+          "the first watch ran out, unsaid: " .. T.dump())
+    "##);
+}
+
 /// On Windows Avenger is its own JUCE child window, matched by the shape of JUCE's class and
 /// identified by the same header read; its corner is the child's, with no DAW difference added —
 /// the log line gives the offsets with the panel's (-2, +2) as well, so one Windows session says
@@ -1262,7 +1807,10 @@ fn on_windows_avenger_is_its_juce_child_and_a_display_factor_is_learned_from_the
         T.ok(r and T.region(r.region) == "248,60,1189,137", r and T.region(r.region))
         T.ok(not header.active)
         T.answer(r, T.header(248, 60, 2.4, 80))
-        T.event()
+        -- Picked up through the `again` the runtime hands `identify` on the pattern's path too: on
+        -- the module's next turn, with no window event and no round of every module's overlays.
+        T.ok(S.rechecks == 0 and not header.active, "asked again through identify's own function: " .. S.rechecks)
+        T.runDue()
         T.ok(header.active and header:origin().id == 70)
         T.ok(T.count("attachEmbedded: matched control [JUCE_1a05739a091] id=70, identify=true") == 1)
         T.ok(T.count("zoom 80 % (read), factor 2.4000, display factor 1.50") == 1)
@@ -1466,7 +2014,7 @@ fn every_click_lands_where_the_table_puts_it_at_50_80_and_200_percent() {
           T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, k, zoom))
           T.event()
           T.ok(header.active, zoom .. " %: active")
-          S.ocr = function() return "Init Preset" end
+          S.ocr = function() return "BA Deep Sub" end
           local e = expected[zoom]
           T.pressAt(header, 2)
           T.ok(T.clickAt() == e[1], zoom .. " % previous: " .. T.clickAt())
@@ -1505,7 +2053,7 @@ fn previous_and_next_say_the_new_name_once_it_is_on_screen() {
         local header = T.avenger()
         T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
         T.event()
-        S.ocr = function(g) return T.region(g) == "152,95,440,119" and "Init Preset" or "" end
+        S.ocr = function(g) return T.region(g) == "152,95,440,119" and "AR Catch Me" or "" end
         T.run(400)
         local function name(text) return { status = "text", text = text, words = {} } end
         local said = #S.speech
@@ -1515,15 +2063,20 @@ fn previous_and_next_say_the_new_name_once_it_is_on_screen() {
         T.run(150)
         local r1 = T.lastRead("vps-avenger name")
         T.ok(r1 and T.region(r1.region) == "152,95,440,119", "the name's box, off the event loop")
-        T.answer(r1, name("Init Preset"))
+        T.answer(r1, name("AR Catch Me"))
         T.run(150)
         T.ok(#S.speech == said, "the old name, not redrawn yet, is not said: " .. T.said(said + 1))
         local r2 = T.lastRead("vps-avenger name")
         T.ok(r2 ~= r1, "read again")
         T.answer(r2, name("BA  Deep Sub"))
         T.run(150)
+        T.ok(#S.speech == said, "a name read once is not said yet: " .. T.said(said + 1))
+        local r3 = T.lastRead("vps-avenger name")
+        T.ok(r3 ~= r2, "read again")
+        T.answer(r3, name("BA Deep Sub"))
+        T.run(150)
         T.ok(T.lastSaid() == "BA Deep Sub", T.said())
-        T.ok(T.count("[watch] VPS Avenger: changed after") == 1)
+        T.ok(T.count("[watch] VPS Avenger: changed after") == 1 and T.count("-> BA Deep Sub (2 readings alike)") == 1, T.dump())
         -- ◀ at the first preset: the name stays, and is said as it is when the watch gives up.
         S.ocr = function(g) return T.region(g) == "152,95,440,119" and "BA Deep Sub" or "" end
         T.pressAt(header, 2)
@@ -1582,6 +2135,9 @@ fn a_name_before_the_click_that_cannot_be_read_is_not_taken_for_a_change() {
         T.answer(T.lastRead("vps-avenger name"), name("BA Deep Sub"))
         T.run(150)
         T.ok(#S.speech == said, "the last name, not redrawn yet, is not said")
+        T.answer(T.lastRead("vps-avenger name"), name("CH Chord Stack"))
+        T.run(150)
+        T.ok(#S.speech == said, "a name read once is not said yet: " .. T.said(said + 1))
         T.answer(T.lastRead("vps-avenger name"), name("CH Chord Stack"))
         T.run(150)
         T.ok(T.lastSaid() == "CH Chord Stack", T.said(said + 1))
@@ -2089,9 +2645,9 @@ fn initialize_and_save_are_refused_where_their_box_would_lie_off_the_screen() {
 
 /// In a calibrating run the header is photographed at each zoom and size it is read at: crosshairs
 /// where the overlay clicks the zoom field, ◀, ▶, MENU and UNDO, then on the words read — the
-/// origin question in one picture. The runtime's own shot marks the hotspots and the name's box at
-/// the scaled places, and the warning box is photographed with YES and NO read and as the table has
-/// them. The module's pictures go to its own folder, the runtime's to the runtime's.
+/// origin question in one picture. The runtime's own shot marks the name's box at the scaled place,
+/// and the warning box is photographed with YES and NO read and as the table has them. The
+/// module's pictures go to its own folder, the runtime's to the runtime's.
 #[test]
 fn a_calibrating_run_draws_where_the_overlay_clicks_and_reads() {
     run_mac(r##"
@@ -2115,9 +2671,9 @@ fn a_calibrating_run_draws_where_the_overlay_clicks_and_reads() {
         T.ok(T.count("scale 1.6000 about (0,0), frame (-2,2)") == 1)
         T.ok(T.count(string.format("  %2d %-24s screen (%d,%d)  pixel %s", 1, "Preset", 296, 107, "20,20,20")
           .. "  region (152,95)-(440,119)") == 1)
-        -- Undo's crosshair is the redo list's point as well; the controls the module clicks itself
-        -- are in the header picture above.
-        T.ok(T.count(string.format("  %2d %-24s screen (%d,%d)  pixel %s", 2, "Undo", 586, 106, "20,20,20")) == 1)
+        -- The controls the module clicks itself — Undo and the redo list among them, at UNDO — are in
+        -- the header picture above, not in the runtime's.
+        T.ok(T.count(string.format("  -- %-24s no position", "Undo")) == 1, T.dump())
         T.ok(T.count("-> C:/modules/overlay-runtime/calibration/VPS-Avenger.png") == 1, "the runtime's shot in the runtime's folder")
         -- The warning box, after Initialize.
         T.choose(header, 7, 490, 116, 192, 96)
@@ -2215,7 +2771,7 @@ fn without_the_preset_database_the_module_is_stage_1s() {
         local labels = {}
         for i, c in ipairs(header.controls) do labels[i] = c.label end
         T.ok(table.concat(labels, "|") == "Preset|Previous preset|Next preset|Load preset|Save preset|"
-          .. "Save preset as|Initialize preset|Undo|Redo list|Zoom", table.concat(labels, "|"))
+          .. "Save preset as|Initialize preset|Undo|Redo list|Zoom|" .. T.RING_LABELS, table.concat(labels, "|"))
         T.ok(T.step(header, 3, "AR Band Pass Slide", "AR Bond Pess Slide") == "AR Bond Pess Slide", T.said())
         T.ok(T.step(header, 2, nil, nil) == "the preset name cannot be read now", T.said())
         T.ok(T.count("database") == 0, "nothing of a database: " .. T.dump())
@@ -2231,7 +2787,7 @@ fn a_preset_database_that_cannot_be_read_leaves_the_steps_as_they_were() {
         local S = T.S
         T.presets({})
         local header = T.avengerAt80("AR Band Pass Slide")
-        T.ok(#header.controls == 11 and header.controls[4].label == "Preset info", tostring(#header.controls))
+        T.ok(#header.controls == 11 + T.RING_CONTROLS and header.controls[4].label == "Preset info", tostring(#header.controls))
         T.ok(#S.presetReads == 0, "nothing read at load")
         T.ok(T.info(header, "AR Band Pass Slide") == "the preset database cannot be read", T.said())
         T.ok(T.count("[avenger] the preset database cannot be read: data/index.json cannot be read: The "
@@ -2580,6 +3136,143 @@ fn a_step_whose_window_left_the_front_during_its_name_read_clicks_nothing() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// ◀ and ▶ on Init Preset (the first Mac test of the page, 2026-10-14: TODO.md, item 3).
+// ---------------------------------------------------------------------------------------------
+
+/// Avenger steps no preset from its blank preset, and the avenger_control project's tool clicked
+/// and waited for a change that never came. Where the latest name read is Init Preset — here the
+/// Preset read-out's, on arrival — ◀ and ▶ say they are unavailable as Tab reaches them (their
+/// `text`), and a press reads the name, clicks nothing, watches nothing and says why; a press whose
+/// read gets nothing goes by the latest name read. The press's own read of a real name — a preset
+/// loaded some other way — makes the step work again, and from then on neither says it is
+/// unavailable. A choice from MENU and the overlay leaving the front forget the claim, since the
+/// preset may have changed with nothing read since: Tab onto ▶ claims nothing, and its press reads
+/// again — Init Preset still, after a Load whose file dialog was cancelled.
+#[test]
+fn previous_and_next_are_unavailable_on_init_preset_and_a_press_clicks_nothing() {
+    run_mac(r##"
+        local S = T.S
+        local refused = function(label)
+          return label .. ": Avenger steps no preset from Init Preset — load a preset first"
+        end
+        local header, _, W = T.avengerAt80("Init Preset")
+        -- A Tab from the control labelled `from`, and the label it lands on, announced.
+        local function tabFrom(from)
+          for i, c in ipairs(header.controls) do
+            if c.label == from then header.focus = i end
+          end
+          T.tab()
+          return header.controls[header.focus].label
+        end
+        T.ok(T.lastSaid() == "Preset, Init Preset", T.said())
+        T.ok(tabFrom("Preset") == "Previous preset"
+          and T.lastSaid() == "Previous preset, unavailable on Init Preset, button", T.said())
+        T.ok(tabFrom("Previous preset") == "Next preset"
+          and T.lastSaid() == "Next preset, unavailable on Init Preset, button", T.said())
+        local clicks, reads = #S.clicks, #S.reads
+        T.pressAt(header, 2)
+        T.ok(T.lastSaid() == refused("Previous preset"), T.said())
+        T.pressAt(header, 3)
+        T.ok(T.lastSaid() == refused("Next preset"), T.said())
+        T.run(600)
+        T.ok(#S.clicks == clicks and #S.reads == reads, "nothing clicked, nothing watched")
+        T.ok(T.count("[avenger] 'Next preset': the name reads Init Preset, which Avenger steps no preset from — "
+          .. "nothing clicked") == 1, T.dump())
+        -- A read that gets nothing: the latest name read stands.
+        T.nameIs(nil)
+        T.pressAt(header, 3)
+        T.ok(#S.clicks == clicks and T.lastSaid() == refused("Next preset"), T.said())
+        T.ok(T.count("[avenger] 'Next preset': the name read last was Init Preset") == 1, T.dump())
+        -- A preset loaded some other way: the press's own read says so, and the step works again.
+        T.nameIs("LD Lead 1")
+        T.pressAt(header, 3)
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "469,106", "▶ clicked: " .. T.clickAt())
+        T.nameReads("LD Lead 2")
+        T.ok(T.lastSaid() == "LD Lead 2", T.said())
+        T.ok(tabFrom("Preset") == "Previous preset" and T.lastSaid() == "Previous preset, button", T.said())
+        T.ok(tabFrom("Previous preset") == "Next preset" and T.lastSaid() == "Next preset, button", T.said())
+        -- Back on Init Preset, read by a press; then Load chosen from MENU, its file dialog cancelled:
+        -- nothing read since, so nothing claimed, and the next press reads it again.
+        T.nameIs("Init Preset")
+        T.pressAt(header, 3)
+        T.ok(T.lastSaid() == refused("Next preset"), T.said())
+        T.choose(header, 4, 490, 116, 192, 96)
+        T.ok(T.count("[menu item] 'VPS Avenger': 'Load preset' chosen") == 1, T.dump())
+        T.ok(tabFrom("Previous preset") == "Next preset" and T.lastSaid() == "Next preset, button", T.said())
+        clicks = #S.clicks
+        T.pressAt(header, 3)
+        T.ok(#S.clicks == clicks and T.lastSaid() == refused("Next preset"), T.said())
+        T.ok(tabFrom("Preset") == "Previous preset"
+          and T.lastSaid() == "Previous preset, unavailable on Init Preset, button", T.said())
+        -- Away and back: the claim does not outlive the stay it was read in.
+        T.show(T.OTHER)
+        T.ok(not header.active, T.dump())
+        T.show(W)
+        T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
+        T.event()
+        T.run(400)
+        T.ok(header.active, T.dump())
+        T.ok(tabFrom("Preset") == "Previous preset" and T.lastSaid() == "Previous preset, button", T.said())
+    "##);
+}
+
+/// Where the preset may have changed with nothing read since, the claim of Init Preset is
+/// forgotten, as the database's position is: after Undo — UNDO clicked where a hotspot would click
+/// it, and said as one says its click — and after the redo list. And the Preset read-out's answer
+/// that comes once the overlay has left the front is no read of the stay it was asked in: it
+/// claims nothing for the next one.
+#[test]
+fn undo_the_redo_list_and_a_late_read_out_answer_leave_no_claim_of_init_preset() {
+    run_mac(r##"
+        local S = T.S
+        local header, _, W = T.avengerAt80("Init Preset")
+        local function tabFrom(from)
+          for i, c in ipairs(header.controls) do
+            if c.label == from then header.focus = i end
+          end
+          T.tab()
+          return header.controls[header.focus].label
+        end
+        -- What Tab onto ◀ says.
+        local function previous()
+          T.ok(tabFrom("Preset") == "Previous preset", "Tab from Preset")
+          return T.lastSaid()
+        end
+        T.ok(previous() == "Previous preset, unavailable on Init Preset, button", T.said())
+        local clicks = #S.clicks
+        T.pressAt(header, 8)
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "586,106" and S.clicks[#S.clicks].button == nil,
+          "UNDO: " .. T.clickAt())
+        T.ok(T.lastSaid() == "Undo, activated" and T.count("[avenger] 'Undo': clicking (586,106)") == 1, T.said())
+        T.ok(previous() == "Previous preset, button", T.said())
+        -- Init Preset read again by a press, then the redo list opened and closed.
+        T.pressAt(header, 3)
+        T.ok(previous() == "Previous preset, unavailable on Init Preset, button", T.said())
+        T.pressAt(header, 9)
+        T.ok(T.clickAt() == "586,106" and S.clicks[#S.clicks].button == "right", "UNDO, right: " .. T.clickAt())
+        T.ok(T.lastSaid() == "Redo list, activated", T.said())
+        T.popup(320, 586, 110, 150, 200)
+        T.tick(1)
+        T.closePopups()
+        T.tick(2)
+        T.ok(previous() == "Previous preset, button", T.said())
+        -- Tab onto Preset asks its read; the overlay leaves the front before the answer, which
+        -- reads Init Preset. Back, with the name unreadable, nothing is claimed.
+        T.ok(tabFrom("Macro button 2") == "Preset", "Tab from the last control")
+        T.show(T.OTHER)
+        T.runDue()
+        T.ok(not header.active, T.dump())
+        T.nameIs(nil)
+        T.show(W)
+        T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
+        T.event()
+        T.run(400)
+        T.ok(header.active and T.lastSaid() == "Preset, cannot be read now", T.said())
+        T.ok(previous() == "Previous preset, button", T.said())
+    "##);
+}
+
+// ---------------------------------------------------------------------------------------------
 // From the avenger_control project into stage 1 (the port's plan, slice 0): its reading of what
 // a recogniser makes of the blank preset, and Ableton Live on a Mac as a daw-hosts entry.
 // ---------------------------------------------------------------------------------------------
@@ -2616,8 +3309,9 @@ fn the_projects_readings_of_the_blank_preset_are_taken_for_it() {
 
 /// In the ring: the Preset read-out says a reading of the blank preset as "Init Preset" — its
 /// `[read]` line keeps what was read — and ◀ and ▶ read the name the same way, before the click
-/// and after it: "hit Presst" before and "lnit Preset" after is the same preset, unchanged. The
-/// log says each reading taken so.
+/// and after it: "hit Presst" before is Init Preset, which Avenger steps no preset from, so ▶
+/// clicks nothing; "lnit Preset" read after a click is said as Init Preset. The log says each
+/// reading taken so.
 #[test]
 fn the_ring_says_a_reading_of_the_blank_preset_as_init_preset() {
     run_mac(r##"
@@ -2625,16 +3319,19 @@ fn the_ring_says_a_reading_of_the_blank_preset_as_init_preset() {
         local header = T.avengerAt80("hit Presst")
         T.ok(T.lastSaid() == "Preset, Init Preset", T.said())
         T.ok(T.count("[read] 'Preset' = \"hit Presst\", said as \"Init Preset\" (region 34,7 180x15") == 1, T.dump())
-        T.ok(T.step(header, 3, "hit Presst", "lnit Preset") == "Init Preset, unchanged", T.said())
+        local clicks = #S.clicks
+        T.ok(T.step(header, 3, "hit Presst", nil) == "Next preset: Avenger steps no preset from Init Preset — load a "
+          .. "preset first", T.said())
+        T.ok(#S.clicks == clicks, "nothing clicked")
         T.ok(T.count("[avenger] the name read 'hit Presst' is taken as Avenger's blank preset, Init Preset") >= 1, T.dump())
+        T.ok(T.step(header, 3, "BA Deep Sub", "lnit Preset") == "Init Preset", T.said())
         T.ok(T.count("[avenger] the name read 'lnit Preset' is taken as Avenger's blank preset, Init Preset") >= 1, T.dump())
-        T.ok(T.step(header, 3, "hit Presst", "BA Deep Sub") == "BA Deep Sub", T.said())
     "##);
 }
 
 /// With the preset database, a reading of the blank preset is Avenger's blank preset, which is in
 /// no expansion: Preset info says "Init Preset, not in the database", the log says why, and a step
-/// from it has no neighbour.
+/// from it clicks nothing and asks the database for no neighbour.
 #[test]
 fn the_preset_database_takes_a_reading_of_the_blank_preset_for_no_catalog_name() {
     run_mac(r##"
@@ -2643,8 +3340,10 @@ fn the_preset_database_takes_a_reading_of_the_blank_preset_for_no_catalog_name()
         local header = T.avengerAt80("hit Presst")
         T.ok(T.info(header, "hit Presst") == "Init Preset, not in the database", T.said())
         T.ok(T.count("[avenger] 'Preset info': read 'Init Preset' — Avenger's blank preset") == 1, T.dump())
-        T.ok(T.step(header, 3, "Init Presst", "BA Deep Sub") == "BA Deep Sub", T.said())
-        T.ok(T.count("the database's neighbour: none, the position is not known") >= 1, T.dump())
+        local clicks = #S.clicks
+        T.ok(T.step(header, 3, "Init Presst", "BA Deep Sub") == "Next preset: Avenger steps no preset from Init "
+          .. "Preset — load a preset first", T.said())
+        T.ok(#S.clicks == clicks and T.count("the database's neighbour") == 0, T.dump())
     "##);
 }
 

@@ -55,6 +55,9 @@ G.UNDO = { 305, 14 }
 -- y 7 to 22 — clear of the zoom field on its left and of ◀ on its right. The project's own
 -- recogniser read "Init Preset" as "hit Presst" in it at 50 % (not measured here: TODO.md).
 G.NAME_REGION = { 34, 7, 214, 22 }
+-- Where the name is double-clicked to rename it in Avenger's own editor: the project's
+-- `preset_name` point (its header_map.py), which it clicks for the same.
+G.NAME = { 123, 14 }
 
 -- ── MENU's items ─────────────────────────────────────────────────────────────
 -- From the project, all at x 257: Load at y 32, Save as at 55, Initialize at 68 (its MENU table).

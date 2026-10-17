@@ -31,10 +31,13 @@
 //!
 //! Unlike Windows, where a removed low-level hook leaves no trace and needs a witness to notice
 //! (see `backend/hook_watch.rs`), each of these four the application can see for itself. One
-//! failure it cannot: a tap that is valid and enabled and never called — Input Monitoring
-//! withdrawn, or never granted on the versions that ask for it separately. Nothing here
-//! witnesses that; the line written when the tap is installed says to check Input Monitoring
-//! when no key is ever captured after it.
+//! failure it sees only by a witness: a tap that is valid and enabled and never called — Input
+//! Monitoring withdrawn, or never granted on the versions that ask for it separately. The witness
+//! is a shortcut of this application's own, which Carbon delivers without any permission and
+//! whose key passes the tap's place first: one that arrives while the tap has seen no key at all
+//! is that failure ([`note_shortcut`]), and the Permissions page then counts Input Monitoring as
+//! needed. Without a shortcut pressed, the line written when the tap is installed still says to
+//! check Input Monitoring when no key is ever captured after it.
 //!
 //! Matching is EXACT: the pressed modifier state must equal the mask, so a capture of "Tab"
 //! does not swallow Command-Tab. Both halves of a suppressed key are swallowed — letting
@@ -130,6 +133,29 @@ const _: () = assert!(keys::CG_FLAG_COMMAND == CGEventFlags::MaskCommand.0);
 static FIRST_SUPPRESSION: AtomicBool = AtomicBool::new(false);
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+// What the key capture has shown about Input Monitoring, for [`keys_seen`]: the evidence by which
+// it is optional (`evidence.rs`). Each is one relaxed access where it is noted.
+/// The callback has been handed a key-down, from anybody, since the tap was installed.
+static CALLED: AtomicBool = AtomicBool::new(false);
+/// A shortcut of this application arrived while the installed tap had seen no key at all.
+static DEAF: AtomicBool = AtomicBool::new(false);
+/// The last creation of the tap was refused while Accessibility was granted.
+static REFUSED_TRUSTED: AtomicBool = AtomicBool::new(false);
+/// When the tap was last switched on — installed, re-enabled after the system or the watchdog
+/// found it off, or created again — in [`now_ms`]'s clock, plus one; 0 while there is none.
+static ON_SINCE_MS: AtomicU64 = AtomicU64::new(0);
+
+/// How long the tap must have been on before a shortcut that it did not see counts: a key pressed
+/// just before the tap existed, or while it was off, reaches a shortcut without passing it, and a
+/// second is far longer than the event takes from the keyboard to the shortcut's handler.
+const DEAF_AFTER_MS: u64 = 1000;
+
+/// Notes that the tap has just been switched on, for [`note_shortcut`]. One clock read and one
+/// relaxed store, so the callback can afford it.
+fn note_on() {
+    ON_SINCE_MS.store(now_ms() + 1, Ordering::Relaxed);
+}
 
 /// The tap's mach port, kept as a raw pointer so the callback and the watchdog can re-enable
 /// it. The retain taken at creation is released only by [`recreate`], after it has swapped a
@@ -333,6 +359,7 @@ pub fn install() -> Result<(), String> {
             return Err(msg);
         }
     };
+    note_on();
     report_tap_list();
 
     // The run loop retains the source, so letting ours go is right. The port is kept by
@@ -387,10 +414,11 @@ fn create_and_attach() -> Result<(CFRetained<CFMachPort>, CFRetained<CFRunLoop>,
         // Almost always a permission, and the failure is total: without a tap nothing is
         // captured and nothing is suppressed, so every overlay looks dead while the
         // application underneath behaves perfectly normally. Accessibility is the one known to
-        // refuse the tap; whether Input Monitoring is needed as well has not been measured
-        // (docs/macos-permissions.md, "Input Monitoring"), so it is named as the next thing to
-        // try rather than as a requirement — a tester cannot see the dialog.
+        // refuse the tap; with it granted, Input Monitoring is what is left, and the Permissions
+        // page counts it as needed from here on ([`keys_seen`]) — named as the next thing to try
+        // rather than as a requirement, since a tester cannot see the dialog.
         let trusted = unsafe { objc2_application_services::AXIsProcessTrusted() };
+        REFUSED_TRUSTED.store(trusted, Ordering::Relaxed);
         return Err(format!(
             "CGEventTapCreate refused (AXIsProcessTrusted = {trusted}) — grant this \
              application Accessibility in System Settings > Privacy & Security, and Input \
@@ -412,7 +440,82 @@ fn create_and_attach() -> Result<(CFRetained<CFMachPort>, CFRetained<CFRunLoop>,
     run_loop.add_source(Some(&source), unsafe { kCFRunLoopCommonModes });
     CGEvent::tap_enable(&port, true);
     let enabled = CGEvent::tap_is_enabled(&port);
+    REFUSED_TRUSTED.store(false, Ordering::Relaxed);
     Ok((port, run_loop, enabled))
+}
+
+/// What the key capture has shown in this run about keys reaching an overlay — the evidence by
+/// which Input Monitoring counts as needed or not (`evidence::listen_needed`). A tap that has seen
+/// a key since a shortcut it missed is no longer deaf. Any thread; a few relaxed loads.
+pub(super) fn keys_seen() -> super::evidence::Keys {
+    use super::evidence::Keys;
+    if CALLED.load(Ordering::Relaxed) {
+        return if FIRST_SUPPRESSION.load(Ordering::Relaxed) { Keys::Reached } else { Keys::Seen };
+    }
+    if DEAF.load(Ordering::Relaxed) {
+        Keys::Deaf
+    } else if REFUSED_TRUSTED.load(Ordering::Relaxed) {
+        Keys::Refused
+    } else {
+        Keys::NotYet
+    }
+}
+
+/// A shortcut of this application arrived (`hotkey.rs`, from Carbon's dispatcher on the main
+/// thread). Its key passed the event tap's place on its way, so a tap that has been on for at
+/// least [`DEAF_AFTER_MS`] and has seen no key-down at all is not being handed the keyboard —
+/// unless secure input is on, which keeps every tap from the keys and leaves Carbon's shortcuts
+/// working, or the tap is off now: then nothing is concluded. Off is what a stall of this thread
+/// leaves (the log has shown iterations of a second): the system gives up on the tap, switches it
+/// off and hands the key on, so the key becomes the shortcut without the tap ever being called
+/// for it; the switch-off reaches the callback only when the thread is free again, before this or
+/// after it, and either way the tap was not deaf. Said once, the first time.
+pub(super) fn note_shortcut() {
+    if CALLED.load(Ordering::Relaxed) || DEAF.load(Ordering::Relaxed) {
+        return;
+    }
+    let on_since = ON_SINCE_MS.load(Ordering::Relaxed);
+    if on_since == 0 || now_ms() + 1 < on_since + DEAF_AFTER_MS {
+        return;
+    }
+    // Switched off by the system, and the callback not yet told: on the main thread, as `PORT`'s
+    // every reader is.
+    let port = PORT.load(Ordering::Relaxed);
+    // SAFETY: the pointer came from a `CFRetained` whose retain only `recreate` releases, on this
+    // same thread, after swapping it out of `PORT`.
+    if port.is_null() || !CGEvent::tap_is_enabled(unsafe { &*port }) {
+        return;
+    }
+    match secure_input() {
+        Some(false) => {}
+        // On, or not known: a tap that sees nothing then proves nothing.
+        _ => return,
+    }
+    DEAF.store(true, Ordering::Relaxed);
+    logging::line(
+        "macos",
+        "a shortcut of this application arrived while the event tap, on for over a second and not \
+         under secure input, has seen no key at all — captured keys do not reach the overlay, so Input \
+         Monitoring is counted as needed now (the Permissions page says so); grant it in System \
+         Settings > Privacy & Security > Input Monitoring",
+    );
+}
+
+/// Whether some process has secure keyboard entry on (Carbon's `IsSecureEventInputEnabled`), or
+/// `None` where this macOS does not have the call. Looked up by name rather than linked, like the
+/// older capture functions in `capture.rs`: a symbol a later macOS drops would otherwise stop the
+/// application before it starts. Carbon is loaded already, for the shortcuts.
+fn secure_input() -> Option<bool> {
+    type IsSecureEventInputEnabledFn = unsafe extern "C" fn() -> u8;
+    static F: OnceLock<Option<usize>> = OnceLock::new();
+    let f = F.get_or_init(|| {
+        // SAFETY: RTLD_DEFAULT with a NUL-terminated name; dlsym only reads.
+        let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"IsSecureEventInputEnabled".as_ptr()) };
+        (!p.is_null()).then_some(p as usize)
+    });
+    // SAFETY: the address of `Boolean IsSecureEventInputEnabled(void)`, whose C signature is the
+    // type above; it takes nothing and answers a byte.
+    f.map(|p| unsafe { core::mem::transmute::<usize, IsSecureEventInputEnabledFn>(p)() } != 0)
 }
 
 /// Creates the tap again, because the one we have cannot be brought back: its mach port is
@@ -441,6 +544,7 @@ fn recreate(why: &str) {
                 drop(old);
             }
             forget_held_keys();
+            note_on();
             RECREATE_FAILURE_SAID.store(false, Ordering::Relaxed);
             let n = RECREATES.fetch_add(1, Ordering::Relaxed) + 1;
             let stays_off = !enabled;
@@ -690,6 +794,7 @@ pub fn health_check() {
     if !CGEvent::tap_is_enabled(port) {
         CGEvent::tap_enable(port, true);
         forget_held_keys();
+        note_on();
         let n = REENABLES.fetch_add(1, Ordering::Relaxed) + 1;
         if !CGEvent::tap_is_enabled(port) {
             // Created again once; a new tap that is off as well is left alone (STAYS_OFF).
@@ -818,6 +923,7 @@ unsafe extern "C-unwind" fn tap_callback(
             CGEvent::tap_enable(unsafe { &*port }, true);
         }
         forget_held_keys();
+        note_on();
         return pass;
     }
 
@@ -883,6 +989,11 @@ unsafe extern "C-unwind" fn tap_callback(
     let source = CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUnixProcessID);
     if !repeat && source != i64::from(std::process::id()) {
         PRESSED.fetch_add(1, Ordering::Relaxed);
+        // And the evidence that the keyboard reaches the tap at all (`keys_seen`): one load once
+        // it is noted.
+        if !CALLED.load(Ordering::Relaxed) {
+            CALLED.store(true, Ordering::Relaxed);
+        }
     }
     // A key held down since a capture took it, repeating while one of our windows has the keyboard
     // now — the capture's own callback showed a page, say: swallowed as its key-down was and its

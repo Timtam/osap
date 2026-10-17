@@ -34,7 +34,8 @@ use super::overlay_host_panel_tests::{run_with_helpers, SPECIFICITY_ARBITER};
 use super::page_example_tests::PAGE_WEBVIEW;
 
 /// The helpers, on top of the host-panel ones, the scripted page and the specificity arbiter.
-const PG: &str = r##"
+/// Shared with `overlay_handover_tests.rs`.
+pub(crate) const PG: &str = r##"
 local S = T.S
 local H = T.host
 T.KEY = "Ctrl+Shift+Alt+F1"
@@ -249,10 +250,15 @@ function T.trip(over)
 end
 
 -- The module disabled, as the host disables it: its pages hidden, its one-shot timers and pending
--- reads dropped, its overlays out of their slots. Enabled again: nothing happens until the next event.
+-- reads dropped, its overlays out of their slots, its captures out of the hook (T.typed) and its
+-- scope and flag forgotten — the flag as a `false` in S.menuOpen — and its recurring timers not run
+-- (T.tick). Enabled again (T.enable): nothing happens until the next event or tick.
 function T.disable()
   S.pg.shown = false
   S.after, S.asyncs, S.reads = {}, {}, {}
+  S.disabled = true
+  S.scopedTo = false
+  S.menuOpen[#S.menuOpen + 1] = false
   for _, c in ipairs(T.claims) do
     c.matching = false
     if c.active then
@@ -260,6 +266,11 @@ function T.disable()
       T.hostCall(c.off)
     end
   end
+end
+-- Enabled again: its captures are back, in every window and with no menu (docs/api/keys.md, scope).
+function T.enable()
+  S.disabled = false
+  S.scopedTo = false
 end
 
 -- A claim of another module on the synth's slot at `spec`, made to match or not.
@@ -772,6 +783,77 @@ fn back_on_logic_tolerates_the_main_window_first_and_ends_by_its_bound_otherwise
     "##);
 }
 
+/// The way back to Logic with the keyboard on nothing anybody can read — what Logic answered on
+/// the tester's way back of 2026-10-14, the plug-in's own view holding the keyboard: away ends at
+/// the plug-in's window, and the overlay is back in front in the stay it left, with no identify,
+/// the arrival said and its hooks paired.
+#[test]
+fn the_way_back_to_logic_with_the_keyboard_on_nothing_comes_back_in_the_stay() {
+    run_mac(r##"
+        local S = T.S
+        T.show(T.W, T.IN)
+        local ov = T.synth()
+        T.ok(ov.active and S.identifies == 1, T.dump())
+        T.run(400)
+        T.openPage()
+        S.landChain = {}
+        T.key()
+        T.land()
+        T.ok(ov.active and not ov.away, "back in front: " .. T.dump())
+        T.ok(S.identifies == 1, "no identify: the stay went on: " .. S.identifies)
+        local said = #S.speech
+        T.run(450)
+        T.ok(T.saidSince(said) == "Preset, button", "the arrival said once: " .. T.saidSince(said))
+        T.ok(T.hookCount("Synth", "on") == 1 and T.hookCount("Synth", "off") == 0, "no second onActivate")
+    "##);
+}
+
+/// A trip that lands with the keyboard on nothing anybody can read acts and comes back, as one that
+/// lands on the DAW's own controls does: the held context does not ask where the keyboard is.
+#[test]
+fn a_trip_that_lands_with_the_keyboard_on_nothing_acts_and_comes_back() {
+    run_mac(r##"
+        local S = T.S
+        T.show(T.W, T.IN)
+        local ov = T.synth()
+        T.openPage()
+        T.trip()
+        S.landChain = {}
+        T.land()
+        T.runDue()
+        T.ok(S.acts == 1, "act ran with the keyboard on nothing: " .. T.dump())
+        T.runDue()
+        T.ok(S.front == T.PAGE and #S.giveUps == 0, "and the page came back")
+    "##);
+}
+
+/// The slot taken by another module's claim, more specific: the overlay's `[deactivate]` line names
+/// the claim that was chosen, as the arbiter lists it — the active one, which the host marks before
+/// it calls the old one off — and not the reason the overlay last left for, before it came back.
+#[test]
+fn another_claim_chosen_on_the_slot_is_named_when_the_overlay_leaves() {
+    run(r##"
+        local S = T.S
+        T.show(T.W, T.IN)
+        local ov = T.synth()
+        T.ok(ov.active, T.dump())
+        T.show(T.OTHER)
+        T.ok(not ov.active and T.count("[deactivate] 'Synth' — in front now: 'Browser' (chrome.exe); ") == 1, T.dump())
+        local left = T.count("; 'Browser' is not a")
+        T.ok(left == 1, T.dump())
+        T.show(T.W, T.IN)
+        T.ok(ov.active, T.dump())
+        local id = T.another(T.O.layer.dialog)
+        T.matching(id, true)
+        T.ok(not ov.active, "outranked")
+        T.ok(T.count("[deactivate] 'Synth' — in front now: 'FX: Track 1 \"test\"' (reaper.exe); another claim "
+          .. "on slot 'com.platform.synth' was chosen: com.platform.other at specificity 40") == 1, T.dump())
+        T.ok(T.count("; 'Browser' is not a") == left, "the reason before it came back, said again: " .. T.dump())
+        T.matching(id, false)
+        T.ok(ov.active, "back when it lets go")
+    "##);
+}
+
 /// The page's close box (or Alt+F4, or Command-W) is a way back: the plug-in's control asked to the
 /// front, and away ends at the plug-in's window with the keys back.
 #[test]
@@ -801,6 +883,7 @@ fn a_disable_while_away_and_enable_recovers_at_the_next_event() {
         T.openPage()
         T.trip()
         T.disable()
+        T.enable()
         T.show(T.W, T.IN)
         T.ok(#S.giveUps == 1 and S.giveUps[1] == "page closed", "the trip ends: " .. tostring(S.giveUps[1]))
         T.ok(T.last() == "Next preset: the page was closed; nothing more was done.", T.last())
@@ -820,6 +903,7 @@ fn a_disable_while_away_and_enable_recovers_at_the_next_event() {
         T.runDue()
         T.ok(S.acts == 1 and #S.reads == 1, "acting, a read out")
         T.disable()
+        T.enable()
         T.show(T.W, T.IN)
         T.ok(#S.giveUps == 1 and S.giveUps[1] == "page closed", "the trip ends")
         T.ok(ov.active and not ov.away and T.holds("Return"), "keys back")
@@ -832,6 +916,7 @@ fn a_disable_while_away_and_enable_recovers_at_the_next_event() {
         local ov = T.synth()
         T.openPage()
         T.disable()
+        T.enable()
         T.show(T.OTHER)
         T.ok(not ov.away, "away ends at the next event")
         T.runDue()

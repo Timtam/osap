@@ -11,7 +11,8 @@
 //   * left out: the Windows-only block, the OSC rename dialog no control opened, and the focus
 //     retries on timers;
 //   * the defects of the port's plan: the spelling, the disclosures a re-render closed, and the
-//     central tabs this page cannot reach yet, which now say so.
+//     central tabs this page cannot reach yet, which now say so;
+//   * Back and Next say they are unavailable where VPS Avenger steps no preset (on Init Preset).
 // Text goes into the page as text (textContent), never as HTML.
 (() => {
   'use strict';
@@ -220,6 +221,23 @@
     updateExpansionSearchVisibility();
   }
 
+  // The port's: Back and Next where VPS Avenger steps no preset — on Init Preset, its blank
+  // preset, from which the tool clicked and waited for a change that never came. The module says
+  // why in the state (`preset_steps_unavailable`, from the name read); the buttons are then
+  // aria-disabled, with the reason in their help, the title, which is also their description.
+  // Never `disabled`: they stay in the Tab order and focusable, and a press still goes to the
+  // module, which sends nothing to Avenger and answers in the error region.
+  const presetSteps = ['prev-preset-button', 'next-preset-button']
+    .map((id) => $(id))
+    .filter(Boolean)
+    .map((button) => ({ button, help: button.title }));
+  function updatePresetSteps(reason) {
+    presetSteps.forEach(({ button, help }) => {
+      button.setAttribute('aria-disabled', reason ? 'true' : 'false');
+      button.title = reason ? `${help}, unavailable: ${reason}.` : help;
+    });
+  }
+
   // --- module → page: the state, whole ---
   function applyState(s) {
     if (!s) return;
@@ -255,6 +273,7 @@
         $('preset-name').textContent = text;
       }
     }
+    updatePresetSteps(readText(s.preset_steps_unavailable));
     currentZoom = readInt(s.zoom);
     const zoomTrigger = $('zoom-menu-trigger');
     if (zoomTrigger) {

@@ -5,7 +5,8 @@
 -- clicks:
 --
 --   prev_preset, next_preset   ◀ or ▶, then the name watched until it changes (O:watch), and
---                              "unchanged" said when it has not by the watch's bound
+--                              "unchanged" said when it has not by the watch's bound; on Init
+--                              Preset nothing is sent, and the error region says why
 --   pick_load_preset,          MENU's item chosen in Avenger's own menu (O:chooseMenuItem), then
 --   pick_save_preset_as        the file dialog that comes next: the trip waits for it, and for
 --                              Avenger in front again (trip:afterDialog), then watches the name
@@ -19,11 +20,36 @@
 --   set_zoom                   the zoom list's entry for the size asked — any entry, where the
 --                              ring's stepper takes the one beside — then the zoom field read
 --
+-- and the oscillator strip's and the macros' (the plan's slice 5), each through src/act.luau with
+-- its spec from src/actions/osc.luau or src/actions/macros.luau, which the ring's controls share:
+-- the part read, the click, its change watched for, the part read again (`viaAct` below);
+--
+-- and the renames and Browse Presets (the plan's slice 6), hand-overs of the keyboard to Avenger's
+-- own editor and browser (src/handover.luau):
+--
+--   start_rename               the preset's name double-clicked, Avenger's editor seen open, the
+--   rename_osc {index}         user's typing Avenger's until Return or Escape and the field seen
+--   rename_macro {index}       closed again; then the name READ off a picture — never recorded
+--                              from the keys
+--   browse_expansion_presets   the tool's sentence, Return let through to Avenger's browser, then
+--                              the name read until it settles
+--
+-- and the knobs turned (the plan's slice 7), each a press held through a hand-over of the keys
+-- (src/amount.luau): the knob pressed and held, the tool's sentence said; PageUp and PageDown one
+-- move each, captured — none of them reaches Avenger or the DAW; Return lets go and the knob is
+-- READ, Escape lets go and reads nothing:
+--
+--   macro_amount {index}       a macro knob's amount
+--   osc_control {control}      the selected oscillator's Volume, Pan, Transpose, Fine Tune or Random
+--                              Pitch — nothing pressed on the Drums or the Trig tab
+--   osc_filter_control {control}   Low-Pass or High-Pass, along x: no reader, Return claims nothing
+--
 -- Nothing is taken for done: every answer is what was read after the click, and a read that did
--- not come is said as that. After every trip the page gets its state — the preset heading from the
--- name read — then the error, or the focus back where the user was; the words `after` returns are
--- said only when the page does not come back. Errors are sentences of the module's own, in the
--- error region; the log has the rest, and no raised message reaches the page.
+-- not come is said as that — after a click or choice that may have changed the preset, with the
+-- preset posted as not read (go). After every trip the page gets its state — the preset heading
+-- from the name read — then the error, or the focus back where the user was; the words `after`
+-- returns are said only when the page does not come back. Errors are sentences of the module's
+-- own, in the error region; the log has the rest, and no raised message reaches the page.
 --
 -- The trip's own checks are the runtime's: one at a time, only from the page with the keyboard,
 -- and `trip:inFront()` after every wait, before a click or a read — false has ended the trip.
@@ -33,6 +59,11 @@ local H = host.include("src/header.luau")
 local D = host.include("src/dialog.luau")
 local S = host.include("src/state.luau")
 local Reads = host.include("src/read/open.luau")
+local Act = host.include("src/act.luau")
+local Osc = host.include("src/actions/osc.luau")
+local Macros = host.include("src/actions/macros.luau")
+local Hv = host.include("src/handover.luau")
+local Am = host.include("src/amount.luau")
 
 local A = {}
 
@@ -51,42 +82,48 @@ local GIVEN_UP = {
   failed = "something went wrong in this module; nothing more was done",
 }
 
--- Why a choice in Avenger's menu was not made (O:chooseMenuItem's `why`).
-local NOT_CHOSEN = {
-  due = "no menu was seen; nothing was chosen",
-  closed = "the menu closed before anything was chosen",
-  unplaced = "the menu cannot be placed now; nothing was chosen",
-  covered = "something else is covering the menu; nothing was chosen",
-  refused = "the menu could not be clicked; nothing was chosen",
-  untaken = "the menu did not take the choice",
-  inactive = "VPS Avenger is not in front; nothing was chosen",
-  ["no tests"] = "the menu cannot be seen here; nothing was chosen",
-  busy = "the last choice is still being made",
-}
-
-local function notChosen(why)
-  return NOT_CHOSEN[why] or ("nothing was chosen (" .. tostring(why) .. ")")
-end
+-- Why a choice in Avenger's menu was not made (O:chooseMenuItem's `why`), in the page's words.
+local notChosen = Act.notChosen
 
 -- What the page is told after a trip, and the words for when it does not come back: the state —
--- what the trip read written over what was read before (`set`, `values`) — then the error, or the
--- focus back where the user was. `result`: { set = { key -> value }?, values = all of them?,
--- error = a reason?, sentence = a whole sentence?, note = a reason? }.
+-- what the trip read written over what was read before (`set`, `values`, `part`) — then the error,
+-- or the focus: on the element the action names (`focus`, the tool's), or back where the user was;
+-- an error with a `focus` is a refusal at a limit, the focus put there and the error said beside.
+-- `result`: { set = { key -> value }?, values = all of them?, part = { keys, values }? (a part read
+-- again, src/act.luau), facts = { key -> value }? (state.luau's), error = a reason?, sentence = a
+-- whole sentence?, note = a reason?, focus = an element's id?, said = what was read, in words? }.
 local function report(label, result)
   local w = E.plugin()
   local id = w and w.id
   if id and result.values then S.read(id, result.values) end
   if id and result.set then S.set(id, result.set) end
+  if id and result.part then S.part(id, result.part.keys, result.part.values) end
+  if id and result.facts then
+    for k, v in pairs(result.facts) do S.note(id, k, v) end
+  end
   E.postState(id)
   local text = result.sentence
     or (result.error and (label .. ": " .. result.error))
     or (result.note and (label .. ": " .. result.note))
   if text then
-    E.post({ kind = "error", text = text, focus = true })
+    if result.focus then
+      -- A refusal at a limit (src/act.luau): the focus where the tool leaves it — the eighth tab,
+      -- the fourth macro tab, the only one — and then the sentence in the error region, a live
+      -- region, which says it without taking the focus there.
+      E.post({ kind = "focus", id = result.focus })
+      E.post({ kind = "error", text = text })
+    else
+      E.post({ kind = "error", text = text, focus = true })
+    end
     return text
   end
   E.post({ kind = "error", text = "" })
-  E.post({ kind = "restoreFocus" })
+  if result.focus then
+    E.post({ kind = "focus", id = result.focus })
+  else
+    E.post({ kind = "restoreFocus" })
+  end
+  if result.said then return label .. ": " .. result.said end
   local name = result.set and result.set.preset
   return name and (label .. ": " .. name) or nil
 end
@@ -102,17 +139,36 @@ local function named(name)
   return { preset = name or false, expansion = expansion }
 end
 
--- Action `action` as a trip from overlay `o`: `act(o, trip)` in Avenger, `trip:done(result)` its
--- end (`report`'s result).
+-- Action `action` as a trip from overlay `o`: `act(o, trip, forget)` in Avenger,
+-- `trip:done(result)` its end (`report`'s result). `forget(why, own)` where the trip's click or
+-- choice may have changed the preset: the database's position is forgotten (DB.forget's `why` and
+-- `own`), and the ring's latest name read (main.luau, "◀ and ▶ on Init Preset"); and from then on
+-- a trip that ends without the name read after it — a watch that read nothing, a give-up — posts
+-- the preset as not read, so the page claims nothing of a preset it has not seen since.
 local function go(o, action, act)
   local label = E.LABELS[action]
+  local touched = false
+  local function forget(why, own)
+    touched = true
+    E.DB.forget(why, own)
+    R.unseen()
+  end
+  -- Whatever the trip does, the ring's reads of this stay are not Avenger's any more (ring.luau).
+  R.forgetRing()
+  local function back(result)
+    if touched and not result.values and not (result.set and result.set.preset ~= nil) then
+      result.set = result.set or {}
+      result.set.preset, result.set.expansion = false, false
+    end
+    return report(label, result)
+  end
   local started, why = o:inPlugin({
     label = label,
-    act = act,
-    after = function(_, result) return report(label, result) end,
+    act = function(w, trip) return act(w, trip, forget) end,
+    after = function(_, result) return back(result) end,
     onGiveUp = function(_, why2)
-      if why2 == "gone" then return report(label, { sentence = E.closedWords() }) end
-      return report(label, { error = GIVEN_UP[why2] or ("nothing more was done (" .. tostring(why2) .. ")") })
+      if why2 == "gone" then return back({ sentence = E.closedWords() }) end
+      return back({ error = GIVEN_UP[why2] or ("nothing more was done (" .. tostring(why2) .. ")") })
     end,
   })
   -- "busy" and "not in front" are the runtime's to log: a message while a trip is out, or one that
@@ -133,34 +189,54 @@ local function nameBefore(o)
 end
 
 -- The name watched after a click, then the trip done with it: `unchanged` says a name that has not
--- changed by the watch's bound ("unchanged" in the page), as ◀ and ▶ say it.
-local function thenName(o, trip, was, unchanged)
+-- changed by the watch's bound ("unchanged" in the page), as ◀ and ▶ say it. A name that changed
+-- counts once it has settled (main.luau, watchName): one that never did is "cannot be read now",
+-- never posted as the preset.
+local function thenName(o, trip, was, unchanged, label)
   R.watchName(o, was, function(now, before, changed)
     if now == nil then return trip:done({ error = "the preset name cannot be read now" }) end
     local note = nil
     if unchanged and not changed and before ~= nil and now == before then note = "unchanged, " .. now end
     trip:done({ set = named(now), note = note })
-  end)
+  end, label)
 end
 
--- ◀ and ▶, and UNDO: a click, then the name.
-local function click(action, ringLabel, at, unchanged)
+-- ◀ and ▶, and UNDO: a click, then the name. ◀ and ▶ (`steps`) only where the preset read is not
+-- Init Preset, which VPS Avenger steps no preset from (main.luau, "◀ and ▶ on Init Preset"): where
+-- the page's state has it, nothing is sent to Avenger — no trip — and the error region says why;
+-- where the name read in Avenger before the click is it (or, read as nothing, the latest one read
+-- was), nothing is clicked, and the page comes back with that name and why.
+local function click(action, ringLabel, at, unchanged, steps)
   return function(o)
-    go(o, action, function(w, trip)
+    if steps then
+      local w = E.plugin()
+      local why = S.stepsUnavailable(w and w.id)
+      if why then
+        log(string.format("'%s': the page's preset is Init Preset — nothing sent to VPS Avenger", ringLabel))
+        E.post({ kind = "error", text = E.LABELS[action] .. ": " .. why })
+        return
+      end
+    end
+    go(o, action, function(w, trip, forget)
       local was = nameBefore(w)
       if not trip:inFront() then return end
+      if steps and R.atInit() then
+        log(string.format("'%s': the name read in VPS Avenger is Init Preset — nothing clicked", ringLabel))
+        return trip:done({ set = named(was), error = S.AT_INIT })
+      end
       local ok, said = R.clickAt(w, ringLabel, at, nil, true)
       if not ok then return trip:done({ sentence = said }) end
       -- A step or an undo the database's position does not follow from the page.
-      E.DB.forget("the page's " .. ringLabel)
-      thenName(w, trip, was, unchanged)
+      forget("the page's " .. ringLabel)
+      thenName(w, trip, was, unchanged, ringLabel)
     end)
   end
 end
 
 -- MENU's item `item` (`ringLabel` as the ring names it), then `andThen(o, trip, was)` once the
--- choice has been taken; the popup closed again when a choice was given up with it left open.
-local function menuChoice(w, trip, ringLabel, item, andThen)
+-- choice has been taken, `forget` (go) told first; the popup closed again when a choice was given
+-- up with it left open.
+local function menuChoice(w, trip, forget, ringLabel, item, andThen)
   local was = nameBefore(w)
   if not trip:inFront() then return end
   local pick = {}
@@ -174,7 +250,7 @@ local function menuChoice(w, trip, ringLabel, item, andThen)
         return trip:done({ error = notChosen(why) })
       end
       -- Every item may load, rename or blank the preset: the database's position is not Avenger's.
-      E.DB.forget(ringLabel .. " chosen from the page", R.OWN_NAME[ringLabel])
+      forget(ringLabel .. " chosen from the page", R.OWN_NAME[ringLabel])
       andThen(m, trip, was)
     end,
   })
@@ -190,14 +266,14 @@ end
 -- the name read all the same.
 local function fileItem(action, ringLabel, item)
   return function(o)
-    go(o, action, function(w, trip)
-      menuChoice(w, trip, ringLabel, item, function(m, t, was)
+    go(o, action, function(w, trip, forget)
+      menuChoice(w, trip, forget, ringLabel, item, function(m, t, was)
         t:afterDialog(function(o2, t2, seen)
           if not seen then log(string.format("'%s': no file dialog came within the bound", ringLabel)) end
           R.watchName(o2, was, function(now)
             if now == nil then return t2:done({ error = "the preset name cannot be read now" }) end
             t2:done({ set = named(now), note = (not seen) and "no file dialog was seen" or nil })
-          end)
+          end, ringLabel)
         end)
       end)
     end)
@@ -205,8 +281,8 @@ local function fileItem(action, ringLabel, item)
 end
 
 A.HANDLERS = {
-  prev_preset = click("prev_preset", "Previous preset", G.PREV, true),
-  next_preset = click("next_preset", "Next preset", G.NEXT, true),
+  prev_preset = click("prev_preset", "Previous preset", G.PREV, true, true),
+  next_preset = click("next_preset", "Next preset", G.NEXT, true, true),
   undo = click("undo", "Undo", G.UNDO, false),
   pick_load_preset = fileItem("pick_load_preset", "Load preset", G.LOAD),
   pick_save_preset_as = fileItem("pick_save_preset_as", "Save preset as", G.SAVE_AS),
@@ -217,13 +293,13 @@ A.HANDLERS = {
 -- YES where it was read (D.answer), and once it has gone, everything read again in the last read's
 -- answer, a handler where the reads wait.
 A.HANDLERS.pick_initialize_preset = function(o)
-  go(o, "pick_initialize_preset", function(w, trip)
+  go(o, "pick_initialize_preset", function(w, trip, forget)
     local r, zoom = R.boxOffScreen(w)
     if r then
       return trip:done({ error = "Avenger's warning box would open off the screen"
         .. (zoom and (" at " .. zoom .. " percent") or "") .. "; zoom out first" })
     end
-    menuChoice(w, trip, "Initialize preset", G.INITIALIZE, function(m, t)
+    menuChoice(w, trip, forget, "Initialize preset", G.INITIALIZE, function(m, t)
       D.answer(m, t, "Initialize preset", function(ok, why)
         if not ok then return t:done({ error = why }) end
         if not t:inFront() then return end
@@ -234,6 +310,7 @@ A.HANDLERS.pick_initialize_preset = function(o)
           log("Initialize Preset: VPS Avenger was not read again — " .. tostring(okR and whyNot or values))
           return t:done({ error = "VPS Avenger cannot be read again now" })
         end
+        if values.preset then R.noteName(values.preset) end
         t:done({ values = values })
       end)
     end)
@@ -244,7 +321,7 @@ end
 -- the list BEFORE the click (it counts as the press), the user chooses in it, and once they see it
 -- closed, the name.
 A.HANDLERS.redo_menu = function(o)
-  go(o, "redo_menu", function(w, trip)
+  go(o, "redo_menu", function(w, trip, forget)
     local was = nameBefore(w)
     if not trip:inFront() then return end
     local ok, why = trip:afterMenu(function(o2, t2, seen)
@@ -256,7 +333,7 @@ A.HANDLERS.redo_menu = function(o)
     if not clicked then return trip:done({ sentence = said }) end
     H.popup(w:origin())
     -- What the list redoes is chosen in the list.
-    E.DB.forget("the redo list opened from the page")
+    forget("the redo list opened from the page")
   end)
 end
 
@@ -313,10 +390,98 @@ A.HANDLERS.set_zoom = function(o, args)
   end)
 end
 
+-- ── The oscillator strip and the macros ───────────────────────────────────────
+-- Action `action` as a trip through src/act.luau: `build(args, label, known)` its spec (osc.luau,
+-- macros.luau), `known` what was last read in Avenger's window, for its words. A builder's refusal
+-- — arguments the page cannot have meant — is posted at once, with no trip: nothing in Avenger is
+-- needed for it.
+local function viaAct(action, build)
+  return function(o, args)
+    local label = E.LABELS[action]
+    local w = E.plugin()
+    local spec, why = build(args, label, S.values(w and w.id))
+    if not spec then
+      log(string.format("'%s' not sent to VPS Avenger: %s", label, tostring(why)))
+      E.post({ kind = "error", text = label .. ": " .. tostring(why) })
+      return
+    end
+    go(o, action, function(m, trip)
+      Act.run(m, spec, function(result)
+        -- nil: the trip's own check ended it, and its give-up says the rest.
+        if result then trip:done(result) end
+      end, trip)
+    end)
+  end
+end
+
+for _, name in ipairs({ "select_osc_tab", "add_osc", "select_drums_tab", "select_trig_tab", "toggle_osc_mute",
+  "toggle_osc_solo", "toggle_drums_mute", "toggle_drums_solo", "toggle_trig_mute", "toggle_trig_solo",
+  "osc_menu_item", "drums_menu_item", "trig_menu_item", "reset_osc_control" }) do
+  A.HANDLERS[name] = viaAct(name, Osc[name])
+end
+for _, name in ipairs({ "select_macro_tab", "add_macro_tab", "delete_macro_tab", "toggle_macro_button",
+  "macro_reset_mode", "macro_button_menu_item", "reset_macro_amount" }) do
+  A.HANDLERS[name] = viaAct(name, Macros[name])
+end
+
+-- ── The renames and Browse Presets ───────────────────────────────────────────
+-- Each a trip whose act hands the keyboard over (src/handover.luau). An index the page cannot have
+-- meant is refused at once, with no trip, as a builder's refusal is (viaAct); an OSC tab past the
+-- count is refused in Avenger, once the dots are read.
+local function refuse(action, why)
+  local label = E.LABELS[action]
+  log(string.format("'%s' not sent to VPS Avenger: %s", label, why))
+  E.post({ kind = "error", text = label .. ": " .. why })
+end
+
+local function whole(v)
+  local n = tonumber(v)
+  return n and n == math.floor(n) and n or nil
+end
+
+A.HANDLERS.start_rename = function(o)
+  go(o, "start_rename", function(w, trip, forget) Hv.renamePreset(w, trip, forget) end)
+end
+
+A.HANDLERS.rename_osc = function(o, args)
+  local i = whole(args.index)
+  if not (i and i >= 1) then return refuse("rename_osc", "no oscillator tab was named") end
+  go(o, "rename_osc", function(w, trip) Hv.renameOsc(w, trip, i) end)
+end
+
+A.HANDLERS.rename_macro = function(o, args)
+  local i = whole(args.index)
+  if not (i and i >= 1 and i <= 5) then return refuse("rename_macro", "no macro field was named") end
+  go(o, "rename_macro", function(w, trip) Hv.renameMacro(w, trip, i) end)
+end
+
+A.HANDLERS.browse_expansion_presets = function(o)
+  go(o, "browse_expansion_presets", function(w, trip, forget) Hv.browse(w, trip, forget) end)
+end
+
+-- ── The knobs turned ─────────────────────────────────────────────────────────
+-- Each a trip whose act presses the knob and hands the keys over (src/amount.luau), its spec built
+-- at once: a knob or a band the page cannot have meant is refused with no trip, as above.
+local function amount(action, build)
+  return function(o, args)
+    local w = E.plugin()
+    local spec, why = build(args, E.LABELS[action], S.values(w and w.id))
+    if not spec then return refuse(action, why) end
+    go(o, action, function(m, trip) Am.run(m, trip, spec) end)
+  end
+end
+A.HANDLERS.macro_amount = amount("macro_amount", Am.macro)
+A.HANDLERS.osc_control = amount("osc_control", Am.osc)
+A.HANDLERS.osc_filter_control = amount("osc_filter_control", Am.filter)
+
 -- What page.luau hands over: { header, DB, ring, zoomOf, LABELS, post, roster, plugin = () -> the
--- window the page was shown beside, postState = (id) -> (), closedWords = () -> the sentence }.
+-- window the page was shown beside, postState = (id) -> (), closedWords = () -> the sentence,
+-- sound = (name) -> (), the page's sounds behind its setting }.
 function A.start(env)
   E, R = env, env.ring
+  Act.start(env.ring)
+  Hv.start({ ring = env.ring, named = named, plugin = env.plugin })
+  Am.start({ ring = env.ring, plugin = env.plugin, sound = env.sound })
 end
 
 return A

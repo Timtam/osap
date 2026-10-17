@@ -42,6 +42,7 @@ Every callback of a module runs as a [handler](../module-runtime-and-lifecycle.m
 |---|---|---|
 | a control's `text`; a tab control's `current` and `verticalName` | in the handler of the key, timer or window event that announces the control | yes |
 | a control's `onActivate`; a stepper's `onStep` | in the handler of the key or hotkey that pressed it | yes |
+| a [menu test](#o-menutests)'s `before` | in the handler of the press — the key, hotkey or trip that opened the menu — before the press counts | yes — `O.menuTests.drawn`'s picture before the click — except for a press made from an `onDone` inside the menu tick's coroutine, where a read raises |
 | a stored [`identify`](#o-attachembedded) — one whose verdict is kept — asked for a control it has no verdict for | in the handler of the event that resolves the overlay's origin; in the arbiter's call, a plain call, when that is the first to resolve it — an overlay on a `slot` brought to the front by the arbiter choosing again, after another claimant left | yes, but not in the arbiter's call |
 | `when`; an `identify` asked at every evaluation (`cacheIdentity = false`, or a `control` function's where the DAW gives no panel); a binding's `present`; a [menu test](#o-menutests) | in a coroutine of the runtime's own, one per scan or tick | no: it must answer at once, and reads no screen — a pixel a `when` needs is a [probe](#o-probe)'s |
 | a `menuItem` function and the `onDone` of [`O:chooseMenuItem`](#o-choosemenuitem) | inside the menu tick's coroutine when a test answers at once; otherwise in the handler of the test's callback, and `onDone` also in a key's handler, in the arbiter's call as the overlay leaves the front, or — in a calibrating run, on a press whose item is photographed — in the handler of the [menu item shot](#o-calibrating)'s answer, right after the item's click | no: it must answer at once; a [probe](#o-probe)'s reader answers what stands, and reads nothing on the tick or in either callback |
@@ -52,6 +53,9 @@ Every callback of a module runs as a [handler](../module-runtime-and-lifecycle.m
 | a page's `onMessage`, `onReady` and `onClose` | as the page's own events, handlers of the module (a message and `onClose("user")` in the interactive lane) | yes |
 | a [trip](#o-inplugin)'s `act`, and the `fn` of its `afterMenu` and `afterDialog` | on the module's next turn after the arrival ([`host.timer.after(0)`](timer.md#host-timer-after)); the arbiter's call that sees the arrival only schedules it | yes |
 | a trip's `after` and `onGiveUp` | on the module's next turn after `done` or the end, or in the page key's handler | yes |
+| a [hand-over](#trip-handover)'s `onKey` | in the handler of the key it captured, the plug-in's window in front | yes |
+| a hand-over's `ends` | on the module's next turn after the arrival that follows its end key ([`host.timer.after(0)`](timer.md#host-timer-after)), as a wait's `fn` | yes — it answers through its `answer`, at once or from a read's callback |
+| a hand-over's `onEnd` | after its own end: where `ends` answered `true` — the arrival's handler, or a read's callback — or, after an `onKey` that answered `true` and with no `ends`, in the arrival's handler on the module's next turn; after any other end, where the trip's `onGiveUp` or `after` runs, just before it; never after a `handOver` that answered false | yes |
 | a page's `onShown` and `onBack` | in the handler that showed or hid the page | yes |
 
 **"Wait for a read"** is [`host.ocr.recognize`](ocr.md#host-ocr-recognize) without a callback, and **"a capture"** a [`host.screen.snapshot`](screen.md#host-screen-snapshot), [`pixel`](screen.md#host-screen-pixel) or [`pixels`](screen.md#host-screen-pixels) of the screen, or a [`profile`](screen.md#host-screen-profile), [`cells`](screen.md#host-screen-cells), [`matchCells`](screen.md#host-screen-matchcells), [`template{ capture }`](screen.md#host-screen-template), snapshot's `crop`, [`imageSearch`](screen.md#host-screen-imagesearch), [`imageSearchAll`](screen.md#host-screen-imagesearchall), [`save`](screen.md#host-screen-save) or [`saveMarked`](screen.md#host-screen-savemarked) without a callback: where the table says yes, it stops the handler until the reading, the picture, the colours or the region's answer come, and only the overlay's module waits — its next key runs after it ([Where it waits](ocr.md#where-it-waits), and for the screen [its own](screen.md#where-it-waits)). With a callback a read waits nowhere, and is fine in every row; so is a `pixel` or `pixels` of a snapshot, which reads no screen. What the rows that say no rule out: a `when` is asked for every control on every Tab and a menu test on every tick, and a module that waited there would be busy all the time.
@@ -341,6 +345,40 @@ One overlay object takes **one** binding: an object is pinned to a single slot a
 **Never in this application's own windows.** When the window in front is one of the application's own — the module manager, a dialog of the host's: a [window table](./window.md#window-table) whose `own` is `true` — every overlay lets go at the window or focus event that brings it, and asks nothing there: no context, no `identify`, no gate, no menu test, and nothing of the window that has just lost the foreground. One on a `slot` reports to the arbiter that it does not match, before the test that would skip an outranked overlay's recheck, so one outranked until then says so at its own recheck too; one without a slot leaves the front. Whatever its matcher says: a standard dialog of the application is a `#32770`, as REAPER's FX window is. The window in front is read once per [epoch](./timer.md#host-epoch) for every overlay of the module, from `host.window.active()`, which keeps its answer for the epoch anyway.
 
 The overlays recheck one after another, and the arbiter elects again at every report. So when a slot's winner lets go first, the arbiter can elect a claim whose last report still says it matches — made in the other program's window by an overlay outranked since, which has skipped its rechecks — before that overlay's own recheck has run. An overlay the arbiter calls to come up while one of the application's own windows has the keyboard does not come up: it reports that it does not match instead, and the arbiter elects again at once, so none comes up there. With no window shown in front it reads [`host.window.foreground()`](./window.md#host-window-foreground)'s `own` for this, each time it is called to come up: the hidden window the tray icon puts in front for its menu on Windows is no window to `active()`. There the rechecks run as they do with nothing in front, and only an overlay called to come up sees that the keyboard is the application's.
+
+
+**Leaving the front.** Every time an overlay leaves the front, one line says what is in front now and which test failed, after a semicolon:
+
+```text
+[deactivate] 'VPS Avenger' — in front now: 'Inst 1' (Logic Pro); the keyboard is on [AXButton//] at 410,55, outside the plug-in's panel (the DAW's own controls)
+```
+
+The reason is the first test that said no, in these words (`<…>` is filled in):
+
+| Test | Reason |
+|---|---|
+| this application's own window in front | `one of this application's own windows is in front ('<title>')`; the overlay's own page: `its page is in front` |
+| a window binding | `no window is in front` · `'<title>' is not a window its binding matches` |
+| an embedded binding's window | `no window is in front` · `'<title>' is not a plug-in window of the binding's hosts` |
+| the module's pattern | `no control matches '<pattern>'` · `identify says control [<class>] id=<id> is not the plug-in` · `identify could not tell yet about control [<class>] id=<id> (<n> of 8)` · `identify raised about control [<class>] id=<id>` · `identify is not asked inside a scan of the overlay's hooks` |
+| a `control` function | `the module's control function found no control` · `the keyboard is outside what the module's control function returned` |
+| `identify` asked at every evaluation | `identify, asked at every evaluation, says no` |
+| `present` | `its binding's present says no` |
+| the gate | `its gate says no`; a [landmark](#o-gate): `its landmark is not seen` |
+| its menu's window ([holding its place](#o-menutests)) | `its place over its menu's window is no longer held; <the binding's reason>` |
+| a [trip](#o-inplugin)'s held place | `the plug-in's window held for the trip is not in front` |
+| none of the above (a binding with no context left) | `nothing it is bound to matches` |
+| the arbiter, while the overlay still matched | `another claim on slot '<slot>' was chosen: <module> at specificity <n>` (the claim [`host.arbiter.participants`](arbiter.md#host-arbiter-participants) names active, which the host marks before it calls the old one off) · with no claim active: `the arbiter called it off on slot '<slot>' while it still matched` |
+
+An overlay with two bindings — sforzando's standalone window and its embedded binding — says both reasons, the first binding's first, joined by `; `. A reason is made of what the test had in hand (the title, the focused element and its place), kept as values and put into words only for this line, and an evaluation that matches makes none. Nothing is asked of the host for a reason, but for the arbiter's: that one calls [`host.arbiter.participants`](arbiter.md#host-arbiter-participants) once, when the line is written.
+
+### Windows
+
+An embedded binding's reasons include the DAW's chrome classes: `the keyboard is on the DAW's own control [<class>]` (REAPER's FX list, `SysListView32`). The panel's reasons below do not occur, since no daw-hosts entry gives a panel on Windows.
+
+### macOS
+
+An embedded binding on the DAW's plug-in panel ([`attachEmbedded`](#o-attachembedded-macos)) says where the keyboard was found: `the keyboard is on [<AXRole/AXSubrole/AXIdentifier>] at <x>,<y>, outside the plug-in's panel (the DAW's own controls)` (the focused element's centre, in screen points) · `the focused element [<class>] has no rectangle` · `the focus chain ends in another window than '<title>'` · `where the keyboard is in '<title>' cannot be read (an empty focus chain), and no stay is in progress there` · `where the keyboard is in '<title>' cannot be read (an empty focus chain), and the DAW's entry gives this binding no plug-in panel there` · `where the keyboard is in '<title>' cannot be read (an empty focus chain), and the module's control function has found no control with the keyboard in it in this stay` · `the DAW's entry gives no plug-in panel in '<title>'`. And what `identify` said of the panel: `identify says the panel shows another plug-in` · `identify could not tell yet (<n> of 8)` · `identify could not tell 8 times: no for this stay` · `identify is not asked inside a scan of the overlay's hooks` · `identify raised`.
 
 ## O.layer {#o-layer}
 
@@ -684,13 +722,22 @@ onStep = function(dir, o)
 end,
 ```
 
-## O.doubleClick(x, y) {#o-doubleclick}
+## O.doubleClick(x, y, opts?, cb?) {#o-doubleclick}
 
-Two clicks at the same point, far enough apart in time to **be** a double-click. A module-level function rather than a method — it touches no overlay state.
+**Signature:** `O.doubleClick(x: number, y: number, opts: { button: ("left" | "right" | "middle")? }?, cb: (() -> ())?) -> ()`
+
+Two clicks at the same point, far enough apart in time to **be** a double-click. A module-level function rather than a method — it touches no overlay state, and checks nothing about the point: place and check it first, as any click of a module's own (`O:toScreen`, [`host.window.ownsPoint`](window.md#host-window-ownspoint)).
 
 Worth having in one place because the same fact is needed from both sides. A plug-in that resets a control to its default on a double-click is offering a genuinely useful gesture — one keystroke instead of twenty steps — and reaching it means sending two clicks close enough together. That same fact is a hazard everywhere else, which [`O:afterIdle`](#o-afteridle) exists to avoid.
 
 The gap is ninety milliseconds, and the number that matters is that it is **not zero**. Two clicks sent back to back go out in the same instant, and an application deciding whether it has seen a double-click is looking at the interval between two presses — an interval of zero reads as easily as one press with a stutter as it does as two. Ninety is plainly two, and comfortably inside any double-click time a system uses.
+
+- `opts.button` — the button **both** clicks are made with: `"left"` (the default, sent as a plain click, exactly as before the option existed), `"right"` or `"middle"`. VPS Avenger resets Pan and Random Pitch with a double-click of the right button.
+- `cb` — called once the second click has gone out, as a handler of its own (the timer's), where a read may wait: the place to start watching for what the double-click changed, rather than a guess at when it is over. Without a timer the two clicks go out at once, and `cb` runs at once after them, inside the call.
+
+**Raises**, at the call and before anything is clicked: an `opts` that is not a table or `nil` (`O.doubleClick: opts must be a table { button = … } or nil, got string`), a `button` it does not know (`O.doubleClick: opts.button must be "left", "right" or "middle", got x`), and a `cb` that is neither a function nor `nil` (`O.doubleClick: the callback (fourth argument) must be a function or nil, got number`).
+
+**Cost.** Two [`host.input.click`](input.md#host-input-click) calls and one [`host.timer.after`](timer.md#host-timer-after); nothing is read.
 
 ```luau
 -- ON:EAR's Tone and Width both reset to their default on a double-click, which is one
@@ -701,19 +748,39 @@ onActivate = function()
   local x, y = screenPoint(widthHandleX(widthNow()), 869)
   if x then O.doubleClick(x, y) end
 end,
+
+-- A pan knob that resets on a double-click of the right button, and the knob read once the
+-- second click is out: `before` is a snapshot the module took before the first click, so the
+-- change wait compares with the knob as it was.
+O.doubleClick(x, y, { button = "right" }, function()
+  host.screen.snapshot({ region = knobBox, change = { from = before, timeout = 2000 } }, function(snap)
+    if snap then sayPan(readPan(snap)) snap:release() end
+  end)
+end)
 ```
+
+### Windows
+
+Each click moves the pointer to the point and sends a press and a release of the button (`SetCursorPos` and `SendInput`, as [`host.input.click`](input.md#host-input-click) makes any click); Windows counts the two as a double-click when they come within its double-click time and rectangle, as from a mouse.
+
+### macOS
+
+Each click carries a click state of 1, so AppKit's own controls see two single clicks rather than a double-click. A JUCE plug-in counts the clicks itself — two presses close in time and place — and takes the pair for a double-click; that is what VPS Avenger's resets rely on, not measured against an Avenger yet.
 
 ## O\:watch(spec) {#o-watch}
 
-Waits for something to **change**, rather than for a length of time. `spec: { read: (overlay) -> any, was: any?, done: ((now: any, was: any) -> boolean)?, every: number?, within: number?, onDone: ((now, was) -> ())?, onGiveUp: ((now, was) -> ())? }`.
+Waits for something to **change**, rather than for a length of time. `spec: { read: (overlay) -> (any, any?), was: any?, done: ((now: any, was: any, n: number) -> boolean)?, every: number?, within: number?, onDone: ((now, was, n) -> ())?, onGiveUp: ((now, was, n) -> ())? }`.
 
 Almost every `host.timer.after` in a module is a guess about how long an application takes, and a guess is wrong in both directions. Too short and the value read back is the one from *before* the action — a real value announced with confidence for the wrong moment, which is how ON:EAR's speaker grid came to name the previously loaded speaker each time a tile was pressed. Too long and everything feels slow.
 
-- `read` — what to look at. **`nil` means "cannot read right now", which is not the same as "unchanged" and never counts as done.** Treating those as the same thing is the specific bug this replaces.
-- `was` — the reading from before the action. Omit it and `read` is called once to get it, which is only correct if nothing has happened yet.
-- `done(now, was)` — defaults to "it changed".
+- `read` — what to look at. **`nil` means "cannot read right now", which is not the same as "unchanged" and never counts as done.** Treating those as the same thing is the specific bug this replaces. An optional second value names the **reading** the value came from — anything compared with `==`, typically a number the read's callback counts up — for a `read` that hands back the last answer of a read with a callback, which several looks can share: a look that names the same reading as the last one read is no new reading, however many looks that read `nil` came in between. Without it every look is a reading, which is right for a read that waits (a pixel, a text read without a callback).
+- `was` — the reading from before the action. Omit it and `read` is called once to get it, which is only correct if nothing has happened yet; a reading it names is then the one the first look is compared with.
+- `done(now, was, n)` — defaults to "it changed". Asked once per **new** reading that is not `nil`, with `n`, how many readings in a row have read `now`, this one included: 1 the first time. A look that reads `nil` neither counts nor breaks the run; a reading of another value starts it again at 1. So `done` can wait for a value read twice — a plug-in that draws something else on its way to the new value (VPS Avenger's loading display before the preset's name) shows it once, and the name again and again.
 - `every` — how often to look, default 100 ms. Each look costs whatever `read` costs, and a screen pixel is a compositor frame, so this is not free.
 - `within` — give up after this long and call `onGiveUp` with the last reading. Not an error: a radio button that was already chosen is *meant* not to change.
+- `onDone(now, was, n)` and `onGiveUp(now, was, n)` get the count as `done` does; `onGiveUp`'s `n` is 0 when the last look read `nil`.
+
+Each end writes one line: `[watch] <label>: changed after <ms> ms — <was> -> <now>` or `… gave up after …`, with ` (<n> readings alike)` after it when `n` is more than 1.
 
 Bound to the overlay. It stops the moment the overlay is no longer active or the window it was watching is no longer in front — a callback arriving after the world has moved is the mistake that pressing the key again cannot undo. It ends **unreported** then: neither `onDone` nor `onGiveUp` is called. So a watch from before a [page](#o-addpage) came to the front ends with nothing said; a [trip](#o-inplugin)'s act takes its own watches, and one whose overlay leaves — a sibling box taking the slot — ends unreported too, while the act must still call `trip:done`.
 
@@ -724,6 +791,35 @@ self:watch({
   within = 600,
   onDone = say,
   onGiveUp = say,   -- it did not move, and that is worth saying too
+})
+```
+
+A name read with a callback, one read out at a time: the watch looks every 100 ms, a read answers in 130 to 200 on a Mac, so the reading's number tells the watch which looks share an answer. The name counts once two readings agree, or at once when it is a name the module knows.
+
+```luau
+-- VPS Avenger, after ◀ or ▶ (modules/vps-avenger/src/main.luau, shortened).
+local last, seq, reading = nil, 0, false
+local function nameNow(o)
+  if not reading then
+    reading = true
+    host.ocr.recognize(o:toScreenRect(NAME), { key = "name" }, function(r)
+      reading = false
+      if r.status == "text" then last, seq = r.text, seq + 1 end
+    end)
+  end
+  if last then return last, seq end   -- the value, and the reading it came from
+end
+
+o:watch({
+  read = nameNow,
+  was = before,
+  done = function(now, was, n) return now ~= was and (n >= 2 or catalog[now]) end,
+  within = 2000,
+  onDone = function(now) host.speech.output(now, { interrupt = true }) end,
+  onGiveUp = function(now, was, n)
+    if now ~= was and n < 2 and not catalog[now] then now = nil end   -- read once: not a name
+    host.speech.output(now or "the preset name cannot be read now", { interrupt = true })
+  end,
 })
 ```
 
@@ -1027,7 +1123,7 @@ The tab keys are the ones written: `Ctrl+Tab` and `Ctrl+Shift+Tab` cycle the tab
 
 Binds the overlay as an **embedded** context: active while keyboard focus is inside a plug-in hosted in a DAW. Coordinates are relative to the plug-in's control — its own child window on Windows, the DAW's plug-in panel on a Mac (below) — so the same regions work standalone and embedded, and in every DAW.
 
-`spec: { hosts: {Entry}?, host: Entry?, control: string | { windows: Control?, macos: Control?, linux: Control? } | ((activeWindow, hostPanel) -> control?)?, identify: ((control) -> boolean?)?, cacheIdentity: boolean?, present: ((control) -> boolean)? }` where `Control` is `string | ((activeWindow, hostPanel) -> control?) | false`.
+`spec: { hosts: {Entry}?, host: Entry?, control: string | { windows: Control?, macos: Control?, linux: Control? } | ((activeWindow, hostPanel) -> control?)?, identify: ((control, again: () -> ()) -> boolean?)?, cacheIdentity: boolean?, present: ((control) -> boolean)? }` where `Control` is `string | ((activeWindow, hostPanel) -> control?) | false`.
 
 `hosts` is the list of DAW entries the plug-in can be embedded in (falls back to `{ spec.host }`): window matchers carrying what each DAW knows about its plug-in windows. A plug-in module passes `daw.all` from `com.platform.daw-hosts` and names no DAW itself — see [daw-hosts](../daw-hosts.md) for the entry format and for adding a DAW. The first entry whose matcher takes the window in front is the one used; its `chrome` classes and its `pluginOrigin` apply.
 
@@ -1041,7 +1137,7 @@ Binds the overlay as an **embedded** context: active while keyboard focus is ins
 
 `identify(control)` is an optional confirmation callback (UIA / OCR / image search) — needed because a class pattern often matches any plug-in (the `Plugin<pointer>` class that several vendors' plug-ins share) and a panel matches every one. `true` matches; any other value except `nil` — `false` included — does not, and is kept as the verdict. `nil` means "cannot tell yet" (UIA not ready the instant a plug-in appears) and is not kept: the control does not match now and `identify` is called again at the next recheck — every focus event, and every `pollMatch` tick — up to 8 times in a row; the eighth `nil` in a row is kept as "no", as `false` would be. Each call runs on the event loop and costs whatever `identify` does (a UIA search of an Electron window was measured at 0.65–0.88 s), so an `identify` that means "no" returns `false`, not nothing. A kept verdict's `identify` runs in the handler of the event that resolves the origin, where it may wait for a read — unless the arbiter's call is the first to resolve it, bringing an overlay on a `slot` to the front after another claimant left: that is a plain call, where it cannot; one reached inside a scan of the overlay's hooks is not asked there, and is asked on the module's next turn ([Where a hook runs](#where-a-hook-runs)). One that raises is no verdict: "cannot tell yet", asked again at the next recheck and not counted towards the 8, logged once per control as `attachEmbedded: [<class>] id=<id>, identify raised: <message> — taken as could not tell yet, and not counted — '<overlay>'`.
 
-An `identify` that reads the screen **with a callback** — [`host.ocr.recognize`](ocr.md#host-ocr-recognize), as sforzando's does on a panel (below) — answers `nil` until its answer lands and then calls [`host.window.recheck`](window.md#host-window-recheck); `false` would be kept. Its answer has to land within those 8 evaluations: every recheck in between counts one, so under a `pollMatch` of 500 ms that is about four seconds of rechecks and nothing else happening, and a read that lands later finds "no" kept already — per control on Windows, for the rest of the stay on a Mac. A read that saw nothing at all (`"blank"`, `"none"`, `"failed"`) is no answer: leave the verdict `nil` so the next evaluation reads again, and keep `false` for text that is not yours. An async read inside a `control` **function** instead — Kontakt's — is not counted by the runtime at all: the function returns `nil` until its read lands, and the function bounds its own retries.
+**Asking again.** A kept verdict's `identify` is handed a second argument, `again`: a function that asks every overlay of this module bound to this `spec` table to evaluate once more, on the module's next turn (`host.timer.after(0)`, about 15 ms) — once however often it is called in a turn, and the same function every time. An `identify` that reads the screen **with a callback** — [`host.ocr.recognize`](ocr.md#host-ocr-recognize), as sforzando's does on a panel (below) — answers `nil` until its answer lands and calls `again()` from the callback; `false` would be kept. The evaluation that follows asks `identify` once more, and it answers from what its read found. That is the way to be picked up as soon as the answer is in: otherwise the next evaluation is whatever window or focus event comes next, and on a Mac, with the keyboard in a view that publishes nothing, there may be none. [`host.window.recheck`](window.md#host-window-recheck) did this before `again` existed (0.7), as a round of every module's overlays; it works as before, and is for a change a module made on screen itself. Each `nil` still counts towards the 8, so an `identify` that calls `again` after every read that saw nothing is bounded too. `again` is not handed to an `identify` asked at every evaluation (below), which answers at once anyway; one written for both ignores a missing `again`. Called after the keyboard has left, it brings nothing up: the evaluation finds what is in front then. Its answer has to land within those 8 evaluations: every recheck in between counts one, so under a `pollMatch` of 500 ms that is about four seconds of rechecks and nothing else happening, and a read that lands later finds "no" kept already — per control on Windows, for the rest of the stay on a Mac. A read that saw nothing at all (`"blank"`, `"none"`, `"failed"`) is no answer: leave the verdict `nil` so the next evaluation reads again, and keep `false` for text that is not yours. An async read inside a `control` **function** instead — Kontakt's — is not counted by the runtime at all: the function returns `nil` until its read lands, and the function bounds its own retries.
 
 How long a verdict is kept is per platform — per control on Windows, per stay in the panel on a Mac — see the sections below. `cacheIdentity = false` keeps nothing: `identify` is called at every evaluation, for a verdict that depends on more than the control (Kontakt's: "is a Komplete Kontrol wrapped around it?"), so such an `identify` has to be cheap — and it must answer at once: it runs in the runtime's own coroutine, as a `when` does ([Where a hook runs](#where-a-hook-runs)), and so does the `identify` of a `control` function's control where the DAW gives no panel, which is asked at every evaluation too. One that raises is "no" for that evaluation, logged once per control: `… identify raised: <message> — taken as no this time — '<overlay>'`. `present(control)`, when given, is asked at every evaluation as well and never kept — for a condition that changes while the same control stays focused — in the runtime's own coroutine, so it must answer at once too. One that raises does not match, and is logged once per binding as `attachEmbedded: '<overlay>': its binding's present raised: <message> — taken as not matching`; the evaluation that asked it goes on to its end, so an overlay in front leaves it.
 
@@ -1064,7 +1160,7 @@ local pending, seen = nil, {}   -- the read out, and its answer: one window is i
 ov:attachEmbedded({
   hosts = daw.all,
   control = { windows = "^Plugin%x+$" },   -- no macos entry: the panel there
-  identify = function(ctrl)
+  identify = function(ctrl, again)
     if host.element.find(ctrl.id, "PlogueXMLGUI", host.element.type.Pane) then return true end
     local x, y = math.floor(ctrl.client.x), math.floor(ctrl.client.y)   -- a panel's may carry a fraction
     local region = { x + WORDMARK[1], y + WORDMARK[2], x + WORDMARK[3], y + WORDMARK[4] }
@@ -1080,7 +1176,7 @@ ov:attachEmbedded({
         if pending == key then pending = nil end
         if r.status ~= "text" then return end       -- nothing read: asked again next time
         seen = { [key] = string.find(string.lower(r.text), "sforzando", 1, true) ~= nil }
-        host.window.recheck()
+        again()                                    -- look again now that the answer is in
       end)
     end
     return nil                                     -- not false: false is kept for the stay
@@ -1105,11 +1201,11 @@ A plug-in inside a DAW publishes no control of its own, as far as anything has b
 
 The window's `id`, so element queries still ask the right window; `bounds` and `client` both the panel. Every authored coordinate, `rawOrigin`, `fromRight` and `O.contentSize` behave against it as against a child control on Windows. `pluginOrigin` is called once per window and client size per VM — it may walk the window's accessibility tree — and a divider dragged inside a window that keeps its size is followed only after the window is resized, or closed and opened again as a new window (whether a DAW reuses the window it closed is not measured). A `pluginOrigin` that raises or answers anything but two numbers — `nil` included, which is how an origin says it could not look this time — gives that window no panel, with one line per window and size (`[overlay] the DAW entry's pluginOrigin for '…' (id=…, <w>x<h>) … — no plug-in panel there`), and is asked again at the next evaluation. An origin that leaves the panel no width or height (past the window's right or bottom edge) gives no panel either, silently.
 
-**The gate is geometric.** The `chrome` classes are Win32 vocabulary and match nothing here, so the runtime asks where the focused element is. The focus chain has to **end in the window in front**: the window in front and the focused element are two separate questions to the system, and a chain that ends in another window — another application's, read in between — says nothing about this one. On such a chain, or an **empty** one (the backend saying it could not read where the keyboard is, as while the application is not answering), the keyboard is not inside, and the origin is not asked for either. Otherwise the window itself as the focused element — all a view that publishes nothing leaves on the chain — counts as inside, and so does an element whose centre lies inside the panel; an element whose centre lies outside the panel is the DAW's own chrome and the overlay stays out, and so is an element that has no rectangle (the host gives every element one; a control a module made may not). The accessibility focus on a menu item outside the panel takes the overlay out as any element outside it does.
+**The gate is geometric.** The `chrome` classes are Win32 vocabulary and match nothing here, so the runtime asks where the focused element is. The focus chain has to **end in the window in front**: the window in front and the focused element are two separate questions to the system, and a chain that ends in another window — another application's, read in between — says nothing about this one. On such a chain the keyboard is not inside, and the origin is not asked for either. An **empty** chain — the backend saying it could not read where the keyboard is — is not inside either, and begins nothing, but it keeps a stay in its window (below): the system answers so while a view that publishes nothing has the keyboard, and Logic does after every click into a plug-in's own drawn view. Otherwise the window itself as the focused element — all a view that publishes nothing leaves on the chain — counts as inside, and so does an element whose centre lies inside the panel; an element whose centre lies outside the panel is the DAW's own chrome and the overlay stays out, and so is an element that has no rectangle (the host gives every element one; a control a module made may not). The accessibility focus on a menu item outside the panel takes the overlay out as any element outside it does.
 
-**A verdict is kept for a stay.** One REAPER FX chain window shows whichever FX is selected in its list, in the same window — possibly at the same rectangle, since REAPER sizes the window to the plug-in — so a panel's verdict cannot be kept per window. Whether Logic's plug-in window can be switched to another insert from its header is not measured yet. The rule assumes that what changes the plug-in shown is the DAW's own chrome, and that the keyboard has to be there to use it. So a verdict is kept for a **stay**: the keyboard inside one window's panel, from the evaluation that first finds it there until anything else is observed — the keyboard on the DAW's chrome, another window in front, an empty chain or one that is another window's, or the window's title or client size changed. The next time the keyboard is inside, `identify` is asked again, once. It is observed at every evaluation, and by a watcher of the runtime's own on every focus and activation event in each VM that has a binding that can take a panel, so an overlay outranked on its slot — which skips its own rechecks — does not bring back a verdict from before the visit. Moving the window keeps the stay. The verdict is kept for the stay **and** the control's place in the window, so a control a function moves within one stay is asked about again. The eighth `nil` in a row is kept as "no" for the rest of the stay.
+**A verdict is kept for a stay.** One REAPER FX chain window shows whichever FX is selected in its list, in the same window — possibly at the same rectangle, since REAPER sizes the window to the plug-in — so a panel's verdict cannot be kept per window. Whether Logic's plug-in window can be switched to another insert from its header is not measured yet. The rule assumes that what changes the plug-in shown is the DAW's own chrome, and that the keyboard has to be there to use it. So a verdict is kept for a **stay**: the keyboard inside one window's panel, from the evaluation that first finds it there until anything else is observed — the keyboard on the DAW's chrome, another window in front, a chain that is another window's or an element without a rectangle, or the window's title or client size changed. The next time the keyboard is inside, `identify` is asked again, once. **An empty chain with the same window in front keeps the stay:** it observes nowhere else, and the panel the stay began with stands for the DAW's — the origin is not asked, `identify` answers from the verdict kept for the stay (or is asked, once, when it could not tell yet), and a `control` function is not asked: the control it last returned in the stay with the keyboard inside is the answer, moved with the window, with no keyboard test — and where it returned none in the stay, or one the keyboard was outside, the overlay is not up there and the empty chain does not bring it up. On a Mac an empty chain is also the host's busy quarantine, in which a function that looks for its plug-in's elements would find none, and a function that counts its misses (Kontakt's) would count those against the plug-in. A function whose own read with a callback lands while the chain is empty is asked again at the first evaluation whose chain is readable. The first evaluation that does so in a stay says it once: `[overlay] '<label>': where the keyboard is in '<title>' cannot be read (an empty focus chain) — the stay goes on there`. An empty chain never begins a stay, so an overlay is not brought up on a reading nobody took: after a visit to the DAW's chrome, in another window, or in this one resized or retitled meanwhile, the overlay comes up at the first evaluation whose chain is readable. It is observed at every evaluation, and by a watcher of the runtime's own on every focus and activation event in each VM that has a binding that can take a panel, so an overlay outranked on its slot — which skips its own rechecks — does not bring back a verdict from before the visit. Moving the window keeps the stay. The verdict is kept for the stay **and** the control's place in the window, so a control a function moves within one stay is asked about again. The eighth `nil` in a row is kept as "no" for the rest of the stay.
 
-What the stay cannot see: a plug-in changed with the keyboard still inside it keeps the old verdict until the keyboard next leaves; and a visit to the DAW's chrome that no evaluation *samples* is not seen either. A focus change on a Mac only marks the focus as changed, and the round that follows reads the chain as it is by then, while moving into a view that publishes nothing raises no notification at all — so Shift+Tab to REAPER's FX list, Down, Tab back, all done before a busy event loop gets to its queue, reads as one round with the keyboard inside, and the old verdict goes on over the newly selected plug-in. `host.window.recheck`, and so the focus key's "already inside" press, is one more evaluation: it undoes an `identify` that could not tell yet, not a verdict the stay keeps.
+What the stay cannot see: a plug-in changed with the keyboard still inside it keeps the old verdict until the keyboard next leaves; and a visit to the DAW's chrome that no evaluation *samples* is not seen either. A focus change on a Mac only marks the focus as changed, and the round that follows reads the chain as it is by then, while moving into a view that publishes nothing raises no notification at all — so Shift+Tab to REAPER's FX list, Down, Tab back, all done before a busy event loop gets to its queue, reads as one round with the keyboard inside, and the old verdict goes on over the newly selected plug-in. `host.window.recheck`, and so the focus key's "already inside" press, is one more evaluation: it undoes an `identify` that could not tell yet, not a verdict the stay keeps. And a visit to the DAW's chrome made while the DAW is in the host's busy quarantine (the five seconds after it did not answer an accessibility question: [`host.window.focusChain`](window.md#host-window-focuschain)) reads as an empty chain too, which keeps the stay: the overlay then holds its keys over the DAW's own controls until the next focus round that can read the chain. Before the empty chain kept the stay (0.7), every click into VPS Avenger's view in Logic ended it — the first Mac test of Avenger's page, 2026-10-14 — and took the overlay down with a choice of its menu still waiting.
 
 The verdict is logged when it differs from the one logged last for that window and place, naming the overlay that asked: `attachEmbedded: [host-panel] panel of '<title>' id=<id> at <dx>,<dy> <w>x<h> from its content origin, identify=<verdict> — '<label>'`. One line per VM, when the first binding with no control of its own for the platform is bound, says that it takes the panel: `[overlay] on macos an embedded binding with no control of its own takes the DAW's plug-in panel … '<label>' is the first here`.
 
@@ -1145,7 +1241,7 @@ control = {
 
 ## O.menuTests — seeing a plug-in's menus {#o-menutests}
 
-**Signature:** `menus = { test, … }` in the options of `O:attach`, `O:attachEmbedded`, `O.window` and `O.embedded`, where each `test` is `(o: Overlay, answer: (seen: any) -> ()) -> ()` or `{ name: string?, cheap: boolean?, test: (o, answer) -> (), pressed: ((o) -> ())?, forget: ((o) -> ())? }` · the building blocks `O.menuTests.nativePopup`, `O.menuTests.newWindow`, `O.menuTests.accessibility`, `O.menuTests.accessibilityAfterPress`
+**Signature:** `menus = { test, … }` in the options of `O:attach`, `O:attachEmbedded`, `O.window` and `O.embedded`, where each `test` is `(o: Overlay, answer: (seen: any) -> ()) -> ()` or `{ name: string?, cheap: boolean?, test: (o, answer) -> (), before: ((o, press: Press) -> any)?, pressed: ((o, press: Press, looked: any) -> ())?, forget: ((o) -> ())? }` and `Press = { label: string, x: number?, y: number?, button: string? }` · the building blocks `O.menuTests.nativePopup`, `O.menuTests.newWindow`, `O.menuTests.accessibility`, `O.menuTests.accessibilityAfterPress`, and `O.menuTests.drawn(spec: { name: string?, region: (o, press: Press) -> ({ x1, y1, x2, y2 }?, { w, h }?), minW: number?, minH: number? }) -> test`
 
 The tests that tell an overlay its plug-in has a menu open, listed in its `menus` option; while a menu is open, the keys belong to it. The overlay gives up its per-control hotkeys — a registered hotkey outranks the application, so `Alt+M` would otherwise re-fire the control under the menu — and tells the key hook through [`host.keys.menuOpen`](keys.md#host-keys-menuopen) to let the navigation keys it captures (`Tab`, `Return`, `Space` and whatever the focused control holds) through to the application. **How a menu is seen is the module's decision**: the module names the tests, and the runtime runs them. ReaHotkey does the same with one fixed check, `WinExist("ahk_class #32768")`; a plug-in that paints its own menu needs a check of its own, and only its module knows which.
 
@@ -1153,7 +1249,8 @@ A test answers one question — *is a menu open over this overlay's plug-in righ
 
 - `name` — what the log calls it. Default `test <n>`.
 - `cheap = true` — may run on every tick even when nothing was pressed (see below). Default `false`.
-- `pressed(o)` — called when a control with `opensMenu` is activated, before it acts: for a test that compares against that moment.
+- `before(o, press)` — called at a press **before it counts**, in the press's handler, where a read may wait ([Where a hook runs](#where-a-hook-runs)): for a test that needs a picture of the moment before the click (`drawn`). What it returns is handed to `pressed` as its third argument. Since a read waited, the press is checked afterwards as after a calibrating run's menu shot: an overlay that is no longer where the press was clicks nothing (`"inactive"`), and an opener's point that is no longer its own is refused (`"refused"`) — see [`O:chooseMenuItem`](#o-choosemenuitem), step 2. A press made where a read cannot wait — in an `onDone`, which runs in the menu tick's coroutine — gets a `before` whose read raises there; `drawn` catches that and arms nothing.
+- `pressed(o, press, looked)` — called when a control with `opensMenu` is activated, before it acts: for a test that compares against that moment. `press` is `{ label, x?, y?, button? }` — the control's or the choice's label, and for an opener with a point (a hotspot, [`O:chooseMenuItem`](#o-choosemenuitem)) that point on screen and its button — and `looked` what the test's own `before` returned.
 - `forget(o)` — called when the user presses one of the overlay's own keys (a navigation key or a hotkey) while no menu counts as open — so the last press opened nothing that took the keys; while an item waits for its menu ([`O:chooseMenuItem`](#o-choosemenuitem)), once the key has run, and not for a second press of the same control — when the overlay leaves the front, and when the plug-in has the keyboard again after the overlay held its place over a menu that was a window in front (see below): a comparison against that press ends there.
 
 `opensMenu = true` on a control ([`addHotspotButton`](#o-addhotspotbutton), [`addCustomButton`](#o-addcustombutton), [`addOCRButton`](#o-addocrbutton), `addGraphicalButton`) says that activating it puts a menu on screen. It makes the tests run on every tick for a while, calls their `pressed`, and in a calibrating run takes the [menu shots](#o-calibrating). It never counts a menu as open by itself.
@@ -1194,8 +1291,21 @@ The building blocks are tests like any other, to be listed where they see a plug
 | `O.menuTests.newWindow` | A window of the plug-in's process that was not there when a control with `opensMenu` was activated: a popup menu drawn as a window of its own. The process is settled at that press and kept. It compares only after such a press, and stops when the windows that appeared have all gone, at `forget`, and at the next press, which starts a new comparison. While it compares, **any** new window of that process counts — a dialog as well as a menu, whether it takes the front or not; one that takes the front keeps the overlay holding its place, with no keys, until it is gone (above). A menu no control of the overlay opened is not seen. It answers with the menu: `{ kind = "window", id, window, layer, class, x, y, w, h }` of the **largest** window that appeared (a toolkit can draw a popup's shadow as windows of their own, thin strips round it), the first the window list names of two the same size; `id` as [`windowsOf`](window.md#host-window-windowsof) lists it — which [`host.window.ownsPoint`](window.md#host-window-ownspoint) takes with `listed = true` — and `window` the same window as a `host.window` id where there is one (see the platform sections). | One [`host.window.windowsOf`](window.md#host-window-windowsof) of one process per tick while it compares, nothing otherwise. | yes |
 | `O.menuTests.accessibility` | An element of the Menu type anywhere in the plug-in's accessibility tree, [`host.element.find(origin, "", host.element.type.Menu)`](element.md#host-element-find), asked with a callback: the test answers when the tree has, on a later turn. An element that stays in the tree while nothing is drawn counts as a menu for as long as it is there. A walk the plug-in did not answer ([not known](element.md#asking-without-waiting)) is answered with the test's last answer: no miss, and no menu that was not seen. | A walk of the plug-in's whole tree, measured at 50–194 ms — on Windows off the event loop, on the host's accessibility thread. Answered once per [epoch](timer.md#host-epoch), which a tick does not turn over, so a tick can get the previous tick's answer. | no |
 | `O.menuTests.accessibilityAfterPress` | What `accessibility` sees, asked only from the activation of a control with `opensMenu` until that press is done with: the menu it opened was seen and has closed (answered no twice in a row; a walk that was not answered counts as neither), one of the overlay's own keys arrived with no menu open, the overlay left the front, or the plug-in has the keyboard again after the overlay held its place over a menu that was a window in front. For a plug-in whose tree can hold a Menu element while nothing is open: such an element keeps the overlay out only until the user leaves the plug-in and comes back. A menu no control of the overlay opened is not seen. | The same walk from a press until it is done with, nothing otherwise. | no |
+| `O.menuTests.drawn{ region }` | A filled area of the rectangle `region` names for the press, changed since the press and read the same twice in a row: a popup painted inside the plug-in (below). Answers `{ x, y, w, h }` with no `kind`. A menu no control of the overlay opened is not seen. | One capture at the press, waited for; then one profile with a callback a tick while it compares; nothing otherwise. | no |
 
-A menu the plug-in paints inside its own window, with no element for it, is seen by none of them — the window list does not change and nothing is announced. That is what a module's own test is for: take the menu shots in a calibrating run, then test a pixel or an image that only an open menu has.
+A menu the plug-in paints inside its own window, with no element for it, is seen by none of the first four — the window list does not change and nothing is announced. `drawn` sees it by its pixels, with no template, where the module says it is drawn; a module's own test can instead test a pixel or an image that only an open menu has, read off the menu shots of a calibrating run.
+
+**`O.menuTests.drawn{ region, … }`** makes a test for a popup **painted** inside the plug-in: VPS Avenger's in Logic, which JUCE draws as a child of the plug-in's editor — no window of the process comes, no notification is posted, and the plug-in publishes no element (the first Mac test of its page, 2026-10-14). At each press `region(o, press)` names the rectangle on screen that press's popup is painted in — corners, cut to whole pixels — and may answer, second, the smallest popup it takes there, `{ w, h }` in screen pixels (otherwise `minW` × `minH`, default 12 × 12); no rectangle arms nothing. Its `before` takes the rectangle's row and column [profile](screen.md#host-screen-profile) then, waited for: the picture before the click. On each tick after the press it profiles the rectangle again, **with a callback**, and compares the two in Luau — at most 256 rows and 256 columns, every line up to 256 and an even spread of that many beyond, never the pixels:
+
+- a row or column has **changed** where its luminance mean differs by 6 or more or a channel's mean by 10 or more (its fill), or where only its darkest or lightest pixel does, by 40 or more (its extremes);
+- the change's **span** runs from the first to the last line that changed either way; it is a popup when it is at least the smallest popup and **filled**: half the rows and half the columns inside it, at least, changed their fill. A ring drawn round something — VoiceOver's cursor — changes the extremes of every line it crosses, and the fill of none but its own, and is no popup;
+- it is **seen** when the same span — each edge within 2 pixels — comes twice in a row and 90 % of the lines compared read alike in the two: the answer is `{ x, y, w, h }`, the span on screen, with **no `kind`**, so an item is chosen in it as in a menu drawn inside the plug-in ([`O:chooseMenuItem`](#o-choosemenuitem), step 4). A flash gone before its second reading and an animation that never reads alike are no menu;
+- it is **still there** while both hold, of the lines whose fill changed at the opening: those that no longer read as they did at the sighting are fewer than a popup — under the smallest popup's height in rows, or under its width in columns, each compared line counting for the pixels between it and the next — **and** 70 % of them still read as they did. A row under the pointer, highlighted, passes both: one band of rows, fewer than the smallest popup's height (a menu of only two rows may fail the second). A popup that goes fails one of them: every line it covered changes back, a popup's worth however much else of the span reads as it did — whatever the press changed that outlasts the popup, such as a tab the same right click selected under the rectangle — and, where it differed from what lies under it in fewer lines than that, most of its own lines. While it is there the same rectangle is answered, so a click the menu did not take is clicked again;
+- it is **gone** otherwise: the answer is `false`, and the test compares nothing more until the next press, so the plug-in redrawn under the popup — a new zoom, a new tab — is no new popup.
+
+No timer decides any of it: readings are counted, and the one bound is the 8 seconds the tests are asked on every tick after a press — a `drawn` test that has seen nothing by then stops comparing (`no popup of '<label>' within 8000 ms`). It stops at `forget` and at the next press as well. It is not cheap: asked every tick for 8 seconds after a press and while the menu counts as open; when it is not comparing it answers `false` at once and reads nothing. **Cost:** one capture at the press, waited for — before the click, so a press takes one capture longer to click (about 16.7 ms through the standard path on Windows, 36–91 ms on a Mac); then one capture a tick while it compares, reduced on the image worker, and at most 1024 comparisons of a line's six numbers in Luau (its mean, its three channels' means, its darkest and its lightest pixel): 512 for its change from the press's picture, and 512 more for how alike it reads with the reading before or with the sighting. Its log lines start with `[menu] '<overlay>': drawn:` — `armed on '<label>' in x1,y1-x2,y2 (wxh), a popup at least wxh`, `nothing armed on '<label>' — <why>`, `a change of wxh at x,y at reading n, not alike yet` (or `not filled — no menu`, or `smaller than a popup … — no menu`; the first five of a press), `a popup wxh at x,y, alike at readings n-1 and n`, `the popup wxh at x,y has gone at reading n (c columns and r rows not as they were, a popup at least wxh; a of its l lines as they were)`, `nothing has changed in … after 20 readings of '<label>'` — which says no popup opened — and `a reading of '<label>' could not be taken: <why>` (a failed reading answers what the test said last). It sees what is drawn in the rectangle whoever draws it: a window of another process put over the plug-in there is a popup to it as well, and the item's own check then refuses the click as covered, the host's hit test naming that window's application.
+
+**A choice is followed only by the test that placed its item.** With `newWindow` and `drawn` on one list, both can see one popup — its window, and the area it covers with its shadow — and answer rectangles a little apart: the one that placed the item is the one whose later answers say whether the menu took the click (step 6 of [`O:chooseMenuItem`](#o-choosemenuitem)), and the other's count only towards the menu's word. It is that test itself, not its name: two tests on a list may share one — two `drawn` without a `name` are both called `drawn` — and only the one that placed the item is followed.
 
 ```luau
 -- sforzando: a native popup on Windows, a window of its own on a Mac.
@@ -1210,6 +1320,22 @@ kontakt:attachEmbedded(spec, { menus = { O.menuTests.nativePopup, O.menuTests.ac
 -- once it has closed, the binding's own match decides.
 kk:attachEmbedded(spec, { slot = SLOT,
   menus = { O.menuTests.nativePopup, O.menuTests.accessibility, O.menuTests.newWindow } })
+
+-- VPS Avenger: JUCE popups, windows in one DAW and painted inside the editor in another. `drawn`
+-- looks where each press's popup is painted: below the zoom field for the zoom list, round the
+-- point of a right click for a tab's menu (modules/vps-avenger/src/popups.luau has every one), at
+-- 50 % from Avenger's corner and placed at the zoom read (`factorOf` is the module's own); nil for
+-- a press that opens none of these.
+local function popupRegion(o, press)
+  local k = factorOf(o:origin())
+  if not k then return nil end
+  if press.label == "Zoom" then return o:toScreenRect({ 12, 18, 72, 262 }), { 20 * k, 34.5 * k } end
+  if press.button == "right" and press.x then
+    return { press.x - 120 * k, press.y + k, press.x + 120 * k, press.y + 145 * k }, { 30 * k, 23 * k }
+  end
+  return nil
+end
+avenger:bind(binding, { menus = { O.menuTests.newWindow, O.menuTests.drawn({ region = popupRegion }) } })
 
 -- A module's own test, one pixel: a plug-in whose list, while it is open, has a white border
 -- at content point (412, 140) — the kind of point read off the menu shots. A test must not wait,
@@ -1242,19 +1368,19 @@ ov:attachEmbedded(spec, { menus = { O.menuTests.nativePopup, list, fileMenu } })
 
 ### Windows {#o-menutests-windows}
 
-`nativePopup` is true while the foreground thread is in menu mode — a `#32768` popup menu, a menu bar, a window's system menu. A menu open in another application does not count. `newWindow` compares visible top-level windows of the process, tooltips left out, so a popup the toolkit draws as a tool window of its own counts; its answer's `window` is the popup's HWND, which is what every `host.window` call names, and its `id` the same number, so [`host.window.ownsPoint`](window.md#host-window-ownspoint) can be asked about it either way. `accessibility` and `accessibilityAfterPress` are a UI Automation search of the plug-in control's subtree for any element of the Menu type, with no visibility test: a Qt menu is seen while it is up, and so is any menu a plug-in keeps in its tree while hidden.
+`nativePopup` is true while the foreground thread is in menu mode — a `#32768` popup menu, a menu bar, a window's system menu. A menu open in another application does not count. `newWindow` compares visible top-level windows of the process, tooltips left out, so a popup the toolkit draws as a tool window of its own counts; its answer's `window` is the popup's HWND, which is what every `host.window` call names, and its `id` the same number, so [`host.window.ownsPoint`](window.md#host-window-ownspoint) can be asked about it either way. `accessibility` and `accessibilityAfterPress` are a UI Automation search of the plug-in control's subtree for any element of the Menu type, with no visibility test: a Qt menu is seen while it is up, and so is any menu a plug-in keeps in its tree while hidden. `drawn` reads the screen through the module's [source](screen.md#which-picture-a-read-sees), in device pixels: a JUCE popup that is a top-level window over the plug-in is in its picture too, so with `newWindow` on the same list both see it — `newWindow` on the tick it is listed, `drawn` two readings later — and the choice follows `newWindow`, which placed its item.
 
 Holding its place: a window is "in front" when it is the foreground window. A `#32768` menu and a menu bar's menus do not become it, so an overlay never needs to hold its place for them; a toolkit's popup that takes the foreground does — Komplete Kontrol's in REAPER (2026-09-26). That window is a full-screen one of `reaper.exe`, and after `Escape` Komplete Kontrol most likely only hides it: no foreground event came for about four seconds, which a destroyed window would most likely have caused — not measured. While a hidden window is the foreground window, [`host.window.foreground()`](window.md#host-window-foreground) answers it with `shown = false` — hidden, minimised and cloaked all count as not shown — and `host.window.active()` answers `nil` once the epoch has turned over; until then it can still answer the window it read while that was shown. The window of the press is brought back with `SetForegroundWindow`, whose `true` means Windows accepted the request: the change is made when REAPER's thread gets to it, with a foreground event, and it does not put the keyboard on any particular control. Where the keyboard is afterwards is REAPER's to decide: in the plug-in, the overlay is in front with its keys; on the FX window itself or its FX list, which the [chrome gate](#o-attachembedded) counts as REAPER's own, it is out until the keyboard reaches the plug-in. The process is the window's `app.pid`: a bridged plug-in's popup is a window of the bridge process, so it is held when the window in front at the press belongs to the bridge as well (REAPER's own bridge window), and not when the bridged plug-in is drawn inside the host's FX window — the overlay then leaves the front for it as it always did.
 
 ### macOS {#o-menutests-macos}
 
-`nativePopup` counts the frontmost application's `AXMenuOpened` / `AXMenuClosed` notifications: a menu counts as open from its opening notification until its closing one, however long it stays up, and the count is cleared when another application comes to the front (see [`host.keys.nativeMenuOpen`](keys.md#host-keys-nativemenuopen)). Holding its place asks [`host.window.active()`](window.md#host-window-active) for the window in front, so it applies when a plug-in's popup becomes the application's focused window. A popup that does not become it leaves the overlay's window in front, and holding its place has no part in what happens then: the binding's own match decides — on the DAW's plug-in panel of [`attachEmbedded`](#o-attachembedded-macos), or a function's control, the accessibility focus on a menu item outside the panel takes the overlay out, as any element outside it does. `host.window.active()` answers nil while the frontmost application has no window (the Finder after a click on the desktop): a hold over a menu the tests still see stands through that, and ends once they stop seeing it. The window that gets the keyboard is the frontmost application's focused window, and [`host.window.foreground()`](window.md#host-window-foreground) reports it as shown unless it is minimised, so a focused menu window brings nothing back here. While the application does not answer, `foreground()` is `nil`, and nothing is brought back either: the runtime does not act on a state it could not read, and does not call `host.window.focus` on an application that is not answering. The reading itself is still taken once at each hold that ends with no test seeing the menu: two accessibility reads of the frontmost application, which against one that has just stopped answering can take up to the one-second timeout once, on the main thread. If the window of the press is brought back, `host.window.focus` raises it and sets its focus flag — at once while its application is the active one, otherwise once the workspace announces that application's activation — and `true` never means that the keyboard is in it (see [`host.window.focus`](window.md#host-window-focus)). The panel and the function form of `attachEmbedded` read an empty focus chain as "not in the plug-in", so the overlay is back once the chain names something inside the panel. `newWindow` compares on-screen windows by owning process with no filter at all, so a tooltip or a window at any level counts as well; an `NSMenu` sits at window level 101. Its answer's `id` is the window server's `CGWindowID`, a numbering `host.window` ids are not in, so its `window` is `nil`; what is drawn over the menu is asked by that `id`, with [`host.window.ownsPoint`](window.md#host-window-ownspoint)'s `listed = true`. `accessibility` and `accessibilityAfterPress` are special-cased by the host to "is a menu open in this application", without descending the menu bar. An application the host has found not answering is left alone for 5 seconds, and in that time the answer is no: a menu only these tests see then counts as closed after two ticks, and as open again once the application answers. The one-miss rule does not cover that.
+`nativePopup` counts the frontmost application's `AXMenuOpened` / `AXMenuClosed` notifications: a menu counts as open from its opening notification until its closing one, however long it stays up, and the count is cleared when another application comes to the front (see [`host.keys.nativeMenuOpen`](keys.md#host-keys-nativemenuopen)). Holding its place asks [`host.window.active()`](window.md#host-window-active) for the window in front, so it applies when a plug-in's popup becomes the application's focused window. A popup that does not become it leaves the overlay's window in front, and holding its place has no part in what happens then: the binding's own match decides — on the DAW's plug-in panel of [`attachEmbedded`](#o-attachembedded-macos), or a function's control, the accessibility focus on a menu item outside the panel takes the overlay out, as any element outside it does. `host.window.active()` answers nil while the frontmost application has no window (the Finder after a click on the desktop): a hold over a menu the tests still see stands through that, and ends once they stop seeing it. The window that gets the keyboard is the frontmost application's focused window, and [`host.window.foreground()`](window.md#host-window-foreground) reports it as shown unless it is minimised, so a focused menu window brings nothing back here. While the application does not answer, `foreground()` is `nil`, and nothing is brought back either: the runtime does not act on a state it could not read, and does not call `host.window.focus` on an application that is not answering. The reading itself is still taken once at each hold that ends with no test seeing the menu: two accessibility reads of the frontmost application, which against one that has just stopped answering can take up to the one-second timeout once, on the main thread. If the window of the press is brought back, `host.window.focus` raises it and sets its focus flag — at once while its application is the active one, otherwise once the workspace announces that application's activation — and `true` never means that the keyboard is in it (see [`host.window.focus`](window.md#host-window-focus)). An empty focus chain begins no stay on the panel and the function form of `attachEmbedded`, so after a menu's window that ended the stay the overlay is back once the chain names something inside the panel; with the plug-in's window in front all along, an empty chain keeps the stay and the overlay stays up. `newWindow` compares on-screen windows by owning process with no filter at all, so a tooltip or a window at any level counts as well; an `NSMenu` sits at window level 101. Its answer's `id` is the window server's `CGWindowID`, a numbering `host.window` ids are not in, so its `window` is `nil`; what is drawn over the menu is asked by that `id`, with [`host.window.ownsPoint`](window.md#host-window-ownspoint)'s `listed = true`. `accessibility` and `accessibilityAfterPress` are special-cased by the host to "is a menu open in this application", without descending the menu bar. An application the host has found not answering is left alone for 5 seconds, and in that time the answer is no: a menu only these tests see then counts as closed after two ticks, and as open again once the application answers. The one-miss rule does not cover that. `drawn`'s pictures are in points, the downsampled values of a Retina display, so its thresholds are on averages that hardly move with the scale; without the Screen Recording permission every picture is the wallpaper, which never changes, and its log says `nothing has changed …` at the twentieth reading. VoiceOver's cursor is in its picture — a ring, which is not filled, and no popup.
 
 ## O\:chooseMenuItem(spec) — choosing an item in a plug-in's menu {#o-choosemenuitem}
 
 **Signature:** `O:chooseMenuItem(spec: { label: string?, at: {number, number} | ((overlay) -> {number, number}?), fromRight: boolean?, rawOrigin: boolean?, button: ("left" | "right" | "middle")?, menuItem: {number, number} | ((overlay, menu, factor) -> {number, number} | false | nil), retries: number?, onDone: ((overlay, chosen: boolean, why: string?) -> ())? }) -> boolean` · the control form: `menuItem` on [`addHotspotButton`](#o-addhotspotbutton)
 
-Opens a plug-in's own popup menu and chooses an item in it: clicks the opener at `at`, clicks the item once one of the overlay's [menu tests](#o-menutests) **sees** the menu and says where it is, and counts it as chosen once the menu is seen to have taken it. A JUCE plug-in's menus are popups it draws itself — windows of their own, with no item anybody can press through the accessibility layer; VPS Avenger's MENU, zoom list and redo list are such popups by the avenger_control project's account. The obvious alternative, a hotspot with `points = { opener, item }`, does not work: every click of a sequence asks [`host.window.ownsPoint`](window.md#host-window-ownspoint) of the plug-in's window first, a popup is a window of its own over it, so the item's click is refused as covered; and the `settle` between the two would be a timer deciding that the menu is up by then.
+Opens a plug-in's own popup menu and chooses an item in it: clicks the opener at `at`, clicks the item once one of the overlay's [menu tests](#o-menutests) **sees** the menu and says where it is, and counts it as chosen once the menu is seen to have taken it. A JUCE plug-in's menus are popups it draws itself, with no item anybody can press through the accessibility layer — windows of their own, or painted inside the editor when the plug-in gives them a parent component: VPS Avenger's MENU, zoom list, redo list and right-click menus in Logic, which `newWindow` cannot see and `drawn` can. The obvious alternative, a hotspot with `points = { opener, item }`, does not work: every click of a sequence asks [`host.window.ownsPoint`](window.md#host-window-ownspoint) of the plug-in's window first, a popup is a window of its own over it, so the item's click is refused as covered; and the `settle` between the two would be a timer deciding that the menu is up by then.
 
 The method is for a module's own code — a stepper whose step is a choice from a list, as Avenger's zoom is. A hotspot with `menuItem` does the same as a control: its `at` (with its `button`) is the opener, its `menuItem` the item, its `retries` the retries, and it has no `onDone`.
 
@@ -1263,11 +1389,11 @@ The method is for a module's own code — a stepper whose step is a choice from 
 What happens, in order:
 
 1. **The opener** is placed like a hotspot's `at` — origin, frame, [scale](#o-scale), `fromRight`, `rawOrigin` — and checked like any hotspot's click (inside the origin, nothing else drawn there). One that cannot be placed — an `at` function that answers `nil`, or no factor — is **said**, `"<label> is not available now"`, unlike a hotspot's silent `nil`; one that is refused is said as the check says it. Either way nothing more happens: `onDone(overlay, false, "unplaced" | "refused")`, and the method returns `false`.
-2. **The press.** Only then does it count as the press of a control with `opensMenu`: the tests run on every tick from here, `newWindow` takes the window list it compares against, and in a calibrating run the [menu shots](#o-calibrating) are taken, the first of them waited for before the click: an overlay that is no longer where the press was by then clicks nothing — `onDone(overlay, false, "inactive")`, and the method returns `false` — and the opener is checked again (refused: `"refused"`). An item the overlay was still waiting to choose for **another** control is dropped (logged). The opener is clicked with `button` (left unless given), and the method returns `true`; the item is chosen later.
+2. **The press.** Only then does it count as the press of a control with `opensMenu`: the tests run on every tick from here, `newWindow` takes the window list it compares against, a test's `before` reads what it needs (`drawn`'s picture of where the popup will be), and in a calibrating run the [menu shots](#o-calibrating) are taken; those reads are waited for before the click: an overlay that is no longer where the press was by then clicks nothing — `onDone(overlay, false, "inactive")`, and the method returns `false` — and the opener is checked again (refused: `"refused"`). An item the overlay was still waiting to choose for **another** control is dropped (logged). The opener is clicked with `button` (left unless given), and the method returns `true`; the item is chosen later.
 3. **The menu.** Each answer of a test that sees a menu is looked at, as it arrives, on the tick it arrives or in a test's callback. One that says where the menu is — a table with numbers `x`, `y`, `w`, `h`, as `newWindow` answers — places the item. A table `menuItem` is the item's offset from the menu's top-left corner, a **distance**: scaled at the factor the opener was placed with (the popup is drawn at the zoom it opened at, and a factor read off the plug-in's screen may not be readable while the popup covers it), never framed. A `menuItem` function is called with the overlay, that table and that factor (`nil` in an overlay without a scale), and answers the offset in **screen pixels** — it works from the menu's rectangle, which is in screen pixels, so its answer is not scaled again, as a `dragBy` function's is not; `false` says "this window is not my menu" (a tooltip that appeared first), and the next answer is looked at; `nil` is an item that cannot be placed. An answer that sees a menu without saying where — `nativePopup`, the accessibility tests — places nothing, and is logged once; another test on the list may still say where, and while an item waits every test on the list is asked, a cheap one that sees the menu holding back none.
 4. **The checks.** The item must lie inside the menu's rectangle; if it does not, it is not clicked, the log says where it fell, and the next answer is looked at — a later answer can be the menu itself where this one was something else that appeared. Then what is drawn there: a menu that is a window is asked [`host.window.ownsPoint`](window.md#host-window-ownspoint) about *itself* — by its `host.window` id (`window`, which `newWindow` gives on Windows), or by its `id` in the window list's numbering with `listed = true` (macOS) — and a `false` refuses the click; a menu with no `kind` — a rectangle a module's own test answered, for a menu painted inside the plug-in — gets the check every click of the overlay gets.
 5. **The click**, at once, in that same pass: no wait of any kind stands between the menu being seen and the item being clicked.
-6. **Taken, or clicked again.** A menu does not always take a click that comes right after it opened: JUCE's popup ignores a mouse-up in its first moments (a quarter of a second in its source as it was read for this, not measured against any JUCE a plug-in here ships), and the first tick that lists a new window can come sooner. So the item keeps waiting after its click. An answer to a question asked on a **later** tick that still shows the same menu — the same window, at the same place and size — is a click the menu did not take: the item is checked again and clicked again, at most `retries` more times (default 3; a count of answers, not a time). The menu closing — for the menu tests, two answers in a row that do not see it — an answer that shows another window in its place, or the overlay leaving the front or moving on after the click, is the choice **taken**: `onDone(overlay, true)`. `retries = 0` is for a menu whose item keeps it open (a tick box in a menu), where a second click would be a second choice: chosen at the click, and not followed. The menu then closes the way any menu does for the menu tests, and the keys come back to the overlay with it.
+6. **Taken, or clicked again.** A menu does not always take a click that comes right after it opened: JUCE's popup ignores a mouse-up in its first moments (a quarter of a second in its source as it was read for this, not measured against any JUCE a plug-in here ships), and the first tick that lists a new window can come sooner. So the item keeps waiting after its click. An answer **of the test that placed the item** to a question asked on a **later** tick that still shows the same menu — the same window, at the same place and size — is a click the menu did not take: the item is checked again and clicked again, at most `retries` more times (default 3; a count of answers, not a time). An item clicked on an answer that came from a callback — between two ticks, as `drawn`'s do — counts as clicked on the next tick, so the reading asked right after the click, of a popup the plug-in has not closed yet, never clicks it again. Another test's answers say nothing about the click. The menu closing — for the menu tests, two answers in a row that do not see it — an answer that shows another window in its place, or the overlay leaving the front or moving on after the click, is the choice **taken**: `onDone(overlay, true)`. `retries = 0` is for a menu whose item keeps it open (a tick box in a menu), where a second click would be a second choice: chosen at the click, and not followed. The menu then closes the way any menu does for the menu tests, and the keys come back to the overlay with it.
 
 A second call for the **same** `label` while its item is still waiting for its menu — a double Return, a held arrow on a stepper — clicks nothing: `"… pressed again while its menu is still being waited for — the opener is not clicked again; the first press stands"` in the log, `onDone(overlay, false, "busy")` for the second call, and `false` from it. The first press is not disturbed: one of the overlay's own keys that is such a repeat does not count as the user moving on either.
 
@@ -1327,13 +1453,13 @@ A popup drawn as a top-level window of the plug-in's process (for a plug-in in a
 
 ### macOS
 
-`newWindow` lists windows as the window server numbers them (`CGWindowID`), which is not the numbering of `host.window` ids, so its answer has no `window`, and the item is checked by the menu's `id` with `ownsPoint`'s `listed = true`: the window server's own hit test, with `nil` — no answer, which lets the click go — where it names no window, a window of VoiceOver's own, or one of this application's. The menu's rectangle and the click are both in points. A tooltip under the pointer is a window of the process as well, and nothing filters it: the largest new window is the menu, and an item that falls outside a smaller one that came first waits for the next answer (step 4).
+`newWindow` lists windows as the window server numbers them (`CGWindowID`), which is not the numbering of `host.window` ids, so its answer has no `window`, and the item is checked by the menu's `id` with `ownsPoint`'s `listed = true`: the window server's own hit test, with `nil` — no answer, which lets the click go — where it names no window, a window of VoiceOver's own, or one of this application's. The menu's rectangle and the click are both in points. A tooltip under the pointer is a window of the process as well, and nothing filters it: the largest new window is the menu, and an item that falls outside a smaller one that came first waits for the next answer (step 4). A popup painted inside the plug-in — VPS Avenger's in Logic, where no window comes for it — is `drawn`'s, a rectangle in points with no `kind`, and its item is checked against the plug-in's own window as any click of the overlay is: the plug-in's window answers for every point of it.
 
 ## O\:menuOpen() {#o-menuopen}
 
 **Signature:** `O:menuOpen() -> boolean`
 
-Whether a menu counts as open over the overlay now: one of its [menu tests](#o-menutests)' word is that one is. `false` for an overlay with no menu tests, and while it is not in front. For a module's own code that tidies up after a menu of its own — closing a popup a choice left open by clicking its opener again — which must not open one that has gone. A table lookup.
+Whether a menu counts as open over the overlay now: one of its [menu tests](#o-menutests)' word is that one is. `false` for an overlay with no menu tests, and while it is not in front. For a module's own code that tidies up after a menu of its own — closing a popup a choice left open by clicking its opener again, or with Escape — which must not open one that has gone, nor send a key to the plug-in once it has. A table lookup.
 
 ```luau
 -- VPS Avenger (modules/vps-avenger, shortened): a choice that could not be made leaves the popup
@@ -1563,7 +1689,8 @@ A foreground event of the page that never came is made up for before `"nothing h
 - `trip:done(result)` — the work is over: the back step runs on the module's next turn, so `done` may be called from anywhere — a read's callback, `chooseMenuItem`'s `onDone`, a plain call. A pending wait is dropped. A second call, or one after the trip ended, is logged and ignored.
 - `trip:afterMenu(fn) -> true | (false, why)` — "the menu my next click opens, then `fn`". A press of a control with `opensMenu` on `trip.overlay`, so called **before** the click: its [menu tests](#o-menutests) run on every tick and `newWindow` takes its list. `false, "inactive"` or `"refused"` (a calibrating run's picture) and nothing is to be clicked. `fn(o, trip, true)` runs as a handler once a test of the group has seen a menu, then seen it closed, and the trip is on the plug-in again; `fn(o, trip, false)` when no test saw a menu within `MENU_LOOK_MS` (8 seconds). Once a menu was seen, nothing bounds the wait: the user's time in a menu is theirs.
 - `trip:afterDialog(fn)` — "the dialog that comes next, then the plug-in again, then `fn`". From the call on, a window of the plug-in's application other than its window that comes forward is the dialog — decided on the module's turn after its event, once every overlay of the VM has looked at it — unless it is the window a menu was held over for the trip's last press or a menu still counts open over the group. `fn(o, trip, true)` once the plug-in's window is in front again with the trip arrived; `fn(o, trip, false)` when no dialog came within 8 seconds. Once a dialog was seen, nothing bounds the wait. Each dialog is logged with its pid and title.
-- **One wait at a time.** `afterMenu` and `afterDialog` raise, naming the caller's line, while another wait is pending, while the trip is not acting (before its arrival, during a wait, after `done` or its end) — they are for `act`, the waits' functions and their callbacks — and `afterMenu` on an overlay with no menu tests.
+- [`trip:handOver(spec)`](#trip-handover) — the keyboard handed to the plug-in itself — the user types into its own text field or chooses in its own browser — until the key that ends it, the module's word that it is over, or any end of the trip; since version 0.9 of the runtime.
+- **One wait at a time.** `afterMenu`, `afterDialog` and `handOver` raise, naming the caller's line, while another wait or a hand-over is pending, while the trip is not acting (before its arrival, during a wait, after `done` or its end) — they are for `act`, the waits' functions and their callbacks — and `afterMenu` on an overlay with no menu tests.
 
 **The ends.** The page's window and focus events decide, and `trip:inFront()` decides on the module's own check:
 
@@ -1578,7 +1705,7 @@ A foreground event of the page that never came is made up for before `"nothing h
 | the plug-in's window in front and another module's overlay at least as specific holding the slot — decided on the turn after its event | on the way, or a wait whose condition holds | `"outranked"` |
 | `act`, a wait's `fn` or the prime raised | acting | `"failed"` |
 
-**Not ends:** another window of the plug-in's application on the way (Logic's main window first, REAPER's main window); a sibling overlay of the group taking the slot (a dialog-layer box, quiet, and `trip.overlay` names it); a popup the menu tests see, over which the overlay holds its place with no keys; the dialog a wait is for; any other window of the plug-in's application while acting — the act's next `trip:inFront()` decides. An act whose callbacks never come — a module's bug, a [watch](#o-watch) whose overlay left — is ended by the page key alone: `[page] '<overlay>': trip '<label>' given up at the key after N ms in <stage>`.
+**Not ends:** another window of the plug-in's application on the way (Logic's main window first, REAPER's main window); a sibling overlay of the group taking the slot (a dialog-layer box, quiet, and `trip.overlay` names it); a popup the menu tests see, over which the overlay holds its place with no keys; the dialog a wait is for; any other window of the plug-in's application while acting — the act's next `trip:inFront()` decides. A [hand-over](#trip-handover) ends with the trip on every end above, its keys back at that moment and its `onEnd` told. An act whose callbacks never come — a module's bug, a [watch](#o-watch) whose overlay left — is ended by the page key alone: `[page] '<overlay>': trip '<label>' given up at the key after N ms in <stage>`.
 
 **Gone.** Windows: the plug-in's window is not listed for its process ([`host.window.list`](window.md#host-window-list): closed, or hidden), or — with it in front — the held control is not among its controls (the plug-in unloaded). macOS: only while the plug-in's application is the active one — a DAW may hide its plug-in windows while it is not — the window in front with another title, or another window of its application in front and the plug-in's window not listed; and a focus declined with nothing of the application listed any more (it quit). Checked at the start, at the way back, and at every window event of a trip that names the plug-in's window or its application.
 
@@ -1637,6 +1764,161 @@ The trip asks for the plug-in's **control**, never its FX window: [`host.window.
 ### macOS
 
 The trip asks for the plug-in's window (the panel's id is its window's), and the [stay](#o-attachembedded-macos) is held across it: no `identify` within a trip, nor between trips while the page is up. A window of the DAW's with the plug-in window's title that comes forward under another id is logged, and the trip waits for the held id (`… came forward as id Y, not the held id X — waiting for X`). With `activates = false` (gui.md) whether the plug-in's window raises a foreground event at all is unmeasured; without one, the trip ends by its bound. A sandboxed DAW's open panel may belong to another process, which ends a dialog wait as `"another application"`: the log names the pid.
+
+## trip\:handOver(spec) — handing the keyboard to the plug-in {#trip-handover}
+
+**Signature:** `trip:handOver(spec: { kind: "typing" | "browse" | "keys", keys: { string }?, onKey: ((overlay, trip, key: string, mods) -> boolean?)?, ends: ((overlay, trip, info, answer: (over: boolean) -> ()) -> ())?, onEnd: (overlay, trip, how: string, info) -> () }) -> true | (false, why)`, where `info = { key: string?, passed: { string }, ms: number }`
+
+A wait of a [trip](#o-inplugin) in which the user works in the plug-in **itself**: types a new name into its own text field, chooses in its own preset browser, or presses keys the module answers one by one. The runtime holds only the keys that end it, and while it holds them the plug-in has the rest of the keyboard; nothing is recorded of what the user types. The page stays where the trip left it — behind the plug-in, not hidden — the group stays [away](#o-away) and quiet, and nothing is said. Since version 0.9 of the runtime: a module that calls it depends on `"com.platform.overlay >= 0.9"`.
+
+| kind | What it holds | `keys` | `onKey` | `ends` | Its own end |
+|---|---|---|---|---|---|
+| `"typing"` | the end keys, captured, and the module's [menu flag](keys.md#host-keys-menuopen) set, so they **go through** to the plug-in | the end keys; default `{ "Return", "Escape" }` | not taken | optional | an end key gone through, then `ends` answering true |
+| `"browse"` | the same | default `{ "Return" }` — Escape and every other key are the plug-in's | not taken | optional | the same |
+| `"keys"` | the keys named, captured for `onKey`; no flag | **required**, the keys `onKey` is handed | **required** | not taken | `onKey` answering true |
+
+Called from `act`, a wait's function or one of their callbacks, while the trip is acting, with the plug-in's window in front.
+
+**It raises**, naming the caller's line: a `spec` that is not a table or has a field it does not have; a `kind` that is none of the three; an `onEnd` that is not a function; `keys` that is not a list of 1 to 8 key specs, names a key [`host.keys.normalize`](keys.md#host-keys-normalize) cannot read, or one key twice; `onKey` missing for `"keys"` or given for another kind; `ends` given for `"keys"`, or not a function; and, as `afterMenu` does, a wait or a hand-over of this trip pending — `ends` asking for another one included — or the trip not acting.
+
+**It answers** `true` once the keys are held, or:
+
+| why | when | what a module does |
+|---|---|---|
+| `"not in front"` | [`trip:inFront()`](#o-inplugin) answered false at the call — which has given the trip up already | returns |
+| `"busy"` | a hand-over of another page of this VM still holds the module's keys: one at a time per VM, since the flag, the scope and the record are the module's. Another page of the VM comes to the front only after that trip has ended (`"another application"`), so this is a guard for events that cross, not a state a module reaches in order | ends the trip with an error |
+| `"refused: <message>"` | a [`host.keys.capture`](keys.md#host-keys-capture) raised — on a Mac without the Accessibility grant | ends the trip with an error; nothing is held |
+
+**At the call**, in this order: what [`host.keys.passedThrough`](keys.md#host-keys-passedthrough) holds from before is drained and dropped, logged — a Return that reached a menu earlier is no end of this one; the module's [scope](keys.md#host-keys-scope) is pinned to the plug-in's window; the keys are captured; for `"typing"` and `"browse"` the flag is set; the VM's menu tick is started if no overlay with menu tests has started it; one line is logged: `[page] '<overlay>': trip '<label>' hands the keyboard over (typing): Return, Escape let through to window id X, the module's scope pinned there; it ends on one of them, the page key or another application — nothing bounds it`. A capture that raises releases what was captured — and, with nothing else of the VM in front, every capture of the module, since on a Mac a capture that raised stays registered ([`capture`](keys.md#host-keys-capture), its macOS block) — sets the scope back as the end does, and writes no flag.
+
+**Why two captures and a flag.** While a module's menu flag counts for the window in front the hook lets every captured key through to it and records it for `passedThrough`, together with every unmodified Return and Escape; and a flag counts only while its module holds a capture, for the window its captures are scoped to ([`menuOpen`](keys.md#host-keys-menuopen)). The captures make the flag count, the scope keeps it to the plug-in's window, and what goes through is recorded — which is how the runtime knows the user pressed Return in the plug-in's own field without taking the key from it.
+
+**The event.** The record is drained by the VM's menu tick (every 150 ms), which hands the keys it holds to the hand-over and decides nothing by time. The first end key is the event: logged (`… Return went through to the plug-in — the hand-over's end is looked at`), and the end is looked at where the trip can arrive — on the module's next turn, the plug-in's window in front (afresh) and an overlay of the group on the held control, as a wait's arrival. A key that is not an end key is logged as gone through, and is no end. For `"keys"` the event is `onKey` answering `true`; it is asked for each captured key, as a handler, with the plug-in's window in front, and a key pressed with another window in front, or after the event, is not handed to it.
+
+**A key taken after all.** When a `"typing"` or `"browse"` end key reaches its capture's callback instead — the flag did not count for the window in front, because something cleared it — it never reached the plug-in, so it is no event: the log says so (`… Return was taken, not let through — the menu flag did not count for the window in front (…)`), the scope and the flag are set again with the plug-in's window in front, and `"<label>: Return did not reach the plug-in; press it again."` is said behind the screen reader.
+
+**`ends(o, trip, info, answer)`** — the module's word on whether the event ended the work: its field closed again, its browser done. It runs as a handler where a read may wait, and answers by calling `answer(true)` (over) or `answer(false)` (it goes on), at once or from a read's callback; a second answer, or one after the trip ended, is logged and ignored. Without `ends` the event is the end. Meanwhile the keys stay held: an end key that comes while `ends` is asked is kept, and is the next event at once if the answer is no. An `ends` that raises gives the trip up, `"failed"`. An `ends` that never answers is a stuck act: the page key ends it.
+
+**`onEnd(o, trip, how, info)`** — told **exactly once**, on every end of a hand-over that answered `true`, after the keys are back; a `handOver` that answered false held nothing, and its `onEnd` is never called:
+
+| how | when | where it runs |
+|---|---|---|
+| `"ended"` | `ends` answered true, or `onKey` did, or — with no `ends` — the event came (`info.key` the end key) | the trip acting: in the handler or the callback that answered `ends` — the arrival's own, or a read's callback — and after `onKey`, or with no `ends`, in the arrival's handler on the module's next turn; the module reads, then calls `trip:done(result)` |
+| `"page key"` | the page key, in every state of the hand-over — the trip's `"key"` | in the key's handler, before `onGiveUp`; then the page is shown |
+| `"another application"` | a window of another application, or one of this application's that is not the page | on the next turn, before `onGiveUp`; the page is not shown over it |
+| `"page closed"` | its close box, its failure, the module's `page:close()` or `O:pageAgain()`, a disable — seen at the first tick, event or captured key after the enable | before `onGiveUp`: where it was seen — the page's close, `O:pageAgain()`, a window or focus event, a captured key — and on the module's next turn when the menu tick saw it first |
+| `"gone"` | the plug-in's window gone ([the trip's rule](#o-inplugin)) | on the next turn, before `onGiveUp` |
+| `"outranked"` | an end key with another module's overlay at least as specific holding the slot | on the next turn, before `onGiveUp` |
+| `"not in front"` or `"another application"` | `trip:inFront()` false inside a hook or a callback of the module's | on the next turn, before `onGiveUp` |
+| `"failed"` | `ends` or `onKey` raised, or `onEnd` raised on `"ended"` — which is then not told again | on the next turn, before `onGiveUp` |
+| `"done"` | the module's own `trip:done` while the hand-over holds | in the back step's handler, before `after` |
+
+`info.key` is the end key on `"ended"` and nil on every other end; `info.passed` every key the record held while the hand-over held its keys, in order — for `"keys"`, every key `onKey` was handed; `info.ms` the time since the call. An `onEnd` that raises is logged, `[page] '<overlay>': onEnd failed: <message>`.
+
+**Keys back on every path, at once.** Whatever ends the trip, the hand-over's keys go back in that moment — in the give-up's own handler, in `done`, at its own end; plain calls only, so in the arbiter's call and a trigger alike: the captures released, the flag what the VM's overlays not away say (false while away), the scope every window again unless an overlay of the module that is not away is in front, whose pin stands, and what the record still holds dropped (logged `… went through after the end: …`). One line says it: `[page] '<overlay>': trip '<label>': the hand-over ends — <how>, after N ms; Return, Escape released, the menu flag false, the scope every window`. While a hand-over holds the module's flag and scope, the runtime writes neither of them anywhere else: an overlay leaving the front, the menu tick's state, a hold over a menu's window leave them as the hand-over set them.
+
+**Not ends:** a window of the plug-in's own application — Logic's main window, REAPER's, a dialog of the DAW's — logged once per hand-over (`… a window of <app> came forward during the hand-over — not an end`); the page itself coming forward; a sibling overlay of the group taking the slot; a key that is not an end key; and **time**: nothing bounds a hand-over. The user's way back is the page key.
+
+**Disable, enable, reload.** A disable takes the module's captures out of the hook and forgets its scope and flag ([`scope`](keys.md#host-keys-scope)), and hides the page; the hand-over's own record still says it holds. Enabled again, the captures are back in every window, with no flag, and the **first** of the menu tick (within 150 ms), a window or focus event, or a captured key ends the trip, `"page closed"`, and releases them: at most the one key pressed in that moment is taken, and the log names it. A reload ends the VM, and the host drops its captures, its scope and its flag with it; no `onEnd` runs then, as no code of the VM's runs any more.
+
+**Cost.** The captures — two for `"typing"` — the flag, one tick of the VM's one 150 ms timer, which drains the record, and nothing read of the screen: what the module's own hooks read is theirs. Everything on the event loop, in the module's handlers.
+
+```luau
+-- In a trip's act: a field the plug-in edits in place on a double-click, renamed by the user and
+-- read back. FIELD is the field's rectangle, in the overlay's coordinates.
+local FIELD = { 34, 7, 214, 22 }
+local region = o:toScreenRect(FIELD, { whole = true })
+host.screen.snapshot({ region = region }, function(before)
+  if not trip:inFront() then return before and before:release() end
+  if not before then return trip:done({ error = "the field cannot be read now" }) end
+  local x, y = o:toScreen(123, 14)
+  O.doubleClick(x, y, nil, function()
+    -- The plug-in's editor, seen open: a box over a tenth of the field that stands still.
+    local open = { from = before, timeout = 2000, settle = 50, minPixels = 400 }
+    host.screen.snapshot({ region = region, change = open }, function(editor, _, seen)
+      before:release()
+      if not trip:inFront() then return editor and editor:release() end
+      if not (editor and seen.changed and seen.settled) then
+        if editor then editor:release() end
+        return trip:done({ error = "the editor did not open" })
+      end
+      editor:release()
+      local handed, why = trip:handOver({
+        kind = "typing", -- Return keeps the name, Escape the old one: both go through to the plug-in
+        ends = function(o2, t2, info, answer)
+          -- Over once the field no longer shows the editor (fieldClosed: the module's own read).
+          host.screen.snapshot({ region = region }, function(now)
+            if not t2:inFront() then return now and now:release() end
+            answer(now ~= nil and fieldClosed(now))
+            if now then now:release() end
+          end)
+        end,
+        onEnd = function(o2, t2, how, info)
+          if how ~= "ended" then return end -- onGiveUp posts the rest
+          if not t2:inFront() then return end
+          host.ocr.recognize(region, {}, function(r)
+            t2:done({ name = r.status == "text" and r.text or nil, cancelled = info.key == "Escape" })
+          end)
+        end,
+      })
+      if not handed and why ~= "not in front" then trip:done({ error = "the keyboard: " .. why }) end
+    end)
+  end)
+end)
+```
+
+And `"keys"`: a knob the plug-in turns only while its button is held, pressed and held through the hand-over — PageUp and PageDown a point each, Return letting go and reading it, Escape letting go — every end letting go once, and not where the host let go already at a disable ([`host.input.held`](input.md#host-input-held)):
+
+```luau
+-- In a trip's act. KNOB is the knob's middle and its box, in the overlay's coordinates; readKnob is
+-- the module's own reader of a picture of it.
+local KNOB, BOX = { 120, 80 }, { 104, 64, 136, 96 }
+local x, y = o:toScreen(KNOB[1], KNOB[2])
+if not x then return trip:done({ error = "the knob cannot be placed now" }) end
+local dy, down = 0, false
+local function letGo()
+  if not down then return end
+  down = false
+  if table.find(host.input.held(), "left") then host.input.mouseUp(x, y + dy) end
+end
+local handed, why = trip:handOver({
+  kind = "keys",
+  keys = { "PageUp", "PageDown", "Return", "Escape" }, -- captured: none of them reaches the plug-in
+  onKey = function(_, _, key)
+    if key == "Return" or key == "Escape" then
+      letGo()
+      return true -- the end: onEnd(…, "ended", …) on the next turn
+    end
+    dy += key == "PageUp" and -1 or 1
+    host.input.move(x, y + dy) -- with the button held, a drag
+    return false
+  end,
+  onEnd = function(o2, t2, how, info)
+    letGo() -- first, on every end
+    if how ~= "ended" or not t2:inFront() then return end -- onGiveUp posts the rest
+    if info.key == "Escape" then return t2:done({}) end
+    host.screen.snapshot({ region = o2:toScreenRect(BOX, { whole = true }) }, function(snap)
+      if not t2:inFront() then return snap and snap:release() end
+      t2:done({ value = snap and readKnob(snap) or nil })
+      if snap then snap:release() end
+    end)
+  end,
+})
+if not handed then
+  if why ~= "not in front" then trip:done({ error = "the keyboard: " .. why }) end
+  return
+end
+host.input.mouseDown(x, y) -- after the hand-over, so that one refused leaves no button down
+down = true
+```
+
+### Windows
+
+The scope is the window in front at the call, the plug-in's FX window or the DAW window it is docked in, and the low-level hook lets a captured end key through to it while the flag counts, records it, and logs once per reason and window `captured Return (vk 0x0d/m0) was let through to the application: … a menu declared open with host.keys.menuOpen(true) by a module scoped to the window in front` ([`capture`](keys.md#host-keys-capture), its Windows block); the keypad's Enter is recorded as `"Return"`. A screen reader's hook after the host's sees the key as usual. Whether a DAW hands Return to a plug-in's text field or takes it for itself — REAPER has a per-FX "Send all keyboard input to plug-in" — is the DAW's; it has not been measured with an overlay (TODO.md, VPS Avenger).
+
+### macOS
+
+The scope is the frontmost application's window in front, read by accessibility at the call, and the event tap lets the end key through unmodified and records it, the keypad's Enter as `"Return"`. VoiceOver's own chords never reach the tap. Whether a plug-in's text field in Logic gets Return and Escape through the tap is not measured yet (TODO.md, VPS Avenger); the log's `went through` against `was taken` lines answer it. Without the Accessibility grant `capture` raises, and the hand-over answers `"refused: …"`.
 
 ## O.away {#o-away}
 

@@ -59,16 +59,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
 };
 
-use super::{ActJob, MouseButton, COVERED};
+// The refusals a click for a `window` shares with the Mac's posted click: the window gone, the
+// point outside it, on its frame, or under another window.
+use super::{ActJob, MouseButton, COVERED, FRAME, GONE, OUTSIDE};
 use crate::logging;
 
-/// The window given as `window` is not there any more.
-pub(super) const GONE: &str = "the window is gone";
-/// The point lies outside the window given as `window`.
-pub(super) const OUTSIDE: &str = "the point is not in the window";
-/// A posted click is a click in a window's client area: on its frame or title bar a real click
-/// is another message, which nothing here posts.
-pub(super) const FRAME: &str = "the point is on the window's frame, not in its client area";
 /// The program runs elevated and this application does not: Windows refuses a message, a style
 /// change and an injected click from a process of lower rights (a click without saying so).
 pub(super) const HIGHER: &str = "the window's program runs with higher rights";
@@ -556,6 +551,8 @@ fn hold_and_click(who: &Identity, front: isize, owner: usize, x: i32, y: i32, bu
         super::windows::send_mouse_event(down, 0);
         super::windows::send_mouse_event(up, 0);
     }
+    // Its release lets go of a button pressed before it, as every click's (windows.rs, PRESSED).
+    super::windows::note_button(button, false);
     logging::line("input", &format!("clicked window {} ('{}') at {x},{y} without activating it", who.hwnd, who.class));
     Ok(())
 }

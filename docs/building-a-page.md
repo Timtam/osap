@@ -852,6 +852,32 @@ window.platform.onmessage = (m) => {
 
 **The page key is the way out of anything.** During a trip it gives the trip up and brings the page; in the page it goes back to the plug-in; on a way back that has not reached the plug-in yet it brings the page again. An act whose callbacks never come — a bug — is ended by it too.
 
+**Handing the keyboard over.** Some work is the user's to do in the plug-in itself: typing a new preset name into the plug-in's own field, choosing in its own browser. A trip hands the keyboard over for it with [`trip:handOver`](api/overlay.md#trip-handover) — since version 0.9 of the runtime, so the manifest asks for `"com.platform.overlay >= 0.9"`: the runtime holds only the keys that end it — Return and Escape for `"typing"`, Return for `"browse"` — lets them through to the plug-in, and notices them as they go; everything else the user types is the plug-in's, and nothing of it is recorded. When an end key has gone through, your `ends` says whether the work is over — the field closed again — and your `onEnd` reads what the plug-in shows now and calls `trip:done`. Every other end of the trip ends the hand-over too, with the keys back at once and `onEnd` told how it ended; nothing bounds it, and the page key is the user's way back. A rename in a fictional synth whose name field edits in place on a double-click:
+
+```luau
+-- In the trip's act, after a picture `before` of the field and the double-click at its middle: the
+-- editor seen open (a change wait from `before`), then the keyboard handed over.
+local handed, why = trip:handOver({
+  kind = "typing",
+  ends = function(o, t, info, answer)
+    host.screen.snapshot({ region = NAME_ON_SCREEN }, function(now)
+      if not t:inFront() then return now and now:release() end
+      answer(now ~= nil and editorGone(now)) -- your own read: the field looks as it did before
+      if now then now:release() end
+    end)
+  end,
+  onEnd = function(o, t, how, info)
+    if how ~= "ended" or not t:inFront() then return end -- a give-up: onGiveUp posts the error
+    host.ocr.recognize(NAME_ON_SCREEN, {}, function(r)
+      t:done({ name = r.status == "text" and r.text or nil })
+    end)
+  end,
+})
+if not handed and why ~= "not in front" then trip:done({ error = "the keyboard cannot be handed over: " .. why }) end
+```
+
+Say nothing as the keyboard goes over where the screen reader announces the plug-in's field itself; the page's button can carry the help ("Type the new name, then press Return").
+
 **The keyboard on Windows.** A trip and the way back ask for the plug-in's own control, not its window, and the host lands the keyboard in it ([`host.window.focus`](api/window.md#host-window-focus)): brought forward, the window's keyboard can be on REAPER's FX list or nowhere, which the host corrects — at most twice, and never after the user pressed a key. The page's own close box gives the keyboard back to the control it took the front from as well ([`page:hide`](api/gui.md#page-hide)).
 
 **On a Mac** the plug-in is the DAW's panel inside its window, and the way back and a trip ask for that window. Whether VoiceOver lands in the plug-in after the way back is unmeasured; the runtime's log says where the keyboard was at each arrival (`[page] … in the plug-in after N ms; the keyboard on …`).
@@ -873,3 +899,4 @@ window.platform.onmessage = (m) => {
 - When the user has just moved, speak with `interrupt = false`, behind the screen reader.
 - On a Mac a page is new and untried with VoiceOver: write it once, pick a Mac key with `host.os.pick`, and take a show's `true` there for the front asked for.
 - A page for an overlay's plug-in: `O:addPage` and `O:inPlugin` instead of Steps 4 to 6 by hand — `open` posts the state, then the focus; every `act` asks `trip:inFront()` after each wait and ends with `trip:done`.
+- Work the user does in the plug-in itself — typing into its own field, choosing in its own browser — is a hand-over (`trip:handOver`): read what the plug-in shows after it, never the keys the user typed.

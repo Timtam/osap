@@ -8,7 +8,7 @@
 //! duplication for the modules that declare it — see `dxgi.rs`).
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicI32, AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicBool, AtomicIsize, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -44,13 +44,13 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, FILTERKEYS, HWINEVENTHOOK};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_KEYBOARD,
-    INPUT_MOUSE, KEYEVENTF_EXTENDEDKEY, MAPVK_VK_TO_VSC_EX,
+    GetAsyncKeyState, RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_0, INPUT_KEYBOARD,
+    INPUT_MOUSE, KEYEVENTF_EXTENDEDKEY, MAPVK_VK_TO_VSC_EX, MOUSEINPUT,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
     MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, VK_CONTROL, VK_LWIN,
-    VK_MENU, VK_RWIN, VK_SHIFT,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, VK_CONTROL, VK_LBUTTON, VK_LWIN,
+    VK_MBUTTON, VK_MENU, VK_RBUTTON, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::MapVirtualKeyW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -67,7 +67,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     TranslateMessage, UnhookWindowsHookEx, HHOOK,
     EVENT_OBJECT_FOCUS, EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND, GA_PARENT, GA_ROOT,
     GUITHREADINFO,
-    HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN,
+    HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_NULL, WM_SYSKEYDOWN,
     WM_SYSKEYUP, WNDCLASSW,
 };
@@ -1467,9 +1468,15 @@ impl Backend for WindowsBackend {
         }
     }
 
+    /// With a button held — one this backend pressed, or one down on the desktop — motion through
+    /// the system's input ("The pointer moved as motion"); otherwise the pointer placed.
     fn mouse_move(&self, x: i32, y: i32) {
         unsafe {
-            SetCursorPos(x, y);
+            if button_held_now() {
+                send_motion(x, y);
+            } else {
+                SetCursorPos(x, y);
+            }
         }
     }
 
@@ -1480,6 +1487,8 @@ impl Backend for WindowsBackend {
             send_mouse_event(down, 0);
             send_mouse_event(up, 0);
         }
+        // Its own release lets go of a button pressed before it.
+        note_button(button, false);
     }
 
     /// A drag with actual MOVEMENT in it, spread over time.
@@ -1501,16 +1510,19 @@ impl Backend for WindowsBackend {
     /// thread for about sixty milliseconds, which is the cost of the gesture being believable
     /// and is only ever paid when somebody deliberately adjusts something. macOS has posted a
     /// real drag event between its press and release all along; this brings Windows level.
+    ///
+    /// Every step is `send_motion`'s, over the virtual desktop, so a drag on any monitor lands
+    /// where it is asked to.
     fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton) {
         let (down, up) = button_flags(button);
         unsafe {
             SetCursorPos(x1, y1);
-            move_injected(x1, y1);
+            send_motion(x1, y1);
             send_mouse_event(down, 0);
             const STEPS: i32 = 16;
             for i in 1..=STEPS {
                 let t = f64::from(i) / f64::from(STEPS);
-                move_injected(
+                send_motion(
                     (f64::from(x1) + f64::from(x2 - x1) * t).round() as i32,
                     (f64::from(y1) + f64::from(y2 - y1) * t).round() as i32,
                 );
@@ -1518,22 +1530,29 @@ impl Backend for WindowsBackend {
             }
             send_mouse_event(up, 0);
         }
+        // Its own release lets go of a button pressed before it.
+        note_button(button, false);
     }
 
+    /// The pointer placed, then the press — noted, so that the moves after it are motion.
     fn mouse_down(&self, x: i32, y: i32, button: MouseButton) {
         let (down, _) = button_flags(button);
         unsafe {
             SetCursorPos(x, y);
             send_mouse_event(down, 0);
         }
+        note_button(button, true);
     }
 
+    /// Motion to (x, y), then the release — no placement: so a press, a glide of moves and the
+    /// release are one drag, and the release lands on the control that followed it.
     fn mouse_up(&self, x: i32, y: i32, button: MouseButton) {
         let (_, up) = button_flags(button);
         unsafe {
-            SetCursorPos(x, y);
+            send_motion(x, y);
             send_mouse_event(up, 0);
         }
+        note_button(button, false);
     }
 
     fn mouse_scroll(&self, x: i32, y: i32, delta: i32) {
@@ -4061,19 +4080,123 @@ pub(super) fn button_flags(button: MouseButton) -> (u32, u32) {
     }
 }
 
-/// A pointer move the system reports AS a move, in absolute screen coordinates.
-///
-/// SendInput wants 0..65535 across the primary screen rather than pixels, so this is the
-/// conversion. Scaled against the primary display only, like `screen_size` elsewhere in this
-/// file — a drag on a second monitor is a thing to fix when somebody has one to fix it on.
-unsafe fn move_injected(x: i32, y: i32) {
-    let w = GetSystemMetrics(SM_CXSCREEN).max(2);
-    let h = GetSystemMetrics(SM_CYSCREEN).max(2);
-    let mut input: INPUT = std::mem::zeroed();
-    input.r#type = INPUT_MOUSE;
-    input.Anonymous.mi.dx = (i64::from(x) * 65535 / i64::from(w - 1)) as i32;
-    input.Anonymous.mi.dy = (i64::from(y) * 65535 / i64::from(h - 1)) as i32;
-    input.Anonymous.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+// ── The pointer moved as motion ──────────────────────────────────────────────
+// `SetCursorPos` places the pointer without input: nothing goes through the system's input
+// stream, no low-level hook or raw input sees it, and a control that holds a press and follows
+// the pointer only on the motion it is told of sits still (ON:EAR's Width slider, measured:
+// `mouse_drag`). So while a button is held, a move is ONE injected absolute motion event over the
+// virtual desktop instead: the system carries the held button into the window's `WM_MOUSEMOVE`
+// (`MK_LBUTTON`, `MK_RBUTTON`) itself, as for a hand on the mouse, and the control sees a drag.
+// Absolute, since a relative move goes through the pointer's speed and "Enhance pointer
+// precision" and lands elsewhere; over the virtual desktop, since without it the axis spans the
+// primary monitor only; one event, not paced — interpolation is `mouse_drag`'s — and not
+// `MOUSEEVENTF_MOVE_NOCOALESCE`: two coalesced moves end on the same point.
+
+/// The buttons this backend pressed through the system's input and has not released since, a
+/// bit each (`bit`): a move right after an injected press is motion, whatever the system's own
+/// state shows by then. `mouse_down` sets a button's bit; `mouse_up`, `mouse_click`, `mouse_drag`
+/// and click_win.rs's click without the front, which go through `SendInput` too, clear it; a
+/// posted click goes past the system's input and leaves it.
+static PRESSED: AtomicU8 = AtomicU8::new(0);
+
+const fn bit(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => 1,
+        MouseButton::Right => 2,
+        MouseButton::Middle => 4,
+    }
+}
+
+/// `mask` after `button` went down (`down`) or up.
+fn pressed_after(mask: u8, button: MouseButton, down: bool) -> u8 {
+    if down {
+        mask | bit(button)
+    } else {
+        mask & !bit(button)
+    }
+}
+
+/// Notes that this backend pressed (`down`) or released `button` through the system's input.
+pub(super) fn note_button(button: MouseButton, down: bool) {
+    // click_win.rs's thread clicks too: the bit is changed where nothing changed the mask meanwhile.
+    let mut now = PRESSED.load(Ordering::SeqCst);
+    while let Err(seen) =
+        PRESSED.compare_exchange_weak(now, pressed_after(now, button, down), Ordering::SeqCst, Ordering::SeqCst)
+    {
+        now = seen;
+    }
+}
+
+/// Whether a move is motion: a button this backend pressed is still down (`pressed`), or the
+/// desktop has one down — the high bit of `GetAsyncKeyState` for the left, right and middle
+/// buttons (`async_states`), which a button the user holds sets too. The low bit, "pressed since
+/// the last call", says nothing of now.
+fn moves_as_motion(pressed: u8, async_states: [i16; 3]) -> bool {
+    pressed != 0 || async_states.iter().any(|s| (*s as u16 & 0x8000) != 0)
+}
+
+/// Whether a button is held now, by either source (`moves_as_motion`).
+fn button_held_now() -> bool {
+    // SAFETY: a read of the system's key state.
+    let states = unsafe {
+        [
+            GetAsyncKeyState(i32::from(VK_LBUTTON)),
+            GetAsyncKeyState(i32::from(VK_RBUTTON)),
+            GetAsyncKeyState(i32::from(VK_MBUTTON)),
+        ]
+    };
+    moves_as_motion(PRESSED.load(Ordering::SeqCst), states)
+}
+
+/// Pixel `v` on an axis of the virtual desktop that starts at `origin` and is `size` pixels long,
+/// as `SendInput`'s absolute axis has it — 0 to 65,535 over the whole desktop — at the middle of
+/// its pixel's share of the axis, so that the system's conversion back lands on the pixel however
+/// it rounds: ⌊d × size / 65,536⌋, or the nearest pixel of d × (size − 1) / 65,535 — the first for
+/// a desktop up to 32,768 pixels long, the second for any. A point off the desktop goes to its
+/// nearest edge, where the system keeps a pointer.
+fn desk_axis(v: i32, origin: i32, size: i32) -> i32 {
+    let size = i64::from(size.max(1));
+    let u = (i64::from(v) - i64::from(origin)).clamp(0, size - 1);
+    ((2 * u + 1) * 65_536 / (2 * size)).clamp(0, 65_535) as i32
+}
+
+/// The virtual desktop: its left, top, width and height, in the physical pixels of this
+/// per-monitor aware process (crates/app/windows/automation-platform.exe.manifest) — the space
+/// `SetCursorPos` and every `host.input` coordinate are in.
+fn virtual_desk() -> (i32, i32, i32, i32) {
+    // SAFETY: reads of the system's metrics.
+    unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1),
+        )
+    }
+}
+
+/// The event that moves the pointer to (x, y) on virtual desktop `desk` (`virtual_desk`'s) as
+/// motion: one absolute move over the virtual desktop, with no button, wheel or time of its own.
+fn motion_input(x: i32, y: i32, desk: (i32, i32, i32, i32)) -> INPUT {
+    let (left, top, w, h) = desk;
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: desk_axis(x, left, w),
+                dy: desk_axis(y, top, h),
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_ABSOLUTE,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+/// The pointer moved to (x, y) as motion through the system's input: `motion_input`, sent.
+unsafe fn send_motion(x: i32, y: i32) {
+    let input = motion_input(x, y, virtual_desk());
     SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
 }
 
@@ -5457,5 +5580,143 @@ mod capture_tests {
         assert!(DOC.contains(DUPLICATION_UNANSWERED));
         // And the one a region too large for duplication gets, beside it.
         assert!(DOC.contains(&format!("{CAPTURE_FAILED}: {}", Fallback::TooLarge.describe())));
+    }
+}
+
+/// The pointer moved as motion while a button is held (the VPS Avenger port's HG1): the events
+/// built and the decisions made, never sent — nothing here moves the pointer or presses a button.
+#[cfg(test)]
+mod pointer_motion_tests {
+    use super::*;
+
+    /// Desktops of one, two and three monitors, some left of or above the primary, and the
+    /// largest a single monitor has.
+    const DESKS: [(i32, i32, i32, i32); 6] = [
+        (0, 0, 1920, 1080),
+        (-1920, 0, 3840, 1080),
+        (0, -1440, 2560, 2520),
+        (-2560, -360, 5120, 1800),
+        (0, 0, 1366, 768),
+        (0, 0, 7680, 4320),
+    ];
+
+    /// Every pixel of every desktop goes to a place on the axis from which the system's
+    /// conversion back lands on that pixel, whichever of the two readings of it holds:
+    /// ⌊d × size / 65,536⌋, and the nearest pixel of d × (size − 1) / 65,535.
+    #[test]
+    fn a_point_lands_on_its_own_pixel_on_every_desktop() {
+        for (left, top, w, h) in DESKS {
+            for (origin, size) in [(left, w), (top, h)] {
+                for v in origin..origin + size {
+                    let d = desk_axis(v, origin, size);
+                    assert!((0..=65_535).contains(&d), "{v} on ({origin}, {size}): {d}");
+                    let floor = origin + (i64::from(d) * i64::from(size) / 65_536) as i32;
+                    assert_eq!(floor, v, "{v} on ({origin}, {size}): {d}, read back by the floor");
+                    let nearest = origin + (f64::from(d) * f64::from(size - 1) / 65_535.0).round() as i32;
+                    assert_eq!(nearest, v, "{v} on ({origin}, {size}): {d}, read back to the nearest pixel");
+                }
+            }
+        }
+    }
+
+    /// A point off the desktop goes to its edge, where the system keeps a pointer.
+    #[test]
+    fn a_point_off_the_desktop_goes_to_its_edge() {
+        for (left, _, w, _) in DESKS {
+            assert_eq!(desk_axis(left - 5, left, w), desk_axis(left, left, w), "left of ({left}, {w})");
+            assert_eq!(desk_axis(left + w + 5, left, w), desk_axis(left + w - 1, left, w), "right of ({left}, {w})");
+            assert_eq!(desk_axis(i32::MIN, left, w), desk_axis(left, left, w));
+            assert_eq!(desk_axis(i32::MAX, left, w), desk_axis(left + w - 1, left, w));
+        }
+    }
+
+    /// One absolute move over the virtual desktop, with no button, wheel, time or extra of its own:
+    /// the held button is the system's to carry into the window's mouse message.
+    #[test]
+    fn the_motion_event_is_one_absolute_virtual_desktop_move() {
+        let desk = (-1920, 0, 3840, 1080);
+        let input = motion_input(-100, 540, desk);
+        assert_eq!(input.r#type, INPUT_MOUSE);
+        // SAFETY: the mouse member is the one motion_input writes.
+        let mi = unsafe { input.Anonymous.mi };
+        assert_eq!(mi.dwFlags, MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_ABSOLUTE);
+        assert_eq!(mi.dwFlags, 0xC001);
+        for not in [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+            MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_WHEEL]
+        {
+            assert_eq!(mi.dwFlags & not, 0, "{not:#x}");
+        }
+        assert_eq!(mi.dwFlags & 0x2000, 0, "MOUSEEVENTF_MOVE_NOCOALESCE");
+        assert_eq!((mi.mouseData, mi.time, mi.dwExtraInfo), (0, 0, 0));
+        assert_eq!((mi.dx, mi.dy), (desk_axis(-100, -1920, 3840), desk_axis(540, 0, 1080)));
+    }
+
+    /// A move is motion while a button is held — one this backend pressed, or one the desktop has
+    /// down now (the high bit) — and a placement otherwise; "pressed since the last call" (the low
+    /// bit) is no button held.
+    #[test]
+    fn a_move_is_motion_only_while_a_button_is_held() {
+        assert!(!moves_as_motion(0, [0, 0, 0]));
+        assert!(moves_as_motion(bit(MouseButton::Left), [0, 0, 0]));
+        assert!(moves_as_motion(bit(MouseButton::Middle), [0, 0, 0]));
+        assert!(moves_as_motion(0, [i16::MIN, 0, 0]));
+        assert!(!moves_as_motion(0, [0, 1, 0]));
+        assert!(moves_as_motion(0, [0, 0, 0x8001u16 as i16]));
+    }
+
+    /// The backend's record of its own presses: a bit a button, set by its press and cleared by
+    /// its release, a click or a drag of it.
+    #[test]
+    fn the_backend_knows_which_buttons_it_holds() {
+        let (l, r, m) = (MouseButton::Left, MouseButton::Right, MouseButton::Middle);
+        assert_eq!(pressed_after(pressed_after(0, l, true), l, false), 0);
+        let both = pressed_after(pressed_after(0, l, true), r, true);
+        assert_eq!(pressed_after(both, l, false), bit(r));
+        assert_eq!(pressed_after(both, m, false), both, "a release of another button");
+        assert_eq!(pressed_after(bit(l), l, true), bit(l), "pressed twice");
+        assert_eq!([bit(l), bit(r), bit(m)], [1, 2, 4]);
+    }
+
+    /// The backend's calls are wired to the builder: a move is motion under `moves_as_motion` and a
+    /// placement otherwise; a release is motion, then the button's up, and never a placement; a
+    /// drag's steps are motion; and every way the backend presses or releases through the system's
+    /// input keeps the record.
+    #[test]
+    fn move_up_and_drag_are_wired_to_the_motion_builder() {
+        const SRC: &str = include_str!("windows.rs");
+        const CLICK: &str = include_str!("click_win.rs");
+        use crate::ocr_wiring_tests::body;
+        let mv = body(SRC, "fn mouse_move(&self, x: i32, y: i32)");
+        let held = mv.find("if button_held_now() {").expect("the move asks whether a button is held");
+        let motion = mv.find("send_motion(x, y);").expect("the move is motion");
+        let placed = mv.find("SetCursorPos(x, y);").expect("the move is a placement otherwise");
+        assert!(held < motion && motion < placed, "{mv}");
+        let asked = body(SRC, "fn button_held_now() -> bool");
+        assert!(asked.contains("moves_as_motion(PRESSED.load(Ordering::SeqCst), states)"));
+        // The desktop's left, right and middle buttons, each asked.
+        for vk in ["VK_LBUTTON", "VK_RBUTTON", "VK_MBUTTON"] {
+            assert!(asked.contains(&format!("GetAsyncKeyState(i32::from({vk}))")), "{vk}: {asked}");
+        }
+        // The record changed as the button went, down or up — never only set.
+        assert!(body(SRC, "pub(super) fn note_button(button: MouseButton, down: bool)").contains("pressed_after(now, button, down)"));
+        // The whole virtual desktop, not the primary display.
+        let desk = body(SRC, "fn virtual_desk() -> (i32, i32, i32, i32)");
+        for metric in ["SM_XVIRTUALSCREEN", "SM_YVIRTUALSCREEN", "SM_CXVIRTUALSCREEN", "SM_CYVIRTUALSCREEN"] {
+            assert!(desk.contains(&format!("GetSystemMetrics({metric})")), "{metric}: {desk}");
+        }
+        assert!(!desk.contains("SM_CXSCREEN") && !desk.contains("SM_CYSCREEN"), "{desk}");
+        let up = body(SRC, "fn mouse_up(&self, x: i32, y: i32, button: MouseButton)");
+        let m = up.find("send_motion(x, y);").expect("the release is motion first");
+        let u = up.find("send_mouse_event(up, 0);").expect("then the up");
+        assert!(m < u && !up.contains("SetCursorPos"), "{up}");
+        assert!(up.contains("note_button(button, false);"));
+        let drag = body(SRC, "fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton)");
+        assert!(drag.contains("send_motion(x1, y1);") && drag.contains("send_motion(\n"), "{drag}");
+        assert!(drag.contains("note_button(button, false);"));
+        assert!(!SRC.contains(&["move", "_injected"].concat()), "the primary display's normalisation is gone");
+        assert!(body(SRC, "fn mouse_down(&self, x: i32, y: i32, button: MouseButton)").contains("note_button(button, true);"));
+        assert!(body(SRC, "fn mouse_click(&self, x: i32, y: i32, button: MouseButton)").contains("note_button(button, false);"));
+        assert!(body(SRC, "unsafe fn send_motion(x: i32, y: i32)").contains("motion_input(x, y, virtual_desk())"));
+        assert!(body(CLICK, "fn hold_and_click(").contains("super::windows::note_button(button, false);"));
     }
 }

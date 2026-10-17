@@ -120,12 +120,22 @@ if (window.platform) {
     if (message.kind === "live") live.textContent = String(message.text);
     else if (message.kind === "heading") heading.textContent = String(message.text);
     // Which window this page is in, said once it has loaded: its switch button names the other.
-    // And whether W10 is offered on this platform: Windows' alone. Its part is hidden until this
-    // says it is offered, so a Mac's page never shows it, not even before this message comes, and
-    // the screen reader there never reads it.
+    // And W10's part, hidden until this says it is offered: with this platform's ways — the Way
+    // select keeps only the options named — and the name of its target key.
     else if (message.kind === "window") {
       switchButton.textContent = message.window === "app" ? "Show as a tool window" : "Show as an application window";
-      if (w10Part) w10Part.hidden = message.w10 !== true;
+      if (w10Part) {
+        const ways = Array.isArray(message.ways) ? message.ways.map(String) : null;
+        const way = document.getElementById("w10-way");
+        if (ways && way) {
+          for (const option of Array.from(way.options)) {
+            if (!ways.includes(option.value)) option.remove();
+          }
+        }
+        const key = document.getElementById("w10-key");
+        if (key && message.targetKey) key.textContent = String(message.targetKey);
+        w10Part.hidden = message.w10 !== true;
+      }
     }
     // W10: the plug-in's elements, for the Target select — the remembered point first, then each
     // element by name and type. Rebuilt from the message, never from HTML the module sent.

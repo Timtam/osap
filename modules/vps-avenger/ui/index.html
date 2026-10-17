@@ -5,8 +5,8 @@
   ids, labels, help texts and ARIA patterns, which are its VoiceOver tuning — but for the port's
   edits, each said where it is: the styles and the script are files of their own (the host runs
   no inline script), the Windows-only block and the dead OSC rename dialog are left out, a note
-  says when a reloaded page's values were read, and four focus targets the module names can take
-  the focus.
+  says when a reloaded page's values were read, four focus targets the module names can take
+  the focus, and Back and Next say when they are unavailable.
 -->
 <html lang="en">
 <head>
@@ -87,14 +87,21 @@
         tabindex="0"
         aria-live="polite" aria-atomic="true">Init Preset</h3>
 
+    <!--
+      The port's: Back and Next carry aria-disabled, which the script sets to "true" where the
+      module's state says VPS Avenger cannot step (on Init Preset), with the reason in their
+      title. Not `disabled`: they stay in the Tab order and focusable, and a press is answered.
+    -->
     <div class="group">
       <button type="button"
               id="prev-preset-button"
               data-action="prev_preset"
+              aria-disabled="false"
               title="Load the previous preset">Back</button>
       <button type="button"
               id="next-preset-button"
               data-action="next_preset"
+              aria-disabled="false"
               title="Load the next preset">Next</button>
       <button type="button"
               id="rename-preset-button"

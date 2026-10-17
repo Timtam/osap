@@ -1,6 +1,8 @@
 -- The knob reader: a knob's value from where its bright pointer points, read off the page's
 -- picture. The three macro knobs' amounts, and the selected oscillator's Volume, Pan, Transpose,
--- Fine Tune and Random or Alternate Pitch.
+-- Fine Tune and Random or Alternate Pitch — all of them off the picture the page key took
+-- (read/open.luau), or one knob off a small picture of its own once the page's amount has turned it
+-- (K.read, src/amount.luau).
 --
 -- SOURCE: the avenger_control project's knob readers (its clicker/__init__.py: the macro amount's
 -- centre of brightness, the Level knob's ray, Transpose's and Fine Tune's end stops, and Pan's and
@@ -16,7 +18,9 @@
 -- scores the same 271 angles with the same weights, but adds each point only to the angles whose
 -- ray passes near it, rather than every point to every angle. Python's round, which rounds a half
 -- to the even neighbour, is kept. A knob with fewer bright pixels than the project's 8 is not
--- read — Random Pitch too, which the project read as 0 % from no pixels at all.
+-- read — Random Pitch too, which the project read as 0 % from no pixels at all. The third knob's
+-- ring is read once for Fine Tune and Random Pitch both, where the project captured and read it
+-- twice.
 
 local P = host.include("src/read/picture.luau")
 local OSC = host.include("src/tables/osc.luau")
@@ -201,87 +205,134 @@ function K.oscMiddles(pl, marks)
   end
 end
 
+-- An oscillator knob's ring round table point `p`, as `ring` answers it.
+local function oscRing(pl, snap, p)
+  return ring(pl, snap, p, OSC.DETECT_MIN_R, OSC.DETECT_MAX_R, 125, 75)
+end
+
+-- Why a ring is not read, in the log's words: too few bright pixels, or no points at all.
+local function tooFew(pts, info)
+  return pts and (seen(pts, info) .. " — too few") or ("not read: " .. tostring(info))
+end
+
+-- The pointer of a knob read as Transpose is, its end stops at 5° and 265° round for -48 and +48
+-- semitones: its raw semitones and its words; `marks` gets where it points.
+local function stops(pts, info, s, marks)
+  local deg = rayOf(pts, s)
+  local delta = (deg - 135) % 360
+  if delta > 270 then delta = 270 end
+  marks[#marks + 1] = tip(info, deg <= 180 and deg or deg - 360)
+  return ((delta - 5) / 260) * 96 - 48, string.format("%s, pointer at %d° (%d° round)", seen(pts, info), deg, delta)
+end
+
+-- Level, at (346, 68): volume from the pointer's angle, pan from the pixels beside it — into `out`
+-- (each nil where it was not read). Its words.
+local function level(pl, snap, out, marks)
+  local s = pl.s
+  local pts, info = oscRing(pl, snap, OSC.CONTROLS.volume)
+  if not (pts and #pts * info.area >= BRIGHT_MIN) then return "Level " .. tooFew(pts, info) end
+  local deg = rayOf(pts, s)
+  local delta = (deg - 135) % 360
+  if delta > 270 then delta = 270 end
+  local raw = delta / 270 * 200
+  out.volume = math.clamp(round(raw / OSC.VOLUME_STEP) * OSC.VOLUME_STEP, 0, 200)
+  local angle = deg <= 180 and deg or deg - 360
+  local pan, pw = sideValue(pts, info.area, s, math.cos(math.rad(angle)), math.sin(math.rad(angle)))
+  out.pan = pan
+  marks[#marks + 1] = tip(info, angle)
+  return string.format("Level %s, pointer at %d° (%d° round), volume %d %%; pan: %s — %d",
+    seen(pts, info), deg, delta, out.volume, pw, pan)
+end
+
+-- Transpose, at (346, 114): its semitones, rounded to 12, into `out.transpose`. Its words.
+local function transposeKnob(pl, snap, out, marks)
+  local pts, info = oscRing(pl, snap, OSC.CONTROLS.transpose)
+  if not (pts and #pts * info.area >= BRIGHT_MIN) then return "Transpose " .. tooFew(pts, info) end
+  local raw, tw = stops(pts, info, pl.s, marks)
+  local st = round(raw / OSC.TRANSPOSE_STEP) * OSC.TRANSPOSE_STEP
+  if st >= -1 and st <= 1 then
+    st = 0
+  elseif st <= -47 then
+    st = -48
+  elseif st >= 47 then
+    st = 48
+  end
+  out.transpose = math.clamp(st, -48, 48)
+  return string.format("Transpose %s, %.1f semitones — %d", tw, raw, out.transpose)
+end
+
+-- The third knob, at (346, 160), read ONCE for both of its values: Fine Tune, read as Transpose
+-- is, its semitones taken as cents; and Random or Alternate Pitch, the pixels beside its pointer
+-- taken as pointing up — left Random, right Alternate. The project's reading, which holds while
+-- Fine Tune is centred: a Fine Tune pointer turned away from the top is itself counted beside the
+-- upright one, and read as Random or Alternate Pitch (TODO.md, "VPS Avenger, the page"). The
+-- project captured and read this knob twice, the same square both times. Into `out.fineTune` and
+-- `out.randomPitch`; its words.
+local function fineKnob(pl, snap, out, marks)
+  local pts, info = oscRing(pl, snap, OSC.CONTROLS.fine_tune)
+  if not (pts and #pts * info.area >= BRIGHT_MIN) then
+    local why = tooFew(pts, info)
+    return "Fine Tune " .. why .. "; Random Pitch " .. why
+  end
+  local fraw, fw = stops(pts, info, pl.s, marks)
+  local cents = fraw / 48 * 100
+  local c = round(cents / OSC.FINE_TUNE_STEP) * OSC.FINE_TUNE_STEP
+  if c > -OSC.FINE_TUNE_STEP and c < OSC.FINE_TUNE_STEP then c = 0 end
+  out.fineTune = math.clamp(c, -100, 100)
+  local value, rw = sideValue(pts, info.area, pl.s, 0, -1)
+  out.randomPitch = value
+  return string.format("Fine Tune %s, %.1f cents — %d; Random Pitch %s; %s — %d", fw, cents, out.fineTune,
+    seen(pts, info), rw, value)
+end
+
 -- The selected oscillator's main controls, into `out`: volume (0 to 200 %), pan (-100 to 100),
 -- transpose (semitones, -48 to 48), fineTune (cents, -100 to 100) and randomPitch (-100 to 100),
--- each nil where it was not read. The log's words; `marks` gets where each pointer was read to.
+-- each nil where it was not read — three rings, one a knob. The log's words; `marks` gets where
+-- each pointer was read to.
 function K.osc(pl, snap, out, marks)
-  local s = pl.s
-  local words = {}
-  local function knob(p)
-    return ring(pl, snap, p, OSC.DETECT_MIN_R, OSC.DETECT_MAX_R, 125, 75)
-  end
+  return table.concat({ level(pl, snap, out, marks), transposeKnob(pl, snap, out, marks),
+    fineKnob(pl, snap, out, marks) }, "; ")
+end
 
-  -- Level: volume from the pointer's angle, pan from the pixels beside it.
-  local pts, info = knob(OSC.CONTROLS.volume)
-  if pts and #pts * info.area >= BRIGHT_MIN then
-    local deg = rayOf(pts, s)
-    local delta = (deg - 135) % 360
-    if delta > 270 then delta = 270 end
-    local raw = delta / 270 * 200
-    out.volume = math.clamp(round(raw / OSC.VOLUME_STEP) * OSC.VOLUME_STEP, 0, 200)
-    local angle = deg <= 180 and deg or deg - 360
-    local pan, pw = sideValue(pts, info.area, s, math.cos(math.rad(angle)), math.sin(math.rad(angle)))
-    out.pan = pan
-    marks[#marks + 1] = tip(info, angle)
-    words[#words + 1] = string.format("Level %s, pointer at %d° (%d° round), volume %d %%; pan: %s — %d",
-      seen(pts, info), deg, delta, out.volume, pw, pan)
-  else
-    words[#words + 1] = "Level " .. (pts and (seen(pts, info) .. " — too few") or ("not read: " .. tostring(info)))
-  end
+-- ── One knob, off a picture of its own ───────────────────────────────────────
+-- What the page's amount reads after its Return (src/amount.luau): ONE knob off ONE small picture
+-- that holds its ring — a few hundred points at most, as above, and the same arithmetic.
 
-  -- Transpose: the same ray, its end stops at 5° and 265° round for -48 and +48 semitones.
-  local function transposeOf(p)
-    local tp, ti = knob(p)
-    if not (tp and #tp * ti.area >= BRIGHT_MIN) then
-      return nil, tp and (seen(tp, ti) .. " — too few") or ("not read: " .. tostring(ti))
-    end
-    local deg = rayOf(tp, s)
-    local delta = (deg - 135) % 360
-    if delta > 270 then delta = 270 end
-    marks[#marks + 1] = tip(ti, deg <= 180 and deg or deg - 360)
-    return ((delta - 5) / 260) * 96 - 48, string.format("%s, pointer at %d° (%d° round)", seen(tp, ti), deg, delta)
-  end
-  local raw, tw = transposeOf(OSC.CONTROLS.transpose)
-  if raw then
-    local st = round(raw / OSC.TRANSPOSE_STEP) * OSC.TRANSPOSE_STEP
-    if st >= -1 and st <= 1 then
-      st = 0
-    elseif st <= -47 then
-      st = -48
-    elseif st >= 47 then
-      st = 48
-    end
-    out.transpose = math.clamp(st, -48, 48)
-    words[#words + 1] = string.format("Transpose %s, %.1f semitones — %d", tw, raw, out.transpose)
-  else
-    words[#words + 1] = "Transpose " .. tw
-  end
+-- The picture each knob is read from: a box this big round its middle, in table points at 50 %.
+-- The rings reach 14 and 8 of them from the middle at every zoom and on every display (the
+-- project's radii of 28 and 16 of its pixels, two to a table point at 50 %), with room round them.
+K.BOX = { macro = { 32, 32 }, osc = { 24, 24 } }
 
-  -- Fine Tune: the third knob read as Transpose is, its semitones taken as cents.
-  local fraw, fw = transposeOf(OSC.CONTROLS.fine_tune)
-  if fraw then
-    local cents = fraw / 48 * 100
-    local c = round(cents / OSC.FINE_TUNE_STEP) * OSC.FINE_TUNE_STEP
-    if c > -OSC.FINE_TUNE_STEP and c < OSC.FINE_TUNE_STEP then c = 0 end
-    out.fineTune = math.clamp(c, -100, 100)
-    words[#words + 1] = string.format("Fine Tune %s, %.1f cents — %d", fw, cents, out.fineTune)
+-- Knob `which`'s middle, a table point at 50 %, and the box round it (K.BOX) as a table rectangle:
+-- "macro1" to "macro3", or a control of the oscillator's (OSC.CONTROLS: volume, pan, transpose,
+-- fine_tune, random_pitch).
+function K.place(which)
+  local field = M.FIELDS[which]
+  local p, size
+  if field and string.match(which, "^macro%d$") then
+    p, size = { field[1], M.AMOUNT_Y }, K.BOX.macro
   else
-    words[#words + 1] = "Fine Tune " .. fw
+    p, size = OSC.CONTROLS[which], K.BOX.osc
   end
+  if not p then error("no knob " .. tostring(which), 2) end
+  return p, { p[1] - size[1] / 2, p[2] - size[2] / 2, p[1] + size[1] / 2, p[2] + size[2] / 2 }
+end
 
-  -- Random or Alternate Pitch: the pixels beside the third knob's pointer, taken as pointing up —
-  -- left Random, right Alternate. The project's reading, which holds while Fine Tune is centred:
-  -- a Fine Tune pointer turned away from the top is itself counted beside the upright one, and
-  -- read as Random or Alternate Pitch (TODO.md, "VPS Avenger, the page").
-  local rp, ri = knob(OSC.CONTROLS.random_pitch)
-  if rp and #rp * ri.area >= BRIGHT_MIN then
-    local value, rw = sideValue(rp, ri.area, s, 0, -1)
-    out.randomPitch = value
-    words[#words + 1] = string.format("Random Pitch %s; %s — %d", seen(rp, ri), rw, value)
-  else
-    words[#words + 1] = "Random Pitch " .. (rp and (seen(rp, ri) .. " — too few") or ("not read: " .. tostring(ri)))
+-- Knob `which` (K.place's) read off snapshot `snap`, which holds its ring: the fields read, each nil
+-- where it was not — { amount } for a macro knob, { volume, pan } for Level (Volume or Pan),
+-- { transpose }, and { fineTune, randomPitch } for the third knob (Fine Tune or Random Pitch) —
+-- and the log's words; `marks` gets where its pointer was read to.
+function K.read(pl, snap, which, marks)
+  local i = string.match(which, "^macro(%d)$")
+  if i then
+    local amount, words = K.macro(pl, snap, tonumber(i), marks)
+    return { amount = amount }, words
   end
-  return table.concat(words, "; ")
+  local out = {}
+  if which == "volume" or which == "pan" then return out, level(pl, snap, out, marks) end
+  if which == "transpose" then return out, transposeKnob(pl, snap, out, marks) end
+  if which == "fine_tune" or which == "random_pitch" then return out, fineKnob(pl, snap, out, marks) end
+  error("no knob " .. tostring(which), 2)
 end
 
 return K

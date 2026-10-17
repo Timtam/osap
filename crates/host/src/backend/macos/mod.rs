@@ -45,7 +45,14 @@ mod ax;
 mod backoff;
 mod budget;
 mod capture;
+/// `automation-platform capture-check`: the screen captured the ways the host captures it, and
+/// which path answered — with `--older-functions`, the older two alone. See the file.
+/// `pub(super)` for `backend::capture_check`.
+pub(super) mod capture_check;
 mod enrol;
+/// Whether Screen Recording is granted and Input Monitoring needed, judged by what this run has
+/// seen. Pure; see the file.
+mod evidence;
 mod ffi;
 /// The front handed to another application's window, asked now and focused when the workspace
 /// announces the activation — see the file.
@@ -73,6 +80,8 @@ pub(crate) mod page;
 /// how the page window behaves, measured — see the file. `pub(super)` for `backend::page_check`.
 pub(super) mod page_check;
 pub(crate) mod perm;
+/// `host.input.click`'s `via = "post"`, its part with nothing macOS in it — see the file.
+mod post_click;
 mod queue;
 /// Sleep and wake, the lock, the session, the displays, applications quitting — heard, queued
 /// and handed to the host as `SystemEvent`s. See the file.
@@ -228,6 +237,14 @@ impl Backend for MacBackend {
 
     fn mouse_click(&self, x: i32, y: i32, button: MouseButton) {
         input::mouse_click(x, y, button);
+    }
+
+    /// The events handed to the window's process, routed inside it by the window's number and
+    /// the place in the window they carry (`post_click.rs`, `input::post_click`); its `[input]`
+    /// line once they are posted. `via = "noactivate"` stays the trait's "not supported": it is a
+    /// Windows window style.
+    fn mouse_click_posted(&self, window: isize, x: i32, y: i32, button: MouseButton, move_pointer: bool) -> Result<(), String> {
+        input::post_click(window, x, y, button, move_pointer).map(|line| crate::logging::line("input", &line))
     }
 
     fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton) {

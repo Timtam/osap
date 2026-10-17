@@ -140,7 +140,7 @@ O, T, Y, N, D and L.
 
 ### macOS
 
-A Carbon event hotkey — deliberately **not** an event tap, so this needs no Input Monitoring grant, whether or not `host.keys` does (not known yet: see [macOS permissions](../macos-permissions.md#input-monitoring)). It is registered by role: `Ctrl` is Command, `Alt` Option, `Shift` Shift and `Win` (`Meta`) Control, so Kontakt's `"Ctrl+L"` is Command+L here. `"Ctrl+Q"`, `"Ctrl+H"`, `"Ctrl+Tab"` and the rest of the reserved list raise.
+A Carbon event hotkey — deliberately **not** an event tap, so this needs no Input Monitoring grant, whether or not `host.keys` does (on macOS 26.6 it did not: see [macOS permissions](../macos-permissions.md#input-monitoring)). That is also what makes a hotkey the application's witness for the tap: one that arrives while the tap, on for more than a second, has seen no key at all says the tap is not handed the keyboard. It is registered by role: `Ctrl` is Command, `Alt` Option, `Shift` Shift and `Win` (`Meta`) Control, so Kontakt's `"Ctrl+L"` is Command+L here. `"Ctrl+Q"`, `"Ctrl+H"`, `"Ctrl+Tab"` and the rest of the reserved list raise.
 
 `F21`–`F24` raise here (see above): macOS has no key code for them.
 

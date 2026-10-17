@@ -1,6 +1,7 @@
 /* VPS Avenger's page: the styles of the avenger_control project's panel (its panel/pages.py),
    taken over with its developer's permission (NOTICE). Copied as they are, but for the page's
-   background: Canvas, where the tool's panel drew none of its own. */
+   background: Canvas, where the tool's panel drew none of its own; and an aria-disabled button
+   drawn dimmed, as a disabled one is. */
   :root { color-scheme: light dark; }
   html, body { height: 100%; }
   body {
@@ -23,6 +24,7 @@
   button:focus, input:focus, select:focus, h2:focus, h3:focus {
     outline: 3px solid #4a9eff; outline-offset: 2px;
   }
+  button[aria-disabled="true"] { opacity: 0.55; }
   .preset-heading:focus { border-radius: 4px; padding: 0.05em 0.25em; }
   [hidden] { display: none !important; }
   .error { color: #c33; margin: 0.2em 0; font-size: 0.95em; }

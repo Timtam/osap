@@ -1878,12 +1878,15 @@ mod tests {
             let region = crate::backend::frame::bbox(at).expect("points");
             snap(id, region, SnapKind::Points { at: at.to_vec(), single }, Instant::now())
         };
-        s.submit_snap(pts(1, &[(4242, 3), (300, 4)], false));
+        // The epoch is noted before the read is handed over: noted after it, the capture thread
+        // could read the points first and answer 0, as a Windows runner once did. When in the read
+        // a bump counts is the pictures' question (`snapshot_pictures_carry_the_noted_input_epoch`).
         s.note_input_epoch(23);
+        s.submit_snap(pts(1, &[(4242, 3), (300, 4)], false));
         match &collect_snaps(&s, 1)[0].outcome {
             SnapOutcome::Colours { colours, input_epoch, .. } => {
                 assert_eq!(colours, &vec![(4242_i32 as u8, 3, 0), (300_i32 as u8, 4, 0)]);
-                assert_eq!(*input_epoch, 23, "the epoch as the read came back");
+                assert_eq!(*input_epoch, 23, "the epoch noted before the read");
             }
             _ => panic!("no colours"),
         }

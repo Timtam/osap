@@ -15,6 +15,10 @@
 //! - **`_AXUIElementGetWindow`.** The one function that pairs an accessibility element with
 //!   the window id capture needs. It is private, it is what every window manager on the
 //!   platform uses, and the fallback when it is missing is matching by geometry.
+//! - **`CGEventSetWindowLocation`.** The place in its window a mouse event carries, which a
+//!   click posted to a process (`host.input.click`'s `via = "post"`) lands by. Private as well,
+//!   declared in no SDK header; WebKit's test runner declares it, and it has no fallback: a
+//!   posted click is refused without it.
 //!
 //! Every declaration cites the header it came from, because comparing this file against
 //! `/System/Library/Frameworks/Carbon.framework/…/Headers/` is the only review that can
@@ -33,7 +37,8 @@
 use core::ffi::{c_ulong, c_void};
 
 use objc2_application_services::{AXError, AXUIElement};
-use objc2_core_graphics::CGWindowID;
+use objc2_core_foundation::CGPoint;
+use objc2_core_graphics::{CGEvent, CGWindowID};
 
 // --- Scalars (MacTypes.h) -------------------------------------------------------------
 
@@ -357,4 +362,51 @@ fn resolve_ax_get_window() -> Option<AXUIElementGetWindowFn> {
     // The cast is the whole point of the exercise: `dlsym` returns a data pointer and we
     // know, from the declaration above, what shape of function is behind it.
     Some(unsafe { std::mem::transmute::<*mut c_void, AXUIElementGetWindowFn>(sym) })
+}
+
+// --- The private window location of an event --------------------------------------------
+
+/// `void CGEventSetWindowLocation(CGEventRef, CGPoint)`.
+///
+/// No public header has it. The declaration is WebKit's, beside its getter
+/// `CGEventGetWindowLocation` and the window number's field, 51 (`kCGSEventWindowIDField`), in
+/// `Tools/TestRunnerShared/spi/CoreGraphicsTestSPI.h`, for the builds without Apple's internal
+/// SDK; its event replay sets both on every mouse event it makes for a window
+/// (`Tools/TestRunnerShared/EventSerialization/mac/EventSerializerMac.mm`). The point is taken by
+/// value: two `f64`s, in two floating-point registers on both halves of the application.
+type CGEventSetWindowLocationFn = unsafe extern "C" fn(*const CGEvent, CGPoint);
+
+/// Resolved once, at the first posted click — see [`AX_GET_WINDOW`] for why a plain `OnceLock`.
+static SET_WINDOW_LOCATION: std::sync::OnceLock<Option<CGEventSetWindowLocationFn>> = std::sync::OnceLock::new();
+
+/// Sets the place in its window `event` carries: `at`, in points from the window's top-left
+/// corner (`post_click::window_location`). `false`, and nothing set, where this macOS does not
+/// have the function — said once in the log, at the first call. A posted click sets it on each of
+/// its events as it builds them, before it posts the first.
+///
+/// Looked up with `dlsym` for the reason [`ax_window_id`] is: named in an `extern` block, a private
+/// symbol a macOS has dropped would keep the application from starting at all.
+pub fn set_window_location(event: &CGEvent, at: CGPoint) -> bool {
+    let Some(f) = *SET_WINDOW_LOCATION.get_or_init(resolve_set_window_location) else {
+        return false;
+    };
+    // SAFETY: the event is a live `CGEvent` for the borrow, and the point is passed by value as
+    // the declaration above has it; the function only writes a field of the event.
+    unsafe { f(event as *const CGEvent, at) };
+    true
+}
+
+fn resolve_set_window_location() -> Option<CGEventSetWindowLocationFn> {
+    let sym = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"CGEventSetWindowLocation".as_ptr()) };
+    if sym.is_null() {
+        crate::logging::line(
+            "macos",
+            "CGEventSetWindowLocation is not present in this macOS; host.input.click with via = \"post\" is \
+             refused here, since a posted click could not carry its place in the window",
+        );
+        return None;
+    }
+    crate::logging::line("macos", "CGEventSetWindowLocation resolved; posted clicks carry their place in the window");
+    // SAFETY: the symbol is the function declared above, by its name.
+    Some(unsafe { std::mem::transmute::<*mut c_void, CGEventSetWindowLocationFn>(sym) })
 }

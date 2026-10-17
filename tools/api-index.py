@@ -110,6 +110,9 @@ def namespace(heading):
         return m.group(1)
     if h.startswith('O:') or h.startswith('O.') or h.startswith('Bindings'):
         return 'Overlay'
+    # The methods of the trip object O:inPlugin hands an act belong with the overlay.
+    if h.startswith('trip:') or h.startswith('trip.'):
+        return 'Overlay'
     # The methods of the object `host.gui.webview` returns belong with it.
     if h.startswith('page:') or h.startswith('page.'):
         return 'host.gui'

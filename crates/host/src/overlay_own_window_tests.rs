@@ -104,6 +104,8 @@ fn an_overlay_lets_go_in_a_window_of_this_application_and_asks_nothing_there() {
         assert(T.count("[deactivate] 'On a slot' — in front now: 'Automation Platform' (automation-platform.exe)") == 1
           and T.count("[deactivate] 'On its own' — in front now: 'Automation Platform' (automation-platform.exe)") == 1,
           T.dump())
+        assert(T.count("(automation-platform.exe); one of this application's own windows is in front "
+          .. "('Automation Platform')") == 2, "and why: " .. T.dump())
         assert(not T.holds("Tab") and not T.holds("Return"), "no key held there")
         -- A focus change inside the dialog, and time passing: still nothing asked.
         T.show(T.OWN, { T.OWN })

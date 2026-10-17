@@ -128,8 +128,9 @@ behave as if the application is broken:
      System Settings > Privacy & Security. The application asks for Screen Recording as soon
      as Accessibility is granted, which is what normally puts it into that list; if it is not
      there, its button on the Permissions page asks again, and failing that, press + under
-     the list and choose the app. Then QUIT AND REOPEN the application: macOS only gives
-     Screen Recording to a process that started after it was granted.
+     the list and choose the app. If the Permissions page still reads Screen Recording NOT
+     granted afterwards, QUIT AND REOPEN the application: older macOS only gives it to a
+     process that started after it was granted.
 
   3. Everything it knows about this Mac is written to
          $root/dist/AutomationPlatform/automation-platform.log

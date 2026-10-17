@@ -233,6 +233,7 @@ real one has not run yet.
 | `screen_size`, `pixel`, `capture` | `CGDisplayBounds`, `CGDisplayCreateImageForRect` |
 | `ocr` | Vision `VNRecognizeTextRequest` (per-word boxes via `boundingBox(for:)`) |
 | mouse + `key_send` + `type_text` | `CGEvent` synthesis posted to `kCGHIDEventTap` |
+| `mouse_click_posted` (`host.input.click{ via = "post" }`) | `CGEvent`s handed to the window's process with `CGEventPostToPid`, carrying the window's number and the private `CGEventSetWindowLocation` place in it |
 | `register_hotkey` | Carbon `RegisterEventHotKey` — no permission, cannot be silently disabled |
 | `set_captured_keys` (capture **and suppress**) | `CGEventTap` with a re-enable watchdog |
 | `watch_foreground` | `NSWorkspaceDidActivateApplicationNotification` + `AXObserver` |
@@ -264,20 +265,26 @@ Three, all granted by the user in System Settings, none grantable programmatical
    `AXIsProcessTrusted`; the prompting variant is used once at startup.
 2. **Screen Recording** — required for capture. Its failure mode is the dangerous one: a
    capture without permission does not error, it returns a picture of the desktop
-   wallpaper. The backend preflights it and, if it cannot, checks a captured frame for the
-   telltale (a capture of a region known to be over another application coming back
+   wallpaper. The backend judges it by evidence rather than by `CGPreflightScreenCaptureAccess`
+   alone, which answered "not granted" for a whole session of captures that held other
+   applications: ScreenCaptureKit's last answer to a capture (a picture, or a refusal), then
+   the system's check where it says granted, then whether other applications' window names
+   can be read ([macos-permissions.md](macos-permissions.md#how-screen-recording-is-judged)).
+   It also checks captured frames for the telltale (several captures in a row coming back
    uniform), so the log says *permission* instead of *no match found* forty times. An
    application appears in that settings list only once it has asked, so it is asked for
    once per run — after Accessibility, never on top of its dialog — with the documented
    request; the Permissions page's button adds a real capture request, one request per
    press; see
    [macos-permissions.md](macos-permissions.md#how-the-application-gets-into-the-screen-recording-list).
-3. **Input Monitoring** — whether the event tap needs it next to Accessibility is not
-   measured: the tap is the active kind, which Accessibility governs. Registered hotkeys
-   deliberately do **not** need it: Carbon is used precisely so the core interaction works
-   before the fussiest permission is granted. It is read with `IOHIDCheckAccess` for
-   listening and not asked for at start; the Permissions page's button asks, with
-   `CGRequestListenEventAccess` and then `IOHIDRequestAccess`.
+3. **Input Monitoring** — optional: the event tap took the overlay's keys with Accessibility
+   alone and Input Monitoring denied on macOS 26.6; the tap is the active kind, which
+   Accessibility governs. Registered hotkeys deliberately do **not** need it: Carbon is used
+   precisely so the core interaction works before the fussiest permission is granted — and a
+   hotkey arriving while the tap has seen no key is how the application notices a tap that
+   is not handed the keyboard, and counts Input Monitoring as needed. It is read with
+   `IOHIDCheckAccess` for listening and not asked for at start; the Permissions page's button
+   asks, with `CGRequestListenEventAccess` and then `IOHIDRequestAccess`.
 
 All three are reported in the startup environment block, by name, with their state. A
 tester who cannot see a dialog needs the log to say which switch is off.

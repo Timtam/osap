@@ -387,6 +387,11 @@ pub fn page_check_calls() -> fn(&[String]) -> i32 {
     backend::page_check
 }
 
+/// `automation-platform capture-check`, named for the same reason: `lib.rs` calls it.
+pub fn capture_check_calls() -> fn(&[String]) -> i32 {
+    backend::capture_check
+}
+
 /// The neural text recogniser's start and end, which `lib.rs` calls around a session: its warm-up
 /// (on a Mac, after Vision's), the exit's call that stops that warm-up waiting, the shadow's
 /// counts at exit, the exit's wait for recognitions still running, ONNX Runtime's release before
@@ -404,10 +409,28 @@ pub fn ocr_lifecycle_calls() -> (fn() -> Option<std::thread::JoinHandle<()>>, fn
     )
 }
 
-/// Following this application's own windows, which `gui.rs` starts once the window system is up.
-/// Named for the reason `app_calls` names its calls.
-pub fn own_window_calls() -> fn() {
-    backend::start_own_windows
+/// Following this application's own windows, which `gui.rs` starts once the window system is up,
+/// and whether this application became the active one since, which the Permissions page's tick
+/// asks. Named for the reason `app_calls` names its calls.
+pub fn own_window_calls() -> (fn(), fn() -> bool) {
+    (backend::start_own_windows, backend::take_became_active)
+}
+
+/// What the Permissions page and the start announcement say (`backend/grants.rs`) and what they
+/// say of a translocated copy (`portable.rs`), as `gui.rs` calls them. Named for the reason
+/// `permission_calls` names its calls.
+#[allow(clippy::type_complexity)]
+pub fn grants_calls() {
+    use backend::grants;
+    let _: fn(&backend::Permission) -> String = grants::line;
+    let _: fn(&[backend::Permission]) -> String = grants::head;
+    let _: fn(&[backend::Permission]) -> Vec<grants::Shown> = grants::shown;
+    let _: fn(&[grants::Shown], &[backend::Permission]) -> Vec<String> = grants::changes;
+    let _: fn(&[grants::Shown], &[backend::Permission]) -> String = grants::rechecked;
+    let _: fn(&[backend::Permission], &str, Option<&str>, bool) -> grants::Start = grants::start;
+    let _: fn(&portable::Translocation) -> Option<String> = portable::Translocation::spoken;
+    let _: fn(&portable::Translocation) -> Option<String> = portable::Translocation::terminal_line;
+    let _: fn(&portable::Translocation) -> bool = portable::Translocation::loads_nothing;
 }
 
 /// The application-level calls `gui.rs` and `lib.rs` make, named for the reason `checked` names
