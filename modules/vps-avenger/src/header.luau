@@ -610,7 +610,8 @@ end
 -- overlay stays in front:
 --   * one of Avenger's popups — MENU, the zoom list, the redo list — becoming the window in front,
 --     which the overlay holds its place over (docs/api/overlay.md, O.menuTests: "a menu that is a
---     window in front"); whether a JUCE popup does that on a Mac is not measured;
+--     window in front"), where a DAW draws them as windows; in Logic they are painted inside
+--     Avenger's editor (popups.luau) and no window comes for them;
 --   * a zoom step, after which the DAW resizes its window to Avenger's new size.
 -- In both, what the panel shows has not changed: our popup cannot put another plug-in there.
 -- Answering nil until a new read of the header lands would take the overlay out of the front

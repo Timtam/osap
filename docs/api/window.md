@@ -190,7 +190,7 @@ end
 
 ### macOS
 
-`CGWindowListCopyWindowInfo` for on-screen windows, filtered by owning pid. `id` is the `CGWindowID`, `layer` the window server's level — an `NSMenu` sits at 101, an ordinary window at 0. `class` is empty. Whether a given plugin's self-drawn menu is a window of its own or painted inside the plugin's window is exactly what this exists to find out; the runtime's `newWindow` test logs each window that appeared after a menu-opening press, with its level and size.
+`CGWindowListCopyWindowInfo` for on-screen windows, filtered by owning pid. `id` is the `CGWindowID`, `layer` the window server's level — an `NSMenu` sits at 101, an ordinary window at 0. `class` is empty. Whether a given plugin's self-drawn menu is a window of its own or painted inside the plugin's window is exactly what this exists to find out; the runtime's `newWindow` test logs each window that appeared after a menu-opening press, with its level and size. sforzando's menus are windows here, at level 101 each. VPS Avenger's in Logic are not (the first Mac test of its page, 2026-10-14): after its zoom field was clicked no new window of Logic's process came on screen in 8 seconds, while the same list of the window server's paired Logic's plug-in window by frame and owner in that session — JUCE paints a popup that has a parent component inside the plug-in's editor. Such a popup is seen by the pixels only: [`O.menuTests.drawn`](overlay.md#o-menutests).
 
 ## host.window.active() {#host-window-active}
 

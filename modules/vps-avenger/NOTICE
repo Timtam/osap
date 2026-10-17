@@ -22,6 +22,10 @@ been published and has no licence of its own.
       expansion from the browser's text.
   src/state.luau
       the tool's state for its panel (its dispatcher's state_snapshot), built from what is read.
+  src/actions/osc.luau, src/actions/macros.luau, src/act.luau
+      the tool's actions on the oscillator strip and the macros (its actions.py and clicker), by
+      its names, arguments, points, menu rows and focus targets, each made to read back what it
+      changed rather than assume it.
   sounds/Open.wav, sounds/Close.wav, sounds/Slider.wav
       the tool's sounds for the page opening and closing and for a knob at its limit.
 

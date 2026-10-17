@@ -717,21 +717,22 @@ fn a_recognize_in_a_text_hook_waits_and_its_reading_is_said() {
 // The runtime's version.
 // ---------------------------------------------------------------------------------------------
 
-/// The runtime is 0.7.0 (calibration as its own setting, `O.calibrating()`, a static text's
+/// The runtime is 0.8.0 (calibration as its own setting, `O.calibrating()`, a static text's
 /// `hotkey`, the checks after its own pixels, `O:probe`, letting go in front of this
 /// application's own windows, its accessibility menu tests asked off the event loop, the
 /// check after a calibrating run's waited picture before a press, a slider's after each of its
 /// searches, its searches and pictures through the calls' callback forms, an OCR button's `value`,
-/// an overlay's page, and `identify`'s `again` and O:watch's count of readings),
-/// so a module that depends on
-/// `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads against it, and
-/// so does one that asks for 0.4, 0.4.1, 0.5, 0.5.6, 0.6 or 0.7, and neither against anything older.
+/// an overlay's page, `identify`'s `again` and O:watch's count of readings, and the drawn menu
+/// test with a test's `before`, and `O.doubleClick`'s button and callback), so a module that
+/// depends on `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads
+/// against it, and so does one that asks for 0.4, 0.4.1, 0.5, 0.5.6, 0.6, 0.7 or 0.8, and neither
+/// against anything older.
 #[test]
-fn the_runtime_is_0_7_so_a_module_that_asks_for_0_2_loads() {
+fn the_runtime_is_0_8_so_a_module_that_asks_for_0_2_loads() {
     let m = module_manifest::ModuleManifest::parse(include_str!("../../../modules/overlay-runtime/module.toml"))
         .expect("the runtime's manifest parses");
     assert_eq!(m.id, "com.platform.overlay");
-    assert_eq!(m.version, "0.7.0");
+    assert_eq!(m.version, "0.8.0");
     for spec in [
         "com.platform.overlay >= 0.2",
         "com.platform.overlay >= 0.3",
@@ -741,6 +742,7 @@ fn the_runtime_is_0_7_so_a_module_that_asks_for_0_2_loads() {
         "com.platform.overlay >= 0.5.6",
         "com.platform.overlay >= 0.6",
         "com.platform.overlay >= 0.7",
+        "com.platform.overlay >= 0.8",
     ] {
         let req = module_manifest::dep_constraint(spec).unwrap();
         let id = module_manifest::dep_id(spec);

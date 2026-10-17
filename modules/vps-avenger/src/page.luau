@@ -14,10 +14,11 @@
 --                 oscillator strip and the selected oscillator's knobs, the central tab and DRUM
 --                 SQ, the macros; what the preset database gives is marked so; everything else
 --                 "not read"; and ◀ and ▶ unavailable where the preset read is Init Preset
---   the actions   the header's are trips into Avenger (actions.luau); Initialize's No clicks
---                 nothing, as it is meant to; every other action the page sends is answered
---                 "<label> is not available in this module yet" in its error region, until the
---                 stage that builds it (the plan's slices 5 to 10)
+--   the actions   the header's, the oscillator strip's and the macros' are trips into Avenger
+--                 (actions.luau, act.luau); Initialize's No clicks nothing, as it is meant to; every
+--                 other action the page sends is answered "<label> is not available in this module
+--                 yet" in its error region, until the stage that builds it (the plan's slices 6 to
+--                 10)
 --
 -- A message counts only while the page has the keyboard (host.window.foreground), so a press that
 -- reaches the module after the user went elsewhere does nothing; and one trip at a time, which the
@@ -127,7 +128,7 @@ P.LABELS = {
   central_drum_sq_speed = "The DRUM SQ speed",
 }
 
--- The actions this module has a handler for: the header's trips (actions.luau), and
+-- The actions this module has a handler for: the trips (actions.luau), and
 -- `cancel_initialize_preset`, Initialize's No in the page's own dialog, which clicks nothing in
 -- Avenger (the maintainer's decision: the tool clicked MENU, Initialize and NO, three clicks that
 -- change nothing): the page closes its dialog, and nothing is left to do here but say so in the
@@ -146,12 +147,8 @@ P.NOT_BUILT = {
   "open_expansion", "close_expansion", "browse_expansion_presets", "select_all_expansion_presets",
   "select_expansion_category", "go_to_loaded_preset_category", "select_expansion_preset",
   "load_expansion_preset", "mark_expansion_preset_favorite", "toggle_expansion_favorite_view",
-  "select_osc_tab", "add_osc", "select_drums_tab", "select_trig_tab", "toggle_osc_mute",
-  "toggle_drums_mute", "toggle_trig_mute", "toggle_osc_solo", "toggle_drums_solo",
-  "toggle_trig_solo", "osc_menu_item", "drums_menu_item", "trig_menu_item", "rename_osc",
-  "select_macro_tab", "add_macro_tab", "delete_macro_tab", "rename_macro", "macro_amount",
-  "reset_macro_amount", "toggle_macro_button", "macro_reset_mode", "macro_button_menu_item",
-  "osc_control", "reset_osc_control", "osc_filter_control", "toggle_drum_pattern",
+  "rename_osc", "rename_macro", "macro_amount",
+  "osc_control", "osc_filter_control", "toggle_drum_pattern",
   "select_drum_mode", "previous_drumkit", "next_drumkit", "select_drumkit_part", "drumkit_column",
   "toggle_drumkit_button", "drumkit_control", "reset_drumkit_control", "drumkit_menu_item",
   "select_central_tab", "sample_browser_focus", "select_sample_editor_tab", "sample_editor_field",

@@ -55,15 +55,42 @@ local DOUBLE_CLICK_GAP = 90
 -- enough together. The same fact is a hazard everywhere else, which `Overlay:afterIdle` exists
 -- to avoid; keeping both here means neither can drift away from the other's timing.
 --
+-- `opts.button` is the button both clicks are made with — "left" (the default), "right" or
+-- "middle": VPS Avenger resets Pan and Random Pitch with a double-click of the RIGHT button, as
+-- the avenger_control project's tool does. `cb`, when given, runs once the second click has gone
+-- out, as a handler of its own (the timer's), so a module can start watching for what the
+-- double-click changed from there rather than from a guess at when it is over. Anything else
+-- raises at the call, naming it: a mistyped button would otherwise click with the left one.
+--
 -- Falls back to two immediate clicks with no timer, which is not a double-click and says so in
--- the log rather than silently doing something else.
-function O.doubleClick(x, y)
-  host.input.click(x, y)
+-- the log rather than silently doing something else; `cb` then runs at once, after them.
+function O.doubleClick(x, y, opts, cb)
+  if opts ~= nil and type(opts) ~= "table" then
+    error(("O.doubleClick: opts must be a table { button = … } or nil, got %s"):format(type(opts)), 2)
+  end
+  local button = opts and opts.button
+  if button ~= nil and button ~= "left" and button ~= "right" and button ~= "middle" then
+    error(("O.doubleClick: opts.button must be \"left\", \"right\" or \"middle\", got %s")
+      :format(tostring(button)), 2)
+  end
+  if cb ~= nil and type(cb) ~= "function" then
+    error(("O.doubleClick: the callback (fourth argument) must be a function or nil, got %s"):format(type(cb)), 2)
+  end
+  -- The left button as a plain click, as it always went out: nothing changes for those calls.
+  local clickOpts = (button ~= nil and button ~= "left") and { button = button } or nil
+  local function click()
+    if clickOpts then host.input.click(x, y, clickOpts) else host.input.click(x, y) end
+  end
+  click()
   if host.timer then
-    host.timer.after(DOUBLE_CLICK_GAP, function() host.input.click(x, y) end)
+    host.timer.after(DOUBLE_CLICK_GAP, function()
+      click()
+      if cb then cb() end
+    end)
   else
     host.log.info("overlay: no timer, so a double-click went out as two immediate clicks")
-    host.input.click(x, y)
+    click()
+    if cb then cb() end
   end
 end
 
@@ -6717,7 +6744,7 @@ local menuTick = 0
 O.menuTests = setmetatable({}, {
   __index = function(_, k)
     error(("O.menuTests has no '%s' — the building blocks are nativePopup, newWindow, "
-      .. "accessibility and accessibilityAfterPress"):format(tostring(k)), 2)
+      .. "accessibility, accessibilityAfterPress and drawn{ … }"):format(tostring(k)), 2)
   end,
 })
 
@@ -6933,13 +6960,329 @@ do
   }
 end
 
+-- A popup PAINTED where the module says it is drawn: a filled area of a rectangle the module names
+-- for each press that has changed since the press, and reads the same twice in a row. For a
+-- plug-in whose popups are neither windows nor elements nor the system's menus — VPS Avenger's in
+-- Logic, which JUCE draws as a child of the plug-in's own editor (a popup given a parent
+-- component): no window appears for newWindow, no AXMenuOpened is posted for nativePopup, and the
+-- plug-in publishes no element (the first Mac test of the page, 2026-10-14). The pixels are the
+-- only thing that changes, and no template is needed to see that they did: a popup is a change.
+--
+-- `O.menuTests.drawn{ name?, region = function(o, press) -> { x1, y1, x2, y2 }?, min?, minW?, minH? }`
+-- makes one. At a press, before it counts (`before`, in the press's handler, where a read may
+-- wait), `region(o, press)` names the rectangle on screen where that press's popup is drawn —
+-- `press` is `{ label, x?, y?, button? }`, the control or choice pressed and its opener's point —
+-- and may answer the smallest popup it takes, `{ w, h }` in screen pixels, as a second value
+-- (otherwise `minW` × `minH`, default 12 × 12). Its row and column profile is taken then, waited
+-- for: the picture before the click. On each tick after the press the test profiles the
+-- rectangle again with a callback, off the event loop, and compares the two in Luau — at most 256
+-- rows and 256 columns, never the pixels:
+--   * a row or column has CHANGED where its luminance mean differs by DRAWN_MEAN or more, a channel
+--     mean by DRAWN_CHANNEL or more (its fill), or its darkest or lightest pixel by DRAWN_EXTREME or
+--     more (only its extremes);
+--   * the change's SPAN is the first to the last line that changed either way; it is a popup when it
+--     is at least the smallest popup and FILLED — at least half the rows and half the columns
+--     inside it changed their fill. A ring drawn round something (VoiceOver's cursor) changes the
+--     extremes of every line it crosses, and the fill of none but its own;
+--   * SEEN when the same span (each edge within DRAWN_EDGE pixels) has come twice in a row and
+--     DRAWN_ALIKE of the lines read alike in the two: the answer is `{ x, y, w, h }`, with no
+--     `kind` — a menu drawn inside the plug-in, which an item is chosen in as one ("Choosing an
+--     item"). A flash, gone before it reads alike, and an animation, never alike, are no menu;
+--   * STILL THERE while, of the lines whose fill changed at the opening, those that no longer read
+--     as at the sighting are fewer than a popup — under the smallest popup's height of rows or
+--     under its width of columns — AND DRAWN_STILL of them still read as they did. A highlighted
+--     row passes both: one band of rows, fewer than the smallest popup's (a menu of two rows may
+--     not pass the second). A popup that goes fails one: every line it covered changes back —
+--     a popup's worth of them, however much else of the span reads as it did, such as a tab the
+--     same right click selected under the rectangle, which outlasts the popup; and where the popup
+--     differed from what lies under it in fewer lines than that, most of its own lines. The same
+--     rectangle is answered, so a click the menu did not take is clicked again;
+--   * GONE otherwise: `false`, and the test stops comparing until the next press, as newWindow
+--     does — the plug-in redrawn under the popup is not a new one.
+-- No timer decides any of it: readings are counted, and the one bound is the time the tests are
+-- asked on every tick after a press (MENU_LOOK_MS) — a test that has seen nothing by then stops
+-- comparing. It also stops at `forget`, and at the next press. A press with no rectangle, or made
+-- where a read cannot wait (an `onDone` in the menu tick's pass), arms nothing, and the log says so.
+--
+-- Cost: at the press one capture, waited for; then one capture a tick while it compares, reduced
+-- on the image worker, and at most 1024 comparisons of a line's six numbers in Luau (its change
+-- and, with a popup in view, how alike it reads); nothing at all otherwise. It sees
+-- what is drawn in the rectangle whoever draws it: a window of another process put over the
+-- plug-in there is a popup to it too, which the item's check then refuses as covered (the host's
+-- hit test names that window). Without Screen Recording on a Mac every picture is the wallpaper,
+-- which never changes: the log says nothing has changed.
+do
+  local DRAWN_MEAN, DRAWN_CHANNEL, DRAWN_EXTREME = 6, 10, 40
+  local DRAWN_ALIKE, DRAWN_STILL = 0.9, 0.7
+  local DRAWN_EDGE = 2
+  -- After how many readings with nothing changed the log says so, once per press.
+  local DRAWN_QUIET = 20
+  -- At most how many lines of each axis are compared.
+  local DRAWN_LINES = 256
+  -- At most how many changes that are not a popup (yet) the log names per press.
+  local DRAWN_SAID = 5
+
+  -- How line `i` of axis `a` differs from line `i` of axis `b`: 2 where its fill does (a mean),
+  -- 1 where only its extremes do, 0 where neither.
+  local function lineDiffers(a, b, i)
+    if math.abs(a.mean[i] - b.mean[i]) >= DRAWN_MEAN
+      or math.abs(a.r[i] - b.r[i]) >= DRAWN_CHANNEL
+      or math.abs(a.g[i] - b.g[i]) >= DRAWN_CHANNEL
+      or math.abs(a.b[i] - b.b[i]) >= DRAWN_CHANNEL then
+      return 2
+    end
+    if math.abs(a.min[i] - b.min[i]) >= DRAWN_EXTREME or math.abs(a.max[i] - b.max[i]) >= DRAWN_EXTREME then
+      return 1
+    end
+    return 0
+  end
+
+  -- The lines of an axis `n` long that are compared: every one up to DRAWN_LINES, and an even
+  -- spread of that many beyond — and the pixels between two of them.
+  local function linesOf(n)
+    local step = math.max(1, math.ceil(n / DRAWN_LINES))
+    local out = {}
+    for i = 1, n, step do out[#out + 1] = i end
+    return out, step
+  end
+
+  -- Whether profile `p` can be compared with profile `base`: both axes, the same size.
+  local function comparable(p, base)
+    return type(p) == "table" and type(p.columns) == "table" and type(p.rows) == "table"
+      and p.w == base.w and p.h == base.h and #p.columns.mean == #base.columns.mean
+      and #p.rows.mean == #base.rows.mean
+  end
+
+  -- The change between `base` (the press's picture) and `p`, over the lines `cols` and `rows`:
+  -- nil when nothing changed, or { rect, filled, fillCols, fillRows } — the span on screen, whether
+  -- half its rows and half its columns changed their fill, and the lines whose fill changed.
+  local function changeOf(base, p, cols, rows)
+    local function axis(a, b, lines)
+      local first, last, levels = nil, nil, {}
+      for j, i in ipairs(lines) do
+        local d = lineDiffers(a, b, i)
+        levels[j] = d
+        if d > 0 then
+          first = first or j
+          last = j
+        end
+      end
+      return first, last, levels
+    end
+    local c1, c2, cl = axis(p.columns, base.columns, cols)
+    local r1, r2, rl = axis(p.rows, base.rows, rows)
+    if not (c1 and r1) then return nil end
+    local function fill(levels, from, to, lines)
+      local n, filled = 0, {}
+      for j = from, to do
+        if levels[j] == 2 then
+          n += 1
+          filled[#filled + 1] = lines[j]
+        end
+      end
+      return n / (to - from + 1), filled
+    end
+    local fc, fillCols = fill(cl, c1, c2, cols)
+    local fr, fillRows = fill(rl, r1, r2, rows)
+    local x1, x2 = p.x + cols[c1] - 1, p.x + cols[c2] - 1
+    local y1, y2 = p.y + rows[r1] - 1, p.y + rows[r2] - 1
+    return {
+      rect = { x = x1, y = y1, w = x2 - x1 + 1, h = y2 - y1 + 1 },
+      filled = fc >= 0.5 and fr >= 0.5,
+      fillCols = fillCols, fillRows = fillRows,
+    }
+  end
+
+  -- The share of `lines` of both axes whose fill reads alike in profiles `a` and `b`.
+  local function alikeShare(a, b, cols, rows)
+    local n, same = 0, 0
+    for _, i in ipairs(cols) do
+      n += 1
+      if lineDiffers(a.columns, b.columns, i) < 2 then same += 1 end
+    end
+    for _, i in ipairs(rows) do
+      n += 1
+      if lineDiffers(a.rows, b.rows, i) < 2 then same += 1 end
+    end
+    return n > 0 and same / n or 0
+  end
+
+  local function near(a, b)
+    return math.abs(a.x - b.x) <= DRAWN_EDGE and math.abs(a.y - b.y) <= DRAWN_EDGE
+      and math.abs(a.x + a.w - b.x - b.w) <= DRAWN_EDGE and math.abs(a.y + a.h - b.y - b.h) <= DRAWN_EDGE
+  end
+
+  local function rectWords(r) return ("%dx%d at %d,%d"):format(r.w, r.h, r.x, r.y) end
+
+  function O.menuTests.drawn(spec)
+    if type(spec) ~= "table" or type(spec.region) ~= "function" then
+      error("O.menuTests.drawn takes { name?, region = function(o, press) -> { x1, y1, x2, y2 }?, minW?, minH? }", 2)
+    end
+    for _, k in ipairs({ "minW", "minH" }) do
+      if spec[k] ~= nil and (type(spec[k]) ~= "number" or spec[k] <= 0) then
+        error(("O.menuTests.drawn: `%s` must be a number above 0, got %s"):format(k, tostring(spec[k])), 2)
+      end
+    end
+    local name = spec.name ~= nil and tostring(spec.name) or "drawn"
+    -- Per overlay: what the last press armed, until it is done with.
+    local armed = setmetatable({}, { __mode = "k" })
+    local function log(o, fmt, ...)
+      host.log.info(("[menu] '%s': %s: " .. fmt):format(tostring(o.label), name, ...))
+    end
+
+    -- The rectangle and the picture before the click, in the press's handler; nil and why.
+    local function before(o, press)
+      local ok, r, min = pcall(spec.region, o, press)
+      if not ok then return nil, "its region function raised: " .. tostring(r) end
+      if type(r) ~= "table" or type(r[1]) ~= "number" or type(r[2]) ~= "number" or type(r[3]) ~= "number"
+        or type(r[4]) ~= "number" then
+        return nil, "no rectangle for '" .. tostring(press.label) .. "'"
+      end
+      local rect = { math.floor(r[1]), math.floor(r[2]), math.ceil(r[3]), math.ceil(r[4]) }
+      if rect[3] - rect[1] < 2 or rect[4] - rect[2] < 2 then
+        return nil, ("an empty rectangle for '%s'"):format(tostring(press.label))
+      end
+      local took, p, why = pcall(host.screen.profile, { region = rect, axes = "both" })
+      if not took then return nil, "the picture before the press cannot be taken here: " .. tostring(p) end
+      if not p then return nil, "the picture before the press could not be taken: " .. tostring(why) end
+      local mw, mh = spec.minW or 12, spec.minH or 12
+      if type(min) == "table" then
+        mw = tonumber(min.w or min[1]) or mw
+        mh = tonumber(min.h or min[2]) or mh
+      end
+      local cols, colStep = linesOf(p.w)
+      local rows, rowStep = linesOf(p.h)
+      return { region = rect, base = p, minW = mw, minH = mh, cols = cols, rows = rows, colStep = colStep,
+        rowStep = rowStep }
+    end
+
+    local function judge(o, w, p)
+      w.readings += 1
+      local n = w.readings
+      if w.seen then
+        -- Still there while what no longer reads as at the sighting is less than a popup's worth
+        -- of lines each way — counted in pixels, every compared line standing for its step — and
+        -- most lines read as they did (see above).
+        local s = w.seen
+        local cols, rows, lines, same = 0, 0, 0, 0
+        for _, i in ipairs(s.fillCols) do
+          lines += 1
+          if lineDiffers(p.columns, s.profile.columns, i) == 2 then cols += w.colStep else same += 1 end
+        end
+        for _, i in ipairs(s.fillRows) do
+          lines += 1
+          if lineDiffers(p.rows, s.profile.rows, i) == 2 then rows += w.rowStep else same += 1 end
+        end
+        local share = lines > 0 and same / lines or 0
+        if (cols < w.minW or rows < w.minH) and share >= DRAWN_STILL then return s.rect end
+        log(o, "the popup %s has gone at reading %d (%d columns and %d rows not as they were, a popup at "
+          .. "least %gx%g; %d of its %d lines as they were) — not comparing until the next press",
+          rectWords(s.rect), n, cols, rows, w.minW, w.minH, same, lines)
+        armed[o] = nil
+        return false
+      end
+      local ch = changeOf(w.base, p, w.cols, w.rows)
+      if not ch then
+        w.candidate = nil
+        w.quiet += 1
+        if w.quiet == DRAWN_QUIET then
+          log(o, "nothing has changed in %d,%d-%d,%d after %d readings of '%s'", w.region[1], w.region[2],
+            w.region[3], w.region[4], DRAWN_QUIET, w.label)
+        end
+        return false
+      end
+      local r = ch.rect
+      local function note(what)
+        if w.said < DRAWN_SAID then
+          w.said += 1
+          log(o, "a change of %s at reading %d, %s", rectWords(r), n, what)
+          if w.said == DRAWN_SAID then log(o, "later changes of this press are not named") end
+        end
+      end
+      if r.w < w.minW or r.h < w.minH then
+        w.candidate = nil
+        note(("smaller than a popup (%gx%g) — no menu"):format(w.minW, w.minH))
+        return false
+      end
+      if not ch.filled then
+        w.candidate = nil
+        note("not filled — no menu")
+        return false
+      end
+      local c = w.candidate
+      if c and near(c.rect, r) and alikeShare(c.profile, p, w.cols, w.rows) >= DRAWN_ALIKE then
+        w.seen = { rect = r, profile = p, fillCols = ch.fillCols, fillRows = ch.fillRows }
+        log(o, "a popup %s, alike at readings %d and %d", rectWords(r), c.n, n)
+        return r
+      end
+      if not (c and near(c.rect, r)) then note("not alike yet") end
+      w.candidate = { rect = r, profile = p, n = n }
+      return false
+    end
+
+    return {
+      name = name,
+      cheap = false,
+      before = function(o, press)
+        local w, why = before(o, press)
+        if not w then
+          log(o, "nothing armed on '%s' — %s", tostring(press.label), tostring(why))
+          return nil
+        end
+        w.label = tostring(press.label)
+        return w
+      end,
+      pressed = function(o, _, w)
+        armed[o] = nil
+        if not w then return end
+        w.readings, w.quiet, w.said = 0, 0, 0
+        w.untilMs = host.now() + MENU_LOOK_MS
+        w.key = "com.platform.overlay drawn " .. tostring(o.label) .. " " .. name
+        armed[o] = w
+        local g = w.region
+        log(o, "armed on '%s' in %d,%d-%d,%d (%dx%d), a popup at least %gx%g", w.label, g[1], g[2], g[3], g[4],
+          g[3] - g[1], g[4] - g[2], w.minW, w.minH)
+      end,
+      forget = function(o)
+        armed[o] = nil
+      end,
+      test = function(o, answer)
+        local w = armed[o]
+        if not w then return answer(false) end
+        if not w.seen and host.now() >= w.untilMs then
+          log(o, "no popup of '%s' within %d ms — not comparing until the next press", w.label, MENU_LOOK_MS)
+          armed[o] = nil
+          return answer(false)
+        end
+        local function unread(why)
+          if not w.saidUnread then
+            w.saidUnread = true
+            log(o, "a reading of '%s' could not be taken: %s", w.label, tostring(why))
+          end
+          -- Not read: the word stands as it was.
+          answer(w.seen and w.seen.rect or false)
+        end
+        local asked, err = pcall(host.screen.profile, { region = w.region, axes = "both", key = w.key },
+          function(p, why)
+            -- A reading for a press that is over: nothing of it counts.
+            if armed[o] ~= w then return answer(false) end
+            if not (p and comparable(p, w.base)) then return unread(p and "a picture of another size" or why) end
+            answer(judge(o, w, p))
+          end)
+        if not asked then unread(err) end
+      end,
+    }
+  end
+end
+
 local MENU_TESTS_HELP = "name the menu tests instead: O.menuTests.nativePopup (a menu the "
   .. "operating system drew), O.menuTests.newWindow (a window that appeared since the click), "
   .. "O.menuTests.accessibility (a Menu element in the plug-in's accessibility tree), "
-  .. "O.menuTests.accessibilityAfterPress (the same, asked only after a click), or a "
+  .. "O.menuTests.accessibilityAfterPress (the same, asked only after a click), "
+  .. "O.menuTests.drawn{ region = … } (a popup painted where the module says), or a "
   .. "function(o, answer) of the module's own — see docs/api/overlay.md, 'Menus'"
 
--- `menus` as the runtime keeps it: one record per test, `{ name, cheap, test, pressed?,
+-- `menus` as the runtime keeps it: one record per test, `{ name, cheap, test, before?, pressed?,
 -- forget? }` plus its word and its outstanding question (see resetMenuTest), fresh per overlay.
 -- Raises for anything that is not a list of tests, naming the overlay — at bind time, where the
 -- mistake is, rather than as a menu that silently keeps the keys.
@@ -6958,7 +7301,7 @@ local function menuTestsOf(self, list)
     if type(t) == "function" then
       out[i] = { name = "test " .. i, cheap = false, test = t }
     elseif type(t) == "table" and type(t.test) == "function" then
-      for _, hook in ipairs({ "pressed", "forget" }) do
+      for _, hook in ipairs({ "before", "pressed", "forget" }) do
         if t[hook] ~= nil and type(t[hook]) ~= "function" then
           error(("overlay '%s': menu test %d's `%s` must be a function(o), got %s")
             :format(who, i, hook, type(t[hook])), 0)
@@ -6968,6 +7311,7 @@ local function menuTestsOf(self, list)
         name = t.name ~= nil and tostring(t.name) or ("test " .. i),
         cheap = t.cheap == true,
         test = t.test,
+        before = t.before,
         pressed = t.pressed,
         forget = t.forget,
       }
@@ -7006,7 +7350,8 @@ end
 
 -- Whether a menu counts as open over this overlay now: some test's word is that one is (see
 -- above). For a module's own code that tidies up after a menu of its own — VPS Avenger clicks a
--- popup's opener again to close one a choice left open, and must not open one that has gone.
+-- popup's opener again, or presses Escape, to close one a choice left open, and must not open one
+-- that has gone, nor send its key to the plug-in.
 -- false for an overlay with no menu tests, and after it left the front.
 function Overlay:menuOpen()
   return self._menu ~= nil and self._menu.open == true
@@ -7049,17 +7394,35 @@ function Overlay:_menuFlagLeft()
 end
 
 -- Calls one hook of every test that has it, guarded: a module's hook must not take the
--- overlay's key handling or its deactivation with it.
-local function menuHook(self, hook)
+-- overlay's key handling or its deactivation with it. `press` goes to `before` and `pressed`, and
+-- `pressed` also gets what that test's `before` answered (`looked`, by test).
+local function menuHook(self, hook, press, looked)
+  local out = {}
   for _, t in ipairs(self._menu.tests) do
     if t[hook] then
-      local ok, err = pcall(t[hook], self)
-      if not ok then
+      local ok, v
+      if hook == "forget" then
+        ok, v = pcall(t[hook], self)
+      else
+        ok, v = pcall(t[hook], self, press, looked and looked[t])
+      end
+      if ok then
+        out[t] = v
+      else
         host.log.info(("[menu] '%s': menu test '%s' failed in `%s`: %s")
-          :format(tostring(self.label), t.name, hook, tostring(err)))
+          :format(tostring(self.label), t.name, hook, tostring(v)))
       end
     end
   end
+  return out
+end
+
+-- Whether a test of the overlay looks before a press counts (`before`): a read that waits then.
+local function menuLooksBefore(self)
+  for _, t in ipairs(self._menu.tests) do
+    if t.before then return true end
+  end
+  return false
 end
 
 -- The menu opened or closed: the overlay goes out (hotkeys given up, keys to the menu) or
@@ -7115,8 +7478,8 @@ end
 
 -- One answer of test `t`: its word, and the transition when it is the first to see the menu or
 -- the last to stop seeing it. `value` is what the test answered, handed to an item waiting to be
--- chosen (see "Choosing an item").
-function Overlay:_menuAnswer(t, seen, value)
+-- chosen (see "Choosing an item"), and `late` whether it came from a callback, after its question.
+function Overlay:_menuAnswer(t, seen, value, late)
   local st = self._menu
   if seen then
     t.saw, t.misses = true, 0
@@ -7125,7 +7488,7 @@ function Overlay:_menuAnswer(t, seen, value)
     -- the word, which stays "open" for a miss after the menu has gone (see _menuHold).
     st.sightings = (st.sightings or 0) + 1
     if not st.open then self:_menuSet(true, t.name) end
-    if self._pick then self:_pickSeen(t, value) end
+    if self._pick then self:_pickSeen(t, value, late) end
     return
   end
   if not t.saw then return end
@@ -7164,6 +7527,9 @@ function Overlay:_menuAsk(t)
   local q = {}
   t.asking, t.waited, t.lastAsked = q, 0, menuTick
   local answered = false
+  -- Whether the test is still inside its own call: an answer after it is a callback's, on a later
+  -- turn — between two ticks, which an item clicked on it counts as (see _pickSeen).
+  local inCall = true
   local function answer(v)
     if answered then
       if not t.saidTwice then
@@ -7177,7 +7543,7 @@ function Overlay:_menuAsk(t)
     if t.asking ~= q then return end -- asked before the overlay left the front
     t.asking = nil
     -- As on the tick, whenever the answer comes: no probe is read in what it goes on to do.
-    asMenuTick(self._menuAnswer, self, t, v ~= nil and v ~= false, v)
+    asMenuTick(self._menuAnswer, self, t, v ~= nil and v ~= false, v, not inCall)
   end
   local function failed(err)
     if not t.saidFailed then
@@ -7200,6 +7566,7 @@ function Overlay:_menuAsk(t)
     ok, err = pcall(noWait, t.test, self, answer)
     askingInline = outer
   end
+  inCall = false
   if not ok then failed(err) end
 end
 
@@ -7375,40 +7742,50 @@ end
 -- A control with `opensMenu` is being activated, before it acts: the tests run on every tick
 -- for a while, and a test that compares against this moment (newWindow) takes its starting
 -- point. Counts no menu as open — only a test does that. In a calibrating run it also takes the
--- menu shots (see the Calibration section), whose first picture the press waits for: an overlay
--- that is no longer where the press was made when it comes — no longer active, in front again
--- after leaving, or on another window — does not act, and this answers false and "inactive"
--- (logged); nor does a press whose point `x, y`, when given, is no longer its own after the wait
--- (refuseOutside says so), false and "refused". Anything else answers true.
+-- menu shots (see the Calibration section), whose first picture the press waits for, and a test
+-- that looks before the press (`before`: drawn's picture of where the popup will be) waits for its
+-- read here too: an overlay that is no longer where the press was made when they come — no longer
+-- active, in front again after leaving, or on another window — does not act, and this answers
+-- false and "inactive" (logged); nor does a press whose point `x, y`, when given, is no longer its
+-- own after the wait (refuseOutside says so), false and "refused". Anything else answers true.
 --
--- The picture comes FIRST, and the press counts only once it has passed: a press that does not act
--- ends no pick, sets no test running, takes no newWindow list, asks for no later picture and uses
--- up none of the control's menu shots — the rule `activate` keeps for an opener that is never
--- clicked.
+-- The pictures come FIRST, and the press counts only once they have passed: a press that does not
+-- act ends no pick, sets no test running, takes no newWindow list, arms no drawn test, asks for no
+-- later picture and uses up none of the control's menu shots — the rule `activate` keeps for an
+-- opener that is never clicked. `c.button` is the opener's button, which the tests are told with
+-- the press: `{ label, x?, y?, button? }`.
 function Overlay:_menuOpening(c, x, y)
   if not self.active then return true end
   -- Whether this press was photographed, so the item it chooses is photographed with it (see
   -- _pickShot): the same first two openings per control, not a count of its own.
   self._pressShot = false
-  local shots
-  if calibrating then
+  local st = self._menu
+  local press = { label = c and c.label or "a control", x = x, y = y, button = c and c.button }
+  local shots, looked
+  local looks = st ~= nil and menuLooksBefore(self)
+  if calibrating or looks then
     local mark = markAt(self, self.focus)
-    shots = self:_menuShots(c)
+    if calibrating then shots = self:_menuShots(c) end
+    if looks then looked = menuHook(self, "before", press) end
     local fine, why = stillHereAt(self, mark)
     if not fine then
       if shots then shots.drop() end
-      host.log.info(("[calibrate] '%s' '%s': not acting after the menu shot — %s")
-        :format(tostring(self.label), tostring(c and c.label or "control"), why))
+      if calibrating then
+        host.log.info(("[calibrate] '%s' '%s': not acting after the menu shot — %s")
+          :format(tostring(self.label), tostring(c and c.label or "control"), why))
+      else
+        host.log.info(("[menu] '%s' '%s': not acting after the picture before the press — %s")
+          :format(tostring(self.label), tostring(c and c.label or "control"), why))
+      end
       return false, "inactive"
     end
     -- The picture was waited for: the point is asked again, as after any read, since something
     -- drawn over it meanwhile would take the click.
-    if shots and x and refuseOutside(self, c, x, y) then
-      shots.drop()
+    if (shots or looks) and x and refuseOutside(self, c, x, y) then
+      if shots then shots.drop() end
       return false, "refused"
     end
   end
-  local st = self._menu
   -- A new press: an item the last one was waiting to choose is not this press's menu.
   if self._pick then self:_pickEnd("press") end
   if st then
@@ -7426,7 +7803,7 @@ function Overlay:_menuOpening(c, x, y)
       st.press = { window = a.id, front = a, pid = pid, base = base, origin = self:origin(),
         control = st.pressed }
     end
-    menuHook(self, "pressed")
+    menuHook(self, "pressed", press, looked)
   end
   if shots then
     shots.go()
@@ -7468,9 +7845,9 @@ function Overlay:_menuLeave()
 end
 
 -- ── Choosing an item ─────────────────────────────────────────────────────────
--- A plug-in whose menu is a popup it draws itself — every JUCE plug-in's is, and VPS Avenger's
--- MENU, zoom list and redo list are by the avenger_control project's account — publishes no item
--- anybody can press. What a sighted user does is click the opener and then the item, and the
+-- A plug-in whose menu is a popup it draws itself — every JUCE plug-in's is, as a window of its
+-- own or painted inside the plug-in's editor (VPS Avenger's MENU, zoom list and redo list in
+-- Logic, which the drawn test sees) — publishes no item anybody can press. What a sighted user does is click the opener and then the item, and the
 -- obvious way to say that here, a hotspot with `points = { opener, item }`, fails twice over:
 --
 --   * the second click is refused. Every click of a sequence asks host.window.ownsPoint of the
@@ -7487,7 +7864,8 @@ end
 --      tick from here, newWindow takes its list — and it is clicked. Placed first, so that a press
 --      whose opener cannot be clicked starts nothing;
 --   2. the first answer that sees a menu AND says where it is — `{ x, y, w, h }` on screen, which
---      newWindow answers with the window that appeared — places the item. A table `menuItem` is
+--      newWindow answers with the window that appeared, and drawn with the area the popup covers —
+--      places the item. A table `menuItem` is
 --      its offset from the menu's corner, authored and scaled like every other distance of the
 --      overlay, by the factor the OPENER was placed with (the popup is drawn at the zoom it opened
 --      at, and a factor read off the plug-in's screen is least likely to be readable while a popup
@@ -7571,7 +7949,7 @@ function Overlay:_armPick(c, onDone, retries)
     noWhere = nil, -- the test that saw the menu without saying where it is
     outside = nil, -- where the item fell, outside the menu that was seen
     other = nil,   -- a window the `menuItem` function said is not its menu
-    clicked = nil, -- once the item is clicked: { x, y, menu, tick, clicks }
+    clicked = nil, -- once the item is clicked: { x, y, menu, tick, clicks, by (the test record that placed it) }
     keyPending = nil, -- one of the overlay's own keys is running (see ownKey)
   }
   host.log.info((PICK_LOG .. "clicked its opener — the item is chosen when a menu test sees the "
@@ -7705,12 +8083,19 @@ end
 
 -- Test `t` sees a menu and answered `value`: the item is chosen in it, if the answer says where
 -- it is and the item lies inside; once the item is clicked, the answer says whether the menu took
--- it (step 5).
-function Overlay:_pickSeen(t, value)
+-- it (step 5) — the answer of the test that placed the item, and only that one: two tests can see
+-- the same popup (newWindow its window, drawn the area it covers) and answer rectangles a little
+-- apart, which would read as another window in its place, the choice taken a tick early and the
+-- clicks again for a click the popup ignored lost.
+function Overlay:_pickSeen(t, value, late)
   local p = self._pick
   local c = p.c
   local m = menuRectOf(value)
-  if p.clicked then return self:_pickFollow(t, m) end
+  if p.clicked then
+    -- The test itself, not its name: two tests on a list may share one (two `drawn` without a name).
+    if p.clicked.by ~= t then return end
+    return self:_pickFollow(t, m, late)
+  end
   -- The menu item shot is being taken, and the item is clicked once it is in (_pickShot).
   if p.shooting then return end
   if not m then
@@ -7773,9 +8158,11 @@ function Overlay:_pickSeen(t, value)
   local covered, checked = self:_pickCovered(c, m, x, y)
   if covered == "refused" then return self:_pickEnd("refused", "refused, and said") end
   if covered then return self:_pickEnd("covered", covered) end
-  -- `between`: clicked between two ticks, in the item shot's answer — the next tick is then the
-  -- click's own, as a pass's tick is for a click made in it, so the menu has a whole tick to take it
-  -- before a test's answer can count against it (_pickFollow).
+  -- `between`: clicked between two ticks, in the item shot's answer or a test's callback (`late`:
+  -- drawn's reading) — the next tick is then the click's own, as a pass's tick is for a click made
+  -- in it, so the menu has a whole tick to take it before a test's answer can count against it
+  -- (_pickFollow): a reading asked right after the click is of the popup the plug-in has not
+  -- closed yet, and clicking again there would click the plug-in under it once it has.
   local function choose(how, between)
     host.log.info((PICK_LOG .. "— test '%s' sees the menu at %s%s (%s); choosing item (%s,%s) at "
       .. "(%d,%d)"):format(tostring(self.label), tostring(c.label), t.name, where,
@@ -7788,9 +8175,9 @@ function Overlay:_pickSeen(t, value)
       self:_pickDone(p, true, nil)
       return
     end
-    p.clicked = { x = x, y = y, menu = m, tick = menuTick + (between and 1 or 0), clicks = 1 }
+    p.clicked = { x = x, y = y, menu = m, tick = menuTick + (between and 1 or 0), clicks = 1, by = t }
   end
-  if not p.shoot then return choose(checked) end
+  if not p.shoot then return choose(checked, late) end
   -- In a calibrating run, the menu with a crosshair on the item, before the click takes it away:
   -- its picture is asked off the event loop, and the item is clicked once it is in — if the pick
   -- still waits for it, the overlay is still on its window and nothing covers the item, the checks
@@ -7815,7 +8202,8 @@ end
 -- question asked on a tick after the last click, is a click the menu did not take: clicked again,
 -- after the same checks, while the pick has retries left, and "untaken" after that. Another window
 -- in its place is the item taken. An answer that does not say where says nothing either way.
-function Overlay:_pickFollow(t, m)
+-- `late`: the answer came from a callback, so a click made again on it is between two ticks.
+function Overlay:_pickFollow(t, m, late)
   local p = self._pick
   local k = p.clicked
   if not m then return end
@@ -7831,7 +8219,7 @@ function Overlay:_pickFollow(t, m)
   if covered == "refused" then return self:_pickEnd("refused", "refused, and said") end
   if covered then return self:_pickEnd("covered", covered) end
   k.clicks += 1
-  k.tick = menuTick
+  k.tick = menuTick + (late and 1 or 0)
   host.log.info((PICK_LOG .. "— test '%s' still sees the menu at %d,%d %dx%d a tick after the "
     .. "item's click, which it did not take: clicking (%d,%d) again, %d of %d"):format(
     tostring(self.label), tostring(p.c.label), t.name, m.x, m.y, m.w, m.h, k.x, k.y, k.clicks,

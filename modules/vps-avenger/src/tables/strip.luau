@@ -45,6 +45,13 @@ T.ADD_X = 544
 T.DRUMS_TAB_X = 576
 T.TRIG_TAB_X = 616
 
+-- The items of a tab's menu, opened with the right button at the tab's menu point (menuX, TAB_Y)
+-- and clicked where the project's clicker clicks them: an OSC tab's at its menu point's x, Copy at
+-- y 46, Paste at 57, Initialize at 69 and Delete at 80; the Drums and the Trig tab's one item,
+-- Initialize, at their tab's x and y 69 (its click_osc_menu, click_drums_tab and click_trig_tab).
+T.MENU_ITEM_Y = { Copy = 46, Paste = 57, Initialize = 69, Delete = 80 }
+T.DRUMS_TRIG_MENU_Y = 69
+
 -- Mute and Solo of Drums and of Trig: the points the project's clicker reads them at.
 T.DRUMS_MUTE = { 569, 26 }
 T.DRUMS_SOLO = { 583, 26 }

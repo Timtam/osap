@@ -44,6 +44,9 @@ mod overlay_scale_tests;
 /// Choosing an item from a plug-in's own popup menu, once a menu test sees it.
 #[cfg(test)]
 mod overlay_menu_item_tests;
+/// A popup painted inside the plug-in, seen by `O.menuTests.drawn`; and `O.doubleClick`'s button.
+#[cfg(test)]
+mod overlay_drawn_menu_tests;
 /// VPS Avenger's module loaded against the same scripted host: its header read, its zoom and
 /// scale, its clicks, its menus and its warning box.
 #[cfg(test)]
@@ -53,6 +56,10 @@ mod overlay_avenger_tests;
 /// against what it sends and against the module.
 #[cfg(test)]
 mod avenger_page_tests;
+/// VPS Avenger's popups painted inside it, and the oscillator strip and the macros by clicks (the
+/// plan's slice 5), from the page and the ring.
+#[cfg(test)]
+mod avenger_osc_macros_tests;
 /// The HTML page probe (tools/html-probe) against the same scripted host, with a scripted page:
 /// its keys, its report, W3's round trip, W7's landing and the automatic show.
 #[cfg(test)]

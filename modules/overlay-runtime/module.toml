@@ -42,8 +42,13 @@ name = "Overlay runtime"
 # counts readings in O:watch: a `read` may name the reading its value came from, and `done`,
 # `onDone` and `onGiveUp` get how many in a row read the same; a module that uses either depends on
 # "com.platform.overlay >= 0.7". On a Mac an empty focus chain keeps a stay in its window and begins
-# none, and every `[deactivate]` line says which test failed.
-version = "0.7.0"
+# none, and every `[deactivate]` line says which test failed. 0.8.0 sees a popup painted inside the
+# plug-in: O.menuTests.drawn{ region }, which a menu test's new `before(o, press)` hook — asked at a
+# press, before it counts, where a read waits — makes possible; `pressed` is handed the press; a
+# choice is followed only by the test that placed its item, and an item clicked on a callback's
+# answer counts as clicked between two ticks; and O.doubleClick takes `opts.button` and a callback
+# after the second click. A module that uses either depends on "com.platform.overlay >= 0.8".
+version = "0.8.0"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

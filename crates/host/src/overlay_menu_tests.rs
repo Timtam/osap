@@ -222,10 +222,15 @@ local function kept(name, read)
   return slot.value
 end
 
--- A snapshot handle: the region it holds, when, and whether it was let go.
+-- A snapshot handle: the region it holds — and its rectangle, as the host's handle has it — when,
+-- and whether it was let go.
 function T.snap(region)
-  return { region = region, time = S.now, released = false,
+  local s = { region = region, time = S.now, released = false,
     release = function(s) s.released = true end }
+  if type(region) == "table" and type(region[1]) == "number" then
+    s.x, s.y, s.w, s.h = region[1], region[2], region[3] - region[1], region[4] - region[2]
+  end
+  return s
 end
 
 -- REAPER's titled, shown top-level windows and another application's: what host.window.list
@@ -3129,9 +3134,15 @@ fn menus_true_raises_naming_the_building_blocks() {
         ok, err = pcall(function() o:_watchMenus({ nil, T.O.menuTests.nativePopup }) end)
         assert(not ok and string.find(tostring(err), "not in the list", 1, true), tostring(err))
         ok, err = pcall(function() return T.O.menuTests.newwindow end)
-        assert(not ok and string.find(tostring(err), "nativePopup, newWindow, accessibility and accessibilityAfterPress", 1, true), tostring(err))
+        assert(not ok and string.find(tostring(err), "nativePopup, newWindow, accessibility, accessibilityAfterPress and drawn{ … }", 1, true), tostring(err))
         ok, err = pcall(function() o:_watchMenus({ { name = "x", test = function() end, pressed = 1 } }) end)
         assert(not ok and string.find(tostring(err), "`pressed` must be a function", 1, true), tostring(err))
+        ok, err = pcall(function() o:_watchMenus({ { name = "x", test = function() end, before = "now" } }) end)
+        assert(not ok and string.find(tostring(err), "`before` must be a function", 1, true), tostring(err))
+        ok, err = pcall(T.O.menuTests.drawn, { name = "list" })
+        assert(not ok and string.find(tostring(err), "O.menuTests.drawn takes { name?, region = function(o, press)", 1, true), tostring(err))
+        ok, err = pcall(T.O.menuTests.drawn, { region = function() end, minW = 0 })
+        assert(not ok and string.find(tostring(err), "`minW` must be a number above 0, got 0", 1, true), tostring(err))
         -- `false` and an empty list are "no tests", and run nothing.
         local q = T.O.new("quiet")
         q:_watchMenus({})

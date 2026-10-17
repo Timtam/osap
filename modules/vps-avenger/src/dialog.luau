@@ -30,10 +30,13 @@
 -- for both is the words themselves. The table's pair is compared with what was read, in the log
 -- and in the calibration picture, which is how a tester's run settles whether the two agree.
 --
--- WHETHER IT IS A WINDOW AFTER ALL is unmeasured. If JUCE draws it as a window of its own, the
+-- WHETHER IT IS A WINDOW AFTER ALL is unmeasured. Avenger's popups are painted inside its editor in
+-- Logic (popups.luau), and the box most likely is too. If JUCE draws it as a window of its own, the
 -- header overlay's menu test (newWindow) can see it as a new window of the process while the press
 -- of MENU is still being compared against, the header overlay then holds its place with no keys,
--- and the buttons' clicks would be refused as covered — each said. TODO.md, "VPS Avenger".
+-- and the buttons' clicks would be refused as covered — each said. The drawn test looks only in
+-- MENU's own rectangle (popups.luau), above the box's band, so the box is no popup to it. TODO.md,
+-- "VPS Avenger".
 
 local O = host.require("com.platform.overlay")
 local G = host.include("src/geometry.luau")

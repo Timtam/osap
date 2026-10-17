@@ -71,7 +71,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O.away`](overlay#o-away) | Whether the overlay's group is **away** |
 | [`O.calibrating()`](overlay#o-calibrating) | Whether calibration is switched on |
 | [`O.contentSize(origin)`](overlay#o-contentsize) | The width and height of an origin's **content**, which is what coordinates are measured against |
-| [`O.doubleClick(x, y)`](overlay#o-doubleclick) | Two clicks at the same point, far enough apart in time to **be** a double-click. |
+| [`O.doubleClick(x, y, opts?, cb?)`](overlay#o-doubleclick) | Two clicks at the same point, far enough apart in time to **be** a double-click. |
 | [`O.layer`](overlay#o-layer) | The specificity ladder within a slot, named |
 | [`O.memoByEpoch(fn)`](overlay#o-memobyepoch) | Memoizes `fn` for the current epoch only |
 | [`O.memoByOrigin(fn, opts?)`](overlay#o-memobyorigin) | Memoizes a per-window property that does not change while that window exists |

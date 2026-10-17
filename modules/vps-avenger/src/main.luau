@@ -20,9 +20,13 @@
 --   Zoom               a stepper over Avenger's zoom list: the entry beside the current one is
 --                      chosen, and what the zoom field then reads is what is said
 --
--- at every zoom from 50 to 200 %, in every DAW daw-hosts has an entry for. Knob values, macros,
--- oscillators, drums and the browser are later stages (TODO.md, "VPS Avenger"). Plug-in only: the
--- project supports no standalone Avenger, and neither does this module yet (TODO.md).
+-- and after it the oscillator strip and the macros (ring.luau): the tab selected, its Mute and
+-- Solo, Add oscillator, the selected oscillator's knobs reset, the macro tab, its knobs reset and
+-- its buttons — each saying what was read, and clicked as the page's trips click them (act.luau)
+--
+-- at every zoom from 50 to 200 %, in every DAW daw-hosts has an entry for. Turning knobs, the drums
+-- and the browser are later stages (TODO.md, "VPS Avenger"). Plug-in only: the project supports
+-- no standalone Avenger, and neither does this module yet (TODO.md).
 --
 -- And the project's panel as a page of this module's own (page.luau, ui/), on the overlay
 -- runtime's page support (O:addPage): its key on an identified Avenger reads Avenger off one
@@ -44,6 +48,9 @@ local DB = host.include("src/presets.luau")
 -- The project's reading of what a recogniser makes of Avenger's text.
 local R = host.include("src/read/ocr.luau")
 local Page = host.include("src/page.luau")
+local Ring = host.include("src/ring.luau")
+-- Where Avenger's popups are painted, for the drawn menu test (below, the binding).
+local Popups = host.include("src/popups.luau")
 
 -- The arbiter slot the header and the warning box share: the box, at the dialog layer, takes the
 -- keyboard from the header while it is up.
@@ -89,10 +96,12 @@ end
 -- already said, and for a trip of the page's, which shows the refusal in the page instead (it is
 -- handed back with the `false`). A click from a hotkey would inherit held modifiers on Windows;
 -- these controls have none, and Return and Space arrive with none.
-local function clickAt(o, label, at, button, quiet)
+-- Where table point `at` lies on screen, checked as above: x and y, or nil and what was said (or
+-- would have been, `quiet`).
+local function pointOf(o, label, at, quiet)
   local function refuse(said)
     if not quiet then host.speech.output(said, { interrupt = true }) end
-    return false, said
+    return nil, said
   end
   local x, y = o:toScreen(at[1], at[2])
   if not x then
@@ -110,6 +119,12 @@ local function clickAt(o, label, at, button, quiet)
     host.log.info(string.format("[avenger] '%s' at (%d,%d): another window is drawn there — not clicking", label, x, y))
     return refuse("something else is covering " .. label)
   end
+  return x, y
+end
+
+local function clickAt(o, label, at, button, quiet)
+  local x, y = pointOf(o, label, at, quiet)
+  if not x then return false, y end
   host.log.info(string.format("[avenger] '%s': clicking (%d,%d)%s", label, x, y,
     button and (" with the " .. button .. " button") or ""))
   if button then
@@ -120,20 +135,48 @@ local function clickAt(o, label, at, button, quiet)
   return true
 end
 
+-- A double-click of the module's own, placed and checked as clickAt's click is (the oscillator's
+-- and the macro knobs' resets, src/act.luau): both clicks with `button` (O.doubleClick), and
+-- `after()`, as a handler, once the second has gone out — where the change is watched for from.
+local function doubleAt(o, label, at, button, quiet, after)
+  local x, y = pointOf(o, label, at, quiet)
+  if not x then return false, y end
+  host.log.info(string.format("[avenger] '%s': double-clicking (%d,%d)%s", label, x, y,
+    button and (" with the " .. button .. " button") or ""))
+  O.doubleClick(x, y, button and { button = button } or nil, after)
+  return true
+end
+
 -- ── A popup left open ────────────────────────────────────────────────────────
--- A choice the runtime gave up on AFTER the popup was seen — it could not be placed, something
--- covers the item, the item fell outside it, or the popup did not take the click — leaves
--- Avenger's popup open, and while a menu test sees it the keys are the popup's: the Zoom control's
--- Left and Right would go to the list, and the user was only told the choice failed. So it is
--- closed the way the project closes the zoom list, by clicking its opener again — a JUCE popup is
--- modal, and a click outside it dismisses it — and only while the menu still counts as open, so
--- that a popup already gone is not opened again. Quiet: the runtime has said what went wrong, and
--- the menu tests say whether the popup has gone (`[menu] … the menu has closed`). Whether that
--- click closes MENU's popup as it closes the zoom list is not measured (TODO.md).
+-- A choice the runtime gave up on AFTER its popup was seen (`pick.seen`, set by the item's
+-- placing) — it could not be placed, something covers the item, the item fell outside it, or the
+-- popup did not take the click — leaves Avenger's popup open, and while a menu test sees it the
+-- keys are the popup's: the Zoom control's Left and Right would go to the list, and the user was
+-- only told the choice failed. So it is closed, and only while the menu still counts as open, so
+-- that a popup already gone is not opened again:
+--   * MENU's and the zoom field's (`opener`): the way the project closes the zoom list, by
+--     clicking the opener again. JUCE's popup is modal, and a click on the component it was
+--     opened from dismisses it later and goes no further (juce_PopupMenu.cpp, MenuWindow::
+--     inputAttemptWhenModal);
+--   * a right click's (no `opener`): with Escape, which the modal popup takes (its keyPressed
+--     dismisses it). Not with a click: a popup opened at a point rather than from a component is
+--     dismissed by a click anywhere outside it AND the click goes on (juce_Component.cpp: "If
+--     processing the input attempt has exited the modal loop, we'll allow the event to be
+--     delivered") — on the tab it selects, the button it toggles, the field it edits, unread.
+--     Which of the two Avenger's right clicks open is not known; Escape is right for both.
+-- Quiet: the runtime has said what went wrong, and the menu tests say whether the popup has gone
+-- (`[menu] … the menu has closed`). Whether either closes Avenger's popups is not measured
+-- (TODO.md).
 local CLOSE_AFTER = { unplaced = true, covered = true, untaken = true, due = true, refused = true }
 
 local function closeLeftOpen(w, pick, why, label, opener)
   if not (pick.seen and CLOSE_AFTER[why] and w:menuOpen()) then return end
+  if opener == nil then
+    host.log.info(string.format("[avenger] '%s': its popup was left open (%s) — pressing Escape to close it",
+      label, tostring(why)))
+    host.input.send("Escape")
+    return
+  end
   host.log.info(string.format("[avenger] '%s': its popup was left open (%s) — clicking its opener "
     .. "again to close it", label, tostring(why)))
   clickAt(w, label, opener, nil, true)
@@ -195,9 +238,11 @@ local function noted(t)
   return t
 end
 
--- The preset may have changed, and nothing has read it since.
+-- The preset may have changed, and nothing has read it since: and with it everything the ring
+-- read of the oscillators and the macros (ring.luau).
 local function unseen()
   names.init = nil
+  Ring.forget()
 end
 
 local function tidy(text)
@@ -318,6 +363,8 @@ local function presetStep(ov, label, at, dir)
       end
       local was = read or names.last
       if not clickAt(o, label, at) then return end
+      -- Another preset: what the ring read of its oscillators and macros is not Avenger's any more.
+      Ring.forget()
       -- The name read before the click places the preset the step starts from; worked out once
       -- the click is sent, so that the first use's index load never holds the click back.
       local step = nil
@@ -406,9 +453,10 @@ local function presetInfo(ov)
 end
 
 -- ── MENU's items ─────────────────────────────────────────────────────────────
--- Chosen in Avenger's own menu, which JUCE draws as a popup window of its own: MENU is clicked,
--- and the item once the menu test (newWindow, below) sees the popup and says where it is — never
--- after a wait — and the choice counts once the popup has taken it (O:chooseMenuItem).
+-- Chosen in Avenger's own menu, a popup JUCE draws itself — painted inside Avenger's editor in
+-- Logic, most likely a window of its own elsewhere (popups.luau): MENU is clicked, and the item
+-- once a menu test (below, the binding) sees the popup and says where it is — never after a wait
+-- — and the choice counts once the popup has taken it (O:chooseMenuItem).
 --
 -- The item is placed from Avenger's corner, where the project's figures are, across the middle of
 -- the popup's own width, in screen pixels at the factor MENU was clicked at (the runtime hands it
@@ -654,8 +702,10 @@ header:addCustomButton({
 })
 -- The redo list is Avenger's own popup, which the project found VoiceOver could step through with
 -- the arrow keys: opened with a right click on UNDO, and while a menu test sees it the keys are the
--- list's (`opensMenu`: the runtime's press, which newWindow compares against, comes before the
--- click). Whether NVDA reads it, and whether VoiceOver does from here, is a session's question
+-- list's (`opensMenu`: the runtime's press, which the menu tests compare against — newWindow's
+-- window list, drawn's picture of the list's rectangle — comes before the click). Whether NVDA
+-- reads it, and whether VoiceOver does from here — a list painted inside Avenger publishes no
+-- element, so most likely not — is a session's question
 -- (TODO.md). UNDO's crosshair in the header picture of a calibrating run (header.luau) is both
 -- controls' point.
 header:addCustomButton({
@@ -672,6 +722,8 @@ header:addCustomButton({
   end,
 })
 zoomStepper(header)
+-- The oscillator strip and the macros, after Zoom (ring.luau).
+Ring.build(header, { lastName = function() return names.last end })
 -- Away from the overlay, the preset can be changed in ways it does not see — the DAW's own
 -- preset menu, a file dialog, another project: the database's position goes with it.
 header:onDeactivate(function()
@@ -701,18 +753,25 @@ Page.start({
     menuItemAt = menuItemAt,
     zoomEntry = zoomEntry,
     closeLeftOpen = closeLeftOpen,
+    doubleAt = doubleAt,
+    forgetRing = Ring.forget,
     boxOffScreen = boxOffScreen,
     OWN_NAME = OWN_NAME,
     ZOOM_SETTLE = ZOOM_SETTLE,
   },
 })
 
--- `newWindow`: Avenger's popups — MENU, the zoom list, the redo list — are JUCE windows of the
--- DAW's process (the process Avenger runs in; a DAW that runs plug-ins apart is the popup's owner
--- then, unmeasured), which is what this test sees, and says where, so an item can be chosen in
--- one. Not `nativePopup`: JUCE draws its menus itself rather than as the system's, and a test that
--- says only "a menu is open" places no item.
-header:bind(BINDING, { specificity = O.layer.base, menus = { O.menuTests.newWindow } })
+-- Avenger's popups — MENU, the zoom list, the redo list, the tabs', knobs' and buttons' menus — are
+-- drawn by JUCE itself, and two tests see them, each saying where so an item can be chosen in one:
+-- `drawn`, a popup painted inside Avenger's editor where popups.luau says it is drawn — what the
+-- first Mac test of the page found in Logic, where no window of the process came for the zoom list
+-- (TODO.md, item 5) — and `newWindow`, a popup that is a window of the DAW's process (JUCE's other
+-- case, and most likely Windows'; a DAW that runs plug-ins apart is the popup's owner then,
+-- unmeasured). A choice is followed by the test that placed its item. Not `nativePopup`: JUCE
+-- draws its menus itself rather than as the system's, and a test that says only "a menu is open"
+-- places no item.
+header:bind(BINDING, { specificity = O.layer.base,
+  menus = { O.menuTests.newWindow, O.menuTests.drawn(Popups.spec) } })
 
 -- ── The warning box ──────────────────────────────────────────────────────────
 -- Its own overlay on the same slot and binding, at the dialog layer: the box's text, YES and NO.

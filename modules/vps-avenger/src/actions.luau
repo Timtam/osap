@@ -20,6 +20,10 @@
 --   set_zoom                   the zoom list's entry for the size asked — any entry, where the
 --                              ring's stepper takes the one beside — then the zoom field read
 --
+-- and the oscillator strip's and the macros' (the plan's slice 5), each through src/act.luau with
+-- its spec from src/actions/osc.luau or src/actions/macros.luau, which the ring's controls share:
+-- the part read, the click, its change watched for, the part read again (`viaAct` below).
+--
 -- Nothing is taken for done: every answer is what was read after the click, and a read that did
 -- not come is said as that — after a click or choice that may have changed the preset, with the
 -- preset posted as not read (go). After every trip the page gets its state — the preset heading
@@ -35,6 +39,9 @@ local H = host.include("src/header.luau")
 local D = host.include("src/dialog.luau")
 local S = host.include("src/state.luau")
 local Reads = host.include("src/read/open.luau")
+local Act = host.include("src/act.luau")
+local Osc = host.include("src/actions/osc.luau")
+local Macros = host.include("src/actions/macros.luau")
 
 local A = {}
 
@@ -53,42 +60,48 @@ local GIVEN_UP = {
   failed = "something went wrong in this module; nothing more was done",
 }
 
--- Why a choice in Avenger's menu was not made (O:chooseMenuItem's `why`).
-local NOT_CHOSEN = {
-  due = "no menu was seen; nothing was chosen",
-  closed = "the menu closed before anything was chosen",
-  unplaced = "the menu cannot be placed now; nothing was chosen",
-  covered = "something else is covering the menu; nothing was chosen",
-  refused = "the menu could not be clicked; nothing was chosen",
-  untaken = "the menu did not take the choice",
-  inactive = "VPS Avenger is not in front; nothing was chosen",
-  ["no tests"] = "the menu cannot be seen here; nothing was chosen",
-  busy = "the last choice is still being made",
-}
-
-local function notChosen(why)
-  return NOT_CHOSEN[why] or ("nothing was chosen (" .. tostring(why) .. ")")
-end
+-- Why a choice in Avenger's menu was not made (O:chooseMenuItem's `why`), in the page's words.
+local notChosen = Act.notChosen
 
 -- What the page is told after a trip, and the words for when it does not come back: the state —
--- what the trip read written over what was read before (`set`, `values`) — then the error, or the
--- focus back where the user was. `result`: { set = { key -> value }?, values = all of them?,
--- error = a reason?, sentence = a whole sentence?, note = a reason? }.
+-- what the trip read written over what was read before (`set`, `values`, `part`) — then the error,
+-- or the focus: on the element the action names (`focus`, the tool's), or back where the user was;
+-- an error with a `focus` is a refusal at a limit, the focus put there and the error said beside.
+-- `result`: { set = { key -> value }?, values = all of them?, part = { keys, values }? (a part read
+-- again, src/act.luau), facts = { key -> value }? (state.luau's), error = a reason?, sentence = a
+-- whole sentence?, note = a reason?, focus = an element's id?, said = what was read, in words? }.
 local function report(label, result)
   local w = E.plugin()
   local id = w and w.id
   if id and result.values then S.read(id, result.values) end
   if id and result.set then S.set(id, result.set) end
+  if id and result.part then S.part(id, result.part.keys, result.part.values) end
+  if id and result.facts then
+    for k, v in pairs(result.facts) do S.note(id, k, v) end
+  end
   E.postState(id)
   local text = result.sentence
     or (result.error and (label .. ": " .. result.error))
     or (result.note and (label .. ": " .. result.note))
   if text then
-    E.post({ kind = "error", text = text, focus = true })
+    if result.focus then
+      -- A refusal at a limit (src/act.luau): the focus where the tool leaves it — the eighth tab,
+      -- the fourth macro tab, the only one — and then the sentence in the error region, a live
+      -- region, which says it without taking the focus there.
+      E.post({ kind = "focus", id = result.focus })
+      E.post({ kind = "error", text = text })
+    else
+      E.post({ kind = "error", text = text, focus = true })
+    end
     return text
   end
   E.post({ kind = "error", text = "" })
-  E.post({ kind = "restoreFocus" })
+  if result.focus then
+    E.post({ kind = "focus", id = result.focus })
+  else
+    E.post({ kind = "restoreFocus" })
+  end
+  if result.said then return label .. ": " .. result.said end
   local name = result.set and result.set.preset
   return name and (label .. ": " .. name) or nil
 end
@@ -118,6 +131,8 @@ local function go(o, action, act)
     E.DB.forget(why, own)
     R.unseen()
   end
+  -- Whatever the trip does, the ring's reads of this stay are not Avenger's any more (ring.luau).
+  R.forgetRing()
   local function back(result)
     if touched and not result.values and not (result.set and result.set.preset ~= nil) then
       result.set = result.set or {}
@@ -353,10 +368,45 @@ A.HANDLERS.set_zoom = function(o, args)
   end)
 end
 
+-- ── The oscillator strip and the macros ───────────────────────────────────────
+-- Action `action` as a trip through src/act.luau: `build(args, label, known)` its spec (osc.luau,
+-- macros.luau), `known` what was last read in Avenger's window, for its words. A builder's refusal
+-- — arguments the page cannot have meant — is posted at once, with no trip: nothing in Avenger is
+-- needed for it.
+local function viaAct(action, build)
+  return function(o, args)
+    local label = E.LABELS[action]
+    local w = E.plugin()
+    local spec, why = build(args, label, S.values(w and w.id))
+    if not spec then
+      log(string.format("'%s' not sent to VPS Avenger: %s", label, tostring(why)))
+      E.post({ kind = "error", text = label .. ": " .. tostring(why) })
+      return
+    end
+    go(o, action, function(m, trip)
+      Act.run(m, spec, function(result)
+        -- nil: the trip's own check ended it, and its give-up says the rest.
+        if result then trip:done(result) end
+      end, trip)
+    end)
+  end
+end
+
+for _, name in ipairs({ "select_osc_tab", "add_osc", "select_drums_tab", "select_trig_tab", "toggle_osc_mute",
+  "toggle_osc_solo", "toggle_drums_mute", "toggle_drums_solo", "toggle_trig_mute", "toggle_trig_solo",
+  "osc_menu_item", "drums_menu_item", "trig_menu_item", "reset_osc_control" }) do
+  A.HANDLERS[name] = viaAct(name, Osc[name])
+end
+for _, name in ipairs({ "select_macro_tab", "add_macro_tab", "delete_macro_tab", "toggle_macro_button",
+  "macro_reset_mode", "macro_button_menu_item", "reset_macro_amount" }) do
+  A.HANDLERS[name] = viaAct(name, Macros[name])
+end
+
 -- What page.luau hands over: { header, DB, ring, zoomOf, LABELS, post, roster, plugin = () -> the
 -- window the page was shown beside, postState = (id) -> (), closedWords = () -> the sentence }.
 function A.start(env)
   E, R = env, env.ring
+  Act.start(env.ring)
 end
 
 return A

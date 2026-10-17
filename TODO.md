@@ -240,14 +240,86 @@ them:
       the ring and from the page, ◀ and ▶ step again — in the ring Tab onto them no longer says
       "unavailable" right after Undo — and the page's Back and Next are no longer dimmed once it
       shows the new name, or the heading says the preset is not read.
-- [ ] **5. Avenger's own popups on a Mac.** The page's Size never saw the zoom list: `'Zoom' not
+- [x] **5. Avenger's own popups on a Mac.** The page's Size never saw the zoom list: `'Zoom' not
       chosen — no menu test saw a menu within 8000 ms`, twice. Avenger draws its popups itself, and
       no menu test of the module sees them on a Mac. Needs pictures of each popup kind from the
       Avenger developer (GM1), then a picture-based menu test.
+      **Built (runtime 0.8.0, VPS Avenger 0.4.0, 2026-10-17); the next log confirms.** Why no test
+      saw it, from the log and the code: the module listed only `newWindow`, which logs every new
+      window of the plug-in's process — and the log has no `[menu]` line at all, while the same
+      window server list paired Logic's plug-in window by frame and owner, and the host's
+      AXMenuOpened observer, which saw Logic's own menus, said nothing after either click. So the
+      list was neither a window of Logic nor a Cocoa menu: in current JUCE a popup given a parent
+      component is painted as a child of the plug-in's editor, with no window and no notification;
+      the tool's numbers fit that (every popup row from Avenger's corner, the macro button menu
+      pushed back inside Avenger's right edge). The log cannot exclude a second reading — no popup
+      opened at all: nothing pictured the screen after the clicks (not a calibrating run). The
+      window list cannot see such a popup, so the fix is a picture test that needs no template, in
+      the runtime and general: `O.menuTests.drawn{ region }` (docs/api/overlay.md, O.menuTests).
+      At each press the module names the rectangle its popup is painted in (src/popups.luau: the
+      zoom list, MENU's popup, the redo list, and round a right click's point, at 50 % from
+      Avenger's corner, cut to Avenger); the test profiles it in the press's handler before the
+      click (a menu test's new `before` hook), then with a callback on each tick, and compares rows
+      and columns in Luau (at most 256 each): a filled area that changed since the press and reads
+      the same twice in a row is the popup, answered as a rectangle drawn inside the plug-in; a
+      flash, an animation and an outline (VoiceOver's cursor) are none; a highlighted row keeps
+      it; it is gone once a popup's worth of its lines each way, or most of its lines, no longer
+      read as at the sighting — so a tab the same right click selected under the region does not
+      keep it open — and its going disarms the test until the next press. A choice is followed only
+      by the test that placed its item (the test itself, not its name), and an item clicked on a
+      callback's answer counts as clicked between two ticks, so a reading taken right after the
+      click never clicks it again. A right click's item is clicked at the tool's own x, kept inside
+      the area seen; a window whose rows do not reach the item's (a tooltip newWindow saw first) is
+      passed over for the next answer. The binding lists `newWindow` and `drawn`. No picture from the developer is needed to build it; his pictures
+      settle the regions and the starting values (below, GM1). Pinned in
+      overlay_drawn_menu_tests.rs and avenger_osc_macros_tests.rs (Size from the page, MENU from
+      the ring, the redo list holding a trip). Residuals: a static filled change in a region that is
+      not the popup would be taken for it (its item is placed inside that area only, and the
+      action's read-back catches a wrong choice); on a popup of two rows the highlight after the
+      click can read as gone (the reset modes keep their retries, the button menu has none); a
+      popup that differs from what lies under it in fewer lines than the smallest popup, beside a
+      lasting change that outweighs it, would still count as open until the next press; an
+      animation inside a region delays "alike". A right click's popup a choice left open (not
+      taken, covered) is closed with Escape, not a click on its opener: JUCE dismisses a popup
+      opened at a point on any click outside it and lets the click through (juce_Component.cpp) —
+      onto the tab, the button or the field — and only swallows one on the component a popup was
+      opened from; which of the two Avenger's right clicks open, and whether Escape reaches the
+      popup in Logic, are not measured.
+      **The Mac tester confirms** (with Calibrate ticked in the settings dialog, from the ring and
+      the page):
+      - Size and the ring's Zoom, MENU's Load and Initialize, and an OSC tab's menu each log
+        `[menu] 'VPS Avenger': drawn: armed on '<label>' in …`, then `drawn: a popup WxH at x,y,
+        alike at readings n and n+1`, `[menu item] … — test 'drawn' sees the menu at …`, `… chosen
+        — clicked 1 time(s) at …` and `drawn: the popup … has gone`; the `…-menu-item.png`
+        pictures show the item's crosshair on its row;
+      - the redo list, which the user chooses in, so no item is clicked and no `[menu item]` line
+        comes: `drawn: armed on 'Redo list'` (the ring) or `'Redo'` (the page), `drawn: a popup …`,
+        `[menu] 'VPS Avenger': a menu is open — test 'drawn' sees it` and, once it has closed,
+        `[menu] 'VPS Avenger': the menu has closed`; from the page also `trip 'Redo': its menu is
+        seen` and `trip 'Redo': its menu has closed`, then the name read;
+      - where instead the log says `drawn: nothing has changed in … after 20 readings`, no popup
+        opened, and the pictures `calibration/VPS-Avenger-<label>-menu-before.png` (the label with
+        `-` for what is not a letter or digit), `-menu-after-600.png` and `-menu-after-1500.png`
+        say what happened. A `newWindow: a window appeared …` line would contradict the reading
+        above: the popups would be windows after all.
+- [ ] **5b. The Avenger developer's pictures of every popup kind (GM1)**, sighted, in Logic: for
+      each, PNGs of Avenger's whole window at 80 % and 50 % — before the click, the popup open with
+      the pointer where it was clicked, the pointer on the second item (its highlight) — and the
+      items' texts top to bottom: MENU's popup; the zoom list (and once at 200 %: does it still fit
+      below the field?); the redo list after six or more undo steps; an OSC tab's menu with one and
+      with three oscillators (is Delete shown or disabled with one?); the Drums and the Trig tab's
+      menus; macro tab 1's menu with one and with three tabs (what does Delete delete?); macro knob
+      3's menu (does it shift left at Avenger's right edge?); macro button 2's menu (are ticks
+      shown, does a click close it?); and whether any popup ever reaches outside Avenger's window
+      (a popup with a parent component cannot). They settle popups.luau's regions and smallest
+      popups, the drawn test's change thresholds, the items' rows from the popup's corner, and
+      whether a tick item keeps its menu open (the `retries` of the button menu and reset modes).
 - [ ] **6. Then a new package for the tester:** Load, Initialize and Size again (ring and page), the
       names after Next and Previous, and the Permissions page. With 2a, 2b, 2c and 4 built, the
       package also asks for what each of them says the Mac tester confirms above, and no window
-      moves between steps.
+      moves between steps. With 5 built: Size, Load, Initialize and the redo list from the ring and
+      from the page with Calibrate ticked, and the log and the calibration folder sent back; with
+      slice 5, its own steps ("What the Mac tester confirms for slice 5", VPS Avenger's page).
 - [ ] **7. Follow-ups of 2a (not built).** (a) The host's busy quarantine: when a focus read is
       skipped or fails for it, arm one focus round for when it ends (`BUSY_PENALTY`, ax.rs), as
       `arm_recheck_ladder` (queue.rs) places its last rungs past it — a bound on looking, so the
@@ -7066,8 +7138,71 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
         (`[avenger] [read] … questions of one picture; … the questions N ms`), against slice 2's;
       - with `pageLeavesDawActive`, whether a trip arrives at all (the plug-in window's foreground
         event with the page described `activates = false` is unmeasured).
-- [ ] **The next stages**: the strip, the hand-overs, the knobs, the drums and the browser, and
-      the page's own Settings section.
+- [x] **The oscillator strip and the macros by clicks** (the plan's slice 5, module 0.4.0, on the
+      runtime 0.8.0, built 2026-10-17). Twenty-one actions of the page's — `select_osc_tab`,
+      `add_osc`, `select_drums_tab`, `select_trig_tab`, Mute and Solo of an OSC tab, Drums and Trig,
+      `osc_menu_item`, `drums_menu_item`, `trig_menu_item`, `select_macro_tab`, `add_macro_tab`,
+      `delete_macro_tab`, `toggle_macro_button`, `macro_reset_mode`, `macro_button_menu_item`,
+      `reset_macro_amount`, `reset_osc_control` — each a trip through one action layer
+      (`src/act.luau`) with its spec in `src/actions/osc.luau` or `src/actions/macros.luau`, which
+      the ring shares: one picture of the part acted on (`read/open.luau`, `Open.part`: the strip,
+      the knobs, the central tab, the macro panel), the click placed from that read or refused
+      without one (no count read, an index past the count, an eighth oscillator, a fifth macro
+      tab, the only macro tab deleted, Delete with one oscillator, an oscillator's knob while Drums
+      or Trig is selected — the tool clicked there all the same), then a change wait from that
+      picture (at most 2 s, a hover redraw looked past) and the part read again: what was read is
+      what the page shows, "unchanged" said at the bound, never a state flipped from memory (the
+      tool turned a macro button over when unsure). The tabs' and buttons' menus with the right
+      button through `O:chooseMenuItem`, their items at the tool's rows and x (`Popups.row`); a
+      popup a choice left open closed with Escape; a reset mode, which Avenger shows only in its
+      menu, said only as chosen; a button menu's tick item clicked once, then both buttons' change
+      waited for from the picture before the right click and both read (Special Switch may turn
+      the other off); Paste and Initialize read the tabs' names before the click and after it, so
+      "nothing VPS Avenger shows changed" is said only where nothing did; an OSC tab's Copy noted
+      for the session (`osc_panel.copied`), so the page offers Paste; the resets a double-click,
+      with the right button for Pan and Random Pitch (the runtime's `O.doubleClick` gained
+      `opts.button` and a callback after the second click, RG4). The page lands where the tool's
+      focus went (`osc-tab-<n>`, `osc-menu-<i>`, `macro-tab-<i>`, `macro-delete-last`, the macro
+      slots' buttons, `osc-reset-<control>`), the refusals at a limit too (`osc-tab-8` at eight
+      oscillators, `macro-tab-4` at four macro tabs, `macro-tab-1` for the only one), their sentence
+      in the error region beside it. The ring has new
+      controls after Zoom (`src/ring.luau`): Oscillator (a stepper over the tabs), Mute and Solo of
+      the selected tab, Add oscillator, Level, Pan, Transpose, Fine tune and Random pitch (Return
+      resets), Macro tab (a stepper), Add macro tab, Delete last macro tab, Macro 1 to 3 (Return
+      resets) and Macro button 1 and 2 (Return clicks) — each saying what was read of its part in
+      this stay, read when first announced or pressed (the overlay's onActivate may not wait for a
+      read), again after each of its actions, and forgotten when the overlay leaves the front, the
+      preset may have changed, or a trip of the page's ran. The tabs' menus, reset modes and button
+      menus stay the page's (Q5-2). Tested in the scripted host, whose painted picture now answers
+      change waits and repaints after a click: every action from the page at 80 % on a Mac, a
+      sample on Windows at 150 % display scaling; of the ring, the Oscillator and Macro tab
+      steppers, Mute, Level, Delete last macro tab and Macro button 1, one action at a time, and
+      its reads forgotten after a trip of the page, ▶ and UNDO (the other ring controls run the same
+      specs, untested from the ring); a trip given up before its click and mid-action, no picture
+      held after an action, and bounds on the Luau work of a part read and of a drawn reading at
+      200 %.
+- [ ] **What the Mac tester confirms for slice 5** (P3, with Avenger in Logic, Calibrate ticked):
+      - an OSC tab, Drums and Trig from the page and with the ring's Oscillator stepper: the click
+        lands on the tab, and the page (or the ring) says the tab read as selected after it;
+      - Mute and Solo of an OSC tab and of Drums: the LED's state after the click, ON then OFF;
+      - Add OSC up to the count shown, the new tab's name read;
+      - an OSC tab's menu: Copy, then Paste offered; Initialize; Delete of the last tab — and the
+        `drawn` lines of item 5 for the right click's popup, with its place in the log's
+        `[avenger] '…': the popup at (x,y) WxH from Avenger's corner in 50 % units`;
+      - a macro tab chosen, one added, the last deleted; a macro button clicked (its state read
+        after), a reset mode chosen, a button menu's item chosen once and both buttons read once
+        they have changed (at most 2 s after the item);
+      - where a right click's popup did not take its item, the log's `[avenger] '<label>': its popup
+        was left open (untaken) — pressing Escape to close it`, and whether `[menu] … the menu has
+        closed` follows (Escape reached the popup) or the popup stays up;
+      - Volume reset with Return in the ring and from the page, and Pan's reset (two right clicks):
+        the value read after — whether Avenger takes our two clicks for a double-click on a Mac
+        (each click carries click state 1; JUCE counts clicks itself);
+      - the `[avenger] [act] '<label>': changed — …` or `unchanged — …` line of each action, and
+        `the picture changed and what this action changes did not … — looking on` where a hover
+        was drawn first.
+- [ ] **The next stages**: the hand-overs, the knobs turned, the drums and the browser, and the
+      page's own Settings section.
 
 ## HTML pages, stage 1: `host.gui.webview` and the Windows probe (2026-09-28)
 

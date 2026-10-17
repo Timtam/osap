@@ -361,4 +361,165 @@ function Open.read(o, opts)
   return v
 end
 
+-- ── A part of Avenger, read again ────────────────────────────────────────────
+-- What an action of the page or the ring reads before its click and after it (src/act.luau): only
+-- the part it acts on, off a picture of that part. Each a rectangle at 50 % from Avenger's corner,
+-- and what is read in it:
+--   strip    the OSC tabs, Drums and Trig: the count, the tab selected, every Mute and Solo, the
+--            Drums tab's switches and mode (read/strip.luau)
+--   knobs    the strip, and the selected oscillator's knobs (read/knob.luau)
+--   tab      the strip, the knobs, and with the Drums tab the central tab and DRUM SQ
+--   macros   the macro panel: the tab shown, its buttons and its knobs' amounts; the tabs counted
+--            and the five names read with `text`
+Open.PARTS = {
+  strip = { rect = { 230, 18, 640, 145 }, strip = true },
+  knobs = { rect = { 230, 18, 640, 182 }, strip = true, knobs = true },
+  tab = { rect = { 230, 18, 640, 268 }, strip = true, knobs = true, centre = true },
+  macros = { rect = { 700, 425, 871, 535 }, macros = true },
+}
+
+-- The keys of state.luau's values each part reads, whether it finds them or not: what it does not
+-- find is not kept from an earlier read (S.part). The OSC names and the macro tabs' count and names
+-- only where the part's text is read.
+local STRIP_KEYS = { "oscCount", "oscMute", "oscSolo", "selectedType", "selectedIndex", "drumsMute",
+  "drumsSolo", "trigMute", "trigSolo", "drumPattern", "drumLock", "drumMode" }
+
+-- The picture's rectangle for part `name` with placer `pl`, cut at the primary display's edge as the
+-- key's picture is (pictureRegion), and to the plug-in's panel; nil when nothing of it is on screen.
+function Open.partRegion(pl, name)
+  local r = pl:rect(Open.PARTS[name].rect)
+  if not r then return nil end
+  local c = pl.origin.client
+  r = { math.max(r[1], math.floor(c.x)), math.max(r[2], math.floor(c.y)), math.min(r[3], math.ceil(c.x + c.w)),
+    math.min(r[4], math.ceil(c.y + c.h)) }
+  local cut = pictureRegion({ x = r[1], y = r[2], w = r[3] - r[1], h = r[4] - r[2] })
+  if cut[3] - cut[1] < 2 or cut[4] - cut[2] < 2 then return nil end
+  return cut
+end
+
+-- Reads part `name` off snapshot `snap` (of Open.partRegion's rectangle), in a handler where its
+-- questions wait. `opts`: { pl = the placer the picture was taken with, text = read the part's text
+-- too, macroCount = the macro tabs counted before, for a part read without its text, preset = the
+-- preset's name last read, whose tabs' names in the database are the names' vocabulary }. Answers
+-- the values read (state.luau's), and the keys the part read — a key of the list missing from the
+-- values was not found. Nothing clicks; nothing but the snapshot is read.
+function Open.part(snap, name, opts)
+  local part = Open.PARTS[name]
+  local pl = opts.pl
+  local view = { snap.x, snap.y, snap.x + snap.w, snap.y + snap.h }
+  local all = {}
+  if part.strip then Strip.ask(pl, all) end
+  if part.centre then
+    Centre.ask(pl, all)
+    DrumSq.ask(pl, all)
+  end
+  if part.macros then Macros.ask(pl, all) end
+  local got = { why = {} }
+  for _, req in ipairs(all) do
+    if cutTo(req, view) then
+      local ok, value, reason
+      if req.kind == "cells" then
+        ok, value, reason = pcall(host.screen.cells, { region = req.rect, cols = req.cols, rows = req.rows,
+          predicate = req.pred, snapshot = snap })
+      else
+        ok, value, reason = pcall(host.screen.profile, { region = req.rect, axes = "columns", snapshot = snap })
+      end
+      if not ok then
+        got.why[req.name] = tostring(value)
+      elseif value ~= nil then
+        local made, g = pcall(function() return req.kind == "cells" and P.grid(req, value) or value end)
+        if made then got[req.name] = g else got.why[req.name] = tostring(g) end
+      else
+        got.why[req.name] = reason
+      end
+    else
+      got.why[req.name] = "outside the part's picture"
+    end
+  end
+  local place = nil
+  if opts.preset and DB.present then
+    local ok, p = pcall(DB.place, opts.preset)
+    if ok then place = p end
+  end
+  local v, keys = {}, {}
+  local function read(list) for _, k in ipairs(list) do keys[#keys + 1] = k end end
+  local marks = { strip = {}, macros = {}, knob = {}, centre = {}, drumsq = {} }
+  local count = nil
+  if part.strip then
+    read(STRIP_KEYS)
+    count = Strip.count(pl, got, log)
+    v.oscCount = count
+  end
+  -- The one text read of the part's picture, where it is asked.
+  local byName = {}
+  if opts.text then
+    local entries = {}
+    if part.strip and count then
+      for i = 1, count do
+        local r = pl:rect(T.tabSpan(i, count, T.NAME_TOP, T.NAME_BOTTOM))
+        if r then entries[#entries + 1] = { name = "osc " .. i, region = r } end
+      end
+    end
+    if part.macros then Macros.entries(pl, entries) end
+    if #entries > 0 then
+      local _, names = host.ocr.recognize(entries, { snapshot = snap, lang = H.lang() })
+      byName = names or {}
+    end
+  end
+  if part.strip then
+    if opts.text and count then
+      read({ "oscNames", "oscSnapped" })
+      local texts = {}
+      for i = 1, count do
+        local r = byName["osc " .. i]
+        texts[i] = r and r.status == "text" and R.tidy(r.text) or nil
+      end
+      oscNames(texts, count, place and place.osc, v)
+    end
+    Strip.decide(pl, snap, got, count, v, log, marks.strip)
+  end
+  if part.knobs then
+    read({ "osc" })
+    if v.selectedType == "osc" then
+      v.osc = {}
+      log("oscillator: " .. Knob.osc(pl, snap, v.osc, marks.knob))
+    end
+  end
+  if part.centre then
+    read({ "central", "drumSq" })
+    if v.selectedType == "drums" then
+      Centre.decide(pl, got, v, log, marks.centre)
+      if v.central == "drum_sq" then DrumSq.decide(pl, got, v, log, marks.drumsq) end
+    end
+  end
+  if part.macros then
+    read({ "macroSelected", "macroButtons", "macroAmounts" })
+    local counted = nil
+    if opts.text then
+      read({ "macroCount", "macroLabels", "macroSnapped" })
+      counted = Macros.count(byName, v)
+    else
+      v.macroCount = opts.macroCount
+    end
+    Macros.selected(pl, got, v.macroCount, v, log, marks.macros)
+    if opts.text then
+      local vocab = place and place.macros and v.macroSelected and place.macros[v.macroSelected] or nil
+      Macros.labels(byName, v, vocab, counted, log)
+    else
+      -- Counted before, not read here: not part of what this read says.
+      v.macroCount = nil
+    end
+    Macros.buttons(pl, got, v, log, marks.macros)
+    v.macroAmounts = {}
+    local amounts = {}
+    for i = 1, 3 do
+      local a, w = Knob.macro(pl, snap, i, marks.macros)
+      v.macroAmounts[i] = a
+      amounts[#amounts + 1] = string.format("knob %d %s", i, w)
+    end
+    log("macros: " .. table.concat(amounts, "; "))
+  end
+  return v, keys
+end
+
 return Open

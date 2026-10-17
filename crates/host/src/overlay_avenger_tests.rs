@@ -63,6 +63,11 @@ S.owns = true
 S.ownsAsked = {}
 S.marked = {}
 
+-- The ring's controls of the oscillator strip and the macros, after Zoom (src/ring.luau).
+T.RING_LABELS = "Oscillator|Mute|Solo|Add oscillator|Level|Pan|Transpose|Fine tune|Random pitch|Macro tab|"
+  .. "Add macro tab|Delete last macro tab|Macro 1|Macro 2|Macro 3|Macro button 1|Macro button 2"
+T.RING_CONTROLS = 17
+
 -- The arbiter is the shared one with the rule a module with a dialog layer needs
 -- (`overlay_host_panel_tests::SPECIFICITY_ARBITER`), its claims Avenger's.
 T.claimModule = "com.platform.vps-avenger"
@@ -159,7 +164,7 @@ rawset(T.host.screen, "cells", function(opts, cb)
   local r = opts.region
   local answer = { cb = cb, key = opts.key }
   if within(r, snap) then
-    answer.value = { cells = T.paintCells(S.picture, r, opts.cols, opts.rows, opts.predicate),
+    answer.value = { cells = T.paintCells(snap.picture or S.picture, r, opts.cols, opts.rows, opts.predicate),
       x = r[1], y = r[2], w = r[3] - r[1], h = r[4] - r[2] }
   else
     answer.why = "the region is not inside the snapshot"
@@ -169,20 +174,30 @@ rawset(T.host.screen, "cells", function(opts, cb)
   S.screenOut[#S.screenOut + 1] = answer
 end)
 
+S.screenProfiles = 0 -- profiles of the screen, not of a snapshot: the drawn menu test's
 rawset(T.host.screen, "profile", function(opts, cb)
   if cb == nil then T.screenWait("host.screen.profile") end
   for k in pairs(opts) do
     assert(k == "region" or k == "axes" or k == "snapshot" or k == "key" or k == "dark",
       "host.screen.profile: opts has a key '" .. tostring(k) .. "'")
   end
-  assert(opts.axes == "columns", "the scripted host profiles columns")
+  assert(opts.axes == "columns" or opts.axes == "both", "the scripted host profiles columns, or both axes")
   whole(opts.region, "host.screen.profile")
-  local snap = heldSnapshot(opts.snapshot, "host.screen.profile")
-  S.profilesAsked += 1
   local r = opts.region
   local answer = { cb = cb, key = opts.key }
+  if opts.snapshot == nil then
+    -- The screen as it is now: S.picture.
+    S.screenProfiles += 1
+    answer.value = T.paintProfile(S.picture, r, opts.axes == "both")
+    if cb == nil then return answer.value end
+    if opts.key then S.out[opts.key] = (S.out[opts.key] or 0) + 1 end
+    S.screenOut[#S.screenOut + 1] = answer
+    return
+  end
+  local snap = heldSnapshot(opts.snapshot, "host.screen.profile")
+  S.profilesAsked += 1
   if within(r, snap) then
-    answer.value = T.paintProfile(S.picture, r)
+    answer.value = T.paintProfile(snap.picture or S.picture, r, opts.axes == "both")
   else
     answer.why = "the region does not overlap the snapshot"
   end
@@ -205,7 +220,7 @@ do
       if p[1] < g[1] or p[2] < g[2] or p[1] >= g[3] or p[2] >= g[4] then return nil, "the point is not inside the snapshot" end
     end
     S.pointLists[#S.pointLists + 1] = #points
-    return T.paintPixels(S.picture, points)
+    return T.paintPixels(snap.picture or S.picture, points)
   end)
 end
 
@@ -242,6 +257,36 @@ end
 -- sentence. S.snapFails is the reason a capture that fails answers. (The primary screen is
 -- S.screenSize, 2560 x 1440 unless a scenario says: overlay_host_panel_tests.rs, T.modules.)
 S.snapHeld = 0
+-- The change waits out (host.screen.snapshot with `change`): each answered on the turn after the
+-- picture has changed from its baseline — another S.picture than `from`'s, which T.paintAvenger or
+-- T.repaint makes — with `changed = true`, or at its timeout with what is there, `changed = false`.
+-- S.onSnapshotWait, when set, runs inside a picture a handler waits for, before it is answered:
+-- the user going elsewhere meanwhile.
+S.changeWaits = {}
+S.changeWaitsAsked = 0
+S.onSnapshotWait = nil
+S.sent = {} -- every host.input.send, in order
+-- Every snapshot handle the scripted host has handed out that the module has not released yet
+-- (T.held): a picture held past its action holds the module's budget.
+S.live = {}
+do
+  local snap = T.snap
+  T.snap = function(region)
+    local s = snap(region)
+    S.live[s] = true
+    local release = s.release
+    s.release = function(h)
+      S.live[h] = nil
+      return release(h)
+    end
+    return s
+  end
+end
+function T.held()
+  local n = 0
+  for _ in pairs(S.live) do n += 1 end
+  return n
+end
 do
   local snapshot = rawget(T.host.screen, "snapshot")
   rawset(T.host.screen, "snapshot", function(opts, cb)
@@ -255,8 +300,68 @@ do
       end
       if S.snapFails then return nil, S.snapFails end
     end
-    return snapshot(opts, cb)
+    if cb ~= nil and opts.change ~= nil then
+      local c = opts.change
+      whole(r, "host.screen.snapshot")
+      for k in pairs(c) do
+        assert(k == "from" or k == "watch" or k == "timeout" or k == "tolerance" or k == "minPixels" or k == "settle",
+          "host.screen.snapshot: opts.change has a key '" .. tostring(k) .. "'")
+      end
+      assert(c.timeout == nil or (c.timeout >= 1 and c.timeout <= 2000 and c.timeout == math.floor(c.timeout)),
+        "opts.change.timeout must be a whole number from 1 to 2000, got " .. tostring(c.timeout))
+      assert(c.from == nil or not c.from.released, "a released snapshot as a change wait's baseline")
+      for _, w in ipairs(c.watch or {}) do
+        whole(w, "a watched region")
+        assert(w[1] < r[3] and w[3] > r[1] and w[2] < r[4] and w[4] > r[2], "a watch region does not overlap the region")
+      end
+      S.changeWaitsAsked += 1
+      S.changeWaits[#S.changeWaits + 1] = { region = r, cb = cb, asked = S.now, timeout = c.timeout or 500,
+        base = c.from and c.from.picture or S.picture, watch = c.watch }
+      return
+    end
+    if cb == nil then
+      local s, why = snapshot(opts, cb)
+      if s then s.picture = S.picture end
+      if s and S.onSnapshotWait then S.onSnapshotWait(opts) end
+      return s, why
+    end
+    -- A plain picture with a callback: of the picture as it is when it is answered.
+    return snapshot(opts, function(s, why, info)
+      if s then s.picture = S.picture end
+      cb(s, why, info)
+    end)
   end)
+  local runDue = T.runDue
+  T.runDue = function()
+    runDue()
+    local due = {}
+    local i = 1
+    while i <= #S.changeWaits do
+      local w = S.changeWaits[i]
+      local changed = S.picture ~= w.base
+      if changed or S.now >= w.asked + w.timeout then
+        table.remove(S.changeWaits, i)
+        due[#due + 1] = { w = w, changed = changed }
+      else
+        i += 1
+      end
+    end
+    if #due == 0 then return end
+    S.epoch += 1
+    for _, d in ipairs(due) do
+      local s = T.snap(d.w.region)
+      s.picture = S.picture
+      T.call("answer", d.w.cb, s, nil, { time = S.now, waited = S.now - d.w.asked, frames = 1,
+        changed = d.changed, settled = d.changed, rebased = false })
+    end
+  end
+end
+
+-- Avenger redrawn as `spec` says (T.paintAvenger's), after a click: a new picture, which a change
+-- wait sees on its next turn. The same spec again is a picture that changed in nothing a read
+-- tells — a hover drawn and gone.
+function T.repaint(spec)
+  T.paintAvenger(S.painted.cx, S.painted.cy, S.painted.k, spec)
 end
 
 -- Avenger as a picture shows it, for the page's reads: shapes at the points of the module's own
@@ -275,6 +380,8 @@ end
 --   buttons = { on, on }, amounts = { a, a, a }   the macro buttons lit, the knobs' pointers
 --   volume, transpose, fine   the selected oscillator's knobs' pointers
 --   fav                FAV lit
+--   lasting            { x1, y1, x2, y2 } at 50 %: a panel a click drew that outlasts its popup
+--   popup              { x1, y1, x2, y2 } at 50 %: Avenger's popup over it all, painted inside it
 -- A pointer is a light ray out from the knob's middle, at the angle its value puts it: 135°
 -- (down and left) for nothing, 270° more clockwise for everything.
 function T.paintAvenger(cx, cy, k, spec)
@@ -361,7 +468,18 @@ function T.paintAvenger(cx, cy, k, spec)
   if spec.transpose then semitones({ 346, 114 }, spec.transpose) end
   if spec.fine then semitones({ 346, 160 }, spec.fine / 100 * 48) end
   if spec.fav then box(EX.FAVORITE_VIEW, 25, 10, { 220, 220, 220 }) end
+  if spec.lasting then
+    local q = spec.lasting
+    rect(q[1], q[2], q[3], q[4], { 60, 60, 66 })
+  end
+  -- Avenger's popup over it, painted inside its window: { x1, y1, x2, y2 } at 50 % (`popup`).
+  if spec.popup then
+    local q = spec.popup
+    rect(q[1], q[2], q[3], q[4], { 70, 70, 76 })
+    for row = q[2] + 4, q[4] - 6, 11.5 do rect(q[1] + 4, row, q[3] - 8, row + 3, { 210, 210, 210 }) end
+  end
   S.picture = { bg = { 40, 40, 40 }, shapes = shapes }
+  S.painted = { cx = cx, cy = cy, k = k, spec = spec }
 end
 
 -- What the page's text read reads: `words`, by the region's name (read/open.luau's names).
@@ -727,7 +845,7 @@ function T.avenger()
     click = function(x, y, opts)
       S.clicks[#S.clicks + 1] = { x, y, button = opts and opts.button }
     end,
-    send = function() end,
+    send = function(combo) S.sent[#S.sent + 1] = combo end,
   }))
   local AH = setmetatable({}, { __index = T.host })
   AH.path = function(p) return "C:/modules/vps-avenger/" .. p end
@@ -1132,27 +1250,34 @@ fn paint_cells(_: &Lua, (p, region, cols, rows, pred): (Table, Table, u32, u32, 
     Ok(to_hex(&cells))
 }
 
-/// `T.paintProfile(picture, region)`: the column profile host.screen.profile answers for it.
-fn paint_profile(lua: &Lua, (p, region): (Table, Table)) -> mlua::Result<Table> {
+/// `T.paintProfile(picture, region, rows)`: the profile host.screen.profile answers for it — its
+/// columns, and its rows as well with `rows` (`axes = "both"`).
+fn paint_profile(lua: &Lua, (p, region, rows): (Table, Table, Option<bool>)) -> mlua::Result<Table> {
     let (x, y, w, h) = area_of(&region)?;
     let img = picture_of(&p)?.image(x, y, w, h);
-    let (cols, _) = crate::profile::profile(&img, Area { x: 0, y: 0, w, h }, true, false, 128)
+    let rows = rows.unwrap_or(false);
+    let (cols, rws) = crate::profile::profile(&img, Area { x: 0, y: 0, w, h }, true, rows, 128)
         .ok_or_else(|| mlua::Error::external("the profile could not be made"))?;
-    let cols = cols.ok_or_else(|| mlua::Error::external("no columns"))?;
-    let axis = lua.create_table()?;
-    axis.set("min", cols.min)?;
-    axis.set("max", cols.max)?;
-    axis.set("dark", cols.dark)?;
-    axis.set("mean", cols.mean)?;
-    axis.set("r", cols.r)?;
-    axis.set("g", cols.g)?;
-    axis.set("b", cols.b)?;
+    let axis = |a: crate::profile::Axis| -> mlua::Result<Table> {
+        let t = lua.create_table()?;
+        t.set("min", a.min)?;
+        t.set("max", a.max)?;
+        t.set("dark", a.dark)?;
+        t.set("mean", a.mean)?;
+        t.set("r", a.r)?;
+        t.set("g", a.g)?;
+        t.set("b", a.b)?;
+        Ok(t)
+    };
     let out = lua.create_table()?;
     out.set("x", x)?;
     out.set("y", y)?;
     out.set("w", w)?;
     out.set("h", h)?;
-    out.set("columns", axis)?;
+    out.set("columns", axis(cols.ok_or_else(|| mlua::Error::external("no columns"))?)?)?;
+    if rows {
+        out.set("rows", axis(rws.ok_or_else(|| mlua::Error::external("no rows"))?)?)?;
+    }
     Ok(out)
 }
 
@@ -2516,7 +2641,7 @@ fn without_the_preset_database_the_module_is_stage_1s() {
         local labels = {}
         for i, c in ipairs(header.controls) do labels[i] = c.label end
         T.ok(table.concat(labels, "|") == "Preset|Previous preset|Next preset|Load preset|Save preset|"
-          .. "Save preset as|Initialize preset|Undo|Redo list|Zoom", table.concat(labels, "|"))
+          .. "Save preset as|Initialize preset|Undo|Redo list|Zoom|" .. T.RING_LABELS, table.concat(labels, "|"))
         T.ok(T.step(header, 3, "AR Band Pass Slide", "AR Bond Pess Slide") == "AR Bond Pess Slide", T.said())
         T.ok(T.step(header, 2, nil, nil) == "the preset name cannot be read now", T.said())
         T.ok(T.count("database") == 0, "nothing of a database: " .. T.dump())
@@ -2532,7 +2657,7 @@ fn a_preset_database_that_cannot_be_read_leaves_the_steps_as_they_were() {
         local S = T.S
         T.presets({})
         local header = T.avengerAt80("AR Band Pass Slide")
-        T.ok(#header.controls == 11 and header.controls[4].label == "Preset info", tostring(#header.controls))
+        T.ok(#header.controls == 11 + T.RING_CONTROLS and header.controls[4].label == "Preset info", tostring(#header.controls))
         T.ok(#S.presetReads == 0, "nothing read at load")
         T.ok(T.info(header, "AR Band Pass Slide") == "the preset database cannot be read", T.said())
         T.ok(T.count("[avenger] the preset database cannot be read: data/index.json cannot be read: The "
@@ -3003,7 +3128,7 @@ fn undo_the_redo_list_and_a_late_read_out_answer_leave_no_claim_of_init_preset()
         T.ok(previous() == "Previous preset, button", T.said())
         -- Tab onto Preset asks its read; the overlay leaves the front before the answer, which
         -- reads Init Preset. Back, with the name unreadable, nothing is claimed.
-        T.ok(tabFrom("Zoom") == "Preset", "Tab from Zoom")
+        T.ok(tabFrom("Macro button 2") == "Preset", "Tab from the last control")
         T.show(T.OTHER)
         T.runDue()
         T.ok(not header.active, T.dump())
