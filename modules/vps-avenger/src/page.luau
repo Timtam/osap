@@ -17,16 +17,25 @@
 --                 read"; ◀ and ▶ unavailable where the preset read is Init Preset; and PASTE of
 --                 DRUM SQ's pattern menu offered once a COPY of this session was taken
 --   the actions   the header's, the oscillator strip's, the macros', the Drums tab's, the sample
---                 editor's and DRUM SQ's are trips into Avenger (actions.luau, act.luau), the
---                 renames, Browse Presets, a drum slot's Browse, a row of the sample browser, a field
---                 of the sample editor and its envelope's Menu and Preset trips that hand the
---                 keyboard to Avenger (handover.luau), and the knobs turned with a press held through
---                 a hand-over of the keys (amount.luau); Initialize's No clicks nothing, as it is
---                 meant to; every other action the page sends is answered "<label> is not available
---                 in this module yet" in its error region, until the stage that builds it (the
---                 plan's slices 9 and 10)
+--                 editor's, DRUM SQ's and the expansion browser's are trips into Avenger
+--                 (actions.luau, act.luau, actions/browser.luau), the renames, Browse Presets, a
+--                 drum slot's Browse, a row of the sample browser, a field of the sample editor and
+--                 its envelope's Menu and Preset trips that hand the keyboard to Avenger
+--                 (handover.luau), and the knobs turned with a press held through a hand-over of the
+--                 keys (amount.luau); Initialize's No clicks nothing, as it is meant to, and Go to
+--                 Category is the database's, with no trip, and Correct open Expansion a trip with
+--                 no click; a name the page sends that is none of these is answered "<label> is not
+--                 available in this module yet"
+--   the list      the expansions the page lists: Avenger's own, read off its grid this session
+--                 where the user asked for it (read_expansion_list), otherwise the preset
+--                 database's roster, marked as the database's (state.luau, S.expansions); an
+--                 expansion opened from the page is the one at its place in the list last posted
 --   the watcher   while the page is hidden, DRUM SQ's selected pattern said as AUTO FOLLOW moves it
 --                 (watch.luau), paced by the `drumSqCadence` setting
+--   the settings  five (P.SETTINGS), which the module's settings dialog shows and the page's own
+--                 Settings section — the tool's Windows-only block made general — writes with
+--                 set_setting and reset_settings, no trip; whichever wrote, the settings are posted
+--                 to the page after the change, and at every `ready`, so the two always agree
 --
 -- A message counts only while the page has the keyboard (host.window.foreground), so a press that
 -- reaches the module after the user went elsewhere does nothing; and one trip at a time, which the
@@ -50,6 +59,60 @@ local KEY_DEFAULT = host.os.pick({
 -- The tool's rosters of expansions, its default first ("Factory Standard": the ones every owner of
 -- Avenger has, its preset_db.py) — the two that name no person.
 P.ROSTERS = { "Factory Standard", "Complete" }
+
+local function onOff(v) return v and "on" or "off" end
+local function whole(v) return type(v) == "number" and v == math.floor(v) end
+
+-- The five, in the dialog's order, from one table: `opts` what host.settings.define is given (the
+-- dialog's label, its bounds or choices), `words` the page's name for it, which its answers begin
+-- with, `say(v)` a value in words, and `check(v)` why `v` cannot be stored, or nil — the page's
+-- messages are checked with it before anything is set, and a stored value at load: `define` hands
+-- back a value of the right kind unchecked (docs/api/settings.md), and a settings.toml written by
+-- hand can hold a list the module does not have or a pace of 5000. The page key's own checks are
+-- its change's (P.start): the platform's, the tool's rule, and the registration itself.
+P.SETTINGS = {
+  { key = "roster", default = P.ROSTERS[1], words = "Expansions List",
+    opts = { label = "Expansions list (from the preset database)", oneOf = P.ROSTERS },
+    say = tostring,
+    check = function(v)
+      if v == nil then return "no expansions list was named" end
+      if type(v) ~= "string" or not table.find(P.ROSTERS, v) then
+        return tostring(v) .. " is not one of the expansions lists"
+      end
+      return nil
+    end },
+  { key = "pageKey", default = KEY_DEFAULT, words = "Page Key",
+    opts = { label = "Key that shows the Avenger Control page and goes back to the plug-in" },
+    check = function(v)
+      if type(v) ~= "string" or v == "" then return "no key was written" end
+      return nil
+    end },
+  { key = "sounds", default = true, words = "Sounds",
+    opts = { label = "Sounds when the page opens and closes, and at a knob's limit" },
+    say = onOff,
+    check = function(v) return type(v) ~= "boolean" and "on or off was not sent" or nil end },
+  { key = "pageLeavesDawActive", default = false, words = "Leave the DAW Active",
+    opts = { label = "On a Mac, the page leaves the DAW the active application (experimental)" },
+    say = onOff,
+    check = function(v) return type(v) ~= "boolean" and "on or off was not sent" or nil end },
+  { key = "drumSqCadence", default = 250, words = "DRUM SQ Auto Follow",
+    opts = { label = "Drum SQ auto follow: milliseconds between reads (100 to 1000)", min = 100, max = 1000 },
+    say = function(v) return tostring(v) .. " milliseconds" end,
+    -- host.settings.set holds the bounds, not the whole number, which the watcher needs
+    -- (watch.luau, cadenceOf).
+    check = function(v)
+      if v == nil then return "no number of milliseconds was sent" end
+      if not (whole(v) and v >= 100 and v <= 1000) then
+        return tostring(v) .. " is no whole number of milliseconds from 100 to 1000"
+      end
+      return nil
+    end },
+}
+local byKey = {}
+for _, s in ipairs(P.SETTINGS) do byKey[s.key] = s end
+-- Reset's order: the Mac mode last, since it describes the page again (O:pageAgain) and the page the
+-- reset came from is closed with it.
+local RESET_ORDER = { "roster", "sounds", "drumSqCadence", "pageKey", "pageLeavesDawActive" }
 
 -- ── The actions ──────────────────────────────────────────────────────────────
 -- Every action the page sends (ui/panel.js, ACTIONS), by the tool's names, with the words its
@@ -76,6 +139,10 @@ P.LABELS = {
   load_expansion_preset = "Loading a preset",
   mark_expansion_preset_favorite = "Mark as favorite",
   toggle_expansion_favorite_view = "The favorites view",
+  align_open_expansion = "Correct open Expansion",
+  read_expansion_list = "Reading Avenger's list",
+  set_setting = "Settings",
+  reset_settings = "Reset Saved Settings",
   select_osc_tab = "Choosing an oscillator tab",
   add_osc = "Add OSC",
   select_drums_tab = "The Drums tab",
@@ -149,13 +216,9 @@ end
 
 -- The actions not built yet, by name: each is answered "<label> is not available in this module
 -- yet". Explicit, so that a name the page sends and nobody listed is a test's failure rather than
--- an answer nobody chose.
-P.NOT_BUILT = {
-  "set_expansion_view",
-  "open_expansion", "close_expansion", "select_all_expansion_presets",
-  "select_expansion_category", "go_to_loaded_preset_category", "select_expansion_preset",
-  "load_expansion_preset", "mark_expansion_preset_favorite", "toggle_expansion_favorite_view",
-}
+-- an answer nobody chose. Every action of the page's has a handler: the port is closed (the plan's
+-- slice 10), and this stays, empty, for the next edit of the page.
+P.NOT_BUILT = {}
 
 -- ── The page ─────────────────────────────────────────────────────────────────
 local E = nil -- what main.luau hands over (P.start)
@@ -173,6 +236,15 @@ local spec = nil -- what O:addPage was given: its `notHere` follows the key (P.s
 -- has them, or gets them when it loads (posts wait for the load), so `ready` answers them without
 -- their age. Forgotten when the page is described again, fails, or reloads itself.
 local given = nil
+-- This page object's document is there to be told the settings: it has loaded, or sent its own
+-- `ready`. A page described again is told them by its own `ready`, never before it.
+local listening = false
+-- A change the page asked for (set_setting, reset_settings), while it is made: the settings'
+-- callbacks run inside the module's own host.settings.set (docs/api/settings.md, "When it runs"),
+-- and with this they leave what they would say to the handler — `said`, a sentence to speak;
+-- `refused`, why the page key was refused; `rebuilt`, the Mac mode the page was described again in
+-- — which answers once, after the set. nil for the dialog's changes: those speak and post at once.
+local asking = nil
 
 -- A message to the page. page:post writes it as host.json.encode does, and raises for what JSON
 -- cannot hold: that is logged, and the key's show or the trip's answer goes on without it rather
@@ -205,9 +277,14 @@ local function sound(name)
   if host.settings.get("sounds") then host.sound.play("sounds/" .. name .. ".wav") end
 end
 
+-- Key spec `s` in this platform's words, or as written where it has none.
+local function describeKey(s)
+  local ok, words = pcall(host.keys.describe, s)
+  return ok and words or tostring(s)
+end
+
 local function keyWords()
-  local ok, words = pcall(host.keys.describe, key)
-  return ok and words or tostring(key)
+  return describeKey(key)
 end
 
 local function say(words)
@@ -236,9 +313,19 @@ local function roster()
   return names
 end
 
+-- The list of expansions the page is posted: Avenger's own where it was read this session, else the
+-- roster (S.expansions) — and the names kept, as the list last posted, which an index the page sends
+-- with open_expansion refers to.
+local lastShown = nil
+local function shownExpansions()
+  local shown = S.expansions(roster())
+  lastShown = shown and shown.names or nil
+  return shown
+end
+
 -- The state of window `id` posted as a press or a trip read it: this page object has its reads.
 local function postState(id)
-  post({ kind = "state", state = S.snapshot(id, roster()) })
+  post({ kind = "state", state = S.snapshot(id, shownExpansions()) })
   given = S.at(id)
 end
 
@@ -270,7 +357,9 @@ local function open(o)
     return false
   end
   local mark = o:here()
-  local ok, values, why, words = pcall(Reads.read, o, { zoom = E.zoomOf(origin), mark = mark, roster = roster() })
+  local before = S.values(win.id)
+  local ok, values, why, words = pcall(Reads.read, o, { zoom = E.zoomOf(origin), mark = mark,
+    expected = before and before.selectedExpansion or nil, expectedFromDatabase = before and before.selectedFromDatabase })
   if not ok then
     host.log.info("[avenger] [page] not shown: the reads could not be made — " .. tostring(values))
     say(Reads.FAILED)
@@ -343,7 +432,25 @@ end
 local function answerReady()
   local id = plugin and plugin.id
   local at = S.at(id)
-  post({ kind = "state", state = S.snapshot(id, roster(), { age = at ~= nil and at ~= given }) })
+  post({ kind = "state", state = S.snapshot(id, shownExpansions(), { age = at ~= nil and at ~= given }) })
+end
+
+-- The settings as the page's Settings section shows them (ui/panel.js, applySettings): the five
+-- values as stored, the expansions lists to choose from, and the key in effect and the default
+-- key in this platform's words. About 200 bytes.
+local function settingsMessage()
+  local values = {}
+  for _, s in ipairs(P.SETTINGS) do values[s.key] = host.settings.get(s.key) end
+  return { kind = "settings", values = values, rosters = P.ROSTERS, keyWords = keyWords(),
+    defaultKeyWords = describeKey(KEY_DEFAULT) }
+end
+
+-- The end of every one of the five settings' callbacks: the settings to the page, so that what the
+-- dialog changed shows there — once its document is there to be told; and while the page's own
+-- change is made, once, after it (`asking`).
+local function postSettings()
+  if asking then return end
+  if listening then post(settingsMessage()) end
 end
 
 -- What the page's `focused` says against the host, logged once per pair: whether a message from
@@ -366,6 +473,8 @@ local function onMessage(o, m)
   end
   if m.action == "ready" then
     answerReady()
+    listening = true
+    post(settingsMessage())
     return
   end
   local action = m.action
@@ -395,7 +504,7 @@ local function onReady()
   -- one. Its own `ready` may have come before this and been answered without the reads' age, so
   -- the state goes again, with it.
   local reloaded = ready
-  ready = true
+  ready, listening = true, true
   if reloaded then
     given = nil
     if S.at(plugin and plugin.id) then answerReady() end
@@ -404,7 +513,7 @@ end
 
 local function onClose(_, why)
   if why == "failed" then
-    ready, given = false, nil
+    ready, given, listening = false, nil, false
     host.log.info("[avenger] [page] the page failed; it is built again the next time it is needed")
     return
   end
@@ -415,7 +524,7 @@ end
 -- runtime's, which runs this module's hooks after its own part.
 local function describe(on)
   local leaves = host.settings.get("pageLeavesDawActive") == true
-  ready, shownOnce, given = false, false, nil
+  ready, shownOnce, given, listening = false, false, nil, false
   return host.gui.webview({
     file = "ui/index.html",
     title = "Avenger Control",
@@ -426,12 +535,173 @@ local function describe(on)
   })
 end
 
--- Why `s` cannot be the page key on this platform (host.keys.check), or nil when it can.
+-- ── The page key ─────────────────────────────────────────────────────────────
+
+-- Whether key spec `s` has no modifier: the whole of it is the key its last part names. The tool's
+-- own rule (its Change Panel Shortcut took a key only with a modifier held): a bare F2 as a global
+-- hotkey would take F2 from every application while the module runs. String work only
+-- (host.keys.normalize), with no platform's spelling of a modifier in it.
+local function bare(s)
+  local last = string.match(s, "([^+]*)$")
+  local ok, all, alone = pcall(function() return host.keys.normalize(s), host.keys.normalize(last) end)
+  return ok and all ~= nil and all == alone
+end
+
+-- Why `s` cannot be the page key on this platform, or nil when it can: the reasons host.keys.check
+-- gives where it says the key cannot work here; a modifier tap, a capture that is never a hotkey
+-- (docs/api/keys.md); and a key with no modifier ("no modifier", the tool's rule). Codes, joined.
 local function refusal(s)
   local ok, c = pcall(host.keys.check, s)
   if not ok then return tostring(c) end
-  if not c.ok then return table.concat(c.reasons or {}, ", ") end
+  local reasons = c.reasons or {}
+  if not c.ok then return table.concat(reasons, ", ") end
+  if table.find(reasons, "tap") then return "tap" end
+  if bare(s) then return "no modifier" end
   return nil
+end
+
+-- A page key's refusal (refusal's codes, or O:pageKey's), in the page's words.
+local KEY_WHY = {
+  parse = "it is not a key",
+  reserved = "the system keeps it",
+  ["no-keycode"] = "this system has no such key",
+  voiceover = "Control with Option is the screen reader's",
+  tap = "a modifier alone is no key",
+  ["no modifier"] = "it needs at least one modifier key",
+  ["a control's hotkey"] = "a control of the ring has it",
+}
+
+local function trim(s) return (string.gsub(s, "^%s*(.-)%s*$", "%1")) end
+
+local function whyWords(because)
+  local m = string.match(because, "^refused: (.*)$")
+  if m then return "the system refused it: " .. m end
+  local out = {}
+  for part in string.gmatch(because, "[^,]+") do
+    local w = KEY_WHY[trim(part)]
+    if not w then return because end
+    out[#out + 1] = w
+  end
+  return #out > 0 and table.concat(out, "; ") or because
+end
+
+-- ── The page's Settings section ──────────────────────────────────────────────
+-- set_setting and reset_settings: no trip — nothing in Avenger is asked — and, as every message of
+-- the page's, only while the page has the keyboard (onMessage). Each is answered once: the
+-- settings, so a control whose value was refused shows the one in effect again, then the error
+-- region, cleared or with the answer, the focus left where it is (actions.luau's refusals do so).
+
+local function answer(text)
+  post(settingsMessage())
+  post({ kind = "error", text = text or "" })
+end
+
+-- Setting `s` set to `value` for the page: what its callbacks left in `asking`, and why the set
+-- raised, if it did (the page's checks come first, so only a host's refusal of its own).
+local function change(s, value)
+  asking = {}
+  local ok, err = pcall(host.settings.set, s.key, value)
+  local left = asking
+  asking = nil
+  if not ok then
+    host.log.info(string.format("[avenger] [page] %s could not be set to %s: %s", s.key, tostring(value),
+      tostring(err)))
+    left.failed = true
+  end
+  return left
+end
+
+-- The page that asked was described again (the Mac mode, O:pageAgain): it is gone, and the new
+-- one is told by its own `ready` — so the answer is spoken, after Close.wav, as for any page that
+-- goes (page:close calls no onClose for the module's own close, docs/api/gui.md). The same words
+-- on both systems, and none about what the mode does: on Windows `activates = false` changes
+-- nothing (docs/api/gui.md), and the page is described again there all the same.
+local function modeWords(leaves)
+  return byKey.pageLeavesDawActive.words .. " is " .. onOff(leaves) .. " now. Press " .. keyWords()
+    .. " to open the page again."
+end
+
+local function gone(first, leaves)
+  sound("Close")
+  say((first and (first .. " ") or "") .. modeWords(leaves))
+end
+
+local function valueWords(s, v)
+  if s.key == "pageKey" then return describeKey(v) end
+  return s.say(v)
+end
+
+-- Whether `a` is the value `b` stored: the same key, for the page key, however it is written.
+local function same(s, a, b)
+  if s.key == "pageKey" then
+    local ok, na, nb = pcall(function() return host.keys.normalize(a), host.keys.normalize(b) end)
+    if ok and na ~= nil and na == nb then return true end
+  end
+  return a == b
+end
+
+local function noSetting(label, name)
+  local why = (type(name) ~= "string" or name == "") and "no setting was named"
+    or (name .. " is no setting of this page")
+  host.log.info(string.format("[avenger] [page] '%s' from the page: %s", label, why))
+  answer(label .. ": " .. why)
+end
+
+-- set_setting {key, value}: one of the five, checked (P.SETTINGS), stored where it is not the value
+-- already stored — the callbacks then do what a change does — and answered.
+P.HANDLERS.set_setting = function(_, args)
+  local s = type(args.key) == "string" and byKey[args.key] or nil
+  if not s then return noSetting(P.LABELS.set_setting, args.key) end
+  local value = args.value
+  if s.key == "pageKey" and type(value) == "string" then value = trim(value) end
+  local bad = s.check(value)
+  if bad then
+    host.log.info(string.format("[avenger] [page] setting %s from the page refused: %s", s.key, bad))
+    return answer(s.words .. ": " .. bad)
+  end
+  local old = host.settings.get(s.key)
+  if same(s, value, old) then return answer(s.words .. ": unchanged, " .. valueWords(s, old)) end
+  host.log.info(string.format("[avenger] [page] setting %s from the page: %s -> %s", s.key, tostring(old),
+    tostring(value)))
+  local left = change(s, value)
+  if left.rebuilt ~= nil then return gone(nil, left.rebuilt) end
+  if left.said then say(left.said) end
+  local text = nil
+  if left.refused then
+    text = string.format("%s: %s cannot be the page key (%s); it stays %s", s.words, value, left.refused, keyWords())
+  elseif left.failed then
+    text = s.words .. ": " .. valueWords(s, value) .. " cannot be stored now"
+  elseif s.key == "roster" and S.avengerList then
+    -- The list shown is Avenger's own, read this session (state.luau): the roster shows again only
+    -- once that is dropped.
+    text = s.words .. ": " .. value .. " is kept; the list shown stays VPS Avenger's own for this session"
+  end
+  answer(text)
+end
+
+-- reset_settings {key?}: with a key, that one setting back at its default (the page key's Reset to
+-- Default) as set_setting would set it; without, every one, in RESET_ORDER. Avenger's own list read
+-- this session is no setting and stays (the tool's reset left what it held in memory alone).
+P.HANDLERS.reset_settings = function(_, args)
+  local label = P.LABELS.reset_settings
+  if args.key ~= nil then
+    local s = type(args.key) == "string" and byKey[args.key] or nil
+    if not s then return noSetting(label, args.key) end
+    return P.HANDLERS.set_setting(nil, { key = s.key, value = s.default })
+  end
+  local refused, rebuilt = nil, nil
+  for _, k in ipairs(RESET_ORDER) do
+    local s = byKey[k]
+    host.log.info(string.format("[avenger] [page] reset: %s %s -> %s", k, tostring(host.settings.get(k)),
+      tostring(s.default)))
+    local left = change(s, s.default)
+    refused = left.refused or refused
+    if left.rebuilt ~= nil then rebuilt = left.rebuilt end
+  end
+  local text = "every setting is back at its default"
+  if refused then text = text .. " but the page key, which stays " .. keyWords() .. " (" .. refused .. ")" end
+  if rebuilt ~= nil then return gone(string.upper(string.sub(text, 1, 1)) .. string.sub(text, 2) .. ".", rebuilt) end
+  answer(label .. ": " .. text)
 end
 
 -- ── What main.luau calls ─────────────────────────────────────────────────────
@@ -441,16 +711,18 @@ end
 -- presets.luau, ring = main.luau's own clicks, reads and choices, for the trips (actions.luau) }.
 function P.start(env)
   E = env
-  host.settings.define("roster", P.ROSTERS[1], {
-    label = "Expansions list (from the preset database)", oneOf = P.ROSTERS })
-  local stored = host.settings.define("pageKey", KEY_DEFAULT, {
-    label = "Key that shows the Avenger Control page and goes back to the plug-in" })
-  host.settings.define("sounds", true, {
-    label = "Sounds when the page opens and closes, and at a knob's limit" })
-  host.settings.define("pageLeavesDawActive", false, {
-    label = "On a Mac, the page leaves the DAW the active application (experimental)" })
-  host.settings.define("drumSqCadence", 250, {
-    label = "Drum SQ auto follow: milliseconds between reads (100 to 1000)", min = 100, max = 1000 })
+  -- The five, and a stored value outside its schema set back to its default (P.SETTINGS); the page
+  -- key's stored value is checked as a key, below.
+  for _, s in ipairs(P.SETTINGS) do
+    local v = host.settings.define(s.key, s.default, s.opts)
+    local bad = s.key ~= "pageKey" and s.check(v) or nil
+    if bad then
+      host.log.info(string.format("[avenger] [page] the stored %s setting: %s — %s instead", s.key, bad,
+        tostring(s.default)))
+      host.settings.set(s.key, s.default)
+    end
+  end
+  local stored = host.settings.get("pageKey")
 
   key = stored
   local why = refusal(stored)
@@ -473,8 +745,10 @@ function P.start(env)
   }
   env.header:addPage(spec)
 
+  -- Every one of the five settings' callbacks ends with the settings posted (postSettings), the
+  -- dialog's OK — which sets every setting, changed or not — included.
   host.settings.onChange("pageKey", function(new)
-    if new == key then return end
+    if new == key then return postSettings() end
     local because = refusal(new)
     if not because then
       local fine, whyNot = env.header:pageKey(new)
@@ -485,23 +759,35 @@ function P.start(env)
       -- What the key says elsewhere names the key: the runtime reads `notHere` at every press.
       spec.notHere = notHereWords()
       host.log.info("[avenger] [page] the page key is now " .. tostring(new))
-      say("Page key changed to " .. keyWords() .. ".")
-      return
+      local words = "Page key changed to " .. keyWords() .. "."
+      if asking then asking.said = words else say(words) end
+      return postSettings()
     end
-    -- Refused: the key in effect stays, and the setting says it again.
+    -- Refused: the key in effect stays, and the setting says it again — spoken for the dialog's,
+    -- in the error region for the page's (P.HANDLERS.set_setting).
     host.log.info(string.format("[avenger] [page] '%s' cannot be the page key (%s); it stays %s",
       tostring(new), because, tostring(key)))
-    say(string.format("%s cannot be the page key; it stays %s.", tostring(new), keyWords()))
+    if asking then
+      asking.refused = whyWords(because)
+    else
+      say(string.format("%s cannot be the page key; it stays %s.", tostring(new), keyWords()))
+    end
     if key then host.settings.set("pageKey", key) end
+    postSettings()
   end)
   host.settings.onChange("pageLeavesDawActive", function(new, old)
-    if new == old then return end
-    -- Fixed for the life of a page object: the page is taken down and described again.
-    env.header:pageAgain()
-    host.log.info("[avenger] [page] the page is described again: activates = " .. tostring(not new))
+    if new ~= old then
+      -- Fixed for the life of a page object: the page is taken down and described again, and the
+      -- new one is told the settings by its own `ready`.
+      env.header:pageAgain()
+      host.log.info("[avenger] [page] the page is described again: activates = " .. tostring(not new))
+      if asking then asking.rebuilt = new end
+    end
+    postSettings()
   end)
   host.settings.onChange("roster", function(new, old)
     if new ~= old and ready then answerReady() end
+    postSettings()
   end)
 
   A.start({
@@ -511,8 +797,8 @@ function P.start(env)
     zoomOf = env.zoomOf,
     LABELS = P.LABELS,
     post = post,
-    roster = roster,
     plugin = function() return plugin end,
+    shown = function() return lastShown end,
     postState = postState,
     closedWords = closedWords,
     sound = sound,
@@ -527,6 +813,9 @@ function P.start(env)
     ringSeen = env.ring.ringSeen,
     S = S,
   })
+  -- After the watcher's own, which arms it at the new pace: the settings posted once it has.
+  host.settings.onChange("sounds", postSettings)
+  host.settings.onChange("drumSqCadence", postSettings)
   host.log.info("[avenger] [page] " .. keyWords() .. " shows the Avenger Control page beside an identified VPS Avenger")
 end
 

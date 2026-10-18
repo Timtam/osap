@@ -8,23 +8,28 @@
 //   * a value that was not read is said "not read", where the tool showed a value it assumed —
 //     a state comes whole, so a value missing from it was not read — and what the preset
 //     database gave rather than the screen is said with ", from the database";
-//   * left out: the Windows-only block, the OSC rename dialog no control opened, and the focus
-//     retries on timers;
+//   * the Windows-only block made the page's Settings section, on both systems: Correct open
+//     Expansion and the module's settings, shown as the module posts them (applySettings);
+//   * left out: the OSC rename dialog no control opened, and the focus retries on timers;
 //   * the defects of the port's plan: the spelling, the disclosures a re-render closed, and the
 //     central tabs this page cannot reach yet, which now say so;
 //   * Back and Next say they are unavailable where VPS Avenger steps no preset (on Init Preset);
 //   * DRUM SQ claims nothing at a click: no pattern SELECTED and no LENGTH before Avenger is read,
-//     and its PASTE items offered from the module's word that a COPY was taken in Avenger's menu.
+//     and its PASTE items offered from the module's word that a COPY was taken in Avenger's menu;
+//   * the expansions listed are Avenger's own where the module read them off its grid (Read
+//     Avenger's List, an action of the port's), marked where the database spelt a name, and the
+//     open expansion's heading says ", from the database" where only the database named it.
 // Text goes into the page as text (textContent), never as HTML.
 (() => {
   'use strict';
 
   const $ = (id) => document.getElementById(id);
 
-  // Every action this page sends the module, by the tool's names: perform() sends no other, and
-  // says so in the module's log — a name not here is this page's own mistake. The module answers
-  // each one, or says it is not available yet; a test of the repository holds this list against
-  // the module's handlers, and every name this script and the markup send against this list.
+  // Every action this page sends the module, by the tool's names, and the port's own: Read
+  // Avenger's List and the Settings section's two. perform() sends no other, and says so in the
+  // module's log — a name not here is this page's own mistake. The module answers each one; a test
+  // of the repository holds this list against the tool's and the module's handlers, and every name
+  // this script and the markup send against this list.
   const ACTIONS = [
     'prev_preset', 'next_preset', 'start_rename', 'pick_load_preset', 'pick_save_preset_as',
     'pick_initialize_preset', 'cancel_initialize_preset', 'undo', 'redo_menu', 'set_zoom',
@@ -47,7 +52,8 @@
     'central_drum_sq_pattern_player', 'central_drum_sq_auto_follow',
     'select_central_drum_sq_pattern', 'toggle_central_drum_sq_pattern',
     'central_drum_sq_pattern_menu_item', 'central_drum_sq_control',
-    'reset_central_drum_sq_control', 'central_drum_sq_length', 'central_drum_sq_speed'
+    'reset_central_drum_sq_control', 'central_drum_sq_length', 'central_drum_sq_speed',
+    'align_open_expansion', 'read_expansion_list', 'set_setting', 'reset_settings'
   ];
   // To the module; nothing when the page is opened in a browser, to be looked at.
   const post = (value) => {
@@ -86,6 +92,11 @@
   const ALL_PRESET_CATEGORY = '__all__';
   let currentExpansions = [];
   let currentExpansionsFromDatabase = false;
+  // The port's: the list is Avenger's own, read off its grid, and the names in it the database
+  // spelt (true where it did); and the open expansion named only by the database.
+  let currentExpansionsFromAvenger = false;
+  let currentExpansionMarks = [];
+  let currentSelectedFromDatabase = false;
   // An open expansion's categories and presets are the preset database's lists.
   let currentExpansionListsFromDatabase = false;
   let currentExpansionView = null;
@@ -169,13 +180,16 @@
     results.setAttribute(
       'aria-label',
       `Expansions, ${shown.length} result${shown.length === 1 ? '' : 's'}` +
-        (currentExpansionsFromDatabase ? ', from the database' : '')
+        (currentExpansionsFromAvenger ? ', as VPS Avenger lists them'
+          : (currentExpansionsFromDatabase ? ', from the database' : ''))
     );
     shown.forEach((item) => {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.id = `expansion-search-button-${item.index}`;
       btn.textContent = item.name;
+      // A name the database spelt for a poor read: said so, its text still the name the search filters by.
+      if (currentExpansionMarks[item.index] === true) btn.setAttribute('aria-label', `${item.name}, from the database`);
       btn.dataset.action = 'open_expansion';
       btn.dataset.index = String(item.index);
       btn.addEventListener('click', () => {
@@ -202,8 +216,10 @@
     const searchInput = $('expansion-search-input');
     const resetButton = $('reset-expansion-search-button');
     const searchSection = $('expansion-search-section');
+    const readList = $('read-expansion-list-button');
     expansionSearchOpen = true;
     if (viewTrigger) viewTrigger.hidden = false;
+    if (readList) readList.hidden = currentExpansionOpen === true;
     if (searchInput) {
       searchInput.hidden = (
         currentExpansionOpen || searchNeedsView()
@@ -301,6 +317,8 @@
     // earlier state is kept in its place.
     currentExpansions = Array.isArray(s.expansions) ? s.expansions : [];
     currentExpansionsFromDatabase = Array.isArray(s.expansions) && !!s.expansions_from_database;
+    currentExpansionsFromAvenger = Array.isArray(s.expansions) && !!s.expansions_from_avenger;
+    currentExpansionMarks = Array.isArray(s.expansions_marks) ? s.expansions_marks.map((v) => v === true) : [];
     currentExpansionView = readText(s.expansion_view);
     const viewTrigger = $('expansion-view-menu-trigger');
     if (viewTrigger) {
@@ -330,10 +348,13 @@
         if (presetSearch) presetSearch.value = '';
         currentSelectedExpansion = selected;
       }
+      currentSelectedFromDatabase = !!selected && s.selected_expansion_from_database === true;
       const name = $('open-expansion-name');
       if (name) {
         name.textContent = (
-          selected || (currentExpansionOpen ? unknownOpenExpansionText : '')
+          selected
+            ? (currentSelectedFromDatabase ? `${selected}, from the database` : selected)
+            : (currentExpansionOpen ? unknownOpenExpansionText : '')
         );
       }
     }
@@ -501,11 +522,8 @@
   }
 
   function renderOpenExpansionDetails() {
-    const hasKnownExpansion = !!(
-      $('open-expansion-name') &&
-      $('open-expansion-name').textContent.trim() &&
-      $('open-expansion-name').textContent.trim() !== unknownOpenExpansionText
-    );
+    // By the expansion the module named, not by the heading's text, which may carry a mark.
+    const hasKnownExpansion = currentSelectedExpansion !== '';
     const categories = $('open-expansion-categories');
     const fromDatabase = currentExpansionListsFromDatabase ? ', from the database' : '';
     const caption = $('open-expansion-presets-table') && $('open-expansion-presets-table').caption;
@@ -3124,6 +3142,201 @@
     initNo.addEventListener('click', () => closeInitDialog(true));
   }
 
+  // --- The Settings section ---
+  // The tool's Windows-only block made general: its disclosure handler, under the section's ids,
+  // and the controls of the module's settings. Each control sends its change and shows nothing of
+  // it by itself: what the controls show is what the module posts (applySettings), after every
+  // change — this section's or its settings dialog's — and at every ready.
+  const settingsTrigger = $('settings-trigger');
+  const settingsItems = $('settings-menu-items');
+  if (settingsTrigger && settingsItems) {
+    settingsTrigger.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const open = settingsTrigger.getAttribute('aria-expanded') === 'true';
+      settingsTrigger.setAttribute('aria-expanded', open ? 'false' : 'true');
+      settingsItems.hidden = open;
+      trackFocus(settingsTrigger);
+      if (!open) {
+        requestAnimationFrame(() => focusElementById('settings-menu-items'));
+      }
+    });
+  }
+
+  // Expansions List: a disclosure as the Size menu's, its entries the lists the module offers.
+  const rosterTrigger = $('settings-roster-trigger');
+  const rosterItems = $('settings-roster-items');
+  let settingsRosters = [];
+  let settingsRoster = null;
+  function buildRosterItems() {
+    if (!rosterItems) return;
+    rosterItems.textContent = '';
+    settingsRosters.forEach((option) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = option;
+      btn.dataset.baseLabel = option;
+      btn.dataset.menuOption = option;
+      btn.id = menuOptionId('settings-roster-items', option);
+      btn.addEventListener('click', () => {
+        rosterTrigger.setAttribute('aria-expanded', 'false');
+        rosterItems.hidden = true;
+        trackFocus(rosterTrigger);
+        requestAnimationFrame(() => focusElementById('settings-roster-trigger'));
+        perform('set_setting', { key: 'roster', value: option });
+      });
+      rosterItems.appendChild(btn);
+    });
+  }
+  if (rosterTrigger && rosterItems) {
+    rosterTrigger.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const open = rosterTrigger.getAttribute('aria-expanded') === 'true';
+      rosterTrigger.setAttribute('aria-expanded', open ? 'false' : 'true');
+      rosterItems.hidden = open;
+      trackFocus(rosterTrigger);
+      if (!open) {
+        requestAnimationFrame(() => {
+          const selected = selectedButtonMenuItem('settings-roster-items');
+          focusElementById(selected ? selected.id : 'settings-roster-items');
+        });
+      }
+    });
+  }
+
+  // The field whose value was sent last: the settings message that answers it writes that field
+  // even while it has the keyboard — Return sends from the field and leaves it there, and the
+  // `change` Return fires is the only one — so a value refused shows the one in effect again.
+  // Typing in the field again before the answer keeps what is typed.
+  let settingsSentFrom = null;
+
+  // The page key, written as a key spec (Change Page Key, or Return in the field), and its default.
+  const keyInput = $('settings-page-key-input');
+  const keyChange = $('settings-page-key-change');
+  const keyDefault = $('settings-page-key-default');
+  function sendPageKey() {
+    settingsSentFrom = keyInput;
+    perform('set_setting', { key: 'pageKey', value: keyInput ? keyInput.value.trim() : '' });
+  }
+  if (keyChange) {
+    keyChange.addEventListener('click', () => {
+      trackFocus(keyChange);
+      sendPageKey();
+    });
+  }
+  if (keyInput) {
+    keyInput.addEventListener('focus', () => trackFocus(keyInput));
+    keyInput.addEventListener('input', () => {
+      if (settingsSentFrom === keyInput) settingsSentFrom = null;
+    });
+    keyInput.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      sendPageKey();
+    });
+  }
+  if (keyDefault) {
+    keyDefault.addEventListener('click', () => {
+      trackFocus(keyDefault);
+      perform('reset_settings', { key: 'pageKey' });
+    });
+  }
+
+  // The two switches: each sends the other of what the module last posted.
+  const soundsToggle = $('settings-sounds');
+  const leaveDawToggle = $('settings-leave-daw');
+  [[soundsToggle, 'sounds'], [leaveDawToggle, 'pageLeavesDawActive']].forEach(([toggle, setting]) => {
+    if (!toggle) return;
+    toggle.addEventListener('click', () => {
+      trackFocus(toggle);
+      perform('set_setting', { key: setting, value: toggle.getAttribute('aria-pressed') !== 'true' });
+    });
+  });
+
+  // DRUM SQ's pace, sent as written once the field is left or Return is pressed in it: a number
+  // where it is one, the text otherwise, for the module to say why it is none.
+  const cadenceInput = $('settings-drum-sq-cadence');
+  if (cadenceInput) {
+    cadenceInput.addEventListener('focus', () => trackFocus(cadenceInput));
+    cadenceInput.addEventListener('input', () => {
+      if (settingsSentFrom === cadenceInput) settingsSentFrom = null;
+    });
+    cadenceInput.addEventListener('change', () => {
+      const text = cadenceInput.value.trim();
+      const n = Number(text);
+      settingsSentFrom = cadenceInput;
+      perform('set_setting', { key: 'drumSqCadence', value: text !== '' && Number.isFinite(n) ? n : text });
+    });
+  }
+
+  // Reset Saved Settings: the page's own alertdialog first, as Initialize Preset's; Reset sends
+  // (its data-action, above), Cancel sends nothing; either closes it and goes back to the trigger.
+  const resetTrigger = $('settings-reset-trigger');
+  const resetDialog = $('confirm-reset-dialog');
+  const resetTitle = $('confirm-reset-title');
+  function closeResetDialog() {
+    if (!resetDialog) return;
+    resetDialog.hidden = true;
+    if (resetTrigger) {
+      try { resetTrigger.focus(); } catch (_) {}
+      trackFocus(resetTrigger);
+    }
+  }
+  if (resetTrigger && resetDialog) {
+    resetTrigger.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      resetDialog.hidden = false;
+      requestAnimationFrame(() => {
+        try { resetTitle.focus(); } catch (_) {}
+        trackFocus(resetTitle);
+      });
+    });
+  }
+  ['confirm-reset-yes', 'confirm-reset-no'].forEach((id) => {
+    const btn = $(id);
+    if (btn) btn.addEventListener('click', () => closeResetDialog());
+  });
+
+  // A settings message: every control set from it, and nothing sent from here — no action, no
+  // event — so a settings message never comes back as a change. The two fields are left alone
+  // while they have the keyboard — what the user is typing stays — except the one whose value was
+  // just sent, which shows the value in effect: the module answers every set_setting with this
+  // message, at once.
+  function applySettings(m) {
+    const sentFrom = settingsSentFrom;
+    settingsSentFrom = null;
+    const values = (m && m.values) || {};
+    const rosters = Array.isArray(m && m.rosters) ? m.rosters.map(String) : [];
+    if (rosters.join('\n') !== settingsRosters.join('\n')) {
+      settingsRosters = rosters;
+      buildRosterItems();
+    }
+    settingsRoster = values.roster == null ? null : String(values.roster);
+    updateButtonMenuSelection('settings-roster-items', settingsRoster);
+    if (rosterTrigger) {
+      rosterTrigger.textContent = settingsRoster ? `Expansions List, ${settingsRoster}` : 'Expansions List';
+    }
+    if (keyInput && values.pageKey != null) {
+      if (document.activeElement !== keyInput || sentFrom === keyInput) keyInput.value = String(values.pageKey);
+    }
+    const keyWords = m && m.keyWords ? String(m.keyWords) : '';
+    if (keyChange && keyWords) {
+      keyChange.title = `Change the key that opens and closes Avenger Control. Current: ${keyWords}.`;
+    }
+    if (keyDefault && m && m.defaultKeyWords) {
+      keyDefault.title = `Set the page key back to ${m.defaultKeyWords}.`;
+    }
+    if (soundsToggle) soundsToggle.setAttribute('aria-pressed', values.sounds === true ? 'true' : 'false');
+    if (leaveDawToggle) leaveDawToggle.setAttribute('aria-pressed', values.pageLeavesDawActive === true ? 'true' : 'false');
+    if (cadenceInput && values.drumSqCadence != null) {
+      if (document.activeElement !== cadenceInput || sentFrom === cadenceInput) {
+        cadenceInput.value = String(values.drumSqCadence);
+      }
+    }
+  }
+
   // --- Header/content disclosure menus ---
   setupButtonMenu(
     'zoom-menu-trigger',
@@ -3249,7 +3462,8 @@
 
   // --- module → page ---
   // Every message is data: the state, whole; an error for the error region; where the focus goes;
-  // or that it goes back where it was. Then the page asks for its state: it starts with nothing.
+  // that it goes back where it was; or the settings. Then the page asks for its state and its
+  // settings: it starts with nothing.
   if (window.platform) {
     window.platform.onmessage = (message) => {
       if (!message || typeof message !== 'object') return;
@@ -3257,6 +3471,7 @@
       else if (message.kind === 'error') showError(message.text, message.focus === true);
       else if (message.kind === 'focus') focusElementById(message.id);
       else if (message.kind === 'restoreFocus') restoreFocus();
+      else if (message.kind === 'settings') applySettings(message);
     };
     post({ action: 'ready' });
   } else {

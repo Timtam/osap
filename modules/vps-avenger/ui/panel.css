@@ -63,18 +63,22 @@
      so a sighted observer can see it open/close, but the real cue
      is VoiceOver: role="alertdialog" + aria-modal="true" announce the
      warning, then focus lands on the main warning text so the user
-     reads the dialog deliberately before reaching Yes/No. */
-  #confirm-init-dialog {
+     reads the dialog deliberately before reaching Yes/No. Reset Saved
+     Settings' confirmation looks the same. */
+  #confirm-init-dialog,
+  #confirm-reset-dialog {
     margin: 0.6em 0; padding: 0.6em 0.8em;
     border: 1px solid currentColor; border-radius: 6px;
     background: Canvas; color: CanvasText;
   }
-  #confirm-init-dialog p { margin: 0 0 0.5em; }
+  #confirm-init-dialog p,
+  #confirm-reset-dialog p { margin: 0 0 0.5em; }
   .dialog-message:focus {
     outline: 2px solid currentColor;
     outline-offset: 2px;
   }
-  #confirm-init-dialog .group { gap: 0.6em; }
+  #confirm-init-dialog .group,
+  #confirm-reset-dialog .group { gap: 0.6em; }
   .expansion-search-list {
     display: grid;
     grid-template-columns: repeat(8, minmax(0, 1fr));

@@ -24,6 +24,16 @@
 -- preset name — stays in the values, for the module's answers and the ring. A slot's name not read
 -- is a hole, which the page shows as the slot's factory name: the slot's role in the kit, as the
 -- tool always showed it.
+--
+-- The browser's (src/actions/browser.luau, src/read/browser.luau): its view, an open expansion and
+-- the expansion the database names by what its columns list (`selectedFromDatabase` where only the
+-- database named it, posted as `selected_expansion_from_database`, a key of the port's), FAV, the
+-- preset rows read with FAV on and their stars (`favoriteStates`, by the preset's place in the
+-- expansion's list, from 0), the category whose presets the rows read as (`categoryShown`, for the
+-- next row's click, not posted), and the category the page asked for (`pageCategory`, a category or
+-- "__all__", posted as `selected_preset_category`). And for the session, not per window and not a
+-- setting: Avenger's own list of expansions, read off its grid when the user asks (S.avengerList),
+-- which the page shows in place of the database's roster.
 
 local S = {}
 
@@ -266,10 +276,45 @@ local function macroPanel(v)
   return out
 end
 
--- The state the page reads, for window `id` (nil: no window yet, nothing read). `roster` is the
--- database's list of expansions, or nil. `opts.age`: the state is answered from earlier reads
--- (the page reloaded itself), so it says how many seconds ago they were made.
-function S.snapshot(id, roster, opts)
+-- ── Avenger's own list ────────────────────────────────────────────────────────
+-- The expansions Avenger lists, in its order, read off its grid from its top to its end
+-- (read_expansion_list): { names, marks = { [i] = true where the name is the database's spelling of
+-- a read that took similarity }, at = when it was read }, or nil. Kept for the session — dropped when
+-- a later read of the grid names an expansion it does not have, and when the module is reloaded —
+-- and never written anywhere: a list kept beyond the session would say what the user had once, and
+-- nothing would read it again by itself (the maintainer's Q3).
+S.avengerList = nil
+
+function S.setAvengerList(names, marks)
+  S.avengerList = { names = names, marks = marks or {}, at = host.now() }
+end
+
+function S.dropAvengerList()
+  S.avengerList = nil
+end
+
+-- The list of expansions the page shows: Avenger's, where it has been read this session — {
+-- names, avenger = true, marks } — otherwise the database's roster `roster` ({ names }), or nil.
+function S.expansions(roster)
+  local own = S.avengerList
+  if own then return { names = own.names, avenger = true, marks = own.marks } end
+  if roster then return { names = roster } end
+  return nil
+end
+
+-- The stars read, keyed by the preset's place as text: a list of them would be too sparse for JSON
+-- where a few rows far down the list were read (docs/api/json.md), and the page reads them by key.
+local function stars(states)
+  if not states then return nil end
+  local out = {}
+  for i, on in pairs(states) do out[tostring(i)] = on end
+  return out
+end
+
+-- The state the page reads, for window `id` (nil: no window yet, nothing read). `shown` is the list
+-- of expansions the page shows (S.expansions), or nil. `opts.age`: the state is answered from
+-- earlier reads (the page reloaded itself), so it says how many seconds ago they were made.
+function S.snapshot(id, shown, opts)
   local st = id and byWindow[id] or nil
   local v = st and st.values or {}
   local out = {
@@ -294,9 +339,25 @@ function S.snapshot(id, roster, opts)
     out.expansion_lists_from_database = true
     out.loaded_expansion_preset_index = v.loadedIndex
   end
-  if roster then
-    out.expansions = roster
-    out.expansions_from_database = true
+  if v.selectedFromDatabase and v.selectedExpansion and v.selectedExpansion ~= "" then
+    out.selected_expansion_from_database = true
+  end
+  out.selected_preset_category = v.pageCategory
+  out.favorite_preset_states = stars(v.favoriteStates)
+  if shown then
+    out.expansions = shown.names
+    if shown.avenger then
+      out.expansions_from_avenger = true
+      -- Every entry true or false, never a hole: a list of few marks far down would be too sparse
+      -- for JSON.
+      if anyOf(shown.marks, #shown.names) then
+        local marks = table.create(#shown.names)
+        for i = 1, #shown.names do marks[i] = shown.marks[i] == true end
+        out.expansions_marks = marks
+      end
+    else
+      out.expansions_from_database = true
+    end
   end
   if opts and opts.age and st and st.at then
     out.read_age_seconds = math.floor((host.now() - st.at) / 1000)

@@ -6,10 +6,20 @@
 -- (NOTICE): at 50 % of Avenger's zoom, in points from the top-left corner of Avenger's own
 -- interface; the numbers as the project wrote them, starting values nobody here has checked
 -- (geometry.luau, "Where the numbers come from"). Not taken over: the project's scrollbar tables,
--- a page for each view and roster size, which the plan for the browser leaves behind for a read
--- of the grid (TODO.md, "VPS Avenger, the page").
+-- a page for each view and roster size, and its tables of where a category's presets lie once
+-- scrolled, measured for one roster and one set of category sizes — the browser's actions read the
+-- grid and the lists and click the words read (src/actions/browser.luau).
+--
+-- WORKED OUT HERE, not the project's (the plan for the browser, §2.1): the browser's picture, the
+-- columns' text regions, the star column, the lists' wheel points and scrollbar tracks, and the
+-- grid's columns per view — each from the project's numbers beside it, and STARTING VALUES until
+-- a picture of the browser settles them (TODO.md, D14 and D15).
 
 local T = {}
+
+-- The browser's whole picture, for its actions: the Expansion View control and its caption, FAV's
+-- box, the area, both scrollbars (x 12 and 228) and the ninth category row (226 ± 10).
+T.BROWSER = { 5, 40, 233, 240 }
 
 -- The Expansion View control at (15, 50): it opens the view menu while the browser shows the
 -- expansions, and closes the open expansion while one is open.
@@ -66,6 +76,50 @@ T.FAVORITE_VIEW = { 212, 50 }
 T.FAVORITE_VIEW_STATE = { 25, 10 }
 T.FAVORITE_STATE = { 9, 9 }
 
+-- An open expansion's two lists as text, each a region of its own: the host joins engine lines that
+-- overlap vertically into one row (docs/api/ocr.md), so a category and a preset at the same height
+-- would come back as one line of one region. The categories right of their scrollbar at x 12, the
+-- nine rows of 20 from y 66; the presets left of their stars at x 220, the fourteen rows of 12.5
+-- from y 60; the stars' column round x 220, as wide as a star's box, from the first star's top — FAV's
+-- box above it reaches y 55, and a grid cell that held part of it would count FAV's light as the
+-- first row's star.
+T.CATEGORY_TEXT = { 16, 56, 70, 236 }
+T.PRESET_TEXT = { 72, 53, 212, 229 }
+T.STAR_COLUMN = { 215, 55.5, 225, 229 }
+
+-- The three lists the browser moves: the grid of expansions, an open expansion's categories and its
+-- presets — each with its text region (`rect`), where the wheel is turned (the list's middle, away
+-- from both scrollbars) and its scrollbar's track, clicked at its end to move the list a page: x,
+-- and y at the top (`up`) and the bottom (`down`) — the project's track ends (its EXPANSION_SCROLL_*,
+-- EXPANSION_CATEGORY_SCROLL_* and EXPANSION_PRESET_SCROLL_*, the grid's from its List view's).
+T.LISTS = {
+  grid = { rect = T.AREA, wheel = { 117, 140 }, track = { x = 228, up = 58, down = 222 } },
+  categories = { rect = T.CATEGORY_TEXT, wheel = { 42, 146 }, track = { x = 12, up = 66, down = 218 } },
+  presets = { rect = T.PRESET_TEXT, wheel = { 142, 141 }, track = { x = 228, up = 58, down = 227 } },
+}
+
+-- The grid's columns in view `view`: the middle of each (`xs`), half a column's width (`half`)
+-- and the distance from one row of tiles to the next (`pitch`). List: one column at the project's
+-- x, its rows 36 apart (its List view's y cycle); 8 per Row: the project's tiles, from x 23 every
+-- 27.5, rows 20 apart; 1 to 7 per Row: the area split evenly, as the project places their tiles (its
+-- expansion_cell_pos), as many rows as columns. nil for a view Avenger does not have.
+function T.columns(view)
+  if view == "List" then
+    return { xs = { T.LIST_X }, half = (T.AREA[3] - T.AREA[1]) / 2, pitch = 36 }
+  end
+  if view == "8 per Row" then
+    local xs = {}
+    for c = 0, 7 do xs[c + 1] = T.GRID8_X0 + c * T.GRID8_X_STEP end
+    return { xs = xs, half = T.GRID8_X_STEP / 2, pitch = T.GRID8_Y_STEP }
+  end
+  local n = tonumber(string.match(tostring(view or ""), "^(%d) per Row$"))
+  if not (n and n >= 1 and n <= 7) then return nil end
+  local w = (T.AREA[3] - T.AREA[1]) / n
+  local xs = {}
+  for c = 0, n - 1 do xs[c + 1] = T.AREA[1] + (c + 0.5) * w end
+  return { xs = xs, half = w / 2, pitch = (T.AREA[4] - T.AREA[2]) / n }
+end
+
 -- Where row `view` of the view menu is (the project's expansion_view_menu_pos), or nil for a view
 -- Avenger does not have.
 function T.viewMenuPoint(view)
@@ -76,26 +130,6 @@ function T.viewMenuPoint(view)
     end
   end
   return nil
-end
-
--- Category row `index` (counted from 0) of `total`, as Avenger shows them once its list is
--- scrolled to the top (index under 9) or to the bottom (the project's expansion_category_pos).
-function T.categoryPoint(index, total)
-  index, total = math.max(0, math.floor(index)), math.max(1, math.floor(total))
-  local row = index
-  if index >= T.CATEGORY_VISIBLE_ROWS then
-    row = T.CATEGORY_VISIBLE_ROWS - 1 - math.max(0, total - 1 - index)
-  end
-  row = math.clamp(row, 0, T.CATEGORY_VISIBLE_ROWS - 1)
-  return { T.CATEGORY_X, T.CATEGORY_Y0 + row * T.CATEGORY_Y_STEP }
-end
-
--- Preset row `index` (counted from 0) of the fourteen shown, or nil past them (the project's
--- expansion_preset_pos).
-function T.presetPoint(index)
-  index = math.floor(index)
-  if index < 0 or index >= T.PRESET_VISIBLE_ROWS then return nil end
-  return { T.PRESET_X, T.PRESET_Y0 + index * T.PRESET_Y_STEP }
 end
 
 return T

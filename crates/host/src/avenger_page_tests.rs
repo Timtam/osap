@@ -202,10 +202,11 @@ fn the_key_away_from_an_identified_avenger_says_why_and_opens_nothing() {
     "##.replace("@KEY@", MAC_KEY).as_str());
 }
 
-/// `ready` — the page loaded, or reloaded itself — gets one state message: before the key, with
-/// nothing read; after it, the reads already made, with how many seconds ago they were made once
-/// the page has reloaded itself since they were posted to it — and so does the host's onReady of
-/// the reload, since the page's own `ready` may come first. The expansions come from the preset
+/// `ready` — the page loaded, or reloaded itself — gets one state message, then the settings
+/// (avenger_settings_tests.rs): before the key, with nothing read; after it, the reads already made,
+/// with how many seconds ago they were made once the page has reloaded itself since they were posted
+/// to it — and so does the host's onReady of the reload, since the page's own `ready` may come
+/// first. The expansions come from the preset
 /// database's roster, marked — "Factory Standard" unless the setting says otherwise — and the
 /// roster setting's change is posted at once.
 #[test]
@@ -216,8 +217,9 @@ fn ready_gets_one_state_message_from_the_reads_already_made() {
         T.avengerAt80("Init Preset")
         local n = #T.page().posts
         T.pageMsg({ action = "ready" })
-        T.ok(#T.page().posts == n + 1 and T.lastPost().kind == "state", "one state")
-        local st = T.lastPost().state
+        T.ok(#T.page().posts == n + 2 and T.page().posts[n + 1].kind == "state" and T.lastPost().kind == "settings",
+          "one state, then the settings")
+        local st = T.lastPost("state").state
         T.ok(st.preset == nil and st.zoom == nil and st.read_age_seconds == nil, "nothing read before the key")
         T.ok(table.concat(st.expansions, "|") == "Alpha" and st.expansions_from_database == true,
           "the database's roster, the tool's default, marked")
@@ -232,20 +234,20 @@ fn ready_gets_one_state_message_from_the_reads_already_made() {
         T.ok(#T.page().posts == n + 1 and T.lastPost().state.read_age_seconds == 5, "the reload's state, with the age")
         n = #T.page().posts
         T.pageMsg({ action = "ready" })
-        T.ok(#T.page().posts == n + 1, "one state")
-        st = T.lastPost().state
+        T.ok(#T.page().posts == n + 2, "one state, then the settings")
+        st = T.lastPost("state").state
         T.ok(st.preset == "LD Lead 1" and st.zoom == 80 and st.read_age_seconds == 5, tostring(st.read_age_seconds))
         T.setting("roster", "Complete")
-        st = T.lastPost().state
+        st = T.lastPost("state").state
         T.ok(table.concat(st.expansions, "|") == "Alpha|Beta|Gamma|Delta",
           "the roster changed: " .. table.concat(st.expansions, "|"))
     "##);
 }
 
-/// While the page has the keyboard, every action it sends that is not built yet is answered in its
-/// error region with the action's own words — "not available in this module yet" — and so is a
-/// name the page does not have, which the log calls so; Initialize's No closes the page's dialog and clicks nothing,
-/// and says nothing. A message while the page does not have the keyboard is not acted on, a problem
+/// While the page has the keyboard, a name the page does not have is answered in its error region
+/// with the action's own words — "not available in this module yet" — and the log calls it so (since
+/// the browser, every action of the page's has a handler); Initialize's No closes the page's dialog
+/// and clicks nothing, and says nothing. A message while the page does not have the keyboard is not acted on, a problem
 /// the page reports is logged wherever the user is, and the page's own word for its keyboard is
 /// logged where it disagrees with the host's.
 #[test]
@@ -257,11 +259,6 @@ fn actions_are_answered_not_available_yet_and_only_while_the_page_has_the_keyboa
         T.openPage()
         T.ok(S.front == T.PAGE_WIN, "in front")
         local clicks = #S.clicks
-        T.pageMsg({ action = "open_expansion", args = {}, focused = true })
-        T.ok(T.lastPost().kind == "error" and T.lastPost().text == "Opening an expansion is not available in this module yet",
-          tostring(T.lastPost().text))
-        T.pageMsg({ action = "set_expansion_view", args = { view = "favorites" }, focused = true })
-        T.ok(T.lastPost().text == "Expansion View is not available in this module yet", T.lastPost().text)
         T.pageMsg({ action = "bogus", args = {} })
         T.ok(T.lastPost().text == "bogus is not available in this module yet", T.lastPost().text)
         T.ok(T.count("[avenger] [page] 'bogus' is no action of the page's") == 1, T.dump())
@@ -956,11 +953,11 @@ fn a_page_the_key_builds_is_not_told_its_fresh_reads_are_old() {
         S.now += 1500
         local n = #T.page().posts
         T.pageMsg({ action = "ready" })
-        st = T.lastPost().state
-        T.ok(#T.page().posts == n + 1 and st.preset == "LD Lead 1" and st.read_age_seconds == nil, "ready: no age")
+        st = T.lastPost("state").state
+        T.ok(#T.page().posts == n + 2 and st.preset == "LD Lead 1" and st.read_age_seconds == nil, "ready: no age")
         T.pageReady()
         st = T.lastPost("state").state
-        T.ok(#T.page().shows == 2 and #T.page().posts > n + 1 and st.read_age_seconds == nil,
+        T.ok(#T.page().shows == 2 and #T.page().posts > n + 2 and st.read_age_seconds == nil,
           "shown once loaded, read afresh, with no age")
     "##);
 }
@@ -1587,23 +1584,107 @@ fn the_page_claims_nothing_of_drum_sq_at_a_click_and_reads_the_slot_lists_either
     }
 }
 
+/// The browser's page edits (the plan's slice 9, §7): Read Avenger's List is a button of the browser's
+/// view row with its action, hidden while an expansion is open; the state's `expansions_from_avenger`,
+/// `expansions_marks` and `selected_expansion_from_database` are read in applyState; the list's label
+/// says whose list it is; a name the database spelt is marked in its button's aria-label, never in
+/// its text, so the search still filters by the name; the open expansion's heading carries the mark,
+/// and whether an expansion is known is told by the name the module posted, not by the heading.
+#[test]
+fn the_browsers_page_edits_read_the_new_keys_and_mark_in_aria_labels_only() {
+    let html = INDEX_HTML.replace("\r\n", "\n");
+    let js = PANEL_JS.replace("\r\n", "\n");
+    let row = html.find("id=\"expansion-view-row\"").expect("the view row");
+    let at = html.find("id=\"read-expansion-list-button\"").expect("index.html has Read Avenger's List");
+    let end = html.find("id=\"expansion-search-section\"").expect("the search's section after the row");
+    assert!(at > row && at < end, "the button is in the view row");
+    let tag = &html[html[..at].rfind('<').unwrap()..at + html[at..].find('>').unwrap()];
+    assert!(
+        tag.contains("data-action=\"read_expansion_list\"")
+            && tag.contains("title=\"Read the expansions VPS Avenger lists, in its order, and show them here for this session.\""),
+        "{tag}"
+    );
+    let apply = js.find("function applyState(s) {").expect("panel.js has applyState");
+    let apply_end = apply + js[apply..].find("\n  }\n").expect("applyState ends");
+    for key in ["s.expansions_from_avenger", "s.expansions_marks", "s.selected_expansion_from_database"] {
+        let i = js.find(key).unwrap_or_else(|| panic!("panel.js reads {key}"));
+        assert!(i > apply && i < apply_end, "{key} is read outside applyState");
+    }
+    assert!(js.contains("readList.hidden = currentExpansionOpen === true;"), "the button hidden while an expansion is open");
+    assert!(js.contains("', as VPS Avenger lists them'"), "the list's label says it is Avenger's");
+    let search = js.find("function renderExpansionSearch() {").expect("panel.js has renderExpansionSearch");
+    let body = &js[search..search + js[search..].find("\n  }\n").unwrap()];
+    assert!(
+        body.contains("btn.setAttribute('aria-label', `${item.name}, from the database`);") && body.contains("btn.textContent = item.name;"),
+        "the mark in the aria-label, the text the name: {body}"
+    );
+    assert!(!body.contains("textContent = `${item.name}, from"), "the mark in the button's text");
+    assert!(js.contains("(currentSelectedFromDatabase ? `${selected}, from the database` : selected)"), "the heading's mark");
+    assert!(js.contains("const hasKnownExpansion = currentSelectedExpansion !== '';"), "known by the name posted");
+}
+
+/// Every action the tool's page sends (inventory A of the port's plan, §11.1: its panel/pages.py),
+/// 81 names, its Windows-only Settings block's two among them.
+const TOOL_PAGE_ACTIONS: &[&str] = &[
+    "prev_preset", "next_preset", "start_rename", "pick_load_preset", "pick_save_preset_as",
+    "pick_initialize_preset", "cancel_initialize_preset", "undo", "redo_menu", "set_zoom",
+    "set_expansion_view", "open_expansion", "close_expansion", "browse_expansion_presets",
+    "select_all_expansion_presets", "select_expansion_category", "go_to_loaded_preset_category",
+    "select_expansion_preset", "load_expansion_preset", "mark_expansion_preset_favorite",
+    "toggle_expansion_favorite_view", "align_open_expansion", "toggle_windows_reaper_rect_x",
+    "select_osc_tab", "add_osc", "select_drums_tab", "select_trig_tab", "toggle_osc_mute",
+    "toggle_drums_mute", "toggle_trig_mute", "toggle_osc_solo", "toggle_drums_solo",
+    "toggle_trig_solo", "osc_menu_item", "drums_menu_item", "trig_menu_item", "rename_osc",
+    "select_macro_tab", "add_macro_tab", "delete_macro_tab", "rename_macro", "macro_amount",
+    "reset_macro_amount", "toggle_macro_button", "macro_reset_mode", "macro_button_menu_item",
+    "osc_control", "reset_osc_control", "osc_filter_control", "toggle_drum_pattern",
+    "select_drum_mode", "previous_drumkit", "next_drumkit", "select_drumkit_part",
+    "drumkit_column", "toggle_drumkit_button", "drumkit_control", "reset_drumkit_control",
+    "drumkit_menu_item", "select_central_tab", "sample_browser_focus", "select_sample_editor_tab",
+    "sample_editor_field", "sample_editor_play_mode", "sample_editor_panel_button",
+    "toggle_sample_editor_enable", "sample_editor_grid", "sample_editor_eq_type",
+    "sample_editor_loop_stretch", "sample_editor_control", "reset_sample_editor_control",
+    "central_drum_sq_sequence_menu_item", "central_drum_sq_pattern_player",
+    "central_drum_sq_auto_follow", "select_central_drum_sq_pattern",
+    "toggle_central_drum_sq_pattern", "central_drum_sq_pattern_menu_item",
+    "central_drum_sq_control", "reset_central_drum_sq_control", "central_drum_sq_length",
+    "central_drum_sq_speed",
+];
+
+/// The tool's page actions the port drops: REAPER's plug-in window edge, which the tool set by hand,
+/// is daw-hosts' to derive (modules/daw-hosts: DAW knowledge only there).
+const DROPPED: &[&str] = &["toggle_windows_reaper_rect_x"];
+
+/// The port's own: Read Avenger's List (slice 9) and the Settings section's two (slice 10).
+const PORT_OWN: &[&str] = &["read_expansion_list", "set_setting", "reset_settings"];
+
 /// The page's list against what it sends: every name the script quotes as an action and every
 /// `data-action` of the markup is on ACTIONS, every name on ACTIONS is sent from somewhere — a
-/// quote outside the list, or the markup — and the list holds the tool's 79 shared actions, its
-/// two Windows-only ones left out. Then the module: every name on ACTIONS has the words of its
-/// answer, and either a handler or a place on the explicit list of actions not built yet, never
-/// both; and nothing the module lists is a name the page does not send. Sent while the page has
-/// the keyboard, each one not built is answered with its words, and each one with a handler is not.
+/// quote outside the list, or the markup — and the list is the tool's 81 page actions less the one
+/// the port drops, with the port's own three: the port is closed. Then the module: every name on
+/// ACTIONS has the words of its answer, and either a handler or a place on the explicit list of
+/// actions not built yet, never both — and that list is empty; and nothing the module lists is a
+/// name the page does not send. Sent while the page has the keyboard, each one not built would be
+/// answered with its words, and each one with a handler is not.
 #[test]
 fn every_action_the_page_sends_is_on_its_list_and_answered_by_the_module() {
     let actions = page_actions();
-    assert_eq!(actions.len(), 79, "the tool's 79 shared actions: {actions:?}");
+    assert_eq!(TOOL_PAGE_ACTIONS.len(), 81, "the tool's page sends 81 actions");
+    assert_eq!(actions.len(), 83, "the tool's 81, less the one dropped, and the port's three: {actions:?}");
     let mut sorted = actions.clone();
     sorted.sort();
     sorted.dedup();
     assert_eq!(sorted.len(), actions.len(), "ACTIONS names an action twice");
-    for gone in ["toggle_windows_reaper_rect_x", "align_open_expansion"] {
-        assert!(!actions.iter().any(|a| a == gone), "{gone} is the Windows-only block's, left out");
+    let mut wanted: Vec<String> = TOOL_PAGE_ACTIONS
+        .iter()
+        .filter(|a| !DROPPED.contains(a))
+        .chain(PORT_OWN.iter())
+        .map(|a| a.to_string())
+        .collect();
+    wanted.sort();
+    assert_eq!(sorted, wanted, "ACTIONS is the tool's page actions, less the one dropped, and the port's own");
+    for gone in DROPPED {
+        assert!(!actions.iter().any(|a| a == gone), "{gone} is dropped");
     }
     let list_start = PANEL_JS.find("const ACTIONS = [").unwrap();
     let list_end = list_start + PANEL_JS[list_start..].find("];").unwrap();
@@ -1639,6 +1720,7 @@ fn every_action_the_page_sends_is_on_its_list_and_answered_by_the_module() {
         T.avengerAt80("Init Preset")
         local P = S.included["modules/vps-avenger/src/page.luau"][1]
         local onList, notBuilt = {}, {}
+        T.ok(#P.NOT_BUILT == 0, "the port is closed: " .. table.concat(P.NOT_BUILT, ", "))
         for _, a in ipairs(ACTIONS) do onList[a] = true end
         for _, a in ipairs(P.NOT_BUILT) do
           T.ok(notBuilt[a] == nil, "not built twice: " .. a)
@@ -1663,7 +1745,109 @@ fn every_action_the_page_sends_is_on_its_list_and_answered_by_the_module() {
             T.ok(not (T.lastPost() and T.lastPost().text == said and #T.page().posts > n), a .. " has a handler")
           end
         end
+        -- reset_settings sent with no arguments reset every setting: the defaults, which the test's were.
+        for k, d in pairs(S.settingDefs) do T.ok(S.settings[k] == d.default, k .. " at its default") end
     "##
         .replace("@ACTIONS@", &list),
     );
+}
+
+/// The page's Settings section (the plan's slice 10): the tool's Windows-only block (its
+/// "Windows-only fallback controls") made general — a "Settings" disclosure over a group, after the
+/// macros and before the error region — with Correct open Expansion (its action and the tool's help),
+/// the expansions list's disclosure, the page key's field and its two buttons, the two switches as
+/// aria-pressed buttons, DRUM SQ's pace with its bounds, and Reset Saved Settings, in that order, and
+/// no live region of its own; Reset behind the page's own alertdialog, whose Reset sends and whose
+/// Cancel does not. The script applies a settings message to the controls and sends nothing from
+/// there — no perform, no post, no event — writes the two fields only where they do not have the
+/// keyboard, and sets the switches' aria-pressed there only, never at the click.
+#[test]
+fn the_settings_section_is_the_windows_block_made_general() {
+    let html = INDEX_HTML.replace("\r\n", "\n");
+    let js = PANEL_JS.replace("\r\n", "\n");
+    let tag_at = |id: &str| -> String {
+        let at = html.find(&format!("id=\"{id}\"")).unwrap_or_else(|| panic!("index.html has #{id}"));
+        let start = html[..at].rfind('<').unwrap();
+        html[start..at + html[at..].find('>').unwrap() + 1].to_string()
+    };
+    let macros = html.find("id=\"macro-panel-group\"").expect("the macros");
+    let trigger = html.find("id=\"settings-trigger\"").expect("the Settings trigger");
+    let errors = html.find("<!-- =================== Errors").expect("the error region");
+    assert!(macros < trigger && trigger < errors, "Settings between the macros and the error region");
+    let t = tag_at("settings-trigger");
+    assert!(t.contains("aria-expanded=\"false\"") && t.contains("aria-controls=\"settings-menu-items\""), "{t}");
+    let g = tag_at("settings-menu-items");
+    assert!(g.contains("role=\"group\"") && g.contains("aria-label=\"Settings\"") && g.contains(" hidden"), "{g}");
+    let items = [
+        "settings-correct-open-expansion",
+        "settings-roster-trigger",
+        "settings-page-key-input",
+        "settings-page-key-change",
+        "settings-page-key-default",
+        "settings-sounds",
+        "settings-leave-daw",
+        "settings-drum-sq-cadence",
+        "settings-reset-trigger",
+    ];
+    let mut last = trigger;
+    for id in items {
+        let at = html.find(&format!("id=\"{id}\"")).unwrap_or_else(|| panic!("index.html has #{id}"));
+        assert!(at > last && at < errors, "#{id} in its place");
+        last = at;
+    }
+    let c = tag_at("settings-correct-open-expansion");
+    assert!(
+        c.contains("data-action=\"align_open_expansion\"")
+            && c.contains("title=\"Correct the panel to the expansion currently open in VPS Avenger.\""),
+        "{c}"
+    );
+    for id in ["settings-sounds", "settings-leave-daw"] {
+        assert!(tag_at(id).contains("aria-pressed="), "#{id} is a switch");
+    }
+    let f = tag_at("settings-drum-sq-cadence");
+    assert!(f.contains("type=\"number\"") && f.contains("min=\"100\"") && f.contains("max=\"1000\""), "{f}");
+    let section = &html[trigger..errors];
+    assert!(!section.contains("aria-live"), "no live region in the section");
+    let d = tag_at("confirm-reset-dialog");
+    assert!(d.contains("role=\"alertdialog\"") && d.contains("aria-modal=\"true\"") && d.contains(" hidden"), "{d}");
+    assert!(tag_at("confirm-reset-yes").contains("data-action=\"reset_settings\""), "Reset sends");
+    assert!(!tag_at("confirm-reset-no").contains("data-action"), "Cancel sends nothing");
+    assert!(js.contains("else if (message.kind === 'settings') applySettings(message);"), "settings messages applied");
+    let apply = js.find("function applySettings(m) {").expect("panel.js has applySettings");
+    let body = &js[apply..apply + js[apply..].find("\n  }\n").expect("applySettings ends")];
+    for sends in ["perform(", "post(", "dispatchEvent", ".click("] {
+        assert!(!body.contains(sends), "applySettings sends nothing: {sends}");
+    }
+    // The two fields: left alone while typed in, but the one that just sent shows the answer — Return
+    // sends from the field and leaves the keyboard there — and typing again keeps what is typed.
+    assert!(body.contains("const sentFrom = settingsSentFrom;\n    settingsSentFrom = null;"), "one answer writes it");
+    for field in ["keyInput", "cadenceInput"] {
+        assert!(
+            body.contains(&format!("if (document.activeElement !== {field} || sentFrom === {field})")),
+            "{field} written while typed in, unless it just sent"
+        );
+        assert_eq!(js.matches(&format!("settingsSentFrom = {field};")).count(), 1, "{field} marks what it sent");
+        assert!(js.contains(&format!("if (settingsSentFrom === {field}) settingsSentFrom = null;")), "typing in {field} again");
+    }
+    // The messages themselves: Reset to Default resets the page key alone — Reset Saved Settings
+    // sends by its data-action, with no key — and each switch sends the other of what it shows.
+    assert!(js.contains("perform('reset_settings', { key: 'pageKey' });"), "Reset to Default: the page key");
+    assert_eq!(js.matches("perform('reset_settings'").count(), 1, "reset_settings sent by Reset to Default only");
+    assert!(
+        js.contains("[[soundsToggle, 'sounds'], [leaveDawToggle, 'pageLeavesDawActive']].forEach(([toggle, setting]) => {"),
+        "the switches' settings"
+    );
+    assert!(
+        js.contains("perform('set_setting', { key: setting, value: toggle.getAttribute('aria-pressed') !== 'true' });"),
+        "a switch sends the other of what it shows"
+    );
+    for (key, value) in [("roster", "option"), ("drumSqCadence", "text !== '' && Number.isFinite(n) ? n : text")] {
+        assert!(js.contains(&format!("perform('set_setting', {{ key: '{key}', value: {value} }});")), "{key} sent");
+    }
+    assert!(js.contains("perform('set_setting', { key: 'pageKey', value: keyInput ? keyInput.value.trim() : '' });"), "the key sent");
+    for toggle in ["soundsToggle", "leaveDawToggle"] {
+        let set = format!("{toggle}.setAttribute('aria-pressed'");
+        assert_eq!(js.matches(&set).count(), 1, "{toggle}'s aria-pressed set once");
+        assert!(body.contains(&set), "{toggle}'s aria-pressed set in applySettings");
+    }
 }

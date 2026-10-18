@@ -23,6 +23,10 @@
 --   the zoom list   below the zoom field, 21 rows of 11.5 from y 18, as wide as the field
 --   MENU's popup    below MENU, its four rows from y 18
 --   the redo list   below UNDO, as many rows as there are steps to redo
+--   the view list   the Expansion View field's, opened with the left button: its rows from List at
+--                   y 60 to 8 per Row at y 154.5 (the project's expansion_view_menu_pos), its top
+--                   near y 54 — which a region from 5 below the click at y 50 would cut, so a region
+--                   of its own, from y 44, as wide as the caption and more
 --   a right click   for every menu a right click opens (the oscillator, Drums and Trig tabs, macro
 --                   tab 1, the macro knobs' fields, the macro buttons, a drum slot's name, DRUM SQ's
 --                   PATTERN MENU and SEQUENCE MENU): from 120 left of the click to 120 right of it,
@@ -58,6 +62,7 @@ local Pp = {}
 Pp.ZOOM_LIST = { rect = { 12, 18, 72, 262 }, min = { 20, 34.5 } }
 Pp.MENU = { rect = { 245, 18, 335, 78 }, min = { 30, 23 } }
 Pp.REDO = { rect = { 290, 18, 430, 200 }, min = { 30, 23 } }
+Pp.VIEW_LIST = { rect = { 5, 44, 110, 175 }, min = { 20, 34.5 } }
 -- From the click, at 50 %.
 Pp.AT_CLICK = { rect = { -120, 1, 120, 145 }, min = { 30, 23 } }
 -- From a left opener's click, at 50 %.
@@ -69,9 +74,10 @@ Pp.SUBMENU = { rect = { 0, -150, 160, 150 }, min = { 30, 23 } }
 local AVENGER = { 0, 0, G.WIDTH_AT_50, G.HEIGHT_AT_50 }
 
 -- Which popup a press opens, by the label the ring and the page press it with (main.luau,
--- actions.luau): the zoom field's, MENU's items, UNDO's right click. Every other press with a
--- point and the right button is a right click's menu (actions/osc.luau, actions/macros.luau), and
--- one with the left button named a field's popup below it (actions/sample.luau, actions/drumsq.luau).
+-- actions.luau): the zoom field's, MENU's items, UNDO's right click, the Expansion View field's.
+-- Every other press with a point and the right button is a right click's menu (actions/osc.luau,
+-- actions/macros.luau), and one with the left button named a field's popup below it
+-- (actions/sample.luau, actions/drumsq.luau).
 local BY_LABEL = {
   Zoom = Pp.ZOOM_LIST,
   ["Load preset"] = Pp.MENU,
@@ -80,6 +86,8 @@ local BY_LABEL = {
   ["Initialize preset"] = Pp.MENU,
   ["Redo list"] = Pp.REDO,
   Redo = Pp.REDO,
+  -- The page's label for set_expansion_view (page.luau).
+  ["Expansion View"] = Pp.VIEW_LIST,
 }
 
 local function cut(a, b)

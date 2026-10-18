@@ -105,6 +105,7 @@ end
 --   part      Open.PARTS' name, read before the click and after it
 --   text, textAfter   the part's text read before the click, after it
 --   fields    the fields read as text before and after the click, where they are shown (Open.part)
+--   expected  the expansion known open, for the `browser` part's reads (read/browser.luau, Br.part)
 --   decide(vb) -> click | nil, why, focus?   from the read before; nil refuses with `why`, and
 --             `focus` the page's element the refusal leaves the focus on. A click is
 --             { at = {x, y}, button = "right"?, double = true?, menu = { item = {x, y},
@@ -161,7 +162,7 @@ function Act.run(o, spec, done, trip)
     return done({ error = "VPS Avenger cannot be read now" })
   end
   local readOpts = { pl = pl, text = spec.text, preset = R.lastName(), macroCount = spec.macroCount,
-    fields = spec.fields }
+    fields = spec.fields, expected = spec.expected }
   local okB, vb, keysB = pcall(Open.part, snap, spec.part, readOpts)
   if not okB then
     snap:release()
@@ -186,7 +187,7 @@ function Act.run(o, spec, done, trip)
   end
 
   local afterOpts = { pl = pl, text = spec.textAfter, preset = readOpts.preset,
-    macroCount = vb.macroCount or spec.macroCount, fields = spec.fields }
+    macroCount = vb.macroCount or spec.macroCount, fields = spec.fields, expected = spec.expected }
   local deadline = nil
   local last = nil -- { keys, values } of the latest read after the click
 

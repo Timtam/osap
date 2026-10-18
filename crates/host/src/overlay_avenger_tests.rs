@@ -59,8 +59,15 @@ use super::overlay_menu_tests::{finish, harness, RUNTIME};
 const AV: &str = r##"
 local S = T.S
 -- Every click, in order; S.onClick(n), when set, runs at the n-th: Avenger answering it at once.
+-- S.browserClick(x, y, button), when set, runs first at every click: the expansion browser's model
+-- (avenger_browser_tests.rs) answering it.
 S.clicks = {}
 S.onClick = nil
+S.browserClick = nil
+-- Every turn of the wheel, in order: { x, y, notches }; S.onScroll(n, notches, x, y), when set, runs
+-- at the n-th.
+S.scrolls = {}
+S.onScroll = nil
 S.owns = true
 S.ownsAsked = {}
 S.marked = {}
@@ -571,7 +578,11 @@ function T.paintAvenger(cx, cy, k, spec)
   if spec.popup then popup(spec.popup) end
   -- A submenu of it, painted the same way, after it (`submenu`).
   if spec.submenu then popup(spec.submenu) end
+  -- The expansion browser's model, where a scenario has one (avenger_browser_tests.rs): its shapes
+  -- under the popups, and the words its reads read, kept with the picture.
+  if T.browserShapes then T.browserShapes(shapes, cx, cy, k, spec) end
   S.picture = { bg = { 40, 40, 40 }, shapes = shapes }
+  if T.browserReads then S.picture.browser = T.browserReads(cx, cy, k) end
   S.painted = { cx = cx, cy = cy, k = k, spec = spec }
 end
 
@@ -581,8 +592,9 @@ function T.words(words)
   S.ocr = function(_, name) return S.words[name] or "" end
 end
 
--- A text read the module waits for, answered at once: a region's text is S.ocr(region, name) —
--- a string, or a whole reading — and a list is answered (list, byName), as the host answers one.
+-- A text read the module waits for, answered at once: a region's text is S.ocr(region, name, snap)
+-- — a string, or a whole reading; `snap` the snapshot read, if any — and a list is answered (list,
+-- byName), as the host answers one.
 -- Every region asked is noted in S.recognized, with its name.
 function T.listReads()
   T.answerWaits(function(what, opts)
@@ -595,7 +607,7 @@ function T.listReads()
         return { text = "", words = {}, lines = {}, skipped = false, status = "failed",
           error = "the region does not overlap the snapshot", name = name }
       end
-      local said = S.ocr and S.ocr(r, name) or ""
+      local said = S.ocr and S.ocr(r, name, snap) or ""
       local reading
       if type(said) == "table" then
         reading = table.clone(said)
@@ -712,8 +724,10 @@ S.pageLoaded = false
 S.pageOrder = {}    -- "post <kind>", "show", "hide", "focus <id>", "sound <path>", in order
 S.postRaises = nil  -- a message: the next page:post raises it, as the host's does for what it cannot write
 S.settings, S.settingDefs, S.settingCbs = {}, {}, {}
+S.settingSets = 0   -- every host.settings.set of the module's, counted
 S.pageKeys, S.pageKeyIds = {}, {}  -- spec -> callback; id -> spec, while registered
-S.badKeys = {}      -- spec -> the reasons host.keys.check gives for a key the platform cannot hold
+S.badKeys = {}      -- spec -> the reasons host.keys.check gives for it; `ok` as the host's (keys.md)
+S.registerRaises = {} -- spec -> what host.hotkey.register raises for it, as for a claim the system refused
 S.sounds = {}
 
 -- The page's window as host.window reports it while the page is in front: one of this
@@ -798,6 +812,7 @@ function T.pageHost(AH)
       assert(d ~= nil and type(v) == type(d.default), "set: " .. tostring(key))
       if d.opts.oneOf then assert(table.find(d.opts.oneOf, v) ~= nil, "not one of its choices") end
       if d.opts.min then assert(v >= d.opts.min and v <= d.opts.max, "out of its bounds") end
+      S.settingSets += 1
       local old = S.settings[key]
       S.settings[key] = v
       for _, cb in ipairs(S.settingCbs[key] or {}) do cb(v, old) end
@@ -810,6 +825,7 @@ function T.pageHost(AH)
   local register, unregister = T.host.hotkey.register, T.host.hotkey.unregister
   rawset(T.host.hotkey, "register", function(spec, fn)
     assert(S.badKeys[spec] == nil, "registered a key check refuses: " .. spec)
+    if S.registerRaises[spec] then error(S.registerRaises[spec], 0) end
     local id = register(spec, fn)
     S.pageKeyIds[id] = spec
     S.pageKeys[spec] = fn
@@ -825,10 +841,43 @@ function T.pageHost(AH)
     S.sounds[#S.sounds + 1] = path
     S.pageOrder[#S.pageOrder + 1] = "sound " .. path
   end })
+  -- `ok` false only for the reasons that mean the key cannot work here; a tap, `altgr` and
+  -- `composes` leave it true (docs/api/keys.md, host.keys.check).
+  local CANNOT = { parse = true, reserved = true, ["no-keycode"] = true, voiceover = true }
+  -- host.keys.normalize as the host's, for the specs these tests write: the modifiers by their role,
+  -- in the platform's order and words, and the key with its first letter capitalised; nil where a
+  -- modifier is none of the spec's words (docs/api/keys.md, host.keys.normalize).
+  local ROLE = { ctrl = "ctrl", cmd = "ctrl", alt = "alt", option = "alt", shift = "shift", win = "win", meta = "win" }
+  local ORDER = T.host.os.pick({
+    macos = { { "win", "Meta" }, { "alt", "Option" }, { "shift", "Shift" }, { "ctrl", "Cmd" } },
+    windows = { { "ctrl", "Ctrl" }, { "alt", "Alt" }, { "shift", "Shift" }, { "win", "Win" } },
+  })
   AH.keys = setmetatable({
     check = function(spec)
-      local bad = S.badKeys[spec]
-      return { ok = bad == nil, resolved = spec, reasons = bad or {} }
+      local reasons, ok = S.badKeys[spec] or {}, true
+      for _, why in ipairs(reasons) do
+        if CANNOT[why] then ok = false end
+      end
+      return { ok = ok, resolved = spec, reasons = reasons }
+    end,
+    normalize = function(spec)
+      local parts = {}
+      for part in string.gmatch(tostring(spec), "[^+]+") do
+        parts[#parts + 1] = string.lower((string.gsub(part, "^%s*(.-)%s*$", "%1")))
+      end
+      local key = table.remove(parts)
+      if key == nil or key == "" then return nil end
+      local held = {}
+      for _, m in ipairs(parts) do
+        if not ROLE[m] then return nil end
+        held[ROLE[m]] = true
+      end
+      local out = {}
+      for _, o in ipairs(ORDER) do
+        if held[o[1]] then out[#out + 1] = o[2] end
+      end
+      out[#out + 1] = string.upper(string.sub(key, 1, 1)) .. string.sub(key, 2)
+      return table.concat(out, "+")
     end,
   }, { __index = T.host.keys })
   local focus = T.host.window.focus
@@ -956,7 +1005,15 @@ function T.avenger()
   rawset(T.host, "input", T.strict("host.input", {
     click = function(x, y, opts)
       S.clicks[#S.clicks + 1] = { x, y, button = opts and opts.button }
+      if S.browserClick then S.browserClick(x, y, opts and opts.button) end
       if S.onClick then S.onClick(#S.clicks) end
+    end,
+    -- The wheel, as the host turns it (docs/api/input.md): at whole pixels, by `notches`, positive up.
+    scroll = function(x, y, notches)
+      point("host.input.scroll", x, y)
+      assert(type(notches) == "number" and notches ~= 0, "host.input.scroll: notches is a number, not 0")
+      S.scrolls[#S.scrolls + 1] = { x, y, notches }
+      if S.onScroll then S.onScroll(#S.scrolls, notches, x, y) end
     end,
     send = function(combo) S.sent[#S.sent + 1] = combo end,
     mouseDown = function(x, y, opts)

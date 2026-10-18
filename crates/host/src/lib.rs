@@ -85,6 +85,14 @@ mod avenger_sample_tests;
 /// pattern menu's COPY as a fact, LENGTH dragged from what it reads, the watcher and the ring's group.
 #[cfg(test)]
 mod avenger_drumsq_tests;
+/// VPS Avenger's expansion browser (the plan's slice 9): every click on the words read, the lists
+/// moved a notch at a time with a change wait each, and Avenger's own list read for the session.
+#[cfg(test)]
+mod avenger_browser_tests;
+/// VPS Avenger's page Settings section (the plan's slice 10): the module's settings written from the
+/// page and from the dialog, always posted back, the key checked, the Mac page mode and Reset.
+#[cfg(test)]
+mod avenger_settings_tests;
 /// The HTML page probe (tools/html-probe) against the same scripted host, with a scripted page:
 /// its keys, its report, W3's round trip, W7's landing and the automatic show.
 #[cfg(test)]

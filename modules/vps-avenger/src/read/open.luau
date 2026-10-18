@@ -51,6 +51,8 @@ local Knob = host.include("src/read/knob.luau")
 local Dr = host.include("src/read/drums.luau")
 local Sm = host.include("src/read/sample.luau")
 local C = host.include("src/tables/centre.luau")
+local X = host.include("src/tables/expansion.luau")
+local Br = host.include("src/read/browser.luau")
 
 local Open = {}
 
@@ -279,9 +281,14 @@ local function decide(ctx)
     log("oscillator: " .. Knob.osc(pl, snap, v.osc, marks.knob))
   end
 
-  -- The browser: its view, or what its area says when the caption reads none; FAV.
+  -- The browser: its view, or what its area says when the caption reads none (read/browser.luau's
+  -- order: the expansion known open in this window scored first, the grid told by the catalog's
+  -- expansions and Avenger's own list); FAV; and with an open expansion named, the category its
+  -- preset rows read as and, with FAV on, their stars — from the area's words in the presets'
+  -- column, of the same picture.
   local viewText = textOf("expansion view")
   v.expansionView = Expansion.parseView(viewText)
+  local areaRead = nil
   if v.expansionView then
     v.expansionOpen, v.selectedExpansion = false, ""
     log(string.format("expansion: the view reads '%s' — %s, no expansion open", tostring(viewText), v.expansionView))
@@ -289,15 +296,19 @@ local function decide(ctx)
     local area = Expansion.area(pl)
     local seen, why = nil, "no area"
     if area then
-      local r = host.ocr.recognize({ name = "expansion area", region = area }, { snapshot = snap, lang = H.lang() })
-      local roster = ctx.opts.roster
-      seen, why = Expansion.fromArea(r and r.status == "text" and r.text or "", DB, roster)
+      areaRead = host.ocr.recognize({ name = "expansion area", region = area }, { snapshot = snap, lang = H.lang() })
+      seen, why = Expansion.fromArea(areaRead and areaRead.status == "text" and areaRead.text or "", DB,
+        ctx.opts.expected, Br.names())
     end
     log(string.format("expansion: the view reads %s — the area read: %s", viewText and ("'" .. viewText .. "'") or "nothing",
       tostring(why)))
     if seen then
       v.expansionOpen = seen.open
       v.selectedExpansion = seen.open and (seen.name or "") or ""
+      -- Named by what it lists, the database's naming — unless it is the one this window had open by
+      -- the word clicked, and the database's scoring only says it still is.
+      v.selectedFromDatabase = seen.name ~= nil and not (seen.name == ctx.opts.expected and not ctx.opts.expectedFromDatabase)
+        or nil
       if seen.name then
         local ok, lists = pcall(DB.lists, seen.name)
         if ok and lists then
@@ -308,6 +319,15 @@ local function decide(ctx)
     end
   end
   Expansion.favorite(pl, got, v, log, marks.expansion)
+  if v.lists and areaRead then
+    local lines = Br.lines(Br.rows(Br.column(areaRead, pl:rect(X.PRESET_TEXT))), v.lists.presets,
+      v.lists.presetCategories, "preset rows")
+    v.categoryShown = Br.categoryOf(lines, v.lists.presetCategories)
+    if v.favoriteView then
+      Br.stars(snap, pl, lines, marks.expansion)
+      v.favoriteStates = Br.starStates(lines)
+    end
+  end
 
   pictures(pl, snap, marks, opts.zoom)
   v.cut = ctx.cut
@@ -351,7 +371,8 @@ end
 
 -- Reads Avenger for the page, in a handler where a read may wait: overlay `o` is the header
 -- overlay, active on an identified Avenger. `opts`: { zoom = the zoom read, or nil; mark = o:here()
--- at the key; roster = the database's expansions, or nil }. Answers the values read — nil where a
+-- at the key; expected = the expansion last read open in this window, or nil; expectedFromDatabase =
+-- whether only the database named it }. Answers the values read — nil where a
 -- read failed — or nil, why nothing was read for the log, and the sentence to say (Open.NO_FACTOR,
 -- NO_PICTURE, FAILED; nil when the user moved on). `values.zoom` is always there, and `values.cut`
 -- is the screen's size when the picture was cut at its edge.
@@ -448,6 +469,10 @@ end
 --            page shows DRUM SQ whatever the strip shows (src/actions/drumsq.luau)
 --   macros   the macro panel: the tab shown, its buttons and its knobs' amounts; the tabs counted
 --            and the five names read with `text`
+--   browser  the expansion browser (read/browser.luau, Br.part): the view's caption as text and
+--            FAV's pixels; with the field "area", the area read where the caption reads no view, for
+--            an open expansion; with "presets", the preset rows and their stars where FAV reads on
+--            (`expected` in the opts: the expansion known open, whose lists the rows are placed in)
 -- `fields` (Open.part's opts) names what is read as text besides: the sample editor's menus' fields,
 -- the envelope's preset name and the browser's rows (read/sample.luau), DRUM SQ's LENGTH and SPEED
 -- (read/drumsq.luau) — each asked only where the pixels read before the text read say it is shown.
@@ -460,6 +485,7 @@ Open.PARTS = {
   central = { rect = { 230, 18, 640, 425 }, strip = true, centre = true, anyTab = true, editor = true },
   drumsq = { rect = { 236, 236, 640, 430 }, centre = true, anyTab = true },
   macros = { rect = { 700, 425, 871, 535 }, macros = true },
+  browser = { rect = X.BROWSER, browser = true },
 }
 
 -- The keys of state.luau's values each part reads, whether it finds them or not: what it does not
@@ -499,6 +525,7 @@ end
 function Open.part(snap, name, opts)
   local part = Open.PARTS[name]
   local pl = opts.pl
+  if part.browser then return Br.part(snap, pl, opts) end
   local view = { snap.x, snap.y, snap.x + snap.w, snap.y + snap.h }
   local all = {}
   if part.strip then Strip.ask(pl, all) end

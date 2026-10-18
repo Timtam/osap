@@ -5,11 +5,15 @@
 -- SOURCE: the avenger_control project's detect_expansion_state and its helpers (its actions.py)
 -- and its detect_expansion_favorite_view (clicker/__init__.py), taken over with its developer's
 -- permission (NOTICE): the view's caption read as text — an open expansion shows an icon there —
--- and, where it reads no view, the browser's whole area read as text and compared with the preset
--- database; FAV from its brightest pixel and its bright ones. Two differences: an open expansion
--- is recognised by the presets of it the text names (the database's index), not also by its
--- categories, which would mean reading every expansion's file; and a text that settles nothing is
--- "not read", where the project kept what it had last known.
+-- and, where it reads no view, the browser's text compared with the preset database; FAV from its
+-- brightest pixel and its bright ones. Three differences: the expansion an action expects is scored
+-- the project's way, by its presets and its categories, and any other only by its presets, which
+-- the database's index holds — every expansion's categories would mean reading every expansion's
+-- file — and a text two expansions' presets are named in as much names neither, where the project
+-- took the first of its roster; the grid is told by the catalog's expansions and Avenger's own list
+-- read this session, not by the roster the page shows, which may hold none of the names a scrolled
+-- grid shows; and a text that settles nothing is "not read", where the project kept what it had
+-- last known.
 
 local P = host.include("src/read/picture.luau")
 local X = host.include("src/tables/expansion.luau")
@@ -30,6 +34,10 @@ local OPEN_MARKERS = {
   "strings", "guitar", "synth", "seq", "pad",
 }
 local NAME_MIN = 5
+E.NAME_MIN = NAME_MIN
+-- What an open expansion has to score (DB.scoreOpen, DB.openExpansion): one preset name, the
+-- project's least.
+local OPEN_SCORE = 6
 
 function E.ask(pl, out)
   local r = pl:box(X.FAVORITE_VIEW, X.FAVORITE_VIEW_STATE)
@@ -81,28 +89,37 @@ function E.area(pl)
   return pl:rect(X.AREA)
 end
 
--- What the browser's area read as `text` says, with the preset database `DB`: { open = true,
--- name = the expansion } for an open expansion the database recognises; { open = false } for the
--- grid of expansions — an expansion of the roster `roster` named in it; { open = true } for an open
--- expansion it does not recognise — two of the markers; or nil, nothing settled. And the log's
--- words.
-function E.fromArea(text, DB, roster)
-  local t = string.lower((string.gsub(tostring(text or ""), "%s+", " ")))
-  if t == "" or t == " " then return nil, "nothing read" end
-  local name, score = nil, nil
+-- What the browser's text `text` (its area, or an open expansion's two columns, read) says, with the
+-- preset database `DB`, the expansion an action expects open (`expected`, or nil) and the names a
+-- grid is told by (`names`: { names, folds } — the catalog's expansions and Avenger's own list):
+-- { open = true, name = the expansion, score } for an open expansion the database recognises — the
+-- one expected where it scores, else the one whose presets the text names most; { open = true } where
+-- two expansions' presets it names as much — which of them is open the text does not say; { open =
+-- false } for the grid of expansions — one of `names` named in it; { open = true } for an open
+-- expansion the database does not recognise — two of the markers; or nil, nothing settled. And the
+-- log's words.
+function E.fromArea(text, DB, expected, names)
+  local t = DB.fold(text)
+  if t == "" then return nil, "nothing read" end
   if DB.present then
-    local ok, n, sc = pcall(DB.openExpansion, t)
-    if ok then
-      name, score = n, sc
-    else
-      return nil, "the preset database failed: " .. tostring(n)
+    if expected and expected ~= "" then
+      local okS, score = pcall(DB.scoreOpen, t, expected)
+      if okS and score >= OPEN_SCORE then
+        return { open = true, name = expected, score = score }, string.format("%s, the one expected, by what it lists (%d)",
+          expected, score)
+      end
     end
+    local ok, n, sc, other = pcall(DB.openExpansion, t)
+    if not ok then return nil, "the preset database failed: " .. tostring(n) end
+    if n and other then
+      return { open = true }, string.format("two expansions list what was read: %s and %s, by their presets named (%d each)",
+        n, other, sc)
+    end
+    if n then return { open = true, name = n, score = sc }, string.format("%s, by its presets named (%d)", n, sc) end
   end
-  if name then return { open = true, name = name }, string.format("%s, by its presets named (%d)", name, score) end
-  for _, e in ipairs(roster or {}) do
-    local f = string.lower((string.gsub(e, "%s+", " ")))
+  for k, f in ipairs(names and names.folds or {}) do
     if #f >= NAME_MIN and string.find(t, f, 1, true) then
-      return { open = false }, string.format("the grid of expansions: '%s' named", e)
+      return { open = false }, string.format("the grid of expansions: '%s' named", names.names[k])
     end
   end
   local hits = {}

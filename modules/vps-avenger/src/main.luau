@@ -102,17 +102,13 @@ end
 -- already said, and for a trip of the page's, which shows the refusal in the page instead (it is
 -- handed back with the `false`). A click from a hotkey would inherit held modifiers on Windows;
 -- these controls have none, and Return and Space arrive with none.
--- Where table point `at` lies on screen, checked as above: x and y, or nil and what was said (or
--- would have been, `quiet`).
-local function pointOf(o, label, at, quiet)
+--
+-- Screen point (x, y) checked as above — what the browser clicks where it READ a word, never a table
+-- point (src/actions/browser.luau): x and y, or nil and what was said (or would have been, `quiet`).
+local function pointAt(o, label, x, y, quiet)
   local function refuse(said)
     if not quiet then host.speech.output(said, { interrupt = true }) end
     return nil, said
-  end
-  local x, y = o:toScreen(at[1], at[2])
-  if not x then
-    host.log.info(string.format("[avenger] '%s' cannot be placed now — %s; nothing clicked", label, tostring(y)))
-    return refuse(label .. " is not available now")
   end
   local origin = o:origin()
   local b = origin and origin.bounds
@@ -126,6 +122,53 @@ local function pointOf(o, label, at, quiet)
     return refuse("something else is covering " .. label)
   end
   return x, y
+end
+
+-- Where table point `at` lies on screen, checked as above: x and y, or nil and what was said (or
+-- would have been, `quiet`).
+local function pointOf(o, label, at, quiet)
+  local x, y = o:toScreen(at[1], at[2])
+  if not x then
+    host.log.info(string.format("[avenger] '%s' cannot be placed now — %s; nothing clicked", label, tostring(y)))
+    local said = label .. " is not available now"
+    if not quiet then host.speech.output(said, { interrupt = true }) end
+    return nil, said
+  end
+  return pointAt(o, label, x, y, quiet)
+end
+
+-- A click at screen point (x, y), checked by pointAt: true, or false and what was said.
+local function clickPoint(o, label, x, y, button, quiet)
+  local px, py = pointAt(o, label, x, y, quiet)
+  if not px then return false, py end
+  host.log.info(string.format("[avenger] '%s': clicking (%d,%d)%s", label, px, py,
+    button and (" with the " .. button .. " button") or ""))
+  if button then
+    host.input.click(px, py, { button = button })
+  else
+    host.input.click(px, py)
+  end
+  return true
+end
+
+-- A double-click at screen point (x, y), checked by pointAt, both clicks left (O.doubleClick), and
+-- `after()`, as a handler, once the second has gone out.
+local function doublePoint(o, label, x, y, quiet, after)
+  local px, py = pointAt(o, label, x, y, quiet)
+  if not px then return false, py end
+  host.log.info(string.format("[avenger] '%s': double-clicking (%d,%d)", label, px, py))
+  O.doubleClick(px, py, nil, after)
+  return true
+end
+
+-- The wheel turned `notches` (positive up, host.input.scroll) at table point `at`, placed and
+-- checked as a click is: true and the point, or false and what was said.
+local function wheelAt(o, label, at, notches, quiet)
+  local x, y = pointOf(o, label, at, quiet)
+  if not x then return false, y end
+  host.log.info(string.format("[avenger] '%s': the wheel %+g at (%d,%d)", label, notches, x, y))
+  host.input.scroll(x, y, notches)
+  return true, x, y
 end
 
 local function clickAt(o, label, at, button, quiet)
@@ -771,6 +814,10 @@ Page.start({
   ring = {
     clickAt = clickAt,
     pointOf = pointOf,
+    pointAt = pointAt,
+    clickPoint = clickPoint,
+    doublePoint = doublePoint,
+    wheelAt = wheelAt,
     nameNow = nameNow,
     lastName = function() return names.last end,
     noteName = noted,

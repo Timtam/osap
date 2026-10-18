@@ -6919,7 +6919,9 @@ tester's stage-1 instructions are a text of their own, not in the repository.
 - [ ] **Stage 4 — the expansion browser**: a list control in the runtime (items from a function,
       first-letter jumps, "n of N"); expansions, categories and presets read by OCR and clicked by
       the word read, not by the project's tables for one library's size; the wheel, measured;
-      **free-text search in a native field from `host.gui`** (the maintainer's decision).
+      **free-text search in a native field from `host.gui`** (the maintainer's decision). The page's
+      browser does the reading, the clicking by the word and the wheel since slice 9 (VPS Avenger,
+      the page, below); the ring's list control and the search field stay open.
 - [x] **The preset database** (the maintainer's decisions of 2026-09-28): the module may orient
       itself on the avenger_control project's database, as the project's tool does, and says
       whatever it did not read off the screen marked "from the database". The developer has
@@ -6980,10 +6982,13 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       bigram index for the search over the whole catalog.
 - [ ] **Which expansions the user has, in Avenger's order.** Not in the catalog, deliberately (the
       owner lists stay out): at an expansion's first and last preset there is no neighbour, and
-      Avenger goes on into the user's own next expansion. Stage 4 reads the expansion list off the
-      browser. The user's own presets and expansions are not in the catalog either: said as read,
-      unless one stands out as like a catalog name (then marked, as a new expansion's above); after
-      Load and Save as, as read until a step shows another name, as the tool skips its snap there.
+      Avenger goes on into the user's own next expansion. Partly done (slice 9): the page's Read
+      Avenger's List reads the list off Avenger's grid when the user asks, for the session
+      (`S.avengerList`); ◀ and ▶ do not use it yet — at an expansion's last preset the next one in
+      it would be the neighbour's expansion — and nothing reads it by itself. The user's own presets
+      and expansions are not in the catalog either: said as read, unless one stands out as like a
+      catalog name (then marked, as a new expansion's above); after Load and Save as, as read until
+      a step shows another name, as the tool skips its snap there.
 - [ ] **The Preset read-out says what the recogniser read**, not the catalog's spelling: it is the
       runtime's OCR read-out, which has no hook to change its text, and Preset info, ◀ and ▶ are
       where the catalog's spelling is said. A general `format` for an OCR read-out would do it;
@@ -7097,9 +7102,11 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       - the drum mode by the tool's rule, the brighter DRUMKIT caption meaning SEQUENCE;
       - the central tabs' captions, read and logged only: whether they should confirm the
         darkest strip, or name the nine tabs the tool has no points for.
-- [ ] **Not read yet, and said so on the page**: the drum slots' names and switches, the sample
-      editor and DRUM SQ's length (the drums' stage); the preset rows' favourite stars, and an
-      open expansion by its categories (the browser's stage).
+- [x] **Not read yet, and said so on the page**: the drum slots' names and switches, the sample
+      editor and DRUM SQ's length (the drums' stage, slice 8); the preset rows' favourite stars, and
+      an open expansion by its categories (the browser's stage, slice 9: the stars by pixels at the
+      key and after every action of the rows, the categories in the score of the expansion an
+      action expects).
 - [x] **The header through the page** (the plan's slice 4, module 0.3.0, on the overlay runtime's
       page support, `com.platform.overlay >= 0.6`). `src/page.luau` is the runtime's page now
       (`O:addPage`): the key, the show beside Avenger, the away, the way back and the page built at
@@ -7629,8 +7636,198 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       ring reads the table but not the editor, so the switch says "not read" until the editor is read
       again (the slot's actions could read the editor's part where EDITOR shows); a twelve-slot list
       posted keyed by the slot is a second shape of the same key, which only the page reads.
-- [ ] **The next stages**: the browser, the ring's knobs turned (above), and the page's own Settings
-      section.
+- [x] **The expansion browser** (the plan's slice 9; module 0.8.0 on the runtime 0.10.0, built
+      2026-10-18, not run live). Eleven actions, every click on the words READ in a picture of the
+      browser — the middle of a tile's or a row's words, a row's star at its own height — never the
+      tool's point for an index in a roster; the tool's tables for one library's size, its scrollbar
+      emulation and its page arithmetic left behind (`src/actions/browser.luau`,
+      `src/read/browser.luau`). `set_expansion_view`, `close_expansion` and
+      `toggle_expansion_favorite_view` through `src/act.luau` on a new part `browser` (the caption
+      as text, FAV's pixels; the area where the caption reads no view; the rows and their stars
+      where FAV reads on): the view field opened with the LEFT button and its row chosen in the list
+      painted inside `Pp.VIEW_LIST`, refused where an expansion is open or the view read is the one
+      asked; Close only where no view is read and the area reads an expansion open (the tool clicked
+      it with the grid shown, which opens the view list); FAV read before and after.
+      `open_expansion` reads the grid, names its tiles by column (a name on two lines joined, a poor
+      read a name only where it stands out by the margin, a name the catalog lacks kept as read, a
+      half tile at the area's edge left out) among the catalog's expansions and Avenger's own list,
+      in reading order by rows the tiles themselves tell apart (a tile more than half a pitch below
+      a row's first starts the next), by the view the caption reads now (refused where it reads
+      none: never a view remembered), and looks for the name a wheel notch at a time (B.seek): a
+      change wait from the picture last read on the list's top and bottom quarters, a still spell of
+      60 ms, the scrollbar's track tried where the wheel moved nothing and kept for the session, the
+      wheel turned round only in an order known (Avenger's list read, an expansion's lists; never
+      the roster's, whose order against Avenger's nobody has measured) and only where the places
+      read went the other way two steps running, once a search, the walk then started again; the
+      other way at the end; a name read at neither end "is not in VPS Avenger's list" only where the
+      list moved and an order known does not put it among the places read or next to them, otherwise
+      it "cannot be read in VPS Avenger's list now", and in a list that never moved it "was not
+      read, and VPS Avenger's list did not move" (the same for the categories and the rows); the
+      tool's page start only orders the first way; then the columns read and the expansion they list
+      scored (the expected one by its presets and categories) — another one said and posted marked,
+      an unnamed one said with the tool's words. `select_expansion_category` and the rows' three
+      actions find their category or row the same way in an expansion's lists (the database's
+      order), a preset of another category has its category clicked first (the read decides, not the
+      page's flag); Select is a click and Load a double-click, the name watched after both as after
+      ◀ and ▶, then the strip and the macros read (the tool's refresh) — never the database's name
+      posted (the tool wrote it); Mark clicks the star and reads it after a change wait on its box.
+      All clicks nothing; Go to Category is the database's with no trip, its five reasons the
+      tool's. The port's own `read_expansion_list` ("Read Avenger's List", a button of the view
+      row): the grid moved to its top with change waits only, then read down to its end, each read
+      placed where most of its names were read before (`B.gather`) and each place the name most of
+      its reads read, so one misread is outvoted and no name is listed twice; kept only where both
+      ends were read and every place told one name — otherwise nothing is kept, and the answer says
+      a part of the list could not be read —; a wheel that took the grid the other way turned round
+      and the list read again from its top; kept for the session and shown in place of the roster
+      (`expansions_from_avenger`, the database's spellings marked in `expansions_marks`), dropped
+      when a later grid read names one it lacks (said) and when the module reloads. The page key
+      tells the grid by the catalog's names and Avenger's list (the roster's three names told
+      nothing of a scrolled grid), scores the expansion known open first, marks an open expansion
+      only the database named (`selected_expansion_from_database`, the heading's ", from the
+      database"), and reads the rows' category and, with FAV on, their stars off the same picture.
+      `NOT_BUILT` is empty. Tested in the scripted host with a model of Avenger's browser that the
+      module's clicks, notches and track clicks move: 40 tests in `avenger_browser_tests.rs` (every
+      one ending with no picture held) and a markup test; a mutation round of 20, all caught; the
+      review's six findings fixed (the turn-round by the roster's order, the view taken from memory,
+      rows by bins from the area's top, Avenger's list doubled by one misread, "not in VPS Avenger's
+      list" for a name not read, ten of its mutations not caught); then a round of 32 mutations —
+      the review's seventeen that still apply (its sixteenth is now the code) and fifteen that each
+      undo one of the fixes — all caught, six of the fifteen only after two more tests, two more
+      scenarios and two sharper checks.
+- [ ] **What the Mac tester confirms for slice 9, the browser** (P5, with Avenger in Logic, Calibrate
+      ticked, the preset database installed; afterwards the log and the calibration folder):
+      1. Expansion View from the page: List, then 8 per Row — the view list must open and take the
+         row (`[menu] … drawn: armed on 'Expansion View' …`, `-menu-item.png`), the page saying the
+         view Avenger then shows;
+      2. an expansion on the grid opened from the page's list, and one that needs scrolling (the
+         log's `[avenger] [browser] step down in the grid of expansions: moved by the wheel, … ms` or
+         `… the track from here on`, and the `browser-grid-<view>-<zoom>pct.png` picture); "Looking
+         for …" heard once; the page's heading the expansion Avenger opened; and one Avenger does not
+         list (one not installed, from the database's list before Read Avenger's List): after the walk
+         "… is not in VPS Avenger's list" heard, nothing clicked;
+      3. a category chosen, a preset selected and one loaded (the name heard and the page back on the
+         row), FAV on, a favourite marked, FAV off; then Close Expansion, the page back on the list;
+      4. Read Avenger's List: "Reading the expansions …" heard, then the page's list Avenger's own,
+         in its order, each name once (the log's `place … read as …` lines where reads disagreed); an
+         expansion opened from it; with the Mac's natural scrolling on, the log's `turned round for
+         the session` line at most once a search;
+      5. All, then Go to Category: the category of the preset loaded.
+      For each, what was heard, and whether the page came back showing what Avenger shows.
+- [ ] **For the Avenger developer, slice 9's browser** (each with its log lines and pictures): D13
+      (GM9), whether the wheel moves the grid, the categories and the presets, how far per notch,
+      smoothly or not (`[avenger] [browser] step …`), which way under natural scrolling (`… two
+      steps running … turned round for the session`), and whether a track click pages where the
+      wheel does not; D14, which views' names a recogniser reads — List, 3, 4 and 8 per Row at 80
+      and 100 % — from the `browser-grid-<view>-<zoom>pct.png` pictures and the tiles' log (`the
+      grid in <view>: … tiles — col …`), two-line names included, and whether half a pitch tells a
+      grid's rows apart; D15, the rectangles of the category and preset columns, the star column and
+      FAV's box (`browser-open-<zoom>pct.png`); D16, whether a single click on a row loads the
+      preset (the Select watch's line) and what a double-click does to the browser; D17, Avenger's
+      order of expansions against the catalog's, from Read Avenger's List with a large library; D18,
+      whether the rows show more than the name (counts, icons) — such a row is logged as "no name";
+      D19, the time per step on the Intel Mac (each step's line), which decides whether a step far
+      from the name needs its text read at all.
+- [ ] **Residuals of slice 9's browser**: the regions — the browser's picture, the columns' text
+      regions, the star column, the view list's region, the lists' wheel points and track ends, the
+      grid's columns and the join of a two-line name — are starting values (D14, D15); whether 8 per
+      Row's names can be read at all is not known, and the page's "Expansion Search requires 8 per
+      Row" stays the tool's (the maintainer's Q2: drop it once D14 shows other views read); the
+      60 ms still spell and the hover bands are not measured (D13); every step of a search reads its
+      list's text, also far from the name (D19); Avenger's list is kept for the session only (Q3),
+      and a search with it goes by its order, and a name of it read at neither end is said as not
+      read now; a wheel is turned round only after two steps running went the other way, once a
+      search; a place of Avenger's list read as two names as often, or two places read as one name,
+      keeps nothing (the list read again); a grid's rows are told apart by half its pitch (D14);
+      without the preset database an opened expansion is not named (nothing scores it); the open
+      expansion's heading is marked where only the database named it (Q4); the lists in the ring
+      stay stage 4's.
+- [x] **The page's Settings section and the port's close** (the plan's slice 10; module 0.9.0 on the
+      runtime 0.10.0, built 2026-10-18, not run live). The tool's Windows-only Settings block made
+      the page's section on both systems, after the macros: Correct open Expansion, Expansions List,
+      the page key (a field for the key spec, Change Page Key and Reset to Default), Sounds, Leave
+      the DAW Active, DRUM SQ Auto Follow's pace, and Reset Saved Settings behind the page's own
+      alertdialog — the settings the tool kept in its Mac status menu and Windows tray, and the
+      port's own three. They write the module's five settings (`P.SETTINGS`, the one table the
+      dialog's definitions come from too) with `set_setting {key, value}` and `reset_settings
+      {key?}`: no trip, only while the page has the keyboard, each value checked first, a value
+      equal to the stored one not set ("unchanged, …"); answered once, the settings and then the
+      error region, cleared or with what was refused, nothing said. Every one of the five settings'
+      callbacks ends with the settings posted (`{kind = "settings", values, rosters, keyWords,
+      defaultKeyWords}`, about 200 bytes), and every `ready` gets them after the state, so the
+      manager's dialog and the page always agree; a page described again is told nothing before its
+      own `ready`. The page key is refused also where it has no modifier — the tool's rule, the
+      dialog's too — and where it is a modifier tap; refused from the page, the reason is in the
+      error region in words and the key in effect stays registered and stored; accepted, "Page key
+      changed to …" is said from either side. The Mac mode changed from the page closes the page it
+      was sent from (Q2 A), with Close.wav and "Leave the DAW Active is on now. Press … to open the
+      page again." — the same words on Windows, where the mode changes nothing but the page is
+      described again all the same. Reset sets every setting to its default, the Mac mode last;
+      Avenger's own list read this session stays (Q3 A). A stored list the module does not have, or
+      a pace out of its bounds or with a fraction, is set back to its default at load, and logged.
+      Correct open Expansion (`align_open_expansion`, `B.align`) is a trip with no click: the name
+      and ONE picture of the caption and the columns, read with no expansion expected — every other
+      read scores the expansion the page has first and keeps naming it on one preset name the
+      columns share — so the database names what the columns list over its whole catalog: "corrected
+      to …" or "unchanged, …" (", from the database" where only the database named it), "no
+      expansion is open in VPS Avenger", "VPS Avenger shows an expansion open; which one cannot be
+      read now" where two expansions list what was read as much (the tool took the first of its
+      roster, and so did the port until the review), or "cannot be told now" with every value of the
+      browser posted as not read; the page's category replaced only where the expansion is another;
+      the tool's 0.45 s second read dropped. A trip's first look at the browser reads nothing once
+      the user has left during its picture. The port's close: `ACTIONS` is the tool's 81 page
+      actions less `toggle_windows_reaper_rect_x` (REAPER's plug-in window edge is daw-hosts' to
+      derive), with the port's own three, `read_expansion_list`, `set_setting` and `reset_settings`
+      — 83, each with a handler — and `NOT_BUILT` is empty (Q4 A). Of the tool's other surfaces,
+      dropped: the four "Confirm …" overrides (those values are read), Quit (the application's tray
+      quits), the Macro Collector and the Tk fallback, the recorded rename, the user-preset store
+      and the three rosters named after people. Tested in the scripted host: 10 tests in
+      `avenger_settings_tests.rs` (the dialog and the page agreeing after every change, `T.agree`),
+      4 for Correct open Expansion in `avenger_browser_tests.rs`, a markup test, and the protocol
+      test against the tool's own list; a mutation round of 31, all caught; the review's five
+      findings fixed (a tie of two expansions settled by the catalog's order and said "unchanged",
+      a roster named after a person in the tests, a refused pace or key left in its field after
+      Return, a sentence on Windows that claimed what the Mac mode does, ten of its fourteen
+      mutations not caught — the scripted key check now gives `ok` as the host's, and the scripted
+      host normalizes keys); then a round of 21 mutations — the review's fourteen and seven that
+      each undo one of the fixes — all caught.
+- [ ] **What the Mac tester confirms for slice 10, the Settings section** (P5, with Avenger in
+      Logic, Calibrate ticked, the preset database installed; afterwards the log):
+      1. the page key, then Settings: the section opens on its group, and its items read in order;
+      2. with an expansion open, Correct open Expansion: "unchanged, …" or "corrected to …"; with
+         the list of expansions shown, "no expansion is open in VPS Avenger"; nothing clicked in
+         Avenger (the log's `[avenger] [browser] 'Correct open Expansion'` line);
+      3. Expansions List, Complete: the page's list changes; then Factory Standard again;
+      4. the page key: Cmd+Shift+F2 written in the field, then Change Page Key — "Page key changed
+         to Shift+Command+F2." heard; back to Avenger with the new key, and the page opened with
+         it; then Meta+Alt+F2 (Control-Option-F2): the error region says why, and the old key
+         stays; then Reset to Default;
+      5. Sounds off: the page opens and closes silently; then Sounds on;
+      6. Leave the DAW Active: the page closes, Close.wav plays and "Leave the DAW Active is on
+         now. Press … to open the page again." comes — what VoiceOver says first, and whether the
+         sentence was heard; the key: "Building the page.", then the page in the new mode (MW1b);
+         then off again the same way;
+      7. DRUM SQ Auto Follow 500, then 50 written and Return pressed in the field: the error region
+         says why, and the field, still with the keyboard, shows 500 again;
+      8. Reset Saved Settings: the dialog read, then Reset — "every setting is back at its
+         default";
+      9. the module manager's settings for VPS Avenger: the dialog shows what the page showed; the
+         key changed there and OK pressed, the page opened with the new key shows it.
+      For each, what was heard.
+- [ ] **Residuals of slice 10**: the page key is written as a key spec (Q1 C); the tool's capture
+      field — the next key pressed becomes the key — needs the host to turn a page's key event into
+      a spec by roles (HK1, `platform.keySpec(event)` in the page's script: which role the physical
+      Control key is differs by platform, and only the host knows it), and a capture would not see
+      VoiceOver's own chords either. The Mac mode changed from the page closes the page, and the key
+      opens it again (Q2 A); the runtime could show the new page by itself once it has loaded (RP1,
+      `O:pageAgain{ show = true }`) if the tester's step 6 says it is worth building. Where
+      VoiceOver lands when the page goes, and whether the sentence is heard over the DAW window's
+      name, is unmeasured (MW1b). DRUM SQ's pace is still unmeasured (D11). Correct open Expansion
+      settles nothing where the columns show no preset name of 8 letters or more and no two of the
+      tool's markers, and names neither of two expansions whose presets the columns name as much
+      (a name shared, the rows shown only those): reading the categories of both, or more rows,
+      could tell them apart; a key typed in another spelling of the one in effect is "unchanged"
+      and keeps the spelling stored.
+- [ ] **The next stages**: the ring's knobs turned (above).
 
 ## HTML pages, stage 1: `host.gui.webview` and the Windows probe (2026-09-28)
 

@@ -73,6 +73,17 @@
 --   central_drum_sq_speed {item}, central_drum_sq_sequence_menu_item {item}, central_drum_sq_length
 --   {steps}, central_drum_sq_control {control}, reset_central_drum_sq_control {control}
 --
+-- and the expansion browser (the plan's slice 9, src/actions/browser.luau), every click on the words
+-- READ in a picture of it, never on the tool's point for an index: the view, Close and FAV through
+-- src/act.luau; the others trips of its own that move a list a step at a time where the name is not
+-- read in it; Go to Category the database's, with no trip:
+--
+--   set_expansion_view {view}, close_expansion, toggle_expansion_favorite_view {enabled},
+--   open_expansion {index, page_start, visible_index}, select_expansion_category {index, total},
+--   select_all_expansion_presets, go_to_loaded_preset_category, select_expansion_preset {…},
+--   load_expansion_preset {…}, mark_expansion_preset_favorite {…}, read_expansion_list,
+--   align_open_expansion (the page's Settings section, the plan's slice 10: no click)
+--
 -- Nothing is taken for done: every answer is what was read after the click, and a read that did
 -- not come is said as that — after a click or choice that may have changed the preset, with the
 -- preset posted as not read (go). After every trip the page gets its state — the preset heading
@@ -97,6 +108,7 @@ local Sq = host.include("src/actions/drumsq.luau")
 local C = host.include("src/tables/centre.luau")
 local Hv = host.include("src/handover.luau")
 local Am = host.include("src/amount.luau")
+local Bw = host.include("src/actions/browser.luau")
 
 local A = {}
 
@@ -337,8 +349,10 @@ A.HANDLERS.pick_initialize_preset = function(o)
         if not ok then return t:done({ error = why }) end
         if not t:inFront() then return end
         local origin = m:origin()
+        local w2 = E.plugin()
+        local before = S.values(w2 and w2.id)
         local okR, values, whyNot = pcall(Reads.read, m, { zoom = origin and E.zoomOf(origin), mark = m:here(),
-          roster = E.roster() })
+          expected = before and before.selectedExpansion or nil, expectedFromDatabase = before and before.selectedFromDatabase })
         if not (okR and values) then
           log("Initialize Preset: VPS Avenger was not read again — " .. tostring(okR and whyNot or values))
           return t:done({ error = "VPS Avenger cannot be read again now" })
@@ -570,15 +584,86 @@ A.HANDLERS.central_drum_sq_length = function(o, args)
   go(o, "central_drum_sq_length", function(w, trip) Sq.length(w, trip, steps, E.LABELS.central_drum_sq_length) end)
 end
 
--- What page.luau hands over: { header, DB, ring, zoomOf, LABELS, post, roster, plugin = () -> the
--- window the page was shown beside, postState = (id) -> (), closedWords = () -> the sentence,
--- sound = (name) -> (), the page's sounds behind its setting }.
+-- ── The expansion browser ────────────────────────────────────────────────────
+-- The view, Close and FAV through src/act.luau; the others trips of src/actions/browser.luau's own,
+-- each given what was last read in Avenger's window — the expansion open and its lists — and refused
+-- with no trip where the page cannot have meant what it sent; Go to Category no trip at all.
+for _, name in ipairs({ "set_expansion_view", "close_expansion", "toggle_expansion_favorite_view" }) do
+  A.HANDLERS[name] = viaAct(name, Bw[name])
+end
+
+-- What was last read in the window the page was shown beside: its values, or none.
+local function known()
+  local w = E.plugin()
+  return S.values(w and w.id) or {}
+end
+
+A.HANDLERS.open_expansion = function(o, args)
+  local name, why = Bw.openArg(args)
+  if not name then return refuse("open_expansion", why) end
+  local k = known()
+  go(o, "open_expansion", function(w, trip) Bw.open(w, trip, args, name, E.LABELS.open_expansion, k) end)
+end
+
+A.HANDLERS.select_expansion_category = function(o, args)
+  local k = known()
+  local target, why = Bw.categoryArg(args, k)
+  if not target then return refuse("select_expansion_category", why) end
+  go(o, "select_expansion_category", function(w, trip)
+    Bw.category(w, trip, target, E.LABELS.select_expansion_category, k)
+  end)
+end
+
+A.HANDLERS.select_all_expansion_presets = function(o)
+  local k = known()
+  go(o, "select_all_expansion_presets", function(w, trip) Bw.all(w, trip, E.LABELS.select_all_expansion_presets, k) end)
+end
+
+for kind, action in pairs({ select = "select_expansion_preset", load = "load_expansion_preset",
+  mark = "mark_expansion_preset_favorite" }) do
+  A.HANDLERS[action] = function(o, args)
+    local k = known()
+    local arg, why = Bw.presetArg(args, k)
+    if not arg then return refuse(action, why) end
+    go(o, action, function(w, trip, forget) Bw.preset(w, trip, forget, kind, arg, E.LABELS[action], k) end)
+  end
+end
+
+A.HANDLERS.read_expansion_list = function(o)
+  local k = known()
+  go(o, "read_expansion_list", function(w, trip) Bw.list(w, trip, E.LABELS.read_expansion_list, k) end)
+end
+
+-- Correct open Expansion (the tool's, in the page's Settings section): a trip with no click and no
+-- `forget` — nothing in Avenger changes — whose one read of the browser expects no expansion.
+A.HANDLERS.align_open_expansion = function(o)
+  local k = known()
+  go(o, "align_open_expansion", function(w, trip) Bw.align(w, trip, E.LABELS.align_open_expansion, k) end)
+end
+
+-- No trip, as the tool's: the database's category for the name last read. The page's category and
+-- the preset placed, then the state and the focus on the categories, the tool's.
+A.HANDLERS.go_to_loaded_preset_category = function()
+  local w = E.plugin()
+  local id = w and w.id
+  local set, why = Bw.goToCategory(S.values(id))
+  if not set then return refuse("go_to_loaded_preset_category", why) end
+  if id then S.set(id, set) end
+  E.postState(id)
+  E.post({ kind = "error", text = "" })
+  E.post({ kind = "focus", id = "open-expansion-categories" })
+end
+
+-- What page.luau hands over: { header, DB, ring, zoomOf, LABELS, post, plugin = () -> the window the
+-- page was shown beside, postState = (id) -> (), closedWords = () -> the sentence, sound = (name) ->
+-- (), the page's sounds behind its setting, shown = () -> the list of expansions last posted }.
 function A.start(env)
   E, R = env, env.ring
   Act.start(env.ring)
   Hv.start({ ring = env.ring, named = named, plugin = env.plugin })
   Am.start({ ring = env.ring, plugin = env.plugin, sound = env.sound })
   Sq.start({ ring = env.ring, plugin = env.plugin })
+  Bw.start({ ring = env.ring, named = named, plugin = env.plugin, shown = env.shown })
 end
 
 return A

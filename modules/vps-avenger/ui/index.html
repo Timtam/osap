@@ -4,9 +4,10 @@
   its developer's permission (NOTICE). The markup is the tool's, copied as it is — its sections,
   ids, labels, help texts and ARIA patterns, which are its VoiceOver tuning — but for the port's
   edits, each said where it is: the styles and the script are files of their own (the host runs
-  no inline script), the Windows-only block and the dead OSC rename dialog are left out, a note
-  says when a reloaded page's values were read, four focus targets the module names can take
-  the focus, and Back and Next say when they are unavailable.
+  no inline script), the Windows-only block is made the page's Settings section, on both systems,
+  the dead OSC rename dialog is left out, a note says when a reloaded page's values were read,
+  four focus targets the module names can take the focus, and Back and Next say when they are
+  unavailable.
 -->
 <html lang="en">
 <head>
@@ -272,6 +273,10 @@
               id="reset-expansion-search-button"
               title="Clear the expansion search and show all expansions"
               hidden>Reset Search</button>
+      <button type="button"
+              id="read-expansion-list-button"
+              data-action="read_expansion_list"
+              title="Read the expansions VPS Avenger lists, in its order, and show them here for this session.">Read Avenger's List</button>
     </div>
 
     <div id="expansion-search-section">
@@ -461,6 +466,125 @@
        tabindex="0"
        aria-label="Macro 1">
     <div id="macro-tab-detail-items"></div>
+  </div>
+</div>
+
+<!-- =================== Settings =================== -->
+<!--
+  The tool's Windows-only block ("Windows-only fallback controls") made the page's Settings
+  section, on both systems: its disclosure and group, its Correct open Expansion, and the settings
+  the tool kept in its Mac status menu and its Windows tray — Expansions List, the page key (its
+  Change Panel Shortcut and Reset to Default) and Reset Saved Settings — with the port's own three:
+  the sounds, the Mac page mode and DRUM SQ's watcher. Its other button, the REAPER window's left
+  edge, is not here: the platform's DAW entries derive that edge. Each control writes one of the
+  module's settings, the ones its settings dialog shows; what the controls show comes back from
+  the module only (panel.js, applySettings), never set at the click. No live region of its own:
+  an answer is said in the error region below.
+-->
+<div id="settings-controls">
+  <button type="button"
+          id="settings-trigger"
+          aria-expanded="false"
+          aria-controls="settings-menu-items"
+          title="Avenger Control settings.">
+    Settings
+  </button>
+  <div id="settings-menu-items"
+       class="osc-menu-items"
+       role="group"
+       tabindex="0"
+       aria-label="Settings"
+       title="Avenger Control settings."
+       hidden>
+    <button type="button"
+            id="settings-correct-open-expansion"
+            data-action="align_open_expansion"
+            title="Correct the panel to the expansion currently open in VPS Avenger.">
+      Correct open Expansion
+    </button>
+    <button type="button"
+            id="settings-roster-trigger"
+            aria-expanded="false"
+            aria-controls="settings-roster-items"
+            title="Choose which expansions list from the preset database this page shows.">
+      Expansions List
+    </button>
+    <div id="settings-roster-items"
+         class="osc-menu-items"
+         role="group"
+         tabindex="0"
+         aria-label="Expansions List"
+         hidden></div>
+    <input type="text"
+           id="settings-page-key-input"
+           aria-label="Page Key"
+           autocomplete="off"
+           spellcheck="false"
+           title="The key that shows this page and goes back to VPS Avenger, written as the module's settings write it: Ctrl, Alt, Shift and Win with a key, for example Ctrl+Shift+Alt+F2. On a Mac, Ctrl is Command and Win is Control; Cmd, Option and Meta are understood too.">
+    <button type="button"
+            id="settings-page-key-change"
+            title="Change the key that opens and closes Avenger Control.">
+      Change Page Key
+    </button>
+    <button type="button"
+            id="settings-page-key-default"
+            title="Set the page key back to its default.">
+      Reset to Default
+    </button>
+    <button type="button"
+            id="settings-sounds"
+            aria-pressed="true"
+            title="Sounds when the page opens and closes, and at a knob's limit.">
+      Sounds
+    </button>
+    <button type="button"
+            id="settings-leave-daw"
+            aria-pressed="false"
+            title="On a Mac, the page leaves the DAW the active application (experimental); on Windows the page is the same either way. Changing it closes the page, and the page key opens it again.">
+      Leave the DAW Active
+    </button>
+    <input type="number"
+           id="settings-drum-sq-cadence"
+           min="100"
+           max="1000"
+           step="10"
+           value="250"
+           aria-label="DRUM SQ Auto Follow, milliseconds between reads"
+           title="How often DRUM SQ's selected pattern is read while the page is hidden, from 100 to 1000 milliseconds.">
+    <button type="button"
+            id="settings-reset-trigger"
+            title="Reset the page's settings to their defaults.">
+      Reset Saved Settings
+    </button>
+  </div>
+
+  <!--
+    The reset's confirmation, as the tool's Reset Saved Settings asked in an alert of its own
+    ("Warning", Reset and Cancel): an alertdialog as Initialize Preset's, its warning saying what
+    this page resets. Reset sends reset_settings; Cancel closes it and sends nothing.
+  -->
+  <div id="confirm-reset-dialog"
+       role="alertdialog"
+       aria-modal="true"
+       aria-labelledby="confirm-reset-title"
+       aria-describedby="confirm-reset-warning confirm-reset-question"
+       hidden>
+    <p id="confirm-reset-title"
+       class="dialog-message"
+       tabindex="0"><strong>Warning</strong></p>
+    <p id="confirm-reset-warning"
+       class="dialog-message"
+       tabindex="0">This will reset the Expansions List, the page key, the sounds, Leave the DAW Active and the DRUM SQ Auto Follow reads to their defaults.</p>
+    <p id="confirm-reset-question"
+       class="dialog-message"
+       tabindex="0">Are you sure?</p>
+    <div class="group">
+      <button type="button" id="confirm-reset-yes"
+              title="Reset every setting"
+              data-action="reset_settings">Reset</button>
+      <button type="button" id="confirm-reset-no"
+              title="Keep the settings">Cancel</button>
+    </div>
   </div>
 </div>
 
