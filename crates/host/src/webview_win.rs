@@ -689,7 +689,7 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
         }
         give_front_back(hwnd, back_to.get(), back_focus.get(), kind.gives_front_back(close_kept.get()), &close_title);
         conceal(&frame, kind);
-        push(PageEvent::Closed { page, build, why: "user" });
+        push(PageEvent::Closed { page, build, why: "user", detail: None });
     });
     // An app page left for another window — by Alt+Tab, the taskbar, a click, or the module
     // bringing the plug-in forward — has not kept the front. Passed on: wx's own handler moves the
@@ -1341,7 +1341,8 @@ impl Native {
                     "it went to {url}, which is not a file of its own and could not be refused — \
                      the page is taken down, and the next show builds it again"
                 ));
-                push(PageEvent::Closed { page, build, why: "failed" });
+                let detail = format!("it went to {url}, which is not a file of its own and could not be refused");
+                push(PageEvent::Closed { page, build, why: "failed", detail: Some(detail) });
             } else if status != COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED {
                 push(PageEvent::LoadFailed { page, build, why: format!("WebView2 error status {} at {url}", status.0) });
             }
@@ -1416,7 +1417,9 @@ impl Native {
                 ),
             );
             if gone {
-                push(PageEvent::Closed { page, build, why: "failed" });
+                let which = if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED { "browser" } else { "renderer" };
+                let detail = format!("its WebView2 {which} process ended (kind {})", kind.0);
+                push(PageEvent::Closed { page, build, why: "failed", detail: Some(detail) });
             }
             Ok(())
         }));
@@ -1435,7 +1438,8 @@ impl Native {
                 "gui",
                 &format!("page '{title}': its script closed its web view — the page is gone, and the next show builds it again"),
             );
-            push(PageEvent::Closed { page, build, why: "failed" });
+            let detail = "its script closed its web view".to_string();
+            push(PageEvent::Closed { page, build, why: "failed", detail: Some(detail) });
             Ok(())
         }));
         let mut token = 0i64;

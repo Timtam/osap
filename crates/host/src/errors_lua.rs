@@ -14,7 +14,7 @@
 //! "detail" }` with no special case, and `page:post({ ok = false, error = err })` hands a page the
 //! shape its `platform.errors` is for (webview.rs).
 
-use mlua::{FromLua, Lua, Table, Value};
+use mlua::{FromLua, Lua, MultiValue, Table, Value};
 
 use crate::errors::{Code, HostError};
 use crate::json::luau_type;
@@ -86,11 +86,31 @@ fn value(lua: &Lua, code: &str, message: &str, detail: Option<&str>) -> mlua::Re
 }
 
 /// `e` as an error value in `lua`: made in the VM that receives it, at delivery, so an answer that
-/// crosses threads stays a [`HostError`] until then. Only the tests make one until the producers
-/// answer with HostError (errors.rs), and the allowance goes with that step.
-#[cfg_attr(not(test), allow(dead_code))]
+/// crosses threads stays a [`HostError`] until then.
 pub(crate) fn to_lua(lua: &Lua, e: &HostError) -> mlua::Result<Table> {
     value(lua, e.code().as_str(), e.message(), e.detail())
+}
+
+/// `first, err`: a call's answer with the error value of `e` second — `first` false, nil or `{}`
+/// when nothing asked was done, or the part that was (a partial answer, docs/api/errors.md).
+pub(crate) fn with_error(lua: &Lua, first: Value, e: &HostError) -> mlua::Result<MultiValue> {
+    Ok(MultiValue::from_vec(vec![first, Value::Table(to_lua(lua, e)?)]))
+}
+
+/// `first` alone, or `first, err` when there is an error value to give beside it.
+pub(crate) fn answer(lua: &Lua, first: Value, e: Option<&HostError>) -> mlua::Result<MultiValue> {
+    match e {
+        Some(e) => with_error(lua, first, e),
+        None => Ok(MultiValue::from_vec(vec![first])),
+    }
+}
+
+/// The answer of a call that did something or did not: `true`, or `false, err`.
+pub(crate) fn done(lua: &Lua, r: &Result<(), HostError>) -> mlua::Result<MultiValue> {
+    match r {
+        Ok(()) => Ok(MultiValue::from_vec(vec![Value::Boolean(true)])),
+        Err(e) => with_error(lua, Value::Boolean(false), e),
+    }
 }
 
 /// `v`'s message when it is an error value of this VM; `None` for anything else.
@@ -115,6 +135,29 @@ impl FromLua for Text {
             return Ok(Text(message));
         }
         String::from_lua(value, lua).map(Text)
+    }
+}
+
+/// An error value as a test reads it back from Luau — its code and its message — to compare with
+/// the [`HostError`] it should be ([`Told::of`]). Anything but an error value fails to convert.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Told(pub String, pub String);
+
+#[cfg(test)]
+impl Told {
+    pub(crate) fn of(e: &HostError) -> Told {
+        Told(e.code().as_str().to_string(), e.message().to_string())
+    }
+}
+
+#[cfg(test)]
+impl FromLua for Told {
+    fn from_lua(value: Value, lua: &Lua) -> mlua::Result<Self> {
+        match (&value, message_of(lua, &value)?) {
+            (Value::Table(t), Some(message)) => Ok(Told(t.raw_get("code")?, message)),
+            _ => Err(mlua::Error::external(format!("not an error value: {value:?}"))),
+        }
     }
 }
 
@@ -316,6 +359,28 @@ mod tests {
             let e = raised(&lua, call);
             assert!(e.contains(&format!("host.errors.new: {says}")), "{call}: {e}");
         }
+    }
+
+    /// A call's answer with an error value: `first, err`, `first` alone without one, and a done
+    /// call's `true` or `false, err`.
+    #[test]
+    fn an_answer_puts_the_error_value_second() {
+        let lua = vm();
+        let e = HostError::of(&input::COVERED);
+        let mv = with_error(&lua, Value::Nil, &e).unwrap();
+        assert_eq!(mv.len(), 2);
+        assert!(mv[0].is_nil());
+        assert_eq!(message_of(&lua, &mv[1]).unwrap().as_deref(), Some("something else is drawn over the point"));
+        let alone = answer(&lua, Value::Integer(3), None).unwrap();
+        assert_eq!((alone.len(), alone[0].as_integer()), (1, Some(3)));
+        let partial = answer(&lua, Value::Boolean(true), Some(&e)).unwrap();
+        assert_eq!((partial.len(), partial[0].as_boolean()), (2, Some(true)));
+        let ok = done(&lua, &Ok(())).unwrap();
+        assert_eq!((ok.len(), ok[0].as_boolean()), (1, Some(true)));
+        let no = done(&lua, &Err(e)).unwrap();
+        assert_eq!((no.len(), no[0].as_boolean()), (2, Some(false)));
+        let Value::Table(t) = &no[1] else { panic!("{:?}", no[1]) };
+        assert_eq!(t.raw_get::<String>("code").unwrap(), "covered");
     }
 
     /// json.encode reads raw fields: the code, the message and the detail, as a page gets them.

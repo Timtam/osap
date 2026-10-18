@@ -887,11 +887,11 @@ mod tests {
         );
     }
 
-    /// `host.keys.check`'s "no-keycode" is decided without this table (it has to answer for a
+    /// `host.keys.check`'s "no_keycode" is decided without this table (it has to answer for a
     /// Mac on any machine), so the two must agree on every key the parser accepts — under the
     /// US letters, the table's own. Under another layout a letter can have no key; that is the
     /// layout's, not the platform's, and `hotkey::register` parks such a hotkey rather than
-    /// refusing it, so "no-keycode" stays structural (see the next test).
+    /// refusing it, so "no_keycode" stays structural (see the next test).
     #[test]
     fn the_no_keycode_rule_agrees_with_the_table() {
         let mut names: Vec<String> = ('a'..='z').map(String::from).collect();
@@ -921,7 +921,7 @@ mod tests {
         let l = pick(Some(layout(&[(0x0C, 'a'), (0x00, '@')])), None);
         let q = key_to_vk("q").unwrap();
         assert_eq!(vk_to_keycode_in(&l, q), None);
-        assert!(crate::backend::has_mac_keycode(q), "a letter is never 'no-keycode'");
+        assert!(crate::backend::has_mac_keycode(q), "a letter is never 'no_keycode'");
         assert_eq!(why_no_keycode(q), "no key of the current keyboard layout types this letter");
         let f21 = key_to_vk("F21").unwrap();
         assert!(!crate::backend::has_mac_keycode(f21));

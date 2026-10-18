@@ -181,8 +181,10 @@ end
 -- breath would report the state from before. 300 ms is far more than that takes and far less
 -- than anybody waits for the line.
 function M.start(ready)
-  local ok, err = pcall(function()
-    host.gamepad.on("connected", function(e)
+  -- A watcher that cannot see pads answers nil and an error value, and registers nothing
+  -- (docs/api/gamepad.md); the first listener's answer says so for both.
+  local ok, token, err = pcall(function()
+    local first, why = host.gamepad.on("connected", function(e)
       log(
         "gamepad pad %d connected: %s (%s, family %s, source %s)%s, age %d ms",
         e.pad, e.info.name, e.info.id, e.info.family, e.info.source,
@@ -194,6 +196,9 @@ function M.start(ready)
       present[e.pad] = true
       listenToValues()
     end)
+    if not first then
+      return nil, why
+    end
     host.gamepad.on("disconnected", function(e)
       log("gamepad pad %d disconnected: %s, age %d ms", e.pad, e.info.name, math.floor(e.age))
       say(string.format("Pad %d disconnected.", e.pad))
@@ -202,13 +207,19 @@ function M.start(ready)
         stopListeningToValues()
       end
     end)
+    return first
   end)
-  if not ok then
+  if not (ok and token) then
     -- The Rust side has already written "gamepad watcher failed" with the reason; this line
     -- ties it to the probe, and the ready line below still comes, so the rest of the probe is
-    -- not lost with the controllers.
-    log("gamepad watcher failed: %s", tostring(err))
-    ready("gamepad: unavailable (" .. tostring(err) .. ")")
+    -- not lost with the controllers. A raise would be the host's own failure. Not for
+    -- `unavailable` — no XInput DLL, which the Rust side says in a line of its own: the watcher
+    -- runs, and the CI's grep for the line above is for a watcher that did not start.
+    local why = ok and tostring(err) or tostring(token)
+    if not (ok and err ~= nil and err.code == host.errors.UNAVAILABLE) then
+      log("gamepad watcher failed: %s", why)
+    end
+    ready("gamepad: unavailable (" .. why .. ")")
     return
   end
   host.hotkey.register(M.KEY, function()

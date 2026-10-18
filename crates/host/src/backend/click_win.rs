@@ -59,21 +59,20 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
 };
 
-// The refusals a click for a `window` shares with the Mac's posted click: the window gone, the
-// point outside it, on its frame, or under another window.
-use super::{ActJob, MouseButton, COVERED, FRAME, GONE, OUTSIDE};
+use super::{ActJob, MouseButton};
+use crate::errors::common::WINDOW_GONE;
+// The refusals a click for a `window` shares with the Mac's posted click — the window gone, the
+// point outside it, on its frame, or under another window — and this file's own: the program of
+// higher rights (Windows refuses a message, a style change and an injected click from a process
+// of lower rights, a click without saying so), a program's main window (one nothing owns, or one
+// marked for the taskbar), the style not kept (the program set it back, or never took it), and a
+// click with the style that reached the thread after the application began to end.
+use crate::errors::input::{
+    COVERED, ENDING, FRAME, HIGHER, MAIN_WINDOW, MESSAGE_NOT_TAKEN, NOT_KEPT, NO_ANSWER_ERROR, NO_ANSWER_WITHIN, OUTSIDE,
+    RESTORE_LIST, STYLE_NOT_TAKEN,
+};
+use crate::errors::HostError;
 use crate::logging;
-
-/// The program runs elevated and this application does not: Windows refuses a message, a style
-/// change and an injected click from a process of lower rights (a click without saying so).
-pub(super) const HIGHER: &str = "the window's program runs with higher rights";
-/// The window's top-level window is one nothing owns, or one marked for the taskbar.
-pub(super) const MAIN_WINDOW: &str = "the window belongs to a program's main window, which never gets the no-activate \
-     style: only a window another window owns — a plug-in's floating window — does";
-/// The program set the style back, or never took it.
-pub(super) const NOT_KEPT: &str = "the window did not keep the no-activate style";
-/// A click with the style that reached the thread after the application began to end.
-pub(super) const ENDING: &str = "the application is ending";
 
 /// How long a program may take to answer the question asked before its window's style is
 /// changed — the same bound the accessibility calls have — and at the end, when the application
@@ -106,23 +105,23 @@ const MK_MBUTTON: usize = 0x0010;
 /// (`WM_NCHITTEST`), so a transparent window a toolkit lays over its content — JUCE's over an
 /// OpenGL editor — is taken for the window drawn there. The posted click's log line names the
 /// window it went into, which is where such a case shows.
-pub(super) fn target(window: isize, x: i32, y: i32) -> Result<HWND, String> {
+pub(super) fn target(window: isize, x: i32, y: i32) -> Result<HWND, HostError> {
     let w = window as HWND;
     // SAFETY: every handle is checked by the calls it is passed to; a stale one fails them.
     unsafe {
         if w.is_null() || IsWindow(w) == 0 {
-            return Err(GONE.into());
+            return Err(HostError::of(&WINDOW_GONE));
         }
         let mut r: RECT = std::mem::zeroed();
         if GetWindowRect(w, &mut r) == 0 {
-            return Err(GONE.into());
+            return Err(HostError::of(&WINDOW_GONE));
         }
         if !(x >= r.left && x < r.right && y >= r.top && y < r.bottom) {
-            return Err(OUTSIDE.into());
+            return Err(HostError::of(&OUTSIDE));
         }
         let at = WindowFromPoint(POINT { x, y });
         if at.is_null() || (at != w && IsChild(w, at) == 0) {
-            return Err(COVERED.into());
+            return Err(HostError::of(&COVERED));
         }
         Ok(at)
     }
@@ -194,11 +193,29 @@ pub(super) fn button_messages(button: MouseButton) -> (u32, u32) {
     }
 }
 
-/// What a failed post, style change or answer says, by its error code.
-pub(super) fn refused(what: &str, error: u32) -> String {
+/// What a window did not take: a posted message, or the style.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Took {
+    Message,
+    Style,
+}
+
+/// What a failed post or style change says, by its error code: a program of higher rights, or the
+/// error.
+pub(super) fn refused(what: Took, error: u32) -> HostError {
+    match (error, what) {
+        (5, _) => HostError::of(&HIGHER),
+        (_, Took::Message) => HostError::with(&MESSAGE_NOT_TAKEN, format!("the window did not take the message (error {error})")),
+        (_, Took::Style) => HostError::with(&STYLE_NOT_TAKEN, format!("the window did not take the style (error {error})")),
+    }
+}
+
+/// What a failed post of a key to `hwnd` says, by its error code: as [`refused`] says it, and a
+/// handle that names no window (`ERROR_INVALID_WINDOW_HANDLE`) as the window gone.
+pub(super) fn post_refused(error: u32) -> HostError {
     match error {
-        5 => HIGHER.to_string(),
-        _ => format!("the window did not take {what} (error {error})"),
+        1400 => HostError::of(&WINDOW_GONE),
+        e => refused(Took::Message, e),
     }
 }
 
@@ -215,7 +232,7 @@ pub(super) fn in_client(p: (i32, i32), client: (i32, i32)) -> bool {
 /// the client rectangle read on the thread switched to the window's own context, where no
 /// scaling of Windows' can come between — whether `GetClientRect` scales another context's read
 /// is nothing to build on.
-fn client_place(at: HWND, x: i32, y: i32) -> Result<((i32, i32), &'static str, u32), String> {
+fn client_place(at: HWND, x: i32, y: i32) -> Result<((i32, i32), &'static str, u32), HostError> {
     // SAFETY: local calls on a handle `target` checked; the thread's context is put back.
     unsafe {
         let ctx = GetWindowDpiAwarenessContext(at);
@@ -231,7 +248,7 @@ fn client_place(at: HWND, x: i32, y: i32) -> Result<((i32, i32), &'static str, u
             SetThreadDpiAwarenessContext(old);
         }
         if !mapped || !measured {
-            return Err(GONE.into());
+            return Err(HostError::of(&WINDOW_GONE));
         }
         let words = awareness_words(
             GetAwarenessFromDpiAwarenessContext(ctx),
@@ -244,7 +261,7 @@ fn client_place(at: HWND, x: i32, y: i32) -> Result<((i32, i32), &'static str, u
         }
         let own = scaled_client((p.x, p.y), GetDpiForWindow(at), dx);
         if !in_client(own, (c.right, c.bottom)) {
-            return Err(FRAME.into());
+            return Err(HostError::of(&FRAME));
         }
         Ok((own, words, dx))
     }
@@ -255,7 +272,7 @@ fn client_place(at: HWND, x: i32, y: i32) -> Result<((i32, i32), &'static str, u
 /// `move_pointer` is false. On the event loop: every call here is local or a post, and a post
 /// never waits for the other program. `Ok` says the three messages were posted — not that the
 /// program did anything with them; one line in the log either way.
-pub(super) fn post_click(window: isize, x: i32, y: i32, button: MouseButton, move_pointer: bool) -> Result<(), String> {
+pub(super) fn post_click(window: isize, x: i32, y: i32, button: MouseButton, move_pointer: bool) -> Result<(), HostError> {
     let at = target(window, x, y)?;
     let ((cx, cy), mode, monitor_dpi) = client_place(at, x, y)?;
     // SAFETY: local calls; the posts go to a window `target` checked, and fail if it went since.
@@ -273,7 +290,7 @@ pub(super) fn post_click(window: isize, x: i32, y: i32, button: MouseButton, mov
             (up, mouse_wparam(None, ctrl, shift)),
         ] {
             if PostMessageW(at, msg, wp, lp) == 0 {
-                let why = refused("the message", GetLastError());
+                let why = refused(Took::Message, GetLastError());
                 logging::line("input", &format!("posted click for window {window}: refused at 0x{msg:04x}: {why}"));
                 return Err(why);
             }
@@ -459,7 +476,7 @@ fn write_ledger() -> Result<(), String> {
 /// changed, which waits for it without a bound. A probe, not a decision about any state: a
 /// program that does not answer keeps its window as it is. One that answers and then hangs as
 /// its style is changed still holds the thread until it answers that.
-fn answers(hwnd: HWND, ms: u32) -> Result<(), String> {
+fn answers(hwnd: HWND, ms: u32) -> Result<(), HostError> {
     // SAFETY: a stale handle fails the call.
     unsafe {
         let mut result = 0usize;
@@ -467,9 +484,9 @@ fn answers(hwnd: HWND, ms: u32) -> Result<(), String> {
             return Ok(());
         }
         match GetLastError() {
-            5 => Err(HIGHER.to_string()),
-            1460 | 0 => Err(format!("the window's program did not answer within {ms} ms")),
-            e => Err(format!("the window's program did not answer (error {e})")),
+            5 => Err(HostError::of(&HIGHER)),
+            1460 | 0 => Err(HostError::with(&NO_ANSWER_WITHIN, format!("the window's program did not answer within {ms} ms"))),
+            e => Err(HostError::with(&NO_ANSWER_ERROR, format!("the window's program did not answer (error {e})"))),
         }
     }
 }
@@ -484,14 +501,14 @@ fn ex_style(hwnd: HWND) -> u32 {
 /// window holds afterwards its callers read back either way: a change Windows made can still be
 /// answered with an error, and a style that is on is held — written down and given back —
 /// whatever the answer was.
-fn set_ex_style(hwnd: HWND, style: u32) -> Result<(), String> {
+fn set_ex_style(hwnd: HWND, style: u32) -> Result<(), HostError> {
     // SAFETY: a cross-process style change, made on a thread of the host's after `answers`.
     unsafe {
         SetLastError(0);
         if SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style as isize) == 0 {
             let e = GetLastError();
             if e != 0 {
-                return Err(refused("the style", e));
+                return Err(refused(Took::Style, e));
             }
         }
     }
@@ -503,28 +520,28 @@ fn set_ex_style(hwnd: HWND, style: u32) -> Result<(), String> {
 /// the job — the style, held, and the click — for a thread of the host's. Local calls only. The
 /// job writes what refused it on the thread to the log itself, so a click handed over without a
 /// callback is accounted for too.
-pub(super) fn prepare_hold(window: isize, x: i32, y: i32, button: MouseButton, owner: usize) -> Result<ActJob, String> {
+pub(super) fn prepare_hold(window: isize, x: i32, y: i32, button: MouseButton, owner: usize) -> Result<ActJob, HostError> {
     if STOPPING.load(Ordering::SeqCst) {
-        return Err(ENDING.into());
+        return Err(HostError::of(&ENDING));
     }
     target(window, x, y)?;
     // SAFETY: local calls on a handle `target` checked.
     let (root, front) = unsafe { (GetAncestor(window as HWND, GA_ROOT), GetForegroundWindow() as isize) };
     if root.is_null() {
-        return Err(GONE.into());
+        return Err(HostError::of(&WINDOW_GONE));
     }
     // SAFETY: as above.
     let owned = unsafe { !GetWindow(root, GW_OWNER).is_null() };
     if !owned || ex_style(root) & WS_EX_APPWINDOW != 0 {
-        return Err(MAIN_WINDOW.into());
+        return Err(HostError::of(&MAIN_WINDOW));
     }
-    let who = Identity::of(root).ok_or_else(|| GONE.to_string())?;
+    let who = Identity::of(root).ok_or_else(|| HostError::of(&WINDOW_GONE))?;
     let pending = Pending::new();
     Ok(Box::new(move || {
         let _pending = pending;
         let made = hold_and_click(&who, front, owner, x, y, button);
         if let Err(why) = &made {
-            logging::line("input", &refusal_line(window, x, y, why));
+            logging::line("input", &refusal_line(window, x, y, why.message()));
         }
         made
     }))
@@ -539,9 +556,9 @@ pub(super) fn refusal_line(window: isize, x: i32, y: i32, why: &str) -> String {
 /// On the thread: the style given — or found already given, by this application or by the
 /// program itself — and the click made, as a real one: the pointer to the point, the button
 /// pressed and released.
-fn hold_and_click(who: &Identity, front: isize, owner: usize, x: i32, y: i32, button: MouseButton) -> Result<(), String> {
+fn hold_and_click(who: &Identity, front: isize, owner: usize, x: i32, y: i32, button: MouseButton) -> Result<(), HostError> {
     if !who.still_there() {
-        return Err(GONE.into());
+        return Err(HostError::of(&WINDOW_GONE));
     }
     hold(who, front, owner)?;
     let (down, up) = super::windows::button_flags(button);
@@ -559,9 +576,9 @@ fn hold_and_click(who: &Identity, front: isize, owner: usize, x: i32, y: i32, bu
 
 /// The style on `who`, for module `owner`'s clicks made while `front` is in front — none once the
 /// application is ending, whose last give-back may already be on its way.
-fn hold(who: &Identity, front: isize, owner: usize) -> Result<(), String> {
+fn hold(who: &Identity, front: isize, owner: usize) -> Result<(), HostError> {
     if STOPPING.load(Ordering::SeqCst) {
-        return Err(ENDING.into());
+        return Err(HostError::of(&ENDING));
     }
     let hwnd = who.hwnd as HWND;
     let known = {
@@ -594,7 +611,7 @@ fn hold(who: &Identity, front: isize, owner: usize) -> Result<(), String> {
         locked(&ADDING).push(who.clone());
         if let Err(e) = write_ledger() {
             forget_unheld(who);
-            return Err(format!("the list of windows to give their style back could not be written ({e})"));
+            return Err(HostError::with(&RESTORE_LIST, format!("the list of windows to give their style back could not be written ({e})")));
         }
     }
     let set = set_ex_style(hwnd, style | WS_EX_NOACTIVATE);
@@ -604,7 +621,7 @@ fn hold(who: &Identity, front: isize, owner: usize) -> Result<(), String> {
         if !known {
             forget_unheld(who);
         }
-        return Err(set.err().unwrap_or_else(|| NOT_KEPT.to_string()));
+        return Err(set.err().unwrap_or_else(|| HostError::of(&NOT_KEPT)));
     }
     if !known {
         // Held first, then off the list of those about to be: in one of the two throughout.
@@ -742,11 +759,11 @@ fn take_style_off(who: &Identity, ms: u32) -> Result<&'static str, String> {
     if style & WS_EX_NOACTIVATE == 0 {
         return Ok("the no-activate style was off already");
     }
-    answers(hwnd, ms)?;
+    answers(hwnd, ms).map_err(|e| e.to_string())?;
     let set = set_ex_style(hwnd, style & !WS_EX_NOACTIVATE);
     // Read back whatever the answer was, as `hold` does: a style still on stays held.
     if ex_style(hwnd) & WS_EX_NOACTIVATE != 0 {
-        return Err(set.err().unwrap_or_else(|| "the window kept the no-activate style".into()));
+        return Err(set.err().map_or_else(|| "the window kept the no-activate style".into(), |e| e.to_string()));
     }
     Ok("the no-activate style given back")
 }
@@ -762,7 +779,7 @@ pub(super) fn exit_job() -> Option<ActJob> {
         return None;
     }
     Some(Box::new(|| {
-        give_back(GiveBack::All, ENDING);
+        give_back(GiveBack::All, ENDING.message);
         Ok(())
     }))
 }
@@ -790,11 +807,12 @@ pub(super) fn left_over_job() -> Option<ActJob> {
                 }
             }
         }
-        let written = write_ledger();
-        if let Err(e) = &written {
+        // Nobody waits for its answer: what it could not write is in the log, and its error the
+        // one a click's would be.
+        write_ledger().map_err(|e| {
             logging::line("input", &format!("the list of windows to give their style back could not be written: {e}"));
-        }
-        written
+            HostError::with(&RESTORE_LIST, format!("the list of windows to give their style back could not be written ({e})"))
+        })
     }))
 }
 
@@ -836,14 +854,14 @@ mod tests {
     #[test]
     fn a_refusal_on_the_thread_is_logged_and_the_end_gives_no_style() {
         assert_eq!(
-            refusal_line(2755348, 940, 310, NOT_KEPT),
+            refusal_line(2755348, 940, 310, NOT_KEPT.message),
             "click at 940,310 for window 2755348 (via = \"noactivate\") refused: the window did not keep the no-activate style"
         );
         const SRC: &str = include_str!("click_win.rs");
         let part = |from: &str, to: &str| &SRC[SRC.find(from).unwrap()..SRC.find(to).unwrap()];
         let prepare = part("pub(super) fn prepare_hold(", "pub(super) fn refusal_line(");
         let job = prepare.find("Ok(Box::new(move || {").unwrap();
-        assert!(prepare[job..].contains("logging::line(\"input\", &refusal_line(window, x, y, why));"));
+        assert!(prepare[job..].contains("logging::line(\"input\", &refusal_line(window, x, y, why.message()));"));
         let hold = part("fn hold(who: &Identity", "fn forget_unheld(");
         assert!(hold.find("STOPPING.load(").unwrap() < hold.find("answers(hwnd").unwrap());
         let exit = part("pub(super) fn exit_job(", "pub(super) fn left_over_job(");
@@ -874,8 +892,16 @@ mod tests {
         assert_eq!(awareness_words(1, false), "system");
         assert_eq!(awareness_words(0, false), "unaware");
         assert_eq!(awareness_words(-1, false), "of an awareness Windows did not say");
-        assert_eq!(refused("the message", 5), HIGHER);
-        assert_eq!(refused("the message", 1816), "the window did not take the message (error 1816)");
+        assert_eq!(refused(Took::Message, 5), HostError::of(&HIGHER));
+        assert_eq!(refused(Took::Style, 5), HostError::of(&HIGHER));
+        let not = refused(Took::Message, 1816);
+        assert_eq!((not.reason(), not.message()), (&MESSAGE_NOT_TAKEN, "the window did not take the message (error 1816)"));
+        let not = refused(Took::Style, 1413);
+        assert_eq!((not.reason(), not.message()), (&STYLE_NOT_TAKEN, "the window did not take the style (error 1413)"));
+        // A key posted: a handle that names no window is the window gone; the rest as a click's.
+        assert_eq!(post_refused(1400), HostError::of(&WINDOW_GONE));
+        assert_eq!(post_refused(5), HostError::of(&HIGHER));
+        assert_eq!(post_refused(1816).reason(), &MESSAGE_NOT_TAKEN);
     }
 
     #[test]

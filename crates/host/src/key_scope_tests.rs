@@ -1118,3 +1118,24 @@ fn a_waiting_modules_menu_flag_holds_its_window_until_a_stop_lifts_it() {
     assert_eq!(press(&h, "Tab", W1), Some(Capture::Pass { why: PassWhy::OutOfScope, owner: None }), "the flag went with the stop");
     assert_eq!(heard(&b), "B tab");
 }
+
+/// Without the keyboard hook — a Mac that has not granted Accessibility, a hook the system would
+/// not install — `host.keys.capture` answers `nil, err` and records nothing: no capture is handed
+/// to the backend, and none is left for a token the module never got (D30 of the typed-errors
+/// plan). Once the hook is in, the next capture is taken as ever.
+#[test]
+fn a_capture_without_the_hook_answers_nil_and_records_nothing() {
+    use crate::errors::{keys, HostError};
+    let h = host();
+    let a = vm(&h, 1);
+    let refused = HostError::with(&keys::HOOK_REFUSED, "SetWindowsHookExW(WH_KEYBOARD_LL) failed (error 5)".into());
+    h.backend.refuse_hook(Some(refused));
+    run(&a, r#"token, err = host.keys.capture("Space", function() end)"#);
+    assert!(yes(&a, "return token == nil and err.code == 'failed' and tostring(err) == 'SetWindowsHookExW(WH_KEYBOARD_LL) failed (error 5)'"));
+    assert!(h.backend.keys().0.is_empty(), "nothing handed to the backend");
+    assert!(press(&h, "Space", 0).is_none(), "the key is not taken");
+    h.backend.refuse_hook(None);
+    run(&a, r#"token, err = host.keys.capture("Space", function() end)"#);
+    assert!(yes(&a, "return type(token) == 'number' and err == nil"));
+    assert_eq!(h.backend.keys().0.len(), 1, "the capture is handed over once the hook is in");
+}

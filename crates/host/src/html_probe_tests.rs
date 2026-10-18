@@ -150,10 +150,12 @@ end
 -- once AppKit makes its window the key window (T.keyed), as this application's activation comes on
 -- the event loop after the call, unless the application is the active one already (one of its
 -- windows in front, but for the page without activation, which has the keyboard only lent) or the
--- page is the one without activation, whose window is the key window at the call. Declined, it is
--- shown and the window in front stays. `prepare` answers true once the page is ready (T.ready,
--- T.appReady, T.naReady), "not ready yet" before. S.order names the application window's shows
--- and hides "show app" and "hide app", the page without activation's "show na" and "hide na".
+-- page is the one without activation, whose window is the key window at the call. Declined
+-- (`refused`), it is shown and the window in front stays. A scenario's answers are what the host
+-- answers: `true`, `true, err` or `false, err`. `prepare` answers true once the page is ready
+-- (T.ready, T.appReady, T.naReady), `not_ready` ("not ready yet") before. S.order names the
+-- application window's shows and hides "show app" and "hide app", the page without activation's
+-- "show na" and "hide na".
 local function pageState()
   return { shows = {}, hides = 0, posts = {}, answers = {}, shown = false, prepares = 0, ready = false }
 end
@@ -177,7 +179,7 @@ rawset(T.host, "gui", T.strict("host.gui", {
       st.shows[#st.shows + 1] = { focus = o and o.focus, avoid = o and o.avoid, at = S.now }
       S.order[#S.order + 1] = "show" .. tag
       local a = table.remove(st.answers, 1) or { true }
-      if a[1] or a[2] == "declined by the system" then
+      if a[1] or T.is(a[2], "refused") then
         st.shown = true
         p.window = win.id
       end
@@ -202,7 +204,7 @@ rawset(T.host, "gui", T.strict("host.gui", {
       assert(self == p, "page:prepare is a method")
       st.prepares += 1
       if st.ready then return true end
-      return false, "not ready yet"
+      return false, T.E("not_ready", "not ready yet")
     end
     function p.isShown(self) return st.shown end
     function p.focus(self) return st.shown end
@@ -265,19 +267,19 @@ function T.probe()
   T.source("tools/html-probe/src/main.luau")(T.host)
 end
 
--- W10: every click callback waiting answered `(made, why)`, each through the module's mailbox,
--- as the host answers one on a later tick.
-function T.acted(made, why)
+-- W10: every click callback waiting answered `(made, err)`, each through the module's mailbox,
+-- as the host answers one on a later tick: `err` an error value (T.E), beside a `false`.
+function T.acted(made, err)
   local cbs = S.actedCbs
   S.actedCbs = {}
-  for _, cb in ipairs(cbs) do ran("acted", cb, made, why) end
+  for _, cb in ipairs(cbs) do ran("acted", cb, made, err) end
 end
--- W10: every dump waiting answered with S.dump (and `why`, for one that is not all of the tree),
--- each through the module's mailbox, as the host answers one on a later turn.
-function T.dumped(why)
+-- W10: every dump waiting answered with S.dump (and `err`, the error value of one that is not all
+-- of the tree), each through the module's mailbox, as the host answers one on a later turn.
+function T.dumped(err)
   local cbs = S.dumpCbs
   S.dumpCbs = {}
-  for _, cb in ipairs(cbs) do ran("dumped", cb, S.dump, why) end
+  for _, cb in ipairs(cbs) do ran("dumped", cb, S.dump, err) end
 end
 -- The oldest read with a callback not answered yet, answered with `text` ("" reads nothing).
 function T.readNext(text)
@@ -309,9 +311,9 @@ function T.key(spec)
   S.epoch += 1
   ran("hotkey", fn)
 end
--- The page sends `m`; the page is ready; the page's window goes ("user" or "failed"): each the
--- page's event, through the module's mailbox, as the host hands it on. The `app` ones are the
--- application window's.
+-- The page sends `m`; the page is ready; the page's window goes ("user" alone, or "failed" with
+-- the host's error value beside it): each the page's event, through the module's mailbox, as the
+-- host hands it on. The `app` ones are the application window's.
 function T.msg(m) ran("page message", S.pageOpts.onMessage, m) end
 function T.appMsg(m) ran("page message", S.appOpts.onMessage, m) end
 function T.ready()
@@ -327,8 +329,9 @@ function T.naReady()
   S.npg.ready = true
   ran("page ready", S.naOpts.onReady)
 end
-function T.closed(why) ran("page close", S.pageOpts.onClose, why) end
-function T.appClosed(why) ran("page close", S.appOpts.onClose, why) end
+local function closing(how) return how, how == "failed" and T.E("failed", "the page failed") or nil end
+function T.closed(how) ran("page close", S.pageOpts.onClose, closing(how)) end
+function T.appClosed(how) ran("page close", S.appOpts.onClose, closing(how)) end
 -- A button of the page activated: `released` whether a key or a pointer went up in the page since
 -- the button before, as the page reports it (true unless said otherwise). Each page counts its own
 -- presses, as page.js does.
@@ -371,7 +374,7 @@ end
 function T.shown()
   S.front = T.FX
   T.turn()
-  S.pg.answers = { { false, "not ready yet" } }
+  S.pg.answers = { { false, T.E("not_ready", "not ready yet") } }
   T.key(T.F7)
   S.now += 300
   T.ready()
@@ -412,7 +415,7 @@ end
 function T.shownMac()
   S.front = T.FLOAT
   T.turn()
-  S.pg.answers = { { false, "not ready yet" } }
+  S.pg.answers = { { false, T.E("not_ready", "not ready yet") } }
   T.key(T.F7)
   S.now += 300
   T.ready()
@@ -484,7 +487,7 @@ fn the_first_press_builds_the_page_and_the_same_key_in_the_page_goes_back() {
         T.ok(T.last() == "No plug-in window is in front." and #S.pg.shows == 0, T.last())
         S.front = T.FX
         T.turn()
-        S.pg.answers = { { false, "not ready yet" } }
+        S.pg.answers = { { false, T.E("not_ready", "not ready yet") } }
         T.key(T.F7)
         T.ok(#S.pg.shows == 1 and S.pg.shows[1].focus == true, "asked once, with the keyboard")
         local avoid = S.pg.shows[1].avoid
@@ -522,7 +525,7 @@ fn a_refused_show_is_said_with_its_reason_and_what_is_in_front() {
         T.shown()
         S.front = T.FX
         T.turn()
-        S.pg.answers = { { false, "declined by the system" } }
+        S.pg.answers = { { false, T.E("refused", "declined by the system") } }
         T.key(T.F7)
         T.ok(T.last() == "Page not shown: declined by the system", T.last())
         local said = T.report()
@@ -769,7 +772,7 @@ fn every_button_hints_at_a_press_that_may_have_arrived_twice() {
 }
 
 /// A plug-in window that leaves no room beside it: the page goes over part of it, and the show
-/// answers true with a note. Said once for a run of such shows; a show with room beside it ends
+/// answers true with an error value beside it (`too_large`, the partial answer). Said once for a run of such shows; a show with room beside it ends
 /// the run.
 #[test]
 fn a_page_over_the_plugin_window_is_said_once_for_a_run_of_such_shows() {
@@ -777,7 +780,7 @@ fn a_page_over_the_plugin_window_is_said_once_for_a_run_of_such_shows() {
         local S = T.S
         T.probe()
         T.shown()
-        local over = "over the rectangle to avoid"
+        local over = T.E("too_large", "over the rectangle to avoid")
         S.front = T.FX
         T.turn()
         S.pg.answers = { { true, over } }
@@ -933,7 +936,7 @@ fn the_switch_shows_the_page_in_an_application_window_and_back() {
           "with Windows' six ways and its target key")
         -- The switch, the application window not built yet: asked beside the FX window, with the
         -- keyboard; the tool page stays in front while it is built, and goes once it is shown.
-        S.apg.answers = { { false, "not ready yet" } }
+        S.apg.answers = { { false, T.E("not_ready", "not ready yet") } }
         local from = #S.order
         S.now += 10
         T.press("switch")
@@ -1030,7 +1033,7 @@ fn a_switch_not_shown_keeps_the_page_in_use_and_a_way_back_gives_one_up() {
         T.probe()
         T.shown()
         S.apg.ready = true
-        S.apg.answers = { { false, "declined by the system" } }
+        S.apg.answers = { { false, T.E("refused", "declined by the system") } }
         local hides = S.pg.hides
         T.press("switch")
         T.ok(S.pg.shown and S.pg.hides == hides and S.front == T.PAGE, "the tool page stays, in front")
@@ -1046,7 +1049,7 @@ fn a_switch_not_shown_keeps_the_page_in_use_and_a_way_back_gives_one_up() {
         T.turn()
         T.key(T.F7)
         S.apg.ready = false
-        S.apg.answers = { { false, "not ready yet" } }
+        S.apg.answers = { { false, T.E("not_ready", "not ready yet") } }
         T.press("switch")
         T.press("back")
         local shows = #S.apg.shows
@@ -1109,7 +1112,7 @@ fn reading_the_elements_posts_the_named_ones_inside_the_client_area() {
         T.msg({ kind = "w10", ["do"] = "read" })
         T.ok(S.dumpedId == T.FX.id, "the remembered plug-in window was dumped")
         T.ok(#posts == before and T.count("named element(s)") == 0, "nothing posted before the dump has answered")
-        T.dumped("the program did not answer within 1000 ms")
+        T.dumped(T.E("timeout", "the program did not answer within 1000 ms"))
         local last = posts[#posts]
         T.ok(T.count("W10: the plug-in's elements are not all of its tree: the program did not answer within 1000 ms") == 1,
           T.dump())
@@ -1389,7 +1392,7 @@ fn w10_on_a_mac_posts_its_clicks_and_the_round_trip_goes_on_on_a_focus_event() {
         T.readNext("Lead")
         T.picture()
         T.ok(#S.acts == 2 and S.acts[2].via == "post" and S.acts[2].move == false, "posted, the pointer left where it is")
-        T.acted(false, "the window is not on screen")
+        T.acted(false, T.E("hidden", "the window is not on screen"))
         T.picture()
         T.readNext("Lead")
         T.ok(T.count("RESULT W10 post-stay on the remembered point (1/1): NOT made (the window is not on screen)") == 1, T.dump())
@@ -1444,7 +1447,7 @@ fn on_a_mac_f8_shows_the_page_without_activation_and_leaves_the_others_as_they_a
         -- From the plug-in window: built first, then shown with the keyboard; the tool page is not asked.
         S.front = T.FLOAT
         T.turn()
-        S.npg.answers = { { false, "not ready yet" } }
+        S.npg.answers = { { false, T.E("not_ready", "not ready yet") } }
         T.key(T.F8)
         T.ok(#S.npg.shows == 1 and S.npg.shows[1].focus == true and S.npg.shows[1].avoid.x == T.FLOAT.bounds.x, "asked beside it")
         T.ok(T.last() == "Building the page.", T.last())
@@ -1648,7 +1651,7 @@ fn mw4_on_a_mac_asks_the_window_server_where_the_page_covers_the_plugin_window()
         S.listed = { T.FLOAT, T.CHAIN, T.LOGIC, OVER }
         S.front = T.FLOAT
         T.turn()
-        S.pg.answers = { { true, "over the rectangle to avoid" } }
+        S.pg.answers = { { true, T.E("too_large", "over the rectangle to avoid") } }
         T.key(T.F7)
         T.keyed(T.PAGE)
         T.report()
@@ -1733,7 +1736,7 @@ fn on_a_mac_the_captured_key_shows_the_page_without_the_keyboard_then_updates_it
         T.probe()
         T.arrive(T.FLOAT)
         T.ok(S.pg.prepares == 1, "prepared when the plug-in window first came forward")
-        S.pg.answers = { { false, "not ready yet" } }
+        S.pg.answers = { { false, T.E("not_ready", "not ready yet") } }
         T.captured(T.F12)
         T.ok(T.last() == "Building the page. Press the key again once it is ready.", T.last())
         T.ready()

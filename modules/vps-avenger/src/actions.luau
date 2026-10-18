@@ -94,6 +94,7 @@
 -- The trip's own checks are the runtime's: one at a time, only from the page with the keyboard,
 -- and `trip:inFront()` after every wait, before a click or a read — false has ended the trip.
 
+local O = host.require("com.platform.overlay")
 local G = host.include("src/geometry.luau")
 local H = host.include("src/header.luau")
 local D = host.include("src/dialog.luau")
@@ -117,17 +118,19 @@ local R = nil -- main.luau's ring helpers
 
 local log = function(s) host.log.info("[avenger] [page] " .. s) end
 
--- Why a trip ended without its work done, in the page's words.
+-- Why a trip ended without its work done, by the code of onGiveUp's error value
+-- (docs/api/overlay.md, O:inPlugin's ends), in the page's words; `gone` says the plug-in window's
+-- sentence, and another code its message.
 local GIVEN_UP = {
-  key = "stopped by the page key; what VPS Avenger did then was not read",
-  ["another application"] = "another window came to the front; nothing more was done",
-  ["page closed"] = "the page was closed; nothing more was done",
-  ["not in front"] = "VPS Avenger's window did not come to the front; nothing more was done",
-  outranked = "another overlay took VPS Avenger's window; nothing more was done",
+  cancelled = "stopped by the page key; what VPS Avenger did then was not read",
+  moved_on = "another window came to the front; nothing more was done",
+  closed = "the page was closed; nothing more was done",
+  not_in_front = "VPS Avenger's window did not come to the front; nothing more was done",
+  taken = "another overlay took VPS Avenger's window; nothing more was done",
   failed = "something went wrong in this module; nothing more was done",
 }
 
--- Why a choice in Avenger's menu was not made (O:chooseMenuItem's `why`), in the page's words.
+-- Why a choice in Avenger's menu was not made (O:chooseMenuItem's error value), in the page's words.
 local notChosen = Act.notChosen
 
 -- What the page is told after a trip, and the words for when it does not come back: the state —
@@ -207,21 +210,21 @@ local function go(o, action, act)
     end
     return report(label, result)
   end
-  local started, why = o:inPlugin({
+  local started, err = o:inPlugin({
     label = label,
     act = function(w, trip) return act(w, trip, forget) end,
     after = function(_, result) return back(result) end,
-    onGiveUp = function(_, why2)
-      if why2 == "gone" then return back({ sentence = E.closedWords() }) end
-      return back({ error = GIVEN_UP[why2] or ("nothing more was done (" .. tostring(why2) .. ")") })
+    onGiveUp = function(_, gaveUp)
+      if gaveUp.code == O.errors.GONE then return back({ sentence = E.closedWords() }) end
+      return back({ error = GIVEN_UP[gaveUp.code] or ("nothing more was done (" .. tostring(gaveUp) .. ")") })
     end,
   })
-  -- "busy" and "not in front" are the runtime's to log: a message while a trip is out, or one that
+  -- `busy` and `not_in_front` are the runtime's to log: a message while a trip is out, or one that
   -- came after the user went elsewhere.
-  if started or why == "busy" or why == "not in front" then return end
-  if why == "gone" then
+  if started or err.code == O.errors.BUSY or err.code == O.errors.NOT_IN_FRONT then return end
+  if err.code == O.errors.GONE then
     E.post({ kind = "error", text = E.closedWords() })
-  elseif why == "nothing held" then
+  elseif err.code == O.errors.NOT_FOUND then
     E.post({ kind = "error", text = label .. ": the page was not opened from VPS Avenger; press the page key there" })
   else
     E.post({ kind = "error", text = label .. ": VPS Avenger's window would not come to the front" })
@@ -280,8 +283,9 @@ end
 
 -- MENU's item `item` (`ringLabel` as the ring names it), then `andThen(o, trip, was)` once the
 -- choice has been taken, `forget` (go) told first; the popup closed again when a choice was given
--- up with it left open.
+-- up with it left open. Asked of the header alone: on the warning box nothing is (Act.menuHere).
 local function menuChoice(w, trip, forget, ringLabel, item, andThen)
+  if not Act.menuHere(w) then return trip:done({ error = Act.NO_MENU_HERE }) end
   local was = nameBefore(w)
   if not trip:inFront() then return end
   local pick = {}
@@ -289,10 +293,10 @@ local function menuChoice(w, trip, forget, ringLabel, item, andThen)
     label = ringLabel,
     at = G.MENU,
     menuItem = R.menuItemAt(ringLabel, item, pick),
-    onDone = function(m, chosen, why)
+    onDone = function(m, chosen, err)
       if not chosen then
-        R.closeLeftOpen(m, pick, why, ringLabel, G.MENU)
-        return trip:done({ error = notChosen(why) })
+        R.closeLeftOpen(m, pick, err, ringLabel, G.MENU)
+        return trip:done({ error = notChosen(err) })
       end
       -- Every item may load, rename or blank the preset: the database's position is not Avenger's.
       forget(ringLabel .. " chosen from the page", R.OWN_NAME[ringLabel])
@@ -369,6 +373,7 @@ end
 -- closed, the name.
 A.HANDLERS.redo_menu = function(o)
   go(o, "redo_menu", function(w, trip, forget)
+    if not Act.menuHere(w) then return trip:done({ error = Act.NO_MENU_HERE }) end
     local was = nameBefore(w)
     if not trip:inFront() then return end
     local ok, why = trip:afterMenu(function(o2, t2, seen)
@@ -390,6 +395,7 @@ end
 A.HANDLERS.set_zoom = function(o, args)
   local to = tonumber(args.percent)
   go(o, "set_zoom", function(w, trip)
+    if not Act.menuHere(w) then return trip:done({ error = Act.NO_MENU_HERE }) end
     local origin = w:origin()
     local t = to and G.zoomIndex(to)
     if not t then return trip:done({ error = tostring(args.percent) .. " is not one of VPS Avenger's sizes" }) end
@@ -402,13 +408,13 @@ A.HANDLERS.set_zoom = function(o, args)
       label = "Zoom",
       at = G.ZOOM_FIELD,
       menuItem = R.zoomEntry(t, z, to, pick),
-      onDone = function(m, chosen, why)
+      onDone = function(m, chosen, err)
         if not chosen then
-          if why ~= "busy" then
+          if err.code ~= O.errors.BUSY then
             H.zoomOver()
-            R.closeLeftOpen(m, pick, why, "Zoom", G.ZOOM_FIELD)
+            R.closeLeftOpen(m, pick, err, "Zoom", G.ZOOM_FIELD)
           end
-          return trip:done({ error = notChosen(why) })
+          return trip:done({ error = notChosen(err) })
         end
         H.stepped(m:origin() or origin, z)
         m:watch({
@@ -659,7 +665,7 @@ end
 -- (), the page's sounds behind its setting, shown = () -> the list of expansions last posted }.
 function A.start(env)
   E, R = env, env.ring
-  Act.start(env.ring)
+  Act.start(env.ring, env.header)
   Hv.start({ ring = env.ring, named = named, plugin = env.plugin })
   Am.start({ ring = env.ring, plugin = env.plugin, sound = env.sound })
   Sq.start({ ring = env.ring, plugin = env.plugin })

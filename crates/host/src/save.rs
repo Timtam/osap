@@ -5,17 +5,18 @@
 //! **In a handler they wait** (`task.rs`): the image worker captures the region — on a snapshot,
 //! nothing — and its matching pool copies the picture, or the part of the snapshot the region
 //! covers, draws the marks, encodes the PNG and writes it (`image_search::Job::Save`); the handler
-//! goes on with `true`, or `false` and the reason. A shot nobody waits for any more once its PNG is
-//! made — its module disabled, reloaded, stopped or removed, its handler cancelled — is not written
-//! ([`write_shot`]'s `wanted`). A file that cannot be written raises at the call, after the wait.
-//! **Where it cannot wait** the call raises (`task::wait_message`), and nothing is captured or
-//! written. A region with nothing to read this time — a window region with no rectangle, or on a
-//! snapshot one with no part inside it — is answered at once wherever it is asked.
+//! goes on with `true`, or `false` and the error value. A shot nobody waits for any more once its
+//! PNG is made — its module disabled, reloaded, stopped or removed, its handler cancelled — is not
+//! written ([`write_shot`]'s `wanted`). A file that cannot be written is answered `false, err` too
+//! (`failed`), its message the one the call used to raise: whether a folder can be written is the
+//! moment's, not the call's. **Where it cannot wait** the call raises (`task::wait_message`), and
+//! nothing is captured or written. A region with nothing to read this time — a window region with
+//! no rectangle, or on a snapshot one with no part inside it — is answered at once wherever it is
+//! asked.
 //!
 //! **With a callback** — `save(path, opts, cb)` — the same shot is filed with the callback as its
-//! waiter and nothing waits: `cb(true)`, or `cb(false, reason)`, then `info`, on a later tick; a
-//! file that cannot be written is reported as the callback's error, which is not called — the call
-//! raises for it in every other form.
+//! waiter and nothing waits: `cb(true)`, or `cb(false, err)`, then `info`, on a later tick — a file
+//! that cannot be written included.
 //!
 //! Its own file, as the profile's bindings are snapshot.rs's: the bindings are registered in lib.rs,
 //! by name, where check-docs.ps1 and tools/api-index.py read what exists.
@@ -31,11 +32,14 @@ use crate::backend::CapturedImage;
 use crate::image_search::{self, BuildAnswer, Haystack, Job, JobKind, Outcome, Plan};
 use crate::ocr::lua::ReadHost;
 use crate::vm_guard::host_call;
-use crate::{describe_value, one_value, snapshot, with_reason, Shared, SHORT_CAPTURE};
+use crate::errors::{screen, HostError};
+use crate::{describe_value, one_value, short_capture, snapshot, with_reason, Shared};
 
 /// What a shot is answered when the host's own code failed it: its work panicked, or the worker
 /// was gone when it was sent.
-pub(crate) const SAVE_FAILED: &str = "internal error: the picture could not be saved";
+pub(crate) fn save_failed() -> HostError {
+    HostError::of(&screen::SAVE_FAILED)
+}
 
 /// The two calls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,21 +80,12 @@ pub(crate) struct SaveJob {
     pub(crate) shot: Shot,
 }
 
-/// Why a shot was not written.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Unsaved {
-    /// There was no picture to write: the reason, answered `false, reason`.
-    Unread(String),
-    /// The file could not be written: the message the call raises.
-    Unwritten(String),
-}
-
 /// What a call of `save` or `saveMarked` asks, its arguments read ([`save_ask`]).
 pub(crate) struct SaveAsk {
     path: PathBuf,
     /// The rectangle to read — on a snapshot already cut to it — or why there is nothing to read
     /// this time, answered at once.
-    region: Result<(i32, i32, i32, i32), String>,
+    region: Result<(i32, i32, i32, i32), HostError>,
     snap: Option<Arc<Frame>>,
     marks: Vec<(i32, i32)>,
     /// `opts.key`, which only the callback form takes.
@@ -170,13 +165,15 @@ fn read_marks(lua: &Lua, opts: &Table) -> mlua::Result<Vec<(i32, i32)>> {
 }
 
 /// What a shot nobody waits for any more answers, to nobody: the answer is let go when it comes.
-pub(crate) const NOT_WAITED: &str = "nobody waits for the shot any more";
+pub(crate) fn not_waited() -> HostError {
+    HostError::of(&screen::NOT_WAITED)
+}
 
 /// Draws the marks on a shot of the region whose top-left is `(rx, ry)` on screen, encodes it as a
 /// PNG and writes it to `path`, its folder made first — unless `wanted` says, once the PNG is made,
 /// that nobody waits for it any more: then neither the folder nor the file is made. The work of a
-/// shot, on the image worker's matching pool. `false`'s reason for a
-/// picture shorter than its own size; the message `shot` raises for a file it could not write.
+/// shot, on the image worker's matching pool. `false`'s error for a picture shorter than its own
+/// size, and for a file it could not write: `screen.save '<path>': <why>`.
 ///
 /// Each mark a magenta crosshair 19 pixels across — not a colour these dark plug-in interfaces use,
 /// so it cannot be mistaken for part of them — and the nth mark n dots on a row 12 pixels below its
@@ -188,10 +185,10 @@ pub(crate) fn write_shot(
     path: &Path,
     shot: Shot,
     wanted: &dyn Fn() -> bool,
-) -> Result<(), Unsaved> {
+) -> Result<(), HostError> {
     let (w, h) = (cap.w as i32, cap.h as i32);
     let Some(mut img) = image::RgbaImage::from_raw(cap.w, cap.h, cap.rgba) else {
-        return Err(Unsaved::Unread(SHORT_CAPTURE.to_string()));
+        return Err(short_capture());
     };
     let ink = image::Rgba([255u8, 0, 255, 255]);
     for (n, &(mx, my)) in marks.iter().enumerate() {
@@ -214,14 +211,20 @@ pub(crate) fn write_shot(
             }
         }
     }
-    let unwritten = |e: &dyn std::fmt::Display| Unsaved::Unwritten(format!("{} '{}': {e}", shot.short(), path.display()));
+    let unwritten = |e: &dyn std::fmt::Display| {
+        let reason = match shot {
+            Shot::Plain => &screen::SAVE_UNWRITTEN,
+            Shot::Marked => &screen::SAVE_MARKED_UNWRITTEN,
+        };
+        HostError::with(reason, format!("{} '{}': {e}", shot.short(), path.display()))
+    };
     // Encoded before anything is put on disk, and asked again after: the encode is the slow part,
     // and a module disabled, reloaded or removed meanwhile — its folder deleted, perhaps — gets no
     // file and no folder made again behind it.
     let mut png = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|e| unwritten(&e))?;
     if !wanted() {
-        return Err(Unsaved::Unread(NOT_WAITED.to_string()));
+        return Err(not_waited());
     }
     // Create the folder: writing the file does not, and "the system cannot find the path" is a poor
     // answer to "put a screenshot here".
@@ -232,15 +235,15 @@ pub(crate) fn write_shot(
 }
 
 /// What a shot answers — to a handler that waited and to a callback alike: `true`, one value;
-/// `false` and the reason when there was nothing to write; and a file that could not be written
-/// raises, so a typo in a folder's name is not mistaken for a failed capture.
+/// `false` and the error value when there was nothing to write or the file could not be written —
+/// a typo in a folder's name says so in its message (`screen.save '<path>': …`), which a failed
+/// capture's never does.
 pub(crate) fn save_values(lua: &Lua, outcome: Outcome) -> mlua::Result<MultiValue> {
     match outcome {
         Outcome::Save(Ok(())) => one_value(Value::Boolean(true)),
-        Outcome::Save(Err(Unsaved::Unread(why))) => with_reason(lua, Value::Boolean(false), why),
-        Outcome::Save(Err(Unsaved::Unwritten(message))) => Err(mlua::Error::external(message)),
+        Outcome::Save(Err(why)) => with_reason(lua, Value::Boolean(false), why),
         // Never: the worker answers a shot with a shot.
-        _ => with_reason(lua, Value::Boolean(false), SAVE_FAILED.to_string()),
+        _ => with_reason(lua, Value::Boolean(false), save_failed()),
     }
 }
 
@@ -289,7 +292,7 @@ fn submit_save<H: ReadHost>(h: &H, lua: &Lua, scope: usize, shot: Shot, cb: Valu
     image_search::submit_plan(h, lua, scope, cb, key, shot.short(), JobKind::Save, plan)
 }
 
-/// `host.screen.save(path, opts?, cb?) -> (boolean, string?)`. In a handler it waits while the
+/// `host.screen.save(path, opts?, cb?) -> (boolean, Error?)`. In a handler it waits while the
 /// image worker captures, encodes and writes ([`start_save`]); where it cannot wait it raises,
 /// unless there is nothing to read this time (`image_search::now_plan`); with a callback nothing
 /// waits ([`submit_save`]).
@@ -315,7 +318,7 @@ pub(crate) fn save(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<F
     crate::task::points(lua, idx, shared.clone())?.call((Shot::Plain.name(), start, now, submit, 3))
 }
 
-/// `host.screen.saveMarked(path, opts) -> (boolean, string?)`: `save`, with a crosshair drawn at every
+/// `host.screen.saveMarked(path, opts) -> (boolean, Error?)`: `save`, with a crosshair drawn at every
 /// point in `opts.marks`, in screen coordinates. It waits in a handler and raises where it cannot
 /// wait, as `save` does.
 ///
@@ -410,20 +413,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A picture shorter than its own size is `false` and the reason; a file that cannot be written
-    /// is the message the call raises, naming the call and the path.
+    /// A picture shorter than its own size is `false` and its error; so is a file that cannot be
+    /// written, `failed`, its message naming the call and the path as the call's raise did.
     #[test]
-    fn a_short_picture_is_unread_and_a_file_that_cannot_be_written_is_unwritten() {
+    fn a_short_picture_and_a_file_that_cannot_be_written_are_answered() {
         let dir = scratch("unwritten");
         let short = CapturedImage { w: 4, h: 4, rgba: vec![0; 10] };
-        assert_eq!(write_shot(short, (0, 0), &[], &dir.join("a.png"), Shot::Plain, &|| true), Err(Unsaved::Unread(SHORT_CAPTURE.to_string())));
+        assert_eq!(write_shot(short, (0, 0), &[], &dir.join("a.png"), Shot::Plain, &|| true), Err(short_capture()));
         // A folder where the file goes: the write fails, whatever the platform.
         let path = dir.join("taken.png");
         std::fs::create_dir_all(&path).unwrap();
-        match write_shot(grey(2, 2), (0, 0), &[], &path, Shot::Marked, &|| true) {
-            Err(Unsaved::Unwritten(m)) => assert!(m.starts_with(&format!("screen.saveMarked '{}': ", path.display())), "{m}"),
-            other => panic!("{other:?}"),
+        for (shot, reason, call) in [(Shot::Marked, &screen::SAVE_MARKED_UNWRITTEN, "screen.saveMarked"), (Shot::Plain, &screen::SAVE_UNWRITTEN, "screen.save")] {
+            let e = write_shot(grey(2, 2), (0, 0), &[], &path, shot, &|| true).unwrap_err();
+            assert!(e.message().starts_with(&format!("{call} '{}': ", path.display())), "{e}");
+            assert_eq!((e.reason(), e.code()), (reason, crate::errors::Code::Failed));
         }
+        let lua = Lua::new();
+        let e = write_shot(grey(2, 2), (0, 0), &[], &path, Shot::Plain, &|| true).unwrap_err();
+        let told = save_values(&lua, Outcome::Save(Err(e.clone()))).expect("answered, not raised").into_vec();
+        assert_eq!(told[0].as_boolean(), Some(false));
+        assert_eq!(crate::errors_lua::message_of(&lua, &told[1]).unwrap().as_deref(), Some(e.message()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -438,12 +447,12 @@ mod tests {
             asked.set(asked.get() + 1);
             false
         };
-        assert_eq!(write_shot(grey(4, 4), (0, 0), &[(1, 1)], &path, Shot::Marked, &wanted), Err(Unsaved::Unread(NOT_WAITED.to_string())));
+        assert_eq!(write_shot(grey(4, 4), (0, 0), &[(1, 1)], &path, Shot::Marked, &wanted), Err(not_waited()));
         assert_eq!(asked.get(), 1);
         assert!(!dir.exists(), "neither the file nor its folder");
         // A picture with nothing to encode is answered before the question.
         let short = CapturedImage { w: 4, h: 4, rgba: vec![0; 10] };
-        assert_eq!(write_shot(short, (0, 0), &[], &path, Shot::Plain, &wanted), Err(Unsaved::Unread(SHORT_CAPTURE.to_string())));
+        assert_eq!(write_shot(short, (0, 0), &[], &path, Shot::Plain, &wanted), Err(short_capture()));
         assert_eq!(asked.get(), 1);
     }
 }

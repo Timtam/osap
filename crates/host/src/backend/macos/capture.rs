@@ -81,7 +81,8 @@ use objc2_core_graphics::{
 use super::backoff::{Attempt, Backoff};
 use super::evidence::Seen;
 use crate::backend::frame::{Frame, FrameVia};
-use crate::backend::{CapturedImage, CAPTURE_FAILED};
+use crate::backend::{capture_failed, CapturedImage};
+use crate::errors::HostError;
 use crate::ocr::types::Rect;
 
 /// Flat captures in a row before the permission is questioned. More than one because a
@@ -758,9 +759,9 @@ impl NativeImage {
 /// again, which the flat-picture watch would misread: it runs only when `poll` is false.
 ///
 /// On the calling thread, inside an autorelease pool. A region wholly off the desktop, one past
-/// `MAX_POINTS`, and a capture every path refused answer [`CAPTURE_FAILED`].
-pub fn frame(x: i32, y: i32, w: i32, h: i32, poll: bool) -> Result<Frame, String> {
-    let failed = || CAPTURE_FAILED.to_string();
+/// `MAX_POINTS`, and a capture every path refused answer [`capture_failed`].
+pub fn frame(x: i32, y: i32, w: i32, h: i32, poll: bool) -> Result<Frame, HostError> {
+    let failed = capture_failed;
     if w <= 0 || h <= 0 || w as i64 * h as i64 > MAX_POINTS {
         return Err(failed());
     }
@@ -795,12 +796,12 @@ pub fn frame(x: i32, y: i32, w: i32, h: i32, poll: bool) -> Result<Frame, String
 /// capture. The others: the rectangles `frame::plan_points` plans for them, each captured at point
 /// resolution like any region read, and sampled — without the flat-picture watch, which a handful
 /// of probe points would trip.
-fn pixels(pts: &[(i32, i32)]) -> Result<Vec<(u8, u8, u8)>, String> {
+fn pixels(pts: &[(i32, i32)]) -> Result<Vec<(u8, u8, u8)>, HostError> {
     use crate::backend::frame;
     frame::black_where_off(pts, |x, y| display_at(x, y).is_none(), |on| {
         frame::read_points(on, |r| {
             let (w, h) = (r.w as u32, r.h as u32);
-            capture_rgba(r.x, r.y, r.w, r.h).map(|rgba| CapturedImage { w, h, rgba }).ok_or_else(|| CAPTURE_FAILED.to_string())
+            capture_rgba(r.x, r.y, r.w, r.h).map(|rgba| CapturedImage { w, h, rgba }).ok_or_else(capture_failed)
         })
     })
 }
@@ -811,7 +812,7 @@ fn pixels(pts: &[(i32, i32)]) -> Result<Vec<(u8, u8, u8)>, String> {
 /// own resolution, so a colour is what a pixel read has always given. A single point that cannot be
 /// read is black, with a line once a session; a list fails as `pixels` fails. Never on the event
 /// loop.
-pub fn points(pts: &[(i32, i32)], single: bool) -> Result<Vec<(u8, u8, u8)>, String> {
+pub fn points(pts: &[(i32, i32)], single: bool) -> Result<Vec<(u8, u8, u8)>, HostError> {
     crate::loop_guard::off_loop_screen("a pixel read a handler waits for");
     if !single {
         return pixels(pts);

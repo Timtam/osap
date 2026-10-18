@@ -46,6 +46,9 @@ use std::cell::RefCell;
 
 use anyhow::Result;
 
+#[cfg(any(windows, target_os = "macos"))]
+use crate::errors::{speech as reasons, HostError};
+
 /// What `use("voiceover")` names, and the one id on macOS that is a TRANSPORT rather than a
 /// voice: it hands the line to the user's screen reader instead of choosing how to say it.
 #[cfg(target_os = "macos")]
@@ -70,6 +73,23 @@ pub struct Engine {
     /// running cannot be spoken through, and saying otherwise would invite a module to pick
     /// something that will never answer.
     pub available: bool,
+}
+
+/// Why `id` is not in `engines`, the list as it stands: it has not been read yet (`not_ready`) — on
+/// Windows the speech worker's first look, which lists every engine of this build; on macOS the
+/// system voices, of which every Mac has some, VoiceOver alone being listed before they are read
+/// — or no engine of this build has that id (`not_found`).
+#[cfg(any(windows, target_os = "macos"))]
+fn unlisted(id: &str, engines: &[Engine]) -> HostError {
+    #[cfg(windows)]
+    let known = !engines.is_empty() || !fallback::builds(id);
+    #[cfg(target_os = "macos")]
+    let known = engines.iter().any(|e| !e.screen_reader);
+    if known {
+        HostError::with(&reasons::NO_ENGINE, format!("no speech engine '{id}' in this build"))
+    } else {
+        HostError::of(&reasons::NOT_KNOWN_YET)
+    }
 }
 
 pub struct Speech {
@@ -205,24 +225,26 @@ impl Speech {
 
     /// Chooses the engine this module VM speaks through, or returns to the ordinary path.
     ///
-    /// Returns false when the engine is not there — unknown to this build, or its screen
-    /// reader not running. Refusing is the honest answer: accepting and then quietly speaking
-    /// somewhere else would be a control claiming what it cannot honour.
+    /// Refused when the engine is not there, with why (`host.speech.use`'s error value): no
+    /// engine with that id in this build (`not_found`), the list not read yet (`not_ready`), or
+    /// its screen reader not running (`unavailable`). Refusing is the honest answer: accepting
+    /// and then quietly speaking somewhere else would be a control claiming what it cannot honour.
     ///
     /// The first line after a choice may wait for the engine to open, which was measured at
     /// 2.0 s for SAPI and 3.5 s for OneCore. That happens on the new voice's own thread, so
     /// nothing else waits with it, and the lines queue rather than being lost.
     #[cfg(any(windows, target_os = "macos"))]
-    pub fn use_engine(&self, vm: usize, id: Option<&str>) -> bool {
+    pub fn use_engine(&self, vm: usize, id: Option<&str>) -> Result<(), HostError> {
         let Some(id) = id else {
             self.chosen.borrow_mut().remove(&vm);
-            return true;
+            return Ok(());
         };
-        let Some(engine) = self.engines().into_iter().find(|e| e.id == id) else {
-            return false;
+        let engines = self.engines();
+        let Some(engine) = engines.iter().find(|e| e.id == id).cloned() else {
+            return Err(unlisted(id, &engines));
         };
         if !engine.available {
-            return false;
+            return Err(HostError::with(&reasons::NOT_RUNNING, format!("'{}' is not running", engine.name)));
         }
         #[cfg(windows)]
         self.voices
@@ -236,7 +258,7 @@ impl Speech {
         // is a deliberate act by the user now, on the Personal Voice switch, and by the time
         // one appears in this list it is already usable.
         self.chosen.borrow_mut().insert(vm, engine.id);
-        true
+        Ok(())
     }
 
     /// The engine this module VM chose, if it chose one.
@@ -683,6 +705,8 @@ mod engine_list {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
+    use super::reasons;
+
     /// The two tests below must not run beside each other.
     ///
     /// What they exercise is process-global — one speech library, one worker thread per
@@ -831,10 +855,13 @@ mod engine_list {
         // Something this machine does not have is refused rather than accepted and ignored.
         let absent = engines.iter().find(|e| !e.available).map(|e| e.id.clone());
         if let Some(absent) = absent {
-            assert!(!speech.use_engine(ME, Some(&absent)), "accepted {absent}, which is not here");
+            let why = speech.use_engine(ME, Some(&absent)).expect_err("accepted an engine that is not here");
+            assert_eq!(why.reason(), &reasons::NOT_RUNNING, "{absent}: {why}");
             assert_eq!(speech.chosen_engine(ME), None, "a refused choice was remembered anyway");
         }
-        assert!(!speech.use_engine(ME, Some("no-such-engine")), "accepted a name that does not exist");
+        let why = speech.use_engine(ME, Some("no-such-engine")).expect_err("accepted a name that does not exist");
+        assert_eq!(why.reason(), &reasons::NO_ENGINE);
+        assert_eq!(why.message(), "no speech engine 'no-such-engine' in this build");
 
         // Something it does have is taken, and belongs to this VM alone.
         let present = engines
@@ -847,7 +874,7 @@ mod engine_list {
             )
             .id
             .clone();
-        assert!(speech.use_engine(ME, Some(&present)), "refused {present}, which is here");
+        assert_eq!(speech.use_engine(ME, Some(&present)), Ok(()), "refused {present}, which is here");
         assert_eq!(speech.chosen_engine(ME), Some(present.clone()));
         assert_eq!(speech.chosen_engine(SOMEBODY_ELSE), None, "one module's choice reached another");
 
@@ -858,7 +885,33 @@ mod engine_list {
         let took = start.elapsed();
         assert!(took < Duration::from_millis(50), "handing a line over took {took:?}");
 
-        assert!(speech.use_engine(ME, None), "could not go back to the ordinary path");
+        assert_eq!(speech.use_engine(ME, None), Ok(()), "could not go back to the ordinary path");
         assert_eq!(speech.chosen_engine(ME), None);
+    }
+}
+
+#[cfg(all(test, any(windows, target_os = "macos")))]
+mod unlisted_tests {
+    //! Why an id is not in the list, from the list alone: nothing here opens or says anything.
+    use super::{reasons, unlisted, Engine, HostError};
+
+    /// Before the list is read, an id is `not_ready` — on Windows one an engine of this build has,
+    /// on macOS any, VoiceOver alone being listed then — and once it is read, or for an id no
+    /// engine of this build has, `not_found` with the id in its message.
+    #[test]
+    fn an_id_is_not_ready_before_the_list_is_read_and_not_found_after() {
+        #[cfg(windows)]
+        assert_eq!(unlisted("sapi", &[]), HostError::of(&reasons::NOT_KNOWN_YET));
+        #[cfg(target_os = "macos")]
+        {
+            let vo = Engine { id: "voiceover".into(), name: "VoiceOver".into(), screen_reader: true, available: true };
+            assert_eq!(unlisted("samantha", &[vo]), HostError::of(&reasons::NOT_KNOWN_YET));
+        }
+        let voice = Engine { id: "sapi".into(), name: "SAPI".into(), screen_reader: false, available: true };
+        let e = unlisted("no-such", &[voice]);
+        assert_eq!((e.reason(), e.message()), (&reasons::NO_ENGINE, "no speech engine 'no-such' in this build"));
+        // On Windows this build's engines are known before the list is: a stranger is not_found then.
+        #[cfg(windows)]
+        assert_eq!(unlisted("no-such", &[]).reason(), &reasons::NO_ENGINE);
     }
 }

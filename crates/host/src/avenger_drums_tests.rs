@@ -471,7 +471,7 @@ fn copy_sample_to_opens_its_submenu_and_the_target_is_chosen_in_it() {
         T.ok(T.lastPost("error").text == "A drum slot's menu: its submenu did not open; nothing was chosen in it",
           T.lastPost("error").text)
         T.ok(#S.sent == sent + 1 and S.sent[#S.sent] == "Escape" and T.count("[avenger] 'A drum slot's menu': its popup was "
-          .. "left open (no submenu) — pressing Escape to close it") == 1, T.dump())
+          .. "left open (no_submenu) — pressing Escape to close it") == 1, T.dump())
         T.repaint(T.drums())
         T.settle(4)
         T.ok(T.held() == 0, "every picture released: " .. T.held())
@@ -527,7 +527,7 @@ fn a_submenu_opened_upward_is_counted_from_its_own_top() {
         T.ok(T.lastPost("error").text == "A drum slot's menu: no submenu it can be chosen in was seen; nothing was chosen in it",
           T.lastPost("error").text)
         T.ok(#S.sent == sent + 1 and S.sent[#S.sent] == "Escape" and T.count("[avenger] 'A drum slot's menu': its popup was "
-          .. "left open (unfit submenu) — pressing Escape to close it") == 1, T.dump())
+          .. "left open (unfit_submenu) — pressing Escape to close it") == 1, T.dump())
         T.repaint(T.drums())
         T.settle(4)
         T.ok(T.held() == 0, "every picture released: " .. T.held())
@@ -851,6 +851,61 @@ fn a_drum_knobs_reset_says_what_the_change_wait_saw() {
         T.ok(T.lastPost("error").text == "Resetting a drum slot's control: unchanged: VPS Avenger drew no change at Ride's "
           .. "Volume knob", T.lastPost("error").text)
         T.ok(T.count("the picture changed and what this action changes did not") == 0, "no looking on")
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// A slot's Browse with Avenger's window leaving the front between the act's check and the
+/// hand-over (while the slot's name is read off the held picture): handOver answers `not_in_front`,
+/// having given the trip up itself — Browse is not clicked, the picture is let go, and nothing more
+/// is ended on a trip already over.
+#[test]
+fn a_browse_refused_for_the_front_clicks_nothing_and_ends_nothing_more() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.pageOn(T.drums(), T.slotWords("KIT", { ["slot 3"] = "RD Ride 1" }))
+        local recognize = T.host.ocr.recognize
+        rawset(T.host.ocr, "recognize", function(r, opts, cb)
+          if type(opts) == "table" and opts.key == "vps-avenger browse slot" then
+            S.listed, S.front, S.chain = { W, T.OTHER }, T.OTHER, { T.OTHER }
+          end
+          return recognize(r, opts, cb)
+        end)
+        local clicks = #S.clicks
+        T.tripFrom({ action = "drumkit_column", args = { index = 3, column = "browse" }, focused = true }, W)
+        T.settle(2)
+        T.ok(#S.clicks == clicks and not S.holding["Return"], "Browse not clicked, nothing handed over")
+        T.ok(T.held() == 0, "the picture let go: " .. T.held())
+        T.ok(T.count("the keyboard was not handed over") == 0 and T.count("done after the trip ended") == 0, T.dump())
+        T.ok(string.find(T.lastPost("error").text, "another window came to the front; nothing more was done", 1, true) ~= nil,
+          tostring(T.lastPost("error").text))
+    "##));
+}
+
+/// A double-click the host does not make (O.doubleClick's answers, D41): a first click refused
+/// sends no second, watches for no change and ends the trip with the page told; a second click
+/// refused ends it the same way once it was asked for, and nothing is watched either.
+#[test]
+fn a_reset_whose_click_is_not_made_watches_for_nothing_and_says_so() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.pageOn(T.drums())
+        local covered = T.E("covered", "something else is drawn over the point")
+        local said = "Resetting a drum slot's control was not clicked: something else is drawn over the point"
+        local n, asked = #S.clicks, S.changeWaitsAsked
+        S.clickAnswers = { covered }
+        T.tripFrom({ action = "reset_drumkit_control", args = { index = 3, control = "volume" }, focused = true }, W)
+        T.tick(2)
+        T.ok(#S.clicks == n and S.changeWaitsAsked == asked, "nothing clicked, nothing watched: " .. #S.clicks)
+        T.ok(T.lastPost("error").text == said, T.lastPost("error").text)
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+        T.event()
+        S.clickAnswers = { true, covered }
+        T.tripFrom({ action = "reset_drumkit_control", args = { index = 3, control = "volume" }, focused = true }, W)
+        T.ok(#S.clicks == n + 1 and T.clickAt() == "831,212", "the first click: " .. T.clickAt())
+        T.tick(2)
+        T.ok(#S.clicks == n + 1 and S.changeWaitsAsked == asked, "the second not made, nothing watched")
+        T.ok(T.count("[avenger] 'Resetting a drum slot's control': the double-click's second click was not made — "
+          .. "something else is drawn over the point") == 1, T.dump())
+        T.ok(T.lastPost("error").text == said, T.lastPost("error").text)
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }

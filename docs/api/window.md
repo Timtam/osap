@@ -344,13 +344,13 @@ free until it ends.
 
 ## host.window.focus(id) {#host-window-focus}
 
-**Signature:** `host.window.focus(id: number) -> boolean`
+**Signature:** `host.window.focus(id: number) -> (boolean, Error?)`
 
 Brings the window with that handle to the front and gives it the keyboard. `id` may also be a
 **control's**, on Windows — one of [`controls()`](#host-window-controls) or
 [`focusChain()`](#host-window-focuschain), or an embedded overlay's
 [`O:hwnd()`](./overlay.md#o-origin): its window is brought to the front, and the keyboard is then
-landed on the control (Windows, below). Returns whether the system accepted it. Like `host.input.*`, it acts at once, also while the calling module has a
+landed on the control (Windows, below). Returns `true` when the system accepted it, and `false, err` when it did not — an [error value](./errors.md#error-values) whose `err.code` says why: `refused` (`declined by the system`), `gone` (`no such window`: the id names no window, or its application has quit), `hidden` (`the window is hidden`: a hidden window of this application, on a Mac), `not_supported` (`not supported on this platform yet`). Like `host.input.*`, it acts at once, also while the calling module has a
 [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) or a snapshot request out: a picture asked for
 just before and not taken yet may show the window in front. Read first and focus once the read is
 answered, and the log notes a module that does not, once a session (see
@@ -409,7 +409,7 @@ end
 
 ### Windows {#host-window-focus-windows}
 
-A minimised window is restored first, then brought to the foreground with `SetForegroundWindow`. `true` means Windows accepted the request — not that the change has been made. For a window of another application the activation can finish only once that window's own thread has processed it, so [`active()`](#host-window-active), [`foreground()`](#host-window-foreground) and `focusChain()` asked straight after the call can still name the window that was in front; the foreground event follows once the change is made, and a module that wants to know where the keyboard went waits for that event rather than reading again at once. `false` means Windows refused: it limits which processes may change the foreground (the conditions are listed under `SetForegroundWindow` in Microsoft's documentation), and it does not say which one applied, and nothing more is done. Read [`focusChain()`](#host-window-focuschain) afterwards for where the keyboard is inside the window.
+A minimised window is restored first, then brought to the foreground with `SetForegroundWindow`. `true` means Windows accepted the request — not that the change has been made. For a window of another application the activation can finish only once that window's own thread has processed it, so [`active()`](#host-window-active), [`foreground()`](#host-window-foreground) and `focusChain()` asked straight after the call can still name the window that was in front; the foreground event follows once the change is made, and a module that wants to know where the keyboard went waits for that event rather than reading again at once. `false` with `refused` means Windows refused: it limits which processes may change the foreground (the conditions are listed under `SetForegroundWindow` in Microsoft's documentation), and it does not say which one applied, and nothing more is done. An id that names no window (`IsWindow`) is `gone`, and nothing is asked. Read [`focusChain()`](#host-window-focuschain) afterwards for where the keyboard is inside the window.
 
 **A control's id — the keyboard lands on it.** Which control of a window gets the keyboard is the application's to decide, and REAPER, brought forward, has been seen to leave it on its FX window itself, on its FX list, or nowhere (the HTML probe's W7 and W10) rather than in the plug-in. So for an `id` that is a control, the control's top-level window is brought forward, and an accepted request starts a **landing** on the control, which decides by events and by no timer:
 
@@ -443,7 +443,7 @@ Minimised windows are additionally dropped from `list()` and `find()` here, so o
 
 **Pass a window's id.** A plug-in in a DAW publishes no control of its own here, and an embedded overlay's origin is the DAW's panel, whose id is its window's ([`attachEmbedded`](./overlay.md#o-attachembedded-macos)), so `host.window.focus(ov:hwnd())` is the same call on both platforms. Nothing here lands the keyboard on a control: where VoiceOver's keyboard goes inside the window is the application's (TODO.md, MW1b).
 
-A window of this application's own is focused with AppKit's calls instead: brought back if minimised, the application asked to become the active one (`NSApplication`'s `activateIgnoringOtherApps:`), and the window ordered in front and made key. `true` whenever the window is shown or minimised; the change is asynchronous, and the window becoming key is what says it happened. The window of a page described [`activates = false`](./gui.md#host-gui-webview) takes the keyboard without that request, so nothing is on its way and the answer is decided at the call: `true` when the window is the key window as the call returns, `false` when it is not. A hidden one — the module manager once it is closed, a page hidden, or any window of the application while the application is hidden — answers `false`, with a line in the log, as the window tables leave it out: only what hid it shows it again.
+A window of this application's own is focused with AppKit's calls instead: brought back if minimised, the application asked to become the active one (`NSApplication`'s `activateIgnoringOtherApps:`), and the window ordered in front and made key. `true` whenever the window is shown or minimised; the change is asynchronous, and the window becoming key is what says it happened. The window of a page described [`activates = false`](./gui.md#host-gui-webview) takes the keyboard without that request, so nothing is on its way and the answer is decided at the call: `true` when the window is the key window as the call returns, `false, err` with `refused` when it is not. A hidden one — the module manager once it is closed, a page hidden, or any window of the application while the application is hidden — answers `false, err` with `hidden`, and a line in the log, as the window tables leave it out: only what hid it shows it again. An id this backend never issued, or one of an application that has quit, is `gone`; any other request the system did not take, `refused`.
 
 ## host.window.controls(win?) {#host-window-controls}
 

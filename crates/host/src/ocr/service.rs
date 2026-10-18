@@ -47,7 +47,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::backend::frame::Frame;
-use crate::backend::{CaptureSource, CompareReq, OcrText, OcrThread, OcrWorker, Recognise, NO_RECOGNISER};
+use crate::backend::{no_recogniser, CaptureSource, CompareReq, OcrText, OcrThread, OcrWorker, Recognise};
+use crate::errors::{ocr, HostError};
 use crate::logging;
 
 use super::lang::{self, LangReq, Languages};
@@ -72,10 +73,14 @@ impl Limits {
 }
 
 /// What a region is answered when the recognition panicked inside the application.
-const RECOGNISER_FAILED: &str = "the text recogniser failed inside the application; the log has the details";
+fn recogniser_panicked() -> HostError {
+    HostError::of(&ocr::RECOGNISER_PANICKED)
+}
 
 /// What a read or a snapshot is answered when its capture panicked inside the application.
-pub const CAPTURE_PANICKED: &str = "the screen capture failed inside the application; the log has the details";
+pub fn capture_panicked() -> HostError {
+    HostError::of(&crate::errors::screen::CAPTURE_PANICKED)
+}
 
 /// The clock the capture thread schedules by: `Instant::now`, except in a test that steps it.
 type Clock = fn() -> Instant;
@@ -108,7 +113,7 @@ pub struct Done {
     pub readings: Vec<Reading>,
     /// The language request that could not be met, when that is why the readings failed —
     /// the event loop logs it once per module and tag.
-    pub lang_error: Option<(LangReq, String)>,
+    pub lang_error: Option<(LangReq, HostError)>,
     pub timings: Timings,
     /// When the job's picture was taken and what `host.inputEpoch()` stood at then — a reading's
     /// `time` and `inputEpoch`. `None` when there was no picture: the capture failed.
@@ -153,7 +158,7 @@ pub enum Pic<S> {
 }
 
 /// The pixels a job holds between its two stages, or why there are none.
-type Pixels<S> = Result<Pic<S>, String>;
+type Pixels<S> = Result<Pic<S>, HostError>;
 
 struct State<S> {
     sched: Scheduler<Spec, Pixels<S>>,
@@ -486,7 +491,7 @@ impl<S: Send + 'static> Service<S> {
     /// before, and the next hang after the recogniser answers again is swept again. `None` while
     /// there is no hang, and after the sweep until then. Failure detection on the hang bound, not
     /// a timer deciding what is said.
-    pub fn hang_sweep(&self) -> Option<(Vec<TicketId>, String)> {
+    pub fn hang_sweep(&self) -> Option<(Vec<TicketId>, HostError)> {
         let now = (self.inner.clock)();
         let mut st = locked(&self.inner.state);
         if st.swept {
@@ -560,8 +565,8 @@ fn snapshot_read_bytes(frame: &Frame, regions: &[Rect]) -> usize {
 }
 
 /// A recognition that has answered no region for `HANG` refuses new work at once, with the
-/// reason, rather than letting the queue fill behind it.
-fn hang_refusal<S>(st: &mut State<S>, limits: &Limits, now: Instant) -> Option<String> {
+/// reason (`timeout`), rather than letting the queue fill behind it.
+fn hang_refusal<S>(st: &mut State<S>, limits: &Limits, now: Instant) -> Option<HostError> {
     let since = st.answered_at?;
     let for_s = now.saturating_duration_since(since);
     if for_s < limits.hang {
@@ -577,7 +582,7 @@ fn hang_refusal<S>(st: &mut State<S>, limits: &Limits, now: Instant) -> Option<S
             ),
         );
     }
-    Some(format!("the text recogniser has not answered a region for {} s", for_s.as_secs()))
+    Some(HostError::with(&ocr::HANG, format!("the text recogniser has not answered a region for {} s", for_s.as_secs())))
 }
 
 fn shutdown<S>(inner: &Inner<S>, bound: Duration) {
@@ -678,11 +683,11 @@ fn capture_for_read<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, 
             Ok((shot, bytes)) => (Ok(Pic::Shot(shot, inner.input_epoch.load(Ordering::SeqCst))), bytes),
             Err(report) => {
                 contained("a screen capture", &report);
-                (Err(CAPTURE_PANICKED.to_string()), 0)
+                (Err(capture_panicked()), 0)
             }
         }
     } else {
-        (Err(NO_RECOGNISER.to_string()), 0)
+        (Err(no_recogniser()), 0)
     };
     {
         let mut st = locked(&inner.state);
@@ -718,7 +723,7 @@ fn snapshot_round<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, mu
             Ok(colours) => colours,
             Err(report) => {
                 contained("a pixel read", &report);
-                Err(CAPTURE_PANICKED.to_string())
+                Err(capture_panicked())
             }
         };
         // When the read came back, and the epoch as it stood then: input the host drives from here
@@ -736,7 +741,7 @@ fn snapshot_round<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, mu
                 Ok(frames) => round.run(frames, (inner.clock)(), inner.input_epoch.load(Ordering::SeqCst)),
                 Err(report) => {
                     contained("a snapshot capture", &report);
-                    round.fail(CAPTURE_PANICKED, (inner.clock)())
+                    round.fail(&capture_panicked(), (inner.clock)())
                 }
             };
             (format!("a snapshot round of {} capture(s)", rects.len()), &SLOW_ROUNDS, done)
@@ -875,7 +880,7 @@ fn recognise_loop<S: Send + 'static>(inner: Arc<Inner<S>>, worker: OcrWorker<S>,
                 Ok(r) => r,
                 Err(report) => {
                     contained("a recognition", &report);
-                    (job.spec.regions.iter().map(|r| Reading::failed(*r, RECOGNISER_FAILED)).collect(), None)
+                    (job.spec.regions.iter().map(|r| Reading::failed(*r, recogniser_panicked())).collect(), None)
                 }
             };
         let finished = Instant::now();
@@ -914,12 +919,12 @@ fn recognise_job<S>(
     preempt: Option<&AtomicBool>,
     stop: &AtomicBool,
     answered: &dyn Fn(),
-) -> (Vec<Reading>, Option<(LangReq, String)>) {
+) -> (Vec<Reading>, Option<(LangReq, HostError)>) {
     let regions = &job.spec.regions;
     let all_failed =
-        |why: &str| regions.iter().map(|r| Reading::failed(*r, why)).collect::<Vec<_>>();
+        |why: &HostError| regions.iter().map(|r| Reading::failed(*r, why.clone())).collect::<Vec<_>>();
     if !worker.present {
-        return (all_failed(NO_RECOGNISER), None);
+        return (all_failed(&no_recogniser()), None);
     }
     let pic = match &job.pixels {
         Ok(p) => p,
@@ -953,7 +958,7 @@ fn recognise_job<S>(
             // Nothing to rebuild: the recognisers keep no state of their own on this thread, and
             // the neural one's lock survives a panic (paddle_ocr.rs). The next job starts clean.
             contained("a recognition", &report);
-            return (all_failed(RECOGNISER_FAILED), None);
+            return (all_failed(&recogniser_panicked()), None);
         }
     };
     let mut answers = answers.into_iter();
@@ -961,14 +966,16 @@ fn recognise_job<S>(
         .iter()
         .map(|r| {
             let answer = answers.next();
+            // A region with no rectangle: one the binding answers itself, whose reading takes the
+            // binding's reason on delivery (`ocr::lua`, `with_unresolved`).
             if r.is_empty() {
-                let mut reading = Reading::failed(*r, "empty region: x2 must be greater than x1 and y2 greater than y1");
+                let mut reading = Reading::failed(*r, crate::empty_region(r.w, r.h));
                 reading.lang = tag.clone();
                 return reading;
             }
             let out = match answer {
                 Some(a) => engine_out(a),
-                None => EngineOut::Failed("the recogniser gave no answer for this region".to_string()),
+                None => EngineOut::Failed(HostError::of(&ocr::NO_ANSWER)),
             };
             pipeline::normalise(*r, out, &tag)
         })
@@ -987,7 +994,7 @@ fn picture_of<S>(pixels: &Pixels<S>, captured_at: Instant) -> Option<Picture> {
 }
 
 /// A backend answer as the pipeline takes it.
-fn engine_out(answer: Result<OcrText, String>) -> EngineOut {
+fn engine_out(answer: Result<OcrText, HostError>) -> EngineOut {
     let t = match answer {
         Err(e) => return EngineOut::Failed(e),
         Ok(t) => t,
@@ -1045,6 +1052,11 @@ mod tests {
     type Fake = Vec<(i32, i32, i32, i32)>;
 
     static CAPTURES: AtomicU32 = AtomicU32::new(0);
+
+    /// Whether `why` is the hang's answer: `timeout`, in its words.
+    fn hung(why: &HostError) -> bool {
+        why.reason() == &ocr::HANG && why.message().starts_with("the text recogniser has not answered a region for")
+    }
 
     fn fake_langs() -> Languages {
         Languages {
@@ -1157,7 +1169,7 @@ mod tests {
     /// y = 81, 50 ms; a held region (x = 5590 to 5599) until its release. Panics at x = 666. At
     /// y = 79 it says whether it may be preempted; at y = 80 it answers a word no screen has
     /// (x = i32::MAX), which the host's own arithmetic cannot place.
-    fn fake_recognise(shot: &Fake, _: &[(i32, i32, i32, i32)], ctx: &Recognise) -> Vec<Result<OcrText, String>> {
+    fn fake_recognise(shot: &Fake, _: &[(i32, i32, i32, i32)], ctx: &Recognise) -> Vec<Result<OcrText, HostError>> {
         ctx.each(shot.iter(), |&(x, y, _, _)| {
             wait_while_recognition_held(x);
             if x == 666 {
@@ -1205,7 +1217,7 @@ mod tests {
     /// it turns 200 once the fake clock passes 100 ms, with the fake clock's time as `taken`.
     /// Panics at x = 668; waits for a held region's release (5580 to 5589); notes its thread at
     /// x = 4242.
-    fn fake_frames(rects: &[(i32, i32, i32, i32)], _: CaptureSource, _: bool) -> Vec<Result<Frame, String>> {
+    fn fake_frames(rects: &[(i32, i32, i32, i32)], _: CaptureSource, _: bool) -> Vec<Result<Frame, crate::errors::HostError>> {
         rects
             .iter()
             .map(|&(x, y, w, h)| {
@@ -1233,7 +1245,7 @@ mod tests {
                 }
                 let taken = if fake { fake_now() } else { Instant::now() };
                 let img = CapturedImage { w: w as u32, h: h as u32, rgba };
-                Frame::from_image(Rect::new(x, y, w, h), img, taken, FrameVia::Gdi, None).ok_or_else(|| "short".to_string())
+                Frame::from_image(Rect::new(x, y, w, h), img, taken, FrameVia::Gdi, None).ok_or_else(crate::backend::capture_failed)
             })
             .collect()
     }
@@ -1249,7 +1261,7 @@ mod tests {
 
     /// The points a handler waits for: `(x, y, 1)` each, read as `pixel` reads one, `(x, y, 0)` as
     /// `pixels` reads a list. Panics at x = 668; notes its thread at x = 4242.
-    fn fake_points(at: &[(i32, i32)], _: CaptureSource, single: bool) -> Result<Vec<(u8, u8, u8)>, String> {
+    fn fake_points(at: &[(i32, i32)], _: CaptureSource, single: bool) -> Result<Vec<(u8, u8, u8)>, crate::errors::HostError> {
         if at.iter().any(|p| p.0 == 668) {
             panic!("{}inside the fake pixel read", crate::EXPECTED_PANIC);
         }
@@ -1388,7 +1400,7 @@ mod tests {
         let other = Owner { idx: 3, gen: 1 };
         let late = s.submit(spec_at(31, 2), of(other, 2, Priority::Interactive));
         let why = late.refused.expect("250 ms into a warm-up, against a hang bound of 150");
-        assert!(why.starts_with("the text recogniser has not answered a region for"), "{why}");
+        assert!(hung(&why), "{why}");
 
         *locked(&RELEASED) = true;
         RELEASE.notify_all();
@@ -1409,8 +1421,10 @@ mod tests {
         let done = collect(&s, 1);
         let r = &done[0].readings[0];
         assert_eq!(r.status, Status::Failed);
-        assert!(r.error.as_deref().unwrap().starts_with("language: ja is not available here (available: en-US, de-DE)"));
-        assert!(done[0].lang_error.is_some());
+        let e = r.error.as_ref().unwrap();
+        assert_eq!(e.reason(), &ocr::LANGUAGE_UNAVAILABLE);
+        assert!(e.message().starts_with("language: ja is not available here (available: en-US, de-DE)"), "{e}");
+        assert_eq!(done[0].lang_error.as_ref().map(|(_, why)| why), Some(e));
         stop.shutdown(Duration::from_secs(2));
     }
 
@@ -1431,7 +1445,7 @@ mod tests {
         assert_eq!((r[0].words[0].x, r[0].words[0].y), (8, 1));
         assert_eq!(r[0].lang, "en-US");
         assert_eq!(r[1].status, Status::Failed);
-        assert!(r[1].error.as_deref().unwrap().starts_with("empty region"));
+        assert_eq!(r[1].error, Some(crate::empty_region(0, 10)), "the binding's own reason replaces it on delivery");
         stop.shutdown(Duration::from_secs(2));
     }
 
@@ -1515,7 +1529,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1000));
         let out = s.submit(spec_at(41, 2), of(other, 4, Priority::Interactive));
         let why = out.refused.expect("1000 ms without a region answered, against a bound of 600");
-        assert!(why.starts_with("the text recogniser has not answered a region for"), "{why}");
+        assert!(hung(&why), "{why}");
         collect(&s, 1);
         assert!(s.submit(spec_at(42, 2), of(other, 5, Priority::Interactive)).refused.is_none(), "over");
         collect(&s, 1);
@@ -1551,10 +1565,10 @@ mod tests {
         let (mut failed, why) = swept(&s);
         failed.sort_unstable();
         assert_eq!(failed, vec![1, 2, 3], "the running read, one waiting for the recogniser, one being photographed");
-        assert!(why.starts_with("the text recogniser has not answered a region for"), "{why}");
+        assert!(hung(&why), "{why}");
         assert!(s.hang_sweep().is_none(), "once per hang");
         let refused = s.submit(spec(34), of(b, 4, Priority::Interactive)).refused.expect("refused while it hangs");
-        assert!(refused.starts_with("the text recogniser has not answered a region for"), "{refused}");
+        assert!(hung(&refused), "{refused}");
 
         release(5586);
         release(5590);
@@ -1616,7 +1630,8 @@ mod tests {
         s.submit(spec(667), ticket(1, None));
         let first = collect(&s, 1);
         assert_eq!(first[0].readings[0].status, Status::Failed);
-        assert!(first[0].readings[0].error.as_deref().unwrap().starts_with("the screen capture failed inside"));
+        assert_eq!(first[0].readings[0].error, Some(capture_panicked()));
+        assert!(capture_panicked().message().starts_with("the screen capture failed inside"));
         s.submit(spec(21), ticket(2, None));
         assert_eq!(collect(&s, 1)[0].readings[0].status, Status::Text, "the capture thread still answers");
         stop.shutdown(Duration::from_secs(2));
@@ -1632,7 +1647,8 @@ mod tests {
         let first = collect(&s, 1);
         assert_eq!(first.len(), 1, "answered");
         if cfg!(debug_assertions) {
-            assert_eq!(first[0].readings[0].error.as_deref(), Some(RECOGNISER_FAILED));
+            assert_eq!(first[0].readings[0].error, Some(recogniser_panicked()));
+            assert_eq!(recogniser_panicked().reason(), &ocr::RECOGNISER_PANICKED);
         }
         s.submit(spec(22), ticket(2, None));
         assert_eq!(collect(&s, 1)[0].readings[0].status, Status::Text, "the recognise thread still answers");
@@ -1655,7 +1671,7 @@ mod tests {
         let done = s.drain();
         let r = &done[0].readings;
         assert!(r.iter().filter(|r| r.status == Status::Text).count() < 8);
-        assert_eq!(r.last().unwrap().error.as_deref(), Some(crate::backend::CLOSING));
+        assert_eq!(r.last().unwrap().error, Some(crate::backend::closing()));
     }
 
     /// The pictures of a round carry the input epoch the event loop last noted before their
@@ -1894,7 +1910,7 @@ mod tests {
         assert!(matches!(&collect_snaps(&s, 1)[0].outcome, SnapOutcome::Colours { colours, .. } if colours == &vec![(4242_i32 as u8, 7, 1)]));
         assert_eq!(*locked(&POINT_THREADS), ["screen-capture", "screen-capture"]);
         s.submit_snap(pts(3, &[(668, 0)], true));
-        assert!(matches!(&collect_snaps(&s, 1)[0].outcome, SnapOutcome::Failed { why, .. } if why == CAPTURE_PANICKED));
+        assert!(matches!(&collect_snaps(&s, 1)[0].outcome, SnapOutcome::Failed { why, .. } if *why == capture_panicked()));
         s.submit_snap(pts(4, &[(20, 0)], true));
         assert!(matches!(collect_snaps(&s, 1)[0].outcome, SnapOutcome::Colours { .. }), "the capture thread still answers");
         std::thread::sleep(Duration::from_millis(30));
@@ -1908,7 +1924,7 @@ mod tests {
         let (s, stop) = Service::spawn(worker());
         s.submit_snap(snap(1, Rect::new(668, 0, 10, 10), SnapKind::Plain, Instant::now()));
         let first = collect_snaps(&s, 1);
-        assert!(matches!(&first[0].outcome, SnapOutcome::Failed { why, .. } if why == CAPTURE_PANICKED));
+        assert!(matches!(&first[0].outcome, SnapOutcome::Failed { why, .. } if *why == capture_panicked()));
         s.submit_snap(snap(2, Rect::new(20, 0, 10, 10), SnapKind::Plain, Instant::now()));
         assert!(matches!(collect_snaps(&s, 1)[0].outcome, SnapOutcome::Picture { .. }), "the capture thread still answers");
         s.submit(spec(23), ticket(3, None));
@@ -2027,7 +2043,8 @@ mod tests {
         assert_eq!(s.languages(Duration::ZERO), Some(Languages::default()));
         s.submit(spec(10), ticket(1, None));
         let done = collect(&s, 1);
-        assert_eq!(done[0].readings[0].error.as_deref(), Some(NO_RECOGNISER));
+        assert_eq!(done[0].readings[0].error, Some(no_recogniser()));
+        assert_eq!(no_recogniser().code(), crate::errors::Code::NotSupported);
         stop.shutdown(Duration::from_secs(2));
     }
 }

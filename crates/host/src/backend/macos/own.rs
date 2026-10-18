@@ -51,6 +51,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSNotification, NSNotificationCenter};
 
 use crate::backend::{active_for_handing, cocoa_frame_top_left, own_id, own_number, Foreground, OwnKind, WinInfo};
+use crate::errors::HostError;
 
 /// [`start`] has run, on the main thread, once the window system was up.
 static STARTED: AtomicBool = AtomicBool::new(false);
@@ -513,19 +514,20 @@ pub(super) fn note_page(number: u32, page: bool) {
 
 /// `host.window.focus` for our window `id`: brought back if minimised, this application asked to
 /// become the active one, and the window ordered in front and made key — AppKit's own calls, where
-/// another application's window is raised and focused through accessibility. `true` when the window
+/// another application's window is raised and focused through accessibility. `Ok` when the window
 /// is shown or minimised: what AppKit then does is asynchronous, and the window's becoming key is
 /// what says it happened. A panel that takes the keyboard without activating this application (a
 /// page described `activates = false`) is made key without that request, as its page takes the
 /// keyboard (`app::keyboard_without_activating`): nothing is then on its way, so its answer is
-/// decided at the call — `true` with the window the key window, `false` without, as its page's
+/// decided at the call — `Ok` with the window the key window, `refused` without, as its page's
 /// `focus` answers. A hidden one — ordered out, as the manager is once it is closed, or with this
-/// application hidden — is `false`, as [`info`] leaves it out: ordering it in from here would show it
-/// behind the back of whatever hid it, which would go on believing it hidden.
-pub(super) fn focus(id: isize) -> bool {
+/// application hidden — is `hidden`, as [`info`] leaves it out: ordering it in from here would show it
+/// behind the back of whatever hid it, which would go on believing it hidden. No such window of
+/// ours is `gone`.
+pub(super) fn focus(id: isize) -> Result<(), HostError> {
     let Some(w) = window(id) else {
         crate::logging::line("macos", &format!("cannot focus window {id}: no such window of ours"));
-        return false;
+        return Err(HostError::of(&crate::errors::window::NO_SUCH_WINDOW));
     };
     if !w.isVisible() && !w.isMiniaturized() {
         crate::logging::line(
@@ -535,7 +537,7 @@ pub(super) fn focus(id: isize) -> bool {
                 w.title()
             ),
         );
-        return false;
+        return Err(HostError::of(&crate::errors::window::HIDDEN));
     }
     if w.isMiniaturized() {
         w.deminiaturize(None);
@@ -556,7 +558,7 @@ pub(super) fn focus(id: isize) -> bool {
                 w.title()
             ),
         );
-        return true;
+        return Ok(());
     }
     let key = w.isKeyWindow();
     crate::logging::line(
@@ -568,5 +570,9 @@ pub(super) fn focus(id: isize) -> bool {
             if key { "it is the key window" } else { "it is NOT the key window, so the system declined" }
         ),
     );
-    key
+    if key {
+        Ok(())
+    } else {
+        Err(HostError::of(&crate::errors::common::DECLINED))
+    }
 }

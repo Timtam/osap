@@ -42,8 +42,9 @@ T.PAGE = { id = 4000, title = "Click helper", class = "wxWindowNR", own = true,
   bounds = { x = 900, y = 100, w = 520, h = 640 }, client = { x = 908, y = 130, w = 504, h = 602 } }
 
 -- host.gui.webview: the page, described once. `show` answers the page's `answers` in turn, and
--- when they run out "not ready yet" until the page has loaded (T.ready), true after; accepted
--- with focus, the page is in front. Declined, it is shown and the window in front stays.
+-- when they run out `not_ready` ("not ready yet") until the page has loaded (T.ready), true after;
+-- accepted with focus, the page is in front. Declined (`refused`), it is shown and the window in
+-- front stays. A scenario's answers are what the host answers: `true`, `true, err` or `false, err`.
 S.pg = { shows = {}, hides = 0, posts = {}, answers = {}, shown = false, prepares = 0, ready = false,
   prepareAnswers = {} }
 rawset(T.host, "gui", T.strict("host.gui", {
@@ -55,8 +56,8 @@ rawset(T.host, "gui", T.strict("host.gui", {
       assert(self == p, "page:show is a method")
       st.shows[#st.shows + 1] = { focus = o and o.focus, avoid = o and o.avoid }
       S.order[#S.order + 1] = "show"
-      local a = table.remove(st.answers, 1) or (st.ready and { true } or { false, "not ready yet" })
-      if a[1] or a[2] == "declined by the system" then
+      local a = table.remove(st.answers, 1) or (st.ready and { true } or { false, T.E("not_ready", "not ready yet") })
+      if a[1] or T.is(a[2], "refused") then
         st.shown = true
         p.window = T.PAGE.id
       end
@@ -83,7 +84,7 @@ rawset(T.host, "gui", T.strict("host.gui", {
       local a = table.remove(st.prepareAnswers, 1)
       if a then return a[1], a[2] end
       if st.ready then return true end
-      return false, "not ready yet"
+      return false, T.E("not_ready", "not ready yet")
     end
     function p.isShown(self) return st.shown end
     function p.focus(self) return st.shown end
@@ -175,17 +176,21 @@ function T.key()
   S.epoch += 1
   ran("hotkey", fn)
 end
--- The page sends `m`; the page has loaded; the page's window goes ("user" or "failed").
+-- The page sends `m`; the page has loaded; the page's window goes ("user" alone, or "failed" with
+-- the host's error value beside it, as onClose(how, err) has them).
 function T.msg(m) ran("page message", S.pageOpts.onMessage, m) end
 function T.ready()
   S.pg.ready = true
   ran("page ready", S.pageOpts.onReady)
 end
-function T.closed(why) ran("page close", S.pageOpts.onClose, why) end
+function T.closed(how)
+  ran("page close", S.pageOpts.onClose, how, how == "failed" and T.E("failed", "the page failed") or nil)
+end
 
 -- The read asked last, answered through the module's mailbox: `rows` are { text, y } of the rows
--- read, 16 high (none: nothing read there), or `failed` names why it could not be read.
-function T.answer(rows, failed)
+-- read, 16 high (none: nothing read there), or `failed` is the message of the error value it could
+-- not be read with, `code` its code (default `failed`).
+function T.answer(rows, failed, code)
   local r = S.reads[#S.reads]
   assert(r and not r.answered, "no read waits")
   r.answered = true
@@ -200,7 +205,7 @@ function T.answer(rows, failed)
   local status = failed and "failed" or (#lines > 0 and "text" or "none")
   ran("answer", r.cb, { x = g[1], y = g[2], w = g[3] - g[1], h = g[4] - g[2], status = status,
     text = table.concat(texts, "\n"), lines = lines, words = words, lang = failed and "" or "en-US",
-    error = failed })
+    error = failed and T.E(code or "failed", failed) or nil })
 end
 
 -- What was said last, and whether it interrupted; the page's status line as it was last posted
@@ -303,7 +308,7 @@ fn notepad_coming_forward_prepares_the_page_until_it_has_loaded() {
         -- Failed: not tried again when Notepad comes forward, and the key builds the page.
         S.pg.ready = false
         T.arrive(T.OTHER)
-        S.pg.prepareAnswers = { { false, "could not be built" } }
+        S.pg.prepareAnswers = { { false, T.E("failed", "could not be built") } }
         T.arrive(T.NOTEPAD)
         T.ok(S.pg.prepares == 3, "prepared once more")
         T.ok(S.logs[#S.logs] == "Page demo: the page was not prepared (could not be built); the key builds it from now on.", S.logs[#S.logs])
@@ -354,10 +359,10 @@ fn the_key_shows_the_page_beside_notepad_and_in_the_page_goes_back() {
         -- is not there; any other reason as the page not coming.
         S.focusAnswer = true
         T.arrive(T.NOTEPAD)
-        S.pg.answers = { { false, "declined by the system" } }
+        S.pg.answers = { { false, T.E("refused", "declined by the system") } }
         T.key()
         T.ok(T.last() == "Windows did not bring the page to the front; if it does not come by itself, the key brings it.", T.last())
-        S.pg.answers = { { false, "could not be built" } }
+        S.pg.answers = { { false, T.E("failed", "could not be built") } }
         T.key()
         T.ok(T.last() == "The page did not come to the front: could not be built.", T.last())
     "##);
@@ -433,7 +438,7 @@ fn a_button_clicks_once_notepad_is_in_front_and_the_page_comes_back_with_the_lin
         -- A read that failed is said with its reason.
         T.msg({ action = "middle" })
         T.arrive(T.NOTEPAD)
-        T.answer(nil, "the text recogniser has not answered a region for 5 s")
+        T.answer(nil, "the text recogniser has not answered a region for 5 s", "timeout")
         T.ok(T.status() == "Clicked the middle. It could not be read: the text recogniser has not answered a region for 5 s.", T.status())
     "##);
 }
@@ -502,7 +507,7 @@ fn a_press_away_from_the_page_a_page_not_brought_back_and_a_trip_given_up() {
         -- Not brought back.
         T.msg({ action = "middle" })
         T.arrive(T.NOTEPAD)
-        S.pg.answers = { { false, "declined by the system" } }
+        S.pg.answers = { { false, T.E("refused", "declined by the system") } }
         T.answer({ { "hello", 403 } })
         T.ok(T.status() == "Clicked the middle. The line there: hello", T.status())
         T.ok(S.logs[#S.logs] == "Page demo: the page did not come back (declined by the system); the result waits on it: Clicked the middle. The line there: hello", S.logs[#S.logs])
@@ -514,7 +519,7 @@ fn a_press_away_from_the_page_a_page_not_brought_back_and_a_trip_given_up() {
         T.ok(S.front == T.PAGE, "the page again")
         T.msg({ action = "middle" })
         T.arrive(T.NOTEPAD)
-        S.pg.answers = { { false, "could not be built" } }
+        S.pg.answers = { { false, T.E("failed", "could not be built") } }
         T.answer({ { "hello again", 403 } })
         T.ok(T.status() == "Clicked the middle. The line there: hello again", T.status())
         T.ok(T.last() == "The page did not come to the front: could not be built. Clicked the middle. The line there: hello again", T.last())

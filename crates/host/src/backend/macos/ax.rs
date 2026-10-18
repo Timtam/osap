@@ -58,6 +58,8 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::NSString;
 
+use crate::errors::HostError;
+
 use super::budget::Budget;
 use super::front_memory::{Memory, Recall};
 use super::handles;
@@ -1522,9 +1524,8 @@ fn frame_of(r: CGRect) -> super::post_click::Frame {
 /// needs: the window — an id from `host.window`, a control's included, or a window of ours — still
 /// there and paired with the window server's number, on screen, the point in it and, for a
 /// window, in its content rather than on its title bar or border, and nothing else drawn over the
-/// point. `Err` with the refusal: [`GONE`](crate::backend::GONE),
-/// [`OUTSIDE`](crate::backend::OUTSIDE), [`FRAME`](crate::backend::FRAME),
-/// [`COVERED`](crate::backend::COVERED), or one of the Mac's own in `post_click.rs`.
+/// point. `Err` with the refusal: the window gone, the point outside it or on its frame, something
+/// drawn over it, or one of the Mac's own (`errors::input`, named in `post_click.rs`).
 ///
 /// What it asks: the window's number, paired once per window (`window_id`, which reads the window
 /// server's list itself the first time); that list of windows on screen, once; the hit test the `window` of every click asks
@@ -1542,11 +1543,13 @@ fn frame_of(r: CGRect) -> super::post_click::Frame {
 /// accessibility.
 ///
 /// Main thread only, as the hit test is; the event loop is.
-pub(super) fn post_target(handle: isize, x: i32, y: i32) -> Result<PostTarget, String> {
-    use super::post_click::{place, NOT_ANSWERING, NOT_ON_SCREEN, NOT_PAIRED};
-    use crate::backend::{COVERED, GONE};
+pub(super) fn post_target(handle: isize, x: i32, y: i32) -> Result<PostTarget, HostError> {
+    use super::post_click::place;
+    use crate::errors::common::WINDOW_GONE as GONE;
+    use crate::errors::input::{COVERED, NOT_ANSWERING, NOT_ON_SCREEN, NOT_PAIRED, OFF_MAIN_THREAD};
+    let no = |r: &'static crate::errors::Reason| HostError::of(r);
     if objc2::MainThreadMarker::new().is_none() {
-        return Err("a posted click is made on the event loop's thread only".to_string());
+        return Err(no(&OFF_MAIN_THREAD));
     }
     // Who is asked, and the window the point has to be in.
     enum Of {
@@ -1559,8 +1562,8 @@ pub(super) fn post_target(handle: isize, x: i32, y: i32) -> Result<PostTarget, S
     }
     let (pid, number, of) = match crate::backend::own_number(handle) {
         Some(n) => {
-            super::own::kind_of(n).ok_or_else(|| GONE.to_string())?;
-            let w = super::own::info(handle, false).ok_or_else(|| NOT_ON_SCREEN.to_string())?;
+            super::own::kind_of(n).ok_or_else(|| no(&GONE))?;
+            let w = super::own::info(handle, false).ok_or_else(|| no(&NOT_ON_SCREEN))?;
             let content = super::post_click::Frame {
                 x: f64::from(w.client_x),
                 y: f64::from(w.client_y),
@@ -1570,30 +1573,30 @@ pub(super) fn post_target(handle: isize, x: i32, y: i32) -> Result<PostTarget, S
             (std::process::id() as i32, n, Of::Own(content))
         }
         None => {
-            let entry = handles::get(handle).ok_or_else(|| GONE.to_string())?;
+            let entry = handles::get(handle).ok_or_else(|| no(&GONE))?;
             let window = if entry.owner == handle { handle } else { entry.owner };
             if window == 0 {
-                return Err(NOT_PAIRED.to_string());
+                return Err(no(&NOT_PAIRED));
             }
             if skip_busy(entry.pid, "posted click") {
-                return Err(NOT_ANSWERING.to_string());
+                return Err(no(&NOT_ANSWERING));
             }
             let number = window_id(window);
             if number == 0 {
-                return Err(NOT_PAIRED.to_string());
+                return Err(no(&NOT_PAIRED));
             }
             let pid = entry.pid;
             (pid, number, if window == handle { Of::Window(entry) } else { Of::Control(entry) })
         }
     };
-    let (owner, bounds) = window_listed(number).ok_or_else(|| NOT_ON_SCREEN.to_string())?;
+    let (owner, bounds) = window_listed(number).ok_or_else(|| no(&NOT_ON_SCREEN))?;
     // A number the window server gave another program's window since: the window paired with it
     // has gone.
     if owner != pid {
-        return Err(GONE.to_string());
+        return Err(no(&GONE));
     }
     // A read of the program's that came back with nothing: it did not answer, or the element went.
-    let unread = || if is_busy(pid) { NOT_ANSWERING.to_string() } else { GONE.to_string() };
+    let unread = || if is_busy(pid) { no(&NOT_ANSWERING) } else { no(&GONE) };
     let (frame, content) = match &of {
         Of::Own(content) => (frame_of(bounds), Some(*content)),
         Of::Window(entry) => {
@@ -1605,7 +1608,7 @@ pub(super) fn post_target(handle: isize, x: i32, y: i32) -> Result<PostTarget, S
                     // The snapshot may have been the read that timed out; the walk would pay it
                     // again for every child (`win_info` stops here for the same reason).
                     if skip_busy(pid, "posted click") {
-                        return Err(NOT_ANSWERING.to_string());
+                        return Err(no(&NOT_ANSWERING));
                     }
                     if snap.rect.is_none() {
                         return Err(unread());
@@ -1617,9 +1620,9 @@ pub(super) fn post_target(handle: isize, x: i32, y: i32) -> Result<PostTarget, S
         }
         Of::Control(entry) => (frame_of(element_rect_cg(&entry.element).ok_or_else(unread)?), None),
     };
-    place(x, y, frame, content).map_err(str::to_string)?;
+    place(x, y, frame, content).map_err(no)?;
     if number_owns_point(number, x, y, &format!("window {handle}")) == Some(false) {
-        return Err(COVERED.to_string());
+        return Err(no(&COVERED));
     }
     Ok(PostTarget { pid, number, bounds: frame_of(bounds) })
 }
@@ -2353,20 +2356,21 @@ fn remembered_info(pid: i32, named: Option<isize>) -> Option<WinInfo> {
 /// become it now, and the window is raised and focused ([`raise_and_focus`]) when the workspace
 /// says that application has — not in the same breath as the request, when it is not in front yet.
 ///
-/// Reports what happened rather than assuming: `true` when the system took the request, or, for an
+/// Reports what happened rather than assuming: `Ok` when the system took the request, or, for an
 /// application in front already, when the window took the raise or the focus. macOS can decline
 /// either — an application that is not scriptable by us, a window that has gone away between being
 /// listed and being asked — and a caller that believes it moved the focus when it did not would
-/// tell a blind user they are somewhere they are not.
-pub fn focus_window(handle: isize) -> bool {
+/// tell a blind user they are somewhere they are not. A handle this backend never issued, or one
+/// whose application has quit, is `gone`; a refusal, `refused` (`front::Handed::answer`).
+pub fn focus_window(handle: isize) -> Result<(), HostError> {
     if crate::backend::own_number(handle).is_some() {
         return super::own::focus(handle);
     }
     let Some(entry) = handles::get(handle) else {
         crate::logging::line("macos", &format!("cannot focus window {handle}: no such handle"));
-        return false;
+        return Err(HostError::of(&crate::errors::window::NO_SUCH_WINDOW));
     };
-    super::front::hand_front_to(entry.pid, handle, None, super::front::HANDING).accepted()
+    super::front::hand_front_to(entry.pid, handle, None, super::front::HANDING).answer()
 }
 
 /// Raises window `handle` of another application inside that application, and sets its

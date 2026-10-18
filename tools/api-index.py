@@ -670,7 +670,7 @@ CONVERTED = set()
 # `O.calibrating()` read as calls and are fields, `O.menuTests` reads as a field and is a concept.
 FIELDS = {
     'page-window', 'host-os-current', 'host-errors', 'host-element-type',
-    'o-layer', 'o-state', 'o-away', 'o-calibrating', 'o-contentsize', 'o-stategeneration',
+    'o-layer', 'o-state', 'o-away', 'o-calibrating', 'o-contentsize', 'o-stategeneration', 'o-errors',
 }
 CONCEPTS = {
     'error-values', 'partial-answers', 'return-or-raise', 'where-an-error-value-arrives',
@@ -728,16 +728,19 @@ def host_table():
 
 def runtime_reasons():
     """The overlay runtime's reasons, from its errors.luau, in the same shape: one
-    `key = { code = "…", message = "…", entries = { "…", … } },` each. None until the runtime
-    has the file."""
+    `key = { code = "…", message = "…", entries = { "…", … } },` each — and how many `code = "…"`
+    outside a comment are not read so, which a reason written another way would be. None until
+    the runtime has the file."""
     if not os.path.exists(ERRORS_LUAU):
-        return []
+        return [], 0
     src = open(ERRORS_LUAU, encoding='utf-8').read()
-    return [{'source': ERRORS_LUAU, 'name': m.group(1), 'code': m.group(2), 'message': m.group(3).replace('\\"', '"'),
-             'entries': re.findall(r'"([^"]+)"', m.group(4))}
-            for m in re.finditer(r'(\w+)\s*=\s*\{\s*code\s*=\s*"([a-z][a-z0-9_]*)",\s*'
-                                 r'message\s*=\s*"((?:[^"\\]|\\.)*)",\s*entries\s*=\s*\{(.*?)\}\s*,?\s*\}',
-                                 src, re.S)]
+    src = re.sub(r'--.*$', '', src, flags=re.M)
+    reasons = [{'source': ERRORS_LUAU, 'name': m.group(1), 'code': m.group(2), 'message': m.group(3).replace('\\"', '"'),
+                'entries': re.findall(r'"([^"]+)"', m.group(4))}
+               for m in re.finditer(r'(\w+)\s*=\s*\{\s*code\s*=\s*"([a-z][a-z0-9_]*)",\s*'
+                                    r'message\s*=\s*"((?:[^"\\]|\\.)*)",\s*entries\s*=\s*\{(.*?)\}\s*,?\s*\}',
+                                    src, re.S)]
+    return reasons, len(re.findall(r'\bcode\s*=\s*"', src)) - len(reasons)
 
 
 # The groups of errors.rs: a group's own section, where its reasons are listed once, is a
@@ -871,13 +874,15 @@ def converted_problems(entries):
     no entry's table and would never be compared with one."""
     order, reasons, groups, unread = host_table()
     GROUP_NAMES.update(groups)
-    runtime = runtime_reasons()
+    runtime, runtime_unread = runtime_reasons()
     reasons = reasons + runtime
     codes = set(order) | {r['code'] for r in runtime}
     pages = {e['anchor']: e['page'] for e in entries}
     problems = []
     if unread:
         problems.append(ERRORS_RS + ': ' + str(unread) + ' Reason(s) not written the way this tool reads one')
+    if runtime_unread:
+        problems.append(ERRORS_LUAU + ': ' + str(runtime_unread) + ' reason(s) not written the way this tool reads one')
     for r in reasons:
         for a in r['entries']:
             if a not in pages and a not in groups:

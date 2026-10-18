@@ -29,20 +29,32 @@ See [what that list is and is not](./index.md#capabilities).
 
 ## host.hotkey.register(spec, callback, opts?) {#host-hotkey-register}
 
-**Signature:** `host.hotkey.register(spec: string, callback: () -> (), opts: { foreground: boolean? }?)` → `id: number`
+**Signature:** `host.hotkey.register(spec: string, callback: () -> (), opts: { foreground: boolean? }?)` → `id: number`, `id: number, Error` or `nil, Error`
 
 Registers a **global** OS hotkey (active regardless of foreground window) for the [key spec](keys#key-spec-string-format) and returns an integer `id`. The callback is invoked with no arguments each time the hotkey fires (only while the owning module is enabled), as a [handler](../module-runtime-and-lifecycle.md#handlers) of the module — one after another with its other handlers — however the press was delivered; what a held-down combination does is in the platform sections.
 
 `opts.foreground = true` is **experimental**, for the HTML probe's test W2 (TODO.md): the press is left to the operating system's own hotkey delivery, which on Windows is what gives this application the right to bring a window of its own to the front — see the Windows section. It may go again once the probe has answered whether it is needed. `foreground` is `true` or `false`; any other value, and any other key in `opts`, raises.
 
-It raises, at once, for every spec the operating system could never hold — each a module author's to fix, and each with a message that says why:
+It raises, at once, for a mistake in the call, which no platform could ever hold — each a module author's to fix, and each with a message that says why:
 
 - a spec the shared parser cannot read at all (an unknown modifier or key name; the message names the part);
-- a `"<modifier> tap"`, which is something [`host.keys.capture`](./keys.md#host-keys-capture) watches and no system registers;
-- a key the platform has no code for: `F21`–`F24` on macOS;
-- a combination **the system keeps for itself** — the `reserved` reason of [`host.keys.check`](./keys.md#host-keys-check): F12 and Win+L on Windows; Command+F5, Command+Q, Command+Tab and the rest of the list there on macOS. The message names the combination and what the system uses it for. Carbon would register Command+Q without complaint and take quitting away from every application for as long as the module held it, which is why this is a refusal and not a warning.
+- a `"<modifier> tap"`, which is something [`host.keys.capture`](./keys.md#host-keys-capture) watches and no system registers.
 
-These are exactly the `check` reasons marked "raises" in its table. Nothing else `check` can report is refused: a chord on VoiceOver's layer, or one that also types a character, registers as asked. A combination that another **application** holds is not known until the claim is made, so it does not raise; see the platform sections.
+It answers `nil, err` and registers nothing for a spec **this platform** can never hold — the same spec may be fine on the other one, so the platform decides, not the call:
+
+- a key the platform has no code for: `F21`–`F24` on macOS. `err.code` is `not_supported`, its message `the hotkey '…' (…) cannot be registered: macOS has no key code for …. Choose another key`;
+- a combination **the system keeps for itself** — the `reserved` reason of [`host.keys.check`](./keys.md#host-keys-check): F12 and Win+L on Windows; Command+F5, Command+Q, Command+Tab and the rest of the list there on macOS. `err.code` is `taken`, and the message names the combination and what the system uses it for: `the hotkey '…' (…) is kept by the system and cannot be registered: …. Choose another combination`. Carbon would register Command+Q without complaint and take quitting away from every application for as long as the module held it, which is why this is a refusal and not a warning;
+- every spec, on a platform without hotkeys (the build for other systems): `not_supported`, `hotkeys are not implemented on this platform yet (spec '…')`.
+
+These are exactly the `check` reasons its table marks as refused. Nothing else `check` can report is refused: a chord on VoiceOver's layer, or one that also types a character, registers as asked. A combination that another **application** holds is not known until the claim is made; it is answered beside the id, below.
+
+**`id, err` is a partial answer: the id and an error value together.** The claim is made and stands — it is tried again, as below — but it is **not held at this moment**, so the callback does not fire until it is. Test both values: `id` alone is held now; `id` with `err` is a standing claim, and `err.code` says why it is not held:
+
+- `taken` — another module holds the combination (`module '…' holds this combination`), or another program does: `RegisterHotKey failed for '…' (already in use by another app?)` on Windows, `macOS refused the shortcut '…' (RegisterEventHotKey returned …); another application probably already uses it system-wide` on a Mac;
+- `not_supported` — on a Mac, a letter no key of the current keyboard layout types (`no key of the current keyboard layout types this letter`), held as soon as a layout that types it is selected;
+- `failed` — on a Mac, the Carbon handler every hotkey arrives through could not be installed (`could not install the Carbon hotkey handler (InstallEventHandler returned …); no global shortcut will work in this session`).
+
+A disabled module gets the id alone: its claims are not made until it is enabled. Keep the id either way; [`unregister`](#host-hotkey-unregister) gives up a standing claim as it gives up a held one.
 
 The host records, logs and reports a registration by its [normalized](./keys.md#host-keys-normalize) spec, so the log names the chord it is on this platform: `Ctrl+Shift+Win+Alt+F6` appears as `Ctrl+Alt+Shift+Win+F6` on Windows, and `Cmd+Shift+F6` as `Shift+Cmd+F6` on a Mac. The dialogs use the same form on Windows. On a Mac they say the key in [`describe`](./keys.md#host-keys-describe)'s spoken words, `Shift+Command+F6`, because the spec's word for the Control key there, `Meta`, is not the key's name.
 
@@ -51,18 +63,25 @@ The host records, logs and reports a registration by its [normalized](./keys.md#
 ```luau
 -- Written once: Ctrl+Shift+F9 on Windows, Command+Shift+F9 on a Mac.
 local KEY = "Ctrl+Shift+F9"
-local id = host.hotkey.register(KEY, function()
+local id, err = host.hotkey.register(KEY, function()
   host.speech.output("Hotkey pressed")
 end)
-host.log.info(host.keys.describe(KEY, { style = "short" }) .. " is registered as " .. id)
+local said = host.keys.describe(KEY, { style = "short" })
+if id == nil then
+  host.log.info(said .. " cannot be a hotkey here: " .. err)       -- registered nothing
+elseif err then
+  host.log.info(said .. " is claimed as " .. id .. ", not held now: " .. err)  -- a partial answer
+else
+  host.log.info(said .. " is registered as " .. id)
+end
 ```
 
 ### A registration is a claim, not a guarantee
 
 Only one module can hold a combination at a time, and a valid spec that somebody else is
 already holding does **not** raise. It is recorded as a standing claim, you get a real `id`
-back, and your callback simply does not fire while the other holder has it. The user is told
-which two modules want the same key.
+back with an error value beside it (`taken`), and your callback simply does not fire while the
+other holder has it. The user is told which two modules want the same key.
 
 The claim is honoured the moment the combination becomes free — the other module being
 disabled in the module manager, uninstalled, or releasing the key with
@@ -83,7 +102,9 @@ reload key reloads every module after the stop, and the quit key quits the appli
 stall that ends without a stop drops nothing.
 
 The practical consequence for an overlay: **do not announce a hotkey as available just
-because `register` returned an id.** It returns one either way.
+because `register` returned an id.** It returns one either way; an error value beside it says
+the claim is not held at the moment of the call. A claim held then can still be lost later —
+on a Mac to a layout switch (below) — and nothing tells the module.
 
 **A screen reader can take a chord before the host sees it.** JAWS and NVDA have keys of their
 own, and both can be extended with scripts and add-ons. When the screen reader acts on a chord
@@ -133,22 +154,22 @@ A key captured with [`host.keys.capture`](./keys.md#host-keys-capture) by any en
 
 A combination held by another **application**
 (rather than by another module) cannot be taken, and that refusal is surfaced to the user by
-name and logged. The claim still stands, and it is tried again on the next change to the
+name, logged and answered beside the id (`taken`). The claim still stands, and it is tried again on the next change to the
 enabled set — so quitting the application that holds the key can be enough. The Windows shell
 is such an application for the four modifiers with a letter: it holds the Office key's W, X, P,
 O, T, Y, N, D and L.
 
 ### macOS {#host-hotkey-register-macos}
 
-A Carbon event hotkey — deliberately **not** an event tap, so this needs no Input Monitoring grant, whether or not `host.keys` does (on macOS 26.6 it did not: see [macOS permissions](../macos-permissions.md#input-monitoring)). That is also what makes a hotkey the application's witness for the tap: one that arrives while the tap, on for more than a second, has seen no key at all says the tap is not handed the keyboard. It is registered by role: `Ctrl` is Command, `Alt` Option, `Shift` Shift and `Win` (`Meta`) Control, so Kontakt's `"Ctrl+L"` is Command+L here. `"Ctrl+Q"`, `"Ctrl+H"`, `"Ctrl+Tab"` and the rest of the reserved list raise.
+A Carbon event hotkey — deliberately **not** an event tap, so this needs no Input Monitoring grant, whether or not `host.keys` does (on macOS 26.6 it did not: see [macOS permissions](../macos-permissions.md#input-monitoring)). That is also what makes a hotkey the application's witness for the tap: one that arrives while the tap, on for more than a second, has seen no key at all says the tap is not handed the keyboard. It is registered by role: `Ctrl` is Command, `Alt` Option, `Shift` Shift and `Win` (`Meta`) Control, so Kontakt's `"Ctrl+L"` is Command+L here. `"Ctrl+Q"`, `"Ctrl+H"`, `"Ctrl+Tab"` and the rest of the reserved list are answered `nil, err` (`taken`).
 
-`F21`–`F24` raise here (see above): macOS has no key code for them.
+`F21`–`F24` are answered `nil, err` here (`not_supported`, see above): macOS has no key code for them.
 
 `{ foreground = true }` is accepted and changes nothing: a Carbon hotkey is the system's own delivery already, and there is no hook on its path.
 
 A chord that holds Control and Option together registers and never arrives while VoiceOver runs with its default modifier; the log says so once per chord, and [`host.keys.check`](./keys.md#host-keys-check) says so before you register. In a spec that is `Meta+Alt`, and the four-modifier chord holds it too. Ctrl+Alt without Win is Command+Option here, which is off it. A key that must be free system-wide is best Command+Shift with a function key (`"Cmd+Shift+F6"`): Command+Shift with a letter is the application-menu layer, and a hotkey there takes it from every application.
 
-A letter is the key that types it under the current keyboard layout — with Command held, when the combination holds Command, so a layout such as "Dvorak – QWERTY ⌘", which types QWERTY while Command is down, puts Ctrl+Z (Command+Z) where its Command shortcuts are — and digits and F-keys are positions, as for every spec on macOS: see [the key spec](./keys.md#key-spec-string-format). A Carbon hotkey is registered on a key code, so when the user switches to a layout that puts the letter elsewhere, a hotkey on a letter is registered again on its new key, and the log says so. One that cannot follow — another application holds the combination on the new key, or no key types the letter now — is logged, and tried again at every later layout change and whenever its module registers it again; until then it is not held, while the host still counts it as held. A hotkey on a letter that no key of the current layout types is treated the same way from the start: `register` returns its id and does not raise, the log says the hotkey is not held, and it is registered when a layout that types the letter is selected.
+A letter is the key that types it under the current keyboard layout — with Command held, when the combination holds Command, so a layout such as "Dvorak – QWERTY ⌘", which types QWERTY while Command is down, puts Ctrl+Z (Command+Z) where its Command shortcuts are — and digits and F-keys are positions, as for every spec on macOS: see [the key spec](./keys.md#key-spec-string-format). A Carbon hotkey is registered on a key code, so when the user switches to a layout that puts the letter elsewhere, a hotkey on a letter is registered again on its new key, and the log says so. One that cannot follow — another application holds the combination on the new key, or no key types the letter now — is logged, and tried again at every later layout change and whenever its module registers it again; until then it is not held, while the host still counts it as held. A hotkey on a letter that no key of the current layout types is treated the same way from the start: `register` returns its id with an error value beside it (`not_supported`, `no key of the current keyboard layout types this letter`), the log says the hotkey is not held, and it is registered when a layout that types the letter is selected.
 
 ## host.hotkey.unregister(id) {#host-hotkey-unregister}
 

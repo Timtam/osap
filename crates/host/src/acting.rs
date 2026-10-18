@@ -29,7 +29,9 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use crate::backend::{ActJob, MouseButton};
-use crate::logging;
+use crate::errors::input::{STYLE_THREAD_FAILED, STYLE_THREAD_GONE, STYLE_THREAD_NOT_STARTED};
+use crate::errors::HostError;
+use crate::{errors_lua, logging};
 use crate::ocr::types::{current_priority, Priority};
 
 /// A thread of the host's for one kind of job.
@@ -67,7 +69,7 @@ pub(crate) struct Answer {
 pub(crate) struct Due {
     pub answer: Answer,
     pub prio: Priority,
-    pub result: Result<(), String>,
+    pub result: Result<(), HostError>,
 }
 
 /// A lane's way to its thread: each job with its number.
@@ -80,8 +82,8 @@ pub(crate) struct Acting {
     /// The answers owed, by the job's number. A job handed over without one is not in here: what
     /// became of it is in the log, where the job writes it — and its thread, should it panic.
     waiting: RefCell<HashMap<u64, (Answer, Priority)>>,
-    done_tx: Sender<(u64, Result<(), String>)>,
-    done_rx: Receiver<(u64, Result<(), String>)>,
+    done_tx: Sender<(u64, Result<(), HostError>)>,
+    done_rx: Receiver<(u64, Result<(), HostError>)>,
     /// Each lane's way to its thread, once that thread is started.
     lanes: [RefCell<Option<ToThread>>; LANES],
 }
@@ -97,7 +99,8 @@ impl Acting {
     pub(crate) fn run(&self, lane: Lane, job: ActJob, answer: Option<Answer>) {
         let token = self.token(answer);
         let sent = self.sender(lane).and_then(|tx| {
-            tx.send((token, job)).map_err(|_| format!("the host's {} thread is gone", lane.thread()))
+            tx.send((token, job))
+                .map_err(|_| HostError::with(&STYLE_THREAD_GONE, format!("the host's {} thread is gone", lane.thread())))
         });
         if let Err(why) = sent {
             logging::line("input", &format!("a job for the {} thread was not done: {why}", lane.thread()));
@@ -138,7 +141,7 @@ impl Acting {
 
     /// An outcome known at the call, for `answer`: delivered on the next tick, as one from a
     /// thread is, so a callback is never called inside the call that handed it over.
-    pub(crate) fn answer_now(&self, answer: Answer, result: Result<(), String>) {
+    pub(crate) fn answer_now(&self, answer: Answer, result: Result<(), HostError>) {
         let token = self.token(Some(answer));
         let _ = self.done_tx.send((token, result));
     }
@@ -155,8 +158,9 @@ impl Acting {
 
     /// `lane`'s thread, started at its first job. It runs each job inside `logging::contain`, so a
     /// job that panics is answered with the panic's report — and the report is in the log, for a
-    /// job nobody waits for — and the thread goes on.
-    fn sender(&self, lane: Lane) -> Result<ToThread, String> {
+    /// job nobody waits for — and the thread goes on. The one lane is the window-style thread, so
+    /// what its thread answers is in `errors::input`'s words for it.
+    fn sender(&self, lane: Lane) -> Result<ToThread, HostError> {
         let mut slot = self.lanes[lane as usize].borrow_mut();
         if let Some(tx) = slot.as_ref() {
             return Ok(tx.clone());
@@ -170,14 +174,14 @@ impl Acting {
                 for (token, job) in rx {
                     let result = logging::contain(job).unwrap_or_else(|p| {
                         logging::line("input", &format!("a job on the host's {name} thread failed: {p}"));
-                        Err(format!("the host's thread for it failed: {p}"))
+                        Err(HostError::with(&STYLE_THREAD_FAILED, format!("the host's thread for it failed: {p}")))
                     });
                     if done.send((token, result)).is_err() {
                         break;
                     }
                 }
             })
-            .map_err(|e| format!("the host could not start its {} thread: {e}", lane.thread()))?;
+            .map_err(|e| HostError::with(&STYLE_THREAD_NOT_STARTED, format!("the host could not start its {} thread: {e}", lane.thread())))?;
         *slot = Some(tx.clone());
         Ok(tx)
     }
@@ -195,16 +199,13 @@ impl Acting {
     }
 }
 
-/// An outcome as its callback is called: `(true)` or `(false, why)`.
-pub(crate) fn outcome_args(lua: &Lua, result: &Result<(), String>) -> mlua::Result<MultiValue> {
-    Ok(match result {
-        Ok(()) => MultiValue::from_vec(vec![Value::Boolean(true)]),
-        Err(why) => MultiValue::from_vec(vec![Value::Boolean(false), Value::String(lua.create_string(why)?)]),
-    })
+/// An outcome as its callback is called: `(true)` or `(false, err)`.
+pub(crate) fn outcome_args(lua: &Lua, result: &Result<(), HostError>) -> mlua::Result<MultiValue> {
+    errors_lua::done(lua, result)
 }
 
-/// The outcome as a call returns it: `true`, or `false, why`.
-pub(crate) fn outcome_values(lua: &Lua, result: Result<(), String>) -> mlua::Result<MultiValue> {
+/// The outcome as a call returns it: `true`, or `false, err`.
+pub(crate) fn outcome_values(lua: &Lua, result: Result<(), HostError>) -> mlua::Result<MultiValue> {
     outcome_args(lua, &result)
 }
 
@@ -383,6 +384,7 @@ mod tests {
     /// way; one nobody waits for is dropped. Pure threads: nothing here touches a window.
     #[test]
     fn a_job_runs_on_its_thread_and_its_outcome_comes_back_to_who_waits() {
+        use crate::errors::input::{COVERED, NOT_KEPT};
         let lua = Lua::new();
         let acting = Acting::new();
         let cb = || lua.create_function(|_, ()| Ok(())).unwrap();
@@ -390,9 +392,9 @@ mod tests {
         let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let (o1, o2) = (order.clone(), order.clone());
         acting.run(Lane::Style, Box::new(move || { o1.lock().unwrap().push(1); Ok(()) }), answer("first"));
-        acting.run(Lane::Style, Box::new(move || { o2.lock().unwrap().push(2); Err("no".into()) }), None);
+        acting.run(Lane::Style, Box::new(move || { o2.lock().unwrap().push(2); Err(HostError::of(&NOT_KEPT)) }), None);
         acting.run(Lane::Style, Box::new(|| panic!("{}a job that fails", crate::EXPECTED_PANIC)), answer("panics"));
-        acting.answer_now(Answer { idx: 4, lua: lua.clone(), cb: cb(), what: "at once" }, Err("refused".into()));
+        acting.answer_now(Answer { idx: 4, lua: lua.clone(), cb: cb(), what: "at once" }, Err(HostError::of(&COVERED)));
         crate::quiet_expected_panics();
         let mut due = Vec::new();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -400,14 +402,15 @@ mod tests {
             due.extend(acting.take_due());
             std::thread::yield_now();
         }
-        let mut got: Vec<(&str, usize, Result<(), String>)> =
+        let mut got: Vec<(&str, usize, Result<(), HostError>)> =
             due.into_iter().map(|d| (d.answer.what, d.answer.idx, d.result)).collect();
         got.sort_by_key(|g| g.0);
         assert_eq!(got.len(), 3, "{got:?}");
-        assert_eq!((got[0].0, got[0].1, &got[0].2), ("at once", 4, &Err("refused".to_string())));
+        assert_eq!((got[0].0, got[0].1, &got[0].2), ("at once", 4, &Err(HostError::of(&COVERED))));
         assert_eq!((got[1].0, &got[1].2), ("first", &Ok(())));
         assert_eq!(got[2].0, "panics");
-        assert!(got[2].2.as_ref().unwrap_err().starts_with("the host's thread for it failed: "), "{:?}", got[2].2);
+        let failed = got[2].2.as_ref().unwrap_err();
+        assert!(failed.reason() == &STYLE_THREAD_FAILED && failed.message().starts_with("the host's thread for it failed: "), "{failed:?}");
         assert_eq!(*order.lock().unwrap(), vec![1, 2], "in the order they were handed over");
         assert!(acting.waiting.borrow().is_empty(), "every answer given once");
     }
@@ -436,15 +439,28 @@ mod tests {
         assert!(t.elapsed() < Duration::from_secs(10), "a panic is not waited out");
     }
 
-    /// A callback's arguments, and a call's values: `true`, or `false` and the reason.
+    /// A callback's arguments, and a call's values: `true`, or `false` and the error value.
     #[test]
     fn an_outcome_is_true_or_false_and_why() {
         let lua = Lua::new();
         let ok = outcome_args(&lua, &Ok(())).unwrap();
         assert_eq!(ok.len(), 1);
         assert!(matches!(ok.front(), Some(Value::Boolean(true))));
-        let no = outcome_values(&lua, Err("the window is gone".into())).unwrap();
+        let no = outcome_values(&lua, Err(HostError::of(&crate::errors::common::WINDOW_GONE))).unwrap();
         assert!(matches!(no.front(), Some(Value::Boolean(false))));
-        assert!(matches!(no.get(1), Some(Value::String(s)) if s.to_str().unwrap() == "the window is gone"));
+        let Some(Value::Table(err)) = no.get(1) else { panic!("{no:?}") };
+        assert_eq!(err.raw_get::<String>("code").unwrap(), "gone");
+        assert_eq!(err.raw_get::<String>("message").unwrap(), "the window is gone");
+    }
+
+    /// What the window-style thread answers for itself is in its Reasons' words: the thread gone,
+    /// not started, a job that failed — as `lane.thread()` names it.
+    #[test]
+    fn the_style_threads_own_answers_are_its_reasons() {
+        assert_eq!(Lane::Style.thread(), "window-style");
+        let gone = HostError::with(&STYLE_THREAD_GONE, format!("the host's {} thread is gone", Lane::Style.thread()));
+        assert_eq!(gone.message(), "the host's window-style thread is gone");
+        let not = HostError::with(&STYLE_THREAD_NOT_STARTED, format!("the host could not start its {} thread: e", Lane::Style.thread()));
+        assert_eq!(not.code(), crate::errors::Code::Failed);
     }
 }

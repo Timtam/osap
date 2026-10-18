@@ -39,6 +39,7 @@ use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use crate::backend::{CaptureSource, CapturedImage, Compare, OcrLine, OcrText, OcrWord, OcrWorker, Recognise};
 use crate::capture_source;
+use crate::errors::HostError;
 use crate::image_search::VmOwner;
 use crate::mailbox::{self, Event, MailHost, Mailboxes, Opened, Why};
 use crate::ocr::lang::Languages;
@@ -132,14 +133,14 @@ fn line_of(text: String) -> OcrText {
 }
 
 /// "x,y" for every region; "preempt=…" at y = 79, which says whether the read was a background
-/// one; a failure at x = 666.
-fn fake_recognise(shot: &Fake, _: &[(i32, i32, i32, i32)], ctx: &Recognise) -> Vec<Result<OcrText, String>> {
+/// one; a failure at x = 666 ([`fake_failure`]).
+fn fake_recognise(shot: &Fake, _: &[(i32, i32, i32, i32)], ctx: &Recognise) -> Vec<Result<OcrText, HostError>> {
     crate::loop_guard::off_loop("the fake recognition");
     ctx.each(shot.iter(), |&(x, y, _, _)| {
         locked(&RECOGNISING).push(x);
         wait_while_held(x, false);
         if x == 666 {
-            return Err("the fake recogniser failed".to_string());
+            return Err(fake_failure());
         }
         if y == 79 {
             return Ok(line_of(format!("preempt={}", ctx.preempt.is_some())));
@@ -148,9 +149,40 @@ fn fake_recognise(shot: &Fake, _: &[(i32, i32, i32, i32)], ctx: &Recognise) -> V
     })
 }
 
+/// What the fake recogniser answers at x = 666, as the system recogniser words a failure.
+fn fake_failure() -> HostError {
+    HostError::with(&crate::errors::ocr::RECOGNITION_FAILED, "OCR failed: the fake recogniser failed".to_string())
+}
+
 /// Where the fake's snapshot rounds begin to have pictures (`worker`'s `frames`), and its pixel
 /// reads colours (`fake_points`).
 const SNAP_X: i32 = 20_000;
+
+/// The error value the global `name` of `lua` holds, as its code and its message.
+fn error_of(lua: &Lua, name: &str) -> (String, String) {
+    let t: Table = lua.globals().get(name).unwrap_or_else(|e| panic!("{name} is no error value: {e}"));
+    (t.raw_get("code").unwrap(), t.raw_get("message").unwrap())
+}
+
+/// `e` as [`error_of`] reads one.
+fn said(e: &HostError) -> (String, String) {
+    (e.code().as_str().to_string(), e.to_string())
+}
+
+/// What the fake's pixel reads and image captures answer where there is no picture: `screen
+/// capture failed`.
+fn no_pixels() -> HostError {
+    crate::backend::capture_failed()
+}
+
+/// What the fake's snapshot rounds answer where there is no picture: another capture error, so a
+/// test tells the two threads' answers apart.
+fn no_snapshots() -> HostError {
+    HostError::with(
+        &crate::errors::screen::CAPTURE_TOO_LARGE,
+        crate::errors::screen::CAPTURE_TOO_LARGE.message.to_string(),
+    )
+}
 
 /// Every point the fake read for `pixel` or `pixels`: its x, whether it was read as `pixel` reads
 /// one, and the thread.
@@ -160,7 +192,7 @@ static POINTS_READ: Mutex<Vec<(i32, bool, String)>> = Mutex::new(Vec::new());
 /// (`worker`'s `points`): from x = 20000 on, the colour a snapshot round's picture has there,
 /// `(x, y, 50)`; elsewhere none, and why. A read of a held x waits until it is let go. On the loop
 /// it is the bug the screen guard names, as the backends' reads are.
-fn fake_points(at: &[(i32, i32)], _: CaptureSource, single: bool) -> Result<Vec<(u8, u8, u8)>, String> {
+fn fake_points(at: &[(i32, i32)], _: CaptureSource, single: bool) -> Result<Vec<(u8, u8, u8)>, HostError> {
     crate::loop_guard::off_loop_screen("the fake pixel read");
     for p in at {
         wait_while_held(p.0, true);
@@ -168,7 +200,7 @@ fn fake_points(at: &[(i32, i32)], _: CaptureSource, single: bool) -> Result<Vec<
     let thread = std::thread::current().name().unwrap_or("?").to_string();
     locked(&POINTS_READ).extend(at.iter().map(|p| (p.0, single, thread.clone())));
     if at.iter().any(|p| p.0 < SNAP_X) {
-        return Err("no pixels here".to_string());
+        return Err(no_pixels());
     }
     Ok(at.iter().map(|&(x, y)| (x as u8, y as u8, 50)).collect())
 }
@@ -196,7 +228,7 @@ fn wait_image_capturing(x: i32) {
 /// snapshot round has there (`snapshot::test_frame`); elsewhere none, and why. A capture of a held x
 /// waits until it is let go. On the loop it is the bug the screen guard names, as the backends'
 /// captures are.
-fn fake_image_capture(regions: &[(i32, i32, i32, i32)], _: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+fn fake_image_capture(regions: &[(i32, i32, i32, i32)], _: CaptureSource) -> Vec<Result<CapturedImage, HostError>> {
     crate::loop_guard::off_loop_screen("the fake region capture");
     let thread = std::thread::current().name().unwrap_or("?").to_string();
     regions
@@ -208,7 +240,7 @@ fn fake_image_capture(regions: &[(i32, i32, i32, i32)], _: CaptureSource) -> Vec
             if x >= SNAP_X {
                 Ok(crate::snapshot::test_frame(x, y, w, h).img)
             } else {
-                Err("no pixels here".to_string())
+                Err(no_pixels())
             }
         })
         .collect()
@@ -277,7 +309,7 @@ pub(crate) fn worker() -> OcrWorker<Fake> {
                     if x >= SNAP_X {
                         Ok(crate::snapshot::test_frame(x, y, w, h))
                     } else {
-                        Err("no snapshots here".to_string())
+                        Err(no_snapshots())
                     }
                 })
                 .collect()
@@ -471,7 +503,7 @@ fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     let hh = h.clone();
     ocr.set("languages", lua.create_function(move |lua, ()| reads::languages_value(&*hh, lua)).unwrap()).unwrap();
     let hh = h.clone();
-    ocr.set("resolveLanguage", lua.create_function(move |_, v: Value| reads::resolve_value(&*hh, &v)).unwrap()).unwrap();
+    ocr.set("resolveLanguage", lua.create_function(move |lua, v: Value| reads::resolve_value(&*hh, lua, &v)).unwrap()).unwrap();
     let hh = h.clone();
     let submit = lua
         .create_function(move |lua, (what, opts, cb): (Value, Value, Value)| reads::read(&*hh, lua, idx, what, opts, cb))
@@ -770,10 +802,11 @@ fn the_first_read_comparison_goes_with_the_read_to_the_capture_thread() {
 }
 
 /// Before the recognise thread has published its language list, `languages` answers `{}` and
-/// `resolveLanguage` `nil` at once — they never wait for it — and the log says so, once a session
-/// through `OcrState::once` (said, not counted, here). A read the recogniser answers comes after
-/// the list: its language is resolved on that thread, after it. So that read's callback, or a
-/// handler after it, always finds the list, and `nil` there never means "not known yet".
+/// `resolveLanguage` `nil, err` at once, `not_ready` — they never wait for it — and the log says
+/// so, once a session through `OcrState::once` (said, not counted, here). A read the recogniser
+/// answers comes after the list: its language is resolved on that thread, after it. So that read's
+/// callback, or a handler after it, always finds the list, and a `nil` there is `unavailable`: no
+/// language here reads it (D34 of the typed-errors plan).
 #[test]
 fn the_language_list_answers_at_once_and_is_known_before_the_recogniser_answers_a_read() {
     let h = holder(Service::spawn(OcrWorker { languages: held_langs, ..worker() }));
@@ -781,7 +814,8 @@ fn the_language_list_answers_at_once_and_is_known_before_the_recogniser_answers_
     run(
         &lua,
         "early = #host.ocr.languages()\n\
-         earlyResolved = host.ocr.resolveLanguage('en')\n\
+         earlyResolved, earlyWhy = host.ocr.resolveLanguage('en')\n\
+         earlyCode, earlyWhy = earlyWhy.code, tostring(earlyWhy)\n\
          again = #host.ocr.languages()\n\
          host.ocr.recognize({ 9411, 5, 9441, 15 }, function(r)\n\
            text = r.text\n\
@@ -791,9 +825,12 @@ fn the_language_list_answers_at_once_and_is_known_before_the_recogniser_answers_
          task.run(function()\n\
            waited = host.ocr.recognize({ 9412, 5, 9442, 15 }).text\n\
            afterWait = host.ocr.resolveLanguage('en')\n\
+           missing, missingWhy = host.ocr.resolveLanguage('ja')\n\
+           missingCode, missingWhy = missingWhy.code, tostring(missingWhy)\n\
          end)\n",
     );
     assert!(yes(&lua, "return early == 0 and earlyResolved == nil and again == 0"), "answered at once, from nothing");
+    assert!(yes(&lua, "return earlyCode == 'not_ready' and earlyWhy == 'the recognition languages are not known yet'"));
     assert!(h.state.has_said("langs-late"), "the line is said");
     // Both photographed at the call, and neither answered: the recogniser reads the list first.
     let until = Instant::now() + Duration::from_secs(10);
@@ -807,6 +844,11 @@ fn the_language_list_answers_at_once_and_is_known_before_the_recogniser_answers_
     settle(&h);
     assert!(yes(&lua, "return text == '9411,5' and inCallback == 'en-US' and resolved == 'en-US'"));
     assert!(yes(&lua, "return waited == '9412,5' and afterWait == 'en-US'"));
+    assert!(yes(
+        &lua,
+        "return missing == nil and missingCode == 'unavailable' \
+         and string.find(missingWhy, 'language: ja is not available here (available: en-US)', 1, true) == 1"
+    ));
     assert!(yes(&lua, "return #host.ocr.languages() == 1"));
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
 }
@@ -1502,9 +1544,9 @@ fn routine_failures_are_readings_and_mistakes_raise_at_the_wait() {
         r#"
         task.run(function()
           local r = host.ocr.recognize({ region = { 666, 5, 696, 15 } })
-          failed = { status = r.status, error = r.error, skipped = r.skipped, time = r.time, epoch = r.inputEpoch }
+          failed = { status = r.status, error = tostring(r.error), code = r.error.code, skipped = r.skipped, time = r.time, epoch = r.inputEpoch }
           local w = host.ocr.recognize({ region = { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0, 1, 1 } } })
-          empty = { status = w.status, error = w.error, time = w.time }
+          empty = { status = w.status, error = tostring(w.error), code = w.error.code, time = w.time }
           okBad, bad = pcall(host.ocr.recognize, { region = { x = 1 } })
           bad = tostring(bad)
         end)
@@ -1513,9 +1555,10 @@ fn routine_failures_are_readings_and_mistakes_raise_at_the_wait() {
     settle(&h);
     assert!(yes(
         &lua,
-        r#"return failed.status == "failed" and failed.error == "the fake recogniser failed" and failed.skipped == false
-          and failed.time == nil and failed.epoch == nil
-          and empty.status == "failed" and empty.error == "the window's client area is empty (0x0)" and empty.time == nil
+        r#"return failed.status == "failed" and failed.error == "OCR failed: the fake recogniser failed" and failed.code == "failed"
+          and failed.skipped == false and failed.time == nil and failed.epoch == nil
+          and empty.status == "failed" and empty.error == "the window's client area is empty (0x0)" and empty.code == "hidden"
+          and empty.time == nil
           and okBad == false and string.find(bad, "host.ocr.recognize: the entry.region", 1, true) ~= nil"#
     ));
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
@@ -1545,15 +1588,16 @@ fn a_wait_pushed_out_by_the_limit_fails_on_the_next_turn() {
     assert!(yes(&lua, "return insideTheCall == nil"), "answered inside the call that pushed it out");
     reads::fire(&*h);
     let first: String = lua.load("return tostring(got[1])").eval().unwrap();
-    assert_eq!(first, format!("failed|{}", crate::ocr::sched::TOO_MANY));
+    assert_eq!(first, format!("failed|{}", crate::ocr::sched::too_many()));
     release(9171);
     settle(&h);
     assert!(yes(&lua, "for i = 2, 17 do if got[i] ~= 'text|nil' then return false end end return true"));
 }
 
 /// Nothing to read is still a wait: a list of window regions whose windows have nothing to show is
-/// answered on a later turn of the loop, each reading `"failed"` with why. Empty corners and an
-/// empty list are mistakes in the call, and raise at the wait.
+/// answered on a later turn of the loop, each reading `"failed"` with why, and so are corners with
+/// no area (`outside`, D5 of the typed-errors plan). An empty list is a mistake in the call, and
+/// raises at the wait.
 #[test]
 fn an_empty_wait_is_answered_on_a_later_turn() {
     let h = host();
@@ -1564,10 +1608,11 @@ fn an_empty_wait_is_answered_on_a_later_turn() {
         local gone = { client = { x = 0, y = 0, w = 0, h = 0 } }
         task.run(function()
           local list = host.ocr.recognize({ { window = gone, fraction = { 0, 0, 1, 1 } }, { window = gone, fraction = { 0, 0, 0.5, 1 } } })
-          many = { n = #list, status = list[2].status, error = list[2].error, time = list[2].time }
-          okEmpty, emptyCorners = pcall(host.ocr.recognize, { 9205, 5, 9205, 15 })
+          many = { n = #list, status = list[2].status, error = tostring(list[2].error), time = list[2].time }
+          local e = host.ocr.recognize({ 9205, 5, 9205, 15 })
+          emptyCorners = { status = e.status, code = e.error.code, error = tostring(e.error), x = e.x, w = e.w, time = e.time }
           okNone, noRegion = pcall(host.ocr.recognize, {})
-          emptyCorners, noRegion = tostring(emptyCorners), tostring(noRegion)
+          noRegion = tostring(noRegion)
         end)
         "#,
     );
@@ -1577,7 +1622,8 @@ fn an_empty_wait_is_answered_on_a_later_turn() {
         &lua,
         r#"return many.n == 2 and many.status == "failed" and many.time == nil
           and many.error == "the window's client area is empty (0x0)"
-          and okEmpty == false and string.find(emptyCorners, "host.ocr.recognize: the region { 9205, 5, 9205, 15 } is empty or turned around", 1, true) ~= nil
+          and emptyCorners.status == "failed" and emptyCorners.code == "outside" and emptyCorners.error == "the region is empty (0x10)"
+          and emptyCorners.x == 0 and emptyCorners.w == 0 and emptyCorners.time == nil
           and okNone == false and string.find(noRegion, "host.ocr.recognize: the region.x1 is missing", 1, true) ~= nil"#
     ));
 }
@@ -1993,8 +2039,7 @@ fn a_waited_snapshot_past_the_applications_limit_answers_nil_and_why() {
     assert!(yes(&lua, "return done == nil"), "it waits for its answer, a refusal too");
     fire_snaps(&h);
     assert!(yes(&lua, "return done == true and waited == nil"));
-    let why: String = lua.globals().get("why").unwrap();
-    assert_eq!(why, crate::snapshot::all_requests_refused());
+    assert_eq!(error_of(&lua, "why"), said(&crate::snapshot::all_requests_refused()));
     release(20041);
     settle_snaps(&h);
     for l in &askers {
@@ -2244,8 +2289,8 @@ fn a_pixel_in_a_handler_waits_and_answers_its_colours() {
         yes(&lua, "return same(list, { { r = 233, g = 5, b = 50, hex = '#E90532' }, { r = 234, g = 6, b = 50, hex = '#EA0632' } })"),
         "the list, in order"
     );
-    assert!(yes(&lua, "return none == nil and why == 'no pixels here'"), "a failed read");
-    assert!(yes(&lua, "return noList == nil and listWhy == 'no pixels here'"), "all or nothing");
+    assert!(yes(&lua, "return none == nil and tostring(why) == 'screen capture failed'"), "a failed read");
+    assert!(yes(&lua, "return noList == nil and tostring(listWhy) == 'screen capture failed'"), "all or nothing");
     assert!(yes(&lua, "return before == after"), "a wait turns no epoch");
     let read = points_read(20201);
     assert_eq!(read, [(true, "screen-capture".into()), (true, "screen-capture".into()), (false, "screen-capture".into())]);
@@ -2289,8 +2334,9 @@ fn a_pixel_that_touches_no_screen_is_answered_at_once_wherever_it_is_asked() {
                 &lua,
                 &format!(
                     "local g = {got} return g.fromSnap.hex == '#F40632' and #g.listFromSnap == 2 and g.outside == nil \
-                     and g.outsideWhy == 'the point is not inside the snapshot' and g.minimised == nil \
-                     and g.minimisedWhy == \"the window's client area is empty (0x0)\" and #g.emptyList == 0 \
+                     and g.outsideWhy.code == 'outside' and tostring(g.outsideWhy) == 'the point is not inside the snapshot' \
+                     and g.minimised == nil and g.minimisedWhy.code == 'hidden' \
+                     and tostring(g.minimisedWhy) == \"the window's client area is empty (0x0)\" and #g.emptyList == 0 \
                      and g.mistake == false and g.listMistake == false"
                 )
             ),
@@ -2365,8 +2411,7 @@ fn a_pixel_wait_is_one_of_its_modules_requests_and_goes_with_it() {
     assert!(yes(&lua, "return done == nil"), "it waits for its answer, a refusal too");
     fire_snaps(&h);
     assert!(yes(&lua, "return done == true and refused == nil"));
-    let why: String = lua.globals().get("why").unwrap();
-    assert_eq!(why, crate::snapshot::all_requests_refused());
+    assert_eq!(error_of(&lua, "why"), said(&crate::snapshot::all_requests_refused()));
     release(20251);
     settle_snaps(&h);
     assert!(points_read(20252).is_empty(), "nothing read for it");
@@ -2547,7 +2592,7 @@ fn a_hang_ends_every_read_still_out_with_the_reason() {
         r#"
         ended = {}
         local function note(what)
-          return function(r) ended[#ended + 1] = { what = what, status = r.status, error = r.error } end
+          return function(r) ended[#ended + 1] = { what = what, status = r.status, error = tostring(r.error), code = r.error.code } end
         end
         host.ocr.recognize({ 9321, 5, 9351, 15 }, { key = "running" }, note("running"))
         host.ocr.recognize({ 9322, 5, 9352, 15 }, { key = "queued" }, note("queued"))
@@ -2561,7 +2606,7 @@ fn a_hang_ends_every_read_still_out_with_the_reason() {
             &lua,
             r#"local seen = {}
             for _, e in ipairs(ended) do
-              if e.status ~= "failed" or string.find(e.error, "the text recogniser has not answered a region for", 1, true) ~= 1 then
+              if e.status ~= "failed" or e.code ~= "timeout" or string.find(e.error, "the text recogniser has not answered a region for", 1, true) ~= 1 then
                 return false
               end
               seen[e.what] = true
@@ -2868,9 +2913,9 @@ fn the_region_calls_in_a_handler_wait_and_answer_what_the_threads_read() {
         ),
         "a table, the grid and nil after it, a match, on the screen and on a snapshot"
     );
-    assert!(yes(&lua, "return waited.notThere[2] == 'no pixels here' and waited.noTemplate[2] == 'no pixels here'"));
+    assert!(yes(&lua, "return tostring(waited.notThere[2]) == 'screen capture failed' and tostring(waited.noTemplate[2]) == 'screen capture failed'"));
     // A profile's picture is taken as a snapshot's is, so it fails as one fails here.
-    assert!(yes(&lua, "return waited.noProfile[1] == nil and waited.noProfile[2] == 'no snapshots here'"));
+    assert!(yes(&lua, "return waited.noProfile[1] == nil and tostring(waited.noProfile[2]) == 'screen capture failed: the region is larger than 40 million pixels'"));
     assert!(
         yes(&lua, "return waited.profile[1].inputEpoch == 41 and type(waited.profile[1].time) == 'number'"),
         "the capture thread's picture"
@@ -2936,12 +2981,13 @@ fn where_the_region_calls_cannot_wait_they_raise_unless_there_is_nothing_to_read
     assert!(
         yes(
             &lua,
-            r#"return quiet[1][1] == nil and quiet[1][2] == "the window's client area is empty (0x0)"
-              and quiet[2][1] == nil and quiet[2][2] == "the region is empty (0x10)" and quiet[3][1] ~= nil
-              and quiet[4][1] == nil and quiet[4][2] == "the region is not inside the snapshot"
-              and quiet[5][1] == nil and quiet[5][2] == quiet[4][2]
-              and got.quiet[2] == quiet[1][2] and got.quietProfile[2] == "the region does not overlap the snapshot"
-              and got.quietCrop[2] == quiet[4][2] and got.waited == nil"#
+            r#"return quiet[1][1] == nil and tostring(quiet[1][2]) == "the window's client area is empty (0x0)"
+              and quiet[2][1] == nil and tostring(quiet[2][2]) == "the region is empty (0x10)" and quiet[2][2].code == "outside"
+              and quiet[3][1] ~= nil
+              and quiet[4][1] == nil and tostring(quiet[4][2]) == "the region is not inside the snapshot"
+              and quiet[5][1] == nil and tostring(quiet[5][2]) == tostring(quiet[4][2])
+              and tostring(got.quiet[2]) == tostring(quiet[1][2]) and tostring(got.quietProfile[2]) == "the region does not overlap the snapshot"
+              and tostring(got.quietCrop[2]) == tostring(quiet[4][2]) and got.waited == nil"#
         ),
         "nothing to read: at once, everywhere; the handler's own call waits"
     );
@@ -3097,9 +3143,10 @@ fn a_key_queued_behind_a_polls_profile_sends_its_reduction_ahead_of_the_polls() 
 }
 
 /// `host.screen.profile` holds a picture of its own under the same limits whether it waits or takes
-/// a callback: corners past 40,000,000 pixels or past the room in the snapshot budget raise at the
-/// call, before anything is captured, and a window region past them is answered `nil` and the
-/// reason. Where it cannot wait each raises the place's message, nothing captured or held.
+/// a callback: corners past 40,000,000 pixels raise at the call, before anything is captured, and a
+/// window region past them is answered `nil` and the error value; past the room in the snapshot
+/// budget either form is answered (D2 of the typed-errors plan). Where it cannot wait each raises
+/// the place's message, nothing captured or held.
 #[test]
 fn a_profile_past_its_limits_raises_or_answers_in_a_handler_and_raises_where_it_cannot_wait() {
     let h = host();
@@ -3112,7 +3159,7 @@ fn a_profile_past_its_limits_raises_or_answers_in_a_handler_and_raises_where_it_
         local WINDOW = { window = { client = { x = 21501, y = 0, w = 10000, h = 5000 } }, fraction = { 0, 0, 1, 1 } }
         local function ask(into)
           into.okHuge, into.huge = pcall(host.screen.profile, { region = HUGE })
-          into.okOver, into.over = pcall(host.screen.profile, { region = OVER })
+          into.okOver, into.over, into.overWhy = pcall(host.screen.profile, { region = OVER })
           into.window = { host.screen.profile({ region = WINDOW }) }
         end
         top = {}
@@ -3127,13 +3174,14 @@ fn a_profile_past_its_limits_raises_or_answers_in_a_handler_and_raises_where_it_
     );
     settle_snaps(&h);
     assert!(yes(&lua, "return waited ~= nil and waited.window ~= nil"), "answered");
-    assert!(yes(&lua, "return waited.okHuge == false and waited.okOver == false"), "corners past a limit raise");
+    assert!(yes(&lua, "return waited.okHuge == false"), "corners past the size limit raise");
     let huge: String = lua.load("return tostring(waited.huge)").eval().unwrap();
     assert!(huge.contains("host.screen.profile: opts.region: the region is 10000x5000, 50000000 pixels; the limit is 40000000"), "{huge}");
-    let over: String = lua.load("return tostring(waited.over)").eval().unwrap();
-    assert!(over.contains("host.screen.profile: this module's snapshots would hold"), "{over}");
+    assert!(yes(&lua, "return waited.okOver == true and waited.over == nil and waited.overWhy.code == 'too_large'"), "past the budget: answered");
+    let over: String = lua.load("return tostring(waited.overWhy)").eval().unwrap();
+    assert!(over.starts_with("this module's snapshots would hold"), "{over}");
     assert!(
-        yes(&lua, r#"return waited.window[1] == nil and waited.window[2] == "at the window's current size the region is 10000x5000, 50000000 pixels; the limit is 40000000""#),
+        yes(&lua, r#"return waited.window[1] == nil and tostring(waited.window[2]) == "at the window's current size the region is 10000x5000, 50000000 pixels; the limit is 40000000""#),
         "{:?}",
         lua.load("return tostring(waited.window[2])").eval::<String>()
     );
@@ -3265,7 +3313,7 @@ fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_image_worker_fou
             &lua,
             r#"return #waited.one == 1 and waited.one[1].x == 22010 and waited.one[1].y == 8 and waited.one[1].n == 1
               and waited.one[1].name == "cut" and waited.oneValues == 1 and #waited.none == 0 and waited.noneValues == 1
-              and waited.snapOne[1].x == 22010 and waited.notThere[1] == nil and waited.notThere[2] == "no pixels here""#
+              and waited.snapOne[1].x == 22010 and waited.notThere[1] == nil and tostring(waited.notThere[2]) == "screen capture failed""#
         ),
         "a hit and nothing after it, nil alone, nil and why"
     );
@@ -3273,7 +3321,7 @@ fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_image_worker_fou
         yes(
             &lua,
             r#"return #waited.list == 1 and waited.list[1].n == 2 and waited.list[1].x == 22010
-              and waited.listNoneValues == 1 and waited.listNotThereValues == 2 and waited.listNotThere[2] == "no pixels here""#
+              and waited.listNoneValues == 1 and waited.listNotThereValues == 2 and tostring(waited.listNotThere[2]) == "screen capture failed""#
         ),
         "the hit of the template that matched, nil alone, nil and why"
     );
@@ -3281,12 +3329,12 @@ fn the_searches_and_shots_in_a_handler_wait_and_answer_what_the_image_worker_fou
         yes(
             &lua,
             r#"return #waited.all[1] == 1 and waited.all[1][1].x == 22010 and waited.allValues == 1 and #waited.allNone[1] == 0
-              and #waited.snapAll[1] == 1 and #waited.allNotThere[1] == 0 and waited.allNotThere[2] == "no pixels here""#
+              and #waited.snapAll[1] == 1 and #waited.allNotThere[1] == 0 and tostring(waited.allNotThere[2]) == "screen capture failed""#
         ),
         "the list, an empty one, an empty one and why"
     );
     assert!(
-        yes(&lua, r#"return #waited.saved == 1 and waited.saved[1] == true and waited.unsaved[1] == false and waited.unsaved[2] == "no pixels here""#),
+        yes(&lua, r#"return #waited.saved == 1 and waited.saved[1] == true and waited.unsaved[1] == false and tostring(waited.unsaved[2]) == "screen capture failed""#),
         "true, or false and why"
     );
     assert!(yes(&lua, "return waited.marked[1] == true and waited.snapSaved[1] == true"));
@@ -3357,9 +3405,11 @@ fn where_the_searches_and_shots_cannot_wait_they_raise_unless_there_is_nothing_t
             r#"local why = "the window's client area is empty (0x0)"
               local off = "the region does not overlap the snapshot"
               local function shaped(q)
-                return q[1][1] == nil and q[1][2] == why and q[2][1] == nil and q[2][2] == why
-                  and #q[3][1] == 0 and q[3][2] == why and q[4][1] == false and q[4][2] == why
-                  and q[5][1] == false and q[5][2] == off and q[6][1] == nil and q[6][2] == off
+                local said = function(i) return tostring(q[i][2]) end
+                return q[1][1] == nil and said(1) == why and q[2][1] == nil and said(2) == why
+                  and #q[3][1] == 0 and said(3) == why and q[4][1] == false and said(4) == why
+                  and q[5][1] == false and said(5) == off and q[6][1] == nil and said(6) == off
+                  and q[1][2].code == "hidden" and q[5][2].code == "outside"
               end
               return shaped(top) and shaped(got.quiet) and got.waited == nil"#
         ),
@@ -3385,12 +3435,13 @@ fn where_the_searches_and_shots_cannot_wait_they_raise_unless_there_is_nothing_t
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A shot whose file cannot be written raises — at the caller's line in a handler, once the wait is
-/// over — so a typo in a folder's name is not taken for a failed capture: `screen.save '<path>':
-/// <why>`, which a `pcall` around it returns, and the handler goes on. A shot of a snapshot raises
-/// the same way. At the top level the shot cannot wait, and raises that before anything is written.
+/// A shot whose file cannot be written is answered `false, err` once the wait is over, `failed` —
+/// whether a folder can be written is the moment's, not the call's — and its message names the
+/// call and the path, so a typo in a folder's name is not taken for a failed capture:
+/// `screen.save '<path>': <why>`. A shot of a snapshot is answered the same way. At the top level
+/// the shot cannot wait, and raises that before anything is written.
 #[test]
-fn a_shot_that_cannot_be_written_raises_at_the_call_that_waited() {
+fn a_shot_that_cannot_be_written_is_answered_false_and_its_error() {
     let h = host();
     let lua = vm(&h, 1);
     let dir = shots_dir("unwritten");
@@ -3405,8 +3456,8 @@ fn a_shot_that_cannot_be_written_raises_at_the_call_that_waited() {
         local AREA = { region = { 22201, 5, 22221, 25 } }
         topOk, topWhy = pcall(host.screen.save, DIR .. "/taken.png", AREA)
         function look()
-          okLive, whyLive = pcall(function() return host.screen.save(DIR .. "/taken.png", AREA) end)
-          okSnap, whySnap = pcall(function() return host.screen.saveMarked(DIR .. "/taken.png", { snapshot = s, marks = {} }) end)
+          okLive, whyLive = host.screen.save(DIR .. "/taken.png", AREA)
+          okSnap, whySnap = host.screen.saveMarked(DIR .. "/taken.png", { snapshot = s, marks = {} })
           wentOn = true
         end
         "#,
@@ -3414,6 +3465,7 @@ fn a_shot_that_cannot_be_written_raises_at_the_call_that_waited() {
     assert_eq!(event(&h, &lua, "look", Vec::new(), false), mailbox::Delivered::Parked);
     settle_images(&h);
     assert!(yes(&lua, "return topOk == false and okLive == false and okSnap == false and wentOn == true"));
+    assert!(yes(&lua, "return whyLive.code == 'failed' and whySnap.code == 'failed'"));
     // The path as the module wrote it, joined to the folder.
     let path = format!("{}/taken.png", dir.display());
     let top: String = lua.load("return tostring(topWhy)").eval().unwrap();
@@ -3421,10 +3473,6 @@ fn a_shot_that_cannot_be_written_raises_at_the_call_that_waited() {
     for (name, call) in [("whyLive", "screen.save"), ("whySnap", "screen.saveMarked")] {
         let got: String = lua.load(format!("return tostring({name})")).eval().unwrap();
         assert!(got.contains(&format!("{call} '{path}': ")), "{name}: {got}");
-    }
-    for name in ["whyLive", "whySnap"] {
-        let got: String = lua.load(format!("return tostring({name})")).eval().unwrap();
-        assert!(got.starts_with("mod.luau:"), "{name}: raised at the caller's line: {got}");
     }
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
@@ -3600,8 +3648,8 @@ fn a_missing_path_raises_and_a_broken_png_is_the_searchs_answer() {
         let got: String = lua.load(format!("return tostring({name})")).eval().unwrap();
         assert!(got.contains("cannot open template '") && got.contains("nowhere.png"), "{name}: {got}");
     }
-    let why: String = lua.load("return broken[2]").eval().unwrap();
-    assert!(yes(&lua, "return topOk == false and okMissing == false and broken[1] == nil"));
+    let why: String = lua.load("return tostring(broken[2])").eval().unwrap();
+    assert!(yes(&lua, "return topOk == false and okMissing == false and broken[1] == nil and broken[2].code == 'invalid'"));
     assert!(why.starts_with(&format!("cannot open template '{}': ", path.display())), "{why}");
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
@@ -3729,13 +3777,13 @@ fn every_call_that_waits_takes_a_callback_and_is_called_with_what_its_wait_answe
         "none", "notThere", "all", "saved", "marked",
     ] {
         assert!(
-            yes(&lua, &format!("return called.{name}.n == 3 and alike(called.{name}[1], waited.{name}[1]) and called.{name}[2] == waited.{name}[2]")),
+            yes(&lua, &format!("return called.{name}.n == 3 and alike(called.{name}[1], waited.{name}[1]) and alike(called.{name}[2], waited.{name}[2])")),
             "{name}: not what its wait answers, then info: {}",
             lua.load(format!("return show(called.{name}) .. ' | ' .. show(waited.{name})")).eval::<String>().unwrap_or_default()
         );
     }
     assert!(
-        yes(&lua, "return called.list[1].n == 2 and called.one[1].n == 1 and called.none[1] == nil and called.none[2] == nil and called.notThere[2] == 'no pixels here'"),
+        yes(&lua, "return called.list[1].n == 2 and called.one[1].n == 1 and called.none[1] == nil and called.none[2] == nil and tostring(called.notThere[2]) == 'screen capture failed'"),
         "a list's hit says which template matched; nil, and nil and why"
     );
     // The moment of the picture: a live read's, stamped with the input epoch as it came back; a
@@ -3825,8 +3873,11 @@ fn a_newer_call_with_the_key_ends_the_older_one_of_the_same_call() {
         "#,
     );
     settle_until(&h, &lua, "local n = 0 for _ in pairs(got) do n += 1 end return n == 5");
-    let superseded = crate::snapshot::SUPERSEDED;
-    assert!(yes(&lua, &format!("return got.older[1] == false and got.older[2] == '{superseded}'")), "the older one ended");
+    let superseded = crate::snapshot::superseded();
+    assert!(
+        yes(&lua, &format!("return got.older[1] == false and tostring(got.older[2]) == '{superseded}' and got.older[2].code == 'replaced'")),
+        "the older one ended"
+    );
     assert!(yes(&lua, "return got.newer[1] and got.cells[1] and got.points[1] and got.snap[1]"), "the others answered");
     assert!(yes(&lua, "return not host.screen.pending('k')"));
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
@@ -3861,7 +3912,7 @@ fn a_replaced_answer_known_at_the_call_is_the_calls_could_not_look_answer() {
         "#,
     );
     settle_until(&h, &lua, "local n = 0 for _ in pairs(got) do n += 1 end return n == 10");
-    let replaced = crate::snapshot::SUPERSEDED;
+    let replaced = crate::snapshot::superseded();
     let empty = "the window's client area is empty (0x0)";
     // Each call's could-not-look first value, as `v`.
     for (call, first) in [
@@ -3870,12 +3921,12 @@ fn a_replaced_answer_known_at_the_call_is_the_calls_could_not_look_answer() {
         ("cells", "v == nil"),
         ("save", "v == false"),
     ] {
-        let older = format!("local v = got.{call}Older[1] return {first} and got.{call}Older[2] == '{replaced}'");
+        let older = format!("local v = got.{call}Older[1] return {first} and tostring(got.{call}Older[2]) == '{replaced}'");
         assert!(yes(&lua, &older), "{call}: the older one replaced");
-        let newer = format!("local v = got.{call}Newer[1] return {first} and got.{call}Newer[2] == \"{empty}\"");
+        let newer = format!("local v = got.{call}Newer[1] return {first} and tostring(got.{call}Newer[2]) == \"{empty}\"");
         assert!(yes(&lua, &newer), "{call}: the newer one its own");
     }
-    assert!(yes(&lua, &format!("return got.templateOlder[1] == nil and got.templateOlder[2] == '{replaced}'")), "no handle for the replaced one");
+    assert!(yes(&lua, &format!("return got.templateOlder[1] == nil and tostring(got.templateOlder[2]) == '{replaced}'")), "no handle for the replaced one");
     assert!(yes(&lua, "return type(got.templateNewer[1]) == 'userdata' and got.templateNewer[2] == nil"), "the newer one its handle");
     assert!(yes(&lua, "return not host.screen.pending('k')"));
     assert!(!dir.join("never.png").exists(), "nothing written");
@@ -3910,10 +3961,10 @@ fn a_points_answer_known_at_the_call_comes_on_its_own_and_its_key_is_then_no_lon
 /// A callback form checks its arguments at the call, and raises there for a mistake, as the call
 /// does without one: a callback that is not a function, an `opts.key` that is not a non-empty
 /// string. Without a callback `opts.key` raises, as only the callback form takes it — and nothing
-/// was asked for a call that raised. A shot whose file cannot be written is the callback's error:
-/// reported, its callback not called.
+/// was asked for a call that raised. A shot whose file cannot be written is answered to its
+/// callback, `false, err`, as the call answers it without one.
 #[test]
-fn a_callback_forms_mistakes_raise_at_the_call_and_an_unwritten_shot_is_its_error() {
+fn a_callback_forms_mistakes_raise_at_the_call_and_an_unwritten_shot_is_answered() {
     let h = host();
     let lua = vm(&h, 1);
     run(&lua, CUT);
@@ -3940,10 +3991,11 @@ fn a_callback_forms_mistakes_raise_at_the_call_and_an_unwritten_shot_is_its_erro
         assert!(e.contains(want), "{code}:\n  got  {e}\n  want {want}");
     }
     assert!(!h.images.has_pending() && !h.snaps.has_pending(), "a call that raised asked for nothing");
-    run(&lua, "host.screen.save(DIR .. '/taken.png', { region = { 23301, 5, 23311, 15 } }, function() called = true end)");
+    run(&lua, "host.screen.save(DIR .. '/taken.png', { region = { 23301, 5, 23311, 15 } }, function(ok, err) called = { ok, err } end)");
     settle_images(&h);
-    assert!(yes(&lua, "return called == nil"), "not called");
-    let errs = errors(&h);
-    assert!(errs.len() == 1 && errs[0].1 == "screen.save" && errs[0].2.contains("screen.save '"), "{errs:?}");
+    assert!(yes(&lua, "return called[1] == false and called[2].code == 'failed'"), "called with false and its error");
+    let said: String = lua.load("return tostring(called[2])").eval().unwrap();
+    assert!(said.starts_with("screen.save '"), "{said}");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -11,8 +11,9 @@ use std::cell::{Cell, RefCell};
 
 use super::{
     Backend, CaptureFn, Captured, ControlInfo, ElementAsk, ElementOutcome,
-    HostEvents, KeyboardNow, MouseButton, OwnerKeys, Stroke, WinInfo, CAPTURE_FAILED,
+    HostEvents, KeyRefusal, KeyboardNow, MouseButton, OwnerKeys, Stroke, WinInfo, capture_failed,
 };
+use crate::errors::{common, hotkey, HostError};
 
 #[derive(Default)]
 pub struct StubBackend {
@@ -33,6 +34,8 @@ pub struct StubBackend {
     passed_phys: RefCell<Vec<Option<u16>>>,
     /// Whether a key passed on is taken: no by default, as there is no input to send it to.
     sends: Cell<bool>,
+    /// What `watch_keys` answers when a test refuses the hook: none by default.
+    hook_refused: RefCell<Option<HostError>>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -75,7 +78,7 @@ impl StubBackend {
         std::mem::take(&mut *self.passed_phys.borrow_mut())
     }
 
-    /// Takes a key passed on (`true`), or refuses it as `key_send` does.
+    /// Takes a key passed on (`true`), or refuses it, as there is no input to send it to.
     pub(crate) fn set_sends(&self, sends: bool) {
         self.sends.set(sends);
     }
@@ -83,6 +86,12 @@ impl StubBackend {
     /// The keys passed on since the last call, as `(vk, mask, strokes)`, in order.
     pub(crate) fn take_passed(&self) -> Vec<(u32, u8, Vec<Stroke>)> {
         std::mem::take(&mut *self.passed.borrow_mut())
+    }
+
+    /// Refuses the keyboard hook with `why` from now on, as a system that will not install it does,
+    /// or installs it again (`None`).
+    pub(crate) fn refuse_hook(&self, why: Option<HostError>) {
+        *self.hook_refused.borrow_mut() = why;
     }
 }
 
@@ -114,7 +123,7 @@ impl Backend for StubBackend {
     // The source is accepted and ignored here, as on macOS: there is only one way of reading
     // nothing.
     fn capture_fn(&self) -> CaptureFn {
-        |regions, _| regions.iter().map(|_| Err(CAPTURE_FAILED.to_string())).collect()
+        |regions, _| regions.iter().map(|_| Err(capture_failed())).collect()
     }
 
     fn cursor_pos(&self) -> (i32, i32) {
@@ -128,19 +137,22 @@ impl Backend for StubBackend {
     fn mouse_up(&self, _x: i32, _y: i32, _button: MouseButton) {}
 
     fn mouse_scroll(&self, _x: i32, _y: i32, _delta: i32) {}
-    fn key_post(&self, _hwnd: isize, _key: &str) -> Result<(), String> {
+    fn key_post(&self, _hwnd: isize, _key: &str) -> Result<(), KeyRefusal> {
         Ok(())
     }
 
-    fn key_send(&self, _combo: &str) -> Result<(), String> {
-        Err("input is not implemented on this platform yet".to_string())
+    // No input to send it to: answered, as a way of acting this platform does not have.
+    fn key_send(&self, _combo: &str) -> Result<(), KeyRefusal> {
+        Err(KeyRefusal::Answer(HostError::of(&common::NOT_YET)))
     }
     fn type_text(&self, _text: &str) {}
 
-    fn register_hotkey(&self, _id: i32, spec: &str) -> Result<(), String> {
-        Err(format!(
-            "hotkeys are not implemented on this platform yet (spec '{spec}')"
-        ))
+    // No hotkey to hold: answered, as a way of being called this platform does not have.
+    fn register_hotkey(&self, _id: i32, spec: &str) -> Result<(), KeyRefusal> {
+        Err(KeyRefusal::Answer(HostError::with(
+            &hotkey::STUB,
+            format!("hotkeys are not implemented on this platform yet (spec '{spec}')"),
+        )))
     }
 
     fn unregister_hotkey(&self, _id: i32) {}
@@ -196,8 +208,8 @@ impl Backend for StubBackend {
     fn native_menu_open(&self) -> bool {
         false
     }
-    fn watch_keys(&self) -> Result<(), String> {
-        Ok(())
+    fn watch_keys(&self) -> Result<(), HostError> {
+        self.hook_refused.borrow().clone().map_or(Ok(()), Err)
     }
 
     fn run_event_loop(&self, _events: &mut dyn HostEvents) -> Result<(), String> {

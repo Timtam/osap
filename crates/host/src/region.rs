@@ -98,6 +98,18 @@ impl std::fmt::Display for Unresolved {
     }
 }
 
+impl Unresolved {
+    /// What a call answers for it: `hidden` for an empty client area, `outside` for a rectangle
+    /// past the coordinate range, the message as [`Display`](std::fmt::Display) words it.
+    pub(crate) fn error(&self) -> crate::errors::HostError {
+        use crate::errors::{screen, HostError};
+        match self {
+            Unresolved::EmptyClient { .. } => HostError::with(&screen::CLIENT_EMPTY, self.to_string()),
+            Unresolved::OutOfRange => HostError::of(&screen::OUT_OF_RANGE),
+        }
+    }
+}
+
 impl Fraction {
     /// The four numbers, refused only when one is not finite: NaN and the infinities have no
     /// floor, and the reader's C# would turn them into an arbitrary integer.
@@ -225,6 +237,20 @@ pub(crate) fn corners(what: &str, x1: i64, y1: i64, x2: i64, y2: i64) -> Result<
     Ok(ScreenRect { x: x1 as i32, y: y1 as i32, w, h })
 }
 
+/// [`corners`] for `host.ocr.recognize`, which reads corners with no area as a region with nothing
+/// in it rather than as a mistake: corners empty or turned around are the rectangle
+/// [`loose_corners`] makes of them, a side below none read as none, and the call answers it as
+/// `host.screen.profile` does (D5 of the typed-errors plan) — a module works such corners out from
+/// what it read, and one that comes out empty is a reading, not a mistake in the call. A corner
+/// outside the coordinate range still raises, and so does every other mistake.
+pub(crate) fn corners_or_empty(what: &str, x1: i64, y1: i64, x2: i64, y2: i64) -> Result<ScreenRect, String> {
+    let fit = |v: i64| i32::try_from(v).ok();
+    match (fit(x1), fit(y1), fit(x2), fit(y2)) {
+        (Some(a), Some(b), Some(c), Some(d)) if x2 <= x1 || y2 <= y1 => Ok(loose_corners(a, b, c, d)),
+        _ => corners(what, x1, y1, x2, y2),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +324,19 @@ mod tests {
             resolve(Client { x: i32::MAX as i64, y: 0, w: 10, h: 10 }, &frac(0.5, 0.0, 1.0, 1.0)),
             Err(Unresolved::OutOfRange)
         );
+    }
+
+    /// Corners for a read of text: with no area, the empty rectangle the call answers; past the
+    /// coordinate range, the same mistake as [`corners`]'s.
+    #[test]
+    fn corners_with_no_area_are_an_empty_rectangle_for_a_read_of_text() {
+        assert_eq!(corners_or_empty("region", 10, 20, 110, 70), corners("region", 10, 20, 110, 70));
+        assert_eq!(corners_or_empty("region", 50, 50, 10, 10), Ok(ScreenRect { x: 50, y: 50, w: 0, h: 0 }));
+        assert_eq!(corners_or_empty("region", 10, 0, 10, 10), Ok(ScreenRect { x: 10, y: 0, w: 0, h: 10 }));
+        assert_eq!(corners_or_empty("region", 0, 10, 10, 9), Ok(ScreenRect { x: 0, y: 10, w: 10, h: 0 }));
+        // Past the coordinate range it is still a mistake, empty or not.
+        assert!(corners_or_empty("region", 10, 0, 5, 3_000_000_000).unwrap_err().contains("region.y2 is 3000000000"));
+        assert!(corners_or_empty("region", -2_000_000_000, 0, 2_000_000_000, 10).unwrap_err().contains("wider or higher"));
     }
 
     /// Corners: a rectangle when it is one, a message naming the region when it is not.

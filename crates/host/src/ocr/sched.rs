@@ -37,6 +37,7 @@ use std::time::Instant;
 
 use super::policy::{AGING, PER_OWNER, TOTAL};
 use super::types::Priority;
+use crate::errors::{ocr, HostError};
 
 pub type TicketId = u64;
 pub type JobId = u64;
@@ -94,15 +95,21 @@ pub struct Submitted {
     pub joined: bool,
     /// Tickets this one superseded: delivered as `stale`.
     pub stale: Vec<TicketId>,
-    /// Tickets evicted to make room: delivered as `failed` with [`TOO_MANY`].
+    /// Tickets evicted to make room: delivered as `failed` with [`too_many`].
     pub evicted: Vec<TicketId>,
     /// Why the new ticket itself was refused.
-    pub refused: Option<String>,
+    pub refused: Option<HostError>,
 }
 
-/// The reason an evicted ticket, or a refused one, carries.
-pub const TOO_MANY: &str = "too many reads waiting — put regions that belong together in one \
-                            call (up to 64)";
+/// The reason an evicted ticket, or one refused for its module's cap, carries: `too_many`.
+pub fn too_many() -> HostError {
+    HostError::of(&ocr::TOO_MANY)
+}
+
+/// The reason a ticket refused for the whole application's cap carries: `too_many`.
+fn all_too_many() -> HostError {
+    HostError::of(&ocr::ALL_TOO_MANY)
+}
 
 /// Which kind of waiting capture goes first on the capture thread — the order `take_capture`
 /// has always taken OCR pictures in. The snapshot lane beside it (`snap_queue.rs`) ranks its own
@@ -194,9 +201,7 @@ impl<S: Clone + PartialEq, P> Scheduler<S, P> {
         }
 
         if self.jobs.len() >= TOTAL {
-            out.refused = Some(format!(
-                "too many reads waiting in the whole application ({TOTAL}); this one was not taken"
-            ));
+            out.refused = Some(all_too_many());
             return out;
         }
         let id = self.next_job;
@@ -228,9 +233,7 @@ impl<S: Clone + PartialEq, P> Scheduler<S, P> {
             return out;
         }
         if self.jobs.len() >= TOTAL {
-            out.refused = Some(format!(
-                "too many reads waiting in the whole application ({TOTAL}); this one was not taken"
-            ));
+            out.refused = Some(all_too_many());
             return out;
         }
         let id = self.next_job;
@@ -286,7 +289,7 @@ impl<S: Clone + PartialEq, P> Scheduler<S, P> {
                     self.tickets_removed();
                 }
                 None => {
-                    out.refused = Some(TOO_MANY.to_string());
+                    out.refused = Some(too_many());
                     return false;
                 }
             }
@@ -682,7 +685,7 @@ mod tests {
         }
         let out = s.submit("y", bg(99, A, None), now);
         assert!(out.evicted.is_empty());
-        assert_eq!(out.refused.as_deref(), Some(TOO_MANY));
+        assert_eq!(out.refused, Some(too_many()));
         assert_eq!(out.job, None);
     }
 
@@ -695,7 +698,9 @@ mod tests {
             assert!(s.submit(i, bg(i + 1, owner, None), now).refused.is_none());
         }
         let out = s.submit(9999, bg(5000, Owner { idx: 99, gen: 1 }, None), now);
-        assert!(out.refused.is_some());
+        let refused = out.refused.expect("the 65th distinct job");
+        assert_eq!(refused.reason(), &ocr::ALL_TOO_MANY);
+        assert_eq!(refused.message(), format!("too many reads waiting in the whole application ({TOTAL}); this one was not taken"));
         let joined = s.submit(3, bg(5001, Owner { idx: 99, gen: 1 }, None), now);
         assert!(joined.joined && joined.refused.is_none());
     }

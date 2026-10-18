@@ -33,7 +33,7 @@ See [what that list is and is not](./index.md#capabilities).
 
 ## host.gamepad.list() {#host-gamepad-list}
 
-**Signature:** `host.gamepad.list()` → `{ PadInfo }`
+**Signature:** `host.gamepad.list()` → `{ PadInfo }`, or `{}, Error`
 
 The pads connected now, sorted by `index`; an empty table when there are none.
 
@@ -47,7 +47,11 @@ PadInfo = { index = 1, id = "xinput:0", name = "Xbox controller",
 
 `index` runs from 1 to 8, lowest free first, and stays with a pad while it is connected; a pad that is unplugged frees its number for the next one, and a ninth pad is not watched (the log says so once). `id` says where the platform sees this connection, not which device it is — see the platform notes below — so do not use it to recognise a pad you have seen before. `buttons` lists every button the pad can report, the derived stick and trigger buttons included. `mapped` is `true` for every pad a platform reports today.
 
-**The first call** of `list`, [`state`](#host-gamepad-state) or [`on`](#host-gamepad-on) anywhere in the application starts watching the pads, and **raises** when that fails — on a platform without controller support (`"game controllers are not supported on linux"`), or when the watcher cannot start; every later call raises with the same reason. Apart from that, `list` does not raise.
+**The first call** of `list`, [`state`](#host-gamepad-state) or [`on`](#host-gamepad-on) anywhere in the application starts watching the pads. **A watcher that cannot see pads is answered, not raised**, by each of the three: `list` answers `{}` and an [error value](./errors.md), `state` and `on` answer `nil` and one, and `on` registers nothing. Every later call answers the same error, for the reason is the machine's. The reasons, their codes in brackets:
+- at the start: `game controllers are not supported on …` (`not_supported`), on a platform without controller support (`linux`, say); `could not start the gamepad thread: …`, `the gamepad thread ended before it was ready`, `could not create the gamepad thread's window (error …)` and `the source panicked while starting: …` (`failed`). The log says `gamepad watcher failed: ` and the reason, once.
+- after it, on Windows (see below): `gamepad watcher failed after starting: could not create the gamepad thread's window (error …)` and `the gamepad thread stopped after a panic: …` (`failed`), the pad thread stopped; `XInput is unavailable, so no Xbox-type pad will be seen: …` (`unavailable`), no XInput DLL. A thread that stopped replaces an XInput that was missing.
+
+`{}` alone means watching works and no pad is connected. Apart from that, `list` does not raise.
 
 ```luau
 for _, pad in ipairs(host.gamepad.list()) do
@@ -57,7 +61,7 @@ end
 
 ### Windows {#host-gamepad-list-windows}
 
-Xbox-type pads, through XInput, which allows at most four. Every XInput pad is reported the same way, because XInput gives no name: `name` is `"Xbox controller"`, `family` is `xbox` and the labels are Xbox ones — a third-party pad in XInput mode, an 8BitDo for instance, is announced with A, B, X and Y whatever is printed on it. Their `id` is XInput's slot, `xinput:0` to `xinput:3`: a different pad plugged into the same slot gets the same `id`. `guide` is in `buttons` only when the system's XInput has the extended entry point that reports it. `vendor` and `product` are the pad's USB ids where XInput's extended capabilities call answers for the slot, and `nil` otherwise. PlayStation, Nintendo and other controllers are not listed on Windows unless they present themselves through XInput. Where no XInput DLL can be loaded at all, watching still starts — `status().watcher` is `"running"` and `status().xinput` says `unavailable` — and `list()` is always empty.
+Xbox-type pads, through XInput, which allows at most four. Every XInput pad is reported the same way, because XInput gives no name: `name` is `"Xbox controller"`, `family` is `xbox` and the labels are Xbox ones — a third-party pad in XInput mode, an 8BitDo for instance, is announced with A, B, X and Y whatever is printed on it. Their `id` is XInput's slot, `xinput:0` to `xinput:3`: a different pad plugged into the same slot gets the same `id`. `guide` is in `buttons` only when the system's XInput has the extended entry point that reports it. `vendor` and `product` are the pad's USB ids where XInput's extended capabilities call answers for the slot, and `nil` otherwise. PlayStation, Nintendo and other controllers are not listed on Windows unless they present themselves through XInput. Where no XInput DLL can be loaded at all, watching still starts — `status().watcher` is `"running"` and `status().xinput` says `unavailable` — and no pad is ever listed: `list()` answers `{}` and `unavailable`, `XInput is unavailable, so no Xbox-type pad will be seen: …`, and `state` and `on` answer `nil` and the same. The pad thread is waited for 250 ms at the first call; a window it could not make after that, and a panic of it, stop it, and from then on the three calls answer `failed` with the reason.
 
 The first call blocks the event loop until the first reading of the four slots is done, or 250 ms at most, so a pad that is plugged in is normally already listed. After that, `list()` answers from what the pad thread last read, except when nothing keeps it reading — no enabled module listens for `down`, `up`, `axis` or `chord`, and no `list()` or `state()` came in the last five seconds: then it asks for a fresh reading and blocks the loop until it comes, up to 50 ms, and the pads stay read for five seconds afterwards. While they are read, a connected pad is read every 4 ms, and a pad being plugged in is found when Windows announces it, or at the latest by a look at the empty slots every two seconds.
 
@@ -67,7 +71,7 @@ The controllers the GameController framework supports, with two sticks and two t
 
 ## host.gamepad.state(pad) {#host-gamepad-state}
 
-**Signature:** `host.gamepad.state(pad: number)` → `PadState?`
+**Signature:** `host.gamepad.state(pad: number)` → `PadState`, `nil`, or `nil, Error`
 
 What pad number `pad` is doing now, or `nil` when there is no pad with that index. A `pad` that is not a whole number from 1 to 8 gives `nil` too. Values are raw — no dead zone — so a module that wants its own curve has the original numbers.
 
@@ -78,7 +82,7 @@ PadState = { pad = 1, buttons = { south = false, dpad_down = true, ... },
 
 `buttons` names every button the pad has, `false` included, so asking about a released button gives `false` rather than `nil`. A button already held when the pad was connected is `true` here, although no `down` was ever sent for it. `time` is when the pad last reported anything.
 
-**Raises** when `pad` is not a number — `nil`, a table, a string that does not read as a number (`"2"` is taken as 2) — and, like `list`, when watching the pads cannot start; this call starts it too.
+**Raises** when `pad` is not a number — `nil`, a table, a string that does not read as a number (`"2"` is taken as 2). A watcher that cannot see pads is answered as [`list`](#host-gamepad-list) answers it: `nil` and the error value, whatever `pad` is; this call starts watching too. `nil` alone means there is no pad with that index.
 
 A long press of one button — a [combination](#button-combinations) has `holdMs` for this, a single button does not: act only if `start` is still down 800 ms later.
 
@@ -103,7 +107,7 @@ Answered at once from the last values GameController delivered, which it does wh
 
 ## host.gamepad.on(event, callback, opts?) {#host-gamepad-on}
 
-**Signature:** `host.gamepad.on(event: "down" | "up" | "axis" | "chord" | "connected" | "disconnected", callback: (e: PadEvent) -> (), opts: { pad: number?, buttons: {string}?, axes: {string}?, deadzone: number?, step: number?, maxAge: number?, exact: boolean?, holdMs: number? }?)` → `token: number`
+**Signature:** `host.gamepad.on(event: "down" | "up" | "axis" | "chord" | "connected" | "disconnected", callback: (e: PadEvent) -> (), opts: { pad: number?, buttons: {string}?, axes: {string}?, deadzone: number?, step: number?, maxAge: number?, exact: boolean?, holdMs: number? }?)` → `token: number`, or `nil, Error`
 
 Calls `callback` for every matching event while the module is enabled, until [`off`](#host-gamepad-off) or until the module is reloaded. While the module is disabled the listener is kept and not called. Returns a token for `off`: a whole number, counted up across the application. `"chord"` is a combination of buttons held together, with rules of its own under [Button combinations](#button-combinations).
 
@@ -133,7 +137,7 @@ The options, each for the events it makes sense for:
 
 `maxAge` and `holdMs` count whole milliseconds: a fraction is cut off (`holdMs = 0.5` fires at the press, `maxAge = 1.9` is 1), and a value above 4294967295 (about 49.7 days, `math.huge` included) counts as 4294967295. `maxAge` below 1 raises instead of being cut to 0, because every press is some time old when it is delivered, so 0 would drop them all.
 
-**What raises**, at the call, so a listener that could never fire is never registered: an `event` that is not one of the six; a `callback` that is not a function; `opts` that is neither a table nor `nil`; an option that is not one of this event's (`maxAge` on `axis`, `deadzone` on `down`, a misspelt name); an option name that is not a string; `pad` that is not a whole number from 1 to 8; `buttons` or `axes` that is not a list of names, an empty list, or an unknown name among them — label spellings such as `"A"`, `"Cross"` or `"LB"` are not names; `deadzone` below 0 or from 1 up; `step` outside 0 to 2; `maxAge` below 1, `holdMs` negative, or either not a number; `exact` that is not `true` or `false`; the [combination rules](#button-combinations) for `buttons` on `chord`; and, as for `list`, watching the pads failing to start. Nothing else raises, and nothing about the pads raises later: a listener for a pad that is not there simply waits.
+**What raises**, at the call, so a listener that could never fire is never registered: an `event` that is not one of the six; a `callback` that is not a function; `opts` that is neither a table nor `nil`; an option that is not one of this event's (`maxAge` on `axis`, `deadzone` on `down`, a misspelt name); an option name that is not a string; `pad` that is not a whole number from 1 to 8; `buttons` or `axes` that is not a list of names, an empty list, or an unknown name among them — label spellings such as `"A"`, `"Cross"` or `"LB"` are not names; `deadzone` below 0 or from 1 up; `step` outside 0 to 2; `maxAge` below 1, `holdMs` negative, or either not a number; `exact` that is not `true` or `false`; the [combination rules](#button-combinations) for `buttons` on `chord`. Nothing else raises, and nothing about the pads raises later: a listener for a pad that is not there simply waits. A watcher that cannot see pads is no mistake in the call: after the arguments are checked, `on` answers `nil` and the error value, as [`list`](#host-gamepad-list) does, and registers nothing.
 
 **Cost.** `on` checks its options and registers the listener on the event loop, and never waits for a press or for a pad to appear. The first call of `list`, `state` or `on` in the application also starts watching the pads; what that and every later call cost is in the platform sections below.
 
@@ -280,7 +284,7 @@ When the last `down`, `up`, `axis` or `chord` listener goes, the App Nap activit
 
 **Signature:** `host.gamepad.status()` → `{ [string]: string }`
 
-What the controller watching is doing, as readable text, for a diagnostic line in a log. `watcher` is `"not started"` until the first `list`, `state` or `on`, `"running"` after that, or `"failed: "` and the reason. The other keys are the platform's, below, and appear once watching has started. Calling this does not start anything, and it never raises.
+What the controller watching is doing, as readable text, for a diagnostic line in a log. It is not for comparing: a module learns that the watcher cannot see pads from what `list`, `state` and `on` answer. `watcher` is `"not started"` until the first `list`, `state` or `on`, `"running"` after that, or `"failed: "` and the reason. The other keys are the platform's, below, and appear once watching has started. Calling this does not start anything, and it never raises.
 
 ```luau
 local s = host.gamepad.status()
@@ -289,7 +293,7 @@ host.log.info("gamepad " .. s.watcher .. ", " .. (s.mode or s.background or ""))
 
 ### Windows {#host-gamepad-status-windows}
 
-Also `xinput` (which DLL, and whether the Guide button can be read — or `unavailable` and why, when no XInput DLL could be loaded: the watcher runs, and no pad is ever listed), `arrival` (whether Windows agreed to announce devices being plugged in), `timer` (whether the 4 ms period is a high-resolution one) and `mode` (parked, probing every two seconds, or polling every 4 ms). `thread` appears only when the pad thread has stopped — it could not create its window, or it failed — and says why; nothing is read from then on.
+Also `xinput` (which DLL, and whether the Guide button can be read — or `unavailable` and why, when no XInput DLL could be loaded: the watcher runs, no pad is ever listed, and `list`, `state` and `on` answer `unavailable`), `arrival` (whether Windows agreed to announce devices being plugged in), `timer` (whether the 4 ms period is a high-resolution one) and `mode` (parked, probing every two seconds, or polling every 4 ms). `thread` appears only when the pad thread has stopped — it could not create its window, or it failed — and says why; nothing is read from then on, and `list`, `state` and `on` answer `failed` with the reason.
 
 ### macOS {#host-gamepad-status-macos}
 

@@ -223,6 +223,7 @@ P.NOT_BUILT = {}
 
 -- ── The page ─────────────────────────────────────────────────────────────────
 local E = nil -- what main.luau hands over (P.start)
+local O = host.require("com.platform.overlay")
 local S = host.include("src/state.luau")
 local Reads = host.include("src/read/open.luau")
 local Watch = host.include("src/watch.luau")
@@ -248,15 +249,16 @@ local listening = false
 local asking = nil
 
 -- A message to the page. page:post writes it as host.json.encode does, and raises for what JSON
--- cannot hold: that is logged, and the key's show or the trip's answer goes on without it rather
--- than failing whole.
+-- cannot hold; it answers false and an error value for a page it could not hand it to (gone with
+-- the module's last load, or its engine refused it: docs/api/gui.md). Either is logged, and the
+-- key's show or the trip's answer goes on without it rather than failing whole.
 local function post(value)
   local page = E.header.page
   if not page then return end
-  local ok, why = pcall(function() page:post(value) end)
-  if not ok then
+  local ok, posted, err = pcall(function() return page:post(value) end)
+  if not ok or posted == false then
     host.log.info(string.format("[avenger] [page] a '%s' message could not be posted: %s", tostring(value.kind),
-      tostring(why)))
+      tostring(ok and err or posted)))
   end
 end
 
@@ -330,11 +332,12 @@ local function postState(id)
   given = S.at(id)
 end
 
-local function notShown(why)
-  if why == "declined by the system" then
+-- page:show's error value (docs/api/gui.md), in the page's words.
+local function notShown(err)
+  if err ~= nil and err.code == host.errors.REFUSED then
     return "The system did not bring the page to the front; if it does not come by itself, the key brings it."
   end
-  return "The page did not come to the front: " .. tostring(why) .. "."
+  return "The page did not come to the front: " .. tostring(err) .. "."
 end
 
 -- In the error region when the picture was cut at the screen's edge (read/open.luau).
@@ -392,17 +395,19 @@ local function open(o)
   return nil
 end
 
--- Every show the runtime made at the key: Open.wav and the time from the key; or why not, said.
-local function onShown(_, ok, why)
+-- Every show the runtime made at the key: Open.wav and the time from the key — and, beside a
+-- `true`, the error value of a page shown over the plug-in's window, in front all the same (a
+-- partial answer, docs/api/gui.md) — or why not, said.
+local function onShown(_, ok, err)
   if ok then
     shownOnce = true
     sound("Open")
     host.log.info(string.format("[avenger] [page] shown beside '%s', %d ms after the key%s",
-      tostring(plugin and plugin.title), host.now() - (keyAt or host.now()), why and (" (" .. why .. ")") or ""))
+      tostring(plugin and plugin.title), host.now() - (keyAt or host.now()), err and (" (" .. err .. ")") or ""))
     return
   end
-  host.log.info("[avenger] [page] not shown: " .. tostring(why))
-  say(notShown(why))
+  host.log.info("[avenger] [page] not shown: " .. tostring(err))
+  say(notShown(err))
 end
 
 -- The way back (the key in the page, the runtime's): Avenger's window asked forward first, the page
@@ -411,7 +416,7 @@ end
 -- plug-in windows while another application is active (docs/api/gui.md, "DAWs" — Logic's floating
 -- ones are reported to), and the focus brings the DAW forward, which shows them again. Only a
 -- window that refused and is not listed is taken as closed.
-local function onBack(_, ok, why)
+local function onBack(_, ok, err)
   if ok then
     -- Whether the DAW hid it while the page was in front is a Mac session's question (TODO.md, MW6).
     if plugin and not current(plugin) then
@@ -421,7 +426,7 @@ local function onBack(_, ok, why)
     sound("Close")
     return
   end
-  if why == "gone" or not current(plugin) then
+  if err.code == host.errors.GONE or not current(plugin) then
     post({ kind = "error", text = closedWords() })
     return
   end
@@ -512,8 +517,8 @@ local function onReady()
   end
 end
 
-local function onClose(_, why)
-  if why == "failed" then
+local function onClose(_, how)
+  if how == "failed" then
     ready, given, listening = false, nil, false
     host.log.info("[avenger] [page] the page failed; it is built again the next time it is needed")
     return
@@ -561,22 +566,25 @@ local function refusal(s)
   return nil
 end
 
--- A page key's refusal (refusal's codes, or O:pageKey's), in the page's words.
+-- A page key's refusal — refusal's codes, joined — in the page's words.
 local KEY_WHY = {
   parse = "it is not a key",
   reserved = "the system keeps it",
-  ["no-keycode"] = "this system has no such key",
+  no_keycode = "this system has no such key",
   voiceover = "Control with Option is the screen reader's",
   tap = "a modifier alone is no key",
   ["no modifier"] = "it needs at least one modifier key",
-  ["a control's hotkey"] = "a control of the ring has it",
 }
 
 local function trim(s) return (string.gsub(s, "^%s*(.-)%s*$", "%1")) end
 
+-- `because`: refusal's codes, or O:pageKey's error value (docs/api/overlay.md): `clash` for a
+-- control's hotkey, any other code a refusal of the system's or another program's.
 local function whyWords(because)
-  local m = string.match(because, "^refused: (.*)$")
-  if m then return "the system refused it: " .. m end
+  if type(because) ~= "string" then
+    if because.code == O.errors.CLASH then return "a control of the ring has it" end
+    return "the system refused it: " .. because
+  end
   local out = {}
   for part in string.gmatch(because, "[^,]+") do
     local w = KEY_WHY[trim(part)]
@@ -752,8 +760,8 @@ function P.start(env)
     if new == key then return postSettings() end
     local because = refusal(new)
     if not because then
-      local fine, whyNot = env.header:pageKey(new)
-      if not fine then because = tostring(whyNot) end
+      local fine, err = env.header:pageKey(new)
+      if not fine then because = err end
     end
     if not because then
       key = new
@@ -767,7 +775,7 @@ function P.start(env)
     -- Refused: the key in effect stays, and the setting says it again — spoken for the dialog's,
     -- in the error region for the page's (P.HANDLERS.set_setting).
     host.log.info(string.format("[avenger] [page] '%s' cannot be the page key (%s); it stays %s",
-      tostring(new), because, tostring(key)))
+      tostring(new), tostring(because), tostring(key)))
     if asking then
       asking.refused = whyWords(because)
     else

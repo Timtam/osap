@@ -624,10 +624,18 @@ return {
   all = all,
 
   -- Runs in this module's own VM only — never in the copy a dependent holds — so the
-  -- shortcut exists once no matter how many plugin modules require this one.
+  -- shortcut exists once no matter how many plugin modules require this one. A combination
+  -- another program holds is claimed all the same, and the host tries it again: the log says it
+  -- does nothing until then, and one the host will not claim at all is said as such.
   activate = function()
-    host.hotkey.register(FOCUS_PLUGIN_WINDOW, focusPluginWindow)
-    host.log.info("[daw-hosts] " .. host.keys.describe(FOCUS_PLUGIN_WINDOW, { style = "short" })
-      .. " puts the focus back in a plugin window")
+    local key = host.keys.describe(FOCUS_PLUGIN_WINDOW, { style = "short" })
+    local id, err = host.hotkey.register(FOCUS_PLUGIN_WINDOW, focusPluginWindow)
+    if err == nil then
+      host.log.info("[daw-hosts] " .. key .. " puts the focus back in a plugin window")
+    elseif id ~= nil then
+      host.log.info("[daw-hosts] " .. key .. " would put the focus back in a plugin window, and is not held now: " .. err)
+    else
+      host.log.info("[daw-hosts] " .. key .. " is not registered: " .. err)
+    end
   end,
 }

@@ -30,7 +30,7 @@ use crate::backend::gamepad::{self as gp, demand, names, Axis, Button, PadEvent,
 use crate::mailbox::{self, Event, Opened, PadKind};
 use crate::task::Ctx;
 use crate::vm_guard::host_call;
-use crate::{appcfg, clock_origin, logging, Shared};
+use crate::{appcfg, clock_origin, errors_lua, logging, Shared};
 
 /// Which events a listener is for — the first argument of `host.gamepad.on`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1020,49 +1020,60 @@ fn string_list(v: &mlua::Value) -> Result<Vec<String>, String> {
 
 /// Installs `host.gamepad` on one module's host table. `idx` is the module that OWNS what is
 /// registered through it — the VM's owner, even for a dependency's code.
+///
+/// A watcher that cannot see pads — it did not start, or stopped since, or has no XInput — is
+/// answered by `list`, `state` and `on` (`gp::watching`, D36 of the typed-errors plan): `{}, err`,
+/// `nil, err` and `nil, err`, the last registering nothing. Only a mistake in the call raises.
 pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) -> mlua::Result<()> {
     let gamepad = lua.create_table()?;
 
-    // host.gamepad.list() -> { PadInfo }
+    // host.gamepad.list() -> { PadInfo } | {}, err
     gamepad.set(
         "list",
         lua.create_function(|lua, ()| {
             host_call!("host.gamepad.list");
-            gp::ensure_started().map_err(mlua::Error::external)?;
-            gp::refresh_if_idle();
             let t = lua.create_table()?;
+            if let Err(e) = gp::watching() {
+                return errors_lua::with_error(lua, mlua::Value::Table(t), &e);
+            }
+            gp::refresh_if_idle();
             for info in gp::hub().list() {
                 t.push(info_table(lua, &info)?)?;
             }
-            Ok(t)
+            Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Table(t)]))
         })?,
     )?;
 
-    // host.gamepad.state(pad) -> PadState?
+    // host.gamepad.state(pad) -> PadState | nil | nil, err
     gamepad.set(
         "state",
-        lua.create_function(|lua, pad: f64| -> mlua::Result<mlua::Value> {
+        lua.create_function(|lua, pad: f64| -> mlua::Result<mlua::MultiValue> {
             host_call!("host.gamepad.state");
-            gp::ensure_started().map_err(mlua::Error::external)?;
+            if let Err(e) = gp::watching() {
+                return errors_lua::with_error(lua, mlua::Value::Nil, &e);
+            }
+            let one = |v: mlua::Value| Ok(mlua::MultiValue::from_vec(vec![v]));
             if pad.fract() != 0.0 || !(1.0..=gp::MAX_PADS as f64).contains(&pad) {
-                return Ok(mlua::Value::Nil);
+                return one(mlua::Value::Nil);
             }
             gp::refresh_if_idle();
             match gp::hub().state(pad as u8) {
-                Some(s) => Ok(mlua::Value::Table(state_table(lua, &s)?)),
-                None => Ok(mlua::Value::Nil),
+                Some(s) => one(mlua::Value::Table(state_table(lua, &s)?)),
+                None => one(mlua::Value::Nil),
             }
         })?,
     )?;
 
-    // host.gamepad.on(event, callback, opts?) -> token
+    // host.gamepad.on(event, callback, opts?) -> token | nil, err
     let sh = shared.clone();
     gamepad.set(
         "on",
         lua.create_function(move |lua, (event, cb, opts): (String, Function, Option<Table>)| {
             host_call!("host.gamepad.on");
             let filter = parse_filter(&event, opts.as_ref())?;
-            gp::ensure_started().map_err(mlua::Error::external)?;
+            if let Err(e) = gp::watching() {
+                return errors_lua::with_error(lua, mlua::Value::Nil, &e);
+            }
             if let Some(c) = filter.chord.as_ref() {
                 // Under trace: which combination a module waits for is the first thing to know
                 // when a tester says "LB and RB did nothing".
@@ -1081,7 +1092,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
             });
             // Also arranges the replay a new `connected` listener is owed.
             sh.refresh_gamepad();
-            Ok(token)
+            Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Integer(token)]))
         })?,
     )?;
 
@@ -1955,5 +1966,30 @@ mod tests {
             let err = parse(event, src).err().unwrap_or_else(|| panic!("{event} {src} was accepted"));
             assert!(err.contains(needle), "{event} {src}: {err}");
         }
+    }
+
+    /// A watcher that sees no pad — it did not start, or stopped since, or has no XInput — is
+    /// answered by `list`, `state` and `on` (D36 of the typed-errors plan), each asking before it
+    /// reads or files anything: `{}, err`, `nil, err` and `nil, err`, `on` registering nothing. A
+    /// mistake in `on`'s arguments raises first. Read where it is written: the real watcher is
+    /// process-wide, and a test does not start it.
+    #[test]
+    fn a_watcher_that_sees_no_pad_is_answered_by_list_state_and_on() {
+        const SRC: &str = include_str!("gamepad_api.rs");
+        let binding = |name: &str| {
+            let at = SRC.find(&format!("\"{name}\",\n        lua.create_function(")).unwrap_or_else(|| panic!("host.gamepad.{name}"));
+            &SRC[at..at + SRC[at..].find("\n    )?;").unwrap()]
+        };
+        let at = |body: &str, what: &str| body.find(what).unwrap_or_else(|| panic!("{what}"));
+        let list = binding("list");
+        assert!(list.contains("return errors_lua::with_error(lua, mlua::Value::Table(t), &e);"), "{list}");
+        assert!(at(list, "gp::watching()") < at(list, "gp::hub().list()"));
+        let state = binding("state");
+        assert!(state.contains("return errors_lua::with_error(lua, mlua::Value::Nil, &e);"), "{state}");
+        assert!(at(state, "gp::watching()") < at(state, "gp::hub().state("));
+        let on = binding("on");
+        assert!(at(on, "parse_filter(&event, opts.as_ref())?") < at(on, "gp::watching()"), "a mistake raises first");
+        assert!(at(on, "return errors_lua::with_error(lua, mlua::Value::Nil, &e);") < at(on, "sh.pads.listeners.borrow_mut().push("), "nothing filed");
+        assert!(!SRC.contains(concat!("gp::ensure_", "started().map_err(")), "a start that failed raised");
     }
 }

@@ -25,30 +25,23 @@
 //! (trycua/cua's cua-driver, and the one Lakr233/bgclick-rev-skill takes apart); `page-check`
 //! checks it on every Mac runner, by the place a page says it was clicked at.
 
-use crate::backend::{FRAME, OUTSIDE};
+use crate::errors::input::{FRAME, OUTSIDE};
+use crate::errors::Reason;
 
-/// This application may not post events: Accessibility is not granted (the system's
-/// `PostEvent` privilege, `CGPreflightPostEventAccess`). Without it the window server drops every
-/// posted event without a word, so the click is refused rather than answered `true`.
-pub const NO_POST_ACCESS: &str =
-    "this application may not post events: Accessibility is not granted to it (System Settings > Privacy & Security > Accessibility)";
-
-/// The macOS running has no `CGEventSetWindowLocation`: a posted click would carry no place in the
-/// window, and land where AppKit makes one of the screen's.
-pub const NO_WINDOW_LOCATION: &str =
-    "this macOS cannot give a posted click its place in the window (CGEventSetWindowLocation is missing)";
-
-/// The window could not be paired with the window server's window (`ax::window_id`), so there is
-/// no number to post to — or, for something inside a window, the window it lies in is not known.
-pub const NOT_PAIRED: &str = "the window has no number in the window server's list";
-
-/// The window's number is not in the window server's list of windows on screen: minimised,
-/// hidden, or on another Space.
-pub const NOT_ON_SCREEN: &str = "the window is not on screen";
-
-/// The window's program did not answer an accessibility question a moment ago (`ax::is_busy`), or
-/// the one this click asked: its window's place could not be read.
-pub const NOT_ANSWERING: &str = "the window's program did not answer";
+// The Mac's own refusals of a posted click are Reasons of errors.rs (`errors::input`):
+//
+// - `NO_POST_ACCESS`: this application may not post events — Accessibility is not granted (the
+//   system's `PostEvent` privilege, `CGPreflightPostEventAccess`). Without it the window server
+//   drops every posted event without a word, so the click is refused rather than answered `true`.
+// - `NO_WINDOW_LOCATION`: the macOS running has no `CGEventSetWindowLocation`, so a posted click
+//   would carry no place in the window, and land where AppKit makes one of the screen's.
+// - `NOT_PAIRED`: the window could not be paired with the window server's window (`ax::window_id`),
+//   so there is no number to post to — or, for something inside a window, the window it lies in is
+//   not known.
+// - `NOT_ON_SCREEN`: the window's number is not in the window server's list of windows on screen:
+//   minimised, hidden, or on another Space.
+// - `NOT_ANSWERING`: the window's program did not answer an accessibility question a moment ago
+//   (`ax::is_busy`), or the one this click asked: its window's place could not be read.
 
 /// What the event-source user data field (`kCGEventSourceUserData`) carries on every event of a
 /// posted click: the host's own, as `keys::PASS_ON_MARK` marks a key passed on. The key tap sees no
@@ -78,12 +71,12 @@ impl Frame {
 /// control's own rectangle for something inside a window — and, for a window, in `content` too,
 /// its client area; `None` where `frame` is a control's, whose rectangle is content already.
 /// `Err` with the refusal: [`OUTSIDE`], or [`FRAME`] on the title bar or a border.
-pub fn place(x: i32, y: i32, frame: Frame, content: Option<Frame>) -> Result<(), &'static str> {
+pub fn place(x: i32, y: i32, frame: Frame, content: Option<Frame>) -> Result<(), &'static Reason> {
     if !frame.holds(x, y) {
-        return Err(OUTSIDE);
+        return Err(&OUTSIDE);
     }
     match content {
-        Some(c) if !c.holds(x, y) => Err(FRAME),
+        Some(c) if !c.holds(x, y) => Err(&FRAME),
         _ => Ok(()),
     }
 }
@@ -122,11 +115,11 @@ mod tests {
     fn a_point_in_the_content_is_clicked_and_one_on_the_title_bar_or_outside_is_not() {
         assert_eq!(place(300, 200, WINDOW, Some(CONTENT)), Ok(()));
         // The title bar: in the window, not in its content.
-        assert_eq!(place(300, 60, WINDOW, Some(CONTENT)), Err(FRAME));
+        assert_eq!(place(300, 60, WINDOW, Some(CONTENT)), Err(&FRAME));
         // Beside the window, and on its right and bottom edges, which are outside it.
-        assert_eq!(place(99, 200, WINDOW, Some(CONTENT)), Err(OUTSIDE));
-        assert_eq!(place(500, 200, WINDOW, Some(CONTENT)), Err(OUTSIDE));
-        assert_eq!(place(300, 350, WINDOW, Some(CONTENT)), Err(OUTSIDE));
+        assert_eq!(place(99, 200, WINDOW, Some(CONTENT)), Err(&OUTSIDE));
+        assert_eq!(place(500, 200, WINDOW, Some(CONTENT)), Err(&OUTSIDE));
+        assert_eq!(place(300, 350, WINDOW, Some(CONTENT)), Err(&OUTSIDE));
         // The top-left corner is in, as on Windows' rectangles.
         assert_eq!(place(100, 78, WINDOW, Some(CONTENT)), Ok(()));
     }
@@ -135,7 +128,7 @@ mod tests {
     fn a_control_has_no_frame_of_its_own() {
         let control = Frame { x: 120.0, y: 90.0, w: 40.0, h: 20.0 };
         assert_eq!(place(130, 95, control, None), Ok(()));
-        assert_eq!(place(170, 95, control, None), Err(OUTSIDE));
+        assert_eq!(place(170, 95, control, None), Err(&OUTSIDE));
     }
 
     #[test]
@@ -161,11 +154,15 @@ mod tests {
 
     #[test]
     fn the_macs_own_refusals_are_said_as_every_other_reason_is() {
+        use crate::errors::input::{NOT_ANSWERING, NOT_ON_SCREEN, NOT_PAIRED, NO_POST_ACCESS, NO_WINDOW_LOCATION};
+        use crate::errors::Code;
         // A module is told these as it is told Windows': a lower-case clause, no full stop.
-        for why in [NO_POST_ACCESS, NO_WINDOW_LOCATION, NOT_PAIRED, NOT_ON_SCREEN, NOT_ANSWERING] {
-            assert!(why.starts_with(|c: char| c.is_ascii_lowercase()) && !why.ends_with('.'), "{why}");
+        for why in [&NO_POST_ACCESS, &NO_WINDOW_LOCATION, &NOT_PAIRED, &NOT_ON_SCREEN, &NOT_ANSWERING] {
+            assert!(why.message.starts_with(|c: char| c.is_ascii_lowercase()) && !why.message.ends_with('.'), "{}", why.message);
         }
-        assert!(NO_POST_ACCESS.contains("Accessibility"), "the permission is named, as the start block names it");
+        assert!(NO_POST_ACCESS.message.contains("Accessibility"), "the permission is named, as the start block names it");
+        let codes = [NO_POST_ACCESS.code, NO_WINDOW_LOCATION.code, NOT_PAIRED.code, NOT_ON_SCREEN.code, NOT_ANSWERING.code];
+        assert_eq!(codes, [Code::Denied, Code::NotSupported, Code::Hidden, Code::Hidden, Code::Timeout]);
     }
 
     #[test]

@@ -11,6 +11,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::errors::{common, input, HostError};
+
 /// Game controllers, observed from the background. Outside the [`Backend`] trait on purpose.
 pub mod gamepad;
 
@@ -729,7 +731,7 @@ pub enum CaptureSource {
 /// and the worker never touches the `Rc` backend. Named once, so that everything which passes
 /// it along — the image worker, its batch runner, their tests — says `CaptureFn` and nothing
 /// more.
-pub type CaptureFn = fn(&[(i32, i32, i32, i32)], CaptureSource) -> Vec<Result<CapturedImage, String>>;
+pub type CaptureFn = fn(&[(i32, i32, i32, i32)], CaptureSource) -> Vec<Result<CapturedImage, HostError>>;
 
 /// The first-read comparison as a thread that captures makes it ([`Backend::compare_fn`],
 /// [`OcrWorker::compare`]): `who` is the module, the region the one its read asked for. `false`
@@ -848,18 +850,22 @@ impl Drop for Carried {
     }
 }
 
-/// The first words of every error a capture gives when the screen could not be read — and,
-/// alone, the whole error of the standard path, which cannot say more: an empty region, one too
-/// large to allocate for, or a read the operating system refused. [`DUPLICATION_UNANSWERED`]
-/// starts with it too. These errors are what a module is told: the reason `pixel`, `profile`,
-/// the image searches, `save` and the cells calls return beside their `nil` or `false` — the
-/// vocabulary `docs/api/screen.md` lists under "Failure reasons". A text read answers each of them
-/// as a reading with `status = "failed"` and this `error`, never a raise.
-pub const CAPTURE_FAILED: &str = "screen capture failed";
+/// The error of a capture the standard path could not make — and it cannot say more: an empty
+/// region, one too large to allocate for, or a read the operating system refused
+/// (`screen::CAPTURE_FAILED`, `failed`). Every capture error is what a module is told: the error
+/// value `pixel`, `profile`, the image searches, `save` and the cells calls return beside their
+/// `nil` or `false` — the capture errors of `docs/api/screen.md` — and its message begins with
+/// these words; a `fallback = "none"` module's for a read desktop duplication could not answer
+/// begins with [`DUPLICATION_UNANSWERED`]. A text read answers each of them as a reading with
+/// `status = "failed"` and this `error`, never a raise.
+pub fn capture_failed() -> HostError {
+    HostError::of(&crate::errors::screen::CAPTURE_FAILED)
+}
 
 /// The first words of the capture error a `fallback = "none"` module is told when desktop
 /// duplication had no picture to give — routine there, at every fullscreen switch and UAC prompt;
-/// with the default fallback the standard path answers instead.
+/// with the default fallback the standard path answers instead. Each such error's Reason is its
+/// tail's (`dxgi::Fallback::reason`).
 pub const DUPLICATION_UNANSWERED: &str = "screen capture failed: desktop duplication could not answer";
 
 /// Tells the Windows duplication engine a module that reads through it has just come to the
@@ -932,13 +938,15 @@ pub struct OcrText {
     pub skipped: bool,
 }
 
-/// What `host.ocr.recognize` says when the platform has no recogniser at all.
-pub const NO_RECOGNISER: &str = "no text recogniser on this platform";
+/// What `host.ocr.recognize` says when the platform has no recogniser at all: `not_supported`.
+pub fn no_recogniser() -> HostError {
+    HostError::of(&crate::errors::ocr::NO_RECOGNISER)
+}
 
 /// The pixels the OCR capture stage took for one read, handed to the recognise stage. `Send`,
 /// because it crosses from the one thread to the other; what it holds is the platform's own.
 #[cfg(windows)]
-pub type OcrShot = Vec<Result<CapturedImage, String>>;
+pub type OcrShot = Vec<Result<CapturedImage, HostError>>;
 #[cfg(target_os = "macos")]
 pub type OcrShot = macos::ocr::Shot;
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -948,14 +956,19 @@ pub type OcrShot = ();
 /// source, one frame per region in the same order — or why there is none — recording which path
 /// answered each. `poll` is true when every request of the round is a change wait, which asks
 /// again and again: macOS then skips its flat-picture watch. A plain `fn`, so it is `Send`.
-pub type FramesFn = fn(&[(i32, i32, i32, i32)], CaptureSource, bool) -> Vec<Result<frame::Frame, String>>;
+pub type FramesFn = fn(&[(i32, i32, i32, i32)], CaptureSource, bool) -> Vec<Result<frame::Frame, HostError>>;
 
 /// The pixel reads' capture routine ([`OcrWorker::points`]), for a handler that waits and for a
 /// callback: the colours at the points, in order, read from one source on the capture thread —
 /// `single`, each point as `host.screen.pixel` reads one (`GetPixel` on the Windows standard
 /// path), and otherwise all of them as `host.screen.pixels` reads a list, from as few captures as
 /// [`frame::plan_points`] allows. All or nothing, with the reason. A plain `fn`, so it is `Send`.
-pub type PointsFn = fn(&[(i32, i32)], CaptureSource, bool) -> Result<Vec<(u8, u8, u8)>, String>;
+pub type PointsFn = fn(&[(i32, i32)], CaptureSource, bool) -> Result<Vec<(u8, u8, u8)>, HostError>;
+
+/// The recognise stage's routine ([`OcrWorker::recognise`]): each region of a capture, one answer
+/// per region in order — its text, or why it could not be read, which its reading's `error`
+/// carries. A plain `fn`, so it is `Send`.
+pub type RecogniseFn<S> = fn(&S, &[(i32, i32, i32, i32)], &Recognise) -> Vec<Result<OcrText, HostError>>;
 
 /// Which of the two OCR threads is starting — see [`OcrWorker::init_thread`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -979,7 +992,7 @@ pub struct Recognise<'a> {
     /// extra passes skips them (macOS's bigger-then-faster rungs). `None` for interactive reads.
     pub preempt: Option<&'a std::sync::atomic::AtomicBool>,
     /// Set when the application is closing: the regions not started yet are answered
-    /// [`CLOSING`] without being read. Without it a job of 64 regions went on recognising —
+    /// [`closing`] without being read. Without it a job of 64 regions went on recognising —
     /// and on Windows kept starting neural recognitions — after the exit had stopped waiting
     /// for it, which is the fault the exit's waits are there to prevent.
     pub stop: Option<&'a std::sync::atomic::AtomicBool>,
@@ -988,8 +1001,11 @@ pub struct Recognise<'a> {
     pub region_done: Option<&'a dyn Fn()>,
 }
 
-/// What a region is answered when the application closed before it was read.
-pub const CLOSING: &str = "the application is closing";
+/// What a region is answered when the application closed before it was read: `cancelled`, which
+/// no module is handed, since no callback runs after the exit has begun.
+pub fn closing() -> HostError {
+    HostError::of(&crate::errors::ocr::CLOSING)
+}
 
 impl Recognise<'_> {
     /// Answers `items` one region at a time, in order, through `read` — every recogniser's loop,
@@ -999,13 +1015,13 @@ impl Recognise<'_> {
     pub fn each<T>(
         &self,
         items: impl IntoIterator<Item = T>,
-        mut read: impl FnMut(T) -> Result<OcrText, String>,
-    ) -> Vec<Result<OcrText, String>> {
+        mut read: impl FnMut(T) -> Result<OcrText, HostError>,
+    ) -> Vec<Result<OcrText, HostError>> {
         items
             .into_iter()
             .map(|item| {
                 if self.stop.is_some_and(|s| s.load(std::sync::atomic::Ordering::Acquire)) {
-                    return Err(CLOSING.to_string());
+                    return Err(closing());
                 }
                 let answer = read(item);
                 if let Some(done) = self.region_done {
@@ -1035,8 +1051,8 @@ pub struct OcrWorker<S = OcrShot> {
     /// Photographs `regions` through the source, at once: all of them from one moment. Returns
     /// the pixels and roughly how many bytes they hold. One failed region fails in its own slot.
     pub capture: fn(&[(i32, i32, i32, i32)], CaptureSource) -> (S, usize),
-    /// Recognises each region of a capture, one answer per region in order.
-    pub recognise: fn(&S, &[(i32, i32, i32, i32)], &Recognise) -> Vec<Result<OcrText, String>>,
+    /// Recognises each region of a capture ([`RecogniseFn`]).
+    pub recognise: RecogniseFn<S>,
     /// The languages the engine reads and the user prefers. Called on the recognise thread.
     pub languages: fn() -> crate::ocr::lang::Languages,
     /// Photographs a snapshot round, on the capture thread: `host.screen.snapshot`'s pictures
@@ -1078,10 +1094,10 @@ impl OcrWorker {
             init_thread: |_| {},
             warm_up: |_| {},
             capture: |_, _| (OcrShot::default(), 0),
-            recognise: |_, regions, _| regions.iter().map(|_| Err(NO_RECOGNISER.to_string())).collect(),
+            recognise: |_, regions, _| regions.iter().map(|_| Err(no_recogniser())).collect(),
             languages: crate::ocr::lang::Languages::default,
-            frames: |regions, _, _| regions.iter().map(|_| Err(CAPTURE_FAILED.to_string())).collect(),
-            points: |pts, _, single| if single { Ok(vec![(0, 0, 0); pts.len()]) } else { Err(CAPTURE_FAILED.to_string()) },
+            frames: |regions, _, _| regions.iter().map(|_| Err(capture_failed())).collect(),
+            points: |pts, _, single| if single { Ok(vec![(0, 0, 0); pts.len()]) } else { Err(capture_failed()) },
             compare: no_comparison,
             display_of: |_, _| 0,
             shot_of: |_, _| OcrShot::default(),
@@ -1170,33 +1186,44 @@ pub enum MouseButton {
     Middle,
 }
 
-/// What a way of acting answers on a platform that does not have it yet: `host.input.click`'s
-/// `via = "noactivate"` and `host.element.press`, on a Mac for now.
-pub const NOT_YET: &str = "not supported on this platform yet";
-
-/// What a click for a `window` is refused with when another window is drawn over its point.
-pub const COVERED: &str = "something else is drawn over the point";
-
-/// What a click for a `window` is refused with when that window is not there any more.
-// Said by the Windows and the Mac backends; the stub has no window to refuse.
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-pub const GONE: &str = "the window is gone";
-
-/// What a click for a `window` is refused with when the point lies outside the window.
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-pub const OUTSIDE: &str = "the point is not in the window";
-
-/// A posted click is a click in a window's client area: on its frame or title bar a real click is
-/// something else — another message on Windows, a move or a zoom of the window on a Mac — which
-/// nothing posts.
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-pub const FRAME: &str = "the point is on the window's frame, not in its client area";
+// What a click for a `window` is refused with, on both platforms, is a Reason of errors.rs: the
+// window gone (`common::WINDOW_GONE`), the point outside it (`input::OUTSIDE`), on its frame
+// (`input::FRAME` — a posted click is a click in a window's client area: on its frame or title bar
+// a real click is something else, another message on Windows, a move or a zoom of the window on a
+// Mac, which nothing posts), or under another window (`input::COVERED`); and a way of acting a
+// platform does not have yet answers `common::NOT_YET`.
 
 /// A piece of work a backend hands the host for a thread of the host's own, because it may wait
 /// for another program — a window's style changed across processes — and so must never run on
 /// the event loop. `Ok` when it was done; `Err` with what a module is told. Runs once, on a thread
 /// with nothing else of the host's on it.
-pub type ActJob = Box<dyn FnOnce() -> Result<(), String> + Send>;
+pub type ActJob = Box<dyn FnOnce() -> Result<(), HostError> + Send>;
+
+/// Why `host.input.post` or `host.input.send` sent nothing: a mistake in the call — a spec that
+/// does not parse, a key with no name, a modifier tap — which raises with its sentence, or what
+/// only the moment decides, which the call answers as `false, err`. A sentence converts into a
+/// mistake, so a parser's `?` raises as it always did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeyRefusal {
+    Mistake(String),
+    Answer(HostError),
+}
+
+impl From<String> for KeyRefusal {
+    fn from(why: String) -> Self {
+        KeyRefusal::Mistake(why)
+    }
+}
+
+/// The sentence of either: what a log line or a dialog says of it.
+impl std::fmt::Display for KeyRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KeyRefusal::Mistake(why) => f.write_str(why),
+            KeyRefusal::Answer(e) => write!(f, "{e}"),
+        }
+    }
+}
 
 /// A question to a window's accessibility tree: one `host.element` call, with its arguments.
 ///
@@ -1317,7 +1344,7 @@ impl ElementAsk {
             ElementAsk::FocusStep { .. } => ElementAnswer::Step(None),
             ElementAsk::FocusWithin { .. } => ElementAnswer::Within(None),
             ElementAsk::FocusPut { .. } => ElementAnswer::Put(false),
-            ElementAsk::Press { .. } => return Err(ElementFailure { why: NOT_YET.to_string(), unanswered: false }),
+            ElementAsk::Press { .. } => return Err(ElementFailure { why: HostError::of(&common::NOT_YET), unanswered: false }),
         })
     }
 }
@@ -1336,9 +1363,9 @@ pub enum ElementAnswer {
     /// or none when the element is not there.
     State(Option<(i32, i32)>),
     /// `dump`, `rawDump`: what the walk found, and — when it stopped before the end because the
-    /// program did not answer one of its questions — why, so that a part of the tree does not read
-    /// as all of it.
-    Nodes(Vec<DumpNode>, Option<String>),
+    /// program did not answer one of its questions, or at a bound — why, so that a part of the tree
+    /// does not read as all of it: a partial answer.
+    Nodes(Vec<DumpNode>, Option<HostError>),
     /// `focusStep`: where the keyboard focus landed, or none.
     Step(Option<FocusStep>),
     /// `focusWithin`: the name and control type of the element that took the focus, or none.
@@ -1371,8 +1398,8 @@ impl ElementAnswer {
 /// press, did not take the action.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ElementFailure {
-    /// What a module is told, a sentence: `"the program did not answer within 1000 ms"`.
-    pub why: String,
+    /// What a module is told: `the program did not answer within 1000 ms`, code `timeout`.
+    pub why: HostError,
     /// The program did not answer within the bound the platform sets (UI Automation's timeout):
     /// the questions to the same program that waited behind this one are not put to it.
     pub unanswered: bool,
@@ -1513,13 +1540,14 @@ pub trait Backend {
     /// hard to return to. Nothing in this platform could offer one either, because nothing
     /// here could focus a window.
     ///
-    /// Returns whether the system accepted it. Both platforms can refuse — Windows will not
-    /// let an application steal the foreground under some conditions, and on macOS the
-    /// window's own application has to be activated as well as the window raised — so the
-    /// answer is reported rather than assumed.
-    fn focus_window(&self, id: isize) -> bool {
+    /// `Ok` when the system accepted it; otherwise why not: declined by the system (`refused`), no
+    /// such window (`gone`), a hidden window of this application (`hidden`). Both platforms can
+    /// refuse — Windows will not let an application steal the foreground under some conditions,
+    /// and on macOS the window's own application has to be activated as well as the window raised
+    /// — so the answer is reported rather than assumed. The default is a platform without it.
+    fn focus_window(&self, id: isize) -> Result<(), HostError> {
         let _ = id;
-        false
+        Err(HostError::of(&common::NOT_YET))
     }
 
     /// The keyboard landings of `host.window.focus` (HW1, `focus_landing.rs`): the puts they want
@@ -1569,10 +1597,10 @@ pub trait Backend {
     /// module is told. Asks nothing of any program, so it is cheap on the event loop.
     ///
     /// The default goes by [`window_owns_point`](Self::window_owns_point) and refuses only its
-    /// definite "no", with [`COVERED`]; Windows says which of three things it is.
-    fn click_check(&self, window: isize, x: i32, y: i32) -> Result<(), String> {
+    /// definite "no", with `input::COVERED`; Windows says which of three things it is.
+    fn click_check(&self, window: isize, x: i32, y: i32) -> Result<(), HostError> {
         match self.window_owns_point(window, x, y) {
-            Some(false) => Err(COVERED.to_string()),
+            Some(false) => Err(HostError::of(&input::COVERED)),
             _ => Ok(()),
         }
     }
@@ -1584,7 +1612,7 @@ pub trait Backend {
     /// Nothing comes to the front. On the event loop: it never waits for the program to take the
     /// click (on a Mac the window's place may be an accessibility read, bounded as every one is).
     /// `Ok` says it was posted, not that the program did anything with it; one line in the log
-    /// either way. The default is a platform without it, [`NOT_YET`].
+    /// either way. The default is a platform without it, `common::NOT_YET`.
     fn mouse_click_posted(
         &self,
         _window: isize,
@@ -1592,8 +1620,8 @@ pub trait Backend {
         _y: i32,
         _button: MouseButton,
         _move_pointer: bool,
-    ) -> Result<(), String> {
-        Err(NOT_YET.to_string())
+    ) -> Result<(), HostError> {
+        Err(HostError::of(&common::NOT_YET))
     }
 
     /// `host.input.click`'s `via = "noactivate"`, its part on the event loop: the checks of
@@ -1601,7 +1629,7 @@ pub trait Backend {
     /// the no-activate style at all — then the job that gives it and clicks, for a thread of the
     /// host's ([`ActJob`]), because changing another program's window waits for that program.
     /// `owner` is the module the click is for, whose stop gives the style back. The default is a
-    /// platform without it, [`NOT_YET`].
+    /// platform without it, `common::NOT_YET`.
     fn mouse_click_noactivate(
         &self,
         _window: isize,
@@ -1609,8 +1637,8 @@ pub trait Backend {
         _y: i32,
         _button: MouseButton,
         _owner: usize,
-    ) -> Result<ActJob, String> {
-        Err(NOT_YET.to_string())
+    ) -> Result<ActJob, HostError> {
+        Err(HostError::of(&common::NOT_YET))
     }
 
     /// The job that gives back their activation — takes the no-activate style off again — to the
@@ -1691,7 +1719,7 @@ pub trait Backend {
 
     /// A pointer to the stateless screen-capture routine, so a worker thread can capture without
     /// holding the (`Rc`, non-`Send`) backend: each region captured through the source, or why it
-    /// could not be — an error that begins with [`CAPTURE_FAILED`], which the module is told. Used
+    /// could not be — a capture error ([`capture_failed`]), which the module is told. Used
     /// by the image worker; the `screen-capture` thread captures through [`OcrWorker::frames`] and
     /// [`OcrWorker::points`]. No read of the screen is made on the calling thread of the backend: a
     /// `host.screen` call that cannot wait raises (task.rs).
@@ -1759,23 +1787,36 @@ pub trait Backend {
     /// path most likely to work here: Melodyne runs its own message pump with its own
     /// accelerator table, so a posted WM_KEYDOWN reaches TranslateAccelerator while a sent one
     /// would bypass it.
-    fn key_post(&self, hwnd: isize, key: &str) -> Result<(), String>;
+    ///
+    /// A key name that is not one raises ([`KeyRefusal::Mistake`]); what the moment decides — the
+    /// window gone, a program of higher rights, a key the layout cannot type — is answered.
+    fn key_post(&self, hwnd: isize, key: &str) -> Result<(), KeyRefusal>;
 
-    /// Sends a key combo like "Ctrl+S" as synthetic input.
-    fn key_send(&self, combo: &str) -> Result<(), String>;
+    /// Sends a key combo like "Ctrl+S" as synthetic input. A spec that does not parse raises
+    /// ([`KeyRefusal::Mistake`]); a key the layout cannot type, or an event that could not be
+    /// made, is answered.
+    fn key_send(&self, combo: &str) -> Result<(), KeyRefusal>;
     /// Types Unicode text.
     fn type_text(&self, text: &str);
 
-    /// Registers a global hotkey identified by `id` from a spec like "Ctrl+Alt+H".
-    fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String>;
+    /// Registers a global hotkey identified by `id` from a spec like "Ctrl+Alt+H". A spec this
+    /// backend's parser refuses is a mistake ([`KeyRefusal::Mistake`]); a combination the system
+    /// would not give it — another program holds it — is answered ([`KeyRefusal::Answer`]).
+    fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), KeyRefusal>;
     /// Registers a hotkey whose press the operating system delivers itself — `host.hotkey.register`
     /// with `{ foreground = true }` (experimental). On Windows that is `RegisterHotKey` without
     /// the keyboard hook's matching, so a press arrives as `WM_HOTKEY`, which is what gives this
     /// process the right to bring a window of its own forward; see `hotkey_foreground` in lib.rs
     /// for the price. Everywhere else a hotkey is the system's own delivery already, so the
     /// default is the ordinary registration.
-    fn register_foreground_hotkey(&self, id: i32, spec: &str) -> Result<(), String> {
+    fn register_foreground_hotkey(&self, id: i32, spec: &str) -> Result<(), KeyRefusal> {
         self.register_hotkey(id, spec)
+    }
+    /// Why hotkey `id`, registered, is not held at the system now, or `None` when it is: a macOS
+    /// letter no key of the current layout types, kept and registered once a layout types it. The
+    /// default holds every hotkey it registered.
+    fn hotkey_parked(&self, _id: i32) -> Option<HostError> {
+        None
     }
     /// Unregisters a previously registered hotkey by id.
     fn unregister_hotkey(&self, id: i32);
@@ -1845,8 +1886,9 @@ pub trait Backend {
     /// the cheap half of "is a menu open", which the key hook already uses and
     /// which the menu watch should ask before paying for an accessibility walk.
     fn native_menu_open(&self) -> bool;
-    /// Installs the low-level keyboard hook (idempotent).
-    fn watch_keys(&self) -> Result<(), String>;
+    /// Installs the low-level keyboard hook (idempotent): the Windows hook's thread, the macOS
+    /// event tap. `Err` with what `host.keys.capture` answers; the next call tries again.
+    fn watch_keys(&self) -> Result<(), HostError>;
 
     /// Starts listening for what the operating system does to the whole session — sleep and
     /// wake, lock and unlock, the session going and coming back, display changes — which then
@@ -2766,7 +2808,7 @@ pub const REASON_RESERVED: &str = "reserved";
 /// Alt roles ([`MAC_VOICEOVER_LAYER`]).
 pub const REASON_VOICEOVER: &str = "voiceover";
 /// macOS: the key has no key code (F21–F24).
-pub const REASON_NO_KEYCODE: &str = "no-keycode";
+pub const REASON_NO_KEYCODE: &str = "no_keycode";
 /// A modifier pressed on its own: something `host.keys.capture` watches, and never a hotkey.
 pub const REASON_TAP: &str = "tap";
 /// Windows: Ctrl+Alt is AltGr, and this one types a character in the current layout.
@@ -2780,10 +2822,12 @@ pub fn reason_blocks(reason: &str) -> bool {
     matches!(reason, REASON_PARSE | REASON_RESERVED | REASON_VOICEOVER | REASON_NO_KEYCODE)
 }
 
-/// Does `host.hotkey.register` raise for a spec `check` gives this reason? Every reason that
-/// makes a registration impossible rather than merely costly: VoiceOver's layer is not one of
-/// them, because a Mac whose VoiceOver modifier is Caps Lock, or that runs no VoiceOver, gets
-/// the key. The overlay runtime skips its control hotkeys by the same list.
+/// Does `host.hotkey.register` refuse a spec `check` gives this reason — raising for one that
+/// does not parse or is a tap, answering `nil, err` for a key the system keeps or has no key code
+/// for ([`hotkey_refusal_for`])? Every reason that makes a registration impossible rather than
+/// merely costly: VoiceOver's layer is not one of them, because a Mac whose VoiceOver modifier is
+/// Caps Lock, or that runs no VoiceOver, gets the key. The overlay runtime skips its control
+/// hotkeys by the same list.
 pub fn reason_refuses_hotkey(reason: &str) -> bool {
     matches!(reason, REASON_PARSE | REASON_RESERVED | REASON_NO_KEYCODE | REASON_TAP)
 }
@@ -2841,7 +2885,7 @@ pub fn reserved_for(os: KeyOs, vk: u32, mask: u8) -> Option<&'static str> {
 /// F21–F24; `macos/keys.rs` checks this against its table. A letter always has one here: which
 /// key types it is the keyboard layout's answer, which can change while the application runs,
 /// so a hotkey on a letter no key of the current layout types is accepted and parked by the
-/// macOS backend until a layout that types it is selected, not refused as `no-keycode`.
+/// macOS backend until a layout that types it is selected, not refused as `no_keycode`.
 pub fn has_mac_keycode(vk: u32) -> bool {
     !(0x84..=0x87).contains(&vk)
 }
@@ -2935,38 +2979,48 @@ pub fn check_spec_for(
 /// the "Binding unavailable" dialog, which blames another application that uses the key. The
 /// [`reason_refuses_hotkey`] reasons of [`check_spec_for`], and derived from them, so the two
 /// cannot say different things.
-pub fn hotkey_refusal_for(os: KeyOs, spec: &str) -> Option<String> {
+///
+/// A tap is a mistake in the call on every platform, and raises ([`KeyRefusal::Mistake`]); a key
+/// this platform keeps or has no code for is answered `nil, err` (`taken`, `not_supported`).
+pub fn hotkey_refusal_for(os: KeyOs, spec: &str) -> Option<KeyRefusal> {
+    use crate::errors::hotkey;
     let (vk, mask) = key_spec(spec)?;
     let check = check_spec_for(os, spec, |_, _| None);
     let reason = check.reasons.iter().copied().find(|r| reason_refuses_hotkey(r))?;
     let shown = describe_key_for(os, vk, mask, KeyStyle::Short);
     Some(match reason {
-        REASON_TAP => format!(
+        REASON_TAP => KeyRefusal::Mistake(format!(
             "the hotkey '{spec}' ({shown}) is a modifier pressed on its own, which cannot be a \
              global hotkey: capture it with host.keys.capture instead"
-        ),
-        REASON_NO_KEYCODE => format!(
-            "the hotkey '{spec}' ({shown}) cannot be registered: macOS has no key code for {}. \
-             Choose another key",
-            key_word(os, vk, Some(KeyStyle::Short))
-        ),
-        _ => format!(
-            "the hotkey '{spec}' ({shown}) is kept by the system and cannot be registered: {}. \
-             Choose another combination",
-            reserved_for(os, vk, mask).unwrap_or("the system uses it")
-        ),
+        )),
+        REASON_NO_KEYCODE => KeyRefusal::Answer(HostError::with(
+            &hotkey::NO_KEYCODE,
+            format!(
+                "the hotkey '{spec}' ({shown}) cannot be registered: macOS has no key code for {}. \
+                 Choose another key",
+                key_word(os, vk, Some(KeyStyle::Short))
+            ),
+        )),
+        _ => KeyRefusal::Answer(HostError::with(
+            &hotkey::KEPT_BY_SYSTEM,
+            format!(
+                "the hotkey '{spec}' ({shown}) is kept by the system and cannot be registered: {}. \
+                 Choose another combination",
+                reserved_for(os, vk, mask).unwrap_or("the system uses it")
+            ),
+        )),
     })
 }
 
 /// What `host.hotkey.register` claims for `spec` on `os`: its `(vk, mask)`, and the spelling the
 /// claim is recorded, logged and handed to the backend under — the canonical one
 /// ([`spec_name_for`]), or the author's own for a spec that does not parse, which the backend
-/// then refuses with the parser's error. `Err`, with the message the binding raises, for
-/// everything [`hotkey_refusal_for`] refuses: then there is nothing to record and nothing to
-/// register, so a refused spec reaches neither the backend nor, on Windows, the keyboard
-/// hook's table. One function, so that "refused before anything is registered" is its order
-/// and not a convention of the binding's.
-pub fn hotkey_claim_for(os: KeyOs, spec: &str) -> Result<(Option<(u32, u8)>, String), String> {
+/// then refuses with the parser's error. `Err` for everything [`hotkey_refusal_for`] refuses —
+/// the sentence the binding raises, or the error value it answers: then there is nothing to
+/// record and nothing to register, so a refused spec reaches neither the backend nor, on
+/// Windows, the keyboard hook's table. One function, so that "refused before anything is
+/// registered" is its order and not a convention of the binding's.
+pub fn hotkey_claim_for(os: KeyOs, spec: &str) -> Result<(Option<(u32, u8)>, String), KeyRefusal> {
     if let Some(why) = hotkey_refusal_for(os, spec) {
         return Err(why);
     }
@@ -3078,7 +3132,7 @@ mod recognise_each_tests {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    fn text(t: &str) -> Result<OcrText, String> {
+    fn text(t: &str) -> Result<OcrText, HostError> {
         Ok(OcrText { text: t.into(), words: vec![], lines: vec![], fallback: None, skipped: false })
     }
 
@@ -3102,7 +3156,8 @@ mod recognise_each_tests {
         assert_eq!(done.get(), 2);
         assert_eq!(answers.len(), 5, "every region is still answered");
         assert_eq!(answers[1].as_ref().unwrap().text, "1");
-        assert!(answers[2..].iter().all(|a| a.as_ref().err().map(String::as_str) == Some(CLOSING)));
+        assert!(answers[2..].iter().all(|a| a.as_ref().err() == Some(&closing())));
+        assert_eq!(closing().reason(), &crate::errors::ocr::CLOSING);
 
         // Neither is required: the legacy shape reads everything and reports nothing.
         let plain = Recognise { lang: None, fast_ok: true, preempt: None, stop: None, region_done: None };
@@ -3531,19 +3586,34 @@ mod key_grammar_tests {
 
     /// What no operating system can hold is refused when the module asks, with the reason —
     /// not left to the claim, where it used to end in a dialog blaming another application.
+    /// A key the system keeps or has no key code for is answered (`taken`, `not_supported`); a tap
+    /// raises on every platform.
     #[test]
     fn register_refuses_what_can_never_be_held() {
+        use crate::errors::hotkey;
+        let answered = |r: &KeyRefusal| match r {
+            KeyRefusal::Answer(e) => Some(e.reason()),
+            KeyRefusal::Mistake(_) => None,
+        };
         let why = hotkey_refusal_for(Windows, "F12").unwrap();
+        assert_eq!(answered(&why), Some(&hotkey::KEPT_BY_SYSTEM));
+        let why = why.to_string();
         assert!(why.contains("'F12'") && why.contains("debugger"), "{why}");
         let why = hotkey_refusal_for(Macos, "Ctrl+Q").unwrap();
+        assert_eq!(answered(&why), Some(&hotkey::KEPT_BY_SYSTEM));
+        let why = why.to_string();
         assert!(why.contains("'Ctrl+Q' (Cmd+Q)") && why.contains("quits"), "{why}");
         assert_eq!(hotkey_refusal_for(Windows, "Ctrl+Q"), None);
         assert_eq!(hotkey_refusal_for(Macos, "Win+Q"), None, "Control+Q on a Mac");
         for os in ALL {
             let why = hotkey_refusal_for(os, "Alt tap").unwrap();
+            assert_eq!(answered(&why), None, "a tap is a mistake in the call: {os:?}");
+            let why = why.to_string();
             assert!(why.contains("on its own") && why.contains("host.keys.capture"), "{os:?}: {why}");
         }
         let why = hotkey_refusal_for(Macos, "Shift+F21").unwrap();
+        assert_eq!(answered(&why), Some(&hotkey::NO_KEYCODE));
+        let why = why.to_string();
         assert!(why.contains("no key code for F21"), "{why}");
         assert_eq!(hotkey_refusal_for(Windows, "F21"), None, "Windows has F21");
         assert_eq!(hotkey_refusal_for(Windows, "Ctrl+F12"), None);
@@ -4138,7 +4208,7 @@ mod own_window_tests {
             ("pub fn foreground_window() -> Option<crate::backend::Foreground>", "if is_ours(pid) {", "app_element(pid)"),
             ("pub fn active_window() -> Option<WinInfo>", "if front_is_ours(front) {", "front_window_of(pid)"),
             ("pub fn window_info(handle: isize, require_title: bool)", "return super::own::info(handle, require_title);", "handles::get(handle)"),
-            ("pub fn focus_window(handle: isize) -> bool", "return super::own::focus(handle);", "handles::get(handle)"),
+            ("pub fn focus_window(handle: isize) -> Result<(), HostError>", "return super::own::focus(handle);", "handles::get(handle)"),
             ("pub(super) fn window_id(handle: isize) -> u32", "if let Some(n) = crate::backend::own_number(handle) {", "handles::get(handle)"),
             ("pub(super) fn frontmost_window_element()", "if is_ours(pid) {", "front_window_of(pid)"),
             ("pub fn window_focus_chain() -> Vec<ControlInfo>", "if keyboard_is_ours(front) {", "system_wide()"),
@@ -4360,7 +4430,7 @@ mod front_tests {
 
         // `host.window.focus` hands the front over; the raise, the focus and the read of the chain
         // are no longer made at the call.
-        let focus = body(AX, "pub fn focus_window(handle: isize) -> bool {");
+        let focus = body(AX, "pub fn focus_window(handle: isize) -> Result<(), HostError> {");
         assert!(focus.contains("super::front::hand_front_to(entry.pid, handle, None, super::front::HANDING)"));
         for gone in ["AXRaise", "window_focus_chain()", "activateWithOptions"] {
             assert!(!focus.contains(gone), "{gone}");
@@ -4477,14 +4547,15 @@ mod front_tests {
         assert_eq!(take.matches("activate_self()").count(), 1, "only for a window that activates");
         assert!(take.contains("if was_active || !self.state.activates {"), "declined at once: nothing is on its way");
 
-        let focus = body(OWN, "pub(super) fn focus(id: isize) -> bool {");
+        let focus = body(OWN, "pub(super) fn focus(id: isize) -> Result<(), HostError> {");
         let decided = at(focus, "let lends = nonactivating(&w);");
         assert!(decided < at(focus, "super::app::keyboard_without_activating();"));
         assert!(decided < at(focus, "super::app::activate_self();"));
         // Answered at the call, as nothing is on its way: the window key, or not.
         let made = at(focus, "w.makeKeyAndOrderFront(None);");
         let read = at(focus, "let key = w.isKeyWindow();");
-        assert!(made < at(focus, "if !lends {") && at(focus, "if !lends {") < read && focus.trim_end().ends_with("key"));
+        let answered = at(focus, "if key {\n        Ok(())\n    } else {\n        Err(HostError::of(&crate::errors::common::DECLINED))");
+        assert!(made < at(focus, "if !lends {") && at(focus, "if !lends {") < read && read < answered);
 
         // Whether this application is the active one, for a show's answer and for a request whose
         // page left, is the hand-over's: not AppKit's word while a panel of ours has the keyboard

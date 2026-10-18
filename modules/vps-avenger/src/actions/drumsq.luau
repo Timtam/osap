@@ -407,8 +407,13 @@ function Sq.length(o, trip, steps, label)
     end)
   end
 
-  -- 2 and 3: the double-click, and LENGTH read after it.
-  local function afterDouble()
+  -- 2 and 3: the double-click, and LENGTH read after it — not where its second click was not made.
+  local function afterDouble(okD, saidD)
+    if not okD then
+      release(held)
+      if not trip:inFront() then return end
+      return trip:done({ part = before, sentence = saidD })
+    end
     -- What LENGTH is from here on is not known until it is read: a give-up posts it so.
     local w = E.plugin()
     if w then S.part(w.id, { "sqLength" }, {}) end

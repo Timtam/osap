@@ -11,7 +11,9 @@
 //! take, named and positional corners mixed, a corner missing, a corner that is not a whole
 //! number or lies outside the screen's coordinate range, corners that are empty or turned
 //! around, a window table without a `client`, a fraction that is not a finite number. There is
-//! no default there: `{}` raises like any other region with a corner missing.
+//! no default there: `{}` raises like any other region with a corner missing. `host.ocr.recognize`
+//! reads with `read_or_empty`, which is `read` but for corners that are empty or turned around:
+//! those are a rectangle with no area, which the call answers (`region::corners_or_empty`).
 //!
 //! `read_loose` is for the older calls — `profile`, `template{ capture }`, the image searches and
 //! an `imageSearchEach` entry's `within`, `save` and `saveMarked`. Their corners are read exactly
@@ -201,6 +203,21 @@ fn not_a_table(what: &str, v: &Value) -> String {
 /// clamps them the way `region.rs` explains). `what` names the value in every message
 /// (`opts.region`, `the region`, `entry 2.region`); the caller puts its function's name first.
 pub(crate) fn read(v: &Value, what: &str) -> Result<Region, String> {
+    read_with(v, what, region::corners)
+}
+
+/// [`read`], but corners that are empty or turned around are a rectangle with no width or no height
+/// rather than a mistake (`region::corners_or_empty`): `host.ocr.recognize`'s, which answers them.
+pub(crate) fn read_or_empty(v: &Value, what: &str) -> Result<Region, String> {
+    read_with(v, what, region::corners_or_empty)
+}
+
+/// [`read`], its corners made a rectangle by `corners`.
+fn read_with(
+    v: &Value,
+    what: &str,
+    corners: fn(&str, i64, i64, i64, i64) -> Result<region::ScreenRect, String>,
+) -> Result<Region, String> {
     let Value::Table(t) = v else {
         return Err(not_a_table(what, v));
     };
@@ -212,7 +229,7 @@ pub(crate) fn read(v: &Value, what: &str) -> Result<Region, String> {
                 .ok_or_else(|| format!("{what}.{name} must be a whole number, got {}", describe_value(v)))?;
         }
         let [x1, y1, x2, y2] = n;
-        return region::corners(what, x1, y1, x2, y2).map(Region::Rect);
+        return corners(what, x1, y1, x2, y2).map(Region::Rect);
     }
     let client = window_client(t, what)?;
     let fraction: Value = t.get("fraction").map_err(|e| e.to_string())?;

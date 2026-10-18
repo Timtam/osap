@@ -22,10 +22,9 @@
 //! text. A number fixed by a constant is written out, so the docs can show it; the producer's
 //! debug assertion ([`HostError::with`]) keeps the two together.
 //!
-//! **Nothing answers one yet.** This is the series' foundation: until the producers move to
-//! HostError namespace by namespace, every call answers the sentence it always did and only the
-//! tests make one, so the allowance below goes with that step.
-#![cfg_attr(not(test), allow(dead_code))]
+//! **Every namespace answers with HostError**: host.gui, host.window.focus, host.element,
+//! host.input, host.keys, host.hotkey, host.screen, host.ocr, host.speech.use, host.sound.play and
+//! host.gamepad. A Reason whose `entries` are empty is one no module is handed; it says why.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -180,7 +179,7 @@ pub mod common {
 pub mod gui {
     use super::{Code, Reason};
 
-    pub const HEADLESS: Reason = Reason { code: Code::NotSupported, message: "headless", entries: &["page-show", "page-prepare", "page-post"] };
+    pub const HEADLESS: Reason = Reason { code: Code::NotSupported, message: "headless", entries: &["page-show", "page-prepare", "page-focus", "page-post"] };
     pub const RUNTIME_MISSING: Reason = Reason { code: Code::Unavailable, message: "WebView2 runtime not installed", entries: &["page-show", "page-prepare"] };
     pub const NOT_READY: Reason = Reason { code: Code::NotReady, message: "not ready yet", entries: &["page-show", "page-prepare"] };
     pub const BUILD_FAILED: Reason = Reason { code: Code::Failed, message: "could not be built", entries: &["page-show", "page-prepare"] };
@@ -377,6 +376,13 @@ pub mod hotkey {
     /// A macOS letter the current layout does not type: parked until one does.
     pub const PARKED: Reason = Reason { code: Code::NotSupported, message: "no key of the current keyboard layout types this letter", entries: &["host-hotkey-register"] };
     pub const STUB: Reason = Reason { code: Code::NotSupported, message: "hotkeys are not implemented on this platform yet (spec '…')", entries: &["host-hotkey-register"] };
+    /// macOS: the Carbon handler every hotkey is delivered through could not be installed, so
+    /// no claim is held until one installs it.
+    pub const NO_HANDLER: Reason = Reason {
+        code: Code::Failed,
+        message: "could not install the Carbon hotkey handler (InstallEventHandler returned …); no global shortcut will work in this session",
+        entries: &["host-hotkey-register"],
+    };
 }
 
 /// `host.screen`. Most reasons are shared by many calls, so the docs name five groups once
@@ -611,8 +617,22 @@ pub mod screen {
         message: "cannot open template '…': …",
         entries: &["host-screen-template", "host-screen-imagesearch", "host-screen-imagesearchall", "host-screen-imagesearcheach"],
     };
+    /// A file there that could not be read for another reason: held by another program, or
+    /// without the right to read it.
+    pub const TEMPLATE_UNREADABLE: Reason = Reason {
+        code: Code::Failed,
+        message: "cannot open template '…': …",
+        entries: &["host-screen-template", "host-screen-imagesearch", "host-screen-imagesearchall", "host-screen-imagesearcheach"],
+    };
     pub const SAVE_UNWRITTEN: Reason = Reason { code: Code::Failed, message: "screen.save '…': …", entries: &["host-screen-save"] };
     pub const SAVE_MARKED_UNWRITTEN: Reason = Reason { code: Code::Failed, message: "screen.saveMarked '…': …", entries: &["host-screen-savemarked"] };
+
+    // Never handed to a module.
+    /// The answer of a branch no request takes — a picture for a points request, a profile's
+    /// reduction for a snapshot: never reaches a module.
+    pub const INTERNAL: Reason = Reason { code: Code::Failed, message: "internal error", entries: &[] };
+    /// A shot whose module, or handler, went before it was written: nobody is answered.
+    pub const NOT_WAITED: Reason = Reason { code: Code::Cancelled, message: "nobody waits for the shot any more", entries: &[] };
 }
 
 /// `host.ocr`. A reading's `error`, and resolveLanguage's answer.
@@ -803,6 +823,7 @@ pub static REASONS: &[&Reason] = &[
     &hotkey::MAC_REFUSED,
     &hotkey::PARKED,
     &hotkey::STUB,
+    &hotkey::NO_HANDLER,
     &screen::CAPTURE_FAILED,
     &screen::CAPTURE_TOO_LARGE,
     &screen::CAPTURE_PANICKED,
@@ -861,8 +882,11 @@ pub static REASONS: &[&Reason] = &[
     &screen::SAVE_FAILED,
     &screen::TEMPLATE_NOT_FOUND,
     &screen::TEMPLATE_INVALID,
+    &screen::TEMPLATE_UNREADABLE,
     &screen::SAVE_UNWRITTEN,
     &screen::SAVE_MARKED_UNWRITTEN,
+    &screen::INTERNAL,
+    &screen::NOT_WAITED,
     &ocr::CROP_OUTSIDE,
     &ocr::MAC_CAPTURE_FAILED,
     &ocr::NO_DISPLAY_PICTURE,
@@ -901,7 +925,9 @@ pub static REASONS: &[&Reason] = &[
 
 /// Each group a Reason may name instead of an entry, and the entries that give every reason of
 /// it. The docs write a group's reasons once, at the group's anchor, and an entry's Errors table
-/// links there ("any of the capture errors"): a group row stands for all of them.
+/// links there ("any of the capture errors"): a group row stands for all of them. Read by the
+/// tests and, as text, by tools/api-index.py; the host itself never needs it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub static GROUPS: &[(&str, &[&str])] = &[
     (
         "capture-errors",

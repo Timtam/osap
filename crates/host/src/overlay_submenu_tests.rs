@@ -173,7 +173,7 @@ fn no_submenu_within_the_bound_is_said_and_the_parent_is_clicked_once() {
         T.run(7950)
         T.ok(#S.done == 0 and #S.clicks == 2, "still waiting, clicked once: " .. #S.clicks)
         T.run(300)
-        T.ok(S.done[1] == "false:no submenu", tostring(S.done[1]))
+        T.ok(S.done[1] == "false:no_submenu", tostring(S.done[1]))
         T.ok(S.speech[#S.speech].text == "Zoom: its submenu did not open, nothing was chosen in it", T.said())
         T.ok(T.count("[menu item] 'Avenger': 'Zoom' not chosen — no submenu was seen within 8000 ms of the item's click") == 1,
           T.dump())
@@ -196,7 +196,7 @@ fn the_parent_closing_without_a_submenu_is_no_submenu_not_chosen() {
         T.tick(3)
         T.ok(T.count("[menu] 'Avenger': newWindow: the menu has gone, and no submenu was seen") == 1, T.dump())
         T.ok(T.count("'Zoom' not chosen — the menu closed after the item's click, and no submenu was seen") == 1, T.dump())
-        T.ok(S.done[1] == "false:no submenu" and S.speech[#S.speech].text
+        T.ok(S.done[1] == "false:no_submenu" and S.speech[#S.speech].text
           == "Zoom: its submenu did not open, nothing was chosen in it", tostring(S.done[1]))
     "##);
 }
@@ -285,7 +285,7 @@ fn no_painted_submenu_within_the_bound_is_no_submenu_and_its_menu_followed_alone
         T.run(7800)
         T.ok(#S.done == 0, "still waiting")
         T.run(450)
-        T.ok(S.done[1] == "false:no submenu" and S.speech[#S.speech].text == "Zoom: its submenu did not open, nothing was "
+        T.ok(S.done[1] == "false:no_submenu" and S.speech[#S.speech].text == "Zoom: its submenu did not open, nothing was "
           .. "chosen in it", tostring(S.done[1]))
         T.ok(T.count("[menu] 'Avenger': drawn: no submenu of 'Zoom' within 8000 ms — its menu is followed alone") == 1, T.dump())
         T.tick(1)
@@ -317,7 +317,7 @@ fn the_parent_inside_the_submenus_region_is_not_taken_for_a_submenu() {
         T.tick(2)
         T.ok(#S.clicks == 2 and T.count("sees a new popup at") == 0, "inside the menu: no submenu")
         T.run(8200)
-        T.ok(S.done[1] == "false:no submenu" and #S.clicks == 2, tostring(S.done[1]))
+        T.ok(S.done[1] == "false:no_submenu" and #S.clicks == 2, tostring(S.done[1]))
     "##);
 }
 
@@ -336,7 +336,7 @@ fn a_submenu_that_closes_alone_leaves_its_item_untaken() {
         T.ok(#S.clicks == 3, "the submenu's item: " .. #S.clicks)
         T.clearLast()
         T.tick(4)
-        T.ok(S.done[1] == "false:untaken", tostring(S.done[1]))
+        T.ok(S.done[1] == "false:refused", tostring(S.done[1]))
         T.ok(S.speech[#S.speech].text == "Zoom: the menu did not take the choice", T.said())
         T.ok(T.count("[menu item] 'Avenger': 'Zoom' not chosen — the submenu has closed and its parent menu is still there "
           .. "after 1 click(s) on the item at (497,135)") == 1, T.dump())
@@ -388,7 +388,7 @@ fn a_submenu_item_not_taken_is_clicked_again_and_then_untaken() {
         T.run(1500)
         T.ok(#S.clicks == 1 + 1 + 3, "the opener, the menu's item once, the submenu's three times: " .. #S.clicks)
         T.ok(T.clickAt(2) == "372,100" and T.clickAt(5) == "497,135", T.clickAt(5))
-        T.ok(S.done[1] == "false:untaken" and T.count("not chosen — the menu was still there after 3 click(s) on the item "
+        T.ok(S.done[1] == "false:refused" and T.count("not chosen — the menu was still there after 3 click(s) on the item "
           .. "at (497,135)") == 1, T.dump())
     "##);
 }
@@ -453,10 +453,10 @@ fn a_parent_item_ready_after_a_wait_is_checked_again_before_its_click() {
             T.tick(2)
             T.ok(#S.clicks == 1, how .. ": the item not clicked: " .. T.clickAt())
             if how == "moved" then
-              T.ok(S.done[1] == "false:moved" and T.count("'Zoom' not chosen — the overlay is on another window now") == 1,
+              T.ok(S.done[1] == "false:moved_on" and T.count("'Zoom' not chosen — the overlay is on another window now") == 1,
                 how .. ": " .. tostring(S.done[1]) .. " " .. T.dump())
             else
-              T.ok(S.done[1] == "false:refused" and T.count("'Zoom' not chosen — refused, and said") == 1,
+              T.ok(S.done[1] == "false:covered" and T.count("'Zoom' not chosen — refused, and said") == 1,
                 how .. ": " .. tostring(S.done[1]) .. " " .. T.dump())
             end
             T.ok(T.count("— clicking item") == 0, how .. ": " .. T.dump())
@@ -484,7 +484,7 @@ fn a_chain_still_getting_ready_at_the_bound_or_the_close_is_said_so() {
             T.ok(#S.clicks == 1 and S.ready ~= nil, how .. ": told, nothing clicked: " .. #S.clicks)
             if how == "bound" then
               T.run(8200)
-              T.ok(S.done[1] == "false:unfollowed" and S.speech[#S.speech].text
+              T.ok(S.done[1] == "false:not_ready" and S.speech[#S.speech].text
                 == "Zoom: its submenu cannot be followed now, nothing was chosen", how .. ": " .. tostring(S.done[1]) .. " " .. T.said())
               T.ok(T.count("'Zoom' not chosen — the bound came while its test was getting ready to follow its submenu; "
                 .. "nothing was clicked in it") == 1, T.dump())
@@ -544,14 +544,14 @@ fn a_submenu_seen_that_its_item_cannot_be_chosen_in_is_unfit() {
             T.ok(#S.clicks == 2 and T.count("sees a new popup at 482,110 100x120") == 1, how .. ": seen, nothing chosen: " .. T.dump())
             if how == "false" then
               T.run(8200)
-              T.ok(S.done[1] == "false:unfit submenu" and S.speech[#S.speech].text
+              T.ok(S.done[1] == "false:unfit_submenu" and S.speech[#S.speech].text
                 == "Zoom: no submenu it can be chosen in was seen, nothing was chosen in it", tostring(S.done[1]) .. " " .. T.said())
               T.ok(T.count("'Zoom' not chosen — its submenu's menuItem function took no popup seen after the item's click "
                 .. "(the last at 482,110 100x120)") == 1, T.dump())
             else
               T.closePopups()
               T.tick(3)
-              T.ok(S.done[1] == "false:unfit submenu" and S.speech[#S.speech].text
+              T.ok(S.done[1] == "false:unfit_submenu" and S.speech[#S.speech].text
                 == "Zoom is not where it should be in its submenu, nothing was chosen in it", tostring(S.done[1]) .. " " .. T.said())
               T.ok(T.count("'Zoom' not chosen — the submenu's item, at (982,135) of 482,110 100x120, is outside the submenu "
                 .. "that was seen") == 1, T.dump())
@@ -591,7 +591,7 @@ fn the_user_moving_on_while_the_chain_is_prepared_clicks_nothing() {
             for i = said + 1, #S.speech do
               T.ok(not string.find(S.speech[i].text, "Zoom", 1, true), how .. ": said: " .. T.said(said + 1))
             end
-            T.ok(S.done[1] == "false:" .. how, tostring(S.done[1]))
+            T.ok(S.done[1] == "false:moved_on", tostring(S.done[1]))
         "##;
         run(&s.replace("@HOW@", how));
     }
@@ -616,7 +616,7 @@ fn a_submenu_follows_only_the_test_that_placed_the_parent() {
         T.ok(T.count("[menu] 'Avenger': drawn: a popup ") >= 1, "drawn sees a popup: " .. T.dump())
         T.ok(#S.clicks == 2 and T.count("sees a new popup at") == 0, "drawn's answers are not followed: " .. #S.clicks)
         T.run(8200)
-        T.ok(S.done[1] == "false:no submenu" and #S.clicks == 2, tostring(S.done[1]))
+        T.ok(S.done[1] == "false:no_submenu" and #S.clicks == 2, tostring(S.done[1]))
     "##);
 }
 

@@ -117,7 +117,8 @@ pub fn webview_calls() {
     let _: fn(&mut Lifecycle) = Lifecycle::closed;
     let _: fn(&mut Lifecycle) -> usize = Lifecycle::take_dropped;
     let _: fn(&Lifecycle) -> webview::Phase = Lifecycle::phase;
-    let _: fn(Refusal) -> &'static str = Refusal::reason;
+    let _: fn(Refusal) -> &'static errors::Reason = Refusal::reason;
+    let _: fn(Refusal) -> errors::HostError = Refusal::error;
     let _: fn(&str) -> String = webview::scheme_for;
     let _: fn(&str) -> String = webview::origin_for;
     let _: fn(&str, &str) -> String = webview::entry_url;
@@ -131,12 +132,14 @@ pub fn webview_calls() {
     let _ = (webview::MAX_MESSAGE_BYTES, webview::MAX_QUEUED_POSTS);
     let _ = webview::PageEvent::Loaded { page: 0, build: 0 };
     let _ = webview::PageEvent::LoadFailed { page: 0, build: 0, why: String::new() };
+    let _ = webview::PageEvent::Closed { page: 0, build: 0, why: "failed", detail: Some(String::new()) };
     let _ = |e: webview::PageEvent| matches!(e, webview::PageEvent::Message { .. } | webview::PageEvent::Closed { .. });
     let _: fn((i32, i32), (i32, i32), webview::Rect, &[webview::Rect]) -> Option<webview::Placement> = webview::place;
     let _: fn((i32, i32), (i32, i32), webview::Rect, &[webview::Rect]) -> Option<webview::Rect> = webview::beside_only;
     let _: fn(&webview::Placement) -> webview::Rect = webview::Placement::rect;
     let _ = |p: webview::Placement| matches!(p, webview::Placement::Beside(_) | webview::Placement::Over { .. });
-    let _ = (webview::OVER, webview::Refusal::NoRoom);
+    let _: fn() -> errors::HostError = webview::over;
+    let _ = webview::Refusal::NoRoom;
     let _: fn(bool, bool) -> Option<webview::Refusal> = webview::over_refused;
     let _: fn((i32, i32), &webview::Rect) -> webview::Rect = webview::centred;
     let _: fn(&webview::Rect, &webview::Rect) -> bool = webview::Rect::intersects;
@@ -204,9 +207,9 @@ pub fn page_calls() {
     let _: fn(&Native) -> Option<String> = Native::memory;
 }
 
-/// Names what `lib.rs` calls in `system_events.rs`, and the speech path's own hook, for the
-/// reason `cells_calls` exists. (The macOS backend's `system.rs` calls `push` and `take`, and
-/// is compiled here with the backend.)
+/// Names what `lib.rs` calls in `system_events.rs`, and the speech path's own hook and the choice
+/// of what speaks for a module, for the reason `cells_calls` exists. (The macOS backend's
+/// `system.rs` calls `push` and `take`, and is compiled here with the backend.)
 #[allow(clippy::type_complexity)]
 pub fn system_calls() {
     let _: fn(
@@ -217,6 +220,7 @@ pub fn system_calls() {
     ) -> system_events::Plan = system_events::Since::plan;
     let _: fn(&mut system_events::Since, std::time::Instant) -> Vec<String> = system_events::Since::due;
     let _: fn(&speech::Speech, system_events::SystemEvent) = speech::Speech::on_system;
+    let _: fn(&speech::Speech, usize, Option<&str>) -> Result<(), errors::HostError> = speech::Speech::use_engine;
 }
 
 /// Names what `lib.rs`, `region_lua.rs` and `ocr/lua.rs` call in the cells and region files, for
@@ -229,11 +233,11 @@ pub fn cells_calls() {
     let _: fn(&str) -> Result<cells::Predicate, cells::PredError> = cells::Predicate::parse;
     let _: fn(u32, u32, cells::Predicate) -> Result<cells::CellSpec, String> = cells::CellSpec::new;
     let _: fn(&cells::CellSpec) -> usize = cells::CellSpec::cells;
-    let _: fn(&backend::CapturedImage, i32, i32, &cells::CellSpec) -> Result<Vec<u8>, String> = cells::of_capture;
-    let _: fn(&cells::Matcher, &backend::CapturedImage, i32, i32) -> Result<(Vec<u8>, cells::Ranked), String> =
+    let _: fn(&backend::CapturedImage, i32, i32, &cells::CellSpec) -> Result<Vec<u8>, errors::HostError> = cells::of_capture;
+    let _: fn(&cells::Matcher, &backend::CapturedImage, i32, i32) -> Result<(Vec<u8>, cells::Ranked), errors::HostError> =
         cells::Matcher::answer;
-    let _: fn(&backend::CapturedImage, cells::Sub, &cells::CellSpec) -> Result<Vec<u8>, String> = cells::of_sub;
-    let _: fn(&cells::Matcher, &backend::CapturedImage, cells::Sub) -> Result<(Vec<u8>, cells::Ranked), String> =
+    let _: fn(&backend::CapturedImage, cells::Sub, &cells::CellSpec) -> Result<Vec<u8>, errors::HostError> = cells::of_sub;
+    let _: fn(&cells::Matcher, &backend::CapturedImage, cells::Sub) -> Result<(Vec<u8>, cells::Ranked), errors::HostError> =
         cells::Matcher::answer_sub;
     let _ = |spec: cells::CellSpec| cells::Matcher { spec, states: Vec::new(), item_of: Vec::new() };
     let _: fn(&[u8], usize) -> Result<Vec<u8>, cells::HexError> = cells::from_hex;
@@ -242,8 +246,10 @@ pub fn cells_calls() {
     let _: fn(f64, f64, f64, f64) -> Result<region::Fraction, String> = region::Fraction::new;
     let _: fn(region::Client, &region::Fraction) -> Result<region::ScreenRect, region::Unresolved> = region::resolve;
     let _: fn(&str, i64, i64, i64, i64) -> Result<region::ScreenRect, String> = region::corners;
+    let _: fn(&str, i64, i64, i64, i64) -> Result<region::ScreenRect, String> = region::corners_or_empty;
     let _: fn(&region::Region) -> Result<region::ScreenRect, region::Unresolved> = region::Region::resolve;
     let _: fn(region::Client, f64, f64) -> Result<(i32, i32), region::Unresolved> = region::resolve_point;
+    let _: fn(&region::Unresolved) -> errors::HostError = region::Unresolved::error;
     let _: fn(i32, i32, i32, i32) -> region::ScreenRect = region::loose_corners;
     let _ = region::Region::Rect(region::ScreenRect { x: 0, y: 0, w: 1, h: 1 });
     let _ = |c: region::Client, f: region::Fraction| region::Region::Window(c, f);
@@ -304,16 +310,16 @@ pub fn snapshot_lane_calls() {
     let _: fn(&mut SnapLane, Instant) -> Vec<SnapDone> = SnapLane::sweep_cancelled;
     let _: fn(&SnapLane, usize) -> bool = SnapLane::picture_due;
     let _: fn(&mut SnapLane, RoundDone, Instant) -> Vec<SnapDone> = SnapLane::finish;
-    let _: fn(Round, Vec<Result<Frame, String>>, Instant, u64) -> RoundDone = Round::run;
+    let _: fn(Round, Vec<Result<Frame, errors::HostError>>, Instant, u64) -> RoundDone = Round::run;
     let _: fn(&[Rect], i64) -> (Vec<Rect>, Vec<usize>) = snap_queue::group;
-    let _: fn(Round, &str, Instant) -> RoundDone = Round::fail;
+    let _: fn(Round, &errors::HostError, Instant) -> RoundDone = Round::fail;
     let _: fn(&Round) -> Vec<(i32, i32, i32, i32)> = Round::tuples;
     let _: fn(&mut Round) -> Vec<backend::CompareReq> = Round::take_compares;
     // The points of `host.screen.pixel` or `pixels`, a handler's or a callback's: a round of their
     // own, read through the capture thread's `points` (the macOS one is the backend's
     // `capture::points`), and answered with the moment they were read.
     let _: fn(&Round) -> Option<(&[(i32, i32)], bool)> = Round::points;
-    let _: fn(Round, Result<Vec<(u8, u8, u8)>, String>, Instant, u64) -> RoundDone = Round::answer_points;
+    let _: fn(Round, Result<Vec<(u8, u8, u8)>, errors::HostError>, Instant, u64) -> RoundDone = Round::answer_points;
     let _ = |at: Vec<(i32, i32)>| snap_queue::SnapKind::Points { at, single: true };
     let _: backend::PointsFn = |_, _, _| Ok(Vec::new());
     // The first-read comparison a request carries, which `capture_source.rs` hands out and the

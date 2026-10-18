@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 194 entries.
+Every call the platform offers a module, in one place. 195 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -72,6 +72,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O.calibrating()`](overlay#o-calibrating) | Whether calibration is switched on |
 | [`O.contentSize(origin)`](overlay#o-contentsize) | The width and height of an origin's **content**, which is what coordinates are measured against |
 | [`O.doubleClick(x, y, opts?, cb?)`](overlay#o-doubleclick) | Two clicks at the same point, far enough apart in time to **be** a double-click. |
+| [`O.errors`](overlay#o-errors) | The codes of the runtime's error values, as constants |
 | [`O.layer`](overlay#o-layer) | The specificity ladder within a slot, named |
 | [`O.memoByEpoch(fn)`](overlay#o-memobyepoch) | Memoizes `fn` for the current epoch only |
 | [`O.memoByOrigin(fn, opts?)`](overlay#o-memobyorigin) | Memoizes a per-window property that does not change while that window exists |
@@ -424,7 +425,7 @@ The shapes and grammars the calls above are written in.
 | [`Region form`](screen#region-form) | A region is a rectangle on screen, written in one of two forms: by its **corners**, or as **fractions of a window's client area**. |
 | [`Return or raise`](errors#return-or-raise) | **A call raises when the arguments alone decide**, so the same call fails whatever the state |
 | [`Table shapes`](window#table-shapes) | Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, `host.window.findAll()`, and passed to trigger/test callbacks. |
-| [`The overlay runtime's codes`](errors#the-overlay-runtime-s-codes) | The overlay runtime answers its own failures with error values too, once it is converted, and adds eight codes of its own |
+| [`The overlay runtime's codes`](errors#the-overlay-runtime-s-codes) | The overlay runtime answers its own failures with error values too, made with `host.errors.new` from its own reasons… |
 | [`The page's side — platform.post and platform.onmessage`](gui#the-page-s-side) | The host puts a small script into every page before the page's own, and it gives the page one object, `platform` |
 | [`What a page is served, and what it may not do`](gui#what-a-page-is-served-and-what-it-may-not-do) | **Its own folder, and nothing else.** A page is served from a scheme of its module's own (`mod-<module id>-<hash>`, the hash… |
 | [`Where a hook runs`](overlay#where-a-hook-runs) | Every callback of a module runs as a handler of the host, one at a time per module, and the runtime calls an overlay's hooks inside them. |

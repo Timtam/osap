@@ -33,6 +33,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::HostEvents;
+use crate::errors::{gamepad as reasons, HostError};
 
 pub mod chord;
 pub mod names;
@@ -349,6 +350,8 @@ pub struct Hub {
     lease_until: Mutex<Option<Instant>>,
     /// What each source reports about itself, for `host.gamepad.status` and the probe.
     status: Mutex<Vec<(String, String)>>,
+    /// Why the source sees no pad, though it started: see [`Hub::set_failure`].
+    failure: Mutex<Option<HostError>>,
 }
 
 impl Default for Hub {
@@ -368,6 +371,7 @@ impl Hub {
             refresh: (Mutex::new(Refresh::default()), Condvar::new()),
             lease_until: Mutex::new(None),
             status: Mutex::new(Vec::new()),
+            failure: Mutex::new(None),
         }
     }
 
@@ -403,6 +407,21 @@ impl Hub {
 
     pub fn status(&self) -> Vec<(String, String)> {
         lock(&self.status).clone()
+    }
+
+    /// The source, though it started, can see no pad, and why: the Windows thread stopped after
+    /// the start's wait — its window not made, or a panic — or XInput is missing (D36 of the
+    /// typed-errors plan). Kept, and answered by every later `list`, `state` and `on`, as a start
+    /// that failed is ([`watching`]). A later one replaces an earlier: a thread that stopped says
+    /// more than an XInput that was missing.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn set_failure(&self, e: HostError) {
+        *lock(&self.failure) = Some(e);
+    }
+
+    /// What [`Hub::set_failure`] was told, if anything.
+    pub fn failure(&self) -> Option<HostError> {
+        lock(&self.failure).clone()
     }
 
     // ── Demand and lease, from the main thread ──────────────────────────────────────
@@ -865,7 +884,7 @@ fn derive(prev: &BTreeSet<Button>, axes: &[(Axis, f32)]) -> BTreeSet<Button> {
 // ── The process-wide hub and its lifecycle ───────────────────────────────────────────
 
 static HUB: OnceLock<Hub> = OnceLock::new();
-static STARTED: OnceLock<Result<(), String>> = OnceLock::new();
+static STARTED: OnceLock<Result<(), HostError>> = OnceLock::new();
 
 /// The one hub the sources feed. Tests never touch it: they build their own with
 /// [`Hub::new`], because `cargo test` runs in parallel and a shared hub would let one test's
@@ -884,7 +903,7 @@ pub fn hub() -> &'static Hub {
 ///
 /// A failure is kept and returned to every later call: it is a property of the machine, and
 /// retrying on every call would only repeat the log line.
-pub fn ensure_started() -> Result<(), String> {
+pub fn ensure_started() -> Result<(), HostError> {
     STARTED
         .get_or_init(|| {
             // Caught, because the first caller is a module's Luau call and the source's start
@@ -897,7 +916,7 @@ pub fn ensure_started() -> Result<(), String> {
                     .map(|s| (*s).to_string())
                     .or_else(|| p.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "no message".to_string());
-                Err(format!("the source panicked while starting: {text}"))
+                Err(HostError::with(&reasons::START_PANICKED, format!("the source panicked while starting: {text}")))
             });
             match &r {
                 Ok(()) => crate::logging::line("gamepad", "gamepad watcher started"),
@@ -909,6 +928,20 @@ pub fn ensure_started() -> Result<(), String> {
         .clone()
 }
 
+/// Whether the watcher can see pads: started ([`ensure_started`], which this calls), and nothing
+/// has stopped it since ([`Hub::set_failure`]) — or why not. What `host.gamepad.list`, `state` and
+/// `on` answer, the start's failure and a later one alike (D36 of the typed-errors plan).
+pub fn watching() -> Result<(), HostError> {
+    watching_with(ensure_started(), hub())
+}
+
+/// [`watching`]'s rule, for how a start went and a hub: a start that failed first, then what
+/// stopped the source since.
+fn watching_with(started: Result<(), HostError>, hub: &Hub) -> Result<(), HostError> {
+    started?;
+    hub.failure().map_or(Ok(()), Err)
+}
+
 /// Whether a source is running. Nothing is drained, and no demand is sent, before it is.
 pub fn started() -> bool {
     matches!(STARTED.get(), Some(Ok(())))
@@ -916,11 +949,11 @@ pub fn started() -> bool {
 
 /// How starting went — `None` while nothing has asked yet. For `host.gamepad.status`, which
 /// reports without starting anything.
-pub fn start_outcome() -> Option<Result<(), String>> {
+pub fn start_outcome() -> Option<Result<(), HostError>> {
     STARTED.get().cloned()
 }
 
-fn platform_start(hub: &'static Hub) -> Result<(), String> {
+fn platform_start(hub: &'static Hub) -> Result<(), HostError> {
     #[cfg(windows)]
     {
         win_thread::start(hub)
@@ -932,7 +965,7 @@ fn platform_start(hub: &'static Hub) -> Result<(), String> {
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = hub;
-        Err(format!("game controllers are not supported on {}", std::env::consts::OS))
+        Err(HostError::with(&reasons::NOT_SUPPORTED, format!("game controllers are not supported on {}", std::env::consts::OS)))
     }
 }
 
@@ -991,6 +1024,24 @@ mod tests {
     use super::fake::Fake;
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    /// What `list`, `state` and `on` answer (D36 of the typed-errors plan): a start that failed,
+    /// kept; else what stopped the source after it started, the latest; else nothing.
+    #[test]
+    fn the_watchers_failures_at_its_start_and_after_it_are_answered() {
+        let hub = Hub::new();
+        assert_eq!(watching_with(Ok(()), &hub), Ok(()));
+        let no_xinput = HostError::with(&reasons::NO_XINPUT, "XInput is unavailable, so no Xbox-type pad will be seen: no DLL".into());
+        hub.set_failure(no_xinput.clone());
+        assert_eq!(watching_with(Ok(()), &hub), Err(no_xinput));
+        assert_eq!(hub.failure().map(|e| e.code()), Some(crate::errors::Code::Unavailable));
+        let stopped = HostError::with(&reasons::STOPPED_AFTER_PANIC, "the gamepad thread stopped after a panic: boom".into());
+        hub.set_failure(stopped.clone());
+        assert_eq!(watching_with(Ok(()), &hub), Err(stopped), "a thread that stopped says more");
+        let not_ready = HostError::of(&reasons::THREAD_NOT_READY);
+        assert_eq!(watching_with(Err(not_ready.clone()), &hub), Err(not_ready), "the start's failure first");
+        assert_eq!(watching_with(Ok(()), &Hub::new()), Ok(()), "each hub its own");
+    }
 
     fn kinds(events: &[PadEvent]) -> Vec<String> {
         events

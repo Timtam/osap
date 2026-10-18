@@ -658,7 +658,7 @@ fn a_capture_that_fails_keeps_the_value_and_says_why_once() {
         T.tab()
         assert(lit() == true)
         T.act()
-        S.pixelsFail = "screen capture failed"
+        S.pixelsFail = T.E("failed", "screen capture failed")
         T.tab()
         T.tab()
         assert(T.reads() == 3 and lit() == true, "due again, the value standing: " .. T.reads())

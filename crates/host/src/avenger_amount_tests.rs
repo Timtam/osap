@@ -152,6 +152,27 @@ fn macro_amount_presses_the_knob_hands_over_four_keys_and_moves_one_point_times_
     "##));
 }
 
+/// Avenger's window leaving the front between the read before the press and the hand-over (while
+/// the press point is checked): handOver answers `not_in_front`, having given the trip up itself —
+/// nothing is pressed, the picture is let go, and the page hears the give-up's words, not "the
+/// keyboard was not handed over" on a trip already over.
+#[test]
+fn a_hand_over_refused_for_the_front_presses_nothing_and_leaves_the_words_to_the_give_up() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.pageOn(T.MACRO, T.MACRO_WORDS)
+        S.owns = function()
+          S.listed, S.front, S.chain = { W, T.OTHER }, T.OTHER, { T.OTHER }
+          return true
+        end
+        T.tripFrom({ action = "macro_amount", args = { index = 1 }, focused = true }, W)
+        T.settle(2)
+        T.ok(#T.inputs("down") == 0 and T.held() == 0 and not S.holding["Return"], "nothing pressed, nothing held")
+        T.ok(T.count("the keyboard was not handed over") == 0 and T.count("done after the trip ended") == 0, T.dump())
+        T.ok(T.lastPost("error").text == "A macro's amount: another window came to the front; nothing more was done",
+          tostring(T.lastPost("error").text))
+    "##));
+}
+
 /// Escape lets go and reads nothing: with no move, at the press point, the knob's value kept as read
 /// before; after two PageDowns, where they left it, no change wait and no points read after the
 /// press, the value posted as not read; the focus on the Amount button either way.
@@ -288,7 +309,7 @@ fn a_read_after_return_that_reads_nothing_says_the_knob_cannot_be_read_now() {
               local snapshot = rawget(T.host.screen, "snapshot")
               rawset(T.host.screen, "snapshot", function(opts, cb)
                 if cb ~= nil and opts and opts.change ~= nil then
-                  S.screenOut[#S.screenOut + 1] = { cb = cb, value = nil, why = "the capture failed" }
+                  S.screenOut[#S.screenOut + 1] = { cb = cb, value = nil, why = T.E("failed", "the capture failed") }
                   return
                 end
                 return snapshot(opts, cb)
@@ -647,7 +668,7 @@ fn a_disable_mid_hold_is_released_by_the_host_and_not_again_after_the_enable() {
             T.settle(4)
             T.ok(#T.inputs("up") == 0 and #S.hostReleases == 1 and T.ups() == 1, first .. ": one release, the host's")
             T.ok(#T.inputs("move") == 2, first .. ": no move after the enable")
-            T.ok(T.count("'macro 1': page closed — the host let go of the left button already; not released again") == 1,
+            T.ok(T.count("'macro 1': the page was closed — the host let go of the left button already; not released again") == 1,
               T.dump())
             T.ok(T.count("the hand-over ends — page closed") == 1, first .. ": told once: " .. T.dump())
             T.ok(T.lastPost("state").state.macro_panel.amount_values[1] == nil, first .. ": posted as not read")

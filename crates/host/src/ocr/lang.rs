@@ -14,9 +14,12 @@
 //! "the user's language" — so a tag is parsed here first, and a bad one is an error the
 //! binding raises.
 //!
-//! Std and `fluent-langneg` only; borrowed by `crates/macos-check`.
+//! Std, `fluent-langneg` and the host's own error (`errors.rs`, as pure) only; borrowed by
+//! `crates/macos-check`.
 
 use fluent_langneg::{negotiate_languages, LanguageIdentifier, NegotiationStrategy};
+
+use crate::errors::{ocr, HostError};
 
 /// What a read asked for, as the module wrote it (trimmed): nothing, or tags in order of
 /// preference. Part of a job's identity, so two reads asking the same thing share a capture.
@@ -121,12 +124,13 @@ pub fn default_tag(langs: &Languages) -> Option<String> {
     langs.available.first().cloned()
 }
 
-/// The platform tag `req` resolves to, or the sentence a failed reading carries. Tags are
-/// tried in order; the first that the engine reads wins.
-pub fn resolve(req: &LangReq, langs: &Languages) -> Result<String, String> {
+/// The platform tag `req` resolves to, or the error a failed reading carries (`unavailable`), which
+/// `host.ocr.resolveLanguage` answers too. Tags are tried in order; the first that the engine
+/// reads wins.
+pub fn resolve(req: &LangReq, langs: &Languages) -> Result<String, HostError> {
     match req {
         LangReq::Default => default_tag(langs).ok_or_else(|| {
-            format!("language: no text recognition language is available here. {}", remedy())
+            HostError::with(&ocr::NO_LANGUAGE, format!("language: no text recognition language is available here. {}", remedy()))
         }),
         LangReq::Tags(tags) => {
             for t in tags {
@@ -143,19 +147,20 @@ pub fn resolve(req: &LangReq, langs: &Languages) -> Result<String, String> {
     }
 }
 
-/// The sentence for a request nothing on this machine reads.
-pub fn unavailable(tags: &[String], langs: &Languages) -> String {
-    let asked = if tags.len() == 1 {
-        format!("{} is not available here", tags[0])
+/// The error for a request nothing on this machine reads: `unavailable`, naming the one tag asked
+/// for or the list.
+pub fn unavailable(tags: &[String], langs: &Languages) -> HostError {
+    let (reason, asked) = if tags.len() == 1 {
+        (&ocr::LANGUAGE_UNAVAILABLE, format!("{} is not available here", tags[0]))
     } else {
-        format!("none of {} is available here", tags.join(", "))
+        (&ocr::LANGUAGES_UNAVAILABLE, format!("none of {} is available here", tags.join(", ")))
     };
     let have = if langs.available.is_empty() {
         "nothing is".to_string()
     } else {
         langs.available.join(", ")
     };
-    format!("language: {asked} (available: {have}). {}", remedy())
+    HostError::with(reason, format!("language: {asked} (available: {have}). {}", remedy()))
 }
 
 /// What the user can do about a missing language, per platform.
@@ -227,7 +232,8 @@ mod tests {
         for code in ["eng", "deu"] {
             assert!(parse(code).is_ok(), "{code} refused");
             let e = resolve(&tags(&[code]), &l).unwrap_err();
-            assert!(e.starts_with(&format!("language: {code} is not available here (available: de-DE, en-US)")), "{e}");
+            assert_eq!(e.reason(), &ocr::LANGUAGE_UNAVAILABLE);
+            assert!(e.message().starts_with(&format!("language: {code} is not available here (available: de-DE, en-US)")), "{e}");
         }
     }
 
@@ -276,9 +282,13 @@ mod tests {
         let l = langs(&["en-US", "fr-FR"], &[]);
         assert_eq!(resolve(&tags(&["de", "fr", "en"]), &l), Ok("fr-FR".to_string()));
         let e = resolve(&tags(&["de", "ja"]), &l).unwrap_err();
-        assert!(e.starts_with("language: none of de, ja is available here (available: en-US, fr-FR)"), "{e}");
+        assert_eq!(e.reason(), &ocr::LANGUAGES_UNAVAILABLE);
+        assert!(e.message().starts_with("language: none of de, ja is available here (available: en-US, fr-FR)"), "{e}");
         let e = resolve(&tags(&["de"]), &l).unwrap_err();
-        assert!(e.starts_with("language: de is not available here"), "{e}");
+        assert_eq!(e.reason(), &ocr::LANGUAGE_UNAVAILABLE);
+        assert!(e.message().starts_with("language: de is not available here"), "{e}");
+        let e = resolve(&tags(&["de"]), &langs(&[], &[])).unwrap_err();
+        assert!(e.message().starts_with("language: de is not available here (available: nothing is). "), "{e}");
     }
 
     #[test]
@@ -292,7 +302,9 @@ mod tests {
         assert_eq!(resolve(&LangReq::Default, &l), Ok("en-GB".to_string()));
         let l = langs(&["fr-FR", "it-IT"], &["ja-JP"]);
         assert_eq!(resolve(&LangReq::Default, &l), Ok("fr-FR".to_string()));
-        assert!(resolve(&LangReq::Default, &langs(&[], &["de"])).unwrap_err().starts_with("language: no text"));
+        let e = resolve(&LangReq::Default, &langs(&[], &["de"])).unwrap_err();
+        assert_eq!(e.reason(), &ocr::NO_LANGUAGE);
+        assert!(e.message().starts_with("language: no text"), "{e}");
         // An unparseable preferred entry is skipped, not fatal.
         let l = langs(&["en-US"], &["??", "en"]);
         assert_eq!(default_tag(&l), Some("en-US".to_string()));

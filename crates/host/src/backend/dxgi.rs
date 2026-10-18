@@ -393,6 +393,33 @@ impl Fallback {
         }
     }
 
+    /// The Reason of what a `fallback = "none"` module is told for it, its code decided by the
+    /// tail (`windows.rs`, `unanswered`). [`Fallback::TooLarge`] is the standard path's own, which
+    /// a region too large for duplication is told before duplication is asked.
+    pub(crate) fn reason(self) -> &'static crate::errors::Reason {
+        use crate::errors::screen;
+        match self {
+            Fallback::SwitchedOff => &screen::DUPLICATION_SWITCHED_OFF,
+            Fallback::Disabled => &screen::DUPLICATION_DISABLED,
+            Fallback::Crashed => &screen::DUPLICATION_CRASHED,
+            Fallback::NoThread => &screen::DUPLICATION_NO_THREAD,
+            Fallback::Closing => &screen::DUPLICATION_CLOSING,
+            Fallback::Overdue => &screen::DUPLICATION_OVERDUE,
+            Fallback::TooLarge => &screen::CAPTURE_TOO_LARGE,
+            Fallback::Unsupported(_) => &screen::DUPLICATION_UNSUPPORTED,
+            Fallback::TooManyRecorders => &screen::DUPLICATION_TOO_MANY_RECORDERS,
+            Fallback::SecureDesktop => &screen::DUPLICATION_SECURE_DESKTOP,
+            Fallback::AccessLost => &screen::DUPLICATION_ACCESS_LOST,
+            Fallback::DeviceRemoved => &screen::DUPLICATION_DEVICE_REMOVED,
+            Fallback::Rotated => &screen::DUPLICATION_ROTATED,
+            Fallback::Topology => &screen::DUPLICATION_TOPOLOGY,
+            Fallback::NoFrameYet => &screen::DUPLICATION_NO_FRAME_YET,
+            Fallback::NoOutput => &screen::DUPLICATION_NO_OUTPUT,
+            Fallback::Format(_) => &screen::DUPLICATION_FORMAT,
+            Fallback::Failed(_) => &screen::DUPLICATION_FAILED,
+        }
+    }
+
     /// Reasons that are part of normal operation rather than news: a read that was not sent
     /// because an earlier one has not come back. They are counted and traced, not logged each
     /// time.

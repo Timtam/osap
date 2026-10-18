@@ -602,7 +602,7 @@ fn the_view_list_is_opened_by_its_field_and_the_caption_is_read_after() {
         T.tripFrom({ action = "set_expansion_view", args = { view = "List" }, focused = true }, W)
         T.paintAvenger(98, 84, 1.6, { popup = { 8, 52, 80, 166 } })
         T.run(8400)
-        T.ok(T.count("its popup was left open (untaken) — clicking its opener again to close it") == 1, T.dump())
+        T.ok(T.count("its popup was left open (refused) — clicking its opener again to close it") == 1, T.dump())
         T.ok(T.clickAt() == "122,164", "the field again: " .. T.clickAt())
         T.repaint({})
         T.settle(4)
@@ -1548,7 +1548,7 @@ fn a_favorite_is_not_marked_where_fav_is_not_read() {
         local cells = rawget(T.host.screen, "cells")
         rawset(T.host.screen, "cells", function(opts, cb)
           -- FAV's box at 80 %, (417, 156)-(457, 172), and nothing else this trip asks above y 176.
-          if opts.region[4] <= 176 then return nil, "the scenario's: not answered" end
+          if opts.region[4] <= 176 then return nil, T.E("failed", "the scenario's: not answered") end
           return cells(opts, cb)
         end)
         local clicks = #S.clicks

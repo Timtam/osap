@@ -214,14 +214,17 @@ fn a_page_key_from_the_page_is_registered_and_one_refused_keeps_the_old() {
         refused("F2", "it needs at least one modifier key")
         S.badKeys["Alt tap"] = { "tap" }
         refused("Alt tap", "a modifier alone is no key")
-        -- The runtime's own refusals (O:pageKey): a control of the ring's key, and a registration that
-        -- raised.
+        -- The runtime's own refusals (O:pageKey): a control of the ring's key (`clash`), a key the
+        -- system keeps (register's nil and its error value), and a claim another program holds now
+        -- (register's id and its error value: the runtime lets the new claim go, the old key stays).
         local hk = header.controls[1].hotkey
         header.controls[1].hotkey = "Ctrl+Shift+F7"
         refused("Ctrl+Shift+F7", "a control of the ring has it")
         header.controls[1].hotkey = hk
-        S.registerRaises["Ctrl+Shift+F8"] = "no hotkey can be registered now"
+        S.registerRefuses["Ctrl+Shift+F8"] = T.E("taken", "no hotkey can be registered now")
         refused("Ctrl+Shift+F8", "the system refused it: no hotkey can be registered now")
+        S.registerNotHeld["Ctrl+Shift+F9"] = T.E("taken", "RegisterHotKey failed for 'Ctrl+Shift+F9' (already in use by another app?)")
+        refused("Ctrl+Shift+F9", "the system refused it: RegisterHotKey failed for 'Ctrl+Shift+F9' (already in use by another app?)")
         -- The dialog's key with no modifier: refused too, and said.
         T.setting("pageKey", "F3")
         T.ok(S.settings.pageKey == "Ctrl+Shift+F2" and T.lastSaid() == "F3 cannot be the page key; it stays Ctrl+Shift+F2.",

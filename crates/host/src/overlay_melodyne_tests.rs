@@ -178,12 +178,12 @@ rawset(T.host.screen, "pixels", function(points, opts)
     if snap then
       local r = snap.region
       if x < r[1] or y < r[2] or x >= r[3] or y >= r[4] then
-        return nil, "the point is not inside the snapshot"
+        return nil, T.E("outside", "the point is not inside the snapshot")
       end
       out[i] = T.picture(x, y)
     else
       local c = T.screenAt(x, y)
-      if c == nil then return nil, "screen capture failed" end
+      if c == nil then return nil, T.E("failed", "screen capture failed") end
       out[i] = c
     end
   end
@@ -399,7 +399,7 @@ function T.reading(text, status)
   status = status or (text ~= "" and "text" or "none")
   local r = { status = status, text = status == "text" and text or "", lines = {}, words = {},
     skipped = false, newer = status == "stale" }
-  if status == "failed" then r.error = "the text recogniser has not answered a region for 5 s" end
+  if status == "failed" then r.error = T.E("timeout", "the text recogniser has not answered a region for 5 s") end
   return r
 end
 
@@ -1927,10 +1927,12 @@ fn a_pass_name_with_accented_letters_is_taken_and_one_with_a_symbol_is_not() {
     "#);
 }
 
-/// The pass is read in English. A read answered "failed" with no language, where English is not
-/// among the recogniser's languages, turns the reads to the user's own language; one where English
-/// is there — a read refused, say — leaves them in English, and so does one answered before the
-/// language list is known, when `resolveLanguage` answers nil for every language.
+/// The pass is read in English. A read answered "failed" for its language (`unavailable`), where
+/// English is not among the recogniser's languages — `resolveLanguage` answers nil and
+/// `unavailable` for it — turns the reads to the user's own language; one where English is there
+/// leaves them in English, and so does one answered before the language list is known, when
+/// `resolveLanguage` answers nil and `not_ready` for every language, and a read that failed for
+/// another reason.
 #[test]
 fn where_english_is_not_read_the_pass_is_read_in_the_users_language() {
     run(r#"
@@ -1939,12 +1941,19 @@ fn where_english_is_not_read_the_pass_is_read_in_the_users_language() {
         local english, known = "en-US", { "de-DE", "en-US" }
         rawset(T.host.ocr, "languages", function() return table.clone(known) end)
         rawset(T.host.ocr, "resolveLanguage", function(lang)
-          return #known > 0 and lang == "en" and english or nil
+          if #known == 0 then return nil, T.E("not_ready", "the recognition languages are not known yet") end
+          if lang == "en" and english then return english end
+          return nil, T.E("unavailable", "language: " .. tostring(lang) .. " is not available here (available: "
+            .. table.concat(known, ", ") .. ").")
         end)
         T.melodyne()
-        local function failed()
+        local function failed(code)
           local r = T.reading("", "failed")
           r.lang = ""
+          if code ~= "timeout" then
+            r.error = T.E("unavailable", "language: en is not available here (available: " .. table.concat(known, ", ")
+              .. ").")
+          end
           return r
         end
         local r = T.lastRead("analysis pass")
@@ -1957,6 +1966,9 @@ fn where_english_is_not_read_the_pass_is_read_in_the_users_language() {
         T.look()
         T.ok(T.lastRead("analysis pass").lang == "en", "the list not known yet: still in English")
         known = { "de-DE" }
+        T.answer(T.lastRead("analysis pass"), failed("timeout"), failed("timeout"))
+        T.look()
+        T.ok(T.lastRead("analysis pass").lang == "en", "a read that failed for another reason: still in English")
         T.answer(T.lastRead("analysis pass"), failed(), failed())
         T.ok(T.count("[melodyne] analysis pass: English is not read here; the user's language from now on")
           == 1, T.dump())

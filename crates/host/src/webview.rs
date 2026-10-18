@@ -17,10 +17,13 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
-/// Every answer `show` gives instead of `true`, and the words it gives it in.
+use crate::errors::{common, gui, HostError, Reason};
+
+/// Every answer `show` gives instead of `true`, and the error value it gives it with
+/// ([`Refusal::error`]).
 ///
-/// The words are the API: a module compares them, so they are fixed strings and not messages.
-/// What went wrong in detail is in the log.
+/// A module compares the error value's code; its message is the words a module was given here
+/// before the codes, word for word. What went wrong in detail is in the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// A headless run has no window system to show anything in.
@@ -45,23 +48,31 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    pub fn reason(self) -> &'static str {
+    /// Its Reason in the host's table (errors.rs).
+    pub fn reason(self) -> &'static Reason {
         match self {
-            Refusal::Headless => "headless",
-            Refusal::Unsupported => "not supported on this platform yet",
-            Refusal::NotReady => "not ready yet",
-            Refusal::RuntimeMissing => "WebView2 runtime not installed",
-            Refusal::BuildFailed => "could not be built",
-            Refusal::Declined => "declined by the system",
-            Refusal::NoRoom => "no room beside the rectangle to avoid",
+            Refusal::Headless => &gui::HEADLESS,
+            Refusal::Unsupported => &common::NOT_YET,
+            Refusal::NotReady => &gui::NOT_READY,
+            Refusal::RuntimeMissing => &gui::RUNTIME_MISSING,
+            Refusal::BuildFailed => &gui::BUILD_FAILED,
+            Refusal::Declined => &common::DECLINED,
+            Refusal::NoRoom => &gui::NO_ROOM,
         }
+    }
+
+    /// The error value `show` answers it with, beside `false`.
+    pub fn error(self) -> HostError {
+        HostError::of(self.reason())
     }
 }
 
-/// What a successful `show` adds as its second value when there was no room beside `avoid` and
-/// the page was put over part of it ([`Placement::Over`]). Its only note: every other success
-/// answers `true` alone.
-pub const OVER: &str = "over the rectangle to avoid";
+/// What a successful `show` gives beside its `true` when there was no room beside `avoid` and the
+/// page was put over part of it ([`Placement::Over`]): a partial answer, `true, err` with
+/// `too_large` (docs/api/errors.md). Every other success answers `true` alone.
+pub fn over() -> HostError {
+    HostError::of(&gui::OVER)
+}
 
 /// Whether a show whose page went over `avoid` ([`Placement::Over`]) ends with the page hidden,
 /// and with which refusal: kept only when the page ends in front — `focus`, and not `declined` by
@@ -273,8 +284,9 @@ pub enum PageEvent {
     /// engine's word for it, for the log.
     LoadFailed { page: u64, build: u64, why: String },
     /// The window went away without the module asking: `"user"` (its close box), or `"failed"`
-    /// (its browser or renderer process ended, or the page's script closed its web view).
-    Closed { page: u64, build: u64, why: &'static str },
+    /// (its browser or renderer process ended, or the page's script closed its web view). `detail`
+    /// says which, for a failure: the `detail` of the error value `onClose` gets beside it.
+    Closed { page: u64, build: u64, why: &'static str, detail: Option<String> },
 }
 
 /// The URL scheme a module's pages are served under, and with it the page's origin — one per
@@ -968,9 +980,13 @@ pub struct Words {
 /// window empty, and a page is closed by its module (`page:close()`), not by itself. Should a
 /// page get round this, the host treats it as a page that failed (webview_win.rs).
 ///
+/// `platform.post` answers too: `{ ok: true }`, or at once `too_large` for a message the host would
+/// drop where it arrives ([`post_script`]).
+///
 /// Built from parts the two engines share, so the one cannot drift from the other; Windows' is
-/// the very script stage 1 shipped, byte for byte (a test holds it to that), so no page of the
-/// Windows probe sees a change. WebKit's adds two things:
+/// the very script stage 1 shipped, byte for byte but for what the typed errors added —
+/// `platform.errors` and `post`'s answer (a test holds it to that) — so a page of the Windows probe
+/// that reads neither sees no change. WebKit's adds two things:
 ///
 /// - **The host's messages** come through `window.__platformDeliver(json)`, which only the host
 ///   calls ([`WEBKIT_DELIVER`]): a function the page cannot replace, with the message as an
@@ -1012,6 +1028,7 @@ pub fn platform_shim(engine: Engine) -> String {
         }
     }
     s.push_str(&errors_script());
+    s.push_str(&post_script());
     s.push_str(SHIM_TAIL);
     s
 }
@@ -1038,6 +1055,49 @@ const SHIM_ERRORS: &str = r#"  const codes = Object.freeze(Object.assign(Object.
       throw new TypeError("platform.errors has no '" + name + "'; the codes are " + Object.keys(target).join(", "));
     },
   });
+"#;
+
+/// What `platform.post` answers in the page for a message the host would drop where it arrives —
+/// JSON text of more than [`MAX_MESSAGE_BYTES`] bytes, as the host counts them, in UTF-8 — at once,
+/// with nothing sent: `{ ok: false, error: { code: "too_large", message } }`, the code and the
+/// message the host's (`errors::gui::PAGE_MESSAGE_TOO_LARGE`), the size put in. `null` for any
+/// other: `post` sends it and answers `{ ok: true }` ([`SHIM_TAIL`]). A text of at most a third of
+/// the limit in UTF-16 units is short enough without being counted, since no unit takes more than
+/// three bytes in UTF-8; only a longer one is encoded to be counted.
+fn post_script() -> String {
+    let reason = &crate::errors::gui::PAGE_MESSAGE_TOO_LARGE;
+    let (before, after) = reason.message.split_once('…').expect("the size is the message's one formatted part");
+    SHIM_POST
+        .replace("MOST", &MAX_MESSAGE_BYTES.to_string())
+        .replacen("CODE", &js_string(reason.code.as_str()), 1)
+        .replacen("BEFORE", &js_string(before), 1)
+        .replacen("AFTER", &js_string(after), 1)
+}
+
+/// `s` as a JavaScript string literal, every character outside printable ASCII escaped, so the
+/// script is plain ASCII whatever the message holds.
+fn js_string(s: &str) -> String {
+    let mut out = String::from("\"");
+    for unit in s.encode_utf16() {
+        match unit {
+            0x22 => out.push_str("\\\""),
+            0x5c => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(char::from(unit as u8)),
+            other => out.push_str(&format!("\\u{other:04x}")),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// [`post_script`]'s text: `MOST` the limit, `CODE`, `BEFORE` and `AFTER` the code and the
+/// message's two parts, as string literals.
+const SHIM_POST: &str = r#"  const tooLarge = (text) => {
+    if (typeof text !== "string" || text.length * 3 <= MOST) return null;
+    const bytes = new TextEncoder().encode(text).length;
+    if (bytes <= MOST) return null;
+    return { ok: false, error: { code: CODE, message: BEFORE + bytes + AFTER } };
+  };
 "#;
 
 /// The start of every [`platform_shim`]: the top frame only, once, and `window.close()` made to do
@@ -1099,13 +1159,18 @@ const SHIM_WEBKIT_FOCUS: &str = r#"  const note = (text) => {
   window.addEventListener("focus", () => { restore(); });
 "#;
 
-/// The end of every [`platform_shim`]: the `platform` object itself, frozen.
+/// The end of every [`platform_shim`]: the `platform` object itself, frozen. `post` answers
+/// `{ ok: true }` once the message is handed to the channel, or [`post_script`]'s refusal.
 const SHIM_TAIL: &str = r#"  const platform = Object.create(null);
   Object.defineProperties(platform, {
     errors: { value: errors },
     post: {
       value: (value) => {
-        ipc.postMessage(JSON.stringify(value === undefined ? null : value));
+        const text = JSON.stringify(value === undefined ? null : value);
+        const refused = tooLarge(text);
+        if (refused) return refused;
+        ipc.postMessage(text);
+        return { ok: true };
       },
     },
     onmessage: {
@@ -1362,7 +1427,7 @@ mod tests {
             true
         });
         assert_eq!(step, ShowStep::Refuse(Refusal::Headless));
-        assert_eq!(Refusal::Headless.reason(), "headless");
+        assert_eq!(Refusal::Headless.error().message(), "headless");
         // Headless wins over an unsupported platform: a headless Mac says headless.
         assert_eq!(
             l.on_show(Where { headless: true, supported: false }, || true),
@@ -1370,7 +1435,7 @@ mod tests {
         );
         let step = l.on_show(Where { headless: false, supported: false }, || true);
         assert_eq!(step, ShowStep::Refuse(Refusal::Unsupported));
-        assert_eq!(Refusal::Unsupported.reason(), "not supported on this platform yet");
+        assert_eq!(Refusal::Unsupported.error().message(), "not supported on this platform yet");
         assert!(!asked.get(), "the runtime is not asked where no page can be built");
         assert_eq!(l.phase(), Phase::Idle, "nothing was started");
     }
@@ -1420,7 +1485,7 @@ mod tests {
     fn a_missing_runtime_is_asked_again_at_every_show() {
         let mut l = Lifecycle::default();
         assert_eq!(l.on_show(HERE, || false), ShowStep::Refuse(Refusal::RuntimeMissing));
-        assert_eq!(Refusal::RuntimeMissing.reason(), "WebView2 runtime not installed");
+        assert_eq!(Refusal::RuntimeMissing.error().message(), "WebView2 runtime not installed");
         assert_eq!(l.phase(), Phase::Idle);
         // Installed meanwhile: the next show builds.
         assert_eq!(l.on_show(HERE, || true), ShowStep::Build);
@@ -1437,7 +1502,7 @@ mod tests {
             true
         };
         assert_eq!(l.on_show(HERE, count), ShowStep::Refuse(Refusal::NotReady));
-        assert_eq!(Refusal::NotReady.reason(), "not ready yet");
+        assert_eq!(Refusal::NotReady.error().message(), "not ready yet");
         l.built(true);
         assert_eq!(l.phase(), Phase::Loading);
         assert_eq!(l.on_show(HERE, || true), ShowStep::Refuse(Refusal::NotReady));
@@ -1453,7 +1518,7 @@ mod tests {
         l.built(false);
         assert_eq!(l.phase(), Phase::Failed);
         assert_eq!(l.on_show(HERE, || true), ShowStep::Refuse(Refusal::BuildFailed));
-        assert_eq!(Refusal::BuildFailed.reason(), "could not be built");
+        assert_eq!(Refusal::BuildFailed.error().message(), "could not be built");
         assert_eq!(l.on_show(HERE, || true), ShowStep::Build);
     }
 
@@ -1529,23 +1594,29 @@ mod tests {
         assert_eq!(idle.phase(), Phase::Idle);
     }
 
+    /// Each refusal is a Reason of its own, with the words a module was given before the codes and
+    /// its code; and the partial answer's error, over the rectangle to avoid, is none of theirs.
     #[test]
-    fn every_refusal_has_its_own_words() {
+    fn every_refusal_has_its_own_words_and_code() {
+        use crate::errors::Code;
         let all = [
-            Refusal::Headless,
-            Refusal::Unsupported,
-            Refusal::NotReady,
-            Refusal::RuntimeMissing,
-            Refusal::BuildFailed,
-            Refusal::Declined,
-            Refusal::NoRoom,
+            (Refusal::Headless, Code::NotSupported, "headless"),
+            (Refusal::Unsupported, Code::NotSupported, "not supported on this platform yet"),
+            (Refusal::NotReady, Code::NotReady, "not ready yet"),
+            (Refusal::RuntimeMissing, Code::Unavailable, "WebView2 runtime not installed"),
+            (Refusal::BuildFailed, Code::Failed, "could not be built"),
+            (Refusal::Declined, Code::Refused, "declined by the system"),
+            (Refusal::NoRoom, Code::TooLarge, "no room beside the rectangle to avoid"),
         ];
-        let mut words: std::collections::HashSet<&str> = all.iter().map(|r| r.reason()).collect();
-        assert_eq!(words.len(), all.len());
-        assert_eq!(Refusal::Declined.reason(), "declined by the system");
-        assert_eq!(Refusal::NoRoom.reason(), "no room beside the rectangle to avoid");
-        assert!(words.insert(OVER), "the note of a success is no refusal's words");
-        assert_eq!(OVER, "over the rectangle to avoid");
+        let mut words = std::collections::HashSet::new();
+        for (r, code, said) in all {
+            let e = r.error();
+            assert_eq!((e.code(), e.message(), e.reason()), (code, said, r.reason()), "{r:?}");
+            assert!(words.insert(said));
+        }
+        let over = over();
+        assert_eq!((over.code(), over.message()), (Code::TooLarge, "over the rectangle to avoid"));
+        assert!(words.insert(over.message()), "the partial answer's words are no refusal's");
     }
 
     #[test]
@@ -2018,8 +2089,9 @@ mod tests {
     }
 
     /// The script WebView2's pages got from stage 1 until the shim was built from parts, as it
-    /// was: the Windows shim is held to it byte for byte but for `platform.errors`, which the typed
-    /// errors added, so building the Mac's beside it changes nothing else for a page on Windows.
+    /// was: the Windows shim is held to it byte for byte but for `platform.errors` and `post`'s
+    /// answer, which the typed errors added, so building the Mac's beside it changes nothing else
+    /// for a page on Windows.
     const WINDOWS_SHIM_OF_STAGE_1: &str = r#"(() => {
   "use strict";
   if (window.top !== window || window.platform) return;
@@ -2057,13 +2129,43 @@ mod tests {
   Object.defineProperty(window, "platform", { value: platform });
 })();"#;
 
+    /// `post` as stage 1 shipped it, and as it answers since the typed errors.
+    const POST_OF_STAGE_1: &str = "        ipc.postMessage(JSON.stringify(value === undefined ? null : value));\n";
+    const POST_ANSWERED: &str = concat!(
+        "        const text = JSON.stringify(value === undefined ? null : value);\n",
+        "        const refused = tooLarge(text);\n",
+        "        if (refused) return refused;\n",
+        "        ipc.postMessage(text);\n",
+        "        return { ok: true };\n",
+    );
+
     #[test]
-    fn the_windows_shim_is_the_one_stage_1_shipped_and_the_codes() {
+    fn the_windows_shim_is_the_one_stage_1_shipped_and_the_codes_and_posts_answer() {
         let shim = platform_shim(Engine::WebView2);
-        let codes = errors_script();
-        assert!(shim.contains(&codes));
-        let without = shim.replacen(&codes, "", 1).replacen("    errors: { value: errors },\n", "", 1);
+        let (codes, post) = (errors_script(), post_script());
+        assert!(shim.contains(&codes) && shim.contains(&post) && shim.contains(POST_ANSWERED));
+        let without = shim
+            .replacen(&codes, "", 1)
+            .replacen(&post, "", 1)
+            .replacen("    errors: { value: errors },\n", "", 1)
+            .replacen(POST_ANSWERED, POST_OF_STAGE_1, 1);
         assert_eq!(without, WINDOWS_SHIM_OF_STAGE_1);
+    }
+
+    /// `platform.post`'s refusal is the host's Reason in the page's words: its code, its message's
+    /// two parts around the size, the host's limit — and the script plain ASCII.
+    #[test]
+    fn the_pages_post_answers_too_large_with_the_hosts_reason() {
+        let post = post_script();
+        assert!(post.contains("text.length * 3 <= 1048576") && post.contains("if (bytes <= 1048576) return null;"), "{post}");
+        assert!(post.contains(r#"code: "too_large""#), "{post}");
+        assert!(post.contains(r#"message: "a message of " + bytes + " bytes was not sent \u2014 the most one may be is 1048576""#), "{post}");
+        assert!(crate::errors::fits(crate::errors::gui::PAGE_MESSAGE_TOO_LARGE.message, &format!(
+            "a message of {} bytes was not sent — the most one may be is {MAX_MESSAGE_BYTES}",
+            MAX_MESSAGE_BYTES + 1
+        )));
+        assert!(post.is_ascii() && !post.contains("MOST") && !post.contains("BEFORE") && !post.contains("AFTER"));
+        assert_eq!(js_string("a \"b\" \\ — é"), r#""a \"b\" \\ \u2014 \u00e9""#);
     }
 
     /// `platform.errors` holds every code of the host's, under its constant, in both shims, and the
@@ -2088,7 +2190,7 @@ mod tests {
             let shim = platform_shim(engine);
             assert!(shim.starts_with("(() => {") && shim.ends_with("})();"), "{engine:?}: one script");
             assert!(shim.contains("post:") && shim.contains("onmessage:"), "{engine:?}");
-            assert!(shim.contains("ipc.postMessage(JSON.stringify("), "{engine:?}");
+            assert!(shim.contains(POST_ANSWERED) && shim.contains("const tooLarge = (text) => {"), "{engine:?}");
             assert!(shim.contains(&format!("waiting.length < {MAX_QUEUED_POSTS}")), "{engine:?}: the page's cap is the host's");
             assert!(
                 shim.contains(r#"defineProperty(window, "close", { value: () => {}"#),

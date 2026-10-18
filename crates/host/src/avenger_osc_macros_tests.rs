@@ -500,7 +500,7 @@ fn macro_tabs_are_counted_before_a_click_and_read_after() {
         -- at 11.
         T.tick(11)
         T.ok(#S.clicks == clicks + 4 and T.clickAt() == "1256,858", "Delete clicked four times: " .. (#S.clicks - clicks))
-        T.ok(S.sent[#S.sent] == "Escape" and T.count("[avenger] 'Delete Last Tab': its popup was left open (untaken) — "
+        T.ok(S.sent[#S.sent] == "Escape" and T.count("[avenger] 'Delete Last Tab': its popup was left open (refused) — "
           .. "pressing Escape to close it") == 1, T.dump())
         T.repaint({ osc = 1, selected = "osc", index = 1, macroShown = 2 })
         T.settle(4)

@@ -29,7 +29,8 @@ use objc2_core_graphics::{
 };
 
 use super::{keys, post_click};
-use crate::backend::MouseButton;
+use crate::backend::{KeyRefusal, MouseButton};
+use crate::errors::{input, HostError};
 
 /// The event field AppKit's own mouse events carry their window's number in, and reads it from:
 /// 51, `kCGSEventWindowIDField` — private, named in no SDK header; WebKit's
@@ -308,10 +309,10 @@ pub fn mouse_click(x: i32, y: i32, button: MouseButton) {
 ///
 /// The modifier flags are cleared, as on every click here (`post_mouse`): a Control held from the
 /// hotkey that asked for the click would make it a secondary click.
-pub fn post_click(window: isize, x: i32, y: i32, button: MouseButton, move_pointer: bool) -> Result<String, String> {
+pub fn post_click(window: isize, x: i32, y: i32, button: MouseButton, move_pointer: bool) -> Result<String, HostError> {
     note_post_access_once();
     if !CGPreflightPostEventAccess() {
-        return Err(post_click::NO_POST_ACCESS.to_string());
+        return Err(HostError::of(&input::NO_POST_ACCESS));
     }
     let target = super::ax::post_target(window, x, y)?;
     let at = post_click::window_location(x, y, target.bounds);
@@ -323,7 +324,8 @@ pub fn post_click(window: isize, x: i32, y: i32, button: MouseButton, move_point
     let mut built = Vec::with_capacity(3);
     for (etype, b, clicks) in [(CGEventType::MouseMoved, CGMouseButton::Left, None), (down, cg, Some(1)), (up, cg, Some(1))] {
         let Some(event) = CGEvent::new_mouse_event(src.as_deref(), etype, point, b) else {
-            return Err(format!("CGEventCreateMouseEvent(type {}) returned NULL; nothing was posted", etype.0));
+            let said = format!("CGEventCreateMouseEvent(type {}) returned NULL; nothing was posted", etype.0);
+            return Err(HostError::with(&input::NULL_MOUSE_EVENT, said));
         };
         CGEvent::set_flags(Some(&event), CGEventFlags::empty());
         let set = |field: CGEventField, value: i64| CGEvent::set_integer_value_field(Some(&event), field, value);
@@ -339,7 +341,7 @@ pub fn post_click(window: isize, x: i32, y: i32, button: MouseButton, move_point
         set(CGEventField::EventSourceUserData, post_click::POSTED_CLICK_MARK);
         // Last: the place in the window, which nothing set after it may move.
         if !super::ffi::set_window_location(&event, CGPoint::new(at.0, at.1)) {
-            return Err(post_click::NO_WINDOW_LOCATION.to_string());
+            return Err(HostError::of(&input::NO_WINDOW_LOCATION));
         }
         built.push(event);
     }
@@ -470,12 +472,17 @@ static KEY_POST_ROUTE_LOGGED: AtomicBool = AtomicBool::new(false);
 /// `WM_COMMAND` menu driver was deleted for exactly that reason. `AXUIElementPostKeyboardEvent`
 /// would be the per-element route and is not one — it is deprecated, undocumented as to which
 /// element it actually targets, and reported not to work at all on recent systems.
-pub fn key_post(hwnd: isize, key: &str) -> Result<(), String> {
+/// A key name that is not one raises; a key the layout cannot type, a handle that is no window's,
+/// and an event that could not be made are answered.
+pub fn key_post(hwnd: isize, key: &str) -> Result<(), KeyRefusal> {
     let vk = crate::backend::key_to_vk(key).ok_or_else(|| format!("unknown key '{key}'"))?;
-    let code = keys::vk_to_keycode(vk)
-        .ok_or_else(|| format!("key '{key}' (VK {vk:#04x}): {}", keys::why_no_keycode(vk)))?;
+    let code = keys::vk_to_keycode(vk).ok_or_else(|| {
+        let said = format!("key '{key}' (VK {vk:#04x}): {}", keys::why_no_keycode(vk));
+        KeyRefusal::Answer(HostError::with(&input::POST_NO_KEYCODE, said))
+    })?;
     let entry = super::handles::get(hwnd).ok_or_else(|| {
-        format!("key_post: {hwnd} is not a handle this backend issued, so there is no process to post '{key}' to")
+        let said = format!("key_post: {hwnd} is not a handle this backend issued, so there is no process to post '{key}' to");
+        KeyRefusal::Answer(HostError::with(&input::POST_NO_PROCESS, said))
     })?;
     if !KEY_POST_ROUTE_LOGGED.swap(true, Ordering::Relaxed) {
         crate::logging::line(
@@ -503,9 +510,8 @@ pub fn key_post(hwnd: isize, key: &str) -> Result<(), String> {
                 CGEvent::post_to_pid(entry.pid as libc::pid_t, Some(&event));
             }
             None => {
-                return Err(format!(
-                    "CGEventCreateKeyboardEvent returned NULL for '{key}' (keycode {code})"
-                ))
+                let said = format!("CGEventCreateKeyboardEvent returned NULL for '{key}' (keycode {code})");
+                return Err(KeyRefusal::Answer(HostError::with(&input::NULL_KEY_EVENT, said)));
             }
         }
     }
@@ -515,15 +521,17 @@ pub fn key_post(hwnd: isize, key: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn key_send(combo: &str) -> Result<(), String> {
+/// A spec that does not parse, or a modifier tap, raises; a key the layout cannot type, and an
+/// event that could not be made, are answered.
+pub fn key_send(combo: &str) -> Result<(), KeyRefusal> {
     // The shared parser, so a spec means here what it means to a hotkey: its modifiers are
     // roles, and `keys::MODIFIER_KEYS` makes them Mac keys — `"Ctrl+C"` is Command+C, which
     // copies, as it does on Windows; `"Win+C"` (or `"Meta+C"`) is Control+C.
     let (vk, mask) = crate::backend::parse_key_spec(combo)?;
     if mask & crate::backend::MASK_TAP != 0 {
-        return Err(format!(
+        return Err(KeyRefusal::Mistake(format!(
             "'{combo}' is a modifier tap, which is something to capture, not a key to send"
-        ));
+        )));
     }
 
     // The modifiers become flags on the key event rather than key events of their own, and
@@ -551,8 +559,10 @@ pub fn key_send(combo: &str) -> Result<(), String> {
     let flags = CGEventFlags(keys::mask_to_cg_flags(mask));
     // The mask also picks the letter table: with Command held (the Ctrl role) a letter is the
     // key the layout's Command table puts it on (`keys::letters_for`).
-    let code = keys::vk_to_keycode_for(vk, mask)
-        .ok_or_else(|| format!("'{combo}' (VK {vk:#04x}): {}", keys::why_no_keycode(vk)))?;
+    let code = keys::vk_to_keycode_for(vk, mask).ok_or_else(|| {
+        let said = format!("'{combo}' (VK {vk:#04x}): {}", keys::why_no_keycode(vk));
+        KeyRefusal::Answer(HostError::with(&input::SEND_NO_KEYCODE, said))
+    })?;
 
     let src = source();
     for is_down in [true, false] {
@@ -566,9 +576,8 @@ pub fn key_send(combo: &str) -> Result<(), String> {
                 post(&event);
             }
             None => {
-                return Err(format!(
-                    "CGEventCreateKeyboardEvent returned NULL for '{combo}' (keycode {code})"
-                ))
+                let said = format!("CGEventCreateKeyboardEvent returned NULL for '{combo}' (keycode {code})");
+                return Err(KeyRefusal::Answer(HostError::with(&input::NULL_KEY_EVENT, said)));
             }
         }
     }

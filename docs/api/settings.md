@@ -6,7 +6,7 @@ toc_max_heading_level: 2
 
 Typed, validated settings, declared by the module and edited by the user in the module manager. For the few choices a module should not make on somebody's behalf — Komplete Kontrol has exactly one, an opt-out for automatically closing KK's library browser, and the overlay runtime one, the calibration switch every overlay module asks ([`O.calibrating`](overlay.md#o-calibrating)). Held per module and persisted in `settings.toml` beside the application (for where that is on each platform, see the platform sections of [`set`](#host-settings-set)), so they survive a restart. There is no fallback location: if that folder cannot be written, settings do not persist, and the log says so once.
 
-`define` is the load-bearing call: it fixes the setting's kind from its default and carries the label, the bounds and the permitted choices, and **the module manager builds the settings dialog out of precisely that** — one native checkbox, number field or dropdown per setting, for a screen reader to read. Everything else works only on what was defined: `get` raises for a key that never was, and `onChange` fires for the dialog as well as for `set`, so nothing has to poll its own settings.
+`define` is the load-bearing call: it fixes the setting's kind from its default and carries the label, the bounds and the permitted choices, and **the module manager builds the settings dialog out of precisely that** — one native checkbox, number field or dropdown per setting, for a screen reader to read. Everything else works only on what was defined: `get`, `set` and `onChange` raise for a key that never was, and `onChange` fires for the dialog as well as for `set`, so nothing has to poll its own settings.
 
 A module sees only its own store, keyed by module id, which also means a code module's settings stay under the id that defined them rather than under whichever VM its code happens to be running in. **So a shared runtime's settings are one set for every game built on it**: a setting its code defines is stored under the runtime's id and appears under the runtime in the module manager, whichever game module's VM ran the `define`, and a `set` from one game changes it for all. A choice that must differ per game — which key repeats the menu, say — is defined by the game module's own entry and handed to the runtime (see [a runtime shared by game modules](./require.md#a-runtime-shared-by-game-modules)). `host.config` is the same table under a second name.
 
@@ -108,14 +108,18 @@ The modules' part of the file is the application's copy, read at start; the `[ap
 Registers `callback` to run whenever this setting is set (via `set` or the
 settings GUI). Returns `nil`. Multiple callbacks may be registered per key.
 
-- `key: string` — the setting to watch.
+- `key: string` — the setting to watch: one this module has `define`d before the call. A key
+  never defined raises, `setting 'speeed' was not defined`, as `get` and `set` do — registered,
+  its callback would never fire — so `define` comes first.
 - `callback: (new, old) -> ()` — called with the new value and the previous
   stored value.
 
 It fires on **every** `set`, including one that stores the value already there,
 so compare `new` with `old` if only a real change matters. The settings dialog's OK
 applies every field, changed or not, so it fires the callbacks of every setting the
-dialog shows. Unlike the module's other callbacks, these also fire while the module
+dialog shows. A value the dialog hands over that its setting does not take is not stored and
+fires nothing; the log says so (`<module id> <key>: the value … from the dialog was not taken:
+…`). Unlike the module's other callbacks, these also fire while the module
 is disabled — the dialog can be opened for a disabled module too — but not while the
 application has [stopped it](../module-runtime-and-lifecycle.md#limits): then they do not
 run; the values are stored, and turning the module on again builds it afresh, so it reads

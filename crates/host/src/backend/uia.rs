@@ -17,6 +17,7 @@
 use std::cell::{Cell, RefCell};
 
 use super::{DumpNode, ElementAnswer, ElementAsk, ElementFailure, ElementOutcome};
+use crate::errors::{common, element, HostError};
 use windows::core::{Interface, BSTR, VARIANT};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{
@@ -38,15 +39,15 @@ thread_local! {
     // Whether this thread's automation object leaves the keyboard focus where it is when it acts
     // (`automation`): an action is made only when it does.
     static ACTS_IN_PLACE: Cell<bool> = const { Cell::new(false) };
-    // The first call of the question in progress that the program did not answer — the words a
-    // module is told, and whether it was the timeout. Cleared by `run` before each question and
-    // taken after it (`settle`).
-    static FAILED: RefCell<Option<(String, bool)>> = const { RefCell::new(None) };
+    // The first call of the question in progress that the program did not answer — what a module
+    // is told, and whether it was the timeout. Cleared by `run` before each question and taken
+    // after it (`settle`).
+    static FAILED: RefCell<Option<(HostError, bool)>> = const { RefCell::new(None) };
     // The first bound a walk of the question in progress stopped at before the end of the tree —
-    // its node budget or its time — in the words a module is told. Cleared by `run` before each
-    // question and taken after it (`settle`): a search it cut short that found nothing is not
-    // known, never "not there".
-    static CUT: RefCell<Option<String>> = const { RefCell::new(None) };
+    // its node budget or its time — as a module is told it. Cleared by `run` before each question
+    // and taken after it (`settle`): a search it cut short that found nothing is not known, never
+    // "not there".
+    static CUT: RefCell<Option<HostError>> = const { RefCell::new(None) };
 }
 
 /// How long a single cross-process UIA call may take before it is given up on.
@@ -126,7 +127,7 @@ impl Budget {
         true
     }
 
-    fn cut(&mut self, why: String) {
+    fn cut(&mut self, why: HostError) {
         self.stopped = true;
         note_cut(why);
     }
@@ -134,18 +135,18 @@ impl Budget {
 
 /// What a module is told of a search that stopped at its node budget of `of` before the end of the
 /// tree.
-fn cut_by_nodes(of: i32) -> String {
-    format!("the tree holds more than the {of} elements a search reads")
+fn cut_by_nodes(of: i32) -> HostError {
+    HostError::with(&element::TOO_MANY_NODES, format!("the tree holds more than the {of} elements a search reads"))
 }
 
 /// What a module is told of a search that stopped at [`WALK_DEADLINE`] before the end of the tree.
-fn cut_by_time() -> String {
-    format!("the search took longer than {} s", WALK_DEADLINE.as_secs())
+fn cut_by_time() -> HostError {
+    HostError::with(&element::TOO_SLOW, format!("the search took longer than {} s", WALK_DEADLINE.as_secs()))
 }
 
 /// A walk of the question in progress stopped at a bound before the end of the tree: noted, the
 /// first one only ([`CUT`]).
-fn note_cut(why: String) {
+fn note_cut(why: HostError) {
     CUT.with(|c| {
         let mut c = c.borrow_mut();
         if c.is_none() {
@@ -282,7 +283,7 @@ fn stopped() -> bool {
 /// it found and says why it is not all. A program that did not answer is said before a bound: it
 /// is what stopped the walk. Only that makes the questions behind this one go unasked
 /// (`unanswered`, element.rs); a tree too large or too slow to walk answered every call.
-fn settle(answer: ElementAnswer, failed: Option<(String, bool)>, cut: Option<String>) -> ElementOutcome {
+fn settle(answer: ElementAnswer, failed: Option<(HostError, bool)>, cut: Option<HostError>) -> ElementOutcome {
     match (answer, failed.or(cut.map(|why| (why, false)))) {
         (ElementAnswer::Nodes(nodes, _), Some((why, _))) => Ok(ElementAnswer::Nodes(nodes, Some(why))),
         (a, Some((why, unanswered))) if a.is_nothing() => Err(ElementFailure { why, unanswered }),
@@ -487,20 +488,20 @@ fn element_locate_via(
 
 /// What `host.element.press` is told for an accessibility call that failed with `code` — and every
 /// other call here that the program did not answer ([`noted`]).
-pub(super) fn failure(code: i32) -> String {
+pub(super) fn failure(code: i32) -> HostError {
     match code as u32 {
-        0x8007_0005 => "the program runs with higher rights".to_string(),
+        0x8007_0005 => HostError::of(&element::DENIED),
         // UIA_E_TIMEOUT: the program did not answer within the bound `automation` sets.
-        TIMEOUT => format!("the program did not answer within {UIA_TIMEOUT_MS} ms"),
+        TIMEOUT => HostError::with(&element::TIMEOUT, format!("the program did not answer within {UIA_TIMEOUT_MS} ms")),
         // UIA_E_ELEMENTNOTAVAILABLE.
-        0x8004_0201 => "the element is gone".to_string(),
+        0x8004_0201 => HostError::of(&element::ELEMENT_GONE),
         // UIA_E_ELEMENTNOTENABLED.
-        0x8004_0200 => "the element is not enabled".to_string(),
+        0x8004_0200 => HostError::of(&element::NOT_ENABLED),
         // UIA_E_INVALIDOPERATION, UIA_E_NOTSUPPORTED.
-        0x8013_1509 | 0x8004_0204 => "the element cannot be pressed".to_string(),
+        0x8013_1509 | 0x8004_0204 => HostError::of(&element::CANNOT_PRESS),
         // RPC_E_DISCONNECTED, RPC_S_SERVER_UNAVAILABLE, RPC_S_CALL_FAILED: its process went.
-        0x8001_0108 | 0x8007_06BA | 0x8007_06BE => "the program is gone".to_string(),
-        other => format!("the program did not take the action (0x{other:08x})"),
+        0x8001_0108 | 0x8007_06BA | 0x8007_06BE => HostError::of(&element::PROGRAM_GONE),
+        other => HostError::with(&element::NOT_TAKEN, format!("the program did not take the action (0x{other:08x})")),
     }
 }
 
@@ -517,15 +518,15 @@ pub(super) fn failure(code: i32) -> String {
 fn element_press(hwnd: isize, name: &str, control_type: i32) -> ElementOutcome {
     // SAFETY: a local question about a handle, which a stale one answers no to.
     if hwnd == 0 || unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd as _) } == 0 {
-        return Err(ElementFailure { why: "the window is gone".into(), unanswered: false });
+        return Err(ElementFailure { why: HostError::of(&common::WINDOW_GONE), unanswered: false });
     }
     let pressed = AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
         let Some(automation) = borrow.as_ref() else {
-            return Err(("this system's accessibility interface could not be reached".to_string(), false));
+            return Err((HostError::of(&element::NO_INTERFACE), false));
         };
         if !ACTS_IN_PLACE.with(|c| c.get()) {
-            return Err(("this system cannot press an element without moving the keyboard focus to it".to_string(), false));
+            return Err((HostError::of(&element::MOVES_FOCUS), false));
         }
         let fail = |e: windows::core::Error| (failure(e.code().0), e.code().0 as u32 == TIMEOUT);
         let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).map_err(fail)?;
@@ -541,7 +542,7 @@ fn element_press(hwnd: isize, name: &str, control_type: i32) -> ElementOutcome {
         let el = match root.FindFirst(TreeScope_Subtree, &cond) {
             Ok(el) => el,
             Err(e) if e.code().is_err() && e.code().0 as u32 != 0x8000_4003 => return Err(fail(e)),
-            Err(_) => return Err(("no such element".to_string(), false)),
+            Err(_) => return Err((HostError::of(&element::NO_ELEMENT), false)),
         };
         // Invoke (10000), else Toggle (10015), else LegacyIAccessible's default action (10018) — the
         // last only when the element names one.
@@ -561,7 +562,7 @@ fn element_press(hwnd: isize, name: &str, control_type: i32) -> ElementOutcome {
                 return p.DoDefaultAction().map(|()| "its default action").map_err(fail);
             }
         }
-        Err(("the element cannot be pressed".to_string(), false))
+        Err((HostError::of(&element::CANNOT_PRESS), false))
     });
     let what = if name.is_empty() { format!("the first element of type {control_type}") } else { format!("'{name}' (type {control_type})") };
     match &pressed {
@@ -616,7 +617,7 @@ fn element_dump(hwnd: isize) -> Vec<DumpNode> {
         let all = arr.Length().unwrap_or(0);
         if all > DUMP_CAP {
             // The rest of the tree is not listed: the dump says so (`settle`).
-            note_cut(format!("the tree holds {all} elements, more than the {DUMP_CAP} a dump lists"));
+            note_cut(HostError::with(&element::DUMP_CUT, format!("the tree holds {all} elements, more than the {DUMP_CAP} a dump lists")));
         }
         for i in 0..all.min(DUMP_CAP) {
             if stopped() {
@@ -1196,17 +1197,29 @@ fn element_focus_put(hwnd: isize) -> bool {
 mod tests {
     use super::*;
 
-    /// An action that failed is said in the words a module is told: rights, time, the element, the
-    /// program; anything else with its code.
+    /// An action that failed is said in the words a module is told, under its code: rights, time,
+    /// the element, the program; anything else with its number.
     #[test]
     fn a_failed_press_says_why_in_words() {
-        assert_eq!(failure(0x8007_0005_u32 as i32), "the program runs with higher rights");
-        assert_eq!(failure(0x8013_1505_u32 as i32), "the program did not answer within 1000 ms");
-        assert_eq!(failure(0x8004_0201_u32 as i32), "the element is gone");
-        assert_eq!(failure(0x8004_0200_u32 as i32), "the element is not enabled");
-        assert_eq!(failure(0x8013_1509_u32 as i32), "the element cannot be pressed");
-        assert_eq!(failure(0x8007_06BA_u32 as i32), "the program is gone");
-        assert_eq!(failure(0x8000_4005_u32 as i32), "the program did not take the action (0x80004005)");
+        use crate::errors::Code;
+        for (code, reason, said) in [
+            (0x8007_0005_u32, &element::DENIED, "the program runs with higher rights"),
+            (0x8013_1505, &element::TIMEOUT, "the program did not answer within 1000 ms"),
+            (0x8004_0201, &element::ELEMENT_GONE, "the element is gone"),
+            (0x8004_0200, &element::NOT_ENABLED, "the element is not enabled"),
+            (0x8013_1509, &element::CANNOT_PRESS, "the element cannot be pressed"),
+            (0x8004_0204, &element::CANNOT_PRESS, "the element cannot be pressed"),
+            (0x8007_06BA, &element::PROGRAM_GONE, "the program is gone"),
+            (0x8000_4005, &element::NOT_TAKEN, "the program did not take the action (0x80004005)"),
+        ] {
+            let e = failure(code as i32);
+            assert_eq!((e.reason(), e.message()), (reason, said), "{code:08x}");
+        }
+        let codes: Vec<Code> = [0x8007_0005_u32, 0x8013_1505, 0x8004_0201, 0x8004_0200, 0x8013_1509, 0x8007_06BA, 0x8000_4005]
+            .iter()
+            .map(|c| failure(*c as i32).code())
+            .collect();
+        assert_eq!(codes, [Code::Denied, Code::Timeout, Code::Gone, Code::Refused, Code::Refused, Code::Gone, Code::Failed]);
     }
 
     /// The focus stays where it is: the automation object of every thread is made with UIA's
@@ -1246,7 +1259,7 @@ mod tests {
         let denied: windows::core::Result<u32> = Err(windows::core::Error::from_hresult(windows::core::HRESULT(0x8007_0005_u32 as i32)));
         assert_eq!(noted(denied), None);
         assert!(stopped());
-        assert_eq!(FAILED.with(|f| f.borrow_mut().take()), Some(("the program did not answer within 1000 ms".to_string(), true)));
+        assert_eq!(FAILED.with(|f| f.borrow_mut().take()), Some((HostError::of(&element::TIMEOUT), true)));
         assert_eq!(noted::<u32>(Ok(7)), Some(7));
     }
 
@@ -1254,7 +1267,7 @@ mod tests {
     /// unanswered is not known, never no; a dump keeps what it found and says why it is not all.
     #[test]
     fn nothing_found_after_an_unanswered_call_is_not_known() {
-        let late = || Some(("the program did not answer within 1000 ms".to_string(), true));
+        let late = || Some((HostError::of(&element::TIMEOUT), true));
         assert_eq!(settle(ElementAnswer::Found(true), late(), None), Ok(ElementAnswer::Found(true)));
         assert_eq!(settle(ElementAnswer::Index(Some(2)), late(), None), Ok(ElementAnswer::Index(Some(2))));
         assert_eq!(settle(ElementAnswer::Point(Some((5, 6))), late(), None), Ok(ElementAnswer::Point(Some((5, 6)))));
@@ -1269,19 +1282,19 @@ mod tests {
             assert_eq!(settle(nothing.clone(), None, None), Ok(nothing.clone()), "an answer when every call was answered");
             assert_eq!(
                 settle(nothing.clone(), late(), None),
-                Err(ElementFailure { why: "the program did not answer within 1000 ms".into(), unanswered: true }),
+                Err(ElementFailure { why: HostError::of(&element::TIMEOUT), unanswered: true }),
                 "{nothing:?}"
             );
         }
-        let denied = Some(("the program runs with higher rights".to_string(), false));
+        let denied = Some((HostError::of(&element::DENIED), false));
         assert_eq!(
             settle(ElementAnswer::Found(false), denied.clone(), None),
-            Err(ElementFailure { why: "the program runs with higher rights".into(), unanswered: false })
+            Err(ElementFailure { why: HostError::of(&element::DENIED), unanswered: false })
         );
         let node = DumpNode { depth: 0, name: "FILE".into(), class: String::new(), ctype: 50000, x: 1, y: 2, w: 3, h: 4 };
         assert_eq!(
             settle(ElementAnswer::Nodes(vec![node.clone()], None), late(), None),
-            Ok(ElementAnswer::Nodes(vec![node.clone()], Some("the program did not answer within 1000 ms".into())))
+            Ok(ElementAnswer::Nodes(vec![node.clone()], Some(HostError::of(&element::TIMEOUT))))
         );
         assert_eq!(settle(ElementAnswer::Nodes(vec![node.clone()], None), None, None), Ok(ElementAnswer::Nodes(vec![node], None)));
     }
@@ -1294,29 +1307,32 @@ mod tests {
     #[test]
     fn a_walk_cut_short_by_its_bound_is_not_known() {
         let cut = || Some(cut_by_nodes(4000));
-        assert_eq!(cut().unwrap(), "the tree holds more than the 4000 elements a search reads");
-        assert_eq!(cut_by_time(), "the search took longer than 5 s");
+        assert_eq!(cut().unwrap(), HostError::of(&element::TOO_MANY_NODES));
+        assert_eq!(cut().unwrap().message(), "the tree holds more than the 4000 elements a search reads");
+        assert_eq!(cut_by_time(), HostError::of(&element::TOO_SLOW));
+        assert_eq!(cut_by_time().message(), "the search took longer than 5 s");
         assert_eq!(
             settle(ElementAnswer::Point(None), None, cut()),
-            Err(ElementFailure { why: "the tree holds more than the 4000 elements a search reads".into(), unanswered: false })
+            Err(ElementFailure { why: HostError::of(&element::TOO_MANY_NODES), unanswered: false })
         );
         assert_eq!(settle(ElementAnswer::State(Some((1, 16))), None, cut()), Ok(ElementAnswer::State(Some((1, 16)))));
         assert_eq!(
             settle(ElementAnswer::Nodes(Vec::new(), None), None, Some(cut_by_time())),
-            Ok(ElementAnswer::Nodes(Vec::new(), Some("the search took longer than 5 s".into())))
+            Ok(ElementAnswer::Nodes(Vec::new(), Some(HostError::of(&element::TOO_SLOW))))
         );
-        let late = Some(("the program did not answer within 1000 ms".to_string(), true));
+        let late = Some((HostError::of(&element::TIMEOUT), true));
         assert_eq!(
             settle(ElementAnswer::Point(None), late, cut()),
-            Err(ElementFailure { why: "the program did not answer within 1000 ms".into(), unanswered: true })
+            Err(ElementFailure { why: HostError::of(&element::TIMEOUT), unanswered: true })
         );
-        // The budget: the last node is spent without a word; asked for one more, it says so, once.
+        // The budget — the walks' 4000, whose words the message is — the last node is spent without
+        // a word; asked for one more, it says so, once.
         CUT.with(|c| *c.borrow_mut() = None);
-        let mut b = Budget::new(2);
-        assert!(b.spend() && b.spend());
+        let mut b = Budget::new(4000);
+        assert!((0..4000).all(|_| b.spend()));
         assert!(CUT.with(|c| c.borrow().is_none()) && !b.stopped, "a tree of exactly the budget is all walked");
         assert!(!b.spend() && b.stopped);
         assert!(!b.spend());
-        assert_eq!(CUT.with(|c| c.borrow_mut().take()), Some("the tree holds more than the 2 elements a search reads".to_string()));
+        assert_eq!(CUT.with(|c| c.borrow_mut().take()), Some(HostError::of(&element::TOO_MANY_NODES)));
     }
 }

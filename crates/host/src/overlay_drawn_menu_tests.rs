@@ -26,9 +26,13 @@ S.owns = true
 S.ownsAsked = {}
 
 rawset(T.host, "input", T.strict("host.input", {
+  -- Answered as the host answers a click: true, or false and its error value (S.clickErr, for
+  -- every click asked while it is set).
   click = function(x, y, opts)
     S.clicks[#S.clicks + 1] = { x, y, button = opts and opts.button }
     S.order[#S.order + 1] = "click"
+    if S.clickErr then return false, S.clickErr end
+    return true
   end,
 }))
 rawset(T.host.window, "ownsPoint", function(id, x, y, opts)
@@ -181,7 +185,7 @@ end
 function T.choose(o, spec)
   S.done = S.done or {}
   local s = { label = "Zoom", at = { 262, 14 }, menuItem = { 10, 20 },
-    onDone = function(_, chosen, why) S.done[#S.done + 1] = tostring(chosen) .. ":" .. tostring(why) end }
+    onDone = function(_, chosen, err) S.done[#S.done + 1] = tostring(chosen) .. ":" .. tostring(err and err.code) end }
   for k, v in pairs(spec or {}) do s[k] = v end
   local out
   assert(T.call("key", function() out = o:chooseMenuItem(s) end) == "Ran")
@@ -290,7 +294,7 @@ fn an_animation_a_flash_and_an_outline_are_no_menu() {
           T.tick(1)
         end
         T.ok(#S.clicks == 1, "no item clicked: " .. #S.clicks)
-        T.ok(S.done[1] == "false:due" and T.count("'Zoom' not chosen — no menu test saw a menu within 8000 ms") == 1,
+        T.ok(S.done[1] == "false:no_menu" and T.count("'Zoom' not chosen — no menu test saw a menu within 8000 ms") == 1,
           tostring(S.done[1]))
         -- Past the press's look, the test is asked once in eight ticks, and stops comparing then.
         T.tick(10)
@@ -365,9 +369,9 @@ fn a_press_where_the_picture_cannot_wait_arms_nothing_and_one_that_moved_on_clic
         local opened = nil
         T.ok(T.call("key", function()
           opened = o:chooseMenuItem({ label = "Zoom", at = { 262, 14 }, menuItem = { 10, 20 },
-            onDone = function(_, chosen, why) S.done[#S.done + 1] = tostring(chosen) .. ":" .. tostring(why) end })
+            onDone = function(_, chosen, err) S.done[#S.done + 1] = tostring(chosen) .. ":" .. tostring(err and err.code) end })
         end) == "Ran")
-        T.ok(opened == false and S.done[1] == "false:inactive" and #S.clicks == clicks, "nothing clicked: " .. tostring(S.done[1]))
+        T.ok(opened == false and S.done[1] == "false:not_in_front" and #S.clicks == clicks, "nothing clicked: " .. tostring(S.done[1]))
         T.ok(T.count("[menu] 'Avenger' 'Zoom': not acting after the picture before the press — the overlay is no longer active") == 1,
           T.dump())
     "##);
@@ -523,7 +527,7 @@ fn a_press_covered_after_its_picture_a_late_reading_and_a_failed_one() {
           S.owns = false
         end
         T.choose(o)
-        T.ok(#S.clicks == 0 and S.done[1] == "false:refused", "refused, nothing clicked: " .. tostring(S.done[1]))
+        T.ok(#S.clicks == 0 and S.done[1] == "false:covered", "refused, nothing clicked: " .. tostring(S.done[1]))
         T.ok(T.count("drawn: armed on") == 0, "nothing armed: " .. T.dump())
         S.owns = true
         -- A reading of the last press, answered after the next one.
@@ -581,7 +585,9 @@ fn a_choice_follows_the_test_that_placed_its_item_not_another_of_its_name() {
 /// RG4: `O.doubleClick` with `button`, both clicks with it and the callback once the second has gone
 /// out (90 ms later, as a handler of the timer's); without options, two plain clicks as ever; a
 /// button it does not know, options that are not a table and a callback that is not a function
-/// raise, naming them.
+/// raise, naming them. And D41: it answers as a click does, `true` and the second click's answer to
+/// the callback; a first click that is not made sends no second, answers its error, and the
+/// callback hears the same table on the next turn.
 #[test]
 fn a_double_click_takes_a_button_and_calls_back_after_the_second_click() {
     run(r##"
@@ -607,5 +613,22 @@ fn a_double_click_takes_a_button_and_calls_back_after_the_second_click() {
         ok, err = pcall(T.O.doubleClick, 1, 2, nil, 5)
         T.ok(not ok and string.find(err, "the callback (fourth argument) must be a function or nil, got number", 1, true), err)
         T.ok(#S.clicks == 6, "nothing clicked by a call that raised")
+        local answers = nil
+        local first = table.pack(T.O.doubleClick(410, 120, nil, function(...) answers = table.pack(...) end))
+        T.ok(first.n == 1 and first[1] == true, "true at the call")
+        T.tick(1)
+        T.ok(answers and answers[1] == true and answers[2] == nil, "the callback hears the second click's answer")
+        local covered = T.E("covered", "something else is drawn over the point")
+        S.clickErr = covered
+        answers = nil
+        local ok2, err2 = T.O.doubleClick(410, 120, nil, function(...) answers = table.pack(...) end)
+        T.ok(ok2 == false and rawequal(err2, covered) and #S.clicks == 9 and answers == nil,
+          "the first click's error at the call, and nothing called back yet: " .. T.what(err2))
+        T.tick(1)
+        T.ok(#S.clicks == 9 and answers and answers[1] == false and rawequal(answers[2], covered),
+          "no second click, and the callback hears the same error value")
+        T.ok(T.count("overlay: a double-click's first click at (410,120) was not made — something else is drawn over "
+          .. "the point; no second is sent") == 1, T.dump())
+        S.clickErr = nil
     "##);
 }

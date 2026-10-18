@@ -69,6 +69,7 @@ use objc2_foundation::{NSNotification, NSNotificationCenter, NSProcessInfo};
 use crate::backend::{
     hand_plan, on_activation, on_own_edge, HandPlan, HandState, Handing, OnActivation, OwnEdge,
 };
+use crate::errors::{common, window, HostError};
 
 /// The way this application hands the front over: (a), the VPS Avenger control tool's, until
 /// `page-check`'s data on the CI runners shows (b) handing it over where (a) does not (TODO.md,
@@ -133,13 +134,17 @@ pub(super) enum Handed {
     Asked { how: Handing, taken: bool, yield_refused: bool },
 }
 
+/// Why nothing was asked when the process is no application any more ([`Handed::Kept`]).
+const NO_APPLICATION: &str = "no such application";
+
 impl Handed {
-    /// `host.window.focus`'s answer: the request taken, or the window raised or focused at once.
-    pub(super) fn accepted(&self) -> bool {
+    /// `host.window.focus`'s answer: `Ok` for the request taken, or the window raised or focused at
+    /// once; `gone` for a process that is no application any more, and `refused` for the rest.
+    pub(super) fn answer(&self) -> Result<(), HostError> {
         match *self {
-            Handed::Kept(_) => false,
-            Handed::AtOnce(ok) => ok,
-            Handed::Asked { taken, .. } => taken,
+            Handed::Kept(NO_APPLICATION) => Err(HostError::of(&window::NO_SUCH_WINDOW)),
+            Handed::AtOnce(true) | Handed::Asked { taken: true, .. } => Ok(()),
+            Handed::Kept(_) | Handed::AtOnce(false) | Handed::Asked { .. } => Err(HostError::of(&common::DECLINED)),
         }
     }
 }
@@ -164,7 +169,7 @@ pub(super) fn hand_front_to(pid: i32, window: isize, leaving: Option<&NSWindow>,
             w.orderOut(None);
         }
         crate::logging::line("macos", &format!("the front is not handed to pid {pid}: no such application"));
-        return Handed::Kept("no such application");
+        return Handed::Kept(NO_APPLICATION);
     };
     let app = super::own::app();
     let front = super::ax::frontmost_pid();

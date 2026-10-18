@@ -359,7 +359,7 @@ end
 -- its place in the list's order or nil, target = the place looked for, or nil, ordered = true where
 -- that order is Avenger's own (read at any time while the search runs), hint = "down" | "up" | nil,
 -- said = a sentence said, behind the screen reader, at the first step, onFound(entry, picture,
--- entries), onNotFound(why, picture or nil, sentence?) }. `why`, both ends reached: "absent" (the list
+-- entries), onNotFound(word, picture or nil, sentence?) }. `word`, both ends reached: "absent" (the list
 -- moved, and the target's place is not in an order known or lies away from the places read — more
 -- than one place beyond them), "missed" (the list moved, and the order puts the target among the
 -- places read or next to them: a name not read), "still" (the list moved neither way); or "guard"
@@ -539,14 +539,14 @@ local function presetRows(s, pl, r, lists, fav, marks)
 end
 
 -- The words for a search that did not find `name` in VPS Avenger's `list` ("list", "list of
--- categories", "list of <category>"), by why (B.seek's): "is not in" only for a list that moved and
+-- categories", "list of <category>"), by B.seek's word: "is not in" only for a list that moved and
 -- an order that does not put the name where the list was read; a name not read where it should have
 -- been, or in a list that did not move, is said as not read.
-local function notFound(why, name, list)
-  if why == "guard" then return name .. " cannot be found now" end
-  if why == "unread" then return "VPS Avenger's browser cannot be read now" end
-  if why == "still" then return name .. " was not read, and VPS Avenger's " .. list .. " did not move" end
-  if why == "missed" then return name .. " cannot be read in VPS Avenger's " .. list .. " now" end
+local function notFound(word, name, list)
+  if word == "guard" then return name .. " cannot be found now" end
+  if word == "unread" then return "VPS Avenger's browser cannot be read now" end
+  if word == "still" then return name .. " was not read, and VPS Avenger's " .. list .. " did not move" end
+  if word == "missed" then return name .. " cannot be read in VPS Avenger's " .. list .. " now" end
   return name .. " is not in VPS Avenger's " .. list
 end
 
@@ -759,13 +759,13 @@ function B.open(o, trip, args, name, label, known)
     hint = start and (start > 0 and "down" or "up") or nil,
     said = "Looking for " .. name .. " in VPS Avenger's list.",
     onFound = click,
-    onNotFound = function(why, pic, sentence)
+    onNotFound = function(word, pic, sentence)
       if pic then pic:release() end
       if sentence then return finish({ sentence = sentence }) end
       -- The name is one of Avenger's own list, still held: it is there, and was not read.
-      if why == "absent" and spec.ordered then why = "missed" end
-      log("'%s': %s not found (%s) — nothing clicked", label, name, why)
-      finish({ error = notFound(why, name, "list") })
+      if word == "absent" and spec.ordered then word = "missed" end
+      log("'%s': %s not found (%s) — nothing clicked", label, name, word)
+      finish({ error = notFound(word, name, "list") })
     end,
   }
   B.seek(o, trip, ctx, spec)
@@ -806,11 +806,11 @@ local function chooseCategory(o, trip, ctx, label, lists, target, pic, cats, nex
         next(r.byName, changed, s2)
       end, true)
     end,
-    onNotFound = function(why, s, sentence)
+    onNotFound = function(word, s, sentence)
       if s then s:release() end
       if sentence then return onFail({ sentence = sentence }) end
-      log("'%s': %s not found among the categories (%s) — nothing clicked", label, name, why)
-      onFail({ error = notFound(why, name, "list of categories") })
+      log("'%s': %s not found among the categories (%s) — nothing clicked", label, name, word)
+      onFail({ error = notFound(word, name, "list of categories") })
     end,
   })
 end
@@ -1009,8 +1009,9 @@ function B.preset(o, trip, forget, kind, arg, label, known)
     pic:release()
     local ok, said
     if kind == "load" then
-      ok, said = E.ring.doublePoint(o, label, row.x, row.y, true, function()
-        E.ring.watchName(o, was, afterName, label)
+      ok, said = E.ring.doublePoint(o, label, row.x, row.y, true, function(okD, saidD)
+        if okD then return E.ring.watchName(o, was, afterName, label) end
+        if trip:inFront() then trip:done({ sentence = saidD }) end
       end)
     else
       ok, said = E.ring.clickPoint(o, label, row.x, row.y, nil, true)
@@ -1031,11 +1032,11 @@ function B.preset(o, trip, forget, kind, arg, label, known)
       target = target,
       ordered = true,
       onFound = act,
-      onNotFound = function(whyN, s, sentence)
+      onNotFound = function(word, s, sentence)
         if s then s:release() end
         if sentence then return trip:done({ sentence = sentence }) end
-        log("'%s': %s not found among the rows (%s) — nothing clicked", label, pname, whyN)
-        trip:done({ part = browserPart(nil), error = notFound(whyN, pname, "list of " .. cat) })
+        log("'%s': %s not found among the rows (%s) — nothing clicked", label, pname, word)
+        trip:done({ part = browserPart(nil), error = notFound(word, pname, "list of " .. cat) })
       end,
     })
   end

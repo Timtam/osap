@@ -27,7 +27,8 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use super::{CapturedImage, CAPTURE_FAILED};
+use super::{capture_failed, CapturedImage};
+use crate::errors::HostError;
 use crate::ocr::types::Rect;
 
 /// The most pixels one frame may hold: 40 million, the limit every capture path already has
@@ -295,8 +296,8 @@ pub fn plan_points(pts: &[(i32, i32)]) -> Vec<Rect> {
 /// dropped before the next is taken, so no more than one is held at a time.
 pub fn read_points(
     pts: &[(i32, i32)],
-    mut capture: impl FnMut(Rect) -> Result<CapturedImage, String>,
-) -> Result<Vec<(u8, u8, u8)>, String> {
+    mut capture: impl FnMut(Rect) -> Result<CapturedImage, HostError>,
+) -> Result<Vec<(u8, u8, u8)>, HostError> {
     let mut out: Vec<Option<(u8, u8, u8)>> = vec![None; pts.len()];
     for r in plan_points(pts) {
         let img = capture(r)?;
@@ -304,7 +305,7 @@ pub fn read_points(
             && img.h as i64 == r.h as i64
             && img.rgba.len() as u64 >= img.w as u64 * img.h as u64 * 4;
         if !whole {
-            return Err(CAPTURE_FAILED.to_string());
+            return Err(capture_failed());
         }
         for (slot, &(x, y)) in out.iter_mut().zip(pts) {
             if slot.is_none() && r.contains(&Rect::new(x, y, 1, 1)) {
@@ -315,7 +316,7 @@ pub fn read_points(
             }
         }
     }
-    out.into_iter().map(|c| c.ok_or_else(|| CAPTURE_FAILED.to_string())).collect()
+    out.into_iter().map(|c| c.ok_or_else(capture_failed)).collect()
 }
 
 /// The colours at `pts`, in order, where a point that `off` says lies on no display reads black
@@ -326,17 +327,17 @@ pub fn read_points(
 pub fn black_where_off(
     pts: &[(i32, i32)],
     off: impl Fn(i32, i32) -> bool,
-    read: impl FnOnce(&[(i32, i32)]) -> Result<Vec<(u8, u8, u8)>, String>,
-) -> Result<Vec<(u8, u8, u8)>, String> {
+    read: impl FnOnce(&[(i32, i32)]) -> Result<Vec<(u8, u8, u8)>, HostError>,
+) -> Result<Vec<(u8, u8, u8)>, HostError> {
     let away: Vec<bool> = pts.iter().map(|&(x, y)| off(x, y)).collect();
     let on: Vec<(i32, i32)> = pts.iter().zip(&away).filter(|(_, a)| !**a).map(|(p, _)| *p).collect();
     let read = if on.is_empty() { Vec::new() } else { read(&on)? };
     if read.len() != on.len() {
-        return Err(CAPTURE_FAILED.to_string());
+        return Err(capture_failed());
     }
     let mut read = read.into_iter();
     away.iter()
-        .map(|a| if *a { Ok((0, 0, 0)) } else { read.next().ok_or_else(|| CAPTURE_FAILED.to_string()) })
+        .map(|a| if *a { Ok((0, 0, 0)) } else { read.next().ok_or_else(capture_failed) })
         .collect()
 }
 
@@ -571,10 +572,11 @@ mod tests {
         assert_eq!(got, vec![(2, 1, 7), (0, 0, 7), (4, 3, 7)], "in the order asked");
         let far = read_points(&[(0, 0), (5000, 5000)], |r| Ok(frame(r.x, r.y, 1, 1).img)).unwrap();
         assert_eq!(far, vec![(0, 0, 7), (0, 0, 7)]);
-        let e = read_points(&[(0, 0), (5000, 5000)], |r| if r.x == 0 { Ok(ramp(1, 1)) } else { Err("no".to_string()) });
-        assert_eq!(e, Err("no".to_string()), "one failed capture fails the call");
+        let no = || HostError::of(&crate::errors::screen::DUPLICATION_OVERDUE);
+        let e = read_points(&[(0, 0), (5000, 5000)], |r| if r.x == 0 { Ok(ramp(1, 1)) } else { Err(no()) });
+        assert_eq!(e, Err(no()), "one failed capture fails the call, with its error");
         let short = read_points(&[(0, 0)], |_| Ok(CapturedImage { w: 1, h: 1, rgba: Vec::new() }));
-        assert_eq!(short, Err(CAPTURE_FAILED.to_string()), "a capture of the wrong size is never indexed");
+        assert_eq!(short, Err(capture_failed()), "a capture of the wrong size is never indexed");
         assert_eq!(read_points(&[], |_| panic!("nothing to capture")), Ok(Vec::new()));
         // Several captures: each point from the one that holds it, in the order asked.
         let mut asked = Vec::new();
@@ -601,7 +603,8 @@ mod tests {
         assert_eq!(handed, vec![(10, 10), (4, 4)]);
         assert_eq!(black_where_off(&[(-1, 0)], off, |_| panic!("asked for a point on no display")), Ok(vec![(0, 0, 0)]));
         assert_eq!(black_where_off(&[], off, |_| panic!("asked for nothing")), Ok(Vec::new()));
-        assert_eq!(black_where_off(&[(1, 1), (2, 2)], off, |_| Ok(vec![(1, 1, 1)])), Err(CAPTURE_FAILED.to_string()));
-        assert_eq!(black_where_off(&[(1, 1)], off, |_| Err("no".to_string())), Err("no".to_string()));
+        assert_eq!(black_where_off(&[(1, 1), (2, 2)], off, |_| Ok(vec![(1, 1, 1)])), Err(capture_failed()));
+        let no = || HostError::of(&crate::errors::screen::DUPLICATION_OVERDUE);
+        assert_eq!(black_where_off(&[(1, 1)], off, |_| Err(no())), Err(no()));
     }
 }

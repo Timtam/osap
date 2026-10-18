@@ -213,7 +213,7 @@ Win: Tolk→NVDA/JAWS (+ Braille) or WinRT · macOS: AVFoundation (direct TTS). 
 local h = host.sound.play("assets/sounds/focus.ogg", { volume = 0.8 })
 h:stop()
 ```
-*As built, `host.sound.play(path)` takes no options and returns nothing: there is no volume and no handle to stop — see the [reference](api/sound.md).*
+*As built, `host.sound.play(path)` takes no options and returns `true`, or `false` and an error value: there is no volume and no handle to stop — see the [reference](api/sound.md).*
 
 ### host.resource — package resources
 ```luau

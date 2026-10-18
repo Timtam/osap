@@ -61,6 +61,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use super::xinput::{self, XInput, SLOTS};
 use super::{Control, DeviceKey, Hub};
+use crate::errors::{gamepad as reasons, HostError};
 
 /// `GUID_DEVINTERFACE_HID`, written out rather than pulling in windows-sys's whole
 /// `Win32_Devices_HumanInterfaceDevice` feature for one constant.
@@ -118,7 +119,7 @@ fn mode_for(xinput_loaded: bool, bits: u8, lease: bool, any_connected: bool) -> 
     }
 }
 
-pub fn start(hub: &'static Hub) -> Result<(), String> {
+pub fn start(hub: &'static Hub) -> Result<(), HostError> {
     // SAFETY: plain thread-id query.
     MAIN_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
     hub.set_waker(|| {
@@ -152,7 +153,7 @@ pub fn start(hub: &'static Hub) -> Result<(), String> {
         }
     });
 
-    let (ready, answered) = mpsc::channel::<Result<(), String>>();
+    let (ready, answered) = mpsc::channel::<Result<(), HostError>>();
     std::thread::Builder::new()
         .name("gamepad".to_string())
         .spawn(move || {
@@ -166,10 +167,12 @@ pub fn start(hub: &'static Hub) -> Result<(), String> {
                     .or_else(|| p.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "no message".to_string());
                 hub.set_status("thread", format!("stopped after a panic: {text}"));
-                crate::logging::line("gamepad", &format!("the gamepad thread stopped after a panic: {text}"));
+                let e = HostError::with(&reasons::STOPPED_AFTER_PANIC, format!("the gamepad thread stopped after a panic: {text}"));
+                crate::logging::line("gamepad", &e.to_string());
+                hub.set_failure(e);
             }
         })
-        .map_err(|e| format!("could not start the gamepad thread: {e}"))?;
+        .map_err(|e| HostError::with(&reasons::THREAD_NOT_STARTED, format!("could not start the gamepad thread: {e}")))?;
 
     // Waited for, briefly, so the `list()` that usually follows the first call sees the pads
     // that are there. Not for longer: this is the pump thread, and an XInput slot that takes
@@ -184,9 +187,7 @@ pub fn start(hub: &'static Hub) -> Result<(), String> {
             );
             Ok(())
         }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err("the gamepad thread ended before it was ready".to_string())
-        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(HostError::of(&reasons::THREAD_NOT_READY)),
     }
 }
 
@@ -223,7 +224,7 @@ struct Source {
     stats: Stats,
 }
 
-fn run(hub: &'static Hub, ready: mpsc::Sender<Result<(), String>>) {
+fn run(hub: &'static Hub, ready: mpsc::Sender<Result<(), HostError>>) {
     // Emulators routinely take a whole core; at normal priority a 4 ms poll behind one of them
     // is a poll that happens when the scheduler gets round to it.
     // SAFETY: the pseudo-handle of this thread.
@@ -238,9 +239,12 @@ fn run(hub: &'static Hub, ready: mpsc::Sender<Result<(), String>>) {
         let why = format!("could not create the gamepad thread's window (error {err})");
         hub.set_status("thread", format!("stopped: {why}"));
         // `ensure_started` logs the error it is sent — but it stops listening after 250 ms,
-        // and a send after that goes nowhere. Then it is said here, or nobody ever says it.
-        if let Err(mpsc::SendError(Err(why))) = ready.send(Err(why)) {
-            crate::logging::line("gamepad", &format!("gamepad watcher failed after starting: {why}"));
+        // and a send after that goes nowhere. Then it is said here, or nobody ever says it, and
+        // the hub keeps it for the calls that come after.
+        if let Err(mpsc::SendError(_)) = ready.send(Err(HostError::with(&reasons::NO_WINDOW, why.clone()))) {
+            let e = HostError::with(&reasons::FAILED_AFTER_START, format!("gamepad watcher failed after starting: {why}"));
+            crate::logging::line("gamepad", &e.to_string());
+            hub.set_failure(e);
         }
         return;
     }
@@ -261,7 +265,9 @@ fn run(hub: &'static Hub, ready: mpsc::Sender<Result<(), String>>) {
         }
         Err(e) => {
             hub.set_status("xinput", format!("unavailable: {e}"));
-            crate::logging::line("gamepad", &format!("XInput is unavailable, so no Xbox-type pad will be seen: {e}"));
+            let e = HostError::with(&reasons::NO_XINPUT, format!("XInput is unavailable, so no Xbox-type pad will be seen: {e}"));
+            crate::logging::line("gamepad", &e.to_string());
+            hub.set_failure(e);
             None
         }
     };

@@ -56,7 +56,17 @@ name = "Overlay runtime"
 # it once, after the test that placed it got ready through its new `chained` hook (newWindow and drawn
 # have one), takes it as taken when that test answers a new popup, and chooses the submenu's item in
 # that; `why` "no submenu" when none came. A module that uses it depends on "com.platform.overlay >= 0.10".
-version = "0.10.0"
+# 0.11.0 answers as the host does: every failure an error value with a code (docs/api/errors.md),
+# made from the runtime's own reasons in src/errors.luau, and O.errors with its eight codes beside
+# the host's. chooseMenuItem answers false and the error value at the call as well as to onDone, and
+# raises on an overlay with no menu tests; stillHere, toScreen, toScreenRect, inPlugin, pageBack,
+# pageKey, trip:afterMenu and trip:handOver answer error values, and so do onGiveUp, onBack and
+# onDone; onShown and onClose hand on the page's; a hand-over's onEnd is (o, trip, how, info, err),
+# `how` "ended", "done" or "given_up"; pageKey raises for a spec that is not a string;
+# O.doubleClick and the calibration and capture methods answer why they did not. A module written
+# against the old words no longer matches them, silently, and a lower bound does not protect it (a
+# dependency is no upper bound); one that compares codes depends on "com.platform.overlay >= 0.11".
+version = "0.11.0"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

@@ -308,7 +308,7 @@ fn the_page_key_or_another_window_while_renaming_posts_the_name_as_not_read() {
     }
 }
 
-/// The keyboard not handed over — a Mac without the Accessibility grant, a capture raising: a rename
+/// The keyboard not handed over — a Mac without the Accessibility grant, a capture refused: a rename
 /// whose editor is open says so, Browse Presets says nothing of pressing Return; no flag is set, no
 /// key is held, and the preset is posted as not read.
 #[test]
@@ -331,7 +331,8 @@ fn a_hand_over_refused_is_said_and_nothing_is_held() {
               and "Renaming the preset: the keyboard cannot be handed to VPS Avenger now; its editor is still open"
               or "Browse Presets: the keyboard cannot be handed to VPS Avenger now"
             T.ok(T.lastPost("error").text == want, tostring(T.lastPost("error").text))
-            T.ok(T.count("the keyboard is not handed over — capturing Return raised") == 1, T.dump())
+            T.ok(T.count("the keyboard is not handed over — Return is not captured: the event tap could not be created "
+              .. "(Accessibility)") == 1, T.dump())
             for i = flags + 1, #S.menuOpen do T.ok(S.menuOpen[i] ~= true, "no flag set") end
             T.ok(next(S.holding) == nil or (not S.holding["Return"] and not S.holding["Escape"]), "no key held")
             for i = said + 1, #S.speech do
@@ -602,6 +603,30 @@ fn browse_presets_ended_by_the_page_key_or_another_window_posts_the_name_as_not_
         "##;
         run_mac(&scenario(&s.replace("@HOW@", how)));
     }
+}
+
+/// Browse Presets with Avenger's window leaving the front between the act's check and the hand-over
+/// (while the name's read is asked): handOver answers `not_in_front`, having given the trip up itself,
+/// so the module ends nothing — the page hears the give-up's words, and no "the keyboard was not
+/// handed over" follows on a trip already over.
+#[test]
+fn browse_presets_refused_for_the_front_leaves_the_words_to_the_give_up() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.pageOn({ osc = 1, selected = "osc", index = 1 }, { preset = "LD Lead 1" })
+        local recognize = T.host.ocr.recognize
+        rawset(T.host.ocr, "recognize", function(r, opts, cb)
+          if type(opts) == "table" and opts.key == "vps-avenger browse" then
+            S.listed, S.front, S.chain = { W, T.OTHER }, T.OTHER, { T.OTHER }
+          end
+          return recognize(r, opts, cb)
+        end)
+        T.tripFrom({ action = "browse_expansion_presets", args = {}, focused = true }, W)
+        T.settle(2)
+        T.ok(not S.holding["Return"], "nothing handed over")
+        T.ok(T.count("done after the trip ended") == 0, T.dump())
+        T.ok(T.lastPost("error").text == "Browse Presets: another window came to the front; nothing more was done",
+          tostring(T.lastPost("error").text))
+    "##));
 }
 
 // ---------------------------------------------------------------------------------------------

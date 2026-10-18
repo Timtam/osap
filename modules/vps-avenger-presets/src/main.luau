@@ -22,6 +22,11 @@
 -- index is 0.35 MB, an expansion's file 2 to 110 KB. A file that cannot be read or does not
 -- decode is not read again until the module using it is reloaded (all of this state lives in
 -- that module's VM), and every call after says why.
+--
+-- WHY, as an error value (docs/api/errors.md): `invalid` for data that cannot be read, is not
+-- JSON, is of another format or does not hold what the index lists — for the caller, all of them
+-- "the preset data is broken" — and `not_found` for a name the index does not have. A raise of
+-- host.resource.read, for a file of this package that is missing, is caught and answered so.
 
 local M = {}
 
@@ -30,16 +35,19 @@ M.FORMAT = 1
 
 local index, indexWhy = nil, nil
 local entries = nil -- expansion name -> its entry in the index
-local files = {} -- expansion name -> its decoded file, or { why = "…" }
+local files = {} -- expansion name -> its decoded file, or { why = an error value }
+
+local function invalid(message) return host.errors.new(host.errors.INVALID, message) end
 
 local function readJson(rel)
   local ok, text = pcall(host.resource.read, rel)
-  if not ok then return nil, string.format("%s cannot be read: %s", rel, tostring(text)) end
+  if not ok then return nil, invalid(string.format("%s cannot be read: %s", rel, tostring(text))) end
   local fine, v = pcall(host.json.decode, text)
-  if not fine then return nil, string.format("%s is not JSON: %s", rel, tostring(v)) end
-  if type(v) ~= "table" then return nil, rel .. " holds no object" end
+  if not fine then return nil, invalid(string.format("%s is not JSON: %s", rel, tostring(v))) end
+  if type(v) ~= "table" then return nil, invalid(rel .. " holds no object") end
   if v.format ~= M.FORMAT then
-    return nil, string.format("%s is format %s, and this reader reads format %d", rel, tostring(v.format), M.FORMAT)
+    return nil, invalid(string.format("%s is format %s, and this reader reads format %d", rel, tostring(v.format),
+      M.FORMAT))
   end
   return v
 end
@@ -47,13 +55,13 @@ end
 -- The index: { format, exported, factoryStandard = { name, … }, expansions = { { name, file,
 -- presets = { name, … } }, … } }, the expansions in the catalog's order and each one's presets
 -- in its own list's order — the order of its category blocks, which is not alphabetical. The
--- live table: a caller that changes it changes it for every later call. nil and why when it
--- cannot be read.
+-- live table: a caller that changes it changes it for every later call. nil and an error value
+-- (`invalid`) when it cannot be read.
 function M.index()
   if index then return index end
   if indexWhy then return nil, indexWhy end
   local v, why = readJson("data/index.json")
-  if v and type(v.expansions) ~= "table" then v, why = nil, "data/index.json lists no expansions" end
+  if v and type(v.expansions) ~= "table" then v, why = nil, invalid("data/index.json lists no expansions") end
   if not v then
     indexWhy = why
     return nil, why
@@ -61,7 +69,7 @@ function M.index()
   local byName = {}
   for _, e in ipairs(v.expansions) do
     if type(e) ~= "table" or type(e.name) ~= "string" or type(e.file) ~= "string" or type(e.presets) ~= "table" then
-      indexWhy = "data/index.json has an expansion without a name, a file or presets"
+      indexWhy = invalid("data/index.json has an expansion without a name, a file or presets")
       return nil, indexWhy
     end
     byName[e.name] = e
@@ -72,8 +80,8 @@ end
 
 -- Expansion `name`'s file: { format, name, categories = { { name, start, count }, … }, presets =
 -- { { name, osc = { … }, macros = { { … }, … } }, … } } — presets in the index's order, so the
--- i-th of one is the i-th of the other. nil and why for a name the index does not have, or a
--- file that cannot be read.
+-- i-th of one is the i-th of the other. nil and an error value: `not_found` for a name the index
+-- does not have, `invalid` for a file that cannot be read (or an index that cannot).
 function M.expansion(name)
   local kept = files[name]
   if kept then
@@ -83,10 +91,12 @@ function M.expansion(name)
   local _, why = M.index()
   if not entries then return nil, why end
   local e = entries[name]
-  if not e then return nil, string.format("the index has no expansion '%s'", tostring(name)) end
+  if not e then
+    return nil, host.errors.new(host.errors.NOT_FOUND, string.format("the index has no expansion '%s'", tostring(name)))
+  end
   local v, bad = readJson(e.file)
   if v and (type(v.presets) ~= "table" or #v.presets ~= #e.presets or type(v.categories) ~= "table") then
-    v, bad = nil, string.format("%s does not hold the %d presets the index lists", e.file, #e.presets)
+    v, bad = nil, invalid(string.format("%s does not hold the %d presets the index lists", e.file, #e.presets))
   end
   files[name] = v or { why = bad }
   return v, bad

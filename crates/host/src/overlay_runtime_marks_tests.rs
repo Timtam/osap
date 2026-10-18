@@ -22,6 +22,10 @@
 //! runtime's own clicks after a pixel — a hotspot toggle's, a `reveal` probe's — are made only while
 //! the overlay is still where the pixel was read, and `O.memoByEpoch` keeps an answer under the
 //! epoch it came back in.
+//!
+//! And for the runtime's error values (version 0.11, the typed-errors series): `O:stillHere` and
+//! `O:toScreenRect` answer them, O.errors holds their codes, and every one comes from a reason of
+//! `modules/overlay-runtime/src/errors.luau`.
 
 use super::overlay_focus_read_tests::FR;
 use super::overlay_menu_tests::run_with;
@@ -30,10 +34,14 @@ use super::overlay_menu_tests::run_with;
 const MK: &str = r##"
 local S = T.S
 
--- A mark's answer as one string, for messages: "true", or "false: <why>".
+-- A mark's answer as one string, for messages: "true", or "false: <why>". The why is an error value,
+-- `not_in_front` for an overlay no longer active and `moved_on` for every other reason.
 function T.still(o, mark, opts)
   local ok, why = o:stillHere(mark, opts)
-  return ok and "true" or ("false: " .. tostring(why))
+  if ok then return "true" end
+  local want = tostring(why) == "the overlay is no longer active" and T.O.errors.NOT_IN_FRONT or T.O.errors.MOVED_ON
+  assert(T.is(why, want), "stillHere's error value: " .. T.what(why))
+  return "false: " .. tostring(why)
 end
 
 -- A key of the overlay's own on the stepper: Left (-1) or Right (+1), as the captured key delivers it.
@@ -551,9 +559,9 @@ fn whole_cuts_the_corners_toward_zero_as_the_focus_read_does() {
 }
 
 /// Nothing left once cut — under one across or down, or corners turned around — is nil and
-/// "empty on screen", where the plain sum answers the corners as they are. No origin, or a scale
-/// with no factor, is nil and its own reason, as without `whole`. A scaled overlay places whole
-/// numbers already, and `whole` changes nothing there.
+/// "empty on screen" (`outside`), where the plain sum answers the corners as they are. No origin, or
+/// a scale with no factor, is nil and its own reason (`unplaced`), as without `whole`. A scaled
+/// overlay places whole numbers already, and `whole` changes nothing there.
 #[test]
 fn whole_is_nil_when_nothing_is_left_and_keeps_the_other_reasons() {
     run(r#"
@@ -563,14 +571,14 @@ fn whole_is_nil_when_nothing_is_left_and_keeps_the_other_reasons() {
         o:addCustomButton({ label = "Init", onActivate = function() end })
         T.front(o)
         local r, why = o:toScreenRect({ 10, 10, 10.4, 20 }, { whole = true })
-        assert(r == nil and why == "empty on screen", tostring(why))
+        assert(r == nil and T.is(why, T.O.errors.OUTSIDE, "empty on screen"), T.what(why))
         r, why = o:toScreenRect({ 20, 10, 10, 20 }, { whole = true })
-        assert(r == nil and why == "empty on screen", tostring(why))
+        assert(r == nil and T.is(why, "outside", "empty on screen"), T.what(why))
         assert(T.region(o:toScreenRect({ 20, 10, 10, 20 })) == "120.5,60,110.5,70", "the plain sum, turned around as asked")
 
         o.active, o.activeCtx = false, false
         r, why = o:toScreenRect({ 34, 7, 214, 22 }, { whole = true })
-        assert(r == nil and why == "the overlay has no origin now", tostring(why))
+        assert(r == nil and T.is(why, T.O.errors.UNPLACED, "the overlay has no origin now"), T.what(why))
 
         local factor = nil
         local s = T.O.new("Scaled")
@@ -578,7 +586,7 @@ fn whole_is_nil_when_nothing_is_left_and_keeps_the_other_reasons() {
         s:addCustomButton({ label = "Init", onActivate = function() end })
         T.front(s)
         r, why = s:toScreenRect({ 34, 7, 214, 22 }, { whole = true })
-        assert(r == nil and why == "its scale function answered nil", tostring(why))
+        assert(r == nil and T.is(why, "unplaced", "its scale function answered nil"), T.what(why))
         factor = 1.5
         local plain, whole = s:toScreenRect({ 34, 7, 214, 22 }), s:toScreenRect({ 34, 7, 214, 22 }, { whole = true })
         assert(T.region(plain) == T.region(whole) and T.region(whole) == "151,61,421,83", T.region(whole))
@@ -717,23 +725,23 @@ fn a_recognize_in_a_text_hook_waits_and_its_reading_is_said() {
 // The runtime's version.
 // ---------------------------------------------------------------------------------------------
 
-/// The runtime is 0.10.0 (calibration as its own setting, `O.calibrating()`, a static text's
+/// The runtime is 0.11.0 (calibration as its own setting, `O.calibrating()`, a static text's
 /// `hotkey`, the checks after its own pixels, `O:probe`, letting go in front of this
 /// application's own windows, its accessibility menu tests asked off the event loop, the
 /// check after a calibrating run's waited picture before a press, a slider's after each of its
 /// searches, its searches and pictures through the calls' callback forms, an OCR button's `value`,
 /// an overlay's page, `identify`'s `again` and O:watch's count of readings, and the drawn menu
-/// test with a test's `before`, `O.doubleClick`'s button and callback, a trip's hand-over, and a
-/// menu item's submenu with a test's `chained`), so a module that depends on
-/// `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads against it, and
-/// so does one that asks for 0.4, 0.4.1, 0.5, 0.5.6, 0.6, 0.7, 0.8, 0.9 or 0.10, and neither against
-/// anything older.
+/// test with a test's `before`, `O.doubleClick`'s button and callback, a trip's hand-over, a menu
+/// item's submenu with a test's `chained`, and its error values with O.errors), so a module
+/// that depends on `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads
+/// against it, and so does one that asks for 0.4, 0.4.1, 0.5, 0.5.6, 0.6, 0.7, 0.8, 0.9, 0.10 or
+/// 0.11, and neither against anything older.
 #[test]
-fn the_runtime_is_0_10_so_a_module_that_asks_for_0_2_loads() {
+fn the_runtime_is_0_11_so_a_module_that_asks_for_0_2_loads() {
     let m = module_manifest::ModuleManifest::parse(include_str!("../../../modules/overlay-runtime/module.toml"))
         .expect("the runtime's manifest parses");
     assert_eq!(m.id, "com.platform.overlay");
-    assert_eq!(m.version, "0.10.0");
+    assert_eq!(m.version, "0.11.0");
     for spec in [
         "com.platform.overlay >= 0.2",
         "com.platform.overlay >= 0.3",
@@ -746,6 +754,7 @@ fn the_runtime_is_0_10_so_a_module_that_asks_for_0_2_loads() {
         "com.platform.overlay >= 0.8",
         "com.platform.overlay >= 0.9",
         "com.platform.overlay >= 0.10",
+        "com.platform.overlay >= 0.11",
     ] {
         let req = module_manifest::dep_constraint(spec).unwrap();
         let id = module_manifest::dep_id(spec);
@@ -781,5 +790,245 @@ fn a_static_texts_hotkey_moves_the_focus_to_it_and_says_it() {
         S.hotkeyFns["Alt+L"]()
         assert(o.focus == 3, "the focus stayed: " .. o.focus)
         assert(T.said(said) == "Level, -6 dB", T.said(said))
+    "#);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The runtime's error values (0.11).
+// ---------------------------------------------------------------------------------------------
+
+/// O.errors: the runtime's eight codes as constants, every host code beside them through
+/// host.errors, a name that is neither raising with the list, read-only, `pairs` giving the eight.
+/// And the error values the runtime makes are the host's kind: read-only, `tostring` and `..` the
+/// message, `err.code` a code of O.errors.
+#[test]
+fn o_errors_holds_the_runtimes_codes_and_answers_the_hosts() {
+    run(r#"
+        local E = T.O.errors
+        assert(E.NOT_IN_FRONT == "not_in_front" and E.MOVED_ON == "moved_on" and E.UNPLACED == "unplaced"
+          and E.CLOSED == "closed" and E.NO_MENU == "no_menu" and E.NO_SUBMENU == "no_submenu"
+          and E.UNFIT_SUBMENU == "unfit_submenu" and E.CLASH == "clash", "the runtime's eight")
+        assert(E.BUSY == T.host.errors.BUSY and E.FAILED == "failed" and E.NOT_READY == "not_ready", "the host's beside them")
+        local ok, err = pcall(function() return E.NO_MENNU end)
+        assert(not ok and string.find(tostring(err), "O.errors has no 'NO_MENNU'; its codes are NOT_IN_FRONT, MOVED_ON, "
+          .. "UNPLACED, CLOSED, NO_MENU, NO_SUBMENU, UNFIT_SUBMENU, CLASH and every one of host.errors's", 1, true), tostring(err))
+        ok, err = pcall(function() return E.new end)
+        assert(not ok and string.find(tostring(err), "O.errors has no 'new'", 1, true), "host.errors.new is no code: " .. tostring(err))
+        ok = pcall(function() E.MINE = "mine" end)
+        assert(not ok, "read-only")
+        local n = 0
+        for k, v in pairs(E) do
+          n += 1
+          assert(type(v) == "string" and string.upper(v) == k, k)
+        end
+        assert(n == 8, "pairs gives the runtime's eight: " .. n)
+        -- One of the runtime's own, as a module gets it.
+        local o = T.O.new("Synth")
+        local r, why = o:toScreenRect({ 1, 2, 3, 4 })
+        assert(r == nil and T.is(why, E.UNPLACED, "the overlay has no origin now"), T.what(why))
+        assert("not placed: " .. why == "not placed: the overlay has no origin now" and tostring(why) == why.message)
+        assert(why.detail == nil and not pcall(function() why.code = "x" end), "read-only, no detail")
+    "#);
+}
+
+/// Every reason of errors.luau: a code of the host's or one of the runtime's eight, a message, and
+/// entries that are strings; every code of the eight carried by some reason. And main.luau makes
+/// its error values only through `fail` — one `host.errors.new` in the file — and names no reason
+/// errors.luau does not have, while every reason is named somewhere in main.luau: one the runtime
+/// never gives would sit in a docs table for nothing.
+#[test]
+fn every_reason_of_the_runtime_is_well_formed_and_given() {
+    use super::overlay_menu_tests::{RUNTIME, RUNTIME_ERRORS};
+    let lua = mlua::Lua::new();
+    let t: mlua::Table = lua.load(RUNTIME_ERRORS).set_name("errors.luau").eval().expect("errors.luau loads");
+    let codes: Vec<String> = t.get::<Vec<String>>("codes").unwrap();
+    assert_eq!(codes.len(), 8, "the runtime's eight codes");
+    let host: Vec<&str> = crate::errors::Code::ALL.iter().map(|c| c.as_str()).collect();
+    for c in &codes {
+        assert!(!host.contains(&c.as_str()), "{c} is a host code already");
+    }
+    let reasons: mlua::Table = t.get("reasons").unwrap();
+    let mut used = std::collections::HashSet::new();
+    let mut keys = Vec::new();
+    for pair in reasons.pairs::<String, mlua::Table>() {
+        let (key, r) = pair.unwrap();
+        let code: String = r.get("code").unwrap();
+        let message: String = r.get("message").unwrap();
+        let entries: Vec<String> = r.get("entries").unwrap();
+        assert!(host.contains(&code.as_str()) || codes.contains(&code), "{key}: {code} is no code");
+        assert!(!message.is_empty(), "{key}: no message");
+        let _ = entries;
+        used.insert(code);
+        keys.push(key);
+    }
+    for c in &codes {
+        assert!(used.contains(c), "no reason carries {c}");
+    }
+    assert_eq!(RUNTIME.matches("host.errors.new(").count(), 1, "error values only through `fail`");
+    let named = |key: &str| RUNTIME.contains(&format!("\"{key}\""));
+    for key in &keys {
+        // O:pageKey's are named by the word host.keys.check gives: `"key_" .. word`.
+        let word = key.strip_prefix("key_").filter(|w| *w != "clash");
+        let given = match word {
+            Some(w) => RUNTIME.contains("fail(\"key_\" .. refused") && RUNTIME.contains(&format!("  {w} = \"")),
+            None => named(key),
+        };
+        assert!(given, "errors.luau's '{key}' is given nowhere in main.luau");
+    }
+    let mut at = 0;
+    while let Some(i) = RUNTIME[at..].find("fail(\"") {
+        let start = at + i + "fail(\"".len();
+        let end = start + RUNTIME[start..].find('"').unwrap();
+        let key = &RUNTIME[start..end];
+        assert!(key == "key_" || keys.iter().any(|k| k == key), "main.luau fails with '{key}', which errors.luau has not");
+        at = end;
+    }
+}
+
+/// Every `O.errors.X` and `host.errors.X` a module, a tool or an example names is a constant there:
+/// O.errors raises for a name it does not have, and host.errors answers nil, but only when the line
+/// runs — and some of those lines run only where the host or the runtime refuses, on a user's
+/// machine, never in a test.
+#[test]
+fn every_error_constant_a_module_names_is_one() {
+    use super::overlay_menu_tests::RUNTIME_ERRORS;
+    let lua = mlua::Lua::new();
+    let t: mlua::Table = lua.load(RUNTIME_ERRORS).set_name("errors.luau").eval().expect("errors.luau loads");
+    let runtime: Vec<String> = t.get::<Vec<String>>("codes").unwrap().iter().map(|c| c.to_uppercase()).collect();
+    let host: Vec<&str> = crate::errors::Code::ALL.iter().map(|c| c.constant()).collect();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut stack: Vec<std::path::PathBuf> = ["modules", "tools", "examples"].iter().map(|d| root.join(d)).collect();
+    let (mut named, mut wrong) = (0, Vec::new());
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "luau") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (table, known) in [("O.errors.", &runtime), ("host.errors.", &Vec::new())] {
+                let mut at = 0;
+                while let Some(i) = text[at..].find(table) {
+                    let start = at + i;
+                    at = start + table.len();
+                    if text[..start].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+                        continue;
+                    }
+                    let name: String = text[at..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                    if name.is_empty() || (table == "host.errors." && name == "new") {
+                        continue;
+                    }
+                    named += 1;
+                    if !host.contains(&name.as_str()) && !known.contains(&name) {
+                        wrong.push(format!("{}: {table}{name}", path.strip_prefix(&root).unwrap_or(&path).display()));
+                    }
+                }
+            }
+        }
+    }
+    assert!(named > 20, "only {named} constants named: the walk missed the modules");
+    assert!(wrong.is_empty(), "constants that do not exist: {wrong:#?}");
+}
+
+/// A key the host cannot capture now — no keyboard hook, or on a Mac no event tap: `nil, err`, with
+/// nothing registered — is held by nothing, asked again at the next sync, and said once per overlay
+/// and code; and a pair that only means something together, a stepper's Left and Right, is taken
+/// whole or not at all, a half let go at once (before, a Left that raised left Right captured with
+/// nothing to release it by).
+#[test]
+fn a_key_the_host_cannot_capture_is_held_by_nothing_and_a_pair_is_whole_or_none() {
+    run(r#"
+        local S = T.S
+        S.captureRaises = { Right = "the keyboard hook is not running" }
+        local o = T.O.new("Synth")
+        o:addStepper({ label = "Tone", text = function() return "5" end, onStep = function() end })
+        o:addCustomButton({ label = "Init", onActivate = function() end })
+        T.front(o)
+        T.tab(); T.tab()
+        assert(o.focus == 1, "on the stepper: " .. o.focus)
+        assert(not S.holding["Left"] and not S.holding["Right"], "neither half held")
+        assert(T.count("[keys] 'Synth': Right is not captured — the keyboard hook is not running") == 1, T.dump())
+        T.tab(); T.tab()
+        assert(o.focus == 1 and not S.holding["Left"], "asked again, and still not whole")
+        assert(T.count("is not captured") == 1, "said once per code: " .. T.dump())
+        S.captureRaises = nil
+        T.tab(); T.tab()
+        assert(S.holding["Left"] and S.holding["Right"], "whole, once the host captures both")
+    "#);
+}
+
+/// The calibration and capture methods answer why they did nothing (D40): the overlay not active
+/// (`not_in_front`), no such control or none focused (`not_found`), nothing to crop around
+/// (`unplaced`), and host.screen.save's own error where the picture was not written — the same
+/// table, for captureAll the first shot's of all it tried; calibrationVerify answers the count, or
+/// nil and the search's own error.
+#[test]
+fn the_calibration_and_capture_methods_answer_why_they_did_not() {
+    run(r#"
+        local S = T.S
+        local o = T.O.new("Synth")
+        o:addOCRButton({ label = "Preset", region = { 34, 7, 214, 22 } })
+        o:addCustomButton({ label = "Init", onActivate = function() end })
+        local ok, err = o:captureControl("Preset", "C:/x.png")
+        assert(ok == false and T.is(err, "not_in_front", "the overlay is not active"), T.what(err))
+        ok, err = o:captureFull("C:/x.png")
+        assert(ok == false and T.is(err, "not_in_front"), T.what(err))
+        T.front(o)
+        ok, err = o:captureControl("Nope", "C:/x.png")
+        assert(ok == false and T.is(err, "not_found", "no control labelled 'Nope' with a region"), T.what(err))
+        ok, err = T.handled(o.captureControl, o, "Preset", "C:/x.png")
+        assert(ok == true and err == nil, "saved")
+        local unwritten = T.E("failed", "screen.save 'C:/x.png': the file could not be written")
+        local save = T.host.screen.save
+        rawset(T.host.screen, "save", function(path, opts) save(path, opts); return false, unwritten end)
+        ok, err = T.handled(o.captureRegion, o, { 0, 0, 10, 10 }, "C:/x.png")
+        assert(ok == false and rawequal(err, unwritten), "save's own error, handed on: " .. T.what(err))
+        -- captureAll tries every shot — the content and Preset's box — and answers the first that
+        -- was not written.
+        local later = T.E("failed", "screen.save 'C:/shots/ctl-Preset.png': the file could not be written")
+        local tried = {}
+        local function saving(answers)
+          tried = {}
+          rawset(T.host.screen, "save", function(path, opts)
+            save(path, opts); table.insert(tried, path)
+            local a = answers[#tried]
+            if a == true then return true end
+            return false, a
+          end)
+        end
+        saving({ unwritten, later })
+        ok, err = T.handled(o.captureAll, o, "C:/shots")
+        assert(ok == false and rawequal(err, unwritten), "the first shot's error: " .. T.what(err))
+        assert(#tried == 2 and tried[1] == "C:/shots/content-full.png" and tried[2] == "C:/shots/ctl-Preset.png",
+          table.concat(tried, ", "))
+        saving({ true, later })
+        ok, err = T.handled(o.captureAll, o, "C:/shots")
+        assert(ok == false and rawequal(err, later), "a later shot's error: " .. T.what(err))
+        saving({ true, true })
+        ok, err = T.handled(o.captureAll, o, "C:/shots")
+        assert(ok == true and err == nil and #tried == 2, "every shot written: " .. T.what(err))
+        rawset(T.host.screen, "save", function(path, opts) save(path, opts); return false, unwritten end)
+        o.focus = 0
+        ok, err = o:calibrationCrop()
+        assert(ok == false and T.is(err, "not_found", "no control is focused"), T.what(err))
+        o.focus = 2
+        ok, err = o:calibrationCrop()
+        assert(ok == false and T.is(err, "unplaced", "the focused control has no position to crop around"), T.what(err))
+        o.focus = 1
+        ok, err = T.handled(o.calibrationCrop, o)
+        assert(ok == false and rawequal(err, unwritten), T.what(err))
+        rawset(T.host.screen, "save", save)
+        rawset(T.host.screen, "imageSearchAll", function() return {}, T.E("failed", "the template could not be read") end)
+        local n, verr = T.handled(o.calibrationVerify, o)
+        assert(n == nil and T.is(verr, "failed", "the template could not be read"), T.what(verr))
+        assert(T.count("[calibrate] Preset: no matches counted for C:/modules/overlay-runtime/calibration/Preset.png — "
+          .. "the template could not be read") == 1, T.dump())
+        rawset(T.host.screen, "imageSearchAll", function() return { { x = 1, y = 2, w = 3, h = 4 } } end)
+        n, verr = T.handled(o.calibrationVerify, o)
+        assert(n == 1 and verr == nil, tostring(n))
     "#);
 }

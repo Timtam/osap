@@ -318,7 +318,7 @@ mod tests {
         let blank = &body[at("if tight.as_ref().is_some_and(|t| t.blank) {")..at("run_ocr(img, lang)")];
         assert!(blank.contains("drop(paddle);") && blank.contains("skipped: true"));
         // 3. A failed system recogniser fails the read before the merge: the neural answer unused.
-        assert!(body.contains("run_ocr(img, lang).map_err(|e| format!(\"OCR failed: {e}\"))?;"));
+        assert!(body.contains("run_ocr(img, lang).map_err(|e| HostError::with(&errors::ocr::RECOGNITION_FAILED, format!(\"OCR failed: {e}\")))?;"));
         assert!(at("run_ocr(img, lang).map_err(") < at("if let Some(asked) = paddle {"));
         // 4 and 5. Waited for only when the system recogniser read nothing; its text then, no words,
         // no lines, the content crop as the box.
@@ -381,6 +381,37 @@ mod tests {
         let counted = body("    fn counted(");
         assert!(counted.contains("Stage::FastCompared") && !counted.contains("rung_one") && !counted.contains("after_rung_one"), "{counted}");
         assert!(!SRC.contains("self.aside"), "no pass is set aside from the budget any more");
+    }
+
+    /// A Mac's read that failed says why rather than reading as nothing (D33 of the typed-errors
+    /// plan), checked where it is written, since that file compiles only for a Mac: pixels
+    /// CoreGraphics could not read back fail the read; Vision's reason for refusing a pass is kept
+    /// for the read — every pass's but the one made only for the counts, and none from an earlier
+    /// read — and a read whose answer was a refused pass, with nothing from the neural recogniser,
+    /// fails with it, after its passes are counted; a region that could not be cut out, a capture
+    /// that was not taken and a snapshot without its picture fail with their reasons.
+    #[test]
+    fn a_mac_read_that_failed_says_why() {
+        const SRC: &str = include_str!("../backend/macos/ocr.rs");
+        let body = |head: &str| {
+            let start = SRC.find(head).unwrap_or_else(|| panic!("{head}"));
+            &SRC[start..start + SRC[start..].find("\n}\n").unwrap()]
+        };
+        let at = |s: &str, what: &str| s.find(what).unwrap_or_else(|| panic!("{what}"));
+        let noted = body("fn recognize_noted(");
+        assert!(noted.contains("\"ocr: could not read the captured pixels back out of CoreGraphics\",\n            );\n            return Err(HostError::of(&reasons::NOT_READ_BACK));"));
+        assert!(noted.contains("let unanswered = !by_paddle && result.is_none();"));
+        assert!(noted.contains("let refused = unanswered && last.is_some_and(|p| p.words.is_none());"));
+        assert!(at(noted, "note_cost(") < at(noted, "&reasons::VISION_REFUSED"), "counted first");
+        assert!(at(noted, "&reasons::VISION_REFUSED") < at(noted, "let note = Note { passes, answer, agreed, today };"));
+        assert!(noted.contains("format!(\"the text recogniser refused the request: {why}\")"));
+        let pass = body("fn run_vision(");
+        assert!(pass.contains("if stage != Stage::FastCompared {\n                REFUSAL.with(|r| *r.borrow_mut() = Some(why));"), "{pass}");
+        assert!(body("fn journal_open(").contains("REFUSAL.with(|r| *r.borrow_mut() = None);"));
+        let shot = body("pub fn recognise_shot(");
+        assert!(shot.contains("None => Err(HostError::of(&reasons::NOT_CUT)),"));
+        assert!(shot.contains("None => Err(HostError::of(&reasons::MAC_CAPTURE_FAILED)),"));
+        assert!(body("pub fn shot_of(").contains("None => Shot::Failed(HostError::of(&reasons::NO_DISPLAY_PICTURE)),"));
     }
 
     #[test]

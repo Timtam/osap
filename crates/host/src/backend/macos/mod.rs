@@ -26,8 +26,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{
     Backend, CaptureFn, CaptureSource, CapturedImage, ControlInfo, ElementAnswer, ElementAsk,
-    ElementOutcome, HostEvents, MouseButton, WinInfo,
+    ElementOutcome, HostEvents, KeyRefusal, MouseButton, WinInfo,
 };
+use crate::errors::HostError;
 
 /// Whether a scroll has been sent yet in this run — so the first one is always recorded and
 /// the rest are not. A Mac has never sent one, so the first is worth a line on its own.
@@ -151,7 +152,7 @@ impl Backend for MacBackend {
         ax::foreground_window()
     }
 
-    fn focus_window(&self, id: isize) -> bool {
+    fn focus_window(&self, id: isize) -> Result<(), crate::errors::HostError> {
         ax::focus_window(id)
     }
 
@@ -204,7 +205,7 @@ impl Backend for MacBackend {
     // resolves such a module to the standard source before it ever gets this far. A failed capture
     // says only that it failed: an empty region, one past `MAX_POINTS` (logged once by
     // `capture.rs`), a region wholly off the desktop, or a capture the window server refused. The
-    // module is told `CAPTURE_FAILED`, as on the Windows standard path.
+    // module is told `capture_failed`, as on the Windows standard path.
     fn capture_fn(&self) -> CaptureFn {
         capture_many
     }
@@ -243,7 +244,7 @@ impl Backend for MacBackend {
     /// the place in the window they carry (`post_click.rs`, `input::post_click`); its `[input]`
     /// line once they are posted. `via = "noactivate"` stays the trait's "not supported": it is a
     /// Windows window style.
-    fn mouse_click_posted(&self, window: isize, x: i32, y: i32, button: MouseButton, move_pointer: bool) -> Result<(), String> {
+    fn mouse_click_posted(&self, window: isize, x: i32, y: i32, button: MouseButton, move_pointer: bool) -> Result<(), crate::errors::HostError> {
         input::post_click(window, x, y, button, move_pointer).map(|line| crate::logging::line("input", &line))
     }
 
@@ -307,11 +308,11 @@ impl Backend for MacBackend {
         input::mouse_scroll(x, y, lines);
     }
 
-    fn key_post(&self, hwnd: isize, key: &str) -> Result<(), String> {
+    fn key_post(&self, hwnd: isize, key: &str) -> Result<(), super::KeyRefusal> {
         input::key_post(hwnd, key)
     }
 
-    fn key_send(&self, combo: &str) -> Result<(), String> {
+    fn key_send(&self, combo: &str) -> Result<(), super::KeyRefusal> {
         input::key_send(combo)
     }
 
@@ -319,8 +320,12 @@ impl Backend for MacBackend {
         input::type_text(text);
     }
 
-    fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String> {
+    fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), KeyRefusal> {
         hotkey::register(id, spec)
+    }
+
+    fn hotkey_parked(&self, id: i32) -> Option<HostError> {
+        hotkey::parked(id)
     }
 
     fn unregister_hotkey(&self, id: i32) {
@@ -399,7 +404,7 @@ impl Backend for MacBackend {
         watch::native_menu_open()
     }
 
-    fn watch_keys(&self) -> Result<(), String> {
+    fn watch_keys(&self) -> Result<(), HostError> {
         tap::install()
     }
 
@@ -488,12 +493,9 @@ impl Backend for MacBackend {
 /// The image worker's capture routine: each region captured on its own, in order, exactly as
 /// the worker did one at a time before it was handed several. The source is ignored — see
 /// `capture_fn` above. Never on the event loop.
-fn capture_many(regions: &[(i32, i32, i32, i32)], _src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+fn capture_many(regions: &[(i32, i32, i32, i32)], _src: CaptureSource) -> Vec<Result<CapturedImage, HostError>> {
     crate::loop_guard::off_loop_screen("the image worker's capture");
-    regions
-        .iter()
-        .map(|&(x, y, w, h)| capture::capture_region(x, y, w, h).ok_or_else(|| super::CAPTURE_FAILED.to_string()))
-        .collect()
+    regions.iter().map(|&(x, y, w, h)| capture::capture_region(x, y, w, h).ok_or_else(super::capture_failed)).collect()
 }
 
 /// The backend, as `platform()` hands it out.

@@ -284,7 +284,10 @@ this context`.
   into [`host.settings`](api/settings.md) — booleans, numbers and strings.
 - **Nothing confines a path to the module.** `host.path`, `host.resource`, `host.sound.play`
   and the image-search paths join a path onto the module's folder as written: `..` is not
-  refused and an absolute path is used as it stands. Only `host.include` checks that a path
+  refused and an absolute path is used as it stands. Where the path leads still matters to what a
+  call answers: a sound, or a template where a call first names it, inside the module's folder
+  that is missing or broken raises, as a mistake in the module, and one outside it is answered
+  `not_found` or `invalid` ([Return or raise](api/errors.md#return-or-raise)). Only `host.include` checks that a path
   stays inside the module, the same way on every platform: a path that leaves it, such as
   `"../other/x.luau"`, is refused (see [its page](api/include.md#host-include)).
 - **Text files are UTF-8, and a byte-order mark is accepted.** Tools such as .NET's

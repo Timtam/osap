@@ -40,12 +40,13 @@ use std::time::Instant;
 
 use mlua::{Function, Lua, MultiValue, RegistryKey, Table, UserData, UserDataFields, UserDataMethods, Value};
 
+use crate::errors::{gui, HostError};
 use crate::mailbox::{self, Event, MailHost, Opened};
 use crate::ocr::types::{current_priority, enter_priority, Priority};
 use crate::task::Ctx;
 use crate::vm_guard::host_call;
 use crate::webview::{self, Lifecycle, PageEvent, Phase, Rect, Refusal, ShowStep, Where, WindowKind};
-use crate::{appcfg, json, logging, Shared};
+use crate::{appcfg, errors_lua, json, logging, Shared};
 
 // The platform's page window under one name: WebView2's on Windows, WebKit's on a Mac. The two
 // have one interface, and `crates/macos-check` holds the Mac's to it from Windows (`page_calls`).
@@ -65,8 +66,9 @@ pub(crate) enum PageCall {
     Message(String),
     /// `onReady`.
     Ready,
-    /// `onClose`, with `"user"` or `"failed"`.
-    Closed(&'static str),
+    /// `onClose`, with `"user"` or `"failed"` — and for `"failed"` which failure it was, the
+    /// `detail` of the error value beside it.
+    Closed(&'static str, Option<String>),
 }
 
 impl PageCall {
@@ -76,7 +78,7 @@ impl PageCall {
         match self {
             PageCall::Message(_) => "page message",
             PageCall::Ready => "page ready",
-            PageCall::Closed(_) => "page close",
+            PageCall::Closed(..) => "page close",
         }
     }
 }
@@ -155,6 +157,9 @@ struct Entry {
     /// Whether the page's last show put it over the rectangle to avoid: the explanation is said
     /// once for a run of such shows, and again after one that found room beside it.
     over_said: bool,
+    /// Why the last build failed, as the log says it, until the `show` or `prepare` that says
+    /// `could not be built` gives it as its error value's `detail`.
+    failed_why: Option<String>,
     /// Whether the current build has been shown yet: its first show logs the memory.
     #[cfg(any(windows, target_os = "macos"))]
     shown_this_build: bool,
@@ -355,6 +360,7 @@ fn create(lua: &Lua, sh: &Rc<Shared>, idx: usize, opts: Value) -> mlua::Result<P
         asked: None,
         env_said: false,
         over_said: false,
+        failed_why: None,
         #[cfg(any(windows, target_os = "macos"))]
         shown_this_build: false,
         #[cfg(any(windows, target_os = "macos"))]
@@ -393,17 +399,17 @@ impl UserData for PageHandle {
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("show", |_, p, opts: Value| {
+        methods.add_method("show", |lua, p, opts: Value| {
             host_call!("page:show");
-            show(&p.sh, p.id, opts)
+            show(lua, &p.sh, p.id, opts)
         });
-        methods.add_method("prepare", |_, p, ()| {
+        methods.add_method("prepare", |lua, p, ()| {
             host_call!("page:prepare");
-            prepare(&p.sh, p.id)
+            prepare(lua, &p.sh, p.id)
         });
-        methods.add_method("focus", |_, p, ()| {
+        methods.add_method("focus", |lua, p, ()| {
             host_call!("page:focus");
-            Ok(focus(&p.sh, p.id))
+            errors_lua::done(lua, &focus(&p.sh, p.id))
         });
         methods.add_method("hide", |_, p, ()| {
             host_call!("page:hide");
@@ -412,7 +418,8 @@ impl UserData for PageHandle {
         });
         methods.add_method("post", |lua, p, value: Value| {
             host_call!("page:post");
-            post(lua, &p.sh, p.id, value)
+            let posted = post(lua, &p.sh, p.id, value)?;
+            errors_lua::done(lua, &posted)
         });
         methods.add_method("isShown", |_, p, ()| {
             host_call!("page:isShown");
@@ -512,8 +519,24 @@ fn words() -> webview::Words {
     webview::Engine::here().words()
 }
 
-fn gone() -> mlua::Error {
-    fail("this page no longer exists: its module was reloaded".to_string())
+/// What a page's method answers once its module was reloaded: the page object it holds is of the
+/// VM before, and no longer names a page. Said in the log under the page's number, as its label
+/// went with it.
+fn gone(id: u64, what: &str) -> HostError {
+    let e = HostError::of(&gui::GONE);
+    logging::line("gui", &format!("page {id}: {what} answered false, \"{e}\""));
+    e
+}
+
+/// What a refusal of `show` or `prepare` answers: its error value, and for a build that failed
+/// why it failed, as `detail` — said once, as the refusal is.
+fn refusal(e: &mut Entry, step: ShowStep) -> Option<HostError> {
+    let ShowStep::Refuse(r) = step else { return None };
+    let why = if r == Refusal::BuildFailed { e.failed_why.take() } else { None };
+    Some(match why {
+        Some(why) => r.error().with_detail(why),
+        None => r.error(),
+    })
 }
 
 /// What a `show` or `prepare` notes on the page once `on_show` has decided `step`: the call that
@@ -533,21 +556,26 @@ fn note_asked(e: &mut Entry, step: ShowStep) {
     }
 }
 
-/// `page:show{ focus?, avoid? } -> ok, reason?`
-fn show(sh: &Rc<Shared>, id: u64, opts: Value) -> mlua::Result<(bool, Option<&'static str>)> {
+/// `page:show{ focus?, avoid? } -> true | true, err | false, err` — `true, err` the partial answer
+/// of a page in front over the rectangle to avoid ([`webview::over`]).
+fn show(lua: &Lua, sh: &Rc<Shared>, id: u64, opts: Value) -> mlua::Result<MultiValue> {
     let (focus, avoid) = show_options(opts)?;
     let at = Where::here(appcfg::headless());
-    let (step, label) = {
+    let decided = {
         let mut entries = sh.pages.entries.borrow_mut();
-        let e = entries.get_mut(&id).ok_or_else(gone)?;
-        let step = e.life.on_show(at, runtime_present);
-        note_asked(e, step);
-        (step, e.label())
+        entries.get_mut(&id).map(|e| {
+            let step = e.life.on_show(at, runtime_present);
+            note_asked(e, step);
+            (step, e.label(), refusal(e, step))
+        })
     };
-    match step {
+    let Some((step, label, refused)) = decided else {
+        return errors_lua::with_error(lua, Value::Boolean(false), &gone(id, "show"));
+    };
+    let (shown, err) = match step {
         ShowStep::Refuse(r) => {
-            logging::line("gui", &format!("{label}: show answered false, \"{}\"", r.reason()));
-            Ok((false, Some(r.reason())))
+            logging::line("gui", &format!("{label}: show answered false, \"{}\"", r.error()));
+            (false, refused)
         }
         ShowStep::Build => {
             sh.pages.builds.borrow_mut().push(id);
@@ -555,34 +583,39 @@ fn show(sh: &Rc<Shared>, id: u64, opts: Value) -> mlua::Result<(bool, Option<&'s
                 "gui",
                 &format!(
                     "{label}: show answered false, \"{}\" — it is built at the end of this tick, once {}",
-                    Refusal::NotReady.reason(),
+                    Refusal::NotReady.error(),
                     words().env_there
                 ),
             );
-            Ok((false, Some(Refusal::NotReady.reason())))
+            (false, Some(Refusal::NotReady.error()))
         }
         ShowStep::Show => show_built(sh, id, &label, focus, avoid),
-    }
+    };
+    errors_lua::answer(lua, Value::Boolean(shown), err.as_ref())
 }
 
-/// `page:prepare() -> ok, reason?` — builds the page without showing it: `true` when it is ready
-/// already; otherwise the answers of `show` that come before a page is shown, in the same order,
-/// a build started or under way being `"not ready yet"`. `onReady` says when it is ready, and the
+/// `page:prepare() -> true | false, err` — builds the page without showing it: `true` when it is
+/// ready already; otherwise the answers of `show` that come before a page is shown, in the same
+/// order, a build started or under way being `not_ready`. `onReady` says when it is ready, and the
 /// `show` after that shows it at once.
-fn prepare(sh: &Rc<Shared>, id: u64) -> mlua::Result<(bool, Option<&'static str>)> {
+fn prepare(lua: &Lua, sh: &Rc<Shared>, id: u64) -> mlua::Result<MultiValue> {
     let at = Where::here(appcfg::headless());
-    let (step, label) = {
+    let decided = {
         let mut entries = sh.pages.entries.borrow_mut();
-        let e = entries.get_mut(&id).ok_or_else(gone)?;
-        let step = e.life.on_show(at, runtime_present);
-        note_asked(e, step);
-        (step, e.label())
+        entries.get_mut(&id).map(|e| {
+            let step = e.life.on_show(at, runtime_present);
+            note_asked(e, step);
+            (step, e.label(), refusal(e, step))
+        })
     };
-    match step {
-        ShowStep::Refuse(Refusal::NotReady) => Ok((false, Some(Refusal::NotReady.reason()))),
+    let Some((step, label, refused)) = decided else {
+        return errors_lua::with_error(lua, Value::Boolean(false), &gone(id, "prepare"));
+    };
+    let err = match step {
+        ShowStep::Refuse(Refusal::NotReady) => refused,
         ShowStep::Refuse(r) => {
-            logging::line("gui", &format!("{label}: prepare answered false, \"{}\"", r.reason()));
-            Ok((false, Some(r.reason())))
+            logging::line("gui", &format!("{label}: prepare answered false, \"{}\"", r.error()));
+            refused
         }
         ShowStep::Build => {
             sh.pages.builds.borrow_mut().push(id);
@@ -590,17 +623,19 @@ fn prepare(sh: &Rc<Shared>, id: u64) -> mlua::Result<(bool, Option<&'static str>
                 "gui",
                 &format!("{label}: prepared — it is built, hidden, at the end of this tick, once {}", words().env_there),
             );
-            Ok((false, Some(Refusal::NotReady.reason())))
+            Some(Refusal::NotReady.error())
         }
-        ShowStep::Show => Ok((true, None)),
-    }
+        ShowStep::Show => return errors_lua::done(lua, &Ok(())),
+    };
+    errors_lua::answer(lua, Value::Boolean(false), err.as_ref())
 }
 
+/// A `show` of a built page: whether it is shown as asked, and the error value beside that.
 #[cfg(any(windows, target_os = "macos"))]
-fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<Rect>) -> mlua::Result<(bool, Option<&'static str>)> {
+fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<Rect>) -> (bool, Option<HostError>) {
     let found = sh.pages.entries.borrow().get(&id).map(|e| (native_of(e), e.kind));
     let Some((Some(native), kind)) = found else {
-        return Ok((false, Some(Refusal::NotReady.reason())));
+        return (false, Some(Refusal::NotReady.error()));
     };
     let started = Instant::now();
     // Beside `avoid`, or — with no room beside it — over it, in a corner, at its smallest
@@ -631,10 +666,10 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
             &format!(
                 "{label}: show answered false, \"{}\" — without the keyboard the page never goes over the \
                  rectangle to avoid ({avoid:?}){hidden}",
-                r.reason()
+                r.error()
             ),
         );
-        return Ok((false, Some(r.reason())));
+        return (false, Some(r.error()));
     }
     let shown = if open_app {
         // In front first, where the user left it — not raised before that, so a decline leaves it
@@ -726,23 +761,23 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
                  only while it is in front: declined, it is hidden again. Anything clicked in the \
                  plug-in, and any screen read of it, must bring the plug-in window to the front \
                  first; the page is not topmost, so the plug-in window is then drawn over it",
-                webview::OVER
+                webview::over()
             ),
         );
     }
     if first {
         sh.pages.memory_due.borrow_mut().push(id);
     }
-    Ok(match shown {
-        Ok(()) => (true, over.map(|_| webview::OVER)),
-        Err(r) => (false, Some(r.reason())),
-    })
+    match shown {
+        Ok(()) => (true, over.map(|_| webview::over())),
+        Err(r) => (false, Some(r.error())),
+    }
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-fn show_built(_: &Rc<Shared>, _: u64, _: &str, _: bool, _: Option<Rect>) -> mlua::Result<(bool, Option<&'static str>)> {
+fn show_built(_: &Rc<Shared>, _: u64, _: &str, _: bool, _: Option<Rect>) -> (bool, Option<HostError>) {
     // `on_show` never answers `Show` where no page can be built.
-    Ok((false, Some(Refusal::Unsupported.reason())))
+    (false, Some(Refusal::Unsupported.error()))
 }
 
 /// The foreground window, for a log line: the page itself, or another window by its id.
@@ -755,19 +790,30 @@ fn front_words(_sh: &Shared, page: isize, front: Option<crate::backend::Foregrou
     }
 }
 
-/// `page:focus() -> ok`
-fn focus(sh: &Rc<Shared>, id: u64) -> bool {
+/// `page:focus() -> true | false, err` — `false` with why: the page gone with its module, a
+/// headless run or a platform with no page window ([`nowhere`]), not built, hidden, or the system
+/// declining.
+fn focus(sh: &Rc<Shared>, id: u64) -> Result<(), HostError> {
     let (native, label) = match sh.pages.entries.borrow().get(&id) {
         Some(e) => (native_of(e), e.label()),
-        None => return false,
+        None => return Err(gone(id, "focus")),
     };
+    // Where no page can ever be shown, none is built: refused as `show` is, not "not built yet".
+    let at = Where::here(appcfg::headless());
+    if !at.can_show() {
+        let e = nowhere(at);
+        logging::line("gui", &format!("{label}: focus answered false, \"{e}\""));
+        return Err(e);
+    }
     #[cfg(any(windows, target_os = "macos"))]
     {
         let Some(native) = native else {
             logging::line("gui", &format!("{label}: focus answered false — the page is not built"));
-            return false;
+            return Err(HostError::of(&gui::NOT_BUILT));
         };
         let accepted = native.focus();
+        // Asked again rather than before: the window system says why it was refused.
+        let shown = accepted || native.is_shown();
         let front = sh.backend.foreground_window();
         logging::line(
             "gui",
@@ -775,7 +821,7 @@ fn focus(sh: &Rc<Shared>, id: u64) -> bool {
                 "{label}: focus {}; in front now: {}",
                 if accepted {
                     words().focus_taken
-                } else if native.is_shown() {
+                } else if shown {
                     "DECLINED"
                 } else {
                     "refused — the page is hidden"
@@ -783,12 +829,32 @@ fn focus(sh: &Rc<Shared>, id: u64) -> bool {
                 front_words(sh, native.hwnd(), front)
             ),
         );
-        accepted
+        focus_answer(accepted, shown)
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = (native, label);
-        false
+        Err(Refusal::Unsupported.error())
+    }
+}
+
+/// What a `focus` of a built page answers: `Ok` when the system accepted; otherwise declined, for a
+/// page that is shown, or hidden.
+fn focus_answer(accepted: bool, shown: bool) -> Result<(), HostError> {
+    match (accepted, shown) {
+        (true, _) => Ok(()),
+        (false, true) => Err(Refusal::Declined.error()),
+        (false, false) => Err(HostError::of(&gui::HIDDEN)),
+    }
+}
+
+/// Why a `focus` or a `post` is refused where no page can ever be shown ([`Where::can_show`]): a
+/// headless run, or a platform with no page window.
+fn nowhere(at: Where) -> HostError {
+    if at.headless {
+        Refusal::Headless.error()
+    } else {
+        Refusal::Unsupported.error()
     }
 }
 
@@ -819,20 +885,23 @@ fn is_shown(sh: &Rc<Shared>, id: u64) -> bool {
     }
 }
 
-/// `page:post(value)`: encoded here, by the host, as `host.json.encode` encodes; delivered at
-/// once to a ready page, kept in order until it is ready otherwise, and dropped where no page
-/// can ever be shown.
-fn post(lua: &Lua, sh: &Rc<Shared>, id: u64, value: Value) -> mlua::Result<()> {
+/// `page:post(value) -> true | false, err`: encoded here, by the host, as `host.json.encode`
+/// encodes — a value it cannot encode raises; delivered at once to a ready page, kept in order until
+/// it is ready otherwise — `true` either way — and refused where no page can ever be shown, for a
+/// page gone with its module, and when the engine would not take it.
+fn post(lua: &Lua, sh: &Rc<Shared>, id: u64, value: Value) -> mlua::Result<Result<(), HostError>> {
     let text = json::encode(lua, (value, Value::Nil)).map_err(|e| {
         let why = e.to_string();
         fail(why.replacen("host.json.encode", "page:post", 1))
     })?;
-    if !Where::here(appcfg::headless()).can_show() {
-        return Ok(());
-    }
     let (deliver, dropped, native, label) = {
         let mut entries = sh.pages.entries.borrow_mut();
-        let e = entries.get_mut(&id).ok_or_else(gone)?;
+        let Some(e) = entries.get_mut(&id) else { return Ok(Err(gone(id, "post"))) };
+        let at = Where::here(appcfg::headless());
+        if !at.can_show() {
+            // Dropped: no page can ever be shown here to take it.
+            return Ok(Err(nowhere(at)));
+        }
         let deliver = e.life.post(text);
         (deliver, e.life.take_dropped(), native_of(e), e.label())
     };
@@ -845,12 +914,14 @@ fn post(lua: &Lua, sh: &Rc<Shared>, id: u64, value: Value) -> mlua::Result<()> {
     #[cfg(any(windows, target_os = "macos"))]
     if let (Some(json), Some(native)) = (deliver, native) {
         if let Err(e) = native.post_json(&json) {
-            logging::line("gui", &format!("{label}: a message could not be handed to the page: {e}"));
+            let err = HostError::with(&gui::NOT_HANDED, format!("a message could not be handed to the page: {e}"));
+            logging::line("gui", &format!("{label}: {err}"));
+            return Ok(Err(err));
         }
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     let _ = (deliver, native);
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// `page:close()`: the window and its web view go; the description stays, and the next `show`
@@ -950,13 +1021,14 @@ pub(crate) fn build_pending(sh: &Shared) {
                     e.build = 0;
                     e.env_said = false;
                     e.retried = false;
+                    e.failed_why = Some(format!("{} ({why})", words().env_failed));
                     logging::line(
                         "gui",
                         &format!(
                             "{}: could not be built: {} ({why}); the next show answers \"{}\" and tries again",
                             e.label(),
                             words().env_failed,
-                            Refusal::BuildFailed.reason()
+                            Refusal::BuildFailed.error()
                         ),
                     );
                 }
@@ -1022,6 +1094,7 @@ pub(crate) fn build_pending(sh: &Shared) {
                             e.build = 0;
                             e.retried = false;
                             logging::line("gui", &format!("{}: could not be built ({ms} ms): {why}", e.label()));
+                            e.failed_why = Some(why);
                             None
                         }
                     }
@@ -1100,7 +1173,7 @@ pub(crate) fn hand_on<H: PageHost>(h: &H, events: Vec<PageEvent>) {
             PageEvent::Loaded { page, build } => loaded(h, page, build),
             PageEvent::LoadFailed { page, build, why } => load_failed(h, page, build, &why),
             PageEvent::Message { page, build, text } => message(h, page, build, text),
-            PageEvent::Closed { page, build, why } => closed(h, page, build, why),
+            PageEvent::Closed { page, build, why, detail } => closed(h, page, build, why, detail),
         }
     }
 }
@@ -1134,27 +1207,34 @@ pub(crate) fn open_event(pages: &Pages, idx: usize, lua: &Lua, page: u64, build:
         let key = match &call {
             PageCall::Message(_) => Some(&e.on_message),
             PageCall::Ready => e.on_ready.as_ref(),
-            PageCall::Closed(_) => e.on_close.as_ref(),
+            PageCall::Closed(..) => e.on_close.as_ref(),
         };
         (callback(e, key), e.label())
     };
     let Some(f) = f else { return Opened::Gone };
     let what = call.what();
-    let value = match call {
+    let args = match call {
         PageCall::Message(text) => match lua.create_string(&text).and_then(|s| json::decode(lua, s)) {
-            Ok(v) => Some(v),
+            Ok(v) => MultiValue::from_vec(vec![v]),
             Err(e) => {
                 logging::line("gui", &undecoded(&label, &e));
                 return Opened::Gone;
             }
         },
-        PageCall::Ready => None,
-        PageCall::Closed(why) => match lua.create_string(why) {
-            Ok(s) => Some(Value::String(s)),
-            Err(_) => return Opened::Gone,
-        },
+        PageCall::Ready => MultiValue::new(),
+        // `onClose(how, err)`: beside `"failed"` the failure's error value, which says which it was
+        // in its `detail`.
+        PageCall::Closed(how, detail) => {
+            let err = (how == "failed").then(|| match detail {
+                Some(d) => HostError::of(&gui::FAILED).with_detail(d),
+                None => HostError::of(&gui::FAILED),
+            });
+            match lua.create_string(how).and_then(|s| errors_lua::answer(lua, Value::String(s), err.as_ref())) {
+                Ok(args) => args,
+                Err(_) => return Opened::Gone,
+            }
+        }
     };
-    let args = value.map_or_else(MultiValue::new, |v| MultiValue::from_vec(vec![v]));
     Opened::Run { f, args, ctx: Ctx::new(what, idx) }
 }
 
@@ -1225,6 +1305,7 @@ fn load_failed<H: PageHost>(h: &H, page: u64, build: u64, why: &str) {
             e.build = 0;
             e.window = None;
             e.asked = None;
+            e.failed_why = Some(format!("its page did not load ({why})"));
             #[cfg(any(windows, target_os = "macos"))]
             let n = e.native.take();
             #[cfg(not(any(windows, target_os = "macos")))]
@@ -1242,7 +1323,7 @@ fn load_failed<H: PageHost>(h: &H, page: u64, build: u64, why: &str) {
             format!(
                 "{label}: its page did not load ({why}); it is taken down, and the next show \
                  answers \"{}\" and builds it again",
-                Refusal::BuildFailed.reason()
+                Refusal::BuildFailed.error()
             )
         } else {
             format!("{label}: a document did not load ({why}); the page stays as it was")
@@ -1263,7 +1344,7 @@ fn message<H: PageHost>(h: &H, page: u64, build: u64, text: String) {
     deliver(h, owner, &lua, page, build, PageCall::Message(text), Priority::Interactive);
 }
 
-fn closed<H: PageHost>(h: &H, page: u64, build: u64, why: &'static str) {
+fn closed<H: PageHost>(h: &H, page: u64, build: u64, why: &'static str, detail: Option<String>) {
     let (native, close, label) = {
         let mut entries = h.pages().entries.borrow_mut();
         let Some(e) = entries.get_mut(&page) else { return };
@@ -1295,7 +1376,7 @@ fn closed<H: PageHost>(h: &H, page: u64, build: u64, why: &'static str) {
     logging::line("gui", &format!("{label}: closed by {}", if why == "user" { "the user; it is hidden and keeps its state" } else { "a failure; the next show builds it again" }));
     if let Some((owner, lua)) = close {
         let lane = if why == "user" { Priority::Interactive } else { Priority::Background };
-        deliver(h, owner, &lua, page, build, PageCall::Closed(why), lane);
+        deliver(h, owner, &lua, page, build, PageCall::Closed(why, detail), lane);
     }
 }
 
@@ -1378,6 +1459,7 @@ pub(crate) fn test_page(
         asked: None,
         env_said: false,
         over_said: false,
+        failed_why: None,
         #[cfg(any(windows, target_os = "macos"))]
         shown_this_build: false,
         #[cfg(any(windows, target_os = "macos"))]
@@ -1591,6 +1673,89 @@ mod tests {
         assert_eq!(windows_only(runtime), 1, "the WebView2 runtime is asked on Windows");
         assert_eq!(windows_only(code), 2, "a path for Windows alone: the alias and the runtime are the only two");
         assert_eq!(code.matches("#[cfg(target_os = \"macos\")]").count(), 2, "the alias and WebKit's version");
+    }
+
+    /// A build that failed is answered `could not be built`, once, with why it failed as the error
+    /// value's `detail`; the next `show` builds again, and no other refusal takes the detail.
+    #[test]
+    fn a_failed_build_says_why_once_in_its_detail() {
+        use crate::errors::{Code, Reason};
+        let (lua, pages) = (Lua::new(), Pages::default());
+        let f: Function = lua.load("return function() end").eval().unwrap();
+        let (id, _) = test_page(&pages, &lua, 1, (f, None, None), Priority::Background);
+        let mut entries = pages.entries.borrow_mut();
+        let e = entries.get_mut(&id).unwrap();
+        e.failed_why = Some("its page did not load (WebView2 error status 2 at http://x)".into());
+        // Loading still: not ready, and the detail stays for the build's own refusal.
+        let step = e.life.on_show(Where { headless: false, supported: true }, || true);
+        let not_yet = refusal(e, step).unwrap();
+        assert_eq!((not_yet.reason(), not_yet.detail()), (&gui::NOT_READY as &Reason, None));
+        assert!(e.life.load_failed());
+        let step = e.life.on_show(Where { headless: false, supported: true }, || true);
+        let failed = refusal(e, step).unwrap();
+        assert_eq!((failed.code(), failed.message()), (Code::Failed, "could not be built"));
+        assert_eq!(failed.detail(), Some("its page did not load (WebView2 error status 2 at http://x)"));
+        assert!(e.failed_why.is_none(), "said once");
+        let step = e.life.on_show(Where { headless: false, supported: true }, || true);
+        assert_eq!(refusal(e, step), None, "built again");
+    }
+
+    /// `focus`, `post` and a page gone with its module answer in the codes of the plan: declined
+    /// for a shown page the system would not bring forward, hidden for a hidden one; headless or no
+    /// page window for a `focus` or a `post` where no page can ever be shown; and gone — no longer
+    /// a raise.
+    #[test]
+    fn focus_post_and_a_gone_page_answer_with_their_codes() {
+        use crate::errors::{common, Code};
+        assert_eq!(focus_answer(true, false), Ok(()));
+        assert_eq!(focus_answer(false, true), Err(HostError::of(&common::DECLINED)));
+        assert_eq!(focus_answer(false, false), Err(HostError::of(&gui::HIDDEN)));
+        assert_eq!(focus_answer(false, false).unwrap_err().code(), Code::Hidden);
+        assert_eq!(nowhere(Where { headless: true, supported: true }), HostError::of(&gui::HEADLESS));
+        assert_eq!(nowhere(Where { headless: false, supported: false }), HostError::of(&common::NOT_YET));
+        let gone = gone(7, "show");
+        assert_eq!((gone.code(), gone.message()), (Code::Gone, "this page no longer exists: its module was reloaded"));
+    }
+
+    /// Where the calls are made: each of `show`, `prepare`, `focus` and `post` answers a page gone
+    /// with its module with `false` and `gone`'s error value, not a raise; and `focus` refuses where
+    /// no page can ever be shown as `post` does, before it looks for a window — a headless run
+    /// builds none, and is not a page "not built yet".
+    #[test]
+    fn every_call_answers_a_gone_page_and_focus_refuses_where_none_is_shown() {
+        let src = include_str!("webview_lua.rs");
+        let code = &src[..src.find("#[cfg(test)]\nmod tests").expect("the tests")];
+        let body = |sig: &str| crate::ocr_wiring_tests::body(code, sig);
+        assert!(body("fn show(lua: &Lua,").contains("return errors_lua::with_error(lua, Value::Boolean(false), &gone(id, \"show\"));"));
+        assert!(body("fn prepare(lua: &Lua,").contains("return errors_lua::with_error(lua, Value::Boolean(false), &gone(id, \"prepare\"));"));
+        let focus = body("fn focus(sh: &Rc<Shared>,");
+        assert!(focus.contains("None => return Err(gone(id, \"focus\")),"));
+        assert!(body("fn post(lua: &Lua,").contains("let Some(e) = entries.get_mut(&id) else { return Ok(Err(gone(id, \"post\"))) };"));
+        // The two whose body answers a `Result` are answered `true` or `false, err` by the method.
+        let methods = body("fn add_methods<");
+        assert!(methods.contains("errors_lua::done(lua, &focus(&p.sh, p.id))"));
+        assert!(methods.contains("let posted = post(lua, &p.sh, p.id, value)?;\n            errors_lua::done(lua, &posted)"));
+        let nowhere = focus.find("if !at.can_show() {").expect("focus asks whether a page can be shown");
+        let native = focus.find("let Some(native) = native else").expect("focus looks for the window");
+        assert!(nowhere < native, "refused where none is shown before \"not built\"");
+        assert!(focus[nowhere..native].contains("let e = nowhere(at);") && focus[nowhere..native].contains("return Err(e);"));
+    }
+
+    /// `show`'s partial answer — in front, over the rectangle to avoid — is `true` and the error
+    /// value, which reads as the note did: its message is the old words, so a module that put them
+    /// in a sentence says what it said.
+    #[test]
+    fn a_show_over_the_rectangle_answers_true_and_its_error() {
+        let lua = Lua::new();
+        let mv = errors_lua::answer(&lua, Value::Boolean(true), Some(&webview::over())).unwrap();
+        lua.globals().set("ok", mv[0].clone()).unwrap();
+        lua.globals().set("err", mv[1].clone()).unwrap();
+        let said: String = lua.load("return tostring(ok) .. ' ' .. err.code .. ': page over ' .. err").eval().unwrap();
+        assert_eq!(said, "true too_large: page over over the rectangle to avoid");
+        let no = errors_lua::answer(&lua, Value::Boolean(false), Some(&Refusal::NotReady.error())).unwrap();
+        lua.globals().set("err", no[1].clone()).unwrap();
+        assert!(lua.load("return err.code == 'not_ready' and tostring(err) == 'not ready yet'").eval::<bool>().unwrap());
+        assert_eq!(errors_lua::answer(&lua, Value::Boolean(true), None).unwrap().len(), 1, "a full success is true alone");
     }
 
     #[test]

@@ -437,14 +437,14 @@ fn blank_none_and_failed_say_nothing_and_are_logged() {
         local said = #S.speech
         T.tab(); T.answer(1, "blank")
         T.tab(); T.answer(2, "none")
-        T.tab(); T.answer(3, "failed", nil, "screen capture failed: the display is asleep")
+        T.tab(); T.answer(3, "failed", nil, T.E("failed", "screen capture failed"))
         assert(#S.speech == said, T.said(said))
         assert(T.count("stop 1 of 4 (type 50000) has no name; read at 300,200 120x24 in 0 ms: nothing drawn "
           .. "there") == 1, T.dump())
         assert(T.count("stop 2 of 4 (type 50000) has no name; read at 300,230 120x24 in 0 ms: the recogniser "
           .. "read nothing") == 1, T.dump())
         assert(T.count("stop 3 of 4 (type 50000) has no name; read at 300,260 120x24 in 0 ms: the read failed "
-          .. "(screen capture failed: the display is asleep)") == 1, T.dump())
+          .. "(screen capture failed)") == 1, T.dump())
         assert(T.outcomes() == 3, T.dump())
     "#);
 }

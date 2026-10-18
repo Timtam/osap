@@ -159,18 +159,21 @@ local function start(key, via)
   end)
 end
 
+-- A capture without the hook answers nil and why, and captures nothing; a registration answers
+-- nil and why for a key it can never hold here, or the id and why for a claim another program
+-- holds now (docs/api/keys.md, docs/api/hotkey.md).
 local how = "keyboard hook"
-local ok, err = pcall(host.keys.capture, KEY, function() start(KEY, "keyboard hook") end)
-if not ok then
+local token, err = host.keys.capture(KEY, function() start(KEY, "keyboard hook") end)
+if not token then
   line("the keyboard hook is not available (%s); using a registered hotkey instead", tostring(err))
   how = "registered hotkey"
   host.hotkey.register(KEY, function() start(KEY, "registered hotkey") end)
 end
-local okReg, errReg = pcall(host.hotkey.register, KEY_REGISTERED,
+local idReg, errReg = host.hotkey.register(KEY_REGISTERED,
   function() start(KEY_REGISTERED, "registered hotkey") end)
-if not okReg then
-  line("%s could not be registered (%s)", host.keys.describe(KEY_REGISTERED, { style = "short" }),
-    tostring(errReg))
+if errReg then
+  line("%s %s (%s)", host.keys.describe(KEY_REGISTERED, { style = "short" }),
+    idReg and "is registered but not held now" or "could not be registered", tostring(errReg))
 end
 
 host.log.info(string.format(

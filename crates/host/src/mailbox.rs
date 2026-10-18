@@ -157,8 +157,8 @@ pub(crate) enum Event {
     /// (`webview_lua::open_event`).
     Page { page: u64, build: u64, call: PageCall },
     /// The outcome of what the module asked another program for, for the callback it handed over
-    /// (acting.rs): called `(true)` or `(false, why)`, its errors reported as `what`'s.
-    Acted { cb: Function, result: Result<(), String>, what: &'static str },
+    /// (acting.rs): called `(true)` or `(false, err)`, its errors reported as `what`'s.
+    Acted { cb: Function, result: Result<(), crate::errors::HostError>, what: &'static str },
     /// An accessibility tree's answer to the question `ask`, for the callback the module handed
     /// over (element.rs): called with what the call would have returned (element_lua.rs,
     /// `values`), its errors reported as `what`'s. `out`: the module VM and `opts.key` it counts

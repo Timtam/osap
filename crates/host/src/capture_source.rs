@@ -389,7 +389,7 @@ pub(crate) fn frame_keys(tasks: impl Iterator<Item = FrameKey>) -> (Vec<FrameKey
 /// One frame of a batch as the image worker captured it: the picture or why there is none, the
 /// milliseconds it cost, when it came back and `host.inputEpoch()` then.
 pub(crate) struct Captured {
-    pub(crate) img: Result<CapturedImage, String>,
+    pub(crate) img: Result<CapturedImage, crate::errors::HostError>,
     pub(crate) ms: u32,
     pub(crate) at: std::time::Instant,
     pub(crate) input_epoch: u64,
@@ -405,7 +405,7 @@ pub(crate) struct Captured {
 /// the capture thread and one GPU sync for all of them. Its time is booked to the first of
 /// them, so the batch's total stays right.
 pub(crate) fn capture_frames(capture: CaptureFn, keys: &[FrameKey], input_epoch: &std::sync::atomic::AtomicU64) -> Vec<Captured> {
-    let missing = || Err(backend::CAPTURE_FAILED.to_string());
+    let missing = || Err(backend::capture_failed());
     let stamp = || (std::time::Instant::now(), input_epoch.load(std::sync::atomic::Ordering::SeqCst));
     let (at, epoch) = stamp();
     let mut out: Vec<Captured> = keys.iter().map(|_| Captured { img: missing(), ms: 0, at, input_epoch: epoch }).collect();
@@ -605,7 +605,7 @@ mod tests {
     /// a text reading carries as `"failed"` with no language, whichever path read it.
     #[test]
     fn a_missing_picture_is_a_capture_failure() {
-        assert!(backend::DUPLICATION_UNANSWERED.starts_with(backend::CAPTURE_FAILED));
+        assert!(backend::DUPLICATION_UNANSWERED.starts_with(crate::errors::screen::CAPTURE_FAILED.message));
     }
 
     #[test]
@@ -810,7 +810,7 @@ mod tests {
 
     static CALLS: Mutex<Vec<(usize, CaptureSource)>> = Mutex::new(Vec::new());
 
-    fn recording(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+    fn recording(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, crate::errors::HostError>> {
         CALLS.lock().unwrap().push((regions.len(), src));
         regions.iter().map(|&(_, _, w, h)| Ok(CapturedImage { w: w as u32, h: h as u32, rgba: vec![] })).collect()
     }

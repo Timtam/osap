@@ -38,6 +38,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::backend::frame::{Frame, FrameVia};
+use crate::errors::HostError;
 
 use super::types::Rect;
 
@@ -137,7 +138,7 @@ pub enum Seen {
     /// Of the wait's region — the lane cuts a shared capture down first.
     Frame(Arc<Frame>),
     /// The capture failed, with the reason: the clocks still move.
-    Failed(String),
+    Failed(HostError),
 }
 
 /// How a wait ended.
@@ -147,7 +148,7 @@ pub struct Outcome {
     /// no capture of the wait ever came back.
     pub frame: Option<Arc<Frame>>,
     /// Why there is no picture.
-    pub why: Option<String>,
+    pub why: Option<HostError>,
     pub changed: bool,
     pub settled: bool,
     pub rebased: bool,
@@ -156,8 +157,10 @@ pub struct Outcome {
 }
 
 /// What `why` says when a wait ended before any round came back, which only a wait whose rounds
-/// never ran can.
-pub const NO_PICTURE: &str = "no picture was taken before the change wait's timeout";
+/// never ran can: `timeout`.
+pub fn no_picture() -> HostError {
+    HostError::of(&crate::errors::screen::NO_PICTURE_BEFORE_TIMEOUT)
+}
 
 enum State {
     /// Looking for the first difference from the baseline.
@@ -185,7 +188,7 @@ pub struct Wait {
     deadline: Instant,
     frames: u32,
     rebased: bool,
-    last_error: Option<String>,
+    last_error: Option<HostError>,
 }
 
 impl Wait {
@@ -341,7 +344,7 @@ impl Wait {
             }
             None => Outcome {
                 frame: None,
-                why: Some(self.last_error.clone().unwrap_or_else(|| NO_PICTURE.to_string())),
+                why: Some(self.last_error.clone().unwrap_or_else(no_picture)),
                 changed: false,
                 settled: false,
                 rebased: self.rebased,
@@ -376,6 +379,11 @@ mod tests {
     use crate::backend::CapturedImage;
 
     const MS: Duration = Duration::from_millis(1);
+
+    /// A round whose capture failed.
+    fn failed() -> HostError {
+        crate::backend::capture_failed()
+    }
 
     /// A frame of `r`, all `(v, v, v)`, with `patch` (a screen rectangle inside it) `(p, p, p)`.
     fn frame(r: Rect, v: u8, patch: Option<(Rect, u8)>, via: FrameVia) -> Arc<Frame> {
@@ -519,8 +527,8 @@ mod tests {
         let mut w = Wait::new(R, &[], spec(50), Some(plain(10)), t0);
         assert!(w.step(t0 + 10 * MS, seen(&patched(Rect::new(110, 110, 4, 4), 200))).is_none());
         assert!(w.step(t0 + 20 * MS, seen(&plain(10))).is_none());
-        assert!(w.step(t0 + 80 * MS, Seen::Failed("no".into())).is_none(), "due, but back where it began");
-        let o = w.step(t0 + 500 * MS, Seen::Failed("no".into())).expect("the deadline");
+        assert!(w.step(t0 + 80 * MS, Seen::Failed(failed())).is_none(), "due, but back where it began");
+        let o = w.step(t0 + 500 * MS, Seen::Failed(failed())).expect("the deadline");
         assert!(!o.changed && o.frame.is_some());
     }
 
@@ -587,8 +595,8 @@ mod tests {
         let mut w = Wait::new(R, &[], spec(50), Some(plain(10)), t0);
         let moved = patched(Rect::new(100, 100, 10, 10), 200);
         assert!(w.step(t0 + 10 * MS, seen(&moved)).is_none());
-        assert!(w.step(t0 + 30 * MS, Seen::Failed("no".into())).is_none(), "not yet still for 50 ms");
-        let o = w.step(t0 + 60 * MS, Seen::Failed("no".into())).expect("a settle completes without a new picture");
+        assert!(w.step(t0 + 30 * MS, Seen::Failed(failed())).is_none(), "not yet still for 50 ms");
+        let o = w.step(t0 + 60 * MS, Seen::Failed(failed())).expect("a settle completes without a new picture");
         assert!(o.changed && o.settled);
         assert!(Arc::ptr_eq(o.frame.as_ref().unwrap(), &moved));
         assert_eq!(o.frames, 1);
@@ -598,10 +606,11 @@ mod tests {
     fn all_failed_is_none_with_the_last_reason() {
         let t0 = Instant::now();
         let mut w = Wait::new(R, &[], spec(0), None, t0);
-        assert!(w.step(t0, Seen::Failed("first".into())).is_none());
-        let o = w.step(t0 + 600 * MS, Seen::Failed("screen capture failed".into())).expect("the deadline");
+        let first = HostError::of(&crate::errors::screen::DUPLICATION_OVERDUE);
+        assert!(w.step(t0, Seen::Failed(first)).is_none());
+        let o = w.step(t0 + 600 * MS, Seen::Failed(failed())).expect("the deadline");
         assert!(o.frame.is_none() && !o.changed);
-        assert_eq!(o.why.as_deref(), Some("screen capture failed"));
+        assert_eq!(o.why, Some(failed()), "the last one's");
         assert_eq!(o.frames, 0);
     }
 

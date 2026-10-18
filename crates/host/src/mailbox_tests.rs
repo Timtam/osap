@@ -681,7 +681,7 @@ fn every_kind_of_handler_waits_at_a_read() {
     let a = vm(&h, 7);
     let owner = reads::owner_of(&a, &h.gens.borrow(), 7);
     let p = crate::snapshot::test_request(&h.snaps, &a, owner, None, f(&a, read("snapshot", 9867)));
-    let ev = Event::Snapshot { p: Box::new(p), answer: crate::snapshot::test_failed("screen capture failed") };
+    let ev = Event::Snapshot { p: Box::new(p), answer: crate::snapshot::test_failed(crate::backend::capture_failed()) };
     assert_eq!(mailbox::deliver(&*h, 7, &a, ev), Delivered::Parked);
     modules.push((a, "snapshot 9867,5"));
     modules.push((answer, "answer 9869,5"));
@@ -848,7 +848,7 @@ fn a_busy_modules_snapshot_answer_runs_once_it_is_free_and_is_judged_when_it_run
     let a = vm(&h, 1);
     let owner = reads::owner_of(&a, &h.gens.borrow(), 1);
     let cb: Function = a.load("return function(snap, why) heard[#heard + 1] = tostring(snap) .. ': ' .. why end").eval().unwrap();
-    let answer = |p| Event::Snapshot { p: Box::new(p), answer: crate::snapshot::test_failed("screen capture failed") };
+    let answer = |p| Event::Snapshot { p: Box::new(p), answer: crate::snapshot::test_failed(crate::backend::capture_failed()) };
     let p = crate::snapshot::test_request(&h.snaps, &a, owner, Some("k"), cb.clone());
     assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
     assert_eq!(mailbox::deliver(&*h, 1, &a, answer(p)), Delivered::Queued);
@@ -862,7 +862,7 @@ fn a_busy_modules_snapshot_answer_runs_once_it_is_free_and_is_judged_when_it_run
     let _newer = crate::snapshot::test_request(&h.snaps, &a, owner, Some("k"), cb);
     assert!(task::test_release(&*h, "w", Value::Nil));
     mailbox::run_queued(&*h);
-    assert_eq!(heard(&a), format!("nil: screen capture failed | nil: {}", crate::snapshot::SUPERSEDED));
+    assert_eq!(heard(&a), format!("nil: screen capture failed | nil: {}", crate::snapshot::superseded()));
     assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
 }
 
@@ -902,7 +902,7 @@ fn a_busy_modules_profile_answer_waits_as_a_handler_and_its_key_is_out_until_it_
     let _newer = crate::snapshot::test_profile(&h.snaps, &a, owner, Some("area"), cb.clone(), rect, (2, 2));
     assert!(task::test_release(&*h, "w", Value::Nil));
     mailbox::run_queued(&*h);
-    assert_eq!(heard(&a), format!("3x2 77 at 1234/9 | nil: {}", crate::snapshot::SUPERSEDED));
+    assert_eq!(heard(&a), format!("3x2 77 at 1234/9 | nil: {}", crate::snapshot::superseded()));
     // Disabled while it waits: dropped, never run, and its key no longer out.
     let p = crate::snapshot::test_profile(&h.snaps, &a, owner, Some("late"), cb, rect, (3, 3));
     assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
@@ -911,7 +911,7 @@ fn a_busy_modules_profile_answer_waits_as_a_handler_and_its_key_is_out_until_it_
     mailbox::drop_owner(&*h, 1, Why::Disabled);
     task::drop_owner(&*h, 1);
     assert!(!pending("late"), "a disabled module's answers are dropped");
-    assert_eq!(heard(&a), format!("3x2 77 at 1234/9 | nil: {}", crate::snapshot::SUPERSEDED));
+    assert_eq!(heard(&a), format!("3x2 77 at 1234/9 | nil: {}", crate::snapshot::superseded()));
     assert!(h.discarded.borrow().iter().any(|d| d.1 == "snapshot" && d.2 == Why::Disabled));
     assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
 }
@@ -1512,7 +1512,10 @@ fn page(h: &Host, lua: &Lua, idx: usize, lane: Priority) -> (u64, u64) {
             "return function(v) heard[#heard + 1] = 'message ' .. tostring(type(v) == 'table' and v.n or v) .. ' ' .. lane() .. {as_handler} end"
         )),
         Some(f(&format!("return function() heard[#heard + 1] = 'ready ' .. lane() .. {as_handler} end"))),
-        Some(f(&format!("return function(why) heard[#heard + 1] = 'close ' .. why .. ' ' .. lane() .. {as_handler} end"))),
+        // The error value beside a failure, as `closeErr`, and how many values came after `how`.
+        Some(f(&format!(
+            "return function(how, ...) local err = ...; closeAfter = select('#', ...); closeErr = err and (err.code .. ': ' .. tostring(err) .. ' (' .. tostring(err.detail) .. ')'); heard[#heard + 1] = 'close ' .. how .. ' ' .. lane() .. {as_handler} end"
+        ))),
     );
     webview_lua::test_page(&h.pages, lua, idx, callbacks, lane)
 }
@@ -1533,14 +1536,19 @@ fn a_pages_events_run_as_handlers_of_its_module_in_their_lanes() {
     let (p, b) = page(&h, &a, 1, Priority::Background);
     webview_lua::hand_on(
         &*h,
-        vec![posted(p, b, 1), PageEvent::Loaded { page: p, build: b }, PageEvent::Closed { page: p, build: b, why: "user" }],
+        vec![posted(p, b, 1), PageEvent::Loaded { page: p, build: b }, PageEvent::Closed { page: p, build: b, why: "user", detail: None }],
     );
     assert_eq!(heard(&a), "message 1 Interactive | ready Background | close user Interactive", "prepared in the background");
+    assert!(yes(&a, "return closeAfter == 0 and closeErr == nil"), "onClose(\"user\") alone");
     assert!(h.mail.is_empty() && h.tasks.handler_of(1).is_none());
     run(&a, "heard = {}");
     let (q, c) = page(&h, &a, 1, Priority::Interactive);
-    webview_lua::hand_on(&*h, vec![PageEvent::Loaded { page: q, build: c }, PageEvent::Closed { page: q, build: c, why: "failed" }]);
+    webview_lua::hand_on(&*h, vec![PageEvent::Loaded { page: q, build: c }, PageEvent::Closed { page: q, build: c, why: "failed", detail: Some("its script closed its web view".into()) }]);
     assert_eq!(heard(&a), "ready Interactive | close failed Background", "shown by a key; nobody asked for the failure");
+    assert!(
+        yes(&a, "return closeAfter == 1 and closeErr == 'failed: the page failed (its script closed its web view)'"),
+        "onClose(\"failed\", err): the failure's error value, which failure it was in its detail"
+    );
     assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
 }
 
@@ -1559,7 +1567,7 @@ fn a_busy_modules_page_events_wait_in_order_with_its_other_events() {
             posted(p, b, 1),
             PageEvent::Loaded { page: p, build: b },
             posted(p, b, 2),
-            PageEvent::Closed { page: p, build: b, why: "user" },
+            PageEvent::Closed { page: p, build: b, why: "user", detail: None },
         ],
     );
     say(&h, &a, 1, "key after", true);
@@ -1623,7 +1631,7 @@ fn a_pages_messages_count_against_a_limit_of_their_own_and_its_life_never_does()
         assert_eq!(say(&h, &a, 1, "key", true), Delivered::Queued, "key {k}: the page's messages took none of the keys' places");
     }
     assert_eq!(say(&h, &a, 1, "key", true), Delivered::Dropped, "the keys' own limit");
-    webview_lua::hand_on(&*h, vec![PageEvent::Loaded { page: p, build: b }, PageEvent::Closed { page: p, build: b, why: "failed" }]);
+    webview_lua::hand_on(&*h, vec![PageEvent::Loaded { page: p, build: b }, PageEvent::Closed { page: p, build: b, why: "failed", detail: Some("its script closed its web view".into()) }]);
     assert_eq!(h.mail.len(1), 2 * n + 2, "the ready and the close kept");
     assert_eq!(h.discarded.borrow().as_slice(), &[(1, "page", Why::Limit), (1, "page", Why::Limit), (1, "call", Why::Limit)]);
     assert!(task::test_release(&*h, "w", Value::Nil));
@@ -1720,7 +1728,7 @@ fn a_page_event_runs_for_the_build_it_came_from() {
     assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
     webview_lua::hand_on(
         &*h,
-        vec![posted(p, b2, 3), PageEvent::Closed { page: p, build: b2, why: "failed" }, posted(p, b2, 4)],
+        vec![posted(p, b2, 3), PageEvent::Closed { page: p, build: b2, why: "failed", detail: Some("its script closed its web view".into()) }, posted(p, b2, 4)],
     );
     // The module shows it again before it hears of the failure: a build of its own.
     let b3 = webview_lua::test_rebuild(&h.pages, p, Priority::Interactive);
@@ -1732,9 +1740,9 @@ fn a_page_event_runs_for_the_build_it_came_from() {
     // Two failures while it waits: both builds are heard to the end, in order.
     run(&a, "heard = {}");
     assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
-    webview_lua::hand_on(&*h, vec![posted(p, b3, 6), PageEvent::Closed { page: p, build: b3, why: "failed" }]);
+    webview_lua::hand_on(&*h, vec![posted(p, b3, 6), PageEvent::Closed { page: p, build: b3, why: "failed", detail: Some("its script closed its web view".into()) }]);
     let b4 = webview_lua::test_rebuild(&h.pages, p, Priority::Interactive);
-    webview_lua::hand_on(&*h, vec![posted(p, b4, 7), PageEvent::Closed { page: p, build: b4, why: "failed" }]);
+    webview_lua::hand_on(&*h, vec![posted(p, b4, 7), PageEvent::Closed { page: p, build: b4, why: "failed", detail: Some("its script closed its web view".into()) }]);
     let b5 = webview_lua::test_rebuild(&h.pages, p, Priority::Interactive);
     assert!(task::test_release(&*h, "w", Value::Nil));
     drain(&h, 10);
@@ -1747,7 +1755,7 @@ fn a_page_event_runs_for_the_build_it_came_from() {
     // build runs — the module is done with the page.
     run(&a, "heard = {}");
     assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
-    webview_lua::hand_on(&*h, vec![posted(p, b5, 8), PageEvent::Closed { page: p, build: b5, why: "failed" }]);
+    webview_lua::hand_on(&*h, vec![posted(p, b5, 8), PageEvent::Closed { page: p, build: b5, why: "failed", detail: Some("its script closed its web view".into()) }]);
     webview_lua::close(&h.pages, p);
     assert_eq!(h.mail.len(1), 2, "both arrived before the close");
     assert!(task::test_release(&*h, "w", Value::Nil));
@@ -1804,7 +1812,7 @@ fn a_pages_callback_error_is_reported_under_its_name() {
     webview_lua::hand_on(&*h, vec![PageEvent::Message { page: p, build: b, text: "{not json".into() }]);
     assert_eq!(h.errors.borrow().len(), 1, "not JSON: dropped, nothing called");
     assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
-    webview_lua::hand_on(&*h, vec![PageEvent::Loaded { page: p, build: b }, PageEvent::Closed { page: p, build: b, why: "user" }]);
+    webview_lua::hand_on(&*h, vec![PageEvent::Loaded { page: p, build: b }, PageEvent::Closed { page: p, build: b, why: "user", detail: None }]);
     assert_eq!(h.mail.len(1), 0, "no callback, no event");
     assert!(task::test_release(&*h, "w", Value::Nil));
 }

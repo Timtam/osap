@@ -46,9 +46,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::backend::frame::Frame;
-use crate::backend::{CaptureSource, CompareReq, CAPTURE_FAILED};
+use crate::backend::{capture_failed, CaptureSource, CompareReq};
+use crate::errors::HostError;
 
-use super::change::{Outcome, Seen, Wait, NO_PICTURE};
+use super::change::{no_picture, Outcome, Seen, Wait};
 use super::policy::{AGING, MIN_ROUND_DUPLICATION, MIN_ROUND_MACOS, MIN_ROUND_STANDARD, UNION_MAX};
 use super::sched::{Cand, Class, Owner};
 use super::types::{Priority, Rect};
@@ -139,7 +140,7 @@ pub enum SnapOutcome {
     /// A points request's colours, one per point, in order ([`SnapKind::Points`]), with when the
     /// read came back and `host.inputEpoch()` then: what a callback's `info` says.
     Colours { colours: Vec<(u8, u8, u8)>, at: Instant, input_epoch: u64 },
-    Failed { why: String, frames: u32, change: Option<ChangeInfo> },
+    Failed { why: HostError, frames: u32, change: Option<ChangeInfo> },
     /// Its flag was set: the event loop answers or drops it itself.
     Cancelled,
 }
@@ -154,7 +155,9 @@ pub struct SnapDone {
 }
 
 /// What a request is answered when the host's own code for its round panicked.
-pub const ROUND_FAILED: &str = "the snapshot failed inside the application; the log has the details";
+pub fn round_failed() -> HostError {
+    HostError::of(&crate::errors::screen::ROUND_FAILED)
+}
 
 /// The least time between the starts of two rounds of a change wait through `source`, decided
 /// by the platform, not by the module (see `policy`).
@@ -476,8 +479,8 @@ impl Round {
     /// A points round's answer, from what the capture thread's `points` gave: its colours, one per
     /// point — a list of another length is a failed capture, never a short answer — read at `at`
     /// with the input epoch `input_epoch`, or the reason there are none. A round of pictures
-    /// answers every request [`ROUND_FAILED`].
-    pub fn answer_points(self, colours: Result<Vec<(u8, u8, u8)>, String>, at: Instant, input_epoch: u64) -> RoundDone {
+    /// answers every request [`round_failed`].
+    pub fn answer_points(self, colours: Result<Vec<(u8, u8, u8)>, HostError>, at: Instant, input_epoch: u64) -> RoundDone {
         let steps = self
             .members
             .into_iter()
@@ -486,15 +489,9 @@ impl Round {
                     (SnapKind::Points { at: points, .. }, Ok(c)) if c.len() == points.len() => {
                         SnapOutcome::Colours { colours: c.clone(), at, input_epoch }
                     }
-                    (SnapKind::Points { .. }, Ok(_)) => {
-                        SnapOutcome::Failed { why: CAPTURE_FAILED.to_string(), frames: 0, change: None }
-                    }
+                    (SnapKind::Points { .. }, Ok(_)) => SnapOutcome::Failed { why: capture_failed(), frames: 0, change: None },
                     (SnapKind::Points { .. }, Err(why)) => SnapOutcome::Failed { why: why.clone(), frames: 0, change: None },
-                    _ => SnapOutcome::Failed {
-                        why: ROUND_FAILED.to_string(),
-                        frames: 0,
-                        change: req.is_wait().then(ChangeInfo::default),
-                    },
+                    _ => SnapOutcome::Failed { why: round_failed(), frames: 0, change: req.is_wait().then(ChangeInfo::default) },
                 };
                 Step::Done { id: req.ticket.id, asked: req.asked, outcome, cancel: req.cancel.clone() }
             })
@@ -514,15 +511,15 @@ impl Round {
     /// or timed request its picture, cut out of a shared capture when it was one; a change wait
     /// the comparison, and its picture when it ended. A panic in the host's own code for one
     /// request answers that request, and the rest are still answered; one anywhere else in here
-    /// answers every request of the round [`ROUND_FAILED`], so the round is finished all the same.
-    pub fn run(self, frames: Vec<Result<Frame, String>>, now: Instant, input_epoch: u64) -> RoundDone {
+    /// answers every request of the round [`round_failed`], so the round is finished all the same.
+    pub fn run(self, frames: Vec<Result<Frame, HostError>>, now: Instant, input_epoch: u64) -> RoundDone {
         let answers: Vec<Step> = self
             .members
             .iter()
             .map(|(req, _)| Step::Done {
                 id: req.ticket.id,
                 asked: req.asked,
-                outcome: SnapOutcome::Failed { why: ROUND_FAILED.to_string(), frames: 0, change: req.is_wait().then(ChangeInfo::default) },
+                outcome: SnapOutcome::Failed { why: round_failed(), frames: 0, change: req.is_wait().then(ChangeInfo::default) },
                 cancel: req.cancel.clone(),
             })
             .collect();
@@ -533,10 +530,10 @@ impl Round {
         }
     }
 
-    fn run_members(self, frames: Vec<Result<Frame, String>>, now: Instant, input_epoch: u64) -> RoundDone {
+    fn run_members(self, frames: Vec<Result<Frame, HostError>>, now: Instant, input_epoch: u64) -> RoundDone {
         test_panic_round(&self.rects);
         let mut frames = frames.into_iter();
-        let shots: Vec<Result<Arc<Frame>, String>> = self
+        let shots: Vec<Result<Arc<Frame>, HostError>> = self
             .rects
             .iter()
             .map(|r| match frames.next() {
@@ -544,7 +541,7 @@ impl Round {
                     f.input_epoch = input_epoch;
                     Ok(Arc::new(f))
                 }
-                Some(Ok(_)) | None => Err(CAPTURE_FAILED.to_string()),
+                Some(Ok(_)) | None => Err(capture_failed()),
                 Some(Err(why)) => Err(why),
             })
             .collect();
@@ -563,7 +560,7 @@ impl Round {
                         Step::Done {
                             id,
                             asked,
-                            outcome: SnapOutcome::Failed { why: ROUND_FAILED.to_string(), frames: 0, change },
+                            outcome: SnapOutcome::Failed { why: round_failed(), frames: 0, change },
                             cancel,
                         }
                     }
@@ -575,9 +572,9 @@ impl Round {
 
     /// Every request of the round answered with `why`: the capture itself panicked. A change
     /// wait counts it as a failed round and may go on.
-    pub fn fail(self, why: &str, now: Instant) -> RoundDone {
+    pub fn fail(self, why: &HostError, now: Instant) -> RoundDone {
         let n = self.rects.len();
-        self.run((0..n).map(|_| Err(why.to_string())).collect(), now, 0)
+        self.run((0..n).map(|_| Err(why.clone())).collect(), now, 0)
     }
 }
 
@@ -608,7 +605,7 @@ fn test_panic(_: Rect) {}
 #[cfg(not(test))]
 fn test_panic_round(_: &[Rect]) {}
 
-fn step_member(mut req: SnapReq, shot: &Result<Arc<Frame>, String>, now: Instant) -> Step {
+fn step_member(mut req: SnapReq, shot: &Result<Arc<Frame>, HostError>, now: Instant) -> Step {
     let (id, asked, region, cancel) = (req.ticket.id, req.asked, req.region, req.cancel.clone());
     test_panic(region);
     if let SnapKind::Change { wait, .. } = &mut req.kind {
@@ -617,7 +614,7 @@ fn step_member(mut req: SnapReq, shot: &Result<Arc<Frame>, String>, now: Instant
         let seen = match shot {
             Ok(f) => match cut(f, region) {
                 Some(g) => Seen::Frame(g),
-                None => Seen::Failed(CAPTURE_FAILED.to_string()),
+                None => Seen::Failed(capture_failed()),
             },
             Err(why) => Seen::Failed(why.clone()),
         };
@@ -630,7 +627,7 @@ fn step_member(mut req: SnapReq, shot: &Result<Arc<Frame>, String>, now: Instant
     let outcome = match shot {
         Ok(f) => match cut(f, region) {
             Some(g) => SnapOutcome::Picture { frame: g, frames: 1, change: None },
-            None => SnapOutcome::Failed { why: CAPTURE_FAILED.to_string(), frames: 0, change: None },
+            None => SnapOutcome::Failed { why: capture_failed(), frames: 0, change: None },
         },
         Err(why) => SnapOutcome::Failed { why: why.clone(), frames: 0, change: None },
     };
@@ -643,9 +640,9 @@ fn outcome_of(o: Outcome, region: Rect) -> SnapOutcome {
     match o.frame {
         Some(f) => match cut(&f, region) {
             Some(g) => SnapOutcome::Picture { frame: g, frames: o.frames, change },
-            None => SnapOutcome::Failed { why: CAPTURE_FAILED.to_string(), frames: o.frames, change },
+            None => SnapOutcome::Failed { why: capture_failed(), frames: o.frames, change },
         },
-        None => SnapOutcome::Failed { why: o.why.unwrap_or_else(|| NO_PICTURE.to_string()), frames: o.frames, change },
+        None => SnapOutcome::Failed { why: o.why.unwrap_or_else(no_picture), frames: o.frames, change },
     }
 }
 
@@ -703,7 +700,7 @@ mod tests {
     /// run it and finish it — or, for a points round, read each point as `(x, y, 7)`, the way
     /// `shoot` answers its region's first pixel: a failed read when `shoot` fails. The rectangles
     /// captured, and every answer.
-    fn turn(lane: &mut SnapLane, now: Instant, shoot: &dyn Fn(Rect) -> Result<Frame, String>) -> (Vec<Rect>, Vec<SnapDone>) {
+    fn turn(lane: &mut SnapLane, now: Instant, shoot: &dyn Fn(Rect) -> Result<Frame, HostError>) -> (Vec<Rect>, Vec<SnapDone>) {
         let mut out = lane.sweep_cancelled(now);
         let Some(round) = lane.take(now) else { return (Vec::new(), out) };
         if let Some((at, _)) = round.points() {
@@ -756,12 +753,16 @@ mod tests {
         assert_eq!((round.ids(), round.points()), (vec![4], Some((&[(2, 2)][..], true))));
         let out = lane.finish(round.answer_points(Ok(vec![(1, 1, 1), (2, 2, 2)]), t0 + MS, 0), t0 + MS);
         assert!(
-            matches!(&out[0].outcome, SnapOutcome::Failed { why, frames: 0, change: None } if why == CAPTURE_FAILED),
+            matches!(&out[0].outcome, SnapOutcome::Failed { why, frames: 0, change: None } if *why == capture_failed()),
             "two colours for one point"
         );
         let round = lane.take(t0 + MS).unwrap();
-        let out = lane.finish(round.answer_points(Err("screen capture failed: an earlier read has not come back yet".into()), t0 + MS, 0), t0 + MS);
-        assert!(matches!(&out[0].outcome, SnapOutcome::Failed { why, .. } if why.ends_with("an earlier read has not come back yet")));
+        let overdue = HostError::with(
+            &crate::errors::screen::DUPLICATION_OVERDUE,
+            crate::errors::screen::DUPLICATION_OVERDUE.message.to_string(),
+        );
+        let out = lane.finish(round.answer_points(Err(overdue.clone()), t0 + MS, 0), t0 + MS);
+        assert!(matches!(&out[0].outcome, SnapOutcome::Failed { why, .. } if *why == overdue), "the read's own error");
 
         // Cancelled while it is read: answered so, as any request is.
         let gone = req(5, A, r, points(&[(1, 1)], false), t0);
@@ -1039,7 +1040,7 @@ mod tests {
         assert_eq!(done.panics.len(), 1);
         let out = lane.finish(done, t0);
         let by_id: HashMap<SnapId, &SnapOutcome> = out.iter().map(|d| (d.id, &d.outcome)).collect();
-        assert!(matches!(by_id[&1], SnapOutcome::Failed { why, .. } if why == ROUND_FAILED));
+        assert!(matches!(by_id[&1], SnapOutcome::Failed { why, .. } if *why == round_failed()));
         assert!(matches!(by_id[&2], SnapOutcome::Picture { .. }), "the other request is answered all the same");
     }
 
@@ -1052,9 +1053,9 @@ mod tests {
         let mut lane = SnapLane::default();
         lane.submit(req(1, A, r, SnapKind::Plain, t0));
         lane.submit(req(2, A, r, wait_kind(r, 500, 0, t0), t0));
-        let (_, done) = turn(&mut lane, t0, &|_| Err("screen capture failed".into()));
+        let (_, done) = turn(&mut lane, t0, &|_| Err(capture_failed()));
         assert_eq!(done.len(), 1);
-        assert!(matches!(&done[0].outcome, SnapOutcome::Failed { why, frames: 0, change: None } if why == "screen capture failed"));
+        assert!(matches!(&done[0].outcome, SnapOutcome::Failed { why, frames: 0, change: None } if why.to_string() == "screen capture failed"));
         assert_eq!(lane.len(), 1, "the wait goes on");
         // A frame that does not cover its rectangle is never cut from. The wait's next round is
         // due the platform's least time between rounds later.
@@ -1197,7 +1198,7 @@ mod tests {
         assert_eq!(done.panics.len(), 1);
         let out = lane.finish(done, t0);
         assert_eq!(out.len(), 2);
-        assert!(out.iter().all(|d| matches!(&d.outcome, SnapOutcome::Failed { why, .. } if why == ROUND_FAILED)));
+        assert!(out.iter().all(|d| matches!(&d.outcome, SnapOutcome::Failed { why, .. } if *why == round_failed())));
         assert!(lane.is_empty(), "nothing is left being taken");
     }
 
@@ -1239,7 +1240,7 @@ mod tests {
                 flags[rnd(flags.len() as u64) as usize].store(true, Ordering::Release);
             }
             let v = (ms / 50) as u8;
-            let (_, done) = turn(&mut lane, now, &|r| if rnd_free(ms) { Err("no".into()) } else { Ok(solid(r, v, now)) });
+            let (_, done) = turn(&mut lane, now, &|r| if rnd_free(ms) { Err(capture_failed()) } else { Ok(solid(r, v, now)) });
             for d in done {
                 *answers.entry(d.id).or_default() += 1;
             }

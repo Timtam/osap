@@ -85,9 +85,9 @@ fn the_page_is_described_once_and_again_when_the_mac_page_mode_changes() {
 /// plays Open.wav. Pressed in the page, it asks Avenger's window to the front FIRST and hides the
 /// page after, with Close.wav. The second show goes back where the user was. A window the host no
 /// longer lists is asked for all the same — a DAW that hides its plug-in windows while the page is
-/// in front shows them again when it comes forward — and taken as closed only when it refuses; a
-/// window that would not come keeps the page, saying why in its error region; the sounds follow
-/// their setting.
+/// in front shows them again when it comes forward — and taken as closed only when it refuses, or
+/// when the focus answers `gone`; a window that would not come keeps the page, saying why in its
+/// error region; the sounds follow their setting.
 #[test]
 fn the_key_shows_the_page_beside_avenger_and_in_the_page_goes_back_to_it() {
     run_mac(r##"
@@ -148,6 +148,18 @@ fn the_key_shows_the_page_beside_avenger_and_in_the_page_goes_back_to_it() {
         T.pageKey()
         T.ok(T.pageSince(from) == "focus 31,post error", T.pageSince(from))
         T.ok(T.lastPost("error").text == "VPS Avenger's window would not come to the front.", T.lastPost("error").text)
+        -- The host's own `gone` for a window still listed — it went between the listing and the focus:
+        -- closed, by its code; and `hidden`, a window that is there, would not come.
+        S.focusErr = T.E("gone", "no such window")
+        from = #S.pageOrder
+        T.pageKey()
+        T.ok(T.pageSince(from) == "focus 31,post error", T.pageSince(from))
+        T.ok(T.lastPost("error").text == "The plug-in window was closed. Please open it again, then press @KEY@ again.",
+          T.lastPost("error").text)
+        S.focusErr = T.E("hidden", "the window is hidden")
+        T.pageKey()
+        T.ok(T.lastPost("error").text == "VPS Avenger's window would not come to the front.", T.lastPost("error").text)
+        S.focusErr = nil
         -- The close box: hidden by the host, the front given back; Close.wav when the sounds are on.
         T.setting("sounds", true)
         T.pageClosed("user")
@@ -1200,6 +1212,88 @@ fn initialize_from_the_page_reads_the_box_before_yes_and_no_clicks_nothing() {
           and T.lastPost("error").text == "", "the page back with what was read")
         T.ok(T.count("[avenger] [page] 'Initialize preset': Avenger's warning box is up: \"Are you sure?\"") == 1, T.dump())
         T.ok(not box.active and T.count("Avenger's warning box is looked for") == 0, "the ring's box never armed")
+    "##);
+}
+
+/// A page action whose trip the runtime does not start, said in the page by the code of inPlugin's
+/// error value: a page that came forward without the page key holds no place (`not_found`), and the
+/// page says to press the key in Avenger; Avenger's window gone (`gone`, nothing of its application
+/// listed and the focus refused) is the tool's closed sentence; a focus the host answers `hidden` is
+/// a window that would not come. Nothing is clicked.
+#[test]
+fn a_trip_not_started_says_why_in_the_page_by_its_code() {
+    run_mac(r##"
+        local S = T.S
+        local _, _, W = T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.openPage()
+        T.event()
+        local clicks = #S.clicks
+        local function undo() T.pageMsg({ action = "undo", args = {}, focused = true }) end
+        S.listed, S.focusAnswer = {}, false
+        undo()
+        T.ok(T.lastPost("error").text == "The plug-in window was closed. Please open it again, then press @KEY@ again.",
+          T.lastPost("error").text)
+        S.listed, S.focusErr = { W }, T.E("hidden", "the window is hidden")
+        undo()
+        T.ok(T.lastPost("error").text == "Undo: VPS Avenger's window would not come to the front", T.lastPost("error").text)
+        S.focusErr, S.focusAnswer = nil, true
+        -- Closed — the way back taken, Avenger in front again — and then shown by the module itself:
+        -- no place held.
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageClosed("user")
+        T.event()
+        T.page().page:show({ focus = true })
+        T.event()
+        undo()
+        T.ok(T.lastPost("error").text == "Undo: the page was not opened from VPS Avenger; press the page key there",
+          T.lastPost("error").text .. "\n" .. T.dump())
+        T.ok(#S.clicks == clicks, "nothing clicked")
+    "##.replace("@KEY@", MAC_KEY).as_str());
+}
+
+/// While the warning box holds the slot — the ring's Initialize waiting on its box — a trip's
+/// overlay is the box (the runtime's `trip.overlay`), which has no menu tests: no menu choice is
+/// asked of it, where O:chooseMenuItem and trip:afterMenu raise, and the trip ends with the page
+/// told the menu cannot be seen here. Every action that chooses in a menu — MENU's items, the redo
+/// list, the size list, and a menu of src/act.luau's — clicks nothing and raises nothing.
+#[test]
+fn a_menu_choice_with_the_warning_box_up_is_not_asked_and_the_page_is_told() {
+    run_mac(r##"
+        local S = T.S
+        local header, box = T.avengerAt80("Init Preset")
+        T.choose(header, 7, 490, 116, 192, 96)
+        T.poll(500)
+        T.answer(T.lastRead("vps-avenger dialog"), T.boxReading("Are you sure?"))
+        T.event()
+        T.ok(box.active and not header.active, "the box holds the slot")
+        local A = S.included["modules/vps-avenger/src/actions.luau"][1]
+        local Ac = S.included["modules/vps-avenger/src/act.luau"][1]
+        T.ok(Ac.menuHere(header) and not Ac.menuHere(box), "the header alone has the menu tests")
+        -- A trip of the page's whose overlay is the box: inPlugin runs the act at once, as a handler.
+        local function onTheBox(run)
+          local ended
+          local trip = { live = true, inFront = function() return true end, done = function(_, r) ended = r end }
+          local o = { inPlugin = function(_, spec) T.handled(spec.act, box, trip); return true end }
+          local clicks = #S.clicks
+          run(o, trip)
+          T.ok(#S.clicks == clicks, "nothing clicked")
+          return ended and (ended.error or ended.sentence)
+        end
+        for _, action in ipairs({ "pick_load_preset", "pick_save_preset_as", "pick_initialize_preset", "redo_menu", "set_zoom" }) do
+          local said = onTheBox(function(o) A.HANDLERS[action](o, { percent = 100 }) end)
+          T.ok(said == "the menu cannot be seen here; nothing was chosen", action .. ": " .. tostring(said))
+        end
+        -- src/act.luau's menu, after its read before the click.
+        local said = onTheBox(function(_, trip)
+          local got
+          T.handled(Ac.run, box, { label = "a menu", part = "strip",
+            decide = function() return { at = { 300, 100 }, menu = { item = { 310, 120 } } } end,
+            answer = function() return {} end }, function(r) got = r end, trip)
+          trip.done(trip, got)
+        end)
+        T.ok(said == "the menu cannot be seen here; nothing was chosen", "act.luau: " .. tostring(said))
+        T.ok(T.count("[avenger] [act] 'a menu': nothing chosen — overlay 'VPS Avenger warning' has no menu tests") == 1, T.dump())
     "##);
 }
 

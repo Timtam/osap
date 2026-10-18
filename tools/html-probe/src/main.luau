@@ -216,7 +216,7 @@ local keyed = tool
 
 -- The plug-in window the page was last shown beside, as a window table.
 local plugin = nil
--- A show that answered "not ready yet": shown again once the page is ready.
+-- A show that answered `not_ready`: shown again once the page is ready.
 local pending = nil
 -- The show whose "page has the focus" is still to come.
 local measuring = nil
@@ -299,10 +299,10 @@ local function frontWords()
 end
 
 -- A show that answered `true`: whether it put the page over part of the plug-in window — no room
--- beside it, a maximised window say. Said once for a run of such shows, and in words for the
--- result.
-local function overWords(note)
-  if note ~= "over the rectangle to avoid" then
+-- beside it, a maximised window say: the partial answer, `true` with an error value beside it
+-- (`too_large`, docs/api/gui.md). Said once for a run of such shows, and in words for the result.
+local function overWords(err)
+  if err == nil then
     overSaid = false
     return ""
   end
@@ -321,7 +321,7 @@ end
 -- succeeds ends one still waiting for its build.
 local function showBeside(rec, p, via, t0, after, replaces)
   local wasShown = rec.page:isShown()
-  local ok, why = rec.page:show({ focus = true, avoid = p.bounds })
+  local ok, err = rec.page:show({ focus = true, avoid = p.bounds })
   local ms = host.now() - t0
   if ok then
     pending = nil
@@ -333,7 +333,7 @@ local function showBeside(rec, p, via, t0, after, replaces)
       replaces.page:hide()
     end
     measuring = { via = via, t0 = t0, after = after }
-    local over = overWords(why)
+    local over = overWords(err)
     local front = frontWords()
     if front == "the page" then
       result("%s: accepted, %d ms after %s; in front: the page%s", via, ms, after, over)
@@ -342,7 +342,7 @@ local function showBeside(rec, p, via, t0, after, replaces)
     else
       result("%s: ACCEPTED BUT NOT IN FRONT, %d ms after %s; in front: %s%s", via, ms, after, front, over)
     end
-  elseif why == "not ready yet" then
+  elseif err.code == host.errors.NOT_READY then
     pending = { via = via, t0 = t0, after = after, plugin = p, rec = rec, replaces = replaces }
     log("%s: the page is being built; it is shown when it is ready", via)
     say("Building the page.")
@@ -352,8 +352,8 @@ local function showBeside(rec, p, via, t0, after, replaces)
     if replaces and replaces ~= rec and not wasShown and rec.page:isShown() then
       rec.page:hide()
     end
-    result("%s: not shown, %s, %d ms after %s; in front: %s", via, tostring(why), ms, after, frontWords())
-    say("Page not shown: " .. tostring(why))
+    result("%s: not shown, %s, %d ms after %s; in front: %s", via, tostring(err), ms, after, frontWords())
+    say("Page not shown: " .. tostring(err))
   end
 end
 
@@ -1261,14 +1261,16 @@ local function onReady(rec)
   end
 end
 
-local function onClose(rec, why)
-  if why == "failed" then
+-- onClose(how, err): "user", or "failed" with the error value that says what failed.
+local function onClose(rec, how, err)
+  if how == "failed" then
     rec.ready = false
   end
+  local words = err and (how .. " — " .. err) or how
   if rec == tool then
-    result("the page was closed: %s", tostring(why))
+    result("the page was closed: %s", words)
   else
-    result("the %s was closed: %s", rec.words, tostring(why))
+    result("the %s was closed: %s", rec.words, words)
   end
 end
 
@@ -1286,8 +1288,8 @@ for _, rec in ipairs(pages) do
     onReady = function()
       onReady(rec)
     end,
-    onClose = function(why)
-      onClose(rec, why)
+    onClose = function(how, err)
+      onClose(rec, how, err)
     end,
   })
 end
@@ -1394,24 +1396,24 @@ local function onUnfocusedKey()
   if not pluginFor(via) then
     return
   end
-  local ok, why = rec.page:show({ focus = false, avoid = plugin.bounds })
+  local ok, err = rec.page:show({ focus = false, avoid = plugin.bounds })
   local ms = host.now() - t0
   if ok then
     result("%s: the %s shown, %d ms after the key's callback; in front: %s", via, rec.words, ms, frontWords())
-  elseif why == "not ready yet" then
+  elseif err.code == host.errors.NOT_READY then
     log("%s: the %s is being built; it is not shown by itself when it is ready", via, rec.words)
     say("Building the page. Press the key again once it is ready.")
   else
-    result("%s: the %s not shown, %s, %d ms after the key's callback; in front: %s", via, rec.words, tostring(why), ms, frontWords())
-    say("Page not shown: " .. tostring(why))
+    result("%s: the %s not shown, %s, %d ms after the key's callback; in front: %s", via, rec.words, tostring(err), ms, frontWords())
+    say("Page not shown: " .. tostring(err))
   end
 end
 
 if KEY_UNFOCUSED then
-  -- A capture raises on a Mac while the event tap cannot be made (no Accessibility grant): said,
-  -- and the rest of the probe goes on.
-  local ok, err = pcall(host.keys.capture, KEY_UNFOCUSED, onUnfocusedKey)
-  if not ok then
+  -- A capture answers nil and an error value on a Mac while the event tap cannot be made (no
+  -- Accessibility grant), and captures nothing: said, and the rest of the probe goes on.
+  local token, err = host.keys.capture(KEY_UNFOCUSED, onUnfocusedKey)
+  if not token then
     log("%s could not be captured: %s", host.keys.describe(KEY_UNFOCUSED, { style = "short" }), tostring(err))
   end
 end
@@ -1526,9 +1528,9 @@ host.window.onTrigger({}, function(w)
   -- now, hidden, so that WebView2's cold start is over before the first key. Not the application
   -- window, which only W6 again needs: its build would hold the event loop in every run (W8).
   if not tool.ready then
-    local ok, why = tool.page:prepare()
-    if not ok and why ~= "not ready yet" then
-      log("the page could not be prepared: %s", tostring(why))
+    local ok, err = tool.page:prepare()
+    if not ok and err.code ~= host.errors.NOT_READY then
+      log("the page could not be prepared: %s", tostring(err))
     end
   end
   if not host.settings.get(AUTO) then

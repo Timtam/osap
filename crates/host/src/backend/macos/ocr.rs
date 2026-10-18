@@ -62,6 +62,7 @@ use objc2_vision::{
 
 use crate::backend::paddle_ocr::{self, Polled, Qos};
 use crate::backend::{CaptureSource, OcrLine, OcrText, OcrThread, OcrWord, Recognise};
+use crate::errors::{ocr as reasons, HostError};
 use crate::ocr::cost::{self, Answered, Capture, Check, CheckWait, PaddleWait, Pass, Stage, Waited};
 use crate::ocr::ladder::{Answer, Level, PaddleUse, Path, Shape};
 use crate::ocr::merge::{self, Pick};
@@ -178,7 +179,7 @@ fn recognize_captured(
     capture: Capture,
     debug: bool,
     ladder: &Ladder,
-) -> Result<OcrText, String> {
+) -> Result<OcrText, HostError> {
     recognize_noted(native, scale, x, y, w, h, lang, started, capture, debug, ladder).map(|(text, _)| text)
 }
 
@@ -204,7 +205,10 @@ impl Note {
     }
 }
 
-/// [`recognize_captured`], and what the read did ([`Note`]).
+/// [`recognize_captured`], and what the read did ([`Note`]). Two failures are answered rather than
+/// read as nothing (D33 of the typed-errors plan): pixels CoreGraphics could not read back, and a
+/// read whose answer was a pass Vision refused — the first accurate pass, or the last rung the
+/// ladder climbed to — with Vision's reason. Both are said in the log once a thread, as before.
 #[allow(clippy::too_many_arguments)]
 fn recognize_noted(
     native: &CGImage,
@@ -218,7 +222,7 @@ fn recognize_noted(
     capture: Capture,
     debug: bool,
     ladder: &Ladder,
-) -> Result<(OcrText, Note), String> {
+) -> Result<(OcrText, Note), HostError> {
     let nw = CGImage::width(Some(native));
     let nh = CGImage::height(Some(native));
     // How long Vision has been idle, taken before this read's own passes, and the journal they
@@ -250,7 +254,7 @@ fn recognize_noted(
                 "ocr-convert",
                 "ocr: could not read the captured pixels back out of CoreGraphics",
             );
-            return Ok((empty(), Note::none()));
+            return Err(HostError::of(&reasons::NOT_READ_BACK));
         };
         if debug {
             // One file per region and content, named for both, rather than one file every read
@@ -328,6 +332,8 @@ fn recognize_noted(
 
     let Climbed { paddle, crop, agreed, today, compared } = climbed;
     let by_paddle = paddle.is_some();
+    // Nothing answered: neither a pass of Vision's nor the neural recogniser.
+    let unanswered = !by_paddle && result.is_none();
     let (text, words, lines, fallback) = match paddle {
         // The neural recogniser's text, which locates nothing: no words and no lines, and the
         // content crop it read as the box, as Windows' fallback answers.
@@ -342,6 +348,9 @@ fn recognize_noted(
     // The last pass that could answer: the fast pass made only for the counts, right after the
     // first, never does.
     let last = passes.iter().rev().find(|p| p.stage != Stage::FastCompared);
+    // The answer was that pass, and Vision refused it: no reading of nothing.
+    let refused = unanswered && last.is_some_and(|p| p.words.is_none());
+    let refusal = refusal_take();
     let answer = if by_paddle { Answer::Paddle } else { Answer::of_last_pass(last.map(|p| (p.stage, p.words))) };
     let answered = Answered {
         path: Path::of(answer),
@@ -372,6 +381,9 @@ fn recognize_noted(
         // Vision's ladder read nothing where the recogniser answered alone.
         let ladder_text = if by_paddle { "" } else { text.as_str() };
         neural.count(answered.path, ladder_text, &passes, compared, (x, y, w, h), debug.then_some((rgba.as_slice(), px_w, px_h)));
+    }
+    if let (true, Some(why)) = (refused, refusal) {
+        return Err(HostError::with(&reasons::VISION_REFUSED, format!("the text recogniser refused the request: {why}")));
     }
     let note = Note { passes, answer, agreed, today };
     Ok((OcrText { text, words, lines, fallback, skipped: false }, note))
@@ -718,8 +730,8 @@ impl Rungs<'_, '_> {
     ///    and here the recogniser is the ladder's last resort. It read "o" for sforzando's "0" on CI's
     ///    macOS 26 Mac, and text on a level meter, where the recogniser reads the digit
     ///    (`ocr-bench`, 2026-10-03).
-    /// 4. When Vision refused the first accurate pass, the read answers nothing, as a refusal always
-    ///    has here, and the recogniser's answer is not used: Windows' read fails then.
+    /// 4. When Vision refused the first accurate pass, the read fails with Vision's reason
+    ///    (`recognize_noted`), and the recogniser's answer is not used: Windows' read fails then too.
     /// 5. When the ladder read anything, that is the answer, and the recognition is cancelled with
     ///    the read; when it read nothing, the recogniser's text, waited for within what is left of
     ///    the budget — its text locates nothing, so the content crop is its box (`merge::pick`). A
@@ -1007,7 +1019,7 @@ pub enum Shot {
     /// Per region, in order: its capture and scale, or `None` when it could not be taken.
     Each(Vec<Option<(CFRetained<CGImage>, f64)>>),
     /// Nothing to read, and why: a snapshot that kept no backing image.
-    Failed(String),
+    Failed(HostError),
 }
 
 impl Default for Shot {
@@ -1099,7 +1111,7 @@ pub fn frames_for_round(
     regions: &[(i32, i32, i32, i32)],
     _src: CaptureSource,
     poll: bool,
-) -> Vec<Result<crate::backend::frame::Frame, String>> {
+) -> Vec<Result<crate::backend::frame::Frame, crate::errors::HostError>> {
     crate::loop_guard::off_loop_screen("a snapshot round");
     regions.iter().map(|&(x, y, w, h)| super::capture::frame(x, y, w, h, poll)).collect()
 }
@@ -1113,7 +1125,7 @@ pub fn shot_of(frame: &crate::backend::frame::Frame, _regions: &[(i32, i32, i32,
     crate::loop_guard::off_loop("a snapshot's pixels for a text read");
     match &frame.native {
         Some(n) => Shot::Shared { big: n.image.clone(), scale: n.scale, origin: (n.on.x, n.on.y) },
-        None => Shot::Failed("this snapshot kept no picture at the display's resolution to read text from".to_string()),
+        None => Shot::Failed(HostError::of(&reasons::NO_DISPLAY_PICTURE)),
     }
 }
 
@@ -1159,7 +1171,7 @@ pub fn recognise_shot(
     shot: &Shot,
     regions: &[(i32, i32, i32, i32)],
     ctx: &Recognise,
-) -> Vec<Result<OcrText, String>> {
+) -> Vec<Result<OcrText, HostError>> {
     crate::loop_guard::off_loop("the recognise stage of a text read");
     let ladder = Ladder { fast_ok: ctx.fast_ok, preempt: ctx.preempt, counts: true, shape: Ladder::shape_now() };
     let debug = crate::appcfg::ocr_debug();
@@ -1194,7 +1206,7 @@ pub fn recognise_shot(
                             drop(buf);
                             r
                         }
-                        None => Err("could not cut this region out of the shared capture".to_string()),
+                        None => Err(HostError::of(&reasons::NOT_CUT)),
                     }
                 }
                 Shot::Failed(why) => Err(why.clone()),
@@ -1202,11 +1214,7 @@ pub fn recognise_shot(
                     Some((native, scale)) => recognize_captured(
                         native, *scale, x, y, w, h, ctx.lang, started, Capture::Apart, debug, &ladder,
                     ),
-                    None => Err(
-                        "screen capture failed — if every read fails, grant this application \
-                         Screen Recording and restart it"
-                            .to_string(),
-                    ),
+                    None => Err(HostError::of(&reasons::MAC_CAPTURE_FAILED)),
                 },
             }
         })
@@ -1521,6 +1529,9 @@ thread_local! {
     static SLOWEST: Cell<Option<f64>> = const { Cell::new(None) };
     /// The passes of the recognition under way on this thread, while one is (`journal_open`).
     static JOURNAL: RefCell<Option<Vec<Pass>>> = const { RefCell::new(None) };
+    /// Vision's reason for refusing the last pass of that recognition that could answer it — any
+    /// but the one made only for the counts: what a read whose answer that pass was fails with.
+    static REFUSAL: RefCell<Option<String>> = const { RefCell::new(None) };
     /// When a slow read's line was last said on this thread, per region.
     static SLOW_SAID: RefCell<HashMap<(i32, i32, i32, i32), Instant>> = RefCell::new(HashMap::new());
 }
@@ -1544,9 +1555,17 @@ fn idle_now() -> cost::Before {
     }
 }
 
-/// Starts writing down this thread's passes, forgetting any a read that ended early left.
+/// Starts writing down this thread's passes, forgetting any a read that ended early left, and
+/// the refusal of one.
 fn journal_open() {
     JOURNAL.with(|j| *j.borrow_mut() = Some(Vec::new()));
+    REFUSAL.with(|r| *r.borrow_mut() = None);
+}
+
+/// The reason Vision refused the last pass since `journal_open` that could answer the read, if it
+/// refused it; taken, so the next read starts without it.
+fn refusal_take() -> Option<String> {
+    REFUSAL.with(|r| r.borrow_mut().take())
 }
 
 /// The passes written down since `journal_open`, and the writing stopped.
@@ -1743,6 +1762,9 @@ fn run_vision(
         Ok(read) => Some(read),
         Err(why) => {
             warn_once("ocr-perform", &format!("ocr: Vision refused the request — {why}"));
+            if stage != Stage::FastCompared {
+                REFUSAL.with(|r| *r.borrow_mut() = Some(why));
+            }
             None
         }
     };

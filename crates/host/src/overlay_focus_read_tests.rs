@@ -371,7 +371,7 @@ fn blank_none_and_failed_say_what_an_empty_read_said() {
         assert(T.last().text == "Preset, button, Alt+P, no text", T.last().text)
         assert(T.count('= "" (region 34,7 180x15, 0 ms, 0 words, en-US): the recogniser read nothing; spoken') == 1, T.dump())
         T.tab(); T.tab()
-        T.answerList(3, { value = { status = "failed", error = "screen capture failed" } })
+        T.answerList(3, { value = { status = "failed", error = T.E("failed", "screen capture failed") } })
         assert(T.last().text == "Preset, button, Alt+P, cannot be read now", T.last().text)
         assert(T.count('= "" (region 34,7 180x15, 0 ms, 0 words, en-US): the read failed (screen capture failed); spoken') == 1,
           T.dump())

@@ -47,13 +47,15 @@ local ME = "A"
 return {
   activate = function()
     -- The return is the registration's id whether or not this module wins the combination:
-    -- a losing claim is recorded and honoured the moment the holder gives it up. Before the
-    -- change it returned 0 here and the callback was dropped.
-    local id = host.hotkey.register(KEY, function()
+    -- a losing claim is recorded and honoured the moment the holder gives it up, and an error
+    -- value beside the id says it is not held now (`taken`, naming the module that holds it).
+    -- Before the change it returned 0 here and the callback was dropped.
+    local id, err = host.hotkey.register(KEY, function()
       -- One letter, because the question is only ever "which of the two answered".
       host.speech.output(ME)
     end)
-    host.log.info(("[hotkey-test-%s] claimed %s, id %s"):format(ME, KEY, tostring(id)))
+    host.log.info(("[hotkey-test-%s] claimed %s, id %s%s"):format(ME, KEY, tostring(id),
+      err and (", not held now: " .. err) or ""))
     host.speech.output("hotkey test " .. ME .. " loaded")
   end,
 }

@@ -77,6 +77,10 @@ use crate::task_tests::{worker, Fake};
 
 pub(crate) const RUNTIME: &str = include_str!("../../../modules/overlay-runtime/src/main.luau");
 
+/// The runtime's own reasons, which its `host.include("src/errors.luau")` reads: the scripted host
+/// answers that include with this file, run once per VM, as the host's include is.
+pub(crate) const RUNTIME_ERRORS: &str = include_str!("../../../modules/overlay-runtime/src/errors.luau");
+
 /// The scripted host and the helpers the scenarios use, returned as the table `T`. Shared with
 /// `overlay_host_panel_tests.rs`, which loads it with the window prelude's real matcher.
 pub(crate) const HARNESS: &str = r##"
@@ -235,6 +239,22 @@ function T.snap(region)
   return s
 end
 
+-- An error value of the host's, as a scripted answer gives one: the host's own constructor, so it
+-- is the same read-only table a module gets (docs/api/errors.md).
+function T.E(code, message, detail) return T.host.errors.new(code, message, detail) end
+
+-- Whether `e` is an error value with `code`, and with `message` when one is given: the two a
+-- scenario compares, the code a module compares and the sentence the log shows.
+function T.is(e, code, message)
+  return type(e) == "table" and rawget(e, "code") == code and (message == nil or rawget(e, "message") == message)
+end
+
+-- `e` for an assertion's message: "<code>: <message>" for an error value, tostring otherwise.
+function T.what(e)
+  if type(e) == "table" and rawget(e, "code") ~= nil then return rawget(e, "code") .. ": " .. tostring(e) end
+  return tostring(e)
+end
+
 -- REAPER's titled, shown top-level windows and another application's: what host.window.list
 -- finds, filtered by pid, unless a scenario sets S.listed.
 T.LISTED = { T.MAIN, T.FX, T.OTHER }
@@ -305,11 +325,12 @@ T.host = strict("host", {
     describe = function(spec) return spec end,
     check = function() return { reasons = {} } end,
     capture = function(spec, fn)
-      -- S.captureRaises: the message a capture raises with (a Mac without the Accessibility grant),
-      -- for every spec, or for the specs a table names.
+      -- S.captureRaises: the message of a capture the host cannot make (a Mac without the
+      -- Accessibility grant), for every spec, or for the specs a table names: answered `nil, err`
+      -- with `denied`, nothing registered, as the host answers it.
       local raises = S.captureRaises
       if type(raises) == "table" then raises = raises[spec] end
-      if raises then error(raises, 0) end
+      if raises then return nil, T.E("denied", raises) end
       local id = nextId()
       S.captured[spec] = fn
       S.holding[spec] = id
@@ -331,7 +352,7 @@ T.host = strict("host", {
   element = strict("host.element", {
     type = { Menu = 50009, MenuItem = 50011, Button = 50000, Pane = 50033, Window = 50032 },
     -- S.find (or what S.find(id) says): true, false, or "late" — the plug-in did not answer, which
-    -- the host answers `nil` and why. With a callback (the runtime's menu tests ask so) the answer
+    -- the host answers `nil` and its error value, `timeout`. With a callback (the runtime's menu tests ask so) the answer
     -- is handed to it inside the call, which the runtime takes as it takes one on a later turn —
     -- unless S.findLater is set: then it is kept in S.findsOut until T.answerFinds() hands it over,
     -- as an event of the module, on a later turn, as the host does.
@@ -342,7 +363,7 @@ T.host = strict("host", {
       local v = S.find
       if type(v) == "function" then v = v(id) end
       local why = nil
-      if v == "late" then v, why = nil, "the program did not answer within 1000 ms" end
+      if v == "late" then v, why = nil, T.E("timeout", "the program did not answer within 1000 ms") end
       if cb == nil then return v, why end
       if S.findLater then
         S.findsOut[#S.findsOut + 1] = { cb = cb, v = v, why = why }
@@ -441,7 +462,9 @@ T.host = strict("host", {
     -- the request is accepted, and the window becomes the foreground window when its own thread
     -- gets to it, with its foreground event after — so by default nothing has changed when the
     -- call returns, and T.land() plays the change and its event. S.focusAtOnce makes it inside
-    -- the call, with no event: the less likely case. Declined, nothing changes.
+    -- the call, with no event: the less likely case. Declined, nothing changes, and the host's
+    -- error value comes beside the `false` where the scenario gives one (S.focusErr): the host's
+    -- own answer; a bare `false` is the runtime's fallback for an answer with none.
     focus = function(id)
       S.focusCalls[#S.focusCalls + 1] = id
       if S.focusRaises then error(S.focusRaises, 0) end
@@ -449,6 +472,7 @@ T.host = strict("host", {
         if S.focusAtOnce then S.focusLands(id) else S.landing = id end
       end
       S.epoch += 1
+      if not S.focusAnswer and S.focusErr ~= nil then return false, S.focusErr end
       return S.focusAnswer
     end,
     -- A list of its own on every call, as the host hands one: the runtime adds the focus chain to it.
@@ -491,7 +515,7 @@ T.host = strict("host", {
           "host.screen.pixels: points[" .. i .. "] is not { x, y } in whole numbers")
       end
       if #points == 0 then return {} end
-      if S.pixel == nil then return nil, "screen capture failed" end
+      if S.pixel == nil then return nil, T.E("failed", "screen capture failed") end
       local out = {}
       for i in ipairs(points) do out[i] = S.pixel end
       return out
@@ -1202,6 +1226,23 @@ pub(crate) fn harness(lua: &Lua) -> Table {
     let host: Table = t.get("host").unwrap();
     let ocr: Table = host.raw_get("ocr").unwrap();
     ocr.raw_set("recognize", waits.get::<Function>("recognize").unwrap()).unwrap();
+    // host.errors, the host's own, and the one include the runtime makes.
+    crate::errors_lua::install(lua, &host).expect("host.errors installs");
+    let errors: Table = lua
+        .load(RUNTIME_ERRORS)
+        .set_name("overlay-runtime/src/errors.luau")
+        .eval()
+        .expect("the runtime's reasons load");
+    let include = lua
+        .create_function(move |_, rel: String| {
+            if rel == "src/errors.luau" {
+                Ok(errors.clone())
+            } else {
+                Err(mlua::Error::external(format!("the scripted host includes src/errors.luau only, not '{rel}'")))
+            }
+        })
+        .unwrap();
+    host.raw_set("include", include).unwrap();
     t
 }
 
@@ -3518,7 +3559,7 @@ fn a_landmark_search_that_could_not_look_keeps_the_last_verdict() {
         answer({ x = 300, y = 60, w = 40, h = 12 })
         assert(o.active, "found: " .. T.dump())
         assert(T.count("found at 300,60") == 1, T.dump())
-        local why = "too many image searches waiting for this module (64); the oldest was ended"
+        local why = T.E("too_many", "too many image searches waiting for this module (64); the oldest was ended")
         answer(nil, why)
         assert(o.active, "ended is not lost")
         T.event()
@@ -3530,8 +3571,8 @@ fn a_landmark_search_that_could_not_look_keeps_the_last_verdict() {
         T.event()
         answer({ x = 300, y = 60, w = 40, h = 12 })
         T.event()
-        answer(nil, "the screen capture failed")
-        assert(T.count("could not look") == 2, T.dump())
+        answer(nil, T.E("failed", "screen capture failed"))
+        assert(T.count("could not look") == 2 and T.count("could not look (screen capture failed)") == 1, T.dump())
         -- Made, and missed in the sticky box: widened; missed in the whole plug-in: lost.
         T.event()
         answer(nil)

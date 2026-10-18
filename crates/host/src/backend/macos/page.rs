@@ -644,7 +644,7 @@ fn closed_by_user(window: &NSWindow, state: &PageState) {
     if let Some(wk) = state.webview() {
         wk.setHidden(true);
     }
-    push(PageEvent::Closed { page: state.page, build: state.build, why: "user" });
+    push(PageEvent::Closed { page: state.page, build: state.build, why: "user", detail: None });
 }
 
 /// A key equivalent the page and WebKit left unhandled: the host's table (`webview::mac_key_of`),
@@ -1216,7 +1216,8 @@ pub(crate) fn build(spec: &BuildSpec, rules: &WKContentRuleList) -> Result<Nativ
                     "it went to {url}, which is not a file of its own and could not be refused — the page is taken \
                      down, and the next show builds it again"
                 ));
-                push(PageEvent::Closed { page, build, why: "failed" });
+                let detail = format!("it went to {url}, which is not a file of its own and could not be refused");
+                push(PageEvent::Closed { page, build, why: "failed", detail: Some(detail) });
             }
         })
         .with_on_web_content_process_terminate_handler(move || {
@@ -1224,7 +1225,8 @@ pub(crate) fn build(spec: &BuildSpec, rules: &WKContentRuleList) -> Result<Nativ
                 "gui",
                 &format!("page '{gone_title}': its WebKit content process ended — the page is gone, and the next show builds it again"),
             );
-            push(PageEvent::Closed { page, build, why: "failed" });
+            let detail = "its WebKit content process ended".to_string();
+            push(PageEvent::Closed { page, build, why: "failed", detail: Some(detail) });
         })
         .with_new_window_req_handler(move |uri, _| {
             win_refusals.say(&format!("a new window for {uri} was refused"));

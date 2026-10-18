@@ -9,9 +9,10 @@
 //! the callback, two are `opts` and the callback — which must be a function then, a `nil` raising —
 //! and a third raises. With a callback the call returns nothing, at once, and `cb` is called with the
 //! answer on a later turn of the event loop, as a handler of the module; without one the call
-//! returns the answer itself. The answer is the same either way: the call's value, or `nil` and why
-//! when the program did not answer — never a "no" made of that. A press answers `true`, or `false`
-//! and why. A dump answers its list, and why it is not all of the tree when it is not.
+//! returns the answer itself. The answer is the same either way: the call's value, or `nil` and an
+//! error value saying why when the program did not answer — never a "no" made of that. A press
+//! answers `true`, or `false, err`. A dump answers its list, and when it is not all of the tree the
+//! error value that says why beside it: a partial answer (docs/api/errors.md).
 //!
 //! **`opts.key`.** A question with a key takes out the module's questions with that key that have
 //! not been asked yet — whether it is answered from the epoch's store, waited for, or asked with a
@@ -36,7 +37,7 @@ use crate::logging;
 use crate::ocr::lua::owner_of;
 use crate::ocr::types::current_priority;
 use crate::vm_guard::host_call;
-use crate::{acting, describe_value, dump_node_to_table, focus_step_table, Shared};
+use crate::{acting, describe_value, dump_node_to_table, errors_lua, focus_step_table, Shared};
 
 /// What follows a call's own arguments: the question's `opts.key`, and the callback.
 pub(crate) struct Tail {
@@ -146,10 +147,10 @@ fn point(lua: &Lua, (x, y): (i32, i32)) -> mlua::Result<Value> {
 }
 
 /// What a call returns, and its callback is called with, for `outcome`: the answer — `nil` for
-/// "nothing there" — or, when the program did not answer, `nil` and why. A press: `true`, or
-/// `false` and why. A dump: its list, and why it is not all of the tree when it is not.
+/// "nothing there" — or, when the program did not answer, `nil, err`. A press: `true`, or
+/// `false, err`. A dump: its list, `{}, err` when nothing was read, and its list so far and the
+/// error value that says why when it is not all of the tree — a partial answer.
 pub(crate) fn values(lua: &Lua, ask: &ElementAsk, outcome: &ElementOutcome) -> mlua::Result<MultiValue> {
-    let why = |s: &str| -> mlua::Result<Value> { Ok(Value::String(lua.create_string(s)?)) };
     let one = |v: Value| MultiValue::from_vec(vec![v]);
     let answer = match outcome {
         Err(f) => {
@@ -158,7 +159,7 @@ pub(crate) fn values(lua: &Lua, ask: &ElementAsk, outcome: &ElementOutcome) -> m
                 ElementAsk::Dump { .. } | ElementAsk::RawDump { .. } => Value::Table(lua.create_table()?),
                 _ => Value::Nil,
             };
-            return Ok(MultiValue::from_vec(vec![first, why(&f.why)?]));
+            return errors_lua::with_error(lua, first, &f.why);
         }
         Ok(a) => a,
     };
@@ -186,10 +187,7 @@ pub(crate) fn values(lua: &Lua, ask: &ElementAsk, outcome: &ElementOutcome) -> m
             for (i, n) in nodes.iter().enumerate() {
                 arr.set(i + 1, dump_node_to_table(lua, n.clone())?)?;
             }
-            match stopped {
-                Some(s) => MultiValue::from_vec(vec![Value::Table(arr), why(s)?]),
-                None => one(Value::Table(arr)),
-            }
+            errors_lua::answer(lua, Value::Table(arr), stopped.as_ref())?
         }
         ElementAnswer::Step(s) => one(match s {
             Some(step) => Value::Table(focus_step_table(lua, step.clone())?),
@@ -293,7 +291,7 @@ fn put(sh: &Rc<Shared>, lua: &Lua, idx: usize, ask: ElementAsk, tail: Tail) -> m
 /// Puts module `idx`'s `host.element` on `host`.
 pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) -> mlua::Result<()> {
     let uia = lua.create_table()?;
-    // host.element.find(hwnd, name, controlType, opts?, cb?) -> true | false | nil, why — does the
+    // host.element.find(hwnd, name, controlType, opts?, cb?) -> true | false | nil, err — does the
     // window's tree hold an element with that Name and ControlType? (Plugin identity.)
     let sh = shared.clone();
     uia.set(
@@ -352,7 +350,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
         types.set(name, id)?;
     }
     uia.set("type", types)?;
-    // host.element.findAny(hwnd, names, types, opts?, cb?) -> index | nil | nil, why — "is any of
+    // host.element.findAny(hwnd, names, types, opts?, cb?) -> index | nil | nil, err — "is any of
     // these names present as any of these control types?", the shape a plugin-identity check
     // takes ("Kontakt 8" as Window OR Pane). One tree traversal per NAME rather than one per
     // name×type pair, and it returns WHICH name matched (1-based), so a caller can read the
@@ -366,7 +364,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
             put(&sh, lua, idx, ElementAsk::FindAny { hwnd, names, types }, tail)
         })?,
     )?;
-    // host.element.locate(hwnd, name, controlType, opts?, cb?) -> { x, y } | nil | nil, why —
+    // host.element.locate(hwnd, name, controlType, opts?, cb?) -> { x, y } | nil | nil, err —
     // the screen centre of the matching element, to click it. For driving plugin UI via UIA.
     let sh = shared.clone();
     uia.set(
@@ -378,7 +376,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
         })?,
     )?;
     // host.element.locateVia(hwnd, viaName, viaType, name, controlType, opts?, cb?) -> { x, y } |
-    // nil | nil, why. Like locate, but descends into a container element (viaName/viaType) first
+    // nil | nil, err. Like locate, but descends into a container element (viaName/viaType) first
     // and searches within it — reaches a plugin's UI that hangs off an identity pane as a nested
     // UIA fragment (a DAW-embedded Kontakt). Ports ReaHotkey's two-level find.
     let sh = shared.clone();
@@ -393,7 +391,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
         )?,
     )?;
     // host.element.pluginLocate(hwnd, containerName, name, controlType, opts?, cb?) -> { x, y } |
-    // nil | nil, why. ReaHotkey's GetPluginUIAElement + FindElement: find the element that IS the
+    // nil | nil, err. ReaHotkey's GetPluginUIAElement + FindElement: find the element that IS the
     // plugin (containerName, Window/Pane, QuickWindow class preferred) and search within it over
     // the RAW tree — the only view that reaches a DAW-embedded plugin's hosted Qt UI.
     let sh = shared.clone();
@@ -407,7 +405,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
             },
         )?,
     )?;
-    // host.element.stateProbe(hwnd, container, name, ctype, opts?, cb?) -> table | nil | nil, why
+    // host.element.stateProbe(hwnd, container, name, ctype, opts?, cb?) -> table | nil | nil, err
     // — what a named element says about its OWN state, rather than what its control type implies.
     let sh = shared.clone();
     uia.set(
@@ -420,7 +418,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
             },
         )?,
     )?;
-    // host.element.dump(hwnd, opts?, cb?) -> { {depth, name, class, ctype, bounds}, … }, why? —
+    // host.element.dump(hwnd, opts?, cb?) -> { {depth, name, class, ctype, bounds}, … }, err? —
     // diagnostic condition-based dump, for discovering plugin identity properties.
     let sh = shared.clone();
     uia.set(
@@ -443,7 +441,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
         })?,
     )?;
     // host.element.classNavPoint(hwnd, className, ctype, child, sibling, opts?, cb?) -> {x,y} |
-    // nil | nil, why — click-point of the element reached from the first ClassName-contains +
+    // nil | nil, err — click-point of the element reached from the first ClassName-contains +
     // ControlType match by walking `child` (nth child) then `sibling` siblings. Ports
     // ReaHotkey's FindElement(ClassName) + WalkTree(path).Click.
     let sh = shared.clone();
@@ -458,7 +456,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
         )?,
     )?;
     // host.element.focusStep(hwnd, direction, opts?, cb?) -> { name, ctype, index, count,
-    // bounds? } | nil | nil, why — Tab pass-through for a standalone plugin window: SetFocus the
+    // bounds? } | nil | nil, err — Tab pass-through for a standalone plugin window: SetFocus the
     // next (direction>=0) / previous keyboard-focusable descendant relative to the current focus,
     // wrapping at the ends, and return the newly focused element — where it is included, so a
     // caller can read what a stop with no name shows (`focus_step_table`, lib.rs).
@@ -472,7 +470,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
         })?,
     )?;
     // host.element.focusWithin(hwnd, { x, y, w, h }, opts?, cb?) -> { name, ctype } | nil | nil,
-    // why. Gives the keyboard to the first focusable element inside the rectangle — the way into a
+    // err. Gives the keyboard to the first focusable element inside the rectangle — the way into a
     // plugin that publishes elements, without pressing anything at its corner.
     let sh = shared.clone();
     uia.set(
@@ -484,7 +482,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
             put(&sh, lua, idx, ElementAsk::FocusWithin { hwnd, x, y, w, h }, tail)
         })?,
     )?;
-    // host.element.press(hwnd, name, controlType, opts?, cb?) -> true | false, why — or nothing
+    // host.element.press(hwnd, name, controlType, opts?, cb?) -> true | false, err — or nothing
     // with a callback. The element's own action (Invoke, Toggle, the default action), the keyboard
     // focus left where it is (backend/uia.rs). Noted as acting, and the input epoch turned over,
     // before it is asked, as a click is.
@@ -529,7 +527,10 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
 mod tests {
     use super::*;
     use crate::backend::{DumpNode, ElementFailure, FocusBounds, FocusStep};
+    use crate::errors::{element, HostError};
 
+    /// The values, one after another: a table by its fields, sorted, and an error value as
+    /// `<code> message`.
     fn shown(lua: &Lua, mv: MultiValue) -> String {
         lua.globals().set("v", lua.create_sequence_from(mv.clone()).unwrap()).unwrap();
         lua.globals().set("n", mv.len()).unwrap();
@@ -537,6 +538,7 @@ mod tests {
             r#"
             local function show(x)
               if type(x) ~= "table" then return tostring(x) end
+              if getmetatable(x) ~= nil then return "<" .. x.code .. "> " .. tostring(x) end
               local keys = {}
               for k in pairs(x) do keys[#keys + 1] = tostring(k) end
               table.sort(keys)
@@ -554,12 +556,12 @@ mod tests {
     }
 
     fn late() -> ElementOutcome {
-        Err(ElementFailure { why: "the program did not answer within 1000 ms".into(), unanswered: true })
+        Err(ElementFailure { why: HostError::of(&element::TIMEOUT), unanswered: true })
     }
 
-    /// What a module is handed, call by call: the answer, `nil` for nothing there — and `nil` and
-    /// why where the program did not answer, which is never `false`; a press's `false` and why; a
-    /// dump's list, and why it is not all of the tree.
+    /// What a module is handed, call by call: the answer, `nil` for nothing there — and `nil, err`
+    /// where the program did not answer, which is never `false`; a press's `false, err`; a dump's
+    /// list, and beside it the error value that says why it is not all of the tree.
     #[test]
     fn an_answer_is_its_value_and_not_known_is_nil_and_why() {
         let lua = Lua::new();
@@ -567,11 +569,11 @@ mod tests {
         let show = |ask: &ElementAsk, o: ElementOutcome| shown(&lua, values(&lua, ask, &o).unwrap());
         assert_eq!(show(&find, Ok(ElementAnswer::Found(true))), "true");
         assert_eq!(show(&find, Ok(ElementAnswer::Found(false))), "false");
-        assert_eq!(show(&find, late()), "nil the program did not answer within 1000 ms");
+        assert_eq!(show(&find, late()), "nil <timeout> the program did not answer within 1000 ms");
         let any = ElementAsk::FindAny { hwnd: 1, names: vec!["a".into()], types: vec![50032] };
         assert_eq!(show(&any, Ok(ElementAnswer::Index(Some(2)))), "2");
         assert_eq!(show(&any, Ok(ElementAnswer::Index(None))), "nil");
-        assert_eq!(show(&any, late()), "nil the program did not answer within 1000 ms");
+        assert_eq!(show(&any, late()), "nil <timeout> the program did not answer within 1000 ms");
         let locate = ElementAsk::Locate { hwnd: 1, name: "Play".into(), ctype: 50000 };
         assert_eq!(show(&locate, Ok(ElementAnswer::Point(Some((10, 20))))), "{x=10,y=20}");
         assert_eq!(show(&locate, Ok(ElementAnswer::Point(None))), "nil");
@@ -583,20 +585,28 @@ mod tests {
         let one = "{1={bounds={h=4,w=3,x=1,y=2},class=,ctype=50000,depth=2,name=FILE}}";
         assert_eq!(show(&dump, Ok(ElementAnswer::Nodes(vec![node.clone()], None))), one);
         assert_eq!(
-            show(&dump, Ok(ElementAnswer::Nodes(vec![node], Some("the program is gone".into())))),
-            format!("{one} the program is gone")
+            show(&dump, Ok(ElementAnswer::Nodes(vec![node.clone()], Some(HostError::of(&element::PROGRAM_GONE))))),
+            format!("{one} <gone> the program is gone"),
+            "the list so far, and why: a partial answer"
         );
-        assert_eq!(show(&dump, late()), "{} the program did not answer within 1000 ms", "a list, empty, and why");
+        let cut = HostError::with(&element::DUMP_CUT, "the tree holds 2400 elements, more than the 2000 a dump lists".into());
+        assert_eq!(
+            show(&dump, Ok(ElementAnswer::Nodes(vec![node], Some(cut)))),
+            format!("{one} <too_large> the tree holds 2400 elements, more than the 2000 a dump lists")
+        );
+        assert_eq!(show(&dump, late()), "{} <timeout> the program did not answer within 1000 ms", "a list, empty, and why");
         let step = ElementAsk::FocusStep { hwnd: 1, direction: 1 };
         let landed = FocusStep { name: "FILE".into(), ctype: 50000, index: 1, count: 3, bounds: FocusBounds::new(1.0, 2.0, 3.0, 4.0) };
         assert_eq!(show(&step, Ok(ElementAnswer::Step(Some(landed)))), "{bounds={h=4,w=3,x=1,y=2},count=3,ctype=50000,index=1,name=FILE}");
-        assert_eq!(show(&step, late()), "nil the program did not answer within 1000 ms");
+        assert_eq!(show(&step, late()), "nil <timeout> the program did not answer within 1000 ms");
         let within = ElementAsk::FocusWithin { hwnd: 1, x: 0, y: 0, w: 1, h: 1 };
         assert_eq!(show(&within, Ok(ElementAnswer::Within(Some(("Search".into(), 50004))))), "{ctype=50004,name=Search}");
-        assert_eq!(show(&within, late()), "nil the program did not answer within 1000 ms");
+        assert_eq!(show(&within, late()), "nil <timeout> the program did not answer within 1000 ms");
         let press = ElementAsk::Press { hwnd: 1, name: "Bypass".into(), ctype: 50000 };
         assert_eq!(show(&press, Ok(ElementAnswer::Pressed)), "true");
-        assert_eq!(show(&press, late()), "false the program did not answer within 1000 ms");
+        assert_eq!(show(&press, late()), "false <timeout> the program did not answer within 1000 ms");
+        let refused = Err(ElementFailure { why: HostError::of(&element::CANNOT_PRESS), unanswered: false });
+        assert_eq!(show(&press, refused), "false <refused> the element cannot be pressed");
     }
 
     /// `opts?, cb?`, counted as recognize counts them: neither; `opts` alone, `nil` included; the

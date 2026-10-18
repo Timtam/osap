@@ -244,6 +244,7 @@ use anyhow::{Context, Result};
 use mlua::{Function, IntoLuaMulti, Lua, LuaSerdeExt, RegistryKey, Table};
 
 use backend::{Backend, ControlInfo, HostEvents, MouseButton, WinInfo};
+use errors::HostError;
 use image_search::{ImageResult, ImageTask};
 use mailbox::{Event, Opened};
 use module_manifest::LoadedModule;
@@ -940,7 +941,7 @@ impl Shared {
     ///
     /// For a hotkey, called for the first refusal only: `refresh_hotkeys` tries the claim again
     /// at every register and unregister, and counts a refusal that repeats (`os_refused`).
-    fn report_os_conflict(&self, idx: usize, kind: &str, spec: &str, err: &str) {
+    fn report_os_conflict(&self, idx: usize, kind: &str, spec: &str, err: &dyn std::fmt::Display) {
         let me = self.ids.borrow().get(idx).cloned().unwrap_or_default();
         logging::line(
             "conflict",
@@ -1079,6 +1080,49 @@ fn hotkey_winners(
     best.into_iter().map(|(b, (_, _, id))| (b, id)).collect()
 }
 
+/// Why hotkey `id` of `regs`, just registered and refreshed, is not held at the system now — what
+/// `host.hotkey.register` answers beside its id, a partial answer (D32 of the typed-errors plan) —
+/// or `None` when it is. `None` for a disabled module too (`enabled`): its claims are not made
+/// until it is enabled. `refused` is what that refresh was refused (`Shared::refresh_hotkeys`);
+/// `module_id` names a module, `parked` is the backend's `hotkey_parked`.
+///
+/// Held but parked — a macOS letter no key of the current layout types — is the backend's to say
+/// (`not_supported`). Not held: refused itself, by the system (`taken`); or another claim of the
+/// combination wins, one that holds it — `module '…' holds this combination`, `taken` — or one the
+/// system refused in the same refresh, whose refusal is this one's too.
+fn hotkey_not_held(
+    regs: &HashMap<i32, HotkeyReg>,
+    enabled: impl Fn(usize) -> bool,
+    module_id: impl Fn(usize) -> String,
+    parked: impl Fn(i32) -> Option<HostError>,
+    id: i32,
+    refused: &[(i32, backend::KeyRefusal)],
+) -> Option<HostError> {
+    let reg = regs.get(&id)?;
+    if !enabled(reg.module_idx) {
+        return None;
+    }
+    if reg.live {
+        return parked(id);
+    }
+    // A refusal the backend could not word as an answer — a spec its own parser refused, which
+    // `hotkey_claim_for` lets through only for a spec that does not parse here either — is in the
+    // log and the dialog alone.
+    let answered = |r: &backend::KeyRefusal| match r {
+        backend::KeyRefusal::Answer(e) => Some(e.clone()),
+        backend::KeyRefusal::Mistake(_) => None,
+    };
+    if let Some((_, r)) = refused.iter().find(|(i, _)| *i == id) {
+        return answered(r);
+    }
+    let binding = reg.binding?;
+    if let Some(holder) = regs.values().find(|r| r.binding == Some(binding) && r.live) {
+        let who = module_id(holder.module_idx);
+        return Some(HostError::with(&errors::hotkey::MODULE_HOLDS, format!("module '{who}' holds this combination")));
+    }
+    refused.iter().find(|(i, _)| regs.get(i).is_some_and(|r| r.binding == Some(binding))).and_then(|(_, r)| answered(r))
+}
+
 /// `Shared::on_change`: (setting owner, key) → [(VM owner, VM, callback, registration id)]. The
 /// id is how a queued `Event::Setting` finds its registration again when it runs.
 pub(crate) type OnChangeMap = HashMap<(usize, String), Vec<(usize, Lua, RegistryKey, u64)>>;
@@ -1167,6 +1211,11 @@ fn rollback_on_change(map: &mut OnChangeMap, n: usize) {
     drop_on_change_from(map, |owner| owner >= n);
 }
 
+/// What `host.settings.get`, `set` and `onChange` raise for a key the module never defined.
+fn undefined_setting(key: &str) -> mlua::Error {
+    mlua::Error::external(format!("setting '{key}' was not defined"))
+}
+
 /// Files an `onChange` callback registered from `lua`: under `setting_of`, the module whose
 /// setting it watches, and owned by the module whose VM `lua` is — for a code dependency's
 /// code, the dependent's. The one place an entry is made, so the rule is tested here.
@@ -1205,7 +1254,12 @@ impl Shared {
     /// Release before claim, in two passes. The OS refuses a combination that is already
     /// held, and the previous holder is usually one of ours: claiming first would fail on our
     /// own registration and leave the key belonging to nobody.
-    fn refresh_hotkeys(&self) {
+    ///
+    /// The claims the backend refused in this pass, each with its refusal: what
+    /// `host.hotkey.register` answers beside an id it could not have held now
+    /// ([`hotkey_not_held`](Self::hotkey_not_held)). Every other caller lets them go; the
+    /// refusals are said in the log and the dialog here.
+    fn refresh_hotkeys(&self) -> Vec<(i32, backend::KeyRefusal)> {
         // Who should hold what.
         let want = {
             let map = self.hotkeys.borrow();
@@ -1257,6 +1311,7 @@ impl Shared {
                 reg.live = false;
             }
         }
+        let mut refused_now = Vec::new();
         for (id, spec, idx, foreground) in claim {
             let claimed = if foreground {
                 self.backend.register_foreground_hotkey(id, &spec)
@@ -1294,12 +1349,29 @@ impl Shared {
                     if first {
                         self.report_os_conflict(idx, "hotkey", &spec, &e);
                     }
+                    refused_now.push((id, e));
                 }
             }
         }
         for (idx, owner, spec) in losers {
             self.report_conflict(idx, owner, "hotkey", &spec);
         }
+        refused_now
+    }
+
+    /// Why hotkey `id`, just registered and refreshed, is not held at the system now — what
+    /// `host.hotkey.register` answers beside its id ([`hotkey_not_held`]).
+    fn hotkey_not_held(&self, id: i32, refused: &[(i32, backend::KeyRefusal)]) -> Option<HostError> {
+        let enabled = self.enabled.borrow();
+        let ids = self.ids.borrow();
+        hotkey_not_held(
+            &self.hotkeys.borrow(),
+            |idx| enabled.get(idx).copied().unwrap_or(false),
+            |idx| ids.get(idx).cloned().unwrap_or_default(),
+            |id| self.backend.hotkey_parked(id),
+            id,
+            refused,
+        )
     }
 
     /// Hands the hook the captures of *enabled* modules, in registration order, and their
@@ -1756,7 +1828,7 @@ impl Shared {
             let took = match outcome {
                 Ok(backend::ElementAnswer::Put(took)) => Ok(took),
                 Ok(other) => Err(format!("answered {other:?}")),
-                Err(f) => Err(f.why),
+                Err(f) => Err(f.why.to_string()),
             };
             self.backend.focus_put_answered(landing, took);
         }
@@ -2154,18 +2226,20 @@ impl Shared {
     /// Applies a setting change from the GUI: validates against the schema,
     /// updates the store (auto-persisted on the next tick), and fires onChange.
     fn set_setting(&self, idx: usize, key: &str, value: settings::Value) {
-        let valid = {
+        let refused = {
             let schemas = self.schemas.borrow();
-            schemas
-                .get(idx)
-                .and_then(|m| m.get(key))
-                .map(|f| f.validate(&value).is_ok())
-                .unwrap_or(false)
+            match schemas.get(idx).and_then(|m| m.get(key)) {
+                Some(f) => f.validate(&value).err(),
+                None => Some("it is not defined".to_string()),
+            }
         };
-        if !valid {
+        let id = self.ids.borrow().get(idx).cloned().unwrap_or_else(|| "?".to_string());
+        // Not a module's answer, so only the log says it, where it used to be dropped without a
+        // word.
+        if let Some(why) = refused {
+            logging::line("settings", &format!("{id} {key}: the value {value} from the dialog was not taken: {why}"));
             return;
         }
-        let id = self.ids.borrow()[idx].clone();
         let old = self.store.borrow_mut().set(&id, key, value.clone());
         self.dirty.set(true);
         // A line per change, as the Application settings tab writes for its own: otherwise the log
@@ -2779,6 +2853,59 @@ mod hotkey_conflict_tests {
         regs.clear();
         regs.insert(12, reg(2, true, true));
         assert_eq!(hotkey_target(&regs, on, 0, 1, 5, Some(F8), None), Target::Gone(Gone::TakenOver));
+    }
+
+    /// What `host.hotkey.register` answers beside an id it could not have held now: nothing for a
+    /// claim that holds or a disabled module's; parked, the backend's word; refused by the system,
+    /// its refusal; held by another module, that module named; and lost to a claim the system
+    /// refused in the same refresh, that refusal. A refusal the backend could not word stays in
+    /// the log.
+    #[test]
+    fn a_claim_not_held_now_says_why() {
+        use crate::backend::KeyRefusal;
+        use crate::errors::hotkey;
+        let lua = Lua::new();
+        let reg = |module_idx: usize, binding: Option<(u32, u8)>, live: bool| HotkeyReg {
+            module_idx,
+            lua: lua.clone(),
+            cb: lua.create_registry_value(lua.create_function(|_, ()| Ok(())).unwrap()).unwrap(),
+            spec: "Ctrl+Alt+H".to_string(),
+            binding,
+            live,
+            foreground: false,
+        };
+        let refusal = || HostError::with(&hotkey::REGISTER_REFUSED, "RegisterHotKey failed for 'Ctrl+Alt+H' (already in use by another app?)".into());
+        let parked = HostError::of(&hotkey::PARKED);
+        let not_held = |regs: &HashMap<i32, HotkeyReg>, on: &[bool], parked_id: Option<i32>, id: i32, refused: &[(i32, KeyRefusal)]| {
+            hotkey_not_held(
+                regs,
+                |i| on.get(i).copied().unwrap_or(false),
+                |i| format!("com.example.m{i}"),
+                |i| (Some(i) == parked_id).then(|| HostError::of(&hotkey::PARKED)),
+                id,
+                refused,
+            )
+        };
+        let mut regs: HashMap<i32, HotkeyReg> = HashMap::new();
+        regs.insert(1, reg(0, Some(H), true));
+        assert_eq!(not_held(&regs, &[true], None, 1, &[]), None, "held");
+        assert_eq!(not_held(&regs, &[true], Some(1), 1, &[]), Some(parked.clone()), "held, parked by the backend");
+        regs.insert(2, reg(1, Some(H), false));
+        assert_eq!(
+            not_held(&regs, &[true, true], None, 2, &[]),
+            Some(HostError::with(&hotkey::MODULE_HOLDS, "module 'com.example.m0' holds this combination".into()))
+        );
+        assert_eq!(not_held(&regs, &[true, false], None, 2, &[]), None, "a disabled module's claim is not made");
+        let refused = [(2, KeyRefusal::Answer(refusal()))];
+        assert_eq!(not_held(&regs, &[true, true], None, 2, &refused), Some(refusal()), "its own refusal first");
+        // Nobody holds it: the winner's claim was refused by the system in the same refresh.
+        regs.get_mut(&1).unwrap().live = false;
+        let refused = [(1, KeyRefusal::Answer(refusal()))];
+        assert_eq!(not_held(&regs, &[true, true], None, 2, &refused), Some(refusal()), "the winner's refusal is this one's");
+        assert_eq!(not_held(&regs, &[true, true], None, 2, &[(2, KeyRefusal::Mistake("no".into()))]), None, "a mistake stays in the log");
+        assert_eq!(not_held(&regs, &[true, true], None, 9, &[]), None, "no such claim");
+        regs.insert(3, reg(0, Some(J), false));
+        assert_eq!(not_held(&regs, &[true], None, 3, &[]), None, "nobody else wants J: nothing to say");
     }
 
     /// Ctrl+Alt+H, wanted by two modules.
@@ -7258,6 +7385,14 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
             host_call!("host.keys.capture");
             // The parser's own error, which names the part it could not read.
             let (vk, mask) = backend::parse_key_spec(&spec).map_err(mlua::Error::external)?;
+            // The hook or the tap first: without it no key is captured, so nothing is recorded and
+            // the module is answered `nil, err` — `denied` on a Mac that has not granted
+            // Accessibility, `failed` otherwise (D30 of the typed-errors plan). It used to raise
+            // after the capture was recorded, and the token went with the raise. The next capture
+            // tries again.
+            if let Err(e) = sh.key_backend().watch_keys() {
+                return errors_lua::with_error(lua, mlua::Value::Nil, &e);
+            }
             // No cross-module conflict surfacing here: captured keys are routinely
             // shared by window-scoped overlays (each active only while its own
             // window is focused), so a duplicate is usually legitimate, not a clash.
@@ -7272,8 +7407,7 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
             let key = lua.create_registry_value(cb)?;
             let token = sh.captures().capture(idx, vk, mask, lua.clone(), key);
             sh.refresh_captured();
-            sh.key_backend().watch_keys().map_err(mlua::Error::external)?;
-            Ok(token)
+            one_value(mlua::Value::Integer(token))
         })?,
     )?;
     let sh = h.clone();
@@ -7524,10 +7658,10 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         })?,
     )?;
 
-    // host.speech.use(id | nil) -> boolean ; host.speech.engine() -> id | nil
+    // host.speech.use(id | nil) -> true | false, err ; host.speech.engine() -> id | nil
     //
-    // A module chooses what speaks for IT. Refused when the engine is not there, because
-    // accepting and quietly speaking somewhere else would be a promise not kept. Choosing
+    // A module chooses what speaks for IT. Refused when the engine is not there, with why,
+    // because accepting and quietly speaking somewhere else would be a promise not kept. Choosing
     // costs the engine's opening time on its own thread — 2.0 s for SAPI, 3.5 s for OneCore —
     // which the lines queue behind rather than being lost to.
     // Registered wherever `Speech` can honour them, which since 2026-09-04 is macOS as well.
@@ -7539,9 +7673,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         let sh = shared.clone();
         speech.set(
             "use",
-            lua.create_function(move |_, id: Option<String>| {
+            lua.create_function(move |lua, id: Option<String>| {
                 host_call!("host.speech.use");
-                Ok(sh.speech.use_engine(idx, id.as_deref()))
+                errors_lua::done(lua, &sh.speech.use_engine(idx, id.as_deref()))
             })?,
         )?;
         let sh = shared.clone();
@@ -7579,8 +7713,14 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             // the Mac's own words there (`dialog_key_words_for`). An unparseable spec keeps the
             // author's spelling for the OS to refuse. Both in `hotkey_claim_for`, where the
             // refusal comes first.
-            let (binding, spec) = backend::hotkey_claim_for(backend::KeyOs::CURRENT, &spec)
-                .map_err(mlua::Error::external)?;
+            //
+            // A tap raises: a mistake in the call on every platform. A key this platform keeps or
+            // has no key code for is answered `nil, err` (D31 of the typed-errors plan): the same
+            // spec is fine on the other platform, so it is the platform that decides.
+            let (binding, spec) = match backend::hotkey_claim_for(backend::KeyOs::CURRENT, &spec) {
+                Ok(claim) => claim,
+                Err(refusal) => return hotkey_refused(lua, refusal),
+            };
             let id = sh.alloc_id();
             // Only an ENABLED module actually claims the OS combo and can clash. A
             // disabled (persisted-off) module just records its binding here so a
@@ -7598,8 +7738,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 } else {
                     sh.backend.register_hotkey(id, &spec)
                 };
-                if let Err(e) = claimed {
-                    return Err(mlua::Error::external(e));
+                if let Err(refusal) = claimed {
+                    return hotkey_refused(lua, refusal);
                 }
             }
 
@@ -7624,8 +7764,18 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             );
             // Which also reports the clash, so a module that lost the contest is told once
             // here rather than in two places that could disagree.
-            sh.refresh_hotkeys();
-            Ok(id)
+            let refused = sh.refresh_hotkeys();
+            // The claim stands and is tried again at every later refresh, as it always was; the
+            // module is told beside its id when it is not held now (D32 of the typed-errors plan).
+            // Nothing on a platform without hotkeys could ever hold it, so there it is not kept.
+            match sh.hotkey_not_held(id, &refused) {
+                None => one_value(mlua::Value::Integer(id as i64)),
+                Some(e) if e.reason() == &errors::hotkey::STUB => {
+                    sh.hotkeys.borrow_mut().remove(&id);
+                    errors_lua::with_error(lua, mlua::Value::Nil, &e)
+                }
+                Some(e) => errors_lua::with_error(lua, mlua::Value::Integer(id as i64), &e),
+            }
         })?,
     )?;
     let sh = shared.clone();
@@ -7789,7 +7939,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // (find/findAll/onTrigger via prelude)
     let win = lua.create_table()?;
 
-    // host.window.focus(id) -> boolean
+    // host.window.focus(id) -> true | false, err
     //
     // Brings a window to the front. It exists because of a gap a tester named: on Windows a
     // screen-reader user returns to a plugin's window with OSARA's F6, and macOS offers no
@@ -7797,9 +7947,10 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // DAW can be genuinely hard to get back to. Nothing here could offer one either, because
     // nothing here could focus a window.
     //
-    // Returns whether the system accepted it, and a module must believe that answer: both
-    // platforms can decline, and a module that announces "back in the plugin" when the focus
-    // did not move has told somebody who cannot check that they are somewhere they are not.
+    // Returns whether the system accepted it, and why not when it did not, and a module must
+    // believe that answer: both platforms can decline, and a module that announces "back in the
+    // plugin" when the focus did not move has told somebody who cannot check that they are
+    // somewhere they are not.
     let sh = shared.clone();
     win.set(
         "focus",
@@ -7816,7 +7967,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             // reads share the epoch the hotkey dispatch began, and the answer is the one
             // thing the caller is asking for.
             sh.bump_epoch();
-            Ok(accepted)
+            errors_lua::done(lua, &accepted)
         })?,
     )?;
 
@@ -8170,11 +8321,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "languages",
         lua.create_function(move |lua, ()| { host_call!("host.ocr.languages"); ocr::lua::languages_value(&*sh, lua) })?,
     )?;
-    // host.ocr.resolveLanguage(tag | { tag } | nil) -> string? — what `lang` would read with.
+    // host.ocr.resolveLanguage(tag | { tag } | nil) -> string | nil, err — what `lang` would read
+    // with, or why nothing would.
     let sh = shared.clone();
     ocr.set(
         "resolveLanguage",
-        lua.create_function(move |_, v: mlua::Value| { host_call!("host.ocr.resolveLanguage"); ocr::lua::resolve_value(&*sh, &v) })?,
+        lua.create_function(move |lua, v: mlua::Value| {
+            host_call!("host.ocr.resolveLanguage");
+            ocr::lua::resolve_value(&*sh, lua, &v)
+        })?,
     )?;
 
     // host.ocr.pending(key) -> boolean — whether a read of this module with `key` is still waiting
@@ -8234,7 +8389,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(())
         })?,
     )?;
-    // host.input.click(x, y, opts?, cb?) -> true | false, why. Three ways, the module's choice per
+    // host.input.click(x, y, opts?, cb?) -> true | false, err. Three ways, the module's choice per
     // call (acting.rs, `click_opts`): through Windows' input, as ever (the default); posted to the
     // window as messages; or through the input with the window's top-level window holding the
     // no-activate style, which a thread of the host's gives it (backend/click_win.rs). With a
@@ -8250,7 +8405,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             let button = c.button;
             let answer = cb.map(|cb| acting::Answer { idx, lua: lua.clone(), cb, what: "input.click" });
             // The way's own checks first: a click refused is no input, and nothing is noted.
-            let ready: Result<Option<backend::ActJob>, String> = match (c.via, c.window) {
+            let ready: Result<Option<backend::ActJob>, errors::HostError> = match (c.via, c.window) {
                 (acting::Via::NoActivate, Some(w)) => sh.backend.mouse_click_noactivate(w, x, y, button, idx).map(Some),
                 (acting::Via::Input, Some(w)) => sh.backend.click_check(w, x, y).map(|()| None),
                 // A posted click checks its window as it posts — or answers that the platform has no
@@ -8304,6 +8459,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             acting::outcome_values(lua, result)
         })?,
     )?;
+    // host.input.post(hwnd, key) -> true | false, err — a key name that is not one raises.
     let sh = shared.clone();
     input.set(
         "post",
@@ -8311,9 +8467,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             host_call!("host.input.post");
             // At once: a picture of this module's still out may show it (said once in the log).
             sh.note_acting(lua, "host.input.post");
-            sh.backend
-                .key_post(hwnd as isize, &key)
-                .map_err(mlua::Error::external)
+            key_answer(lua, sh.backend.key_post(hwnd as isize, &key))
         })?,
     )?;
     let sh = shared.clone();
@@ -8396,6 +8550,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(())
         })?,
     )?;
+    // host.input.send(combo) -> true | false, err — a spec that does not parse raises.
     let sh = shared.clone();
     input.set(
         "send",
@@ -8404,7 +8559,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             // At once: a picture of this module's still out may show it (said once in the log).
             sh.note_acting(lua, "host.input.send");
             sh.bump_input_epoch();
-            sh.backend.key_send(&combo).map_err(mlua::Error::external)
+            key_answer(lua, sh.backend.key_send(&combo))
         })?,
     )?;
     let sh = shared.clone();
@@ -8421,14 +8576,25 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     host.set("input", input)?;
 
-    // host.sound.play(path) — fire-and-forget audio asset playback
+    // host.sound.play(path) -> true | false, err — fire-and-forget audio asset playback: true once
+    // the sound is handed to the output. The file first, whatever the output, so a sound of the
+    // package that is missing or broken raises with no device too (sound.rs, `source`); the rest
+    // is answered, and said in the log as it always was.
     let sound = lua.create_table()?;
     let sh = shared.clone();
     sound.set(
         "play",
-        lua.create_function(move |_, rel: String| {
+        lua.create_function(move |lua, rel: String| {
             host_call!("host.sound.play");
-            let path = sh.root(idx).join(&rel);
+            let root = sh.root(idx);
+            let path = root.join(&rel);
+            let source = match sound::source(&root, &path)? {
+                Ok(source) => source,
+                Err(e) => {
+                    logging::line("sound", &e.to_string());
+                    return errors_lua::with_error(lua, mlua::Value::Boolean(false), &e);
+                }
+            };
             let mut audio = sh.audio.borrow_mut();
             // Opened again when its stream failed or the default device is another one now
             // (sound.rs); the manager drops it after a resume, so it is opened then too.
@@ -8445,27 +8611,21 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 }
             }
             if audio.is_none() {
-                // Open the audio device on first use only (see the field doc).
+                // Open the audio device on first use only (see the field doc), and again at the
+                // next sound when there is none.
                 match sound::Output::open() {
                     Ok(out) => *audio = Some(out),
                     Err(e) => {
-                        logging::line("sound", &format!("no audio output device: {e}"));
-                        return Ok(());
+                        let e = HostError::with(&errors::sound::NO_DEVICE, format!("no audio output device: {e}"));
+                        logging::line("sound", &e.to_string());
+                        return errors_lua::with_error(lua, mlua::Value::Boolean(false), &e);
                     }
                 }
             }
             if let Some(out) = audio.as_ref() {
-                let play = || -> anyhow::Result<()> {
-                    let file = std::io::BufReader::new(std::fs::File::open(&path)?);
-                    let source = rodio::Decoder::new(file)?;
-                    out.play(source);
-                    Ok(())
-                };
-                if let Err(e) = play() {
-                    logging::line("sound", &format!("cannot play '{}': {e}", path.display()));
-                }
+                out.play(source);
             }
-            Ok(())
+            Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Boolean(true)]))
         })?,
     )?;
     host.set("sound", sound)?;
@@ -8544,7 +8704,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         lua.create_function(move |lua, key: String| {
             host_call!("host.settings.get");
             if !sh.schemas.borrow()[idx].contains_key(&key) {
-                return Err(mlua::Error::external(format!("setting '{key}' was not defined")));
+                return Err(undefined_setting(&key));
             }
             let id = sh.ids.borrow()[idx].clone();
             let v = sh
@@ -8563,9 +8723,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             let v = lua_to_value(&value)?;
             {
                 let schemas = sh.schemas.borrow();
-                let field = schemas[idx].get(&key).ok_or_else(|| {
-                    mlua::Error::external(format!("setting '{key}' was not defined"))
-                })?;
+                let field = schemas[idx].get(&key).ok_or_else(|| undefined_setting(&key))?;
                 field
                     .validate(&v)
                     .map_err(|e| mlua::Error::external(format!("setting '{key}': {e}")))?;
@@ -8584,6 +8742,11 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "onChange",
         lua.create_function(move |lua, (key, cb): (String, Function)| {
             host_call!("host.settings.onChange");
+            // A key never defined raises, as `get` and `set` do: filed, its callback would never
+            // fire, and nothing would say why (D37 of the typed-errors plan).
+            if !sh.schemas.borrow()[idx].contains_key(&key) {
+                return Err(undefined_setting(&key));
+            }
             file_on_change(&mut sh.on_change.borrow_mut(), lua, idx, key, cb)
         })?,
     )?;
@@ -9192,6 +9355,68 @@ mod source_and_option_tests {
         assert!(refresh.contains("self.backend.register_foreground_hotkey(id, &spec)"));
     }
 
+    /// `host.hotkey.register` answers what it cannot hold: `nil, err` and nothing recorded for a
+    /// spec this platform never holds, at the call and for one only the backend's parser reads;
+    /// after the refresh, `id, err` for a claim not held now (`hotkey_not_held`, tested in
+    /// `hotkey_conflict_tests`), and `nil, err` for a platform with no hotkeys, its claim dropped.
+    /// `host.keys.capture` asks for the hook before it records the capture.
+    #[test]
+    fn register_and_capture_answer_what_they_cannot_hold() {
+        use super::ocr_wiring_tests::body;
+        const LIB: &str = include_str!("lib.rs");
+        let api = body(LIB, "fn install_host_api(");
+        let register = &api[api.find("\"register\",").expect("host.hotkey.register")..api.find("\"unregister\",").expect("unregister")];
+        assert!(register.contains("Err(refusal) => return hotkey_refused(lua, refusal),"), "the spec refused before anything is recorded");
+        assert!(register.contains("if let Err(refusal) = claimed {\n                    return hotkey_refused(lua, refusal);"));
+        let refreshed = register.find("let refused = sh.refresh_hotkeys();").expect("the refusals of the refresh");
+        let inserted = register.find("sh.hotkeys.borrow_mut().insert(").expect("the claim recorded");
+        assert!(inserted < refreshed, "the claim is recorded, then claimed");
+        assert!(register[refreshed..].contains("match sh.hotkey_not_held(id, &refused) {"));
+        assert!(register[refreshed..].contains("Some(e) if e.reason() == &errors::hotkey::STUB => {\n                    sh.hotkeys.borrow_mut().remove(&id);"));
+        // The partial answer: the id that stands, and beside it why it is not held now.
+        assert!(
+            register[refreshed..].contains("Some(e) => errors_lua::with_error(lua, mlua::Value::Integer(id as i64), &e),"),
+            "a claim not held now answers its id and the error value"
+        );
+        let refused = body(LIB, "fn hotkey_refused(");
+        assert!(refused.contains("backend::KeyRefusal::Answer(e) => errors_lua::with_error(lua, mlua::Value::Nil, &e),"));
+        assert!(refused.contains("backend::KeyRefusal::Mistake(why) => Err(mlua::Error::external(why)),"));
+        let captures = body(LIB, "fn install_key_captures<");
+        let hook = captures.find("if let Err(e) = sh.key_backend().watch_keys() {").expect("the hook asked for");
+        let recorded = captures.find("sh.captures().capture(idx, vk, mask, lua.clone(), key)").expect("the capture recorded");
+        assert!(hook < recorded, "the hook first, so a refusal records nothing");
+        assert!(captures[hook..recorded].contains("return errors_lua::with_error(lua, mlua::Value::Nil, &e);"));
+    }
+
+    /// The other namespaces of the typed-errors plan (§4.8), where the calls are made: `speech.use`
+    /// answers `true` or `false, err`; `sound.play` reads its file before anything else and raises
+    /// for one of the package (`sound::source`, tested in sound.rs), answering the rest;
+    /// `settings.onChange` raises for a key never defined before it files anything, as `get` and
+    /// `set` do (D37); `ocr.resolveLanguage` answers in the calling VM.
+    #[test]
+    fn speech_sound_settings_and_languages_answer_or_raise_as_the_rule_says() {
+        use super::ocr_wiring_tests::body;
+        const LIB: &str = include_str!("lib.rs");
+        let api = body(LIB, "fn install_host_api(");
+        let from = |head: &str, until: &str| {
+            let at = api.find(head).unwrap_or_else(|| panic!("{head}"));
+            &api[at..at + api[at..].find(until).unwrap_or_else(|| panic!("{until} after {head}"))]
+        };
+        let speech = from("\"use\",", "\"engine\",");
+        assert!(speech.contains("errors_lua::done(lua, &sh.speech.use_engine(idx, id.as_deref()))"), "{speech}");
+        let play = from("\"play\",", "host.set(\"sound\", sound)?;");
+        let read = play.find("let source = match sound::source(&root, &path)? {").expect("the file read first");
+        assert!(read < play.find("let mut audio = sh.audio.borrow_mut();").unwrap(), "before the output, so a mistake raises with no device too");
+        assert!(play.contains("errors::sound::NO_DEVICE") && play.contains("Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Boolean(true)]))"));
+        assert_eq!(play.matches("return errors_lua::with_error(lua, mlua::Value::Boolean(false), &e);").count(), 2, "the file, the device");
+        let watch = from("\"onChange\",", "host.set(\"settings\"");
+        let checked = watch.find("if !sh.schemas.borrow()[idx].contains_key(&key) {\n                return Err(undefined_setting(&key));").expect("checked");
+        assert!(checked < watch.find("file_on_change(").unwrap(), "nothing filed for a key never defined");
+        assert_eq!(api.matches("undefined_setting(&key)").count(), 3, "get, set and onChange, in the same words");
+        assert!(undefined_setting("x").to_string().contains("setting 'x' was not defined"));
+        assert!(from("\"resolveLanguage\",", "\"pending\",").contains("ocr::lua::resolve_value(&*sh, lua, &v)"));
+    }
+
     /// The same reader for `host.keys.check`'s `layout`.
     #[test]
     fn a_boolean_option_is_strict() {
@@ -9499,14 +9724,14 @@ pub(crate) fn profile_table(
 ///
 /// A mistake in it raises, named `{fname}: {what} …`: a table that is neither corners nor the
 /// window form, a value that is not a table, a window form that is not exactly right. `nil` is
-/// the whole primary screen. `Ok(Err(reason))` is a window region with no rectangle this time —
+/// the whole primary screen. `Ok(Err(err))` is a window region with no rectangle this time —
 /// a minimised window — which each call answers in its own shape instead of raising.
 pub(crate) fn region_arg(
     backend: &dyn Backend,
     v: &mlua::Value,
     fname: &str,
     what: &str,
-) -> mlua::Result<std::result::Result<region::ScreenRect, String>> {
+) -> mlua::Result<std::result::Result<region::ScreenRect, HostError>> {
     region_arg_on(backend.screen_size(), v, fname, what)
 }
 
@@ -9517,9 +9742,9 @@ pub(crate) fn region_arg_on(
     v: &mlua::Value,
     fname: &str,
     what: &str,
-) -> mlua::Result<std::result::Result<region::ScreenRect, String>> {
+) -> mlua::Result<std::result::Result<region::ScreenRect, HostError>> {
     let given = region_lua::read_loose(v, what, screen).map_err(|m| mlua::Error::external(format!("{fname}: {m}")))?;
-    Ok(given.resolve().map_err(|u| u.to_string()))
+    Ok(given.resolve().map_err(|u| u.error()))
 }
 
 /// `pixel(x, y)`'s screen coordinates, converted exactly as they always were (a fraction cut
@@ -9537,13 +9762,17 @@ pub(crate) fn pixel_coords(lua: &Lua, x: &mlua::Value, y: &mlua::Value) -> mlua:
     Ok((coord(x, "x")?, coord(y, "y")?))
 }
 
-/// The reason given when a capture came back smaller than it said it was — which a backend
-/// should never do, and a binding must not index past.
-pub(crate) const SHORT_CAPTURE: &str = "the capture came back shorter than its own size";
+/// The error of a capture that came back smaller than it said it was — which a backend should
+/// never do, and a binding must not index past.
+pub(crate) fn short_capture() -> HostError {
+    HostError::of(&errors::screen::SHORT_CAPTURE)
+}
 
-/// The first words of `profile`'s reason for a region with no width or height, which it has
-/// always refused before capturing; the size follows in brackets, `(0x20)`.
-pub(crate) const EMPTY_REGION: &str = "the region is empty";
+/// `profile`'s error for a region with no width or height, which it has always refused before
+/// capturing (`outside`, D5 of the typed-errors plan): the size in brackets, `(0x20)`.
+pub(crate) fn empty_region(w: i32, h: i32) -> HostError {
+    HostError::with(&errors::screen::EMPTY_REGION, format!("the region is empty ({w}x{h})"))
+}
 
 /// Reads an optional `{ scales = { 1.0, 0.9, ... } }` list of scale factors for the
 /// template search; empty when absent (= a single 1.0 pass, i.e. no scaling).
@@ -9564,7 +9793,7 @@ fn read_scales(opts: Option<&Table>) -> Vec<f32> {
 // so a misspelt key that silently fell back to a default — a region reading down to the bottom
 // of the screen, a grid of the wrong size — would give a module confident, wrong answers. What
 // raises is a mistake in the call; what the screen or the window does at run time (an empty
-// client area, a capture that failed) is `nil, reason`, never an error dialog over a game.
+// client area, a capture that failed) is `nil, err`, never an error dialog over a game.
 //
 // The options and the states are read with serde through mlua's deserializer, so a wrong key
 // or type is reported with its path (`states[3].cells`, 1-based like Luau); the region is read
@@ -9724,8 +9953,8 @@ fn predicate_error(fname: &str, what: &str, src: &str, e: &cells::PredError) -> 
 /// What the cells calls read from `opts`.
 struct CellsCall {
     /// Where to read — or why there is nothing to read this time, which the call answers as
-    /// `nil, reason` (an empty client area; on a snapshot, a region not wholly inside it).
-    rect: std::result::Result<region::ScreenRect, String>,
+    /// `nil, err` (an empty client area; on a snapshot, a region not wholly inside it).
+    rect: std::result::Result<region::ScreenRect, HostError>,
     spec: cells::CellSpec,
     /// The snapshot to read instead of the screen, when `opts.snapshot` gave one.
     snapshot: Option<Arc<backend::frame::Frame>>,
@@ -9777,9 +10006,9 @@ fn read_cells_opts(lua: &Lua, fname: &str, opts: mlua::Value, cb: bool, which: &
         .map_err(|e| predicate_error(fname, "opts.predicate", &o.predicate, &e))?;
     let spec = cells::CellSpec::new(o.cols.0 as u32, o.rows.0 as u32, pred).map_err(|m| err(format!("opts: {m}")))?;
     // The Region form's one strict reader, shared with `host.ocr.recognize`: a mistake raises, an
-    // empty client area is this call's `nil, reason`.
+    // empty client area is this call's `nil, err`.
     let given = region_lua::read(&region_value, "opts.region").map_err(err)?;
-    let mut rect = given.resolve().map_err(|u| u.to_string());
+    let mut rect = given.resolve().map_err(|u| u.error());
     if let Ok(r) = &rect {
         let px = r.w as u64 * r.h as u64;
         if px > cells::MAX_REGION_PIXELS {
@@ -9789,7 +10018,9 @@ fn read_cells_opts(lua: &Lua, fname: &str, opts: mlua::Value, cb: bool, which: &
                 region::Region::Rect(_) => return Err(err(why)),
                 // A window region's size is the window's, at run time: answered, like an empty
                 // client area, so the same call cannot raise only when the window is large.
-                region::Region::Window(..) => rect = Err(format!("at the window's current size {why}")),
+                region::Region::Window(..) => {
+                    rect = Err(HostError::with(&errors::screen::REGION_TOO_LARGE, format!("at the window's current size {why}")))
+                }
             }
         }
     }
@@ -9915,11 +10146,30 @@ pub(crate) fn one_value(v: mlua::Value) -> mlua::Result<mlua::MultiValue> {
     Ok(mlua::MultiValue::from_vec(vec![v]))
 }
 
+/// What `host.hotkey.register` answers for a spec it records nothing for: `nil, err`, or a raise
+/// for a mistake in the call (backend `KeyRefusal`).
+fn hotkey_refused(lua: &Lua, refusal: backend::KeyRefusal) -> mlua::Result<mlua::MultiValue> {
+    match refusal {
+        backend::KeyRefusal::Answer(e) => errors_lua::with_error(lua, mlua::Value::Nil, &e),
+        backend::KeyRefusal::Mistake(why) => Err(mlua::Error::external(why)),
+    }
+}
+
+/// What `host.input.post` and `host.input.send` answer: `true`, `false, err` for what only the
+/// moment decides, and a raise for a mistake in the call (backend `KeyRefusal`).
+fn key_answer(lua: &Lua, sent: Result<(), backend::KeyRefusal>) -> mlua::Result<mlua::MultiValue> {
+    match sent {
+        Ok(()) => errors_lua::done(lua, &Ok(())),
+        Err(backend::KeyRefusal::Answer(e)) => errors_lua::done(lua, &Err(e)),
+        Err(backend::KeyRefusal::Mistake(why)) => Err(mlua::Error::external(why)),
+    }
+}
+
 /// What one of those calls answers when it could not look: the value it has always returned
-/// then (`nil`, `false`, an empty list), and the reason as ONE value more. A caller that reads
-/// only the first value reads what it always did.
-pub(crate) fn with_reason(lua: &Lua, first: mlua::Value, why: String) -> mlua::Result<mlua::MultiValue> {
-    Ok(mlua::MultiValue::from_vec(vec![first, mlua::Value::String(lua.create_string(why)?)]))
+/// then (`nil`, `false`, an empty list), and the error value as ONE value more. A caller that
+/// reads only the first value reads what it always did.
+pub(crate) fn with_reason(lua: &Lua, first: mlua::Value, why: HostError) -> mlua::Result<mlua::MultiValue> {
+    errors_lua::with_error(lua, first, &why)
 }
 
 /// `host.screen.cells(opts, cb?) -> ({ cells, x, y, w, h }?, string?)`: in a handler it waits while
@@ -10035,7 +10285,7 @@ mod cells_binding_tests {
             "return { region = { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0, 1, 1 } }, cols = 2, rows = 2, predicate = 'r >= 1' }",
         )
         .unwrap();
-        assert_eq!(c.rect, Err("the window's client area is empty (0x0)".to_string()));
+        assert_eq!(c.rect, Err(HostError::with(&errors::screen::CLIENT_EMPTY, "the window's client area is empty (0x0)".into())));
         // So is a window region past the pixel limit: its size is the window's, and corners of
         // the same size raise (every_mistake_in_opts_raises_naming_it).
         let c = opts(
@@ -10045,11 +10295,14 @@ mod cells_binding_tests {
         .unwrap();
         assert_eq!(
             c.rect,
-            Err("at the window's current size the region is 10000x5000, 50000000 pixels; the limit is 40000000".to_string())
+            Err(HostError::with(
+                &errors::screen::REGION_TOO_LARGE,
+                "at the window's current size the region is 10000x5000, 50000000 pixels; the limit is 40000000".into()
+            ))
         );
         // docs/api/screen.md lists it, with the numbers this call made written `…` (the other
         // reasons are held to the page by image_search.rs, `the_hosts_own_reasons_are_listed`).
-        let listed = c.rect.clone().unwrap_err().replacen("10000", "…", 1).replacen("5000", "…", 1).replacen("50000000", "…", 1);
+        let listed = c.rect.clone().unwrap_err().to_string().replacen("10000", "…", 1).replacen("5000", "…", 1).replacen("50000000", "…", 1);
         assert!(
             include_str!("../../../docs/api/screen.md").contains(&format!("`{listed}`")),
             "docs/api/screen.md does not list the reason `{listed}`"
@@ -10560,6 +10813,7 @@ mod ocr_wiring_tests {
     const GAMEPAD: &str = include_str!("gamepad_api.rs");
     const SNAP: &str = include_str!("snapshot.rs");
     const OCR_LUA: &str = include_str!("ocr/lua.rs");
+    const REGION_LUA: &str = include_str!("region_lua.rs");
     const MAILBOX: &str = include_str!("mailbox.rs");
     const TIMERS: &str = include_str!("timers.rs");
     const WEBVIEW_LUA: &str = include_str!("webview_lua.rs");
@@ -10634,6 +10888,37 @@ mod ocr_wiring_tests {
         let new = body(LIB, "pub fn new() -> Result<Self>");
         let left = new.find("give_back_left_over_activation()").expect("the last run's styles are not given back");
         assert!(left < new.find("shared.reload_hotkey_id.set(").expect("the reload key"), "given back before any module loads");
+    }
+
+    /// `host.input.post` and `host.input.send`: `true` sent, `false, err` for what only the moment
+    /// decides, a raise with its sentence for a mistake in the call — and the stub, with no input to
+    /// send to, answers that the platform has none.
+    #[test]
+    fn a_key_sent_or_posted_answers_and_a_mistake_raises() {
+        use crate::backend::Backend;
+        use crate::errors::{common, input, HostError};
+        let lua = mlua::Lua::new();
+        let sent = crate::key_answer(&lua, Ok(())).unwrap();
+        assert_eq!((sent.len(), sent[0].as_boolean()), (1, Some(true)));
+        let refused = crate::key_answer(&lua, Err(crate::backend::KeyRefusal::Answer(HostError::of(&input::HIGHER)))).unwrap();
+        assert_eq!((refused.len(), refused[0].as_boolean()), (2, Some(false)));
+        lua.globals().set("err", refused[1].clone()).unwrap();
+        assert!(lua.load("return err.code == 'denied' and tostring(err) == \"the window's program runs with higher rights\"").eval::<bool>().unwrap());
+        let raised = crate::key_answer(&lua, Err(crate::backend::KeyRefusal::Mistake("unknown key 'F99'".into()))).unwrap_err().to_string();
+        assert!(raised.contains("unknown key 'F99'"), "{raised}");
+        // A parser's sentence is a mistake, through `?`.
+        let parsed: Result<(), crate::backend::KeyRefusal> = (|| {
+            Err::<(), String>("'Ctrl+' has no key".into())?;
+            Ok(())
+        })();
+        assert_eq!(parsed, Err(crate::backend::KeyRefusal::Mistake("'Ctrl+' has no key".into())));
+        let stub = crate::backend::stub::StubBackend::default();
+        assert_eq!(stub.key_send("Ctrl+S"), Err(crate::backend::KeyRefusal::Answer(HostError::of(&common::NOT_YET))));
+        assert_eq!(stub.key_post(1, "F5"), Ok(()));
+        // The stub has no page window, no press, no posted click and no focus.
+        assert_eq!(stub.focus_window(1), Err(HostError::of(&common::NOT_YET)));
+        assert_eq!(stub.mouse_click_posted(1, 0, 0, crate::backend::MouseButton::Left, true), Err(HostError::of(&common::NOT_YET)));
+        assert!(stub.mouse_click_noactivate(1, 0, 0, crate::backend::MouseButton::Left, 0).is_err_and(|e| e == HostError::of(&common::NOT_YET)));
     }
 
     /// Every `host.input` call that acts, and `host.window.focus`, acts at once and notes it
@@ -10830,8 +11115,9 @@ mod ocr_wiring_tests {
     #[test]
     fn a_snapshot_callback_reserves_by_the_form_and_gives_a_refused_charge_back() {
         let f = body(SNAP, "pub(crate) fn submit_snap<");
-        // The budget by the form the region was given in: a window region's overrun is answered.
-        assert!(f.contains("reserve_by_form(lua, h.snap_bytes(), reservation_for(*r, change), fname, ask.window, true)?"));
+        // The budget by the form the region was given in: an overrun is answered, a window
+        // region's message as its size limit's begins.
+        assert!(f.contains("reserve_by_form(lua, h.snap_bytes(), reservation_for(*r, change), ask.window, true)?"));
         assert!(body(SNAP, "fn ask(self) -> Ask {").contains("let window = matches!(self.form, region::Region::Window(..));"));
         // A request the application's limit refuses gives its charge back before it is queued.
         let refused = &f[f.find("if let Some(why) = refused {").expect("the refusal")..];
@@ -10928,8 +11214,11 @@ mod ocr_wiring_tests {
         assert!(body(LIB, "pub(crate) fn cells_ask(").contains("read_cells_opts(lua, fname, opts, cb, which)?"));
         assert!(body(LIB, "fn match_cells_fn(").contains("cells_ask(lua, MATCH_CELLS, opts, Some(states), true)?"), "matchCells' callback form");
         assert!(body(LIB, "fn read_cells_opts(").contains("region_lua::read(&region_value"));
-        // `recognize`, both its forms: the strict reader, under its name.
-        assert!(body(OCR_LUA, "fn region(").contains("region_lua::read(v, what).map_err(bad)"));
+        // `recognize`, both its forms: the strict reader, under its name — but for corners with no
+        // area, which it answers (D5 of the typed-errors plan).
+        assert!(body(OCR_LUA, "fn region(").contains("region_lua::read_or_empty(v, what).map_err(bad)"));
+        assert!(REGION_LUA.contains("pub(crate) fn read_or_empty(v: &Value, what: &str) -> Result<Region, String> {\n    read_with(v, what, region::corners_or_empty)\n}"));
+        assert!(REGION_LUA.contains("pub(crate) fn read(v: &Value, what: &str) -> Result<Region, String> {\n    read_with(v, what, region::corners)\n}"));
         assert!(body(OCR_LUA, "fn bad(").contains("format!(\"host.ocr.recognize: {msg}\")"));
         assert!(body(LIB, "fn region_arg(").contains("region_arg_on("));
         assert!(body(LIB, "fn region_arg_on(").contains("region_lua::read_loose("));
@@ -10996,7 +11285,8 @@ mod ocr_wiring_tests {
             assert!(!b.contains("template_store::open(") && !b.contains(".make()") && !b.contains("image::open("), "`{f}`");
         }
         assert!(body(IMAGES, "fn template_file(").contains("template_store::header(&full)"));
-        assert!(body(IMAGES, "fn locate_in(").contains("template_store::locate(root.join(path))"));
+        let locate = body(IMAGES, "fn locate_in(");
+        assert!(locate.contains("template_store::in_package(root, &full)") && locate.contains("template_store::locate(full)"));
         assert!(body(IMAGES, "pub(crate) fn template(").contains("queue_preparation(&*sh, p)"), "a handle's picture is queued for the image worker at the call");
         assert!(!LIB.contains(concat!("fn load_", "template(")), "the event loop's template cache is back");
     }
@@ -11098,7 +11388,7 @@ mod ocr_wiring_tests {
         );
         assert_eq!(
             read("return { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0, 1, 1 } }").unwrap(),
-            Err("the window's client area is empty (0x0)".to_string()),
+            Err(crate::errors::HostError::with(&crate::errors::screen::CLIENT_EMPTY, "the window's client area is empty (0x0)".into())),
             "a minimised window is answered"
         );
         assert_eq!(read("return nil").unwrap(), Ok(rect(0, 0, 1920, 1080)), "no region");
@@ -11165,17 +11455,17 @@ mod ocr_wiring_tests {
     }
 
     /// The older calls answer as they always did when they look — ONE value, nothing after it —
-    /// and add the reason as one value more when they could not. Held for every one of them,
+    /// and add the error value as one value more when they could not. Held for every one of them,
     /// since a trailing `nil` after a success would change what `f(host.screen.pixel(x, y))` or
     /// `table.insert(t, host.screen.imageSearch(p))` passes on.
     #[test]
     fn the_older_calls_add_a_reason_and_nothing_else() {
         let lua = Lua::new();
         assert_eq!(one_value(mlua::Value::Boolean(true)).unwrap().len(), 1);
-        let told = with_reason(&lua, mlua::Value::Nil, "screen capture failed".into()).unwrap().into_vec();
+        let told = with_reason(&lua, mlua::Value::Nil, crate::backend::capture_failed()).unwrap().into_vec();
         assert_eq!(told.len(), 2);
         assert!(told[0].is_nil());
-        assert_eq!(told[1].as_string().unwrap().to_string_lossy(), "screen capture failed");
+        assert_eq!(crate::errors_lua::message_of(&lua, &told[1]).unwrap().as_deref(), Some("screen capture failed"));
         // `save` and `saveMarked` build their answers in save.rs, wherever they were made.
         let saved = body(SAVE, "pub(crate) fn save_values(");
         assert!(saved.contains("one_value(") && saved.contains("with_reason(lua, "), "save and saveMarked");
@@ -11461,7 +11751,7 @@ mod ocr_wiring_tests {
         let lane = deliver.find("let _prio = enter_priority(lane);").expect("no lane");
         assert!(lane < deliver.find("mailbox::deliver(h, owner, lua, Event::Page { page, build, call });").expect("not through the mailbox"));
         let hand_on = body(WEBVIEW_LUA, "pub(crate) fn hand_on<H: PageHost>(");
-        for f in ["loaded(h, page, build)", "load_failed(h, page, build, &why)", "message(h, page, build, text)", "closed(h, page, build, why)"] {
+        for f in ["loaded(h, page, build)", "load_failed(h, page, build, &why)", "message(h, page, build, text)", "closed(h, page, build, why, detail)"] {
             assert!(hand_on.contains(f), "{f}");
         }
         let open = body(LIB, "fn open(&self, idx: usize, lua: &Lua, ev: Event) -> Opened");
@@ -12154,8 +12444,8 @@ mod uptime_wiring_tests {
         // was ended.
         let filed = body(IMAGES, "fn file_callback<");
         assert!(filed.contains("oldest_over_cap(&im.pending.borrow(), owner, IMAGE_PER_OWNER)"));
-        assert!(filed.contains("if im.end(old, why.clone()) {\n            h.note_image_crowding(owner, &why);"));
-        assert!(body(IMAGES, "fn end(&self, id: u64, why: String) -> bool {").contains("self.ready.borrow_mut().push((p, outcome));"));
+        assert!(filed.contains("if im.end(old, why.clone()) {\n            h.note_image_crowding(owner, why.message());"));
+        assert!(body(IMAGES, "fn end(&self, id: u64, why: HostError) -> bool {").contains("self.ready.borrow_mut().push((p, outcome));"));
         let crowding = body(OCR_LUA, "fn note_image_crowding(&self, idx: usize, why: &str) {\n        let who");
         assert!(crowding.contains("self.error_repeats.borrow_mut().note(&key, std::time::Instant::now())"));
         assert!(crowding.contains("crate::logging::Said::Summary { count, over } =>"), "the summary is written");

@@ -67,6 +67,7 @@ use objc2_core_graphics::{
 
 use super::{key_age, keys, queue, watch};
 use crate::backend::{capture_decision, menu_flag_owners, Capture, Captured, OwnerKeys, PassWhy, Pressed, Taken, MASK_TAP};
+use crate::errors::HostError;
 use crate::logging;
 
 /// What the tap asks to see.
@@ -347,16 +348,16 @@ fn due(last: &AtomicU64, gap_ms: u64) -> bool {
     true
 }
 
-pub fn install() -> Result<(), String> {
+pub fn install() -> Result<(), HostError> {
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return Ok(()); // already installed; `host.keys.capture` re-arms this on every call
     }
     let (port, run_loop, enabled) = match create_and_attach() {
         Ok(created) => created,
-        Err(msg) => {
+        Err(e) => {
             INSTALLED.store(false, Ordering::SeqCst);
-            logging::line("macos", &msg);
-            return Err(msg);
+            logging::line("macos", e.message());
+            return Err(e);
         }
     };
     note_on();
@@ -389,7 +390,8 @@ pub fn install() -> Result<(), String> {
 }
 
 /// Creates the tap, puts its source on the main run loop and enables it: the port, the run
-/// loop, and whether the tap reports itself enabled. `Err` is the line for the log.
+/// loop, and whether the tap reports itself enabled. `Err` is what `host.keys.capture` answers,
+/// and the line for the log.
 ///
 /// Created with `Default` rather than `ListenOnly`, which is the whole point: a listening
 /// tap sees the key and cannot stop it, and an overlay that speaks the control under Tab
@@ -399,7 +401,7 @@ pub fn install() -> Result<(), String> {
 /// the suppression happens before the window server has decided who the key belongs to.
 /// The consequence to know: keys this platform synthesises through `CGEvent::post` come
 /// back through here as well, exactly as a Windows low-level hook sees `SendInput`.
-fn create_and_attach() -> Result<(CFRetained<CFMachPort>, CFRetained<CFRunLoop>, bool), String> {
+fn create_and_attach() -> Result<(CFRetained<CFMachPort>, CFRetained<CFRunLoop>, bool), HostError> {
     let port = unsafe {
         CGEvent::tap_create(
             CGEventTapLocation::HIDEventTap,
@@ -419,15 +421,18 @@ fn create_and_attach() -> Result<(CFRetained<CFMachPort>, CFRetained<CFRunLoop>,
         // rather than as a requirement, since a tester cannot see the dialog.
         let trusted = unsafe { objc2_application_services::AXIsProcessTrusted() };
         REFUSED_TRUSTED.store(trusted, Ordering::Relaxed);
-        return Err(format!(
-            "CGEventTapCreate refused (AXIsProcessTrusted = {trusted}) — grant this \
-             application Accessibility in System Settings > Privacy & Security, and Input \
-             Monitoring too if keys are still not captured after that; until then no key can be \
-             captured or suppressed"
+        return Err(HostError::with(
+            &crate::errors::keys::TAP_REFUSED,
+            format!(
+                "CGEventTapCreate refused (AXIsProcessTrusted = {trusted}) — grant this \
+                 application Accessibility in System Settings > Privacy & Security, and Input \
+                 Monitoring too if keys are still not captured after that; until then no key can \
+                 be captured or suppressed"
+            ),
         ));
     };
     let Some(source) = CFMachPort::new_run_loop_source(None, Some(&port), 0) else {
-        return Err("CFMachPortCreateRunLoopSource failed for the event tap".to_string());
+        return Err(HostError::of(&crate::errors::keys::TAP_SOURCE));
     };
     // The MAIN run loop, which wxWidgets already runs: a tap only fires while a run loop is
     // running in a mode its source was added to, and this application has no other loop to
@@ -435,7 +440,7 @@ fn create_and_attach() -> Result<(CFRetained<CFMachPort>, CFRetained<CFRunLoop>,
     // loop into its own modes while a menu is tracking or a modal panel is up — the moments
     // an overlay most needs its keys.
     let Some(run_loop) = CFRunLoop::main().or_else(CFRunLoop::current) else {
-        return Err("no CFRunLoop to attach the event tap to".to_string());
+        return Err(HostError::of(&crate::errors::keys::TAP_NO_RUN_LOOP));
     };
     run_loop.add_source(Some(&source), unsafe { kCFRunLoopCommonModes });
     CGEvent::tap_enable(&port, true);

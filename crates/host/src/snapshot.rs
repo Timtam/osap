@@ -18,9 +18,9 @@
 //! collector ever hurrying. So every snapshot is charged against a budget — 128 MiB per module
 //! VM and 512 MiB in the whole application — reserved before the capture from an estimate and
 //! settled to the truth once the picture exists; over it, this VM's collector runs twice and the
-//! call raises only if they still do not fit — for corners the module wrote; a window region,
-//! whose size is the window's at run time, is answered `nil` and the reason instead, as its size
-//! limit is (`reserve_for`). Every reservation also steps the collector by
+//! call answers `nil, err` (`too_large`) if they still do not fit, whatever form its region was
+//! given in: other modules' snapshots count toward the application's limit, so the moment decides
+//! it, not the call (`reserve_for`). Every reservation also steps the collector by
 //! about as much as it reserved, but never more than the heap holds (`gc_kbytes`), so an
 //! unreleased poll is paced by the collector: a snapshot as large as the heap or larger costs
 //! about one collection of it, a smaller one a part of one. The template budget in
@@ -31,15 +31,15 @@
 //! region — `profile`, the image searches, `save`, `saveMarked` — read the part of it inside the
 //! snapshot (`clip`); the calls whose answer would change if the region were cut — `pixel`,
 //! `pixels`, `crop`, `template{ capture }`, the cells calls — need it wholly inside (`inside`).
-//! A miss is `nil` and one of three fixed reasons, never an error.
+//! A miss is `nil` and an error value of one of three fixed reasons (`outside`), never a raise.
 //!
 //! **Taken off the event loop.** `host.screen.snapshot(opts, cb)` hands the picture to the
 //! `screen-capture` thread `host.ocr.recognize` photographs on (`ocr/service.rs`,
 //! `ocr/snap_queue.rs`): at once, at a set time (`at`), or as a change wait (`change`,
 //! `ocr/change.rs`) that photographs round after round until the watched part differs from a
 //! baseline. Its callback runs exactly once on the event loop — `cb(snap, nil, info)` or
-//! `cb(nil, reason, info)` — unless the module is disabled, reloaded, removed or stopped first, when
-//! it is dropped. A newer request with the same key answers the older one `nil` and a reason; too
+//! `cb(nil, err, info)` — unless the module is disabled, reloaded, removed or stopped first, when
+//! it is dropped. A newer request with the same key answers the older one `nil` and an error; too
 //! many at once end the module's oldest or refuse the new one — never both for one request — and
 //! never raise. Everything here that decides — the keys, the caps, the answers — works on
 //! [`SnapState`] alone, so it is tested without the application around it.
@@ -47,12 +47,12 @@
 //! **`host.screen.snapshot` without a callback waits.** In a handler it is one of these requests
 //! too, a plain one with no key, whose waiter is the handler (`task.rs`): its charge reserved at the
 //! call, under the same limits, answered by the same delivery — which resumes the handler at once
-//! with what the call returns, the handle or `nil` and the reason, rather than handing a callback to
+//! with what the call returns, the handle or `nil` and the error value, rather than handing a callback to
 //! the mailbox ([`fire_snaps`]). Where it cannot wait it raises (`task::wait_message`), and nothing
 //! is captured.
 //!
 //! **Every callback is called alike** ([`callback_values`]): with what the call returns — its first
-//! value and its reason, `nil` when there is none — and then `info`, which carries `time` and
+//! value and its error value, `nil` when there is none — and then `info`, which carries `time` and
 //! `inputEpoch` of the picture the answer was read from, when one was.
 //!
 //! **So do `host.screen.pixel` and `pixels`.** In a handler a read of the screen is a request of
@@ -87,6 +87,7 @@ use std::time::{Duration, Instant};
 use mlua::{Function, Lua, MetaMethod, MultiValue, RegistryKey, Table, UserData, UserDataFields, UserDataMethods, Value};
 
 use crate::backend::frame::{self, Frame, FrameVia};
+use crate::errors::{screen, HostError};
 #[cfg(test)]
 use crate::backend::CapturedImage;
 use crate::image_search::{self, Haystack, ImageTask, Job, Outcome, Reduced};
@@ -123,11 +124,17 @@ const ESTIMATE_FACTOR: usize = 5;
 #[cfg(not(target_os = "macos"))]
 const ESTIMATE_FACTOR: usize = 1;
 
-/// The three reasons a read of a snapshot answers with when the region or point misses it.
-/// Listed word for word in docs/api/screen.md ("Failure reasons"), which a test holds.
-pub(crate) const NOT_INSIDE: &str = "the region is not inside the snapshot";
-pub(crate) const POINT_NOT_INSIDE: &str = "the point is not inside the snapshot";
-pub(crate) const NO_OVERLAP: &str = "the region does not overlap the snapshot";
+/// The three errors a read of a snapshot answers with when the region or point misses it
+/// (`outside`): the inside rule's, a point's, and the clip rule's.
+pub(crate) fn not_inside() -> HostError {
+    HostError::of(&screen::NOT_INSIDE)
+}
+pub(crate) fn point_not_inside() -> HostError {
+    HostError::of(&screen::POINT_NOT_INSIDE)
+}
+pub(crate) fn no_overlap() -> HostError {
+    HostError::of(&screen::NO_OVERLAP)
+}
 /// What a call that is handed a released snapshot raises with, after its own name.
 const RELEASED: &str = "the snapshot was released";
 
@@ -206,18 +213,18 @@ fn gc_kbytes(bytes: usize, used: usize) -> i32 {
 /// Reserves `bytes` against this VM's budget and the application's (`process`), collecting
 /// this VM's garbage twice first if they do not fit — one full collection may only finish the
 /// cycle already running, and a dropped handle gives its bytes back only once it is finalised —
-/// and answering `Ok(Err(why))` if they still do not, `why` naming the limit and what to do,
-/// without a function's name; [`reserve_for`] decides whether that raises. Then steps the
-/// collector. Only this VM is collected: the application's limit can also be reached by other
-/// modules' snapshots, which no call here can free, and the message says so.
-fn try_reserve(lua: &Lua, process: &Rc<Cell<usize>>, bytes: usize) -> mlua::Result<Result<Reservation, String>> {
+/// and answering `Ok(Err(err))` if they still do not, its message naming the limit and what to
+/// do, without a function's name ([`reserve_for`]). Then steps the collector. Only this VM is
+/// collected: the application's limit can also be reached by other modules' snapshots, which no
+/// call here can free, and the message says so.
+fn try_reserve(lua: &Lua, process: &Rc<Cell<usize>>, bytes: usize) -> mlua::Result<Result<Reservation, HostError>> {
     try_reserve_stepping(lua, process, bytes, true)
 }
 
 /// [`try_reserve`], stepping the collector only when `step`: a charge the host itself gives back
 /// at a known moment — a profile's picture, once its answer is handed over — leaves no handle
 /// for the collector to find, so pacing it would cost the event loop for nothing.
-fn try_reserve_stepping(lua: &Lua, process: &Rc<Cell<usize>>, bytes: usize, step: bool) -> mlua::Result<Result<Reservation, String>> {
+fn try_reserve_stepping(lua: &Lua, process: &Rc<Cell<usize>>, bytes: usize, step: bool) -> mlua::Result<Result<Reservation, HostError>> {
     let vm = vm_budget(lua);
     let fits = |vm: &Cell<usize>| {
         vm.get().saturating_add(bytes) <= SNAPSHOT_BUDGET_PER_VM
@@ -230,18 +237,24 @@ fn try_reserve_stepping(lua: &Lua, process: &Rc<Cell<usize>>, bytes: usize, step
             let mib = |b: usize| b as f64 / (1 << 20) as f64;
             let over_vm = vm.get().saturating_add(bytes) > SNAPSHOT_BUDGET_PER_VM;
             return Ok(Err(if over_vm {
-                format!(
-                    "this module's snapshots would hold {:.1} MiB; the limit is {} MiB per module VM ({} MiB in the whole application). Release the ones you no longer need with s:release()",
-                    mib(vm.get().saturating_add(bytes)),
-                    SNAPSHOT_BUDGET_PER_VM >> 20,
-                    SNAPSHOT_BUDGET_PROCESS >> 20
+                HostError::with(
+                    &screen::MODULE_SNAPSHOTS,
+                    format!(
+                        "this module's snapshots would hold {:.1} MiB; the limit is {} MiB per module VM ({} MiB in the whole application). Release the ones you no longer need with s:release()",
+                        mib(vm.get().saturating_add(bytes)),
+                        SNAPSHOT_BUDGET_PER_VM >> 20,
+                        SNAPSHOT_BUDGET_PROCESS >> 20
+                    ),
                 )
             } else {
-                format!(
-                    "the application's snapshots would hold {:.1} MiB; the limit is {} MiB in the whole application ({} MiB per module VM), and other modules' snapshots count toward it. Release the ones this module no longer needs with s:release()",
-                    mib(process.get().saturating_add(bytes)),
-                    SNAPSHOT_BUDGET_PROCESS >> 20,
-                    SNAPSHOT_BUDGET_PER_VM >> 20
+                HostError::with(
+                    &screen::APPLICATION_SNAPSHOTS,
+                    format!(
+                        "the application's snapshots would hold {:.1} MiB; the limit is {} MiB in the whole application ({} MiB per module VM), and other modules' snapshots count toward it. Release the ones this module no longer needs with s:release()",
+                        mib(process.get().saturating_add(bytes)),
+                        SNAPSHOT_BUDGET_PROCESS >> 20,
+                        SNAPSHOT_BUDGET_PER_VM >> 20
+                    ),
                 )
             }));
         }
@@ -256,33 +269,35 @@ fn try_reserve_stepping(lua: &Lua, process: &Rc<Cell<usize>>, bytes: usize, step
     Ok(Ok(res))
 }
 
-/// The reservation for a picture of a region given as `form`: corners the module wrote raise
-/// when the budget has no room — a mistake in the call, like corners past the size limit — while
-/// a window region, whose size is the window's at run time, is answered `Ok(Err(why))`, as the
-/// size limit answers it: a poll of a window that was maximised on a large display never puts an
-/// error dialog over it.
-fn reserve_for(lua: &Lua, process: &Rc<Cell<usize>>, bytes: usize, fname: &str, form: &region::Region) -> mlua::Result<Result<Reservation, String>> {
-    match (try_reserve(lua, process, bytes)?, form) {
-        (Ok(res), _) => Ok(Ok(res)),
-        (Err(why), region::Region::Window(..)) => Ok(Err(format!("{AT_WINDOW_SIZE}{why}"))),
-        (Err(why), region::Region::Rect(_)) => Err(err(format!("{fname}: {why}"))),
-    }
+/// The reservation for a picture of a region given as `form`, or `Ok(Err(err))` when the budget has
+/// no room: answered for every form (D2 of the typed-errors plan), corners too — other modules'
+/// snapshots count toward the application's limit, so the same corners fit at one moment and not
+/// at the next. A window region's message begins as its size limit's does.
+fn reserve_for(lua: &Lua, process: &Rc<Cell<usize>>, bytes: usize, form: &region::Region) -> mlua::Result<Result<Reservation, HostError>> {
+    let window = matches!(form, region::Region::Window(..));
+    Ok(try_reserve(lua, process, bytes)?.map_err(|why| formed(why, window)))
 }
 
 /// [`reserve_for`] by whether the region was a window's (`window`) rather than by its form, and
 /// stepping the collector only when `step` ([`try_reserve_stepping`]).
-fn reserve_by_form(lua: &Lua, process: &Rc<Cell<usize>>, bytes: usize, fname: &str, window: bool, step: bool) -> mlua::Result<Result<Reservation, String>> {
-    match (try_reserve_stepping(lua, process, bytes, step)?, window) {
-        (Ok(res), _) => Ok(Ok(res)),
-        (Err(why), true) => Ok(Err(format!("{AT_WINDOW_SIZE}{why}"))),
-        (Err(why), false) => Err(err(format!("{fname}: {why}"))),
+fn reserve_by_form(lua: &Lua, process: &Rc<Cell<usize>>, bytes: usize, window: bool, step: bool) -> mlua::Result<Result<Reservation, HostError>> {
+    Ok(try_reserve_stepping(lua, process, bytes, step)?.map_err(|why| formed(why, window)))
+}
+
+/// `why` as a region of its form answers it: a window region's message after [`AT_WINDOW_SIZE`],
+/// which every Reason a window's size at run time gives leaves room for; corners' as it is.
+fn formed(why: HostError, window: bool) -> HostError {
+    if window {
+        HostError::with(why.reason(), format!("{AT_WINDOW_SIZE}{why}"))
+    } else {
+        why
     }
 }
 
 /// How every reason a window region's size at run time gives begins.
 const AT_WINDOW_SIZE: &str = "at the window's current size ";
 
-/// A charge that raises when it does not fit, as one for corners does: for the tests.
+/// A charge that raises when it does not fit: for the tests.
 #[cfg(test)]
 pub(crate) fn reserve(lua: &Lua, process: &Rc<Cell<usize>>, bytes: usize, fname: &str) -> mlua::Result<Reservation> {
     try_reserve(lua, process, bytes)?.map_err(|why| err(format!("{fname}: {why}")))
@@ -402,7 +417,7 @@ pub(crate) fn moment_of(frame: &Frame) -> Moment {
 }
 
 /// What every `host.screen` callback is called with: what the call returns — its first value and its
-/// reason, `nil` where there is none, so the reason is always the second — then `info`, given `time`
+/// error value, `nil` where there is none, so the error is always the second — then `info`, given `time`
 /// and `inputEpoch` of `seen`, the picture the answer was read from, when there was one.
 pub(crate) fn callback_values(values: MultiValue, info: Table, seen: Option<Moment>) -> mlua::Result<MultiValue> {
     if let Some((time, epoch)) = seen {
@@ -447,15 +462,15 @@ const FC: &str = "Snapshot:crop";
 const CROP_KEY: &str = "__snapshot_crop";
 
 /// What a crop asks, its arguments read: its answer at once — the region with no rectangle this
-/// time, not inside the snapshot, or a window region the budget has no room for — or the part to
-/// copy, its charge reserved.
+/// time, not inside the snapshot, or a region the budget has no room for — or the part to copy,
+/// its charge reserved.
 enum CropAsk {
     Now(MultiValue),
     Copy { frame: Arc<Frame>, r: Rect, res: Reservation, input_epoch: u64, process: Rc<Cell<usize>> },
 }
 
 /// `s:crop(region)`'s arguments, read strictly — the region as `host.screen.snapshot`'s is — and
-/// the charge for the copy reserved ([`reserve_for`]: corners the budget has no room for raise). A
+/// the charge for the copy reserved ([`reserve_for`]: a budget with no room is answered). A
 /// snapshot that was released, or a `crop` called on anything but a Snapshot, raises.
 fn crop_args(lua: &Lua, s: &Value, v: &Value) -> mlua::Result<CropAsk> {
     let (frame, input_epoch, process) = {
@@ -468,12 +483,12 @@ fn crop_args(lua: &Lua, s: &Value, v: &Value) -> mlua::Result<CropAsk> {
     let given = region_lua::read(v, "the region").map_err(|m| err(format!("{FC}: {m}")))?;
     let r = match given.resolve() {
         Ok(r) => rect_of(r),
-        Err(u) => return Ok(CropAsk::Now(with_reason(lua, Value::Nil, u.to_string())?)),
+        Err(u) => return Ok(CropAsk::Now(with_reason(lua, Value::Nil, u.error())?)),
     };
     if !frame.contains(r) {
-        return Ok(CropAsk::Now(with_reason(lua, Value::Nil, NOT_INSIDE.to_string())?));
+        return Ok(CropAsk::Now(with_reason(lua, Value::Nil, not_inside())?));
     }
-    let res = match reserve_for(lua, &process, estimate(r), FC, &given)? {
+    let res = match reserve_for(lua, &process, estimate(r), &given)? {
         Ok(res) => res,
         Err(why) => return Ok(CropAsk::Now(with_reason(lua, Value::Nil, why)?)),
     };
@@ -482,7 +497,7 @@ fn crop_args(lua: &Lua, s: &Value, v: &Value) -> mlua::Result<CropAsk> {
 
 /// What a crop answers of its copy — to a handler that waited and to a callback alike: a snapshot
 /// of its own, charged by the reservation settled to what it holds, with the source's moment; or
-/// `nil` and the reason, the charge given back.
+/// `nil` and the error value, the charge given back.
 fn crop_values(lua: &Lua, outcome: Outcome, res: Reservation, input_epoch: u64, process: &Rc<Cell<usize>>) -> mlua::Result<MultiValue> {
     match outcome {
         Outcome::Crop(Ok(f)) => handle_value(lua, f, res, input_epoch, process),
@@ -490,23 +505,23 @@ fn crop_values(lua: &Lua, outcome: Outcome, res: Reservation, input_epoch: u64, 
     }
 }
 
-/// What a crop answers when there is no copy: `nil` and the reason.
+/// What a crop answers when there is no copy: `nil` and the error value.
 fn crop_failed(lua: &Lua, outcome: Outcome) -> mlua::Result<MultiValue> {
     match outcome {
         Outcome::Crop(Err(why)) => with_reason(lua, Value::Nil, why),
         // Never: the worker answers a crop's task with its copy.
-        _ => with_reason(lua, Value::Nil, image_search::CROP_FAILED.to_string()),
+        _ => with_reason(lua, Value::Nil, HostError::of(&screen::CROP_FAILED)),
     }
 }
 
-/// `s:crop(region) -> (Snapshot?, string?)` copied on the spot, for a VM the host did not build: a
+/// `s:crop(region) -> (Snapshot?, Error?)` copied on the spot, for a VM the host did not build: a
 /// snapshot of its own of a part of `s`, the pixels copied here and charged anew, from the same
 /// moment.
 fn crop_now(lua: &Lua, ask: CropAsk) -> mlua::Result<MultiValue> {
     match ask {
         CropAsk::Now(values) => Ok(values),
         CropAsk::Copy { frame, r, res, input_epoch, process } => {
-            let got = frame.crop(r).ok_or_else(|| NOT_INSIDE.to_string());
+            let got = frame.crop(r).ok_or_else(not_inside);
             crop_values(lua, Outcome::Crop(got), res, input_epoch, &process)
         }
     }
@@ -535,7 +550,7 @@ fn start_crop<H: ReadHost>(h: &H, lua: &Lua, scope: usize, nonce: Table, s: Valu
 }
 
 /// `s:crop(region, cb)`: the same crop with `cb` as its waiter — it never waits, and its answer,
-/// the snapshot or `nil` and the reason, is handed to `cb` on a later tick. A crop takes no key: it
+/// the snapshot or `nil` and the error value, is handed to `cb` on a later tick. A crop takes no key: it
 /// has no options.
 fn submit_crop<H: ReadHost>(h: &H, lua: &Lua, scope: usize, s: Value, v: Value, cb: Value) -> mlua::Result<()> {
     let cb = image_search::callback_arg(FC, cb, "second argument")?;
@@ -641,17 +656,17 @@ pub(crate) fn strict_opts(v: &Value, fname: &str, cb: bool, which: &str) -> mlua
 
 /// A region a call reads loosely, on a snapshot: the one reader with the snapshot's edges as the
 /// defaults, so a region left out is the whole snapshot and a corner left out its edge. A
-/// mistake raises as it does live; `Ok(Err(reason))` is a window region with no rectangle this
+/// mistake raises as it does live; `Ok(Err(err))` is a window region with no rectangle this
 /// time. The rule (`clip` or `inside`) is the caller's to apply.
-pub(crate) fn loose_region(v: &Value, fname: &str, what: &str, frame: &Frame) -> mlua::Result<Result<ScreenRect, String>> {
+pub(crate) fn loose_region(v: &Value, fname: &str, what: &str, frame: &Frame) -> mlua::Result<Result<ScreenRect, HostError>> {
     let r = frame.rect;
     let given = region_lua::read_loose_within(v, what, (r.x, r.y, r.right(), r.bottom()))
         .map_err(|m| err(format!("{fname}: {m}")))?;
-    Ok(given.resolve().map_err(|u| u.to_string()))
+    Ok(given.resolve().map_err(|u| u.error()))
 }
 
 /// [`loose_region`] of `opts.region`.
-pub(crate) fn opts_region_in(opts: Option<&Table>, fname: &str, frame: &Frame) -> mlua::Result<Result<ScreenRect, String>> {
+pub(crate) fn opts_region_in(opts: Option<&Table>, fname: &str, frame: &Frame) -> mlua::Result<Result<ScreenRect, HostError>> {
     let v = match opts {
         Some(o) => o.get::<Value>("region")?,
         None => Value::Nil,
@@ -659,29 +674,29 @@ pub(crate) fn opts_region_in(opts: Option<&Table>, fname: &str, frame: &Frame) -
     loose_region(&v, fname, "opts.region", frame)
 }
 
-/// The clip rule: the part of `r` inside the snapshot, or [`NO_OVERLAP`].
-pub(crate) fn clip(frame: &Frame, r: ScreenRect) -> Result<Rect, String> {
-    frame.clip(rect_of(r)).ok_or_else(|| NO_OVERLAP.to_string())
+/// The clip rule: the part of `r` inside the snapshot, or [`no_overlap`].
+pub(crate) fn clip(frame: &Frame, r: ScreenRect) -> Result<Rect, HostError> {
+    frame.clip(rect_of(r)).ok_or_else(no_overlap)
 }
 
-/// The inside rule: `r` when it lies wholly inside the snapshot, or [`NOT_INSIDE`].
-pub(crate) fn inside(frame: &Frame, r: ScreenRect) -> Result<Rect, String> {
+/// The inside rule: `r` when it lies wholly inside the snapshot, or [`not_inside`].
+pub(crate) fn inside(frame: &Frame, r: ScreenRect) -> Result<Rect, HostError> {
     let r = rect_of(r);
     if frame.contains(r) {
         Ok(r)
     } else {
-        Err(NOT_INSIDE.to_string())
+        Err(not_inside())
     }
 }
 
 // ── host.screen.snapshot ───────────────────────────────────────────────────────────────────
 
 /// `host.screen.snapshot`'s options without a callback: `{ region = … }`, strictly, and the region's
-/// rectangle with the form it was given in — or `Ok(Err(reason))` for a window region with none
+/// rectangle with the form it was given in — or `Ok(Err(err))` for a window region with none
 /// this time, or one so large at the window's current size that it is past
 /// [`frame::MAX_FRAME_PIXELS`]; corners that large raise. `key`, `at` and `change` are the callback
 /// form's ([`parse_with_callback`]), and raise here as such.
-fn read_opts(v: &Value, fname: &str) -> mlua::Result<Result<(Rect, region::Region), String>> {
+fn read_opts(v: &Value, fname: &str) -> mlua::Result<Result<(Rect, region::Region), HostError>> {
     let Value::Table(t) = v else {
         return Err(err(format!("{fname}: opts must be a table {{ region = … }}, got {}", describe_value(v))));
     };
@@ -701,7 +716,7 @@ fn read_opts(v: &Value, fname: &str) -> mlua::Result<Result<(Rect, region::Regio
     let given = region_lua::read(&t.get::<Value>("region")?, "opts.region").map_err(|m| err(format!("{fname}: {m}")))?;
     let r = match given.resolve() {
         Ok(r) => rect_of(r),
-        Err(u) => return Ok(Err(u.to_string())),
+        Err(u) => return Ok(Err(u.error())),
     };
     if r.area() > frame::MAX_FRAME_PIXELS {
         let why = format!("the region is {}x{}, {} pixels; the limit is {}", r.w, r.h, r.area(), frame::MAX_FRAME_PIXELS);
@@ -709,13 +724,13 @@ fn read_opts(v: &Value, fname: &str) -> mlua::Result<Result<(Rect, region::Regio
             // Corners are the module's own: a mistake in the call.
             region::Region::Rect(_) => Err(err(format!("{fname}: {why}"))),
             // A window region's size is the window's, at run time: answered.
-            region::Region::Window(..) => Ok(Err(format!("{AT_WINDOW_SIZE}{why}"))),
+            region::Region::Window(..) => Ok(Err(HostError::with(&screen::REGION_TOO_LARGE, format!("{AT_WINDOW_SIZE}{why}")))),
         };
     }
     Ok(Ok((r, given)))
 }
 
-/// `host.screen.snapshot(opts) -> (Snapshot?, string?)`, and with a callback
+/// `host.screen.snapshot(opts) -> (Snapshot?, Error?)`, and with a callback
 /// `host.screen.snapshot(opts, cb)`. Without one, in a handler it waits: its picture is taken on the
 /// `screen-capture` thread, as a plain request with a callback is ([`start_waited`]), and the
 /// handler goes on with the handle. Where it cannot wait it raises, whatever it was given
@@ -738,7 +753,7 @@ pub(crate) fn snapshot(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Resu
 /// A waited `host.screen.snapshot`: its options read strictly — a mistake raises at the call — and a
 /// plain request filed for the handler that waits ([`submit_snap`]): its charge reserved at the
 /// call, one of the module's requests under their limits, with no key. A window region with no
-/// rectangle this time, or past a limit, is answered `nil` and the reason, as a callback is.
+/// rectangle this time, or past a limit, is answered `nil` and the error value, as a callback is.
 pub(crate) fn start_waited<H: ReadHost>(h: &H, lua: &Lua, scope: usize, nonce: Table, opts: Value) -> mlua::Result<()> {
     crate::task::start_wait(h, lua, scope, FS, nonce, || read_opts(&opts, FS), |parsed, task, prio| {
         let (rect, window) = match parsed {
@@ -746,7 +761,7 @@ pub(crate) fn start_waited<H: ReadHost>(h: &H, lua: &Lua, scope: usize, nonce: T
             Err(why) => (Err(why), false),
         };
         let ask = Ask { rect, window, key: None, at_ms: None, change: None };
-        Ok(crate::task::On::Snap(submit_snap(h, lua, scope, FS, ask, Asker::Handler(task), prio, Instant::now())?))
+        Ok(crate::task::On::Snap(submit_snap(h, lua, scope, ask, Asker::Handler(task), prio, Instant::now())?))
     })
 }
 
@@ -825,12 +840,12 @@ pub(crate) fn pixel_args(lua: &Lua, a: &Value, b: &Value, c: &Value, cb: bool) -
     let (snap, key) = strict_opts(opts, F, cb, PIXEL_CALLBACK)?;
     let (x, y) = match a {
         // The window form: the region form's start formula, resolved against the client area the
-        // table carries. A minimised window has no pixel: `nil, reason`.
+        // table carries. A minimised window has no pixel: `nil, err`.
         Value::Table(_) => {
             let (client, fx, fy) = region_lua::read_point(a, "point").map_err(|m| err(format!("{F}: {m}")))?;
             match region::resolve_point(client, fx, fy) {
                 Ok(p) => p,
-                Err(u) => return Ok((Reading::Now(with_reason(lua, Value::Nil, u.to_string())?, None), key)),
+                Err(u) => return Ok((Reading::Now(with_reason(lua, Value::Nil, u.error())?, None), key)),
             }
         }
         // Screen coordinates, converted as they always were (`pixel_coords`).
@@ -841,7 +856,7 @@ pub(crate) fn pixel_args(lua: &Lua, a: &Value, b: &Value, c: &Value, cb: bool) -
     if let Some(frame) = snap {
         let values = match frame.sample(x, y) {
             Some(px) => one_value(Value::Table(colour_table(lua, px)?))?,
-            None => with_reason(lua, Value::Nil, POINT_NOT_INSIDE.to_string())?,
+            None => with_reason(lua, Value::Nil, point_not_inside())?,
         };
         return Ok((Reading::Now(values, Some(moment_of(&frame))), key));
     }
@@ -859,7 +874,7 @@ pub(crate) fn pixels_args(lua: &Lua, points: &Value, opts: &Value, cb: bool) -> 
     for p in &pts {
         match p.resolve() {
             Ok(xy) => at.push(xy),
-            Err(u) => return Ok((Reading::Now(with_reason(lua, Value::Nil, u.to_string())?, None), key)),
+            Err(u) => return Ok((Reading::Now(with_reason(lua, Value::Nil, u.error())?, None), key)),
         }
     }
     if at.is_empty() {
@@ -868,7 +883,7 @@ pub(crate) fn pixels_args(lua: &Lua, points: &Value, opts: &Value, cb: bool) -> 
     if let Some(frame) = snap {
         let values = match at.iter().map(|&(x, y)| frame.sample(x, y)).collect::<Option<Vec<_>>>() {
             Some(c) => colour_list(lua, c)?,
-            None => with_reason(lua, Value::Nil, POINT_NOT_INSIDE.to_string())?,
+            None => with_reason(lua, Value::Nil, point_not_inside())?,
         };
         return Ok((Reading::Now(values, Some(moment_of(&frame))), key));
     }
@@ -877,14 +892,14 @@ pub(crate) fn pixels_args(lua: &Lua, points: &Value, opts: &Value, cb: bool) -> 
 
 /// What a live `pixel` or `pixels` of `n` points answers, from what was read — the same to a
 /// handler that waited and to a callback: one colour, or the list in order; a list of another
-/// length is a failed capture, never a short answer; a failed read is `nil` and its reason.
-fn live_values(lua: &Lua, call: PointCall, n: usize, got: Result<Vec<(u8, u8, u8)>, String>) -> mlua::Result<MultiValue> {
+/// length is a failed capture, never a short answer; a failed read is `nil` and its error value.
+fn live_values(lua: &Lua, call: PointCall, n: usize, got: Result<Vec<(u8, u8, u8)>, HostError>) -> mlua::Result<MultiValue> {
     match got {
         Ok(c) if c.len() == n && n > 0 => match call {
             PointCall::Pixel => one_value(Value::Table(colour_table(lua, c[0])?)),
             PointCall::Pixels => colour_list(lua, c),
         },
-        Ok(_) => with_reason(lua, Value::Nil, crate::backend::CAPTURE_FAILED.to_string()),
+        Ok(_) => with_reason(lua, Value::Nil, crate::backend::capture_failed()),
         Err(why) => with_reason(lua, Value::Nil, why),
     }
 }
@@ -954,7 +969,7 @@ fn now_of(reading: Reading) -> MultiValue {
     })
 }
 
-/// `host.screen.pixel(x, y, opts?, cb?)` or `pixel(point, opts?, cb?) -> (Colour?, string?)`. In a
+/// `host.screen.pixel(x, y, opts?, cb?)` or `pixel(point, opts?, cb?) -> (Colour?, Error?)`. In a
 /// handler a screen point waits: it is read on the `screen-capture` thread ([`start_points`]), and
 /// the handler goes on with the colour. Where it cannot wait it raises (`task::wait_message`). A
 /// snapshot's pixel, and a window point with no pixel this time, are answered at once wherever the
@@ -979,7 +994,7 @@ pub(crate) fn pixel(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<
     crate::task::points(lua, idx, shared.clone())?.call((FP, start, now, submit, pixel_callback_at(lua)?))
 }
 
-/// `host.screen.pixels(points, opts?, cb?) -> ({ Colour }?, string?)`: every point from as few
+/// `host.screen.pixels(points, opts?, cb?) -> ({ Colour }?, Error?)`: every point from as few
 /// captures as the backend can make of them — in a handler on the `screen-capture` thread, which the
 /// handler waits for; where it cannot wait it raises — or from a snapshot, touching nothing, at once
 /// wherever it is called. With a callback it never waits.
@@ -1091,27 +1106,46 @@ fn submit_points<H: ReadHost>(
 
 // ── host.screen.snapshot with a callback ───────────────────────────────────────────────────
 
-/// What a request is answered when a newer one with the same key replaced it.
-pub(crate) const SUPERSEDED: &str = "a newer request with the same key replaced this one";
+/// What a request is answered when a newer one with the same key replaced it (`replaced`).
+pub(crate) fn superseded() -> HostError {
+    HostError::of(&screen::REPLACED)
+}
 /// What a change wait is answered when a `watch` region misses its region at the window's size.
-pub(crate) const WATCH_MISS: &str = "a watch region does not overlap the region";
+pub(crate) fn watch_miss() -> HostError {
+    HostError::of(&screen::WATCH_MISS)
+}
 
-/// The reasons the caps answer with, numbers included.
-pub(crate) fn owner_waits_ended() -> String {
-    format!("too many change waits for this module ({SNAP_WAITS_PER_OWNER}); the oldest was ended")
+/// The errors the caps answer with (`too_many`), numbers included: each message is written with
+/// its constant, and its Reason's pattern holds the two together.
+pub(crate) fn owner_waits_ended() -> HostError {
+    HostError::with(
+        &screen::OWNER_WAITS_ENDED,
+        format!("too many change waits for this module ({SNAP_WAITS_PER_OWNER}); the oldest was ended"),
+    )
 }
-pub(crate) fn owner_requests_ended() -> String {
-    format!("too many snapshot requests waiting for this module ({SNAP_PER_OWNER}); the oldest was ended")
+pub(crate) fn owner_requests_ended() -> HostError {
+    HostError::with(
+        &screen::OWNER_REQUESTS_ENDED,
+        format!("too many snapshot requests waiting for this module ({SNAP_PER_OWNER}); the oldest was ended"),
+    )
 }
-pub(crate) fn all_waits_refused() -> String {
-    format!("too many change waits in the whole application ({SNAP_WAITS}); this one was not started")
+pub(crate) fn all_waits_refused() -> HostError {
+    HostError::with(
+        &screen::ALL_WAITS_REFUSED,
+        format!("too many change waits in the whole application ({SNAP_WAITS}); this one was not started"),
+    )
 }
-pub(crate) fn all_requests_refused() -> String {
-    format!("too many snapshot requests waiting in the whole application ({SNAP_TOTAL}); this one was not taken")
+pub(crate) fn all_requests_refused() -> HostError {
+    HostError::with(
+        &screen::ALL_REQUESTS_REFUSED,
+        format!("too many snapshot requests waiting in the whole application ({SNAP_TOTAL}); this one was not taken"),
+    )
 }
 /// What a request the thread answered `Cancelled` while the event loop still waited for it is
 /// told — which no path of the host makes; kept so the callback still runs exactly once.
-const CANCELLED: &str = "the request was cancelled";
+fn cancelled() -> HostError {
+    HostError::of(&screen::CANCELLED)
+}
 
 /// `change` of `snapshot` with a callback, once its arguments passed.
 pub(crate) struct ChangeArgs {
@@ -1127,8 +1161,8 @@ pub(crate) struct CallbackArgs {
     /// empty, past the size limit at the window's size; a `watch` of a window missing the region,
     /// or a window leaving fewer watched pixels than `minPixels`), which the callback is told on
     /// the next tick.
-    pub rect: Result<Rect, String>,
-    /// The region as it was given: a window region's budget overrun is answered (`reserve_for`).
+    pub rect: Result<Rect, HostError>,
+    /// The region as it was given: a window region's budget overrun says so (`reserve_for`).
     pub form: region::Region,
     pub key: Option<String>,
     /// `at`, in `host.now()` milliseconds.
@@ -1172,18 +1206,18 @@ fn whole_in(v: &Value, what: &str, lo: i64, hi: i64, hi_is: &str) -> mlua::Resul
 }
 
 /// A region's rectangle within `limit` pixels: corners past it raise (the module wrote them), a
-/// window region past it at the window's current size is answered, as is one whose client area is
-/// empty.
-fn resolve_within(given: region::Region, what: &str, limit: i64) -> mlua::Result<Result<Rect, String>> {
+/// window region past it at the window's current size is answered `too_large` — `past`, the
+/// limit's Reason — as is one whose client area is empty, `hidden`.
+fn resolve_within(given: region::Region, what: &str, limit: i64, past: &'static crate::errors::Reason) -> mlua::Result<Result<Rect, HostError>> {
     let r = match given.resolve() {
         Ok(r) => rect_of(r),
-        Err(u) => return Ok(Err(u.to_string())),
+        Err(u) => return Ok(Err(u.error())),
     };
     if r.area() > limit {
         let why = format!("the region is {}x{}, {} pixels; the limit is {limit}", r.w, r.h, r.area());
         return match given {
             region::Region::Rect(_) => Err(err(format!("{FS}: {what}: {why}"))),
-            region::Region::Window(..) => Ok(Err(format!("{AT_WINDOW_SIZE}{why}"))),
+            region::Region::Window(..) => Ok(Err(HostError::with(past, format!("{AT_WINDOW_SIZE}{why}")))),
         };
     }
     Ok(Ok(r))
@@ -1289,9 +1323,13 @@ pub(crate) fn parse_with_callback(opts: &Value, now_ms: f64) -> mlua::Result<Cal
     }
     let given = region_lua::read(&region_v, "opts.region").map_err(|m| err(format!("{FS}: {m}")))?;
     let change = change_v.as_ref().map(read_change).transpose()?;
-    let limit = if change.is_some() { MAX_WAIT_PIXELS } else { frame::MAX_FRAME_PIXELS };
+    let (limit, past) = if change.is_some() {
+        (MAX_WAIT_PIXELS, &screen::CHANGE_REGION_TOO_LARGE)
+    } else {
+        (frame::MAX_FRAME_PIXELS, &screen::REGION_TOO_LARGE)
+    };
     let region_is_corners = matches!(given, region::Region::Rect(_));
-    let mut rect = resolve_within(given, "opts.region", limit)?;
+    let mut rect = resolve_within(given, "opts.region", limit, past)?;
     let change = match change {
         None => None,
         Some((from, watch_given, spec)) => {
@@ -1304,7 +1342,7 @@ pub(crate) fn parse_with_callback(opts: &Value, now_ms: f64) -> mlua::Result<Cal
                     Ok(r) => rect_of(r),
                     Err(u) => {
                         if rect.is_ok() {
-                            rect = Err(u.to_string());
+                            rect = Err(u.error());
                         }
                         continue;
                     }
@@ -1323,7 +1361,7 @@ pub(crate) fn parse_with_callback(opts: &Value, now_ms: f64) -> mlua::Result<Cal
                                 wr.bottom()
                             )))
                         }
-                        None => rect = Err(WATCH_MISS.to_string()),
+                        None => rect = Err(watch_miss()),
                     }
                 }
             }
@@ -1356,9 +1394,13 @@ fn watched_pixels(region: Rect, watch: &[Rect]) -> i64 {
     crate::ocr::change::disjoint(&cut).iter().map(|r| r.area()).sum()
 }
 
-/// What a change wait is answered when, at a window's size, it watches fewer than `minPixels`.
-pub(crate) fn too_few_watched(n: i64, min: u32) -> String {
-    format!("{AT_WINDOW_SIZE}the change wait watches {n} pixels, fewer than its minPixels {min}")
+/// What a change wait is answered when, at a window's size, it watches fewer than `minPixels`
+/// (`outside`).
+pub(crate) fn too_few_watched(n: i64, min: u32) -> HostError {
+    HostError::with(
+        &screen::TOO_FEW_WATCHED,
+        format!("{AT_WINDOW_SIZE}the change wait watches {n} pixels, fewer than its minPixels {min}"),
+    )
 }
 
 /// What a snapshot request is reserved at: the estimate — and for a change wait, which holds
@@ -1475,7 +1517,7 @@ pub(crate) struct ProfileReq {
 /// What a callback is called with, or a handler goes on with.
 pub(crate) enum Answer {
     Picture { frame: Arc<Frame>, frames: u32, change: Option<ChangeInfo>, waited: Duration },
-    Failed { why: String, frames: u32, change: Option<ChangeInfo>, waited: Duration },
+    Failed { why: HostError, frames: u32, change: Option<ChangeInfo>, waited: Duration },
     /// A profile's reduction, from the image worker.
     Profile(Box<Reduced>),
     /// The colours of a points request, one per point, in order, and the moment they were read.
@@ -1492,13 +1534,13 @@ pub(crate) struct SnapState {
     pending: RefCell<HashMap<SnapId, PendingSnap>>,
     /// Answered without the thread — superseded, ended or refused by a cap, nothing to capture
     /// this time — on the next tick, never from inside the binding.
-    ready: RefCell<Vec<(PendingSnap, String)>>,
+    ready: RefCell<Vec<(PendingSnap, HostError)>>,
     /// A points callback's answers decided at the call, on the next tick likewise.
     now: RefCell<Vec<(PendingSnap, Answer)>>,
     next_id: Cell<SnapId>,
     /// Per module VM, call and key, the newest request asked with it, while it has not been
     /// delivered: an older answer with the key that is delivered after a newer request was made —
-    /// from a callback earlier in the same batch — is answered [`SUPERSEDED`] instead (`deliver`).
+    /// from a callback earlier in the same batch — is answered [`superseded`] instead (`deliver`).
     newest_key: RefCell<HashMap<(Owner, Kind, String), SnapId>>,
     /// Per module VM and key, the answers in its mailbox, neither run nor dropped yet: still out
     /// for `host.screen.pending`.
@@ -1559,7 +1601,7 @@ impl SnapState {
 
     /// Takes `id` off the thread's hands and answers it `why` on the next tick, giving its bytes
     /// back to the budget now: its answer carries no picture. False when it was not waiting.
-    fn end(&self, id: SnapId, why: String) -> bool {
+    fn end(&self, id: SnapId, why: HostError) -> bool {
         let Some(mut p) = self.pending.borrow_mut().remove(&id) else { return false };
         p.cancel.store(true, Ordering::Release);
         // A profile with the image worker: not reduced if the worker has not begun it, and no
@@ -1598,7 +1640,7 @@ impl SnapState {
         }
     }
 
-    /// Latest wins per key: `owner`'s requests of `kind` with `key` are answered [`SUPERSEDED`] —
+    /// Latest wins per key: `owner`'s requests of `kind` with `key` are answered [`superseded`] —
     /// also one whose picture was already taken, and a profile being reduced. Keys are each call's
     /// own: a text read's never replaces a snapshot, nor a profile's a snapshot. How many were
     /// ended.
@@ -1611,22 +1653,22 @@ impl SnapState {
             .map(|p| p.id)
             .collect();
         ids.sort_unstable();
-        ids.into_iter().filter(|id| self.end(*id, SUPERSEDED.to_string())).count()
+        ids.into_iter().filter(|id| self.end(*id, superseded())).count()
     }
 
     /// Room for a new request of `owner`: the module's oldest change wait ends when it would
     /// have more than its share, and its oldest request of any kind likewise, so the newest
     /// proceeds — unless the whole application's limits, counted as they stand once those have
     /// ended, refuse it; then nothing of the module's is ended for a request that is not taken.
-    /// The requests ended, and the reason the new one is refused.
-    fn make_room(&self, owner: Owner, change: bool) -> (Vec<String>, Option<String>) {
+    /// The requests ended, and the error the new one is refused with.
+    fn make_room(&self, owner: Owner, change: bool) -> (Vec<HostError>, Option<HostError>) {
         let (plan, refused) = {
             let pending = self.pending.borrow();
             // The module's requests, oldest first, and whether each is a change wait.
             let mut mine: Vec<(SnapId, bool)> =
                 pending.values().filter(|p| p.owner.idx == owner.idx).map(|p| (p.id, p.change)).collect();
             mine.sort_unstable();
-            let mut plan: Vec<(SnapId, bool, String)> = Vec::new();
+            let mut plan: Vec<(SnapId, bool, HostError)> = Vec::new();
             if change && mine.iter().filter(|m| m.1).count() >= SNAP_WAITS_PER_OWNER {
                 if let Some(i) = mine.iter().position(|m| m.1) {
                     let (id, wait) = mine.remove(i);
@@ -1681,7 +1723,7 @@ impl SnapState {
                 SnapOutcome::Failed { why, frames, change } => Answer::Failed { why, frames, change, waited },
                 SnapOutcome::Colours { colours, at, input_epoch } => Answer::Colours { colours, moment: (millis_of(at), input_epoch) },
                 SnapOutcome::Cancelled => {
-                    Answer::Failed { why: CANCELLED.to_string(), frames: 0, change: p.change.then(ChangeInfo::default), waited }
+                    Answer::Failed { why: cancelled(), frames: 0, change: p.change.then(ChangeInfo::default), waited }
                 }
             };
             out.push((p, answer));
@@ -1789,8 +1831,8 @@ fn info_table(lua: &Lua, frames: u32, change: Option<ChangeInfo>, waited: Durati
 }
 
 /// One request's callback and what it is called with: `cb(snap, nil, info)` with a handle charged
-/// by its reservation settled to what the picture holds, or `cb(nil, reason, info)` — and for a
-/// profile `cb(profile, nil, info)`, its tables built here, or `cb(nil, reason, info)`; `info`
+/// by its reservation settled to what the picture holds, or `cb(nil, err, info)` — and for a
+/// profile `cb(profile, nil, info)`, its tables built here, or `cb(nil, err, info)`; `info`
 /// carries the picture's `time` and `inputEpoch` when there is one ([`callback_values`]). Its charge
 /// goes either way.
 fn call_args(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> mlua::Result<(Function, MultiValue)> {
@@ -1810,7 +1852,7 @@ fn call_args(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> 
             // Never: a profile's picture goes on to the image worker (`fire_snapshot_results`), and
             // a profile reads no points.
             Answer::Picture { .. } | Answer::Colours { .. } | Answer::Values { .. } => {
-                (with_reason(&lua, Value::Nil, image_search::PROFILE_FAILED.to_string())?, None)
+                (with_reason(&lua, Value::Nil, HostError::of(&screen::PROFILE_FAILED))?, None)
             }
         };
         return Ok((f, callback_values(values, lua.create_table()?, seen)?));
@@ -1823,7 +1865,7 @@ fn call_args(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> 
             Answer::Values { values, moment } => (values, moment),
             Answer::Failed { why, .. } => (with_reason(&lua, Value::Nil, why)?, None),
             // Never: a points request is answered its colours or a failure.
-            Answer::Picture { .. } | Answer::Profile(_) => (with_reason(&lua, Value::Nil, "internal error".to_string())?, None),
+            Answer::Picture { .. } | Answer::Profile(_) => (with_reason(&lua, Value::Nil, HostError::of(&screen::INTERNAL))?, None),
         };
         return Ok((f, callback_values(values, lua.create_table()?, seen)?));
     }
@@ -1842,7 +1884,7 @@ fn call_args(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> 
         // Never: only a profile is reduced, and only a points request is answered colours.
         Answer::Profile(_) | Answer::Colours { .. } | Answer::Values { .. } => {
             p.res.take();
-            let values = with_reason(&lua, Value::Nil, "internal error".to_string())?;
+            let values = with_reason(&lua, Value::Nil, HostError::of(&screen::INTERNAL))?;
             callback_values(values, info_table(&lua, 0, None, Duration::ZERO)?, None)?
         }
     };
@@ -1851,10 +1893,10 @@ fn call_args(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> 
 
 /// What a handler that waited goes on with: what its call returns. For `host.screen.snapshot` the
 /// handle, charged by the request's reservation settled to what the picture holds, or `nil` and the
-/// reason; no `info`. The charge goes either way. For `host.screen.pixel` or `pixels` the colour or
-/// the list, or `nil` and the reason, built as a callback's are ([`live_values`]). For
-/// `host.screen.profile` its table, its picture's `time` and `inputEpoch` with it
-/// ([`profile_answer`]), or `nil` and the reason.
+/// error value; no `info`. The charge goes either way. For `host.screen.pixel` or `pixels` the
+/// colour or the list, or `nil` and the error value, built as a callback's are ([`live_values`]).
+/// For `host.screen.profile` its table, its picture's `time` and `inputEpoch` with it
+/// ([`profile_answer`]), or `nil` and the error value.
 fn waited_values(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> mlua::Result<MultiValue> {
     let lua = p.lua.clone();
     let res = p.res.take();
@@ -1865,7 +1907,7 @@ fn waited_values(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>)
             // Never: a profile's picture goes on to the image worker, and a profile reads no
             // points.
             Answer::Picture { .. } | Answer::Colours { .. } | Answer::Values { .. } => {
-                with_reason(&lua, Value::Nil, image_search::PROFILE_FAILED.to_string())
+                with_reason(&lua, Value::Nil, HostError::of(&screen::PROFILE_FAILED))
             }
         };
     }
@@ -1875,7 +1917,7 @@ fn waited_values(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>)
             Answer::Failed { why, .. } => with_reason(&lua, Value::Nil, why),
             // Never: a handler's points are read, and answered their colours or a failure.
             Answer::Picture { .. } | Answer::Profile(_) | Answer::Values { .. } => {
-                with_reason(&lua, Value::Nil, "internal error".to_string())
+                with_reason(&lua, Value::Nil, HostError::of(&screen::INTERNAL))
             }
         };
     }
@@ -1886,12 +1928,12 @@ fn waited_values(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>)
         }
         Answer::Failed { why, .. } => with_reason(&lua, Value::Nil, why),
         // Never: only a profile is reduced, and only a points request is answered colours.
-        Answer::Profile(_) | Answer::Colours { .. } | Answer::Values { .. } => with_reason(&lua, Value::Nil, "internal error".to_string()),
+        Answer::Profile(_) | Answer::Colours { .. } | Answer::Values { .. } => with_reason(&lua, Value::Nil, HostError::of(&screen::INTERNAL)),
     }
 }
 
 /// An answer as it runs (`Event::Snapshot`), its module still the VM that asked and enabled: answered
-/// [`SUPERSEDED`], its picture let go, when a newer request with its key was made since — by an
+/// [`superseded`], its picture let go, when a newer request with its key was made since — by an
 /// event that ran before it, earlier in the same batch or in its module's mailbox — as it would
 /// have been had the newer request come before the thread answered. Its key is forgotten when it
 /// was the newest with it, it is no longer out, and its callback is let go: the call it returns
@@ -1909,7 +1951,7 @@ pub(crate) fn open_answer(
             Answer::Picture { change, waited, .. } | Answer::Failed { change, waited, .. } => (change, waited),
             Answer::Profile(_) | Answer::Colours { .. } | Answer::Values { .. } => (None, Duration::ZERO),
         };
-        Answer::Failed { why: SUPERSEDED.to_string(), frames: 0, change: change.map(|_| ChangeInfo::default()), waited }
+        Answer::Failed { why: superseded(), frames: 0, change: change.map(|_| ChangeInfo::default()), waited }
     } else {
         answer
     };
@@ -2023,8 +2065,8 @@ pub(crate) fn test_reduced(rect: Rect, lum: u8) -> Answer {
 
 /// An answer without a picture, for `why`.
 #[cfg(test)]
-pub(crate) fn test_failed(why: &str) -> Answer {
-    Answer::Failed { why: why.to_string(), frames: 0, change: None, waited: Duration::ZERO }
+pub(crate) fn test_failed(why: HostError) -> Answer {
+    Answer::Failed { why, frames: 0, change: None, waited: Duration::ZERO }
 }
 
 /// A batch of answers as the tick and the mailboxes deliver it, every module free: each to a VM
@@ -2058,9 +2100,9 @@ fn deliver(
 
 /// What a request asks of the `screen-capture` thread, its arguments checked: the region's
 /// rectangle, or why there is none this time (answered on the next tick); whether the region was a
-/// window's, whose budget overrun is answered where corners raise; and the callback form's options.
+/// window's, whose budget overrun says so; and the callback form's options.
 pub(crate) struct Ask {
-    pub rect: Result<Rect, String>,
+    pub rect: Result<Rect, HostError>,
     pub window: bool,
     pub key: Option<String>,
     pub at_ms: Option<f64>,
@@ -2082,20 +2124,17 @@ pub(crate) enum Asker {
     Handler(TaskId),
 }
 
-/// Files a request of the VM `lua`, called under the identity `scope` as `fname`, for `asker`, at
-/// `prio`: its charge reserved at the call — a call that raises for it changes nothing else, and a
-/// window region that does not fit is answered like one past the size limit — the newest with its
-/// key, within the module's and the application's limits, and handed to the capture thread with
-/// the module's first-read comparison when it is owed. What is decided without the thread —
-/// nothing to capture this time, a refusal — is answered on the next tick, never from inside the
-/// call. `snapshot` with a callback and a waited `snapshot` share it, and so the same limits and
-/// answers.
-#[allow(clippy::too_many_arguments)]
+/// Files a request of the VM `lua`, called under the identity `scope`, for `asker`, at `prio`: its
+/// charge reserved at the call — a region that does not fit is answered, a window's like one past
+/// the size limit — the newest with its key, within the module's and the application's limits, and
+/// handed to the capture thread with the module's first-read comparison when it is owed. What is
+/// decided without the thread — nothing to capture this time, a refusal — is answered on the next
+/// tick, never from inside the call. `snapshot` with a callback and a waited `snapshot` share it,
+/// and so the same limits and answers.
 pub(crate) fn submit_snap<H: ReadHost>(
     h: &H,
     lua: &Lua,
     scope: usize,
-    fname: &str,
     ask: Ask,
     asker: Asker,
     prio: Priority,
@@ -2105,7 +2144,7 @@ pub(crate) fn submit_snap<H: ReadHost>(
     let change = ask.change.is_some();
     let mut rect = ask.rect;
     let res = match &rect {
-        Ok(r) => match reserve_by_form(lua, h.snap_bytes(), reservation_for(*r, change), fname, ask.window, true)? {
+        Ok(r) => match reserve_by_form(lua, h.snap_bytes(), reservation_for(*r, change), ask.window, true)? {
             Ok(res) => Some(res),
             Err(why) => {
                 note_crowding(h, owner.idx, &why);
@@ -2192,8 +2231,8 @@ pub(crate) fn submit_snap<H: ReadHost>(
 }
 
 /// One line per module per `SLOW_LOG_EVERY` when its snapshot requests are ended or refused by a
-/// limit, or a window region's is answered for the budget.
-fn note_crowding<H: ReadHost>(h: &H, idx: usize, why: &str) {
+/// limit, or one is answered for the budget.
+fn note_crowding<H: ReadHost>(h: &H, idx: usize, why: &HostError) {
     let now = Instant::now();
     {
         let mut logged = h.snap_state().logged.borrow_mut();
@@ -2299,7 +2338,7 @@ fn reduce<H: ReadHost>(h: &H, p: PendingSnap, frame: Arc<Frame>) {
     let id = p.id;
     let sent = st.to_worker(p, frame, task);
     if !h.images().send(sent) {
-        st.end(id, image_search::PROFILE_FAILED.to_string());
+        st.end(id, HostError::of(&screen::PROFILE_FAILED));
     }
 }
 
@@ -2307,7 +2346,7 @@ fn reduce<H: ReadHost>(h: &H, p: PendingSnap, frame: Arc<Frame>) {
 /// waited in `profile` goes on with it at once, turning no epoch; a callback's answer is handed to
 /// its module's mailbox in the lane it was asked from, as a picture is ([`fire_snaps`]), the epoch
 /// turned before the drain's first callback (`bumped`). Driven by `image_search::fire_images`.
-pub(crate) fn deliver_reduced<H: MailHost>(h: &H, mut p: PendingSnap, reduced: Result<Box<Reduced>, String>, bumped: &mut bool) {
+pub(crate) fn deliver_reduced<H: MailHost>(h: &H, mut p: PendingSnap, reduced: Result<Box<Reduced>, HostError>, bumped: &mut bool) {
     let answer = match reduced {
         Ok(r) => Answer::Profile(r),
         Err(why) => Answer::Failed { why, frames: 0, change: None, waited: Duration::ZERO },
@@ -2451,15 +2490,16 @@ pub(crate) fn callback_only(opts: Option<&Table>, fname: &str, names: &[&str], w
     Ok(())
 }
 
-/// A region of `fname` within `limit` pixels: corners past it raise (the module wrote them), a
-/// window region past it at the window's current size is answered.
-fn within_limit(r: Rect, window: bool, fname: &str, limit: i64) -> mlua::Result<Result<Rect, String>> {
+/// A region of `fname` within [`frame::MAX_FRAME_PIXELS`]: corners past it raise (the module
+/// wrote them), a window region past it at the window's current size is answered `too_large`.
+fn within_limit(r: Rect, window: bool, fname: &str) -> mlua::Result<Result<Rect, HostError>> {
+    let limit = frame::MAX_FRAME_PIXELS;
     if r.area() <= limit {
         return Ok(Ok(r));
     }
     let why = format!("the region is {}x{}, {} pixels; the limit is {limit}", r.w, r.h, r.area());
     if window {
-        Ok(Err(format!("{AT_WINDOW_SIZE}{why}")))
+        Ok(Err(HostError::with(&screen::REGION_TOO_LARGE, format!("{AT_WINDOW_SIZE}{why}"))))
     } else {
         Err(err(format!("{fname}: opts.region: {why}")))
     }
@@ -2470,13 +2510,13 @@ pub(crate) struct ProfileArgs {
     /// The snapshot to profile instead of the screen.
     snap: Option<Arc<Frame>>,
     /// The region, resolved — or why a window region has none this time.
-    region: Result<ScreenRect, String>,
+    region: Result<ScreenRect, HostError>,
     cols: bool,
     rows: bool,
     /// The luminance threshold of the `dark` counts.
     dark: u8,
-    /// Whether the region was a window's, whose size is the window's at run time: past a limit it
-    /// is answered, where corners raise.
+    /// Whether the region was a window's, whose size is the window's at run time: past the size
+    /// limit it is answered, where corners raise.
     window: bool,
 }
 
@@ -2542,12 +2582,12 @@ fn profile_answer(
 }
 
 /// What a profile of `args` answers when it has nothing to read this time — a window region with no
-/// rectangle, an empty region, a region outside its snapshot: `nil` and the reason, without a
+/// rectangle, an empty region, a region outside its snapshot: `nil` and the error value, without a
 /// picture, at once wherever the call is made. `None` for one that reads.
 fn nothing_to_profile(lua: &Lua, args: &ProfileArgs) -> mlua::Result<Option<MultiValue>> {
     let why = match (&args.region, &args.snap) {
         (Err(why), _) => why.clone(),
-        (Ok(r), _) if r.w <= 0 || r.h <= 0 => format!("{} ({}x{})", crate::EMPTY_REGION, r.w, r.h),
+        (Ok(r), _) if r.w <= 0 || r.h <= 0 => crate::empty_region(r.w, r.h),
         (Ok(r), Some(frame)) => match clip(frame, *r) {
             Err(why) => why,
             Ok(_) => return Ok(None),
@@ -2596,7 +2636,7 @@ fn profile_opts_table(v: Value) -> mlua::Result<Option<Table>> {
     }
 }
 
-/// `host.screen.profile(opts?) -> (Profile?, string?)`, and with a callback
+/// `host.screen.profile(opts?) -> (Profile?, Error?)`, and with a callback
 /// `host.screen.profile(opts, cb)`. Without one it waits in a handler: its picture is taken on the
 /// `screen-capture` thread as a plain snapshot's is — none for a snapshot — reduced on the
 /// image worker, and only the table is built on the event loop as the handler goes on
@@ -2699,21 +2739,21 @@ pub(crate) fn submit_profile<H: ReadHost>(
         Asker::Handler(_) => (None, None),
     };
     let ProfileArgs { snap, region, cols, rows, dark, window } = args;
-    // A window region's size is the window's at run time: past a limit it is answered, where
-    // corners raise.
+    // A window region's size is the window's at run time: past the size limit it is answered,
+    // where corners raise.
     let mut rect = match region {
         Err(why) => Err(why),
-        Ok(r) if r.w <= 0 || r.h <= 0 => Err(format!("{} ({}x{})", crate::EMPTY_REGION, r.w, r.h)),
+        Ok(r) if r.w <= 0 || r.h <= 0 => Err(crate::empty_region(r.w, r.h)),
         Ok(r) => match &snap {
             Some(frame) => clip(frame, r),
-            None => within_limit(rect_of(r), window, F, frame::MAX_FRAME_PIXELS)?,
+            None => within_limit(rect_of(r), window, F)?,
         },
     };
     let owner = crate::ocr::lua::owner_of(lua, &h.vm_gens(), scope);
     // A picture of its own is charged from the call until the answer is handed over; a
     // snapshot's pixels are the module's already.
     let res = match (&snap, &rect) {
-        (None, Ok(r)) => match reserve_by_form(lua, h.snap_bytes(), estimate(*r), F, window, false)? {
+        (None, Ok(r)) => match reserve_by_form(lua, h.snap_bytes(), estimate(*r), window, false)? {
             Ok(res) => Some(res),
             Err(why) => {
                 note_crowding(h, owner.idx, &why);
@@ -2851,7 +2891,7 @@ pub(crate) fn snap_callback<H: ReadHost>(h: &H, lua: &Lua, scope: usize, opts: V
     let now = Instant::now();
     let now_ms = now.saturating_duration_since(crate::clock_origin()).as_secs_f64() * 1000.0;
     let args = parse_with_callback(&opts, now_ms)?;
-    submit_snap(h, lua, scope, FS, args.ask(), Asker::Callback(cb), current_priority(), now)?;
+    submit_snap(h, lua, scope, args.ask(), Asker::Callback(cb), current_priority(), now)?;
     Ok(())
 }
 
@@ -2955,6 +2995,13 @@ pub(crate) fn test_points<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors_lua::Told;
+    use mlua::FromLua;
+
+    /// The error value `v` of `lua`, as a test compares it.
+    fn told(lua: &Lua, v: &Value) -> Told {
+        Told::from_lua(v.clone(), lua).unwrap()
+    }
 
     /// A frame of `r` in one colour: cheap to make at the sizes the budget tests need.
     fn blank(r: Rect) -> Frame {
@@ -2963,22 +3010,22 @@ mod tests {
     }
 
     /// A snapshot of `opts` as a request's answer is made of it, with the capture passed in: reads
-    /// `opts`, reserves the budget ([`reserve_for`]: a window region's overrun is answered), takes
-    /// the picture through `capture` and answers the handle with `input_epoch` — or `nil` and why,
-    /// giving the reservation back.
+    /// `opts`, reserves the budget ([`reserve_for`]: an overrun is answered), takes the picture
+    /// through `capture` and answers the handle with `input_epoch` — or `nil` and why, giving the
+    /// reservation back.
     fn take(
         lua: &Lua,
         process: &Rc<Cell<usize>>,
         input_epoch: u64,
         opts: &Value,
-        capture: impl FnOnce(Rect) -> Result<Frame, String>,
+        capture: impl FnOnce(Rect) -> Result<Frame, HostError>,
     ) -> mlua::Result<MultiValue> {
         const F: &str = FS;
         let (r, given) = match read_opts(opts, F)? {
             Ok(r) => r,
             Err(why) => return with_reason(lua, Value::Nil, why),
         };
-        let res = match reserve_for(lua, process, estimate(r), F, &given)? {
+        let res = match reserve_for(lua, process, estimate(r), &given)? {
             Ok(res) => res,
             Err(why) => return with_reason(lua, Value::Nil, why),
         };
@@ -3063,26 +3110,38 @@ mod tests {
         let opts: Value = lua.load("return { region = { 0, 0, 100, 100 } }").eval().unwrap();
         let got = take(&lua, &process, 0, &opts, |_| {
             assert_eq!(vm_budget(&lua).get(), 40_000 * ESTIMATE_FACTOR, "reserved before the capture");
-            Err("screen capture failed".to_string())
+            Err(crate::backend::capture_failed())
         })
         .unwrap()
         .into_vec();
         assert!(got[0].is_nil());
-        assert_eq!(got[1].as_string().unwrap().to_string_lossy(), "screen capture failed");
+        assert_eq!(Told::from_lua(got[1].clone(), &lua).unwrap(), Told::of(&crate::backend::capture_failed()));
         assert_eq!((vm_budget(&lua).get(), process.get()), (0, 0));
     }
 
+    /// Over the budget the collector runs twice, and a request that still does not fit is answered
+    /// `nil, err` (`too_large`), corners too (D2 of the typed-errors plan): other modules'
+    /// snapshots count toward the application's limit, so the moment decides it.
     #[test]
-    fn over_budget_collects_twice_then_raises_naming_release() {
+    fn over_budget_collects_twice_then_answers_naming_release() {
         let lua = Lua::new();
         let process = Rc::new(Cell::new(0));
         lua.globals().set("snap", snap_fn(&lua, &process)).unwrap();
         // 16 MiB each. Forty dropped at once are five times the budget, which only a collection
         // gives back.
         lua.load("for i = 1, 40 do local s = snap({ region = { 0, 0, 2048, 2048 } }) end").exec().unwrap();
-        let e = err_text(lua.load("held = {} for i = 1, 40 do held[i] = snap({ region = { 0, 0, 2048, 2048 } }) end").exec());
-        assert!(e.contains("host.screen.snapshot: this module's snapshots would hold 144.0 MiB; the limit is 128 MiB per module VM (512 MiB in the whole application)"), "{e}");
-        assert!(e.contains("s:release()"), "{e}");
+        let (_, told): (Value, Told) = lua
+            .load(
+                "held = {} for i = 1, 40 do local s, err = snap({ region = { 0, 0, 2048, 2048 } })                  if s == nil then return s, err end held[i] = s end",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(told.0, "too_large");
+        assert!(
+            told.1.starts_with("this module's snapshots would hold 144.0 MiB; the limit is 128 MiB per module VM (512 MiB in the whole application)"),
+            "{told:?}"
+        );
+        assert!(told.1.contains("s:release()"), "{told:?}");
         let n: usize = lua.load("return #held").eval().unwrap();
         // Each is reserved at its estimate before it settles to 16 MiB: eight fit in 128 on
         // Windows, four on macOS, where the estimate is five times the pixels.
@@ -3207,14 +3266,14 @@ mod tests {
             .unwrap();
         assert_eq!((w, h, x, y, r), (10, 5, 110, 60, 0), "the same moment");
         assert_eq!(process.get(), 40 * 30 * 4 + 10 * 5 * 4, "charged anew");
-        let got: (Value, String) = lua.load("return s:crop({ 130, 60, 150, 65 })").eval().unwrap();
+        let got: (Value, Told) = lua.load("return s:crop({ 130, 60, 150, 65 })").eval().unwrap();
         assert!(got.0.is_nil());
-        assert_eq!(got.1, NOT_INSIDE);
-        let win: (Value, String) = lua
+        assert_eq!(got.1, Told::of(&not_inside()));
+        let win: (Value, Told) = lua
             .load("return s:crop({ window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0, 1, 1 } })")
             .eval()
             .unwrap();
-        assert_eq!(win.1, "the window's client area is empty (0x0)");
+        assert_eq!(win.1, Told("hidden".into(), "the window's client area is empty (0x0)".into()));
         let e = err_text(lua.load("return s:crop({ 110, 60 })").exec());
         assert!(e.contains("Snapshot:crop: the region.x2 is missing"), "{e}");
         let e = err_text(lua.load("return s:crop()").exec());
@@ -3251,18 +3310,18 @@ mod tests {
             let e = err_text(lua.load(src).exec());
             assert!(e.contains(want), "{src}:\n  got  {e}\n  want {want}");
         }
-        let (v, why): (Value, String) = lua
+        let (v, why): (Value, Told) = lua
             .load("return snap({ region = { window = { client = { x = 0, y = 0, w = 10000, h = 5000 } }, fraction = { 0, 0, 1, 1 } } })")
             .eval()
             .unwrap();
         assert!(v.is_nil());
-        assert_eq!(why, "at the window's current size the region is 10000x5000, 50000000 pixels; the limit is 40000000");
-        let (v, why): (Value, String) = lua
+        assert_eq!(why, Told("too_large".into(), "at the window's current size the region is 10000x5000, 50000000 pixels; the limit is 40000000".into()));
+        let (v, why): (Value, Told) = lua
             .load("return snap({ region = { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0, 1, 1 } } })")
             .eval()
             .unwrap();
         assert!(v.is_nil());
-        assert_eq!(why, "the window's client area is empty (0x0)");
+        assert_eq!(why, Told("hidden".into(), "the window's client area is empty (0x0)".into()));
         assert_eq!(process.get(), 0, "nothing reserved for what was not taken");
         // The window form, resolved at the call.
         let (x, y, w, h): (i32, i32, i32, i32) = lua
@@ -3291,8 +3350,8 @@ mod tests {
         let r = |x, y, w, h| ScreenRect { x, y, w, h };
         assert_eq!(clip(&f, r(0, 0, 200, 100)), Ok(Rect::new(100, 50, 100, 50)), "the part inside");
         assert_eq!(clip(&f, r(200, 100, 10, 10)), Ok(Rect::new(200, 100, 10, 10)));
-        assert_eq!(clip(&f, r(0, 0, 50, 50)), Err(NO_OVERLAP.to_string()));
-        assert_eq!(clip(&f, r(200, 100, 0, 0)), Err(NO_OVERLAP.to_string()), "an empty region overlaps nothing");
+        assert_eq!(clip(&f, r(0, 0, 50, 50)), Err(no_overlap()));
+        assert_eq!(clip(&f, r(200, 100, 0, 0)), Err(no_overlap()), "an empty region overlaps nothing");
     }
 
     #[test]
@@ -3300,9 +3359,9 @@ mod tests {
         let f = test_frame(100, 50, 640, 480);
         let r = |x, y, w, h| ScreenRect { x, y, w, h };
         assert_eq!(inside(&f, r(100, 50, 640, 480)), Ok(Rect::new(100, 50, 640, 480)));
-        assert_eq!(inside(&f, r(0, 0, 200, 100)), Err(NOT_INSIDE.to_string()), "not cut, refused");
+        assert_eq!(inside(&f, r(0, 0, 200, 100)), Err(not_inside()), "not cut, refused");
         assert_eq!(inside(&f, r(739, 529, 1, 1)), Ok(Rect::new(739, 529, 1, 1)));
-        assert_eq!(inside(&f, r(739, 529, 2, 1)), Err(NOT_INSIDE.to_string()));
+        assert_eq!(inside(&f, r(739, 529, 2, 1)), Err(not_inside()));
     }
 
     #[test]
@@ -3347,7 +3406,7 @@ mod tests {
         lua: &Lua,
         points: &Value,
         opts: &Value,
-        live: impl FnOnce(&[(i32, i32)]) -> Result<Vec<(u8, u8, u8)>, String>,
+        live: impl FnOnce(&[(i32, i32)]) -> Result<Vec<(u8, u8, u8)>, HostError>,
     ) -> mlua::Result<MultiValue> {
         match pixels_args(lua, points, opts, false)?.0 {
             Reading::Now(values, _) => Ok(values),
@@ -3374,7 +3433,7 @@ mod tests {
         assert_eq!(e.raw_len(), 0, "{{}} reads nothing");
         let min = pixels_of(&lua, "return { { 1, 2 }, { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0 } } }", "return nil").unwrap();
         assert!(min[0].is_nil());
-        assert_eq!(min[1].as_string().unwrap().to_string_lossy(), "the window's client area is empty (0x0)");
+        assert_eq!(told(&lua, &min[1]), Told("hidden".into(), "the window's client area is empty (0x0)".into()));
         for (points, want) in [
             ("return 5", "host.screen.pixels: points must be a list of points { { x, y }, … }, got 5"),
             ("return { { 1, 2 }, n = 1 }", "points must be a list (1, 2, 3, …) with nothing else in it"),
@@ -3406,58 +3465,59 @@ mod tests {
         assert_eq!((first.get::<u8>("r").unwrap(), first.get::<u8>("g").unwrap(), first.get::<u8>("b").unwrap()), (10, 20, 50));
         let miss = read("return { { 10, 20 }, { 40, 59 } }");
         assert!(miss[0].is_nil());
-        assert_eq!(miss[1].as_string().unwrap().to_string_lossy(), POINT_NOT_INSIDE);
+        assert_eq!(told(&lua, &miss[1]), Told::of(&point_not_inside()));
     }
 
-    /// A live read of `live` that fails is `nil` and its reason, and one that answers for too
+    /// A live read of `live` that fails is `nil` and its error value, and one that answers for too
     /// few points is a failed capture, never a short list.
     #[test]
     fn a_failed_live_read_is_nil_and_why() {
         let lua = Lua::new();
         let p: Value = lua.load("return { { 1, 2 }, { 3, 4 } }").eval().unwrap();
-        let got = read_pixels(&lua, &p, &Value::Nil, |_| {
-            Err("screen capture failed: desktop duplication could not answer — an earlier read has not come back yet".into())
-        })
-        .unwrap()
-        .into_vec();
+        let overdue = HostError::with(&screen::DUPLICATION_OVERDUE, screen::DUPLICATION_OVERDUE.message.to_string());
+        let got = read_pixels(&lua, &p, &Value::Nil, |_| Err(overdue.clone())).unwrap().into_vec();
         assert!(got[0].is_nil());
-        assert!(got[1].as_string().unwrap().to_string_lossy().ends_with("an earlier read has not come back yet"));
+        assert_eq!(told(&lua, &got[1]), Told::of(&overdue), "busy: the read's own");
         let short = read_pixels(&lua, &p, &Value::Nil, |_| Ok(vec![(0, 0, 0)])).unwrap().into_vec();
-        assert_eq!(short[1].as_string().unwrap().to_string_lossy(), "screen capture failed");
+        assert_eq!(told(&lua, &short[1]), Told::of(&crate::backend::capture_failed()));
         // `pixel` the same: one colour and nothing after it, or `nil` and the reason.
         let one = live_values(&lua, PointCall::Pixel, 1, Ok(vec![(1, 2, 3)])).unwrap().into_vec();
         assert_eq!(one.len(), 1);
         let Value::Table(c) = &one[0] else { panic!("a colour") };
         assert_eq!(c.get::<String>("hex").unwrap(), "#010203");
-        let none = live_values(&lua, PointCall::Pixel, 1, Err("why".into())).unwrap().into_vec();
-        assert!(none[0].is_nil() && none[1].as_string().unwrap().to_string_lossy() == "why");
+        let none = live_values(&lua, PointCall::Pixel, 1, Err(overdue.clone())).unwrap().into_vec();
+        assert!(none[0].is_nil());
+        assert_eq!(told(&lua, &none[1]), Told::of(&overdue));
         let wrong = live_values(&lua, PointCall::Pixel, 1, Ok(Vec::new())).unwrap().into_vec();
-        assert_eq!(wrong[1].as_string().unwrap().to_string_lossy(), "screen capture failed", "no colour is no answer");
+        assert_eq!(told(&lua, &wrong[1]), Told::of(&crate::backend::capture_failed()), "no colour is no answer");
     }
 
     /// Every reason a snapshot call answers with is listed in the reference, word for word.
     #[test]
     fn the_snapshot_reasons_are_listed() {
         const DOC: &str = include_str!("../../../docs/api/screen.md");
-        let fixed = [
-            NOT_INSIDE,
-            POINT_NOT_INSIDE,
-            NO_OVERLAP,
-            SUPERSEDED,
-            WATCH_MISS,
-            crate::ocr::change::NO_PICTURE,
-            crate::ocr::snap_queue::ROUND_FAILED,
-            crate::ocr::service::CAPTURE_PANICKED,
-            CANCELLED,
+        let all = [
+            not_inside(),
+            point_not_inside(),
+            no_overlap(),
+            superseded(),
+            watch_miss(),
+            crate::ocr::change::no_picture(),
+            crate::ocr::snap_queue::round_failed(),
+            crate::ocr::service::capture_panicked(),
+            cancelled(),
+            owner_waits_ended(),
+            owner_requests_ended(),
+            all_waits_refused(),
+            all_requests_refused(),
         ];
-        let counted = [owner_waits_ended(), owner_requests_ended(), all_waits_refused(), all_requests_refused()];
-        for why in fixed.iter().map(|s| s.to_string()).chain(counted) {
+        for why in all {
             assert!(DOC.contains(&format!("`{why}`")), "docs/api/screen.md does not list `{why}`");
         }
         assert!(DOC.contains("`at the window's current size the region is …x…, … pixels; the limit is 40000000`"));
         assert!(DOC.contains("`at the window's current size the region is …x…, … pixels; the limit is 8294400`"));
         assert!(DOC.contains("`at the window's current size the change wait watches … pixels, fewer than its minPixels …`"));
-        assert_eq!(too_few_watched(7, 9), "at the window's current size the change wait watches 7 pixels, fewer than its minPixels 9");
+        assert_eq!(too_few_watched(7, 9).message(), "at the window's current size the change wait watches 7 pixels, fewer than its minPixels 9");
         assert!(DOC.contains("`at the window's current size this module's snapshots would hold … MiB; the limit is 128 MiB per module VM (512 MiB in the whole application). Release the ones you no longer need with s:release()`"));
         assert!(DOC.contains("`at the window's current size the application's snapshots would hold … MiB; the limit is 512 MiB in the whole application (128 MiB per module VM), and other modules' snapshots count toward it. Release the ones this module no longer needs with s:release()`"));
     }
@@ -3539,12 +3599,12 @@ mod tests {
         );
         let win = "{ window = { client = { x = 0, y = 0, w = 100, h = 100 } }, fraction = { 0, 0, 1, 1 } }";
         let a = args(&lua, &format!("return {{ region = {win}, change = {{ watch = {{ {{ 200, 200, 300, 300 }} }} }} }}")).unwrap();
-        assert_eq!(a.rect, Err(WATCH_MISS.to_string()));
+        assert_eq!(a.rect, Err(watch_miss()));
         let a = args(&lua, &format!("return {{ region = {{ 150, 150, 400, 400 }}, change = {{ watch = {{ {win} }} }} }}")).unwrap();
-        assert_eq!(a.rect, Err(WATCH_MISS.to_string()), "a window watch beside corners is the window's doing");
+        assert_eq!(a.rect, Err(watch_miss()), "a window watch beside corners is the window's doing");
         let empty = "{ window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0, 1, 1 } }";
         let a = args(&lua, &format!("return {{ region = {{ 0, 0, 100, 100 }}, change = {{ watch = {{ {empty} }} }} }}")).unwrap();
-        assert_eq!(a.rect, Err("the window's client area is empty (0x0)".to_string()));
+        assert_eq!(a.rect, Err(HostError::with(&screen::CLIENT_EMPTY, "the window's client area is empty (0x0)".into())));
         let a = args(&lua, "return { region = { 0, 0, 100, 100 }, change = { watch = { { 90, 90, 120, 120 } } } }").unwrap();
         assert_eq!(a.change.unwrap().watch, vec![Rect::new(90, 90, 30, 30)], "cut to the region by the wait itself");
     }
@@ -3557,7 +3617,13 @@ mod tests {
         assert_eq!(args(&lua, "return { region = { 0, 0, 4000, 3000 } }").unwrap().rect, Ok(Rect::new(0, 0, 4000, 3000)));
         let a = args(&lua, "return { region = { window = { client = { x = 0, y = 0, w = 4000, h = 3000 } }, fraction = { 0, 0, 1, 1 } }, change = {} }")
             .unwrap();
-        assert_eq!(a.rect, Err("at the window's current size the region is 4000x3000, 12000000 pixels; the limit is 8294400".to_string()));
+        assert_eq!(
+            a.rect,
+            Err(HostError::with(
+                &screen::CHANGE_REGION_TOO_LARGE,
+                "at the window's current size the region is 4000x3000, 12000000 pixels; the limit is 8294400".into()
+            ))
+        );
         assert_eq!(reservation_for(Rect::new(0, 0, 100, 50), false), 100 * 50 * 4 * ESTIMATE_FACTOR);
         assert_eq!(reservation_for(Rect::new(0, 0, 100, 50), true), (ESTIMATE_FACTOR + 2) * 100 * 50 * 4, "3x on Windows, 7x on macOS");
     }
@@ -3627,7 +3693,7 @@ mod tests {
             &st,
             vec![
                 done(a, SnapOutcome::Picture { frame: frame.clone(), frames: 1, change: None }),
-                done(b, SnapOutcome::Failed { why: "screen capture failed".into(), frames: 3, change: Some(rebased) }),
+                done(b, SnapOutcome::Failed { why: crate::backend::capture_failed(), frames: 3, change: Some(rebased) }),
             ],
             &process,
         );
@@ -3637,7 +3703,7 @@ mod tests {
                 r#"return #g == 2
                   and g[1].snap.w == 30 and g[1].snap.x == 10 and g[1].snap.inputEpoch == 3 and g[1].why == nil
                   and g[1].info.frames == 1 and g[1].info.waited >= 0 and g[1].info.changed == nil
-                  and g[2].snap == nil and g[2].why == "screen capture failed" and g[2].info.frames == 3
+                  and g[2].snap == nil and tostring(g[2].why) == "screen capture failed" and g[2].why.code == "failed" and g[2].info.frames == 3
                   and g[2].info.changed == false and g[2].info.settled == false and g[2].info.rebased == true"#,
             )
             .eval()
@@ -3667,7 +3733,7 @@ mod tests {
         // A wait that ends without a picture gives its whole reservation back.
         let id = add(&st, &lua, A, None, true);
         st.pending.borrow_mut().get_mut(&id).unwrap().res = Some(reserve(&lua, &process, reservation_for(r, true), "t").unwrap());
-        deliver_all(&st, vec![done(id, SnapOutcome::Failed { why: "no".into(), frames: 0, change })], &process);
+        deliver_all(&st, vec![done(id, SnapOutcome::Failed { why: crate::backend::capture_failed(), frames: 0, change })], &process);
         assert_eq!(process.get(), 20_000);
     }
 
@@ -3710,7 +3776,7 @@ mod tests {
         deliver_all(&st, vec![late], &process);
         lua.globals().set("g", got(&lua)).unwrap();
         let ok: bool = lua
-            .load(r#"return #g == 1 and g[1].snap == nil and g[1].why == "a newer request with the same key replaced this one" and g[1].info.changed == false"#)
+            .load(r#"return #g == 1 and g[1].snap == nil and g[1].why.code == "replaced" and tostring(g[1].why) == "a newer request with the same key replaced this one" and g[1].info.changed == false"#)
             .eval()
             .unwrap();
         assert!(ok, "answered once, superseded — the picture that came late is let go");
@@ -3762,7 +3828,7 @@ mod tests {
         deliver(&st, answers, &|_| true, &process, &|_, e| panic!("{e}"));
         lua.globals().set("g", got(&lua)).unwrap();
         let ok: bool = lua
-            .load(r#"return #g == 3 and g[1].snap ~= nil and g[2].snap == nil and g[2].why == "a newer request with the same key replaced this one" and g[3].snap ~= nil"#)
+            .load(r#"return #g == 3 and g[1].snap ~= nil and g[2].snap == nil and tostring(g[2].why) == "a newer request with the same key replaced this one" and g[3].snap ~= nil"#)
             .eval()
             .unwrap();
         assert!(ok, "W1 superseded, another VM's key untouched");
@@ -3844,10 +3910,11 @@ mod tests {
         assert!(flag(&st, waits[0]));
     }
 
-    /// The budget for a window region, whose size is the window's at run time, is answered like
-    /// the size limit; the same region given as corners raises. `snapshot` and `crop` alike.
+    /// The budget is answered for every form (D2 of the typed-errors plan): a window region's, whose
+    /// size is the window's at run time, as its size limit is; the same region given as corners
+    /// without the window's words. `snapshot` and `crop` alike.
     #[test]
-    fn a_window_region_past_the_budget_is_answered_corners_raise() {
+    fn a_region_past_the_budget_is_answered_whatever_its_form() {
         let lua = Lua::new();
         let process = Rc::new(Cell::new(0));
         lua.globals().set("snap", snap_fn(&lua, &process)).unwrap();
@@ -3856,18 +3923,22 @@ mod tests {
         let _hold = reserve(&lua, &process, SNAPSHOT_BUDGET_PER_VM - vm_budget(&lua).get() - 1000, "t").unwrap();
         let before = process.get();
         let win = "{ window = { client = { x = 0, y = 0, w = 100, h = 100 } }, fraction = { 0, 0, 1, 1 } }";
-        let (v, why): (Value, String) = lua.load(format!("return snap({{ region = {win} }})")).eval().unwrap();
+        let (v, why): (Value, Told) = lua.load(format!("return snap({{ region = {win} }})")).eval().unwrap();
         assert!(v.is_nil());
-        assert!(why.starts_with("at the window's current size this module's snapshots would hold "), "{why}");
-        assert!(why.ends_with("Release the ones you no longer need with s:release()"), "{why}");
-        let (v, why): (Value, String) = lua.load(format!("return s:crop({win})")).eval().unwrap();
+        assert_eq!(why.0, "too_large");
+        assert!(why.1.starts_with("at the window's current size this module's snapshots would hold "), "{why:?}");
+        assert!(why.1.ends_with("Release the ones you no longer need with s:release()"), "{why:?}");
+        let (v, why): (Value, Told) = lua.load(format!("return s:crop({win})")).eval().unwrap();
         assert!(v.is_nil());
-        assert!(why.starts_with("at the window's current size this module's snapshots would hold "), "{why}");
+        assert!(why.1.starts_with("at the window's current size this module's snapshots would hold "), "{why:?}");
+        let (v, why): (Value, Told) = lua.load("return snap({ region = { 0, 0, 100, 100 } })").eval().unwrap();
+        assert!(v.is_nil());
+        assert_eq!(why.0, "too_large");
+        assert!(why.1.starts_with("this module's snapshots would hold "), "corners: {why:?}");
+        let (v, why): (Value, Told) = lua.load("return s:crop({ 0, 0, 100, 100 })").eval().unwrap();
+        assert!(v.is_nil());
+        assert!(why.1.starts_with("this module's snapshots would hold "), "{why:?}");
         assert_eq!(process.get(), before, "nothing charged for what was answered");
-        let e = err_text(lua.load("return snap({ region = { 0, 0, 100, 100 } })").exec());
-        assert!(e.contains("host.screen.snapshot: this module's snapshots would hold "), "{e}");
-        let e = err_text(lua.load("return s:crop({ 0, 0, 100, 100 })").exec());
-        assert!(e.contains("Snapshot:crop: this module's snapshots would hold "), "{e}");
         // A snapshot with a callback keeps the form it was given for the same decision.
         assert!(matches!(args(&lua, &format!("return {{ region = {win} }}")).unwrap().form, region::Region::Window(..)));
         assert!(matches!(args(&lua, "return { region = { 0, 0, 10, 10 } }").unwrap().form, region::Region::Rect(_)));
@@ -4018,7 +4089,7 @@ mod tests {
             crate::call_plain(&f, args).unwrap();
         }
         lua.globals().set("g", got(&lua)).unwrap();
-        let ok: bool = lua.load(format!("return #g == 1 and g[1].p == nil and g[1].why == {SUPERSEDED:?}")).eval().unwrap();
+        let ok: bool = lua.load(format!("return #g == 1 and g[1].p == nil and tostring(g[1].why) == {:?} and g[1].why.code == 'replaced'", superseded().message())).eval().unwrap();
         assert!(ok, "answered once, superseded");
         assert!(st.reduced(task.id).is_none(), "its late reduction is let go");
     }
@@ -4047,7 +4118,7 @@ mod tests {
         crate::call_plain(&f, args).unwrap();
         // Answered without the threads: out until delivered.
         let snap = add(&st, &lua, A, Some("k"), false);
-        st.end(snap, "x".to_string());
+        st.end(snap, crate::backend::capture_failed());
         assert!(st.waiting_with(A, "k"), "a snapshot answered and not delivered yet");
         let gone = st.drop_owner(A.idx);
         assert!(!st.waiting_with(A, "k"), "a dropped module has nothing out");
@@ -4138,11 +4209,14 @@ mod tests {
         assert_eq!(e, "host.screen.profile: opts.at belongs with a region to capture; the snapshot's picture is taken already");
         // Corners past the size limit raise; a window region is answered.
         let big = Rect::new(0, 0, 10_000, 5_000);
-        let e = err_text(within_limit(big, false, "host.screen.profile", frame::MAX_FRAME_PIXELS));
+        let e = err_text(within_limit(big, false, "host.screen.profile"));
         assert_eq!(e, "host.screen.profile: opts.region: the region is 10000x5000, 50000000 pixels; the limit is 40000000");
         assert_eq!(
-            within_limit(big, true, "host.screen.profile", frame::MAX_FRAME_PIXELS).unwrap(),
-            Err("at the window's current size the region is 10000x5000, 50000000 pixels; the limit is 40000000".to_string())
+            within_limit(big, true, "host.screen.profile").unwrap(),
+            Err(HostError::with(
+                &screen::REGION_TOO_LARGE,
+                "at the window's current size the region is 10000x5000, 50000000 pixels; the limit is 40000000".into()
+            ))
         );
     }
 

@@ -14,6 +14,53 @@
 
 local O = {}
 
+-- Error values. What the runtime cannot do, it answers as the host does (docs/api/errors.md): an
+-- error value, read-only, whose `code` a module compares — the host's codes, or one of the eight
+-- the runtime adds (errors.luau's `codes`), all of them in O.errors. Each is made from one of the
+-- runtime's own reasons in errors.luau, and only by `fail(key, detail, …)`: each `…` of the
+-- reason's message filled in by the next argument, `detail` (or nil) more for the log. Inside the
+-- runtime a reason that is COMPARED stays a word — a pick's "due", a trip's "page closed" — and
+-- becomes an error value where it leaves for the module: a return, onDone, onGiveUp, onEnd, onBack.
+-- A sentence that is only logged and handed on (a factor that cannot be had, a click refused) is
+-- made one where it is worded, and reads the same in every log line through tostring and `..`. An
+-- error of the host's is handed on as it came, the same table.
+local fail
+do
+  local errors = host.include("src/errors.luau")
+  local reasons = errors.reasons
+  function fail(key, detail, ...)
+    local r = reasons[key]
+    if r == nil then error(("overlay runtime: errors.luau has no reason '%s'"):format(tostring(key)), 2) end
+    local parts = { ... }
+    local i = 0
+    local message, n = string.gsub(r.message, "…", function()
+      i += 1
+      return tostring(parts[i])
+    end)
+    if n ~= select("#", ...) then
+      error(("overlay runtime: reason '%s' fills in %d part(s), and was handed %d"):format(key, n,
+        select("#", ...)), 2)
+    end
+    return host.errors.new(r.code, message, detail)
+  end
+  -- O.errors: the runtime's eight codes as constants, `O.errors.NO_MENU` is "no_menu", and every
+  -- host code beside them (`O.errors.BUSY` is `host.errors.BUSY`). A name that is neither raises,
+  -- as host.errors does for one it does not have: a misspelt constant fails where it is written.
+  local mine, names = {}, {}
+  for _, code in ipairs(errors.codes) do
+    mine[string.upper(code)] = code
+    names[#names + 1] = string.upper(code)
+  end
+  local known = table.concat(names, ", ")
+  O.errors = table.freeze(setmetatable(mine, table.freeze({
+    __index = function(_, k)
+      local v = type(k) == "string" and rawget(host.errors, k) or nil
+      if type(v) == "string" then return v end
+      error(("O.errors has no '%s'; its codes are %s and every one of host.errors's"):format(tostring(k), known), 2)
+    end,
+  })))
+end
+
 -- Image-match robustness. ReaHotkey matches templates exactly (variation 0); we add a
 -- per-channel colour tolerance plus a spread of scale factors, so a template still
 -- matches under minor render / colour-profile / DPI-scale differences instead of
@@ -64,6 +111,12 @@ local DOUBLE_CLICK_GAP = 90
 --
 -- Falls back to two immediate clicks with no timer, which is not a double-click and says so in
 -- the log rather than silently doing something else; `cb` then runs at once, after them.
+--
+-- It answers as host.input.click does: true, or false and the click's error value. A first click
+-- that is not made sends no second — one click alone is not what was asked — and the call answers
+-- its error, which `cb` is handed too, `cb(false, err)`, on the next turn as a handler of its own;
+-- otherwise `cb` gets the second click's answer, `cb(true)` or `cb(false, err)`. Without a timer the
+-- call answers the second click's, both being made in it.
 function O.doubleClick(x, y, opts, cb)
   if opts ~= nil and type(opts) ~= "table" then
     error(("O.doubleClick: opts must be a table { button = … } or nil, got %s"):format(type(opts)), 2)
@@ -79,19 +132,29 @@ function O.doubleClick(x, y, opts, cb)
   -- The left button as a plain click, as it always went out: nothing changes for those calls.
   local clickOpts = (button ~= nil and button ~= "left") and { button = button } or nil
   local function click()
-    if clickOpts then host.input.click(x, y, clickOpts) else host.input.click(x, y) end
+    if clickOpts then return host.input.click(x, y, clickOpts) end
+    return host.input.click(x, y)
   end
-  click()
+  local ok, err = click()
+  if ok == false then
+    host.log.info(("overlay: a double-click's first click at (%s,%s) was not made — %s; no second is sent")
+      :format(tostring(x), tostring(y), tostring(err)))
+    if cb then
+      if host.timer then host.timer.after(0, function() cb(false, err) end) else cb(false, err) end
+    end
+    return false, err
+  end
   if host.timer then
     host.timer.after(DOUBLE_CLICK_GAP, function()
-      click()
-      if cb then cb() end
+      local ok2, err2 = click()
+      if cb then cb(ok2, err2) end
     end)
-  else
-    host.log.info("overlay: no timer, so a double-click went out as two immediate clicks")
-    click()
-    if cb then cb() end
+    return true
   end
+  host.log.info("overlay: no timer, so a double-click went out as two immediate clicks")
+  local ok2, err2 = click()
+  if cb then cb(ok2, err2) end
+  return ok2, err2
 end
 
 -- The width and height of an origin's CONTENT, which is what coordinates are measured
@@ -1131,29 +1194,29 @@ end
 -- An overlay that never calls O:scale takes none of this: every site below keeps the arithmetic
 -- it had, character for character, on its unscaled branch.
 
--- The factor in effect now, or nil and why not. Asked of the module's function at every
--- resolution and not kept here: the function knows what its answer depends on (a zoom read once
--- per epoch, a window height) and memoises accordingly. Guarded, because a raising factor must
--- cost the controls it would have placed and not the key that asked.
+-- The factor in effect now, or nil and why not, an error value (`unplaced`). Asked of the
+-- module's function at every resolution and not kept here: the function knows what its answer
+-- depends on (a zoom read once per epoch, a window height) and memoises accordingly. Guarded,
+-- because a raising factor must cost the controls it would have placed and not the key that asked.
 local function factorNow(self)
   local s = self._scale
   local o = self:origin()
-  if not o then return nil, "the overlay has no origin now" end
+  if not o then return nil, fail("no_origin") end
   local ok, k = pcall(s.fn, o)
   local why = nil
   if not ok then
-    why = "its scale function raised: " .. tostring(k)
+    why = fail("scale_raised", nil, tostring(k))
     k = nil
   elseif k == nil then
-    why = "its scale function answered nil"
+    why = fail("scale_nil")
   elseif type(k) ~= "number" or k ~= k or k <= 0 or k == math.huge then
-    why = "its scale function answered " .. tostring(k) .. ", not a factor above 0"
+    why = fail("scale_bad", nil, tostring(k))
     k = nil
   end
   -- Said when it CHANGES, never per resolution: a calibration shot resolves every control, and
   -- a Tab resolves one. The change is the event a log reader wants — Avenger zoomed, ON:EAR's
   -- window was resized, the caption stopped being readable.
-  local now = k and string.format("%.4f", k) or why
+  local now = k and string.format("%.4f", k) or tostring(why)
   if now ~= self._scaleSaid then
     self._scaleSaid = now
     if k then
@@ -1206,18 +1269,18 @@ local function placeRect(self, c, r)
 end
 
 -- A control's authored rectangle in `field` ("region", "ocrLabel"): the table, or what its
--- function answers now — nil and why when it answers none. A table is handed on as it is, exactly
--- as before functions were allowed; only a function's answer is checked, because it is the one
--- that can change between two reads.
+-- function answers now — nil and why (an error value, `unplaced`) when it answers none. A table is
+-- handed on as it is, exactly as before functions were allowed; only a function's answer is
+-- checked, because it is the one that can change between two reads.
 local function authoredRect(self, c, field)
   local r = c[field]
   if type(r) ~= "function" then return r end
   local ok, v = pcall(r, self)
-  if not ok then return nil, "its `" .. field .. "` function raised: " .. tostring(v) end
-  if v == nil then return nil, "its `" .. field .. "` function answered nil" end
+  if not ok then return nil, fail("region_raised", nil, field, tostring(v)) end
+  if v == nil then return nil, fail("region_nil", nil, field) end
   if type(v) ~= "table" or type(v[1]) ~= "number" or type(v[2]) ~= "number"
     or type(v[3]) ~= "number" or type(v[4]) ~= "number" then
-    return nil, "its `" .. field .. "` function answered " .. tostring(v) .. ", not {x1, y1, x2, y2}"
+    return nil, fail("region_bad", nil, field, tostring(v))
   end
   return v
 end
@@ -1268,10 +1331,10 @@ end
 
 -- Authored point (x, y) of this overlay on screen, for a module's own code: what an `at` would
 -- click, through the same frame and scale. `opts.rawOrigin` places it as a `rawOrigin` control.
--- nil and why when the overlay has no origin or no factor now — the ordinary Lua pair, since a
--- module reads `local x, y = o:toScreen(…)` and tests `x`.
+-- nil and an error value (`unplaced`) when the overlay has no origin or no factor now — the
+-- ordinary Lua pair, since a module reads `local x, y = o:toScreen(…)` and tests `x`.
 function Overlay:toScreen(x, y, opts)
-  if not self:origin() then return nil, "the overlay has no origin now" end
+  if not self:origin() then return nil, fail("no_origin") end
   local sx, sy, why = placePoint(self, (opts and opts.rawOrigin) and { rawOrigin = true } or nil, x, y)
   if sx == nil then return nil, why end
   return sx, sy
@@ -1292,15 +1355,15 @@ end
 --
 -- `opts.whole = true` gives the corners host.ocr.recognize and host.screen.snapshot take, which
 -- are whole numbers and not empty: cut toward zero, the pixels the overlay's own focus read takes
--- (readCorners), and nil with "empty on screen" when nothing is left. A scaled overlay places whole
--- numbers already; an unscaled one with a fractional frame does not, and a read would refuse its
--- corners at the call.
+-- (readCorners), and nil with "empty on screen" (`outside`) when nothing is left. A scaled overlay
+-- places whole numbers already; an unscaled one with a fractional frame does not, and a read would
+-- refuse its corners at the call.
 function Overlay:toScreenRect(r, opts)
-  if not self:origin() then return nil, "the overlay has no origin now" end
+  if not self:origin() then return nil, fail("no_origin") end
   local placed, why = placeRect(self, (opts and opts.rawOrigin) and { rawOrigin = true } or nil, r)
   if not placed or not (opts and opts.whole == true) then return placed, why end
   local whole = readCorners(placed)
-  if not whole then return nil, "empty on screen" end
+  if not whole then return nil, fail("empty_on_screen") end
   return whole
 end
 
@@ -1345,27 +1408,40 @@ end
 -- one the focus is not on). So is `menusSince`: only a menu opened since, not one open now — what a
 -- sentence asks after each of its hooks (speakControl), since a menu open before the hook is no news
 -- after it.
+--
+-- The reason is the runtime's sentence, for its own log lines, and its key in errors.luau third,
+-- for an answer that leaves for the module (O:stillHere, a press that waited): `fail(key)` makes
+-- the error value, whose message is the same sentence.
 local function stillHereAt(self, m, opts)
+  local key = nil
   if not (opts and opts.place == false) then
-    if not self.active then return false, "the overlay is no longer active" end
-    if self._stay ~= m.stay then return false, "the overlay left the front and came back since" end
-    if self:hwnd() ~= m.hwnd then return false, "the overlay is on another window now" end
+    if not self.active then
+      key = "no_longer_active"
+    elseif self._stay ~= m.stay then
+      key = "came_back"
+    elseif self:hwnd() ~= m.hwnd then
+      key = "other_window"
+    end
   end
-  if not opts then return true end
-  if opts.control and self.controls[m.index] ~= m.control then
-    return false, "the control is not in the overlay any more"
+  if key == nil and opts then
+    if opts.control and self.controls[m.index] ~= m.control then
+      key = "control_gone"
+    elseif opts.focus and (self.focus ~= m.at or self.controls[m.index] ~= m.control) then
+      key = "focus_moved"
+    elseif opts.keys and self._keys ~= m.keys then
+      key = "later_key"
+    elseif opts.said and self._said ~= m.said then
+      key = "later_said"
+    elseif opts.spoken and self._spoken ~= m.spoken then
+      key = "later_spoken"
+    elseif opts.menus and self:menuOpen() then
+      key = "menu_open"
+    elseif (opts.menus or opts.menusSince) and self._menuOpens ~= m.menuOpens then
+      key = "menu_since"
+    end
   end
-  if opts.focus and (self.focus ~= m.at or self.controls[m.index] ~= m.control) then
-    return false, "the focus has moved on"
-  end
-  if opts.keys and self._keys ~= m.keys then return false, "a later key reached the overlay" end
-  if opts.said and self._said ~= m.said then return false, "a later announcement was made" end
-  if opts.spoken and self._spoken ~= m.spoken then return false, "a later announcement was spoken" end
-  if opts.menus and self:menuOpen() then return false, "a menu is open over the overlay" end
-  if (opts.menus or opts.menusSince) and self._menuOpens ~= m.menuOpens then
-    return false, "a menu opened over the overlay since"
-  end
-  return true
+  if key == nil then return true end
+  return false, fail(key).message, key
 end
 
 -- Where the overlay is now, as a mark for O:stillHere: in front or not, which stay in front, the
@@ -1377,11 +1453,13 @@ end
 
 local STILL_HERE_OPTS = { focus = true, keys = true, said = true, spoken = true, menus = true, place = true }
 
--- Whether what `mark` noted still holds: true, or false and why. Always asked, unless `place =
--- false`: the overlay still active, in the same stay in front, on the same window. And with
--- `focus = true` the same focus on the same control, `keys = true` no key of the overlay's own
--- since, `said = true` no announcement begun since, `spoken = true` none said since, `menus =
--- true` no menu open over it and none opened since. A mark from another overlay, anything but a mark, or an option it does not know raises:
+-- Whether what `mark` noted still holds: true, or false and why, an error value — `not_in_front`
+-- for an overlay no longer active, `moved_on` for the rest — whose message is the sentence the
+-- runtime's own `[read]` lines say. Always asked, unless `place = false`: the overlay still
+-- active, in the same stay in front, on the same window. And with `focus = true` the same focus on
+-- the same control, `keys = true` no key of the overlay's own since, `said = true` no announcement
+-- begun since, `spoken = true` none said since, `menus = true` no menu open over it and none opened
+-- since. A mark from another overlay, anything but a mark, or an option it does not know raises:
 -- a typo in an option would otherwise check nothing, silently.
 function Overlay:stillHere(mark, opts)
   if getmetatable(mark) ~= Mark then
@@ -1404,7 +1482,9 @@ function Overlay:stillHere(mark, opts)
       end
     end
   end
-  return stillHereAt(self, mark, opts)
+  local still, _, key = stillHereAt(self, mark, opts)
+  if still then return true end
+  return false, fail(key)
 end
 
 -- The overlay's (first) tab control and its index in `controls`, or nil if none.
@@ -1437,11 +1517,18 @@ local function spokenKey(spec)
   return host.keys.describe(spec) or spec
 end
 
--- The host.keys.check reasons host.hotkey.register raises for: a spec that does not parse, a
--- combination the system keeps, a key this platform has no code for, and a modifier tap.
--- VoiceOver's layer is not one — it registers, and arrives on a Mac whose VoiceOver modifier
--- is Caps Lock — and neither is a character the layout types with the key.
-local REFUSES_HOTKEY = { parse = true, reserved = true, ["no-keycode"] = true, tap = true }
+-- The host.keys.check reasons host.hotkey.register will not hold a key for — a spec that does not
+-- parse, a combination the system keeps, a key this platform has no code for, and a modifier tap —
+-- each with what the declaration report says of it, and O:pageKey's error value (`key_<word>` in
+-- errors.luau, whose message is the same words). VoiceOver's layer is not one — it registers, and
+-- arrives on a Mac whose VoiceOver modifier is Caps Lock — and neither is a character the layout
+-- types with the key.
+local REFUSES_HOTKEY = {
+  parse = "is not a key spec",
+  reserved = "is kept by the system",
+  no_keycode = "has no key code on this platform",
+  tap = "is a modifier tap, which only host.keys.capture can watch",
+}
 local hotkeyRefusals = {}
 
 -- Why the host will not hold `spec` as a hotkey, or nil when it will. Asked with the layout
@@ -1454,9 +1541,9 @@ local function hotkeyRefusal(spec)
   local known = hotkeyRefusals[key]
   if known == nil then
     known = false
-    for _, why in ipairs(host.keys.check(key, { layout = false }).reasons) do
-      if REFUSES_HOTKEY[why] then
-        known = why
+    for _, word in ipairs(host.keys.check(key, { layout = false }).reasons) do
+      if REFUSES_HOTKEY[word] then
+        known = word
         break
       end
     end
@@ -1610,19 +1697,19 @@ local function pointInOrigin(self, x, y)
 end
 
 -- The refusal names the control: one that is present and silently inert is the harder thing
--- to make sense of without seeing the screen.
+-- to make sense of without seeing the screen. Refused, it answers the error value — `outside` or
+-- `covered`, by the check that refused, its message the log line's without the overlay's name —
+-- and false otherwise, so that `if refuseOutside(…) then return end` reads as it always did.
 local function refuseOutside(self, c, x, y)
   local o = self:origin()
   if not pointInOrigin(self, x, y) then
     local b = o and o.bounds
-    host.log.info(string.format(
-      "%s: '%s' resolves to (%d,%d), outside its origin's window (%d,%d) %dx%d — not clicking",
-      tostring(self.label), tostring(c.label), x, y,
-      b and b.x or 0, b and b.y or 0, b and b.w or 0, b and b.h or 0
-    ))
+    local err = fail("outside_origin", nil, tostring(c.label), x, y, b and b.x or 0, b and b.y or 0,
+      b and b.w or 0, b and b.h or 0)
+    host.log.info(tostring(self.label) .. ": " .. err)
     host.speech.output((c.label or "Control") .. " is not where it should be",
       { interrupt = true })
-    return true
+    return err
   end
   -- INSIDE THE RECTANGLE IS NOT THE SAME AS ON TOP OF IT.
   --
@@ -1645,14 +1732,11 @@ local function refuseOutside(self, c, x, y)
   if o and o.id and host.window and host.window.ownsPoint then
     local ok, mine = pcall(host.window.ownsPoint, o.id, x, y)
     if ok and mine == false then
-      host.log.info(string.format(
-        "%s: '%s' at (%d,%d) is inside our window's frame but another window is drawn there "
-          .. "— not clicking",
-        tostring(self.label), tostring(c.label), x, y
-      ))
+      local err = fail("covered_point", nil, tostring(c.label), x, y)
+      host.log.info(tostring(self.label) .. ": " .. err)
       host.speech.output("something else is covering " .. (c.label or "that control"),
         { interrupt = true })
-      return true
+      return err
     end
   end
   return false
@@ -3510,14 +3594,16 @@ function Overlay:_syncControlHotkeys()
   for _, spec in ipairs(specs) do
     local candidates = claim[spec]
     -- A combination the host refuses (see hotkeyRefusal) is left out rather than asked for:
-    -- asking raises, and raising here would take the rest of the activation with it. The
-    -- declaration report has already said why. The registration is still guarded, so a refusal
-    -- this list does not know about costs one key and says so, not the activation.
+    -- the host would answer that it holds nothing, and the declaration report has already said
+    -- why. The registration is still guarded, so a refusal this list does not know about costs one
+    -- key and says so, not the activation. A claim the host makes but does not hold now — another
+    -- program or module has the combination — keeps its id, since the host tries it again, and is
+    -- listed as not taken, not held: the holds line must not name a key that does nothing.
     local refused = hotkeyRefusal(spec)
     if refused then
       skipped[#skipped + 1] = spec .. " (" .. refused .. ")"
     elseif self:_visibleClaimant(candidates) then
-      local ok, id = pcall(host.hotkey.register, spec, ownKey(self, function()
+      local ok, id, err = pcall(host.hotkey.register, spec, ownKey(self, function()
         -- The claimant is resolved AFTER the wait, not before: the point of resolving at press
         -- time is that the visible set can have changed, and waiting is time in which it can.
         afterModifiersReleased(function()
@@ -3526,11 +3612,13 @@ function Overlay:_syncControlHotkeys()
           self:activate(i or candidates[1])
         end)
       end))
-      if ok then
-        took[#took + 1] = spec
-        self.controlHotkeys[#self.controlHotkeys + 1] = id
-      else
+      if ok and id ~= nil then self.controlHotkeys[#self.controlHotkeys + 1] = id end
+      if not ok then
         skipped[#skipped + 1] = spec .. " (refused: " .. tostring(id) .. ")"
+      elseif err ~= nil then
+        skipped[#skipped + 1] = spec .. (id ~= nil and " (not held now: " or " (refused: ") .. err .. ")"
+      else
+        took[#took + 1] = spec
       end
     else
       -- Every claimant hidden: the combination is deliberately NOT taken, so it reaches the
@@ -3596,6 +3684,39 @@ function Overlay:_suspendControlHotkeys(suspend)
   end
 end
 
+-- host.keys.capture, for a key of the overlay's own: the token, or nil when the host cannot capture
+-- it now — no keyboard hook, or on a Mac no event tap (keys.md) — and has registered nothing. Logged
+-- once per overlay and code, since the key is asked again at every sync and every move of the focus
+-- that wants it, and the reason does not change between them.
+function Overlay:_captureKey(spec, fn)
+  local token, err = host.keys.capture(spec, fn)
+  if token ~= nil then return token end
+  local code = err ~= nil and err.code or "none"
+  self._captureSaid = self._captureSaid or {}
+  if not self._captureSaid[code] then
+    self._captureSaid[code] = true
+    host.log.info(string.format("[keys] '%s': %s is not captured — %s", tostring(self.label), tostring(spec),
+      tostring(err)))
+  end
+  return nil
+end
+
+-- A pair (or set) of keys that only mean something together — Left and Right, Up and Down: the
+-- tokens, or false when any of them cannot be captured now, with the ones that were let go again at
+-- once. A half would hold one key with nothing to release it by, and leave the other to the plug-in.
+function Overlay:_captureKeys(list)
+  local tokens = {}
+  for _, k in ipairs(list) do
+    local token = self:_captureKey(k[1], k[2])
+    if not token then
+      for _, t in ipairs(tokens) do host.keys.release(t) end
+      return false
+    end
+    tokens[#tokens + 1] = token
+  end
+  return tokens
+end
+
 -- `suspended`: the per-control hotkeys start given up, and applyMenuState takes them back — an
 -- overlay whose hold over its own menu's window ended with the plug-in having the keyboard again
 -- (see the Menus section, "holding its place"), so that the hand-back is the one transition that
@@ -3625,14 +3746,15 @@ function Overlay:_registerHotkeys(suspended)
             tostring(self.label), tostring(tab.label), tostring(tab.hotkey), refused))
         elseif tab.hotkey then
           local n = tn
-          local ok, id = pcall(host.hotkey.register, tab.hotkey, ownKey(self, function()
+          local ok, id, err = pcall(host.hotkey.register, tab.hotkey, ownKey(self, function()
             afterModifiersReleased(function() self:gotoTab(n) end)
           end))
-          if ok then
-            self.registered[#self.registered + 1] = id
-          else
-            host.log.info(string.format("[keys] '%s': tab '%s' hotkey %s is not registered: %s",
-              tostring(self.label), tostring(tab.label), tostring(tab.hotkey), tostring(id)))
+          -- Kept when the host holds it later (`id, err`): the claim stands and is tried again.
+          if ok and id ~= nil then self.registered[#self.registered + 1] = id end
+          if not ok or err ~= nil then
+            host.log.info(string.format("[keys] '%s': tab '%s' hotkey %s is not %s: %s",
+              tostring(self.label), tostring(tab.label), tostring(tab.hotkey),
+              (ok and id ~= nil) and "held now" or "registered", tostring(ok and err or id)))
           end
         end
       end
@@ -3645,9 +3767,11 @@ function Overlay:_registerHotkeys(suspended)
   -- (e.g. KK chrome and its Preferences dialog both capturing Tab) isn't dropped when
   -- this one deactivates. See host.keys.capture/release.
   local function cap(spec, fn)
-    self.capturedKeys[#self.capturedKeys + 1] = host.keys.capture(spec, fn)
+    local token = self:_captureKey(spec, fn)
+    if token then self.capturedKeys[#self.capturedKeys + 1] = token end
     -- Kept alongside the token so the whole set can be handed back and taken again without
-    -- rebuilding the overlay's registration (see _suspendCapturedKeys).
+    -- rebuilding the overlay's registration (see _suspendCapturedKeys) — a key the host could not
+    -- capture now included, which is asked again there.
     self.capturedSpecs[#self.capturedSpecs + 1] = { spec = spec, fn = fn }
   end
   -- Calibration keys, only while calibration is on (see the Calibration section). Captured,
@@ -3793,7 +3917,8 @@ function Overlay:_suspendCapturedKeys(on)
     local specs = self.capturedSpecs or {}
     self.capturedKeys = {}
     for _, e in ipairs(specs) do
-      self.capturedKeys[#self.capturedKeys + 1] = host.keys.capture(e.spec, e.fn)
+      local token = self:_captureKey(e.spec, e.fn)
+      if token then self.capturedKeys[#self.capturedKeys + 1] = token end
     end
   end
 end
@@ -3873,14 +3998,15 @@ function Overlay:_syncNativeKeys()
     or (c.kind == "ocr" and c.readOnly)
   local wantSpace = not inert and c.kind ~= "ocredit" and not c.editable
   local wantReturn = not inert
+  -- A key the host cannot capture now stays false, and is asked again at the next sync (_captureKey).
   if wantSpace and not self._spaceToken then
-    self._spaceToken = host.keys.capture("Space", ownKey(self, function() self:activate() end))
+    self._spaceToken = self:_captureKey("Space", ownKey(self, function() self:activate() end)) or false
   elseif not wantSpace and self._spaceToken then
     host.keys.release(self._spaceToken)
     self._spaceToken = false
   end
   if wantReturn and not self._returnToken then
-    self._returnToken = host.keys.capture("Return", ownKey(self, function() self:activate() end))
+    self._returnToken = self:_captureKey("Return", ownKey(self, function() self:activate() end)) or false
   elseif not wantReturn and self._returnToken then
     host.keys.release(self._returnToken)
     self._returnToken = false
@@ -3896,14 +4022,14 @@ function Overlay:_syncNativeKeys()
     -- The same two keys mean different things to the two controls that want them, so which
     -- one is focused decides what they do.
     local isTab = c.kind == "tabcontrol"
-    self._arrowTokens = {
-      host.keys.capture("Left", ownKey(self, function()
+    self._arrowTokens = self:_captureKeys({
+      { "Left", ownKey(self, function()
         if isTab then self:switchTab(-1) else self:adjust(-1) end
-      end)),
-      host.keys.capture("Right", ownKey(self, function()
+      end) },
+      { "Right", ownKey(self, function()
         if isTab then self:switchTab(1) else self:adjust(1) end
-      end)),
-    }
+      end) },
+    })
   elseif not wantArrows and self._arrowTokens then
     for _, t in ipairs(self._arrowTokens) do host.keys.release(t) end
     self._arrowTokens = false
@@ -3913,10 +4039,10 @@ function Overlay:_syncNativeKeys()
   -- the focused control does not itself need.
   local wantVertical = c ~= nil and c.kind == "tabcontrol" and c.verticalStep ~= nil
   if wantVertical and not self._verticalTokens then
-    self._verticalTokens = {
-      host.keys.capture("Up", ownKey(self, function() self:stepTabVertical(-1) end)),
-      host.keys.capture("Down", ownKey(self, function() self:stepTabVertical(1) end)),
-    }
+    self._verticalTokens = self:_captureKeys({
+      { "Up", ownKey(self, function() self:stepTabVertical(-1) end) },
+      { "Down", ownKey(self, function() self:stepTabVertical(1) end) },
+    })
   elseif not wantVertical and self._verticalTokens then
     for _, t in ipairs(self._verticalTokens) do host.keys.release(t) end
     self._verticalTokens = false
@@ -4908,18 +5034,12 @@ local function report(self, opts)
   -- at activation it is only left out of the holds line. The informational reasons (a character
   -- the layout types with the key, VoiceOver's layer on a Mac) are not findings: the first costs
   -- a character and still works, and the second is a setting the module may never meet.
-  local REFUSAL_WORDS = {
-    parse = "is not a key spec",
-    reserved = "is kept by the system",
-    ["no-keycode"] = "has no key code on this platform",
-    tap = "is a modifier tap, which only host.keys.capture can watch",
-  }
   for _, spec in ipairs(order) do
-    local why = hotkeyRefusal(spec)
-    if why then
+    local word = hotkeyRefusal(spec)
+    if word then
       local c = self.controls[claim[spec][1]]
       bad("control '%s': hotkey %s %s — it will not be registered", tostring(c.label or ""), spec,
-        REFUSAL_WORDS[why] or why)
+        REFUSES_HOTKEY[word])
     end
   end
   for _, spec in ipairs(order) do
@@ -7412,7 +7532,9 @@ do
         if not rect then return done(false, mw) end
         local pr = { math.floor(menu.x), math.floor(menu.y), math.ceil(menu.x + menu.w), math.ceil(menu.y + menu.h) }
         local got, out, failed = {}, 2, false
-        local function fail(why)
+        -- Not ready to follow: the test's `done(false, why)`, once. Not the runtime's `fail`: a test's
+        -- answer to the runtime is a word of its own, not an error value.
+        local function cannot(why)
           if failed then return end
           failed = true
           done(false, why)
@@ -7422,8 +7544,8 @@ do
           local asked, err = pcall(host.screen.profile, { region = region, axes = "both", key = w.key .. " " .. which },
             function(p, why)
               if failed then return end
-              if armed[o] ~= w then return fail("its press is over") end
-              if not p then return fail(("the picture of the %s could not be taken: %s"):format(what, tostring(why))) end
+              if armed[o] ~= w then return cannot("its press is over") end
+              if not p then return cannot(("the picture of the %s could not be taken: %s"):format(what, tostring(why))) end
               got[which] = p
               out -= 1
               if out > 0 then return end
@@ -7438,7 +7560,7 @@ do
                 rect[1], rect[2], rect[3], rect[4], pr[1], pr[2], pr[3] - pr[1], pr[4] - pr[2])
               done(true)
             end)
-          if not asked then fail(("the picture of the %s cannot be asked: %s"):format(what, tostring(err))) end
+          if not asked then cannot(("the picture of the %s cannot be asked: %s"):format(what, tostring(err))) end
         end
         one("child", rect)
         if not failed then one("parent", pr) end
@@ -7966,8 +8088,9 @@ end
 -- that looks before the press (`before`: drawn's picture of where the popup will be) waits for its
 -- read here too: an overlay that is no longer where the press was made when they come — no longer
 -- active, in front again after leaving, or on another window — does not act, and this answers
--- false and "inactive" (logged); nor does a press whose point `x, y`, when given, is no longer its
--- own after the wait (refuseOutside says so), false and "refused". Anything else answers true.
+-- false and why, stillHereAt's reason as an error value (logged); nor does a press whose point
+-- `x, y`, when given, is no longer its own after the wait, false and refuseOutside's error value
+-- (it says so). Anything else answers true.
 --
 -- The pictures come FIRST, and the press counts only once they have passed: a press that does not
 -- act ends no pick, sets no test running, takes no newWindow list, arms no drawn test, asks for no
@@ -7987,7 +8110,7 @@ function Overlay:_menuOpening(c, x, y)
     local mark = markAt(self, self.focus)
     if calibrating then shots = self:_menuShots(c) end
     if looks then looked = menuHook(self, "before", press) end
-    local fine, why = stillHereAt(self, mark)
+    local fine, why, key = stillHereAt(self, mark)
     if not fine then
       if shots then shots.drop() end
       if calibrating then
@@ -7997,13 +8120,14 @@ function Overlay:_menuOpening(c, x, y)
         host.log.info(("[menu] '%s' '%s': not acting after the picture before the press — %s")
           :format(tostring(self.label), tostring(c and c.label or "control"), why))
       end
-      return false, "inactive"
+      return false, fail(key)
     end
     -- The picture was waited for: the point is asked again, as after any read, since something
     -- drawn over it meanwhile would take the click.
-    if (shots or looks) and x and refuseOutside(self, c, x, y) then
+    local refused = (shots or looks) and x and refuseOutside(self, c, x, y)
+    if refused then
       if shots then shots.drop() end
-      return false, "refused"
+      return false, refused
     end
   end
   -- A new press: an item the last one was waiting to choose is not this press's menu.
@@ -8193,7 +8317,7 @@ local function inMenu(m, was)
 end
 
 -- Control `c`'s opener has just been clicked: its item is chosen when a test sees the menu.
--- `onDone(overlay, chosen, why)` is O:chooseMenuItem's, `retries` its count (default
+-- `onDone(overlay, chosen, err)` is O:chooseMenuItem's, `retries` its count (default
 -- MENU_ITEM_RETRIES). The factor the opener was placed with is kept for the item (step 2).
 function Overlay:_armPick(c, onDone, retries)
   local k = nil
@@ -8230,162 +8354,141 @@ function Overlay:_pickRepeat(c)
   return true
 end
 
--- Calls the pick's `onDone`, guarded: a module's hook must not take the menu tick with it.
-function Overlay:_pickDone(p, chosen, why)
+-- Calls the pick's `onDone`, guarded: a module's hook must not take the menu tick with it. `err` is
+-- the error value of a pick that chose nothing, nil for one that chose.
+function Overlay:_pickDone(p, chosen, err)
   if not p.onDone then return end
-  local ok, err = pcall(p.onDone, self, chosen, why)
+  local ok, raised = pcall(p.onDone, self, chosen, err)
   if not ok then
     host.log.info((PICK_LOG .. "onDone failed: %s"):format(tostring(self.label),
-      tostring(p.c.label), tostring(err)))
+      tostring(p.c.label), tostring(raised)))
   end
 end
 
--- The pick is over. `why` is one of:
+-- The pick is over. `word` is one of:
 --   press / key / left / moved — the user or the world moved on first: logged only;
 --   due / closed — no answer placed the item in time, or the menu closed: said, in the words of
 --                  what was seen; after a submenu's item was clicked and before its submenu was
---                  chosen in, "no submenu" or "unfit submenu" (Submenus) — onDone hears that; at
+--                  chosen in, its submenu did not open or could not be chosen in (Submenus); at
 --                  the bound while the test that placed a submenu's item gets ready to follow it,
---                  "unfollowed";
---   unplaced / covered — the item could not be placed, or something is drawn over it: said;
---   refused — refuseOutside has said it already: logged only;
+--                  that it could not be followed;
+--   unplaced / covered — the item could not be placed (`detail` says why), or something is drawn
+--                  over it (`detail` is the error value of _pickCovered): said;
+--   refused — refuseOutside has said it already, and `detail` is its error value: logged only;
 --   untaken — the menu was still there after the last click on the item, or a submenu's menu
 --             alone after a click in the submenu (`detail` says so): said.
 -- Once the item has been clicked, every other ending — the menu closed, another window in its
 -- place ("taken"), the overlay left the front or moved on — is the item CHOSEN: onDone(true).
-function Overlay:_pickEnd(why, detail)
+-- A pick that chose nothing hands onDone its error value (errors.luau), whose message is what the
+-- log line says after "not chosen — ".
+function Overlay:_pickEnd(word, detail)
   local p = self._pick
   if not p then return end
   self._pick = nil
   local label = tostring(p.c.label or "That control")
   local k = p.clicked
+  local function notChosen(err, said, logged)
+    host.log.info((PICK_LOG .. "%s"):format(tostring(self.label), tostring(p.c.label), logged or ("not chosen — " .. err)))
+    if said then host.speech.output(said, { interrupt = true }) end
+    self:_pickDone(p, false, err)
+  end
   -- A submenu's item clicked, and nothing chosen in its submenu by the bound or the menu's close: a
   -- new popup seen that the submenu's item could not be chosen in — its menuItem took none of them,
-  -- or the item fell outside — is "unfit submenu"; no new popup at all is "no submenu".
-  if p.parent and not k and (why == "due" or why == "closed") then
-    local said, logged, ended
+  -- or the item fell outside — is `unfit_submenu`; no new popup at all is `no_submenu`.
+  if p.parent and not k and (word == "due" or word == "closed") then
     if p.other then
-      ended = "unfit submenu"
-      said = label .. ": no submenu it can be chosen in was seen, nothing was chosen in it"
-      logged = "its submenu's menuItem function took no popup seen after the item's click (the last at "
-        .. p.other .. ")"
+      return notChosen(fail("unfit_submenu", nil, p.other),
+        label .. ": no submenu it can be chosen in was seen, nothing was chosen in it")
     elseif p.outside then
-      ended = "unfit submenu"
-      said = label .. " is not where it should be in its submenu, nothing was chosen in it"
-      logged = "the submenu's item, at " .. p.outside .. ", is outside the submenu that was seen"
-    else
-      ended = "no submenu"
-      said = label .. ": its submenu did not open, nothing was chosen in it"
-      logged = why == "due" and ("no submenu was seen within %d ms of the item's click"):format(MENU_LOOK_MS)
-        or "the menu closed after the item's click, and no submenu was seen"
+      return notChosen(fail("unfit_submenu_outside", nil, p.outside),
+        label .. " is not where it should be in its submenu, nothing was chosen in it")
     end
-    host.log.info((PICK_LOG .. "not chosen — %s"):format(tostring(self.label), tostring(p.c.label), logged))
-    host.speech.output(said, { interrupt = true })
-    return self:_pickDone(p, false, ended)
+    return notChosen(word == "due" and fail("no_submenu", nil, MENU_LOOK_MS) or fail("no_submenu_closed"),
+      label .. ": its submenu did not open, nothing was chosen in it")
   end
   -- The item placed, and its test still getting ready to follow its submenu (`chained`): nothing
-  -- was clicked in the menu that was seen. At the bound "unfollowed"; a menu that closed meanwhile
-  -- closed before anything was chosen, as any menu that closes first.
-  if p.chaining and why == "due" then
-    host.log.info((PICK_LOG .. "not chosen — the bound came while its test was getting ready to follow its "
-      .. "submenu; nothing was clicked in it"):format(tostring(self.label), tostring(p.c.label)))
-    host.speech.output(label .. ": its submenu cannot be followed now, nothing was chosen", { interrupt = true })
-    return self:_pickDone(p, false, "unfollowed")
+  -- was clicked in the menu that was seen. At the bound it could not be followed (`not_ready`); a
+  -- menu that closed meanwhile closed before anything was chosen, as any menu that closes first.
+  if p.chaining and word == "due" then
+    return notChosen(fail("unfollowed"), label .. ": its submenu cannot be followed now, nothing was chosen")
   end
-  if p.chaining and why == "closed" then
-    host.log.info((PICK_LOG .. "not chosen — the menu closed while its test was getting ready to follow its "
-      .. "submenu; nothing was clicked in it"):format(tostring(self.label), tostring(p.c.label)))
-    host.speech.output(label .. ": the menu closed before anything was chosen", { interrupt = true })
-    return self:_pickDone(p, false, "closed")
+  if p.chaining and word == "closed" then
+    return notChosen(fail("unfollowed_closed"), label .. ": the menu closed before anything was chosen")
   end
-  if k and why ~= "untaken" and why ~= "covered" and why ~= "refused" then
+  if k and word ~= "untaken" and word ~= "covered" and word ~= "refused" then
     local how
-    if why == "closed" then
+    if word == "closed" then
       how = "the menu has closed"
-    elseif why == "taken" then
+    elseif word == "taken" then
       how = tostring(detail)
-    elseif why == "due" then
+    elseif word == "due" then
       how = "the menu was not seen again after it"
     else
       how = ({ left = "the overlay left the front after it", moved = "the overlay is on another "
         .. "window after it", key = "the overlay's own keys are back, no menu open",
-        press = "another press came after it" })[why] or tostring(why)
+        press = "another press came after it" })[word] or tostring(word)
     end
     host.log.info((PICK_LOG .. "chosen — clicked %d time(s) at (%d,%d); %s"):format(
       tostring(self.label), tostring(p.c.label), k.clicks, k.x, k.y, how))
     self:_pickDone(p, true, nil)
     return
   end
-  local said, logged
-  if why == "press" then
-    logged = "not chosen — another press came first"
-  elseif why == "key" then
-    logged = "not chosen — one of the overlay's own keys came first, with no menu open"
-  elseif why == "left" then
-    logged = "not chosen — the overlay left the front first"
-  elseif why == "moved" then
-    logged = "not chosen — the overlay is on another window now"
-  elseif why == "due" or why == "closed" then
+  if word == "press" then
+    return notChosen(fail("moved_press"))
+  elseif word == "key" then
+    return notChosen(fail("moved_key"))
+  elseif word == "left" then
+    return notChosen(fail("moved_left"))
+  elseif word == "moved" then
+    return notChosen(fail("other_window"))
+  elseif word == "due" or word == "closed" then
+    -- `no_menu` at the bound, `closed` at the menu's close, each in the words of what was seen.
+    local due = word == "due"
     if p.outside then
-      said = label .. " is not where it should be"
-      logged = "not chosen — the item, at " .. p.outside .. ", is outside the menu that was seen"
+      return notChosen(fail(due and "pick_outside" or "pick_outside_closed", nil, p.outside),
+        label .. " is not where it should be")
     elseif p.other then
-      said = label .. ": no menu it can be chosen in was seen, nothing was chosen"
-      logged = "not chosen — its menuItem function took no window seen for its menu (the last at "
-        .. p.other .. ")"
+      return notChosen(fail(due and "pick_other" or "pick_other_closed", nil, p.other),
+        label .. ": no menu it can be chosen in was seen, nothing was chosen")
     elseif p.noWhere then
-      said = label .. ": the menu does not say where it is, nothing was chosen"
-      logged = "not chosen — test '" .. p.noWhere .. "' sees a menu but does not say where it is, "
-        .. "and no test that does saw it"
-    elseif why == "closed" then
-      said = label .. ": the menu closed before anything was chosen"
-      logged = "not chosen — the menu closed before a test placed the item"
-    else
-      said = label .. ": no menu was seen, nothing was chosen"
-      logged = ("not chosen — no menu test saw a menu within %d ms of the press"):format(MENU_LOOK_MS)
+      return notChosen(fail(due and "pick_nowhere" or "pick_nowhere_closed", nil, p.noWhere),
+        label .. ": the menu does not say where it is, nothing was chosen")
+    elseif not due then
+      return notChosen(fail("pick_closed"), label .. ": the menu closed before anything was chosen")
     end
-  elseif why == "unplaced" then
-    said = label .. " is not available now"
-    logged = "not chosen — the item cannot be placed now: " .. tostring(detail)
-  elseif why == "covered" then
-    said = "something else is covering " .. label
-    logged = "not chosen — " .. tostring(detail)
-  elseif why == "untaken" then
-    said = label .. ": the menu did not take the choice"
-    logged = detail and ("not chosen — " .. tostring(detail) .. (" after %d click(s) on the item at (%d,%d)")
-      :format(k and k.clicks or 0, k and k.x or 0, k and k.y or 0))
-      or ("not chosen — the menu was still there after %d click(s) on the item at (%d,%d)")
-      :format(k and k.clicks or 0, k and k.x or 0, k and k.y or 0)
-  else
-    logged = "not chosen — " .. tostring(detail or why)
+    return notChosen(fail("pick_no_menu", nil, MENU_LOOK_MS), label .. ": no menu was seen, nothing was chosen")
+  elseif word == "unplaced" then
+    return notChosen(fail("item_unplaced", nil, tostring(detail)), label .. " is not available now")
+  elseif word == "covered" then
+    return notChosen(detail, "something else is covering " .. label)
+  elseif word == "untaken" then
+    local clicks, x, y = k and k.clicks or 0, k and k.x or 0, k and k.y or 0
+    return notChosen(detail and fail("untaken_submenu", nil, clicks, x, y) or fail("untaken", nil, clicks, x, y),
+      label .. ": the menu did not take the choice")
   end
-  host.log.info((PICK_LOG .. "%s"):format(tostring(self.label), tostring(p.c.label), logged))
-  if said then host.speech.output(said, { interrupt = true }) end
-  self:_pickDone(p, false, why)
+  -- "refused": refuseOutside's own check refused the point, said it and logged where; `detail` is
+  -- its error value, `outside` or `covered`.
+  return notChosen(detail, nil, "not chosen — refused, and said")
 end
 
 -- What is drawn at (x, y) over menu `m`, for control `c`: nil and how it was asked when it is the
--- menu (or nothing can say), the reason when another window is, or "refused" when the overlay's
--- own check refused the point and said so (step 3).
+-- menu (or nothing can say); "covered" and the error value when another window is; or "refused"
+-- and refuseOutside's error value when the overlay's own check refused the point and said so
+-- (step 3).
 function Overlay:_pickCovered(c, m, x, y)
   if m.window ~= nil then
     local ok, mine = pcall(host.window.ownsPoint, m.window, x, y)
-    if ok and mine == false then
-      return ("(%d,%d) is inside the menu's window id %s, but another window is drawn there")
-        :format(x, y, tostring(m.window))
-    end
+    if ok and mine == false then return "covered", fail("item_covered", nil, x, y, tostring(m.window)) end
     return nil, "its window id " .. tostring(m.window) .. " is asked what is drawn there"
   end
   if m.kind == "window" and m.id ~= nil then
     local ok, mine = pcall(host.window.ownsPoint, m.id, x, y, { listed = true })
-    if ok and mine == false then
-      return ("(%d,%d) is inside the menu's window %s of the window list, but another window is "
-        .. "drawn there"):format(x, y, tostring(m.id))
-    end
+    if ok and mine == false then return "covered", fail("item_covered_listed", nil, x, y, tostring(m.id)) end
     return nil, "its window " .. tostring(m.id) .. " of the window list is asked what is drawn there"
   end
   -- Drawn inside the plug-in: the check any click of this overlay gets.
-  if refuseOutside(self, c, x, y) then return "refused" end
+  local refused = refuseOutside(self, c, x, y)
+  if refused then return "refused", refused end
   return nil, "drawn inside the plug-in, checked like any click of the overlay"
 end
 
@@ -8453,12 +8556,8 @@ function Overlay:_pickPlace(t, m, item)
     return nil
   end
   local covered, checked = self:_pickCovered(c, m, x, y)
-  if covered == "refused" then
-    self:_pickEnd("refused", "refused, and said")
-    return nil
-  end
   if covered then
-    self:_pickEnd("covered", covered)
+    self:_pickEnd(covered, checked)
     return nil
   end
   return x, y, item, checked
@@ -8539,8 +8638,7 @@ function Overlay:_pickShoot(t, m, x, y, choose, suffix)
     p.shooting = nil
     if not self.active or self:hwnd() ~= p.pinned then return self:_pickEnd("moved") end
     local again, how = self:_pickCovered(c, m, x, y)
-    if again == "refused" then return self:_pickEnd("refused", "refused, and said") end
-    if again then return self:_pickEnd("covered", again) end
+    if again then return self:_pickEnd(again, how) end
     choose(how, true)
   end, suffix)
 end
@@ -8605,8 +8703,7 @@ function Overlay:_pickChained(p, t, m, x, y, item, how, between, ok, why, late)
   if late then
     if not self.active or self:hwnd() ~= p.pinned then return self:_pickEnd("moved") end
     local again, how2 = self:_pickCovered(p.c, m, x, y)
-    if again == "refused" then return self:_pickEnd("refused", "refused, and said") end
-    if again then return self:_pickEnd("covered", again) end
+    if again then return self:_pickEnd(again, how2) end
     how = how2
   end
   host.log.info((PICK_LOG .. "— clicking item (%s,%s) at (%d,%d) once (%s); its submenu is chosen in "
@@ -8675,9 +8772,8 @@ function Overlay:_pickFollow(t, m, late)
   if not after then return end
   if k.clicks > p.retries then return self:_pickEnd("untaken") end
   if not self.active or self:hwnd() ~= p.pinned then return self:_pickEnd("moved") end
-  local covered = self:_pickCovered(p.c, m, k.x, k.y)
-  if covered == "refused" then return self:_pickEnd("refused", "refused, and said") end
-  if covered then return self:_pickEnd("covered", covered) end
+  local covered, err = self:_pickCovered(p.c, m, k.x, k.y)
+  if covered then return self:_pickEnd(covered, err) end
   k.clicks += 1
   k.tick = menuTick + (late and 1 or 0)
   host.log.info((PICK_LOG .. "— test '%s' still sees the menu at %d,%d %dx%d a tick after the "
@@ -8690,12 +8786,13 @@ end
 -- Opens a menu and chooses an item in it, for a module's own code — a stepper whose step is a
 -- choice from the plug-in's list (Avenger's zoom). `spec` is what a hotspot with `menuItem` takes:
 -- `label`, `at` (a table or a function of the overlay), `fromRight`, `rawOrigin`, `button`,
--- `menuItem`, `retries`, and `onDone(overlay, chosen, why)`; and `submenu = { menuItem }`, an
--- item that opens a submenu, chosen in it (Submenus), which a hotspot does not take. Returns
--- whether the opener was clicked. A spec that cannot work — no `at`, a `menuItem` that is neither
--- {dx, dy} nor a function, a `submenu` whose `menuItem` is neither, a `button` the click does not
--- know, a `retries` that is not a whole number from 0 — raises here, at the call, rather than
--- after the menu has opened.
+-- `menuItem`, `retries`, and `onDone(overlay, chosen, err)`; and `submenu = { menuItem }`, an
+-- item that opens a submenu, chosen in it (Submenus), which a hotspot does not take. Returns true
+-- when the opener was clicked, or false and the error value onDone is handed too. A spec that
+-- cannot work — no `at`, a `menuItem` that is neither {dx, dy} nor a function, a `submenu` whose
+-- `menuItem` is neither, a `button` the click does not know, a `retries` that is not a whole
+-- number from 0 — raises here, at the call, rather than after the menu has opened; and so does an
+-- overlay with no menu tests, which can never see the menu: its declaration decides, not the moment.
 function Overlay:chooseMenuItem(spec)
   local who = tostring(self.label)
   if type(spec) ~= "table" or (type(spec.at) ~= "table" and type(spec.at) ~= "function")
@@ -8729,20 +8826,19 @@ function Overlay:chooseMenuItem(spec)
     error(("overlay '%s': chooseMenuItem's `retries` must be a whole number from 0, got %s")
       :format(who, tostring(r)), 2)
   end
+  if not self._menu then
+    error(("overlay '%s': chooseMenuItem needs menu tests to see the menu with — `menus` on its binding")
+      :format(who), 2)
+  end
   local label = spec.label or "Menu item"
-  local function fail(why)
-    if spec.onDone then pcall(spec.onDone, self, false, why) end
-    return false
+  -- Not opened: onDone hears it as a later end would, and the call answers it.
+  local function notOpened(err)
+    if spec.onDone then pcall(spec.onDone, self, false, err) end
+    return false, err
   end
   if not self.active then
     host.log.info((PICK_LOG .. "not opened — the overlay is not in front"):format(who, label))
-    return fail("inactive")
-  end
-  if not self._menu then
-    host.log.info((PICK_LOG .. "not opened — the overlay lists no menu tests to see the menu with")
-      :format(who, label))
-    host.speech.output(label .. " is not available now", { interrupt = true })
-    return fail("no tests")
+    return notOpened(fail("pick_not_in_front"))
   end
   -- One control per label, kept: the menu shots count a control's openings by the control, and
   -- a fresh table per call would be photographed at every one.
@@ -8752,19 +8848,21 @@ function Overlay:chooseMenuItem(spec)
     c = { kind = "pick", label = label }
     self._pickControls[label] = c
   end
-  if self:_pickRepeat(c) then return fail("busy") end
+  if self:_pickRepeat(c) then return notOpened(fail("pick_busy")) end
   c.at, c.fromRight, c.rawOrigin, c.button, c.menuItem, c.submenu =
     spec.at, spec.fromRight, spec.rawOrigin, spec.button, spec.menuItem, sub
   local px, py, why = hotspotPoint(self, c)
   if not px then
-    unplaced(self, c, why or "its `at` answered nil")
-    return fail("unplaced")
+    why = why or "its `at` answered nil"
+    unplaced(self, c, why)
+    return notOpened(fail("opener_unplaced", nil, label, tostring(why)))
   end
-  if refuseOutside(self, c, px, py) then return fail("refused") end
+  local refused = refuseOutside(self, c, px, py)
+  if refused then return notOpened(refused) end
   -- Placed and checked: now it is a press (step 1). A calibrating run's picture before it is
   -- waited for, and the overlay must still be where it was, the point still its own.
   local opened, notWhy = self:_menuOpening(c, px, py)
-  if not opened then return fail(notWhy) end
+  if not opened then return notOpened(notWhy) end
   host.log.info((PICK_LOG .. "opening its menu, clicking (%d,%d)%s"):format(who,
     label, px, py, c.button and (" with the " .. tostring(c.button) .. " button") or ""))
   if c.button ~= nil then
@@ -9233,11 +9331,12 @@ function pg.wordsAfter(v)
   return ""
 end
 
-function pg.notShownWords(why)
-  if why == "declined by the system" then
+-- What is said for a show that did not come to the front, `err` page:show's error value.
+function pg.notShownWords(err)
+  if err ~= nil and err.code == host.errors.REFUSED then
     return "The page did not come to the front; if it does not come by itself, the page key brings it."
   end
-  return "The page did not come to the front: " .. tostring(why) .. "."
+  return "The page did not come to the front: " .. tostring(err) .. "."
 end
 
 function pages.why(o)
@@ -9520,12 +9619,12 @@ function pg.arrivable(t)
   return t.live and (t.stage == "forward" or (t.stage == "waiting" and pg.waitMet(t)))
 end
 
--- A trip hook, as a handler: one that raises gives the trip up.
+-- A trip hook, as a handler: one that raises gives the trip up, its raise the detail of the error.
 function pg.runHook(P, t, name, fn, ...)
   local ok, err = pcall(fn, ...)
   if not ok then
     pg.plog(P, "%s failed: %s", name, tostring(err))
-    if P.trip == t and t.live then pg.giveUp(P, t, "failed") end
+    if P.trip == t and t.live then pg.giveUp(P, t, "failed", false, fail("hook_failed", tostring(err), name)) end
   end
 end
 
@@ -9582,7 +9681,9 @@ function pg.arrive(P, t)
   local o = (f and f.id == P.held.window.id) and pg.heldActive(P) or nil
   if not o then
     t.stage = was
-    if was == "forward" and host.now() >= t.deadline then pg.giveUp(P, t, "not in front") end
+    if was == "forward" and host.now() >= t.deadline then
+      pg.giveUp(P, t, "not in front", false, fail("not_come", nil, TRIP_LOOK_MS))
+    end
     return
   end
   t._overlay = o
@@ -9600,7 +9701,7 @@ function pg.arrive(P, t)
     local okP, err = pcall(pg.primeClick, P, o)
     if not okP then
       pg.plog(P, "the prime failed: %s", tostring(err))
-      return pg.giveUp(P, t, "failed")
+      return pg.giveUp(P, t, "failed", false, fail("hook_failed", tostring(err), "the prime"))
     end
     pg.runHook(P, t, "act", t.spec.act, o, t)
   elseif wait.kind == "handover" then
@@ -9668,7 +9769,9 @@ function pg.showBack(P, words)
   P.asked = place
   local ok, why = P.page:show({ focus = true, avoid = pg.boundsNow(place.window) })
   if ok then
-    P.covers = why == "over the rectangle to avoid" and place.window.id or false
+    -- In front with an error beside it: over the rectangle to avoid, there being no room beside it
+    -- (a partial answer, gui.md).
+    P.covers = why ~= nil and place.window.id or false
     pg.plog(P, "the page back: shown%s", why and (", " .. why) or "")
     -- In front already — a page that never left it — has no event to come.
     if pg.pageHasKeyboard(P) then
@@ -9685,25 +9788,25 @@ function pg.showBack(P, words)
   end
 end
 
--- The rest of a give-up (§4.5): the module's `onGiveUp` posts the error, and the page comes back
--- with it unless the page was closed or the window in front is another application's — except at
--- the key, which always brings it. Otherwise the runtime's sentence and the module's words, behind
+-- The rest of a give-up (§4.5): the module's `onGiveUp(o, err)` posts the error, and the page comes
+-- back with it unless the page was closed or the window in front is another application's — except
+-- at the key, which always brings it. Otherwise the runtime's sentence and the module's words, behind
 -- the screen reader.
 function pg.giveUpRest(P, t)
   if P.trip ~= t then return end
   P.trip = nil
   if P.away then P.stage = "page" end
-  local why = t.why
+  local word = t.why
   -- A hand-over's `onEnd` first, once: its keys went back at the give-up itself.
   pg.handOverTell(P, t, t.overlay)
-  local _, v = pg.hookCall(P, "onGiveUp", t.spec.onGiveUp, P.owner, why)
+  local _, v = pg.hookCall(P, "onGiveUp", t.spec.onGiveUp, P.owner, t.err)
   local words = pg.wordsAfter(v)
-  if why == "page closed" or not pg.shownNow(P) then
+  if word == "page closed" or not pg.shownNow(P) then
     pg.say(t.label .. ": the page was closed; nothing more was done." .. words, false)
     pg.awayByFront(P, "the page was closed")
     return
   end
-  if why ~= "key" and not pg.backRule(P) then
+  if word ~= "key" and not pg.backRule(P) then
     pg.plog(P, "trip '%s': the page is not brought back — %s", t.label, pg.frontLine())
     pg.say(t.label .. ": another window came to the front; nothing more was done." .. words, false)
     pg.awayByFront(P, "another window is in front")
@@ -9712,33 +9815,50 @@ function pg.giveUpRest(P, t)
   pg.showBack(P, words)
 end
 
+-- What a give-up's word is to the module: the reason of errors.luau its error value is made from,
+-- when the place that gave it up has no more to say (pg.giveUp's `err`).
+pg.GIVE_UP = {
+  ["another application"] = "another_application",
+  key = "page_key",
+  ["page closed"] = "page_closed",
+  gone = "window_gone",
+  ["not in front"] = "no_keyboard",
+  outranked = "outranked",
+}
+
 -- A trip ends without its work done. At once: no longer live, the held contexts out. The rest on the
 -- module's next turn — or now, in the page key's handler (`now`). A trip whose work was done (`back`)
--- runs its back step instead; one ending already is left to its end.
-function pg.giveUp(P, t, why, now)
+-- runs its back step instead; one ending already is left to its end. `word` decides what follows,
+-- and the error value the module is handed — onGiveUp's, and a hand-over's onEnd's — is `err` where
+-- the caller made one that says more (the window gone, the hook that raised), otherwise the word's.
+function pg.giveUp(P, t, word, now, err)
   if P.trip ~= t then return end
   if t.stage == "back" then
     if now then return pg.backStep(P, t) end
     return
   end
+  if err == nil then
+    local key = pg.GIVE_UP[word]
+    err = key and fail(key) or fail("hook_failed", nil, "a hook")
+  end
   if t.stage == "ending" then
     if now then
-      t.why = why
+      t.why, t.err = word, err
       return pg.giveUpRest(P, t)
     end
     return
   end
-  if why == "key" then
+  if word == "key" then
     pg.plog(P, "trip '%s' given up at the key after %d ms in %s", t.label, host.now() - t.started, tostring(t.stage))
   else
-    pg.plog(P, "trip '%s' given up — %s, after %d ms in %s", t.label, why, host.now() - t.started, tostring(t.stage))
+    pg.plog(P, "trip '%s' given up — %s, after %d ms in %s", t.label, word, host.now() - t.started, tostring(t.stage))
   end
-  -- A hand-over's keys back at once, whatever ended it: "key" is "page key" to its `onEnd`, which
-  -- cannot take it for an end key.
-  pg.handOverRelease(P, t, why == "key" and "page key" or why)
+  t.err = err
+  -- A hand-over's keys back at once, whatever ended it: "key" is "page key" in its line.
+  pg.handOverRelease(P, t, word == "key" and "page key" or word)
   t.live = false
   t.stage = "ending"
-  t.why = why
+  t.why = word
   t.wait = nil
   pg.tripOut(P)
   if now then return pg.giveUpRest(P, t) end
@@ -9843,8 +9963,9 @@ function pg.tripControl(o, label)
 end
 
 -- "The menu my next click opens, then fn": a press of a control with `opensMenu` on trip.overlay —
--- the tests on every tick, newWindow's list — so called BEFORE the click. true, or false and
--- "inactive" or "refused" (a calibrating run's picture), and then nothing is to be clicked.
+-- the tests on every tick, newWindow's list — so called BEFORE the click. true, or false and an
+-- error value — the overlay not in front, or not where the press was once a calibrating run's
+-- picture was in (_menuOpening) — and then nothing is to be clicked.
 -- fn(o, trip, true) once a test of the group has seen a menu, then seen it closed, and the trip is
 -- on W again; fn(o, trip, false) when none saw a menu within MENU_LOOK_MS. Once seen, nothing bounds
 -- the wait: the user's time in a menu is theirs.
@@ -9857,7 +9978,7 @@ function Trip:afterMenu(fn)
   end
   if not o.active then
     pg.plog(P, "trip '%s': afterMenu — '%s' is not in front", self.label, tostring(o.label))
-    return false, "inactive"
+    return false, fail("menu_overlay_away", nil, tostring(o.label))
   end
   local ok, why = o:_menuOpening(pg.tripControl(o, self.label))
   if not ok then
@@ -9967,7 +10088,7 @@ function pg.tripEvent(P, t, a, class)
   local gone = pg.goneWhy(P)
   if gone then
     pg.plog(P, "trip '%s': the plug-in's window id %s is gone — %s", t.label, tostring(P.held.window.id), gone)
-    return pg.giveUp(P, t, "gone")
+    return pg.giveUp(P, t, "gone", false, fail("window_gone", gone))
   end
   if class == "W" then
     if pg.arrivable(t) then pg.outrankedSoon(P, t) end
@@ -10209,7 +10330,7 @@ function pg.handOverKey(P, t, w, key)
         local ok, v = pcall(w.onKey, t.overlay, t, key, mods)
         if not ok then
           pg.plog(P, "onKey failed: %s", tostring(v))
-          if P.trip == t and t.live then pg.giveUp(P, t, "failed") end
+          if P.trip == t and t.live then pg.giveUp(P, t, "failed", false, fail("hook_failed", tostring(v), "onKey")) end
         elseif v == true and not (w.released or w.seen) and P.trip == t and t.live then
           pg.handOverSeen(P, t, w, key, "ended it, the module's onKey says")
         end
@@ -10231,7 +10352,10 @@ end
 -- that raises gives the trip up, "failed", and is not told again.
 function pg.handOverOver(P, t, w, o)
   pg.handOverRelease(P, t, "ended")
-  if not pg.handOverTell(P, t, o) and P.trip == t and t.live then pg.giveUp(P, t, "failed") end
+  local told, raised = pg.handOverTell(P, t, o)
+  if not told and P.trip == t and t.live then
+    pg.giveUp(P, t, "failed", false, fail("hook_failed", tostring(raised), "onEnd"))
+  end
 end
 
 -- The trip has arrived after the event (pg.arrive: acting now). Without `ends` it is over; with
@@ -10261,7 +10385,7 @@ function pg.handOverArrived(P, t, w, o)
   if not ok then
     w.asking = nil
     pg.plog(P, "ends failed: %s", tostring(err))
-    if P.trip == t and t.live then pg.giveUp(P, t, "failed") end
+    if P.trip == t and t.live then pg.giveUp(P, t, "failed", false, fail("hook_failed", tostring(err), "ends")) end
   end
 end
 
@@ -10269,7 +10393,8 @@ end
 -- the trip is no longer live), from `done`, at its own end; in the arbiter's call or a trigger
 -- alike: the captures released, the flag what the VM's overlays not away say (false while away),
 -- the scope as _deactivate leaves it — every window, unless an overlay of the VM's not away is in
--- front, whose pin stands — and what the record still holds dropped.
+-- front, whose pin stands — and what the record still holds dropped. `how` is the line's word: the
+-- give-up's ("page key" for the key), "done" or "ended".
 function pg.handOverRelease(P, t, how)
   local w = rawget(t, "_handOver")
   if not w or w.released then return end
@@ -10298,18 +10423,23 @@ function pg.handOverRelease(P, t, how)
     pinned and "left to the overlay in front" or "every window", after)
 end
 
--- `onEnd(o, trip, how, info)` once in the VM's life, after the release: `told` is set before the
--- call, so a second path finds it told. One that raises is logged, and answers false.
+-- `onEnd(o, trip, how, info, err)` once in the VM's life, after the release: `how` is "ended" (its
+-- own end), "done" (the module's trip:done) or "given_up", the trip's give-up's error value fifth —
+-- the one onGiveUp is handed: read from the trip when onEnd is called, just before onGiveUp, so a
+-- later give-up that came first to the end (the page key's, before the turn after the first) is
+-- the one both hear. `told` is set before the call, so a second path finds it told. One that
+-- raises is logged, and answers false and its raise.
 function pg.handOverTell(P, t, o)
   local w = rawget(t, "_handOver")
   if not (w and w.released) or w.told then return true end
   w.told = true
-  local ok, err = pcall(w.onEnd, o, t, w.how, pg.handOverInfo(w, true))
+  local how = (w.how == "ended" or w.how == "done") and w.how or "given_up"
+  local ok, err = pcall(w.onEnd, o, t, how, pg.handOverInfo(w, true), how == "given_up" and rawget(t, "err") or nil)
   if not ok then pg.plog(P, "onEnd failed: %s", tostring(err)) end
-  return ok
+  return ok, err
 end
 
--- trip:handOver(spec) -> true | false, why. See the sub-section's head, and docs/api/overlay.md.
+-- trip:handOver(spec) -> true | false, err. See the sub-section's head, and docs/api/overlay.md.
 -- Raises at the module's line for a spec it cannot hold, and where a wait could not start
 -- (pg.mayWait). In this order, then: the record from before dropped, the scope pinned to W, the
 -- keys captured, the flag set, the tick started.
@@ -10365,9 +10495,9 @@ function Trip:handOver(spec)
   if busy then
     pg.plog(P, "trip '%s': handOver — trip '%s' of this module holds the module's keys; nothing handed over",
       self.label, tostring(busy.t.label))
-    return false, "busy"
+    return false, fail("keys_held", nil, tostring(busy.t.label))
   end
-  if not self:inFront() then return false, "not in front" end
+  if not self:inFront() then return false, fail("no_keyboard") end
   local W = P.held.window
   -- What the record holds from before is no end of this one: a Return that reached a menu earlier.
   local okB, before = pcall(host.keys.passedThrough)
@@ -10384,17 +10514,20 @@ function Trip:handOver(spec)
     ends = spec.ends, onKey = spec.onKey, onEnd = spec.onEnd }
   for _, name in ipairs(names) do w.endKeys[name] = true end
   for _, k in ipairs(keys) do
-    local ok, tok = pcall(host.keys.capture, k, pg.handOverKey(P, self, w, k))
-    if not ok then
+    -- A capture the host cannot make answers nil and why, having registered nothing (keys.md): that
+    -- error is handOver's. One that raises — a spec normalize read and capture did not — is the
+    -- host's failure, answered as one.
+    local ok, tok, err = pcall(host.keys.capture, k, pg.handOverKey(P, self, w, k))
+    if not ok or tok == nil then
       for _, held in ipairs(w.tokens) do pcall(host.keys.release, held) end
-      -- On a Mac a capture that raised stays registered with its token lost (keys.md): where nothing
-      -- else of the VM is in front holding keys, every capture of the module goes.
-      if not anotherActive(nil) then
-        pcall(host.keys.releaseAll)
-        host.keys.scope(false)
+      if not anotherActive(nil) then host.keys.scope(false) end
+      if not ok then
+        err = fail("capture_raised", nil, k, tostring(tok))
+        pg.plog(P, "trip '%s': the keyboard is not handed over — capturing %s raised: %s", self.label, k, tostring(tok))
+      else
+        pg.plog(P, "trip '%s': the keyboard is not handed over — %s is not captured: %s", self.label, k, tostring(err))
       end
-      pg.plog(P, "trip '%s': the keyboard is not handed over — capturing %s raised: %s", self.label, k, tostring(tok))
-      return false, "refused: " .. tostring(tok)
+      return false, err
     end
     w.tokens[#w.tokens + 1] = tok
     w.tokenOf[k] = tok
@@ -10426,33 +10559,43 @@ function pg.recover(P)
   end
 end
 
+-- What host.window.focus of the held control answered, as the error a way back or a trip that it
+-- declined answers: its own error value — `refused`, or `gone` or `hidden` where it says more — or,
+-- where it gave none (a raise, a bare false), "not brought forward", the raise its detail.
+function pg.notBrought(okF, accepted, ferr)
+  if okF and ferr ~= nil then return ferr end
+  return fail("not_brought", not okF and tostring(accepted) or nil)
+end
+
 -- The way back (O:pageBack, the page key in the page): W asked to the front first — the held
 -- control, where HW1a lands the keyboard on Windows — then the page hidden, and W looked for
--- (startReturn).
+-- (startReturn). true, or false and an error value; onBack hears the second kind too.
 function pg.backTo(P)
   pg.recover(P)
-  local function refused(why)
-    pg.plog(P, "the way back not taken — %s", why)
-    return false, why
+  local function refused(word, err)
+    pg.plog(P, "the way back not taken — %s", word)
+    return false, err
   end
-  if P.trip then return refused("busy") end
-  if not pg.pageHasKeyboard(P) then return refused("not in front") end
-  if not P.held then return refused("nothing held") end
+  if P.trip then return refused("busy", fail("trip_busy")) end
+  if not pg.pageHasKeyboard(P) then return refused("not in front", fail("page_not_in_front")) end
+  if not P.held then return refused("nothing held", fail("nothing_held")) end
   local o = P.owner
-  local function declined(why)
-    pg.plog(P, "the way back — %s", why == "gone" and "the plug-in's window is gone" or "its window was not brought forward")
+  local function declined(err)
+    local gone = err.code == host.errors.GONE
+    pg.plog(P, "the way back — %s", gone and "the plug-in's window is gone" or "its window was not brought forward")
     if P.spec.onBack then
-      pg.hookCall(P, "onBack", P.spec.onBack, o, false, why)
-    elseif why == "gone" then
+      pg.hookCall(P, "onBack", P.spec.onBack, o, false, err)
+    elseif gone then
       pg.say(tostring(o.label) .. ": the plug-in's window is gone.", true)
     else
       pg.say(tostring(o.label) .. ": the plug-in's window would not come to the front.", true)
     end
-    return false, why
+    return false, err
   end
-  if pg.goneWhy(P) then return declined("gone") end
-  local okF, accepted = pcall(host.window.focus, P.held.origin.id)
-  if not (okF and accepted == true) then return declined("declined") end
+  local gone = pg.goneWhy(P)
+  if gone then return declined(fail("window_gone", gone)) end
+  local okF, accepted, ferr = pcall(host.window.focus, P.held.origin.id)
+  if not (okF and accepted == true) then return declined(pg.notBrought(okF, accepted, ferr)) end
   P.page:hide()
   pg.startReturn(P)
   pg.plog(P, "the way back: control id %s of window id %s asked to the front, the page hidden",
@@ -10461,34 +10604,36 @@ function pg.backTo(P)
   return true
 end
 
--- The page shown at the key, for `place`, and its answer (§2.2's table).
+-- The page shown at the key, for `place`, and its answer (§2.2's table): page:show's own, which
+-- onShown is handed as it came — `true`, `true, err` in front over the rectangle to avoid, or
+-- `false, err`.
 function pg.showAtKey(P, place)
   local o = P.owner
   P.asked = place
-  local ok, why = P.page:show({ focus = true, avoid = pg.boundsNow(place.window) })
+  local ok, err = P.page:show({ focus = true, avoid = pg.boundsNow(place.window) })
   pg.plog(P, "shown at the key beside window id %s: %s", tostring(place.window.id),
-    ok and ("true" .. (why and (", " .. why) or "")) or ("false, " .. tostring(why)))
+    ok and ("true" .. (err and (", " .. err) or "")) or ("false, " .. tostring(err)))
   if ok then
-    P.covers = why == "over the rectangle to avoid" and place.window.id or false
+    P.covers = err ~= nil and place.window.id or false
     if P.away and pg.pageHasKeyboard(P) then
       P.asked = nil
       P.stage = "page"
     end
-    pg.hookCall(P, "onShown", P.spec.onShown, o, true, why)
+    pg.hookCall(P, "onShown", P.spec.onShown, o, true, err)
     return
   end
-  if why == "not ready yet" then
+  if err ~= nil and err.code == host.errors.NOT_READY then
     P.asked = nil
     P.wanted = { id = place.origin.id }
     pg.say("Building the page.", true)
     return
   end
   -- Windows may grant a declined show a moment later: the place stays asked for.
-  if why ~= "declined by the system" then P.asked = nil end
+  if not (err ~= nil and err.code == host.errors.REFUSED) then P.asked = nil end
   if P.spec.onShown then
-    pg.hookCall(P, "onShown", P.spec.onShown, o, false, why)
+    pg.hookCall(P, "onShown", P.spec.onShown, o, false, err)
   else
-    pg.say(pg.notShownWords(why), true)
+    pg.say(pg.notShownWords(err), true)
   end
 end
 
@@ -10585,24 +10730,26 @@ function pg.pageReady(P)
   pg.hookCall(P, "onReady", P.spec.onReady, P.owner)
 end
 
-function pg.pageClosed(P, why)
-  if why == "failed" then
+-- The page's onClose(how, err): `how` "user" or "failed", the error value beside "failed", both
+-- handed on to the module's own onClose.
+function pg.pageClosed(P, how, err)
+  if how == "failed" then
     P.ready = false
     P.preparing = false
   end
   local t = P.trip
   if t then
-    pg.plog(P, "the page closed (%s) — trip '%s' ends", tostring(why), t.label)
+    pg.plog(P, "the page closed (%s) — trip '%s' ends", tostring(how), t.label)
     pg.giveUp(P, t, "page closed", true)
-  elseif why == "user" and P.away and P.stage == "page" and P.held then
+  elseif how == "user" and P.away and P.stage == "page" and P.held then
     -- The host has hidden the page and given the front back: the way back, as at the key.
     local okF, accepted = pcall(host.window.focus, P.held.origin.id)
     pg.startReturn(P)
     pg.plog(P, "the page closed by the user: the way back, control id %s asked to the front: %s",
       tostring(P.held.origin.id), (okF and accepted == true) and "accepted" or "declined")
   end
-  if why == "failed" and P.away and not pg.pageHasKeyboard(P) then pg.awayByFront(P, "the page failed") end
-  pg.hookCall(P, "onClose", P.spec.onClose, P.owner, why)
+  if how == "failed" and P.away and not pg.pageHasKeyboard(P) then pg.awayByFront(P, "the page failed") end
+  pg.hookCall(P, "onClose", P.spec.onClose, P.owner, how, err)
 end
 
 -- The page built before it is wanted (page:prepare), on the module's turn after the page's overlay
@@ -10617,15 +10764,15 @@ function pg.preparePage(P)
     return
   end
   local t0 = host.now()
-  local ok, why = P.page:prepare()
+  local ok, err = P.page:prepare()
   local ms = host.now() - t0
   if ok then
     pg.plog(P, "prepared: ready already (the call took %d ms)", ms)
-  elseif why == "not ready yet" then
+  elseif err ~= nil and err.code == host.errors.NOT_READY then
     pg.plog(P, "prepared: building (the call took %d ms)", ms)
   else
     P.prepareFailed = true
-    pg.plog(P, "not prepared (%s, the call took %d ms); the page key builds it from now on", tostring(why), ms)
+    pg.plog(P, "not prepared (%s, the call took %d ms); the page key builds it from now on", tostring(err), ms)
   end
 end
 
@@ -10677,7 +10824,9 @@ function pages.stayWatch(a)
   if a.title ~= stay.title then
     endStayNow()
     pg.plog(P, "the plug-in's window came forward titled '%s' — another plug-in; the stay ends", tostring(a.title))
-    if t and t.live then pg.giveUp(P, t, "gone") end
+    if t and t.live then
+      pg.giveUp(P, t, "gone", false, fail("window_gone", ("it came forward titled '%s'"):format(tostring(a.title))))
+    end
     return
   end
   if a.client and (a.client.w ~= stay.cw or a.client.h ~= stay.ch) then
@@ -10749,7 +10898,7 @@ function pg.describePage(P)
   local handlers = {
     message = function(m) pg.pageMessage(P, m) end,
     ready = function() pg.pageReady(P) end,
-    close = function(why) pg.pageClosed(P, why) end,
+    close = function(how, err) pg.pageClosed(P, how, err) end,
   }
   local reads = { message = 0, ready = 0, close = 0 }
   local on = setmetatable({}, {
@@ -10830,12 +10979,14 @@ function Overlay:addPage(spec)
     host.window.onFocus(pg.pageEvent)
   end
   -- No `foreground` option: a key matched in the keyboard hook was accepted every time (W2), and
-  -- that option may go (hotkey.md).
-  local ok, id = pcall(host.hotkey.register, spec.key, function() pg.keyPressed(P) end)
-  if ok then
-    P.key.id = id
-  else
+  -- that option may go (hotkey.md). A claim that is not held now — another program or module holds
+  -- the chord — is kept, as the host tries it again; one the host will not make is logged alike.
+  local ok, id, err = pcall(host.hotkey.register, spec.key, function() pg.keyPressed(P) end)
+  if not ok then
     pg.plog(P, "the page key %s is not registered: %s", spec.key, tostring(id))
+  else
+    P.key.id = id
+    if err ~= nil then pg.plog(P, "the page key %s is not registered: %s", spec.key, tostring(err)) end
   end
   return P.page
 end
@@ -10851,7 +11002,7 @@ end
 
 local IN_PLUGIN_FIELDS = { label = true, act = true, after = true, onGiveUp = true }
 
--- O:inPlugin(spec) -> true | false, why. See the section's head, and docs/api/overlay.md.
+-- O:inPlugin(spec) -> true | false, err. See the section's head, and docs/api/overlay.md.
 function Overlay:inPlugin(spec)
   local who = tostring(self.label)
   if type(spec) ~= "table" then
@@ -10872,23 +11023,26 @@ function Overlay:inPlugin(spec)
     error(("overlay '%s': inPlugin's `onGiveUp` must be a function or nil, got %s"):format(who, type(spec.onGiveUp)), 2)
   end
   local P = pg.pageOrRaise(self, "inPlugin")
-  local function refused(why)
-    pg.plog(P, "trip '%s' not started — %s", spec.label, why)
-    return false, why
+  local function refused(word, err)
+    pg.plog(P, "trip '%s' not started — %s", spec.label, word)
+    return false, err
   end
-  if P.trip then return refused("busy") end
-  if not pg.pageHasKeyboard(P) then return refused("not in front") end
+  if P.trip then return refused("busy", fail("trip_busy")) end
+  if not pg.pageHasKeyboard(P) then return refused("not in front", fail("page_not_in_front")) end
   pg.recover(P)
-  if not P.held then return refused("nothing held") end
-  if pg.goneWhy(P) then return refused("gone") end
-  local okF, accepted = pcall(host.window.focus, P.held.origin.id)
+  if not P.held then return refused("nothing held", fail("nothing_held")) end
+  local gone = pg.goneWhy(P)
+  if gone then return refused("gone", fail("window_gone", gone)) end
+  local okF, accepted, ferr = pcall(host.window.focus, P.held.origin.id)
   if not (okF and accepted == true) then
     -- On a Mac a DAW that quit has its handles forgotten: nothing of it is listed any more.
     if host.os.current == "macos" then
       local okL, list = pcall(host.window.list, { pids = { P.held.window.pid } })
-      if okL and type(list) == "table" and #list == 0 then return refused("gone") end
+      if okL and type(list) == "table" and #list == 0 then
+        return refused("gone", fail("window_gone", "nothing of its application is listed any more"))
+      end
     end
-    return refused("declined")
+    return refused("declined", pg.notBrought(okF, accepted, ferr))
   end
   local now = host.now()
   local t = setmetatable({
@@ -10902,29 +11056,39 @@ function Overlay:inPlugin(spec)
   host.timer.after(TRIP_LOOK_MS, function()
     if P.trip == t and t.live and t.stage == "forward" then
       pg.plog(P, "trip '%s': the plug-in's window did not come within %d ms", t.label, TRIP_LOOK_MS)
-      pg.giveUp(P, t, "not in front")
+      pg.giveUp(P, t, "not in front", false, fail("not_come", nil, TRIP_LOOK_MS))
     end
   end)
   return true
 end
 
--- O:pageBack() -> true | false, why: the way back. Raises only for an overlay whose group has no page.
+-- O:pageBack() -> true | false, err: the way back. Raises only for an overlay whose group has no page.
 function Overlay:pageBack()
   return pg.backTo(pg.pageOrRaise(self, "pageBack"))
 end
 
--- O:pageKey(spec) -> true | false, why: another page key, for a setting. The old one stays when the
--- new one is refused.
+-- O:pageKey(spec) -> true | false, err: another page key, for a setting. The old one stays when the
+-- new one is refused — and when the host makes the claim but cannot hold it now (`id, err`), which
+-- is let go again at once: a page key that does nothing is no key. A spec that is not a string
+-- raises: the argument alone decides.
 function Overlay:pageKey(spec)
   local P = pg.pageOrRaise(self, "pageKey")
-  if type(spec) ~= "string" then return false, "parse" end
-  local refused = hotkeyRefusal(spec)
-  if refused then return false, refused end
-  for _, o in ipairs(pg.groupOf(P)) do
-    if pg.hotkeyClash(o, spec) then return false, "a control's hotkey" end
+  if type(spec) ~= "string" then
+    error(("overlay '%s': pageKey takes a key spec, a string, got %s"):format(tostring(self.label), type(spec)), 2)
   end
-  local ok, id = pcall(host.hotkey.register, spec, function() pg.keyPressed(P) end)
-  if not ok then return false, "refused: " .. tostring(id) end
+  local refused = hotkeyRefusal(spec)
+  if refused then return false, fail("key_" .. refused, nil, spec) end
+  for _, o in ipairs(pg.groupOf(P)) do
+    local hit = pg.hotkeyClash(o, spec)
+    if hit then return false, fail("key_clash", nil, spec, hit, tostring(o.label)) end
+  end
+  local ok, id, err = pcall(host.hotkey.register, spec, function() pg.keyPressed(P) end)
+  if not ok then return false, fail("register_raised", nil, spec, tostring(id)) end
+  if err ~= nil then
+    if id ~= nil then host.hotkey.unregister(id) end
+    pg.plog(P, "the page key stays %s: %s is not held — %s", tostring(P.key.spec), spec, tostring(err))
+    return false, err
+  end
   if P.key.id ~= nil then host.hotkey.unregister(P.key.id) end
   pg.plog(P, "the page key is %s now, was %s", spec, tostring(P.key.spec))
   P.key = { spec = spec, id = id }
@@ -11221,11 +11385,15 @@ function Overlay:_calibrationPlaces(c)
   return table.concat(out)
 end
 
+-- The calibration and capture methods below answer true, or false and an error value: the
+-- overlay not active, nothing to place or no control to take, or host.screen.save's own error, the
+-- file not written; calibrationVerify answers its count, or nil and one. The calibration keys drop
+-- the answer: each method has logged what it did.
 function Overlay:calibrationShot()
   local o = self:origin()
   if not (o and o.client and o.bounds) then
     host.log.info("[calibrate] no active origin")
-    return false
+    return false, fail("no_origin")
   end
   local marks, points, openers = calibrationMarks(self)
   -- The pixel under every crosshair, the controls' and the openers', in one read of the screen:
@@ -11289,7 +11457,7 @@ function Overlay:calibrationShot()
   local region = calibrationRegion(o, marks)
   local stem = shotPath(self.label)
   local path = host.path("calibration/" .. stem .. ".png")
-  local ok = host.screen.saveMarked(path, { region = region, marks = marks })
+  local ok, err = host.screen.saveMarked(path, { region = region, marks = marks })
   -- The SAME frame without the crosshairs. They are drawn over the very thing a control
   -- points at, which is fine for a hotspot and destroys the evidence for an image-matched
   -- one: measuring why a slider's thumb had stopped matching meant reading its knob through
@@ -11326,7 +11494,8 @@ function Overlay:calibrationShot()
   for _, l in ipairs(calibrationContext(o)) do host.log.info("[calibrate]" .. l) end
   for _, l in ipairs(calibrationUia(o)) do host.log.info("[calibrate]" .. l) end
   for _, l in ipairs(lines) do host.log.info("[calibrate]" .. l) end
-  return ok == true
+  if ok == true then return true end
+  return false, err
 end
 
 -- The MENU SHOTS, in a calibrating run: a control with `opensMenu` was activated, so its menu
@@ -11502,20 +11671,21 @@ end
 -- too tight matches everywhere, too loose breaks when anything near it changes.
 function Overlay:calibrationCrop(size)
   local c = self.controls[self.focus]
-  if not c then return false end
+  if not c then return false, fail("no_focus") end
   local x, y = calibrationPoint(self, c)
   if not x then
     host.log.info("[calibrate] focused control has no position to crop around")
-    return false
+    return false, fail("no_position")
   end
   local half = math.floor((size or 28) / 2)
   local name = string.gsub(tostring(c.label or "control"), "[^%w]", "-")
   local path = host.path("calibration/" .. name .. ".png")
-  local ok = host.screen.save(path, { region = { x - half, y - half, x + half, y + half } })
+  local ok, err = host.screen.save(path, { region = { x - half, y - half, x + half, y + half } })
   host.log.info(string.format(
     "[calibrate] cropped %s around (%d,%d) -> %s (%s)", tostring(c.label), x, y, path, tostring(ok)
   ))
-  return ok == true
+  if ok == true then return true end
+  return false, err
 end
 
 -- Counts every match of the focused control's template across the coordinate window.
@@ -11524,16 +11694,23 @@ end
 function Overlay:calibrationVerify()
   local c = self.controls[self.focus]
   local o = self:origin()
-  if not (c and o and o.client and o.bounds) then return false end
+  if not c then return nil, fail("no_focus") end
+  if not (o and o.client and o.bounds) then return nil, fail("no_origin") end
   local image = c.onImage or c.offImage
   if not image then
     local name = string.gsub(tostring(c.label or "control"), "[^%w]", "-")
     image = host.path("calibration/" .. name .. ".png")
   end
-  local hits = host.screen.imageSearchAll(image, {
+  local hits, err = host.screen.imageSearchAll(image, {
     region = { o.client.x, o.client.y, o.client.x + o.bounds.w, o.client.y + o.bounds.h },
     tolerance = 8,
   })
+  -- Not looked: the search's own error, not a count of none.
+  if err ~= nil then
+    host.log.info(string.format("[calibrate] %s: no matches counted for %s — %s", tostring(c.label),
+      tostring(image), tostring(err)))
+    return nil, err
+  end
   host.log.info(string.format(
     "[calibrate] %s: %d match(es) for %s", tostring(c.label), #hits, tostring(image)
   ))
@@ -11551,25 +11728,26 @@ end
 function Overlay:captureControl(label, path)
   if not self.active then
     host.log.info("captureControl: overlay not active")
-    return false
+    return false, fail("not_active")
   end
   for _, c in ipairs(self.controls) do
     if c.region and c.label == label then
       local region, why = regionOf(self, c)
       if not region then
         host.log.info("captureControl '" .. tostring(label) .. "': no region now (" .. tostring(why) .. ")")
-        return false
+        return false, why
       end
-      local ok = host.screen.save ~= nil and host.screen.save(path, { region = region })
+      local ok, err = host.screen.save(path, { region = region })
       host.log.info(string.format(
         "captureControl '%s' region=(%d,%d,%d,%d) -> %s ok=%s",
         label, region[1], region[2], region[3], region[4], path, tostring(ok)
       ))
-      return ok == true
+      if ok == true then return true end
+      return false, err
     end
   end
   host.log.info("captureControl: no control labelled '" .. tostring(label) .. "' with a region")
-  return false
+  return false, fail("no_control", nil, tostring(label))
 end
 
 -- Like captureControl but for an arbitrary origin-relative region {x1,y1,x2,y2} — a
@@ -11577,18 +11755,19 @@ end
 function Overlay:captureRegion(region, path)
   if not self.active then
     host.log.info("captureRegion: overlay not active")
-    return false
+    return false, fail("not_active")
   end
   local r, why = placeRect(self, nil, region)
   if not r then
     host.log.info("captureRegion: cannot be placed now (" .. tostring(why) .. ")")
-    return false
+    return false, why
   end
-  local ok = host.screen.save ~= nil and host.screen.save(path, { region = r })
+  local ok, err = host.screen.save(path, { region = r })
   host.log.info(string.format(
     "captureRegion (%d,%d,%d,%d) -> %s ok=%s", r[1], r[2], r[3], r[4], path, tostring(ok)
   ))
-  return ok == true
+  if ok == true then return true end
+  return false, err
 end
 
 -- Captures the WHOLE active plugin control (its client rect) to `path` — the full
@@ -11596,17 +11775,18 @@ end
 function Overlay:captureFull(path)
   if not self.active then
     host.log.info("captureFull: overlay not active")
-    return false
+    return false, fail("not_active")
   end
   local o = self:origin()
-  if not o or not o.client or not o.bounds then return false end
+  if not o or not o.client or not o.bounds then return false, fail("no_origin") end
   local r = { o.client.x, o.client.y, o.client.x + o.bounds.w, o.client.y + o.bounds.h }
-  local ok = host.screen.save ~= nil and host.screen.save(path, { region = r })
+  local ok, err = host.screen.save(path, { region = r })
   host.log.info(string.format(
     "captureFull client=(%d,%d) bounds=%dx%d -> %s ok=%s",
     o.client.x, o.client.y, o.bounds.w, o.bounds.h, path, tostring(ok)
   ))
-  return ok == true
+  if ok == true then return true end
+  return false, err
 end
 
 -- Dev calibration: dump a content-frame-exact shot of the whole plugin content
@@ -11614,15 +11794,21 @@ end
 -- without O:scale; a scaled one's picture is the authored rectangle placed through the scale, so
 -- its pixels are authored coordinates times the factor) plus a small box around every positioned
 -- control, into `dir` (an absolute path), so re-derived coordinates can be verified against the
--- live plugin in one shot. Skips rawOrigin (chrome-frame) controls. Active only.
+-- live plugin in one shot. Skips rawOrigin (chrome-frame) controls. Active only. Every shot is
+-- tried; the first that was not written is the answer, `false, err`, as captureRegion gave it.
 function Overlay:captureAll(dir)
   if not self.active then
     host.log.info("captureAll: overlay not active")
-    return false
+    return false, fail("not_active")
   end
   local ox, oy = originOf(self)
   host.log.info(string.format("captureAll: content origin=(%d,%d) -> %s", ox, oy, dir))
-  self:captureRegion({ 0, 0, 640, 430 }, dir .. "/content-full.png")
+  local firstErr
+  local function shot(region, path)
+    local ok, err = self:captureRegion(region, path)
+    if not ok and firstErr == nil then firstErr = err end
+  end
+  shot({ 0, 0, 640, 430 }, dir .. "/content-full.png")
   for _, c in ipairs(self.controls) do
     if c.label and c.label ~= "" and not c.rawOrigin then
       local cx, cy
@@ -11634,10 +11820,11 @@ function Overlay:captureAll(dir)
       end
       if cx then
         local safe = string.gsub(c.label, "[^%w]", "_")
-        self:captureRegion({ cx - 34, cy - 26, cx + 34, cy + 26 }, string.format("%s/ctl-%s.png", dir, safe))
+        shot({ cx - 34, cy - 26, cx + 34, cy + 26 }, string.format("%s/ctl-%s.png", dir, safe))
       end
     end
   end
+  if firstErr ~= nil then return false, firstErr end
   return true
 end
 

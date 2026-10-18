@@ -66,7 +66,7 @@ The module is a `code_module`, so that its reader runs inside the VM of the modu
 ```luau
 local P = host.tryRequire("com.platform.vps-avenger-presets")
 if P then
-  local index = P.index()                 -- nil and why, when it cannot be read
+  local index, err = P.index()            -- nil and an error value, when it cannot be read
   local x = index and P.expansion("Factory")
   if x then
     local category, k, n = P.category(x, 1)   -- "Arp", 1, 96
@@ -78,13 +78,13 @@ end
 | Call | Returns |
 |---|---|
 | `P.FORMAT` | 1, the format this reader reads. |
-| `P.index()` | The index as above, or `nil` and why. Read at the first call and kept: the same table every time. |
-| `P.expansion(name)` | The expansion's file as above, or `nil` and why (a name the index does not have; a file that cannot be read, is not JSON, is of another format, or does not hold the presets the index lists). Read at the first call for that name and kept. |
+| `P.index()` | The index as above, or `nil` and an [error value](../../docs/api/errors.md#error-values), code `invalid` (the index cannot be read, is not JSON, is of another format, lists no expansions, or has one without a name, a file or presets). Read at the first call and kept: the same table every time. |
+| `P.expansion(name)` | The expansion's file as above, or `nil` and an error value: `not_found` for a name the index does not have; `invalid` for a file that cannot be read, is not JSON, is of another format, or does not hold the presets the index lists, and for an index that cannot be read. Read at the first call for that name and kept. |
 | `P.category(x, i)` | The category of preset `i` of expansion file `x`: its name, the preset's place in it (from 1) and how many it holds; `nil` when no block holds `i`. |
 | `P.oscillators(x, i)` | `{ { name, default }, … }`, one per tab; a default name comes back as Avenger's caption with `default = true`. |
 | `P.macros(x, i)` | `{ { knobs = { three }, buttons = { two } }, … }`, one per tab, each name `{ name, default }`. |
 
-**Cost.** Nothing is read when the module loads. `P.index()` reads and decodes 0.35 MB once, an expansion's file 2 to 110 KB once: each one `host.resource.read` and one `host.json.decode`, on the calling thread, which is the main one. Measured in a debug test build, on 1.0.0's 0.3 MB index: 30 to 50 ms for the index, 25 ms for the largest file. A file that cannot be read is not read again until the module using it is reloaded, and every call after says why.
+**Cost.** Nothing is read when the module loads. `P.index()` reads and decodes 0.35 MB once, an expansion's file 2 to 110 KB once: each one `host.resource.read` and one `host.json.decode`, on the calling thread, which is the main one. Measured in a debug test build, on 1.0.0's 0.3 MB index: 30 to 50 ms for the index, 25 ms for the largest file. A file that cannot be read is not read again until the module using it is reloaded, and every call after answers the same error value. Since 1.2.0 the second value is an error value — its message the sentence 1.1.0 answered, word for word — so compare `err.code`, and hand the message on with `tostring` or `..`.
 
 **Turning it off.** Unticking this module in the module manager does not stop what `vps-avenger` does with it: a `code_module`'s code runs in its dependents' VMs, and disabling it stops only its own VM ([what a code module must not do](../../docs/api/require.md#code-module-rules)). To run the overlay without the database, remove this folder and reload VPS Avenger.
 
@@ -93,7 +93,7 @@ end
 When the avenger_control project exports a new database — new expansions, corrected names — run the converter on it and raise the version, so that the module manager's update check sees a new one:
 
 ```
-python tools/avenger-presets/convert.py <folder with the three exports> --version 1.2.0
+python tools/avenger-presets/convert.py <folder with the three exports> --version 1.3.0
 ```
 
 It rewrites `module.toml` and `data/`, and leaves `src/`, this README and `NOTICE` alone. [`tools/avenger-presets/README.md`](../../tools/avenger-presets/README.md) says what it checks and what it drops.

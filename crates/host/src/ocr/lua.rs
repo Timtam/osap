@@ -5,8 +5,9 @@
 //! tag, no region or more than 64, corners of too many pixels, a name used twice: those are
 //! mistakes in the call, and they raise at the call. Everything that goes wrong routinely — a
 //! capture that failed, a language not installed, a read superseded by a newer one, a window
-//! whose size leaves nothing to read — arrives as a reading with a `status`, so code that only
-//! looks at `.text` never raises for it.
+//! whose size leaves nothing to read, corners with no area (worked out from an earlier reading,
+//! D5 of the typed-errors plan) — arrives as a reading with a `status`, a `"failed"` one with its
+//! `error` an error value, so code that only looks at `.text` never raises for it.
 //!
 //! **Delivered while the module is enabled, or not at all.** A callback runs exactly once, on
 //! the event loop, under the priority of the dispatch that asked for it. It is dropped when its
@@ -46,6 +47,8 @@ use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::backend::frame::Frame;
 use crate::backend::CaptureSource;
+use crate::errors::{ocr, HostError};
+use crate::errors_lua;
 use crate::image_search::vm_owner;
 use crate::region::Region;
 use crate::mailbox::{self, Event, MailHost, Opened};
@@ -54,7 +57,7 @@ use crate::{capture_source, logging, region_lua, Shared};
 
 use super::lang::{self, LangReq};
 use super::policy::{self, MAX_CALL_PIXELS, MAX_REGIONS};
-use super::sched::{Owner, Ticket, TicketId, TOO_MANY};
+use super::sched::{too_many, Owner, Ticket, TicketId};
 use super::service::{Done, Picture, Service, Spec};
 use super::types::{current_priority, enter_priority, Priority, Reading, Rect, Status};
 
@@ -159,13 +162,16 @@ impl std::fmt::Debug for SnapArg {
     }
 }
 
+/// Each region of a call with its name, in the order given: its rectangle, or why it has none.
+pub(crate) type Entries = Vec<(Option<String>, Result<Rect, HostError>)>;
+
 /// What a `host.ocr.recognize` call asked for, once its arguments passed.
 #[derive(Debug, PartialEq)]
 pub(crate) struct ReadArgs {
     /// Each region with its name, in the order given: its rectangle, or — a window region whose
-    /// client area is empty at the call, or that would take the call past the pixel limit — why
-    /// it has none, which its reading will carry.
-    pub entries: Vec<(Option<String>, Result<Rect, String>)>,
+    /// client area is empty at the call, or that would take the call past the pixel limit, and
+    /// corners with no area — why it has none, which its reading will carry.
+    pub entries: Entries,
     /// A list was given (even of one): the reading comes as `(list, byName)`.
     pub list: bool,
     pub lang: LangReq,
@@ -179,9 +185,10 @@ fn bad(msg: impl std::fmt::Display) -> mlua::Error {
 }
 
 /// A region, read by the Region form's one strict reader (`region_lua.rs`, shared with the
-/// cells calls). A mistake raises. `parse_read` resolves it, once every region is read.
+/// cells calls), but for corners with no area, which this call answers rather than raises (D5).
+/// A mistake raises. `parse_read` resolves it, once every region is read.
 fn region(v: &Value, what: &str) -> mlua::Result<Region> {
-    region_lua::read(v, what).map_err(bad)
+    region_lua::read_or_empty(v, what).map_err(bad)
 }
 
 /// The regions of a call as rectangles, resolved at the call: corners as given, a window region
@@ -192,12 +199,13 @@ fn region(v: &Value, what: &str) -> mlua::Result<Region> {
 /// in the call and raise. A window region's size is the window's at run time — the same call
 /// must not raise with the game at full screen and work in a smaller window — so window regions
 /// are counted after the corners, in the order given, and one that would take the call past
-/// the limit is `Err`: its reading fails with the reason, and it is not counted. So is a window
-/// region whose client area is empty. `fname` names the call in a mistake.
+/// the limit is `Err`: its reading fails with the reason (`too_large`), and it is not counted. So
+/// is a window region whose client area is empty (`hidden`), and corners with no width or no
+/// height (`outside`, as `host.screen.profile` answers them). `fname` names the call in a mistake.
 fn resolve_all(
     regions: Vec<(Option<String>, Region)>,
     fname: &str,
-) -> mlua::Result<Vec<(Option<String>, Result<Rect, String>)>> {
+) -> mlua::Result<Entries> {
     let rect = |r: crate::region::ScreenRect| Rect::new(r.x, r.y, r.w, r.h);
     // Saturating: each rectangle fits the coordinate range, but three of the largest do not
     // fit an i64 together.
@@ -218,16 +226,20 @@ fn resolve_all(
         .into_iter()
         .map(|(name, r)| {
             let resolved = match r {
+                Region::Rect(s) if s.w <= 0 || s.h <= 0 => Err(crate::empty_region(s.w, s.h)),
                 Region::Rect(s) => Ok(rect(s)),
                 Region::Window(..) => match r.resolve() {
-                    Err(u) => Err(u.to_string()),
+                    Err(u) => Err(u.error()),
                     Ok(s) => {
                         let s = rect(s);
                         if s.area() > left {
-                            Err(format!(
-                                "not read: at the window's current size this region is {}x{}, which \
-                                 would take the call past {MAX_CALL_PIXELS} pixels",
-                                s.w, s.h
+                            Err(HostError::with(
+                                &ocr::CALL_TOO_LARGE,
+                                format!(
+                                    "not read: at the window's current size this region is {}x{}, which \
+                                     would take the call past {MAX_CALL_PIXELS} pixels",
+                                    s.w, s.h
+                                ),
                             ))
                         } else {
                             left -= s.area();
@@ -410,15 +422,12 @@ pub(crate) fn parse_read(what: &Value, opts: &Value) -> mlua::Result<ReadArgs> {
 /// (`Frame::ocr_rect`): a region reads what of it the snapshot holds, and one of which it holds
 /// nothing is not read — its reading fails with the reason, as a window region with no rectangle
 /// does, and the call's other regions are read.
-pub(crate) fn clip_to_snapshot(
-    entries: Vec<(Option<String>, Result<Rect, String>)>,
-    frame: &Frame,
-) -> Vec<(Option<String>, Result<Rect, String>)> {
+pub(crate) fn clip_to_snapshot(entries: Entries, frame: &Frame) -> Entries {
     let readable = frame.ocr_rect();
     entries
         .into_iter()
         .map(|(name, r)| {
-            let r = r.and_then(|r| readable.intersect(&r).ok_or_else(|| crate::snapshot::NO_OVERLAP.to_string()));
+            let r = r.and_then(|r| readable.intersect(&r).ok_or_else(crate::snapshot::no_overlap));
             (name, r)
         })
         .collect()
@@ -446,7 +455,7 @@ impl Seen {
 /// picture of its region at all (a capture that failed for that region, a window region without
 /// a rectangle) and an answer decided without the threads (refused, evicted) never had one; a
 /// `"stale"` one was never read. So the moment is there exactly when the screen was read.
-fn seen_of(picture: Option<Picture>, unresolved: &[Option<String>], readings: &[Reading]) -> Vec<Option<Seen>> {
+fn seen_of(picture: Option<Picture>, unresolved: &[Option<HostError>], readings: &[Reading]) -> Vec<Option<Seen>> {
     readings
         .iter()
         .enumerate()
@@ -459,7 +468,8 @@ fn seen_of(picture: Option<Picture>, unresolved: &[Option<String>], readings: &[
 }
 
 /// One reading as the table a callback receives, and a wait returns; `time` and `inputEpoch` from
-/// `seen`; `skipped`, whether no recogniser was asked: `status == "blank"`.
+/// `seen`; `skipped`, whether no recogniser was asked: `status == "blank"`; `error`, an error value
+/// made in `lua`, the module's VM, exactly when the status is `"failed"`.
 pub(crate) fn reading_table(
     lua: &Lua,
     r: &Reading,
@@ -514,7 +524,7 @@ pub(crate) fn reading_table(
     t.set("words", words)?;
     t.set("lang", r.lang.as_str())?;
     if let Some(e) = &r.error {
-        t.set("error", e.as_str())?;
+        t.set("error", errors_lua::to_lua(lua, e)?)?;
     }
     if let Some(s) = seen.filter(|_| r.status != Status::Stale) {
         t.set("time", s.time)?;
@@ -581,9 +591,9 @@ pub(crate) struct PendingOcr {
     names: Vec<Option<String>>,
     rects: Vec<Rect>,
     /// Per region: why it had no rectangle at the call (a window region, its client area
-    /// empty). Such a region goes to the queue as an empty rectangle, and its reading is
-    /// given this reason on delivery.
-    unresolved: Vec<Option<String>>,
+    /// empty; corners with no area). Such a region goes to the queue as an empty rectangle, and
+    /// its reading is given this reason on delivery.
+    unresolved: Vec<Option<HostError>>,
     list: bool,
     key: Option<String>,
 }
@@ -594,7 +604,7 @@ pub(crate) struct OcrState {
     pending: RefCell<HashMap<TicketId, PendingOcr>>,
     /// Answers decided without the threads — stale, evicted, refused — delivered on the next
     /// tick, never from inside the binding.
-    ready: RefCell<Vec<(TicketId, Status, Option<String>)>>,
+    ready: RefCell<Vec<(TicketId, Status, Option<HostError>)>>,
     /// (module index, VM generation, key) → the newest ticket asked with that key, while a read
     /// with that key is waiting: forgotten once none is (`forget_settled`), as the snapshot
     /// requests forget their keys, so a key made from a row number or from text is not kept for the
@@ -739,10 +749,10 @@ fn note_newest(
     }
 }
 
-/// A window region whose client area was empty at the call was never read: its reading is
-/// `"failed"` with that reason, whatever the queue made of the empty rectangle that stood in for
-/// it — unless the whole read went stale, which is the more useful thing to know.
-fn with_unresolved(mut readings: Vec<Reading>, unresolved: &[Option<String>]) -> Vec<Reading> {
+/// A region with no rectangle at the call was never read: its reading is `"failed"` with that
+/// reason, whatever the queue made of the empty rectangle that stood in for it — unless the whole
+/// read went stale, which is the more useful thing to know.
+fn with_unresolved(mut readings: Vec<Reading>, unresolved: &[Option<HostError>]) -> Vec<Reading> {
     for (r, why) in readings.iter_mut().zip(unresolved) {
         if let Some(why) = why {
             if r.status != Status::Stale {
@@ -805,7 +815,7 @@ pub(crate) fn submit<H: ReadHost>(
     }
     let owner = owner_of(lua, &h.vm_gens(), scope);
     let rects: Vec<Rect> = args.entries.iter().map(|(_, r)| r.clone().unwrap_or_default()).collect();
-    let unresolved: Vec<Option<String>> = args.entries.iter().map(|(_, r)| r.clone().err()).collect();
+    let unresolved: Vec<Option<HostError>> = args.entries.iter().map(|(_, r)| r.clone().err()).collect();
     let nothing_to_read = unresolved.iter().all(Option::is_some);
 
     let st = h.ocr_state();
@@ -828,8 +838,8 @@ pub(crate) fn submit<H: ReadHost>(
         },
     );
     if nothing_to_read {
-        // Every region is a window region with no rectangle this time. Answered on the next tick
-        // like any read, but without
+        // No region has a rectangle this time: window regions, or corners with no area. Answered on
+        // the next tick like any read, but without
         // the queue: no ticket against the module's limit or the application's, no picture, no
         // language to resolve, no capture source chosen — the cells calls answer the same case
         // without a capture too. With a key it is still the newest read: the module's waiting
@@ -866,14 +876,14 @@ pub(crate) fn submit<H: ReadHost>(
     // After the queue answered, and only when it took the read. Nothing is delivered before
     // the next tick, so no answer can be judged against a key recorded too late.
     note_newest(&mut st.key_seq.borrow_mut(), owner, args.key.as_deref(), id, out.refused.is_none());
-    let crowded = out.refused.clone().or_else(|| (!out.evicted.is_empty()).then(|| TOO_MANY.to_string()));
+    let crowded = out.refused.clone().or_else(|| (!out.evicted.is_empty()).then(too_many));
     {
         let mut ready = st.ready.borrow_mut();
         for s in out.stale {
             ready.push((s, Status::Stale, None));
         }
         for e in out.evicted {
-            ready.push((e, Status::Failed, Some(TOO_MANY.to_string())));
+            ready.push((e, Status::Failed, Some(too_many())));
         }
         if let Some(why) = out.refused {
             ready.push((id, Status::Failed, Some(why)));
@@ -886,7 +896,7 @@ pub(crate) fn submit<H: ReadHost>(
 }
 
 /// One line per module per `SLOW_LOG_EVERY` when its reads are evicted or refused.
-fn note_crowding<H: ReadHost>(h: &H, idx: usize, why: &str) {
+fn note_crowding<H: ReadHost>(h: &H, idx: usize, why: &HostError) {
     let now = Instant::now();
     let mut logged = h.ocr_state().slow_logged.borrow_mut();
     let key = usize::MAX - idx; // a slot of its own beside the slow-job one
@@ -1263,16 +1273,19 @@ pub(crate) fn languages_value<H: ReadHost>(h: &H, lua: &Lua) -> mlua::Result<Tab
     Ok(t)
 }
 
-/// `host.ocr.resolveLanguage(tag | {tag} | nil)`: `nil` for a language nothing here reads, and
-/// before the list is published.
-pub(crate) fn resolve_value<H: ReadHost>(h: &H, v: &Value) -> mlua::Result<Option<String>> {
+/// `host.ocr.resolveLanguage(tag | {tag} | nil)`: the tag, or `nil, err` (D34 of the typed-errors
+/// plan) — `not_ready` before the list is published, `unavailable` for a language nothing here
+/// reads, in the words a reading of it would fail with.
+pub(crate) fn resolve_value<H: ReadHost>(h: &H, lua: &Lua, v: &Value) -> mlua::Result<mlua::MultiValue> {
     let req = lang_request(v, "host.ocr.resolveLanguage")?;
-    let Some(langs) = known_langs(h) else { return Ok(None) };
+    let Some(langs) = known_langs(h) else {
+        return errors_lua::with_error(lua, Value::Nil, &HostError::of(&ocr::LANGUAGES_NOT_KNOWN));
+    };
     match lang::resolve(&req, &langs) {
-        Ok(tag) => Ok(Some(tag)),
-        Err(_) => {
+        Ok(tag) => Ok(mlua::MultiValue::from_vec(vec![Value::String(lua.create_string(&tag)?)])),
+        Err(why) => {
             h.ocr().reread_languages();
-            Ok(None)
+            errors_lua::with_error(lua, Value::Nil, &why)
         }
     }
 }
@@ -1280,6 +1293,12 @@ pub(crate) fn resolve_value<H: ReadHost>(h: &H, v: &Value) -> mlua::Result<Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::screen;
+
+    /// A window region's client area, empty at the call: `hidden`.
+    fn client_empty(w: i32, h: i32) -> HostError {
+        HostError::with(&screen::CLIENT_EMPTY, format!("the window's client area is empty ({w}x{h})"))
+    }
 
     fn parse(lua: &Lua, what: &str, opts: &str) -> mlua::Result<ReadArgs> {
         let w: Value = lua.load(what).eval().unwrap();
@@ -1310,7 +1329,8 @@ mod tests {
         assert_eq!(a.entries, vec![(None, Ok(Rect::new(10, 20, 100, 20)))]);
         assert!(!a.list);
         // The Region form's one strict rule (region_lua.rs), shared with the cells calls: a
-        // fraction of a pixel, no corners at all and turned-around corners are mistakes.
+        // fraction of a pixel and no corners at all are mistakes. Corners with no area are not,
+        // here (below).
         fails(&lua, "return { x1 = 10.9, y1 = 20, x2 = 110, y2 = 40 }", "return nil", "the region.x1 must be a whole number, got 10.9");
         fails(&lua, "return {}", "return nil", "the region.x1 is missing");
         let a = parse(&lua, "return { x1 = 10.0, y1 = 20, x2 = 110, y2 = 40 }", "return nil").unwrap();
@@ -1331,8 +1351,24 @@ mod tests {
         assert_eq!(a.key.as_deref(), Some("menu"));
         let a = parse(&lua, "return { { 0, 0, 10, 10 } }", "return nil").unwrap();
         assert!(a.list, "a list of one is still a list");
-        fails(&lua, "return { 50, 50, 10, 10 }", "return nil", "the region { 50, 50, 10, 10 } is empty or turned around");
-        fails(&lua, "return { { 0, 0, 1, 1 }, { region = { 5, 0, 5, 1 } } }", "return nil", "entry 2.region { 5, 0, 5, 1 } is empty");
+    }
+
+    /// Corners with no width or no height — empty, or turned around — are a region with nothing in
+    /// it, answered as `host.screen.profile` answers them (D5 of the typed-errors plan): its
+    /// reading fails, `outside`, with the size, a turned-around side counted as none; the call's
+    /// other regions are read. Every other mistake in corners still raises.
+    #[test]
+    fn corners_with_no_area_are_answered_not_raised() {
+        let lua = Lua::new();
+        let a = parse(&lua, "return { 50, 50, 10, 10 }", "return nil").unwrap();
+        assert_eq!(a.entries, vec![(None, Err(crate::empty_region(0, 0)))]);
+        let a = parse(&lua, "return { { 0, 0, 1, 1 }, { region = { 5, 0, 5, 1 }, name = 'gone' } }", "return nil").unwrap();
+        assert_eq!(a.entries[0].1, Ok(Rect::new(0, 0, 1, 1)));
+        assert_eq!(a.entries[1], (Some("gone".into()), Err(crate::empty_region(0, 1))));
+        let e = crate::empty_region(0, 1);
+        assert_eq!((e.code(), e.message()), (crate::errors::Code::Outside, "the region is empty (0x1)"));
+        fails(&lua, "return { 0, 0, 3000000000, 1 }", "return nil", "the region.x2 is 3000000000, outside the screen's coordinate range");
+        fails(&lua, "return { 10, 0, 5, 3000000000 }", "return nil", "the region.y2 is 3000000000, outside the screen's coordinate range");
     }
 
     /// The window-relative form, as bare region, entry and list item, resolved at the call with
@@ -1356,7 +1392,7 @@ mod tests {
         .unwrap();
         assert!(a.list);
         assert_eq!(a.entries[0], (Some("menu".into()), Ok(Rect::new(100, 50, 640, 1024))));
-        assert_eq!(a.entries[1], (None, Err("the window's client area is empty (0x600)".to_string())));
+        assert_eq!(a.entries[1], (None, Err(client_empty(0, 600))));
         assert_eq!(a.entries[2], (None, Ok(Rect::new(0, 0, 10, 10))));
         fails(&lua, &format!("{win} return {{ window = w, fraction = {{ 0, 0, 1/0, 1 }} }}"), "return nil", "the region.fraction.x2 is inf");
         fails(&lua, &format!("{win} return {{ window = w }}"), "return nil", "the region.fraction must be a table");
@@ -1375,7 +1411,8 @@ mod tests {
         let a = parse(&lua, &format!("return {{ {big}, {big}, {half} }}"), "return nil").unwrap();
         assert_eq!(a.entries[0].1, Ok(Rect::new(0, 0, 8000, 4000)));
         let e = a.entries[1].1.clone().unwrap_err();
-        assert!(e.contains("at the window's current size this region is 8000x4000") && e.contains("40000000"), "{e}");
+        assert_eq!(e.reason(), &ocr::CALL_TOO_LARGE);
+        assert!(e.message().contains("at the window's current size this region is 8000x4000") && e.message().contains("40000000"), "{e}");
         assert_eq!(a.entries[2].1, Ok(Rect::new(0, 0, 4000, 2000)), "8 million still fit after the 32");
         // Corners are counted first, whatever their place in the list.
         let a = parse(&lua, &format!("return {{ {big}, {{ 0, 0, 5000, 2000 }} }}"), "return nil").unwrap();
@@ -1391,17 +1428,17 @@ mod tests {
     /// stays stale, and the other regions keep what the queue answered.
     #[test]
     fn an_unresolved_window_region_is_answered_failed_with_the_reason() {
-        let why = "the window's client area is empty (0x600)".to_string();
+        let why = client_empty(0, 600);
         let readings = vec![
-            Reading::failed(Rect::default(), "empty region: x2 must be greater than x1 and y2 greater than y1"),
+            Reading::failed(Rect::default(), crate::empty_region(0, 0)),
             Reading::outcome(Rect::new(0, 0, 10, 10), Status::Text, None),
         ];
         let out = with_unresolved(readings, &[Some(why.clone()), None]);
-        assert_eq!((out[0].status, out[0].error.as_deref()), (Status::Failed, Some(why.as_str())));
-        assert_eq!((out[1].status, out[1].error.as_deref()), (Status::Text, None));
+        assert_eq!((out[0].status, out[0].error.as_ref()), (Status::Failed, Some(&why)));
+        assert_eq!((out[1].status, out[1].error.as_ref()), (Status::Text, None));
         let stale = vec![Reading::outcome(Rect::default(), Status::Stale, None)];
         let out = with_unresolved(stale, &[Some(why)]);
-        assert_eq!((out[0].status, out[0].error.as_deref()), (Status::Stale, None));
+        assert_eq!((out[0].status, out[0].error.as_ref()), (Status::Stale, None));
     }
 
     #[test]
@@ -1457,13 +1494,13 @@ mod tests {
             (Some("inside".to_string()), Ok(Rect::new(120, 110, 20, 10))),
             (None, Ok(Rect::new(250, 150, 100, 100))),
             (None, Ok(Rect::new(0, 0, 50, 50))),
-            (None, Err("the window's client area is empty (0x0)".to_string())),
+            (None, Err(client_empty(0, 0))),
         ];
         let out = clip_to_snapshot(entries, &frame);
         assert_eq!(out[0], (Some("inside".to_string()), Ok(Rect::new(120, 110, 20, 10))));
         assert_eq!(out[1].1, Ok(Rect::new(250, 150, 50, 50)), "cut to the snapshot");
-        assert_eq!(out[2].1, Err(crate::snapshot::NO_OVERLAP.to_string()));
-        assert_eq!(out[3].1, Err("the window's client area is empty (0x0)".to_string()));
+        assert_eq!(out[2].1, Err(crate::snapshot::no_overlap()));
+        assert_eq!(out[3].1, Err(client_empty(0, 0)));
     }
 
     /// Delivered only to the VM that asked, while its module is enabled: a reload (a new
@@ -1598,14 +1635,18 @@ mod tests {
             .eval()
             .unwrap();
         assert!(ok);
-        let failed = Reading::failed(Rect::new(0, 0, 1, 1), "screen capture failed");
+        let failed = Reading::failed(Rect::new(0, 0, 1, 1), crate::backend::capture_failed());
         let t = reading_table(&lua, &failed, None, false, None).unwrap();
         lua.globals().set("f", t).unwrap();
         let ok: bool = lua
-            .load(r#"return f.name == nil and f.status == "failed" and f.skipped == false and f.text == "" and #f.words == 0 and f.error == "screen capture failed" and f.approx == nil and f.time == nil and f.inputEpoch == nil"#)
+            .load(r#"return f.name == nil and f.status == "failed" and f.skipped == false and f.text == "" and #f.words == 0 and f.approx == nil and f.time == nil and f.inputEpoch == nil"#)
             .eval()
             .unwrap();
         assert!(ok);
+        // Its `error` is an error value: the code to compare, and the old sentence as its message.
+        let e: crate::errors_lua::Told = lua.load("return f.error").eval().unwrap();
+        assert_eq!(e, crate::errors_lua::Told::of(&crate::backend::capture_failed()));
+        assert!(lua.load(r#"return tostring(f.error) == "screen capture failed" and f.error.code == "failed" and "read: " .. f.error == "read: screen capture failed""#).eval::<bool>().unwrap());
         // A stale reading never says when, whatever it is handed: it was never recognised.
         let stale = Reading::outcome(Rect::new(0, 0, 1, 1), Status::Stale, None);
         let t = reading_table(&lua, &stale, None, true, Some(Seen { time: 1, input_epoch: 1 })).unwrap();
@@ -1622,13 +1663,13 @@ mod tests {
         let picture = Some(Picture { at: Instant::now(), input_epoch: 3 });
         let readings = vec![
             Reading::outcome(Rect::new(0, 0, 10, 10), Status::Text, None),
-            Reading::outcome(Rect::default(), Status::Failed, Some("the window's client area is empty (0x0)".into())),
+            Reading::outcome(Rect::default(), Status::Failed, Some(client_empty(0, 0))),
             Reading::outcome(Rect::new(20, 0, 10, 10), Status::Stale, None),
-            Reading::outcome(Rect::new(30, 0, 10, 10), Status::Failed, Some("screen capture failed".into())),
+            Reading::outcome(Rect::new(30, 0, 10, 10), Status::Failed, Some(crate::backend::capture_failed())),
             Reading::outcome(Rect::new(40, 0, 10, 10), Status::Blank, None),
             Reading::outcome(Rect::new(50, 0, 10, 10), Status::None, None),
         ];
-        let unresolved = vec![None, Some("the window's client area is empty (0x0)".to_string()), None, None, None, None];
+        let unresolved = vec![None, Some(client_empty(0, 0)), None, None, None, None];
         let seen = seen_of(picture, &unresolved, &readings);
         assert_eq!(seen[0].map(|s| s.input_epoch), Some(3));
         assert_eq!((seen[1], seen[2], seen[3]), (None, None, None));

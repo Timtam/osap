@@ -9,8 +9,14 @@ host.hotkey.register(TOGGLE, function()
   capturing = not capturing
   if capturing then
     -- Plain Tab and Shift+Tab are captured; Alt+Tab is NOT (different combo),
-    -- so window switching keeps working.
-    host.keys.capture("Tab", function() host.speech.output("Tab intercepted", { interrupt = true }) end)
+    -- so window switching keeps working. Without the keyboard hook (a Mac without the
+    -- Accessibility grant) a capture answers nil and an error value, and captures nothing.
+    local token, err = host.keys.capture("Tab", function() host.speech.output("Tab intercepted", { interrupt = true }) end)
+    if not token then
+      capturing = false
+      host.speech.output("Key capture is not available: " .. err, { interrupt = true })
+      return
+    end
     host.keys.capture("Shift+Tab", function() host.speech.output("Shift Tab intercepted", { interrupt = true }) end)
     host.keys.capture("Escape", function() host.speech.output("Escape intercepted", { interrupt = true }) end)
     host.speech.output("Key capture on. Plain Tab, Shift Tab and Escape are intercepted; Alt Tab still works.", { interrupt = true })

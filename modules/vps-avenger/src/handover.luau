@@ -40,6 +40,7 @@
 -- every kind of rename; here each kind reads its own field. Its rename dialog was dead code, and is
 -- left out of the page.
 
+local O = host.require("com.platform.overlay")
 local G = host.include("src/geometry.luau")
 local H = host.include("src/header.luau")
 local S = host.include("src/state.luau")
@@ -215,7 +216,13 @@ function Hv.rename(o, trip, F)
   end
 
   -- The editor seen open, or not: the double-click's change wait from the field's picture before it.
-  local function afterDouble()
+  -- A second click that was not made opens no editor: said, as a click refused is.
+  local function afterDouble(okD, saidD)
+    if not okD then
+      release(held)
+      if not trip:inFront() then return end
+      return over({ sentence = saidD })
+    end
     local asked, err = pcall(host.screen.snapshot, { region = at.picture, change = Ed.wait(held.before, at) },
       function(snap, why, info)
         if not trip:inFront() then
@@ -247,9 +254,9 @@ function Hv.rename(o, trip, F)
         -- The edges are what is kept: no picture is held while the user types.
         release(held)
         if not trip:inFront() then return end
-        local handed, whyH = trip:handOver({ kind = "typing", ends = ends, onEnd = onEnd })
-        if handed or whyH == "not in front" then return end
-        log("'%s': the keyboard was not handed over (%s); VPS Avenger's editor is open", F.kind, tostring(whyH))
+        local handed, errH = trip:handOver({ kind = "typing", ends = ends, onEnd = onEnd })
+        if handed or errH.code == O.errors.NOT_IN_FRONT then return end
+        log("'%s': the keyboard was not handed over (%s); VPS Avenger's editor is open", F.kind, tostring(errH))
         over({ error = Hv.NO_KEYBOARD .. "; its editor is still open" })
       end)
     if not asked then
@@ -437,7 +444,7 @@ function Hv.browse(o, trip, forget)
       if res.status == "text" then start.name = R.tidy(res.text) end
     end)
   end
-  local handed, why = trip:handOver({
+  local handed, err = trip:handOver({
     kind = "browse",
     onEnd = function(o2, t2, how)
       if how ~= "ended" or not t2:inFront() then return end
@@ -453,7 +460,7 @@ function Hv.browse(o, trip, forget)
     host.speech.output(Hv.BROWSE, { interrupt = false })
     return
   end
-  if why == "not in front" then return end
+  if err.code == O.errors.NOT_IN_FRONT then return end
   trip:done({ error = Hv.NO_KEYBOARD })
 end
 
@@ -564,11 +571,11 @@ local function browseName(o, trip, F)
     end
   end
 
-  local handed, whyH = trip:handOver({ kind = "browse", onEnd = onEnd })
+  local handed, errH = trip:handOver({ kind = "browse", onEnd = onEnd })
   if not handed then
     release(held)
-    if whyH == "not in front" then return end
-    slog("nothing clicked — the keyboard was not handed over (%s)", tostring(whyH))
+    if errH.code == O.errors.NOT_IN_FRONT then return end
+    slog("nothing clicked — the keyboard was not handed over (%s)", tostring(errH))
     return trip:done({ part = before, error = Hv.NO_KEYBOARD })
   end
   local clicked, said = E.ring.clickAt(o, F.label, F.at, nil, true)
@@ -721,11 +728,11 @@ function Hv.browseEnvelope(o, trip, button, label)
     end
   end
 
-  local handed, whyH = trip:handOver({ kind = "browse", onEnd = onEnd })
+  local handed, errH = trip:handOver({ kind = "browse", onEnd = onEnd })
   if not handed then
     release(held)
-    if whyH == "not in front" then return end
-    slog("nothing clicked — the keyboard was not handed over (%s)", tostring(whyH))
+    if errH.code == O.errors.NOT_IN_FRONT then return end
+    slog("nothing clicked — the keyboard was not handed over (%s)", tostring(errH))
     return trip:done({ part = before, error = Hv.NO_KEYBOARD })
   end
   local clicked, said = E.ring.clickAt(o, label, C.PANEL[button], nil, true)

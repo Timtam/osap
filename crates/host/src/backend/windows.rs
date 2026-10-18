@@ -19,10 +19,11 @@ use super::hook_watch_thread;
 use super::hotkey_hook::{self, Down, Mods, OsPress, Route, NO_ID};
 use super::{
     capture_decision, menu_flag_owners, scope_of, Backend, Capture, CaptureFn, CaptureSource,
-    CapturedImage, CompareFn, Captured, ControlInfo, HostEvents, MouseButton, OcrLine, OcrShot,
-    OcrText, OcrThread, OcrWord, OcrWorker, OwnerKeys, Pressed, Recognise, Taken, WinInfo, CAPTURE_FAILED,
+    CapturedImage, CompareFn, Captured, ControlInfo, HostEvents, KeyRefusal, MouseButton, OcrLine, OcrShot,
+    OcrText, OcrThread, OcrWord, OcrWorker, OwnerKeys, Pressed, Recognise, Taken, WinInfo, capture_failed,
     DUPLICATION_UNANSWERED,
 };
+use crate::errors::{self, HostError};
 use crate::ocr::plan::{self, Plan};
 use crate::ocr::types::Rect;
 
@@ -36,7 +37,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
-use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE};
+use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow, SetForegroundWindow, ShowWindow, SW_RESTORE};
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::System::Threading::{
     GetCurrentThread, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
@@ -515,14 +516,14 @@ pub(super) fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedI
 /// Standard is `capture_screen` per region, exactly as before this existed. Duplication sends
 /// every region in one request (one GPU sync for all of them) and, when it cannot answer,
 /// either reads the standard way or fails each region with the reason, as the module's
-/// `fallback` says. The error is a sentence that begins with [`CAPTURE_FAILED`] — for a request
-/// duplication did not answer, with [`DUPLICATION_UNANSWERED`].
-fn capture_all(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+/// `fallback` says. The error is a capture error ([`capture_failed`]) — for a request duplication
+/// did not answer, one that begins with [`DUPLICATION_UNANSWERED`] ([`unanswered`]).
+fn capture_all(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, HostError>> {
     let CaptureSource::Duplication { or_standard } = src else {
         // Exactly the read every module has always had.
         return regions
             .iter()
-            .map(|&(x, y, w, h)| capture_screen(x, y, w, h).ok_or_else(|| CAPTURE_FAILED.to_string()))
+            .map(|&(x, y, w, h)| capture_screen(x, y, w, h).ok_or_else(capture_failed))
             .collect();
     };
     match duplicate(regions) {
@@ -538,25 +539,35 @@ fn capture_all(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Resu
 }
 
 /// The standard read of one region, standing in for duplication.
-fn standard_instead(&(x, y, w, h): &(i32, i32, i32, i32)) -> Result<CapturedImage, String> {
+fn standard_instead(&(x, y, w, h): &(i32, i32, i32, i32)) -> Result<CapturedImage, HostError> {
     // Too large for the duplication path is too large for its fallback too: GDI is protected
     // from a 14 GB allocation only by its bitmap creation happening to fail first. (A module
     // that reads the standard way keeps exactly the read it always had, without this limit.)
     if w > 0 && h > 0 && !dxgi::fits(w, h) {
-        return Err(format!("{CAPTURE_FAILED}: {}", Fallback::TooLarge.describe()));
+        return Err(too_large());
     }
-    capture_screen(x, y, w, h).ok_or_else(|| CAPTURE_FAILED.to_string())
+    capture_screen(x, y, w, h).ok_or_else(capture_failed)
 }
 
 /// The error a read gets when duplication could not answer and the module forbade the
-/// fallback. It begins with [`DUPLICATION_UNANSWERED`], which is how the OCR binding tells it
-/// from every other failure — a degenerate or oversized region still raises.
-fn unanswered(why: Fallback) -> String {
-    format!("{DUPLICATION_UNANSWERED} — {}", why.describe())
+/// fallback: its message begins with [`DUPLICATION_UNANSWERED`], its code is its tail's
+/// (`Fallback::reason`). A region too large for duplication is never sent to it, and is told so
+/// as the standard path tells it ([`too_large`]).
+fn unanswered(why: Fallback) -> HostError {
+    match why {
+        Fallback::TooLarge => too_large(),
+        _ => HostError::with(why.reason(), format!("{DUPLICATION_UNANSWERED} — {}", why.describe())),
+    }
+}
+
+/// What a region too large for desktop duplication is told, by duplication and by its fallback
+/// alike: `screen capture failed: the region is larger than 40 million pixels`.
+fn too_large() -> HostError {
+    HostError::with(&errors::screen::CAPTURE_TOO_LARGE, format!("{}: {}", capture_failed(), Fallback::TooLarge.describe()))
 }
 
 /// Every region through desktop duplication in ONE request — or the reason nothing came back.
-fn duplicate(regions: &[(i32, i32, i32, i32)]) -> Result<Vec<Result<CapturedImage, String>>, Fallback> {
+fn duplicate(regions: &[(i32, i32, i32, i32)]) -> Result<Vec<Result<CapturedImage, HostError>>, Fallback> {
     duplicate_with(regions, dxgi::capture)
 }
 
@@ -569,17 +580,9 @@ fn duplicate(regions: &[(i32, i32, i32, i32)]) -> Result<Vec<Result<CapturedImag
 fn duplicate_with(
     regions: &[(i32, i32, i32, i32)],
     read: impl FnOnce(&[(i32, i32, i32, i32)]) -> Result<Vec<CapturedImage>, Fallback>,
-) -> Result<Vec<Result<CapturedImage, String>>, Fallback> {
-    let mut out: Vec<Result<CapturedImage, String>> = regions
-        .iter()
-        .map(|&(_, _, w, h)| {
-            Err(if w > 0 && h > 0 {
-                format!("{CAPTURE_FAILED}: {}", Fallback::TooLarge.describe())
-            } else {
-                CAPTURE_FAILED.to_string()
-            })
-        })
-        .collect();
+) -> Result<Vec<Result<CapturedImage, HostError>>, Fallback> {
+    let mut out: Vec<Result<CapturedImage, HostError>> =
+        regions.iter().map(|&(_, _, w, h)| Err(if w > 0 && h > 0 { too_large() } else { capture_failed() })).collect();
     let asked: Vec<usize> =
         (0..regions.len()).filter(|&i| dxgi::fits(regions[i].2, regions[i].3)).collect();
     if asked.is_empty() {
@@ -596,7 +599,7 @@ fn duplicate_with(
 /// The image worker's capture routine (`Backend::capture_fn`): a plain `fn`, so it is `Send`,
 /// and the duplication state it reaches is the engine thread's, not this backend's. Never the
 /// event loop's.
-fn capture_on_worker(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+fn capture_on_worker(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, HostError>> {
     crate::loop_guard::off_loop_screen("the image worker's capture");
     capture_all(regions, src)
 }
@@ -607,9 +610,9 @@ fn capture_on_worker(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Ve
 /// recording the path that actually answered it — `Duplication` only for a picture duplication
 /// gave, `Gdi` for the standard path and for the fallback to it. The same decisions as
 /// `capture_all`, fallback and reasons included.
-fn frames_all(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<Frame, String>> {
+fn frames_all(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<Frame, HostError>> {
     frames_with(regions, src, duplicate, |&(x, y, w, h)| {
-        capture_screen(x, y, w, h).ok_or_else(|| CAPTURE_FAILED.to_string())
+        capture_screen(x, y, w, h).ok_or_else(capture_failed)
     })
 }
 
@@ -618,15 +621,15 @@ fn frames_all(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Resul
 fn frames_with(
     regions: &[(i32, i32, i32, i32)],
     src: CaptureSource,
-    dup: impl FnOnce(&[(i32, i32, i32, i32)]) -> Result<Vec<Result<CapturedImage, String>>, Fallback>,
-    gdi: impl Fn(&(i32, i32, i32, i32)) -> Result<CapturedImage, String>,
-) -> Vec<Result<Frame, String>> {
+    dup: impl FnOnce(&[(i32, i32, i32, i32)]) -> Result<Vec<Result<CapturedImage, HostError>>, Fallback>,
+    gdi: impl Fn(&(i32, i32, i32, i32)) -> Result<CapturedImage, HostError>,
+) -> Vec<Result<Frame, HostError>> {
     // The moment the picture came back, and a picture exactly the region's size or none: a
     // frame is read by index arithmetic, and a short one must never be kept.
-    let kept = |r: &(i32, i32, i32, i32), img: Result<CapturedImage, String>, via: FrameVia| {
+    let kept = |r: &(i32, i32, i32, i32), img: Result<CapturedImage, HostError>, via: FrameVia| {
         img.and_then(|img| {
             Frame::from_image(Rect::from_tuple(*r), img, std::time::Instant::now(), via, None)
-                .ok_or_else(|| CAPTURE_FAILED.to_string())
+                .ok_or_else(capture_failed)
         })
     };
     let CaptureSource::Duplication { or_standard } = src else {
@@ -644,29 +647,28 @@ fn frames_with(
             // capture cut from it, unions up to `UNION_MAX` pixels — so a round of several
             // regions that duplication could not answer costs a compositor frame per planned
             // capture, not one per region.
-            let too_large = |&(_, _, w, h): &(i32, i32, i32, i32)| w > 0 && h > 0 && !dxgi::fits(w, h);
-            let asked: Vec<usize> = (0..regions.len()).filter(|&i| !too_large(&regions[i])).collect();
+            let past = |&(_, _, w, h): &(i32, i32, i32, i32)| w > 0 && h > 0 && !dxgi::fits(w, h);
+            let asked: Vec<usize> = (0..regions.len()).filter(|&i| !past(&regions[i])).collect();
             let rects: Vec<Rect> = asked.iter().map(|&i| Rect::from_tuple(regions[i])).collect();
             let (plan, at) = crate::ocr::snap_queue::group(&rects, crate::ocr::policy::UNION_MAX);
-            let mut shots: Vec<Option<Result<Frame, String>>> =
+            let mut shots: Vec<Option<Result<Frame, HostError>>> =
                 plan.iter().map(|p| Some(kept(&p.tuple(), gdi(&p.tuple()), FrameVia::Gdi))).collect();
             let mut users = vec![0usize; plan.len()];
             for &k in &at {
                 users[k] += 1;
             }
-            let mut out: Vec<Result<Frame, String>> =
-                regions.iter().map(|_| Err(format!("{CAPTURE_FAILED}: {}", Fallback::TooLarge.describe()))).collect();
+            let mut out: Vec<Result<Frame, HostError>> = regions.iter().map(|_| Err(too_large())).collect();
             for (n, &i) in asked.iter().enumerate() {
                 let (k, r) = (at[n], rects[n]);
                 // The one region of a capture of exactly it takes the frame itself.
                 let whole = users[k] == 1 && matches!(&shots[k], Some(Ok(f)) if f.rect == r);
                 out[i] = if whole {
-                    shots[k].take().unwrap_or_else(|| Err(CAPTURE_FAILED.to_string()))
+                    shots[k].take().unwrap_or_else(|| Err(capture_failed()))
                 } else {
                     match &shots[k] {
-                        Some(Ok(f)) => f.crop(r).ok_or_else(|| CAPTURE_FAILED.to_string()),
+                        Some(Ok(f)) => f.crop(r).ok_or_else(capture_failed),
                         Some(Err(e)) => Err(e.clone()),
-                        None => Err(CAPTURE_FAILED.to_string()),
+                        None => Err(capture_failed()),
                     }
                 };
             }
@@ -683,9 +685,9 @@ fn frames_with(
 /// each of them as a 1x1 piece of ONE request, and when it cannot answer they are read the
 /// standard way or fail with the reason, as the module's `fallback` says. The capture thread waits
 /// for duplication up to 250 ms.
-fn pixels_through(pts: &[(i32, i32)], src: CaptureSource) -> Result<Vec<(u8, u8, u8)>, String> {
+fn pixels_through(pts: &[(i32, i32)], src: CaptureSource) -> Result<Vec<(u8, u8, u8)>, HostError> {
     pixels_with(pts, src, dxgi::capture, off_every_monitor, |r| {
-        capture_screen(r.x, r.y, r.w, r.h).ok_or_else(|| CAPTURE_FAILED.to_string())
+        capture_screen(r.x, r.y, r.w, r.h).ok_or_else(capture_failed)
     })
 }
 
@@ -693,7 +695,7 @@ fn pixels_through(pts: &[(i32, i32)], src: CaptureSource) -> Result<Vec<(u8, u8,
 /// and for a callback: each point as [`pixel_through`] reads it for `host.screen.pixel` (`single`),
 /// or all of them as [`pixels_through`] reads them for `host.screen.pixels`, waiting for desktop
 /// duplication as the capture thread's reads do, up to 250 ms. Never on the event loop.
-fn points_on_capture_thread(pts: &[(i32, i32)], src: CaptureSource, single: bool) -> Result<Vec<(u8, u8, u8)>, String> {
+fn points_on_capture_thread(pts: &[(i32, i32)], src: CaptureSource, single: bool) -> Result<Vec<(u8, u8, u8)>, HostError> {
     crate::loop_guard::off_loop_screen("a pixel read a handler waits for");
     if single {
         pts.iter().map(|&(x, y)| pixel_through(x, y, src)).collect()
@@ -708,8 +710,8 @@ fn pixels_with(
     src: CaptureSource,
     dup: impl FnOnce(&[(i32, i32, i32, i32)]) -> Result<Vec<CapturedImage>, Fallback>,
     off: impl Fn(i32, i32) -> bool,
-    gdi: impl FnMut(Rect) -> Result<CapturedImage, String>,
-) -> Result<Vec<(u8, u8, u8)>, String> {
+    gdi: impl FnMut(Rect) -> Result<CapturedImage, HostError>,
+) -> Result<Vec<(u8, u8, u8)>, HostError> {
     frame::black_where_off(pts, off, |on| match src {
         CaptureSource::Standard => frame::read_points(on, gdi),
         CaptureSource::Duplication { or_standard } => {
@@ -727,10 +729,10 @@ fn pixels_with(
                     .iter()
                     .map(|p| {
                         let img = &images[slot[p]];
-                        img.rgba.get(0..3).map(|c| (c[0], c[1], c[2])).ok_or_else(|| CAPTURE_FAILED.to_string())
+                        img.rgba.get(0..3).map(|c| (c[0], c[1], c[2])).ok_or_else(capture_failed)
                     })
                     .collect(),
-                Ok(_) => Err(CAPTURE_FAILED.to_string()),
+                Ok(_) => Err(capture_failed()),
                 Err(why) => {
                     dxgi::note_fallback(why, or_standard);
                     if !or_standard {
@@ -748,7 +750,7 @@ fn pixels_with(
 /// The snapshot rounds' capture (`OcrWorker::frames`), on the capture thread: `frames_all` as
 /// the image worker's reads wait for desktop duplication — up to 250 ms — with the path each
 /// frame came from. `poll` means nothing here. Never on the event loop.
-fn frames_on_capture_thread(regions: &[(i32, i32, i32, i32)], src: CaptureSource, _poll: bool) -> Vec<Result<Frame, String>> {
+fn frames_on_capture_thread(regions: &[(i32, i32, i32, i32)], src: CaptureSource, _poll: bool) -> Vec<Result<Frame, HostError>> {
     crate::loop_guard::off_loop_screen("a snapshot round");
     frames_all(regions, src)
 }
@@ -760,7 +762,7 @@ fn ocr_shot_of(frame: &Frame, regions: &[(i32, i32, i32, i32)]) -> OcrShot {
     crate::loop_guard::off_loop("a snapshot's pixels for a text read");
     regions
         .iter()
-        .map(|&r| frame.crop_image(Rect::from_tuple(r)).ok_or_else(|| CAPTURE_FAILED.to_string()))
+        .map(|&r| frame.crop_image(Rect::from_tuple(r)).ok_or_else(capture_failed))
         .collect()
 }
 
@@ -789,8 +791,8 @@ fn capture_for_read(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Ocr
             }
         }
     }
-    let one = |&(x, y, w, h): &(i32, i32, i32, i32)| -> Result<CapturedImage, String> {
-        capture_screen(x, y, w, h).ok_or_else(|| CAPTURE_FAILED.to_string())
+    let one = |&(x, y, w, h): &(i32, i32, i32, i32)| -> Result<CapturedImage, HostError> {
+        capture_screen(x, y, w, h).ok_or_else(capture_failed)
     };
     let rects: Vec<Rect> = regions.iter().copied().map(Rect::from_tuple).collect();
     match plan::capture_plan(&rects) {
@@ -802,8 +804,9 @@ fn capture_for_read(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Ocr
                 .iter()
                 .zip(regions)
                 .map(|(r, t)| match plan::offset_in(r, &b) {
-                    Some((ox, oy)) if !r.is_empty() => crop(&big, ox, oy, r.w, r.h)
-                        .ok_or_else(|| "region outside the captured area".to_string()),
+                    Some((ox, oy)) if !r.is_empty() => {
+                        crop(&big, ox, oy, r.w, r.h).ok_or_else(|| HostError::of(&errors::ocr::CROP_OUTSIDE))
+                    }
                     _ => one(t),
                 })
                 .collect(),
@@ -821,7 +824,7 @@ fn ocr_recognise(
     shot: &OcrShot,
     _regions: &[(i32, i32, i32, i32)],
     ctx: &Recognise,
-) -> Vec<Result<OcrText, String>> {
+) -> Vec<Result<OcrText, HostError>> {
     crate::loop_guard::off_loop("the recognise stage of a text read");
     ctx.each(shot.iter(), |piece| match piece {
         Ok(img) => recognize_image(img, ctx.lang),
@@ -889,7 +892,7 @@ fn ensure_winrt() {
 /// A pixel through `src`: `GetPixel` for the standard source, a 1x1 region of the duplicated
 /// picture otherwise. `Err` only when duplication could not answer and the module forbade the
 /// fallback: the reason, as [`unanswered`] words it for every other read.
-fn pixel_through(x: i32, y: i32, src: CaptureSource) -> Result<(u8, u8, u8), String> {
+fn pixel_through(x: i32, y: i32, src: CaptureSource) -> Result<(u8, u8, u8), HostError> {
     let CaptureSource::Duplication { or_standard } = src else {
         return Ok(pixel_gdi(x, y));
     };
@@ -905,7 +908,7 @@ fn pixel_through(x: i32, y: i32, src: CaptureSource) -> Result<(u8, u8, u8), Str
         Ok(images) => images
             .first()
             .map(|c| (c.rgba[0], c.rgba[1], c.rgba[2]))
-            .ok_or_else(|| CAPTURE_FAILED.to_string()),
+            .ok_or_else(capture_failed),
         Err(why) => {
             dxgi::note_fallback(why, or_standard);
             if or_standard {
@@ -1162,6 +1165,11 @@ fn physical_cores() -> Option<u32> {
     u32::try_from(buf[..got].iter().filter(|i| i.Relationship == RelationProcessorCore).count()).ok()
 }
 
+/// What a hotkey the system would not register answers: another program holds the combination.
+fn register_refused(spec: &str) -> HostError {
+    HostError::with(&errors::hotkey::REGISTER_REFUSED, format!("RegisterHotKey failed for '{spec}' (already in use by another app?)"))
+}
+
 impl Backend for WindowsBackend {
     fn environment(&self) -> Vec<(String, String)> {
         let mut out = self.display_environment();
@@ -1248,11 +1256,13 @@ impl Backend for WindowsBackend {
     /// A control's id brings its top-level window forward and then lands the keyboard on the
     /// control (HW1a); a top-level id is brought forward as ever — and lands on the control a page
     /// in front took the front from, when the id is the window that page came from (HW1b). See
-    /// [`start_landing`]. A declined call starts no landing.
-    fn focus_window(&self, id: isize) -> bool {
+    /// [`start_landing`]. A declined call starts no landing. A handle that names no window is
+    /// `gone`; one Windows would not bring forward, `refused`.
+    fn focus_window(&self, id: isize) -> Result<(), HostError> {
         let hwnd = id as HWND;
-        if hwnd.is_null() {
-            return false;
+        // SAFETY: a local question about a handle, which a stale one answers no to.
+        if hwnd.is_null() || unsafe { IsWindow(hwnd) } == 0 {
+            return Err(HostError::of(&errors::window::NO_SUCH_WINDOW));
         }
         // SAFETY: plain queries and requests about a handle; a stale one is refused.
         let (root, accepted) = unsafe {
@@ -1266,7 +1276,7 @@ impl Backend for WindowsBackend {
             (root, SetForegroundWindow(root) != 0)
         };
         if !accepted {
-            return false;
+            return Err(HostError::of(&errors::common::DECLINED));
         }
         // SAFETY: a plain query.
         let in_front = unsafe { GetForegroundWindow() } == root;
@@ -1275,7 +1285,7 @@ impl Backend for WindowsBackend {
         if let Some(control) = plan.land_on {
             start_landing(control, root as isize, plan.look_now);
         }
-        true
+        Ok(())
     }
 
     fn take_focus_puts(&self) -> Vec<(u64, isize)> {
@@ -1335,11 +1345,11 @@ impl Backend for WindowsBackend {
     /// Stricter than `window_owns_point`, which compares top-level windows: the point has to be
     /// in `window` itself or a window inside it, so a click for a plug-in's own window is not made
     /// on the DAW's list beside it. And it says which of three things is wrong.
-    fn click_check(&self, window: isize, x: i32, y: i32) -> Result<(), String> {
+    fn click_check(&self, window: isize, x: i32, y: i32) -> Result<(), HostError> {
         super::click_win::target(window, x, y).map(|_| ())
     }
 
-    fn mouse_click_posted(&self, window: isize, x: i32, y: i32, button: MouseButton, move_pointer: bool) -> Result<(), String> {
+    fn mouse_click_posted(&self, window: isize, x: i32, y: i32, button: MouseButton, move_pointer: bool) -> Result<(), HostError> {
         super::click_win::post_click(window, x, y, button, move_pointer)
     }
 
@@ -1350,7 +1360,7 @@ impl Backend for WindowsBackend {
         y: i32,
         button: MouseButton,
         owner: usize,
-    ) -> Result<super::ActJob, String> {
+    ) -> Result<super::ActJob, HostError> {
         super::click_win::prepare_hold(window, x, y, button, owner)
     }
 
@@ -1424,10 +1434,7 @@ impl Backend for WindowsBackend {
     // be started answers every question with why itself (`element.rs`). UI Automation is not asked
     // from the event loop, whose apartment is single-threaded and whose messages it would hold up.
     fn element_ask(&self, _ask: &super::ElementAsk) -> super::ElementOutcome {
-        Err(super::ElementFailure {
-            why: "accessibility questions are asked on the host's accessibility thread".to_string(),
-            unanswered: false,
-        })
+        Err(super::ElementFailure { why: HostError::of(&errors::element::WRONG_THREAD), unanswered: false })
     }
 
     fn screen_size(&self) -> (i32, i32) {
@@ -1562,29 +1569,40 @@ impl Backend for WindowsBackend {
         }
     }
 
-    fn key_post(&self, hwnd: isize, key: &str) -> Result<(), String> {
+    /// The key-down and the key-up posted; a post Windows refuses is answered by its error — a
+    /// program of higher rights, a handle that names no window, or the error's number — and the
+    /// key-up is not posted after a refused key-down.
+    fn key_post(&self, hwnd: isize, key: &str) -> Result<(), KeyRefusal> {
         let vk = parse_key(key)? as u16;
+        // No handle names no window — and `PostMessageW` would post to this thread's own queue.
+        if hwnd == 0 {
+            return Err(KeyRefusal::Answer(HostError::of(&errors::common::WINDOW_GONE)));
+        }
         // The scan code goes in the lParam because some applications read it rather than the
         // virtual key, and Melodyne decodes keys itself (it imports GetKeyboardState, ToUnicode
         // and MapVirtualKeyW) rather than leaving it to the defaults.
         let scan = unsafe { MapVirtualKeyW(vk as u32, 0) } as isize;
         let lp_down = 1isize | (scan << 16);
         let lp_up = 1isize | (scan << 16) | (1 << 30) | (1 << 31);
-        unsafe {
-            PostMessageW(hwnd as HWND, WM_KEYDOWN, vk as usize, lp_down);
-            PostMessageW(hwnd as HWND, WM_KEYUP, vk as usize, lp_up);
+        for (msg, lp) in [(WM_KEYDOWN, lp_down), (WM_KEYUP, lp_up)] {
+            // SAFETY: a post to a handle, which a stale one fails.
+            if unsafe { PostMessageW(hwnd as HWND, msg, vk as usize, lp) } == 0 {
+                let why = super::click_win::post_refused(unsafe { GetLastError() });
+                crate::logging::line("input", &format!("post of '{key}' to window {hwnd}: refused at 0x{msg:04x}: {why}"));
+                return Err(KeyRefusal::Answer(why));
+            }
         }
         Ok(())
     }
 
-    fn key_send(&self, combo: &str) -> Result<(), String> {
+    fn key_send(&self, combo: &str) -> Result<(), KeyRefusal> {
         // The shared parser, so a spec means here what it means to a hotkey. Its modifiers are
         // roles, which on Windows are the keys of their names.
         let (vk, mask) = super::parse_key_spec(combo)?;
         if mask & super::MASK_TAP != 0 {
-            return Err(format!(
+            return Err(KeyRefusal::Mistake(format!(
                 "'{combo}' is a modifier tap, which is something to capture, not a key to send"
-            ));
+            )));
         }
         let mod_vks = modifier_vks(mask);
         let key_vk = vk as u16;
@@ -1610,7 +1628,7 @@ impl Backend for WindowsBackend {
         }
     }
 
-    fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String> {
+    fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), KeyRefusal> {
         let (mods, vk) = parse_spec(spec)?;
         let hwnd = hotkey_window();
         let granted = unsafe { RegisterHotKey(hwnd, id, mods | MOD_NOREPEAT, vk) } != 0;
@@ -1622,9 +1640,7 @@ impl Backend for WindowsBackend {
         // is the rule, and it is tested with a refusal.
         self.file_for_hook(id, vk, mods, granted);
         if !granted {
-            return Err(format!(
-                "RegisterHotKey failed for '{spec}' (already in use by another app?)"
-            ));
+            return Err(KeyRefusal::Answer(register_refused(spec)));
         }
         Ok(())
     }
@@ -1632,13 +1648,11 @@ impl Backend for WindowsBackend {
     /// `RegisterHotKey` and nothing more: not filed for the keyboard hook, so the hook lets the
     /// press through and Windows turns it into a `WM_HOTKEY`. A combination refused here belongs
     /// to another program, as with `register_hotkey`.
-    fn register_foreground_hotkey(&self, id: i32, spec: &str) -> Result<(), String> {
+    fn register_foreground_hotkey(&self, id: i32, spec: &str) -> Result<(), KeyRefusal> {
         let (mods, vk) = parse_spec(spec)?;
         let hwnd = hotkey_window();
         if unsafe { RegisterHotKey(hwnd, id, mods | MOD_NOREPEAT, vk) } == 0 {
-            return Err(format!(
-                "RegisterHotKey failed for '{spec}' (already in use by another app?)"
-            ));
+            return Err(KeyRefusal::Answer(register_refused(spec)));
         }
         Ok(())
     }
@@ -1959,23 +1973,21 @@ impl Backend for WindowsBackend {
     /// see `keyboard_hook_thread` — and then the watch that installs it again whenever Windows
     /// may have removed it (`hook_watch_thread`). Idempotent: every capture and every granted
     /// hotkey asks.
-    fn watch_keys(&self) -> Result<(), String> {
+    fn watch_keys(&self) -> Result<(), HostError> {
         if KEY_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
             return Ok(()); // already installed
         }
         // The thread the hook wakes when it has queued something: this one, the pump.
         PUMP_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<u32, String>>(1);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<u32, HostError>>(1);
         let result = match std::thread::Builder::new()
             .name("keyboard-hook".to_string())
             .spawn(move || keyboard_hook_thread(ready_tx))
         {
-            Err(e) => Err(format!("could not start the keyboard hook's thread: {e}")),
+            Err(e) => Err(HostError::with(&errors::keys::HOOK_THREAD, format!("could not start the keyboard hook's thread: {e}"))),
             // It answers once, straight after SetWindowsHookExW, which does not block; a
             // sender dropped unanswered means the thread ended first, and is a failure too.
-            Ok(_) => ready_rx.recv().unwrap_or_else(|_| {
-                Err("the keyboard hook's thread ended before it answered".to_string())
-            }),
+            Ok(_) => ready_rx.recv().unwrap_or_else(|_| Err(HostError::of(&errors::keys::HOOK_ENDED))),
         };
         match &result {
             Ok(hook_thread) => {
@@ -2630,14 +2642,15 @@ fn popup_menu_open() -> bool {
 ///
 /// It never ends, and never needs to: Windows removes the hook with the process. It answers
 /// `ready` with its thread id, for the watch to post to.
-fn keyboard_hook_thread(ready: std::sync::mpsc::SyncSender<Result<u32, String>>) {
+fn keyboard_hook_thread(ready: std::sync::mpsc::SyncSender<Result<u32, HostError>>) {
     unsafe {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
         let hmod = GetModuleHandleW(std::ptr::null());
         let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_keyboard_proc), hmod, 0);
         if hook.is_null() {
             let error = GetLastError();
-            let _ = ready.send(Err(format!("SetWindowsHookExW(WH_KEYBOARD_LL) failed (error {error})")));
+            let refused = format!("SetWindowsHookExW(WH_KEYBOARD_LL) failed (error {error})");
+            let _ = ready.send(Err(HostError::with(&errors::keys::HOOK_REFUSED, refused)));
             return;
         }
         HOOK.with(|h| h.set(hook));
@@ -4304,7 +4317,7 @@ fn crop(src: &CapturedImage, x: i32, y: i32, w: i32, h: i32) -> Option<CapturedI
 /// Split out of `ocr` so that a caller with SEVERAL regions can pay for one capture instead of
 /// one per region — measured at ~17 ms against 4-6 ms for the recognition itself, so the
 /// capture was two thirds of a two-region read.
-fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, String> {
+fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, HostError> {
         crate::loop_guard::off_loop("Windows.Media.Ocr");
         let debug = crate::appcfg::ocr_debug();
         if debug {
@@ -4360,7 +4373,7 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
         }
         let t_win = std::time::Instant::now();
         let (mut text, mut words, mut lines) =
-            run_ocr(img, lang).map_err(|e| format!("OCR failed: {e}"))?;
+            run_ocr(img, lang).map_err(|e| HostError::with(&errors::ocr::RECOGNITION_FAILED, format!("OCR failed: {e}")))?;
         let win_ms = t_win.elapsed().as_secs_f64() * 1000.0;
 
         let mut used_paddle = false;
@@ -4438,7 +4451,7 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
 /// [`recognize_image`] with no language — the system recogniser, the neural one beside it, the
 /// blank guard. Crate-internal; the bench is its only caller.
 pub(super) fn bench_system_read(cap: &CapturedImage) -> Result<OcrText, String> {
-    recognize_image(cap, None)
+    recognize_image(cap, None).map_err(|e| e.to_string())
 }
 
 /// Every Windows function that photographs for a read or recognises asks the loop guard first,
@@ -5245,24 +5258,26 @@ mod capture_tests {
         // and neither reads as "duplication could not answer", so neither answers an OCR call
         // with an error table instead of raising.
         let degenerate = out[1].as_ref().err().unwrap();
-        let too_large = out[2].as_ref().err().unwrap();
-        assert_eq!(degenerate, CAPTURE_FAILED);
-        assert!(too_large.starts_with(CAPTURE_FAILED) && too_large.contains("40 million"));
-        assert!(!degenerate.starts_with(DUPLICATION_UNANSWERED));
-        assert!(!too_large.starts_with(DUPLICATION_UNANSWERED));
+        let big = out[2].as_ref().err().unwrap();
+        assert_eq!(degenerate, &capture_failed());
+        assert_eq!((big.reason(), big.message()), (&errors::screen::CAPTURE_TOO_LARGE, "screen capture failed: the region is larger than 40 million pixels"));
+        assert!(!degenerate.message().starts_with(DUPLICATION_UNANSWERED));
+        assert!(!big.message().starts_with(DUPLICATION_UNANSWERED));
     }
 
     #[test]
     fn a_batch_with_nothing_readable_never_asks_the_engine() {
         let out = duplicate_with(&[(0, 0, 0, 0)], |_| panic!("the engine was asked")).unwrap();
-        assert_eq!(out[0].as_ref().err().map(String::as_str), Some(CAPTURE_FAILED));
+        assert_eq!(out[0].as_ref().err(), Some(&capture_failed()));
     }
 
     #[test]
     fn an_engine_that_cannot_answer_fails_the_batch_with_its_reason() {
         let got = duplicate_with(&[(0, 0, 4, 4)], |_| Err(Fallback::SecureDesktop));
         assert_eq!(got.err(), Some(Fallback::SecureDesktop));
-        assert!(unanswered(Fallback::SecureDesktop).starts_with(DUPLICATION_UNANSWERED));
+        let told = unanswered(Fallback::SecureDesktop);
+        assert!(told.message().starts_with(DUPLICATION_UNANSWERED), "{told}");
+        assert_eq!(told.reason(), &errors::screen::DUPLICATION_SECURE_DESKTOP, "the secure desktop: denied");
     }
 
     /// A snapshot's frame is `capture_all`'s picture with the path that answered it: the same
@@ -5270,35 +5285,35 @@ mod capture_tests {
     /// path it fell back to. `Opening` is a quiet reason, so the test writes no log line.
     #[test]
     fn frames_all_maps_duplication_failures_like_capture_all() {
-        let gdi = |&(_, _, w, h): &(i32, i32, i32, i32)| -> Result<CapturedImage, String> {
-            if w > 0 && h > 0 { Ok(img(w, h)) } else { Err(CAPTURE_FAILED.to_string()) }
+        let gdi = |&(_, _, w, h): &(i32, i32, i32, i32)| -> Result<CapturedImage, HostError> {
+            if w > 0 && h > 0 { Ok(img(w, h)) } else { Err(capture_failed()) }
         };
         let regions = [(0, 0, 4, 4), (5, 5, 0, 4)];
         let standard = frames_with(&regions, CaptureSource::Standard, |_| panic!("duplication was asked"), gdi);
         let f = standard[0].as_ref().expect("a frame");
         assert_eq!((f.rect, f.via), (Rect::new(0, 0, 4, 4), FrameVia::Gdi));
         assert!(f.img.rgba.chunks_exact(4).all(|p| p[3] == 255), "alpha forced opaque");
-        assert_eq!(standard[1].as_ref().err().map(String::as_str), Some(CAPTURE_FAILED));
+        assert_eq!(standard[1].as_ref().err(), Some(&capture_failed()));
 
-        let dup_ok = |rects: &[(i32, i32, i32, i32)]| -> Result<Vec<Result<CapturedImage, String>>, Fallback> {
+        let dup_ok = |rects: &[(i32, i32, i32, i32)]| -> Result<Vec<Result<CapturedImage, HostError>>, Fallback> {
             duplicate_with(rects, |r| Ok(r.iter().map(|&(_, _, w, h)| img(w, h)).collect()))
         };
         let both = CaptureSource::Duplication { or_standard: true };
         let got = frames_with(&regions, both, dup_ok, gdi);
         assert_eq!(got[0].as_ref().map(|f| f.via).ok(), Some(FrameVia::Duplication));
-        assert_eq!(got[1].as_ref().err().map(String::as_str), Some(CAPTURE_FAILED), "a degenerate region fails on its own");
+        assert_eq!(got[1].as_ref().err(), Some(&capture_failed()), "a degenerate region fails on its own");
 
-        let lost = |_: &[(i32, i32, i32, i32)]| -> Result<Vec<Result<CapturedImage, String>>, Fallback> { Err(Fallback::Overdue) };
+        let lost = |_: &[(i32, i32, i32, i32)]| -> Result<Vec<Result<CapturedImage, HostError>>, Fallback> { Err(Fallback::Overdue) };
         let got = frames_with(&[(0, 0, 4, 4), (0, 0, 60_000, 60_000)], both, lost, gdi);
         assert_eq!(got[0].as_ref().map(|f| f.via).ok(), Some(FrameVia::Gdi), "read the standard way, and it says so");
-        let too_large = got[1].as_ref().err().unwrap();
-        assert!(too_large.starts_with(CAPTURE_FAILED) && too_large.contains("40 million"), "{too_large}");
+        let big = got[1].as_ref().err().unwrap();
+        assert_eq!(big, &too_large(), "{big}");
 
         // Several regions duplication could not answer: planned as a standard round is — one
         // capture of two close regions and of one inside them, a far one on its own — each cut
         // out, every frame saying it came the standard way.
         let asked = std::cell::RefCell::new(Vec::new());
-        let gdi_logged = |r: &(i32, i32, i32, i32)| -> Result<CapturedImage, String> {
+        let gdi_logged = |r: &(i32, i32, i32, i32)| -> Result<CapturedImage, HostError> {
             asked.borrow_mut().push(*r);
             gdi(r)
         };
@@ -5312,10 +5327,11 @@ mod capture_tests {
         let none = CaptureSource::Duplication { or_standard: false };
         let got = frames_with(&[(0, 0, 4, 4)], none, lost, |_| panic!("the standard path was asked"));
         let why = got[0].as_ref().err().unwrap();
-        assert!(why.starts_with(DUPLICATION_UNANSWERED) && why.ends_with("an earlier read has not come back yet"), "{why}");
+        assert!(why.message().starts_with(DUPLICATION_UNANSWERED) && why.message().ends_with("an earlier read has not come back yet"), "{why}");
+        assert_eq!(why.code(), errors::Code::Busy);
 
         let short = frames_with(&[(0, 0, 4, 4)], CaptureSource::Standard, |_| unreachable!(), |_| Ok(img(4, 3)));
-        assert_eq!(short[0].as_ref().err().map(String::as_str), Some(CAPTURE_FAILED), "a picture of the wrong size is not kept");
+        assert_eq!(short[0].as_ref().err(), Some(&capture_failed()), "a picture of the wrong size is not kept");
     }
 
     /// `pixels`: the standard path captures the planned rectangles and samples them; desktop
@@ -5372,7 +5388,7 @@ mod capture_tests {
         let fell_back = pixels_with(&[(5, 6)], CaptureSource::Duplication { or_standard: true }, lost, off, |r| Ok(shot(r)));
         assert_eq!(fell_back, Ok(vec![(5, 6, 9)]));
         let failed = pixels_with(&[(5, 6)], dup, lost, off, |_| panic!("gdi under fallback = none"));
-        assert!(failed.unwrap_err().starts_with(DUPLICATION_UNANSWERED));
+        assert!(failed.unwrap_err().message().starts_with(DUPLICATION_UNANSWERED));
         assert_eq!(pixels_with(&[], dup, |_| panic!("asked"), off, |_| panic!("gdi")), Ok(Vec::new()));
     }
 
@@ -5568,8 +5584,12 @@ mod capture_tests {
             (Fallback::Failed(0x8000_4005_u32 as i32), Some("0x80004005")),
         ];
         for (why, number) in all {
+            // Its message fits its Reason's pattern, or making it panics in a debug build.
             let told = unanswered(why);
-            assert!(told.starts_with(&format!("{DUPLICATION_UNANSWERED} — ")), "{told}");
+            assert_eq!(told.reason(), why.reason());
+            if why != Fallback::TooLarge {
+                assert!(told.message().starts_with(&format!("{DUPLICATION_UNANSWERED} — ")), "{told}");
+            }
             let tail = why.describe();
             let listed = match number {
                 Some(n) => tail.replacen(n, "…", 1),
@@ -5579,7 +5599,7 @@ mod capture_tests {
         }
         assert!(DOC.contains(DUPLICATION_UNANSWERED));
         // And the one a region too large for duplication gets, beside it.
-        assert!(DOC.contains(&format!("{CAPTURE_FAILED}: {}", Fallback::TooLarge.describe())));
+        assert!(DOC.contains(too_large().message()));
     }
 }
 
@@ -5718,5 +5738,43 @@ mod pointer_motion_tests {
         assert!(body(SRC, "fn mouse_click(&self, x: i32, y: i32, button: MouseButton)").contains("note_button(button, false);"));
         assert!(body(SRC, "unsafe fn send_motion(x: i32, y: i32)").contains("motion_input(x, y, virtual_desk())"));
         assert!(body(CLICK, "fn hold_and_click(").contains("super::windows::note_button(button, false);"));
+    }
+}
+
+/// What the backend answers about a window that is not there — the null handle, which no window
+/// has — for each call that answers with an error value: refused before Windows is asked anything,
+/// so nothing is focused, clicked or posted anywhere. (A handle made up to be stale could still be
+/// a live window's on some machine; only null is none for certain. Windows' own refusal of a post,
+/// by its error, is `click_win::post_refused`'s, tested there.)
+#[cfg(test)]
+mod answer_tests {
+    use super::*;
+    use crate::errors::{common, window};
+
+    #[test]
+    fn a_window_that_is_not_there_is_answered_gone() {
+        let b = WindowsBackend;
+        assert_eq!(b.focus_window(0), Err(HostError::of(&window::NO_SUCH_WINDOW)));
+        assert_eq!(b.click_check(0, 10, 10), Err(HostError::of(&common::WINDOW_GONE)));
+        assert_eq!(b.mouse_click_posted(0, 10, 10, MouseButton::Left, false), Err(HostError::of(&common::WINDOW_GONE)));
+        assert!(b.mouse_click_noactivate(0, 10, 10, MouseButton::Left, 1).is_err_and(|e| e == HostError::of(&common::WINDOW_GONE)));
+        assert_eq!(b.key_post(0, "F5"), Err(KeyRefusal::Answer(HostError::of(&common::WINDOW_GONE))));
+        // A key name that is not one raises, before any window is asked. (`key_send` is not called
+        // here: what it parses, it sends.)
+        assert!(matches!(b.key_post(0, "Ctrl+S"), Err(KeyRefusal::Mistake(_))));
+    }
+
+    /// A post Windows refuses is answered by its error, where it is posted: each of the key-down
+    /// and the key-up reads `PostMessageW`'s result and, refused, answers `post_refused` of the
+    /// last error — the two halves posted in order, the up never after a refused down.
+    #[test]
+    fn a_post_windows_refuses_is_answered_by_its_error() {
+        const SRC: &str = include_str!("windows.rs");
+        let post = crate::ocr_wiring_tests::body(SRC, "fn key_post(&self, hwnd: isize, key: &str)");
+        let posted = post.find("if unsafe { PostMessageW(hwnd as HWND, msg, vk as usize, lp) } == 0 {").expect("the post's result is read");
+        let refused = post.find("let why = super::click_win::post_refused(unsafe { GetLastError() });").expect("by its error");
+        let answered = post.find("return Err(KeyRefusal::Answer(why));").expect("and answered");
+        assert!(post.contains("for (msg, lp) in [(WM_KEYDOWN, lp_down), (WM_KEYUP, lp_up)] {"), "{post}");
+        assert!(posted < refused && refused < answered, "{post}");
     }
 }

@@ -1109,7 +1109,7 @@ fn sforzando_asks_its_own_control_again_after_a_read_that_read_nothing() {
           client = { x = 240, y = 90, w = 760, h = 560 } }
         S.front, S.controls, S.chain = T.FX, { T.LIST, plugin }, { plugin, T.FX }
         local answer = { status = "failed", text = "", words = {}, skipped = false,
-          error = "the text recogniser has not answered a region for 5 s" }
+          error = T.E("timeout", "the text recogniser has not answered a region for 5 s") }
         local asked = 0
         S.ocr = function(r)
           assert(T.region(r) == "845,123,1002,160", "the wordmark: " .. T.region(r))
@@ -1337,7 +1337,7 @@ fn kontakts_identity_is_asked_off_the_event_loop_once_per_window_and_not_known_t
           if q.name == "Komplete Kontrol" then return nil end
           return 1
         end
-        local function late() return nil, "the program did not answer within 1000 ms" end
+        local function late() return nil, T.E("timeout", "the program did not answer within 1000 ms") end
         local function k8()
           for _, o in ipairs(made) do
             if o.label == "Kontakt 8" and o.active then return o end
@@ -1860,7 +1860,7 @@ fn kontakt_clicks_its_menu_row_only_while_its_program_stays_in_front() {
         -- the log says why, and the menu is closed.
         T.at(T.FX)
         T.answerWaits(function()
-          return { status = "failed", text = "", words = {}, error = "no English text recognition is installed" }
+          return { status = "failed", text = "", words = {}, error = T.E("unavailable", "no English text recognition is installed") }
         end)
         spoken = #S.speech
         n = press("Load...")
@@ -2285,7 +2285,7 @@ fn komplete_kontrols_identity_is_asked_off_the_event_loop_and_never_kept_as_no()
         for _ = 1, 3 do T.event() end
         assert(asked == 1, "not again while its answer is out: " .. asked)
         for _ = 1, 12 do
-          answer(nil, "the program did not answer within 1000 ms")
+          answer(nil, T.E("timeout", "the program did not answer within 1000 ms"))
           T.event()
         end
         assert(not embedded() and asked == 13, "asked again after each answer not given: " .. asked .. "\n" .. T.dump())

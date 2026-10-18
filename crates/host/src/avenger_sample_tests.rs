@@ -482,7 +482,7 @@ fn a_left_opened_popup_left_open_is_closed_by_clicking_its_opener() {
         T.paintAvenger(98, 84, 1.6, T.sample("amp", { popup = { 321, 378, 380, 450 } }))
         local sent = #S.sent
         T.run(8400)
-        T.ok(T.count("its popup was left open (untaken) — clicking its opener again to close it") == 1, T.dump())
+        T.ok(T.count("its popup was left open (refused) — clicking its opener again to close it") == 1, T.dump())
         T.ok(T.clickAt() == "612,679" and S.clicks[#S.clicks].button == nil and #S.sent == sent, "the field clicked again, no Escape")
         T.repaint(T.sample("amp"))
         T.settle(4)

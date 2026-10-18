@@ -26,6 +26,8 @@ use super::ffi::{
     RegisterEventHotKey, UnregisterEventHotKey,
 };
 use super::{keys, queue};
+use crate::backend::KeyRefusal;
+use crate::errors::HostError;
 
 /// Our tag on every hotkey we own. The OS does not validate it — it is a caller-chosen
 /// four-character code — but the handler is installed on the *application* event target,
@@ -109,7 +111,7 @@ pub(super) fn warn_if_voiceover_owns(vk: u32, mask: u8, how: &str) {
     );
 }
 
-pub fn register(id: i32, spec: &str) -> Result<(), String> {
+pub fn register(id: i32, spec: &str) -> Result<(), KeyRefusal> {
     // The shared parser, not a second one: what a module writes in its manifest has to mean
     // the same thing on both platforms, and a spec that parses here but not on Windows is a
     // module that works on one machine and mystifies the user on the other.
@@ -122,17 +124,17 @@ pub fn register(id: i32, spec: &str) -> Result<(), String> {
     // is the difference between a message the user can act on and a shortcut that fires on
     // the wrong key.
     if mask & crate::backend::MASK_TAP != 0 {
-        return Err(format!(
+        return Err(KeyRefusal::Mistake(format!(
             "'{spec}' is a modifier tap, which cannot be a global hotkey — capture it with \
              host.keys instead"
-        ));
+        )));
     }
 
     // Said here, at registration, because this is the last place the chord is a chord and
     // not a reference. See `warn_if_voiceover_owns` for why it is worth a line at all.
     warn_if_voiceover_owns(vk, mask, "registered");
 
-    install_handler()?;
+    install_handler().map_err(KeyRefusal::Answer)?;
 
     // Re-registering an id replaces what was there, which is the documented behaviour on
     // Windows and something the host relies on. Carbon would otherwise leave the old
@@ -173,9 +175,17 @@ pub fn register(id: i32, spec: &str) -> Result<(), String> {
     register_on_key(id, spec, vk, mask)
 }
 
+/// Why hotkey `id` is kept without being held now — a letter no key of the current layout types,
+/// parked by [`register`] or by [`reregister_letters`] — or `None` for one that is held, or not
+/// registered here. What `host.hotkey.register` answers beside the id.
+pub fn parked(id: i32) -> Option<HostError> {
+    let parked = REGISTERED.with(|m| m.borrow().get(&id).is_some_and(|r| r.reference.is_null()));
+    parked.then(|| HostError::of(&crate::errors::hotkey::PARKED))
+}
+
 /// The registration itself, on the key the letters in force give `vk` — shared by `register`
 /// and by [`reregister_letters`], which moves a letter's hotkey when the layout changes.
-fn register_on_key(id: i32, spec: &str, vk: u32, mask: u8) -> Result<(), String> {
+fn register_on_key(id: i32, spec: &str, vk: u32, mask: u8) -> Result<(), KeyRefusal> {
     // A letter is the key that types it under the current layout (`keys.rs`, `layout.rs`) — with
     // Command held when the combination holds Command — so for a letter the miss means no key
     // of that layout types it.
@@ -210,7 +220,7 @@ fn register_on_key(id: i32, spec: &str, vk: u32, mask: u8) -> Result<(), String>
              another application probably already uses it system-wide"
         );
         crate::logging::line("macos", &msg);
-        return Err(msg);
+        return Err(KeyRefusal::Answer(HostError::with(&crate::errors::hotkey::MAC_REFUSED, msg)));
     }
 
     REGISTERED.with(|m| {
@@ -331,7 +341,7 @@ pub fn unregister(id: i32) {
 /// Deliberately not done in `MacBackend::new`: registration and delivery both have to
 /// happen on the thread that runs the pump, and doing it here means the handler is
 /// installed by the same call that first needs it, on whichever thread that is.
-fn install_handler() -> Result<(), String> {
+fn install_handler() -> Result<(), HostError> {
     if HANDLER_INSTALLED.with(Cell::get) {
         return Ok(());
     }
@@ -357,7 +367,7 @@ fn install_handler() -> Result<(), String> {
              {status}); no global shortcut will work in this session"
         );
         crate::logging::line("macos", &msg);
-        return Err(msg);
+        return Err(HostError::with(&crate::errors::hotkey::NO_HANDLER, msg));
     }
 
     // The handler is never removed. It costs nothing while nothing is registered, and the

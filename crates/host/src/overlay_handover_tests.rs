@@ -41,8 +41,8 @@ end
 -- The hand-over's spec, its hooks recorded: `over` replaces fields (false removes one). `ends`
 -- answers S.endsFn's way (default: over), `onEnd` S.onEndFn's (default: done, with a name, on its
 -- own end). S.endsAsked: each `ends`' info and whether the plug-in was in front; S.ended: each
--- `onEnd`'s how and info, whether the trip was still live, and whether a key of the hand-over's was
--- still held then.
+-- `onEnd`'s how, info and error value, `as` its how or, given up, the error's code, whether the trip
+-- was still live, and whether a key of the hand-over's was still held then.
 S.endsAsked, S.ended = {}, {}
 function T.spec(over)
   local spec = {
@@ -54,10 +54,13 @@ function T.spec(over)
       if S.endsFn then return S.endsFn(o, trip, info, answer) end
       answer(true)
     end,
-    onEnd = function(o, trip, how, info)
-      S.ended[#S.ended + 1] = { how = how, info = info, live = trip.live, held = T.hoHeld() }
-      S.order[#S.order + 1] = "onEnd " .. how
-      if S.onEndFn then return S.onEndFn(o, trip, how, info) end
+    onEnd = function(o, trip, how, info, err)
+      T.ok((how == "given_up") == (err ~= nil) and (how == "ended" or how == "done" or how == "given_up"),
+        "onEnd's how is ended, done or given_up, with an error value given up only: " .. tostring(how) .. " " .. T.what(err))
+      local as = err and err.code or how
+      S.ended[#S.ended + 1] = { how = how, err = err, as = as, info = info, live = trip.live, held = T.hoHeld() }
+      S.order[#S.order + 1] = "onEnd " .. as
+      if S.onEndFn then return S.onEndFn(o, trip, how, info, err) end
       if how == "ended" then trip:done({ name = "Pad" }) end
     end,
   }
@@ -163,7 +166,7 @@ fn typing_holds_return_and_escape_for_the_plugin_with_the_flag_and_the_scope_on_
           .. "to window id " .. T.W.id .. ", the module's scope pinned there; it ends on one of them, the page key or "
           .. "another application — nothing bounds it") == 1, T.dump())
         T.key()
-        T.ok(S.ended[1].how == "page key", tostring(S.ended[1] and S.ended[1].how))
+        T.ok(S.ended[1].as == "cancelled", tostring(S.ended[1] and S.ended[1].as))
         T.pageFront()
         T.allBack("after the page key")
         T.ok(T.onlyPageKey(), "the page key alone")
@@ -189,7 +192,7 @@ fn a_return_let_through_ends_it_on_the_next_turn_and_on_end_is_told_once_with_th
         T.runDue()
         T.ok(#S.endsAsked == 1 and S.endsAsked[1].inW and S.endsAsked[1].info.key == "Return"
           and S.endsAsked[1].info.passed[1] == "Return", "ends asked with the plug-in in front")
-        T.ok(#S.ended == 1 and S.ended[1].how == "ended" and S.ended[1].info.key == "Return"
+        T.ok(#S.ended == 1 and S.ended[1].as == "ended" and S.ended[1].info.key == "Return"
           and #S.ended[1].info.passed == 1 and S.ended[1].info.passed[1] == "Return", "onEnd told")
         T.ok(S.ended[1].held == false and S.ended[1].live == true, "released by then, the trip acting")
         T.ok(T.count("[page] 'Synth': trip 'Next preset': the hand-over ends — ended, after ") == 1, T.dump())
@@ -258,7 +261,7 @@ fn ends_false_hands_over_again_and_the_next_return_is_looked_at() {
         T.ok(T.hoHeld() and T.open() == true and S.trip.stage == "waiting", "still holding, waiting")
         T.ok(T.count("[page] 'Synth': trip 'Next preset': its module says the hand-over goes on") == 1, T.dump())
         T.typedAndTicked("Return")
-        T.ok(#S.endsAsked == 2 and #S.ended == 1 and S.ended[1].how == "ended", "the second Return ends it")
+        T.ok(#S.endsAsked == 2 and #S.ended == 1 and S.ended[1].as == "ended", "the second Return ends it")
         T.ok(#S.ended[1].info.passed == 2, "both in the record")
         T.runDue()
         T.pageFront()
@@ -297,8 +300,8 @@ fn a_return_while_ends_waits_is_kept_and_looked_at_if_ends_says_no() {
 // ---------------------------------------------------------------------------------------------
 
 /// The page key ends a hand-over while it holds, once its end key was seen, and while `ends` waits:
-/// the keys back in the key's handler, `onEnd("page key")` before `onGiveUp`, the page shown; a late
-/// answer of `ends` changes nothing.
+/// the keys back in the key's handler, `onEnd("given_up", …, err)` (`cancelled`) before `onGiveUp`,
+/// the page shown; a late answer of `ends` changes nothing.
 #[test]
 fn the_page_key_ends_a_hand_over_while_it_holds_and_while_ends_waits_and_shows_the_page() {
     for stage in ["holding", "seen", "checking"] {
@@ -319,9 +322,9 @@ fn the_page_key_ends_a_hand_over_while_it_holds_and_while_ends_waits_and_shows_t
             local shows, from = #S.pg.shows, #S.order
             T.key()
             T.ok(not T.hoHeld() and T.open() ~= true, stage .. ": the keys back in the key's handler")
-            T.ok(#S.ended == 1 and S.ended[1].how == "page key" and S.ended[1].info.key == nil, stage .. ": onEnd(page key)")
-            T.ok(T.since(from) == "onEnd page key,post error,show", T.since(from))
-            T.ok(S.giveUps[1] == "key" and #S.pg.shows == shows + 1, "onGiveUp(key), the page shown")
+            T.ok(#S.ended == 1 and S.ended[1].as == "cancelled" and S.ended[1].info.key == nil, stage .. ": onEnd(page key)")
+            T.ok(T.since(from) == "onEnd cancelled,post error,show", T.since(from))
+            T.ok(S.giveUps[1] == "cancelled" and #S.pg.shows == shows + 1, "onGiveUp(key), the page shown")
             T.runDue()
             if S.answer then T.call("answer", S.answer, true) end
             T.ok(#S.ended == 1 and #S.afters == 0, stage .. ": the late answer changes nothing")
@@ -335,8 +338,8 @@ fn the_page_key_ends_a_hand_over_while_it_holds_and_while_ends_waits_and_shows_t
     }
 }
 
-/// Another application's window gives the keys back at its event, and `onEnd("another application")`
-/// is told on the next turn; the page is not shown over it.
+/// Another application's window gives the keys back at its event, and `onEnd("given_up", …, err)`
+/// (`moved_on`) is told on the next turn; the page is not shown over it.
 #[test]
 fn another_applications_window_gives_the_keys_back_at_its_event_and_on_end_after() {
     both(r##"
@@ -350,11 +353,35 @@ fn another_applications_window_gives_the_keys_back_at_its_event_and_on_end_after
         T.allBack("right after the event")
         T.ok(#S.ended == 0, "onEnd on the next turn")
         T.runDue()
-        T.ok(#S.ended == 1 and S.ended[1].how == "another application" and S.ended[1].info.key == nil,
-          tostring(S.ended[1] and S.ended[1].how))
-        T.ok(#S.pg.shows == shows and S.giveUps[1] == "another application", "not shown over it")
+        T.ok(#S.ended == 1 and S.ended[1].as == "moved_on" and S.ended[1].info.key == nil,
+          tostring(S.ended[1] and S.ended[1].as))
+        T.ok(#S.pg.shows == shows and S.giveUps[1] == "moved_on", "not shown over it")
         T.runDue()
         T.ok(T.onlyPageKey(), "the page key alone")
+    "##);
+}
+
+/// A later give-up that comes to the end first — the page key, before the turn after another
+/// application's window — is the one `onEnd` and `onGiveUp` both hear: the same error value
+/// (`cancelled`), not the first give-up's for one and the key's for the other.
+#[test]
+fn the_page_key_before_the_turn_after_another_window_is_the_give_up_both_hear() {
+    run(r##"
+        local S = T.S
+        T.show(T.W, T.IN)
+        T.synth()
+        T.openPage()
+        T.handOver()
+        T.show(T.OTHER)
+        T.allBack("right after the event")
+        T.ok(#S.ended == 0 and #S.giveUps == 0, "the rest on the next turn")
+        T.key()
+        T.ok(#S.ended == 1 and S.ended[1].as == "cancelled", tostring(S.ended[1] and S.ended[1].as))
+        T.ok(#S.giveUpErrs == 1 and rawequal(S.ended[1].err, S.giveUpErrs[1]), "one error value: " .. T.what(S.giveUpErrs[1]))
+        T.runDue()
+        T.ok(#S.ended == 1 and #S.giveUpErrs == 1, "told once")
+        T.pageFront()
+        T.allBack("after the key")
     "##);
 }
 
@@ -385,7 +412,7 @@ fn a_window_of_the_plugins_application_is_no_end_and_keeps_the_flag_and_the_scop
         T.ok(#S.menuOpen == n and #S.ended == 0, "still holding")
         T.runDue()
         T.ok(T.typedAndTicked("Return") == "passed", "through")
-        T.ok(#S.ended == 1 and S.ended[1].how == "ended", tostring(S.ended[1] and S.ended[1].how))
+        T.ok(#S.ended == 1 and S.ended[1].as == "ended", tostring(S.ended[1] and S.ended[1].as))
         T.runDue()
         T.pageFront()
         T.allBack()
@@ -419,7 +446,7 @@ fn the_runtimes_own_writes_of_the_flag_and_the_scope_wait_for_the_hand_over() {
         T.show(T.OTHER)
         T.ok(T.open() == false and S.scopedTo == false, "set back by the hand-over's end")
         T.runDue()
-        T.ok(#S.ended == 1 and S.ended[1].how == "another application", tostring(S.ended[1] and S.ended[1].how))
+        T.ok(#S.ended == 1 and S.ended[1].as == "moved_on", tostring(S.ended[1] and S.ended[1].as))
         T.show(T.W, T.IN)
         T.runDue()
         T.ok(other.active and S.scopedTo == T.W.id, "the other overlay back as before")
@@ -444,7 +471,7 @@ fn the_runtimes_own_writes_of_the_flag_and_the_scope_wait_for_the_hand_over() {
         T.show(T.W, T.IN)
         T.runDue()
         T.key()
-        T.ok(#S.ended == 1 and S.ended[1].how == "page key", "ended at the key")
+        T.ok(#S.ended == 1 and S.ended[1].as == "cancelled", "ended at the key")
         T.pageFront()
     "##);
     // The other overlay's control pressed and a menu of the plug-in's process in a window of its own
@@ -474,7 +501,7 @@ fn the_runtimes_own_writes_of_the_flag_and_the_scope_wait_for_the_hand_over() {
         T.tick(3)
         T.ok(#S.menuOpen == n and T.open() == true, "nor by the ticks over the menu: " .. T.history(n))
         T.key()
-        T.ok(#S.ended == 1 and S.ended[1].how == "page key", "ended at the key")
+        T.ok(#S.ended == 1 and S.ended[1].as == "cancelled", "ended at the key")
         T.pageFront()
     "##);
     // The hand-over's own end, the other overlay still in front: the scope stays pinned for it.
@@ -492,7 +519,7 @@ fn the_runtimes_own_writes_of_the_flag_and_the_scope_wait_for_the_hand_over() {
         T.handOver()
         T.ok(other.active and not other.away, "the other overlay is in front")
         T.ok(T.typedAndTicked("Return") == "passed", "through")
-        T.ok(#S.ended == 1 and S.ended[1].how == "ended", tostring(S.ended[1] and S.ended[1].how))
+        T.ok(#S.ended == 1 and S.ended[1].as == "ended", tostring(S.ended[1] and S.ended[1].as))
         -- (The other overlay's own keys stay held: its Space, which the hand-over did not take.)
         T.ok(not S.holding["Return"] and not S.holding["Escape"] and T.open() == false and S.scopedTo == T.W.id,
           "the keys back, the scope left pinned for the other overlay: " .. tostring(S.scopedTo))
@@ -525,8 +552,8 @@ fn the_page_closed_ends_it() {
             else
               T.closed(how)
             end
-            T.ok(not T.hoHeld() and #S.ended == 1 and S.ended[1].how == "page closed", how .. ": " .. tostring(S.ended[1] and S.ended[1].how))
-            T.ok(S.giveUps[1] == "page closed", tostring(S.giveUps[1]))
+            T.ok(not T.hoHeld() and #S.ended == 1 and S.ended[1].as == "closed", how .. ": " .. tostring(S.ended[1] and S.ended[1].as))
+            T.ok(S.giveUps[1] == "closed", tostring(S.giveUps[1]))
             T.runDue()
             T.ok(#S.ended == 1, "once")
             if how ~= "module" then T.ok(ov.active and not ov.away, "back in the plug-in") end
@@ -556,7 +583,7 @@ fn the_plugins_window_gone_ends_it() {
             end
             T.ok(not T.hoHeld(), case .. ": the keys back at the event")
             T.runDue()
-            T.ok(#S.ended == 1 and S.ended[1].how == "gone" and S.giveUps[1] == "gone", case .. ": " .. tostring(S.giveUps[1]))
+            T.ok(#S.ended == 1 and S.ended[1].as == "gone" and S.giveUps[1] == "gone", case .. ": " .. tostring(S.giveUps[1]))
             T.runDue()
         "##;
         run(&scenario.replace("@CASE@", case));
@@ -571,7 +598,7 @@ fn the_plugins_window_gone_ends_it() {
           bounds = T.LOGIC.bounds, client = T.LOGIC.client })
         T.ok(not T.hoHeld(), "the keys back")
         T.runDue()
-        T.ok(#S.ended == 1 and S.ended[1].how == "gone", tostring(S.ended[1] and S.ended[1].how))
+        T.ok(#S.ended == 1 and S.ended[1].as == "gone", tostring(S.ended[1] and S.ended[1].as))
         T.runDue()
     "##);
 }
@@ -603,7 +630,7 @@ fn a_disable_and_enable_mid_hand_over_ends_it_at_the_first_tick_and_a_stale_capt
               T.ok(not T.hoHeld(), "released in the key's handler")
               T.ok(T.count("Return was taken by the hand-over's capture with the page not shown") == 1, T.dump())
             end
-            T.ok(#S.ended == 1 and S.ended[1].how == "page closed", first .. ": " .. tostring(S.ended[1] and S.ended[1].how))
+            T.ok(#S.ended == 1 and S.ended[1].as == "closed", first .. ": " .. tostring(S.ended[1] and S.ended[1].as))
             T.ok(T.last() == "Next preset: the page was closed; nothing more was done.", T.last())
             T.runDue()
             T.ok(#S.ended == 1, "once")
@@ -637,7 +664,7 @@ fn a_return_taken_instead_of_let_through_pins_again_says_so_and_is_no_end() {
         T.ok(T.open() == true and S.scopedTo == T.W.id, "pinned again")
         T.ok(S.trip.stage == "waiting" and #S.endsAsked == 0, "no event")
         T.ok(T.typedAndTicked("Return") == "passed", "the next one passes")
-        T.ok(#S.ended == 1 and S.ended[1].how == "ended", "and ends it")
+        T.ok(#S.ended == 1 and S.ended[1].as == "ended", "and ends it")
         T.runDue()
         T.pageFront()
         T.allBack()
@@ -664,7 +691,7 @@ fn done_while_it_holds_releases_and_on_end_hears_done_before_after() {
         T.land()
         T.runDue()
         T.ok(S.handed[1] == true and S.heldAfterDone == false and S.toldAtDone == 0, "released in done; told later")
-        T.ok(#S.ended == 1 and S.ended[1].how == "done" and #S.afters == 1 and S.afters[1].name == "early", "told, then after")
+        T.ok(#S.ended == 1 and S.ended[1].as == "done" and #S.afters == 1 and S.afters[1].name == "early", "told, then after")
         T.ok(string.find(T.since(from), "onEnd done,post state", 1, true) ~= nil, T.since(from))
         T.pageFront()
         T.allBack()
@@ -713,8 +740,10 @@ fn on_end_is_told_exactly_once_on_every_end() {
             end
             T.event()
             T.runDue()
-            local want = ending == "disable" and "page closed" or ending
-            T.ok(#S.ended == 1 and S.ended[1].how == want, ending .. ": " .. #S.ended .. " " .. tostring(S.ended[1] and S.ended[1].how))
+            -- Its own end and done as themselves; every other end given up, with its error's code.
+            local want = ({ ended = "ended", done = "done", ["page key"] = "cancelled", ["another application"] = "moved_on",
+              ["page closed"] = "closed", gone = "gone", outranked = "taken", failed = "failed", disable = "closed" })[ending]
+            T.ok(#S.ended == 1 and S.ended[1].as == want, ending .. ": " .. #S.ended .. " " .. tostring(S.ended[1] and S.ended[1].as))
             T.ok(not T.hoHeld(), ending .. ": the keys back")
             if ending == "failed" then T.ok(T.count("[page] 'Synth': ends failed: ") == 1, T.dump()) end
         "##;
@@ -757,7 +786,7 @@ fn a_keys_hand_over_captures_its_keys_for_on_key_writes_no_flag_and_ends_when_on
         T.ok(T.typed("PageDown") == "taken" and #S.got == 2, "a key after the event: not handed to onKey")
         T.ok(T.count("PageDown pressed while the hand-over's end is looked at — not handed to the module") == 1, T.dump())
         T.runDue()
-        T.ok(#S.ended == 1 and S.ended[1].how == "ended" and S.ended[1].info.key == "Return"
+        T.ok(#S.ended == 1 and S.ended[1].as == "ended" and S.ended[1].info.key == "Return"
           and S.ended[1].info.passed[1] == "PageUp" and S.ended[1].info.passed[2] == "Return", "ended by onKey")
         for i = mark + 1, #S.menuOpen do T.ok(S.menuOpen[i] ~= true, "no flag written") end
         T.runDue()
@@ -790,12 +819,12 @@ fn a_keys_hand_over_is_ended_by_the_page_key_and_a_window_change_too() {
             T.runDue()
             if how == "key" then
               T.key()
-              T.ok(S.ended[1].how == "page key", tostring(S.ended[1] and S.ended[1].how))
+              T.ok(S.ended[1].as == "cancelled", tostring(S.ended[1] and S.ended[1].as))
               T.pageFront()
             else
               T.show(T.OTHER)
               T.runDue()
-              T.ok(S.ended[1].how == "another application", tostring(S.ended[1] and S.ended[1].how))
+              T.ok(S.ended[1].as == "moved_on", tostring(S.ended[1] and S.ended[1].as))
             end
             T.ok(#S.ended == 1 and S.got == 0 and not T.hoHeld(), "once, nothing handed")
         "##;
@@ -892,7 +921,7 @@ fn hand_over_raises_outside_acting_with_a_wait_or_another_hand_over_pending_and_
 }
 
 /// The plug-in not in front at the call: `trip:inFront()` gives the trip up, and handOver answers
-/// `false, "not in front"` with nothing captured or written.
+/// `false, err` (`not_in_front`) with nothing captured or written.
 #[test]
 fn hand_over_with_the_plugin_not_in_front_ends_the_trip_and_answers_not_in_front() {
     run(r##"
@@ -909,17 +938,18 @@ fn hand_over_with_the_plugin_not_in_front_ends_the_trip_and_answers_not_in_front
         T.trip()
         T.land()
         T.runDue()
-        T.ok(S.handed[1] == false and S.handed[2] == "not in front", tostring(S.handed[2]))
+        T.ok(S.handed[1] == false and T.is(S.handed[2], "not_in_front", "the plug-in's window does not have the keyboard"),
+          T.what(S.handed[2]))
         T.ok(S.heldInAct == nil and S.wrote == 0, "nothing captured, no flag")
-        T.ok(S.giveUps[1] == "another application" and #S.ended == 0, "the trip given up; no onEnd: no hand-over began")
+        T.ok(S.giveUps[1] == "moved_on" and #S.ended == 0, "the trip given up; no onEnd: no hand-over began")
     "##);
 }
 
-/// A capture that raises (a Mac without the Accessibility grant): handOver answers
-/// `false, "refused: <message>"`, what it captured is released — with nothing else of the module in
-/// front, every capture of it — no flag is written, the scope is set back, and the trip goes on.
+/// A capture the host cannot make (a Mac without the Accessibility grant): handOver answers
+/// `false, err`, the capture's own error value, what it captured is released, no flag is written, the
+/// scope is set back, and the trip goes on. The capture registered nothing, so nothing else is let go.
 #[test]
-fn a_capture_that_raises_answers_refused_and_leaves_nothing_held() {
+fn a_capture_that_fails_answers_its_error_and_leaves_nothing_held() {
     run_mac(r##"
         local S = T.S
         T.show(T.W, T.IN)
@@ -936,10 +966,11 @@ fn a_capture_that_raises_answers_refused_and_leaves_nothing_held() {
         T.trip()
         T.land()
         T.runDue()
-        T.ok(S.handed[1] == false and S.handed[2] == "refused: the event tap could not be created (Accessibility)",
-          tostring(S.handed[2]))
-        T.ok(S.held == nil and S.wrote == 0 and S.releasedAll == 1 and S.scopedTo == false, "nothing held or written")
-        T.ok(T.count("the keyboard is not handed over — capturing Escape raised") == 1, T.dump())
+        T.ok(S.handed[1] == false and T.is(S.handed[2], "denied", "the event tap could not be created (Accessibility)"),
+          T.what(S.handed[2]))
+        T.ok(S.held == nil and S.wrote == 0 and S.releasedAll == nil and S.scopedTo == false, "nothing held or written")
+        T.ok(T.count("the keyboard is not handed over — Escape is not captured: the event tap could not be created "
+          .. "(Accessibility)") == 1, T.dump())
         S.captureRaises = nil
         T.runDue()
         T.ok(#S.afters == 1 and #S.ended == 0 and #S.giveUps == 0, "the trip went on to its done")
@@ -989,7 +1020,7 @@ fn what_went_through_after_the_end_is_dropped_at_the_release_and_logged() {
         T.tick()
         T.ok(T.typed("Return") == "passed", "a second Return through before the end is looked at")
         T.runDue()
-        T.ok(#S.ended == 1 and S.ended[1].how == "ended" and #S.ended[1].info.passed == 1, "ended by the first")
+        T.ok(#S.ended == 1 and S.ended[1].as == "ended" and #S.ended[1].info.passed == 1, "ended by the first")
         T.ok(T.count("the hand-over ends — ended, after ") == 1 and T.count("; went through after the end: Return") == 1,
           T.dump())
         T.ok(#S.passed == 0, "the record empty")
@@ -1019,7 +1050,7 @@ fn no_bound_ends_a_hand_over() {
         T.run(600000)
         T.ok(T.hoHeld() and T.open() == true and #S.ended == 0 and #S.giveUps == 0 and S.trip.live, "still holding")
         T.key()
-        T.ok(#S.ended == 1 and S.ended[1].how == "page key", "the page key ends it")
+        T.ok(#S.ended == 1 and S.ended[1].as == "cancelled", "the page key ends it")
         T.ok(T.count("[page] 'Synth': trip 'Next preset': the hand-over ends — page key, after 600000 ms") == 1, T.dump())
         T.pageFront()
     "##);
@@ -1038,7 +1069,7 @@ fn the_tick_hears_a_hand_over_on_an_overlay_without_menu_tests_and_the_menu_log_
         T.handOver()
         T.ok(S.every ~= nil, "the hand-over started it")
         T.ok(T.typedAndTicked("Return") == "passed", "through")
-        T.ok(#S.ended == 1 and S.ended[1].how == "ended", "the tick delivered it")
+        T.ok(#S.ended == 1 and S.ended[1].as == "ended", "the tick delivered it")
         T.ok(T.count("went through to the menu") == 0, T.dump())
         T.runDue()
         T.pageFront()
@@ -1058,7 +1089,7 @@ fn the_tick_hears_a_hand_over_on_an_overlay_without_menu_tests_and_the_menu_log_
 }
 
 /// The end key with another module's overlay at least as specific holding the slot on the plug-in's
-/// window: the trip is given up, "outranked", on the turn after the tick saw the key.
+/// window: the trip is given up, `taken`, on the turn after the tick saw the key.
 #[test]
 fn the_end_key_with_another_modules_overlay_on_the_slot_is_outranked() {
     run(r##"
@@ -1074,7 +1105,7 @@ fn the_end_key_with_another_modules_overlay_on_the_slot_is_outranked() {
         T.tick()
         T.ok(#S.giveUps == 0 and T.hoHeld(), "decided on the next turn")
         T.runDue()
-        T.ok(not T.hoHeld() and S.giveUps[1] == "outranked" and #S.ended == 1 and S.ended[1].how == "outranked"
+        T.ok(not T.hoHeld() and S.giveUps[1] == "taken" and #S.ended == 1 and S.ended[1].as == "taken"
           and #S.endsAsked == 0, tostring(S.giveUps[1]))
         T.ok(T.count("[page] 'Synth': trip 'Next preset' given up — outranked, after 150 ms in waiting") == 1, T.dump())
     "##);
@@ -1098,7 +1129,7 @@ fn every_hand_over_hook_runs_as_a_handler_where_a_read_may_wait() {
         T.synth()
         T.openPage()
         S.endsFn = function(o, trip, info, answer) picture("ends"); answer(true) end
-        S.onEndFn = function(o, trip, how) picture("onEnd " .. how); if how == "ended" then trip:done({}) end end
+        S.onEndFn = function(o, trip, how, _, err) picture("onEnd " .. (err and err.code or how)); if how == "ended" then trip:done({}) end end
         T.handOver()
         T.typedAndTicked("Return")
         T.runDue()
@@ -1112,7 +1143,7 @@ fn every_hand_over_hook_runs_as_a_handler_where_a_read_may_wait() {
         T.show(T.W, T.IN)
         T.runDue()
         T.openPage()
-        S.onEndFn = function(o, trip, how) picture("onEnd " .. how) end
+        S.onEndFn = function(o, trip, how, _, err) picture("onEnd " .. (err and err.code or how)) end
         S.actFn = function(o, trip)
           trip:handOver(T.spec())
           trip:done({})
@@ -1122,19 +1153,19 @@ fn every_hand_over_hook_runs_as_a_handler_where_a_read_may_wait() {
         T.runDue()
         T.runDue()
         T.pageFront()
-        S.onEndFn = function(o, trip, how) picture("onEnd " .. how); if how == "ended" then trip:done({}) end end
+        S.onEndFn = function(o, trip, how, _, err) picture("onEnd " .. (err and err.code or how)); if how == "ended" then trip:done({}) end end
         T.handOver({ kind = "keys", keys = { "PageUp" }, ends = false,
           onKey = function() picture("onKey"); return true end })
         T.typed("PageUp")
         T.runDue()
         T.runDue()
         T.pageFront()
-        T.ok(table.concat(S.pictures, ",") == "ends,onEnd ended,onEnd page key,onEnd another application,onEnd done,"
+        T.ok(table.concat(S.pictures, ",") == "ends,onEnd ended,onEnd cancelled,onEnd moved_on,onEnd done,"
           .. "onKey,onEnd ended", table.concat(S.pictures, ","))
     "##);
 }
 
-/// A hook of the hand-over that raises gives the trip up, "failed", and `onEnd` is told once:
+/// A hook of the hand-over that raises gives the trip up, `failed`, and `onEnd` is told once:
 /// `ends` raising, `onKey` raising, and `onEnd` raising on its own end — told once, then the trip
 /// given up.
 #[test]
@@ -1162,8 +1193,8 @@ fn a_hand_over_hook_that_raises_gives_the_trip_up_failed_and_on_end_is_told_once
             T.runDue()
             T.runDue()
             T.ok(S.giveUps[1] == "failed", hook .. ": " .. tostring(S.giveUps[1]))
-            T.ok(#S.ended == 1 and S.ended[1].how == (hook == "onEnd" and "ended" or "failed"), hook .. ": told once, "
-              .. tostring(S.ended[1] and S.ended[1].how))
+            T.ok(#S.ended == 1 and S.ended[1].as == (hook == "onEnd" and "ended" or "failed"), hook .. ": told once, "
+              .. tostring(S.ended[1] and S.ended[1].as))
             T.ok(T.count("[page] 'Synth': " .. hook .. " failed: ") == 1, T.dump())
             T.ok(S.front == T.PAGE, "the page back with the error")
             T.pageFront()

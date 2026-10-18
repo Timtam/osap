@@ -79,7 +79,7 @@ fn queue() -> &'static DispatchQueue {
 
 /// Registers the observers, adds the controllers already known, and logs what the run can be
 /// judged by. Main thread.
-pub fn start(hub: &'static Hub) -> Result<(), String> {
+pub fn start(hub: &'static Hub) -> Result<(), crate::errors::HostError> {
     // An empty bundle identifier left `[GCController controllers]` empty (Apple forum thread
     // 667832). The shipped build runs from the .app and has one; `run-dev.sh` runs the bare
     // binary out of target/, which may not — and "no controllers" there would otherwise look

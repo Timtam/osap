@@ -94,7 +94,7 @@ function T.stepper(spec)
     onStep = function(dir, ov)
       local s = { label = "Zoom", at = { 21, 14 },
         menuItem = function(_, menu) return { 5, 6 + 11.5 * (6 + dir) } end,
-        onDone = function(_, chosen, why) S.done[#S.done + 1] = tostring(chosen) .. ":" .. tostring(why) end }
+        onDone = function(_, chosen, err) S.done[#S.done + 1] = tostring(chosen) .. ":" .. tostring(err and err.code) end }
       for k, v in pairs(spec or {}) do s[k] = v end
       if not ov:chooseMenuItem(s) then return false end
     end })
@@ -617,16 +617,18 @@ fn choose_menu_item_from_a_stepper() {
         assert(#marks == 1 and marks[1][1] == 121 and marks[1][2] == 64, "the zoom field's crosshair")
         assert(T.count("[calibrate]" .. string.format("  %2d %-24s screen (%d,%d)  pixel %s  [menu opener]",
           1, "Zoom", 121, 64, "20,20,20")) == 1, T.dump())
-        -- No menu tests: not opened, said, and the step reports it.
+        -- No menu tests: a raise at the call, in front or not — the overlay's declaration decides,
+        -- and nothing is opened.
         local p = T.O.new("Bare")
-        local r = nil
-        p:addCustomButton({ label = "x", onActivate = function(ov)
-          r = ov:chooseMenuItem({ label = "Zoom", at = { 21, 14 }, menuItem = { 1, 1 } })
-        end })
-        T.front(p)
-        p:activate(1)
-        assert(r == false and #S.clicks == 2, "not opened")
-        assert(S.speech[#S.speech].text == "Zoom is not available now", T.said())
+        p:addCustomButton({ label = "x", onActivate = function() end })
+        for _, front in ipairs({ false, true }) do
+          if front then T.front(p) end
+          assert(p.active == front, "in front: " .. tostring(front))
+          local ok, err = pcall(function() p:chooseMenuItem({ label = "Zoom", at = { 21, 14 }, menuItem = { 1, 1 } }) end)
+          assert(not ok and string.find(tostring(err), "overlay 'Bare': chooseMenuItem needs menu tests to see the menu "
+            .. "with — `menus` on its binding", 1, true), tostring(front) .. ": " .. tostring(err))
+          assert(#S.clicks == 2, "not opened")
+        end
     "##);
 }
 
@@ -650,20 +652,31 @@ fn choose_menu_item_checks_its_spec_and_its_opener_first() {
         raises({ at = { 1, 2 }, menuItem = 5 }, "`menuItem` must be {dx, dy} or a function")
         raises({ at = { 1, 2 }, menuItem = { 1, 2 }, button = "secondary" }, "`button` must be")
         raises({ at = { 1, 2 }, menuItem = { 1, 2 }, retries = -1 }, "`retries` must be a whole number")
-        local done = {}
+        local done, heard = {}, {}
         local function spec(at)
           return { label = "Zoom", at = at, menuItem = { 1, 1 },
-            onDone = function(_, chosen, why) done[#done + 1] = tostring(chosen) .. ":" .. why end }
+            onDone = function(_, chosen, err)
+              done[#done + 1] = tostring(chosen) .. ":" .. err.code
+              heard[#heard + 1] = err
+            end }
         end
-        assert(o:chooseMenuItem(spec({ 21, 14 })) == false and done[1] == "false:inactive")
+        -- The answer at the call is `false, err`, and onDone hears the same table.
+        local function refused(at, n, code)
+          local ok, err = o:chooseMenuItem(spec(at))
+          assert(ok == false and T.is(err, code), n .. ": " .. T.what(err))
+          assert(done[n] == "false:" .. code and rawequal(heard[n], err), n .. ": " .. tostring(done[n]))
+          return err
+        end
+        local err = refused({ 21, 14 }, 1, "not_in_front")
+        assert(T.is(err, "not_in_front", "the overlay is not in front"), T.what(err))
         T.front(o)
         T.calibrate(true)
         local lists = S.windowLists
         S.k = nil
-        assert(o:chooseMenuItem(spec({ 21, 14 })) == false and done[2] == "false:unplaced", tostring(done[2]))
+        refused({ 21, 14 }, 2, "unplaced")
         assert(S.speech[#S.speech].text == "Zoom is not available now", T.said())
         S.k = 1
-        assert(o:chooseMenuItem(spec({ 2000, 14 })) == false and done[3] == "false:refused", tostring(done[3]))
+        refused({ 2000, 14 }, 3, "outside")
         assert(#S.clicks == 0 and S.windowLists == lists, "no click, and newWindow took no list")
         assert(T.count("[menu item] 'Avenger': 'Zoom' clicked its opener") == 0, T.dump())
         assert(S.snaps == 0 and #S.asyncs == 0, "no menu shot taken")
@@ -690,7 +703,7 @@ fn the_quiet_endings_are_logged_and_told_to_on_done() {
         -- Left the front.
         T.right()
         o:_deactivate()
-        assert(S.done[1] == "false:left", tostring(S.done[1]))
+        assert(S.done[1] == "false:moved_on", tostring(S.done[1]))
         assert(T.count("not chosen — the overlay left the front first") == 1, T.dump())
         -- Another press.
         T.front(o)
@@ -701,7 +714,7 @@ fn the_quiet_endings_are_logged_and_told_to_on_done() {
         o:_syncNativeKeys()
         S.epoch += 1
         S.captured["Return"]()
-        assert(S.done[2] == "false:press", tostring(S.done[2]))
+        assert(S.done[2] == "false:moved_on", tostring(S.done[2]))
         assert(T.count("not chosen — another press came first") == 1, T.dump())
         -- On another window when the menu is seen.
         o.focus = 1
@@ -711,7 +724,7 @@ fn the_quiet_endings_are_logged_and_told_to_on_done() {
         S.origin = { id = 8, class = was.class, app = was.app, client = was.client, bounds = was.bounds }
         T.popup(300, 121, 72, 60, 250)
         T.tick(1)
-        assert(S.done[3] == "false:moved", tostring(S.done[3]))
+        assert(S.done[3] == "false:moved_on", tostring(S.done[3]))
         T.closePopups()
         T.tick(2)
         -- On another window when the tests stop looking: moved, not said.
@@ -720,7 +733,7 @@ fn the_quiet_endings_are_logged_and_told_to_on_done() {
         T.right()
         S.origin = { id = 8, class = was.class, app = was.app, client = was.client, bounds = was.bounds }
         T.run(8200)
-        assert(S.done[4] == "false:moved", tostring(S.done[4]))
+        assert(S.done[4] == "false:moved_on", tostring(S.done[4]))
         for i = said + 1, #S.speech do
           assert(not string.find(S.speech[i].text, "no menu was seen", 1, true), T.said(said + 1))
         end
@@ -860,8 +873,9 @@ fn an_opener_whose_overlay_moved_on_while_its_picture_was_taken_is_not_clicked()
           chosen = o:chooseMenuItem({ label = "Zoom", at = { 280, 14 }, menuItem = { 5, 5 },
             onDone = function(_, ok, why) done = { ok, why } end })
         end)
-        assert(chosen == false and #S.clicks == 0 and done and done[1] == false and done[2] == "inactive",
-          "chosen on another window: " .. tostring(done and done[2]))
+        assert(chosen == false and #S.clicks == 0 and done and done[1] == false
+          and T.is(done[2], "moved_on", "the overlay is on another window now"),
+          "chosen on another window: " .. T.what(done and done[2]))
         moveOn = false
         T.press(o)
         assert(#S.clicks == 1 and T.clickAt(1) == "362,64", "where the press was, the opener is clicked: " .. T.clickAt(1))
@@ -874,7 +888,7 @@ fn an_opener_whose_overlay_moved_on_while_its_picture_was_taken_is_not_clicked()
           chosen = o:chooseMenuItem({ label = "Zoom", at = { 280, 14 }, menuItem = { 5, 5 },
             onDone = function(_, ok, why) done = { ok, why } end })
         end)
-        assert(chosen == false and #S.clicks == 1 and done[2] == "refused", "chosen under a cover: " .. tostring(done[2]))
+        assert(chosen == false and #S.clicks == 1 and T.is(done[2], "covered"), "chosen under a cover: " .. T.what(done[2]))
         assert(T.count("Avenger: 'Zoom' at (380,64) is inside our window's frame but another window is "
           .. "drawn there — not clicking") == 1, T.dump())
         assert(o._pick == pick and pressed == 1 and #S.asyncs == 2 and pictures[#pictures].released,

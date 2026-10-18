@@ -55,11 +55,13 @@ do
     S.order[#S.order + 1] = "focus " .. tostring(id)
     return focus(id)
   end)
-  -- A chord another program holds: the host's registration raises for it.
+  -- A chord another program holds (S.registerHeld[spec], its message): the host makes the claim
+  -- and answers its id with `taken` beside it, the claim tried again until the chord is free.
   local register = H.hotkey.register
   rawset(H.hotkey, "register", function(spec, fn)
-    if S.registerRaises and S.registerRaises[spec] then error(S.registerRaises[spec], 0) end
-    return register(spec, fn)
+    local id = register(spec, fn)
+    if S.registerHeld and S.registerHeld[spec] then return id, T.E("taken", S.registerHeld[spec]) end
+    return id
   end)
 end
 S.owns, S.ownsAsked = true, {}
@@ -137,8 +139,8 @@ function T.pageSpec(over)
       o.page:post({ kind = "focus" })
     end,
     onMessage = function(o, m) if S.onMsg then return S.onMsg(o, m) end end,
-    onShown = function(o, ok, why) S.shown[#S.shown + 1] = { ok = ok, why = why } end,
-    onBack = function(o, ok, why) S.backs[#S.backs + 1] = { ok = ok, why = why } end,
+    onShown = function(o, ok, err) S.shown[#S.shown + 1] = { ok = ok, err = err } end,
+    onBack = function(o, ok, err) S.backs[#S.backs + 1] = { ok = ok, err = err } end,
   }
   for k, v in pairs(over or {}) do
     if v == false then spec[k] = nil else spec[k] = v end
@@ -184,19 +186,19 @@ function T.key(spec)
   return T.call("hotkey", fn)
 end
 -- The page's message, its load, its window gone ("user": the host hid it and gave the front back;
--- "failed": the page is gone).
+-- "failed": the page is gone, and its error value beside it, as the host hands it).
 function T.msg(m) return T.call("page message", S.pageOpts.onMessage, m) end
 function T.ready()
   S.pg.ready = true
   return T.call("page ready", S.pageOpts.onReady)
 end
-function T.closed(why)
+function T.closed(how)
   S.pg.shown = false
-  if why == "failed" then
+  if how == "failed" then
     S.pg.ready = false
     S.page.window = nil
   end
-  return T.call("page close", S.pageOpts.onClose, why)
+  return T.call("page close", S.pageOpts.onClose, how, how == "failed" and T.E("failed", "the page failed") or nil)
 end
 -- The page's foreground event: its show put it in front already.
 function T.pageFront()
@@ -211,8 +213,9 @@ function T.openPage()
 end
 
 -- A trip from a page message: `over` replaces fields of the spec (false removes one). The default
--- act clicks once inside the plug-in and is done; S.actFn replaces it.
-S.giveUps, S.afters = {}, {}
+-- act clicks once inside the plug-in and is done; S.actFn replaces it. S.giveUps: the code of each
+-- give-up's error value, S.giveUpErrs the value itself.
+S.giveUps, S.giveUpErrs, S.afters = {}, {}, {}
 function T.tripSpec(over)
   local spec = {
     label = "Next preset",
@@ -230,9 +233,10 @@ function T.tripSpec(over)
       o.page:post({ kind = "state" })
       return S.afterWords
     end,
-    onGiveUp = function(o, why)
-      S.giveUps[#S.giveUps + 1] = why
-      o.page:post({ kind = "error", text = why })
+    onGiveUp = function(o, err)
+      S.giveUps[#S.giveUps + 1] = err.code
+      S.giveUpErrs[#S.giveUpErrs + 1] = err
+      o.page:post({ kind = "error", text = tostring(err) })
       return S.giveUpWords
     end,
   }
@@ -365,7 +369,7 @@ fn the_page_key_runs_open_then_shows_beside_the_plugin_and_the_order_is_state_fo
         local a = S.pg.shows[1].avoid
         T.ok(a.x == 0 and a.y == 0 and a.w == 1000 and a.h == 700, "beside the FX window")
         T.ok(S.pg.shows[1].focus == true, "with the keyboard")
-        T.ok(#S.shown == 1 and S.shown[1].ok == true and S.shown[1].why == nil, "onShown(true)")
+        T.ok(#S.shown == 1 and S.shown[1].ok == true and S.shown[1].err == nil, "onShown(true)")
         T.ok(T.count("[page] 'Synth': shown at the key beside window id 1: true") == 1, T.dump())
     "##);
 }
@@ -482,13 +486,15 @@ fn a_page_not_ready_is_shown_from_ready_only_while_the_overlay_is_still_on_that_
 
 /// The page is prepared on the turn after its overlay first comes to the front, and not again once
 /// it has loaded, nor after a prepare that failed — the key builds it then; after `close("failed")`
-/// the next arrival prepares again.
+/// the next arrival prepares again. The module's own onClose hears the page's how and, beside
+/// "failed", its error value.
 #[test]
 fn the_page_is_prepared_at_the_first_arrival_and_not_again_after_a_prepare_failed() {
     run(r##"
         local S = T.S
         T.show(T.OTHER)
-        T.synth()
+        S.closes = {}
+        T.synth({ page = { onClose = function(o, how, err) S.closes[#S.closes + 1] = { how = how, err = err } end } })
         T.ok(S.pg.prepares == 0, "not before the plug-in came forward")
         T.show(T.W, T.IN)
         T.runDue()
@@ -500,13 +506,15 @@ fn the_page_is_prepared_at_the_first_arrival_and_not_again_after_a_prepare_faile
         T.runDue()
         T.ok(S.pg.prepares == 1, "not again once it has loaded")
         T.closed("failed")
+        T.ok(#S.closes == 1 and S.closes[1].how == "failed" and T.is(S.closes[1].err, "failed", "the page failed"),
+          "onClose(o, \"failed\", err)")
         T.show(T.OTHER)
         T.show(T.W, T.IN)
         T.runDue()
         T.ok(S.pg.prepares == 2, "again after the page failed")
         -- A prepare that answers a failure is not asked again from an arrival.
         T.closed("failed")
-        S.pg.prepareAnswers = { { false, "could not be built" } }
+        S.pg.prepareAnswers = { { false, T.E("failed", "could not be built") } }
         T.show(T.OTHER)
         T.show(T.W, T.IN)
         T.runDue()
@@ -606,9 +614,11 @@ fn a_show_declined_and_granted_later_still_holds_the_place() {
         T.show(T.W, T.IN)
         local ov = T.synth()
         S.pg.ready = true
-        S.pg.answers = { { false, "declined by the system" } }
+        local declined = T.E("refused", "declined by the system")
+        S.pg.answers = { { false, declined } }
         T.key()
-        T.ok(#S.shown == 1 and S.shown[1].ok == false and S.shown[1].why == "declined by the system", "onShown(false)")
+        -- page:show's own error value, handed on: the same table.
+        T.ok(#S.shown == 1 and S.shown[1].ok == false and rawequal(S.shown[1].err, declined), "onShown(false)")
         T.ok(S.front == T.W and ov.active and not ov.away, "the plug-in keeps the keyboard")
         S.front, S.chain = T.PAGE, { T.PAGE }
         T.event()
@@ -620,15 +630,15 @@ fn a_show_declined_and_granted_later_still_holds_the_place() {
         T.show(T.W, T.IN)
         T.synth({ page = { onShown = false } })
         S.pg.ready = true
-        S.pg.answers = { { false, "declined by the system" } }
+        S.pg.answers = { { false, T.E("refused", "declined by the system") } }
         T.key()
         T.ok(T.last() == "The page did not come to the front; if it does not come by itself, the page key brings it."
           and T.lastInterrupts(), T.last())
-        S.pg.answers = { { false, "could not be built" } }
+        S.pg.answers = { { false, T.E("failed", "could not be built") } }
         T.key()
         T.ok(T.last() == "The page did not come to the front: could not be built.", T.last())
         -- Another window lets the declined place go.
-        S.pg.answers = { { false, "declined by the system" } }
+        S.pg.answers = { { false, T.E("refused", "declined by the system") } }
         T.key()
         T.show(T.OTHER)
         T.ok(T.count("[page] 'Synth': the place asked for is let go — in front: 'Browser'") == 1, T.dump())
@@ -679,9 +689,10 @@ fn coming_back_by_alt_tab_ends_away_and_a_page_over_the_plugin_is_hidden_and_one
         T.show(T.W, T.IN)
         local ov = T.synth()
         S.pg.ready = true
-        S.pg.answers = { { true, "over the rectangle to avoid" } }
+        local over = T.E("too_large", "over the rectangle to avoid")
+        S.pg.answers = { { true, over } }
         T.key()
-        T.ok(S.shown[1].ok and S.shown[1].why == "over the rectangle to avoid", "onShown(true, over)")
+        T.ok(S.shown[1].ok and rawequal(S.shown[1].err, over), "onShown(true, over): the partial answer as it came")
         T.pageFront()
         T.show(T.W, T.IN)
         T.ok(ov.active and S.pg.hides == 1 and not S.pg.shown, "a page over the plug-in is hidden")
@@ -885,7 +896,7 @@ fn a_disable_while_away_and_enable_recovers_at_the_next_event() {
         T.disable()
         T.enable()
         T.show(T.W, T.IN)
-        T.ok(#S.giveUps == 1 and S.giveUps[1] == "page closed", "the trip ends: " .. tostring(S.giveUps[1]))
+        T.ok(#S.giveUps == 1 and S.giveUps[1] == "closed", "the trip ends: " .. tostring(S.giveUps[1]))
         T.ok(T.last() == "Next preset: the page was closed; nothing more was done.", T.last())
         T.ok(ov.active and not ov.away and T.holds("Return"), "keys back in the plug-in")
         T.runDue()
@@ -905,7 +916,7 @@ fn a_disable_while_away_and_enable_recovers_at_the_next_event() {
         T.disable()
         T.enable()
         T.show(T.W, T.IN)
-        T.ok(#S.giveUps == 1 and S.giveUps[1] == "page closed", "the trip ends")
+        T.ok(#S.giveUps == 1 and S.giveUps[1] == "closed", "the trip ends")
         T.ok(ov.active and not ov.away and T.holds("Return"), "keys back")
         T.runDue()
         T.ok(S.answered == nil, "the dropped read never answers")
@@ -1137,7 +1148,7 @@ fn another_applications_window_ends_the_trip_at_every_stage_and_the_page_is_not_
             local shows = #S.pg.shows
             T.show(T.OTHER)
             T.runDue()
-            T.ok(S.giveUps[1] == "another application", stage .. ": " .. tostring(S.giveUps[1]))
+            T.ok(S.giveUps[1] == "moved_on", stage .. ": " .. tostring(S.giveUps[1]))
             T.ok(T.last() == "Next preset: another window came to the front; nothing more was done."
               and T.lastInterrupts() == false, T.last())
             T.ok(#S.pg.shows == shows, "the page is not brought back")
@@ -1184,7 +1195,7 @@ fn the_page_key_gives_a_trip_up_and_shows_the_page_in_every_stage() {
               T.ok(#S.afters == 1 and #S.giveUps == 0, "the back step: after, not onGiveUp")
               T.ok(T.since(from) == "post state,show", T.since(from))
             else
-              T.ok(S.giveUps[1] == "key" and #S.afters == 0, "onGiveUp(key)")
+              T.ok(S.giveUps[1] == "cancelled" and #S.afters == 0, "onGiveUp(key)")
               T.ok(T.since(from) == "post error,show", T.since(from))
               T.ok(T.count("[page] 'Synth': trip 'Next preset' given up at the key after 0 ms in " .. (stage == "waiting" and "waiting" or stage)) == 1, T.dump())
             end
@@ -1214,7 +1225,7 @@ fn the_page_closed_gives_a_trip_up() {
             else
               T.closed(how)
             end
-            T.ok(S.giveUps[1] == "page closed", how .. ": " .. tostring(S.giveUps[1]))
+            T.ok(S.giveUps[1] == "closed", how .. ": " .. tostring(S.giveUps[1]))
             T.ok(T.last() == "Next preset: the page was closed; nothing more was done." and T.lastInterrupts() == false, T.last())
             T.ok(#S.pg.shows == shows, "nothing shown")
             if how ~= "module" then T.land() end
@@ -1225,7 +1236,7 @@ fn the_page_closed_gives_a_trip_up() {
     }
 }
 
-/// One trip at a time: a second message's inPlugin, and O:pageBack, answer "busy" while one is
+/// One trip at a time: a second message's inPlugin, and O:pageBack, answer `busy` while one is
 /// under way, logged, with no second focus asked.
 #[test]
 fn one_trip_at_a_time_and_back_during_a_trip_is_busy() {
@@ -1236,9 +1247,9 @@ fn one_trip_at_a_time_and_back_during_a_trip_is_busy() {
         T.openPage()
         T.ok(T.trip() == true, "the first starts")
         local ok, why = T.trip()
-        T.ok(ok == false and why == "busy", "the second: " .. tostring(why))
+        T.ok(ok == false and T.is(why, "busy", "a trip of the page is under way"), "the second: " .. T.what(why))
         local okB, whyB = ov:pageBack()
-        T.ok(okB == false and whyB == "busy", "the way back: " .. tostring(whyB))
+        T.ok(okB == false and T.is(whyB, "busy"), "the way back: " .. T.what(whyB))
         T.ok(#S.focusCalls == 1, "one focus asked")
         T.ok(T.count("[page] 'Synth': trip 'Next preset' not started — busy") == 1, T.dump())
         T.ok(T.count("[page] 'Synth': the way back not taken — busy") == 1, T.dump())
@@ -1260,11 +1271,11 @@ fn a_message_while_the_page_does_not_have_the_keyboard_starts_no_trip() {
         T.openPage()
         S.front, S.chain = T.OTHER, { T.OTHER }
         local ok, why = T.trip()
-        T.ok(ok == false and why == "not in front" and #S.focusCalls == 0, tostring(why))
+        T.ok(ok == false and T.is(why, "not_in_front", "the page does not have the keyboard") and #S.focusCalls == 0, T.what(why))
         T.ok(T.count("[page] 'Synth': trip 'Next preset' not started — not in front") == 1, T.dump())
     "##);
     // A page the module showed itself holds no place: the overlay let go as for any window, and a
-    // trip is refused, "nothing held".
+    // trip is refused, `not_found` ("no place is held: the page came forward another way").
     run(r##"
         local S = T.S
         T.show(T.W, T.IN)
@@ -1275,11 +1286,11 @@ fn a_message_while_the_page_does_not_have_the_keyboard_starts_no_trip() {
         T.ok(T.count("[page] 'Synth': the page came to the front without the page key — nothing held") == 1, T.dump())
         T.ok(not ov.away and T.hookCount("Synth", "off") == 1, "let go, its onDeactivate")
         local ok, why = T.trip()
-        T.ok(ok == false and why == "nothing held", tostring(why))
+        T.ok(ok == false and T.is(why, "not_found", "no place is held: the page came forward another way"), T.what(why))
     "##);
 }
 
-/// The plug-in's window never comes: 8 seconds after the focus the trip is given up, "not in front".
+/// The plug-in's window never comes: 8 seconds after the focus the trip is given up, `not_in_front`.
 /// The error is posted and the page shown again where the page or another window of the plug-in's
 /// application is in front; where another application's is, nothing is shown.
 #[test]
@@ -1301,7 +1312,7 @@ fn the_8_second_bound_gives_the_trip_up_when_the_plugin_never_comes() {
             T.run(7900)
             T.ok(#S.giveUps == 0, "still looked for at 7.9 s")
             T.run(300)
-            T.ok(S.giveUps[1] == "not in front", front .. ": " .. tostring(S.giveUps[1]))
+            T.ok(S.giveUps[1] == "not_in_front", front .. ": " .. tostring(S.giveUps[1]))
             T.ok(T.posts("error") == 1, "the error posted")
             if front == "other" then
               T.ok(#S.pg.shows == shows and T.last() == "Next preset: another window came to the front; nothing more was done.", T.last())
@@ -1314,9 +1325,9 @@ fn the_8_second_bound_gives_the_trip_up_when_the_plugin_never_comes() {
     }
 }
 
-/// The plug-in's window gone: listed no more, a trip is refused ("gone"); the plug-in unloaded from
-/// it on the way, the trip is given up ("gone") and the page comes back with the module's error. On
-/// a Mac, the window back with another title is another plug-in: "gone".
+/// The plug-in's window gone: listed no more, a trip is refused (`gone`); the plug-in unloaded from
+/// it on the way, the trip is given up (`gone`) and the page comes back with the module's error. On
+/// a Mac, the window back with another title is another plug-in: `gone`.
 #[test]
 fn a_window_gone_refuses_the_trip_and_one_gone_midway_gives_it_up() {
     run(r##"
@@ -1326,7 +1337,7 @@ fn a_window_gone_refuses_the_trip_and_one_gone_midway_gives_it_up() {
         T.openPage()
         S.listed = { T.MAIN, T.OTHER }
         local ok, why = T.trip()
-        T.ok(ok == false and why == "gone" and #S.focusCalls == 0, tostring(why))
+        T.ok(ok == false and T.is(why, "gone", "the plug-in's window is gone") and #S.focusCalls == 0, T.what(why))
     "##);
     run(r##"
         local S = T.S
@@ -1356,7 +1367,9 @@ fn a_window_gone_refuses_the_trip_and_one_gone_midway_gives_it_up() {
     "##);
 }
 
-/// A focus the system declines starts no trip: "declined", nothing held in the group's contexts.
+/// A focus the system declines starts no trip, nothing held in the group's contexts: the trip
+/// answers host.window.focus's own error value — the same table, `gone` or `hidden` where it says
+/// more — and `refused` ("not brought forward") only for a focus that answered a bare false.
 #[test]
 fn a_focus_declined_starts_no_trip() {
     run(r##"
@@ -1366,8 +1379,15 @@ fn a_focus_declined_starts_no_trip() {
         T.openPage()
         S.focusAnswer = false
         local ok, why = T.trip()
-        T.ok(ok == false and why == "declined", tostring(why))
+        T.ok(ok == false and T.is(why, "refused", "the plug-in's window was not brought forward"), T.what(why))
         T.ok(#ov.contexts == 1, "no held context")
+        for _, err in ipairs({ T.E("gone", "no such window"), T.E("hidden", "the window is hidden") }) do
+          S.focusErr = err
+          ok, why = T.trip()
+          T.ok(ok == false and rawequal(why, err), "the host's own: " .. T.what(why))
+          T.ok(#ov.contexts == 1, "no held context")
+        end
+        S.focusErr = nil
         S.focusAnswer = true
         T.ok(T.trip() == true, "the next one starts")
         T.land()
@@ -1393,7 +1413,7 @@ fn another_modules_overlay_on_the_slot_gives_the_trip_up_on_the_next_turn() {
         T.land()
         T.runDue()
         T.runDue()
-        T.ok(S.giveUps[1] == "outranked" and S.acts == nil, tostring(S.giveUps[1]))
+        T.ok(S.giveUps[1] == "taken" and S.acts == nil, tostring(S.giveUps[1]))
         T.ok(S.front == T.PAGE, "the page back")
     "##);
     run(r##"
@@ -1542,8 +1562,8 @@ fn done_from_a_plain_call_runs_the_back_step_on_the_next_turn() {
 
 /// `trip:inFront()` answering false ENDS the trip, so an act that just returns leaves nothing under
 /// way: REAPER's main window came forward while the act waited at a read — nothing clicked, the
-/// trip given up "not in front" and the page back; the same with another application's window —
-/// "another application", nothing shown; and the next inPlugin starts.
+/// trip given up `not_in_front` and the page back; the same with another application's window —
+/// `moved_on`, nothing shown; and the next inPlugin starts.
 #[test]
 fn in_front_false_ends_the_trip_so_an_act_that_returns_leaves_nothing_under_way() {
     for other in [false, true] {
@@ -1574,7 +1594,7 @@ fn in_front_false_ends_the_trip_so_an_act_that_returns_leaves_nothing_under_way(
             T.queued()
             T.runDue()
             T.ok(#S.clicks == clicks, "nothing clicked")
-            T.ok(S.giveUps[1] == (other and "another application" or "not in front"), tostring(S.giveUps[1]))
+            T.ok(S.giveUps[1] == (other and "moved_on" or "not_in_front"), tostring(S.giveUps[1]))
             if other then
               T.ok(#S.pg.shows == shows, "not shown over another application")
             else
@@ -1606,7 +1626,7 @@ fn a_stuck_act_is_ended_by_the_page_key() {
         T.run(3000)
         T.ok(S.trip.live, "stuck: no bound ends an act")
         T.key()
-        T.ok(S.giveUps[1] == "key" and S.front == T.PAGE, "given up at the key, the page shown")
+        T.ok(S.giveUps[1] == "cancelled" and S.front == T.PAGE, "given up at the key, the page shown")
         T.ok(T.count("[page] 'Synth': trip 'Next preset' given up at the key after 3000 ms in acting") == 1, T.dump())
         T.pageFront()
         S.actFn = nil
@@ -1632,7 +1652,7 @@ fn a_show_that_does_not_bring_the_page_back_ends_away_with_keys_and_no_announcem
         S.afterWords = "Preset Pad"
         T.trip()
         T.land()
-        S.pg.answers = { { false, "declined by the system" } }
+        S.pg.answers = { { false, T.E("refused", "declined by the system") } }
         T.runDue()
         T.runDue()
         T.ok(T.last() == "The page did not come to the front; if it does not come by itself, the page key brings it. Preset Pad"
@@ -1648,7 +1668,8 @@ fn a_show_that_does_not_bring_the_page_back_ends_away_with_keys_and_no_announcem
 }
 
 /// The way back asks for the plug-in's control first (on a Mac its window), then hides the page, then
-/// tells the module; declined, the page stays, still away, and onBack(false, "declined").
+/// tells the module; declined, the page stays, still away, and onBack(false, err): host.window.focus's
+/// own error value, the same table, or `refused` where it answered a bare false.
 #[test]
 fn the_way_back_focuses_the_control_first_then_hides() {
     for mac in [false, true] {
@@ -1667,8 +1688,16 @@ fn the_way_back_focuses_the_control_first_then_hides() {
             S.focusAnswer = false
             from = #S.order
             local ok, why = ov:pageBack()
-            T.ok(ok == false and why == "declined" and T.since(from) == "focus " .. T.HELD, tostring(why) .. " " .. T.since(from))
-            T.ok(S.backs[2].ok == false and S.backs[2].why == "declined" and S.pg.shown and ov.away, "the page stays")
+            T.ok(ok == false and T.is(why, "refused") and T.since(from) == "focus " .. T.HELD, T.what(why) .. " " .. T.since(from))
+            T.ok(S.backs[2].ok == false and S.backs[2].err == why and S.pg.shown and ov.away, "the page stays")
+            -- The host's own error value, where it gives one: handed on as it came, to onBack too.
+            for _, err in ipairs({ T.E("gone", "no such window"), T.E("hidden", "the window is hidden") }) do
+              S.focusErr = err
+              ok, why = ov:pageBack()
+              T.ok(ok == false and rawequal(why, err) and rawequal(S.backs[#S.backs].err, err), T.what(why))
+              T.ok(S.pg.shown and ov.away, "the page stays")
+            end
+            S.focusErr = nil
         "##;
         if mac { run_mac(scenario) } else { run(scenario) }
     }
@@ -1682,7 +1711,7 @@ fn the_way_back_focuses_the_control_first_then_hides() {
         T.ok(T.last() == "Synth: the plug-in's window would not come to the front." and T.lastInterrupts(), T.last())
         S.listed = { T.MAIN, T.OTHER }
         local ok, why = ov:pageBack()
-        T.ok(ok == false and why == "gone" and T.last() == "Synth: the plug-in's window is gone.", T.last())
+        T.ok(ok == false and T.is(why, "gone") and T.last() == "Synth: the plug-in's window is gone.", T.last())
     "##);
 }
 
@@ -1794,13 +1823,21 @@ fn the_page_key_spec_is_checked_at_addpage_and_at_each_group_overlays_bind() {
           "a second page in the same group")
         -- O:pageKey: refused, and the old key kept.
         local ok, why = ov:pageKey("Alt+P")
-        T.ok(ok == false and why == "a control's hotkey", tostring(why))
+        T.ok(ok == false and T.is(why, T.O.errors.CLASH, "Alt+P is the hotkey of control 'Preset' of overlay 'Synth'"),
+          T.what(why))
         S.refuse["Ctrl+Alt+Del"] = "reserved"
         ok, why = ov:pageKey("Ctrl+Alt+Del")
-        T.ok(ok == false and why == "reserved", tostring(why))
-        S.registerRaises = { ["Ctrl+Shift+F9"] = "held by another program" }
+        T.ok(ok == false and T.is(why, T.O.errors.TAKEN, "Ctrl+Alt+Del is kept by the system"), T.what(why))
+        -- Claimed but not held now: let go again at once, the old key kept.
+        S.registerHeld = { ["Ctrl+Shift+F9"] = "held by another program" }
+        local claims = S.registered
         ok, why = ov:pageKey("Ctrl+Shift+F9")
-        T.ok(ok == false and why == "refused: held by another program", tostring(why))
+        T.ok(ok == false and T.is(why, "taken", "held by another program"), T.what(why))
+        T.ok(S.registered == claims + 1 and T.count("the page key stays " .. T.KEY .. ": Ctrl+Shift+F9 is not held — "
+          .. "held by another program") == 1, T.dump())
+        local raised, msg = pcall(ov.pageKey, ov, 5)
+        T.ok(not raised and string.find(tostring(msg), "overlay 'Synth': pageKey takes a key spec, a string, got number", 1, true),
+          tostring(msg))
         S.pg.ready = true
         T.key()
         T.ok(S.front == T.PAGE, "the old key still works")
@@ -1813,7 +1850,7 @@ fn the_page_key_spec_is_checked_at_addpage_and_at_each_group_overlays_bind() {
     "##);
     run(r##"
         local S = T.S
-        S.registerRaises = { [T.KEY] = "held by another program" }
+        S.registerHeld = { [T.KEY] = "held by another program" }
         T.show(T.W, T.IN)
         local ov = T.synth()
         T.ok(ov.page ~= nil, "added all the same")
@@ -1821,7 +1858,22 @@ fn the_page_key_spec_is_checked_at_addpage_and_at_each_group_overlays_bind() {
     "##);
 }
 
-/// O:pageAgain: a trip under way is given up ("page closed"), the page closed and described again,
+/// A control's hotkey the host claims but does not hold now — another program has the chord, `id,
+/// err` — keeps its id, since the host tries the claim again, and the holds line lists it as not
+/// taken, with the reason, rather than as a key the overlay holds.
+#[test]
+fn a_hotkey_claimed_but_not_held_now_is_kept_and_not_listed_as_held() {
+    run(r##"
+        local S = T.S
+        S.registerHeld = { ["Alt+P"] = "held by another program" }
+        T.show(T.W, T.IN)
+        local ov = T.synth()
+        T.ok(ov.active and #ov.controlHotkeys == 1, "the claim's id kept")
+        T.ok(T.count("[keys] 'Synth' holds:  | not taken: Alt+P (not held now: held by another program)") == 1, T.dump())
+    "##);
+}
+
+/// O:pageAgain: a trip under way is given up (`closed`), the page closed and described again,
 /// `o.page` the new one; away ends where the user is; the page is prepared at the next arrival.
 #[test]
 fn page_again_closes_redescribes_gives_a_trip_up_and_prepares() {
@@ -1834,7 +1886,7 @@ fn page_again_closes_redescribes_gives_a_trip_up_and_prepares() {
         T.trip()
         S.redescribe = true
         local again = ov:pageAgain()
-        T.ok(S.giveUps[1] == "page closed", tostring(S.giveUps[1]))
+        T.ok(S.giveUps[1] == "closed", tostring(S.giveUps[1]))
         T.ok(again ~= first and ov.page == again and S.page == again, "the new page")
         T.ok(not ov.away, "away ends")
         S.pg.ready = false
@@ -1961,6 +2013,34 @@ fn a_menu_that_never_opens_is_told_after_the_look_bound() {
         T.ok(S.seenArg == nil, "still looked for")
         T.run(300)
         T.ok(S.seenArg == false, "told: no menu")
+        T.runDue()
+        T.ok(#S.afters == 1, "done")
+    "##);
+}
+
+/// afterMenu with the trip's overlay not in front answers `false, err` at the call — `not_in_front`,
+/// naming the overlay — waits for nothing and counts no press.
+#[test]
+fn after_menu_on_an_overlay_not_in_front_answers_not_in_front() {
+    run(r##"
+        local S = T.S
+        T.show(T.W, T.IN)
+        T.synth()
+        T.openPage()
+        S.actFn = function(o, trip)
+          o.active = false
+          S.menuAnswer = table.pack(trip:afterMenu(function() S.seenArg = "called" end))
+          o.active = true
+          trip:done({})
+        end
+        T.trip()
+        T.land()
+        T.runDue()
+        local ok, err = S.menuAnswer[1], S.menuAnswer[2]
+        T.ok(ok == false and T.is(err, "not_in_front", "'Synth' is not in front"), T.what(err))
+        T.ok(T.count("[page] 'Synth': trip 'Next preset': afterMenu — 'Synth' is not in front") == 1, T.dump())
+        T.run(8500)
+        T.ok(S.seenArg == nil, "nothing waited for")
         T.runDue()
         T.ok(#S.afters == 1, "done")
     "##);

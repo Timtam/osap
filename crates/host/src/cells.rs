@@ -37,6 +37,7 @@ use winnow::stream::{LocatingSlice, Location};
 use winnow::token::{one_of, take_while};
 
 use crate::backend::CapturedImage;
+use crate::errors::{screen, HostError};
 
 // ── Limits ─────────────────────────────────────────────────────────────────────────────
 
@@ -652,11 +653,19 @@ pub(crate) enum CellsError {
 
 impl fmt::Display for CellsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            CellsError::OutOfImage => "the region is not inside the captured image",
-            CellsError::ShortBuffer => "the capture came back shorter than its own size",
-            CellsError::Empty => "the region is empty",
-            CellsError::TooLarge => "the region is too large to count",
+        f.write_str(self.error().message())
+    }
+}
+
+impl CellsError {
+    /// What a cells call answers for it: `failed`, each with its own words. All but a short
+    /// buffer are made unreachable by the checks before them.
+    pub(crate) fn error(self) -> HostError {
+        HostError::of(match self {
+            CellsError::OutOfImage => &screen::CELLS_OUT_OF_IMAGE,
+            CellsError::ShortBuffer => &screen::SHORT_CAPTURE,
+            CellsError::Empty => &screen::CELLS_EMPTY,
+            CellsError::TooLarge => &screen::CELLS_TOO_LARGE,
         })
     }
 }
@@ -780,17 +789,20 @@ pub(crate) fn reduce(img: &CapturedImage, sub: Sub, spec: &CellSpec) -> Result<V
 }
 
 /// The cells of a whole capture that should be `w` x `h`, or why there are none.
-pub(crate) fn of_capture(cap: &CapturedImage, w: i32, h: i32, spec: &CellSpec) -> Result<Vec<u8>, String> {
+pub(crate) fn of_capture(cap: &CapturedImage, w: i32, h: i32, spec: &CellSpec) -> Result<Vec<u8>, HostError> {
     if cap.w as i64 != w as i64 || cap.h as i64 != h as i64 {
-        return Err(format!("the capture came back {}x{}, not the region's {w}x{h}", cap.w, cap.h));
+        return Err(HostError::with(
+            &screen::CAPTURE_SIZE,
+            format!("the capture came back {}x{}, not the region's {w}x{h}", cap.w, cap.h),
+        ));
     }
-    reduce(cap, Sub { x: 0, y: 0, w: cap.w, h: cap.h }, spec).map_err(|e| e.to_string())
+    reduce(cap, Sub { x: 0, y: 0, w: cap.w, h: cap.h }, spec).map_err(CellsError::error)
 }
 
 /// The cells of `sub` of an image that holds more than the region — a snapshot, read where the
 /// region lies in it rather than copied out — or why there are none.
-pub(crate) fn of_sub(img: &CapturedImage, sub: Sub, spec: &CellSpec) -> Result<Vec<u8>, String> {
-    reduce(img, sub, spec).map_err(|e| e.to_string())
+pub(crate) fn of_sub(img: &CapturedImage, sub: Sub, spec: &CellSpec) -> Result<Vec<u8>, HostError> {
+    reduce(img, sub, spec).map_err(CellsError::error)
 }
 
 // ── Comparison ─────────────────────────────────────────────────────────────────────────
@@ -896,19 +908,19 @@ pub(crate) struct Matcher {
 
 impl Matcher {
     /// The live cells of a capture that should be `w` x `h`, and their ranking.
-    pub(crate) fn answer(&self, cap: &CapturedImage, w: i32, h: i32) -> Result<(Vec<u8>, Ranked), String> {
+    pub(crate) fn answer(&self, cap: &CapturedImage, w: i32, h: i32) -> Result<(Vec<u8>, Ranked), HostError> {
         let live = of_capture(cap, w, h, &self.spec)?;
         self.ranked(live)
     }
 
     /// The live cells of `sub` of a larger image (a snapshot), and their ranking.
-    pub(crate) fn answer_sub(&self, img: &CapturedImage, sub: Sub) -> Result<(Vec<u8>, Ranked), String> {
+    pub(crate) fn answer_sub(&self, img: &CapturedImage, sub: Sub) -> Result<(Vec<u8>, Ranked), HostError> {
         let live = of_sub(img, sub, &self.spec)?;
         self.ranked(live)
     }
 
-    fn ranked(&self, live: Vec<u8>) -> Result<(Vec<u8>, Ranked), String> {
-        let ranked = rank(&live, &self.states, &self.item_of).ok_or_else(|| "no states to compare".to_string())?;
+    fn ranked(&self, live: Vec<u8>) -> Result<(Vec<u8>, Ranked), HostError> {
+        let ranked = rank(&live, &self.states, &self.item_of).ok_or_else(|| HostError::of(&screen::NO_STATES))?;
         Ok((live, ranked))
     }
 }
@@ -1485,7 +1497,8 @@ mod tests {
             let m = Matcher { spec: spec.clone(), states, item_of: vec![0, 1] };
             assert_eq!(m.answer_sub(&big, sub), m.answer(&cut, w as i32, h as i32), "{sub:?}");
         }
-        assert_eq!(of_sub(&big, Sub { x: 60, y: 0, w: 5, h: 1 }, &spec), Err("the region is not inside the captured image".to_string()));
+        let e = of_sub(&big, Sub { x: 60, y: 0, w: 5, h: 1 }, &spec).unwrap_err();
+        assert_eq!((e.reason(), e.message()), (&screen::CELLS_OUT_OF_IMAGE, "the region is not inside the captured image"));
     }
 
     #[test]
@@ -1497,7 +1510,9 @@ mod tests {
         let short = CapturedImage { w: 4, h: 4, rgba: vec![0; 63] };
         assert_eq!(reduce(&short, Sub { x: 0, y: 0, w: 4, h: 4 }, &spec), Err(CellsError::ShortBuffer));
         let e = of_capture(&img, 4, 5, &spec).unwrap_err();
-        assert!(e.contains("came back 4x4, not the region's 4x5"), "{e}");
+        assert_eq!((e.reason(), e.message()), (&screen::CAPTURE_SIZE, "the capture came back 4x4, not the region's 4x5"));
+        assert_eq!(CellsError::ShortBuffer.error().reason(), &screen::SHORT_CAPTURE);
+        assert_eq!(CellsError::TooLarge.to_string(), "the region is too large to count");
         assert_eq!(of_capture(&img, 4, 4, &spec).unwrap(), vec![0; 4]);
         assert!(CellSpec::new(0, 3, Predicate::parse("r >= 1").unwrap()).unwrap_err().contains("cols is 0"));
         assert!(CellSpec::new(3, 257, Predicate::parse("r >= 1").unwrap()).unwrap_err().contains("rows is 257"));

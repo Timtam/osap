@@ -85,7 +85,8 @@ use objc2_web_kit::{WKContentRuleList, WKContentRuleListStore};
 
 use super::front::{self, Ended, Handed};
 use super::page::{self, EnvNow};
-use crate::backend::{Handing, MouseButton, COVERED};
+use crate::backend::{Handing, MouseButton};
+use crate::errors::input::COVERED;
 use crate::webview::{self, PageEvent, WindowKind};
 
 const USAGE: &str = "\
@@ -1311,7 +1312,7 @@ fn posted_clicks(app: &NSApplication, tally: &mut Tally, tool: &page::Native, n:
         let t = Instant::now();
         let line = match super::input::post_click(tool.hwnd(), screen.0, screen.1, MouseButton::Left, move_pointer) {
             Ok(line) => line,
-            Err(why) if why == COVERED => {
+            Err(why) if why.reason() == &COVERED => {
                 say(&format!(
                     "check {name}: skipped — the window server names another window over the page's button on this \
                      runner; neither a pass nor a failure"

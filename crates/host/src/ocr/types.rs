@@ -1,11 +1,15 @@
-//! What a read is made of, with nothing in it but the standard library: the rectangle, the
-//! priority it runs at, the engine's answer per region, and the `Reading` a module is handed.
+//! What a read is made of, with nothing in it but the standard library and the host's own error
+//! (`errors.rs`, as pure): the rectangle, the priority it runs at, the engine's answer per region,
+//! and the `Reading` a module is handed.
 //!
 //! Kept free of `mlua`, `image` and every platform crate on purpose. `crates/macos-check`
-//! borrows this file (and the other pure ones beside it) so that the macOS backend, which
-//! names these types, is type-checked against the same definitions the real build uses.
+//! borrows this file (and the other pure ones beside it, `errors.rs` among them) so that the macOS
+//! backend, which names these types, is type-checked against the same definitions the real build
+//! uses.
 
 use std::cell::Cell;
+
+use crate::errors::HostError;
 
 /// A screen rectangle: top-left corner and size, in the platform's screen units (physical
 /// pixels on Windows, points on macOS). `w` or `h` of 0 is an empty region.
@@ -209,13 +213,13 @@ pub struct Reading {
     /// The language tag the engine was asked for, as the platform names it; empty when the read
     /// never reached an engine.
     pub lang: String,
-    /// Why, when `status` is `Failed`.
-    pub error: Option<String>,
+    /// Why, when `status` is `Failed`: the reading's `error`, an error value in the module's VM.
+    pub error: Option<HostError>,
 }
 
 impl Reading {
     /// A reading that says nothing but `status` and why.
-    pub fn outcome(rect: Rect, status: Status, error: Option<String>) -> Reading {
+    pub fn outcome(rect: Rect, status: Status, error: Option<HostError>) -> Reading {
         Reading {
             rect,
             status,
@@ -227,8 +231,8 @@ impl Reading {
         }
     }
 
-    pub fn failed(rect: Rect, error: impl Into<String>) -> Reading {
-        Reading::outcome(rect, Status::Failed, Some(error.into()))
+    pub fn failed(rect: Rect, error: HostError) -> Reading {
+        Reading::outcome(rect, Status::Failed, Some(error))
     }
 }
 
@@ -261,8 +265,8 @@ pub enum EngineOut {
     /// The Windows fallback recogniser read `text` and located nothing; `content` is the
     /// content crop it read, region-relative.
     Fallback { text: String, content: Rect },
-    /// It could not be read.
-    Failed(String),
+    /// It could not be read, and why.
+    Failed(HostError),
 }
 
 #[cfg(test)]

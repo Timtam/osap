@@ -31,6 +31,9 @@
 //! device error. So each output dropped after a failure leaves one handle: one per unplugged
 //! device or failed resume, not per sound.
 
+use std::fs::File;
+use std::io::BufReader;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -38,6 +41,36 @@ use rodio::cpal;
 use rodio::cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rodio::dynamic_mixer::{self, DynamicMixer, DynamicMixerController};
 use rodio::Source;
+
+use crate::errors::{sound, HostError};
+
+/// A sound file, opened and decoded far enough to play.
+pub(crate) type Sound = rodio::Decoder<BufReader<File>>;
+
+/// The sound file at `path`, opened and its header read, or why not, in the words the log has
+/// always had: `cannot play '…': …` — `not_found` for a file that is not there, `invalid` for one
+/// that does not decode, `failed` for one that is there and cannot be opened (no right to read it,
+/// a folder, another program holding it). On the event loop: it reads the file's header.
+pub(crate) fn open(path: &Path) -> Result<Sound, HostError> {
+    let cannot = |reason, e: &dyn std::fmt::Display| HostError::with(reason, format!("cannot play '{}': {e}", path.display()));
+    let file = File::open(path).map_err(|e| {
+        cannot(if e.kind() == std::io::ErrorKind::NotFound { &sound::NOT_FOUND } else { &sound::FAILED }, &e)
+    })?;
+    rodio::Decoder::new(BufReader::new(file)).map_err(|e| cannot(&sound::INVALID, &e))
+}
+
+/// What `host.sound.play` plays from `path`, a path of the module whose package is `root`: the
+/// sound, or why not (`Ok(Err(..))`), answered — or a raise, for a file inside the package that is
+/// missing or broken: a sound the module ships is part of it, and a mistyped name in it is a
+/// mistake to fix (D3 of the typed-errors plan), as a template's is. Outside the package — an
+/// absolute path, or one that climbs out with `..` — the file is the system's or the user's, and
+/// its absence is answered.
+pub(crate) fn source(root: &Path, path: &Path) -> mlua::Result<Result<Sound, HostError>> {
+    match open(path) {
+        Err(e) if crate::template_store::in_package(root, path) => Err(mlua::Error::external(e.to_string())),
+        other => Ok(other),
+    }
+}
 
 /// An open audio output: the stream, the mixer sounds are added to, and whether the stream has
 /// reported an error since.
@@ -165,6 +198,33 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A missing file and one that does not decode: inside the package they raise, with the words
+    /// the log always had; outside it they are answered, `not_found` and `invalid`. Nothing is
+    /// played: no output is opened here.
+    #[test]
+    fn a_file_inside_the_package_raises_and_one_outside_is_answered() {
+        let dir = std::env::temp_dir().join(format!("host-sound-test-{}", std::process::id()));
+        let root = dir.join("module");
+        std::fs::create_dir_all(root.join("sounds")).unwrap();
+        std::fs::write(root.join("sounds").join("noise.wav"), b"not a sound at all").unwrap();
+        std::fs::write(dir.join("elsewhere.wav"), b"not a sound either").unwrap();
+
+        let missing = root.join("sounds").join("gone.wav");
+        let raised = source(&root, &missing).err().expect("a missing sound of the package raises");
+        assert!(raised.to_string().contains(&format!("cannot play '{}': ", missing.display())), "{raised}");
+        assert!(source(&root, &root.join("sounds").join("noise.wav")).is_err(), "a broken one raises");
+
+        let outside = dir.join("gone.wav");
+        let e = source(&root, &outside).unwrap().err().expect("answered");
+        assert_eq!(e.reason(), &sound::NOT_FOUND);
+        assert!(e.message().starts_with(&format!("cannot play '{}': ", outside.display())), "{e}");
+        let climbed = root.join("..").join("elsewhere.wav");
+        let e = source(&root, &climbed).unwrap().err().expect("answered");
+        assert_eq!(e.reason(), &sound::INVALID, "{e}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_output_is_opened_again_when_it_failed_or_the_default_moved() {

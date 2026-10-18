@@ -151,14 +151,41 @@ local function clickPoint(o, label, x, y, button, quiet)
   return true
 end
 
--- A double-click at screen point (x, y), checked by pointAt, both clicks left (O.doubleClick), and
--- `after()`, as a handler, once the second has gone out.
+-- O.doubleClick at screen point (x, y) with `button` (nil: the left), its answers as this file's: false
+-- and what was said where the first click was not made — no second goes out, and `after` is not
+-- called — otherwise true, and `after(true)`, as a handler, once the second has gone out, or
+-- `after(false, said)` where the second was not made. Each refusal is said unless `quiet`.
+local function doubled(label, x, y, button, quiet, after)
+  local function refuse(err)
+    local said = label .. " was not clicked: " .. tostring(err)
+    if not quiet then host.speech.output(said, { interrupt = true }) end
+    return said
+  end
+  local refused = false
+  local ok, err = O.doubleClick(x, y, button and { button = button } or nil, function(ok2, err2)
+    -- The first click's refusal was answered at the call.
+    if refused then return end
+    if ok2 == false then
+      host.log.info(string.format("[avenger] '%s': the double-click's second click was not made — %s", label,
+        tostring(err2)))
+      return after(false, refuse(err2))
+    end
+    after(true)
+  end)
+  if ok == false then
+    refused = true
+    return false, refuse(err)
+  end
+  return true
+end
+
+-- A double-click at screen point (x, y), checked by pointAt, both clicks left (doubled): true and
+-- `after(ok, said)` later, or false and what was said.
 local function doublePoint(o, label, x, y, quiet, after)
   local px, py = pointAt(o, label, x, y, quiet)
   if not px then return false, py end
   host.log.info(string.format("[avenger] '%s': double-clicking (%d,%d)", label, px, py))
-  O.doubleClick(px, py, nil, after)
-  return true
+  return doubled(label, px, py, nil, quiet, after)
 end
 
 -- The wheel turned `notches` (positive up, host.input.scroll) at table point `at`, placed and
@@ -185,15 +212,15 @@ local function clickAt(o, label, at, button, quiet)
 end
 
 -- A double-click of the module's own, placed and checked as clickAt's click is (the oscillator's
--- and the macro knobs' resets, src/act.luau): both clicks with `button` (O.doubleClick), and
--- `after()`, as a handler, once the second has gone out — where the change is watched for from.
+-- and the macro knobs' resets, src/act.luau): both clicks with `button` (doubled), and
+-- `after(true)`, as a handler, once the second has gone out — where the change is watched for from
+-- — or `after(false, said)`; false and what was said where nothing went out.
 local function doubleAt(o, label, at, button, quiet, after)
   local x, y = pointOf(o, label, at, quiet)
   if not x then return false, y end
   host.log.info(string.format("[avenger] '%s': double-clicking (%d,%d)%s", label, x, y,
     button and (" with the " .. button .. " button") or ""))
-  O.doubleClick(x, y, button and { button = button } or nil, after)
-  return true
+  return doubled(label, x, y, button, quiet, after)
 end
 
 -- ── A popup left open ────────────────────────────────────────────────────────
@@ -215,23 +242,25 @@ end
 --     Which of the two Avenger's right clicks open is not known; Escape is right for both.
 -- Quiet: the runtime has said what went wrong, and the menu tests say whether the popup has gone
 -- (`[menu] … the menu has closed`). Whether either closes Avenger's popups is not measured
--- (TODO.md). A submenu that did not open ("no submenu", a drum slot's Copy Sample to), one its
--- target could not be chosen in ("unfit submenu") and one the drawn test could not get ready to
--- follow ("unfollowed") leave the menu up: Escape too, which JUCE takes for the whole of a menu and
+-- (TODO.md). A submenu that did not open (`no_submenu`, a drum slot's Copy Sample to), one its
+-- target could not be chosen in (`unfit_submenu`) and one the drawn test could not get ready to
+-- follow (`not_ready`) leave the menu up: Escape too, which JUCE takes for the whole of a menu and
 -- its submenus (its dismissMenu walks up to the first menu; read in its source, not measured).
-local CLOSE_AFTER = { unplaced = true, covered = true, untaken = true, due = true, refused = true,
-  ["no submenu"] = true, ["unfit submenu"] = true, unfollowed = true }
+-- By the code of O:chooseMenuItem's error value (docs/api/overlay.md): `refused` is a popup that
+-- did not take the click, `outside` and `covered` an item the overlay's own check refused.
+local CLOSE_AFTER = { unplaced = true, covered = true, outside = true, refused = true, no_menu = true,
+  no_submenu = true, unfit_submenu = true, not_ready = true }
 
-local function closeLeftOpen(w, pick, why, label, opener)
-  if not (pick.seen and CLOSE_AFTER[why] and w:menuOpen()) then return end
+local function closeLeftOpen(w, pick, err, label, opener)
+  if not (pick.seen and CLOSE_AFTER[err.code] and w:menuOpen()) then return end
   if opener == nil then
     host.log.info(string.format("[avenger] '%s': its popup was left open (%s) — pressing Escape to close it",
-      label, tostring(why)))
+      label, err.code))
     host.input.send("Escape")
     return
   end
   host.log.info(string.format("[avenger] '%s': its popup was left open (%s) — clicking its opener "
-    .. "again to close it", label, tostring(why)))
+    .. "again to close it", label, err.code))
   clickAt(w, label, opener, nil, true)
 end
 
@@ -609,7 +638,7 @@ local function menuEntry(ov, label, item, arms)
         label = label,
         at = G.MENU,
         menuItem = menuItemAt(label, item, pick),
-        onDone = function(w, chosen, why)
+        onDone = function(w, chosen, err)
           if chosen then
             -- Every item may load, rename, overwrite or blank the preset: the database's position
             -- is not Avenger's any more, nor the latest name read.
@@ -618,7 +647,7 @@ local function menuEntry(ov, label, item, arms)
             if arms then D.arm(id, label) end
             return
           end
-          closeLeftOpen(w, pick, why, label, G.MENU)
+          closeLeftOpen(w, pick, err, label, G.MENU)
         end,
       })
       -- What a hotspot says on its click: MENU was clicked. What the item did is the plug-in's to
@@ -719,15 +748,15 @@ local function zoomStepper(ov)
         label = "Zoom",
         at = G.ZOOM_FIELD,
         menuItem = zoomEntry(i + dir, z, to, pick),
-        onDone = function(w, chosen, why)
+        onDone = function(w, chosen, err)
           if chosen then
             H.stepped(w:origin() or origin, z)
             return
           end
           -- A press dropped while this one's list is awaited ends nothing of this one's.
-          if why == "busy" then return end
+          if err.code == O.errors.BUSY then return end
           H.zoomOver()
-          closeLeftOpen(w, pick, why, "Zoom", G.ZOOM_FIELD)
+          closeLeftOpen(w, pick, err, "Zoom", G.ZOOM_FIELD)
         end,
       })
       -- Not opened: a press while the last one's list is still awaited ("pressed again", logged by

@@ -480,9 +480,9 @@ fn a_calibration_shot_reads_every_crosshairs_pixel_in_one_read() {
         assert(T.logged(line(3, "Zoom", 121, 64, "3,6,9", "  [menu opener]")), T.dump())
         assert(T.logged("[calibrate]" .. string.format("  -- %-24s hidden (its `when` is false)", "Hidden")), T.dump())
         local from = #S.logs + 1
-        fails = "the screen capture failed"
+        fails = T.E("failed", "screen capture failed")
         assert(T.handled(o.calibrationShot, o) == true)
-        assert(T.count("[calibrate]  the pixels could not be read: the screen capture failed", from) == 1, T.dump())
+        assert(T.count("[calibrate]  the pixels could not be read: screen capture failed", from) == 1, T.dump())
         assert(T.logged(line(1, "Undo", 110, 70, "?")) and T.logged(line(3, "Zoom", 121, 64, "?", "  [menu opener]")),
           T.dump())
         assert(T.count("  pixel ?", from) == 3, T.dump())
@@ -1037,7 +1037,7 @@ fn on_ear_grid_down_says_nothing_once_another_window_came_to_the_front_and_reads
         S.origin = here
         T.front(phones)
         answer = { status = "failed", text = "", words = {}, skipped = false,
-          error = "the text recogniser has not answered a region for 5 s" }
+          error = T.E("timeout", "the text recogniser has not answered a region for 5 s") }
         press(down)
         later(300)
         assert(reads == 3, "read: " .. reads)
@@ -1132,7 +1132,7 @@ fn on_ear_show_all_reads_its_rows_in_one_read() {
         lit = 3
         T.turn()
         assert(text(speakers) == nil, "a category is in force")
-        lit, fails = nil, "screen capture failed"
+        lit, fails = nil, T.E("failed", "screen capture failed")
         T.turn()
         assert(text(speakers) == nil, "nothing read is no answer")
         assert(#asked == 3 and S.pixels == 0, #asked .. ", " .. S.pixels)

@@ -29,7 +29,7 @@ local LINE = 24
 
 local page -- described below; the functions before it reach it only when they run
 local target = nil -- the Notepad window the page was last shown beside, as a window table
-local wanted = false -- a show answered "not ready yet": shown from onReady, if still wanted
+local wanted = false -- a show answered `not_ready`: shown from onReady, if still wanted
 local ready = false -- the page is built and has loaded
 local prepareFailed = false -- a prepare failed: from then on only the key builds the page
 local trip = nil -- the click under way: { point, id, stage = "forward" | "read" }
@@ -47,15 +47,15 @@ local function inFront(id)
   return front ~= nil and front.id == id
 end
 
--- What a `show` that answered false is said as. Declined, Windows kept the keyboard where it
--- was: the page is shown without it — or hidden, where it would be over the window — and has
--- been seen to come to the front by itself a moment later, so the user is not told it is not
--- there.
-local function notShown(why)
-  if why == "declined by the system" then
+-- What a `show` that answered false is said as, by its error value's code. Declined
+-- (`refused`), Windows kept the keyboard where it was: the page is shown without it — or hidden,
+-- where it would be over the window — and has been seen to come to the front by itself a moment
+-- later, so the user is not told it is not there. Any other code: its message.
+local function notShown(err)
+  if err.code == host.errors.REFUSED then
     return "Windows did not bring the page to the front; if it does not come by itself, the key brings it."
   end
-  return "The page did not come to the front: " .. why .. "."
+  return "The page did not come to the front: " .. err .. "."
 end
 
 -- Window `w` as it is now — it may have moved — or nil when it is gone.
@@ -71,30 +71,31 @@ local function current(w)
   return nil
 end
 
--- The page beside `w`, with the keyboard.
+-- The page beside `w`, with the keyboard. `true` with an error value beside it is the page in
+-- front over part of Notepad, with no room beside it (`too_large`): shown all the same.
 local function showBeside(w)
   target = w
   page:post({ kind = "target", title = w.title })
-  local ok, why = page:show({ focus = true, avoid = w.bounds })
+  local ok, err = page:show({ focus = true, avoid = w.bounds })
   if ok then
     wanted = false
-  elseif why == "not ready yet" then
+  elseif err.code == host.errors.NOT_READY then
     -- The first show builds the page; onReady says when it has loaded.
     wanted = true
     host.speech.output("Building the page.", { interrupt = true })
   else
     wanted = false
-    host.speech.output(notShown(why), { interrupt = true })
+    host.speech.output(notShown(err), { interrupt = true })
   end
 end
 
 -- The page built ahead of the key. A build that failed is not started again from here, where
 -- nobody asked for it: the key builds the page from then on, and says why it cannot.
 local function prepare()
-  local ok, why = page:prepare()
-  if not ok and why ~= "not ready yet" then
+  local ok, err = page:prepare()
+  if not ok and err.code ~= host.errors.NOT_READY then
     prepareFailed = true
-    host.log.info("Page demo: the page was not prepared (" .. why .. "); the key builds it from now on.")
+    host.log.info("Page demo: the page was not prepared (" .. err .. "); the key builds it from now on.")
   end
 end
 
@@ -170,10 +171,10 @@ end
 local function comeBack(w, text)
   trip = nil
   page:post({ kind = "result", text = text })
-  local ok, why = page:show({ focus = true, avoid = w.bounds })
+  local ok, err = page:show({ focus = true, avoid = w.bounds })
   if not ok then
-    host.log.info("Page demo: the page did not come back (" .. why .. "); the result waits on it: " .. text)
-    host.speech.output(notShown(why) .. " " .. text, { interrupt = true })
+    host.log.info("Page demo: the page did not come back (" .. err .. "); the result waits on it: " .. text)
+    host.speech.output(notShown(err) .. " " .. text, { interrupt = true })
   end
 end
 
@@ -259,10 +260,10 @@ end
 
 -- The page's window went without the module asking: "user" (its close box, or Alt+F4 in it —
 -- only hidden) or "failed" (gone: built again by the next show, or when Notepad next comes
--- forward).
-local function onPageClose(why)
+-- forward), with an error value beside it that says how.
+local function onPageClose(how)
   trip = nil
-  if why == "failed" then
+  if how == "failed" then
     ready = false
   end
 end

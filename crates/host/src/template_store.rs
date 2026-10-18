@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::SystemTime;
 
-use crate::image_search::TEMPLATE_FAILED;
+use crate::errors::{screen, HostError};
 use crate::logging;
 use crate::template::Decoded;
 
@@ -36,9 +36,35 @@ const CACHE_CAP: usize = 64;
 const SEEN_CAP: usize = 1024;
 
 /// What a search answers, and a handle from a file is left with, when the PNG cannot be read: a
-/// path's, given the reason.
-pub(crate) fn cannot_open(path: &Path, why: impl std::fmt::Display) -> String {
-    format!("cannot open template '{}': {why}", path.display())
+/// path's, given the reason — `not_found` for a file that is not there, `invalid` for one that is
+/// not a PNG it can decode, `failed` for one it could not read (held by another program, no
+/// right to read it).
+pub(crate) fn cannot_open(path: &Path, e: &image::ImageError) -> HostError {
+    use std::io::ErrorKind;
+    let reason = match e {
+        image::ImageError::IoError(io) => match io.kind() {
+            ErrorKind::NotFound => &screen::TEMPLATE_NOT_FOUND,
+            // The decoder's own words for a body cut short or not in the form it reads.
+            ErrorKind::UnexpectedEof | ErrorKind::InvalidData => &screen::TEMPLATE_INVALID,
+            _ => &screen::TEMPLATE_UNREADABLE,
+        },
+        _ => &screen::TEMPLATE_INVALID,
+    };
+    HostError::with(reason, format!("cannot open template '{}': {e}", path.display()))
+}
+
+/// What a template is answered when the host's own code failed to make it: its decode or its
+/// preparation panicked.
+fn template_failed() -> HostError {
+    HostError::of(&screen::TEMPLATE_FAILED)
+}
+
+/// Whether `full` lies inside the module's package, `root`: as a path, its `..` taken away, so
+/// `images/../../x.png` does not. A template file inside it that is missing or broken raises
+/// where a call names it; one outside it is answered (D3 of the typed-errors plan).
+pub(crate) fn in_package(root: &Path, full: &Path) -> bool {
+    let clean = |p: &Path| path_clean::clean(std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
+    clean(full).starts_with(clean(root))
 }
 
 // ── The PNG files ─────────────────────────────────────────────────────────────────────────
@@ -74,8 +100,8 @@ fn cache() -> std::sync::MutexGuard<'static, Cache> {
 /// captures again is picked up by the next search, without a restart. A file the system gives no
 /// modification time is decoded every time and never kept. `Err` is what the search answers:
 /// `cannot open template '<path>': <why>`, for a file gone since its path was checked or a body
-/// that cannot be decoded.
-pub(crate) fn open(path: &Path) -> Result<Arc<Decoded>, String> {
+/// that cannot be decoded ([`cannot_open`]).
+pub(crate) fn open(path: &Path) -> Result<Arc<Decoded>, HostError> {
     let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
     if let Some(at) = modified {
         let mut c = cache();
@@ -103,28 +129,28 @@ pub(crate) fn open(path: &Path) -> Result<Arc<Decoded>, String> {
 }
 
 /// The PNG at `path`, read and decoded to RGBA. A panic in the decoder is answered for this PNG
-/// alone, as the host's own failure (`TEMPLATE_FAILED`), and said within the image worker's
+/// alone, as the host's own failure ([`template_failed`]), and said within the image worker's
 /// throttle: the rest of its batch — other modules' searches, cells, profiles and shots — reads as
 /// usual. Not kept, so the next search that names it decodes it again.
-fn decode(path: &Path) -> Result<Arc<Decoded>, String> {
+fn decode(path: &Path) -> Result<Arc<Decoded>, HostError> {
     #[cfg(test)]
     note(path.display().to_string());
     match logging::contain(|| read_png(path)) {
         Ok(got) => got,
         Err(report) => {
             crate::image_search::contained("a template's decode", "its searches are answered nil", &report);
-            Err(TEMPLATE_FAILED.to_string())
+            Err(template_failed())
         }
     }
 }
 
 /// The PNG at `path`, decoded.
-fn read_png(path: &Path) -> Result<Arc<Decoded>, String> {
+fn read_png(path: &Path) -> Result<Arc<Decoded>, HostError> {
     #[cfg(test)]
     if path.file_name().is_some_and(|n| n == TEST_PANICS) {
         panic!("a decoder that panics, in a test");
     }
-    let img = image::open(path).map_err(|e| cannot_open(path, e))?.to_rgba8();
+    let img = image::open(path).map_err(|e| cannot_open(path, &e))?.to_rgba8();
     let (w, h) = (img.width(), img.height());
     Ok(Arc::new(Decoded::from_png_rgba(w, h, img.into_raw())))
 }
@@ -138,9 +164,9 @@ fn seen() -> std::sync::MutexGuard<'static, HashSet<PathBuf>> {
 
 /// The size of the PNG at `path`, read from its header — a few bytes at the start of the file,
 /// never its pixels — and the path remembered as checked. `Err`: `cannot open template '<path>':
-/// <why>`, for a file that is not there, cannot be opened, or is not a PNG.
-pub(crate) fn header(path: &Path) -> Result<(u32, u32), String> {
-    let size = image::image_dimensions(path).map_err(|e| cannot_open(path, e))?;
+/// <why>`, for a file that is not there, cannot be opened, or is not a PNG ([`cannot_open`]).
+pub(crate) fn header(path: &Path) -> Result<(u32, u32), HostError> {
+    let size = image::image_dimensions(path).map_err(|e| cannot_open(path, &e))?;
     let mut s = seen();
     if s.len() >= SEEN_CAP {
         s.clear();
@@ -153,7 +179,7 @@ pub(crate) fn header(path: &Path) -> Result<(u32, u32), String> {
 /// that is not there, or not a PNG, raises at the call that names it, wherever it sits in a list
 /// of templates. After that the path is taken as it is, and the image worker opens it; a file gone
 /// since, or one whose body cannot be decoded, is answered by the search that finds it so.
-pub(crate) fn locate(path: PathBuf) -> Result<PathBuf, String> {
+pub(crate) fn locate(path: PathBuf) -> Result<PathBuf, HostError> {
     if !seen().contains(&path) {
         header(&path)?;
     }
@@ -182,10 +208,10 @@ pub(crate) struct Prepared {
     /// so a thread that asks meanwhile waits for that one; the event loop's looks
     /// ([`get`](Prepared::get), [`failed`](Prepared::failed)) never take it.
     raw: Mutex<Option<Raw>>,
-    made: OnceLock<Result<(Arc<Decoded>, u32), String>>,
+    made: OnceLock<Result<(Arc<Decoded>, u32), HostError>>,
     /// Why a file's picture could not be made the last time it was tried, while it is still to be
     /// made: `tostring` says it.
-    failed: Mutex<Option<String>>,
+    failed: Mutex<Option<HostError>>,
 }
 
 impl Prepared {
@@ -203,13 +229,13 @@ impl Prepared {
 
     /// The picture and its count, or why it could not be made — `None` while it is still to be
     /// made. Never makes it: the event loop asks this.
-    pub(crate) fn get(&self) -> Option<&Result<(Arc<Decoded>, u32), String>> {
+    pub(crate) fn get(&self) -> Option<&Result<(Arc<Decoded>, u32), HostError>> {
         self.made.get()
     }
 
     /// Why a file's picture could not be made the last time a search or the preparation tried,
     /// while it is still to be made. Never makes it, and never waits for a making.
-    pub(crate) fn failed(&self) -> Option<String> {
+    pub(crate) fn failed(&self) -> Option<HostError> {
         self.failed.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
@@ -221,7 +247,7 @@ impl Prepared {
     /// this time — gone, held by another program, half written — is not kept: the next search
     /// that needs the picture tries again. Kept, it would leave the handle unusable for as long as
     /// it lives, where the call that built it used to raise and could simply be made again.
-    pub(crate) fn make(&self) -> Result<(Arc<Decoded>, u32), String> {
+    pub(crate) fn make(&self) -> Result<(Arc<Decoded>, u32), HostError> {
         if let Some(made) = self.made.get() {
             return made.clone();
         }
@@ -239,7 +265,7 @@ impl Prepared {
             Ok(got) => got,
             Err(report) => {
                 crate::image_search::contained("a template's preparation", "its searches are answered nil", &report);
-                Err(TEMPLATE_FAILED.to_string())
+                Err(template_failed())
             }
         };
         match (got, file) {
@@ -257,18 +283,20 @@ impl Prepared {
     }
 }
 
-/// `raw` made a picture, and its pixels counted.
-fn prepare(raw: Option<Raw>) -> Result<(Arc<Decoded>, u32), String> {
+/// `raw` made a picture, and its pixels counted. Bytes of the wrong size or count are refused at
+/// the call that gave them, so their conversion cannot fail here; were it to, it is the host's
+/// own failure.
+fn prepare(raw: Option<Raw>) -> Result<(Arc<Decoded>, u32), HostError> {
     #[cfg(test)]
     if let Some(Raw::Rgba { w, h, .. } | Raw::Rgb { w, h, .. }) = &raw {
         note(format!("bytes {w}x{h}"));
     }
     let dec = match raw {
-        Some(Raw::Rgba { w, h, bytes }) => Arc::new(Decoded::from_rgba(w, h, bytes).map_err(|e| e.to_string())?),
-        Some(Raw::Rgb { w, h, bytes }) => Arc::new(Decoded::from_rgb(w, h, &bytes).map_err(|e| e.to_string())?),
+        Some(Raw::Rgba { w, h, bytes }) => Arc::new(Decoded::from_rgba(w, h, bytes).map_err(|_| template_failed())?),
+        Some(Raw::Rgb { w, h, bytes }) => Arc::new(Decoded::from_rgb(w, h, &bytes).map_err(|_| template_failed())?),
         Some(Raw::File(path)) => open(&path)?,
         // Taken by a making that panicked: answered as the host's own failure.
-        None => return Err(TEMPLATE_FAILED.to_string()),
+        None => return Err(template_failed()),
     };
     let count = dec.count();
     Ok((dec, count))
@@ -287,12 +315,12 @@ pub(crate) enum Needle {
 
 /// The PNGs one batch has opened, by path: a path two of its searches share is opened once.
 #[derive(Default)]
-pub(crate) struct Opened(HashMap<PathBuf, Result<Arc<Decoded>, String>>);
+pub(crate) struct Opened(HashMap<PathBuf, Result<Arc<Decoded>, HostError>>);
 
 /// Each needle's picture, in order — or why one of them has none, which is what the search
 /// answers: `cannot open template '<path>': <why>` for a PNG that cannot be opened or decoded, and
 /// a handle's own reason for one whose picture could not be made.
-pub(crate) fn resolve<'a>(needles: impl IntoIterator<Item = &'a Needle>, opened: &mut Opened) -> Result<Vec<Arc<Decoded>>, String> {
+pub(crate) fn resolve<'a>(needles: impl IntoIterator<Item = &'a Needle>, opened: &mut Opened) -> Result<Vec<Arc<Decoded>>, HostError> {
     needles
         .into_iter()
         .map(|n| match n {
@@ -375,18 +403,23 @@ mod tests {
 
     /// A path is checked the first time it is named — a file that is not there, or is not a PNG,
     /// raises there — and taken as it is after that: a file gone since is the search's to answer.
+    /// What it says is the error a search answers for it: `not_found` for a file that is not
+    /// there, `invalid` for one that is not a PNG.
     #[test]
     fn a_path_is_checked_the_first_time_it_is_named() {
         let d = dir("locate");
         let missing = d.join("missing.png");
         let e = locate(missing.clone()).unwrap_err();
-        assert!(e.starts_with(&format!("cannot open template '{}': ", missing.display())), "{e}");
+        assert!(e.message().starts_with(&format!("cannot open template '{}': ", missing.display())), "{e}");
+        assert_eq!(e.reason(), &screen::TEMPLATE_NOT_FOUND);
         let bmp = d.join("dot.bmp");
         std::fs::write(&bmp, b"BM not really").unwrap();
-        assert!(locate(bmp).unwrap_err().starts_with("cannot open template '"), "not a PNG");
+        let e = locate(bmp).unwrap_err();
+        assert!(e.message().starts_with("cannot open template '"), "not a PNG");
+        assert_eq!(e.reason(), &screen::TEMPLATE_INVALID);
         let garbage = d.join("garbage.png");
         std::fs::write(&garbage, b"not a PNG at all").unwrap();
-        assert!(locate(garbage).is_err(), "no PNG header");
+        assert_eq!(locate(garbage).unwrap_err().reason(), &screen::TEMPLATE_INVALID, "no PNG header");
         let path = d.join("dot.png");
         test_write_dot(&path, [1, 2, 3], 0);
         assert_eq!(header(&path).unwrap(), (1, 1));
@@ -395,8 +428,21 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert_eq!(locate(path.clone()).unwrap(), path, "seen: taken as it is");
         let e = open(&path).err().unwrap();
-        assert!(e.starts_with(&format!("cannot open template '{}': ", path.display())), "{e}");
+        assert!(e.message().starts_with(&format!("cannot open template '{}': ", path.display())), "{e}");
+        assert_eq!(e.reason(), &screen::TEMPLATE_NOT_FOUND, "gone since");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Inside the package is a path under its root once its `..` are taken away.
+    #[test]
+    fn a_path_is_in_the_package_when_it_stays_under_its_root() {
+        let root = dir("package");
+        assert!(in_package(&root, &root.join("images").join("x.png")));
+        assert!(in_package(&root, &root.join("images/../x.png")));
+        assert!(!in_package(&root, &root.join("../x.png")));
+        assert!(!in_package(&root, &root.join("images/../../other/x.png")));
+        assert!(!in_package(&root, &std::env::temp_dir().join("elsewhere.png")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A PNG whose header reads and whose body does not is found out by the open, not the check.
@@ -411,7 +457,9 @@ mod tests {
         bytes.truncate(at + 4 + 2);
         std::fs::write(&path, bytes).unwrap();
         assert_eq!(locate(path.clone()).unwrap(), path, "the header reads");
-        assert!(open(&path).err().unwrap().starts_with(&format!("cannot open template '{}': ", path.display())));
+        let e = open(&path).err().unwrap();
+        assert!(e.message().starts_with(&format!("cannot open template '{}': ", path.display())), "{e}");
+        assert_eq!(e.reason(), &screen::TEMPLATE_INVALID);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -443,9 +491,9 @@ mod tests {
         let path = d.join("later.png");
         let f = Prepared::of(Raw::File(path.clone()));
         let e = f.make().err().unwrap();
-        assert!(e.starts_with(&format!("cannot open template '{}': ", path.display())), "{e}");
+        assert!(e.message().starts_with(&format!("cannot open template '{}': ", path.display())), "{e}");
         assert!(f.get().is_none(), "not kept");
-        assert_eq!(f.failed().as_deref(), Some(e.as_str()));
+        assert_eq!(f.failed().as_ref(), Some(&e));
         test_write_dot(&path, [3, 4, 5], 0);
         let (dec, count) = f.make().unwrap();
         assert_eq!((rgba(&dec), count), (vec![3, 4, 5, 255], 1), "made once it is there");
@@ -465,8 +513,8 @@ mod tests {
         let d = dir("panics");
         let path = d.join(TEST_PANICS);
         test_write_dot(&path, [1, 1, 1], 0);
-        assert_eq!(open(&path).err().as_deref(), Some(TEMPLATE_FAILED));
-        assert_eq!(open(&path).err().as_deref(), Some(TEMPLATE_FAILED), "tried again");
+        assert_eq!(open(&path).err(), Some(template_failed()));
+        assert_eq!(open(&path).err(), Some(template_failed()), "tried again");
         assert_eq!(test_made_on(&path.display().to_string()).len(), 2);
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -487,7 +535,7 @@ mod tests {
         assert!(Arc::ptr_eq(&got[0], &got[2]));
         assert_eq!(test_made_on(&what).len(), before + 1);
         let e = resolve([&handle, &Needle::File(d.join("gone.png"))], &mut opened).err().unwrap();
-        assert!(e.contains("gone.png"), "{e}");
+        assert!(e.message().contains("gone.png"), "{e}");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

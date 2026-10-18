@@ -222,6 +222,12 @@ fn look(ctx: &Context, known: &Arc<Mutex<Vec<super::Engine>>>) {
     }
 }
 
+/// Whether an engine of this build has the id `id`: what `host.speech.use` can be asked for, known
+/// before the worker's first look lists them.
+pub fn builds(id: &str) -> bool {
+    prism_sys::BACKENDS.iter().any(|name| id_for(name) == id)
+}
+
 /// The name a module uses for an engine, from the name prism reports.
 ///
 /// Lower case and without punctuation, so it survives a screen reader renaming itself between

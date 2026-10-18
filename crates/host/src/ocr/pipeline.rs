@@ -247,7 +247,7 @@ mod tests {
             (EngineOut::Lines(vec![]), Status::None),
             (EngineOut::Lines(vec![line(" ", vec![wb(" ", 0, 0, 1, 1)])]), Status::None),
             (EngineOut::Fallback { text: "  ".into(), content: region }, Status::None),
-            (EngineOut::Failed("screen capture failed".into()), Status::Failed),
+            (EngineOut::Failed(crate::errors::HostError::of(&crate::errors::screen::CAPTURE_FAILED)), Status::Failed),
         ] {
             let r = normalise(region, out, "en-US");
             assert_eq!(r.status, status);

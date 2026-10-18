@@ -180,7 +180,7 @@ rawset(T.host.screen, "cells", function(opts, cb)
     answer.value = { cells = T.paintCells(snap.picture or S.picture, r, opts.cols, opts.rows, opts.predicate),
       x = r[1], y = r[2], w = r[3] - r[1], h = r[4] - r[2] }
   else
-    answer.why = "the region is not inside the snapshot"
+    answer.why = T.E("outside", "the region is not inside the snapshot")
   end
   if cb == nil then return answer.value, answer.why end
   if opts.key then S.out[opts.key] = (S.out[opts.key] or 0) + 1 end
@@ -212,7 +212,7 @@ rawset(T.host.screen, "profile", function(opts, cb)
   if within(r, snap) then
     answer.value = T.paintProfile(snap.picture or S.picture, r, opts.axes == "both")
   else
-    answer.why = "the region does not overlap the snapshot"
+    answer.why = T.E("outside", "the region does not overlap the snapshot")
   end
   if cb == nil then return answer.value, answer.why end
   if opts.key then S.out[opts.key] = (S.out[opts.key] or 0) + 1 end
@@ -230,7 +230,9 @@ do
       assert(type(p) == "table" and #p == 2 and p[1] == math.floor(p[1]) and p[2] == math.floor(p[2]),
         "host.screen.pixels: points[" .. i .. "] is not { x, y } in whole numbers")
       local g = snap.region
-      if p[1] < g[1] or p[2] < g[2] or p[1] >= g[3] or p[2] >= g[4] then return nil, "the point is not inside the snapshot" end
+      if p[1] < g[1] or p[2] < g[2] or p[1] >= g[3] or p[2] >= g[4] then
+        return nil, T.E("outside", "the point is not inside the snapshot")
+      end
     end
     S.pointLists[#S.pointLists + 1] = #points
     return T.paintPixels(snap.picture or S.picture, points)
@@ -267,8 +269,9 @@ end
 
 -- A snapshot of corners against the module's budget, as the host keeps it (docs/api/screen.md):
 -- w * h * 4 bytes, five times that on a Mac, on top of S.snapHeld — what the module's other
--- snapshots hold, nothing unless a scenario says — within 128 MiB, or the call raises the host's
--- sentence. S.snapFails is the reason a capture that fails answers. (The primary screen is
+-- snapshots hold, nothing unless a scenario says — within 128 MiB, or the call answers nil and the
+-- host's error value (`too_large`). S.snapFails is the message of the error value (`failed`) a
+-- capture that fails answers. (The primary screen is
 -- S.screenSize, 2560 x 1440 unless a scenario says: overlay_host_panel_tests.rs, T.modules.)
 S.snapHeld = 0
 -- The change waits out (host.screen.snapshot with `change`): each answered on the turn after the
@@ -319,11 +322,11 @@ do
     if cb == nil and type(r) == "table" and #r == 4 then
       local bytes = (r[3] - r[1]) * (r[4] - r[2]) * 4 * (T.host.os.current == "macos" and 5 or 1)
       if S.snapHeld + bytes > 128 * 1024 * 1024 then
-        error(string.format("host.screen.snapshot: this module's snapshots would hold %.1f MiB; the limit is 128 MiB "
+        return nil, T.E("too_large", string.format("this module's snapshots would hold %.1f MiB; the limit is 128 MiB "
           .. "per module VM (512 MiB in the whole application). Release the ones you no longer need with s:release()",
-          (S.snapHeld + bytes) / 1048576), 2)
+          (S.snapHeld + bytes) / 1048576))
       end
-      if S.snapFails then return nil, S.snapFails end
+      if S.snapFails then return nil, T.E("failed", S.snapFails) end
     end
     if cb ~= nil and opts.change ~= nil then
       local c = opts.change
@@ -605,7 +608,7 @@ function T.listReads()
       local g = snap and snap.region
       if g and (r[3] <= g[1] or r[4] <= g[2] or r[1] >= g[3] or r[2] >= g[4]) then
         return { text = "", words = {}, lines = {}, skipped = false, status = "failed",
-          error = "the region does not overlap the snapshot", name = name }
+          error = T.E("outside", "the region does not overlap the snapshot"), name = name }
       end
       local said = S.ocr and S.ocr(r, name, snap) or ""
       local reading
@@ -719,7 +722,7 @@ end
 -- host.hotkey.register, which keeps the page key's callback (S.pageKeys), and host.window.focus,
 -- noted in the page's order.
 S.pages = {}        -- every page described, in order: { opts, shows, hides, posts, prepares, closed, page }
-S.pageAnswers = {}  -- what the next shows answer, in turn: { ok, why }; then "not ready yet" until loaded
+S.pageAnswers = {}  -- what the next shows answer, in turn: { ok, err }; then `not_ready` until loaded
 S.pageLoaded = false
 S.pageOrder = {}    -- "post <kind>", "show", "hide", "focus <id>", "sound <path>", in order
 S.postRaises = nil  -- a message: the next page:post raises it, as the host's does for what it cannot write
@@ -727,7 +730,8 @@ S.settings, S.settingDefs, S.settingCbs = {}, {}, {}
 S.settingSets = 0   -- every host.settings.set of the module's, counted
 S.pageKeys, S.pageKeyIds = {}, {}  -- spec -> callback; id -> spec, while registered
 S.badKeys = {}      -- spec -> the reasons host.keys.check gives for it; `ok` as the host's (keys.md)
-S.registerRaises = {} -- spec -> what host.hotkey.register raises for it, as for a claim the system refused
+S.registerRefuses = {} -- spec -> the error value host.hotkey.register answers with nil: a key the system keeps
+S.registerNotHeld = {} -- spec -> the one it answers beside the id: a claim made that another program holds now
 S.sounds = {}
 
 -- The page's window as host.window reports it while the page is in front: one of this
@@ -746,8 +750,8 @@ function T.pageHost(AH)
       assert(self == p and not st.closed, "page:show on the page in use")
       st.shows[#st.shows + 1] = { focus = o and o.focus, avoid = o and o.avoid }
       S.pageOrder[#S.pageOrder + 1] = "show"
-      local a = table.remove(S.pageAnswers, 1) or (S.pageLoaded and { true } or { false, "not ready yet" })
-      if a[1] or a[2] == "declined by the system" then
+      local a = table.remove(S.pageAnswers, 1) or (S.pageLoaded and { true } or { false, T.E("not_ready", "not ready yet") })
+      if a[1] or T.is(a[2], "refused") then
         st.shown = true
         p.window = T.PAGE_WIN.id
       end
@@ -782,7 +786,7 @@ function T.pageHost(AH)
       assert(self == p, "page:prepare is a method")
       st.prepares += 1
       if S.pageLoaded then return true end
-      return false, "not ready yet"
+      return false, T.E("not_ready", "not ready yet")
     end
     function p.isShown() return st.shown end
     function p.focus() return st.shown end
@@ -825,11 +829,11 @@ function T.pageHost(AH)
   local register, unregister = T.host.hotkey.register, T.host.hotkey.unregister
   rawset(T.host.hotkey, "register", function(spec, fn)
     assert(S.badKeys[spec] == nil, "registered a key check refuses: " .. spec)
-    if S.registerRaises[spec] then error(S.registerRaises[spec], 0) end
+    if S.registerRefuses[spec] then return nil, S.registerRefuses[spec] end
     local id = register(spec, fn)
     S.pageKeyIds[id] = spec
     S.pageKeys[spec] = fn
-    return id
+    return id, S.registerNotHeld[spec]
   end)
   rawset(T.host.hotkey, "unregister", function(id)
     local spec = S.pageKeyIds[id]
@@ -840,10 +844,11 @@ function T.pageHost(AH)
   AH.sound = T.strict("host.sound", { play = function(path)
     S.sounds[#S.sounds + 1] = path
     S.pageOrder[#S.pageOrder + 1] = "sound " .. path
+    return true
   end })
   -- `ok` false only for the reasons that mean the key cannot work here; a tap, `altgr` and
   -- `composes` leave it true (docs/api/keys.md, host.keys.check).
-  local CANNOT = { parse = true, reserved = true, ["no-keycode"] = true, voiceover = true }
+  local CANNOT = { parse = true, reserved = true, no_keycode = true, voiceover = true }
   -- host.keys.normalize as the host's, for the specs these tests write: the modifiers by their role,
   -- in the platform's order and words, and the key with its first letter capitalised; nil where a
   -- modifier is none of the spec's words (docs/api/keys.md, host.keys.normalize).
@@ -913,8 +918,9 @@ function T.lastPost(kind)
   end
   return nil
 end
--- The page sends `m`; the page has loaded; the page's window goes ("user" or "failed"); the
--- settings dialog's OK for `key`, its callbacks run as the module's handlers.
+-- The page sends `m`; the page has loaded; the page's window goes ("user" alone, or "failed" with
+-- the host's error value beside it); the settings dialog's OK for `key`, its callbacks run as the
+-- module's handlers.
 function T.pageMsg(m)
   local got = T.call("page message", T.page().opts.onMessage, m)
   assert(got == "Ran", "the page's message: " .. got)
@@ -924,8 +930,8 @@ function T.pageReady()
   local got = T.call("page ready", T.page().opts.onReady)
   assert(got == "Ran", "the page's onReady: " .. got)
 end
-function T.pageClosed(why)
-  local got = T.call("page close", T.page().opts.onClose, why)
+function T.pageClosed(how)
+  local got = T.call("page close", T.page().opts.onClose, how, how == "failed" and T.E("failed", "the page failed") or nil)
   assert(got == "Ran", "the page's onClose: " .. got)
 end
 function T.setting(key, v)
@@ -1003,7 +1009,11 @@ function T.avenger()
     return b
   end
   rawset(T.host, "input", T.strict("host.input", {
+    -- S.clickAnswers, when set: one entry per click, `true` for a click made or the error value a
+    -- refused one is answered with, nothing clicked (host.input.click's `false, err`).
     click = function(x, y, opts)
+      local answer = S.clickAnswers and table.remove(S.clickAnswers, 1)
+      if answer ~= nil and answer ~= true then return false, answer end
       S.clicks[#S.clicks + 1] = { x, y, button = opts and opts.button }
       if S.browserClick then S.browserClick(x, y, opts and opts.button) end
       if S.onClick then S.onClick(#S.clicks) end
@@ -1521,7 +1531,7 @@ fn paint_cells(_: &Lua, (p, region, cols, rows, pred): (Table, Table, u32, u32, 
     let pred = Predicate::parse(&pred).map_err(|e| mlua::Error::external(e.to_string()))?;
     let spec = CellSpec::new(cols, rows, pred).map_err(mlua::Error::external)?;
     let img = picture_of(&p)?.image(x, y, w, h);
-    let cells = of_capture(&img, w as i32, h as i32, &spec).map_err(mlua::Error::external)?;
+    let cells = of_capture(&img, w as i32, h as i32, &spec).map_err(|e| mlua::Error::external(e.to_string()))?;
     Ok(to_hex(&cells))
 }
 
@@ -2942,7 +2952,8 @@ fn without_the_preset_database_the_module_is_stage_1s() {
 
 /// Installed but not readable — its index missing, or of another format: Preset info says so, the
 /// log says why, the index is not read again, and ◀ and ▶ say what they read, as without it.
-/// Nothing is read at load.
+/// Nothing is read at load. The reader answers nil and an error value, `invalid`, its message the
+/// sentence the log has, and the same one at every call after.
 #[test]
 fn a_preset_database_that_cannot_be_read_leaves_the_steps_as_they_were() {
     run_mac(r##"
@@ -2964,6 +2975,10 @@ fn a_preset_database_that_cannot_be_read_leaves_the_steps_as_they_were() {
         local header = T.avengerAt80("AR Band Pass Slide")
         T.ok(T.info(header, "AR Band Pass Slide") == "the preset database cannot be read", T.said())
         T.ok(T.count("data/index.json is format 2, and this reader reads format 1") == 1, T.dump())
+        local idx, err = S.presets.index()
+        T.ok(idx == nil and T.is(err, "invalid", "data/index.json is format 2, and this reader reads format 1"), T.what(err))
+        local x, err2 = S.presets.expansion("Alpha")
+        T.ok(x == nil and rawequal(err2, err), "the index's error, the same value: " .. T.what(err2))
     "##);
 }
 
@@ -2991,7 +3006,7 @@ fn the_preset_databases_reader_interprets_its_format() {
         T.ok(#tabs == 2 and tabs[1].buttons[2].name == "Gate" and tabs[2].knobs[1].name == "Macro 4"
           and tabs[2].knobs[1].default and tabs[2].knobs[2].name == "Wobble" and tabs[2].buttons[1].name == "MacroBtn 3")
         local none, why = P.expansion("Omega")
-        T.ok(none == nil and why == "the index has no expansion 'Omega'", tostring(why))
+        T.ok(none == nil and T.is(why, "not_found", "the index has no expansion 'Omega'"), T.what(why))
         local reads = table.concat(S.presetReads, " ")
         T.ok(reads == "data/index.json data/expansions/alpha.json", reads)
     "##);

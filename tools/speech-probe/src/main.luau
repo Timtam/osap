@@ -58,14 +58,17 @@ local function examine(chosen, engines)
     )
   end
 
-  local asked, accepted = pcall(function()
+  -- use() answers true, or false and an error value whose code says why (docs/api/speech.md).
+  local asked, accepted, err = pcall(function()
     return host.speech.use(chosen.id)
   end)
-  report(
-    "chose '%s' (%s): use() %s",
-    chosen.name, chosen.id,
-    asked and (accepted and "accepted" or "REFUSED") or "THREW"
-  )
+  local outcome = "THREW"
+  if asked and accepted then
+    outcome = "accepted"
+  elseif asked then
+    outcome = "REFUSED (" .. (err and (err.code .. ": " .. err) or "no error value") .. ")"
+  end
+  report("chose '%s' (%s): use() %s", chosen.name, chosen.id, outcome)
 
   -- The say itself. A runner has no audio device, so nothing is heard and nothing should be:
   -- what is being asked is whether handing a line over survives the trip at all. A crash here

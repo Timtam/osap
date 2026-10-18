@@ -144,18 +144,24 @@ is what the "Offer my Personal Voice to modules" switch does.
 
 ## host.speech.use(id) {#host-speech-use}
 
-**Signature:** `host.speech.use(id: string?)` → `boolean`
+**Signature:** `host.speech.use(id: string?)` → `true`, or `false, Error`
 
-Chooses what speaks for **this module**. `nil` returns it to the ordinary path.
+Chooses what speaks for **this module**. `nil` returns it to the ordinary path, and always answers `true`.
 
 ```luau
 -- A module that wants its own voice, so its announcements are not mistaken for the reader's
-if not host.speech.use("sapi") then
-  host.log.info("SAPI is not available here; staying with the usual voice")
+local ok, err = host.speech.use("sapi")
+if not ok and err.code ~= host.errors.NOT_READY then -- not_ready: ask again in a moment
+  host.log.info("staying with the usual voice: " .. err)
 end
 ```
 
-Returns `false` when the engine is not there — unknown to this build, or a screen reader that is not running. It refuses rather than accepting and quietly speaking somewhere else, because a call that reports success and does something different is a promise not kept.
+Returns `true` once the choice is made, or `false` and an [error value](./errors.md) when the engine is not there, the choice left as it was:
+- `not_found` — `no speech engine '…' in this build`: no engine of this build, nor any voice in the list, has that id.
+- `not_ready` — `the speech engines are not known yet`: the list has not been read since the application started (see [`engines`](#host-speech-engines)), and the id is one it may hold. Ask again in a moment.
+- `unavailable` — `'…' is not running`, with the engine's name: a screen reader that is not running.
+
+It refuses rather than accepting and quietly speaking somewhere else, because a call that reports success and does something different is a promise not kept. An `id` that is neither a string nor `nil` raises; a number is taken as its digits.
 
 **The choice belongs to the module VM**, which is the unit this API can honestly promise. `host.speech` falls through to the VM owner rather than to the module that defined the code, so a `use` written inside a shared framework belongs to whichever module inherited it — and that is the module somebody installed and enabled, which makes it the right owner of the decision.
 
@@ -165,11 +171,11 @@ A chosen engine that later stops answering falls through to the ordinary path ra
 
 ### Windows {#host-speech-use-windows}
 
-Any id from `host.speech.engines()` that reports `available`.
+Any id from `host.speech.engines()` that reports `available`. Before the list has filled, an id of the nine this build reaches is `not_ready` and any other is `not_found`.
 
 ### macOS {#host-speech-use-macos}
 
-Any id from `host.speech.engines()` that reports `available`, including `voiceover`.
+Any id from `host.speech.engines()` that reports `available`, including `voiceover`; `voiceover` while VoiceOver is not running is `unavailable`. Before the installed voices are read, the list holds `voiceover` alone, and any other id is `not_ready`.
 
 There is no per-voice worker here, unlike Windows: a voice is a property of each utterance
 rather than of the synthesiser, so choosing one costs nothing and the first line after a

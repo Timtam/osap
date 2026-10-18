@@ -44,6 +44,7 @@
 -- changes — a drum knob's reset — `same` is left out, and the change wait's own verdict on the
 -- watched boxes is the answer: "changed" or, at its bound, "unchanged", with no looking on.
 
+local O = host.require("com.platform.overlay")
 local H = host.include("src/header.luau")
 local P = host.include("src/read/picture.luau")
 local Open = host.include("src/read/open.luau")
@@ -52,6 +53,7 @@ local Pp = host.include("src/popups.luau")
 local Act = {}
 
 local R = nil -- main.luau's ring helpers (Act.start)
+local Header = nil -- the header overlay, the one with menu tests (Act.start)
 
 -- How long a change is looked for after the click, at most — the longest one change wait may wait
 -- (docs/api/screen.md) and the project's measure of Avenger's redraw, about 150 ms and up to 500,
@@ -60,24 +62,36 @@ Act.CHANGE_WITHIN = 2000
 -- What counts as changed in a change wait: a channel 16 apart, in 4 pixels — the host's defaults.
 local TOLERANCE, MIN_PIXELS = 16, 4
 
--- Why a choice in Avenger's menu was not made (O:chooseMenuItem's `why`), in the page's words.
+-- Why a choice in Avenger's menu was not made, by the code of O:chooseMenuItem's error value
+-- (docs/api/overlay.md), in the page's words; another code says its message.
 local NOT_CHOSEN = {
-  due = "no menu was seen; nothing was chosen",
+  no_menu = "no menu was seen; nothing was chosen",
   closed = "the menu closed before anything was chosen",
   unplaced = "the menu cannot be placed now; nothing was chosen",
   covered = "something else is covering the menu; nothing was chosen",
-  refused = "the menu could not be clicked; nothing was chosen",
-  untaken = "the menu did not take the choice",
-  ["no submenu"] = "its submenu did not open; nothing was chosen in it",
-  ["unfit submenu"] = "no submenu it can be chosen in was seen; nothing was chosen in it",
-  unfollowed = "its submenu cannot be followed now; nothing was chosen",
-  inactive = "VPS Avenger is not in front; nothing was chosen",
-  ["no tests"] = "the menu cannot be seen here; nothing was chosen",
+  outside = "the menu could not be clicked; nothing was chosen",
+  refused = "the menu did not take the choice",
+  no_submenu = "its submenu did not open; nothing was chosen in it",
+  unfit_submenu = "no submenu it can be chosen in was seen; nothing was chosen in it",
+  not_ready = "its submenu cannot be followed now; nothing was chosen",
+  not_in_front = "VPS Avenger is not in front; nothing was chosen",
+  moved_on = "something else came first; nothing was chosen",
+  gone = "VPS Avenger's window is gone; nothing was chosen",
   busy = "the last choice is still being made",
 }
 
-function Act.notChosen(why)
-  return NOT_CHOSEN[why] or ("nothing was chosen (" .. tostring(why) .. ")")
+function Act.notChosen(err)
+  return NOT_CHOSEN[err.code] or ("nothing was chosen (" .. tostring(err) .. ")")
+end
+
+-- Where no menu can be seen: a trip's overlay is the warning box while the box holds the slot (a
+-- Save or Initialize waiting for it), and the box has no menu tests, so O:chooseMenuItem and
+-- trip:afterMenu raise there — a mistake in the call, by the runtime's rule. Nothing is chosen on
+-- it, and the page is told so. Only the header has the menu tests (main.luau, its binding).
+Act.NO_MENU_HERE = "the menu cannot be seen here; nothing was chosen"
+
+function Act.menuHere(o)
+  return o == Header
 end
 
 local function corners(r)
@@ -279,6 +293,11 @@ function Act.run(o, spec, done, trip)
       log("nothing clicked — its file dialog is waited for only in a trip of the page's")
       return done({ part = before, error = "that is chosen from the page" })
     end
+    if not Act.menuHere(o) then
+      snap:release()
+      log("nothing chosen — overlay '%s' has no menu tests", tostring(o.label))
+      return done({ part = before, error = Act.NO_MENU_HERE })
+    end
     local pick = {}
     local left = menu.button == "left"
     local opened = o:chooseMenuItem({
@@ -288,13 +307,13 @@ function Act.run(o, spec, done, trip)
       menuItem = Pp.row(label, menu.item, pick),
       submenu = menu.submenu and { menuItem = Pp.submenuRow(label, menu.submenu) } or nil,
       retries = menu.retries,
-      onDone = function(m, chosen, why)
+      onDone = function(m, chosen, err)
         if not chosen then
           -- A right click's popup is closed with Escape, a left opener's by clicking the opener
           -- again (main.luau).
-          if why ~= "busy" then R.closeLeftOpen(m, pick, why, label, left and click.at or nil) end
+          if err.code ~= O.errors.BUSY then R.closeLeftOpen(m, pick, err, label, left and click.at or nil) end
           snap:release()
-          return done({ part = before, error = Act.notChosen(why) })
+          return done({ part = before, error = Act.notChosen(err) })
         end
         if menu.dialog then
           snap:release()
@@ -336,7 +355,13 @@ function Act.run(o, spec, done, trip)
   end
   local ok, said
   if click.double then
-    ok, said = R.doubleAt(o, label, click.at, click.button, true, watchFromNow)
+    -- The change watched for once the second click has gone out; one that was not made ends it.
+    ok, said = R.doubleAt(o, label, click.at, click.button, true, function(okD, saidD)
+      if okD then return watchFromNow() end
+      snap:release()
+      if not here("after the double-click") then return movedOn() end
+      done({ part = before, sentence = saidD })
+    end)
   else
     ok, said = R.clickAt(o, label, click.at, click.button, true)
   end
@@ -370,8 +395,8 @@ function Act.partBefore(pl, part, text, log, fields)
 end
 
 -- What main.luau hands over: its clicks, its reads of the name and its tidying up after a popup.
-function Act.start(ring)
-  R = ring
+function Act.start(ring, header)
+  R, Header = ring, header
 end
 
 return Act

@@ -384,7 +384,8 @@ function Open.read(o, opts)
     return nil, "the plug-in cannot be placed now (no factor)", Open.NO_FACTOR
   end
   local region, cut = pictureRegion(origin.client)
-  -- Guarded: corners past what this module's snapshots may hold raise (docs/api/screen.md).
+  -- Corners past what this module's snapshots may hold are answered nil and why; guarded all the
+  -- same, for a call the host refuses as a mistake (docs/api/screen.md).
   local taken, snap, why = pcall(host.screen.snapshot, { region = region })
   if not (taken and snap) then
     return nil, "no picture of " .. corners(region) .. ": " .. tostring(taken and why or snap), Open.NO_PICTURE

@@ -67,6 +67,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::backend::{Backend, ElementAnswer, ElementAsk, ElementFailure, ElementOutcome, ElementRunner};
+use crate::errors::element::{self as reason, NESTED, OWN_WINDOW, REPLACED};
+use crate::errors::{Code, HostError};
 use crate::logging;
 use crate::ocr::sched::Owner;
 use crate::ocr::types::{current_priority, Priority};
@@ -81,20 +83,19 @@ const THREAD: &str = "accessibility";
 pub(crate) const SLOW: Duration = Duration::from_millis(50);
 
 /// What a module is told for a question the thread did not ask because it waited behind one the
-/// same program did not answer in time; `{}` is the reason that one got.
-fn not_asked(why: &str) -> String {
-    format!("{why} to an earlier question, so this one was not asked")
+/// same program did not answer in time — `earlier`, that one's answer — under that one's code: the
+/// program's timeout, as UI Automation answers it (`backend/uia.rs`), and its higher rights or its
+/// going away should a platform ever answer those as not answered in time. The other reasons a
+/// module is told without the question being put to the program are [`REPLACED`], [`NESTED`] and
+/// [`OWN_WINDOW`] (see the module's docs), and the thread's own failures.
+fn not_asked(earlier: &HostError) -> HostError {
+    let r = match earlier.code() {
+        Code::Denied => &reason::NOT_ASKED_DENIED,
+        Code::Gone => &reason::NOT_ASKED_GONE,
+        _ => &reason::NOT_ASKED_TIMEOUT,
+    };
+    HostError::with(r, format!("{earlier} to an earlier question, so this one was not asked"))
 }
-
-/// What a module is told for a question replaced, before it was asked, by a newer one of the same
-/// module with the same `opts.key`.
-pub(crate) const REPLACED: &str = "a newer question with the same key was asked before this one";
-
-/// What a question asked inside another one's wait is told: the event loop is already waiting.
-pub(crate) const NESTED: &str = "another accessibility question is being waited for";
-
-/// What a question about a window of this application itself is told (see the module's docs).
-pub(crate) const OWN_WINDOW: &str = "the window is this application's own, which is not asked about";
 
 /// Which questions the thread asks first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -369,7 +370,8 @@ fn serve(inner: Arc<Inner>, runner: ElementRunner, done: Sender<Done>) {
         // A panic's report is the host's, not the program's answer.
         let program = ran.is_ok();
         let outcome = ran.unwrap_or_else(|p| {
-            Err(ElementFailure { why: format!("the host's accessibility thread failed: {p}"), unanswered: false })
+            let why = HostError::with(&reason::THREAD_FAILED, format!("the host's accessibility thread failed: {p}"));
+            Err(ElementFailure { why, unanswered: false })
         });
         let took = t.elapsed();
         if took >= SLOW {
@@ -378,8 +380,7 @@ fn serve(inner: Arc<Inner>, runner: ElementRunner, done: Sender<Done>) {
         let unanswered = matches!(&outcome, Err(f) if f.unanswered);
         let (to, behind) = lock(&inner.queue).finish(unanswered);
         answer(to, &outcome, program, &done);
-        if !behind.is_empty() {
-            let why = outcome.as_ref().err().map(|f| f.why.clone()).unwrap_or_default();
+        if let (false, Err(earlier)) = (behind.is_empty(), &outcome) {
             logging::line(
                 "uia",
                 &format!(
@@ -387,7 +388,7 @@ fn serve(inner: Arc<Inner>, runner: ElementRunner, done: Sender<Done>) {
                     behind.len()
                 ),
             );
-            let told: ElementOutcome = Err(ElementFailure { why: not_asked(&why), unanswered: true });
+            let told: ElementOutcome = Err(ElementFailure { why: not_asked(&earlier.why), unanswered: true });
             for job in behind {
                 answer(job.to, &told, false, &done);
             }
@@ -445,7 +446,7 @@ pub(crate) struct Waited {
 enum Started {
     No,
     Yes,
-    Failed(String),
+    Failed(HostError),
 }
 
 /// The questions on their way and the answers coming back. Event loop only, like the rest of
@@ -511,19 +512,19 @@ impl Elements {
     /// not for a question that shares the one being asked: that wait is for its own answer.
     fn ask_on(&self, runner: ElementRunner, ask: ElementAsk, input_epoch: u64, guard: Option<&Arc<Guard>>) -> Waited {
         let refused =
-            |why: String| Waited { outcome: Err(ElementFailure { why, unanswered: false }), program: false, behind: Duration::ZERO };
+            |why: HostError| Waited { outcome: Err(ElementFailure { why, unanswered: false }), program: false, behind: Duration::ZERO };
         if self.waiting.get() {
-            return refused(NESTED.to_string());
+            return refused(HostError::of(&NESTED));
         }
         if let Err(why) = self.start(runner) {
             return refused(why);
         }
         let pid = (runner.process_of)(ask.hwnd());
         if pid == std::process::id() {
-            return refused(OWN_WINDOW.to_string());
+            return refused(HostError::of(&OWN_WINDOW));
         }
         let Some(signal) = Signal::new() else {
-            return refused("the event the host waits on for the answer could not be made".to_string());
+            return refused(HostError::of(&reason::NO_SIGNAL));
         };
         let back = Arc::new(Back::new(signal, guard.cloned()));
         let asked = Instant::now();
@@ -553,7 +554,7 @@ impl Elements {
         };
         let (outcome, program) = back
             .take()
-            .unwrap_or_else(|| (Err(ElementFailure { why: "the answer was lost".to_string(), unanswered: false }), false));
+            .unwrap_or_else(|| (Err(ElementFailure { why: HostError::of(&reason::LOST), unanswered: false }), false));
         Waited { outcome, program, behind }
     }
 
@@ -563,7 +564,7 @@ impl Elements {
     pub(crate) fn ask_for(&self, runner: ElementRunner, ask: ElementAsk, input_epoch: u64, pending: Pending) {
         let (owner, key) = (pending.owner, pending.key.clone());
         let token = self.keep(pending);
-        let refuse = |why: String| {
+        let refuse = |why: HostError| {
             let _ = self.done_tx.send((token, Err(ElementFailure { why, unanswered: false }), false));
         };
         if let Err(why) = self.start(runner) {
@@ -571,7 +572,7 @@ impl Elements {
         }
         let pid = (runner.process_of)(ask.hwnd());
         if pid == std::process::id() {
-            return refuse(OWN_WINDOW.to_string());
+            return refuse(HostError::of(&OWN_WINDOW));
         }
         let lane = Lane::of(current_priority());
         if lock(&self.inner.queue).submit(ask, pid, lane, input_epoch, To::Call { token, owner, key }) == Put::New {
@@ -587,7 +588,7 @@ impl Elements {
         let token = self.next.get() + 1;
         self.next.set(token);
         self.host_pending.borrow_mut().insert(token, landing);
-        let refuse = |why: String| {
+        let refuse = |why: HostError| {
             let _ = self.done_tx.send((token, Err(ElementFailure { why, unanswered: false }), false));
         };
         if let Err(why) = self.start(runner) {
@@ -595,7 +596,7 @@ impl Elements {
         }
         let pid = (runner.process_of)(ask.hwnd());
         if pid == std::process::id() {
-            return refuse(OWN_WINDOW.to_string());
+            return refuse(HostError::of(&OWN_WINDOW));
         }
         if lock(&self.inner.queue).submit(ask, pid, Lane::Interactive, input_epoch, To::Host { token }) == Put::New {
             self.inner.work.notify_one();
@@ -614,7 +615,7 @@ impl Elements {
     pub(crate) fn replace(&self, owner: Owner, key: &str) {
         let replaced = lock(&self.inner.queue).take_calls(|o, k| o == owner && k == Some(key));
         for token in replaced {
-            let _ = self.done_tx.send((token, Err(ElementFailure { why: REPLACED.to_string(), unanswered: false }), false));
+            let _ = self.done_tx.send((token, Err(ElementFailure { why: HostError::of(&REPLACED), unanswered: false }), false));
         }
     }
 
@@ -684,7 +685,7 @@ impl Elements {
 
     /// The thread, started at the first question. One that cannot be started says so once and
     /// answers every question with why.
-    fn start(&self, runner: ElementRunner) -> Result<(), String> {
+    fn start(&self, runner: ElementRunner) -> Result<(), HostError> {
         let mut started = self.started.borrow_mut();
         match &*started {
             Started::Yes => return Ok(()),
@@ -698,8 +699,8 @@ impl Elements {
                 Ok(())
             }
             Err(e) => {
-                let why = format!("the host could not start its accessibility thread: {e}");
-                logging::line("uia", &why);
+                let why = HostError::with(&reason::THREAD_NOT_STARTED, format!("the host could not start its accessibility thread: {e}"));
+                logging::line("uia", &why.to_string());
                 *started = Started::Failed(why.clone());
                 Err(why)
             }
@@ -1063,9 +1064,7 @@ mod tests {
                 open = OPEN.wait(open).unwrap();
             }
             match ask {
-                ElementAsk::Find { name, .. } if name == "late" => {
-                    Err(ElementFailure { why: "the program did not answer within 1000 ms".into(), unanswered: true })
-                }
+                ElementAsk::Find { name, .. } if name == "late" => Err(ElementFailure { why: HostError::of(&reason::TIMEOUT), unanswered: true }),
                 ElementAsk::Find { name, .. } => Ok(ElementAnswer::Found(name == "yes")),
                 _ => ask.nothing(),
             }
@@ -1093,18 +1092,18 @@ mod tests {
         let mut got: Vec<(usize, ElementOutcome, bool)> = due.into_iter().map(|d| (d.pending.answer.idx, d.outcome, d.program)).collect();
         got.sort_by_key(|g| g.0);
         assert_eq!(got.len(), 4);
-        let late = Err(ElementFailure { why: "the program did not answer within 1000 ms".into(), unanswered: true });
+        let late = Err(ElementFailure { why: HostError::of(&reason::TIMEOUT), unanswered: true });
         assert_eq!((&got[0].1, got[0].2), (&late, true), "the program's own not known");
+        let Err(behind) = &got[1].1 else { panic!("{:?}", got[1].1) };
         assert_eq!(
-            (&got[1].1, got[1].2),
+            (behind.why.reason(), behind.why.message(), behind.unanswered, got[1].2),
             (
-                &Err(ElementFailure {
-                    why: "the program did not answer within 1000 ms to an earlier question, so this one was not asked".into(),
-                    unanswered: true
-                }),
+                &reason::NOT_ASKED_TIMEOUT,
+                "the program did not answer within 1000 ms to an earlier question, so this one was not asked",
+                true,
                 false
             ),
-            "the same program's question, behind it, not put to it"
+            "the same program's question, behind it, not put to it, under the earlier one's code"
         );
         assert_eq!((&got[2].1, &got[3].1), (&Ok(ElementAnswer::Found(true)), &Ok(ElementAnswer::Found(true))));
         assert!(got[2].2 && got[3].2);
@@ -1115,16 +1114,23 @@ mod tests {
         assert_eq!(ASKED.load(Ordering::SeqCst), 3);
         // A runner that panics: not known, the thread goes on, and it is no answer of the program's.
         let w = e.ask_on(runner, find(3, "boom"), 0, None);
-        assert!(!w.program && matches!(&w.outcome, Err(f) if f.why.starts_with("the host's accessibility thread failed")), "{:?}", w.outcome);
+        assert!(
+            !w.program
+                && matches!(&w.outcome, Err(f) if f.why.reason() == &reason::THREAD_FAILED
+                    && f.why.message().starts_with("the host's accessibility thread failed")),
+            "{:?}",
+            w.outcome
+        );
         assert_eq!(e.ask_on(runner, find(3, "yes"), 0, None).outcome, Ok(ElementAnswer::Found(true)));
         assert_eq!(ASKED.load(Ordering::SeqCst), 5);
         // A window of this application is not asked about, with a callback or without.
         let own = std::process::id() as isize;
         let w = e.ask_on(runner, find(own, "x"), 0, None);
-        assert_eq!((w.outcome, w.program), (Err(ElementFailure { why: OWN_WINDOW.into(), unanswered: false }), false));
+        let own_window = Err(ElementFailure { why: HostError::of(&OWN_WINDOW), unanswered: false });
+        assert_eq!((&w.outcome, w.program), (&own_window, false));
         e.ask_for(runner, find(own, "x"), 0, p(5));
         let due = e.take_due();
-        assert_eq!((due.len(), &due[0].outcome, due[0].program), (1, &Err(ElementFailure { why: OWN_WINDOW.into(), unanswered: false }), false));
+        assert_eq!((due.len(), &due[0].outcome, due[0].program), (1, &own_window, false));
         assert_eq!(ASKED.load(Ordering::SeqCst), 5, "neither was put to the thread");
         assert!(e.pending.borrow().is_empty(), "every callback answered once");
     }
@@ -1191,7 +1197,7 @@ mod tests {
         let e = Elements::new();
         e.waiting.set(true);
         let w = e.ask_on(runner, find(1, "x"), 0, None);
-        assert_eq!((w.outcome, w.program), (Err(ElementFailure { why: NESTED.into(), unanswered: false }), false));
+        assert_eq!((w.outcome, w.program), (Err(ElementFailure { why: HostError::of(&NESTED), unanswered: false }), false));
         assert!(matches!(&*e.started.borrow(), Started::No), "nothing was started for it");
         e.waiting.set(false);
         let stub = crate::backend::stub::StubBackend::default();
@@ -1228,7 +1234,7 @@ mod tests {
         e.replace(VM, "menu");
         assert!(lock(&e.inner.queue).jobs.is_empty(), "not asked");
         let due = e.take_due();
-        assert_eq!((due.len(), &due[0].outcome, due[0].program), (1, &Err(ElementFailure { why: REPLACED.into(), unanswered: false }), false));
+        assert_eq!((due.len(), &due[0].outcome, due[0].program), (1, &Err(ElementFailure { why: HostError::of(&REPLACED), unanswered: false }), false));
         assert!(e.pending_with(VM, "menu"));
         e.settle(due[0].pending.out());
         assert!(!e.pending_with(VM, "menu"));
@@ -1316,7 +1322,7 @@ mod tests {
     #[test]
     fn a_slow_question_says_what_it_asked_and_what_came_of_it() {
         let any = ElementAsk::FindAny { hwnd: 4242, names: vec!["Kontakt 8".into(), "Kontakt 7".into()], types: vec![50032, 50033] };
-        let late = Err(ElementFailure { why: "the program did not answer within 1000 ms".into(), unanswered: true });
+        let late = Err(ElementFailure { why: HostError::of(&reason::TIMEOUT), unanswered: true });
         assert_eq!(
             slow_line(&any, 77, Duration::from_millis(1003), &late),
             "findAny(Kontakt 8/Kontakt 7) of window 4242 (process 77) took 1003 ms on the accessibility thread: \
@@ -1326,8 +1332,23 @@ mod tests {
         assert!(slow_line(&any, 77, Duration::from_millis(60), &Ok(ElementAnswer::Index(None))).ends_with(": nothing found"));
         let dump = ElementAsk::RawDump { hwnd: 9 };
         assert_eq!(
-            slow_line(&dump, 1, Duration::from_millis(5000), &Ok(ElementAnswer::Nodes(Vec::new(), Some("the program is gone".into())))),
+            slow_line(&dump, 1, Duration::from_millis(5000), &Ok(ElementAnswer::Nodes(Vec::new(), Some(HostError::of(&reason::PROGRAM_GONE))))),
             "rawDump() of window 9 (process 1) took 5000 ms on the accessibility thread: 0 element(s), and then the program is gone"
         );
+    }
+
+    /// A question not asked behind one its program did not answer is told so in that one's words,
+    /// under that one's code — not a code of its own (D12 of the typed-errors plan).
+    #[test]
+    fn a_question_not_asked_has_the_earlier_ones_code() {
+        for (earlier, told) in [
+            (HostError::of(&reason::TIMEOUT), &reason::NOT_ASKED_TIMEOUT),
+            (HostError::of(&reason::DENIED), &reason::NOT_ASKED_DENIED),
+            (HostError::of(&reason::PROGRAM_GONE), &reason::NOT_ASKED_GONE),
+        ] {
+            let e = not_asked(&earlier);
+            let said = format!("{earlier} to an earlier question, so this one was not asked");
+            assert_eq!((e.reason(), e.code(), e.message()), (told, earlier.code(), said.as_str()));
+        }
     }
 }

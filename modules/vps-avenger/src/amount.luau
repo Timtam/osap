@@ -403,8 +403,9 @@ function Am.run(o, trip, spec)
   local ended = nil      -- "Return" or "Escape", once onKey has had one
   local moves, clips, lastMoveAt = 0, 0, nil
 
-  -- The button let go of, once, wherever the gesture ends — `why` for the log. After a disable the
-  -- host has let go already, and its record says so: nothing is sent again.
+  -- The button let go of, once, wherever the gesture ends — `why` for the log: the key, onEnd's
+  -- `how`, or a give-up's message. After a disable the host has let go already, and its record says
+  -- so: nothing is sent again.
   local function letGo(why)
     if not down then return end
     down = false
@@ -478,9 +479,9 @@ function Am.run(o, trip, spec)
     if w and p then S.part(w.id, p.keys, p.values) end
   end
 
-  local function onEnd(_, t2, how)
+  local function onEnd(_, t2, how, _, err)
     -- First, before anything that can raise: every end lets go of the button.
-    letGo(how)
+    letGo(err and tostring(err) or how)
     if how ~= "ended" or not t2:inFront() then
       release(held)
       if moved and spec.knob then notRead() end
@@ -528,11 +529,11 @@ function Am.run(o, trip, spec)
   end
 
   -- 4. The keyboard, before the press: a hand-over refused leaves no button down.
-  local handed, whyH = trip:handOver({ kind = "keys", keys = Am.KEYS, onKey = onKey, onEnd = onEnd })
+  local handed, errH = trip:handOver({ kind = "keys", keys = Am.KEYS, onKey = onKey, onEnd = onEnd })
   if not handed then
     release(held)
-    if whyH == "not in front" then return end
-    log("nothing pressed — the keyboard was not handed over (%s)", tostring(whyH))
+    if errH.code == O.errors.NOT_IN_FRONT then return end
+    log("nothing pressed — the keyboard was not handed over (%s)", tostring(errH))
     return trip:done({ part = before, error = Am.NO_KEYBOARD })
   end
 
