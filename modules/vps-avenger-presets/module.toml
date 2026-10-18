@@ -1,7 +1,7 @@
 # Written by tools/avenger-presets/convert.py: change that, not this file.
 id = "com.platform.vps-avenger-presets"
 name = "VPS Avenger preset database"
-version = "1.0.0"
+version = "1.1.0"
 license = "GPL-3.0-or-later"
 # A code module, so that its reader (src/main.luau) runs in the VM of the module that uses
 # it and reads this module's own files: com.platform.vps-avenger, as an optional dependency.

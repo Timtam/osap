@@ -1,8 +1,8 @@
 -- VPS Avenger's preset database: the reader of this module's data.
 --
--- The data is the catalog of VPS Avenger's expansions, the commercial ones as the catalog lists
--- them — for every expansion its categories and presets, for every preset its oscillator tabs'
--- names and its macro tabs' names —
+-- The data is the catalog of VPS Avenger's expansions, the ones the project's catalog lists and
+-- the five more its export has preset lists for — for every expansion its categories and
+-- presets, for every preset its oscillator tabs' names and its macro tabs' names —
 -- written by tools/avenger-presets/convert.py from the avenger_control project's database, whose
 -- developer gave it without restriction (NOTICE). README.md describes the files.
 --
@@ -17,9 +17,9 @@
 --
 -- WHEN IT READS. Never at load: this file also runs in this module's own VM, where nobody asks
 -- it anything. The index is read at the first M.index() and kept; an expansion's file at the
--- first M.expansion() that names it, and kept — at most all 124, 2.3 MB of text. Each read is
+-- first M.expansion() that names it, and kept — at most all 129, 2.4 MB of text. Each read is
 -- one host.resource.read and one host.json.decode on the caller's thread, the main one: the
--- index is 0.3 MB, an expansion's file 5 to 110 KB. A file that cannot be read or does not
+-- index is 0.35 MB, an expansion's file 2 to 110 KB. A file that cannot be read or does not
 -- decode is not read again until the module using it is reloaded (all of this state lives in
 -- that module's VM), and every call after says why.
 

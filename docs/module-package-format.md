@@ -195,8 +195,9 @@ memory_mib = 512   # leave it out for the default, 256
 ```
 
 - **The value** is a whole number from **256 to 2048**; leaving it out means 256. 256 is about
-  thirteen times the largest need measured so far — VPS Avenger with all 124 of its expansion
-  files uses 19 MB — and 2048 is the bound against a mistyped value.
+  thirteen times the largest need measured so far — VPS Avenger with all of its preset
+  database's expansion files: 19 MB with the 124 of 1.0.0, and the 129 of 1.1.0 decode 4 %
+  larger — and 2048 is the bound against a mistyped value.
 - **A wrong value fails the manifest**, as a bad `id` does, wherever the manifest is read: at
   start-up (the folder is skipped, with the reason in the log), on a hot-load, when an install
   or an update works out what it adds — before its review, so nothing is written — and for a

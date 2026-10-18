@@ -12,20 +12,27 @@ format tools/avenger-presets/README.md and the data module's README describe.
     python tools/avenger-presets/convert.py <folder with the three exports>
     python tools/avenger-presets/convert.py <folder> --out <data module folder> --version 1.1.0
 
-**What is kept is an allowlist.** The exports also carry lists of which expansions particular
-people own, named after them, and expansions that come only through such a list. None of that is
-anybody else's business: only the two rosters in ALLOW are read — the catalog, "Complete", and
-"Factory Standard", what every owner of Avenger has — and only the expansions the catalog names.
-Everything else is dropped without its key or its name ever being written: not to the output, not
-to the screen, not to an error. Counts are said, never names.
+**The rosters kept are an allowlist.** The exports also carry lists of which expansions particular
+people own, named after them. None of that is anybody else's business: only the two rosters in
+ALLOW are read — the catalog, "Complete", and "Factory Standard", what every owner of Avenger has.
+Every other roster is dropped without its key or its name, or the name of anything only it holds,
+ever being written: not to the output, not to the screen, not to an error. Counts are said, never
+names.
+
+**The expansions kept are every one with a preset list** (the maintainer's decision of
+2026-10-18): the catalog's, and those it does not name — five in the export of 2026-09-26 —
+whose names are product names, as the catalog's are. The index lists them in the catalog's
+order (ordered(): Factory and Factory 2 first, the rest alphabetical without regard to case),
+each the catalog does not name at the place that rule gives it.
 
 **Checked as the project's tool checks it**, and more strictly, since this output ships: every
-catalog expansion has its preset list, and its count agrees with it; its categories' blocks,
-from each category's first preset and count, tile the list exactly; every preset has its
-oscillators (1 to 8, each "OSC n: name") and its macro tabs (1 to 4, each five lines: three
-knobs and two buttons). A problem that makes the data wrong is an error: nothing is written, and
+catalog expansion has its preset list, and every expansion's count agrees with its list; its
+categories' blocks, from each category's first preset and count, tile the list exactly; every
+preset has its oscillators (1 to 8, each "OSC n: name") and its macro tabs (1 to 4, each five
+lines: three knobs and two buttons). An expansion the catalog does not name is checked exactly
+as the catalog's are. A problem that makes the data wrong is an error: nothing is written, and
 the exit code is 1. One the data can stand — an oscillator name missing from its own key but in
-the preset's oscillator list — is a warning, said with the preset's name (catalog data, never
+the preset's oscillator list — is a warning, said with the preset's name (expansion data, never
 personal).
 
 Standard library only, so it runs wherever Python 3.9 or later does.
@@ -50,6 +57,9 @@ CATALOG = "Expansions Complete"
 FACTORY = "Expansions Factory Standard"
 ALLOW = (CATALOG, FACTORY)
 
+# The catalog's first expansions, before its alphabetical rest (ordered()).
+FIRST = ("Factory", "Factory 2")
+
 SOURCES = {
     "xp": "AvengerXPDB_*.json",
     "osc": "AvengerOSCDB_*.json",
@@ -66,7 +76,8 @@ DEVICES = {"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(10)} | {f"lpt
 
 
 class Problems:
-    """Errors and warnings, said at the end. Every text in here names catalog data only."""
+    """Errors and warnings, said at the end. Every text in here names expansion data only — an
+    expansion, a category, a preset — never a roster's."""
 
     def __init__(self):
         self.errors = []
@@ -225,6 +236,33 @@ def categories(xp, expansion, presets, problems):
     return out
 
 
+def with_lists(xp):
+    """Every expansion the export has a preset list for (`XP-<name>PresetList`), once each, in the
+    order of its keys."""
+    out = {}
+    for k in xp:
+        m = re.fullmatch(r"XP-(.*)PresetList", k, re.S)
+        if m:
+            out[m.group(1)] = True
+    return list(out)
+
+
+def ordered(catalog, others):
+    """The catalog's expansions in its own order, and each of `others` where the catalog's rule
+    puts it: after its first ones (FIRST), before the first of the rest that sorts after it,
+    without regard to case. Where the catalog's own order is not alphabetical ("8 Bit Era" before
+    "16 Bit Era", "Trance One" to "Trance Four" in their numbers' order) it is kept as it is."""
+    out = list(catalog)
+    head = 0
+    while head < len(out) and out[head] in FIRST:
+        head += 1
+    for name in sorted(others, key=str.casefold):
+        key = name.casefold()
+        at = next((i for i in range(head, len(out)) if out[i].casefold() > key), len(out))
+        out.insert(at, name)
+    return out
+
+
 def convert(xp, osc, macro, problems):
     """The index and the expansions' files, as Python values, or None after an error."""
     for key in ALLOW:
@@ -236,13 +274,15 @@ def convert(xp, osc, macro, problems):
     if len(set(catalog)) != len(catalog):
         problems.error("the catalog names an expansion twice")
         return None
-    # Counted, not named: an expansion the catalog does not name is never written anywhere.
+    # Counted, not named: an error never names what a roster holds.
     missing = sum(1 for e in factory if e not in catalog)
     if missing:
         problems.error(f"Factory Standard names {missing} expansion(s) the catalog does not")
         return None
+    # Every expansion with a preset list, the catalog's or not: checked alike, and kept alike.
+    others = [e for e in with_lists(xp) if e not in catalog]
     taken, expansions, files = set(), [], {}
-    for expansion in catalog:
+    for expansion in ordered(catalog, others):
         presets = lines(xp.get(f"XP-{expansion}PresetList", ""))
         if not presets:
             problems.error(f"{expansion}: no preset list")
@@ -279,17 +319,11 @@ def convert(xp, osc, macro, problems):
     return {"format": FORMAT, "factoryStandard": factory, "expansions": expansions}, files
 
 
-def dropped(xp, catalog):
-    """How much was left out, in counts: the rosters not on the allowlist, and the expansions with
-    data that the catalog does not name. No key and no name leaves this function."""
-    rosters = sum(1 for k in xp if k.startswith("Expansions ") and k not in ALLOW)
-    lists = set()
-    for k in xp:
-        m = re.fullmatch(r"XP-(.*)PresetList", k, re.S)
-        if m:
-            lists.add(m.group(1))
-    outside = len(lists - set(catalog))
-    return rosters, outside
+def dropped(xp):
+    """How many rosters were left out, the ones not on the allowlist: a count. No key and no name
+    leaves this function. (Every expansion with a preset list is kept, so none is left out; what
+    else the exports hold is in used_keys' counts.)"""
+    return sum(1 for k in xp if k.startswith("Expansions ") and k not in ALLOW)
 
 
 def used_keys(xp, osc, macro, index):
@@ -425,17 +459,22 @@ def main(argv=None):
     version = args.version or existing_version(args.out) or "1.0.0"
     write(args.out, index, files, version, exported)
 
-    rosters, outside = dropped(xp, lines(xp[CATALOG]))
+    rosters = dropped(xp)
     unused = used_keys(xp, osc, macro, index)
     presets = sum(len(e["presets"]) for e in index["expansions"])
+    catalog = set(lines(xp[CATALOG]))
+    others = [e["name"] for e in index["expansions"] if e["name"] not in catalog]
     size = sum(p.stat().st_size for p in (args.out / "data").rglob("*") if p.is_file())
     print(f"read {', '.join(p.name for p in paths.values())}")
     print(f"wrote {len(index['expansions'])} expansions, {presets} presets: data/index.json and "
           f"{len(files)} expansion files, {size / 1024:.0f} KB, and module.toml (version {version}) "
           f"in {args.out}")
-    print(f"left out: {rosters} roster list(s) not on the allowlist, {outside} expansion(s) the "
-          f"catalog does not name; keys not read: {unused['xp']} in the catalog export, "
-          f"{unused['osc']} in the oscillator export, {unused['macro']} in the macro export")
+    # Expansion names, written to the data module as well: never a roster's.
+    print(f"kept {len(others)} expansion(s) the catalog does not name, each where its order puts it"
+          + (": " + ", ".join(others) if others else ""))
+    print(f"left out: {rosters} roster list(s) not on the allowlist; keys not read: {unused['xp']} in "
+          f"the catalog export, {unused['osc']} in the oscillator export, {unused['macro']} in the macro "
+          "export")
     print(f"{len(problems.warnings)} warning(s)")
     return 0
 

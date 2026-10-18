@@ -6944,6 +6944,13 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       says the expansion, category, oscillators and macros, each part marked. Tested against the
       scripted host with a small fixture catalog, never the real data (`overlay_avenger_tests.rs`,
       7 more scenarios); the converter by its own 7 tests on a made-up export.
+      **2026-10-18 (1.1.0):** every expansion the export has a preset list for is kept, not only
+      the catalog's — the five it does not name (Artist Series Nyhdroe, FairVenger CMII and its two
+      add-on packs, Quantum State; 875 presets) are in the index at their alphabetical places, and
+      so in "Complete": 129 expansions, 18,446 presets, 134 files, 2.77 MB of data. The rosters stay
+      an allowlist: every other one is still dropped unread, counted and never named. The converter
+      has 9 tests now; one browser scenario runs on the shipped data (Quantum State found on the
+      grid by its name, opened and named by its presets, a preset of it placed by Preset info).
 - [x] **The database's licence** (2026-10-02). There is none to wait for: the avenger_control tool
       has not been published and has no licence, and its developer gave the database without
       restriction, to be integrated. The data module is GPL-3.0-or-later like the rest

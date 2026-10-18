@@ -4,9 +4,11 @@
     python -m unittest discover -s tools/avenger-presets
 
 The made-up export has what the real one has: the two rosters that are kept, and one that must
-never leave it — a list of what one owner has, with an expansion that comes only through it. What
-these check first is that nothing of that list, not its key, not its name, not its expansion,
-reaches the data module or anything the converter prints.
+never leave it — a list of what one owner has, naming an expansion the export has no preset list
+for, and one it has a preset list for that the catalog does not name. What these check first is
+that nothing of that list, not its key, not its name, not the name only it gives, reaches the data
+module or anything the converter prints; then that the expansion with a preset list is kept, as
+every one with a preset list is, where the catalog's order puts it.
 """
 import contextlib
 import io
@@ -20,16 +22,21 @@ import convert
 
 # Stand-ins for the kind of thing the converter must drop. No real person is named anywhere here.
 OWNER_ROSTER = "Expansions Owner Seven"
-PRIVATE = "Private Pack"
+# A name only the owner's list gives, with no preset list: never written.
+UNLISTED = "Phantom Pack"
+# An expansion the catalog does not name, with its preset list: kept, between Alpha and Beta, as
+# the catalog's order puts it without regard to case (by case it would come after both).
+EXTRA = "another Pack"
 
 
 def export(**changes):
     """The three made-up exports as dicts: Alpha (four presets in two category blocks, the second
-    before the first alphabetically), Beta (two), and PRIVATE only in OWNER_ROSTER."""
+    before the first alphabetically), Beta (two), and EXTRA (one), which only OWNER_ROSTER names,
+    as it names UNLISTED."""
     xp = {
         "Expansions Complete": "Alpha\nBeta",
         "Expansions Factory Standard": "Alpha",
-        OWNER_ROSTER: f"Alpha\n{PRIVATE}",
+        OWNER_ROSTER: f"Alpha\n{EXTRA}\n{UNLISTED}",
         "XP Alpha": "Arp\nBass",
         "XP-AlphaPresetList": "BA One\nBA Two\nAR One\nAR Two",
         "XP-AlphaPresetCount": "4",
@@ -43,15 +50,15 @@ def export(**changes):
         "XP-BetaPresetCount": "2",
         "XP_Beta-PadsCategorieStart": "PD Palm´s Pad",
         "XP_Beta-PadsCategorieCount": "2",
-        f"XP {PRIVATE}": "Leads",
-        f"XP-{PRIVATE}PresetList": "LD Secret",
-        f"XP-{PRIVATE}PresetCount": "1",
-        f"XP_{PRIVATE}-LeadsCategorieStart": "LD Secret",
-        f"XP_{PRIVATE}-LeadsCategorieCount": "1",
+        f"XP {EXTRA}": "Leads",
+        f"XP-{EXTRA}PresetList": "LD Extra",
+        f"XP-{EXTRA}PresetCount": "1",
+        f"XP_{EXTRA}-LeadsCategorieStart": "LD Extra",
+        f"XP_{EXTRA}-LeadsCategorieCount": "1",
     }
     osc, macro = {}, {}
     presets = {"Alpha": ["BA One", "BA Two", "AR One", "AR Two"], "Beta": ["PD Palm´s Pad", "PD Plain "],
-               PRIVATE: ["LD Secret"]}
+               EXTRA: ["LD Extra"]}
     for e, names in presets.items():
         for i, n in enumerate(names):
             p = f"XP_{e}-{n}"
@@ -85,26 +92,51 @@ def run(xp, osc, macro, *extra):
 
 
 class Converter(unittest.TestCase):
-    def test_the_owner_list_and_what_only_it_has_never_leave_the_export(self):
+    def test_the_owner_list_and_what_only_it_names_never_leave_the_export(self):
         code, printed, files = run(*export())
         self.assertEqual(code, 0, printed)
-        everything = printed + "".join(files.values()) + "".join(files)
-        for secret in (OWNER_ROSTER, "Owner Seven", PRIVATE, "LD Secret", "private-pack"):
-            self.assertNotIn(secret, everything)
-        self.assertIn("left out: 1 roster list(s) not on the allowlist, 1 expansion(s) the catalog "
-                      "does not name", printed)
+        everything = (printed + "".join(files.values()) + "".join(files)).casefold()
+        for secret in (OWNER_ROSTER, "Owner Seven", UNLISTED, "phantom"):
+            self.assertNotIn(secret.casefold(), everything)
+        self.assertIn("left out: 1 roster list(s) not on the allowlist; keys not read:", printed)
+
+    def test_an_expansion_the_catalog_does_not_name_is_kept_where_its_order_puts_it(self):
+        code, printed, files = run(*export())
+        self.assertEqual(code, 0, printed)
+        index = json.loads(files["data/index.json"])
+        self.assertEqual([e["name"] for e in index["expansions"]], ["Alpha", EXTRA, "Beta"])
+        self.assertEqual(index["expansions"][1], {"name": EXTRA, "file": "data/expansions/another-pack.json",
+                                                  "presets": ["LD Extra"]})
+        # Not one every owner of Avenger has.
+        self.assertEqual(index["factoryStandard"], ["Alpha"])
+        extra = json.loads(files["data/expansions/another-pack.json"])
+        self.assertEqual(extra["categories"], [{"name": "Leads", "start": 1, "count": 1}])
+        self.assertEqual(extra["presets"], [{"name": "LD Extra", "osc": ["Sub 0", ""],
+                                             "macros": [["Tone", "", "Macro 6", "", "Wide"]]}])
+        self.assertIn(f"kept 1 expansion(s) the catalog does not name, each where its order puts it: {EXTRA}",
+                      printed)
+
+    def test_the_catalogs_order(self):
+        # Factory and Factory 2 first; the rest alphabetical without regard to case; the catalog's
+        # own order kept where it is not alphabetical ("8 Bit Era" before "16 Bit Era", "Trance One"
+        # before "Trance Two").
+        catalog = ["Factory", "Factory 2", "8 Bit Era", "16 Bit Era", "Trance One", "Trance Two", "Zeta"]
+        self.assertEqual(convert.ordered(catalog, ["quantum", "Artist", "Aardvark", "Zz Last"]),
+                         ["Factory", "Factory 2", "8 Bit Era", "16 Bit Era", "Aardvark", "Artist", "quantum",
+                          "Trance One", "Trance Two", "Zeta", "Zz Last"])
+        self.assertEqual(convert.ordered(catalog, []), catalog)
 
     def test_the_format(self):
         code, printed, files = run(*export())
         self.assertEqual(code, 0, printed)
-        self.assertEqual(sorted(files), ["data/expansions/alpha.json", "data/expansions/beta.json",
-                                         "data/index.json", "module.toml"])
+        self.assertEqual(sorted(files), ["data/expansions/alpha.json", "data/expansions/another-pack.json",
+                                         "data/expansions/beta.json", "data/index.json", "module.toml"])
         index = json.loads(files["data/index.json"])
         self.assertEqual(index["format"], convert.FORMAT)
         self.assertEqual(index["exported"], "2026-09-26 18:57")
         self.assertEqual(index["factoryStandard"], ["Alpha"])
-        self.assertEqual([e["name"] for e in index["expansions"]], ["Alpha", "Beta"])
-        self.assertEqual(index["expansions"][1]["presets"], ["PD Palm´s Pad", "PD Plain "])
+        self.assertEqual([e["name"] for e in index["expansions"]], ["Alpha", EXTRA, "Beta"])
+        self.assertEqual(index["expansions"][2]["presets"], ["PD Palm´s Pad", "PD Plain "])
         alpha = json.loads(files["data/expansions/alpha.json"])
         self.assertEqual(alpha["categories"], [{"name": "Arp", "start": 3, "count": 2},
                                                {"name": "Bass", "start": 1, "count": 2}])
@@ -143,6 +175,9 @@ class Converter(unittest.TestCase):
             ({"osc:XP_Beta-PD Plain OSCCount": "9"}, "Beta/PD Plain  (preset 2): OSCCount is '9', not 1 to 8"),
             ({"macro:XP_Alpha-AR One-Macro TAB 1 List": "Tone\nDrive"}, "macro tab 1 has 2 lines, not 5"),
             ({"xp:Expansions Factory Standard": "Alpha\nGamma"}, "Factory Standard names 1 expansion(s) the catalog does not"),
+            # One the catalog does not name is checked as the catalog's are.
+            ({f"xp:XP-{EXTRA}PresetCount": "2"}, f"{EXTRA}: PresetCount is '2', the list has 1"),
+            ({f"osc:XP_{EXTRA}-LD ExtraOSCCount": "0"}, f"{EXTRA}/LD Extra (preset 1): OSCCount is '0', not 1 to 8"),
         ):
             with self.subTest(message=message):
                 code, printed, files = run(*export(**change))
@@ -150,8 +185,9 @@ class Converter(unittest.TestCase):
                 self.assertIn(message, printed)
                 self.assertIn("nothing written", printed)
                 self.assertEqual(files, {})
-                # Not even an expansion of an allowed roster, when the catalog does not name it.
-                for secret in (PRIVATE, "Gamma"):
+                # Not the owner's list, nor a name only it gives, nor one only an allowed roster
+                # gives when the catalog does not name it.
+                for secret in (OWNER_ROSTER, UNLISTED, "Gamma"):
                     self.assertNotIn(secret, printed)
 
     def test_a_name_twice_in_one_expansion_and_a_category_placed_by_position(self):

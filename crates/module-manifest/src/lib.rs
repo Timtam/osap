@@ -87,8 +87,8 @@ pub struct ModuleManifest {
 /// needs MORE, and it rules out 0, which the VM's allocator would read as "no limit".
 pub const DEFAULT_MEMORY_MIB: u32 = 256;
 /// The most `[limits] memory_mib` accepts, in MiB: the bound against an absurd value. About a
-/// hundred times the largest real need measured — VPS Avenger with all 124 of its expansion
-/// files uses 19 MB.
+/// hundred times the largest real need measured — VPS Avenger with all of its preset database's
+/// expansion files: 19 MB with the 124 of 1.0.0, and the 129 of 1.1.0 decode 4 % larger.
 pub const MAX_MEMORY_MIB: u32 = 2048;
 
 /// `[limits]` block: what the module's code may use.

@@ -57,7 +57,8 @@ local KEY_DEFAULT = host.os.pick({
   linux = "Ctrl+Shift+Alt+F1",
 })
 -- The tool's rosters of expansions, its default first ("Factory Standard": the ones every owner of
--- Avenger has, its preset_db.py) — the two that name no person.
+-- Avenger has, its preset_db.py) — the two that name no person. "Complete" is every expansion of
+-- the preset database (DB.roster): the tool's catalog and the five it does not name.
 P.ROSTERS = { "Factory Standard", "Complete" }
 
 local function onOff(v) return v and "on" or "off" end

@@ -1344,6 +1344,15 @@ pub(crate) fn run_on(os: &str, scenario: &str) {
         .expect("the window prelude compiles");
     t.set("windowPrelude", prelude).unwrap();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // A file of the repository as text: the shipped preset database's, for the scenarios that run
+    // on it (avenger_browser_tests.rs).
+    let files = root.clone();
+    t.set(
+        "repoText",
+        lua.create_function(move |_, rel: String| std::fs::read_to_string(files.join(&rel)).map_err(mlua::Error::external))
+            .unwrap(),
+    )
+    .unwrap();
     let source = lua
         .create_function(move |lua, rel: String| {
             let src = std::fs::read_to_string(root.join(&rel)).map_err(mlua::Error::external)?;

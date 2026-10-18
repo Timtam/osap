@@ -1,0 +1,17 @@
+{"format":1,
+"name":"Artist Series Nyhdroe",
+"categories":[{"name":"Arp","start":1,"count":5},{"name":"Drums","start":6,"count":1},{"name":"Leads","start":7,"count":1},{"name":"Sequences","start":8,"count":4},{"name":"Voice","start":12,"count":1}],
+"presets":[
+{"name":"AR Glory Of Live Dubstep","osc":["Bass","Bass Layer","Lead","Voice","Uplifter"],"macros":[["Low Lift","Bass Solo","Drums","Vocal / Lead","More Drums"]]},
+{"name":"AR Resurrection","osc":["","","","","","","",""],"macros":[["","","","",""]]},
+{"name":"AR Scooter - Rapsody","osc":["Lead Gated","Back Gated","Bass"],"macros":[["","","","",""]]},
+{"name":"AR Scooter - Unity PT1","osc":["Lead","Lead Gated","Back Gated","Bass"],"macros":[["","","","",""]]},
+{"name":"AR Unity PT1","osc":["Lead","Back Gated","Bass"],"macros":[["","","","",""]]},
+{"name":"DR Loop","osc":[""],"macros":[["","","","",""]]},
+{"name":"LD - Event Trigger Slot 1 Note Off","osc":[""],"macros":[["","","","",""]]},
+{"name":"SQ Call Me Euro Vocal","osc":["Lead","Bassline","Lead"],"macros":[["Drum Solo","Dreams","DJ Sweep","Variation 1","Variation 2"]]},
+{"name":"SQ Music sounds better with you","osc":["Polysynth","Piano","Bass","Guitar","Filler Arp","Vocal","Lead","Lead Strings"],"macros":[["Fuller Polysynth","Filler Arp & Guit","Add Vocal","No kick","FilterFlange"]]},
+{"name":"SQ Nyhdroe Drom & Arp","osc":["Saw","Square"],"macros":[["","","","",""]]},
+{"name":"SQ Nyhdroe Drums & Arp","osc":[""],"macros":[["","","","",""]]},
+{"name":"VC Its A Rave World (high bpm) (arp) Dreaming","osc":["Vocal","Bassline","Pads","Blinks 1","Blinks 2","Blinks 3","Sub"],"macros":[["Pads","Blinks","Vocal","Bassline","Drums"]]}
+]}

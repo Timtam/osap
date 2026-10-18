@@ -29,6 +29,11 @@
 //! gathered by where most names were read before and each place's most-read name, so one misread
 //! neither doubles it nor is kept; and a name read at neither end is "not in VPS Avenger's list"
 //! only where the list moved and an order known puts it away from the places read.
+//!
+//! And one scenario on the shipped data (the preset database 1.1.0, the maintainer's decision of
+//! the same day): Quantum State, one of the five expansions the catalog does not name, is in the
+//! list "Complete" at its alphabetical place, found on the grid by its name, opened and named by
+//! its presets, and Preset info places a preset of it.
 
 use super::overlay_avenger_tests::run_mac;
 
@@ -80,12 +85,18 @@ do
   T.BROWSER_FIXTURE = files
 end
 
--- Expansion `name`'s lists from the catalog: its categories, and each category's presets.
-function T.listsOf(name)
-  local idx = T.jsonDecode(T.BROWSER_FIXTURE["data/index.json"])
+-- The shipped preset database (modules/vps-avenger-presets) as the data module's files, each read
+-- off the repository when it is first asked for: for the one scenario that runs on the real data.
+T.SHIPPED = setmetatable({}, { __index = function(_, rel) return T.repoText("modules/vps-avenger-presets/" .. rel) end })
+
+-- Expansion `name`'s lists from the catalog (`files`, the fixture above unless it says): its
+-- categories, and each category's presets.
+function T.listsOf(name, files)
+  files = files or T.BROWSER_FIXTURE
+  local idx = T.jsonDecode(files["data/index.json"])
   for _, x in ipairs(idx.expansions) do
     if x.name == name then
-      local f = T.jsonDecode(T.BROWSER_FIXTURE[x.file])
+      local f = T.jsonDecode(files[x.file])
       local cats, presets, all = {}, {}, {}
       for _, c in ipairs(f.categories) do
         cats[#cats + 1] = c.name
@@ -120,8 +131,8 @@ end
 -- its words, FAV and the stars lit; read as text (T.browserReads, kept with the picture): the caption,
 -- the area (also the page key's "expansion area"), the two columns. Every click, notch and track click
 -- the module makes moves it and paints it again.
-function T.openOf(name, extra)
-  local cats, presets = T.listsOf(name)
+function T.openOf(name, extra, files)
+  local cats, presets = T.listsOf(name, files)
   local o = { name = name, categories = cats, presets = presets, category = cats[1], firstCategory = 0, firstRow = 0,
     fav = false, stars = {}, perNotch = 1 }
   for k, v in pairs(extra or {}) do o[k] = v end
@@ -771,6 +782,52 @@ fn a_name_off_the_grid_is_found_a_notch_at_a_time() {
           T.dump())
         T.ok(T.st().selected_expansion == "Future Bass", "opened")
         T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// On the shipped database (T.SHIPPED): the list "Complete" holds all 129 expansions, and Quantum
+/// State — one of the five the catalog does not name — is its 103rd, between Psy 2 and Retrowave
+/// 80s, as the catalog's order puts it. Avenger's grid in 4 per Row shows the 81st to 96th: its
+/// place lies after them, so two notches down, and its words are clicked; its columns read name it
+/// by its presets, and its lists from its file are posted — eleven categories, the rows placed in
+/// Arp. Preset info on one of its presets says where it is, its oscillator and its macros; the log
+/// counts the database it read.
+#[test]
+fn an_expansion_the_catalog_does_not_name_is_listed_found_and_read_on_the_shipped_database() {
+    run_mac(&scenario(r##"
+        local names = {}
+        for i, x in ipairs(T.jsonDecode(T.SHIPPED["data/index.json"]).expansions) do names[i] = x.name end
+        local model = T.grid("4 per Row", names, { firstRow = 20,
+          opens = { ["Quantum State"] = T.openOf("Quantum State", nil, T.SHIPPED) } })
+        local _, _, W = T.browserPage(model, { files = T.SHIPPED })
+        local list = T.st().expansions
+        local i = T.indexIn("Quantum State")
+        T.ok(#list == 129 and i == 102 and list[i] == "Psy 2" and list[i + 2] == "Retrowave 80s",
+          "Complete: " .. #list .. " expansions, Quantum State at " .. i)
+        -- What the page sends for it (panel.js, a list of 129 or more).
+        T.tripFrom({ action = "open_expansion", args = { index = i, page_start = 96, visible_index = 30 }, focused = true }, W)
+        T.settle(8)
+        local down = 0
+        for _, s in ipairs(S.scrolls) do if s[3] < 0 then down += 1 end end
+        T.ok(#S.scrolls == 2 and down == 2, "two notches down: " .. T.scrollsSince(0))
+        T.ok(T.count("its place 103 lies after the 81 to 96 read") == 1, T.dump())
+        T.ok(S.browser.clicked[1] == "Quantum State", "clicked: " .. tostring(S.browser.clicked[1]))
+        local st = T.st()
+        T.ok(st.expansion_open == true and st.selected_expansion == "Quantum State" and st.selected_expansion_from_database == nil,
+          "open, named by the word clicked: " .. tostring(st.selected_expansion))
+        T.ok(table.concat(st.expansion_categories, "|") == "Arp|Bass|Bells|Chords|Drums|Effects|Leads|Organ|Pads|Piano & Keys|Plucked"
+          and st.expansion_lists_from_database == true and st.selected_preset_category == "Arp",
+          "its lists: " .. table.concat(st.expansion_categories or {}, "|") .. ", " .. tostring(st.selected_preset_category))
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+    run_mac(&scenario(r##"
+        T.presets(T.SHIPPED)
+        local header = T.avengerAt80("AR Analog Pop (Avenger)")
+        T.ok(T.info(header, "AR Analog Pop (Avenger)") == "AR Analog Pop (Avenger). Expansion Quantum State, category Arp, "
+          .. "1 of 42, from the database. 1 oscillator, from the database: OSC 1. Macros, from the database: Envelope, "
+          .. "Saturation, Space FX; buttons: FM, RATE", T.said())
+        T.ok(T.count("[avenger] 'Preset info': read 'AR Analog Pop (Avenger)' — Quantum State 1 of 197 (exactly)") == 1, T.dump())
+        T.ok(T.count("[avenger] the preset database: 129 expansions, 18446 presets, exported 2026-09-26 18:57") == 1, T.dump())
     "##));
 }
 
@@ -2059,12 +2116,13 @@ fn avengers_list_is_gathered_by_where_most_of_its_names_were_read_before() {
 // ---------------------------------------------------------------------------------------------
 
 /// The turns of Luau's loops and calls one read of the grid may spend (T.interrupts): 64 tiles in
-/// 8 per Row, eight of them misread, looked up among a catalog of 124 expansions — the most it spent
-/// when measured on 2026-10-18, BROWSER_TILES, plus a margin. Fewer than the pixels of the area at
-/// 80 % (344 by 269, 92,536 of them), so a loop in Luau over the area's pixels, one turn a pixel, is
-/// more than the read may spend; and the same read again, its names looked up already, at most a
-/// quarter of it (10,377 turns when measured: the columns, the log, the order).
-const BROWSER_TILES: u64 = 49400;
+/// 8 per Row, eight of them misread, looked up among a catalog of 129 expansions, as many as the
+/// preset database 1.1.0 has — the most it spent when measured on 2026-10-18, BROWSER_TILES, plus a
+/// margin. Fewer than the pixels of the area at 80 % (344 by 269, 92,536 of them), so a loop in Luau
+/// over the area's pixels, one turn a pixel, is more than the read may spend; and the same read
+/// again, its names looked up already, at most a quarter of it (10,635 turns when measured: the
+/// columns, the log, the order).
+const BROWSER_TILES: u64 = 49700;
 
 #[test]
 fn the_browsers_reads_stay_small_on_the_event_loop() {

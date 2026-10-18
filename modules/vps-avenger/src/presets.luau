@@ -1,9 +1,10 @@
 -- The preset database, as this overlay uses it — when it is installed.
 --
 -- WHAT IT IS. com.platform.vps-avenger-presets: the catalog of VPS Avenger's expansions — the
--- commercial ones, as the catalog lists them, with their categories, presets, oscillator tab
--- names and macro names — from the avenger_control project's database, given by its developer
--- without restriction. An OPTIONAL dependency: without it `DB.present` is false, nothing here is
+-- ones the project's catalog lists, and since 1.1.0 the five more its export has preset lists
+-- for, with their categories, presets, oscillator tab names and macro names — from the
+-- avenger_control project's database, given by its developer without restriction. "The catalog"
+-- below is all of them. An OPTIONAL dependency: without it `DB.present` is false, nothing here is
 -- asked, and the module is stage 1 exactly.
 --
 -- WHAT IT MAY DO (the maintainer's decision of 2026-09-28). This module works from the screen,
@@ -44,7 +45,9 @@
 -- WHERE. A name the catalog has once is one position: an expansion and a place in its list. 597
 -- names are in several expansions (one in 26), and 19 differ from another only in case: such a
 -- name is placed in the expansion the module last knew Avenger in when it is there once, and
--- otherwise not placed at all — the Preset info then names the expansions it is in.
+-- otherwise not placed at all — the Preset info then names the expansions it is in. Four are twice
+-- in one expansion's list (FairVenger CMII's): placed where the anchor is one of the two, and
+-- otherwise not — the Preset info then says so ("2 times in FairVenger CMII").
 --
 -- THE ANCHOR is the position of the preset Avenger shows, as far as this module knows: set by
 -- every name read that is placed (the Preset info's read, and the reads before and after ◀ and
@@ -88,15 +91,15 @@
 --
 -- COST, all of it on the event loop. Nothing is read until the first ◀, ▶ or Preset info press
 -- after the module loads — for ◀ and ▶, once the click is sent. That press reads, decodes and
--- indexes the index (0.3 MB, 17,571 names), once, and the log says how long it took; an
--- expansion's file (5 to 110 KB) is read at the first Preset info in it. Measured in a debug test
--- build against the real data on 2026-09-28: the index 30 to 50 ms to read and decode and about
--- 100 to index, the largest file 25, a first Preset info 150 to 190 in all; a name the catalog
--- has, under a millisecond; one found by similarity in the anchor's expansion, a few; one
--- compared with the whole catalog — a name it does not have, the user's own preset — 150 to 300
--- ms for ten made-up names, of which MARGIN's extra comparisons are about a tenth. The release
--- build that ships is not measured (TODO.md). The last SNAPS_MAX answers are kept, so a name is
--- compared with the catalog once, not before and after every step.
+-- indexes the index (0.35 MB, 18,446 names), once, and the log says how long it took; an
+-- expansion's file (2 to 110 KB) is read at the first Preset info in it. Measured in a debug test
+-- build against the real data on 2026-09-28 (1.0.0's: 0.3 MB, 17,571 names): the index 30 to 50
+-- ms to read and decode and about 100 to index, the largest file 25, a first Preset info 150 to
+-- 190 in all; a name the catalog has, under a millisecond; one found by similarity in the
+-- anchor's expansion, a few; one compared with the whole catalog — a name it does not have, the
+-- user's own preset — 150 to 300 ms for ten made-up names, of which MARGIN's extra comparisons
+-- are about a tenth. The release build that ships is not measured (TODO.md). The last SNAPS_MAX
+-- answers are kept, so a name is compared with the catalog once, not before and after every step.
 
 local P = host.tryRequire("com.platform.vps-avenger-presets")
 local R = host.include("src/read/ocr.luau")
@@ -122,7 +125,7 @@ local LIST_MAX = 5
 
 -- A position is one number: the expansion's place in the index × SPAN + the preset's place in
 -- its list (the longest list is 978). A number rather than a table, because the catalog has
--- 17,571 of them.
+-- 18,446 of them.
 local SPAN = 65536
 local function E(p) return p // SPAN end
 local function I(p) return p % SPAN end
@@ -136,7 +139,7 @@ local ownName = false -- after Load or Save as: a read is looked up as the same 
 -- ── Text ─────────────────────────────────────────────────────────────────────
 
 -- The form names are compared in, and said in: runs of spaces as one space, none at either end
--- (50 catalog names end in a space or hold two), and ´ ` ‘ ’ as '. A name with none of that — most
+-- (53 catalog names end in a space or hold two), and ´ ` ‘ ’ as '. A name with none of that — most
 -- of them — comes back as it is after four searches.
 local function tidy(s)
   s = s or ""
@@ -562,7 +565,9 @@ end
 
 -- The expansions of roster `name`, in the catalog's order, for the page's list of expansions:
 -- "Factory Standard", the ones every owner of Avenger has, or "Complete", every expansion the
--- catalog lists. The catalog's list, never Avenger's own — the page marks it as the database's —
+-- database has (129 in 1.1.0: the project's catalog's, and the five it does not name at their
+-- alphabetical places, where the catalog's order puts them). The catalog's list, never Avenger's
+-- own — the page marks it as the database's —
 -- or nil and why there is none. It reads the index only (P.index, decoded once), not the lookups
 -- the name searches build.
 function DB.roster(name)
