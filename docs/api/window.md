@@ -70,11 +70,11 @@ Returned by `host.window.controls()` and `host.window.focusChain()`. Built by `c
 
 Note: a control table has no `title` / `app` fields — only `id`, `class`, `bounds`, `client`.
 
-### Windows
+### Windows {#table-shapes-windows}
 
 `class` is the real Win32 class from `GetClassNameW` — `"REAPERwnd"`, `"Qt5152QWindowIcon"`, `"#32770"`. `app.exe` is the executable's file name (`"reaper.exe"`) and `app.name` its stem; `app.bundleId` is always `""`. `id` is a real `HWND`, which the operating system **reuses**, so a stale id can quietly come to mean a different window. `client` is `GetClientRect` translated to the screen.
 
-### macOS
+### macOS {#table-shapes-macos}
 
 `class` is a synthesised triple, `AXRole/AXSubrole/AXIdentifier`, with both separators always present and missing parts left empty: `"AXWindow/AXStandardWindow/"`, `"AXGroup//NI.Kontakt.Main"`. It is never the empty string — an element with no role at all yields `"//"`. A Windows class pattern therefore cannot match here, and the overlay simply never activates with nothing to say why; `host.os.pick` is how a matcher carries both.
 
@@ -134,13 +134,13 @@ end
 local reaper = host.window.list({ pids = { reaperPid } })
 ```
 
-### Windows
+### Windows {#host-window-list-windows}
 
 `EnumWindows` — local, microseconds, and the filter merely drops entries. There is no cost to leaving it out.
 
 Only **visible windows with a title** are listed, so `find` and `findAll` never return an untitled window — Komplete Kontrol's untitled `#32770` save dialog, for one. `active()` is the one call that also returns an untitled window as a window table; [`foreground()`](#host-window-foreground) names the foreground window by id whether it has a title or not, and whether it is visible or not.
 
-### macOS
+### macOS {#host-window-list-macos}
 
 Every application listed is a call into that process for its `AXWindows`, each with its own timeout, on the thread that carries the event tap. Unfiltered, the listing asks every running application that could own a window, and gives each of them **a quarter of a second** rather than the process-wide second — the third Mac session measured 2.0–2.3 s of every 3 s probe stall going to one unrelated process that never answered, and the tap was switched off each time. An application that misses that short deadline is left out of the listing and **named in the log, but not quarantined**: only a miss at the full timeout marks an application as not answering for the paths that consult that. With `pids`, the named applications are asked at the **full** timeout, because those are the ones the caller is waiting on and a slow-but-alive plugin must not read as absent. An application that takes 100 ms or more is named in the log either way, with how many windows it listed.
 
@@ -157,11 +157,11 @@ for _, a in ipairs(host.window.apps()) do
 end
 ```
 
-### Windows
+### Windows {#host-window-apps-windows}
 
 Derived from the visible top-level windows: their owning processes, one entry per pid. A process with no window is not a place a window search could find anything, so it is not listed.
 
-### macOS
+### macOS {#host-window-apps-macos}
 
 The workspace's own list of running applications, minus those whose activation policy is *prohibited* (helpers, agents, XPC services — more of them than everything else together, and none can own a window). Hidden applications (Command-H) are included, as they are in `list()`: a module that finds a hidden DAW's plugin window and focuses it is how that DAW comes back.
 
@@ -184,11 +184,11 @@ for _, w in ipairs(host.window.windowsOf(pid)) do
 end
 ```
 
-### Windows
+### Windows {#host-window-windowsof-windows}
 
 `EnumWindows` filtered to visible windows owned by the process, with the Win32 class in `class`. A `#32768` popup menu is a top-level window owned by the thread that opened it, so it appears here; so does a toolkit's self-drawn popup, which is usually a tool window of its own. `layer` is always 0.
 
-### macOS
+### macOS {#host-window-windowsof-macos}
 
 `CGWindowListCopyWindowInfo` for on-screen windows, filtered by owning pid. `id` is the `CGWindowID`, `layer` the window server's level — an `NSMenu` sits at 101, an ordinary window at 0. `class` is empty. Whether a given plugin's self-drawn menu is a window of its own or painted inside the plugin's window is exactly what this exists to find out; the runtime's `newWindow` test logs each window that appeared after a menu-opening press, with its level and size. sforzando's menus are windows here, at level 101 each. VPS Avenger's in Logic are not (the first Mac test of its page, 2026-10-14): after its zoom field was clicked no new window of Logic's process came on screen in 8 seconds, while the same list of the window server's paired Logic's plug-in window by frame and owner in that session — JUCE paints a popup that has a parent component inside the plug-in's editor. Such a popup is seen by the pixels only: [`O.menuTests.drawn`](overlay.md#o-menutests).
 
@@ -205,7 +205,7 @@ local w = host.window.active()
 if w then host.log.info("front: " .. w.title) end
 ```
 
-### macOS
+### macOS {#host-window-active-macos}
 
 **This application's own window** is AppKit's answer: while this application is the frontmost one,
 or a panel of it has the keyboard without activating it (see [`foreground()`](#host-window-foreground)),
@@ -230,7 +230,7 @@ in the log, so a session can be explained afterwards.
 A minimised window reads as `nil` — minimised is this platform's hidden — and the call does not
 go on to another window of the application instead.
 
-### Windows
+### Windows {#host-window-active-windows}
 
 `GetForegroundWindow`, a local question answered without asking the application anything — but
 asked once per epoch and kept, as above, so "local" is not "current": the answer is refreshed
@@ -283,7 +283,7 @@ if f and a and f.id ~= a.id then
 end
 ```
 
-### Windows
+### Windows {#host-window-foreground-windows}
 
 `GetForegroundWindow` — the window whose thread gets keyboard input — then its process
 (`GetWindowThreadProcessId`) and three local tests. `shown` is `true` only when the window is
@@ -303,7 +303,7 @@ A Windows Store (UWP) app's foreground window is its frame, an `ApplicationFrame
 `ApplicationFrameHost.exe`, so `pid` is that process's — as `active()`'s `app.pid` is — while the
 keys go to the app's own window inside the frame, in the app's process.
 
-### macOS
+### macOS {#host-window-foreground-macos}
 
 The frontmost application — the workspace's own answer, local — and its `AXFocusedWindow`. Only
 that attribute: `active()` falls back to the application's main window and then its first window
@@ -407,7 +407,7 @@ if not host.window.focus(ov:hwnd()) then
 end
 ```
 
-### Windows
+### Windows {#host-window-focus-windows}
 
 A minimised window is restored first, then brought to the foreground with `SetForegroundWindow`. `true` means Windows accepted the request — not that the change has been made. For a window of another application the activation can finish only once that window's own thread has processed it, so [`active()`](#host-window-active), [`foreground()`](#host-window-foreground) and `focusChain()` asked straight after the call can still name the window that was in front; the foreground event follows once the change is made, and a module that wants to know where the keyboard went waits for that event rather than reading again at once. `false` means Windows refused: it limits which processes may change the foreground (the conditions are listed under `SetForegroundWindow` in Microsoft's documentation), and it does not say which one applied, and nothing more is done. Read [`focusChain()`](#host-window-focuschain) afterwards for where the keyboard is inside the window.
 
@@ -433,7 +433,7 @@ if host.window.focus(plugin.id) then
 end
 ```
 
-### macOS
+### macOS {#host-window-focus-macos}
 
 Three things are done: the window's application is made the active one, the window is raised inside it, and its accessibility focus flag is set. When that application is the active one already — and this application is not — the window is raised and its focus flag set at once, and `true` means that the window accepted either. That is also the case while a page described [`activates = false`](./gui.md#host-gui-webview) has the keyboard: the application it took the keyboard from is still the active one, though AppKit says this one is. Whether raising and focusing a window of that application then takes the keyboard from the page is unmeasured (TODO.md, MW1b). Otherwise the application is asked first, with `NSRunningApplication`'s `activateWithOptions` for all of its windows, and this application is left as it is: its module manager's window, say, keeps the keyboard until that application takes it. The window is raised and focused only when the workspace announces that application as the active one — after the call has returned, in the turn of the event loop that announces the activation, before the window in front is read for the foreground event, so that event names this window where the application lets it be raised. Here `true` means that the system took the request: activation is asynchronous, and the system can still decline it without a word. Only events end the wait, never a length of time. If another application becomes the active one first, the window is neither raised nor focused, and the log says `the front went to … instead`. If a key was pressed after the call, the window is not raised or focused when the activation comes, since the user has moved on and that key went somewhere else (`… but a key was pressed since`); the keys are seen by the event tap, so this needs the permission the tap needs. A second call, this application taking the front itself, and this application becoming the active one again after it had stopped being it give up a focus still waiting (`… is given up`). So a request the system declined leaves the window to be raised and focused the next time its application becomes the active one, if none of these came first. [`active()`](#host-window-active), [`foreground()`](#host-window-foreground) and `focusChain()` asked straight after a call that had to ask can still name the window that was in front before, as on Windows: a module that wants to know where the keyboard went waits for the foreground event.
 
@@ -459,11 +459,11 @@ for _, c in ipairs(host.window.controls()) do
 end
 ```
 
-### Windows
+### Windows {#host-window-controls-windows}
 
 Every **visible child window**, from `EnumChildWindows`, with no node or depth cap. A Win32 dialog therefore yields its buttons, edit fields and labels as well as its containers.
 
-### macOS
+### macOS {#host-window-controls-macos}
 
 **Container roles only** — `AXGroup`, `AXScrollArea`, `AXSplitGroup`, `AXTabGroup`, `AXToolbar`, `AXWindow` and their like. Buttons, labels and text fields are deliberately excluded, and the walk stops at 600 nodes, depth 8, or 256 results.
 
@@ -482,11 +482,11 @@ local chain = host.window.focusChain()
 local focused = chain[1]   -- innermost focused control, if any
 ```
 
-### Windows
+### Windows {#host-window-focuschain-windows}
 
 The chain's links are **windows**: it walks from the focused `HWND` up through its parents. A plug-in that draws its own interface is one link, because it is one window.
 
-### macOS
+### macOS {#host-window-focuschain-macos}
 
 The links are **accessibility elements**. Both platforms start at whatever has focus, but the units differ, so the same self-drawn plug-in can be many links deep here and one link there. A gate written as "the chain is at most one deep, therefore we are in the plug-in" is reading a granularity, not a fact about the plug-in — check what the chain actually contains rather than how long it is.
 
@@ -508,11 +508,11 @@ Compared at the **top level**. An overlay's origin is often a child — an embed
 
 **`nil` means the platform cannot say, and must be read as permission rather than refusal.** A check with no answer must not block what it cannot judge. Only a definite `false` should stop anything.
 
-### Windows
+### Windows {#host-window-ownspoint-windows}
 
 Implemented with `WindowFromPoint` + `GetAncestor(GA_ROOT)` on both sides. `WindowFromPoint` is the window manager's own hit test, so a click-through window (`WS_EX_TRANSPARENT`) is correctly seen through rather than treated as a cover. `windowsOf` lists windows by their `HWND`, so with `listed` the question is the same one about the same number.
 
-### macOS
+### macOS {#host-window-ownspoint-macos}
 
 `NSWindow.windowNumberAtPoint:belowWindowWithWindowNumber:` — the window server's own hit-test, which names the frontmost window that would receive a mouse-down at the point across every application and skips windows that let clicks through. That is the question a click asks, and the reason the cheap route was not taken: `CGWindowListCopyWindowInfo` answers what is *drawn* there, and a screen reader's cursor ring is drawn over the very control being operated while letting clicks pass, so the drawn-there answer would have refused essentially every press on the machines this exists for.
 
@@ -612,7 +612,7 @@ end)
 
 **A trigger belongs to the VM that registers it**, and a `code_module`'s source runs in more than one: once in its own VM and once in every dependent's (see [`host.require`](./require.md#host-require)). A trigger registered at the top level of a shared runtime is therefore registered — and reported — once per VM. Where the trigger is the dependent's business, as a game's is, the runtime exports a function that registers it and each game module's entry calls that function once, in its own VM, with its own data: the trigger, and the poll and hotkey it starts, then belong to the game module, stop while it is disabled and go when it is reloaded. That shape, with a hotkey that works for any number of games on one runtime, is the example under [a runtime shared by game modules](./require.md#a-runtime-shared-by-game-modules). What must exist once per application goes into the runtime's `activate`, which runs in its own VM only. A poll that starts from `initial = true` and stops itself when the game leaves the front is the example under [`host.timer.cancel`](./timer.md#host-timer-cancel).
 
-### Windows
+### Windows {#host-window-ontrigger-windows}
 
 A system-wide foreground hook, registered for **every process**, whether or not it cooperates with accessibility, is what fires this. A foreground window **without a title** is never handed to a trigger: it runs a focus round (the `onFocus` callbacks) instead. The focus and name-change hooks beside it only ever run a focus round, so a window whose title becomes matchable after it came forward does not fire `onTrigger` either — re-check such a window from `onFocus`.
 
@@ -622,7 +622,7 @@ No focus round is run when watching starts. The window already in front is seen 
 
 **After a sleep, an unlock or a new connection** — the machine resumed, the session was unlocked, or it was connected to the console or a remote client again — the window in front is reported again as an activation, when it has a title, whether or not Windows raised a foreground change of its own, and a focus round follows; so an overlay that was active before the lock looks again at once. When Windows does raise one as well, the window is reported twice, as it is when the same window comes forward twice. After a display, scale or work-area change a focus round runs, and no activation. Each of these writes a `[system]` line to the log.
 
-### macOS
+### macOS {#host-window-ontrigger-macos}
 
 Only *application* activation is system-wide. Focus-within-an-application, window-created and title-changed exist solely as per-process accessibility observers, created lazily the first time that application comes to the front and abandoned after three permanent refusals.
 
@@ -653,11 +653,11 @@ end)
 
 `window_prelude.luau` also defines `W._hasTriggers()`, `W._wantsInitial(reprime)`, `W._dispatchActivate(win, beforeFirst)`, `W._dispatchInitial(win, reprime, beforeFirst)` and `W._dispatchFocus()`, and the host adds `W._requestInitial()`, which `onTrigger { initial = true }` calls to queue its module for the report. The host event loop calls the dispatchers to deliver foreground and focus changes, and the initial report, into the registered `onTrigger`/`onFocus` callbacks; modules do not call any of them directly.
 
-### Windows
+### Windows {#host-window-onfocus-windows}
 
 Fired by the system-wide focus and name-change hooks, by a foreground change to a window without a title, and after a sleep, an unlock, a new connection and a display, scale or work-area change (see [`onTrigger`](#host-window-ontrigger)). No focus round is run when watching starts.
 
-### macOS
+### macOS {#host-window-onfocus-macos}
 
 Same caveat as `onTrigger` above: focus changes *within* an application are delivered by a per-process accessibility observer rather than by a system-wide hook, so an application that will not answer accessibility produces no focus events at all.
 
@@ -688,10 +688,10 @@ if p then
 end
 ```
 
-### Windows
+### Windows {#host-window-recheck-windows}
 
 Answered by the 15 ms tick, in the manager window's timer and in a headless run alike.
 
-### macOS
+### macOS {#host-window-recheck-macos}
 
 Answered by the same 15 ms tick as on Windows, in the wxWidgets timer and in a headless run alike.

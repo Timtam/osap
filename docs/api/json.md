@@ -47,11 +47,11 @@ if not ok then
 end
 ```
 
-### Windows
+### Windows {#host-json-decode-windows}
 
 The same code on every platform: `serde_json` inside the host, with no call into the operating system.
 
-### macOS
+### macOS {#host-json-decode-macos}
 
 The same code as on Windows; nothing in it is platform-specific. Its unit tests are part of the `cargo test` run of the macOS CI job.
 
@@ -89,11 +89,11 @@ local function onMenuRead(items, cursor)
 end
 ```
 
-### Windows
+### Windows {#host-json-encode-windows}
 
 The same code on every platform: a walk over the value inside the host, printed by `serde_json`, with no call into the operating system.
 
-### macOS
+### macOS {#host-json-encode-macos}
 
 The same code as on Windows; nothing in it is platform-specific. Its unit tests are part of the `cargo test` run of the macOS CI job.
 
@@ -114,10 +114,10 @@ end
 host.log.info(host.json.encode({ found = found }))   -- {"found":[]} when nothing matched
 ```
 
-### Windows
+### Windows {#host-json-array-windows}
 
 A metatable set in the host; no call into the operating system.
 
-### macOS
+### macOS {#host-json-array-macos}
 
 The same code as on Windows.

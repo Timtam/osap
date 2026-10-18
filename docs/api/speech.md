@@ -27,7 +27,7 @@ See [what that list is and is not](./index.md#capabilities).
 
 ## host.speech.output(text, opts?) {#host-speech-output}
 
-**Signature:** `host.speech.output(text: string, opts: { interrupt: boolean? }?)` → `nil`
+**Signature:** `host.speech.output(text: string | Error, opts: { interrupt: boolean? }?)` → `nil`
 
 Speaks `text`, cutting off what is being said unless `opts.interrupt` is `false`. Leaving `opts` out, passing `{}` and passing `{ interrupt = nil }` all interrupt; `false` queues behind what is being said. Output is **not** echoed to the console — a screen reader reading the terminal would double the speech. The call itself does not check whether the module is enabled: a disabled module's callbacks are not called, but its entry file still runs at load, and a line spoken there is heard.
 
@@ -36,15 +36,17 @@ host.speech.output("Reverb enabled")
 host.speech.output("loading...", { interrupt = false })  -- queue, don't cut off
 -- A value read from a data file may be absent; nil interrupts, as leaving it out does.
 host.speech.output(item.name, { interrupt = pack.interrupt })
+-- An error value is spoken as its message.
+host.speech.output(host.errors.new("not_found", "no preset of that name"))
 ```
 
-**Nothing the speech engine does raises; wrong arguments do.** A screen reader that refuses a line, stops answering or is not running, and a voice that fails to open, end in the line going another way or in a log line — never in an error in the module's key handler. The arguments are checked at the call, and these raise: a `text` that is not a string — a number is accepted and spoken as its digits, `nil`, a boolean or a table raise — or a string that is not valid UTF-8; an `opts` that is neither a table nor `nil`; and an `interrupt` that is not `true`, `false` or `nil` (`{ interrupt = 1 }` raises `host.speech.output: interrupt is true or false, not a number`).
+**Nothing the speech engine does raises; wrong arguments do.** A screen reader that refuses a line, stops answering or is not running, and a voice that fails to open, end in the line going another way or in a log line — never in an error in the module's key handler. The arguments are checked at the call, and these raise: a `text` that is not a string — a number is accepted and spoken as its digits, an [error value](./errors.md#error-values) as its message (never its `detail`), and `nil`, a boolean or any other table raise — or a string that is not valid UTF-8; an `opts` that is neither a table nor `nil`; and an `interrupt` that is not `true`, `false` or `nil` (`{ interrupt = 1 }` raises `host.speech.output: interrupt is true or false, not a number`).
 
 **Cost.** The call hands the line to a speech thread and returns; it does not wait for the line to be said. It runs on the main thread, like every Lua call.
 
 `interrupt` governs the platform's own queue. On the VoiceOver path, whether an announcement also cuts off what VoiceOver is saying for its own reasons is VoiceOver's decision, not one this API can make.
 
-### Windows
+### Windows {#host-speech-output-windows}
 
 The line goes to the running screen reader if there is one (NVDA, JAWS, ZoomText, ZDSR, PC-Talker, Boy PC Reader or Sense Reader) and **Speak through the screen reader** is ticked in the Application settings tab, as it is by default; otherwise to OneCore, or SAPI where OneCore cannot open. Speech reaches them through prism, compiled into the application, so nothing has to be installed alongside it. What is spoken also reaches a **braille display**, unless **Also send what is said to a braille display** is unticked in the Application settings tab. An empty text, or one of spaces only, says nothing.
 
@@ -61,7 +63,7 @@ None of this runs on the main thread. A look is estimated at about 50 ms of the 
 
 The log says what happened: which reader refused a line and prism's error for it (`JAWS refused a line (prism error 9: Internal backend error, …)`); at start-up with none open, `no screen reader would open` — the start-up look cannot tell a reader that is not running from one that runs and refuses; what the search's first look found (`JAWS is running but would not open (…)`, `ZDSR would not open (…); some of its processes run, but they include its background services…`, or `no screen reader is running`); when that changes; when the pace drops, to 10 or to 30 seconds; the reader once it opens — `back to JAWS` after a refusal or a stall, `JAWS is open now` for a search that began at start-up, `speaking through JAWS` after the box was ticked; and that the search stopped when the setting was unticked.
 
-### macOS
+### macOS {#host-speech-output-macos}
 
 The line goes to the platform's own voice, unless **Speak through VoiceOver** is ticked in the Application settings tab. Ticked, the line goes to VoiceOver and arrives in the user's voice, at their rate, and **on their braille display**, which nothing else can do. Every call also asks macOS whether VoiceOver is running, a lookup in its list of running applications by bundle identifier.
 
@@ -116,11 +118,11 @@ The answer is a snapshot from a moment ago and a fresh look is started behind it
 
 **It can be empty just after start-up, and that is not the same as "nothing can speak here."** The first snapshot is taken behind the scenes rather than at launch, deliberately — a session that says nothing should not pay for opening a synthesiser — so a module that asks immediately may be told there is nothing. Measured: on one macOS machine the list arrived after 282 ms, while on one Windows machine two consecutive runs took 500 ms and **5500 ms** before a plain voice could be chosen. A module that picks a voice should keep looking rather than ask once and believe the answer; `tools/speech-probe` is written that way and says how long it waited.
 
-### Windows
+### Windows {#host-speech-engines-windows}
 
 Nine entries once the list has filled, always the same nine, because they are what the application was compiled to reach: `nvda`, `jaws`, `zoomtext`, `zdsr`, `pctalker`, `boypcreader`, `sensereader` — and `sapi` and `onecore`, which are Windows itself and therefore always available. Before it has filled there are none; see above.
 
-### macOS
+### macOS {#host-speech-engines-macos}
 
 `voiceover` first, then every installed system voice by its AVFoundation identifier —
 `com.apple.voice.compact.en-GB.Daniel` and its like. Those identifiers are stable across
@@ -161,11 +163,11 @@ Two things worth knowing before reaching for it. The first line after a choice m
 
 A chosen engine that later stops answering falls through to the ordinary path rather than to silence.
 
-### Windows
+### Windows {#host-speech-use-windows}
 
 Any id from `host.speech.engines()` that reports `available`.
 
-### macOS
+### macOS {#host-speech-use-macos}
 
 Any id from `host.speech.engines()` that reports `available`, including `voiceover`.
 

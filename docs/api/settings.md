@@ -93,11 +93,11 @@ host.settings.set("mode", "safe")
 
 The modules' part of the file is the application's copy, read at start; the `[app]` table — the application's own switches — is taken from the file as it stands at each save, since the Application settings tab writes those to the file itself. So a switch changed in that tab stays as it was set when a module's setting is saved after it. The file is replaced whole on every save: the store is written to a temporary file of its own beside `settings.toml` (named `settings.<random>.toml.tmp`), flushed to disk, and renamed over `settings.toml`. A crash in the middle leaves the old file or the new one, never a cut-off one, and so does a power cut on a volume that can flush. At worst a temporary file is left behind; nothing reads it, and the application removes it at its next start once it is a minute old. A save that fails leaves `settings.toml` as it was and is logged once per session. On a volume that cannot flush, the save goes through without the flush, and that is logged once per session too; a power cut right after such a save can lose it.
 
-### Windows
+### Windows {#host-settings-set-windows}
 
 `settings.toml` is next to the `.exe`. The rename replaces the old file in one step, even while another program has it open (a second instance reading it, a virus scanner, the search indexer, a sync client): `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, and when that is refused, a POSIX-semantics rename (`SetFileInformationByHandle`), which is what `std::fs::rename` does. The flush is `FlushFileBuffers`.
 
-### macOS
+### macOS {#host-settings-set-macos}
 
 `settings.toml` is in the folder that holds the `.app` — the original `.app` when macOS runs a translocated copy of it and can say where the original is; otherwise the copy's folder, where nothing can be saved (see [building on macOS](../building-on-macos.md#translocation)). The flush is `fcntl(F_FULLFSYNC)`, which APFS and HFS+ support and a network share (SMB, NFS) may not; there the save goes through unflushed, as described above. After the rename the folder itself is flushed as well, since on macOS a rename is only on disk once its folder is. The file is created with mode 0666 less the umask (usually `rw-r--r--`), so other accounts on the Mac can read it.
 

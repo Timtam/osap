@@ -87,6 +87,13 @@ pub mod profile;
 #[path = "../../host/src/webview.rs"]
 pub mod webview;
 
+/// What a call answers when something it was asked to do was not done — the codes, every reason
+/// the host can give, the error it carries — pure. `webview.rs` builds a page's `platform.errors`
+/// from its codes, so it has to exist at `crate::errors` here as it does in `host` — and so it does
+/// for the backend's producers once they answer with its errors; `--tests` builds its tests too.
+#[path = "../../host/src/errors.rs"]
+pub mod errors;
+
 /// Where the keyboard lands after `host.window.focus` of a control (HW1): pure, and the Windows
 /// backend's to use, but built on every platform, so it is checked for macOS here and `--tests`
 /// builds its tests here too.

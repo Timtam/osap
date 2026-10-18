@@ -90,7 +90,7 @@ end)
 
 Poll only while your window is in front. A [`host.timer.every`](./timer.md#host-timer-every) poll runs until it is [cancelled](./timer.md#host-timer-cancel), so gate its callback: return at once unless `host.window.active()` is your window, as the example under [`imageSearchEach`](#host-screen-imagesearcheach) does.
 
-### Windows
+### Windows {#which-picture-a-read-sees-windows}
 
 `duplication` is DXGI Desktop Duplication: it reads the picture the compositor hands the display, where the standard path reads the screen device context. It is meant for an application whose picture the standard path reads frozen or black. **Measured with such a game** (the standard path 2026-09-21, duplication 2026-09-25; full screen at 1280×1024, on an AMD Radeon integrated graphics chip): the standard path read its always-moving picture as 40 identical pictures out of 40, while desktop duplication gave 40 and 39 different pictures out of 40 in two runs — it read the game live. A whole `profile` call over the 1280×1024 client area (`axes = "columns"`: the capture and its column reduction together) took 6–7 ms through duplication, the slowest 11 ms, where the same call through the standard path had taken about 23 ms; how the 6–7 ms divide between capture and reduction was not measured. Creating the Direct3D device took 32 ms, opening the duplication under a millisecond, and the first picture came 4–16 ms after opening; after 30 s without a read the duplication was closed, and the next read opened it again without trouble. Whether duplication sees another application's frames better than the standard path has to be checked with that application.
 
@@ -121,7 +121,7 @@ The log names each reason once, and again only after a read has been answered in
 - **HDR:** Windows converts the picture to 8 bits per channel for this path, so its colours may differ from the standard path's. Cut templates with `host.screen.save` from a module that declares the same `capture`.
 - **"Let modules that ask for it read the screen through the graphics card"** in the Application settings tab turns duplication off for every module: a module that allows the fallback reads the standard way, and every read of a `fallback = "none"` module fails with `it is switched off in Application settings`. Turning it off and on again starts duplication afresh — after it stopped for three hangs, after its thread stopped, or while it is stuck inside the graphics driver.
 
-### macOS
+### macOS {#which-picture-a-read-sees-macos}
 
 `[screen]` is accepted and ignored: a module that declares it reads the screen exactly as one that does not, and none of the duplication reasons under [Failure reasons](#failure-reasons) occurs.
 
@@ -286,11 +286,11 @@ end })
 
 **The image worker's waits** (`cells`, `matchCells`, `template{ capture }`, `crop`, the searches, `save`, `saveMarked`, and `profile`'s reduction) wait for the batch the worker is in the middle of — which may be a large match — and then for the reads of a higher priority: a key's read is a batch of its own, after the one in progress and ahead of the polls queued before it (see the top of this page). A handler waits for one read at a time, so its reads are not counted among the module's 64 image searches ([Failure reasons](#failure-reasons)).
 
-### Windows
+### Windows {#where-it-waits-windows}
 
 The waited picture is taken through the module's [source](#which-picture-a-read-sees) on the `screen-capture` thread, by the standard path or desktop duplication, about one compositor frame through the standard path. The waited points are read there: `pixel`'s point with `GetPixel`, `pixels`' points with the captures [`pixels`](#host-screen-pixels) plans, or through duplication as a piece of one request. Through desktop duplication that thread waits up to 250 ms for its answer; the wait holds the module, not the event loop. The image worker captures `cells`', `matchCells`', `template{ capture }`'s, the searches', `save`'s and `saveMarked`'s regions through the same source, and waits for duplication up to 250 ms likewise. The module's [first-read comparison](#which-picture-a-read-sees), when it is owed, goes with the request and is made on the thread, before its capture. Where it cannot wait the call raises, and nothing reads the screen on the event loop: the comparison is left to the module's next read.
 
-### macOS
+### macOS {#where-it-waits-macos}
 
 The waited picture is taken by ScreenCaptureKit on the `screen-capture` thread, at the display's own resolution and drawn down to points, as a snapshot's given a callback is — a `profile`'s too, so a waited profile's colours are a snapshot's. The waited points are captured there at point resolution — never at the display's own resolution, so a colour may differ a little from the same point of a snapshot; one ScreenCaptureKit capture for each rectangle `pixels` plans (one for a single `pixel`), measured at 36 to 91 ms each. The image worker captures `cells`', `matchCells`', `template{ capture }`'s, the searches', `save`'s and `saveMarked`'s regions at point resolution. Where it cannot wait the call raises, and nothing reads the screen on the event loop.
 
@@ -328,11 +328,11 @@ host.timer.every(500, function()
 end)
 ```
 
-### Windows
+### Windows {#with-a-callback-windows}
 
 The work is the call's own, on the threads that do it without a callback, through the module's [source](#which-picture-a-read-sees). `info.time` is when the capture came back on that thread; through desktop duplication the picture is the most recently composed frame, which may be a little older.
 
-### macOS
+### macOS {#with-a-callback-macos}
 
 The work is the call's own, on the threads that do it without a callback. `info.time` is when ScreenCaptureKit's capture came back on that thread: for a pixel read, measured at 36 to 91 ms after it was asked ([`pixel`](#host-screen-pixel)).
 
@@ -402,13 +402,13 @@ host.timer.every(200, function()
 end)
 ```
 
-### Windows
+### Windows {#host-screen-pixel-windows}
 
 **Every call without a snapshot is a screen read of its own**; nothing is kept between calls. Reads the pixel straight from the screen. What you get is what is there — unless the module declares [`[screen] capture = "duplication"`](#which-picture-a-read-sees), in which case it is read from the duplicated picture. A point that lies on no monitor reads as black (0, 0, 0), the same as a region read gives there, whichever way the module reads.
 
 The cost is per call. The standard path is `GetPixel` on the screen, measured at about 16.7 ms each — one compositor frame — so ten points in one poll are ten frames, about 170 ms: the module's wait, on the `screen-capture` thread. Under a declared `capture = "duplication"` each call is a 1×1 read of the duplicated picture, measured at 0.30 ms on an idle desktop in a test build; still one read per point. That thread may first wait for duplication — up to 250 ms, the module's wait and not the event loop's (see [How long a read waits](#which-picture-a-read-sees)); when duplication cannot answer, the call costs that wait plus the standard `GetPixel`, or returns `nil` and the reason under `fallback = "none"`. The window form adds no call to the operating system: its point is worked out from the table given.
 
-### macOS
+### macOS {#host-screen-pixel-macos}
 
 In a handler and given a callback the point is captured by itself on the `screen-capture` thread, at point resolution, as `pixels` captures one: one ScreenCaptureKit capture per call, measured at 36 to 91 ms, which a handler waits out. Nothing is kept between calls: two reads of nearby points are two captures, so read them with one [`pixels`](#host-screen-pixels). A point that cannot be read is black, with one line in the log a session. How the backing pixels of a Retina display are reduced to one value per point has not been measured, so compare colours with a tolerance rather than exactly.
 
@@ -441,11 +441,11 @@ host.hotkey.register("Ctrl+Alt+Shift+M", function()
 end)
 ```
 
-### Windows
+### Windows {#host-screen-pixels-windows}
 
 A point that lies on no monitor reads black without anything being captured or asked for it, whichever way the module reads. The other points: through the standard path the planned captures are `BitBlt`s of the screen — not `GetPixel`, which `pixel` uses — each about one compositor frame, 16.7 ms, up to about 1028×666 and about 28 ms for a whole 1920×1080 screen. So a list of close points costs one `pixel`; points spread over a whole 1920×1080 primary screen take up to two captures (it reaches two rows of tiles), and over a 3840×2160 one up to six. Under a declared `capture = "duplication"` each of them is a 1×1 piece of one duplication request, which the `screen-capture` thread waits for up to 250 ms (see [How long a read waits](#which-picture-a-read-sees)). When duplication cannot answer, the points are read the standard way, or the call returns `nil` and the reason under `fallback = "none"`. Coordinates are device pixels.
 
-### macOS
+### macOS {#host-screen-pixels-macos}
 
 The same plan of captures, each at point resolution like every capture on this page: every call captures afresh — in a handler and given a callback on the `screen-capture` thread, one ScreenCaptureKit capture per planned rectangle, each measured at 36 to 91 ms. Colours are the downsampled values of a Retina display, so compare them with a tolerance. Without the Screen Recording permission the colours are those of the desktop wallpaper, not `nil`.
 
@@ -683,13 +683,13 @@ host.gamepad.on("down", function(e)
 end, { buttons = { "dpad_up", "dpad_down", "dpad_left", "dpad_right" } })
 ```
 
-### Windows
+### Windows {#host-screen-snapshot-windows}
 
 The capture is `profile`'s: through the standard path the fixed compositor frame (about 16.7 ms up to about 1028×666, 28 ms for the whole 1920×1080 screen), through desktop duplication 0.3–5 ms on an idle desktop, by size, plus any wait for duplication — at most 250 ms on the `screen-capture` thread, which a handler waits out (see [How long a read waits](#which-picture-a-read-sees)). Through duplication the snapshot is the most recently composed frame, which may predate the newest redraw of a window. Coordinates and pixels are device pixels; the part of a region that leaves every monitor is black. A snapshot holds `w * h * 4` bytes.
 
 With a callback each picture is taken so on the `screen-capture` thread: through the standard path the fixed compositor frame (about 16.7 ms up to about 1028×666, 28 ms for the whole 1920×1080 screen); through desktop duplication the most recently composed frame, 0.3–5 ms on an idle desktop, the thread waiting up to 250 ms for duplication as the image worker does (see [How long a read waits](#which-picture-a-read-sees)) and answering `nil` and the reason under `fallback = "none"` when it cannot. A change wait through the standard path therefore captures back to back, one compositor frame a round, for up to its timeout. Between rounds, and until an `at`, the thread sleeps, and Windows wakes it on its timer: a round or a timed picture can come up to one timer tick late (15.6 ms at Windows' default timer resolution). Through desktop duplication a round that finds no newly composed frame compares the frame it already holds. When duplication cannot answer a round and the module allows the fallback, the round's regions are read the standard way, planned as a standard round is — a region inside another's capture cut from it, unions of up to 2,000,000 pixels — one compositor frame per planned capture. Coordinates are device pixels; the part of a region that leaves every monitor is black.
 
-### macOS
+### macOS {#host-screen-snapshot-macos}
 
 The snapshot is taken at the display's own resolution and drawn down to one pixel per point, which is what every read of it reads: the downsampled values of a Retina display, so compare colours with a tolerance. The picture at the display's own resolution is kept beside them, so on a Retina display a snapshot holds up to about five times `w * h * 4` bytes, and is charged that. The part of a region off the desktop is black; a region wholly off it answers `nil, "screen capture failed"`. Without the Screen Recording permission the capture does not fail: the snapshot is a picture of the wallpaper.
 
@@ -746,11 +746,11 @@ host.hotkey.register("Ctrl+Alt+Shift+G", function()
 end)
 ```
 
-### Windows
+### Windows {#reading-a-snapshot-windows}
 
 Reading a snapshot is the same on every platform: its pixels are those the capture delivered, in device pixels here.
 
-### macOS
+### macOS {#reading-a-snapshot-macos}
 
 Reading a snapshot is the same on every platform: its pixels are one per point, the downsampled values of a Retina display.
 
@@ -765,11 +765,11 @@ local s = host.screen.size()
 host.log.info("screen is " .. s.w .. "x" .. s.h)
 ```
 
-### Windows
+### Windows {#host-screen-size-windows}
 
 **Device pixels.** The application declares per-monitor DPI awareness, so a 4K panel at 200% scaling reports 3840x2160 and every coordinate the platform takes or returns is one physical pixel. A program that is not DPI-aware — a Python script that never called `SetProcessDpiAwareness`, for one — is told the scaled size instead (1920x1080 for the same panel), so coordinates it measured are that factor too small here unless the display was at 100%.
 
-### macOS
+### macOS {#host-screen-size-macos}
 
 **Points.** The same panel reports 1920x1080 on a Retina Mac; a capture is downsampled so that one pixel of a captured image is one point, and no coordinate can address a single backing pixel.
 
@@ -856,11 +856,11 @@ host.timer.every(500, function()
 end)
 ```
 
-### Windows
+### Windows {#host-screen-profile-windows}
 
 The capture goes through the module's [source](#which-picture-a-read-sees): in a handler and with a callback on the `screen-capture` thread, as a [snapshot request](#snapshot-with-a-callback)'s does, waiting up to 250 ms for desktop duplication there. Through the standard path it is the fixed compositor frame above; through desktop duplication the capture measured 0.3–5 ms on an idle desktop, by size. The reduction comes on top, in proportion to the area — in a handler and with a callback, on the image worker. With a game in front, a whole call over a 1280×1024 client area with `axes = "columns"` — capture and reduction together — took 6–11 ms through duplication, where the same call through the standard path took about 23 ms; how much longer a wait for it takes from asking to the answer has not been measured. Add any wait for duplication (see [How long a read waits](#which-picture-a-read-sees)). Coordinates and the profile are in device pixels.
 
-### macOS
+### macOS {#host-screen-profile-macos}
 
 The capture is in points (see [`host.screen.size`](#host-screen-size)). In a handler and with a callback it is the `screen-capture` thread's, taken at the display's own resolution and drawn down to points, which it keeps beside its points until the reduction has run, as a snapshot request's does: a request is charged 20 bytes a point. The image worker's captures for searches, the nearest measured, took about 19 ms per batch in the fifth macOS session. Without the Screen Recording permission the capture does not fail: the profile is of the desktop wallpaper, not `nil`.
 
@@ -894,11 +894,11 @@ host.timer.every(200, function()
 end)
 ```
 
-### Windows
+### Windows {#host-screen-pending-windows}
 
 The same on every platform: it reads the host's own record of the module's requests.
 
-### macOS
+### macOS {#host-screen-pending-macos}
 
 The same on every platform: it reads the host's own record of the module's requests.
 
@@ -965,13 +965,13 @@ host.hotkey.register("Ctrl+Alt+Shift+K", function()
 end)
 ```
 
-### Windows
+### Windows {#host-screen-template-windows}
 
 Sizes and coordinates are device pixels (see [`host.screen.size`](#host-screen-size)). A `capture` is one screen capture — through the standard path measured at a fixed ~16.7 ms whatever the region's size — on the image worker in a handler, which the module waits for along with the batch ahead of it there, and given a callback; so learn a captured template once, not on a poll. Without a `snapshot` it is always a live read of the screen, never an earlier frame; with one it is that snapshot's picture, and costs a copy of the region's pixels. It reads through the module's [source](#which-picture-a-read-sees) like every other read, and in a module that declares `capture = "duplication"` that alone does not make it the picture the module's searches will see: a `capture` made before duplication has opened — one made at load, or just after the module's window came forward — may be read the standard way, or return `nil` and the reason under `fallback = "none"`, when the opening takes longer than the read waits for it, and the template keeps whichever picture it got for as long as the module keeps it. Under `fallback = "none"` a `pixel` that returned a colour was answered through duplication, so such a module learns its captured templates after one and asks again later when it gets `nil`; under the default fallback nothing tells a module which picture a read got. A game that is not DPI-aware is bitmap-stretched by the desktop compositor at any scaling other than 100% — Microsoft's own documentation says such applications "appear blurry" — so a template made at one scaling setting will not match pixel for pixel at another: give the search a `tolerance`, and one `scales` factor computed from the window's actual size rather than a ladder of guesses.
 
 A template from bytes or a file is made on the image worker below normal priority, as its matching is (see the top of this page): on a busy machine its picture, and with it its `count`, comes later, and the first search that uses it makes it itself.
 
-### macOS
+### macOS {#host-screen-template-macos}
 
 The picture of a template from bytes or a file is made on the image worker, at the default priority, exactly as on Windows; a file's `w` and `h` are its PNG's pixels, which a search compares with a capture in points.
 
@@ -1045,11 +1045,11 @@ host.hotkey.register("Ctrl+Alt+Shift+W", function()
 end)
 ```
 
-### Windows
+### Windows {#host-screen-imagesearch-windows}
 
 The capture is one read through the module's [source](#which-picture-a-read-sees): through the standard path the fixed ~16.7 ms compositor frame whatever the region's size, through desktop duplication 0.3–5 ms on an idle desktop as measured there, plus any wait for duplication — at most 250 ms on the image worker, where a handler's search and one given a callback are made. The match follows on the image worker's matching pool — a snapshot's, which captures nothing, as well — and grows with the area searched and the number of scales. Searches in one batch of the image worker share a capture only when both the region and the source are the same, and the regions that go through desktop duplication are captured together, one request per `fallback` setting; while the worker waits for duplication it holds every read queued behind it — the image worker at the top of this page is one thread for every module. Coordinates are device pixels.
 
-### macOS
+### macOS {#host-screen-imagesearch-macos}
 
 Without the Screen Recording permission, macOS does **not** fail a capture — it hands back a picture of the desktop wallpaper. So a missing grant does not show up as an error or an empty result; it shows up as a search that never matches, or worse, matches something that was never on the plug-in. If every image search suddenly stops matching on a Mac, check the grant before the template: without it the answer is usually "not found" — `nil` alone, `cb(nil, nil, info)` given a callback — and a reason comes only for a region that cannot be captured at all (empty, too large, or wholly off the desktop) or a window region whose window had an empty client area. The capture is in points, on the image worker, each region one after the other. The image worker's capture measured about 19 ms per batch in the fifth macOS session.
 
@@ -1095,11 +1095,11 @@ host.timer.every(250, function()
 end)
 ```
 
-### Windows
+### Windows {#host-screen-imagesearcheach-windows}
 
 The capture runs on the worker thread, not on the event loop, through the module's [source](#which-picture-a-read-sees) exactly as `imageSearch`'s given a callback does; through the standard path it costs the same fixed compositor frame as any other (~16.7 ms whatever its size), and through duplication the worker waits at most 250 ms for it. The matching is spread across cores, one entry per task, on the matching pool below normal priority (see the top of this page).
 
-### macOS
+### macOS {#host-screen-imagesearcheach-macos}
 
 The same worker and the same capture as `imageSearch` given a callback. Without the Screen Recording permission the capture succeeds with a picture of the wallpaper, so the answer is **not** `nil, reason` — that only means the capture itself failed (a region that is empty, too large, or wholly off the desktop) or a window region's window had an empty client area — but usually a list of `false`. Usually: a [`capture` template](#host-screen-template) that was itself made without the grant is a picture of the wallpaper, and its entry will match.
 
@@ -1152,11 +1152,11 @@ host.log.info(WARM)
 --   (r >= 100 and g >= 45 and b <= 150 and r - g >= 0 and g - b >= 0)
 ```
 
-### Windows
+### Windows {#host-screen-predicate-windows}
 
 The test runs in the host on the red, green and blue bytes of each captured pixel, and the same string gives the same answer for the same colour on every platform. What can differ is the colour a capture yields for the same picture; see [`cells`](#host-screen-cells).
 
-### macOS
+### macOS {#host-screen-predicate-macos}
 
 As on Windows: the same string gives the same answer for the same colour. A Mac capture of a picture does not necessarily yield the colours a Windows capture of it yields; see [`cells`](#host-screen-cells).
 
@@ -1210,7 +1210,7 @@ host.hotkey.register("Ctrl+Alt+Shift+R", function()
 end)
 ```
 
-### Windows
+### Windows {#host-screen-cells-windows}
 
 Device pixels, never scaled: a window region resolves against the client area `host.window` reports, which is `GetClientRect` on the screen. The capture reads through the module's [source](#which-picture-a-read-sees). Through the standard path it costs about 16.7 ms whatever its size up to about 1028×666, and 28 ms for the whole 1920×1080 screen; through desktop duplication, 0.3 to 1 ms for regions up to 633×418, and 5 ms for the whole screen. What covers the region is what gets read: another window over the game, the mouse pointer when Windows draws it into the picture, and black where the region leaves every monitor.
 
@@ -1219,7 +1219,7 @@ A stored state matches only if it was recorded from the same pixels:
 - the same display scaling: a game that is not DPI-aware is stretched by the compositor at any scaling other than 100 %, so a state recorded at one scaling is not the same bytes at another;
 - the same capture source. Whether the standard path and desktop duplication give the same bytes for the same game has not been measured, so record through the source the module polls with.
 
-### macOS
+### macOS {#host-screen-cells-macos}
 
 Points, not pixels: a window region resolves against the client area `host.window` derives from the window's frame, and a capture on a Retina display is downsampled so that one pixel is one point (see [`host.screen.size`](#host-screen-size)). Cells computed from a Mac capture are not guaranteed to be the same bytes as those from a Windows capture of the same picture, so record the states on a Mac for a Mac. Without the Screen Recording permission the capture does not fail: it is a picture of the wallpaper, so the call returns cells of the wallpaper, not `nil`. In a handler and given a callback the image worker captures the region at point resolution.
 
@@ -1301,11 +1301,11 @@ host.timer.every(150, function()
 end)
 ```
 
-### Windows
+### Windows {#host-screen-matchcells-windows}
 
 The capture and the pixels are those of [`cells`](#host-screen-cells): device pixels, through the module's source, on the image worker, and states recorded from the same pixels match exactly. Given a callback, what a poll costs the event loop is checking its arguments and decoding its states (0.4 ms for 100 states of 360 cells, above) and resolving its region. In a module that reads through desktop duplication, the worker makes the [first-read comparison](#which-picture-a-read-sees) before its capture, until duplication has answered it once.
 
-### macOS
+### macOS {#host-screen-matchcells-macos}
 
 The capture and the pixels are those of [`cells`](#host-screen-cells): points, with states recorded on a Mac for a Mac. Without the Screen Recording permission this compares the wallpaper with the states and returns a match rather than `nil`; its `similarity` is whatever the wallpaper happens to score, so the thresholds are what keep it quiet.
 
@@ -1371,11 +1371,11 @@ host.hotkey.register("Ctrl+Alt+Shift+F", function()
 end)
 ```
 
-### Windows
+### Windows {#region-form-windows}
 
 Fractions resolve to device pixels of the client area `GetClientRect` reports, translated to the screen.
 
-### macOS
+### macOS {#region-form-macos}
 
 Fractions resolve to points of the client area derived from the window's frame (see [the window table](./window.md#table-shapes)). The same fractions cover the same part of a window as on Windows, where corners measured on one platform would need converting for the other.
 
@@ -1409,11 +1409,11 @@ host.timer.after(0, function()
 end)
 ```
 
-### Windows
+### Windows {#host-screen-save-windows}
 
 The shot is taken through the module's [source](#which-picture-a-read-sees) like every other read: on the image worker, which waits for desktop duplication up to 250 ms. In a module that declares `capture = "duplication"`, a shot taken while duplication is still opening for longer than that — just after the module's window came forward, say — is taken the standard way, or `save` returns `false` and the reason under `fallback = "none"`, so a template cut from such a shot is not necessarily the kind of picture the module's searches read.
 
-### macOS
+### macOS {#host-screen-save-macos}
 
 Without the Screen Recording permission the capture does **not** fail — macOS hands back a picture of the desktop wallpaper. A saved shot is therefore the cheapest way to tell a missing grant from a wrong rectangle: if the PNG shows the wallpaper, no coordinate in the module is at fault. A template cut around the same on-screen element on a Retina Mac also comes back at point resolution, i.e. half the pixel dimensions of the same crop taken on a HiDPI Windows machine (see [`host.screen.size`](#host-screen-size)).
 
@@ -1445,11 +1445,11 @@ host.screen.saveMarked(host.path("calibration/" .. stem .. ".png"), { region = r
 host.screen.saveMarked(host.path("calibration/" .. stem .. "-clean.png"), { region = region, marks = {} })
 ```
 
-### Windows
+### Windows {#host-screen-savemarked-windows}
 
 The capture is `save`'s: one read through the module's [source](#which-picture-a-read-sees), on the image worker, and under `fallback = "none"` a shot duplication could not answer returns `false` and the reason, with no file written. Marks, region and PNG are all in device pixels, so a crosshair lands on the very pixel its screen point names at any display scaling.
 
-### macOS
+### macOS {#host-screen-savemarked-macos}
 
 The capture is `save`'s, so the wallpaper-instead-of-error case applies here too — and it is nastier with marks on it, because crosshairs drawn over a picture of the desktop look like a considered answer rather than a missing permission. Check that the shot shows the plug-in before reading anything into where the marks landed.
 
@@ -1477,10 +1477,10 @@ local all, why = host.screen.imageSearchAll(image, { region = { window = o, frac
 if why then host.log.info("not searched: " .. why) end
 ```
 
-### Windows
+### Windows {#host-screen-imagesearchall-windows}
 
 The capture is one read through the module's [source](#which-picture-a-read-sees), on the image worker: the fixed ~16.7 ms frame through the standard path, less through desktop duplication plus any wait for it (at most 250 ms). The full scan follows, in device pixels, on the image worker's matching pool.
 
-### macOS
+### macOS {#host-screen-imagesearchall-macos}
 
 The capture is in points, on the image worker. Without the Screen Recording permission it does not fail: the list is the matches in a picture of the wallpaper — usually none, and no reason with it.

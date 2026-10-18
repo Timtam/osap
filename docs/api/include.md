@@ -43,10 +43,10 @@ Semantics worth knowing:
 - **Text encoding.** The file is UTF-8. One byte-order mark at its very start is skipped, so a file written by a tool that puts one there (.NET's `Encoding.UTF8`, PowerShell 5's `Out-File -Encoding utf8`) loads; the same holds for a module's entry file and a code dependency's. A second mark, or one anywhere else, is left for Luau, which rejects it (`Unicode character U+feff`).
 - **Cost.** The first include of a file in a VM reads it and compiles it synchronously, on the main thread, and then runs it; the time grows with the file, and a module's entry file waits for it. Later includes of the same file in that VM are a table lookup. A code module's files are read and compiled once in each VM its code runs in.
 
-### Windows
+### Windows {#host-include-windows}
 
 The include is remembered by its tidied path as text, so spellings the file system treats as one file but the text does not — `"Src/A.luau"` beside `"src/a.luau"`, or a short 8.3 name — are two includes, and the file runs twice in one VM.
 
-### macOS
+### macOS {#host-include-macos}
 
 Checked the same way as on Windows: the path is tidied as text before it is compared, so `"../other/x.luau"` is rejected here too. The file system is usually case-insensitive, so as on Windows `"Src/A.luau"` and `"src/a.luau"` are two includes of one file.

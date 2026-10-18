@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 
 # ---- What the host registers ------------------------------------------------------------
-# Four shapes, because the host uses four. Missing one produces a false alarm, and a checker
+# Five shapes, because the host uses five. Missing one produces a false alarm, and a checker
 # that cries wolf is turned off, which is worse than not having it.
 #
 # Forward slashes in the paths: this runs on a Linux CI runner as well as on Windows, and .NET
@@ -31,14 +31,17 @@ $root = $PSScriptRoot
 #
 # gamepad_api.rs registers `host.gamepad` from a file of its own, so it is read beside lib.rs;
 # without it every documented `host.gamepad.*` call would be reported as one the host lacks.
-# timers.rs is the same for `host.timer`, webview_lua.rs for `host.gui`, and element_lua.rs for
-# `host.element`.
+# timers.rs is the same for `host.timer`, webview_lua.rs for `host.gui`, element_lua.rs for
+# `host.element`, and errors_lua.rs for `host.errors` — whose constants are named in errors.rs,
+# one `Code::X => "X"` arm each, the fifth shape below.
 $sources = @(
   (Get-Content (Join-Path $root "crates/host/src/lib.rs") -Raw),
   (Get-Content (Join-Path $root "crates/host/src/element_lua.rs") -Raw),
   (Get-Content (Join-Path $root "crates/host/src/gamepad_api.rs") -Raw),
   (Get-Content (Join-Path $root "crates/host/src/timers.rs") -Raw),
   (Get-Content (Join-Path $root "crates/host/src/webview_lua.rs") -Raw),
+  (Get-Content (Join-Path $root "crates/host/src/errors_lua.rs") -Raw),
+  (Get-Content (Join-Path $root "crates/host/src/errors.rs") -Raw),
   (Get-Content (Join-Path $root "crates/host/src/window_prelude.luau") -Raw)
 ) -join "`n"
 
@@ -47,7 +50,8 @@ foreach ($pattern in @(
     '\.set\(\s*"([A-Za-z_][A-Za-z0-9_]*)"',      # the ordinary Rust binding
     '\(\s*"([A-Za-z_][A-Za-z0-9_]*)"\s*,\s*\d+\s*\)', # the UIA control-type tuples
     'function\s+[A-Za-z_][A-Za-z0-9_.]*\.([A-Za-z_][A-Za-z0-9_]*)\s*\(', # prelude functions
-    '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*function'   # table-literal functions
+    '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*function',  # table-literal functions
+    'Code::[A-Za-z]+\s*=>\s*"([A-Z][A-Z0-9_]*)"'     # host.errors' constants (errors.rs)
   )) {
   foreach ($m in [regex]::Matches($sources, $pattern, 'Multiline')) {
     [void]$registered.Add($m.Groups[1].Value)

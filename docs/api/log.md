@@ -27,9 +27,11 @@ See [what that list is and is not](./index.md#capabilities).
 
 ## host.log.info(msg) {#host-log-info}
 
-**Signature:** `host.log.info(msg: string)` → `nil`
+**Signature:** `host.log.info(msg: string | Error)` → `nil`
 
 Writes `msg` to the host log under the `module` channel. This is the **only** method on `host.log` — there is no `warn`/`error`/`debug`.
+
+`msg` is a string; a number is written as its digits; an [error value](./errors.md#error-values) is written as its message, word for word, and its `detail` is left out — a module that wants it logs `err.detail` itself. Anything else raises, a table that is not an error value among them (`bad argument #1: error converting Lua table to String (expected string or number)`).
 
 The line is written as it is, after a timestamp and `[module]`, and **without the name of the module that wrote it** — unlike the host's own error lines, which carry the module id. Every module's lines share that one channel, so a module that is one of several (the game modules built on one runtime, say) puts its own name at the front of what it logs.
 
@@ -39,14 +41,19 @@ host.log.info("module initialized")
 -- One of several game modules on the same runtime: say which.
 local function log(msg) host.log.info("[my-game] " .. msg) end
 log("menu watcher started")
+
+-- An error value logs its message, alone or in a sentence.
+local err = host.errors.new("busy", "the menu is still opening")
+host.log.info(err)
+log("not read: " .. err)
 ```
 
-### Windows
+### Windows {#host-log-info-windows}
 
 The log is next to the `.exe`. When that folder cannot be written, it goes to
 `%LOCALAPPDATA%\AutomationPlatform` instead.
 
-### macOS
+### macOS {#host-log-info-macos}
 
 The log is in the folder that holds the `.app`. When that folder cannot be written, it goes
 to `~/Library/Application Support/AutomationPlatform` instead. When macOS runs a translocated

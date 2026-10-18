@@ -954,8 +954,9 @@ pub struct Words {
 }
 
 /// The script the host puts into every page before the page's own: `platform.post(value)` to
-/// send the module a value, and `platform.onmessage = function (value) … end` to receive what
-/// the module posts. It hides which engine carries the messages (WebView2's `chrome.webview` on
+/// send the module a value, `platform.onmessage = function (value) … end` to receive what
+/// the module posts, and `platform.errors`, the codes of an error value the module posts
+/// ([`errors_script`]). It hides which engine carries the messages (WebView2's `chrome.webview` on
 /// Windows, a function only the host calls on a Mac), so a page is written once.
 ///
 /// Messages the module posts before the page has set `onmessage` wait for it, up to the same
@@ -1010,9 +1011,34 @@ pub fn platform_shim(engine: Engine) -> String {
             s.push_str(SHIM_WEBKIT_FOCUS);
         }
     }
+    s.push_str(&errors_script());
     s.push_str(SHIM_TAIL);
     s
 }
+
+/// `platform.errors`: the codes of the host's error values, `NOT_READY: "not_ready"` and the rest,
+/// made from [`Code::ALL`](crate::errors::Code::ALL), so a page compares `m.error.code` with the
+/// same constants a module compares with `host.errors` (docs/api/errors.md). Frozen, behind a proxy
+/// that throws for a name it does not have, as `host.errors` raises. A symbol is no name, and
+/// neither are the four names JavaScript itself asks an object for — `then` (`await`, an async
+/// function's return), `toJSON` (`JSON.stringify`), `toString` and `valueOf` (a conversion) —
+/// which read as `undefined`, as on any object without them.
+fn errors_script() -> String {
+    let codes: Vec<String> =
+        crate::errors::Code::ALL.iter().map(|c| format!("{}: \"{}\"", c.constant(), c.as_str())).collect();
+    SHIM_ERRORS.replacen("CODES", &codes.join(", "), 1)
+}
+
+/// [`errors_script`]'s text, `CODES` standing for the list.
+const SHIM_ERRORS: &str = r#"  const codes = Object.freeze(Object.assign(Object.create(null), { CODES }));
+  const asked = ["then", "toJSON", "toString", "valueOf"];
+  const errors = new Proxy(codes, {
+    get: (target, name) => {
+      if (typeof name !== "string" || name in target || asked.includes(name)) return target[name];
+      throw new TypeError("platform.errors has no '" + name + "'; the codes are " + Object.keys(target).join(", "));
+    },
+  });
+"#;
 
 /// The start of every [`platform_shim`]: the top frame only, once, and `window.close()` made to do
 /// nothing.
@@ -1076,6 +1102,7 @@ const SHIM_WEBKIT_FOCUS: &str = r#"  const note = (text) => {
 /// The end of every [`platform_shim`]: the `platform` object itself, frozen.
 const SHIM_TAIL: &str = r#"  const platform = Object.create(null);
   Object.defineProperties(platform, {
+    errors: { value: errors },
     post: {
       value: (value) => {
         ipc.postMessage(JSON.stringify(value === undefined ? null : value));
@@ -1991,8 +2018,8 @@ mod tests {
     }
 
     /// The script WebView2's pages got from stage 1 until the shim was built from parts, as it
-    /// was: the Windows shim is held to it byte for byte, so building the Mac's beside it changes
-    /// nothing for a page on Windows.
+    /// was: the Windows shim is held to it byte for byte but for `platform.errors`, which the typed
+    /// errors added, so building the Mac's beside it changes nothing else for a page on Windows.
     const WINDOWS_SHIM_OF_STAGE_1: &str = r#"(() => {
   "use strict";
   if (window.top !== window || window.platform) return;
@@ -2031,8 +2058,28 @@ mod tests {
 })();"#;
 
     #[test]
-    fn the_windows_shim_is_the_one_stage_1_shipped() {
-        assert_eq!(platform_shim(Engine::WebView2), WINDOWS_SHIM_OF_STAGE_1);
+    fn the_windows_shim_is_the_one_stage_1_shipped_and_the_codes() {
+        let shim = platform_shim(Engine::WebView2);
+        let codes = errors_script();
+        assert!(shim.contains(&codes));
+        let without = shim.replacen(&codes, "", 1).replacen("    errors: { value: errors },\n", "", 1);
+        assert_eq!(without, WINDOWS_SHIM_OF_STAGE_1);
+    }
+
+    /// `platform.errors` holds every code of the host's, under its constant, in both shims, and the
+    /// proxy's refusal names the list.
+    #[test]
+    fn both_shims_give_the_page_the_codes() {
+        for engine in [Engine::WebView2, Engine::WebKit] {
+            let shim = platform_shim(engine);
+            for c in crate::errors::Code::ALL {
+                assert!(shim.contains(&format!("{}: \"{}\"", c.constant(), c.as_str())), "{engine:?}: {c:?}");
+            }
+            assert!(shim.contains("errors: { value: errors },"), "{engine:?}");
+            assert!(shim.contains(r#"throw new TypeError("platform.errors has no '" + name + "'; the codes are ""#), "{engine:?}");
+            assert!(shim.contains(r#"const asked = ["then", "toJSON", "toString", "valueOf"];"#), "{engine:?}: what the engine asks for");
+            assert!(!shim.contains("CODES"), "{engine:?}");
+        }
     }
 
     #[test]

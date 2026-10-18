@@ -80,7 +80,7 @@ local function kkOf(id)
 end
 ```
 
-### Windows
+### Windows {#asking-without-waiting-windows}
 
 Every question is asked on the host's `accessibility` thread, started at the first one, and never on the event loop. The thread has no window, lives in the multithreaded COM apartment — as Microsoft recommends for a UI Automation client — and holds the automation object, whose every call into another program is bounded at 1000 ms (`IUIAutomation2`'s connection and transaction timeouts); a walk stops at the first call the program did not answer. A question that took 50 ms or more there gets a line, `[uia] findAny(Kontakt 8/Kontakt 7) of window 4589 (process 4242) took 1003 ms on the accessibility thread: not known: the program did not answer within 1000 ms`, and so do the questions answered "not known" without being asked behind it.
 
@@ -88,7 +88,7 @@ Without a callback the event loop waits for the answer — for the question the 
 
 A window of this application itself — a [`host.gui.webview`](./gui.md) page, the manager — is not asked about: every call answers `nil, "the window is this application's own, which is not asked about"` (a press, `false` and that, a dump an empty list and that), with a callback or without. Its accessibility is answered on the event loop, in part through calls *posted* to it, which the wait above does not run: the thread would wait for the event loop and the event loop for the thread.
 
-### macOS
+### macOS {#asking-without-waiting-macos}
 
 There is no such thread yet: a question is asked on the event loop, as before, with Accessibility's own bound on each call and the host's quarantine of an application that does not answer (see the calls below); a callback still gets its answer on a later turn, never inside the call. A question that ran into either reads as nothing found, as it always did: on this platform the answer is never "not known" yet.
 
@@ -124,13 +124,13 @@ if host.element.find(hwnd, "", 50004) then
 end
 ```
 
-### Windows
+### Windows {#host-element-find-windows}
 
 A subtree search performed by UIA itself, with no traversal budget of ours.
 
 The documented "is a menu open" idiom — an empty name with `host.element.type.Menu` — is exactly that: an ordinary search for any element of that control type.
 
-### macOS
+### macOS {#host-element-find-macos}
 
 A hand-rolled walk capped at **1500 nodes and depth 24**. Exhausting that budget returns the same "not found" a completed search returns, and only a once-per-session log line tells them apart — so a large or deep plug-in tree can make an identity check answer `false` permanently here while succeeding on Windows, with nothing to distinguish that from "this is not the plug-in".
 
@@ -150,7 +150,7 @@ if pt then
 end
 ```
 
-### macOS
+### macOS {#host-element-locate-macos}
 
 Subject to the same **1500 node / depth 24** traversal budget as `host.element.find` — a tree larger than that answers "not here" to every question, indistinguishably from an honest miss.
 
@@ -165,11 +165,11 @@ local U = host.element.type
 if host.element.find(hwnd, "Kontakt 8", U.Pane) then … end
 ```
 
-### Windows
+### Windows {#host-element-type-windows}
 
 Every constant in the table is a real UIA property condition and can match.
 
-### macOS
+### macOS {#host-element-type-macos}
 
 The ids are translated to accessibility roles, and **ten of them have no mapping at all**: `Calendar`, `StatusBar`, `Thumb`, `DataGrid`, `DataItem`, `Document`, `SplitButton`, `Header`, `HeaderItem` and `TitleBar`. A query whose control type is one of those is well-formed, can never succeed, and says so only in the log — which the module never sees.
 
@@ -203,11 +203,11 @@ local pt = host.element.pluginLocate(hwnd, "Kontakt 8", "Kontakt File Menu", 500
 if pt then host.input.click(pt.x, pt.y) end
 ```
 
-### Windows
+### Windows {#host-element-pluginlocate-windows}
 
 A hand-rolled walk of its own, bounded at 4000 nodes and depth 40 — deliberately larger than the ordinary search, because a hosted plug-in fragment is where the deep trees are — and at 5 s for each of its two walks (the containers, then each container's content), against a program that answers every call in time but slowly. A walk stopped at its node budget or its time before the end of the tree, that found nothing, answers `nil` and why — `"the tree holds more than the 4000 elements a search reads"`, `"the search took longer than 5 s"` — never `nil` alone: the part it did not walk may hold the element. What it found stands. Elements below depth 40 are not looked at, and nothing says so: that is the call's reach, not a cut.
 
-### macOS
+### macOS {#host-element-pluginlocate-macos}
 
 The general **1500 node / depth 24** budget applies here too; there is no larger allowance for this call. A plug-in tree that this reaches on Windows can be out of reach here, and the miss looks identical to a genuine one.
 
@@ -259,13 +259,13 @@ for _, c in ipairs(host.window.controls()) do
 end
 ```
 
-### Windows
+### Windows {#host-element-dump-windows}
 
 One `FindAll` over the subtree, returning a **flat** list capped at the first 2000 elements: `depth` is `0` on every node here, so nesting has to be read from the rectangles rather than from the field. `rawDump` is the one that reports real depth. A tree larger than that is listed in part, and the second value says so: `"the tree holds 2875 elements, more than the 2000 a dump lists"`.
 
 `rawDump` here walks at most 4000 elements and 5 s, depth 40, and says the same of a walk that stopped at the first two: `"the tree holds more than the 4000 elements a search reads"`, `"the search took longer than 5 s"`.
 
-### macOS
+### macOS {#host-element-dump-macos}
 
 Accessibility has only one view of the tree, so `dump` and `rawDump` are the same call and return the same list — a `dump` is never the thinner answer it can be on Windows. Bounded at **2000 nodes and depth 24**, and `depth` is the real nesting depth.
 
@@ -293,11 +293,11 @@ else
 end
 ```
 
-### Windows
+### Windows {#host-element-locatevia-windows}
 
 Both levels are condition-based `FindFirst` calls: the container must itself be reachable by a condition-based search from `hwnd`, and there is no raw-walker pass here — where `pluginLocate` uses the raw walker for both of its levels.
 
-### macOS
+### macOS {#host-element-locatevia-macos}
 
 Control types are translated to accessibility roles, so an unmapped type at **either** level makes the call impossible — it can never match, and says so only in the log (see [`host.element.type`](#host-element-type)). Each level gets its own **1500 node / depth 24** budget, and an exhausted budget returns the same `nil` an honest miss returns.
 
@@ -323,13 +323,13 @@ if st.toggle ~= nil then return st.toggle == 1 end  -- 0 off, 1 on
 return nil
 ```
 
-### Windows
+### Windows {#host-element-stateprobe-windows}
 
 `legacyState` is a real `LegacyIAccessible` state word, so bits beyond CHECKED (`0x10`) carry information: `0x08` PRESSED, `0x04` FOCUSED, `0x100000` FOCUSABLE. Read them with care — Kontakt's Side and Info panes were seen going `0x100000` → `0x100004` across a press, and that `0x4` is the consequence of our own click rather than a panel state.
 
 The search is confined to elements named `containerName` with control type Window or Pane (the `ni::qt::QuickWindow` class preferred over the window host), and a window with no container of that name answers `nil` without looking further. The same walks as [`pluginLocate`](#host-element-pluginlocate), with the same bounds: one stopped at its bound before the end that found nothing answers `nil` and why.
 
-### macOS
+### macOS {#host-element-stateprobe-macos}
 
 There is no state word here. `toggle` comes from `AXValue` — `0` off, `1` on, `2` for anything else, absent when the element carries no value — and `legacyState` is synthesised from it: `0x10` when `toggle` is `1`, otherwise `0`. Only `checked` is meaningful; the other bits are never set, so a module that reads PRESSED or FOCUSED gets a permanent zero.
 
@@ -355,11 +355,11 @@ local function browserToggle(hwnd)
 end
 ```
 
-### Windows
+### Windows {#host-element-classnavpoint-windows}
 
 Matches on ClassName containing the substring, searched depth-first over the raw view to depth 25, and the sibling steps are raw-view siblings.
 
-### macOS
+### macOS {#host-element-classnavpoint-macos}
 
 There are no class names. The first pass matches `AXIdentifier` containing the substring — Qt fills that from `objectName`, which is where the ReaHotkey class names came from in the first place — and only if that finds nothing does a second pass try `AXDescription`, for toolkits that leave the identifier empty. An identifier match therefore always beats a description match.
 
@@ -417,13 +417,13 @@ if r and not r.name:find("%S") and r.bounds then
 end
 ```
 
-### Windows
+### Windows {#host-element-focusstep-windows}
 
 The ring is scoped to the window's first child — ReaHotkey's content area — which drops the frame and the menu bar without a control-type blocklist. Candidates are the descendants the provider reports as keyboard-focusable and not off-screen, and focus is moved with UIA's own `SetFocus`. No traversal budget of ours applies — the whole content subtree is enumerated however large it is.
 
 `bounds` is the landed element's `CurrentBoundingRectangle`, read once, right after the focus has landed and been read back, at the cost of one more cross-process property read per step. It has whatever the plug-in did to the element while taking the focus — a list it scrolled to the element inside its focus handling puts the element where it is now — but a scroll the plug-in animates after that is not waited for: the rectangle is the one at that read. Whole physical pixels: the application is per-monitor DPI aware, so UIA hands it the same unscaled coordinates the screen reads use.
 
-### macOS
+### macOS {#host-element-focusstep-macos}
 
 While the keyboard is in this application — one of its windows has it, or it is the frontmost application — nothing is moved and the answer is `nil`, with a line in the log: where the keyboard is would have to be asked of this application itself.
 
@@ -449,11 +449,11 @@ else
 end
 ```
 
-### Windows
+### Windows {#host-element-focuswithin-windows}
 
 Not implemented — returns `nil`. Screen-reader users have OSARA's F6 there, and the plug-in host's own controls are reachable by Tab.
 
-### macOS
+### macOS {#host-element-focuswithin-macos}
 
 Walked from the window itself, not from its first child as `focusStep` is: inside REAPER's FX window Kontakt's elements *are* the window's children, with no content group to scope to. The rectangle is the scope instead. A candidate qualifies when `AXFocused` is settable and its centre is inside the rectangle; the first in tree order that actually takes the focus (read back from the system-wide focused element, not assumed) wins, so a text field near the top of a panel is what usually gets it. Same bounds as `focusStep`, and the same `nil` while the keyboard is in this application. One log line either way, naming the element and its role, or the number of candidates that accepted the question and then did not take the focus. Unverified on hardware as of 2026-09-11.
 
@@ -475,7 +475,7 @@ host.element.press(plugin.id, "Bypass", host.element.type.Button, function(press
 end)
 ```
 
-### Windows
+### Windows {#host-element-press-windows}
 
 On the accessibility thread, as every question ([Asking without waiting](#asking-without-waiting)). UI Automation: one `FindFirst` over the subtree, then the element's Invoke pattern (`Invoke`), else its Toggle pattern (`Toggle`), else LegacyIAccessible's default action (`DoDefaultAction`) — the last only when the element names one. UI Automation moves the keyboard focus to an element before it acts on it unless told not to, so every automation object of the host's is made with `AutoSetFocus` off (`IUIAutomation2`, Windows 8 and later); where that cannot be set, a press answers `"this system cannot press an element without moving the keyboard focus to it"` rather than move it. What follows is the program's: JUCE's buttons (6.1 and later, where the plug-in leaves accessibility on) post their click to the plug-in's own thread; the system's proxy for a standard Windows button sends it `BM_CLICK`, which Microsoft says might fail while its dialog is not the active window; a provider that moves the focus itself as it acts still does. One line in the log per press:
 
@@ -483,7 +483,7 @@ On the accessibility thread, as every question ([Asking without waiting](#asking
 
 or `[uia] could not press 'Bypass' (type 50000) in window 2755348: no such element`.
 
-### macOS
+### macOS {#host-element-press-macos}
 
 Not there yet: every press answers `false, "not supported on this platform yet"`, and the callback the same. The way it would go is `AXPress`; until a Mac has measured it, a module written for both platforms clicks there.
 
@@ -516,10 +516,10 @@ host.timer.every(250, function()
 end)
 ```
 
-### Windows
+### Windows {#host-element-pending-windows}
 
 A question is out from the call until its callback has run, whether the accessibility thread asks it, it shares another's answer, or the epoch's store answers it at the call: every answer comes on a later turn.
 
-### macOS
+### macOS {#host-element-pending-macos}
 
 The questions are asked on the event loop at the call, and their callbacks still run on a later turn: `pending` is `true` for that turn, as on Windows.

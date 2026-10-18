@@ -273,11 +273,11 @@ ov:addCustomButton({
 })
 ```
 
-### Windows
+### Windows {#o-probe-windows}
 
 Read through `host.screen.pixels`: a `BitBlt` of the box around the points through the standard path, about one compositor frame (16.7 ms) for points close together; under a declared `capture = "duplication"` a 1×1 piece of one duplication request each, which the `screen-capture` thread waits for up to 250 ms ([`host.screen.pixels`](screen.md#host-screen-pixels)). Coordinates are device pixels.
 
-### macOS
+### macOS {#o-probe-macos}
 
 Read through `host.screen.pixels`: one capture of the box at point resolution on the `screen-capture` thread — one ScreenCaptureKit capture, measured at 36 to 91 ms — afresh on every call, with colours downsampled from a Retina display, so a `read` compares with a tolerance. Coordinates are points. Without the Screen Recording permission the colours are the wallpaper's: a `read` that recognises only the plug-in's own colours answers `nil`, and the last value stands.
 
@@ -308,11 +308,11 @@ ov:addCustomButton({
 })
 ```
 
-### Windows
+### Windows {#o-expectchange-windows}
 
 Nothing of its own. Each read while the change is not read is the probe's: about one compositor frame (16.7 ms) for points close together ([`O:probe`](#o-probe)).
 
-### macOS
+### macOS {#o-expectchange-macos}
 
 Nothing of its own. Each read while the change is not read is the probe's: one capture of the box around the points, afresh on every read ([`O:probe`](#o-probe)), which took 36 to 91 ms through ScreenCaptureKit where it was measured.
 
@@ -373,11 +373,11 @@ The reason is the first test that said no, in these words (`<…>` is filled in)
 
 An overlay with two bindings — sforzando's standalone window and its embedded binding — says both reasons, the first binding's first, joined by `; `. A reason is made of what the test had in hand (the title, the focused element and its place), kept as values and put into words only for this line, and an evaluation that matches makes none. Nothing is asked of the host for a reason, but for the arbiter's: that one calls [`host.arbiter.participants`](arbiter.md#host-arbiter-participants) once, when the line is written.
 
-### Windows
+### Windows {#bindings-windows}
 
 An embedded binding's reasons include the DAW's chrome classes: `the keyboard is on the DAW's own control [<class>]` (REAPER's FX list, `SysListView32`). The panel's reasons below do not occur, since no daw-hosts entry gives a panel on Windows.
 
-### macOS
+### macOS {#bindings-macos}
 
 An embedded binding on the DAW's plug-in panel ([`attachEmbedded`](#o-attachembedded-macos)) says where the keyboard was found: `the keyboard is on [<AXRole/AXSubrole/AXIdentifier>] at <x>,<y>, outside the plug-in's panel (the DAW's own controls)` (the focused element's centre, in screen points) · `the focused element [<class>] has no rectangle` · `the focus chain ends in another window than '<title>'` · `where the keyboard is in '<title>' cannot be read (an empty focus chain), and no stay is in progress there` · `where the keyboard is in '<title>' cannot be read (an empty focus chain), and the DAW's entry gives this binding no plug-in panel there` · `where the keyboard is in '<title>' cannot be read (an empty focus chain), and the module's control function has found no control with the keyboard in it in this stay` · `the DAW's entry gives no plug-in panel in '<title>'`. And what `identify` said of the panel: `identify says the panel shows another plug-in` · `identify could not tell yet (<n> of 8)` · `identify could not tell 8 times: no for this stay` · `identify is not asked inside a scan of the overlay's hooks` · `identify raised`.
 
@@ -469,11 +469,11 @@ ov:scale(function(o)
 end)
 ```
 
-### Windows
+### Windows {#o-contentsize-windows}
 
 An embedded plug-in's control is borderless, so its `client` and `bounds` are the same size and either answers alike. A standalone window's are not: a Kontakt 8 window is 1026 wide around 1010 of plug-in, and the content is the 1010.
 
-### macOS
+### macOS {#o-contentsize-macos}
 
 A DAW's plug-in panel ([`attachEmbedded`](#o-attachembedded-macos)) has `client` equal to `bounds`, so the two agree there. A standalone window's `client` is derived from its own geometry rather than read ([window table shapes](window.md#table-shapes), macOS): a titled window's content below its title bar, and the frame itself for a borderless one — its content size is then the frame's.
 
@@ -539,11 +539,11 @@ ov:frame(function(o) return o.client.w / 2, 0 end)
 ov:scale(function(o) return o.client.h > 0 and o.client.h / 1009 or nil end, { about = { 960, 0 } })
 ```
 
-### Windows
+### Windows {#o-scale-windows}
 
 A coordinate is a physical pixel ([Coordinates](index.md#coordinates)), so a plug-in drawn at 150 % display scaling is 1.5 times the size it has at 100 %, at the same zoom. The factor has to carry that: one learned from what is on screen — a width, a height, the distance between two things read by OCR — already does; one computed from the plug-in's zoom alone does not, and nothing in the host says which scaling a window is drawn at.
 
-### macOS
+### macOS {#o-scale-macos}
 
 A coordinate is a point, and a Retina display draws two pixels per point, so the factor is the same on a Retina display as on one without: a zoom read off the plug-in, divided by the zoom the coordinates were measured at, is the whole factor there.
 
@@ -581,11 +581,11 @@ onActivate = function(o)
 end,
 ```
 
-### Windows
+### Windows {#o-toscreen-windows}
 
 The answer is in physical pixels, as every coordinate is.
 
-### macOS
+### macOS {#o-toscreen-macos}
 
 The answer is in points, as every coordinate is; a factor that is not a whole number can put a point between two pixels of a Retina display, and it is rounded to the nearest whole point like any other.
 
@@ -760,11 +760,11 @@ O.doubleClick(x, y, { button = "right" }, function()
 end)
 ```
 
-### Windows
+### Windows {#o-doubleclick-windows}
 
 Each click moves the pointer to the point and sends a press and a release of the button (`SetCursorPos` and `SendInput`, as [`host.input.click`](input.md#host-input-click) makes any click); Windows counts the two as a double-click when they come within its double-click time and rectangle, as from a mouse.
 
-### macOS
+### macOS {#o-doubleclick-macos}
 
 Each click carries a click state of 1, so AppKit's own controls see two single clicks rather than a double-click. A JUCE plug-in counts the clicks itself — two presses close in time and place — and takes the pair for a double-click; that is what VPS Avenger's resets rely on, not measured against an Avenger yet.
 
@@ -880,11 +880,11 @@ ov:addCustomButton({
 })
 ```
 
-### Windows
+### Windows {#o-here-windows}
 
 The window is the origin's window handle: the plug-in's own child window in a DAW, its window standalone.
 
-### macOS
+### macOS {#o-here-macos}
 
 The window is the origin's `id`: on a DAW's plug-in panel, the plug-in window's. A plug-in's menu can be a window of its own that comes to the front, and the overlay may not be active while it is; an action that belongs to the press before it — a click into that menu — asks `{ keys = true, place = false }` and checks its target itself, for instance that the same application is in front ([`host.window.foreground()`](window.md#host-window-foreground)).
 
@@ -939,13 +939,13 @@ ov:addOCRButton({ label = "Slot value", readOnly = true,
   end })
 ```
 
-### Windows
+### Windows {#o-addocrbutton-windows}
 
-The read is the one [`host.ocr.recognize`](ocr.md#windows) makes for any module: through the module's capture source, then `Windows.Media.Ocr` with the second recogniser beside it for a lone digit — the recognisers, the small-text treatment and the language (the first language in the user's Windows list that OCR has installed) that the read on the event loop used here before. One difference in the language: the user's list is read when the application starts, so a change to it in Windows Settings is used from the next start, where the read on the event loop asked Windows at every read. A read of one of sforzando's read-outs took 22–42 ms (measured on the event loop, a debug build on a six-core desktop), so the sentence comes about as soon after the key as it did — later by about one turn of the loop, which is a timer message of the lowest priority every 15–16 ms, and by any recognition of another read already running, which is not interrupted; an activation's click, after the sentence, by as much. A region's corners are cut toward zero, as the read on the event loop read them, so an overlay with a fractional [frame](#o-frame) reads the pixels it always did.
+The read is the one [`host.ocr.recognize`](ocr.md#host-ocr-recognize-windows) makes for any module: through the module's capture source, then `Windows.Media.Ocr` with the second recogniser beside it for a lone digit — the recognisers, the small-text treatment and the language (the first language in the user's Windows list that OCR has installed) that the read on the event loop used here before. One difference in the language: the user's list is read when the application starts, so a change to it in Windows Settings is used from the next start, where the read on the event loop asked Windows at every read. A read of one of sforzando's read-outs took 22–42 ms (measured on the event loop, a debug build on a six-core desktop), so the sentence comes about as soon after the key as it did — later by about one turn of the loop, which is a timer message of the lowest priority every 15–16 ms, and by any recognition of another read already running, which is not interrupted; an activation's click, after the sentence, by as much. A region's corners are cut toward zero, as the read on the event loop read them, so an overlay with a fractional [frame](#o-frame) reads the pixels it always did.
 
-### macOS
+### macOS {#o-addocrbutton-macos}
 
-The pipeline [`host.ocr.recognize`](ocr.md#macos) uses on a Mac: Vision's retry ladder, and the second recogniser beside it where the download carries it, with an Intel Mac's checked first pass. The language is the user's — the first of their preferred languages that Vision reads, then English — where the read on the event loop without `lang` handed Vision none, and so Vision's own default; for a user whose first language is not English, a value or label is now read with that language. How long the sentence takes is the recognition's, measured with the read on the event loop and Vision alone, before the second recogniser answered on a Mac: 25–56 ms for sforzando's read-outs on a Mac mini M1, 115–164 ms after more than 5 s without a read, and 143–786 ms on an Intel MacBook Air (2020) — see [`host.ocr.recognize`](ocr.md#macos). While it runs, the keyboard's event tap, the timers and every other key go on; on that Air each such read used to hold them up for as long.
+The pipeline [`host.ocr.recognize`](ocr.md#host-ocr-recognize-macos) uses on a Mac: Vision's retry ladder, and the second recogniser beside it where the download carries it, with an Intel Mac's checked first pass. The language is the user's — the first of their preferred languages that Vision reads, then English — where the read on the event loop without `lang` handed Vision none, and so Vision's own default; for a user whose first language is not English, a value or label is now read with that language. How long the sentence takes is the recognition's, measured with the read on the event loop and Vision alone, before the second recogniser answered on a Mac: 25–56 ms for sforzando's read-outs on a Mac mini M1, 115–164 ms after more than 5 s without a read, and 143–786 ms on an Intel MacBook Air (2020) — see [`host.ocr.recognize`](ocr.md#host-ocr-recognize-macos). While it runs, the keyboard's event tap, the timers and every other key go on; on that Air each such read used to hold them up for as long.
 
 ## O\:addGraphicalToggle(opts) {#o-addgraphicaltoggle}
 
@@ -1061,13 +1061,13 @@ ov:addPassThrough({ label = "Kontakt controls" })
 ov:addPassThrough({ label = "Synth controls", readUnnamed = false })
 ```
 
-### Windows
+### Windows {#o-addpassthrough-windows}
 
 `bounds` is the element's UI Automation rectangle, read once, right after the focus has landed: a scroll the plug-in animates after that is not in it (see [`host.element.focusStep`](./element.md#host-element-focusstep)). The capture is a fixed ~17 ms screen frame through the standard path, and the recognition 4–6 ms for a small read-out, tens to hundreds of milliseconds for a large region (see [`host.ocr.recognize`](./ocr.md#host-ocr-recognize)).
 
 With **Speak through the screen reader** ticked in the Application settings tab, as it is by default, and a screen reader running — NVDA, say — the line goes to the screen reader, without cutting off what it is saying: when its announcement of the element has begun, the line waits behind it. When the answer comes first, which a small element's read can, what becomes of the line once the screen reader handles the focus event is the screen reader's decision. With the box unticked, or no screen reader running, the line goes to the plain voice — a second voice beside the screen reader, which can talk over its announcement (see [`host.speech.output`](./speech.md#host-speech-output)).
 
-### macOS
+### macOS {#o-addpassthrough-macos}
 
 `bounds` is the element's Accessibility frame as the walk read it, before the focus moved. The recognition is Vision's, with its retry ladder abandoned after 250 ms (see [`host.ocr.recognize`](./ocr.md#host-ocr-recognize)).
 
@@ -1508,11 +1508,11 @@ o:chooseMenuItem({
 })
 ```
 
-### Windows
+### Windows {#o-choosemenuitem-windows}
 
 A popup drawn as a top-level window of the plug-in's process (for a plug-in in a DAW, the DAW's process, unless the DAW bridges it) is what `newWindow` sees; its answer's `window` is that window's HWND, and the item is checked with `ownsPoint` against it — the window manager's hit test, taken up to the top-level window on both sides, which sees through a window that lets clicks pass. A toolkit can draw a popup's drop shadow as separate windows beside it, which is why the largest new window is taken as the menu. A submenu of such a popup is another window of the same process: `newWindow` takes the largest window new since its `chained` as the submenu (step 7).
 
-### macOS
+### macOS {#o-choosemenuitem-macos}
 
 `newWindow` lists windows as the window server numbers them (`CGWindowID`), which is not the numbering of `host.window` ids, so its answer has no `window`, and the item is checked by the menu's `id` with `ownsPoint`'s `listed = true`: the window server's own hit test, with `nil` — no answer, which lets the click go — where it names no window, a window of VoiceOver's own, or one of this application's. The menu's rectangle and the click are both in points. A tooltip under the pointer is a window of the process as well, and nothing filters it: the largest new window is the menu, and an item that falls outside a smaller one that came first waits for the next answer (step 4). A popup painted inside the plug-in — VPS Avenger's in Logic, where no window comes for it — is `drawn`'s, a rectangle in points with no `kind`, and its item is checked against the plug-in's own window as any click of the overlay is: the plug-in's window answers for every point of it. Its submenu is painted too: `drawn` follows it, the submenu's item checked the same way.
 
@@ -1708,11 +1708,11 @@ ov:addPage({
 ov:bind(BINDING, { slot = "com.example.synth", specificity = O.layer.base, menus = { O.menuTests.newWindow } })
 ```
 
-### Windows
+### Windows {#o-addpage-windows}
 
 The place's control is the plug-in's own child window. The way back and every trip ask for that control with [`host.window.focus`](window.md#host-window-focus), which brings its window forward and lands the keyboard in it.
 
-### macOS
+### macOS {#o-addpage-macos}
 
 The place's control is the DAW's [plug-in panel](#o-attachembedded-macos), whose id is its window's: the way back and a trip ask for the window. While a page has the keyboard the DAW is not the active application (unless the page is described `activates = false`), and Logic may hide its plug-in windows then (gui.md, macOS). The page key's chord is a Mac's own: pick one with [`host.os.pick`](os.md#host-os-pick).
 
@@ -1818,11 +1818,11 @@ if not started and why ~= "busy" and why ~= "not in front" then
 end
 ```
 
-### Windows
+### Windows {#o-inplugin-windows}
 
 The trip asks for the plug-in's **control**, never its FX window: [`host.window.focus`](window.md#host-window-focus) of a control brings its window forward and lands the keyboard in the control, putting it there at most twice where the application left it elsewhere (HW1). A trip arrives whether or not that lands.
 
-### macOS
+### macOS {#o-inplugin-macos}
 
 The trip asks for the plug-in's window (the panel's id is its window's), and the [stay](#o-attachembedded-macos) is held across it: no `identify` within a trip, nor between trips while the page is up. A window of the DAW's with the plug-in window's title that comes forward under another id is logged, and the trip waits for the held id (`… came forward as id Y, not the held id X — waiting for X`). With `activates = false` (gui.md) whether the plug-in's window raises a foreground event at all is unmeasured; without one, the trip ends by its bound. A sandboxed DAW's open panel may belong to another process, which ends a dialog wait as `"another application"`: the log names the pid.
 
@@ -1973,11 +1973,11 @@ host.input.mouseDown(x, y) -- after the hand-over, so that one refused leaves no
 down = true
 ```
 
-### Windows
+### Windows {#trip-handover-windows}
 
 The scope is the window in front at the call, the plug-in's FX window or the DAW window it is docked in, and the low-level hook lets a captured end key through to it while the flag counts, records it, and logs once per reason and window `captured Return (vk 0x0d/m0) was let through to the application: … a menu declared open with host.keys.menuOpen(true) by a module scoped to the window in front` ([`capture`](keys.md#host-keys-capture), its Windows block); the keypad's Enter is recorded as `"Return"`. A screen reader's hook after the host's sees the key as usual. Whether a DAW hands Return to a plug-in's text field or takes it for itself — REAPER has a per-FX "Send all keyboard input to plug-in" — is the DAW's; it has not been measured with an overlay (TODO.md, VPS Avenger).
 
-### macOS
+### macOS {#trip-handover-macos}
 
 The scope is the frontmost application's window in front, read by accessibility at the call, and the event tap lets the end key through unmodified and records it, the keypad's Enter as `"Return"`. VoiceOver's own chords never reach the tap. Whether a plug-in's text field in Logic gets Return and Escape through the tap is not measured yet (TODO.md, VPS Avenger); the log's `went through` against `was taken` lines answer it. Without the Accessibility grant `capture` raises, and the hand-over answers `"refused: …"`.
 
@@ -2000,11 +2000,11 @@ host.timer.every(1000, function()
 end)
 ```
 
-### Windows
+### Windows {#o-away-windows}
 
 As above.
 
-### macOS
+### macOS {#o-away-macos}
 
 As above; the [stay](#o-attachembedded-macos) is held while away.
 
@@ -2039,11 +2039,11 @@ host.settings.onChange("pageKey", function(new)
 end)
 ```
 
-### Windows
+### Windows {#o-pageback-windows}
 
 The held control is the plug-in's child window, and the focus lands the keyboard in it ([`host.window.focus`](window.md#host-window-focus), HW1). The page's own hand-back gives the keyboard back to the control it took the front from as well ([`page:hide`](gui.md#page-hide)).
 
-### macOS
+### macOS {#o-pageback-macos}
 
 The held control is the DAW's panel, whose id is its window's. Where VoiceOver lands after the way back is unmeasured; with the keyboard on Logic's header the overlay does not come up, and the stay ends there.
 

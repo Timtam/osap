@@ -55,13 +55,13 @@ for _, pad in ipairs(host.gamepad.list()) do
 end
 ```
 
-### Windows
+### Windows {#host-gamepad-list-windows}
 
 Xbox-type pads, through XInput, which allows at most four. Every XInput pad is reported the same way, because XInput gives no name: `name` is `"Xbox controller"`, `family` is `xbox` and the labels are Xbox ones — a third-party pad in XInput mode, an 8BitDo for instance, is announced with A, B, X and Y whatever is printed on it. Their `id` is XInput's slot, `xinput:0` to `xinput:3`: a different pad plugged into the same slot gets the same `id`. `guide` is in `buttons` only when the system's XInput has the extended entry point that reports it. `vendor` and `product` are the pad's USB ids where XInput's extended capabilities call answers for the slot, and `nil` otherwise. PlayStation, Nintendo and other controllers are not listed on Windows unless they present themselves through XInput. Where no XInput DLL can be loaded at all, watching still starts — `status().watcher` is `"running"` and `status().xinput` says `unavailable` — and `list()` is always empty.
 
 The first call blocks the event loop until the first reading of the four slots is done, or 250 ms at most, so a pad that is plugged in is normally already listed. After that, `list()` answers from what the pad thread last read, except when nothing keeps it reading — no enabled module listens for `down`, `up`, `axis` or `chord`, and no `list()` or `state()` came in the last five seconds: then it asks for a fresh reading and blocks the loop until it comes, up to 50 ms, and the pads stay read for five seconds afterwards. While they are read, a connected pad is read every 4 ms, and a pad being plugged in is found when Windows announces it, or at the latest by a look at the empty slots every two seconds.
 
-### macOS
+### macOS {#host-gamepad-list-macos}
 
 The controllers the GameController framework supports, with two sticks and two triggers; `family` comes from the controller's own description, `name` is the name the framework gives it, and `vendor` and `product` are always `nil`. Their `id` is `gc:` and a number counted up for every connection, so the same pad unplugged and plugged back in gets a new one. The first call does not wait: the framework finds controllers on its own schedule, so a pad attached at launch can appear a moment after the first call — listen for [`connected`](#host-gamepad-on) as well, which also announces the pads already there. The log records the application's bundle identifier when watching starts, and warns when there is none: run the application from its `.app`.
 
@@ -93,11 +93,11 @@ host.gamepad.on("down", function(e)
 end, { buttons = { "start" } })
 ```
 
-### Windows
+### Windows {#host-gamepad-state-windows}
 
 While the pad is read every 4 ms — an enabled module listens for `down`, `up`, `axis` or `chord`, or a `list()` or `state()` came in the last five seconds — `state()` answers at once from the last reading, the same one those listeners get. Otherwise — no listener, or only `connected` and `disconnected` ones, which are served by a look every two seconds — it asks for a fresh reading, blocks the event loop until it comes (up to 50 ms), and keeps the pad read for five seconds, so calling it repeatedly does not start and stop the reading each time.
 
-### macOS
+### macOS {#host-gamepad-state-macos}
 
 Answered at once from the last values GameController delivered, which it does whenever anything on the pad changes.
 
@@ -176,7 +176,7 @@ end, { buttons = { "dpad_up", "dpad_down", "left_stick_up", "left_stick_down" } 
 
 A help bubble that appears after a press is the same call with `before = nil`: anything found is new. [`host.screen.snapshot`](screen.md#snapshot-with-a-callback) given a callback does the waiting in one call, off the event loop: with `change` it photographs the menu until the cursor column differs from the picture the module last read (`from`) or, without one, from the wait's own first picture, taken after the press was delivered; and with `at = e.time + 80` it takes a picture a set time after the press itself; its page has this menu written that way.
 
-### Windows
+### Windows {#host-gamepad-on-windows}
 
 **Detection.** While a `down`, `up`, `axis` or `chord` listener of an enabled module exists (or for five seconds after a `list()` or `state()`), connected XInput pads are read every 4 ms, on a thread of the application's own, with a high-resolution timer. Where Windows gives no high-resolution timer — before Windows 10 version 1803 — or refuses to arm it, they are read about every 15.6 ms instead, the system's tick; `status().timer` says which, and the log says so once. `time` is the reading that saw the change, so it comes up to one reading period after the press itself, and `age` counts from that reading; a press shorter than the period can be missed altogether. With only `connected` and `disconnected` listeners the four slots are looked at every two seconds, and with no listener nothing is read at all. While anybody listens, a new pad is also looked for as soon as Windows announces a HID device arriving. The pads are read the same way whichever application is in front.
 
@@ -186,7 +186,7 @@ A help bubble that appears after a press is the same call with `before = nil`: a
 
 Windows opens Xbox Game Bar on the Guide button by default (Settings, Gaming), which takes the focus from the game.
 
-### macOS
+### macOS {#host-gamepad-on-macos}
 
 The first call does not wait for a controller (see [`list`](#host-gamepad-list)). The `on` that brings the first `down`, `up`, `axis` or `chord` listener of an enabled module also asks macOS, on the event loop, for the activity described below.
 
@@ -242,11 +242,11 @@ host.gamepad.on("chord", function(e)
 end, { buttons = { "back", "start" }, holdMs = 800, exact = true })
 ```
 
-### Windows
+### Windows {#button-combinations-windows}
 
 A reading is one poll of the pad, every 4 ms while the listener exists (about 15.6 ms without a high-resolution timer; see [`on`](#host-gamepad-on)), so two buttons pressed within the same poll arrive together.
 
-### macOS
+### macOS {#button-combinations-macos}
 
 A reading is one call of GameController's value-changed handler, which comes on its queue whenever an element of the pad changes; the application reads the whole pad at each call. Whether two buttons pressed together arrive in one call or in two decides only which of their `down` events the combination comes with, not whether it comes.
 
@@ -268,11 +268,11 @@ end)
 
 Register on your overlay's activation and call `off` on its deactivation, and the pad is only listened to while your overlay is the one in front.
 
-### Windows
+### Windows {#host-gamepad-off-windows}
 
 When the last listener goes, the pad thread stops reading and waits without a timer.
 
-### macOS
+### macOS {#host-gamepad-off-macos}
 
 When the last `down`, `up`, `axis` or `chord` listener goes, the App Nap activity is ended, unless keys are captured, which hold it as well — or, at a first setup, the application's own Screen Recording request is still waiting for Accessibility, which keeps an activity without `LatencyCritical` (see [macOS permissions](../macos-permissions.md#how-the-application-gets-into-the-screen-recording-list)).
 
@@ -287,11 +287,11 @@ local s = host.gamepad.status()
 host.log.info("gamepad " .. s.watcher .. ", " .. (s.mode or s.background or ""))
 ```
 
-### Windows
+### Windows {#host-gamepad-status-windows}
 
 Also `xinput` (which DLL, and whether the Guide button can be read — or `unavailable` and why, when no XInput DLL could be loaded: the watcher runs, and no pad is ever listed), `arrival` (whether Windows agreed to announce devices being plugged in), `timer` (whether the 4 ms period is a high-resolution one) and `mode` (parked, probing every two seconds, or polling every 4 ms). `thread` appears only when the pad thread has stopped — it could not create its window, or it failed — and says why; nothing is read from then on.
 
-### macOS
+### macOS {#host-gamepad-status-macos}
 
 Also `bundle` (the application's bundle identifier), `gamecontroller` (how many controllers were known at start), `background` (what macOS reported after the background request) and, once a `down`, `up`, `axis` or `chord` listener has existed, `activity` (whether the App Nap activity is held, and for what, as it was when a listener last came or went: `held (latency-critical, while a button or axis listener exists)`; `held while …; no button or axis listener`, naming what still held it then — `keys are captured`, `Screen Recording's own request waits for Accessibility to be granted`, or both joined by `and`; or `not held`).
 

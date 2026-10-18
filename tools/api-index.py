@@ -19,6 +19,10 @@ entry, grouped by namespace, with the one-line summary each page already carries
 
 The index is generated rather than written, because a hand-kept list of 87 entries is a list
 that is wrong within a month.
+
+The same pass stamps an entry's own level-3 headings (its Returns, Errors and OS blocks) from
+its anchor, and `--check` also holds docs/api/errors.md's codes to crates/host/src/errors.rs, and
+every Errors table of a page in CONVERTED to the reasons the host can give, both ways.
 """
 import glob
 import io
@@ -35,7 +39,7 @@ NS_ORDER = [
     'Overlay', 'host.window', 'host.screen', 'host.ocr', 'host.element', 'host.input',
     'host.keys', 'host.hotkey', 'host.gamepad', 'host.speech', 'host.sound', 'host.gui',
     'host.timer', 'host.settings',
-    'host.config', 'host.os', 'host.log', 'host.path', 'host.resource', 'host.json',
+    'host.config', 'host.errors', 'host.os', 'host.log', 'host.path', 'host.resource', 'host.json',
     'host.require',
     'host.tryRequire', 'host.include', 'host.epoch', 'host.now', 'host.inputEpoch',
     'host.arbiter', 'Concepts',
@@ -64,6 +68,8 @@ NS_BLURB = {
     'host.timer': 'Waiting without blocking, and knowing when a cached reading went stale.',
     'host.settings': 'Typed, per-module settings, edited by the user in the module manager.',
     'host.log': 'Writing to the log file beside the application.',
+    'host.errors': 'What a call answers when something it was asked to do was not done: an error '
+                   'value, its code, and the constants to compare the code with.',
     'host.json': 'Turning JSON text a module ships into Luau values, and Luau values into JSON text.',
     'Concepts': 'The shapes and grammars the calls above are written in.',
 }
@@ -193,6 +199,7 @@ def collect():
                 'anchor': slug(head),
                 'ns': namespace(head),
                 'summary': summarise(parts[i + 1]),
+                'body': parts[i + 1],
             })
     return entries
 
@@ -211,6 +218,8 @@ def rewrite_anchors(entries, dry):
         if m and m.group(1) != e['anchor']:
             renames[m.group(1)] = e['anchor']
 
+    texts = {}
+    level3 = {}
     for path, es in by_path.items():
         text = open(path, encoding='utf-8').read()
         for e in es:
@@ -224,12 +233,91 @@ def rewrite_anchors(entries, dry):
             guessed = re.sub(r'[^a-z0-9]+', '', e['title'].lower())
             if guessed and guessed != e['anchor']:
                 text = text.replace('(#' + guessed + ')', '(#' + e['anchor'] + ')')
+        texts[os.path.normpath(path)], level3[os.path.normpath(path)] = stamp_level3(text)
+
+    # A level-3 anchor that changed is linked from other pages too, the guides included.
+    docs = {os.path.normpath(p) for p in glob.glob(os.path.join('docs', '**', '*.md'), recursive=True)}
+    for path in sorted(set(texts) | docs):
         original = open(path, encoding='utf-8').read()
+        text = repoint(path, texts.get(path, original), level3)
         if text != original:
             changed.append(path)
             if not dry:
                 io.open(path, 'w', encoding='utf-8', newline='\n').write(text)
     return changed
+
+
+# ── An entry's own level-3 headings ─────────────────────────────────────────────────────────
+#
+# Every call entry has the same few level-3 headings — its OS blocks, and from the typed errors
+# on its Returns and Errors — so Docusaurus numbered their anchors down the page: `#macos-1` was
+# page:show's macOS block until an entry above it grew one, and then every link after it pointed
+# at the wrong call, silently, as the entry anchors once did. Each is stamped from its entry's
+# anchor instead, `{#page-show-macos}`. Any other level-3 heading keeps the anchor it has: it is
+# named by what it says, and other pages link to it by that.
+STAMPED = ('Returns', 'Errors', 'Windows', 'macOS', 'Both')
+
+
+def headings(text):
+    """(line number, level, text) of every heading outside fenced code, in page order."""
+    out, fenced = [], False
+    for i, line in enumerate(text.split('\n')):
+        if re.match(r'^(```|~~~)', line):
+            fenced = not fenced
+            continue
+        m = None if fenced else re.match(r'^(#{1,6}) (.+?)\s*$', line)
+        if m:
+            out.append((i, len(m.group(1)), m.group(2)))
+    return out
+
+
+def explicit(head):
+    m = re.search(r'\{#([A-Za-z0-9_-]+)\}\s*$', head)
+    return m.group(1) if m else None
+
+
+def bare(head):
+    return unescaped(re.sub(r'\s*\{#[^}]*\}\s*$', '', head).strip())
+
+
+def stamp_level3(text):
+    """`text` with each entry's STAMPED headings stamped, and the anchors they had before: the
+    numbered ones Docusaurus gave them (github-slugger's: the second `macOS` of a page is
+    `macos-1`; a heading with an anchor of its own takes no number) or an explicit one that
+    differs."""
+    lines = text.split('\n')
+    renames, seen, entry = {}, {}, None
+    for i, level, head in headings(text):
+        own = explicit(head)
+        if level == 2:
+            entry = own
+        before = own
+        if own is None:
+            base = re.sub(r'[^\w\- ]', '', bare(head).lower()).replace(' ', '-')
+            n = seen.get(base, 0)
+            seen[base] = n + 1
+            before = base if n == 0 else base + '-' + str(n)
+        if level == 3 and entry and bare(head) in STAMPED:
+            want = entry + '-' + bare(head).lower()
+            if own != want:
+                lines[i] = '### ' + bare(head) + ' {#' + want + '}'
+                renames[before] = want
+    return '\n'.join(lines), renames
+
+
+def repoint(path, text, level3):
+    """`text`, the page at `path`, with every link to a level-3 anchor that changed repointed:
+    `(#macos-1)` on the page itself, `(gui.md#macos-1)` and `(api/gui.md#windows-1)` from
+    another."""
+    here = os.path.dirname(path)
+
+    def one(m):
+        target, anchor = m.group(1), m.group(2)
+        page = os.path.normpath(os.path.join(here, target)) if target else os.path.normpath(path)
+        new = level3.get(page, {}).get(anchor)
+        return '](' + target + '#' + new + ')' if new else m.group(0)
+
+    return re.sub(r'\]\(([^()\s#]*)#([A-Za-z0-9_-]+)\)', one, text)
 
 
 # What every page's "What to declare" box links to. Said once, here, rather than repeated
@@ -280,7 +368,7 @@ CAPABILITIES = [
     'module supplies is its own code, though, and needs `window` if it calls `host.window`.',
     '',
     'Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, '
-    '`host.epoch`, `host.now`, `host.inputEpoch` or `host.json`, nor on '
+    '`host.epoch`, `host.now`, `host.inputEpoch`, `host.json` or `host.errors`, nor on '
     '`host.keys.normalize`, `describe` and `check` — the rest of `host.keys` needs `keys`. A '
     'clock, a counter, a platform name, a way to reach a declared dependency and a parser of '
     'strings the module already holds are not worth asking permission for, and gating them would '
@@ -508,6 +596,7 @@ BINDING_SOURCES = [
     os.path.join('crates', 'host', 'src', 'element_lua.rs'),
     os.path.join('crates', 'host', 'src', 'gamepad_api.rs'),
     os.path.join('crates', 'host', 'src', 'webview_lua.rs'),
+    os.path.join('crates', 'host', 'src', 'errors_lua.rs'),
 ]
 
 
@@ -562,6 +651,274 @@ def undocumented(entries):
     return missing
 
 
+# ── Returns and Errors: what a converted page says, held to the Reason table ────────────────
+#
+# Every call entry says what it returns and which errors it gives, under `### Returns` and
+# `### Errors` (docs/api/errors.md, "Reading an Errors table"). An Errors table is compared with
+# the reasons the host can give — crates/host/src/errors.rs, the one table every reason is made
+# from — and with the overlay runtime's, in both directions: a row with no reason behind it
+# fails, and so does a reason of the entry with no row. That is the only way a wrong or
+# incomplete Errors table can fail CI, so the table is read from the source, not restated here.
+#
+# The pages are revised one at a time. CONVERTED names those whose entries follow the template;
+# the checks below run for them alone, and the set ends when it names every page.
+CONVERTED = set()
+
+# Entries that are not calls, by anchor. A field says what it holds under Returns and has no
+# Errors; a concept needs neither. Every other entry is a call, so a new heading is told to grow
+# both. Named rather than guessed from the title's punctuation: `O.contentSize(origin)` and
+# `O.calibrating()` read as calls and are fields, `O.menuTests` reads as a field and is a concept.
+FIELDS = {
+    'page-window', 'host-os-current', 'host-errors', 'host-element-type',
+    'o-layer', 'o-state', 'o-away', 'o-calibrating', 'o-contentsize', 'o-stategeneration',
+}
+CONCEPTS = {
+    'error-values', 'partial-answers', 'return-or-raise', 'where-an-error-value-arrives',
+    'reading-an-errors-table', 'comparing-codes', 'the-overlay-runtime-s-codes',
+    'asking-without-waiting', 'button-combinations', 'button-and-axis-names',
+    'what-a-page-is-served-and-what-it-may-not-do', 'key-spec-string-format',
+    'recognition-language', 'where-a-hook-runs', 'ocrlabel', 'o-menutests',
+    'plugin-base-library-overlays', 'a-runtime-shared-by-game-modules',
+    'which-picture-a-read-sees', 'failure-reasons', 'where-it-waits', 'with-a-callback',
+    'reading-a-snapshot', 'region-form', 'a-slow-callback', 'table-shapes', 'matchers',
+}
+
+ERRORS_RS = os.path.join('crates', 'host', 'src', 'errors.rs')
+ERRORS_LUAU = os.path.join('modules', 'overlay-runtime', 'src', 'errors.luau')
+ERRORS_PAGE = os.path.join(API, 'errors.md')
+
+# The fixed words of an Errors table's "arrives" and "platform" cells.
+ARRIVES = re.compile(r'(return|callback|both|field|hook [A-Za-z][A-Za-z0-9]*)')
+PLATFORMS = {'both', 'Windows', 'macOS', 'other'}
+
+
+def host_table():
+    """errors.rs as the tool reads it: the codes in order, every Reason (`code`, `message`,
+    `entries`), and the groups. Each Reason is one `const` or `static`, of any visibility,
+    `NAME: Reason = Reason { … };` with its message on one line. Every Reason literal outside a
+    comment is counted, so one written another way — or anywhere else in the file — is reported
+    rather than skipped."""
+    src = open(ERRORS_RS, encoding='utf-8').read()
+    src = src[:src.index('\nmod tests {')] if '\nmod tests {' in src else src
+    src = re.sub(r'^[ \t]*//.*$', '', src, flags=re.M)
+    codes = dict(re.findall(r'Code::(\w+) => "([a-z][a-z0-9_]*)"', src))
+    lists = {m.group(1): re.findall(r'"([^"]+)"', m.group(2))
+             for m in re.finditer(r'const (\w+): &\[&str\] = &\[(.*?)\];', src, re.S)}
+    reasons = []
+    for m in re.finditer(r'^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?(?:const|static)[ \t]+(\w+): Reason = Reason \{\s*'
+                         r'code: Code::(\w+),\s*message: "((?:[^"\\]|\\.)*)",\s*'
+                         r'entries: (&\[(.*?)\]|\w+),?\s*\};', src, re.S | re.M):
+        name, code, message, entries, inline = m.groups()
+        reasons.append({
+            'source': ERRORS_RS,
+            'name': name,
+            'code': codes[code],
+            'message': message.replace('\\"', '"').replace('\\\\', '\\'),
+            'entries': re.findall(r'"([^"]+)"', inline) if entries.startswith('&[') else lists[entries],
+        })
+    declared = len(re.findall(r'(?<!\w)Reason\s*\{\s*(?:code|message|entries)\b', src))
+    unread = declared - len(reasons)
+    block = src[src.index('pub static GROUPS'):]
+    block = block[:block.index('\n];')]
+    groups = {m.group(1): re.findall(r'"([^"]+)"', m.group(2))
+              for m in re.finditer(r'\(\s*"([a-z0-9-]+)",\s*&\[(.*?)\],?\s*\)', block, re.S)}
+    order = [codes[c] for c in re.findall(r'Code::(\w+),', src[src.index('pub const ALL'):src.index('];', src.index('pub const ALL'))])]
+    return order, reasons, groups, unread
+
+
+def runtime_reasons():
+    """The overlay runtime's reasons, from its errors.luau, in the same shape: one
+    `key = { code = "…", message = "…", entries = { "…", … } },` each. None until the runtime
+    has the file."""
+    if not os.path.exists(ERRORS_LUAU):
+        return []
+    src = open(ERRORS_LUAU, encoding='utf-8').read()
+    return [{'source': ERRORS_LUAU, 'name': m.group(1), 'code': m.group(2), 'message': m.group(3).replace('\\"', '"'),
+             'entries': re.findall(r'"([^"]+)"', m.group(4))}
+            for m in re.finditer(r'(\w+)\s*=\s*\{\s*code\s*=\s*"([a-z][a-z0-9_]*)",\s*'
+                                 r'message\s*=\s*"((?:[^"\\]|\\.)*)",\s*entries\s*=\s*\{(.*?)\}\s*,?\s*\}',
+                                 src, re.S)]
+
+
+# The groups of errors.rs: a group's own section, where its reasons are listed once, is a
+# concept like any other.
+GROUP_NAMES = set()
+
+
+def kind(e):
+    if e['anchor'] in CONCEPTS or e['anchor'] in GROUP_NAMES:
+        return 'concept'
+    return 'field' if e['anchor'] in FIELDS else 'call'
+
+
+def sections(text):
+    """An entry's level-3 sections, in order: (heading, its text)."""
+    out, fenced, current = [], False, None
+    for line in text.split('\n'):
+        if re.match(r'^(```|~~~)', line):
+            fenced = not fenced
+        m = None if fenced else re.match(r'^### (.+?)\s*$', line)
+        if m:
+            current = [bare(m.group(1)), []]
+            out.append(current)
+        elif current:
+            current[1].append(line)
+    return [(h, '\n'.join(body)) for h, body in out]
+
+
+def table_rows(text):
+    """The rows of every table in `text` whose header is the Errors template's."""
+    rows, inside = [], False
+    for line in text.split('\n'):
+        cells = [c.strip() for c in line.strip().strip('|').split('|')] if line.lstrip().startswith('|') else None
+        if cells is None:
+            inside = False
+            continue
+        if not inside:
+            inside = [c.lower() for c in cells] == ['code', 'arrives', 'when', 'message', 'platform']
+            continue
+        if set(''.join(cells)) <= set('-: '):
+            continue
+        rows.append(cells)
+    return rows
+
+
+def entry_problems(e, body, reasons, groups, codes, pages):
+    """What is wrong with one entry of a converted page. `codes` are the codes a row may name, the
+    host's and the runtime's; `pages` maps every entry's anchor to its page."""
+    problems = []
+    k = kind(e)
+    if k == 'concept':
+        return problems
+    heads = [h for h, _ in sections(body)]
+    os_at = min([i for i, h in enumerate(heads) if h in ('Windows', 'macOS', 'Both')] or [len(heads)])
+    if 'Returns' not in heads[:os_at]:
+        problems.append('no `### Returns` before its OS blocks')
+    if k == 'field':
+        return problems
+    if 'Errors' not in heads[:os_at]:
+        problems.append('no `### Errors` before its OS blocks')
+        return problems
+    if 'Returns' in heads and heads.index('Errors') < heads.index('Returns'):
+        problems.append('`### Errors` comes before `### Returns`')
+    text = dict(sections(body))['Errors']
+    rows = table_rows(text)
+    mine = reasons_of(e['anchor'], reasons, groups)
+    if not rows and 'None. It never answers an error value.' not in text:
+        problems.append('an Errors section with neither the table nor "None. It never answers an error value."')
+    covered = set()
+    for row in rows:
+        if len(row) != 5:
+            problems.append('a row without five cells: ' + ' | '.join(row))
+            continue
+        code, arrives, _when, message, platform = row
+        if not ARRIVES.fullmatch(arrives):
+            problems.append('arrives `' + arrives + '` is not return, callback, both, field or hook <name>')
+        if not all(p.strip() in PLATFORMS for p in platform.split(',')):
+            problems.append('platform `' + platform + '` is not both, Windows, macOS or other')
+        link = re.search(r'\]\(([^)#]*)#([A-Za-z0-9_-]+)\)', code)
+        if link and not re.fullmatch(r'`[a-z_]+`', code):
+            target = link.group(2)
+            if target in groups:
+                if e['anchor'] not in groups[target]:
+                    problems.append('the group ' + target + ' is not one this entry gives (errors.rs, GROUPS)')
+                covered |= {id(r) for r in reasons if target in r['entries']}
+            elif target.endswith('-errors'):
+                entry = target[:-len('-errors')]
+                page = os.path.splitext(os.path.basename(link.group(1)))[0] if link.group(1) else e['page']
+                if pages.get(entry) != page:
+                    problems.append('a code cell that links to ' + (link.group(1) or '') + '#' + target
+                                    + ', the errors of no entry there')
+                    continue
+                theirs = reasons_of(entry, reasons, groups)
+                extra = [r for r in theirs if id(r) not in {id(m) for m in mine}]
+                for r in extra:
+                    problems.append('the row for ' + target + ' brings `' + r['message'] + '`, which is no reason of this entry')
+                covered |= {id(r) for r in theirs}
+            else:
+                problems.append('a code cell that links to ' + target + ', which is neither a group nor an entry\'s errors')
+            continue
+        m = re.fullmatch(r'`([a-z_]+)`', code)
+        if not m:
+            problems.append('a code cell that is neither a code nor a link: ' + code)
+            continue
+        if m.group(1) not in codes:
+            problems.append('the row `' + m.group(1) + '` names no code of host.errors or the runtime\'s')
+            continue
+        messages = re.findall(r'`([^`]+)`', message)
+        if not messages:
+            problems.append('the row `' + m.group(1) + '` has no message in backticks to compare')
+        for msg in messages:
+            hit = [r for r in mine if r['code'] == m.group(1) and r['message'] == msg]
+            if not hit:
+                problems.append('the row `' + m.group(1) + '` `' + msg + '` is no reason of this entry')
+            covered |= {id(r) for r in hit}
+    for r in mine:
+        if id(r) not in covered:
+            problems.append('the reason `' + r['code'] + '` `' + r['message'] + '` has no row')
+    return problems
+
+
+def reasons_of(anchor, reasons, groups):
+    """The reasons an entry gives: those naming it, and those naming a group it is in."""
+    return [r for r in reasons
+            if anchor in r['entries'] or any(g in groups and anchor in groups[g] for g in r['entries'])]
+
+
+def converted_problems(entries):
+    """Checks 1 to 3 of the typed-errors plan, for the pages in CONVERTED; and, for every page,
+    that each reason and group names entries that exist, since a reason naming anything else is in
+    no entry's table and would never be compared with one."""
+    order, reasons, groups, unread = host_table()
+    GROUP_NAMES.update(groups)
+    runtime = runtime_reasons()
+    reasons = reasons + runtime
+    codes = set(order) | {r['code'] for r in runtime}
+    pages = {e['anchor']: e['page'] for e in entries}
+    problems = []
+    if unread:
+        problems.append(ERRORS_RS + ': ' + str(unread) + ' Reason(s) not written the way this tool reads one')
+    for r in reasons:
+        for a in r['entries']:
+            if a not in pages and a not in groups:
+                problems.append(r['source'] + ': ' + r['name'] + ' names ' + a + ', which is neither an entry nor a group')
+    for g, members in groups.items():
+        for a in members:
+            if a not in pages:
+                problems.append(ERRORS_RS + ': the group ' + g + ' names ' + a + ', which is no entry')
+    for e in entries:
+        if e['page'] not in CONVERTED:
+            continue
+        for p in entry_problems(e, e['body'], reasons, groups, codes, pages):
+            problems.append(e['page'] + '.md#' + e['anchor'] + ': ' + p)
+    return problems
+
+
+def codes_problems():
+    """errors.md explains every host code, and nothing else, in errors.rs's order."""
+    order, _, groups, _ = host_table()
+    GROUP_NAMES.update(groups)
+    text = open(ERRORS_PAGE, encoding='utf-8').read()
+    start = text.index('{#host-errors}')
+    rows = []
+    for line in text[start:].split('\n')[1:]:
+        if line.startswith('## '):
+            break
+        m = re.match(r'^\| `([a-z_]+)` \| `([A-Z_]+)` \|(.*)\|\s*$', line)
+        if m:
+            rows.append(m.groups())
+    problems = []
+    if [c for c, _, _ in rows] != order:
+        problems.append('errors.md\'s table of codes is not errors.rs\'s Code::ALL, in order: '
+                        + ', '.join(c for c, _, _ in rows) + ' against ' + ', '.join(order))
+    for c, k, meaning in rows:
+        if k != c.upper():
+            problems.append('errors.md: the constant of `' + c + '` is `' + k + '`')
+        if not meaning.strip():
+            problems.append('errors.md: the code `' + c + '` has no meaning')
+    return problems
+
+
 def undeclared_pages():
     """Reference pages missing the box that says what module.toml must list.
 
@@ -598,6 +955,16 @@ def main():
         for a, t in clashes.items():
             print('  #' + a + ': ' + ', '.join(t))
         return 1
+    # And within a page, with the level-3 anchors stamped from the entries': `foo-errors` is the
+    # Errors heading of `foo` and must not be an entry of its own.
+    for path in sorted({e['path'] for e in entries}):
+        stamped, _ = stamp_level3(open(path, encoding='utf-8').read())
+        ids = [e['anchor'] for e in entries if e['path'] == path]
+        ids += [explicit(h) for _, level, h in headings(stamped) if level >= 3 and explicit(h)]
+        twice = sorted({a for a in ids if ids.count(a) > 1})
+        if twice:
+            print('anchor collisions on ' + path.replace(os.sep, '/') + ': #' + ', #'.join(twice))
+            return 1
 
     changed = rewrite_anchors(entries, dry=check)
     changed += limit_toc(sorted({e['path'] for e in entries}), dry=check)
@@ -612,8 +979,14 @@ def main():
         for g in gaps:
             print('  ' + g)
 
+    errors = codes_problems() + converted_problems(entries)
+    if errors:
+        print('Returns and Errors that do not match crates/host/src/errors.rs:')
+        for p in errors:
+            print('  ' + p)
+
     if check:
-        if gaps or undeclared:
+        if gaps or undeclared or errors:
             return 1
         stale = changed + ([INDEX] if current != index else [])
         if stale:

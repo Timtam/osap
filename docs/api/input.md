@@ -77,13 +77,13 @@ for step = 1, 5 do host.input.move(x, y - step) end
 host.input.mouseUp(x, y - 5)
 ```
 
-### Windows
+### Windows {#host-input-move-windows}
 
 Without a button held, the pointer is **placed** (`SetCursorPos`): no event goes through the system's input, so no low-level hook or raw input sees it. A control that holds a press and follows the pointer sat still through such placements — ON:EAR's Width slider, measured — which is why a move with a button held is motion instead.
 
 While a button is held — one a module pressed with `mouseDown` and has not let go of, or one down on the desktop (the high bit of `GetAsyncKeyState`: the user's own hand on the mouse) — the move is **one injected absolute motion event** instead: `SendInput` with `MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_ABSOLUTE`, the point placed over the whole virtual desktop at the middle of its pixel's share of the 0–65,535 axis, so that it lands on that pixel on any monitor; a point off the desktop goes to its nearest edge, where the system keeps the pointer. The event carries no button: the system puts the held button into the window's `WM_MOUSEMOVE` (`MK_LBUTTON`, `MK_RBUTTON`) itself, as for a hand on the mouse, so a control holding the press sees motion it follows. Absolute rather than relative, because a relative move goes through the pointer's speed and "Enhance pointer precision" and lands somewhere else. One event per call, not paced and not marked against coalescing — `drag` paces — costing one `SendInput`. A low-level mouse hook sees it as injected motion, which a placement never was.
 
-### macOS
+### macOS {#host-input-move-macos}
 
 A real move event is posted — or a **drag** event of the held button when one is currently held, which is also what the implicit move inside `mouseDown` and `mouseUp` does.
 
@@ -130,7 +130,7 @@ host.input.click(x, y, { window = plugin.id, via = "noactivate" }, function(made
 end)
 ```
 
-### Windows
+### Windows {#host-input-click-windows}
 
 **`via = "input"`.** Whatever the user is **physically holding is inherited** by the injected click, so one posted from a hotkey callback while Alt is still down is an Alt+click. The overlay runtime waits for the modifiers to come up before clicking for exactly that reason; a module clicking from its own hotkey handler needs the same care.
 
@@ -150,7 +150,7 @@ Every window given the style is written to `held-window-styles.txt` beside the a
 
 `[input] window 2755348 ('#32770'): the no-activate style given back — another window came to the front`
 
-### macOS
+### macOS {#host-input-click-macos}
 
 **`via = "input"`.** The event's modifier flags are **cleared**, so a click is a bare click whatever is held — the same treatment `send` gives a key, and the same for `scroll`, `drag` and the `mouseDown`/`mouseUp` pair. Added when the shortcut that puts the keyboard back into a plug-in was found to click while its five-key chord was still down. What such a click would have done was not measured: by the AppKit convention a Control-modified left click is a secondary click, and the chord in question holds Control among four others, so a context menu is the likely reading rather than an observed one.
 
@@ -183,11 +183,11 @@ A drag is not a press, a warp and a release. On Windows the pointer is moved wit
 
 If a control needs a sustained press before it will react at all, use `mouseDown`/`mouseUp` with a timer instead — that is why those exist separately.
 
-### Windows
+### Windows {#host-input-drag-windows}
 
 The pointer is moved with injected absolute move events over the virtual desktop — the event a [`move`](#host-input-move) with a button held sends, so a drag lands where it is asked to on any monitor — rather than `SetCursorPos`, interpolated over sixteen steps a few milliseconds apart. The pacing blocks the calling thread for about sixty milliseconds, paid only when something is deliberately dragged.
 
-### macOS
+### macOS {#host-input-drag-macos}
 
 A single `Dragged` event is posted between press and release — no interpolation. That asymmetry is deliberate: a scrollbar needs one intermediate event and gets it. A control that only reacts to *continuous* movement would work on Windows and not here, and nothing has yet exercised the difference on a Mac.
 
@@ -201,11 +201,11 @@ Moves to `(x, y)` and scrolls the mouse wheel by `notches`, which may be fractio
 
 A notch is 120 units to the operating system, and a control decides for itself what one is worth — ON:EAR's tone knob moves by five of its own units per notch, which is as fine as this could ask for while notches were whole. Half a notch is 60 units, and an application that scales its step by the delta moves by half as much. One that rounds to its own interval instead simply does not move and reports the same value back, which is the honest outcome and says to stop asking for halves.
 
-### Windows
+### Windows {#host-input-scroll-windows}
 
 The unit is native: 120 units to a notch is what `WHEEL_DELTA` counts, so a fractional request is expressed exactly.
 
-### macOS
+### macOS {#host-input-scroll-macos}
 
 Expressed in Quartz **lines**, which cannot be smaller than one. A caller asking for less than a line gets the smallest whole line rather than nothing — a control that needs a half-step will not get one here until this asks Quartz in pixel units instead. The conversion logs the first scroll of a run, and after that every request that is not a whole notch, saying what was asked for and what was sent; the difference shows up as evidence rather than as a mystery.
 
@@ -229,13 +229,13 @@ host.input.send("Ctrl+S")         -- the application's Save, on either platform
 host.input.send("Ctrl+Shift+Esc")
 ```
 
-### Windows
+### Windows {#host-input-send-windows}
 
 Each role is the key of its name. The modifiers are synthesised as real key presses around the key — pressed in the order Ctrl, Alt, Shift, Win, whatever order the spec wrote them in, and released in reverse — and whatever the user is **physically holding is inherited**. Called from a hotkey callback while Alt is still down, `host.input.send("Escape")` arrives as Alt+Escape — which is why `host.keys.modifiersDown()` exists and why modules defer a synthesised key until the user has let go.
 
 Every key is sent by **virtual-key code only**: `SendInput` with scan code 0, without `KEYEVENTF_SCANCODE` and without the extended-key flag — so the arrows, Home, End, Page Up/Down and Delete go out as their non-extended forms. Each press and release is its own `SendInput` call, back to back with no delay between them, so there is no hold time. An application that reads scan codes, DirectInput or Raw Input — many games — may ignore the key, or read it as a different one.
 
-### macOS
+### macOS {#host-input-send-macos}
 
 `Ctrl` is Command, `Alt` Option, `Shift` Shift and `Win` (`Meta`) Control, so `"Ctrl+C"` copies and `"Meta+C"` is Control+C. The modifiers are set as flags on the event, and setting them **replaces the whole set**, so anything the user is holding is stripped and the same call delivers a bare Escape. No modifier key event is posted at all, so an application that watches for physical modifier presses sees an unmodified key.
 
@@ -258,11 +258,11 @@ host.input.text("Hello, world!")
 host.input.send("Enter")   -- not "\n"
 ```
 
-### Windows
+### Windows {#host-input-text-windows}
 
 Each UTF-16 unit is sent with `SendInput` as a `KEYEVENTF_UNICODE` event (virtual key `VK_PACKET`), down and up. An application that reads scan codes, DirectInput or Raw Input — many games — does not see it.
 
-### macOS
+### macOS {#host-input-text-macos}
 
 Each character is posted as a keyboard event pair with key code 0 and the character as its Unicode payload, with the modifier flags cleared, so the keyboard layout plays no part.
 
@@ -294,11 +294,11 @@ host.timer.after(350, function()
 end)
 ```
 
-### Windows
+### Windows {#host-input-mousedown-windows}
 
 The pointer is placed with `SetCursorPos` and then the button-down event is sent. As with `host.input.move` without a button held, the placement is no input: no low-level hook or raw input sees the pointer arrive. The press is noted, so the moves after it are motion ([`move`](#host-input-move)) until its `mouseUp`, a `drag` of the same button, or a `click` of it through the system's input (`via = "input"` or `"noactivate"`); a posted click (`via = "post"`) goes past the system's input and leaves the note.
 
-### macOS
+### macOS {#host-input-mousedown-macos}
 
 A movement event is posted before the press — or a **drag** event if a button is already held — so the press lands on a control that has been told the pointer is there.
 
@@ -331,11 +331,11 @@ end
 glide()
 ```
 
-### Windows
+### Windows {#host-input-mouseup-windows}
 
 The motion event a `host.input.move` with a button held sends, to `(x, y)`, then the button-up event — no `SetCursorPos`. So press, glide and release are one drag on Windows as on a Mac: a control that followed the pointer through the moves gets the release where it is. The host's own release at a disable is the same, at the pointer's place: motion of no distance, then the up. Where the pace of the movement matters, `host.input.drag` paces it.
 
-### macOS
+### macOS {#host-input-mouseup-macos}
 
 The move before the release is posted as a **drag** event, because the backend sees a button still held. That is what makes "press here, glide there, let go" a genuine drag on this platform: the control has followed the pointer the whole way and the release lands on the entry it was over.
 
@@ -359,11 +359,11 @@ local function letGo(x, y)
 end
 ```
 
-### Windows
+### Windows {#host-input-held-windows}
 
 The host's record, as above: the system is not asked, so a button down on the desktop that this module did not press is not listed. (What a `move` asks besides the desktop's state is the backend's own note of its presses, which is not this.)
 
-### macOS
+### macOS {#host-input-held-macos}
 
 The host's record, as on Windows: the session's button state is not asked.
 
@@ -390,10 +390,10 @@ end
 host.timer.after(PRESS_GAP, step)
 ```
 
-### Windows
+### Windows {#host-input-post-windows}
 
 Genuinely per-window: `WM_KEYDOWN`/`WM_KEYUP` are posted to the handle you passed with `PostMessageW`, with the scan code packed into the `lParam` because some applications read that rather than the virtual key — Melodyne decodes keys itself rather than leaving it to the defaults. Posting is also the path most likely to be seen at all here: Melodyne runs its own message pump with its own accelerator table, so a posted `WM_KEYDOWN` reaches `TranslateAccelerator` where a sent one would bypass it. A handle whose window is gone is not reported: the post goes nowhere and the call returns normally. A posted key exists only as a window message: the keyboard state is not changed, and an application that reads the keyboard through DirectInput or Raw Input — as many games do — never sees it.
 
-### macOS
+### macOS {#host-input-post-macos}
 
 There is no per-window message queue to post into, so this is one step coarser — the event is handed to the window's **process** with `CGEventPostToPid` and lands wherever that application routes it, which need not be the window you addressed. Three consequences a caller can observe: the handle must be one this backend issued, and a stale or foreign number raises an error naming it instead of quietly doing nothing; a key name the shared table accepts can still fail here, because it has to map on to a Quartz keycode as well — a letter maps to the key that types it under the current keyboard layout (see [the key spec](./keys.md#key-spec-string-format)) — and one that does not (`F21`–`F24`, or a letter no key of the layout types) raises an error naming the key and its VK code; and the modifier flags on the event are **cleared**, not inherited, so a key posted from inside a hotkey callback while its combination is still physically held arrives bare. The first post of a run writes a line to the log saying it is routing per process — the line to suspect if a posted key ever surfaces in the wrong window of the same application.

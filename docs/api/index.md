@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 185 entries.
+Every call the platform offers a module, in one place. 194 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -30,7 +30,7 @@ Ownership is unaffected, and deliberately so. A hotkey or a timer that a depende
 
 **Receiving window events needs no declaration.** The host delivers foreground and focus changes to the callbacks registered with `host.window.onTrigger` and `onFocus` through a handle of its own, not through the module's `host` table. So a module that attaches an overlay declares `window` only if its own code calls `host.window`: the overlay runtime registers the triggers with its own manifest's permission, and a module that registered none is skipped. A gate or a matcher's `where` function the module supplies is its own code, though, and needs `window` if it calls `host.window`.
 
-Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, `host.epoch`, `host.now`, `host.inputEpoch` or `host.json`, nor on `host.keys.normalize`, `describe` and `check` — the rest of `host.keys` needs `keys`. A clock, a counter, a platform name, a way to reach a declared dependency and a parser of strings the module already holds are not worth asking permission for, and gating them would mean every manifest names them — which is the same as naming none. `host.keys.check` reads one thing besides its string: for a Ctrl+Alt chord on Windows or an Option chord on a Mac, the character the keyboard layout in use types with it, unless it is asked with `layout = false`.
+Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, `host.epoch`, `host.now`, `host.inputEpoch`, `host.json` or `host.errors`, nor on `host.keys.normalize`, `describe` and `check` — the rest of `host.keys` needs `keys`. A clock, a counter, a platform name, a way to reach a declared dependency and a parser of strings the module already holds are not worth asking permission for, and gating them would mean every manifest names them — which is the same as naming none. `host.keys.check` reads one thing besides its string: for a Ctrl+Alt chord on Windows or an Option chord on a Mac, the character the keyboard layout in use types with it, unless it is asked with `layout = false`.
 
 The list is also shown to the user before installing from GitHub — for the module chosen and for every dependency the install adds — and again before an update that asks for a capability the installed version did not, or starts using a module it did not (see [the module manager](../module-manager.md#browse-tab)). Nothing is granted or refused per capability, and a module copied into `modules/` by hand is not reviewed at all. It is not a security boundary on its own — a module still runs arbitrary Luau, and the declaration is the module's own word — but it is now the word the platform holds it to.
 
@@ -303,6 +303,15 @@ Typed, per-module settings, edited by the user in the module manager.
 |---|---|
 | [`host.config.get / host.config.set / host.config.define / host.config.onChange`](settings#host-config-get) | `host.config` is the **same table** as `host.settings` (a catalog-compatibility |
 
+## host.errors
+
+What a call answers when something it was asked to do was not done: an error value, its code, and the constants to compare the code with.
+
+| | |
+|---|---|
+| [`host.errors`](errors#host-errors) | The codes, as constants: `host.errors.NOT_READY` is `"not_ready"`. |
+| [`host.errors.new(code, message, detail?)`](errors#host-errors-new) | Makes an error value of the module's own |
+
 ## host.os
 
 | | |
@@ -402,17 +411,24 @@ The shapes and grammars the calls above are written in.
 | [`Asking without waiting`](element#asking-without-waiting) | Every call on this page but `pending` takes two more arguments after its own, either of which may be left out |
 | [`Button and axis names`](gamepad#button-and-axis-names) | Every name a filter accepts, beside what SDL3, pygame and XInput call it. |
 | [`Button combinations`](gamepad#button-combinations) | A combination fires once when every button of a set is held together on one pad. |
+| [`Comparing codes`](errors#comparing-codes) | **Compare `err.code` with a constant**: `err.code == host.errors.NOT_READY`. |
+| [`Error values`](errors#error-values) | An error value is a table with three fields |
 | [`Failure reasons`](screen#failure-reasons) | When a read gets no picture, the call says why. |
 | [`Key spec string format`](keys#key-spec-string-format) | One grammar, read by one parser, for every call that takes a key |
 | [`Matchers`](window#matchers) | A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTrigger`, and to the overlay's bindings. |
+| [`Partial answers`](errors#partial-answers) | A call answers no error value when it did everything it was asked, and an error value when it did not |
 | [`Plugin base + library overlays (the cell model)`](overlay#plugin-base-library-overlays) | A plugin is not one overlay. |
 | [`Reading a snapshot`](screen#reading-a-snapshot) | A call given `{ snapshot = s }` reads the picture `s` holds instead of the screen. |
+| [`Reading an Errors table`](errors#reading-an-errors-table) | A converted entry has two sections after its prose and examples, before its Windows and macOS blocks |
 | [`Recognition language`](ocr#recognition-language) | What `lang` means, and what leaving it out means. |
 | [`Region form`](screen#region-form) | A region is a rectangle on screen, written in one of two forms: by its **corners**, or as **fractions of a window's client area**. |
+| [`Return or raise`](errors#return-or-raise) | **A call raises when the arguments alone decide**, so the same call fails whatever the state |
 | [`Table shapes`](window#table-shapes) | Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, `host.window.findAll()`, and passed to trigger/test callbacks. |
+| [`The overlay runtime's codes`](errors#the-overlay-runtime-s-codes) | The overlay runtime answers its own failures with error values too, once it is converted, and adds eight codes of its own |
 | [`The page's side — platform.post and platform.onmessage`](gui#the-page-s-side) | The host puts a small script into every page before the page's own, and it gives the page one object, `platform` |
 | [`What a page is served, and what it may not do`](gui#what-a-page-is-served-and-what-it-may-not-do) | **Its own folder, and nothing else.** A page is served from a scheme of its module's own (`mod-<module id>-<hash>`, the hash… |
 | [`Where a hook runs`](overlay#where-a-hook-runs) | Every callback of a module runs as a handler of the host, one at a time per module, and the runtime calls an overlay's hooks inside them. |
+| [`Where an error value arrives`](errors#where-an-error-value-arrives) | Always in one of five places, which each Errors table names with these words |
 | [`Where it waits`](screen#where-it-waits) | **`snapshot`, `pixel`, `pixels`, `profile`, `cells`, `matchCells`, `template{ capture }`, a snapshot's `crop`, `imageSearch`,… |
 | [`Which picture a read sees`](screen#which-picture-a-read-sees) | Every call on this page, and `host.ocr.recognize`, reads the screen one way for the whole module, chosen in its manifest rather than per call. |
 | [`With a callback`](screen#with-a-callback) | **Every call that waits takes a callback as its last argument** |

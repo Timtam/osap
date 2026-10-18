@@ -281,6 +281,7 @@ fn vm_in(h: &Rc<Host>, idx: usize, lua: Lua) -> Lua {
     )
     .unwrap();
     host.set("log", log).unwrap();
+    crate::errors_lua::install(&lua, &host).unwrap();
     crate::install_window_prelude(&lua, &host).unwrap();
     lua.globals().set("host", host).unwrap();
     lua.globals().set("wait", task::test_wait(&lua, idx, h.clone()).unwrap()).unwrap();
@@ -460,6 +461,30 @@ fn a_handlers_error_after_a_wait_keeps_its_context() {
     let errors = h.errors.borrow().clone();
     assert!(errors.len() == 1 && errors[0].0 == 1 && errors[0].1 == "hotkey" && errors[0].2.contains("after the wait"), "{errors:?}");
     assert_eq!(heard(&a), "next");
+}
+
+/// An error value a callback raises is reported by its message, as a sentence is: through a plain
+/// call (the `Function::call` every callback outside a mailbox takes), and through a handler's
+/// coroutine before a wait and after one — mlua's message handlers turn the raised value into text
+/// with `__tostring` on both paths. (Luau's `assert` takes a string message only; errors_lua.rs.)
+#[test]
+fn a_raised_error_value_is_reported_by_its_message() {
+    let h = host();
+    let a = vm(&h, 1);
+    let f: Function = a.load("error(host.errors.new('busy', 'raised in a plain call'))").into_function().unwrap();
+    let e = crate::call_plain(&f, ()).unwrap_err();
+    assert!(e.contains("raised in a plain call") && !e.contains("table: 0x"), "{e}");
+    call(&h, &a, 1, "error(host.errors.new('busy', 'raised at once'))", false);
+    let f: Function = a.load("wait('w'); error(host.errors.new('busy', 'raised after the wait'))").into_function().unwrap();
+    let d = mailbox::deliver(&*h, 1, &a, Event::Call { f, args: MultiValue::new(), input: true, what: "hotkey" });
+    assert_eq!(d, Delivered::Parked);
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    mailbox::run_queued(&*h);
+    let errors = h.errors.borrow().clone();
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert!(errors[0].1 == "timer" && errors[0].2.contains("raised at once"), "{errors:?}");
+    assert!(errors[1].1 == "hotkey" && errors[1].2.contains("raised after the wait"), "{errors:?}");
+    assert!(errors.iter().all(|e| !e.2.contains("table: 0x")), "{errors:?}");
 }
 
 /// A callback's own `coroutine.yield` through to the host raises at the yield, with the message

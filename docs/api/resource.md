@@ -42,11 +42,11 @@ host.log.info("layout has " .. #layout.controls .. " controls")
 
 A data file is read by the module that ships it. In a `code_module` dependency, `resource` resolves under the dependency's own root — even while its code runs in your VM — so a game module that feeds a shared runtime reads its own file and hands the runtime the decoded table — see [`host.json.decode`](./json.md#host-json-decode). Handing the runtime a relative path instead would make it read from its own folder.
 
-### Windows
+### Windows {#host-resource-read-windows}
 
 `/` and `\` both separate folders, and names are compared without case, as the file system does: `"Data\\Pack.json"` (a Luau string, so the `\` is written twice) finds `data/pack.json`. The same holds for `exists`.
 
-### macOS
+### macOS {#host-resource-read-macos}
 
 Only `/` separates folders. A `\` is part of a file name here, so `"data\\pack.json"` looks for a file of that name in the module's root, does not find `data/pack.json`, and raises; write `/` for code that runs on both. Whether names are compared without case depends on the volume: the default one does, a case-sensitive one does not. The same holds for `exists`, which answers `false` for such a path.
 

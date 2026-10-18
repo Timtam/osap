@@ -35,10 +35,10 @@ Plays an audio file from the module's package directory, fire-and-forget.
 host.sound.play("assets/ding.wav")
 ```
 
-### Windows
+### Windows {#host-sound-play-windows}
 
 The output is a WASAPI shared-mode stream (through `cpal`) on the default render device, and a device that is removed or invalidated is reported as a stream error. After the machine resumes from sleep, or the session is connected to the console or a remote client again, the output is let go and opened at the next sound, not before: nothing is held open for a sound that never comes.
 
-### macOS
+### macOS {#host-sound-play-macos}
 
 The output is a Core Audio stream (through `cpal`) on the default output device. It is opened again at the next play when its stream reported an error or the default output device is another one, as on Windows. After the Mac wakes from sleep, or this user's session is back at the console after fast user switching, the output is let go and opened at the next sound, not before, as on Windows.

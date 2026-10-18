@@ -111,7 +111,7 @@ forward (see [the module manager](../module-manager.md#starting-it-again-brings-
 A build from before that rule takes no lock and looks for none, so it can still run beside a
 newer copy and hold keys; quit it from its tray icon.
 
-### Windows
+### Windows {#host-hotkey-register-windows}
 
 `RegisterHotKey`, with auto-repeat suppressed: the callback fires once per press, and holding the combination does not fire it again. Each role is the key of its name: `Ctrl` is Control and `Win` the Windows key.
 
@@ -138,7 +138,7 @@ enabled set — so quitting the application that holds the key can be enough. Th
 is such an application for the four modifiers with a letter: it holds the Office key's W, X, P,
 O, T, Y, N, D and L.
 
-### macOS
+### macOS {#host-hotkey-register-macos}
 
 A Carbon event hotkey — deliberately **not** an event tap, so this needs no Input Monitoring grant, whether or not `host.keys` does (on macOS 26.6 it did not: see [macOS permissions](../macos-permissions.md#input-monitoring)). That is also what makes a hotkey the application's witness for the tap: one that arrives while the tap, on for more than a second, has seen no key at all says the tap is not handed the keyboard. It is registered by role: `Ctrl` is Command, `Alt` Option, `Shift` Shift and `Win` (`Meta`) Control, so Kontakt's `"Ctrl+L"` is Command+L here. `"Ctrl+Q"`, `"Ctrl+H"`, `"Ctrl+Tab"` and the rest of the reserved list raise.
 
@@ -160,11 +160,11 @@ Releases the OS hotkey and forgets the callback for the `id` returned by `regist
 host.hotkey.unregister(id)
 ```
 
-### Windows
+### Windows {#host-hotkey-unregister-windows}
 
 `UnregisterHotKey`, and the combination leaves the keyboard hook's table in the same call, so from the next keystroke on neither path takes it. A press whose key is still down when its hotkey goes keeps its repeats going to the application, as with no registration.
 
-### macOS
+### macOS {#host-hotkey-unregister-macos}
 
 `UnregisterEventHotKey`. A refusal is not reported to the module; it is logged, because it leaves the combination claimed.
 

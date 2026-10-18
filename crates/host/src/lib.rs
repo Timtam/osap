@@ -174,6 +174,11 @@ mod stops_tests;
 /// Who wants this application to have a Dock icon on a Mac: the claims of its windows, counted by
 /// owner — see the file. Borrowed by crates/macos-check.
 mod dock;
+/// What a call answers when something it was asked to do was not done: the codes, every reason
+/// the host can give and the error it carries until a VM has it, pure — see the file.
+mod errors;
+/// The error value a module gets, `host.errors` and the text calls that take one — see the file.
+mod errors_lua;
 mod gui;
 mod image_search;
 mod modal_spans;
@@ -7065,9 +7070,10 @@ impl mailbox::MailHost for Shared {
 /// Which `host.<key>` a manifest's capability name unlocks.
 ///
 /// Everything not in here is free: `os`, `require`, `tryRequire`, `include`, `epoch`, `now`,
-/// `inputEpoch`, `match`, `json`. A clock, a counter, a platform name, a way to reach a declared
-/// dependency and a parser of strings the module already holds are not worth asking permission
-/// for, and gating them would mean every manifest names them, which is the same as naming none.
+/// `inputEpoch`, `match`, `json`, `errors`. A clock, a counter, a platform name, a way to reach a
+/// declared dependency, a parser of strings the module already holds and the codes every answer
+/// is compared with are not worth asking permission for, and gating them would mean every
+/// manifest names them, which is the same as naming none.
 ///
 /// `config` is the second name of the settings table, so it answers to the same capability
 /// rather than to one of its own — nothing declares `"config"` and nothing should have to.
@@ -7376,13 +7382,16 @@ impl captures::KeyHost for Shared {
 fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table> {
     let host = lua.create_table()?;
 
-    // host.log.info(msg)
+    // host.errors: the codes an error value carries, and `new` (errors_lua.rs). Ungated.
+    errors_lua::install(lua, &host)?;
+
+    // host.log.info(msg) — a string, a number, or an error value, which logs its message.
     let log = lua.create_table()?;
     log.set(
         "info",
-        lua.create_function(|_, msg: String| {
+        lua.create_function(|_, msg: errors_lua::Text| {
             host_call!("host.log.info");
-            logging::line("module", &msg);
+            logging::line("module", &msg.0);
             Ok(())
         })?,
     )?;
@@ -7471,13 +7480,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // Kontakt → Komplete Kontrol). Neither needs contract discovery.)
 
     // host.speech.output(text, { interrupt = true })  (do not echo to console:
-    // a screen reader would read the terminal and double the speech)
+    // a screen reader would read the terminal and double the speech). An error value speaks its
+    // message.
     let speech = lua.create_table()?;
     let sh = shared.clone();
     speech.set(
         "output",
-        lua.create_function(move |_, (text, opts): (String, Option<Table>)| {
+        lua.create_function(move |_, (text, opts): (errors_lua::Text, Option<Table>)| {
             host_call!("host.speech.output");
+            let text = text.0;
             // A missing `interrupt` — no table, `{}`, `{ interrupt = nil }` — interrupts, as the
             // page promises. It used to be `get::<bool>(…).unwrap_or(true)`, and mlua reads nil
             // as `false`, so the default only applied when `opts` itself was left out: `{}`
@@ -11907,6 +11918,7 @@ mod ocr_wiring_tests {
             "lib.rs: install_include",
             // The host's own Luau.
             "lib.rs: install_window_prelude",
+            "errors_lua.rs: metatables",
             "lib.rs: has_triggers",
             "lib.rs: trigger_seq",
             "lib.rs: wants_initial",

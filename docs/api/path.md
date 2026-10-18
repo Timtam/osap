@@ -40,13 +40,13 @@ its digits). Folders may be separated by `/` on every platform.
 local img = host.path("assets/kontakt.png") -- "C:\...\modules\my-mod\assets\kontakt.png"
 ```
 
-### Windows
+### Windows {#host-path-windows}
 
 Making the path absolute also resolves `..` in it, so `host.path("../x")` comes back
 without the `..`, naming the file beside the module folder directly. `/` and `\` both
 separate folders, and the result is written with `\`.
 
-### macOS
+### macOS {#host-path-macos}
 
 The `..` is left in the returned path, and the file system resolves it when the path
 is used. Only `/` separates folders: a `\` is part of a file name here, so a path written

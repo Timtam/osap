@@ -33,11 +33,11 @@ Read-only string: the current OS, from Rust `std::env::consts::OS` (`"windows"`,
 host.log.info("running on " .. host.os.current)
 ```
 
-### Windows
+### Windows {#host-os-current-windows}
 
 `"windows"`, on every Windows version.
 
-### macOS
+### macOS {#host-os-current-macos}
 
 `"macos"`, on Intel and Apple silicon alike.
 
@@ -57,11 +57,11 @@ if host.os.is("macos") then
 end
 ```
 
-### Windows
+### Windows {#host-os-is-windows}
 
 True for `"windows"` only.
 
-### macOS
+### macOS {#host-os-is-macos}
 
 True for `"macos"` only.
 
@@ -87,10 +87,10 @@ local INFO_PANE = host.os.pick {
 }
 ```
 
-### Windows
+### Windows {#host-os-pick-windows}
 
 Returns `t.windows`.
 
-### macOS
+### macOS {#host-os-pick-macos}
 
 Returns `t.macos`. A `control` pattern written as a plain string — a Win32 window class such as `"Qt%d+.-QWindowIcon"` — is not picked per platform at all, and on a Mac it is compared with the `AXRole/AXSubrole/AXIdentifier` triple a control's class is there, so it practically never matches. The overlay runtime logs that once per pattern that names no `AX` role and has no `/` — which also catches a real macOS pattern on the identifier alone, hence "probably" in the line; give such a `control` a `macos` entry.

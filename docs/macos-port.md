@@ -327,7 +327,7 @@ Every item here needs a Mac. They are listed in the order a first session should
    dependency, so on macOS Vision carries the case alone. Ten minutes with one request
    against the crops the Windows work already produced. (Answered by `ocr-bench` in 2026-10:
    Vision is blind to a lone digit at times, and the fallback now runs on a Mac too, by
-   Windows' rule, where the download carries it — see [`host.ocr.recognize`](api/ocr.md#macos).)
+   Windows' rule, where the download carries it — see [`host.ocr.recognize`](api/ocr.md#host-ocr-recognize-macos).)
 9. **Do Qt object names survive into `AXIdentifier`** — see the `class` section. If they do
    not, the modules that navigate by them need a different anchor on macOS.
 

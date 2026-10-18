@@ -18,6 +18,9 @@ on:
       - 'crates/host/src/lib.rs'
       - 'crates/host/src/gamepad_api.rs'
       - 'crates/host/src/window_prelude.luau'
+      # host.errors' bindings, and the Reason table every converted page's Errors are held to.
+      - 'crates/host/src/errors.rs'
+      - 'crates/host/src/errors_lua.rs'
       - 'check-docs.ps1'
       # The checkers' own source. Without this, a change to the scraper could break the check
       # and nothing would run it until the next docs edit — which is exactly what happened.
@@ -29,6 +32,8 @@ on:
       - 'crates/host/src/lib.rs'
       - 'crates/host/src/gamepad_api.rs'
       - 'crates/host/src/window_prelude.luau'
+      - 'crates/host/src/errors.rs'
+      - 'crates/host/src/errors_lua.rs'
       - 'check-docs.ps1'
       - 'tools/api-index.py'
   workflow_dispatch:
