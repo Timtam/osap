@@ -2122,7 +2122,7 @@ fn avengers_list_is_gathered_by_where_most_of_its_names_were_read_before() {
 /// over the area's pixels, one turn a pixel, is more than the read may spend; and the same read
 /// again, its names looked up already, at most a quarter of it (10,635 turns when measured: the
 /// columns, the log, the order).
-const BROWSER_TILES: u64 = 49700;
+const BROWSER_TILES: u64 = 50750;
 
 #[test]
 fn the_browsers_reads_stay_small_on_the_event_loop() {
@@ -2131,7 +2131,7 @@ fn the_browsers_reads_stay_small_on_the_event_loop() {
           "Misty", "Neon" }
         local N = { "Keys", "Leads", "Pads", "Plucks", "Drums", "Bass", "Strings", "Voices", "Worlds", "Waves", "Bells" }
         local names = {}
-        for i = 1, 124 do names[i] = string.format("%s %s %d", A[(i * 7) % 13 + 1], N[(i * 5) % 11 + 1], i) end
+        for i = 1, 129 do names[i] = string.format("%s %s %d", A[(i * 7) % 13 + 1], N[(i * 5) % 11 + 1], i) end
         local files = { }
         local index = { format = 1, exported = "2026-10-18", factoryStandard = {}, expansions = {} }
         for i, n in ipairs(names) do
