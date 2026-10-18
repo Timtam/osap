@@ -31,7 +31,7 @@ on:
         required: true
         type: string
       ocr-bench:
-        description: 'whether this run measures text recognition (the ocr-bench job), as build.yml decided it'
+        description: 'whether this run measures text recognition on macOS (the ocr-bench job), as build.yml decided it'
         required: true
         type: boolean
 
@@ -967,14 +967,16 @@ jobs:
   # took seven: the benchmark grew from ten
   # pictures to forty-one and from one way of reading to twelve, its sections are estimated at 20 to
   # 30 minutes on the Intel runner, and the first run of this size is what its rounds are set by.
-  # Only in a run that measures text recognition, as build.yml decides it (its `ocr` job, with
-  # the list of what the measurements run and why each entry is on it): a push that changed
-  # something on that list, or a run started by hand with its `ocr-bench` box ticked. The
-  # maintainer's choice of 2026-10-18, for faster builds; until then it was every build with
-  # Rust changes and every run started by hand (TODO.md, "Text recognition on the Mac,
-  # measured"). And on a push only for an executable this run built, because a reused one
-  # measured again shows runner noise and nothing else; a run started by hand that asks for it
-  # measures a reused one too.
+  # Only in a run that measures text recognition on macOS, as build.yml decides it (its `ocr`
+  # job, with the lists of what each platform's measurement runs and why each entry is on its
+  # list): a push that changed something this job runs, either what both platforms' measurements
+  # run or what only this one does (Vision, package-macos.sh, this file), or a run started by
+  # hand whose `ocr-bench` choice is `both` or `macos`. A change only Windows' measurement runs,
+  # the Windows backend say, leaves it out. The maintainer's choices of 2026-10-18, for faster
+  # builds; until then it was every build with Rust changes and every run started by hand
+  # (TODO.md, "Text recognition on the Mac, measured"). And on a push only for an executable this
+  # run built, because a reused one measured again shows runner noise and nothing else; a run
+  # started by hand that asks for it measures a reused one too.
   ocr-bench:
     needs: build
     if: inputs.ocr-bench && (needs.build.outputs.reused != 'true' || github.event_name == 'workflow_dispatch')

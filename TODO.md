@@ -8748,6 +8748,21 @@ that is built; what the application reads and says is unchanged.
       push the macOS legs still skip a reused executable. Of the last 300 commits, each as a push of
       its own, 114 would have measured, 44 of them only for `backend/mod.rs` or
       `backend/windows.rs`, whole files of which the bench runs a few functions.
+- [x] **Each platform on its own** (the maintainer, 2026-10-18): a platform measures only when
+      something ITS measurement runs changed. The `ocr` job's lists are three now, each entry
+      with its reason: what both run (`crates/host/src/ocr/`, the neural recogniser,
+      `backend/mod.rs`, `main.rs`, the pictures, the model; `ort`, `ort-sys`, `ndarray`, `image`,
+      `png`), what only the Mac's runs (Vision's half, `tools/onnxruntime-mac.txt`,
+      `package-macos.sh`, `macos-build.yml`; the three `objc2` crates) and what only Windows' runs
+      (`backend/windows.rs`, `windows-build.yml`; `windows`); a crate's entry in one platform's
+      own target table counts for that platform alone. Two outputs, `macos` and `windows`, each
+      with its line in the log and the summary; a push it cannot compare measures on both. A run
+      started by hand chooses: `none` (the default), `both`, `macos` or `windows`.
+      `backend/mod.rs` stays on both: git's hunk headers name the item above a hunk rather than
+      the one changed, so they cannot narrow it to the bench's functions reliably. Of the 300
+      commits up to 784d551, each as a push of its own, 99 would have measured on macOS and 93 on
+      Windows (77 on both, 22 on macOS alone, 16 on Windows alone), where all 115 of them measured
+      on both before; 33 of the 77 measure on macOS only for `backend/mod.rs`.
 - [x] **Read** (2026-10-02, CI run 36972644006): every leg finished, in 226 to 408 s. No CI Mac
       offers Vision a Neural Engine. On the Intel runner one accurate pass over a small field
       costs 262 to 312 ms, the fast level 12 to 14 ms and it reads the fields and the line right,
