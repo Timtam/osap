@@ -25,8 +25,14 @@ local O = host.require("com.platform.overlay")
 Source: `modules/overlay-runtime/src/main.luau`, and its reasons in `modules/overlay-runtime/src/errors.luau`.
 
 :::caution Since version 0.11: error values, not words
-Every answer of the runtime's that says why something was not done is an [error value](./errors.md#error-values), as the host's are: what `O:chooseMenuItem` and its `onDone`, `O:inPlugin`, `O:pageBack`, `O:pageKey`, `trip:afterMenu`, `trip:handOver`, `O:stillHere`, `O:toScreen`, `O:toScreenRect`, `onGiveUp`, `onBack`, a hand-over's `onEnd`, `O.doubleClick` and the calibration and capture methods answer — and `onShown` and `onClose` hand on the page's own. Compare its `code` with a constant of [`O.errors`](#o-errors), which holds the runtime's eight codes and every one of `host.errors`'s: `err.code == O.errors.BUSY`. Its message is the sentence the runtime logs, and `tostring` and `..` give it. **Code written against the words of 0.10 — `why == "busy"`, a table keyed by `"due"` — no longer matches, and says nothing.** A dependency is a lower bound only, so a module that asks for `"com.platform.overlay >= 0.10"` loads against this runtime all the same; one that compares codes asks for `>= 0.11`.
+Every answer of the runtime's that says why something was not done is an [error value](./errors.md#error-values), as the host's are: what `O:chooseMenuItem` and its `onDone`, `O:inPlugin`, `O:pageBack`, `O:pageKey`, `trip:afterMenu`, `trip:handOver`, `O:stillHere`, `O:toScreen`, `O:toScreenRect`, `onGiveUp`, `onBack`, a hand-over's `onEnd` and the calibration and capture methods answer — and `onShown` and `onClose` hand on the page's own. (`O.doubleClick` answers as `host.input.click` does, and no click it makes is refused today.) Compare its `code` with a constant of [`O.errors`](#o-errors), which holds the runtime's eight codes and every one of `host.errors`'s: `err.code == O.errors.BUSY`. Its message is the sentence the runtime logs, and `tostring` and `..` give it. **Code written against the words of 0.10 — `why == "busy"`, a table keyed by `"due"` — no longer matches, and says nothing.** A dependency is a lower bound only, so a module that asks for `"com.platform.overlay >= 0.10"` loads against this runtime all the same; one that compares codes asks for `>= 0.11`.
 :::
+
+**Reading an entry.** Every entry ends with **Returns** and **Errors**, before its Windows and macOS blocks ([Reading an Errors table](./errors.md#reading-an-errors-table)). The runtime's own messages are its reasons in `errors.luau`, word for word; a message may change between versions, and the code does not. An error the runtime only hands on — a capture's, a focus's, a page's, a hotkey registration's — is the host's own table, and its row links to that call's Errors; `errors.luau`'s `passes` names, for each entry, the host calls whose errors it hands on, and the docs check holds the rows to it. A hook's error values are rows of the call whose spec holds the hook, under "arrives" `hook onDone`, `hook onGiveUp` and so on.
+
+**The runtime makes no partial answer of its own.** Where a call of the runtime answers an error value, its first value is `false` or `nil`, and nothing of what was asked was done — but for [`O:captureAll`](#o-captureall), which answers `false, err` for the first shot it could not write, having written the others. The one partial answer a module meets through it is the host's: a page's `onShown` is handed [`page:show`](./gui.md#page-show)'s `true, err` as it came — the page is in front, but over the plug-in's window ([`O:addPage`](#o-addpage-errors)).
+
+**Two raises any method can meet**, said once here. A binding's `control` function and the overlay's [`O:frame`](#o-frame) function are called unguarded wherever the overlay works out its origin or places a coordinate, so what they raise comes out of the method that asked — `O:origin`, `O:hwnd`, `O:here`, `O:toScreen` and every other that places. And the host's guard: `stopped by the host: …`, when the module has run too long ([the limits](../module-runtime-and-lifecycle.md#limits)). The capability gate is not met: the runtime is a code module, and its own calls of the host are judged by its own manifest ([`[capabilities]`](../module-package-format.md#capabilities)), while a module's hooks call the host under the module's.
 
 ## What to declare {#declare}
 
@@ -51,12 +57,12 @@ Every callback of a module runs as a [handler](../module-runtime-and-lifecycle.m
 | `when`; an `identify` asked at every evaluation (`cacheIdentity = false`, or a `control` function's where the DAW gives no panel); a binding's `present`; a [menu test](#o-menutests) | in a coroutine of the runtime's own, one per scan or tick | no: it must answer at once, and reads no screen — a pixel a `when` needs is a [probe](#o-probe)'s |
 | a [menu test](#o-menutests)'s `chained` | where the answer of the test that placed an item with a `submenu` runs — in a coroutine of its own inside the menu tick's work, or in the handler of the test's callback — before the item is clicked | no: it answers through its `done`, at once or from a callback |
 | a `menuItem` function (a `submenu`'s too) and the `onDone` of [`O:chooseMenuItem`](#o-choosemenuitem) | inside the menu tick's coroutine when a test answers at once; otherwise in the handler of the test's callback, and `onDone` also in a key's handler, in the arbiter's call as the overlay leaves the front, or — in a calibrating run, on a press whose item is photographed — in the handler of the [menu item shot](#o-calibrating)'s answer, right after the item's click | no: it must answer at once; a [probe](#o-probe)'s reader answers what stands, and reads nothing on the tick or in either callback |
-| the overlay's own [`onActivate` and `onDeactivate`](#o-onactivate) | on a `slot`, in the arbiter's call, a plain call; without one, in the handler of whatever looked at the overlay again — a window or focus event, a `pollMatch` poll, the runtime's own timers (the first evaluation of a binding, the check 250 ms after it came to the front), the menu tick | no: on a slot nothing can wait there, and either way the overlay is half way into or out of the front |
-| a [library](#o-gate)'s `gate` | in the handler of whatever looked at the overlay again, outside any scan | yes, but a read with a callback keeps the module's keys free |
+| the overlay's own [`onActivate`](#o-onactivate) and [`onDeactivate`](#o-ondeactivate) | on a `slot`, in the arbiter's call, a plain call; without one, in the handler of whatever looked at the overlay again — a window or focus event, a `pollMatch` poll, the runtime's own timers (the first evaluation of a binding, the check 250 ms after it came to the front), the menu tick | no: on a slot nothing can wait there, and either way the overlay is half way into or out of the front |
+| a [library](#o-gate)'s `gate`, a [landmark](#o-landmark) among them | in the handler of whatever looked at the overlay again, outside any scan | yes, but a read with a callback keeps the module's keys free |
 | a [page](#o-addpage)'s `describe` | in the `addPage` or `pageAgain` call | no: it only describes |
 | a page's `open` | in the page key's handler, or in the page's `onReady` handler when the page loaded after the key | yes |
 | a page's `onMessage`, `onReady` and `onClose` | as the page's own events, handlers of the module (a message and `onClose("user")` in the interactive lane) | yes |
-| a [trip](#o-inplugin)'s `act`, and the `fn` of its `afterMenu` and `afterDialog` | on the module's next turn after the arrival ([`host.timer.after(0)`](timer.md#host-timer-after)); the arbiter's call that sees the arrival only schedules it | yes |
+| a [trip](#o-inplugin)'s `act`, and the `fn` of its [`afterMenu`](#trip-aftermenu) and [`afterDialog`](#trip-afterdialog) | on the module's next turn after the arrival ([`host.timer.after(0)`](timer.md#host-timer-after)); the arbiter's call that sees the arrival only schedules it | yes |
 | a trip's `after` and `onGiveUp` | on the module's next turn after `done` or the end, or in the page key's handler | yes |
 | a [hand-over](#trip-handover)'s `onKey` | in the handler of the key it captured, the plug-in's window in front | yes |
 | a hand-over's `ends` | on the module's next turn after the arrival that follows its end key ([`host.timer.after(0)`](timer.md#host-timer-after)), as a wait's `fn` | yes — it answers through its `answer`, at once or from a read's callback |
@@ -65,7 +71,7 @@ Every callback of a module runs as a [handler](../module-runtime-and-lifecycle.m
 
 **"Wait for a read"** is [`host.ocr.recognize`](ocr.md#host-ocr-recognize) without a callback, and **"a capture"** a [`host.screen.snapshot`](screen.md#host-screen-snapshot), [`pixel`](screen.md#host-screen-pixel) or [`pixels`](screen.md#host-screen-pixels) of the screen, or a [`profile`](screen.md#host-screen-profile), [`cells`](screen.md#host-screen-cells), [`matchCells`](screen.md#host-screen-matchcells), [`template{ capture }`](screen.md#host-screen-template), snapshot's `crop`, [`imageSearch`](screen.md#host-screen-imagesearch), [`imageSearchAll`](screen.md#host-screen-imagesearchall), [`save`](screen.md#host-screen-save) or [`saveMarked`](screen.md#host-screen-savemarked) without a callback: where the table says yes, it stops the handler until the reading, the picture, the colours or the region's answer come, and only the overlay's module waits — its next key runs after it ([Where it waits](ocr.md#where-it-waits), and for the screen [its own](screen.md#where-it-waits)). With a callback a read waits nowhere, and is fine in every row; so is a `pixel` or `pixels` of a snapshot, which reads no screen. What the rows that say no rule out: a `when` is asked for every control on every Tab and a menu test on every tick, and a module that waited there would be busy all the time.
 
-**Where it may wait**, the overlay checks afterwards that what it was doing still stands. A sentence notes where the overlay is before its control's first hook runs — in front, in which stay, on which window, the focus and the control, the keys of its own, the announcements, the menus opened — and after each of `text`, `current` and `verticalName` it asks whether that still holds, as [`O:stillHere`](#o-here) does with `focus`, `keys` and `said`, and a menu opened since (a menu that was open before the hook does not count against it). When it no longer holds, nothing of the sentence is said, the log says `[read] '<label>' not spoken after its text: <why>` (`after its current`, `after its verticalName`) in `stillHere`'s words, and an OCR button's click is not made: `[read] '<label>': not clicking — <why>`. Without a wait nothing changes between the two, and the sentence is said as it always was. A module's own `onActivate` or `onStep` that reads and then acts — as VPS Avenger's preset steps read the name, then click — takes [`O:here()`](#o-here) before the read and asks `O:stillHere` after it, before it acts: the runtime cannot check that for it. The runtime does the same around its own reads of a pixel before a click: a [hotspot toggle](#o-addhotspottoggle)'s press, and a [graphical toggle](#o-addgraphicaltoggle)'s `reveal` probe.
+**Where it may wait**, the overlay checks afterwards that what it was doing still stands. A sentence notes where the overlay is before its control's first hook runs — in front, in which stay, on which window, the focus and the control, the keys of its own, the announcements, the menus opened — and after each of `text`, `current` and `verticalName` it asks whether that still holds, as [`O:stillHere`](#o-stillhere) does with `focus`, `keys` and `said`, and a menu opened since (a menu that was open before the hook does not count against it). When it no longer holds, nothing of the sentence is said, the log says `[read] '<label>' not spoken after its text: <why>` (`after its current`, `after its verticalName`) in `stillHere`'s words, and an OCR button's click is not made: `[read] '<label>': not clicking — <why>`. Without a wait nothing changes between the two, and the sentence is said as it always was. A module's own `onActivate` or `onStep` that reads and then acts — as VPS Avenger's preset steps read the name, then click — takes [`O:here()`](#o-here) before the read and asks [`O:stillHere`](#o-stillhere) after it, before it acts: the runtime cannot check that for it. The runtime does the same around its own reads of a pixel before a click: a [hotspot toggle](#o-addhotspottoggle)'s press, and a [graphical toggle](#o-addgraphicaltoggle)'s `reveal` probe.
 
 **Where it must not wait**, the hooks run in a coroutine the runtime makes: one for a whole scan — every `when` of a Tab's search for the next control, every claimant of a shared hotkey, every test a menu tick asks — and each hook inline inside it; a hook asked on its own, such as the `when` of the control Return presses, has one to itself. That is one coroutine per scan or per lone hook. To the host it is a coroutine the module made: `host.ocr.recognize` without a callback does not wait there, and raises — the hook then raises with it ([Where it waits](ocr.md#where-it-waits)). Nor does such a hook read the screen itself: the `host.screen` calls that wait in a handler — `snapshot`, `pixel`, `pixels`, `profile`, `cells`, `matchCells`, `template{ capture }`, `crop`, the searches, `save`, `saveMarked` — raise there without a callback, as `recognize` does, and the hook raises with them ([Where it waits](screen.md#where-it-waits)); a `pixel` or `pixels` of a snapshot is answered at once. What a `when` needs of the screen is declared as a [probe](#o-probe): the runtime reads it in the handler before the scan, one capture for all the overlay's probes and only after something acted (or at every Tab: for a probe declared so, and while a change the module [expects](#o-expectchange) has not been read), and the `when` answers from that reading. A call with a callback — [`host.ocr.recognize`](ocr.md#host-ocr-recognize), and every [`host.screen`](screen.md#with-a-callback) call given one — asks and returns at once, and is fine there. A `coroutine.yield` of the hook's own is ended with the error `a hook asked on every scan yielded; it must return at once`: a `when` asked on its own then hides its control, as a `when` that raises does; inside a scan the yield reaches past that guard, and the scan — and with it the key that started it — ends with that error. A menu test that yields has failed, as one that raises has: the tick goes on, the tests after it are asked on the next tick, and the test itself is asked in a coroutine of its own from then on, where it fails alone.
 
@@ -112,9 +118,9 @@ ov:addStaticText({
 
 ## O.new(label) {#o-new}
 
-Creates a new overlay object. `label: string?` (defaults to `"Overlay"`).
+**Signature:** `O.new(label: string?) -> Overlay`
 
-Returns an `Overlay` (metatable-backed table) with fields `label`, `controls = {}`, `focus = 0`, `active = false`, `hoverToRead = false`, `contexts = {}`, `activeCtx = false`, and internal registration/key/trigger state.
+Creates a new overlay object, with no controls and no binding: it does nothing until it is bound ([`O:attach`](#o-attach), [`O:attachEmbedded`](#o-attachembedded), [`O:bind`](#o-bind)). `label` is the name announced when the overlay comes up, and the name every log line of it carries; `"Overlay"` when it is `nil`.
 
 ```luau
 -- sforzando's standalone overlay: the object, its controls, then where it lives.
@@ -127,13 +133,25 @@ ov:attach({ title = { contains = "sforzando" }, windows = { class = "PLGWindowCl
   { menus = { O.menuTests.nativePopup, O.menuTests.newWindow } })
 ```
 
+Costs one table, on the event loop; nothing is asked of the host.
+
+### Returns {#o-new-returns}
+
+An `Overlay`, a table with a metatable, every time. Its fields a module reads are `label`, `controls` (the controls in the order they were added), `focus` (the index of the focused control, `0` before the ring is entered), `active` (whether it is in front), `hoverToRead`, [`state`](#o-state), [`away`](#o-away) and, once it has a page, `page`. The fields that begin with `_`, `contexts` and `activeCtx` are the runtime's.
+
+### Errors {#o-new-errors}
+
+None. It never answers an error value.
+
+It never raises: `label` is kept as it is given, and only `nil` is replaced.
+
 ## O\:addStaticText(label) {#o-addstatictext}
 
-Appends a static text control: Tab-reachable and read aloud on focus. Space and Return do nothing on it; its `hotkey` and [`O:activate`](#o-activate) say it again. `label: string`.
+**Signature:** `O:addStaticText(labelOrOpts: string | { label: string, text: ((overlay) -> string?)?, when: ((overlay) -> boolean)?, hotkey: string?, hotkeyKeepsFocus: boolean? }) -> Control`
 
-Returns the control table `{ kind = "static", label = label }`.
+Appends a static text control: Tab-reachable and read aloud on focus. Space and Return do nothing on it; its `hotkey` and [`O:activate`](#o-activate) say it again.
 
-`labelOrOpts` may also be a **table** — `{ label, text, when, hotkey, hotkeyKeepsFocus }` — and that form is the one worth knowing. `text(overlay) -> string?` is appended to the label each time the control is announced, which turns a caption into a **read-out**: a value the user wants to check is then read by arriving at it, with nothing pressed and nothing changed. The alternative would be a button, and a button that only reports is a promise of an action it does not perform. `text` runs in the handler of the key or event that announces the control, and may read there ([Where a hook runs](#where-a-hook-runs)). The table form returns `{ kind = "static", label, text, when, hotkey, hotkeyKeepsFocus }`.
+`labelOrOpts` may also be a **table** — `{ label, text, when, hotkey, hotkeyKeepsFocus }` — and that form is the one worth knowing. `text(overlay) -> string?` is appended to the label each time the control is announced, which turns a caption into a **read-out**: a value the user wants to check is then read by arriving at it, with nothing pressed and nothing changed. The alternative would be a button, and a button that only reports is a promise of an action it does not perform. `text` runs in the handler of the key or event that announces the control, and may read there ([Where a hook runs](#where-a-hook-runs)).
 
 `hotkey` (since version 0.4.1 of the runtime) gives a read-out a key of its own: pressing it moves the focus to the control, as any control's hotkey does, and says it — `"<label>, <text>"`, interrupting what is being said, without the key's name, which is said only when focus arrives by Tab. `hotkeyKeepsFocus = true` says it and leaves the focus where it was. Space and Return are never taken while the focus is on a static text, with or without a hotkey: they stay the application's. A module that sets `hotkey` depends on `"com.platform.overlay >= 0.4.1"`; an older runtime ignores it.
 
@@ -155,11 +173,23 @@ ov:addStaticText({
 })
 ```
 
+### Returns {#o-addstatictext-returns}
+
+The control table, appended to `o.controls`: `{ kind = "static", label = label }` for a string, and `{ kind = "static", label, text, when, hotkey, hotkeyKeepsFocus }` for a table, `hotkeyKeepsFocus` made a boolean. `when` is the control's own ANDed with an enclosing [`O:group`](#o-group)'s.
+
+### Errors {#o-addstatictext-errors}
+
+None. It never answers an error value.
+
+**Raises** for a control added after the overlay is bound: `overlay '<label>': adding a control must be called BEFORE binding it — the binding is what starts it`. Nothing else is checked at the call. A field of the wrong kind is reported when the overlay binds, in a line `[overlay] <overlay>: <finding>` that names the control, and the control is kept.
+
 ## O\:addHotspotButton(opts) {#o-addhotspotbutton}
 
-Appends a button that, when activated, clicks a fixed origin-relative point. `opts: { label: string, at: {number, number} | ((overlay) -> {number, number}?), points: {{number, number}}?, settle: number?, text: ((overlay) -> string?)?, ocrLabel: {number, number, number, number} | ((overlay) -> {…}?)?, hotkey: string?, hotkeyKeepsFocus: boolean?, rawOrigin: boolean?, fromRight: boolean?, button: ("left" | "right" | "middle")?, opensMenu: boolean?, menuItem: {number, number} | ((overlay, menu, factor) -> {number, number} | false | nil)?, retries: number?, when: ((overlay) -> boolean)? }` — `at` is `{x, y}` relative to the origin; `hotkey` is an optional global activation hotkey spec (e.g. `"Alt+P"`); `opensMenu` says the click puts a menu on screen (see [`O.menuTests`](#o-menutests)).
+**Signature:** `O:addHotspotButton(opts) -> Control`, where `opts: { label: string, at: {number, number} | ((overlay) -> {number, number}?), points: {{number, number}}?, settle: number?, text: ((overlay) -> string?)?, ocrLabel: {number, number, number, number} | ((overlay) -> {…}?)?, hotkey: string?, hotkeyKeepsFocus: boolean?, rawOrigin: boolean?, fromRight: boolean?, button: ("left" | "right" | "middle")?, opensMenu: boolean?, menuItem: {number, number} | ((overlay, menu, factor) -> {number, number} | false | nil)?, retries: number?, when: ((overlay) -> boolean)? }`
 
-Returns `{ kind = "hotspot", label, ocrLabel, text, at, points, settle, hotkey, hotkeyKeepsFocus, opensMenu, rawOrigin, fromRight, button, menuItem, retries, when }`. On activate it clicks `(origin.x + at[1], origin.y + at[2])` — through the frame and the scale, when the overlay has them — logs `<overlay>: '<label>' activated, clicking (x,y)`, and speaks `"label, activated"`.
+Appends a button that, when activated, clicks a fixed origin-relative point. `at` is `{x, y}` relative to the origin; `hotkey` is an optional global activation hotkey spec (e.g. `"Alt+P"`); `opensMenu` says the click puts a menu on screen (see [`O.menuTests`](#o-menutests)).
+
+On activate it clicks `(origin.x + at[1], origin.y + at[2])` — through the frame and the scale, when the overlay has them — logs `<overlay>: '<label>' activated, clicking (x,y)`, and speaks `"label, activated"`.
 
 `button` is the mouse button of that click: `"right"` for a control a right click opens (VPS Avenger's redo list is a right click on UNDO), `"middle"`, or `"left"` — the default, and what [`host.input.click`](input.md#host-input-click) makes of any other value, which the overlay reports when it binds. It applies to `at` only, not to a `points` sequence.
 
@@ -193,6 +223,16 @@ ov:addHotspotButton({ label = "Load preset", at = { 262, 14 }, menuItem = { 5, 1
 ov:addHotspotButton({ label = "Sync to host", at = { 400, 14 }, menuItem = { 5, 30 }, retries = 0 })
 ```
 
+### Returns {#o-addhotspotbutton-returns}
+
+The control table, appended to `o.controls`: `{ kind = "hotspot", label, ocrLabel, text, at, points, settle, hotkey, hotkeyKeepsFocus, opensMenu, rawOrigin, fromRight, button, menuItem, retries, when }`, with `opensMenu` true whenever `menuItem` is given and `hotkeyKeepsFocus` made a boolean.
+
+### Errors {#o-addhotspotbutton-errors}
+
+None. It never answers an error value. A press it cannot make — the point outside the origin's window, another window drawn there, no factor from the scale — is said and logged at the press, as above, and a choice its `menuItem` could not make is said and logged as [`O:chooseMenuItem`](#o-choosemenuitem-errors)'s are; the module is handed none of them.
+
+**Raises** for a control added after the overlay is bound (`overlay '<label>': adding a control must be called BEFORE binding it — the binding is what starts it`) and for an `opts` that is `nil` (Luau's own `attempt to index nil with 'label'`). Nothing else is checked at the call: a missing `at`, a `menuItem` without `at` or without menu tests, a `button` it does not know and the like are reported when the overlay binds, each in a line `[overlay] <overlay>: <finding>` that names the control. An `at` function is called unguarded at the press: what it raises ends that key's handler, and the host logs it.
+
 ## O\:group(pred, build) {#o-group}
 
 **Signature:** `O:group(pred: (overlay) -> boolean, build: (overlay) -> ()) -> Overlay`
@@ -214,7 +254,23 @@ A control's `hotkey` also **moves the overlay's focus** to that control, silentl
 
 Space or Return on a focused control that has **hidden itself** since focus reached it acts on the visible control that shares its hotkey — Kontakt's "Switch to classic view" and "Switch to play view" share Alt+V and swap places on every press. With no such control, the overlay says "… is not available now" instead of doing nothing without a word.
 
-Two controls **share** a hotkey when their specs name the same key on this platform, however they are written: the runtime compares them through [`host.keys.normalize`](keys.md#host-keys-normalize), so `"Cmd+S"` beside an inherited `"Ctrl+S"` is one claim on every platform (both are the Ctrl role, which is Command on a Mac). The key is spoken on focus in the platform's words through [`host.keys.describe`](keys.md#host-keys-describe) — `"Alt+V"` is "Option+V" on a Mac, and a tab's `hotkeyLabel` is said the same way when it is a key spec. A hotkey the host would refuse — one that is not a key spec, one the system keeps for itself, a modifier tap, or a key the platform has no code for (the reasons [`host.keys.check`](keys.md#host-keys-check) marks "raises") — is reported when the overlay binds, naming the control, left out of the `[keys] … holds:` line with its reason instead of being registered, and not spoken when the control or tab is focused.
+Two controls **share** a hotkey when their specs name the same key on this platform, however they are written: the runtime compares them through [`host.keys.normalize`](keys.md#host-keys-normalize), so `"Cmd+S"` beside an inherited `"Ctrl+S"` is one claim on every platform (both are the Ctrl role, which is Command on a Mac). The key is spoken on focus in the platform's words through [`host.keys.describe`](keys.md#host-keys-describe) — `"Alt+V"` is "Option+V" on a Mac, and a tab's `hotkeyLabel` is said the same way when it is a key spec. A hotkey the host would refuse — one that is not a key spec, one the system keeps for itself, a modifier tap, or a key the platform has no code for (the reasons [`host.keys.check`](keys.md#host-keys-check) marks "raises") — is reported when the overlay binds, naming the control, left out of the `[keys] … holds:` line with its reason instead of being registered, and not spoken when the control or tab is focused. A hotkey the host claims but cannot hold at that moment — another module, program or the system holds it ([`host.hotkey.register`](hotkey.md#host-hotkey-register)'s `id, err`) — is kept, since the host tries the claim again, and listed in that line as not held now, with the error's message.
+
+```luau
+ov:group(function(o) return o.state.editorOpen == true end, function(g)
+  g:addHotspotButton({ label = "Close editor", at = { 600, 12 }, hotkey = "Alt+E" })
+end)
+```
+
+### Returns {#o-group-returns}
+
+The overlay itself, so calls chain.
+
+### Errors {#o-group-errors}
+
+None. It never answers an error value.
+
+**Raises** what `build` raises — it is called at once, unguarded — and so a control `build` adds after the overlay is bound raises there. `pred` is not checked at the call: anything but a function is a `when` that hides every control of the group, logged once per control when it is first asked (``<overlay>: '<label>' — its `when` failed (<message>); hiding just this control``).
 
 ## O\:probe(name, points, opts?) {#o-probe}
 
@@ -242,9 +298,7 @@ So a Tab after an act reads once, and Tabs in a row read nothing (an `everyEpoch
 
 **A capture that fails** reads nothing: every probe that was due keeps its value and is due again in a later epoch, logged once until a read succeeds: `[probe] '<overlay>': <n> probe(s) not read — <reason>` ([failure reasons](screen.md#failure-reasons)).
 
-**A reading the overlay has left** is not kept: when the overlay is no longer where it was as the read was asked — out of the front, in another stay there, on another window, as [`O:stillHere`](#o-here) asks without options — nothing of it is kept and no hotkey is registered, logged each time: `[probe] '<overlay>': <n> probe(s) read and not kept — <why>` in `stillHere`'s words. The probes stay due, and the next scan where the overlay is reads them.
-
-**What raises**, at the call: a probe declared after the overlay is bound (`overlay '<label>': probe must be called BEFORE binding it — the binding is what starts it`), a name that is not a non-empty string or is already one of the overlay's probes, `points` that is neither a list of `{x, y}` nor a function, `opts` that is not a table, an option other than `read`, `rawOrigin` and `everyEpoch`, and a `read` that is not a function.
+**A reading the overlay has left** is not kept: when the overlay is no longer where it was as the read was asked — out of the front, in another stay there, on another window, as [`O:stillHere`](#o-stillhere) asks without options — nothing of it is kept and no hotkey is registered, logged each time: `[probe] '<overlay>': <n> probe(s) read and not kept — <why>` in `stillHere`'s words. The probes stay due, and the next scan where the overlay is reads them.
 
 **Cost.** Declaring one costs nothing. A scan with nothing due works out each probe's points — its function called, or its list placed — and compares a key. A scan with probes due adds one `host.screen.pixels` over all their points, which the handler [waits](screen.md#where-it-waits) for while the `screen-capture` thread reads them — the module's keys queue behind it, the event loop goes on: one capture of the box around them when they lie within 2,000,000 pixels of each other (see [its Cost](screen.md#host-screen-pixels)).
 
@@ -277,6 +331,16 @@ ov:addCustomButton({
 })
 ```
 
+### Returns {#o-probe-returns}
+
+The probe's **reader**, a function of no arguments: `reader()` answers the probe's value — what `read` answered for the last reading kept, or the list of colours without `read` — or `nil` before a reading was first kept. Called in a handler outside a scan, it reads the overlay's due probes first; inside a scan, or inside a `read`, it answers what stands.
+
+### Errors {#o-probe-errors}
+
+None. It never answers an error value. Neither does its reader: a capture that fails, a reading `read` does not recognise and a reading the overlay has left keep the value that stands, and the log says why (above).
+
+**Raises** for a mistake in the call: a probe declared after the overlay is bound (`overlay '<label>': probe must be called BEFORE binding it — the binding is what starts it`); a name that is not a non-empty string (`overlay '<label>': probe takes a name, got <type>`) or is one of the overlay's probes already (`overlay '<label>': a probe named '<name>' is declared already`); `points` that is neither a list of `{x, y}` (`… probe '<name>': points[<i>] is not {x, y}`) nor a function; `opts` that is not a table; an option other than `read`, `rawOrigin` and `everyEpoch`; and a `read` that is not a function.
+
 ### Windows {#o-probe-windows}
 
 Read through `host.screen.pixels`: a `BitBlt` of the box around the points through the standard path, about one compositor frame (16.7 ms) for points close together; under a declared `capture = "duplication"` a 1×1 piece of one duplication request each, which the `screen-capture` thread waits for up to 250 ms ([`host.screen.pixels`](screen.md#host-screen-pixels)). Coordinates are device pixels.
@@ -295,8 +359,6 @@ Says that what the module is about to do will change what the [probes](#o-probe)
 
 **When it ends.** At the first kept reading of any probe named that differs from that probe's value at the call — compared as a [value that changed](#o-probe) is — the change counts as read for every probe named: each is due again only when its key changes, and a probe read in that capture stands under its key, so the Tabs after it read nothing (one named that was not read in it, its points not placed then, is read once more at the next key). A reading `read` does not recognise, a capture that fails and a reading the overlay left are not kept, and end nothing. A probe named again in a later call takes the later one's value and ends with the later one. The overlay on another window than at the call (another origin `id`) ends it at the next read there; an overlay with no origin at the call looks for the change on any window. An act that changed nothing — a key the plug-in did not take — leaves the probes due at every key until the overlay is on another window, or a later call names them.
 
-**What raises**, at the call: no name (`overlay '<label>': expectChange takes the names of one or more of its probes`), a name that is not a string (`overlay '<label>': expectChange takes probe names, got <type>`), and a name that is not one of the overlay's probes (`overlay '<label>': expectChange: no probe named '<name>'`).
-
 **Cost.** The call costs a look at the overlay's origin and a table. Each key while the change is not read costs one [`host.screen.pixels`](screen.md#host-screen-pixels) over the points of the overlay's due probes, as a probe's read does — a wait of the key's handler, not of the event loop: usually one or two keys after the act. Once the change is read, Tabs in a row cost nothing again.
 
 ```luau
@@ -312,6 +374,16 @@ ov:addCustomButton({
 })
 ```
 
+### Returns {#o-expectchange-returns}
+
+Nothing.
+
+### Errors {#o-expectchange-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: no name (`overlay '<label>': expectChange takes the names of one or more of its probes`), a name that is not a string (`overlay '<label>': expectChange takes probe names, got <type>`), and a name that is not one of the overlay's probes (`overlay '<label>': expectChange: no probe named '<name>'`). It may be called before or after the overlay is bound.
+
 ### Windows {#o-expectchange-windows}
 
 Nothing of its own. Each read while the change is not read is the probe's: about one compositor frame (16.7 ms) for points close together ([`O:probe`](#o-probe)).
@@ -320,30 +392,9 @@ Nothing of its own. Each read while the change is not read is the probe's: about
 
 Nothing of its own. Each read while the change is not read is the probe's: one capture of the box around the points, afresh on every read ([`O:probe`](#o-probe)), which took 36 to 91 ms through ScreenCaptureKit where it was measured.
 
-## Bindings — O.window / O.embedded / \:with / O.hosts / O\:bind {#bindings}
+## Bindings — where an overlay lives {#bindings}
 
-**Signatures:**
-`O.window(matcher, opts?) -> Binding` · `O.embedded(spec, opts?) -> Binding` · `Binding:with(over) -> Binding` · `O.hosts(...) -> {matcher}` · `O:bind(binding, opts?) -> Overlay`
-
-A **binding** is an inert value saying *where* an overlay lives: which window or embedded control, on which `slot`, at which `specificity`, with `pollMatch` / `menus`. Declare it once and reuse it, instead of writing a factory function that rebuilds an attach spec per attachment — the reason such factories appear is that a caller mutates the table and the next caller needs a clean copy. `O.window` takes what [`attach`](#o-attach) takes, and `O.embedded` what [`attachEmbedded`](#o-attachembedded) takes — so an embedded binding with no control of its own for a platform gets the DAW's plug-in panel there, as `attachEmbedded` describes, and every overlay bound to one `O.embedded` value shares the control it resolves, once per epoch, and on a panel its identity verdict.
-
-`:with(over)` returns a **copy** with `over` merged into the target (`control`, `identify`, `title`, …); `over.opts` merges into the options. `O.hosts(...)` concatenates host lists and skips `nil`, so an optional host (a plugin that may not be installed) can be listed inline: a table with an array part is a list of entries, any other non-empty table is one entry — an entry may carry nothing but a platform block, as Logic's does in [daw-hosts](../daw-hosts.md) — and an empty table adds nothing. `O:bind(binding, opts)` attaches, with `opts` overriding the binding's own options.
-
-```luau
-local HOSTED = O.embedded({
-    hosts = O.hosts(daw.all, kk and kk.standaloneWindow),
-    control = "Qt%d+.-QWindowIcon",
-    identify = identifyHost,
-    cacheIdentity = false,
-}, { slot = SLOT, menus = { O.menuTests.nativePopup, O.menuTests.accessibility } })
-
-base:bind(HOSTED, { specificity = O.layer.base })
--- `macos = false`: the dialog is Kontakt's own, never a plug-in panel, so on a Mac — where a
--- plain pattern that finds nothing would take the DAW's panel — the binding does not apply.
-dialog:bind(HOSTED:with({ control = { windows = "^NIChildWindow%x+$", macos = false },
-                          identify = present, opts = { menus = false } }),
-            { specificity = O.layer.dialog })
-```
+A **binding** is an inert value saying *where* an overlay lives: which window or embedded control, on which `slot`, at which `specificity`, with `pollMatch` / `menus`. Declare it once and reuse it, instead of writing a factory function that rebuilds an attach spec per attachment — the reason such factories appear is that a caller mutates the table and the next caller needs a clean copy. [`O.window`](#o-window) takes what [`attach`](#o-attach) takes, and [`O.embedded`](#o-embedded) what [`attachEmbedded`](#o-attachembedded) takes — so an embedded binding with no control of its own for a platform gets the DAW's plug-in panel there, as `attachEmbedded` describes, and every overlay bound to one `O.embedded` value shares the control it resolves, once per epoch, and on a panel its identity verdict. [`:with`](#binding-with) derives a variant, [`O.hosts`](#o-hosts) lists the hosts, and [`O:bind`](#o-bind) attaches an overlay by one. In their signatures, `AttachOpts` is the options table `attach` and `attachEmbedded` take: `{ hoverToRead, menus, slot, specificity, pollMatch, pollWhen }`.
 
 One overlay object takes **one** binding: an object is pinned to a single slot and its match poll belongs to that join. Two places to live means two overlay objects sharing a build function.
 
@@ -369,7 +420,7 @@ The reason is the first test that said no, in these words (`<…>` is filled in)
 | a `control` function | `the module's control function found no control` · `the keyboard is outside what the module's control function returned` |
 | `identify` asked at every evaluation | `identify, asked at every evaluation, says no` |
 | `present` | `its binding's present says no` |
-| the gate | `its gate says no`; a [landmark](#o-gate): `its landmark is not seen` |
+| the gate | `its gate says no`; a [landmark](#o-landmark): `its landmark is not seen` |
 | its menu's window ([holding its place](#o-menutests)) | `its place over its menu's window is no longer held; <the binding's reason>` |
 | a [trip](#o-inplugin)'s held place | `the plug-in's window held for the trip is not in front` |
 | none of the above (a binding with no context left) | `nothing it is bound to matches` |
@@ -385,6 +436,118 @@ An embedded binding's reasons include the DAW's chrome classes: `the keyboard is
 
 An embedded binding on the DAW's plug-in panel ([`attachEmbedded`](#o-attachembedded-macos)) says where the keyboard was found: `the keyboard is on [<AXRole/AXSubrole/AXIdentifier>] at <x>,<y>, outside the plug-in's panel (the DAW's own controls)` (the focused element's centre, in screen points) · `the focused element [<class>] has no rectangle` · `the focus chain ends in another window than '<title>'` · `where the keyboard is in '<title>' cannot be read (an empty focus chain), and no stay is in progress there` · `where the keyboard is in '<title>' cannot be read (an empty focus chain), and the DAW's entry gives this binding no plug-in panel there` · `where the keyboard is in '<title>' cannot be read (an empty focus chain), and the module's control function has found no control with the keyboard in it in this stay` · `the DAW's entry gives no plug-in panel in '<title>'`. And what `identify` said of the panel: `identify says the panel shows another plug-in` · `identify could not tell yet (<n> of 8)` · `identify could not tell 8 times: no for this stay` · `identify is not asked inside a scan of the overlay's hooks` · `identify raised`.
 
+## O.window(matcher, opts?) {#o-window}
+
+**Signature:** `O.window(matcher, opts: AttachOpts?) -> Binding`
+
+A binding to a **standalone** window: what [`O:attach(matcher, opts)`](#o-attach) does when an overlay is bound by it. `matcher` is a window matcher for [`host.window.test`](window.md#host-window-test), and `opts` the options `attach` takes (`hoverToRead`, `menus`, `slot`, `specificity`, `pollMatch`, `pollWhen`). Nothing is checked or asked here: the binding is a value, and what is wrong with it shows when an overlay is bound by it.
+
+```luau
+local STANDALONE = O.window({ app = { exe = { contains = "sforzando" } } },
+  { menus = { O.menuTests.nativePopup, O.menuTests.newWindow } })
+ov:bind(STANDALONE)
+```
+
+### Returns {#o-window-returns}
+
+A new `Binding`: `{ target = matcher, opts = opts or {} }` with the binding metatable, every time. `matcher` and `opts` are held as given, not copied.
+
+### Errors {#o-window-errors}
+
+None. It never answers an error value.
+
+It never raises.
+
+## O.embedded(spec, opts?) {#o-embedded}
+
+**Signature:** `O.embedded(spec, opts: AttachOpts?) -> Binding`
+
+A binding to a plug-in **embedded** in a DAW: what [`O:attachEmbedded(spec, opts)`](#o-attachembedded) does when an overlay is bound by it. `spec` is the spec `attachEmbedded` takes (`hosts`, `control`, `identify`, `cacheIdentity`, `present`), and every overlay bound to the same value shares the control it resolves, once per epoch, and on a panel its identity verdict.
+
+```luau
+local HOSTED = O.embedded({
+    hosts = O.hosts(daw.all, kk and kk.standaloneWindow),
+    control = "Qt%d+.-QWindowIcon",
+    identify = identifyHost,
+    cacheIdentity = false,
+}, { slot = SLOT, menus = { O.menuTests.nativePopup, O.menuTests.accessibility } })
+```
+
+### Returns {#o-embedded-returns}
+
+A new `Binding`: `{ target = spec, opts = opts or {} }` with the binding metatable, every time. `spec` and `opts` are held as given, not copied — the table is what the shared resolution is keyed by.
+
+### Errors {#o-embedded-errors}
+
+None. It never answers an error value.
+
+It never raises.
+
+## Binding\:with(over) {#binding-with}
+
+**Signature:** `Binding:with(over: { [string]: any, opts: AttachOpts? }?) -> Binding`
+
+A **copy** of the binding with `over` merged into its target (`control`, `identify`, `title`, …), and `over.opts` merged into its options. The binding it is called on is not changed. A copy of an `O.embedded` binding is a new spec table, so its overlays do not share the control the original's resolve.
+
+```luau
+-- `macos = false`: the dialog is Kontakt's own, never a plug-in panel, so on a Mac — where a
+-- plain pattern that finds nothing would take the DAW's panel — the binding does not apply.
+dialog:bind(HOSTED:with({ control = { windows = "^NIChildWindow%x+$", macos = false },
+                          identify = present, opts = { menus = false } }),
+            { specificity = O.layer.dialog })
+```
+
+### Returns {#binding-with-returns}
+
+A new `Binding` of the same kind (window or embedded): its target a shallow copy of the original's with `over`'s fields set over it, and its options a shallow copy with `over.opts`'s set over them. `nil` for `over` gives a plain copy.
+
+### Errors {#binding-with-errors}
+
+None. It never answers an error value.
+
+**Raises** for an `over` that is neither a table nor `nil`, and an `over.opts` that is not a table (Luau's own `pairs` error).
+
+## O.hosts(...) {#o-hosts}
+
+**Signature:** `O.hosts(...: { Entry } | Entry | nil) -> { Entry }`
+
+Concatenates host lists and skips `nil`, so that an optional host, a plug-in that may not be installed, can be listed inline. A table with an array part is a list of entries. Any other non-empty table is one entry; an entry may carry nothing but a platform block, as Logic's does in [daw-hosts](../daw-hosts.md). An empty table adds nothing. Every argument is looked at, a `nil` in the middle included.
+
+```luau
+local hosts = O.hosts(daw.all, kk and kk.standaloneWindow)   -- kk may not be installed
+```
+
+### Returns {#o-hosts-returns}
+
+A new list of the entries, in the order given; `{}` when there are none.
+
+### Errors {#o-hosts-errors}
+
+None. It never answers an error value.
+
+It never raises: an argument that is not a table is skipped like `nil`.
+
+## O\:bind(binding, opts?) {#o-bind}
+
+**Signature:** `O:bind(binding: Binding, opts: AttachOpts?) -> Overlay`
+
+Attaches the overlay by `binding`: [`O:attach`](#o-attach) for an `O.window` binding, [`O:attachEmbedded`](#o-attachembedded) for an `O.embedded` one, with `opts` set over the binding's own options for this overlay alone (the binding is not changed). From here the overlay is live: what must be declared before binding — controls, probes, a frame, a scale, a gate, a page — raises after it.
+
+```luau
+base:bind(HOSTED, { specificity = O.layer.base })
+dialog:bind(HOSTED, { specificity = O.layer.dialog })
+```
+
+### Returns {#o-bind-returns}
+
+The overlay itself, so calls chain.
+
+### Errors {#o-bind-errors}
+
+None. It never answers an error value.
+
+**Raises** what [`O:attach`](#o-attach-errors) and [`O:attachEmbedded`](#o-attachembedded-errors) raise for its options, and Luau's own `attempt to index nil with 'opts'` for a `binding` that is `nil`.
+
 ## O.layer {#o-layer}
 
 The specificity ladder within a slot, named: `chrome` (a host's own frame), `base` (the plugin's generic header), `content` (what is loaded inside it right now), `dialog` (a modal that must own the keyboard). Pass `specificity = O.layer.content` rather than a bare number.
@@ -398,6 +561,10 @@ kontakt:bind(HOSTED, { specificity = O.layer.base })      -- the plug-in's gener
 library:bind(HOSTED, { specificity = O.layer.content })   -- what is loaded in it right now
 contentMissing:bind(DIALOG, { specificity = O.layer.dialog })
 ```
+
+### Returns {#o-layer-returns}
+
+A table of four numbers, the same table every time in a VM: `chrome = 10`, `base = 20`, `content = 30`, `dialog = 40`. Spaced by ten, so a layer nobody has met yet can go between two of them. It is a plain table, not frozen: writing to it changes it for every overlay in the VM, so a module reads it and never writes it.
 
 ## O.errors {#o-errors}
 
@@ -416,7 +583,7 @@ The codes of the runtime's error values, as constants: its own eight, and every 
 | `unfit_submenu` | `UNFIT_SUBMENU` | A submenu opened, and none it could choose in was seen. |
 | `clash` | `CLASH` | A control of the page's overlays has that hotkey. |
 
-The runtime's other answers carry host codes — `busy`, `gone`, `refused`, `outside`, `covered`, `not_found`, `taken`, `invalid`, `not_supported`, `not_ready`, `cancelled`, `failed` — each entry below says which. Every error value the runtime makes comes from one of its own reasons, in `modules/overlay-runtime/src/errors.luau`: a code, a message, and the entries that give it. One it only hands on — a click's, a capture's, a page's, a hotkey registration's — is the host's own table, as the host answered it.
+The runtime's other answers carry host codes — `busy`, `gone`, `refused`, `outside`, `covered`, `not_found`, `taken`, `invalid`, `not_supported`, `not_ready`, `cancelled`, `failed` — each entry below says which. Every error value the runtime makes comes from one of its own reasons, in `modules/overlay-runtime/src/errors.luau`: a code, a message, and the entries that give it. One it only hands on — a capture's, a page's, a focus's, a hotkey registration's — is the host's own table, as the host answered it.
 
 ```luau
 local opened, err = o:chooseMenuItem({ label = "Zoom", at = { 21, 14 }, menuItem = { 5, 5 },
@@ -451,6 +618,16 @@ local variantOf = O.memoByOrigin(function(ctrl)
 end)
 ```
 
+### Returns {#o-memobyorigin-returns}
+
+The memo, a function `(origin, ...) -> value`. It answers what `fn(origin, ...)` answered for that window (and `opts.key`'s value), from the memo when a non-`nil` answer is kept — only the first value `fn` answered is kept and handed back. An `origin` that is `nil` or has no `id` is not memoised: `fn` is asked every time, and its answers come back as they are.
+
+### Errors {#o-memobyorigin-errors}
+
+None. It never answers an error value.
+
+It never raises at the call: nothing is checked there. The memo raises what `fn` or `opts.key` raises — neither is guarded, and nothing is kept for that call — and Luau's own error at its first call when `fn` is not a function.
+
 ## O.memoByEpoch(fn) {#o-memobyepoch}
 
 **Signature:** `O.memoByEpoch(fn: (...) -> value) -> (...) -> value`
@@ -468,19 +645,23 @@ local tree = O.memoByEpoch(function() return host.element.rawDump(ov:hwnd()) end
 local zoomOf = O.memoByEpoch(function(origin) return readZoom(origin) end)
 ```
 
-## O\:origin() / O\:hwnd() {#o-origin}
+### Returns {#o-memobyepoch-returns}
 
-**Signature:** `O:origin() -> Control | Window | nil` · `O:hwnd() -> number | nil`
+The memo, a function `(...) -> value`. Within one epoch it answers the first non-`nil` value `fn` answered in it, whatever it is handed; until `fn` has answered one, every call asks `fn` again. Only the first value `fn` answers is kept and handed back, every time.
 
-The active context's coordinate window — the plugin control when embedded, the window when standalone — and its handle. `nil` while the overlay is not active. This is the module's handle on the thing it overlays; use it instead of reaching into `activeCtx`.
+### Errors {#o-memobyepoch-errors}
+
+None. It never answers an error value.
+
+It never raises at the call: nothing is checked there. The memo raises what `fn` raises — `fn` is not guarded, and nothing is kept for that call — and Luau's own error at its first call when `fn` is not a function.
+
+## O\:origin() {#o-origin}
+
+**Signature:** `O:origin() -> Control | Window | nil`
+
+The active context's coordinate window — the plug-in control when embedded (on a Mac, the DAW's [plug-in panel](#o-attachembedded-macos)), the window when standalone. This is the module's handle on the thing it overlays; use it instead of reaching into `activeCtx`. It is resolved at the call — once per [epoch](timer.md#host-epoch) per binding for an embedded overlay, which keeps the answer for the epoch; a window query for a standalone one ([`host.window.active`](window.md#host-window-active), which keeps its own answer for the epoch).
 
 ```luau
--- `:hwnd()` -- the window handle, for asking the accessibility layer about it:
-onActivate = function(o)
-  local p = host.element.locate(o:hwnd(), "", host.element.type.Edit)
-  if p then host.input.click(p.x, p.y) end
-end,
-
 -- `:origin()` -- the context itself, whose `client` rect every authored coordinate is
 -- measured against. ON:EAR works a point in its design back out of where a word was read:
 local function designY(overlay, screenY)
@@ -489,6 +670,41 @@ local function designY(overlay, screenY)
   return (screenY - o.client.y) / (o.client.h / DESIGN_H)
 end
 ```
+
+### Returns {#o-origin-returns}
+
+- A [control table](window.md#table-shapes) (`id`, `class`, `bounds`, `client`, and on a Mac's panel `stay`) for an embedded overlay, or a [window table](window.md#window-table) for a standalone one.
+- `nil` while the overlay is not active, while its context finds nothing now, and for the rest of an epoch in which its origin raised as it came to the front.
+
+### Errors {#o-origin-errors}
+
+None. It never answers an error value. An origin it cannot find now is `nil`.
+
+**Raises** what the binding's `control` function raises, which is called unguarded (see the top of this page). `identify` is guarded.
+
+## O\:hwnd() {#o-hwnd}
+
+**Signature:** `O:hwnd() -> number | nil`
+
+The handle of [`O:origin()`](#o-origin): its `id`. On Windows the plug-in's own child window when embedded and the window standalone; on a Mac's plug-in panel, the plug-in window's id. One origin resolution, as `O:origin()` costs.
+
+```luau
+-- `:hwnd()` -- the window handle, for asking the accessibility layer about it:
+onActivate = function(o)
+  local p = host.element.locate(o:hwnd(), "", host.element.type.Edit)
+  if p then host.input.click(p.x, p.y) end
+end,
+```
+
+### Returns {#o-hwnd-returns}
+
+The origin's `id`, a number; `nil` whenever `O:origin()` is `nil`.
+
+### Errors {#o-hwnd-errors}
+
+None. It never answers an error value.
+
+**Raises** what [`O:origin()`](#o-origin) raises.
 
 ## O.contentSize(origin) {#o-contentsize}
 
@@ -504,6 +720,10 @@ ov:scale(function(o)
 end)
 ```
 
+### Returns {#o-contentsize-returns}
+
+Two numbers, the width and the height: each the `client`'s when it is above 0, else the `bounds`'s, else `0`; `0, 0` for `nil` or `false`. Never `nil`. It raises only for an argument it cannot index, such as a number.
+
 ### Windows {#o-contentsize-windows}
 
 An embedded plug-in's control is borderless, so its `client` and `bounds` are the same size and either answers alike. A standalone window's are not: a Kontakt 8 window is 1026 wide around 1010 of plug-in, and the content is the 1010.
@@ -516,7 +736,7 @@ A DAW's plug-in panel ([`attachEmbedded`](#o-attachembedded-macos)) has `client`
 
 **Signature:** `O:frame(fn: (origin) -> (number, number)) -> Overlay`
 
-Shifts the overlay's whole coordinate frame: `fn` returns `dx, dy`, resolved per active control — a host version's content shift, or a nested plugin's inner origin. Controls marked `rawOrigin` opt out, and so does a landmark-anchored overlay while its landmark is on screen ([`O:landmark`](#o-gate)): it places from the landmark's corner. Called before the overlay is bound; afterwards it raises. A second call replaces the first.
+Shifts the overlay's whole coordinate frame: `fn` returns `dx, dy`, resolved per active control — a host version's content shift, or a nested plugin's inner origin. Controls marked `rawOrigin` opt out, and so does a landmark-anchored overlay while its landmark is on screen ([`O:landmark`](#o-landmark)): it places from the landmark's corner. Called before the overlay is bound; afterwards it raises. A second call replaces the first.
 
 The shift is **not scaled**: in an overlay with [`O:scale`](#o-scale) it is added to the origin first, and the scaled part of a coordinate after it — the frame is where the part of the geometry that does not zoom goes: an offset of the plug-in's own corner from the origin (VPS Avenger's -2, +2 on a DAW's panel), or a centring (ARC ON:EAR's half width). Never the DAW's own chrome: daw-hosts has put the origin below it already ([daw-hosts](../daw-hosts.md)), and DAW geometry in a plug-in's module would have to be written again for every DAW. `fn` is called at every resolution, with the origin, and is not guarded: an error in it raises out of whatever was placing the control — [`O:toScreen`](#o-toscreen) included.
 
@@ -534,6 +754,16 @@ ov:frame(function(kkCtrl)
 end)
 ```
 
+### Returns {#o-frame-returns}
+
+The overlay itself, so calls chain.
+
+### Errors {#o-frame-errors}
+
+None. It never answers an error value.
+
+**Raises** for a call after the overlay is bound: `overlay '<label>': frame must be called BEFORE binding it — the binding is what starts it`. `fn` is not checked at the call; what it raises later, or a non-function's call error, comes out of whatever was placing a coordinate then.
+
 ## O\:scale(fn, opts?) {#o-scale}
 
 **Signature:** `O:scale(fn: (origin) -> number?, opts: { about: {number, number}? }?) -> Overlay`
@@ -544,7 +774,7 @@ Scales every authored coordinate of the overlay by the factor `fn` answers, for 
 screen = origin + frame + k × (authored − about)
 ```
 
-rounded once, to the nearest whole unit — a pixel on Windows, a point on macOS — with a half rounded up: `origin` is the client-area top-left as above, `frame` what [`O:frame`](#o-frame) answers (unscaled), `k` what `fn(origin)` answers now, and `about` the authored point that stays where the frame puts it — `{0, 0}` unless `opts.about` says otherwise. `about` is for a plug-in that scales around something other than its corner: ARC ON:EAR scales by its window's height about its design's centre line, which is `about = {960, 0}` with a frame of half the window's width. Two cases do not fit the formula as written: `fromRight` is `origin + frame's dx + content width − k × at[1]` across (a distance from the right edge, which `about` has nothing to say about), with `y` as above; and a landmark-anchored overlay ([`O:landmark`](#o-gate) with `anchor = true`), while its landmark is on screen, is `landmark's corner + k × (authored − about)`, with no frame.
+rounded once, to the nearest whole unit — a pixel on Windows, a point on macOS — with a half rounded up: `origin` is the client-area top-left as above, `frame` what [`O:frame`](#o-frame) answers (unscaled), `k` what `fn(origin)` answers now, and `about` the authored point that stays where the frame puts it — `{0, 0}` unless `opts.about` says otherwise. `about` is for a plug-in that scales around something other than its corner: ARC ON:EAR scales by its window's height about its design's centre line, which is `about = {960, 0}` with a frame of half the window's width. Two cases do not fit the formula as written: `fromRight` is `origin + frame's dx + content width − k × at[1]` across (a distance from the right edge, which `about` has nothing to say about), with `y` as above; and a landmark-anchored overlay ([`O:landmark`](#o-landmark) with `anchor = true`), while its landmark is on screen, is `landmark's corner + k × (authored − about)`, with no frame.
 
 It applies to `at` (a table or a function's answer), `points`, `region` (a table or a function's answer), `ocrLabel`, a tab's `at`, a `reveal` probe, a slider's `from` and `to` (and so the size of one arrow-key step, one percent of the track as drawn), a graphical button's `clickOffset` and a fixed `dragBy` (distances: scaled, not framed and not moved by `about`), a menu item's offset from its menu's corner when it is a table ([`O:chooseMenuItem`](#o-choosemenuitem): a distance too, at the factor its opener was placed with), the points of [`O:toScreen`](#o-toscreen) and `captureRegion`, and every crosshair of a calibration shot. It does **not** apply to a `rawOrigin` control, which is in the origin's own pixels — neither framed nor scaled — to a `dragBy` function's or a `menuItem` function's answer, or anything else worked out from a search's hit or a menu's rectangle, which are screen pixels already, or to template images, which are matched at their own `scales`.
 
@@ -574,6 +804,16 @@ ov:frame(function(o) return o.client.w / 2, 0 end)
 ov:scale(function(o) return o.client.h > 0 and o.client.h / 1009 or nil end, { about = { 960, 0 } })
 ```
 
+### Returns {#o-scale-returns}
+
+The overlay itself, so calls chain.
+
+### Errors {#o-scale-errors}
+
+None. It never answers an error value. A factor that cannot be had later is no error of this call: each call that places answers it or says it — [`O:toScreen`](#o-toscreen-errors) with `unplaced`, a control with `"<label> is not available now"`.
+
+**Raises** for a mistake in the call: a call after the overlay is bound (`overlay '<label>': scale must be called BEFORE binding it — the binding is what starts it`), a `fn` that is not a function (`overlay '<label>': scale takes a function(origin) -> factor, got <type>`), and an `about` that is not two numbers (``overlay '<label>': scale's `about` must be {x, y}, got <type>``).
+
 ### Windows {#o-scale-windows}
 
 A coordinate is a physical pixel ([Coordinates](index.md#coordinates)), so a plug-in drawn at 150 % display scaling is 1.5 times the size it has at 100 %, at the same zoom. The factor has to carry that: one learned from what is on screen — a width, a height, the distance between two things read by OCR — already does; one computed from the plug-in's zoom alone does not, and nothing in the host says which scaling a window is drawn at.
@@ -582,15 +822,13 @@ A coordinate is a physical pixel ([Coordinates](index.md#coordinates)), so a plu
 
 A coordinate is a point, and a Retina display draws two pixels per point, so the factor is the same on a Retina display as on one without: a zoom read off the plug-in, divided by the zoom the coordinates were measured at, is the whole factor there.
 
-## O\:toScreen(x, y, opts?) / O\:toScreenRect(r, opts?) {#o-toscreen}
+## O\:toScreen(x, y, opts?) {#o-toscreen}
 
-**Signature:** `O:toScreen(x: number, y: number, opts: { rawOrigin: boolean? }?) -> (number, number) | (nil, Error)` · `O:toScreenRect(r: {number, number, number, number}, opts: { rawOrigin: boolean?, whole: boolean? }?) -> {number, number, number, number} | (nil, Error)`
+**Signature:** `O:toScreen(x: number, y: number, opts: { rawOrigin: boolean? }?) -> (number, number) | (nil, Error)`
 
-Where an authored point, or an authored rectangle `{x1, y1, x2, y2}`, lands on screen now: what an `at` or a `region` of the overlay would click or read, through the same origin, frame and [scale](#o-scale), for a module's own code — a custom button's `onActivate`, a stepper's `onStep`, a `text` function that reads by OCR. `opts.rawOrigin = true` places it as a `rawOrigin` control would: in the origin's own pixels.
+Where an authored point lands on screen now: what an `at` of the overlay would click, through the same origin, frame and [scale](#o-scale), for a module's own code — a custom button's `onActivate`, a stepper's `onStep`, a hook that clicks what it read. `opts.rawOrigin = true` places it as a `rawOrigin` control would: in the origin's own pixels, neither framed nor scaled. Its rectangle twin is [`O:toScreenRect`](#o-toscreenrect).
 
-Returns `nil` and an error value, `unplaced`, when the overlay is not active (`the overlay has no origin now`), and when its scale has no factor now (`its scale function answered nil`, `its scale function raised: …`, `its scale function answered …, not a factor above 0`); a caller tests the first value. It raises what the overlay's [frame](#o-frame) function raises: the factor is asked guarded, the frame is not. In an overlay without a scale it is the plain sum, `origin + frame + authored`, unrounded — whole numbers in, whole numbers out. It clicks and reads nothing itself, and costs one origin resolution (memoised per [epoch](timer.md#host-epoch) for an embedded overlay) plus the frame's and the factor's functions.
-
-`opts.whole = true` makes the rectangle one that [`host.ocr.recognize`](ocr.md#host-ocr-recognize) and [`host.screen.snapshot`](screen.md#host-screen-snapshot) take as it is: whole numbers, not empty. Each corner is cut toward zero — `134.5` becomes `134`, `-965.5` becomes `-965` — which is the pixels the overlay's own read of a `region` covers; and when nothing is left once cut — corners turned around, or less than one across or down — the answer is `nil, err`, `outside` (`empty on screen`). An overlay with a fractional frame places fractions otherwise, and `recognize` refuses them at the call. In a scaled overlay the corners are whole numbers already, and `whole` changes nothing but the empty case. Any value but `true` leaves the corners as placed. `whole` came with version 0.2 of the runtime: a module that uses it depends on `"com.platform.overlay >= 0.2"`.
+In an overlay without a scale it is the plain sum, `origin + frame + authored`, unrounded — whole numbers in, whole numbers out. In a scaled one it is the scale's formula, rounded once to the nearest whole unit. The factor is asked guarded; the [frame](#o-frame) function is not, and what it raises comes out of this call. It clicks and reads nothing itself, and costs one origin resolution (memoised per [epoch](timer.md#host-epoch) for an embedded overlay) plus the frame's and the factor's functions, on the event loop.
 
 ```luau
 -- A stepper that turns a knob by dragging it a few authored units, at whatever zoom it is drawn.
@@ -600,21 +838,35 @@ onStep = function(dir, o)
   if x1 and x2 then host.input.drag(x1, y1, x2, y1) end
 end,
 
--- A read-out that reads its own region: the handler that announces it waits for the reading.
-text = function(o)
-  local r = o:toScreenRect({ 34, 7, 214, 22 }, { whole = true })
-  return r and host.ocr.recognize(r).text or nil
-end,
-
--- The same region read with a callback: the press returns at once, and the value is said later.
+-- A point that cannot be placed now is logged, not guessed.
 onActivate = function(o)
-  local r = o:toScreenRect({ 34, 7, 214, 22 }, { whole = true })
-  if not r then return end   -- no origin, no factor, or nothing of it on screen
-  host.ocr.recognize(r, function(reading)
-    if reading.status == "text" then host.speech.output(reading.text, { interrupt = true }) end
-  end)
+  local x, y = o:toScreen(120, 40)
+  if x == nil then
+    local err = y   -- on failure the second value is the error value
+    host.log.info("[my-module] Play not clicked: " .. err)
+    return
+  end
+  host.input.click(x, y)
 end,
 ```
+
+### Returns {#o-toscreen-returns}
+
+- `x, y` — the point on screen, two numbers.
+- `nil, err` — it cannot be placed now; `err.code` is `unplaced`. The error is the **second** value, where `y` would be, so a caller tests `x` and reads the error from the second place.
+
+### Errors {#o-toscreen-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `unplaced` | return | The overlay is not active, or its context finds no origin now (no plug-in control, no window in front). | `the overlay has no origin now` | both |
+| `unplaced` | return | A scaled overlay, without `rawOrigin`: the scale's function raised. Its message is the raise's. | `its scale function raised: …` | both |
+| `unplaced` | return | A scaled overlay, without `rawOrigin`: the scale's function answered `nil`, which is how it says "cannot tell now". | `its scale function answered nil` | both |
+| `unplaced` | return | A scaled overlay, without `rawOrigin`: the scale's function answered something other than a number above 0 and below infinity — a string, 0, a negative number, NaN. | `its scale function answered …, not a factor above 0` | both |
+
+**Raises** for a mistake in the call: an `x` or `y` that is not a number (Luau's own arithmetic error). And what the frame function raises.
 
 ### Windows {#o-toscreen-windows}
 
@@ -624,6 +876,60 @@ The answer is in physical pixels, as every coordinate is.
 
 The answer is in points, as every coordinate is; a factor that is not a whole number can put a point between two pixels of a Retina display, and it is rounded to the nearest whole point like any other.
 
+## O\:toScreenRect(r, opts?) {#o-toscreenrect}
+
+**Signature:** `O:toScreenRect(r: {number, number, number, number}, opts: { rawOrigin: boolean?, whole: boolean? }?) -> {number, number, number, number} | (nil, Error)`
+
+Where an authored rectangle `{x1, y1, x2, y2}` lands on screen now: what a `region` of the overlay would read, each corner placed as [`O:toScreen`](#o-toscreen) places a point — through the origin, the frame and the [scale](#o-scale), or in the origin's own pixels with `opts.rawOrigin = true`. For a module's own code: a `text` function that reads by OCR, a read with a callback, a snapshot of a part of the plug-in. It clicks and reads nothing itself, and costs what `O:toScreen` costs.
+
+`opts.whole = true` makes the rectangle one that [`host.ocr.recognize`](ocr.md#host-ocr-recognize) and [`host.screen.snapshot`](screen.md#host-screen-snapshot) take as it is: whole numbers, not empty. Each corner is cut toward zero — `134.5` becomes `134`, `-965.5` becomes `-965` — which is the pixels the overlay's own read of a `region` covers; and when nothing is left once cut — corners turned around, or less than one across or down — the answer is `nil, err`, `outside`. An overlay with a fractional frame places fractions otherwise, and `recognize` refuses them at the call. In a scaled overlay the corners are whole numbers already, and `whole` changes nothing but the empty case. Any value but `true` leaves the corners as placed, turned around or not. `whole` came with version 0.2 of the runtime: a module that uses it depends on `"com.platform.overlay >= 0.2"`.
+
+```luau
+-- A read-out that reads its own region: the handler that announces it waits for the reading.
+text = function(o)
+  local r = o:toScreenRect({ 34, 7, 214, 22 }, { whole = true })
+  return r and host.ocr.recognize(r).text or nil
+end,
+
+-- The same region read with a callback: the press returns at once, and the value is said later.
+onActivate = function(o)
+  local r, err = o:toScreenRect({ 34, 7, 214, 22 }, { whole = true })
+  if not r then   -- no origin, no factor, or nothing of it on screen
+    if err.code == O.errors.OUTSIDE then host.speech.output("The name is not on screen") end
+    return
+  end
+  host.ocr.recognize(r, function(reading)
+    if reading.status == "text" then host.speech.output(reading.text, { interrupt = true }) end
+  end)
+end,
+```
+
+### Returns {#o-toscreenrect-returns}
+
+- `{x1, y1, x2, y2}` — a new table, the corners on screen. With `whole`, whole numbers with `x2 > x1` and `y2 > y1`; without it, as placed.
+- `nil, err` — it cannot be placed now (`unplaced`), or with `whole` nothing of it is left on screen (`outside`).
+
+### Errors {#o-toscreenrect-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `unplaced` | return | The overlay is not active, or its context finds no origin now. | `the overlay has no origin now` | both |
+| `unplaced` | return | A scaled overlay, without `rawOrigin`: the scale's function raised. | `its scale function raised: …` | both |
+| `unplaced` | return | A scaled overlay, without `rawOrigin`: the scale's function answered `nil`. | `its scale function answered nil` | both |
+| `unplaced` | return | A scaled overlay, without `rawOrigin`: the scale's function answered something other than a number above 0 and below infinity. | `its scale function answered …, not a factor above 0` | both |
+| `outside` | return | With `whole = true`: nothing is left once the corners are cut — corners turned around, or less than one across or down. | `empty on screen` | both |
+
+**Raises** for a mistake in the call: an `r` that is not a table of four numbers (Luau's own indexing or arithmetic error). And what the frame function raises.
+
+### Windows {#o-toscreenrect-windows}
+
+The corners are in physical pixels, as every coordinate is.
+
+### macOS {#o-toscreenrect-macos}
+
+The corners are in points, as every coordinate is; a factor that is not a whole number can put a corner between two pixels of a Retina display, and it is rounded to the nearest whole point like any other.
 ## O.state {#o-state}
 
 A free-form table on every overlay for the owning module's own state, so it does not have to squat in the runtime's reserved `_`-prefixed fields.
@@ -643,6 +949,33 @@ ov:addStepper({
   end,
 })
 ```
+
+### Returns {#o-state-returns}
+
+A table, `{}` when the overlay is made, the same one for the overlay's life: the runtime never reads, writes or clears it, through every stay in front, every window and every page round trip.
+
+## O.stateGeneration() {#o-stategeneration}
+
+**Signature:** `O.stateGeneration() -> number`
+
+A count that goes up by one 250 ms after an overlay of this VM comes to the front, once per arrival: the runtime's "look again", for a reading of the screen taken in the first moments after a focus change, which can still show the window that was in front before. A module that keeps a screen reading of its own keys it on this count — read again when the count has moved — so the reading taken while the screen still showed the old window is replaced exactly once. A reading taken afresh each time needs nothing: the look again rechecks the overlay, and its probes are read again by it ([`O:probe`](#o-probe)).
+
+A function of the runtime, not a method, and a read of one number: no host call, on the event loop.
+
+```luau
+-- A per-window reading of the plug-in's view, read again once after each arrival.
+local seen = { gen = -1, view = nil }
+local function viewNow(o)
+  if seen.gen ~= O.stateGeneration() then
+    seen.gen, seen.view = O.stateGeneration(), readView(o)   -- readView is the module's own
+  end
+  return seen.view
+end
+```
+
+### Returns {#o-stategeneration-returns}
+
+A whole number, `0` when the runtime is loaded into the VM, one more at each look again of any overlay of the VM — counted only while that overlay is still in front 250 ms after it came. It never goes down, and it never raises.
 
 ## ocrLabel — reading a control's name off the screen {#ocrlabel}
 
@@ -666,7 +999,9 @@ ov:addHotspotToggle({
 
 ## O\:addCustomButton(opts) {#o-addcustombutton}
 
-Appends a button that runs a Luau callback on activation. `opts: { label: string, onActivate: (overlay) -> (), text: ((overlay) -> string?)?, typeLabel: string?, editable: boolean?, opensMenu: boolean?, hotkey: string?, when: ((overlay) -> boolean)? }` — `onActivate` receives the overlay itself (so a header control can reach the active context).
+**Signature:** `O:addCustomButton(opts) -> Control`, where `opts: { label: string, onActivate: (overlay) -> (), text: ((overlay) -> string?)?, typeLabel: string?, editable: boolean?, opensMenu: boolean?, hotkey: string?, hotkeyKeepsFocus: boolean?, when: ((overlay) -> boolean)? }`
+
+Appends a button that runs a Luau callback on activation. `onActivate` receives the overlay itself (so a header control can reach the active context).
 
 `onActivate` is called **guarded**. A control whose action throws says so rather than going silent: the host used to catch the error at the key dispatch and write a line, while the person who pressed it heard nothing at all — which is indistinguishable from a control that quietly did its job. It runs in the handler of the key or hotkey, and may read there; one that reads and then acts checks that the overlay is still where it was before it acts ([Where a hook runs](#where-a-hook-runs)).
 
@@ -675,8 +1010,6 @@ Appends a button that runs a Luau callback on activation. `opts: { label: string
 `typeLabel` overrides the word for what this control *is*. The kind a control is built from and the thing it stands for are not always the same: a custom button that puts the caret into a text field is an edit box to everyone using it, and announcing "button" describes the implementation to somebody with no interest in it — and says the wrong thing about what typing will do next.
 
 `editable` says that activating this control leaves the caret in a text field, so **Space belongs to the application** from then on. Return still activates, because it is the only way back into the field after tabbing away. This is the same rule an `addOCREdit` gets by virtue of its kind; the flag is for controls that reach their field some other way (a coordinate, an accessibility element) and would otherwise swallow the space in "White 80s".
-
-Returns `{ kind = "custom", label, onActivate, text, typeLabel, editable, opensMenu, hotkey, when }`.
 
 ```luau
 -- Komplete Kontrol's library browser hides the instrument loaded behind it, so the overlay
@@ -692,9 +1025,21 @@ ov:addCustomButton({
 })
 ```
 
+### Returns {#o-addcustombutton-returns}
+
+The control table, appended to `o.controls`: `{ kind = "custom", label, onActivate, text, typeLabel, editable, opensMenu, hotkey, hotkeyKeepsFocus, when }`, `hotkeyKeepsFocus` made a boolean.
+
+### Errors {#o-addcustombutton-errors}
+
+None. It never answers an error value. An `onActivate` that raises is logged, `<overlay>: '<label>' failed while activating: <message>`, and said, `"<label> could not be used"`; the module is handed nothing.
+
+**Raises** for a control added after the overlay is bound (`overlay '<label>': adding a control must be called BEFORE binding it — the binding is what starts it`) and for an `opts` that is `nil` (Luau's own `attempt to index nil with 'label'`). Nothing else is checked at the call; a field of the wrong kind is reported when the overlay binds.
+
 ## O\:addStepper(opts) {#o-addstepper}
 
-Appends a **value changed with Left and Right**, where the module knows how to change it. `opts: { label: string, text: (overlay) -> string?, onStep: (dir: number, overlay) -> false?, onActivate: ((overlay) -> ())?, settle: number?, typeLabel: string?, hotkey: string?, hotkeyKeepsFocus: boolean?, when: ((overlay) -> boolean)? }`.
+**Signature:** `O:addStepper(opts) -> Control`, where `opts: { label: string, text: (overlay) -> string?, onStep: (dir: number, overlay) -> false?, onActivate: ((overlay) -> ())?, settle: number?, typeLabel: string?, hotkey: string?, hotkeyKeepsFocus: boolean?, when: ((overlay) -> boolean)? }`
+
+Appends a **value changed with Left and Right**, where the module knows how to change it.
 
 Announced as a slider, because that is what it is to the person using it; how it is driven underneath is the module's problem rather than theirs.
 
@@ -736,7 +1081,71 @@ zoom = ov:addStepper({
 })
 ```
 
+### Returns {#o-addstepper-returns}
+
+The control table, appended to `o.controls`: `{ kind = "stepper", label, text, onStep, onActivate, settle, typeLabel, hotkey, hotkeyKeepsFocus, when }`, `hotkeyKeepsFocus` made a boolean. Its `settle` is read at every step, so a module sets it on this table.
+
+### Errors {#o-addstepper-errors}
+
+None. It never answers an error value. An `onStep` that raises is logged, `<overlay>: '<label>' failed while stepping: <message>`, and said, `"<label> could not be moved"`; an `onActivate` that raises is said `"<label> could not be used"`.
+
+**Raises** for a control added after the overlay is bound (`overlay '<label>': adding a control must be called BEFORE binding it — the binding is what starts it`) and for an `opts` that is `nil` (Luau's own `attempt to index nil with 'label'`). Nothing else is checked at the call.
+
+## O\:addSlider(opts) {#o-addslider}
+
+**Signature:** `O:addSlider(opts) -> Control`, where `opts: { label: string, region: {number, number, number, number} | ((overlay) -> {…}?), thumbImage: string | { string }, from: number, to: number, hotkey: string?, hotkeyKeepsFocus: boolean?, tolerance: number?, scales: { number }?, when: ((overlay) -> boolean)? }`
+
+Appends a **graphical slider** — ReaHotkey's `GraphicalHorizontalSlider` — whose value is where its thumb is drawn. The thumb is found by an [image search](screen.md#host-screen-imagesearch) of `thumbImage` inside `region`, and its centre against `from` (0 %) and `to` (100 %), two x coordinates in the overlay's own, gives a percentage. `thumbImage` may be a list, for a thumb drawn one way at rest and another while it is dragged; every path is absolute ([`host.path`](path.md#host-path)). `tolerance` and `scales` are the search's, a per-control override of the overlay's defaults (a tolerance of 20 and ten scales from 0.67 to 2). It is announced `"<label>, slider"`, and its percentage after that, as a value: `"<n> percent"`, or `"not found"` when the thumb is not in the region.
+
+**Left and Right** move it one percent of the track as drawn ([`O:adjust`](#o-adjust)): the thumb is dragged that far, looked for again 25 ms later, and when the reading has not moved, dragged one pixel further, up to 24 times, until the percentage changes or the track's end is reached; then the new percentage is said. Every step after a search goes on only while the overlay is where the key was pressed — active, in the same stay, on the same window ([`O:stillHere`](#o-stillhere) without options); otherwise the log says `[overlay] <overlay>: '<label>' not going on <after what> — <why>`. The point each drag ends at is checked as every click of the overlay is, and a drag refused there ends the step. The region, `from` and `to` are scaled in an overlay with [`O:scale`](#o-scale); the template is not.
+
+**Cost.** One image search per announcement, with a callback. A step costs one search, then one before and one after each drag — each a capture and a match, which the handler waits for: the arrow key's, then the timer's.
+
+```luau
+-- A mic blend slider: a thumb on a track 40 to 240 across (the numbers are illustrative).
+ov:addSlider({
+  label = "Mic blend",
+  region = { 30, 300, 250, 320 },
+  thumbImage = host.path("images/Blend/Thumb.png"),
+  from = 40, to = 240,
+})
+```
+
+### Returns {#o-addslider-returns}
+
+The control table, appended to `o.controls`: `{ kind = "slider", label, region, thumbImage, from, to, hotkey, hotkeyKeepsFocus, tolerance, scales, when }`.
+
+### Errors {#o-addslider-errors}
+
+None. It never answers an error value. A thumb not found is said, `"<label>, not found"`, and a track that cannot be placed now is said `"<label> is not available now"`.
+
+**Raises** for a control added after the overlay is bound (`overlay '<label>': adding a control must be called BEFORE binding it — the binding is what starts it`) and for an `opts` that is `nil`. Nothing else is checked at the call: no `region`, no `thumbImage`, a missing `from` or `to`, a `to` not right of `from`, and a path that is not absolute are reported when the overlay binds.
+
+## O\:adjust(dir) {#o-adjust}
+
+**Signature:** `O:adjust(dir: number) -> ()`
+
+One step of the **focused** control's value, as Left (`-1`) and Right (`+1`) make it: a [slider](#o-addslider)'s drag, or a [stepper](#o-addstepper)'s `onStep(dir, overlay)` and the announcement of what the value became. Left and Right are bound to it by the runtime while a slider or a stepper is focused, so a module calls it only to step from another key. Nothing happens when the focused control is hidden, is of another kind, or is a stepper without `onStep`.
+
+```luau
+-- A second pair of keys for the focused value, for a plug-in whose arrows the user wants.
+host.hotkey.register("Alt+Up", function() if ov.active then ov:adjust(1) end end)
+host.hotkey.register("Alt+Down", function() if ov.active then ov:adjust(-1) end end)
+```
+
+### Returns {#o-adjust-returns}
+
+Nothing. What the step did is said, and logged where it was not made.
+
+### Errors {#o-adjust-errors}
+
+None. It never answers an error value.
+
+**Raises** only for a `dir` that is not a number on a slider (Luau's own arithmetic error). A stepper's `onStep` and `text` run guarded, and a stepper is handed `dir` as given.
+
 ## O\:afterIdle(key, ms, fn) {#o-afteridle}
+
+**Signature:** `O:afterIdle(key: any, ms: number, fn: (overlay) -> ()) -> ()`
 
 Runs `fn` **once**, `ms` after the last call carrying the same `key`. Every call restarts the clock, so a run of keystrokes produces exactly one action at the end of it rather than one per press.
 
@@ -758,6 +1167,16 @@ onStep = function(dir, o)
 end,
 ```
 
+### Returns {#o-afteridle-returns}
+
+Nothing. `fn(overlay)` runs later, as a handler of the timer's, or never: when a later call with the same `key` came, or the overlay is not active on the same window by then.
+
+### Errors {#o-afteridle-errors}
+
+None. It never answers an error value. An `fn` that raises is logged, `<overlay>: coalesced '<key>' failed: <message>`.
+
+It never raises for `key` or `fn`: an `fn` that is not a function makes the call do nothing. An `ms` that is not a number of milliseconds raises as [`host.timer.after`](timer.md#host-timer-after) raises for it.
+
 ## O.doubleClick(x, y, opts?, cb?) {#o-doubleclick}
 
 **Signature:** `O.doubleClick(x: number, y: number, opts: { button: ("left" | "right" | "middle")? }?, cb: ((ok: boolean, err: Error?) -> ())?) -> true | (false, Error)`
@@ -769,11 +1188,9 @@ Worth having in one place because the same fact is needed from both sides. A plu
 The gap is ninety milliseconds, and the number that matters is that it is **not zero**. Two clicks sent back to back go out in the same instant, and an application deciding whether it has seen a double-click is looking at the interval between two presses — an interval of zero reads as easily as one press with a stutter as it does as two. Ninety is plainly two, and comfortably inside any double-click time a system uses.
 
 - `opts.button` — the button **both** clicks are made with: `"left"` (the default, sent as a plain click, exactly as before the option existed), `"right"` or `"middle"`. VPS Avenger resets Pan and Random Pitch with a double-click of the right button.
-- `cb` — called once, as a handler of its own (the timer's), where a read may wait. Once the second click has gone out, with its answer — `cb(true)`, the place to start watching for what the double-click changed rather than a guess at when it is over, or `cb(false, err)` with [`host.input.click`](input.md#host-input-click)'s error value. Where the first click was not made, no second is sent and `cb(false, err)` comes on the next turn with that click's error (below): so test `ok` before watching for a change. Without a timer the two clicks go out at once, and `cb` runs at once after them, inside the call.
+- `cb` — called once, as a handler of its own (the timer's), where a read may wait. Once the second click has gone out, with its answer: `cb(true)`, the place to start watching for what the double-click changed rather than a guess at when it is over. Without a timer the two clicks go out at once, and `cb` runs at once after them, inside the call.
 
-**It answers** as `host.input.click` does: `true`, or `false` and the click's error value. A first click that is not made sends no second — one click alone is not what was asked — and the call answers that click's error, which `cb` is handed too, `cb(false, err)`, on the next turn as a handler of its own. Otherwise the call answers `true` once the first click is out, and the second's answer goes to `cb`. Without a timer the call answers the second click's, both being made in it. Since version 0.11 of the runtime; before, both answers were dropped.
-
-**Raises**, at the call and before anything is clicked: an `opts` that is not a table or `nil` (`O.doubleClick: opts must be a table { button = … } or nil, got string`), a `button` it does not know (`O.doubleClick: opts.button must be "left", "right" or "middle", got x`), and a `cb` that is neither a function nor `nil` (`O.doubleClick: the callback (fourth argument) must be a function or nil, got number`).
+**It answers** as `host.input.click` does — `true`, or `false` and the click's error value — since version 0.11 of the runtime; before, both answers were dropped. Today it always answers `true`: neither click is given a `window`, and `host.input.click` refuses only a click given one. The `false, err` is there so that a module written against it keeps working should a later host refuse such a click (Returns, below).
 
 **Cost.** Two [`host.input.click`](input.md#host-input-click) calls and one [`host.timer.after`](timer.md#host-timer-after); nothing is read.
 
@@ -798,6 +1215,18 @@ O.doubleClick(x, y, { button = "right" }, function(ok, err)
 end)
 ```
 
+### Returns {#o-doubleclick-returns}
+
+- `true` — the first click was made, as it always is today. The second goes out 90 ms later, and its answer goes to `cb`: `cb(true)`, as it always is today.
+- `false, err` — never answered today, and kept for parity with [`host.input.click`](input.md#host-input-click-returns): neither click is given a `window`, and only a click given one is refused. Should a later host refuse a click made for no window, it would mean that the first click was not made, so no second was sent — one click alone is not what was asked — and `err` would be that click's error value. With a `cb`, it would hear the same, `cb(false, err)`, on the next turn as a handler of its own; and a second click refused would come to `cb` as `cb(false, err)`. So a `cb` that tests `ok` before watching for a change goes on working.
+- Without a timer, which a module never meets — the runtime declares `timer` — the two clicks go out at once, and the call answers the second's, as `cb` does.
+
+### Errors {#o-doubleclick-errors}
+
+None. It never answers an error value. Neither click is given a `window`, and every error of [`host.input.click`](input.md#host-input-click-errors) is one of a click given a `window` — or of a `via` this call does not use — so both clicks are always made, on every platform. Were a first click ever refused, the runtime would hand its error value on as the host answered it, logged `overlay: a double-click's first click at (<x>,<y>) was not made — <message>; no second is sent`.
+
+**Raises** for a mistake in the call, before anything is clicked: an `opts` that is not a table or `nil` (`O.doubleClick: opts must be a table { button = … } or nil, got string`), a `button` it does not know (`O.doubleClick: opts.button must be "left", "right" or "middle", got x`), and a `cb` that is neither a function nor `nil` (`O.doubleClick: the callback (fourth argument) must be a function or nil, got number`). What `host.input.click` raises for `x` and `y` comes out of the call for the first click, and out of the timer's handler for the second. `cb` is not guarded: what it raises is the timer handler's, logged by the host.
+
 ### Windows {#o-doubleclick-windows}
 
 Each click moves the pointer to the point and sends a press and a release of the button (`SetCursorPos` and `SendInput`, as [`host.input.click`](input.md#host-input-click) makes any click); Windows counts the two as a double-click when they come within its double-click time and rectangle, as from a mouse.
@@ -808,7 +1237,9 @@ Each click carries a click state of 1, so AppKit's own controls see two single c
 
 ## O\:watch(spec) {#o-watch}
 
-Waits for something to **change**, rather than for a length of time. `spec: { read: (overlay) -> (any, any?), was: any?, done: ((now: any, was: any, n: number) -> boolean)?, every: number?, within: number?, onDone: ((now, was, n) -> ())?, onGiveUp: ((now, was, n) -> ())? }`.
+**Signature:** `O:watch(spec) -> any`, where `spec: { read: (overlay) -> (any, any?), was: any?, done: ((now: any, was: any, n: number) -> boolean)?, every: number?, within: number?, onDone: ((now, was, n) -> ())?, onGiveUp: ((now, was, n) -> ())? }`
+
+Waits for something to **change**, rather than for a length of time.
 
 Almost every `host.timer.after` in a module is a guess about how long an application takes, and a guess is wrong in both directions. Too short and the value read back is the one from *before* the action — a real value announced with confidence for the wrong moment, which is how ON:EAR's speaker grid came to name the previously loaded speaker each time a tile was pressed. Too long and everything feels slow.
 
@@ -816,7 +1247,7 @@ Almost every `host.timer.after` in a module is a guess about how long an applica
 - `was` — the reading from before the action. Omit it and `read` is called once to get it, which is only correct if nothing has happened yet; a reading it names is then the one the first look is compared with.
 - `done(now, was, n)` — defaults to "it changed". Asked once per **new** reading that is not `nil`, with `n`, how many readings in a row have read `now`, this one included: 1 the first time. A look that reads `nil` neither counts nor breaks the run; a reading of another value starts it again at 1. So `done` can wait for a value read twice — a plug-in that draws something else on its way to the new value (VPS Avenger's loading display before the preset's name) shows it once, and the name again and again.
 - `every` — how often to look, default 100 ms. Each look costs whatever `read` costs, and a screen pixel is a compositor frame, so this is not free.
-- `within` — give up after this long and call `onGiveUp` with the last reading. Not an error: a radio button that was already chosen is *meant* not to change.
+- `within` — give up after this long and call `onGiveUp` with the last reading, default 900 ms; counted in whole `every`s. Not an error: a radio button that was already chosen is *meant* not to change.
 - `onDone(now, was, n)` and `onGiveUp(now, was, n)` get the count as `done` does; `onGiveUp`'s `n` is 0 when the last look read `nil`.
 
 Each end writes one line: `[watch] <label>: changed after <ms> ms — <was> -> <now>` or `… gave up after …`, with ` (<n> readings alike)` after it when `n` is more than 1.
@@ -862,37 +1293,52 @@ o:watch({
 })
 ```
 
-## O\:here() / O\:stillHere(mark, opts?) {#o-here}
+### Returns {#o-watch-returns}
 
-**Signature:** `O:here() -> Mark` · `O:stillHere(mark: Mark, opts: { focus: boolean?, keys: boolean?, said: boolean?, spoken: boolean?, menus: boolean?, place: boolean? }?) -> true | (false, Error)`
+The reading it compares with: `spec.was` when given, otherwise what `read` answered at the call (`nil` when it raised). Nothing when `spec.read` is not a function: no watch is started. What comes later goes to `onDone` or `onGiveUp`, each called at most once, and neither when the watch ends unreported.
 
-Whether the overlay is still where it was, for an answer that comes later and acts on what it learned — a [`host.ocr.recognize`](ocr.md#host-ocr-recognize) callback, a timer. `here` notes where the overlay is now, as a mark; `stillHere` says whether that still holds: `true`, or `false` and an error value. They are the checks the runtime makes itself before it says a value read off the screen and before an OCR button clicks ([`O:addOCRButton`](#o-addocrbutton)), with the messages in the same words as its `[read]` lines.
+### Errors {#o-watch-errors}
 
-A mark notes the stay in front (every time the overlay comes to the front is a new one — a quiet arrival in a [trip](#o-inplugin) included), the window — its origin's handle, [`O:hwnd()`](#o-origin) — the focus and the control on it, and how many keys of the overlay's own, announcements begun and said, and menu openings it has seen. It is opaque: its fields are the runtime's. A mark taken while the overlay is not active never holds, except with `place = false`. `stillHere` asks, in this order, and answers the first that no longer holds:
+None. It never answers an error value. A look that could not read is `nil` from `read`, and a watch that ends without a change is `onGiveUp`, not an error.
 
-| What | Asked | Code, when it no longer holds | Message |
-|---|---|---|---|
-| The overlay is active | always, unless `place = false` | `not_in_front` | `the overlay is no longer active` |
-| The same stay: it has not left the front since, not even to come back to the same window | always, unless `place = false` | `moved_on` | `the overlay left the front and came back since` |
-| The same window: the same handle | always, unless `place = false` | `moved_on` | `the overlay is on another window now` |
-| The same focus, and the same control on it | `focus = true` | `moved_on` | `the focus has moved on` |
-| No key of the overlay's own since | `keys = true` | `moved_on` | `a later key reached the overlay` |
-| No announcement of the overlay's since | `said = true` | `moved_on` | `a later announcement was made` |
-| No announcement of the overlay's said since | `spoken = true` | `moved_on` | `a later announcement was spoken` |
-| No menu open over the overlay now ([`O:menuOpen()`](#o-menuopen)) | `menus = true` | `moved_on` | `a menu is open over the overlay` |
-| No menu opened over it since, not even one closed again | `menus = true` | `moved_on` | `a menu opened over the overlay since` |
+**Raises** only for a `spec` it cannot index: `nil` gives Luau's own `attempt to index nil with 'read'`. Every hook is called guarded: a `read` that raises reads `nil`, a `done` that raises is not done, and what `onDone` or `onGiveUp` raises is dropped without a line.
 
-- **A key of the overlay's own** is one that reached it — Tab, Shift+Tab, Return, Space, an arrow it holds, the tab keys, a control's or a tab's hotkey — whatever it did, nothing included. A key that went to the plug-in is not one, nor is a calibration key.
-- **An announcement** is the overlay saying a control as a whole — the focus arriving on it, the overlay's arrival, a control said again once a press settled (a toggle, a stepper, an OCR control's activation) — whether or not it was said in the end. What the overlay says about an action — `"<label>, activated"`, a tab switched with Left or Right — is not one.
-- **Said** (`spoken`) is an announcement handed to speech: at once for a control with nothing to read, and for an OCR control when its read answers — so from when it begins until then, `said` has moved and `spoken` has not, and an announcement that is dropped in the end is never said. Something a module says after the overlay's own sentence, queued behind it, waits for `spoken`; `said` would let it go ahead of a sentence still waiting for its read. A graphic control's value, said after its name, is part of the same announcement and not counted again.
-- **A menu** is one the overlay's [menu tests](#o-menutests) see; without menu tests none ever opens.
+## O\:here() {#o-here}
+
+**Signature:** `O:here() -> Mark`
+
+Notes where the overlay is now, as a **mark**, for an answer that comes later and acts on what it learned — a [`host.ocr.recognize`](ocr.md#host-ocr-recognize) callback, a timer. [`O:stillHere(mark)`](#o-stillhere) then says whether that still holds. The two are the checks the runtime makes itself before it says a value read off the screen and before an OCR button clicks ([`O:addOCRButton`](#o-addocrbutton)), with the messages in the same words as its `[read]` lines.
+
+A mark notes the stay in front (every time the overlay comes to the front is a new one — a quiet arrival in a [trip](#o-inplugin) included), the window — its origin's handle, [`O:hwnd()`](#o-hwnd) — the focus and the control on it, and how many keys of the overlay's own, announcements begun and said, and menu openings it has seen. A mark taken while the overlay is not active never holds, except with `place = false`.
+
+It runs where it is called, on the main thread, and costs a small table and one origin resolution (memoised per [epoch](timer.md#host-epoch) for an embedded overlay). It touches no screen. It came with version 0.2 of the runtime: a module that calls it depends on `"com.platform.overlay >= 0.2"`, and an older runtime then fails its load instead of its first call.
+
+### Returns {#o-here-returns}
+
+A mark, a new table every time. It is opaque: its fields are the runtime's, and a module only hands it to `O:stillHere` of the same overlay.
+
+### Errors {#o-here-errors}
+
+None. It never answers an error value.
+
+**Raises** only what the origin's resolution raises (see the top of this page).
+
+## O\:stillHere(mark, opts?) {#o-stillhere}
+
+**Signature:** `O:stillHere(mark: Mark, opts: { focus: boolean?, keys: boolean?, said: boolean?, spoken: boolean?, menus: boolean?, place: boolean? }?) -> true | (false, Error)`
+
+Whether what a [mark](#o-here) noted still holds: `true`, or `false` and an error value. It asks, in the order of the Errors table, and answers the first check that no longer holds. The first three are always asked, unless `place = false`; the others only with their option:
+
+- **`focus = true`** — the same focus, and the same control on it.
+- **`keys = true`** — no key of the overlay's own since. **A key of the overlay's own** is one that reached it — Tab, Shift+Tab, Return, Space, an arrow it holds, the tab keys, a control's or a tab's hotkey — whatever it did, nothing included. A key that went to the plug-in is not one, nor is a calibration key.
+- **`said = true`** — no announcement of the overlay's since. **An announcement** is the overlay saying a control as a whole — the focus arriving on it, the overlay's arrival, a control said again once a press settled (a toggle, a stepper, an OCR control's activation) — whether or not it was said in the end. What the overlay says about an action — `"<label>, activated"`, a tab switched with Left or Right — is not one.
+- **`spoken = true`** — no announcement of the overlay's *said* since: handed to speech, at once for a control with nothing to read, and for an OCR control when its read answers. So from when an announcement begins until then, `said` has moved and `spoken` has not, and an announcement that is dropped in the end is never said. Something a module says after the overlay's own sentence, queued behind it, waits for `spoken`; `said` would let it go ahead of a sentence still waiting for its read. A graphic control's value, said after its name, is part of the same announcement and not counted again.
+- **`menus = true`** — no menu open over the overlay now ([`O:menuOpen()`](#o-menuopen)), and none opened over it since, not even one closed again. **A menu** is one the overlay's [menu tests](#o-menutests) see; without menu tests none ever opens.
 - **`place = false`** leaves the first three out, for an action that stays right while another window of the same application is in front and the overlay may not be active (see macOS below). The code then checks its target itself. The other options are asked as given.
 
 No timer and no [epoch](timer.md#host-epoch) decides anything here: each count changes only when its event happens. What a mark does not see: typing that went to the plug-in, the plug-in redrawing, and a window moved or resized, which is the same window. Coordinates worked out before the wait are worked out again after it ([`O:toScreen`](#o-toscreen)).
 
-`stillHere` raises, naming the caller's line, when `mark` is not one from `O:here()`, when it is a mark of another overlay, when `opts` is not a table, and for an option it does not have — a misspelled option would otherwise check nothing at all. It never raises otherwise. Both run where they are called, on the main thread: `here` costs a small table and one origin resolution (memoised per epoch for an embedded overlay), `stillHere` a few comparisons and, unless `place = false`, one more origin resolution. Neither touches the screen.
-
-They came with version 0.2 of the runtime, and `spoken` with 0.4.1: a module that calls them says so, `dependencies = ["com.platform.overlay >= 0.2"]` (`>= 0.4.1` for `spoken`), and an older runtime then fails its load instead of its first call.
+It runs where it is called, on the main thread, and costs a few comparisons and, unless `place = false`, one origin resolution. It touches no screen. It came with version 0.2 of the runtime, and `spoken` with 0.4.1: a module that calls it depends on `"com.platform.overlay >= 0.2"` (`>= 0.4.1` for `spoken`).
 
 ```luau
 -- Return on "Bank" reads the bank's name and clicks it, but only while the overlay is where the
@@ -908,7 +1354,11 @@ ov:addCustomButton({
     if not r then return end
     host.ocr.recognize(r, function(reading)
       local still, err = o:stillHere(mark, { keys = true })
-      if not still then return host.log.info("Bank: not clicking, " .. err) end
+      if not still then
+        -- Out of the front: the user is elsewhere, and nothing is said. Moved on: logged.
+        if err.code == O.errors.NOT_IN_FRONT then return end
+        return host.log.info("Bank: not clicking, " .. err)
+      end
       if not samePlace(o:toScreenRect(BANK, { whole = true }), r) then return end -- it moved
       if reading.status ~= "text" then return end
       local w = reading.words[1]
@@ -918,19 +1368,44 @@ ov:addCustomButton({
 })
 ```
 
-### Windows {#o-here-windows}
+### Returns {#o-stillhere-returns}
+
+- `true` — every check asked still holds.
+- `false, err` — the first check that no longer holds; `err.code` is `not_in_front` or `moved_on`, and its message the runtime's `[read]` words for it.
+
+### Errors {#o-stillhere-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says. They are listed in the order they are asked.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `not_in_front` | return | The overlay is not active now. Asked unless `place = false`. | `the overlay is no longer active` | both |
+| `moved_on` | return | Another stay: it left the front since, even if it came back to the same window. Asked unless `place = false`. | `the overlay left the front and came back since` | both |
+| `moved_on` | return | Another window: the origin's handle is not the mark's. Asked unless `place = false`. | `the overlay is on another window now` | both |
+| `moved_on` | return | With `focus = true`: the focus moved, or another control is at the focused index. | `the focus has moved on` | both |
+| `moved_on` | return | With `keys = true`: a key of the overlay's own reached it since. | `a later key reached the overlay` | both |
+| `moved_on` | return | With `said = true`: an announcement of the overlay's began since. | `a later announcement was made` | both |
+| `moved_on` | return | With `spoken = true`: an announcement of the overlay's was said since. | `a later announcement was spoken` | both |
+| `moved_on` | return | With `menus = true`: a menu counts as open over the overlay now. | `a menu is open over the overlay` | both |
+| `moved_on` | return | With `menus = true`: a menu opened over the overlay since, open or closed again now. | `a menu opened over the overlay since` | both |
+
+**Raises** for a mistake in the call, naming the caller's line: a `mark` that is not one from `O:here()` (`overlay '<label>': stillHere takes a mark from O:here(), got <type>`), a mark of another overlay (`overlay '<label>': stillHere was handed a mark of overlay '<other>'`), an `opts` that is not a table (`overlay '<label>': stillHere's options are a table, got <type>`), and an option it does not have (`overlay '<label>': stillHere has no option '<name>' (it has focus, keys, said, spoken, menus and place)`) — a misspelled option would otherwise check nothing at all. It never raises otherwise, but for the origin's resolution (see the top of this page).
+
+### Windows {#o-stillhere-windows}
 
 The window is the origin's window handle: the plug-in's own child window in a DAW, its window standalone.
 
-### macOS {#o-here-macos}
+### macOS {#o-stillhere-macos}
 
 The window is the origin's `id`: on a DAW's plug-in panel, the plug-in window's. A plug-in's menu can be a window of its own that comes to the front, and the overlay may not be active while it is; an action that belongs to the press before it — a click into that menu — asks `{ keys = true, place = false }` and checks its target itself, for instance that the same application is in front ([`host.window.foreground()`](window.md#host-window-foreground)).
 
 ## O\:addOCRButton(opts) {#o-addocrbutton}
 
-Appends a button whose label/value is read live by OCR over a region; activating re-reads it then clicks the region centre. `opts: { label: string, region: {number, number, number, number} | ((overlay) -> {number, number, number, number}?), text: ((overlay) -> string?)?, value: ((overlay, text: string) -> string?)?, fallback: string?, hotkey: string?, hotkeyKeepsFocus: boolean?, readOnly: boolean?, opensMenu: boolean?, when: ((overlay) -> boolean)? }` — `region` is `{x1, y1, x2, y2}` origin-relative; `readOnly` re-reads on activation and never clicks; `opensMenu` says the click puts a menu on screen (see [`O.menuTests`](#o-menutests)).
+**Signature:** `O:addOCRButton(opts) -> Control`, where `opts: { label: string, region: {number, number, number, number} | ((overlay) -> {number, number, number, number}?), text: ((overlay) -> string?)?, value: ((overlay, text: string) -> string?)?, fallback: string?, hotkey: string?, hotkeyKeepsFocus: boolean?, readOnly: boolean?, opensMenu: boolean?, when: ((overlay) -> boolean)? }`
 
-Returns `{ kind = "ocr", label, region, hotkey, hotkeyKeepsFocus, readOnly, opensMenu, when, text, value, fallback }`. It is announced as `"<label>[, <text>], button[, <key>], <value>"` — the key its `hotkey`, said in the platform's words when focus arrives on the control (not when it is activated), and the value what the region reads: its text; `fallback` when nothing is drawn there or the recogniser read nothing, and `"no text"` when there is no `fallback`; `"cannot be read now"` when the read failed — and a `readOnly` one without the word "button": a control that cannot be pressed does not describe itself as one.
+Appends a button whose label/value is read live by OCR over a region; activating re-reads it then clicks the region centre. `region` is `{x1, y1, x2, y2}` origin-relative; `readOnly` re-reads on activation and never clicks; `opensMenu` says the click puts a menu on screen (see [`O.menuTests`](#o-menutests)).
+
+It is announced as `"<label>[, <text>], button[, <key>], <value>"` — the key its `hotkey`, said in the platform's words when focus arrives on the control (not when it is activated), and the value what the region reads: its text; `fallback` when nothing is drawn there or the recogniser read nothing, and `"no text"` when there is no `fallback`; `"cannot be read now"` when the read failed — and a `readOnly` one without the word "button": a control that cannot be pressed does not describe itself as one.
 
 **Read off the event loop.** The region is read with [`host.ocr.recognize`](ocr.md#host-ocr-recognize) and a callback at every announcement — arriving on the control, and activating it — in the user's language, and the announcement is said when the answer comes: one sentence, as late as the recognition makes it, while the keys, the timers and the speech of the whole application go on. A value read as several lines is said as one, the lines joined with a space.
 
@@ -977,6 +1452,16 @@ ov:addOCRButton({ label = "Slot value", readOnly = true,
   end })
 ```
 
+### Returns {#o-addocrbutton-returns}
+
+The control table, appended to `o.controls`: `{ kind = "ocr", label, region, hotkey, hotkeyKeepsFocus, readOnly, opensMenu, when, text, value, fallback }`, `hotkeyKeepsFocus` made a boolean.
+
+### Errors {#o-addocrbutton-errors}
+
+None. It never answers an error value. A read that failed or was refused is said as `"cannot be read now"`, and its error's message is in the `[read]` line (above); a click not made is logged.
+
+**Raises** for a control added after the overlay is bound (`overlay '<label>': adding a control must be called BEFORE binding it — the binding is what starts it`) and for an `opts` that is `nil` (Luau's own `attempt to index nil with 'label'`). Nothing else is checked at the call: a missing `region`, or one that is neither four numbers nor a function, is reported when the overlay binds.
+
 ### Windows {#o-addocrbutton-windows}
 
 The read is the one [`host.ocr.recognize`](ocr.md#host-ocr-recognize-windows) makes for any module: through the module's capture source, then `Windows.Media.Ocr` with the second recogniser beside it for a lone digit — the recognisers, the small-text treatment and the language (the first language in the user's Windows list that OCR has installed) that the read on the event loop used here before. One difference in the language: the user's list is read when the application starts, so a change to it in Windows Settings is used from the next start, where the read on the event loop asked Windows at every read. A read of one of sforzando's read-outs took 22–42 ms (measured on the event loop, a debug build on a six-core desktop), so the sentence comes about as soon after the key as it did — later by about one turn of the loop, which is a timer message of the lowest priority every 15–16 ms, and by any recognition of another read already running, which is not interrupted; an activation's click, after the sentence, by as much. A region's corners are cut toward zero, as the read on the event loop read them, so an overlay with a fractional [frame](#o-frame) reads the pixels it always did.
@@ -985,13 +1470,38 @@ The read is the one [`host.ocr.recognize`](ocr.md#host-ocr-recognize-windows) ma
 
 The pipeline [`host.ocr.recognize`](ocr.md#host-ocr-recognize-macos) uses on a Mac: Vision's retry ladder, and the second recogniser beside it where the download carries it, with an Intel Mac's checked first pass. The language is the user's — the first of their preferred languages that Vision reads, then English — where the read on the event loop without `lang` handed Vision none, and so Vision's own default; for a user whose first language is not English, a value or label is now read with that language. How long the sentence takes is the recognition's, measured with the read on the event loop and Vision alone, before the second recogniser answered on a Mac: 25–56 ms for sforzando's read-outs on a Mac mini M1, 115–164 ms after more than 5 s without a read, and 143–786 ms on an Intel MacBook Air (2020) — see [`host.ocr.recognize`](ocr.md#host-ocr-recognize-macos). While it runs, the keyboard's event tap, the timers and every other key go on; on that Air each such read used to hold them up for as long.
 
+## O\:addOCREdit(opts) {#o-addocredit}
+
+**Signature:** `O:addOCREdit(opts) -> Control`, where `opts: { label: string, region: {number, number, number, number} | ((overlay) -> {…}?), hotkey: string?, hotkeyKeepsFocus: boolean?, when: ((overlay) -> boolean)? }`
+
+Appends an **edit field read by OCR** — ReaHotkey's `OCREdit`, for a plug-in's own text field that publishes nothing: Komplete Kontrol's "Save as". It is announced `"<label>, edit, <value>"`, the value read off `region` as an [OCR button](#o-addocrbutton)'s is, off the event loop, with the same endings (`"no text"`, `"cannot be read now"`). Once its sentence is said, the region's centre is clicked, so the caret lands in the plug-in's field and the user can type — only while the focus is still on the control and no key of the overlay's own has come since (`[read] '<label>': the focus moved on before the answer; not clicking into the field`). Return reads it again and clicks the centre again, which is the way back into the field after tabbing away; Space is not taken while it is focused, so a space can be typed. It takes no `text`, `value`, `fallback`, `readOnly` or `opensMenu`.
+
+```luau
+-- A save dialog drawn by the plug-in: the name field, then the button that saves (the numbers
+-- are illustrative).
+ov:addOCREdit({ label = "Preset name", region = { 120, 60, 420, 84 } })
+ov:addHotspotButton({ label = "Save", at = { 380, 120 } })
+```
+
+### Returns {#o-addocredit-returns}
+
+The control table, appended to `o.controls`: `{ kind = "ocredit", label, region, hotkey, hotkeyKeepsFocus, when }`, `hotkeyKeepsFocus` made a boolean.
+
+### Errors {#o-addocredit-errors}
+
+None. It never answers an error value. A read that failed is said as `"cannot be read now"`, and a click not made is logged.
+
+**Raises** for a control added after the overlay is bound (`overlay '<label>': adding a control must be called BEFORE binding it — the binding is what starts it`) and for an `opts` that is `nil`. A missing `region` is reported when the overlay binds.
+
 ## O\:addGraphicalToggle(opts) {#o-addgraphicaltoggle}
 
-Appends a toggle whose on/off state is read by image-matching its region against an "on" and "off" template; activating clicks the region centre and re-reads the new state after ~150 ms, unless a key of the overlay's own came meanwhile. `opts: { label: string, region: {number, number, number, number}, onImage: string?, offImage: string?, hotkey: string? }` — `region` is `{x1, y1, x2, y2}` origin-relative; `onImage`/`offImage` are template image paths.
+**Signature:** `O:addGraphicalToggle(opts) -> Control`, where `opts: { label: string, region: {number, number, number, number} | ((overlay) -> {…}?), onImage: string | { string } | nil, offImage: string | { string } | nil, hotkey: string?, hotkeyKeepsFocus: boolean?, hint: { on: string?, off: string? }?, reveal: { at: {number, number}, closedColor: {number, number, number}, settle: number? }?, tolerance: number?, scales: { number }?, when: ((overlay) -> boolean)? }`
 
-Returns `{ kind = "gtoggle", label, region, onImage, offImage, hotkey }`. Spoken state is `"on"` / `"off"` (omitted when neither template matches).
+Appends a toggle whose on/off state is read by image-matching its region against an "on" and "off" template; activating clicks the region centre and re-reads the new state after ~150 ms, unless a key of the overlay's own came meanwhile. `region` is `{x1, y1, x2, y2}` origin-relative; `onImage`/`offImage` are template image paths, each one path or a list of them for a state drawn more than one way. `hint` is what is said after the state when a press turned it to that state; `tolerance` and `scales` are the search's.
 
-A `reveal` probe, `{ at = {x, y}, closedColor = {r, g, b}, settle = ms }` — a point whose colour says the panel the toggle lives in is collapsed, and which opens it — is read before the toggle's state is read and before its click. A pixel there within 30 of `closedColor` (the three channels' differences added up) is closed; anything else, or a pixel that cannot be read, lets the state read or the click go ahead at once. Whatever the probe reads, what follows it is made only while the overlay is still where the probe was read — active, in the same stay in front, on the same window, as [`O:stillHere`](#o-here) asks without options. Closed, the probe is clicked — like a hotspot's click, not outside the origin's window or over another window's pixel — and the state read or the click follows `settle` ms later (250 by default), again only while the overlay is still where the probe was read. Where it is not, nothing more is read or clicked for that press or announcement, and the log says `[overlay] <overlay>: '<label>' not going on after reading its panel's probe — <why>` (`after opening its panel`, once `settle` is over), in `stillHere`'s words.
+Spoken state is `"on"` / `"off"` (omitted when neither template matches).
+
+A `reveal` probe, `{ at = {x, y}, closedColor = {r, g, b}, settle = ms }` — a point whose colour says the panel the toggle lives in is collapsed, and which opens it — is read before the toggle's state is read and before its click. A pixel there within 30 of `closedColor` (the three channels' differences added up) is closed; anything else, or a pixel that cannot be read, lets the state read or the click go ahead at once. Whatever the probe reads, what follows it is made only while the overlay is still where the probe was read — active, in the same stay in front, on the same window, as [`O:stillHere`](#o-stillhere) asks without options. Closed, the probe is clicked — like a hotspot's click, not outside the origin's window or over another window's pixel — and the state read or the click follows `settle` ms later (250 by default), again only while the overlay is still where the probe was read. Where it is not, nothing more is read or clicked for that press or announcement, and the log says `[overlay] <overlay>: '<label>' not going on after reading its panel's probe — <why>` (`after opening its panel`, once `settle` is over), in `stillHere`'s words.
 
 ```luau
 -- Soundiron's shared FX rack. The reverb bypass is a bar with a legend rather than a lit
@@ -1006,9 +1516,53 @@ ov:addGraphicalToggle({
 })
 ```
 
+### Returns {#o-addgraphicaltoggle-returns}
+
+The control table, appended to `o.controls`: `{ kind = "gtoggle", label, region, onImage, offImage, hotkey, hotkeyKeepsFocus, hint, reveal, tolerance, scales, when }`, `hotkeyKeepsFocus` made a boolean.
+
+### Errors {#o-addgraphicaltoggle-errors}
+
+None. It never answers an error value. A search that could not be made — the capture failed, or too many were waiting — says no state, and the log says why: `[gtoggle] '<label>': could not look (<message>), so no value is said`.
+
+**Raises** for a control added after the overlay is bound (`overlay '<label>': adding a control must be called BEFORE binding it — the binding is what starts it`) and for an `opts` that is `nil`. Nothing else is checked at the call: no `region`, neither image, a path that is not absolute, a half-declared `reveal` and a `hint` keyed by anything but `on` and `off` are reported when the overlay binds.
+
+## O\:addGraphicalButton(opts) {#o-addgraphicalbutton}
+
+**Signature:** `O:addGraphicalButton(opts) -> Control`, where `opts: { label: string, image: string | { string }, region: {number, number, number, number} | ((overlay) -> {…}?) | nil, hotkey: string?, hotkeyKeepsFocus: boolean?, opensMenu: boolean?, dragBy: {number, number} | ((overlay, hit) -> (number?, number?, string?))?, clickOffset: {number, number}?, state: ((overlay, hit) -> string?)?, unavailable: ((overlay) -> string?)?, rawOrigin: boolean?, tolerance: number?, scales: { number }?, when: ((overlay) -> boolean)? }`
+
+Appends a button that is **found rather than placed** — ReaHotkey's `GraphicalButton`: `image` is searched for inside `region` (the whole origin when there is no `region`), and activating clicks the centre of where it was found, never the middle of the region. For a control with no coordinate to write down: Kontakt's "Performance | FX Rack" tabs sit at the foot of each instrument's own interface, at a height that depends on the instrument. Every path is absolute ([`host.path`](path.md#host-path)), and may be a list of variants.
+
+- **Announced** `"<label>, button"`, and after it, from a search with a callback: nothing when it is found, `"not found"` when it is not, or what `state(overlay, hit)` answers for the hit (worked out from where it was found, a pixel beside it, say). `unavailable(overlay)`, when it answers a string, is said in place of a search, for a button that is there but cannot act now. A search that could not be made says nothing more, and is logged.
+- **Activating** says `"<label>, activated"` at the press, then searches, with a callback; the answer is used only while the overlay is still active on the same window. Not found, it says `"<label> not found"`; a search that could not be made, `"<label> could not be looked for, try again"`. Found, it clicks the hit's centre — or `clickOffset`, an authored distance from the hit's corner (scaled in a scaled overlay) — after the check every click of the overlay gets.
+- **`dragBy`** drags from that point instead of clicking, for a handle: `{dx, dy}` authored (and scaled), or a function of the overlay and the hit answering `dx, dy` in screen pixels, or nothing and a sentence to say instead (`"<label> cannot go further"` when it gives none). The drag's end is not checked: a resize drag is meant to end outside the window it started in.
+- **`rawOrigin`** places `region` in the origin's own pixels, as on a hotspot. `tolerance` and `scales` are the search's.
+
+A search that misses is logged with what it searched, `[gbutton] '<label>' not found: searched (x1,y1)-(x2,y2) for <n> template(s) at <m> scale(s)`, and in a calibrating run the picture it searched is written once per control, `calibration/miss-<label>.png`.
+
+**Cost.** One image search per announcement and per press, each a capture and a match off the event loop.
+
+```luau
+-- Kontakt's FX Rack tab, wherever the instrument's interface puts it.
+ov:addGraphicalButton({
+  label = "FX Rack",
+  image = host.path("images/Rack/FxRackTab.png"),
+  rawOrigin = true,
+})
+```
+
+### Returns {#o-addgraphicalbutton-returns}
+
+The control table, appended to `o.controls`: `{ kind = "gbutton", label, region, image, hotkey, hotkeyKeepsFocus, opensMenu, dragBy, clickOffset, state, unavailable, rawOrigin, tolerance, scales, when }`, `hotkeyKeepsFocus` made a boolean.
+
+### Errors {#o-addgraphicalbutton-errors}
+
+None. It never answers an error value. Not found and could not look are said, as above.
+
+**Raises** for a control added after the overlay is bound (`overlay '<label>': adding a control must be called BEFORE binding it — the binding is what starts it`) and for an `opts` that is `nil`. Nothing else is checked at the call: no `image`, a path that is not absolute and a `dragBy` that is neither `{dx, dy}` nor a function are reported when the overlay binds. A `dragBy` function and `unavailable` are called unguarded: what they raise ends the handler they run in, and the host logs it; `state` is guarded.
+
 ## O\:addHotspotToggle(opts) {#o-addhotspottoggle}
 
-Appends a toggle whose on/off state is read from a **single pixel** at its click point (ReaHotkey's `HotspotToggleButton`) — cheap (one screen touch), where a region scan would cost ~16 ms *per pixel*. The pixel is compared to an on/off reference colour and the **nearest** wins. Activating clicks the point (toggling it) and then [waits for the state to actually change](#o-watch) before announcing it, giving up after ~900 ms — and does not announce it when a key of the overlay's own came meanwhile (see [`O:addOCRButton`](#o-addocrbutton)). A control that redraws in thirty milliseconds is announced in thirty; one that takes half a second is announced correctly instead of early; one that does not change at all — the already-chosen member of a radio group — is announced at the deadline, which is the truth about it. `opts: { label: string, at: {number, number}, onColor: {number, number, number}, offColor: {number, number, number}, hotkey: string?, rawOrigin: boolean? }` — `at` is `{x, y}` origin-relative; `onColor`/`offColor` are `{r, g, b}`.
+Appends a toggle whose on/off state is read from a **single pixel** at its click point (ReaHotkey's `HotspotToggleButton`) — cheap (one screen touch), where a region scan would cost ~16 ms *per pixel*. The pixel is compared to an on/off reference colour and the **nearest** wins. Activating clicks the point (toggling it) and then [waits for the state to actually change](#o-watch) before announcing it, giving up after ~900 ms — and does not announce it when a key of the overlay's own came meanwhile (see [`O:addOCRButton`](#o-addocrbutton)). A control that redraws in thirty milliseconds is announced in thirty; one that takes half a second is announced correctly instead of early; one that does not change at all — the already-chosen member of a radio group — is announced at the deadline, which is the truth about it. `opts: { label: string, at: {number, number} | ((overlay) -> {number, number}?), onColor: {number, number, number} | { {number, number, number} }, offColor: (likewise), text: ((overlay) -> string?)?, ocrLabel: {number, number, number, number}?, hint: { on: string?, off: string? }?, hotkey: string?, hotkeyKeepsFocus: boolean?, rawOrigin: boolean?, fromRight: boolean?, when: ((overlay) -> boolean)? }` — `at` is `{x, y}` origin-relative; `onColor`/`offColor` are `{r, g, b}`.
 
 `at` may also be a **function** of the overlay, for a control whose position depends on what is on screen right now; returning `nil` yields no point and the click is skipped rather than guessed. `onColor`/`offColor` may each be a **list** of `{r, g, b}`, because one state can legitimately look several ways. A reading that resembles neither closely enough — measured against how far apart the references are — reports **no state at all** and logs why, rather than announcing whichever is nearer. Announcing the opposite of the truth is the worst thing this system can do to somebody who cannot check it against the screen; saying nothing is merely unhelpful.
 
@@ -1016,9 +1570,9 @@ Appends a toggle whose on/off state is read from a **single pixel** at its click
 
 Like `addHotspotButton`, the click is refused if another window is drawn over the point (see [`host.window.ownsPoint`](window#host-window-ownspoint)).
 
-The pixel before the click — the one the log line after the press compares with the pixel after it — is read where the key was pressed, and the click is made only while the overlay is still there: active, in the same stay in front, on the same window ([`O:stillHere`](#o-here) without options). Otherwise nothing is clicked or announced, and the log says `[overlay] <overlay>: '<label>' not clicking after reading its pixel — <why>`, in `stillHere`'s words. The point is asked again after the read, before the click: another window drawn over it meanwhile refuses the click, as above.
+The pixel before the click — the one the log line after the press compares with the pixel after it — is read where the key was pressed, and the click is made only while the overlay is still there: active, in the same stay in front, on the same window ([`O:stillHere`](#o-stillhere) without options). Otherwise nothing is clicked or announced, and the log says `[overlay] <overlay>: '<label>' not clicking after reading its pixel — <why>`, in `stillHere`'s words. The point is asked again after the read, before the click: another window drawn over it meanwhile refuses the click, as above.
 
-Returns `{ kind = "hotspottoggle", label, at, onColor, offColor, text, hotkey, rawOrigin }`. Spoken state is `"on"` / `"off"` (omitted when the pixel can't be read). Prefer this over `addGraphicalToggle` when the control has a distinct lit/unlit colour (an indicator LED, a lit ⏻ icon) — it needs no template images and is a fraction of the cost.
+Spoken state is `"on"` / `"off"` (omitted when the pixel can't be read). Prefer this over `addGraphicalToggle` when the control has a distinct lit/unlit colour (an indicator LED, a lit ⏻ icon) — it needs no template images and is a fraction of the cost.
 
 ```luau
 ov:addHotspotToggle({
@@ -1029,9 +1583,136 @@ ov:addHotspotToggle({
 })
 ```
 
+### Returns {#o-addhotspottoggle-returns}
+
+The control table, appended to `o.controls`: `{ kind = "hotspottoggle", label, ocrLabel, text, at, onColor, offColor, hotkey, hotkeyKeepsFocus, hint, rawOrigin, fromRight, when }`, `hotkeyKeepsFocus` made a boolean.
+
+### Errors {#o-addhotspottoggle-errors}
+
+None. It never answers an error value. A pixel that cannot be read says no state, and a click refused or not made is said or logged, as above.
+
+**Raises** for a control added after the overlay is bound (`overlay '<label>': adding a control must be called BEFORE binding it — the binding is what starts it`) and for an `opts` that is `nil`. Nothing else is checked at the call: no `at`, a missing colour and a colour that is not `{r, g, b}` are reported when the overlay binds. An `at` function is called unguarded at the press, as a hotspot's is.
+
+## O\:addTabControl(opts) {#o-addtabcontrol}
+
+**Signature:** `O:addTabControl(opts) -> { control: Control, onTab: (self, n: number) -> (() -> boolean) }`, where `opts: { label: string?, tabs: { { label: string, at: {number, number}?, hotkey: string?, hotkeyLabel: string? } }, typeLabel: string?, current: ((overlay) -> number?)?, verticalStep: ((overlay, tab: number, dir: number) -> string?)?, verticalName: ((overlay, tab: number) -> string?)?, hotkeyKeepsFocus: boolean?, onSelect: ((overlay, tab: number) -> ())?, when: ((overlay) -> boolean)? }`
+
+Appends a **tab control** — ReaHotkey's `TabControl`: one focus stop that stands for a row of tabs, of which only the **current** tab's controls are in the ring. It is announced `"<tab> tab selected, tab control"` (`typeLabel` in place of "tab control"), and a tab's `hotkeyLabel` after it, in the platform's words when it is a key spec. Choosing a tab clicks its `at` — through the frame and the scale, so the plug-in's own tab follows — and says `"<tab> tab selected"`; a tab whose point cannot be placed now stays unchosen, the tab before it current, and says `"<tab> tab is not available now"`.
+
+- **The keys.** While the tab control is focused, Left and Right choose the previous and next tab, wrapping ([`O:switchTab`](#o-switchtab)). From anywhere in the overlay, Ctrl+Tab and Ctrl+Shift+Tab choose the next and previous and put the focus on the tab control ([`O:cycleTab`](#o-cycletab)), and Ctrl+1 to Ctrl+9 choose tab 1 to 9 ([`O:gotoTab`](#o-gototab)) — on a Mac Control-Tab, Control-Shift-Tab and Command-1 to 9 ([`O:attach`](#o-attach-macos)). A tab's own `hotkey` chooses it from anywhere, once its modifiers are let go. Ctrl+1 to Ctrl+9 and a tab's hotkey move the focus to the tab control, unless it has `hotkeyKeepsFocus`: then the tab is chosen and said, and the focus stays where it was. These keys are taken only by an overlay that has a tab control, and act on its first one.
+- **The tabs' controls.** The handle's `onTab(n)` answers a `when` that is true while tab `n` is current: give it to each control of that tab, added after this call, and they are in the ring and hold their hotkeys only then. Combined with a control's own condition through [`O:group`](#o-group).
+- **`current(overlay)`** — where the plug-in is, asked each time the tab control is announced: an index of a tab makes it the current one; anything else leaves the one the control last chose. For a plug-in whose own keys change the tab.
+- **`verticalStep(overlay, tab, dir)`** — a second axis: Up (`-1`) and Down (`+1`), taken while the tab control is focused, step something within the current tab, and what it answers is said; `nil` says nothing ([`O:stepTabVertical`](#o-steptabvertical)). **`verticalName(overlay, tab)`**, when it answers a string, is said in place of the tab's label: what the tab is called now. Melodyne's tool bar uses both for the tools stacked behind each icon.
+- **`onSelect(overlay, tab)`** — after a tab was chosen and said, guarded: for a module that must not talk over that announcement.
+
+On a new window the tab control starts on tab 1; on the same window again it keeps its tab ([`O:attach`](#o-attach)). `current` and `verticalName` run in the handler of the key or event that announces the control, where they may read ([Where a hook runs](#where-a-hook-runs)); one that raises gives no value.
+
+```luau
+-- A plug-in with two pages of controls, chosen by tabs it draws at the top.
+local tabs = ov:addTabControl({
+  label = "Pages",
+  tabs = { { label = "Main", at = { 40, 12 } }, { label = "Effects", at = { 110, 12 } } },
+})
+ov:addHotspotButton({ label = "Power", at = { 60, 80 }, when = tabs:onTab(1) })
+ov:addHotspotButton({ label = "Reverb", at = { 60, 80 }, when = tabs:onTab(2) })
+```
+
+### Returns {#o-addtabcontrol-returns}
+
+A handle, not the control: `{ control = <the control table>, onTab = <function> }`. The control table, appended to `o.controls`, is `{ kind = "tabcontrol", label, tabs, typeLabel, current, verticalStep, verticalName, hotkeyKeepsFocus, onSelect, when }`, with `label` `""` and `tabs` `{}` when not given. `handle:onTab(n)` answers a new function of no arguments, `true` while tab `n` is current and `false` otherwise.
+
+### Errors {#o-addtabcontrol-errors}
+
+None. It never answers an error value. A tab's hotkey the host refuses, or claims and cannot hold now, is logged, `[keys] '<overlay>': tab '<tab>' hotkey <spec> is not registered (<reason>)` or `… is not held now: <message>`.
+
+**Raises** for a control added after the overlay is bound (`overlay '<label>': adding a control must be called BEFORE binding it — the binding is what starts it`) and for an `opts` that is `nil`. Nothing else is checked at the call. A `verticalStep` that raises says nothing; `onSelect` is guarded and logged, `[overlay] <overlay>: tab onSelect failed: <message>`.
+
+## O\:switchTab(dir) {#o-switchtab}
+
+**Signature:** `O:switchTab(dir: number) -> ()`
+
+Chooses the tab `dir` steps from the current one, wrapping — `-1` the previous, `+1` the next — on the **focused** [tab control](#o-addtabcontrol), and says it, as Left and Right do there. Nothing happens unless the focused control is a tab control with tabs.
+
+```luau
+host.hotkey.register("Alt+PageDown", function() if ov.active then ov:switchTab(1) end end)
+```
+
+### Returns {#o-switchtab-returns}
+
+Nothing.
+
+### Errors {#o-switchtab-errors}
+
+None. It never answers an error value. A tab that cannot be placed now is said, `"<tab> tab is not available now"`, and the tab before it stays.
+
+**Raises** for a `dir` that is not a number, when the focused control is a tab control (Luau's own arithmetic error).
+
+## O\:cycleTab(dir) {#o-cycletab}
+
+**Signature:** `O:cycleTab(dir: number) -> ()`
+
+Chooses the tab `dir` steps from the current one, wrapping, on the overlay's **first** [tab control](#o-addtabcontrol), from anywhere in the overlay, and moves the focus onto the tab control — what Ctrl+Tab and Ctrl+Shift+Tab do. Nothing happens on an overlay without a tab control, or one with no tabs.
+
+```luau
+host.hotkey.register("Ctrl+Alt+T", function() if ov.active then ov:cycleTab(1) end end)
+```
+
+### Returns {#o-cycletab-returns}
+
+Nothing.
+
+### Errors {#o-cycletab-errors}
+
+None. It never answers an error value.
+
+**Raises** for a `dir` that is not a number, on an overlay with a tab control (Luau's own arithmetic error).
+
+## O\:gotoTab(n, keepFocus?) {#o-gototab}
+
+**Signature:** `O:gotoTab(n: number, keepFocus: boolean?) -> ()`
+
+Chooses tab `n` of the overlay's **first** [tab control](#o-addtabcontrol) and says it — what Ctrl+`n` and a tab's own hotkey do. The focus moves onto the tab control unless `keepFocus` is true or the tab control has `hotkeyKeepsFocus`; the tab is chosen and said either way. Nothing happens for an `n` outside `1` to the number of tabs, or on an overlay without a tab control.
+
+```luau
+-- A key of the module's own for the second tab, leaving the focus where it is.
+host.hotkey.register("Ctrl+Alt+2", function() if ov.active then ov:gotoTab(2, true) end end)
+```
+
+### Returns {#o-gototab-returns}
+
+Nothing.
+
+### Errors {#o-gototab-errors}
+
+None. It never answers an error value. A tab that cannot be placed now is said, and the tab before it stays.
+
+**Raises** for an `n` that cannot be compared with numbers (Luau's own error), on an overlay with a tab control.
+
+## O\:stepTabVertical(dir) {#o-steptabvertical}
+
+**Signature:** `O:stepTabVertical(dir: number) -> ()`
+
+One step along the second axis of the overlay's **first** [tab control](#o-addtabcontrol): its `verticalStep(overlay, current, dir)` is called, guarded, and a string it answers is said, interrupting — what Up and Down do while the tab control is focused. Nothing happens without a tab control or without `verticalStep`.
+
+```luau
+host.hotkey.register("Alt+Down", function() if ov.active then ov:stepTabVertical(1) end end)
+```
+
+### Returns {#o-steptabvertical-returns}
+
+Nothing.
+
+### Errors {#o-steptabvertical-errors}
+
+None. It never answers an error value.
+
+It never raises: `verticalStep` is guarded, and one that raises says nothing.
+
 ## O\:focusNext() {#o-focusnext}
 
-Moves focus to the next control (wrapping) and speaks it, moving the mouse onto OCR controls if `hoverToRead` is set. No-op when there are no controls. Returns nothing. On a [pass-through](#o-addpassthrough) stop it steps through the plug-in's own controls instead, as Tab does there, and `focusPrev` back.
+**Signature:** `O:focusNext() -> ()`
+
+Moves focus to the next control (wrapping) and speaks it, moving the mouse onto OCR controls if `hoverToRead` is set. No-op when there are no controls. On a [pass-through](#o-addpassthrough) stop it steps through the plug-in's own controls instead, as Tab does there, and `focusPrev` back.
 
 Tab is already bound to this by the runtime, so a module calls it only to give the ring a second, more natural key.
 
@@ -1042,9 +1723,21 @@ host.hotkey.register("Alt+Right", function()
 end)
 ```
 
+### Returns {#o-focusnext-returns}
+
+Nothing. The control it reaches is said; with no control shown, nothing is.
+
+### Errors {#o-focusnext-errors}
+
+None. It never answers an error value.
+
+It never raises for a hook that raises: every `when` and `text` it asks runs guarded. It raises only for a `when` that yields inside the scan for the next control, `a hook asked on every scan yielded; it must return at once` ([Where a hook runs](#where-a-hook-runs)).
+
 ## O\:focusPrev() {#o-focusprev}
 
-Moves focus to the previous control (wrapping) and speaks it. No-op when empty. Returns nothing. On a [pass-through](#o-addpassthrough) stop whose walk has gone into the plug-in it steps one element back, as Shift+Tab does there — and on the element the walk went in on, back out onto the stop.
+**Signature:** `O:focusPrev() -> ()`
+
+Moves focus to the previous control (wrapping) and speaks it. No-op when empty. On a [pass-through](#o-addpassthrough) stop whose walk has gone into the plug-in it steps one element back, as Shift+Tab does there — and on the element the walk went in on, back out onto the stop.
 
 ```luau
 -- The mirror of the above, and worth having for the wrap: with nothing focused yet this
@@ -1055,9 +1748,19 @@ host.hotkey.register("Alt+Left", function()
 end)
 ```
 
+### Returns {#o-focusprev-returns}
+
+Nothing. The control it reaches is said.
+
+### Errors {#o-focusprev-errors}
+
+None. It never answers an error value.
+
+**Raises** only for a `when` that yields inside the scan, as `focusNext` does.
+
 ## O\:addPassThrough(opts) {#o-addpassthrough}
 
-**Signature:** `O:addPassThrough(opts: { label: string?, when: ((overlay) -> boolean)?, readUnnamed: boolean? }?) -> Control` · `O:enableUiaPassThrough(opts?) -> Overlay`
+**Signature:** `O:addPassThrough(opts: { label: string?, when: ((overlay) -> boolean)?, readUnnamed: boolean? }?) -> Control`
 
 Appends a stop that hands Tab to the plug-in's own focusable elements, for a plug-in window that does not move focus on Tab by itself. In Kontakt standalone it is the only way into Kontakt's native controls, and Kontakt's standalone overlay ends with it, as "Kontakt controls". Like every control it is added before the overlay binds; afterwards it raises.
 
@@ -1065,7 +1768,7 @@ Appends a stop that hands Tab to the plug-in's own focusable elements, for a plu
 - `when` — as for every control: the stop is in the ring only while it returns exactly `true`.
 - `readUnnamed` — read a stop that has no name off the screen, below. On unless it is `false`; `nil` and anything else leave it on.
 
-Returns the control table, `{ kind = "passthrough", label, when, readUnnamed }`. `O:enableUiaPassThrough(opts)` is the old spelling: it adds the same control with the same `opts`, and returns the overlay.
+[`O:enableUiaPassThrough(opts)`](#o-enableuiapassthrough) is the old spelling.
 
 **Tab and Shift+Tab.** Arriving on the stop says `"<label>, Tab to step through them"`. Tab from there moves the plug-in's own keyboard focus one element on with [`host.element.focusStep`](./element.md#host-element-focusstep), and the screen reader announces the element from the focus event; each further Tab moves on one element, and Shift+Tab one back. Once every element has been visited, Tab goes on to the overlay's next control without touching the plug-in's focus; Shift+Tab on the element Tab went in on comes back out onto the stop; Shift+Tab on the stop itself goes back through the overlay's controls, never into the plug-in. Arriving on the stop again starts the walk afresh. How a walk is counted — in steps, against a ring that may change size as it is walked — is under [`host.element.focusStep`](./element.md#host-element-focusstep). While the stop has the focus, Space and Return are not the overlay's: they reach the plug-in's element, which is where a check box is ticked or a list opened.
 
@@ -1099,6 +1802,16 @@ ov:addPassThrough({ label = "Kontakt controls" })
 ov:addPassThrough({ label = "Synth controls", readUnnamed = false })
 ```
 
+### Returns {#o-addpassthrough-returns}
+
+The control table, appended to `o.controls`: `{ kind = "passthrough", label, when, readUnnamed }`, `label` `"Plugin controls"` when not given and `readUnnamed` a boolean.
+
+### Errors {#o-addpassthrough-errors}
+
+None. It never answers an error value. A step the plug-in did not take, and an unnamed stop that could not be read, are logged (above); nothing is handed to the module.
+
+**Raises** for a control added after the overlay is bound: `overlay '<label>': adding a control must be called BEFORE binding it — the binding is what starts it`. `opts` may be `nil`.
+
 ### Windows {#o-addpassthrough-windows}
 
 `bounds` is the element's UI Automation rectangle, read once, right after the focus has landed: a scroll the plug-in animates after that is not in it (see [`host.element.focusStep`](./element.md#host-element-focusstep)). The capture is a fixed ~17 ms screen frame through the standard path, and the recognition 4–6 ms for a small read-out, tens to hundreds of milliseconds for a large region (see [`host.ocr.recognize`](./ocr.md#host-ocr-recognize)).
@@ -1111,9 +1824,31 @@ With **Speak through the screen reader** ticked in the Application settings tab,
 
 The line goes to the platform's own voice unless **Speak through VoiceOver** is ticked in the Application settings tab (see [`host.speech.output`](./speech.md#host-speech-output)): through the platform's own voice it is a second voice beside VoiceOver, and can overlap VoiceOver's announcement of the element rather than follow it; through VoiceOver, whether it waits behind that announcement is VoiceOver's decision.
 
+## O\:enableUiaPassThrough(opts?) {#o-enableuiapassthrough}
+
+**Signature:** `O:enableUiaPassThrough(opts: { label: string?, when: ((overlay) -> boolean)?, readUnnamed: boolean? }?) -> Overlay`
+
+The old spelling of [`O:addPassThrough`](#o-addpassthrough), from when the pass-through was a mode: it adds the same control with the same `opts`. New code calls `addPassThrough`.
+
+```luau
+ov:enableUiaPassThrough({ label = "Kontakt controls" })   -- the same as ov:addPassThrough{…}
+```
+
+### Returns {#o-enableuiapassthrough-returns}
+
+The overlay itself, not the control.
+
+### Errors {#o-enableuiapassthrough-errors}
+
+None. It never answers an error value.
+
+**Raises** for a call after the overlay is bound: `overlay '<label>': enableUiaPassThrough must be called BEFORE binding it — the binding is what starts it`.
+
 ## O\:activate(index) {#o-activate}
 
-Activates the control at `index` (defaults to the focused control). `index: number?`. Behaviour by kind: `hotspot` clicks `at` and speaks `"label, activated"` — and, with `menuItem`, chooses that item once a menu test sees the menu (see [`O:chooseMenuItem`](#o-choosemenuitem)); `custom` calls `onActivate(self)`; `ocr` reads the region again, off the event loop, says it, and then clicks the region centre, unless the overlay or the user has moved on by then (see [`O:addOCRButton`](#o-addocrbutton)); `gtoggle` clicks the region centre and re-reads state after ~150 ms; `static` says the control again, interrupting, as its hotkey does (see [`O:addStaticText`](#o-addstatictext)). A control that cannot be placed now (a [scale](#o-scale) with no factor, a region function with no answer) clicks nothing and says so: `"<label> is not available now"`, or for an OCR control the `"cannot be read now"` of its announcement. No-op for a missing control. Returns nothing.
+**Signature:** `O:activate(index: number?) -> ()`
+
+Activates the control at `index` (defaults to the focused control). Behaviour by kind: `hotspot` clicks `at` and speaks `"label, activated"` — and, with `menuItem`, chooses that item once a menu test sees the menu (see [`O:chooseMenuItem`](#o-choosemenuitem)); `custom` calls `onActivate(self)`; `ocr` reads the region again, off the event loop, says it, and then clicks the region centre, unless the overlay or the user has moved on by then (see [`O:addOCRButton`](#o-addocrbutton)); `gtoggle` clicks the region centre and re-reads state after ~150 ms; `static` says the control again, interrupting, as its hotkey does (see [`O:addStaticText`](#o-addstatictext)); `ocredit` reads and clicks as `ocr` does ([`O:addOCREdit`](#o-addocredit)); `gbutton` searches, then clicks or drags where it was found ([`O:addGraphicalButton`](#o-addgraphicalbutton)); `hotspottoggle` clicks its point and says its state once it has changed ([`O:addHotspotToggle`](#o-addhotspottoggle)); `stepper` runs its `onActivate`, and says the value it then reads. A slider, a tab control and a pass-through stop do nothing here. A control that cannot be placed now (a [scale](#o-scale) with no factor, a region function with no answer) clicks nothing and says so: `"<label> is not available now"`, or for an OCR control the `"cannot be read now"` of its announcement. A hidden control asked by its `index` does nothing; the focused one hidden since acts on the visible control that shares its hotkey, or says `"<label> is not available now"` ([`O:group`](#o-group)). No-op for a missing control.
 
 ```luau
 -- Space and Return are bound to this by the runtime, so a module needs it only to press a
@@ -1127,11 +1862,23 @@ end)
 -- ov:activate(1)
 ```
 
+### Returns {#o-activate-returns}
+
+Nothing. What the press did is said, and what it could not do is said and logged.
+
+### Errors {#o-activate-errors}
+
+None. It never answers an error value.
+
+**Raises** only what a control's `at` function raises — called unguarded, as `O:frame`'s is — and for a `when` that yields inside the scan for the control that shares a hotkey. A control's `onActivate`, `text` and `when` run guarded: one that raises is logged and said (`"<label> could not be used"` for `onActivate`).
+
 ## O\:attach(matcher, opts) {#o-attach}
+
+**Signature:** `O:attach(matcher, opts: { hoverToRead: boolean?, menus: {MenuTest}?, slot: string?, specificity: number?, pollMatch: number?, pollWhen: ((overlay) -> boolean)? }?) -> ()`
 
 Binds the overlay as a **standalone** context: active while a window matching `matcher` is the foreground/active window — or while the overlay holds its place over its own menu, a window of the same application in front after one of its controls opened it, in which one of its tests sees a menu (see [`O.menuTests`](#o-menutests)) — with coordinates relative to that window's client area. `matcher` is a window matcher passed to `host.window.test`; `opts: { hoverToRead: boolean?, menus: {MenuTest}?, slot: string?, specificity: number?, pollMatch: number?, pollWhen: ((overlay) -> boolean)? }?` — `menus` is described under [`O.menuTests`](#o-menutests), and `slot`, `specificity`, `pollMatch` and `pollWhen` as for [`attachEmbedded`](#o-attachembedded). The overlay is first evaluated on the module's next turn after it is bound, not inside the call ([Where a hook runs](#where-a-hook-runs)).
 
-While active, the overlay captures and suppresses the navigation keys, scoped to its own window (so `Alt+Tab` and menus pass through natively): `Tab` / `Shift+Tab` move between controls, `Return` and `Space` activate the focused control, and — when the overlay has a tab control — `Left`/`Right`, `Ctrl+Tab`/`Ctrl+Shift+Tab` and `Ctrl+<n>` drive it (the first two are Control+Tab on a Mac, see [below](#o-attach-macos)). `Space` is released while an editable field (an `ocredit` control) is focused, so a literal space can be typed into it. On activation the overlay starts at its first control (and any tab control at its first tab) when a **genuinely new** window opened, but resumes the last-focused control when the *same* still-open window merely regained the foreground (`Alt+Tab` out and back); the two are told apart by the window's identity (its HWND). `hoverToRead` (default `false`) moves the mouse onto an OCR control on focus (some UIs only reveal values on hover). Registers the foreground/focus trigger once. Returns nothing.
+While active, the overlay captures and suppresses the navigation keys, scoped to its own window (so `Alt+Tab` and menus pass through natively): `Tab` / `Shift+Tab` move between controls, `Return` and `Space` activate the focused control, and — when the overlay has a tab control — `Left`/`Right`, `Ctrl+Tab`/`Ctrl+Shift+Tab` and `Ctrl+<n>` drive it (the first two are Control+Tab on a Mac, see [below](#o-attach-macos)). `Space` is released while an editable field (an `ocredit` control) is focused, so a literal space can be typed into it. On activation the overlay starts at its first control (and any tab control at its first tab) when a **genuinely new** window opened, but resumes the last-focused control when the *same* still-open window merely regained the foreground (`Alt+Tab` out and back); the two are told apart by the window's identity (its HWND). `hoverToRead` (default `false`) moves the mouse onto an OCR control on focus (some UIs only reveal values on hover). Registers the foreground/focus trigger once.
 
 ```luau
 -- Melodyne's standalone window, by executable and window class.
@@ -1149,6 +1896,16 @@ ov:attach({
 -- settings:attach(on_ear, { menus = { O.menuTests.nativePopup, O.menuTests.newWindow },
 --                           slot = ON_EAR_SLOT, specificity = O.layer.dialog, pollMatch = 500 })
 ```
+
+### Returns {#o-attach-returns}
+
+Nothing. The overlay is bound: what must be declared before binding raises from here on. Whatever the declaration gets wrong that does not raise — a control with no point, a hotkey the host refuses, a `specificity` without a `slot`, a relative image path — is reported now, one line each, `[overlay] <overlay>: <finding>`.
+
+### Errors {#o-attach-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the options, as the overlay is bound: `menus = true` (``overlay '<label>': `menus = true` no longer says how a menu is seen — …``, naming the building blocks), a `menus` that is not a list of tests or has a gap in it, a test's `before`, `pressed`, `forget` or `chained` that is not a function ([`O.menuTests`](#o-menutests)); a `pollWhen` that is not a function (``overlay '<label>': `pollWhen` must be a function(overlay) -> boolean, got <type>``); and, for an overlay with a [page](#o-addpage), its page key being the hotkey of one of its controls or tabs, or a second page in its group.
 
 ### Windows {#o-attach-windows}
 
@@ -1180,7 +1937,7 @@ Binds the overlay as an **embedded** context: active while keyboard focus is ins
 
 How long a verdict is kept is per platform — per control on Windows, per stay in the panel on a Mac — see the sections below. `cacheIdentity = false` keeps nothing: `identify` is called at every evaluation, for a verdict that depends on more than the control (Kontakt's: "is a Komplete Kontrol wrapped around it?"), so such an `identify` has to be cheap — and it must answer at once: it runs in the runtime's own coroutine, as a `when` does ([Where a hook runs](#where-a-hook-runs)), and so does the `identify` of a `control` function's control where the DAW gives no panel, which is asked at every evaluation too. One that raises is "no" for that evaluation, logged once per control: `… identify raised: <message> — taken as no this time — '<overlay>'`. `present(control)`, when given, is asked at every evaluation as well and never kept — for a condition that changes while the same control stays focused — in the runtime's own coroutine, so it must answer at once too. One that raises does not match, and is logged once per binding as `attachEmbedded: '<overlay>': its binding's present raised: <message> — taken as not matching`; the evaluation that asked it goes on to its end, so an overlay in front leaves it.
 
-`opts: { hoverToRead?, menus?, slot: string?, specificity: number?, pollMatch: number?, pollWhen: ((overlay) -> boolean)? }` — `hoverToRead`, `menus` and the navigation / focus-reset behaviour are as in `attach`. With `slot` the overlay joins the host **arbiter** for that slot at `specificity` (a base and the overlays inheriting it pass the same slot; the most-specific *matching* one is active — see `host.arbiter`); `pollMatch` (ms) additionally re-checks the match on a recurring timer, for matches that change with no window event (a library landmark appearing inside an already-focused plugin). `pollWhen`, with `pollMatch`, is asked on each of its ticks, with the overlay, and the match is re-checked only when it answers `true`: for a match that can change without a window event only while the module expects it to — VPS Avenger's warning box, looked for only after a Save or Initialize of its own. Every other tick then costs one call of it rather than a context match (the focus chain is read, and on a Mac in Logic that is the slow accessibility). One that raises is logged once, `[poll] '<overlay>': pollWhen failed: …`, and the match is re-checked as if it were not there; anything but a function raises when the overlay is bound. The poll's interval and its one timer per interval are unchanged by it. Returns nothing. The overlay is evaluated on the module's next turn after it is bound, like any binding ([Where a hook runs](#where-a-hook-runs)) — and an overlay that is already bound (to its standalone window, say) is evaluated again after this call, once, so a plug-in already in front is recognised without waiting for a window or focus event, which on a Mac may never come.
+`opts: { hoverToRead?, menus?, slot: string?, specificity: number?, pollMatch: number?, pollWhen: ((overlay) -> boolean)? }` — `hoverToRead`, `menus` and the navigation / focus-reset behaviour are as in `attach`. With `slot` the overlay joins the host **arbiter** for that slot at `specificity` (a base and the overlays inheriting it pass the same slot; the most-specific *matching* one is active — see `host.arbiter`); `pollMatch` (ms) additionally re-checks the match on a recurring timer, for matches that change with no window event (a library landmark appearing inside an already-focused plugin). `pollWhen`, with `pollMatch`, is asked on each of its ticks, with the overlay, and the match is re-checked only when it answers `true`: for a match that can change without a window event only while the module expects it to — VPS Avenger's warning box, looked for only after a Save or Initialize of its own. Every other tick then costs one call of it rather than a context match (the focus chain is read, and on a Mac in Logic that is the slow accessibility). One that raises is logged once, `[poll] '<overlay>': pollWhen failed: …`, and the match is re-checked as if it were not there; anything but a function raises when the overlay is bound. The poll's interval and its one timer per interval are unchanged by it. The overlay is evaluated on the module's next turn after it is bound, like any binding ([Where a hook runs](#where-a-hook-runs)) — and an overlay that is already bound (to its standalone window, say) is evaluated again after this call, once, so a plug-in already in front is recognised without waiting for a window or focus event, which on a Mac may never come.
 
 The control is resolved once per [`host.epoch()`](timer.md#host-epoch) per `spec` table, shared by every overlay bound to that table, so the controls, the focus chain and `identify` are asked once per event however many overlays and coordinates want the answer; on a panel the verdict is kept per `spec` table as well, so an overlay that asks while another bound to the same table is outranked does not ask again.
 
@@ -1222,6 +1979,16 @@ ov:attachEmbedded({
   end,
 }, { menus = { O.menuTests.nativePopup, O.menuTests.newWindow } })
 ```
+
+### Returns {#o-attachembedded-returns}
+
+Nothing. The overlay is bound, as by [`O:attach`](#o-attach-returns), and the declaration's findings are reported now, together with the line that says a binding is inactive on this platform when it is.
+
+### Errors {#o-attachembedded-errors}
+
+None. It never answers an error value. A binding that cannot apply on this platform is no error: it says so once, `[<label>] embedded binding is inactive on <os>: <why>`, and asks nothing afterwards.
+
+**Raises** for a mistake in the options, as [`O:attach`](#o-attach-errors) does. `spec` is not checked at the call. An `identify` and a `present` that raise are guarded and logged (above); a `control` function is not guarded, and what it raises comes out of whatever resolved the origin then (see the top of this page).
 
 ### Windows {#o-attachembedded-windows}
 
@@ -1291,7 +2058,7 @@ A test answers one question — *is a menu open over this overlay's plug-in righ
 - `before(o, press)` — called at a press **before it counts**, in the press's handler, where a read may wait ([Where a hook runs](#where-a-hook-runs)): for a test that needs a picture of the moment before the click (`drawn`). What it returns is handed to `pressed` as its third argument. Since a read waited, the press is checked afterwards as after a calibrating run's menu shot: an overlay that is no longer where the press was clicks nothing (`not_in_front` or `moved_on`), and an opener's point that is no longer its own is refused (`outside` or `covered`) — see [`O:chooseMenuItem`](#o-choosemenuitem), step 2. A press made where a read cannot wait — in an `onDone`, which runs in the menu tick's coroutine — gets a `before` whose read raises there; `drawn` catches that and arms nothing.
 - `pressed(o, press, looked)` — called when a control with `opensMenu` is activated, before it acts: for a test that compares against that moment. `press` is `{ label, x?, y?, button? }` — the control's or the choice's label, and for an opener with a point (a hotspot, [`O:chooseMenuItem`](#o-choosemenuitem)) that point on screen and its button — and `looked` what the test's own `before` returned.
 - `forget(o)` — called when the user presses one of the overlay's own keys (a navigation key or a hotkey) while no menu counts as open — so the last press opened nothing that took the keys; while an item waits for its menu ([`O:chooseMenuItem`](#o-choosemenuitem)), once the key has run, and not for a second press of the same control — when the overlay leaves the front, and when the plug-in has the keyboard again after the overlay held its place over a menu that was a window in front (see below): a comparison against that press ends there.
-- `chained(o, press, menu, done)` — called when the item this test placed opens a **submenu** ([`O:chooseMenuItem`](#o-choosemenuitem)'s `submenu`, step 7), **before** the item is clicked: for a test that has to get ready to see a popup that opens from a menu it already sees. `press` is `{ label, x, y, button = "left", parent }` — the item's point on screen, and `parent` the menu's rectangle as this test answered it — and `menu` that answer itself. It runs where the test's answer runs — in the menu tick's coroutine for an answer given at once, in the menu tick's work after a callback otherwise — and **must not wait**: it calls `done(true)` once it is ready, at once or from a callback, or `done(false, why)` when it cannot follow a submenu, and the item is then not clicked. A second `done` is logged and ignored; a hook that raises or yields counts as `done(false, <its error>)`; one that has not answered when the press's 8 seconds are over ends the choice as `unfollowed`, and its `done` after that clicks nothing. `newWindow` and `drawn` have one (see [Following a submenu](#o-menutests-submenu)); a test without one is not told, and its next answer that is not the menu is taken for the submenu.
+- `chained(o, press, menu, done)` — called when the item this test placed opens a **submenu** ([`O:chooseMenuItem`](#o-choosemenuitem)'s `submenu`, step 7), **before** the item is clicked: for a test that has to get ready to see a popup that opens from a menu it already sees. `press` is `{ label, x, y, button = "left", parent }` — the item's point on screen, and `parent` the menu's rectangle as this test answered it — and `menu` that answer itself. It runs where the test's answer runs — in the menu tick's coroutine for an answer given at once, in the menu tick's work after a callback otherwise — and **must not wait**: it calls `done(true)` once it is ready, at once or from a callback, or `done(false, why)` when it cannot follow a submenu, and the item is then not clicked. A second `done` is logged and ignored; a hook that raises or yields counts as `done(false, <its error>)`; one that has not answered when the press's 8 seconds are over ends the choice, and `onDone` hears `not_ready` — `closed` if the menu closed meanwhile; its `done` after that clicks nothing. `newWindow` and `drawn` have one (see [Following a submenu](#o-menutests-submenu)); a test without one is not told, and its next answer that is not the menu is taken for the submenu.
 
 `opensMenu = true` on a control ([`addHotspotButton`](#o-addhotspotbutton), [`addCustomButton`](#o-addcustombutton), [`addOCRButton`](#o-addocrbutton), `addGraphicalButton`) says that activating it puts a menu on screen. It makes the tests run on every tick for a while, calls their `pressed`, and in a calibrating run takes the [menu shots](#o-calibrating). It never counts a menu as open by itself.
 
@@ -1317,7 +2084,7 @@ A test answers one question — *is a menu open over this overlay's plug-in righ
 
 No timer decides any of it: the window in front, the press, the tests' answers and the window that gets the keyboard do. With nothing in front — the moment between a popup closing and its owner coming back — a hold over a menu the tests still see stands until a window is. Only an overlay with menu tests holds its place.
 
-**While away.** An overlay whose group is [away](#o-away) — in front quietly during a trip of its page — runs its tests and holds its place over its menu as above, but holds no keys before, during or after: when the hold ends, nothing is taken back, and a menu closing hands nothing back either. Its keys come back when away ends. A trip waits for such a menu with [`trip:afterMenu`](#o-inplugin).
+**While away.** An overlay whose group is [away](#o-away) — in front quietly during a trip of its page — runs its tests and holds its place over its menu as above, but holds no keys before, during or after: when the hold ends, nothing is taken back, and a menu closing hands nothing back either. Its keys come back when away ends. A trip waits for such a menu with [`trip:afterMenu`](#trip-aftermenu).
 
 `menus = true` **raises** when the overlay is bound, with a message naming the building blocks. So does anything that is not a list of tests, a list with a gap in it (a `nil` before another entry, which is what a misspelt name leaves), and a `before`, `pressed`, `forget` or `chained` that is not a function; reading a name that `O.menuTests` does not have raises as well. `menus = false`, `{}` or no `menus` means no tests: nothing runs, and a control declared with `opensMenu` on such an overlay is reported when the overlay binds.
 
@@ -1442,52 +2209,20 @@ The method is for a module's own code — a stepper whose step is a choice from 
 What happens, in order:
 
 1. **The opener** is placed like a hotspot's `at` — origin, frame, [scale](#o-scale), `fromRight`, `rawOrigin` — and checked like any hotspot's click (inside the origin, nothing else drawn there). One that cannot be placed — an `at` function that answers `nil`, or no factor — is **said**, `"<label> is not available now"`, unlike a hotspot's silent `nil`; one that is refused is said as the check says it. Either way nothing more happens: the method answers `false` and an error value — `unplaced`, or `outside` or `covered` by the check that refused — and `onDone(overlay, false, err)` hears the same one.
-2. **The press.** Only then does it count as the press of a control with `opensMenu`: the tests run on every tick from here, `newWindow` takes the window list it compares against, a test's `before` reads what it needs (`drawn`'s picture of where the popup will be), and in a calibrating run the [menu shots](#o-calibrating) are taken; those reads are waited for before the click: an overlay that is no longer where the press was by then clicks nothing — the method answers `false, err` with [`O:stillHere`](#o-here)'s code and message (`not_in_front`, `moved_on`), and `onDone` hears it — and the opener is checked again (refused: `outside` or `covered`). An item the overlay was still waiting to choose for **another** control is dropped (logged). The opener is clicked with `button` (left unless given), and the method returns `true`; the item is chosen later.
-3. **The menu.** Each answer of a test that sees a menu is looked at, as it arrives, on the tick it arrives or in a test's callback. One that says where the menu is — a table with numbers `x`, `y`, `w`, `h`, as `newWindow` answers — places the item. A table `menuItem` is the item's offset from the menu's top-left corner, a **distance**: scaled at the factor the opener was placed with (the popup is drawn at the zoom it opened at, and a factor read off the plug-in's screen may not be readable while the popup covers it), never framed. A `menuItem` function is called with the overlay, that table and that factor (`nil` in an overlay without a scale), and answers the offset in **screen pixels** — it works from the menu's rectangle, which is in screen pixels, so its answer is not scaled again, as a `dragBy` function's is not; `false` says "this window is not my menu" (a tooltip that appeared first), and the next answer is looked at; `nil` is an item that cannot be placed. An answer that sees a menu without saying where — `nativePopup`, the accessibility tests — places nothing, and is logged once; another test on the list may still say where, and while an item waits every test on the list is asked, a cheap one that sees the menu holding back none.
+2. **The press.** Only then does it count as the press of a control with `opensMenu`: the tests run on every tick from here, `newWindow` takes the window list it compares against, a test's `before` reads what it needs (`drawn`'s picture of where the popup will be), and in a calibrating run the [menu shots](#o-calibrating) are taken; those reads are waited for before the click: an overlay that is no longer where the press was by then clicks nothing — the method answers `false, err` with [`O:stillHere`](#o-stillhere)'s code and message (`not_in_front`, `moved_on`), and `onDone` hears it — and the opener is checked again (refused: `outside` or `covered`). An item the overlay was still waiting to choose for **another** control is dropped (logged). The opener is clicked with `button` (left unless given), and the method returns `true`; the item is chosen later.
+3. **The menu.** Each answer of a test that sees a menu is looked at, as it arrives, on the tick it arrives or in a test's callback. One that says where the menu is — a table with numbers `x`, `y`, `w`, `h`, as `newWindow` answers — places the item. A table `menuItem` is the item's offset from the menu's top-left corner, a **distance**: scaled at the factor the opener was placed with (the popup is drawn at the zoom it opened at, and a factor read off the plug-in's screen may not be readable while the popup covers it), never framed. A `menuItem` function is called with the overlay, that table and that factor (`nil` in an overlay without a scale), and answers the offset in **screen pixels** — it works from the menu's rectangle, which is in screen pixels, so its answer is not scaled again, as a `dragBy` function's is not; `false` says "this window is not my menu" (a tooltip that appeared first), and the next answer is looked at — a second value beside it, a few words or an error value, only goes into the log line that says so, once per window; `nil` is an item that cannot be placed, and a value beside it is not read. An answer that sees a menu without saying where — `nativePopup`, the accessibility tests — places nothing, and is logged once; another test on the list may still say where, and while an item waits every test on the list is asked, a cheap one that sees the menu holding back none.
 4. **The checks.** The item must lie inside the menu's rectangle; if it does not, it is not clicked, the log says where it fell, and the next answer is looked at — a later answer can be the menu itself where this one was something else that appeared. Then what is drawn there: a menu that is a window is asked [`host.window.ownsPoint`](window.md#host-window-ownspoint) about *itself* — by its `host.window` id (`window`, which `newWindow` gives on Windows), or by its `id` in the window list's numbering with `listed = true` (macOS) — and a `false` refuses the click; a menu with no `kind` — a rectangle a module's own test answered, for a menu painted inside the plug-in — gets the check every click of the overlay gets.
 5. **The click**, at once, in that same pass: no wait of any kind stands between the menu being seen and the item being clicked.
 6. **Taken, or clicked again.** A menu does not always take a click that comes right after it opened: JUCE's popup ignores a mouse-up in its first moments (a quarter of a second in its source as it was read for this, not measured against any JUCE a plug-in here ships), and the first tick that lists a new window can come sooner. So the item keeps waiting after its click. An answer **of the test that placed the item** to a question asked on a **later** tick that still shows the same menu — the same window, at the same place and size — is a click the menu did not take: the item is checked again and clicked again, at most `retries` more times (default 3; a count of answers, not a time). An item clicked on an answer that came from a callback — between two ticks, as `drawn`'s do — counts as clicked on the next tick, so the reading asked right after the click, of a popup the plug-in has not closed yet, never clicks it again. Another test's answers say nothing about the click. The menu closing — for the menu tests, two answers in a row that do not see it — an answer that shows another window in its place, or the overlay leaving the front or moving on after the click, is the choice **taken**: `onDone(overlay, true)`. `retries = 0` is for a menu whose item keeps it open (a tick box in a menu), where a second click would be a second choice: chosen at the click, and not followed. The menu then closes the way any menu does for the menu tests, and the keys come back to the overlay with it.
 7. **A submenu** (`submenu = { menuItem }`): the item is one that opens another popup — VPS Avenger's Copy Sample to, whose twelve slots are a submenu — and the choice is made in that popup.
    - The item is placed and checked as in steps 3 and 4, and **not clicked at once**: the test that placed it is told first through its `chained` hook ([Following a submenu](#o-menutests-submenu)), and the item is clicked once that answers `done(true)` — after the checks a click made after a wait gets: the overlay still where the press was, nothing drawn over the item. While the hook is getting ready, the tests' answers count for nothing. A hook that answers `done(false, why)`, raises or yields places nothing: `unplaced`, the item not clicked. A test with no hook goes on at once.
    - The item is clicked **once**. It counts as **taken** when the test that placed it answers a **new popup**: a rectangle that is not the menu's own nor inside it (each edge within two pixels). Its answers of the menu itself are waited through, and the item is **never clicked again**: a toolkit that ignored the click opens its submenu on the item's hover as well (JUCE does), and a second click while the submenu is drawing could close it and open it again under a reading. So the item has no retries; the bound ends it.
-   - The bound starts again at the item's click: no new popup within 8 seconds of it, or the menu closing first, is `no submenu`; new popups that the submenu's item could not be chosen in — `submenu.menuItem` answered `false` for each, or the item fell outside each — are `unfit submenu`.
+   - The bound starts again at the item's click: no new popup within 8 seconds of it, or the menu closing first, is `no_submenu`; new popups that the submenu's item could not be chosen in — `submenu.menuItem` answered `false` for each, or the item fell outside each — are `unfit_submenu`.
    - The submenu's item is then placed by `submenu.menuItem` in the new popup — a table at the opener's factor, a function handed the popup and that factor, as in step 3 — checked, clicked and followed as in steps 4 to 6, `retries` counting the submenu item's clicks. Place it from the **submenu's own corner**, as a table does, not from the item that opened it: a toolkit puts a submenu where it fits, as it does a menu. JUCE puts it beside its item with its top at the item's top when the item lies in the upper half of the area the menu may use — the plug-in, for a popup painted inside it, otherwise the display it is on — but with its **bottom** at the item's bottom in the lower half, so that it opens upward, and pushes it inside that area at its edges (`calculateWindowPos` in `juce_PopupMenu.cpp`, read in its source). A row counted from the item is right only in the first case. The submenu closing and **its menu left open** — the test that placed the item answering the menu alone, on a tick after the submenu's item was clicked — is the click **untaken**: a toolkit closes a menu and its submenus together on a choice (JUCE's `dismissMenu` walks up to the first menu), so a menu left means the click chose nothing.
 
 A second call for the **same** `label` while its item is still waiting for its menu — a double Return, a held arrow on a stepper — clicks nothing: `"… pressed again while its menu is still being waited for — the opener is not clicked again; the first press stands"` in the log, `false, err` from the second call, `busy`, and `onDone(overlay, false, err)` for it. The first press is not disturbed: one of the overlay's own keys that is such a repeat does not count as the user moving on either.
 
-Nothing more is clicked, the item is dropped, `onDone(overlay, false, err)` is called with an error value, and the log says `[menu item] '<overlay>': '<label>' not chosen — <its message>`:
-
-| When | Code | Said | Message |
-| --- | --- | --- | --- |
-| no test saw a menu within 8 seconds of the press — the time the tests run on every tick after a press, a bound on how long a press waits for its menu, not a guess that it is up | `no_menu` | `"<label>: no menu was seen, nothing was chosen"` | `no menu test saw a menu within 8000 ms of the press` |
-| the menu was seen only by tests that do not say where, by then or when it closes | `no_menu`; `closed` at its close | `"<label>: the menu does not say where it is, nothing was chosen"` | `test '<name>' sees a menu but does not say where it is, and no test that does saw it` |
-| the `menuItem` function took no window seen for its menu, by then or when it closes | `no_menu`; `closed` at its close | `"<label>: no menu it can be chosen in was seen, nothing was chosen"` | `its menuItem function took no window seen for its menu (the last at …)` |
-| the item fell outside every menu seen, by then or when it closes | `no_menu`; `closed` at its close | `"<label> is not where it should be"` | `the item, at (x,y) of x,y wxh, is outside the menu that was seen` |
-| the menu closed before any of that | `closed` | `"<label>: the menu closed before anything was chosen"` | `the menu closed before a test placed the item` |
-| the item cannot be placed: `menuItem` (or `submenu.menuItem`) raised or answered `nil` or no `{dx, dy}`, or a `chained` hook could not follow (`test '<name>' cannot follow its submenu: <why>`) | `unplaced` | `"<label> is not available now"` | `the item cannot be placed now: <why>` |
-| another window is drawn over the item, at its click or a retry | `covered` | `"something else is covering <label>"` | `(x,y) is inside the menu's window id …, but another window is drawn there` (Windows), `(x,y) is inside the menu's window … of the window list, but another window is drawn there` (macOS) |
-| a menu drawn inside the plug-in, and the overlay's own check refused the item | `outside` or `covered`, by the check that refused | what that check says | the check's own (step 1, below); logged `refused, and said` |
-| the menu was still there after the last retry | `refused` | `"<label>: the menu did not take the choice"` | `the menu was still there after <n> click(s) on the item at (x,y)` |
-| a submenu's menu answered alone after the submenu's item was clicked (step 7) | `refused` | `"<label>: the menu did not take the choice"` | `the submenu has closed and its parent menu is still there after <n> click(s) on the item at (x,y)` |
-| no new popup within 8 seconds of the click on an item with a `submenu`, or the menu closed first (step 7) | `no_submenu` | `"<label>: its submenu did not open, nothing was chosen in it"` | `no submenu was seen within 8000 ms of the item's click`, `the menu closed after the item's click, and no submenu was seen` |
-| a new popup was seen after that click, but `submenu.menuItem` answered `false` for every one, by then or when the menu closes (step 7) | `unfit_submenu` | `"<label>: no submenu it can be chosen in was seen, nothing was chosen in it"` | `its submenu's menuItem function took no popup seen after the item's click (the last at …)` |
-| a new popup was seen after that click, but the submenu's item fell outside every one, by then or when the menu closes (step 7) | `unfit_submenu` | `"<label> is not where it should be in its submenu, nothing was chosen in it"` | `the submenu's item, at (x,y) of x,y wxh, is outside the submenu that was seen` |
-| the test that placed an item with a `submenu` was still getting ready (`chained`) at the bound | `not_ready` | `"<label>: its submenu cannot be followed now, nothing was chosen"` | `the bound came while its test was getting ready to follow its submenu; nothing was clicked in it` |
-| the menu closed while that test was getting ready | `closed` | `"<label>: the menu closed before anything was chosen"` | `the menu closed while its test was getting ready to follow its submenu; nothing was clicked in it` |
-| one of the overlay's own keys arrived with no menu open, the overlay left the front, another control's press came, or the overlay is on another window by the time the menu is seen or the 8 seconds are over | `moved_on` | nothing: the user moved on, and the key says what it does | `one of the overlay's own keys came first, with no menu open`, `the overlay left the front first`, `another press came first`, `the overlay is on another window now` |
-
-**At the call itself** the method answers `false` and an error value, and `onDone(overlay, false, err)` hears the same one:
-
-| When | Code | Said | Message |
-| --- | --- | --- | --- |
-| the overlay is not in front | `not_in_front` | nothing | `the overlay is not in front` |
-| a repeat of the same `label` while its item is awaited (above) | `busy` | nothing | `pressed again while its menu is still being waited for — the opener is not clicked again; the first press stands` |
-| the opener cannot be placed (step 1) | `unplaced` | `"<label> is not available now"` | `'<label>' cannot be placed now — <why>; nothing clicked` |
-| the opener lies outside the origin's window (step 1, or again after a picture before the press) | `outside` | `"<label> is not where it should be"` | `'<label>' resolves to (x,y), outside its origin's window (x,y) wxh — not clicking` |
-| another window is drawn over the opener (likewise) | `covered` | `"something else is covering <label>"` | `'<label>' at (x,y) is inside our window's frame but another window is drawn there — not clicking` |
-| the overlay is no longer where the press was once a picture before the press is in (step 2) | `not_in_front`, `moved_on` | nothing | `the overlay is no longer active`, `the overlay left the front and came back since`, `the overlay is on another window now` |
-
-The method **raises** at the call for a `spec` that is not a table or has no `at` of `{x, y}` or a function, a `menuItem` that is neither `{dx, dy}` nor a function, a `submenu` that is not `{ menuItem = … }` with such a `menuItem` (`overlay '<o>': chooseMenuItem's \`submenu\` must be { menuItem = {dx, dy} or a function(overlay, menu, factor) }, got …`), a `button` other than `"left"`, `"right"` or `"middle"`, and a `retries` that is not a whole number from 0: a mistake that would otherwise show only after the menu had opened. It raises too on an overlay **with no menu tests** — `overlay '<o>': chooseMenuItem needs menu tests to see the menu with — \`menus\` on its binding` — in front or not, since its declaration decides, not the moment: no menu could ever be seen. Before version 0.11 of the runtime it answered `false` there and said `"<label> is not available now"`.
+A choice that fails after the press clicks nothing more: the item is dropped, `onDone(overlay, false, err)` is called with an error value, what the user hears is said, and the log says `[menu item] '<overlay>': '<label>' not chosen — <its message>`. One that fails at the call answers `false, err`, and `onDone` hears the same error value. Every one is under Errors, with what is said.
 
 A menu that stays open after its item was refused keeps the keys, as any open menu does: `Escape` goes to it, and a module that knows how its plug-in's popup closes can close it in `onDone` — [`O:menuOpen`](#o-menuopen) says whether a menu still counts as open. A menu that appears after the item was dropped is an ordinary menu: nothing is chosen in it.
 
@@ -1557,6 +2292,56 @@ o:chooseMenuItem({
 })
 ```
 
+### Returns {#o-choosemenuitem-returns}
+
+- `true` — the opener was placed, checked and clicked; the item is chosen later. `onDone(overlay, chosen, err)` is called once, when the choice is over: `chosen = true` and no error value once the menu took the item, or `chosen = false` and an error value.
+- `false, err` — nothing was clicked. `onDone(overlay, false, err)` has heard the same error value already, inside the call, before it returned.
+
+`onDone` is called guarded: one that raises is logged, `[menu item] '<overlay>': '<label>' onDone failed: <message>` after the press.
+
+### Errors {#o-choosemenuitem-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says. At the call, `return`: `onDone` hears the same one. After the press, `hook onDone` only. "Said" is what the user hears; where nothing is said, the user moved on or the overlay was not in front, and a key says what it does.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `not_in_front` | return | At the call, the overlay is not in front. Nothing is said. | `the overlay is not in front` | both |
+| `busy` | return | A repeat of the same `label` while its item still waits for its menu — a double Return, a held arrow on a stepper. The first press stands. Nothing is said. | `pressed again while its menu is still being waited for — the opener is not clicked again; the first press stands` | both |
+| `unplaced` | return | The opener cannot be placed: its `at` function answered `nil`, or the scale has no factor (step 1). Said: `"<label> is not available now"`. | `'…' cannot be placed now — …; nothing clicked` | both |
+| `outside` | return | The opener lies outside the origin's window — at the call, or again after a picture before the press. Said: `"<label> is not where it should be"`. | `'…' resolves to (…,…), outside its origin's window (…,…) …x… — not clicking` | both |
+| `covered` | return | Another window is drawn over the opener, likewise. Said: `"something else is covering <label>"`. | `'…' at (…,…) is inside our window's frame but another window is drawn there — not clicking` | both |
+| `not_in_front` | return | The overlay is no longer active once a picture before the press is in (step 2). Nothing is said. | `the overlay is no longer active` | both |
+| `moved_on` | return | Likewise, the overlay left the front and came back, or is on another window. Nothing is said. | `the overlay left the front and came back since`, `the overlay is on another window now` | both |
+| `no_menu` | hook onDone | No test saw a menu within 8 seconds of the press — the time the tests run on every tick after a press, a bound on how long a press waits for its menu, not a guess that it is up. Said: `"<label>: no menu was seen, nothing was chosen"`. | `no menu test saw a menu within … ms of the press` | both |
+| `no_menu` | hook onDone | At the bound, the menu was seen only by tests that do not say where it is. Said: `"<label>: the menu does not say where it is, nothing was chosen"`. | `test '…' sees a menu but does not say where it is, and no test that does saw it` | both |
+| `closed` | hook onDone | The same, when the menu closes before the bound. Said likewise. | `test '…' sees a menu but does not say where it is, and no test that does saw it` | both |
+| `no_menu` | hook onDone | At the bound, the `menuItem` function took no window seen for its menu (it answered `false` for each). Said: `"<label>: no menu it can be chosen in was seen, nothing was chosen"`. | `its menuItem function took no window seen for its menu (the last at …)` | both |
+| `closed` | hook onDone | The same, when the menu closes before the bound. Said likewise. | `its menuItem function took no window seen for its menu (the last at …)` | both |
+| `no_menu` | hook onDone | At the bound, the item fell outside every menu seen; the message gives where it fell, `(x,y) of x,y wxh`. Said: `"<label> is not where it should be"`. | `the item, at …, is outside the menu that was seen` | both |
+| `closed` | hook onDone | The same, when the menu closes before the bound. Said likewise. | `the item, at …, is outside the menu that was seen` | both |
+| `closed` | hook onDone | The menu closed before a test placed the item, and none of the above was seen. Said: `"<label>: the menu closed before anything was chosen"`. | `the menu closed before a test placed the item` | both |
+| `unplaced` | hook onDone | The item cannot be placed: `menuItem` (or `submenu.menuItem`) raised or answered `nil` or no `{dx, dy}`, no factor was known at the press, or a `chained` hook could not follow its submenu (`test '<name>' cannot follow its submenu: <why>`). Said: `"<label> is not available now"`. | `the item cannot be placed now: …` | both |
+| `covered` | hook onDone | Another window is drawn over the item, at its click or a retry, asked of the menu's own window by its `host.window` id — the `window` of `newWindow`'s answer on Windows. Said: `"something else is covering <label>"`. | `(…,…) is inside the menu's window id …, but another window is drawn there` | both |
+| `covered` | hook onDone | The same, asked by the menu's `id` in the window list's numbering, for an answer of `kind = "window"` with no `window` — `newWindow`'s on a Mac. Said likewise. | `(…,…) is inside the menu's window … of the window list, but another window is drawn there` | both |
+| `outside` | hook onDone | A menu drawn inside the plug-in (an answer with no `kind`): the overlay's own check found the item outside the origin's window. Said as that check says it, and logged `not chosen — refused, and said`. | `'…' resolves to (…,…), outside its origin's window (…,…) …x… — not clicking` | both |
+| `covered` | hook onDone | The same, another window drawn over the item. | `'…' at (…,…) is inside our window's frame but another window is drawn there — not clicking` | both |
+| `refused` | hook onDone | The menu was still there after the last retry: it did not take the choice. Said: `"<label>: the menu did not take the choice"`. | `the menu was still there after … click(s) on the item at (…,…)` | both |
+| `refused` | hook onDone | With a `submenu`: the submenu's menu answered alone after the submenu's item was clicked (step 7). Said likewise. | `the submenu has closed and its parent menu is still there after … click(s) on the item at (…,…)` | both |
+| `no_submenu` | hook onDone | With a `submenu`: no new popup within 8 seconds of the item's click. Said: `"<label>: its submenu did not open, nothing was chosen in it"`. | `no submenu was seen within … ms of the item's click` | both |
+| `no_submenu` | hook onDone | With a `submenu`: the menu closed after the item's click, before a new popup was seen. Said likewise. | `the menu closed after the item's click, and no submenu was seen` | both |
+| `unfit_submenu` | hook onDone | With a `submenu`: new popups were seen, and `submenu.menuItem` answered `false` for every one, by the bound or the menu's close. Said: `"<label>: no submenu it can be chosen in was seen, nothing was chosen in it"`. | `its submenu's menuItem function took no popup seen after the item's click (the last at …)` | both |
+| `unfit_submenu` | hook onDone | With a `submenu`: new popups were seen, and the submenu's item fell outside every one. Said: `"<label> is not where it should be in its submenu, nothing was chosen in it"`. | `the submenu's item, at …, is outside the submenu that was seen` | both |
+| `not_ready` | hook onDone | With a `submenu`: the bound came while the test that placed the item was still getting ready to follow it (`chained`). Said: `"<label>: its submenu cannot be followed now, nothing was chosen"`. | `the bound came while its test was getting ready to follow its submenu; nothing was clicked in it` | both |
+| `closed` | hook onDone | With a `submenu`: the menu closed while that test was getting ready. Said: `"<label>: the menu closed before anything was chosen"`. | `the menu closed while its test was getting ready to follow its submenu; nothing was clicked in it` | both |
+| `moved_on` | hook onDone | One of the overlay's own keys arrived with no menu open, before the item was clicked. Nothing is said. | `one of the overlay's own keys came first, with no menu open` | both |
+| `moved_on` | hook onDone | The overlay left the front before the item was clicked. Nothing is said. | `the overlay left the front first` | both |
+| `moved_on` | hook onDone | Another control's press came first: a new press drops the item the last one waited to choose. Nothing is said. | `another press came first` | both |
+| `moved_on` | hook onDone | The overlay is on another window by the time the menu is seen or the 8 seconds are over. Nothing is said. | `the overlay is on another window now` | both |
+
+Once the item has been clicked, every other ending — the menu closed, another window in its place, the overlay leaving the front or moving on — is the choice taken: `onDone(overlay, true)`, with no error value.
+
+**Raises** for a mistake in the call, before anything is clicked: a `spec` that is not a table, has no `at` of `{x, y}` or a function, or no `menuItem` (``overlay '<o>': chooseMenuItem takes { label, at, menuItem, … }, with `at` {x, y} or a function(overlay)``); a `menuItem` that is neither `{dx, dy}` nor a function; a `submenu` that is not `{ menuItem = … }` with such a `menuItem` (``overlay '<o>': chooseMenuItem's `submenu` must be { menuItem = {dx, dy} or a function(overlay, menu, factor) }, got …``); a `button` other than `"left"`, `"right"` or `"middle"`; and a `retries` that is not a whole number from 0 — a mistake that would otherwise show only after the menu had opened. It raises too on an overlay **with no menu tests** — ``overlay '<o>': chooseMenuItem needs menu tests to see the menu with — `menus` on its binding`` — in front or not, since its declaration decides, not the moment: no menu could ever be seen. Before version 0.11 of the runtime it answered `false` there and said `"<label> is not available now"`. An `at` function is called unguarded: what it raises comes out of the call.
+
 ### Windows {#o-choosemenuitem-windows}
 
 A popup drawn as a top-level window of the plug-in's process (for a plug-in in a DAW, the DAW's process, unless the DAW bridges it) is what `newWindow` sees; its answer's `window` is that window's HWND, and the item is checked with `ownsPoint` against it — the window manager's hit test, taken up to the top-level window on both sides, which sees through a window that lets clicks pass. A toolkit can draw a popup's drop shadow as separate windows beside it, which is why the largest new window is taken as the menu. A submenu of such a popup is another window of the same process: `newWindow` takes the largest window new since its `chained` as the submenu (step 7).
@@ -1582,6 +2367,16 @@ onDone = function(o, chosen, err)
 end,
 ```
 
+### Returns {#o-menuopen-returns}
+
+`true` while a menu counts as open over the overlay — one of its tests' word is that one is; `false` otherwise: always with no menu tests, and from the moment the overlay leaves the front, which drops every word, until a test sees a menu again.
+
+### Errors {#o-menuopen-errors}
+
+None. It never answers an error value.
+
+It never raises.
+
 ## O\:resume(on) {#o-resume}
 
 **Signature:** `O:resume(on: boolean) -> Overlay`
@@ -1597,33 +2392,27 @@ box:resume(false)   -- every box starts on its own text
 box:bind(BINDING, { specificity = O.layer.dialog })
 ```
 
-## O\:gate(fn) / O\:landmark(image) {#o-gate}
+### Returns {#o-resume-returns}
 
-`gate(fn)` sets an extra activation condition ANDed onto the context match:
-`fn(origin)` (origin = the active context's coordinate window/control) returns
-whether the overlay should be active. `landmark(image)` is the common case — a gate
-satisfied only while `image` (an **absolute** path, via `host.path`) is found within
-the active context's region. A derived / library overlay uses a landmark to take
-over from its base only when its product wordmark is on screen. Both return the
-overlay (chainable).
+The overlay itself, so calls chain. Anything but `false` is taken as `true`.
 
-On an overlay bound to an arbiter slot, the gate's answer is what the slot is decided on:
-context match AND gate is reported to the arbiter as this claim's `matching`, and specificity
-only ranks the claims that are matching. So a dialog overlay takes the slot exactly while its
-gate says the dialog is there — see [host.arbiter](arbiter#matches).
+### Errors {#o-resume-errors}
 
-**A gate whose condition can change without a window event needs `pollMatch`.** Gates are otherwise re-evaluated only when a window is activated or focused, which is enough for a dialog — opening and closing one *is* a window event — and not enough for anything that appears and disappears *inside* a window that never changes. ON:EAR's chooser panels are exactly that, and without the poll the overlay kept the arbiter slot after its panel had closed: a ring for a panel that was no longer on screen, which somebody who cannot see it has no way to escape. See `pollMatch` under `O:attach` below.
+None. It never answers an error value.
 
-**Coordinate anchoring (opt-in):** pass `landmark(image, { anchor = true })` and, while
-the landmark is on screen, the overlay's control coordinates resolve **relative to the
-landmark's top-left** instead of the plugin's client area (a `rawOrigin` control still
-uses the client). So an overlay whose landmark sits *in the same UI panel as its
-controls* (a library's wordmark above its mixer) stays correctly positioned regardless
-of host, window size, or plugin chrome/browser state — the landmark and the controls
-move together. Author such controls relative to the wordmark (coordinates may be
-negative if a control sits above/left of it). WITHOUT `anchor`, `landmark` is a pure
-gate and controls stay client-relative — the right choice when the image is used only
-to tell the overlay apart from a sibling on a shared slot (a dialog's header image).
+**Raises** for a call after the overlay is bound: `overlay '<label>': resume must be called BEFORE binding it — the binding is what starts it`.
+
+## O\:gate(fn) {#o-gate}
+
+**Signature:** `O:gate(fn: (origin) -> boolean) -> Overlay`
+
+Sets an extra activation condition ANDed onto the context match: `fn(origin)` — `origin` the active context's coordinate window or control, as [`O:origin()`](#o-origin) answers it — says whether the overlay should be active, and only an answer of exactly `true` counts. A derived or library overlay uses one to take over from its base only when what it is for is on screen; [`O:landmark`](#o-landmark) is the common case, an image. It is asked at every evaluation after the context matched, except while the overlay holds its place over its own menu's window, in the handler of whatever looked at the overlay again ([Where a hook runs](#where-a-hook-runs)).
+
+On an overlay bound to an arbiter slot, the gate's answer is what the slot is decided on: context match AND gate is reported to the arbiter as this claim's `matching`, and specificity only ranks the claims that are matching. So a dialog overlay takes the slot exactly while its gate says the dialog is there — see [host.arbiter](arbiter#matches).
+
+**A gate whose condition can change without a window event needs `pollMatch`.** Gates are otherwise re-evaluated only when a window is activated or focused, which is enough for a dialog — opening and closing one *is* a window event — and not enough for anything that appears and disappears *inside* a window that never changes. ON:EAR's chooser panels are exactly that, and without the poll the overlay kept the arbiter slot after its panel had closed: a ring for a panel that was no longer on screen, which somebody who cannot see it has no way to escape. See `pollMatch` under [`O:attach`](#o-attach).
+
+One gate per overlay: a second call replaces the first, and so does a landmark, which is a gate. Called before the overlay is bound.
 
 ```luau
 -- A gate: sforzando inside REAPER is active only while the keyboard is in the PLUG-IN.
@@ -1633,15 +2422,49 @@ inDaw:gate(function()
   local chain = host.window.focusChain()
   return not chain or #chain <= 1
 end)
+```
 
+### Returns {#o-gate-returns}
+
+The overlay itself, so calls chain.
+
+### Errors {#o-gate-errors}
+
+None. It never answers an error value. A gate that says no is logged where the overlay leaves the front: `its gate says no`.
+
+**Raises** for a call after the overlay is bound: `overlay '<label>': gate must be called BEFORE binding it — the binding is what starts it`. `fn` is not checked at the call, and is called unguarded: what it raises ends the evaluation that asked it, and the handler it ran in, and the host logs it.
+
+## O\:landmark(image, opts?) {#o-landmark}
+
+**Signature:** `O:landmark(image: string, opts: { anchor: boolean? }?) -> Overlay`
+
+A [gate](#o-gate) satisfied only while `image` — an **absolute** path, via [`host.path`](path.md#host-path) — is found within the active context's region. A derived or library overlay uses one to take over from its base only when its product wordmark is on screen. The search is made with a callback, off the event loop: the gate answers the last verdict and asks for a new one, one search out at a time, and a verdict that changes looks at the overlay again at once. Once found, only the last hit and 6 pixels round it are searched, and a miss there widens the next search to the whole region; while a claim of at least the overlay's rank holds its slot, it searches nothing and answers its last verdict.
+
+**Coordinate anchoring (opt-in):** pass `landmark(image, { anchor = true })` and, while the landmark is on screen, the overlay's control coordinates resolve **relative to the landmark's top-left** instead of the plugin's client area (a `rawOrigin` control still uses the client). So an overlay whose landmark sits *in the same UI panel as its controls* (a library's wordmark above its mixer) stays correctly positioned regardless of host, window size, or plugin chrome/browser state — the landmark and the controls move together. Author such controls relative to the wordmark (coordinates may be negative if a control sits above/left of it). WITHOUT `anchor`, `landmark` is a pure gate and controls stay client-relative — the right choice when the image is used only to tell the overlay apart from a sibling on a shared slot (a dialog's header image).
+
+It replaces a gate set before it, and a gate set after it replaces the landmark. Its log lines start with `[landmark] <overlay>:` — a hit and the region searched, a search that could not be made (`could not look (<message>); the last verdict (…) stands …`), and a near miss: a full search that missed, made again at three times the tolerance and hit there, which says the template has drifted.
+
+```luau
 -- A landmark, anchoring: this library's controls are authored relative to its wordmark,
 -- so they follow it wherever Kontakt draws the panel.
 ov:landmark(host.path("images/MimiPage/Wordmark.png"), { anchor = true })
 ```
 
+### Returns {#o-landmark-returns}
+
+The overlay itself, so calls chain.
+
+### Errors {#o-landmark-errors}
+
+None. It never answers an error value. A search that could not be made keeps the last verdict, and says so once per spell in the log.
+
+**Raises** for a call after the overlay is bound: `overlay '<label>': landmark must be called BEFORE binding it — the binding is what starts it`. A path that is not absolute is not raised: it is reported when the overlay binds (`landmark image is not an absolute path — use host.path()`).
+
 ## O\:typingWhen(fn) {#o-typingwhen}
 
-`fn() -> boolean`. While it returns true, the overlay **holds no keys at all** — not the navigation keys, not Space, not Return.
+**Signature:** `O:typingWhen(fn: (overlay) -> boolean) -> Overlay`
+
+While `fn` answers exactly `true`, the overlay **holds no keys at all** — not the navigation keys, not Space, not Return. It is asked, with the overlay, every time the overlay works out which keys it holds: at every focus move, as it comes to the front, and at every evaluation while it is in front — a window or focus event, a `pollMatch` tick.
 
 Letting named keys through one at a time patches a hole whose shape is not known: any key nobody thought of stays swallowed, and a swallowed key in a text box is indistinguishable, from the keyboard, from the application having frozen. The condition is supplied by the module because only the module can tell — ON:EAR's answer is that its accessibility tree goes dark exactly while the caret is in its search box, which its gate is measuring anyway.
 
@@ -1662,15 +2485,46 @@ end)
 settings:typingWhen(function() return settingsDark end)
 ```
 
-## O\:onActivate(fn) / O\:onDeactivate(fn) {#o-onactivate}
+### Returns {#o-typingwhen-returns}
 
-**Signature:** `O:onActivate(fn: (overlay) -> ()) -> Overlay` · `O:onDeactivate(fn: (overlay) -> ()) -> Overlay`
+The overlay itself, so calls chain. A second call replaces the first; `nil` takes the condition away.
 
-Hooks the module runs each time the overlay comes to the front and each time it leaves it. Neither may wait for a read ([Where a hook runs](#where-a-hook-runs)): an overlay on a `slot` runs them in the arbiter's call, a plain call of the host's where nothing can wait — `host.ocr.recognize` without a callback raises there — and any overlay is half way into or out of the front while they run. A hook that needs a read starts it with a callback. `onActivate` runs after the overlay has taken its keys and before its first control is announced (350 ms later), so the origin is known and a hook can prepare what that announcement reads; it is called guarded — a hook that raises is logged, `[overlay] <label>: onActivate failed: …`, and the overlay comes up all the same. `onDeactivate` runs after the keys have been handed back and the menu state dropped, and is not guarded: what it raises leaves the overlay's deactivation into the window event that caused it — the overlay is inactive and its keys are released by then — and the host logs it there. Both are set before the overlay is bound; afterwards they raise. One of each per overlay: a second call replaces the first.
+### Errors {#o-typingwhen-errors}
+
+None. It never answers an error value. Each change is logged: `<overlay>: a text field has the keyboard — holding no keys until it gives it back (<n> key(s) handed back)`, and `… the text field gave the keyboard back — navigation keys taken again (…)`.
+
+It never raises: it may be called before or after the overlay is bound, and `fn` runs guarded — one that raises counts as not typing.
+
+## O\:onActivate(fn) {#o-onactivate}
+
+**Signature:** `O:onActivate(fn: (overlay) -> ()) -> Overlay`
+
+A hook the module runs each time the overlay comes to the front; [`O:onDeactivate`](#o-ondeactivate) is its pair. It may not wait for a read ([Where a hook runs](#where-a-hook-runs)): an overlay on a `slot` runs it in the arbiter's call, a plain call of the host's where nothing can wait — `host.ocr.recognize` without a callback raises there — and any overlay is half way into the front while it runs. A hook that needs a read starts it with a callback. It runs after the overlay has taken its keys and before its first control is announced (350 ms later), so the origin is known and a hook can prepare what that announcement reads. Set before the overlay is bound; one per overlay, a second call replacing the first.
 
 "Comes to the front" is the overlay's activation, not a window event: an overlay that holds its place over its own menu stays active, and comes to the front again only after it has left it — so a hook that forgets a per-window reading here forgets it at every return to the plug-in, Alt+Tab included.
 
 **Paired, and held while away.** The two alternate: `onActivate` is called only for an overlay the module has not been told is active, `onDeactivate` only for one it has. While the overlay's group is [away](#o-away) — its page in front, or a trip of its page under way — neither is called: the overlay leaves the front for the page, comes up quietly in a trip, gives the slot to a sibling box and takes it back, and the module hears nothing. On the turn after away ends they are settled: an overlay the module was told is active that is not in front gets `onDeactivate`, and one in front it was not told of — a sibling that came up during a trip and is still up — gets `onActivate`. So a page round trip, a trip, and a box during one are invisible to these hooks; the user leaving the page for another application is one `onDeactivate`, at that settle. A module disabled while away gets its deferred `onDeactivate` at the settle after the first event once it is enabled again.
+
+```luau
+-- A module that reads the plug-in's zoom once per stay in front forgets it on every return.
+ov:onActivate(function(o) o.state.zoom = nil end)
+```
+
+### Returns {#o-onactivate-returns}
+
+The overlay itself, so calls chain.
+
+### Errors {#o-onactivate-errors}
+
+None. It never answers an error value. The hook is called guarded: one that raises is logged, `[overlay] <label>: onActivate failed: …`, and the overlay comes up all the same.
+
+**Raises** for a call after the overlay is bound: `overlay '<label>': onActivate must be called BEFORE binding it — the binding is what starts it`. `fn` is not checked at the call.
+
+## O\:onDeactivate(fn) {#o-ondeactivate}
+
+**Signature:** `O:onDeactivate(fn: (overlay) -> ()) -> Overlay`
+
+A hook the module runs each time the overlay leaves the front, the pair of [`O:onActivate`](#o-onactivate), with the same rules: it may not wait for a read, it is not called while the overlay's group is away, and the two alternate. It runs after the keys have been handed back and the menu state dropped. Set before the overlay is bound; one per overlay, a second call replacing the first.
 
 ```luau
 -- A scanning dialog says when a scan it committed to has gone (modules/komplete-kontrol does
@@ -1679,10 +2533,17 @@ scan:onDeactivate(function(o)
   if o.state.scanCommitted then host.speech.output("Scanning stopped", { interrupt = true }) end
   o.state.scanCommitted = false
 end)
-
--- A module that reads the plug-in's zoom once per stay in front forgets it on every return.
-ov:onActivate(function(o) o.state.zoom = nil end)
 ```
+
+### Returns {#o-ondeactivate-returns}
+
+The overlay itself, so calls chain.
+
+### Errors {#o-ondeactivate-errors}
+
+None. It never answers an error value.
+
+**Raises** for a call after the overlay is bound: `overlay '<label>': onDeactivate must be called BEFORE binding it — the binding is what starts it`. The hook itself is **not** guarded where the overlay leaves the front: what it raises leaves the overlay's deactivation into the window event that caused it — the overlay is inactive and its keys are released by then — and the host logs it there. At the settle after away it is guarded, logged `[overlay] <label>: onDeactivate failed: <message>`.
 
 ## O\:addPage(spec) — an overlay's page {#o-addpage}
 
@@ -1699,8 +2560,6 @@ Called at the module's top level, **before the overlay is bound** — afterwards
 3. `o.page` is set to the page, and the first page of a VM registers the runtime's page trigger: every window and focus event, one callback of each kind per VM.
 4. `key` is registered with [`host.hotkey.register`](hotkey.md#host-hotkey-register), for the module's life — the **page key**.
 
-**It raises**, naming the caller's line, for a call after binding, a field it does not have, a missing field or one of the wrong type, a `prime` that is not `{ x, y }`, a `describe` that raised, answered no page or did not read all of `on`, a second page on the same overlay, and a `key` the host refuses for a hotkey ([`host.keys.check`](keys.md#host-keys-check)'s `parse`, `reserved`, `no_keycode`, `tap`). It does **not** raise when the system will not hold the chord now — another program or module holds it: [`host.hotkey.register`](hotkey.md#host-hotkey-register) answers the claim's id and an error value, the claim is kept and tried again by the host, and one line says so, `[page] '<overlay>': the page key <key> is not registered: <message>`; [`O:pageKey`](#o-pageback) can try another key.
-
 **The group.** The page is shared by every overlay of this VM on the overlay's arbiter slot — a dialog-layer box over the same plug-in is in it — or by the overlay alone when it has no slot. When each overlay of the group is bound, it raises for the page key being, by [`host.keys.normalize`](keys.md#host-keys-normalize), the hotkey of one of its controls or tabs, and for a second page in the group.
 
 | Field | What it is |
@@ -1711,7 +2570,7 @@ Called at the module's top level, **before the overlay is bound** — afterwards
 | `onMessage(o, m)` | Every message from the page, as a handler, in the interactive lane. Nothing is filtered: a trip and the way back refuse themselves when the page is not in front. |
 | `notHere` | What the key says where the overlay is not in front. Default `"<label> is not in front; its page opens from there."` |
 | `onReady(o)`, `onClose(o, how, err)` | The module's own hooks, after the runtime's part: `onClose` hands on the page's own `how` (`"user"` or `"failed"`) and, beside `"failed"`, its error value ([`host.gui.webview`](gui.md#host-gui-webview)). |
-| `onShown(o, ok, err)` | After every show the runtime made at the key, [`page:show`](gui.md#page-show)'s answer as it came: `true`; `true, err` — in front over the rectangle to avoid, `too_large`, a partial answer; or `false, err`. The module plays its sound there. Without it, a `false` is said in the runtime's words. |
+| `onShown(o, ok, err)` | After every show the runtime made at the key, [`page:show`](gui.md#page-show)'s answer as it came: `true`; `true, err` — in front over the rectangle to avoid, `too_large`, a partial answer; or `false, err` — but for `not_ready`, which the runtime answers itself (step 4, below). The module plays its sound there. Without it, a `false` is said in the runtime's words. |
 | `onBack(o, ok, err)` | After the way back (below): `true`, or `false` and its error value. Without it, a `false` is said in the runtime's words. |
 | `prime` | The page's neutral point, in the overlay's coordinates, for a DAW whose [daw-hosts entry](../daw-hosts.md#entry) says it drops the first click (`swallowsFirstClick`, reserved): one click there at each trip's arrival, before `act`. No entry sets it today. |
 
@@ -1720,7 +2579,7 @@ Called at the module's top level, **before the overlay is bound** — afterwards
 1. **A trip is under way:** given up (`cancelled`), its `onGiveUp` run in this handler, and the page shown — even one in front already, since a focus still on its way could undo it. A trip whose work is done runs its back step now.
 2. **The page has the keyboard:** the way back, [`O:pageBack()`](#o-pageback).
 3. **A way back is under way and the plug-in's window has not come yet** (Logic's main window in front): the page shown again, beside the plug-in's window.
-4. **The overlay is in front.** With a menu open over it — counted open, or held over its own popup — nothing is shown: `"<label>: a menu is open; close it, then press the key again."` Otherwise the place is noted — the window in front, the control the overlay is active on, the DAW's entry — `open` runs, the place is checked again ([`O:stillHere`](#o-here), `place`), and the page is shown with `{ focus = true, avoid = <the window's bounds> }`. A page not built yet — `show`'s `not_ready` — says "Building the page." and shows it from its `onReady` — `open` asked afresh — only while the overlay is still on that control. A show Windows declines (`refused`) keeps the place asked for: it may come a moment later.
+4. **The overlay is in front.** With a menu open over it — counted open, or held over its own popup — nothing is shown: `"<label>: a menu is open; close it, then press the key again."` Otherwise the place is noted — the window in front, the control the overlay is active on, the DAW's entry — `open` runs, the place is checked again ([`O:stillHere`](#o-stillhere), `place`), and the page is shown with `{ focus = true, avoid = <the window's bounds> }`. A page not built yet — `show`'s `not_ready` — says "Building the page." and shows it from its `onReady` — `open` asked afresh — only while the overlay is still on that control. A show Windows declines (`refused`) keeps the place asked for: it may come a moment later.
 5. **Otherwise:** `notHere` is said, interrupting, and logged with what is in front.
 
 The order is the one [Step 5](../building-a-page.md#step-5) asks of a page: the state, then the error or the focus, then `show`.
@@ -1757,6 +2616,38 @@ ov:addPage({
 ov:bind(BINDING, { slot = "com.example.synth", specificity = O.layer.base, menus = { O.menuTests.newWindow } })
 ```
 
+### Returns {#o-addpage-returns}
+
+The page — what `describe` answered, `host.gui.webview`'s page object — which is `o.page` from now on. It is not built yet: the first prepare or the page key builds it.
+
+**Its `onShown` can hear the page in front with an error beside it.** `onShown(o, true, err)`, `err.code` `too_large`, is [`page:show`](gui.md#page-show)'s partial answer handed on: the page is in front with the keyboard, but over part of the plug-in's window, there being no room beside it. It is the one partial answer a module meets through the runtime. Test `ok` for whether the page is up, and `err` for whether it is where it was asked to be:
+
+```luau
+onShown = function(o, ok, err)
+  if not ok then
+    -- not shown: `err` says why (the page's own error, not_ready never reaches here)
+    return host.speech.output("The page did not open: " .. err)
+  end
+  if err then host.log.info("[synth] the page is in front, over the plug-in: " .. err) end   -- too_large
+end,
+```
+
+### Errors {#o-addpage-errors}
+
+None of these is raised. Each comes as an error value to one of the page's hooks; the call itself answers none.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| any of [page:show's errors](gui.md#page-show-errors) | hook onShown | After the runtime's show at the page key, `page:show`'s answer as it came: `false, err`, or `true, err` with `too_large` (Returns, above). Every one but `not_ready`, which the runtime answers itself — it says "Building the page." and shows the page from `onReady`, whose answer `onShown` then hears. Without `onShown`, a `false` is said in the runtime's words. | the host's | both |
+| `gone` | hook onBack | The way back — [`O:pageBack`](#o-pageback), the page key in the page — found the plug-in's window gone; `err.detail` says how. The page stays. Without `onBack`, `"<label>: the plug-in's window is gone."` is said. | `the plug-in's window is gone` | both |
+| any of [host.window.focus's errors](window.md#host-window-focus-errors) | hook onBack | The way back: the focus of the held control was not accepted, and its own error value is handed on — `refused`, or `gone`, `hidden` or `not_supported` where it says more. The page stays. | the host's | both |
+| `refused` | hook onBack | The way back: that focus raised, or answered `false` with no error value; `err.detail` is the raise's message. Without `onBack`, `"<label>: the plug-in's window would not come to the front."` is said. | `the plug-in's window was not brought forward` | both |
+| any of [host.gui.webview's errors](gui.md#host-gui-webview-errors) | hook onClose | The page failed: `onClose(o, "failed", err)`, the page's own error value beside `"failed"`. `onClose(o, "user")` has none. | the host's | both |
+
+The way back's refusals that ask nothing of the system — a trip under way, the page without the keyboard, no place held — are `O:pageBack`'s answers, and `onBack` does not hear them. The page key the host claims but cannot hold now is no error of the call: the claim is kept and tried again by the host, and one line says so, `[page] '<overlay>': the page key <key> is not registered: <message>`; [`O:pageKey`](#o-pagekey) can try another key.
+
+**Raises** for a mistake in the call, naming the caller's line: a call after binding (`overlay '<label>': addPage must be called BEFORE binding it — the binding is what starts it`), a field it does not have, a missing field or one of the wrong type, a `prime` that is not `{ x, y }`, a `describe` that raised, answered no page or did not read all of `on`, a second page on the same overlay (`overlay '<label>': a second page — one page to a group`), and a `key` the host refuses for a hotkey ([`host.keys.check`](keys.md#host-keys-check)'s `parse`, `reserved`, `no_keycode`, `tap`: `overlay '<label>': addPage's key <key> is refused for a hotkey (<reason>)`). As each overlay of the group is bound, it raises for the page key being the hotkey of one of its controls or tabs, and for a second page in the group (**The group**, above).
+
 ### Windows {#o-addpage-windows}
 
 The place's control is the plug-in's own child window. The way back and every trip ask for that control with [`host.window.focus`](window.md#host-window-focus), which brings its window forward and lands the keyboard in it.
@@ -1775,18 +2666,7 @@ One action of the page's in the plug-in — a **trip**: the plug-in's window com
 - `trip:done(result)` ends the work; `after(o, result)` then posts the state, then the error or the focus, and the page comes back. `after` may return a short sentence, said only when the page does not come back.
 - `onGiveUp(o, err)` posts the error of a trip that ended without `done`, handed its error value (the ends, below), and may return words, said likewise.
 
-**It raises**, naming the caller's line, for a missing or empty `label`, an `act` or `after` that is not a function, an `onGiveUp` that is neither a function nor nil, a field it does not have, and an overlay whose group has no page. **Refused** with `false, err` — nothing asked of the system but the focus, one line logged, `[page] '<overlay>': trip '<label>' not started — <word>` (`busy`, `not in front`, `nothing held`, `gone`, `declined`) — in this order:
-
-| code | when | message | what a module does |
-|---|---|---|---|
-| `busy` | a trip of the group is under way — one at a time; the second message is dropped | `a trip of the page is under way` | nothing: the runtime logged it |
-| `not_in_front` | the page does not have the keyboard ([`foreground()`](window.md#host-window-foreground), read afresh): a message sent before the user went elsewhere | `the page does not have the keyboard` | nothing: the runtime logged it |
-| `not_found` | no place is held: the page came forward another way | `no place is held: the page came forward another way` | posts an error |
-| `gone` | the plug-in's window is gone (below); `detail` says how | `the plug-in's window is gone` | posts its "plug-in window closed" sentence |
-| [`host.window.focus`](window.md#host-window-focus)'s own | the focus of the held control was not accepted: its own error value, handed on — `refused` (`declined by the system`), or `gone`, `hidden` or `not_supported` where it says more | the host's | posts an error |
-| `refused` | that focus raised, or answered `false` with no error value | `the plug-in's window was not brought forward` | posts an error |
-
-A foreground event of the page that never came is made up for before `not_found` is decided, as at the key.
+**Refused** with `false, err` — nothing asked of the system but the focus, one line logged, `[page] '<overlay>': trip '<label>' not started — <word>` (`busy`, `not in front`, `nothing held`, `gone`, `declined`) — in the order of the Errors table. A module posts nothing for `busy` and `not_in_front`, which the runtime has logged; for the others it posts an error to its page, and for `gone` its "plug-in window closed" sentence. A foreground event of the page that never came is made up for before `not_found` is decided, as at the key.
 
 **Started:** `true`. The plug-in's control was asked to the front and accepted — accepted, not arrived. The trip waits for the plug-in's window **at most 8 seconds** (`TRIP_LOOK_MS`, a bound on looking, as [`MENU_LOOK_MS`](#o-choosemenuitem) is for a menu, never a guess that it has come).
 
@@ -1796,25 +2676,14 @@ A foreground event of the page that never came is made up for before `not_found`
 
 - `trip.label` and `trip.live` — true until the trip ended or its work was done.
 - `trip.overlay` — the group's overlay active on the held control as it is asked: a sibling box that took the slot meanwhile is the one to act through (`trip.overlay:chooseMenuItem{ … }`).
-- `trip:inFront() -> boolean` — the check before every click and every read of the plug-in after a wait: true while the trip is live, the plug-in's window has the keyboard (afresh) and an overlay of the group is on the held control, not held over a menu. **False ends the trip**: `moved_on` when the window in front is another application's or one of this application's that is not the page, `not_in_front` otherwise. Another window's foreground event waits behind a handler that waits ([handlers](../module-runtime-and-lifecycle.md#handlers)), so only this fresh reading knows the user went elsewhere meanwhile. An act just returns after a false.
-- `trip:done(result)` — the work is over: the back step runs on the module's next turn, so `done` may be called from anywhere — a read's callback, `chooseMenuItem`'s `onDone`, a plain call. A pending wait is dropped. A second call, or one after the trip ended, is logged and ignored.
-- `trip:afterMenu(fn) -> true | (false, Error)` — "the menu my next click opens, then `fn`". A press of a control with `opensMenu` on `trip.overlay`, so called **before** the click: its [menu tests](#o-menutests) run on every tick and `newWindow` takes its list. `false, err` and nothing is to be clicked: `not_in_front` (`'<overlay>' is not in front`), or — the overlay no longer where the press was once a calibrating run's picture was in — [`O:stillHere`](#o-here)'s `not_in_front` or `moved_on`. `fn(o, trip, true)` runs as a handler once a test of the group has seen a menu, then seen it closed, and the trip is on the plug-in again; `fn(o, trip, false)` when no test saw a menu within `MENU_LOOK_MS` (8 seconds). Once a menu was seen, nothing bounds the wait: the user's time in a menu is theirs.
-- `trip:afterDialog(fn)` — "the dialog that comes next, then the plug-in again, then `fn`". From the call on, a window of the plug-in's application other than its window that comes forward is the dialog — decided on the module's turn after its event, once every overlay of the VM has looked at it — unless it is the window a menu was held over for the trip's last press or a menu still counts open over the group. `fn(o, trip, true)` once the plug-in's window is in front again with the trip arrived; `fn(o, trip, false)` when no dialog came within 8 seconds. Once a dialog was seen, nothing bounds the wait. Each dialog is logged with its pid and title.
+- [`trip:inFront()`](#trip-infront) — the check before every click and every read of the plug-in after a wait; false ends the trip.
+- [`trip:done(result)`](#trip-done) — the work is over, and the back step follows.
+- [`trip:afterMenu(fn)`](#trip-aftermenu) — the menu the next click opens, then `fn`.
+- [`trip:afterDialog(fn)`](#trip-afterdialog) — the dialog that comes next, then the plug-in again, then `fn`.
 - [`trip:handOver(spec)`](#trip-handover) — the keyboard handed to the plug-in itself — the user types into its own text field or chooses in its own browser — until the key that ends it, the module's word that it is over, or any end of the trip; since version 0.9 of the runtime.
 - **One wait at a time.** `afterMenu`, `afterDialog` and `handOver` raise, naming the caller's line, while another wait or a hand-over is pending, while the trip is not acting (before its arrival, during a wait, after `done` or its end) — they are for `act`, the waits' functions and their callbacks — and `afterMenu` on an overlay with no menu tests.
 
-**The ends.** The page's window and focus events decide, and `trip:inFront()` decides on the module's own check. `onGiveUp(o, err)` is handed the error value of the end, and the log says `[page] '<overlay>': trip '<label>' given up — <word>, after N ms in <stage>` with the word in the last column:
-
-| Ends the trip | In | code | message | log |
-|---|---|---|---|---|
-| a window of another application comes forward, or one of this application's that is not the page | every stage but after `done` | `moved_on` | `a window of another application came to the front, or one of this application's that is not the page` | `another application` |
-| the page key | every stage — after `done`, the back step runs now | `cancelled` | `the page key gave the trip up` | (`given up at the key`) |
-| the page closed: its close box, its failure, the module's `page:close()` or `O:pageAgain()`, a disable — the page not shown at an event | every stage | `closed` | `the page was closed` | `page closed` |
-| the plug-in's window gone | every stage but after `done` | `gone` | `the plug-in's window is gone`; `detail` how | `gone` |
-| the plug-in's window not in front within 8 seconds of the focus | on the way | `not_in_front` | `the plug-in's window did not come within 8000 ms` | `not in front` |
-| `trip:inFront()` false | acting, or waiting | `moved_on`, or `not_in_front` | the first row's, or `the plug-in's window does not have the keyboard` | `another application`, `not in front` |
-| the plug-in's window in front and another module's overlay at least as specific holding the slot — decided on the turn after its event | on the way, or a wait whose condition holds | `taken` | `another module's overlay holds the plug-in's window` | `outranked` |
-| `act`, a wait's `fn` or the prime raised | acting | `failed` | `act failed`, `afterMenu failed`, `afterDialog failed`, `the prime failed`; `detail` the raise's message | `failed` |
+**The ends.** The page's window and focus events decide, and `trip:inFront()` decides on the module's own check. `onGiveUp(o, err)` is handed the error value of the end — each is a `hook onGiveUp` row under Errors, with the stages it ends — and the log says `[page] '<overlay>': trip '<label>' given up — <word>, after N ms in <stage>`, the word the row names.
 
 **Not ends:** another window of the plug-in's application on the way (Logic's main window first, REAPER's main window); a sibling overlay of the group taking the slot (a dialog-layer box, quiet, and `trip.overlay` names it); a popup the menu tests see, over which the overlay holds its place with no keys; the dialog a wait is for; any other window of the plug-in's application while acting — the act's next `trip:inFront()` decides. A [hand-over](#trip-handover) ends with the trip on every end above, its keys back at that moment and its `onEnd` told. An act whose callbacks never come — a module's bug, a [watch](#o-watch) whose overlay left — is ended by the page key alone: `[page] '<overlay>': trip '<label>' given up at the key after N ms in <stage>`.
 
@@ -1844,9 +2713,9 @@ local started, err = ov:inPlugin({
       end
       host.input.click(x, y)
       host.screen.snapshot({ region = region, change = { from = before, timeout = 2000 } },
-        function(after, why2)
+        function(after, err2)
           if not trip:inFront() then return end
-          if not after then return trip:done({ error = "the name cannot be read now (" .. tostring(why2) .. ")" }) end
+          if not after then return trip:done({ error = "the name cannot be read now (" .. tostring(err2) .. ")" }) end
           host.ocr.recognize(region, { snapshot = after }, function(r)
             trip:done({ name = r.status == "text" and r.lines[1] and r.lines[1].text or nil })
           end)
@@ -1868,6 +2737,34 @@ if not started and err.code ~= O.errors.BUSY and err.code ~= O.errors.NOT_IN_FRO
 end
 ```
 
+### Returns {#o-inplugin-returns}
+
+- `true` — started: the plug-in's control was asked to the front and accepted — accepted, not arrived. `act` runs once it is there, and the trip ends with one of two hooks, once: `after(o, result)` once `trip:done(result)` was called, or `onGiveUp(o, err)` when it ended without `done`.
+- `false, err` — not started; nothing was asked of the system but, for the last three rows at the call, the focus.
+
+### Errors {#o-inplugin-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says: at the call `return`, in the order they are decided; after a start, `hook onGiveUp`, the trip given up.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `busy` | return | A trip of the group is under way — one at a time; the second message is dropped. Logged `busy`. | `a trip of the page is under way` | both |
+| `not_in_front` | return | The page does not have the keyboard ([`foreground()`](window.md#host-window-foreground), read afresh): a message sent before the user went elsewhere. Logged `not in front`. | `the page does not have the keyboard` | both |
+| `not_found` | return | No place is held: the page came forward another way, not by the page key. Logged `nothing held`. | `no place is held: the page came forward another way` | both |
+| `gone` | return | The plug-in's window is gone (**Gone**, above), or on a Mac a focus was declined with nothing of its application listed any more; `err.detail` says how. Logged `gone`. | `the plug-in's window is gone` | both |
+| any of [host.window.focus's errors](window.md#host-window-focus-errors) | return | The focus of the held control was not accepted, and its own error value is handed on — `refused` (`declined by the system`), or `gone`, `hidden` or `not_supported` where it says more. Logged `declined`. | the host's | both |
+| `refused` | return | That focus raised, or answered `false` with no error value; `err.detail` is the raise's message. Logged `declined`. | `the plug-in's window was not brought forward` | both |
+| `moved_on` | hook onGiveUp | A window of another application came forward, or one of this application's that is not the page, in every stage but after `done`; or `trip:inFront()` found that window in front. Log word `another application`. | `a window of another application came to the front, or one of this application's that is not the page` | both |
+| `cancelled` | hook onGiveUp | The page key, in every stage but after `done` — then the back step runs at once instead. `onGiveUp` runs in the key's handler, and the page is shown. Logged `given up at the key`. | `the page key gave the trip up` | both |
+| `closed` | hook onGiveUp | The page closed — its close box, its failure, the module's `page:close()` or `O:pageAgain()`, a disable: the page not shown at an event — in every stage. Log word `page closed`. | `the page was closed` | both |
+| `gone` | hook onGiveUp | The plug-in's window gone (**Gone**, above), in every stage but after `done`; `err.detail` says how. Log word `gone`. | `the plug-in's window is gone` | both |
+| `not_in_front` | hook onGiveUp | On the way: the plug-in's window not in front within 8 seconds of the focus. Log word `not in front`. | `the plug-in's window did not come within … ms` | both |
+| `not_in_front` | hook onGiveUp | Acting or waiting: `trip:inFront()` false, the window in front not another application's — the plug-in's window without the keyboard, or no overlay of the group on the held control. Log word `not in front`. | `the plug-in's window does not have the keyboard` | both |
+| `taken` | hook onGiveUp | On the way, or in a wait whose condition holds: the plug-in's window in front and another module's overlay at least as specific holding the slot, decided on the turn after its event. Log word `outranked`. | `another module's overlay holds the plug-in's window` | both |
+| `failed` | hook onGiveUp | Acting: `act`, a wait's `fn` or the prime raised — or a hand-over's `ends`, `onKey` or `onEnd` ([`trip:handOver`](#trip-handover-errors)). The message names it: `act failed`, `afterMenu failed`, `afterDialog failed`, `the prime failed`, `ends failed`, `onKey failed`, `onEnd failed`; `err.detail` is the raise's message. Log word `failed`. | `… failed` | both |
+
+**Raises** for a mistake in the call, naming the caller's line: a `spec` that is not a table, a field it does not have, a missing or empty `label`, an `act` or `after` that is not a function, an `onGiveUp` that is neither a function nor `nil`, and an overlay whose group has no page (`overlay '<label>': inPlugin — its group has no page (O:addPage)`). `act`, `after`, `onGiveUp` and the waits' functions run guarded: one that raises is logged, `[page] '<overlay>': <hook> failed: <message>`, and `act` or a wait's `fn` gives the trip up (`failed`, above).
+
 ### Windows {#o-inplugin-windows}
 
 The trip asks for the plug-in's **control**, never its FX window: [`host.window.focus`](window.md#host-window-focus) of a control brings its window forward and lands the keyboard in the control, putting it there at most twice where the application left it elsewhere (HW1). A trip arrives whether or not that lands.
@@ -1875,6 +2772,110 @@ The trip asks for the plug-in's **control**, never its FX window: [`host.window.
 ### macOS {#o-inplugin-macos}
 
 The trip asks for the plug-in's window (the panel's id is its window's), and the [stay](#o-attachembedded-macos) is held across it: no `identify` within a trip, nor between trips while the page is up. A window of the DAW's with the plug-in window's title that comes forward under another id is logged, and the trip waits for the held id (`… came forward as id Y, not the held id X — waiting for X`). With `activates = false` (gui.md) whether the plug-in's window raises a foreground event at all is unmeasured; without one, the trip ends by its bound. A sandboxed DAW's open panel may belong to another process, which ends a dialog wait as another application's window (`moved_on`): the log names the pid.
+
+## trip\:inFront() {#trip-infront}
+
+**Signature:** `trip:inFront() -> boolean`
+
+The check a [trip](#o-inplugin)'s act makes before every click and every read of the plug-in after a wait: true while the trip is live, the plug-in's window has the keyboard ([`foreground()`](window.md#host-window-foreground), read afresh) and an overlay of the group is on the held control, not held over a menu. **False ends the trip**: given up on the module's next turn, `onGiveUp` hearing `moved_on` when the window in front is another application's or one of this application's that is not the page, and `not_in_front` otherwise. Another window's foreground event waits behind a handler that waits ([handlers](../module-runtime-and-lifecycle.md#handlers)), so only this fresh reading knows the user went elsewhere meanwhile. An act just returns after a false. Each false is logged: `[page] '<overlay>': trip '<label>': its act asked, and it is not in the plug-in — <what is in front>`.
+
+Costs one `host.window.foreground()` read, which asks the system afresh, on the event loop.
+
+```luau
+host.screen.snapshot({ region = region }, function(before)
+  if not trip:inFront() then return end   -- false ended the trip already: onGiveUp says why
+  host.input.click(x, y)
+end)
+```
+
+### Returns {#trip-infront-returns}
+
+`true` or `false`. After the trip ended or its work was done, `false`, and nothing more happens.
+
+### Errors {#trip-infront-errors}
+
+None. It never answers an error value. The error value of the end it causes goes to `onGiveUp` ([`O:inPlugin`](#o-inplugin-errors)), and to a hand-over's `onEnd`.
+
+It never raises.
+
+## trip\:done(result) {#trip-done}
+
+**Signature:** `trip:done(result: any) -> ()`
+
+The work of a [trip](#o-inplugin) is over: the back step runs on the module's next turn — `after(o, result)`, then the page back — so `done` may be called from anywhere: a read's callback, `chooseMenuItem`'s `onDone`, a plain call. A pending wait is dropped, and a hand-over's keys go back at once (its `onEnd` hears `"done"` in the back step). Logged `[page] '<overlay>': trip '<label>' done after N ms`.
+
+```luau
+host.ocr.recognize(region, { snapshot = after }, function(r)
+  trip:done({ name = r.status == "text" and r.text or nil })
+end)
+```
+
+### Returns {#trip-done-returns}
+
+Nothing. `result` is handed to `after` as given.
+
+### Errors {#trip-done-errors}
+
+None. It never answers an error value.
+
+It never raises. A second call, or one after the trip ended, is logged and ignored: `[page] '<overlay>': trip '<label>': done after the trip ended — ignored`.
+
+## trip\:afterMenu(fn) {#trip-aftermenu}
+
+**Signature:** `trip:afterMenu(fn: (overlay, trip, seen: boolean) -> ()) -> true | (false, Error)`
+
+"The menu my next click opens, then `fn`." A press of a control with `opensMenu` on `trip.overlay`, so called **before** the click: its [menu tests](#o-menutests) run on every tick from here and `newWindow` takes its list. `fn(o, trip, true)` runs as a handler once a test of the group has seen a menu, then seen it closed, and the trip is on the plug-in again; `fn(o, trip, false)` when no test saw a menu within `MENU_LOOK_MS` (8 seconds). Once a menu was seen, nothing bounds the wait: the user's time in a menu is theirs. While it waits, the trip is not acting: a second wait raises, and `fn` is where the act goes on.
+
+```luau
+-- In a trip's act: the plug-in's preset menu, opened by a click, and the plug-in again after it.
+local ok, err = trip:afterMenu(function(o2, t2, seen)
+  if not seen then return t2:done({ error = "the menu did not open" }) end
+  t2:done({})
+end)
+if not ok then return trip:done({ error = "the menu cannot be opened now: " .. err }) end
+host.input.click(x, y)   -- only after a true: the press counts from the call
+```
+
+### Returns {#trip-aftermenu-returns}
+
+- `true` — the press counts, and the wait has begun: make the click now.
+- `false, err` — nothing is to be clicked, and no wait has begun.
+
+### Errors {#trip-aftermenu-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `not_in_front` | return | `trip.overlay` is not in front at the call — a sibling box has the slot, say. | `'…' is not in front` | both |
+| `not_in_front` | return | A calibrating run's picture or a menu test's `before` was taken before the press, and by then the overlay is no longer active. | `the overlay is no longer active` | both |
+| `moved_on` | return | Likewise, the overlay left the front and came back, or is on another window, by then. | `the overlay left the front and came back since`, `the overlay is on another window now` | both |
+
+**Raises**, naming the caller's line: another wait of the trip pending (`trip '<label>': afterMenu while a <kind> wait is pending — one wait at a time`), its hand-over under way, the trip not acting — before its arrival, during a wait, after `done` or its end (`trip '<label>': afterMenu is for the trip's act and its continuations, while it is acting (it is <stage>)`) — an `fn` that is not a function, and `trip.overlay` with no menu tests (``trip '<label>': afterMenu needs menu tests on overlay '<overlay>' — `menus` on its binding``). `fn` runs guarded: one that raises gives the trip up, `failed` (`afterMenu failed`).
+
+## trip\:afterDialog(fn) {#trip-afterdialog}
+
+**Signature:** `trip:afterDialog(fn: (overlay, trip, seen: boolean) -> ()) -> ()`
+
+"The dialog that comes next, then the plug-in again, then `fn`." From the call on, a window of the plug-in's application other than its window that comes forward is the dialog — decided on the module's turn after its event, once every overlay of the VM has looked at it — unless it is the window a menu was held over for the trip's last press or a menu still counts open over the group. `fn(o, trip, true)` once the plug-in's window is in front again with the trip arrived; `fn(o, trip, false)` when no dialog came within 8 seconds. Once a dialog was seen, nothing bounds the wait: the user's time in a file dialog is theirs. Each dialog is logged with its pid and title.
+
+```luau
+-- In a trip's act: the plug-in's Save button opens a file dialog; the user saves in it.
+trip:afterDialog(function(o2, t2, seen)
+  t2:done({ saved = seen })
+end)
+host.input.click(x, y)
+```
+
+### Returns {#trip-afterdialog-returns}
+
+Nothing: the wait always begins. What follows comes to `fn`.
+
+### Errors {#trip-afterdialog-errors}
+
+None. It never answers an error value. A dialog that did not come is `fn(o, trip, false)`; a window of another application coming forward meanwhile gives the trip up ([`O:inPlugin`](#o-inplugin-errors)).
+
+**Raises**, naming the caller's line, as `afterMenu` does: another wait pending, a hand-over under way, the trip not acting, and an `fn` that is not a function (`trip '<label>': afterDialog takes a function(overlay, trip, seen), got <type>`). `fn` runs guarded: one that raises gives the trip up, `failed` (`afterDialog failed`).
 
 ## trip\:handOver(spec) — handing the keyboard to the plug-in {#trip-handover}
 
@@ -1890,16 +2891,7 @@ A wait of a [trip](#o-inplugin) in which the user works in the plug-in **itself*
 
 Called from `act`, a wait's function or one of their callbacks, while the trip is acting, with the plug-in's window in front.
 
-**It raises**, naming the caller's line: a `spec` that is not a table or has a field it does not have; a `kind` that is none of the three; an `onEnd` that is not a function; `keys` that is not a list of 1 to 8 key specs, names a key [`host.keys.normalize`](keys.md#host-keys-normalize) cannot read, or one key twice; `onKey` missing for `"keys"` or given for another kind; `ends` given for `"keys"`, or not a function; and, as `afterMenu` does, a wait or a hand-over of this trip pending — `ends` asking for another one included — or the trip not acting.
-
-**It answers** `true` once the keys are held, or `false` and an error value:
-
-| code | when | message | what a module does |
-|---|---|---|---|
-| `not_in_front` | [`trip:inFront()`](#o-inplugin) answered false at the call — which has given the trip up already | `the plug-in's window does not have the keyboard` | returns |
-| `busy` | a hand-over of another page of this VM still holds the module's keys: one at a time per VM, since the flag, the scope and the record are the module's. Another page of the VM comes to the front only after that trip has ended (another application's window), so this is a guard for events that cross, not a state a module reaches in order | `trip '<label>' of this module holds the module's keys` | ends the trip with an error |
-| [`host.keys.capture`](keys.md#host-keys-capture)'s own | a key could not be captured — no keyboard hook, or on a Mac no event tap without the Accessibility grant (`denied`); the host registered nothing | the host's | ends the trip with an error; nothing is held |
-| `failed` | a capture raised — a key `normalize` read and `capture` did not: the host's own failure | `capturing <key> raised: <message>` | ends the trip with an error; nothing is held |
+**It answers** `true` once the keys are held, or `false` and an error value (Returns and Errors, below). After `not_in_front` a module just returns: the trip is given up already, and its `onGiveUp` posts it. After any other, it ends the trip with an error, `trip:done({ error = … })`; nothing is held.
 
 **At the call**, in this order: what [`host.keys.passedThrough`](keys.md#host-keys-passedthrough) holds from before is drained and dropped, logged — a Return that reached a menu earlier is no end of this one; the module's [scope](keys.md#host-keys-scope) is pinned to the plug-in's window; the keys are captured; for `"typing"` and `"browse"` the flag is set; the VM's menu tick is started if no overlay with menu tests has started it; one line is logged: `[page] '<overlay>': trip '<label>' hands the keyboard over (typing): Return, Escape let through to window id X, the module's scope pinned there; it ends on one of them, the page key or another application — nothing bounds it`. A capture that is refused releases what was captured, sets the scope back as the end does — with nothing else of the VM in front — and writes no flag; the refused one registered nothing ([`capture`](keys.md#host-keys-capture)). One line says so: `… the keyboard is not handed over — <key> is not captured: <message>`.
 
@@ -1911,19 +2903,13 @@ Called from `act`, a wait's function or one of their callbacks, while the trip i
 
 **`ends(o, trip, info, answer)`** — the module's word on whether the event ended the work: its field closed again, its browser done. It runs as a handler where a read may wait, and answers by calling `answer(true)` (over) or `answer(false)` (it goes on), at once or from a read's callback; a second answer, or one after the trip ended, is logged and ignored. Without `ends` the event is the end. Meanwhile the keys stay held: an end key that comes while `ends` is asked is kept, and is the next event at once if the answer is no. An `ends` that raises gives the trip up, `failed`. An `ends` that never answers is a stuck act: the page key ends it.
 
-**`onEnd(o, trip, how, info, err)`** — told **exactly once**, on every end of a hand-over that answered `true`, after the keys are back; a `handOver` that answered false held nothing, and its `onEnd` is never called. `how` is `"ended"`, `"done"` or `"given_up"`; for `"given_up"` the trip's give-up's error value comes fifth — the same table [`onGiveUp`](#o-inplugin) is handed — and for the other two nothing does:
+**`onEnd(o, trip, how, info, err)`** — told **exactly once**, on every end of a hand-over that answered `true`, after the keys are back; a `handOver` that answered false held nothing, and its `onEnd` is never called. `how` is a status word, `"ended"`, `"done"` or `"given_up"`; for `"given_up"` the trip's give-up's error value comes fifth — the same table [`onGiveUp`](#o-inplugin) is handed, one of the `hook onEnd` rows under Errors — and for the other two nothing does:
 
-| how | code of `err` | when | where it runs |
-|---|---|---|---|
-| `"ended"` | | `ends` answered true, or `onKey` did, or — with no `ends` — the event came (`info.key` the end key) | the trip acting: in the handler or the callback that answered `ends` — the arrival's own, or a read's callback — and after `onKey`, or with no `ends`, in the arrival's handler on the module's next turn; the module reads, then calls `trip:done(result)` |
-| `"given_up"` | `cancelled` | the page key, in every state of the hand-over | in the key's handler, before `onGiveUp`; then the page is shown |
-| `"given_up"` | `moved_on` | a window of another application, or one of this application's that is not the page | on the next turn, before `onGiveUp`; the page is not shown over it |
-| `"given_up"` | `closed` | its close box, its failure, the module's `page:close()` or `O:pageAgain()`, a disable — seen at the first tick, event or captured key after the enable | before `onGiveUp`: where it was seen — the page's close, `O:pageAgain()`, a window or focus event, a captured key — and on the module's next turn when the menu tick saw it first |
-| `"given_up"` | `gone` | the plug-in's window gone ([the trip's rule](#o-inplugin)) | on the next turn, before `onGiveUp` |
-| `"given_up"` | `taken` | an end key with another module's overlay at least as specific holding the slot | on the next turn, before `onGiveUp` |
-| `"given_up"` | `not_in_front` or `moved_on` | `trip:inFront()` false inside a hook or a callback of the module's | on the next turn, before `onGiveUp` |
-| `"given_up"` | `failed` | `ends` or `onKey` raised, or `onEnd` raised on `"ended"` — which is then not told again (`ends failed`, `onKey failed`, `onEnd failed`; `detail` the raise's message) | on the next turn, before `onGiveUp` |
-| `"done"` | | the module's own `trip:done` while the hand-over holds | in the back step's handler, before `after` |
+| how | when | where it runs |
+|---|---|---|
+| `"ended"` | `ends` answered true, or `onKey` did, or — with no `ends` — the event came (`info.key` the end key) | the trip acting: in the handler or the callback that answered `ends` — the arrival's own, or a read's callback — and after `onKey`, or with no `ends`, in the arrival's handler on the module's next turn; the module reads, then calls `trip:done(result)` |
+| `"done"` | the module's own `trip:done` while the hand-over holds | in the back step's handler, before `after` |
+| `"given_up"` | any end of the trip without `done`, `err` beside it | before `onGiveUp`, in the place each Errors row names |
 
 Before version 0.11 of the runtime `how` named each give-up in a word of its own (`"page key"`, `"another application"`, …) and `onEnd` had no fifth argument.
 
@@ -2030,6 +3016,31 @@ host.input.mouseDown(x, y) -- after the hand-over, so that one refused leaves no
 down = true
 ```
 
+### Returns {#trip-handover-returns}
+
+- `true` — the keys are held, and the hand-over has begun; `onEnd` will be told once, on whatever ends it.
+- `false, err` — nothing is held, nothing was registered, and `onEnd` is never called. For `not_in_front` the trip itself is given up already.
+
+### Errors {#trip-handover-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says: at the call `return`, in the order they are decided; after a `true`, `hook onEnd` with `how = "given_up"`, the same error value the trip's `onGiveUp` hears just after.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `busy` | return | A hand-over of another page of this VM still holds the module's keys: one at a time per VM, since the flag, the scope and the record are the module's. Another page of the VM comes to the front only after that trip has ended (another application's window), so this is a guard for events that cross, not a state a module reaches in order. | `trip '…' of this module holds the module's keys` | both |
+| `not_in_front` | return | [`trip:inFront()`](#trip-infront) answered false at the call, which has given the trip up already; whatever is in front, this is the message. | `the plug-in's window does not have the keyboard` | both |
+| any of [host.keys.capture's errors](keys.md#host-keys-capture-errors) | return | A key could not be captured — no keyboard hook, or on a Mac no event tap without the Accessibility grant (`denied`). The host registered nothing for it, and what was captured before it is released. | the host's | both |
+| `failed` | return | A capture raised — a key `normalize` read and `capture` did not: the host's own failure. What was captured before it is released. | `capturing … raised: …` | both |
+| `cancelled` | hook onEnd | The page key, in every state of the hand-over. `onEnd` runs in the key's handler, before `onGiveUp`; then the page is shown. | `the page key gave the trip up` | both |
+| `moved_on` | hook onEnd | A window of another application came forward, or one of this application's that is not the page — or `trip:inFront()` found one in front, inside a hook or a callback of the module's. On the next turn, before `onGiveUp`; the page is not shown over it. | `a window of another application came to the front, or one of this application's that is not the page` | both |
+| `closed` | hook onEnd | The page closed — its close box, its failure, the module's `page:close()` or `O:pageAgain()`, a disable, seen at the first tick, event or captured key after the enable. Before `onGiveUp`, where it was seen — the page's close, `O:pageAgain()`, a window or focus event, a captured key — and on the module's next turn when the menu tick saw it first. | `the page was closed` | both |
+| `gone` | hook onEnd | The plug-in's window gone ([the trip's rule](#o-inplugin)); `err.detail` says how. On the next turn, before `onGiveUp`. | `the plug-in's window is gone` | both |
+| `taken` | hook onEnd | An end key with another module's overlay at least as specific holding the slot. On the next turn, before `onGiveUp`. | `another module's overlay holds the plug-in's window` | both |
+| `not_in_front` | hook onEnd | `trip:inFront()` false inside a hook or a callback of the module's, the window in front not another application's. On the next turn, before `onGiveUp`. | `the plug-in's window does not have the keyboard` | both |
+| `failed` | hook onEnd | `ends` or `onKey` raised, or `onEnd` raised on `"ended"` — which is then not told again — or the trip's act raised after the hand-over began. The message names it, `ends failed`, `onKey failed`, `onEnd failed`, `act failed`; `err.detail` is the raise's message. On the next turn, before `onGiveUp`. | `… failed` | both |
+
+**Raises** for a mistake in the call, naming the caller's line: a `spec` that is not a table or has a field it does not have; a `kind` that is none of the three; an `onEnd` that is not a function; `keys` that is not a list of 1 to 8 key specs, names a key [`host.keys.normalize`](keys.md#host-keys-normalize) cannot read, or one key twice; `onKey` missing for `"keys"` or given for another kind; `ends` given for `"keys"`, or not a function; and, as [`trip:afterMenu`](#trip-aftermenu-errors) does, a wait or a hand-over of this trip pending — `ends` asking for another one included — or the trip not acting.
+
 ### Windows {#trip-handover-windows}
 
 The scope is the window in front at the call, the plug-in's FX window or the DAW window it is docked in, and the low-level hook lets a captured end key through to it while the flag counts, records it, and logs once per reason and window `captured Return (vk 0x0d/m0) was let through to the application: … a menu declared open with host.keys.menuOpen(true) by a module scoped to the window in front` ([`capture`](keys.md#host-keys-capture), its Windows block); the keypad's Enter is recorded as `"Return"`. A screen reader's hook after the host's sees the key as usual. Whether a DAW hands Return to a plug-in's text field or takes it for itself — REAPER has a per-FX "Send all keyboard input to plug-in" — is the DAW's; it has not been measured with an overlay (TODO.md, VPS Avenger).
@@ -2057,6 +3068,10 @@ host.timer.every(1000, function()
 end)
 ```
 
+### Returns {#o-away-returns}
+
+`true` or `false`, never `nil`: `false` from `O.new` on, and on an overlay with no page. The same value on every overlay of the group. A module reads it and never writes it: the runtime decides by it whether the overlay holds any key.
+
 ### Windows {#o-away-windows}
 
 As above.
@@ -2065,33 +3080,18 @@ As above.
 
 As above; the [stay](#o-attachembedded-macos) is held while away.
 
-## O\:pageBack() / O\:pageKey(spec) / O\:pageAgain() {#o-pageback}
+## O\:pageBack() {#o-pageback}
 
-**Signature:** `O:pageBack() -> true | (false, Error)` · `O:pageKey(spec: string) -> true | (false, Error)` · `O:pageAgain() -> Page`
+**Signature:** `O:pageBack() -> true | (false, Error)`
 
-The way back from an overlay's page to the plug-in, another page key, and the page described again.
+The way back from an overlay's [page](#o-addpage) to the plug-in: what the page key does in the page, and what a page's own "Back" button calls. It is refused first, with nothing asked of the system, while a trip is under way, unless the page has the keyboard, and when no place is held. Then the held control is asked to the front with [`host.window.focus`](window.md#host-window-focus) **first**, while the page still has the front — refused there, the page stays — and only then the page is hidden. Accepted, the group stays away until the plug-in's window comes: another window of the plug-in's application on the way is waited past (Logic's main window first), for at most 8 seconds, after which away ends where the user is. The page's close box, Alt+F4 in it, and Command-W on a Mac are a way back too: the host has hidden the page and given the front back, and the runtime asks for the held control.
 
-**`O:pageBack()`** is the way back to the plug-in: what the page key does in the page, and what a page's own "Back" button calls. Refused, in this order, with nothing asked of the system and one line logged: `false, err` with `busy` while a trip is under way, `not_in_front` unless the page has the keyboard, `not_found` when no place is held — the messages [`O:inPlugin`](#o-inplugin)'s are. Then the held control is asked to the front with [`host.window.focus`](window.md#host-window-focus) **first**, while the page still has the front — `false, err` with `gone` (the window gone, as for a trip) or the focus's own error value, `refused` where it gave none (`the plug-in's window was not brought forward`), and the page stays — and only then the page is hidden. `onBack(o, ok, err)` hears it; without one, a `false` is said: `"<label>: the plug-in's window would not come to the front."` or `"<label>: the plug-in's window is gone."`. Accepted, the group stays away until the plug-in's window comes: another window of the plug-in's application on the way is waited past (Logic's main window first), for at most 8 seconds, after which away ends where the user is. The page's close box, Alt+F4 in it, and Command-W on a Mac are a way back too: the host has hidden the page and given the front back, and the runtime asks for the held control. It raises only for an overlay whose group has no page.
+`onBack(o, ok, err)`, the page's hook, hears every way back the runtime takes — this call's and the page key's — that got as far as the focus: `true` once the page is hidden, or `false` and the error value. Without `onBack`, a `false` there is said: `"<label>: the plug-in's window would not come to the front."` or `"<label>: the plug-in's window is gone."`. A way back refused before the focus is logged, `[page] '<overlay>': the way back not taken — <word>`, and `onBack` does not hear it.
 
-**`O:pageKey(spec)`** registers another page key and gives up the old one, for a setting. Refused with `false` and an error value, the old key registered still:
-
-| code | when | message |
-|---|---|---|
-| `invalid` | [`host.keys.check`](keys.md#host-keys-check) says `parse` or `tap` | `<spec> is not a key spec`, `<spec> is a modifier tap, which only host.keys.capture can watch` |
-| `taken` | it says `reserved` | `<spec> is kept by the system` |
-| `not_supported` | it says `no_keycode` | `<spec> has no key code on this platform` |
-| `clash` | the key is the hotkey of a control or tab of an overlay of the group | `<spec> is the hotkey of control '<label>' of overlay '<overlay>'` (or `tab '<label>'`) |
-| [`host.hotkey.register`](hotkey.md#host-hotkey-register)'s own | the host will not hold it: another program or module holds it now (`taken`), the platform has no key code for it (`not_supported`); a claim the host made but cannot hold now is let go again at once, logged `[page] '<overlay>': the page key stays <old>: <spec> is not held — <message>` | the host's |
-| `failed` | the registration raised — a spec `check` read and `register` did not | `registering <spec> raised: <message>` |
-
-It raises for a `spec` that is not a string (`overlay '<o>': pageKey takes a key spec, a string, got number`) — before version 0.11 that answered `false, "parse"` — and for an overlay whose group has no page.
-
-**`O:pageAgain()`** closes the page and describes it again, for a setting fixed per page object (`activates`, `window`): a trip under way is given up (`closed`), [`page:close()`](gui.md#page-close) gives the front back first where the page was in front, `describe` is called again with `addPage`'s checks — raising as `addPage` does — and `o.page` is the new page. Away ends by what is in front. The new page is prepared at once where the overlay is in front and not away, otherwise at its next arrival. It raises for an overlay whose group has no page.
-
-All three run where they are called, on the event loop; `pageBack` and `pageKey` cost one system call each, `pageAgain` a page closed and described.
+It runs where it is called, on the event loop, and costs one system call, the focus.
 
 ```luau
--- The page's own "Back" button, and a setting for the page key.
+-- The page's own "Back" button.
 onMessage = function(o, m)
   if m.action == "back" then
     local ok, err = o:pageBack()
@@ -2100,12 +3100,27 @@ onMessage = function(o, m)
     end
   end
 end
-
-host.settings.onChange("pageKey", function(new)
-  local ok, err = ov:pageKey(new)
-  if not ok then host.log.info("the page key stays as it was: " .. err) end
-end)
 ```
+
+### Returns {#o-pageback-returns}
+
+- `true` — the held control was asked to the front and accepted, and the page is hidden. `onBack(o, true)` has run.
+- `false, err` — the page stays where it is.
+
+### Errors {#o-pageback-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says, in the order they are decided. The first three ask nothing of the system and do not reach `onBack`; the last three do, `onBack(o, false, err)` with the same error value ([`O:addPage`](#o-addpage-errors)).
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `busy` | return | A trip of the page is under way. Logged `busy`. | `a trip of the page is under way` | both |
+| `not_in_front` | return | The page does not have the keyboard ([`foreground()`](window.md#host-window-foreground), read afresh). Logged `not in front`. | `the page does not have the keyboard` | both |
+| `not_found` | return | No place is held: the page came forward another way, not by the page key. Logged `nothing held`. | `no place is held: the page came forward another way` | both |
+| `gone` | return | The plug-in's window is gone, by the trip's rule ([`O:inPlugin`](#o-inplugin)); `err.detail` says how. | `the plug-in's window is gone` | both |
+| any of [host.window.focus's errors](window.md#host-window-focus-errors) | return | The focus of the held control was not accepted, and its own error value is handed on — `refused`, or `gone`, `hidden` or `not_supported` where it says more. | the host's | both |
+| `refused` | return | That focus raised, or answered `false` with no error value; `err.detail` is the raise's message. | `the plug-in's window was not brought forward` | both |
+
+**Raises** only for an overlay whose group has no page: `overlay '<label>': pageBack — its group has no page (O:addPage)`. `onBack` runs guarded, logged `[page] '<overlay>': onBack failed: <message>`.
 
 ### Windows {#o-pageback-windows}
 
@@ -2114,6 +3129,70 @@ The held control is the plug-in's child window, and the focus lands the keyboard
 ### macOS {#o-pageback-macos}
 
 The held control is the DAW's panel, whose id is its window's. Where VoiceOver lands after the way back is unmeasured; with the keyboard on Logic's header the overlay does not come up, and the stay ends there.
+
+## O\:pageKey(spec) {#o-pagekey}
+
+**Signature:** `O:pageKey(spec: string) -> true | (false, Error)`
+
+Registers another page key for an overlay's [page](#o-addpage) and gives up the old one, for a setting. Refused, the old key stays registered. **It never answers a partial answer:** a key the host claims but cannot hold now — [`host.hotkey.register`](hotkey.md#host-hotkey-register)'s `id, err` — is let go again at once, and the call answers `false, err` with register's error value, since a page key that does nothing is no key; logged `[page] '<overlay>': the page key stays <old>: <spec> is not held — <message>`. Accepted, it logs `[page] '<overlay>': the page key is <spec> now, was <old>`.
+
+It runs where it is called, on the event loop, and costs one [`host.keys.check`](keys.md#host-keys-check) of the spec (remembered for the VM's life) and one registration.
+
+```luau
+-- A setting for the page key.
+host.settings.onChange("pageKey", function(new)
+  local ok, err = ov:pageKey(new)
+  if not ok then
+    if err.code == O.errors.CLASH then host.speech.output("That key belongs to a control of the overlay.") end
+    host.log.info("the page key stays as it was: " .. err)
+  end
+end)
+```
+
+### Returns {#o-pagekey-returns}
+
+- `true` — the new key is registered and held, and the old one is given up.
+- `false, err` — the old key stays; nothing of the new one is kept.
+
+### Errors {#o-pagekey-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says, in the order they are decided.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `invalid` | return | [`host.keys.check`](keys.md#host-keys-check) says `parse`: the spec does not read as a key. | `… is not a key spec` | both |
+| `invalid` | return | It says `tap`: a modifier on its own, which a hotkey cannot be. | `… is a modifier tap, which only host.keys.capture can watch` | both |
+| `taken` | return | It says `reserved`: the system keeps the combination. | `… is kept by the system` | both |
+| `not_supported` | return | It says `no_keycode`: this platform has no key code for it. | `… has no key code on this platform` | both |
+| `clash` | return | The key is, by [`host.keys.normalize`](keys.md#host-keys-normalize), the hotkey of a control or a tab of an overlay of the group; the message names it, `control '<label>'` or `tab '<label>'`, and the overlay. | `… is the hotkey of … of overlay '…'` | both |
+| `failed` | return | The registration raised — a spec `check` read and `register` did not: the host's own failure. | `registering … raised: …` | both |
+| any of [host.hotkey.register's errors](hotkey.md#host-hotkey-register-errors) | return | The host will not hold it now: another program, module or the system holds it (`taken`), the layout types no such letter (`not_supported`), and the others register answers. Whether register answered `nil, err` or `id, err`, nothing is kept. | the host's | both |
+
+**Raises** for a mistake in the call: a `spec` that is not a string (`overlay '<label>': pageKey takes a key spec, a string, got number`) — before version 0.11 that answered `false, "parse"` — and an overlay whose group has no page (`overlay '<label>': pageKey — its group has no page (O:addPage)`).
+
+## O\:pageAgain() {#o-pageagain}
+
+**Signature:** `O:pageAgain() -> Page`
+
+Closes an overlay's [page](#o-addpage) and describes it again, for a setting fixed per page object (`activates`, `window`): a trip under way is given up (`closed`), [`page:close()`](gui.md#page-close) gives the front back first where the page was in front, `describe` is called again with `addPage`'s checks, and `o.page` is the new page. Away ends by what is in front. The new page is prepared at once where the overlay is in front and not away, otherwise at its next arrival.
+
+It runs where it is called, on the event loop, and costs a page closed and described.
+
+```luau
+host.settings.onChange("pageBeside", function()
+  ov:pageAgain()   -- describe reads the setting, and the new page takes it
+end)
+```
+
+### Returns {#o-pageagain-returns}
+
+The new page, which `o.page` is from now on. The old one is closed.
+
+### Errors {#o-pageagain-errors}
+
+None. It never answers an error value. A trip it gives up hears `closed` in its `onGiveUp` ([`O:inPlugin`](#o-inplugin-errors)).
+
+**Raises** for an overlay whose group has no page (`overlay '<label>': pageAgain — its group has no page (O:addPage)`), and as `addPage` raises for its `describe`: one that raised, answered no page, or did not read all of `on`. A `describe` that raises leaves the old page closed and `o.page` the old object.
 
 ## O.calibrating() {#o-calibrating}
 
@@ -2151,18 +3230,9 @@ end
 
 `O.calibrating` came with version 0.4 of the runtime: a module that asks it depends on `"com.platform.overlay >= 0.4"`, and an older runtime then fails its load instead of its first call.
 
-**The calibration and capture methods** an overlay has — `calibrationShot()`, `calibrationCrop(size?)`, `captureControl(label, path)`, `captureRegion(region, path)`, `captureFull(path)` and `captureAll(dir)`, which the calibration keys and a module's own measuring call — answer `true`, or `false` and an error value; `calibrationVerify()` answers the count of matches, or `nil` and one. `captureAll` tries every one of its shots, and answers `false` with the error of the first that was not written, as `captureRegion` gave it. The keys drop the answer, each method having logged what it did. Since version 0.11 of the runtime; before, a bare `false`:
+**The calibration and capture methods** an overlay has — [`calibrationShot()`](#o-calibrationshot), [`calibrationCrop(size?)`](#o-calibrationcrop) and [`calibrationVerify()`](#o-calibrationverify), which the three calibration keys call on the overlay in front, and [`captureControl`](#o-capturecontrol), [`captureRegion`](#o-captureregion), [`captureFull`](#o-capturefull) and [`captureAll`](#o-captureall), which a module's own measuring calls — answer why they did not, since version 0.11 of the runtime; before, a bare `false`. The keys drop the answer, each method having logged what it did. Each is an entry below.
 
-| code | when | message |
-|---|---|---|
-| `not_in_front` | a capture method on an overlay not active | `the overlay is not active` |
-| `unplaced` | no origin to place by (`calibrationShot`, `calibrationVerify`, `captureFull`), or what is to be taken cannot be placed now — the factor of the [scale](#o-scale), a `region` function's answer | `the overlay has no origin now`, the factor's (as [`O:toScreen`](#o-toscreen)'s), `its \`region\` function raised: …`, `its \`region\` function answered nil`, `its \`region\` function answered …, not {x1, y1, x2, y2}` |
-| `unplaced` | `calibrationCrop`: the focused control has no position | `the focused control has no position to crop around` |
-| `not_found` | `calibrationCrop`, `calibrationVerify`: no control is focused; `captureControl`: no control of that label with a region | `no control is focused`, `no control labelled '<label>' with a region` |
-| [`host.screen.save`](screen.md#host-screen-save)'s own | the picture not taken or the file not written (`saveMarked`'s for `calibrationShot`) | the host's |
-| [`host.screen.imageSearchAll`](screen.md#host-screen-imagesearchall)'s own | `calibrationVerify`: the search could not be made — logged `no matches counted for <template> — <message>`, not as "0 match(es)" | the host's |
-
-**The menu shots.** While calibration is on, activating an overlay control declared with `opensMenu` saves three pictures — no crosshairs — of the overlay's origin whole: the plug-in's control when it is embedded, the window with its frame when it is standalone (the origin's `bounds`, see [`O:origin()`](#o-origin)). The rectangle is read once, just before the control acts, and all three pictures use it, so they line up pixel for pixel; the part of a popup that reaches past it is not in them. **One screen capture is all that stands between the key and the click**: the first picture is a [snapshot](screen.md#host-screen-snapshot) taken on the press — on the `screen-capture` thread, which the press's handler [waits](screen.md#where-it-waits) for — and kept. The control acts only while the overlay is still where the press was made once the picture is in — active, in the same stay in front, on the same window ([`O:stillHere`](#o-here) without options); otherwise nothing is clicked or chosen, and the log says why: `[calibrate] '<overlay>' '<control>': not acting after the menu shot — <why>`, in `stillHere`'s words. A single point is also asked again before its click, as after any read. A press that does not act counts for nothing: its picture is let go unwritten, the later two are not asked for, and it ends no item the last press waits to choose, sets no [menu test](#o-menutests) running and is not one of the control's two photographed openings (below). Nothing else is looked up on the press — no control's visibility or point. The later two are taken off the event loop at their time, counted from just before the click ([`host.screen.snapshot`](screen.md#taken-at-a-set-time) with a callback and `at`) and each is written when it arrives; the first is written after the second of them, not straight after the click, which is when the menu's first answer, its window coming to the front and the user's first key arrive. So a key pressed while the menu opens waits for no capture and no PNG, and one pressed at about 600 or 1500 ms waits for one or two PNGs being written. The log lines come in the order the pictures are written — 600 ms, 1500 ms, then the one of the press:
+**The menu shots.** While calibration is on, activating an overlay control declared with `opensMenu` saves three pictures — no crosshairs — of the overlay's origin whole: the plug-in's control when it is embedded, the window with its frame when it is standalone (the origin's `bounds`, see [`O:origin()`](#o-origin)). The rectangle is read once, just before the control acts, and all three pictures use it, so they line up pixel for pixel; the part of a popup that reaches past it is not in them. **One screen capture is all that stands between the key and the click**: the first picture is a [snapshot](screen.md#host-screen-snapshot) taken on the press — on the `screen-capture` thread, which the press's handler [waits](screen.md#where-it-waits) for — and kept. The control acts only while the overlay is still where the press was made once the picture is in — active, in the same stay in front, on the same window ([`O:stillHere`](#o-stillhere) without options); otherwise nothing is clicked or chosen, and the log says why: `[calibrate] '<overlay>' '<control>': not acting after the menu shot — <why>`, in `stillHere`'s words. A single point is also asked again before its click, as after any read. A press that does not act counts for nothing: its picture is let go unwritten, the later two are not asked for, and it ends no item the last press waits to choose, sets no [menu test](#o-menutests) running and is not one of the control's two photographed openings (below). Nothing else is looked up on the press — no control's visibility or point. The later two are taken off the event loop at their time, counted from just before the click ([`host.screen.snapshot`](screen.md#taken-at-a-set-time) with a callback and `at`) and each is written when it arrives; the first is written after the second of them, not straight after the click, which is when the menu's first answer, its window coming to the front and the user's first key arrive. So a key pressed while the menu opens waits for no capture and no PNG, and one pressed at about 600 or 1500 ms waits for one or two PNGs being written. The log lines come in the order the pictures are written — 600 ms, 1500 ms, then the one of the press:
 
 | File, under `modules/overlay-runtime/calibration/` | Taken |
 | --- | --- |
@@ -2183,8 +3253,6 @@ They are what a module's own [menu test](#o-menutests) is written from. A menu a
 
 numbered like the other pictures (`<overlay>-<control>-2-menu-item.png`, …). Its log line gives the rectangle captured, the item's point and the path: `[calibrate] '<overlay>' '<control>': menu item shot, (x1,y1)-(x2,y2), the item marked at (x,y) -> <path> (true)` (`submenu item shot` for the submenu's) — or `(false: …)` with the reason, and the click is made either way; a picture that cannot be asked for gives that line its reason, and the item is clicked at once. It is the picture an item's offset is measured from: the offset is from the menu's top-left corner, which is the picture's corner plus 12.
 
-**A scaled overlay's calibration shot** ([`O:scale`](#o-scale)). Its first line adds the factor its crosshairs were placed with and the frame, `… scale 1.6000 about (0,0), frame (0,0) -> …`, or `no scale now (<why>)`; each control's line adds every region it reads as the screen rectangle, `region (x1,y1)-(x2,y2)` (and `ocrLabel (…)`), since the authored numbers are not where it reads. A control with no factor now has no crosshair and is listed with `no position`. In any overlay, the line of a control that chooses a menu item ends `then item (dx,dy) of its menu` (or `then an item of its menu`, for a `menuItem` function): the opener is what the crosshair marks, and the item is in the menu item shot. An opener a module's own code has asked [`O:chooseMenuItem`](#o-choosemenuitem) to click — a stepper's, which no control's `at` names — is marked too once it has been asked for, at the `at` it was last given, after the controls, in label order: `  n <label> screen (x,y)  pixel r,g,b  [menu opener]` (or `-- <label> no position  [menu opener]` when it cannot be placed now).
-
 ```luau
 -- Nothing to call: the control only has to say that it opens a menu.
 ov:addHotspotButton({ label = "Preset menu", at = { 412, 118 }, hotkey = "Alt+M", opensMenu = true })
@@ -2197,6 +3265,10 @@ ov:addHotspotButton({ label = "Preset menu", at = { 412, 118 }, hotkey = "Alt+M"
 --     (120,90)-(1120,742), content at (120,90) -> C:\…\Diva-Preset-menu-menu-before.png (true)
 ```
 
+### Returns {#o-calibrating-returns}
+
+`true` while calibration is switched on, `false` otherwise — never `nil`. A read of a variable: it never raises, and asks the host nothing.
+
 ### Windows {#o-calibrating-windows}
 
 `settings.toml` is next to the `.exe`. The keys are Ctrl+Alt+Shift+S, T and V.
@@ -2208,6 +3280,229 @@ The capture before the click goes through the module's [source](screen.md#which-
 `settings.toml` is in the folder that holds the `.app` (see [`host.settings.set`](settings.md#host-settings-set) for a translocated copy). The keys are Command+Option+Shift+S, T and V — a spec's Ctrl is Command there — off Control+Option, which is VoiceOver's.
 
 The capture before the click is taken by ScreenCaptureKit on the `screen-capture` thread, which the press waits for, at the display's own resolution, and kept at up to five times the bytes of the rectangle (see [`host.screen.snapshot`](screen.md#host-screen-snapshot)), for the 1.5 seconds until the last picture has arrived; the pictures of a maximised window held at once come close to a module's snapshot budget, and a capture the budget refuses is written as `(false: …)`. The menu item shot is one more capture, of the menu's rectangle only, taken by ScreenCaptureKit on the `screen-capture` thread while the item's click waits for it, and held until the next pass writes it. Without the Screen Recording permission the pictures show the wallpaper.
+
+## O\:calibrationShot() {#o-calibrationshot}
+
+**Signature:** `O:calibrationShot() -> true | (false, Error)`
+
+What the calibration key Ctrl+Alt+Shift+S does on the overlay in front ([calibration keys](../building-an-overlay.md#calibrator)): a picture of the coordinate window with a **crosshair on every control where it will actually click**, and the pixel read there, and the same picture without the crosshairs. It writes `calibration/<overlay>.png` and `calibration/<overlay>-clean.png` under the overlay runtime's own folder (`modules/overlay-runtime/calibration/`), the overlay's label with every run of characters other than letters and digits turned into `-`; a later shot of the same overlay is numbered, `<overlay>-2.png`, counting from the files already on disk. The log says the origin, the rectangle captured and the path, then which context the overlay took as its origin and what else was on offer, then one line per control: its number, label, screen point and pixel, or ``hidden (its `when` is false)``, or `no position`. The pixels under every crosshair are read in one capture; a read that fails leaves every pixel `?` and says why first.
+
+**A scaled overlay's calibration shot** ([`O:scale`](#o-scale)). Its first line adds the factor its crosshairs were placed with and the frame, `… scale 1.6000 about (0,0), frame (0,0) -> …`, or `no scale now (<why>)`; each control's line adds every region it reads as the screen rectangle, `region (x1,y1)-(x2,y2)` (and `ocrLabel (…)`), since the authored numbers are not where it reads. A control with no factor now has no crosshair and is listed with `no position`. In any overlay, the line of a control that chooses a menu item ends `then item (dx,dy) of its menu` (or `then an item of its menu`, for a `menuItem` function): the opener is what the crosshair marks, and the item is in the menu item shot. An opener a module's own code has asked [`O:chooseMenuItem`](#o-choosemenuitem) to click — a stepper's, which no control's `at` names — is marked too once it has been asked for, at the `at` it was last given, after the controls, in label order: `  n <label> screen (x,y)  pixel r,g,b  [menu opener]` (or `-- <label> no position  [menu opener]` when it cannot be placed now).
+
+**Cost.** One capture of the crosshairs' pixels, two captures and two PNGs written — the handler waits for each, on the `screen-capture` thread and the image worker — and, for the context lines, the window's controls, its focus chain and a dump of the origin's accessibility tree.
+
+```luau
+-- A module's own key for a shot, beside the calibration key, while it is being written.
+host.hotkey.register("Ctrl+Alt+Shift+F12", function()
+  if not ov.active then return end
+  local ok, err = ov:calibrationShot()
+  if not ok then host.log.info("[my-module] no shot: " .. err) end
+end)
+```
+
+### Returns {#o-calibrationshot-returns}
+
+- `true` — the marked picture was written. The clean one's answer is not checked.
+- `false, err` — the marked picture was not written, or nothing could be placed.
+
+### Errors {#o-calibrationshot-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `unplaced` | return | The overlay has no origin now — it is not active, or its context finds nothing; logged `[calibrate] no active origin`. | `the overlay has no origin now` | both |
+| any of [host.screen.saveMarked's errors](screen.md#host-screen-savemarked-errors) | return | The marked picture was not taken or the file not written. | the host's | both |
+
+**Raises** what `host.screen.saveMarked` raises for its arguments, which the runtime makes itself: nothing for a mistake of the module's, since it takes none.
+
+**Raises where it cannot wait**: called with an origin where a read cannot wait — outside every handler, in a function the host calls and waits for, or in a coroutine of the module's own — the `host.screen.pixels` inside it raises, `host.screen.pixels cannot wait here: …` — or `host.screen.saveMarked`, with no crosshair to read — and nothing is written; see [Where it waits](screen.md#where-it-waits). The calibration key calls it in a handler.
+
+## O\:calibrationCrop(size?) {#o-calibrationcrop}
+
+**Signature:** `O:calibrationCrop(size: number?) -> true | (false, Error)`
+
+What the calibration key Ctrl+Alt+Shift+T does: crops `size` pixels (28 by default) square around the **focused** control's point and writes it as a template, `calibration/<label>.png` under the overlay runtime's folder, the control's label with every character other than a letter or a digit turned into `-`. The point is where the calibration shot puts its crosshair: a hotspot's `at`, a slider's thumb or a graphical button's hit where they are found, otherwise its region's middle. A later crop of the same label **replaces** the file. It does not check that the overlay is in front; the key that calls it is armed only on the overlay in front. Logged `[calibrate] cropped <label> around (x,y) -> <path> (<answer>)`.
+
+```luau
+ov:calibrationCrop(40)   -- a wider template around the focused control
+```
+
+### Returns {#o-calibrationcrop-returns}
+
+- `true` — the template was written.
+- `false, err` — it was not.
+
+### Errors {#o-calibrationcrop-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `not_found` | return | No control is focused. | `no control is focused` | both |
+| `unplaced` | return | The focused control has no point now: none to place, a scale with no factor, a region function with no answer. | `the focused control has no position to crop around` | both |
+| any of [host.screen.save's errors](screen.md#host-screen-save-errors) | return | The picture was not taken or the file not written. | the host's | both |
+
+**Raises** for a `size` that is not a number (Luau's own arithmetic error), and what an `at` function raises, as at a press.
+
+**Raises where it cannot wait**: called with a point to crop around where a read cannot wait — outside every handler, in a function the host calls and waits for, or in a coroutine of the module's own — the `host.screen.save` inside it raises, `host.screen.save cannot wait here: …`, and nothing is written; see [Where it waits](screen.md#where-it-waits). The calibration key calls it in a handler.
+
+## O\:calibrationVerify() {#o-calibrationverify}
+
+**Signature:** `O:calibrationVerify() -> number | (nil, Error)`
+
+What the calibration key Ctrl+Alt+Shift+V does: counts every match of the **focused** control's template across the coordinate window — its `onImage` (or `offImage`), or else the crop [`calibrationCrop`](#o-calibrationcrop) wrote for its label — with a tolerance of 8. Exactly one is what a control wants before it clicks blindly; two means it will one day click the wrong one, and none that it never fires. Logged `[calibrate] <label>: <n> match(es) for <template>`, then one line per hit.
+
+```luau
+local n, err = ov:calibrationVerify()
+if n == nil then host.log.info("[my-module] not counted: " .. err)
+elseif n ~= 1 then host.log.info("[my-module] the template matches " .. n .. " times") end
+```
+
+### Returns {#o-calibrationverify-returns}
+
+- A number from `0` — the matches counted. `0` is an answer: the search was made and found none.
+- `nil, err` — nothing was counted.
+
+### Errors {#o-calibrationverify-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `not_found` | return | No control is focused. | `no control is focused` | both |
+| `unplaced` | return | The overlay has no origin now. | `the overlay has no origin now` | both |
+| any of [host.screen.imageSearchAll's errors](screen.md#host-screen-imagesearchall-errors) | return | The search could not be made — logged `[calibrate] <label>: no matches counted for <template> — <message>`, not as "0 match(es)". | the host's | both |
+
+**Raises** what `host.screen.imageSearchAll` raises for a template it cannot load — a missing file inside the runtime's package, such as a crop never written.
+
+**Raises where it cannot wait**: called with a template to count where a read cannot wait — outside every handler, in a function the host calls and waits for, or in a coroutine of the module's own — the `host.screen.imageSearchAll` inside it raises, `host.screen.imageSearchAll cannot wait here: …`, and nothing is counted; see [Where it waits](screen.md#where-it-waits). The calibration key calls it in a handler.
+
+## O\:captureControl(label, path) {#o-capturecontrol}
+
+**Signature:** `O:captureControl(label: string, path: string) -> true | (false, Error)`
+
+Writes the live pixels of the control labelled `label` — the first with a `region` — to `path`, an absolute file path, as a PNG: its region placed now, through the origin, the frame and the scale. For re-capturing an image control's on and off templates against the real plug-in. The overlay must be active, so the origin is the plug-in in front. Logged `captureControl '<label>' region=(x1,y1,x2,y2) -> <path> ok=<answer>`.
+
+```luau
+ov:captureControl("Reverb", host.path("images/FxRack/ReverbOn.png"))
+```
+
+### Returns {#o-capturecontrol-returns}
+
+- `true` — the picture was written.
+- `false, err` — it was not.
+
+### Errors {#o-capturecontrol-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says, in the order they are decided.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `not_in_front` | return | The overlay is not active. | `the overlay is not active` | both |
+| `unplaced` | return | The control's `region` is a function, and it raised. | ``its `…` function raised: …`` | both |
+| `unplaced` | return | The control's `region` function answered `nil`. | ``its `…` function answered nil`` | both |
+| `unplaced` | return | The control's `region` function answered something other than four numbers. | ``its `…` function answered …, not {x1, y1, x2, y2}`` | both |
+| `unplaced` | return | A scaled overlay with no origin now. | `the overlay has no origin now` | both |
+| `unplaced` | return | A scaled overlay whose scale function raised. | `its scale function raised: …` | both |
+| `unplaced` | return | A scaled overlay whose scale function answered `nil`. | `its scale function answered nil` | both |
+| `unplaced` | return | A scaled overlay whose scale function answered no factor above 0. | `its scale function answered …, not a factor above 0` | both |
+| `not_found` | return | No control with that label has a `region`. | `no control labelled '…' with a region` | both |
+| any of [host.screen.save's errors](screen.md#host-screen-save-errors) | return | The picture was not taken or the file not written. | the host's | both |
+
+**Raises** what `host.screen.save` raises for a `path` it does not take.
+
+**Raises where it cannot wait**: called with a region to write where a read cannot wait — outside every handler, in a function the host calls and waits for, or in a coroutine of the module's own — the `host.screen.save` inside it raises, `host.screen.save cannot wait here: …`, and nothing is written; see [Where it waits](screen.md#where-it-waits).
+
+## O\:captureRegion(region, path) {#o-captureregion}
+
+**Signature:** `O:captureRegion(region: {number, number, number, number}, path: string) -> true | (false, Error)`
+
+Writes an authored rectangle `{x1, y1, x2, y2}` of the overlay — placed as [`O:toScreenRect`](#o-toscreenrect) places it, without `whole` — to `path`, an absolute file path, as a PNG: a wider shot for calibration or inspection. The overlay must be active. Logged `captureRegion (x1,y1,x2,y2) -> <path> ok=<answer>`.
+
+```luau
+ov:captureRegion({ 0, 0, 400, 120 }, host.path("calibration/header.png"))
+```
+
+### Returns {#o-captureregion-returns}
+
+- `true` — the picture was written.
+- `false, err` — it was not.
+
+### Errors {#o-captureregion-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says, in the order they are decided.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `not_in_front` | return | The overlay is not active. | `the overlay is not active` | both |
+| `unplaced` | return | A scaled overlay with no origin now. | `the overlay has no origin now` | both |
+| `unplaced` | return | A scaled overlay whose scale function raised. | `its scale function raised: …` | both |
+| `unplaced` | return | A scaled overlay whose scale function answered `nil`. | `its scale function answered nil` | both |
+| `unplaced` | return | A scaled overlay whose scale function answered no factor above 0. | `its scale function answered …, not a factor above 0` | both |
+| any of [host.screen.save's errors](screen.md#host-screen-save-errors) | return | The picture was not taken or the file not written — corners turned around included, which read as an empty region (`failed`, `screen capture failed`). Fractional corners are cut toward zero and the picture written. | the host's | both |
+
+**Raises** for a `region` that is not a table of four numbers (Luau's own error), and what `host.screen.save` raises for a `path` it does not take.
+
+**Raises where it cannot wait**: called with the overlay active where a read cannot wait — outside every handler, in a function the host calls and waits for, or in a coroutine of the module's own — the `host.screen.save` inside it raises, `host.screen.save cannot wait here: …`, and nothing is written; see [Where it waits](screen.md#where-it-waits).
+
+## O\:captureFull(path) {#o-capturefull}
+
+**Signature:** `O:captureFull(path: string) -> true | (false, Error)`
+
+Writes the **whole** plug-in in front — the origin's client area's corner, as large as its `bounds` — to `path`, an absolute file path, as a PNG: for locating controls and working out coordinates and offsets again. The overlay must be active. Logged `captureFull client=(x,y) bounds=<w>x<h> -> <path> ok=<answer>`.
+
+```luau
+ov:captureFull(host.path("calibration/whole.png"))
+```
+
+### Returns {#o-capturefull-returns}
+
+- `true` — the picture was written.
+- `false, err` — it was not.
+
+### Errors {#o-capturefull-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says, in the order they are decided.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `not_in_front` | return | The overlay is not active. | `the overlay is not active` | both |
+| `unplaced` | return | It has no origin now, or one without a `client` and `bounds`. | `the overlay has no origin now` | both |
+| any of [host.screen.save's errors](screen.md#host-screen-save-errors) | return | The picture was not taken or the file not written. | the host's | both |
+
+**Raises** what `host.screen.save` raises for a `path` it does not take.
+
+**Raises where it cannot wait**: called with an origin where a read cannot wait — outside every handler, in a function the host calls and waits for, or in a coroutine of the module's own — the `host.screen.save` inside it raises, `host.screen.save cannot wait here: …`, and nothing is written; see [Where it waits](screen.md#where-it-waits).
+
+## O\:captureAll(dir) {#o-captureall}
+
+**Signature:** `O:captureAll(dir: string) -> true | (false, Error)`
+
+A shot of the whole plug-in's content and a small one round every positioned control, into the folder `dir` (an absolute path), so coordinates worked out again can be checked against the live plug-in in one go: `content-full.png`, the authored rectangle `{0, 0, 640, 430}` — in an overlay without a scale, a pixel at `(x, y)` in it is the authored content point `(x, y)` — and `ctl-<label>.png` for each control with a label, a table `at` or a table `region`, and no `rawOrigin`, 68 by 52 authored units round its point (the label's characters other than letters and digits turned into `_`). Each is taken as [`O:captureRegion`](#o-captureregion) takes it. **Every shot is tried**; one that is not written stops none of the others. The overlay must be active.
+
+```luau
+local ok, err = ov:captureAll(host.path("calibration/all"))
+if not ok then host.log.info("[my-module] not every shot was written: " .. err) end
+```
+
+### Returns {#o-captureall-returns}
+
+- `true` — every shot was written.
+- `false, err` — at least one was not; `err` is the **first** that was not written, as `captureRegion` gave it. The others were tried, and those that could be written were.
+
+### Errors {#o-captureall-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `not_in_front` | return | The overlay is not active; nothing is tried. | `the overlay is not active` | both |
+| any of [O:captureRegion's errors](#o-captureregion-errors) | return | The first shot that was not written: its placement in a scaled overlay with no factor or no origin, or the picture or the file. | the runtime's or the host's | both |
+
+**Raises** what `host.screen.save` raises for a `dir` that makes a `path` it does not take.
+
+**Raises where it cannot wait**: called with the overlay active where a read cannot wait — outside every handler, in a function the host calls and waits for, or in a coroutine of the module's own — the first `host.screen.save` inside it raises, `host.screen.save cannot wait here: …`, and no shot after it is tried; see [Where it waits](screen.md#where-it-waits).
 
 ## Plugin base + library overlays (the cell model) {#plugin-base-library-overlays}
 

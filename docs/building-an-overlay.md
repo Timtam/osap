@@ -123,7 +123,7 @@ ov:bind(binding, { menus = { O.menuTests.newWindow } })
 
 ### Acting on what was read
 
-Text read off the screen with [`host.ocr.recognize`](api/ocr.md#host-ocr-recognize) comes back later — in its callback, or to the handler that waited for it — and by then the user may have moved on: another control, another key, another window. Before acting on the answer, ask whether the overlay is still where it was: [`o:here()`](api/overlay.md#o-here) when the key is pressed, [`o:stillHere(mark, opts)`](api/overlay.md#o-here) when the answer comes. It is the check the overlay makes itself before it says a value or clicks an OCR button, and it answers why not in the same words.
+Text read off the screen with [`host.ocr.recognize`](api/ocr.md#host-ocr-recognize) comes back later — in its callback, or to the handler that waited for it — and by then the user may have moved on: another control, another key, another window. Before acting on the answer, ask whether the overlay is still where it was: [`o:here()`](api/overlay.md#o-here) when the key is pressed, [`o:stillHere(mark, opts)`](api/overlay.md#o-stillhere) when the answer comes. It is the check the overlay makes itself before it says a value or clicks an OCR button, and it answers why not in the same words.
 
 ```luau
 ov:addCustomButton({ label = "Bank", onActivate = function(o)
