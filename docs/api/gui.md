@@ -20,6 +20,10 @@ A walkthrough that builds a page step by step — beside another window, with bu
 
 **Nothing here waits.** The page is built the first time it is shown, or before with [`prepare`](#page-prepare), on the event loop after the modules' callbacks have run, and `show` answers `false, err` with `err.code` `not_ready` until the page has loaded; [`onReady`](#host-gui-webview) says when it has. What a page's methods answer instead of `true` is an [error value](./errors.md#error-values): compare its `code`, never its message. Part of the first build — WebView2's environment, its browser process starting, and on a Mac the pages' rule list — is not waited for; how a cold start's time splits between that part and the part that is waited for is test W8 ([cost](#page-show)). No timer is involved anywhere.
 
+**What each call answers** is under its **Returns**, and every error value it can give is in the table under its **Errors** ([Reading an Errors table](./errors.md#reading-an-errors-table)). A message there is what the log shows, and it may change between versions; the code does not. **One call answers a value and an error together**: [`page:show`](#page-show-returns) can answer `true, err`, the page in front but over the rectangle it was to avoid.
+
+**Two raises any call here can meet** are said once, here. A module that did not declare `gui` ([below](#declare)) raises at its first reach for `host.gui`, naming the capability. And any call raises `stopped by the host: …` when its module has run past its [limits](../module-runtime-and-lifecycle.md#limits). A page's method called with `.` instead of `:` (`page.show()`) raises too, as it is given no page. The rest each entry lists under **Raises**.
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -45,9 +49,9 @@ Describes a page and returns the object every call below is a method of. **It bu
 
   The host hides neither kind when the user goes to another window: a module hides a tool page when it is no longer wanted — the way back to the plug-in, say — and leaves an app page open until the user closes it, as any program's window stays.
 - `activates` — optional, **experimental**: whether the page's window makes this application the active one when it takes the keyboard — `true`, the default, or `false`, for a tool page only. Anything but a boolean raises, and so does `false` with `window = "app"`: an app page is a window like any program's, which makes its application the active one. Fixed for the life of the page object, as `window` is. It matters on a Mac alone, where a tool page described `false` takes the keyboard while the DAW stays the active application ([macOS](#host-gui-webview-macos)) — a way that has not met VoiceOver yet and may change or go, offered so that a module's developer can try it beside the default with their DAW; on Windows it changes nothing ([Windows](#host-gui-webview-windows)). The log's line for the description says it (`[gui] … described, …, activates = false …`).
-- `onMessage(value)` — called with each value the page sends with `platform.post(value)`, decoded as [`host.json.decode`](./json.md#host-json-decode) decodes: an object is a table, `null` is `nil`. A message that is not JSON, or larger than 1 MiB — which the page's own `platform.post` refuses before it is sent ([below](#the-page-s-side)) — is dropped with a line in the log; so is one the module's VM has no memory left to decode, and the line says so — the decoding happens in that VM before the callback starts, so it is neither the module's error nor a [stop](../module-runtime-and-lifecycle.md#limits).
+- `onMessage(value)` — called with each value the page sends with `platform.post(value)`, decoded as [`host.json.decode`](./json.md#host-json-decode) decodes: an object is a table, `null` is `nil`. A message that is not JSON, or larger than 1 MiB — which the page's own `platform.post` refuses before it is sent ([below](#platform-post)) — is dropped with a line in the log; so is one the module's VM has no memory left to decode, and the line says so — the decoding happens in that VM before the callback starts, so it is neither the module's error nor a [stop](../module-runtime-and-lifecycle.md#limits).
 - `onReady()` — optional; called each time a document of the page's own has loaded successfully: after the first build, and again whenever the page reloads itself. A navigation the host refused (a link to anything else) does not call it. Messages posted before that are delivered to the page when it has loaded, in the order they were posted, before `onReady` runs. A first document that does not load at all (its file deleted since, say) is a build that failed: `onReady` is not called, and the next `show` answers `false, err` with `failed` — `could not be built`, its `detail` saying why.
-- `onClose(how, err)` — optional; called when the window goes without the module asking, `how` saying how: `"user"` when the user closed it with its close box (the page is **hidden**, not destroyed, and keeps its state for the next `show`, and the window it came from gets the front back, as at [`hide`](#page-hide) — on Windows the keyboard with it, on the control it was on; Alt+F4 pressed inside the page does the same — seen on 2026-10-11 — and on a Mac Command-W), `"failed"` when the page is gone — WebView2's browser or renderer process ended, or on a Mac WebKit's content process, the page's script got round the `window.close()` that does nothing ([below](#the-page-s-side)), or it went to something that is not its own and could not be refused (`about:blank`); the next `show` builds it again. Beside `"failed"` comes an [error value](./errors.md#error-values), `err`: code `failed`, message `the page failed`, and a `detail` saying which failure it was — `its WebView2 renderer process ended (kind 1)` (or `browser`), `its script closed its web view`, `it went to …, which is not a file of its own and could not be refused`, on a Mac `its WebKit content process ended`. `"user"` comes alone. `how` is one of the two words, never an error value: compare it with them.
+- `onClose(how, err)` — optional; called when the window goes without the module asking, `how` saying how: `"user"` when the user closed it with its close box (the page is **hidden**, not destroyed, and keeps its state for the next `show`, and the window it came from gets the front back, as at [`hide`](#page-hide) — on Windows the keyboard with it, on the control it was on; Alt+F4 pressed inside the page does the same — seen on 2026-10-11 — and on a Mac Command-W), `"failed"` when the page is gone — WebView2's browser or renderer process ended, or on a Mac WebKit's content process, the page's script got round the `window.close()` that does nothing ([below](#platform-post)), or it went to something that is not its own and could not be refused (`about:blank`); the next `show` builds it again. Beside `"failed"` comes an [error value](./errors.md#error-values), `err`: code `failed`, message `the page failed`, and a `detail` saying which failure it was — `its WebView2 renderer process ended (kind 1)` (or `browser`), `its script closed its web view`, `it went to …, which is not a file of its own and could not be refused`, on a Mac `its WebKit content process ended`. `"user"` comes alone. `how` is one of the two words, never an error value: compare it with them.
 
 Any other option, or an option of the wrong type, raises. **The three callbacks are events of the module's**, as a hotkey's or a timer's callback is: each runs as a [handler](../module-runtime-and-lifecycle.md#handlers) of the module whose VM created the page, one after another with that module's other handlers, on the event loop — never from inside the web view's own callbacks. It runs at the first tick after the window reported the event (a tick comes every 15 ms), or, when events of the module's are still waiting to run then, after them — and while a handler of the module [waits](../module-runtime-and-lifecycle.md#a-handler-waits), for a reading say, the page's events wait with the module's others and run in order after it. A tick hands the pages' events on in the order the windows reported them, after that tick's keys, hotkeys, controller events, window and focus changes, timers and answers, and before its report of the window already in front (`onTrigger { initial = true }`) and its [`host.window.recheck()`](./window.md#host-window-recheck) round: a message the page sent just before a key was pressed can run after the key's callback. They run only while that module is enabled: what arrives while it is disabled is dropped, and so is what waited for it when it was disabled. At most 256 of a module's pages' messages wait, apart from its keys and buttons; the next are dropped, and the log says so under `[gui]` at the first, then at most every 10 seconds with how many since, and the rest once the module has caught up. `onReady` and `onClose` are never dropped, and an `onReady` that would wait right behind one of the same page and build is one with it. Each is delivered to the page and the build it came from: once the module has called `page:close()`, nothing the closed page sent reaches it, while a build that failed is heard to the end — what it sent before the failure, then `onClose("failed")` when its window failed (a first document that did not load calls none, above). `onMessage` and `onClose("user")` run in the interactive lane, as a key's callback does — a message whoever sent it, as the host cannot tell a person's click in the page from the page's own script — so a [text read](./ocr.md#host-ocr-recognize) one asks for goes ahead of the polls', and a poll's read a handler of the module waits for meanwhile is made an interactive one, as a key makes it; `onReady` in the lane of the `show` or `prepare` that started the build, or in the interactive one if a `show` or `prepare` made in it while the build was under way asked too (a poll's when the page loaded again by itself); `onClose("failed")` in a poll's. An error in one is logged and shown once in a dialog as an error in a `page message`, `page ready` or `page close` callback. Each is held to the [limits](../module-runtime-and-lifecycle.md#limits) every callback is held to: one that runs past 2 seconds of the event loop's processor time or 10 seconds in all, or runs out of memory without catching it, stops its module, and the sentence and the dialog name it as its `page message`, `page ready` or `page close` callback — and a method of the page the time ran out in, such as `in page:show`. The page belongs to the module whose VM created it: disabling that module hides it, and reloading it closes it — the reloaded code describes its page again. A module the application stopped is turned off at once, so what its pages send from then on is dropped, and at the end of that turn of the event loop its pages are hidden, as a disabled module's are; ticking it again builds it afresh, as a reload does, which closes them. A `page:close()` made inside `onReady` or `onClose` takes the window down like any other.
 
@@ -93,6 +97,20 @@ host.hotkey.register("Ctrl+Shift+Win+Alt+B", function()
 end)
 ```
 
+### Returns {#host-gui-webview-returns}
+
+- A `Page` — always, and nothing beside it: the object the methods below are called on, described and not built. It is a page of the module's until the module is reloaded; after that each method answers as its entry says for a page that is gone.
+
+### Errors {#host-gui-webview-errors}
+
+The call itself never answers an error value. One comes later, to the page's `onClose`:
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `failed` | hook onClose | The page's window went without the module asking: its engine's process ended, its script got round the `window.close()` that does nothing, or it went to something not its own that could not be refused. `how` is `"failed"`, and `err.detail` says which of these it was. The next `show` builds the page again. | `the page failed` | both |
+
+**Raises** for a mistake in the call, at the caller's line: `opts` that is not a table; a key that is not one of the seven options; a `file` or a `title` that is missing, not a string or empty; a `file` that is not a file inside the module's folder (above); a `window` other than `"tool"` and `"app"`; an `activates` that is not a boolean, or `false` with `window = "app"`; an `onMessage` that is missing or not a function; an `onReady` or `onClose` that is neither a function nor `nil`. And a module whose folder cannot be read raises too, naming the module.
+
 ### Windows {#host-gui-webview-windows}
 
 WebView2, the web engine of Microsoft Edge, through the Tauri team's wry. The WebView2 runtime is part of Windows 11 and installed on most Windows 10 machines; without it `show` answers `false, err` with `unavailable` — `WebView2 runtime not installed` — asked again at every `show`, so installing it needs no restart. The runtime updates itself with Edge, so the engine a page runs in can change under the application without anything here changing: in 2023 an Edge update made web views silent to JAWS for a while.
@@ -119,24 +137,13 @@ The system's web engine, WebKit (`WKWebView`), through the Tauri team's wry — 
 
 **Signature:** `page:show(opts: { focus: boolean?, avoid: { x, y, w, h }? }?)` → `true`, `true, Error` or `false, Error`
 
-Shows the page, raised above the ordinary windows without taking the front, and with `focus` (the default) brings it to the front and puts the keyboard into the document — on the element that had the focus last time, or the document itself. `avoid` is a rectangle the page must not cover, in screen coordinates as [`host.window`](./window.md#table-shapes) gives them — physical pixels on Windows, points on a Mac — so a window table's `bounds` is one. Anything else in `opts`, a `focus` that is not a boolean, or an `avoid` without four numbers or with no area raises.
+Shows the page, raised above the ordinary windows without taking the front, and with `focus` (the default) brings it to the front and puts the keyboard into the document — on the element that had the focus last time, or the document itself. `avoid` is a rectangle the page must not cover, in screen coordinates as [`host.window`](./window.md#table-shapes) gives them — physical pixels on Windows, points on a Mac — so a window table's `bounds` is one.
 
 **Where the page goes.** The page is 520 by 640 at 100 % display scaling (scaled with the display scaling of the monitor `avoid` is on; on a Mac 520 by 640 points). With `avoid`: on the monitor that rectangle is mostly on — to its right, then to its left, then below it, then above it, each lined up with it and kept inside the monitor's work area — and failing all four, in the middle of another monitor that has room. Where none of that fits, it is made smaller, down to 320 by 360, on the side of `avoid` that leaves the most room on its monitor — and failing that, as large as another monitor's work area allows (not smaller than 320 by 360), in its middle. **Where not even that fits** — a maximised or full-screen plug-in window, and no other monitor with room — a `show` with `focus` puts the page **over part of `avoid`**: at 320 by 360, in the corner of that monitor's work area where it covers the least of `avoid` (with equal cover: bottom right, top right, bottom left, top left — a plug-in draws from the top left of its window, and a maximised window's extra room is to the right and below), and answers `true, err` — **a partial answer**: shown and in front, *and* an error value, code `too_large`, message `over the rectangle to avoid`, saying it is over part of `avoid`. A `show` with `focus` is never refused for want of room: a page that is not shown is a page the user cannot reach. But the page stays over `avoid` only in front: a `show` without `focus` answers `false, err` — `too_large`, `no room beside the rectangle to avoid` — and leaves the page hidden (hiding it if it was shown), and one the system declines is hidden again (below) — except an app page the user has open, which neither hides nor moves ([Windows](#page-show-windows), [macOS](#page-show-macos)). A `show` with `avoid` gives the page its size again, so a size the user dragged it to lasts until then. Without `avoid`, the first `show` puts it in the middle of the monitor the window in front is on, and after that it stays where it is. With no monitor's work area readable at all (never seen), the page stays where it is, with a line in the log.
 
 **A page over the plug-in window** is where the application's own clicks and screen reads would land. So a module **must** bring the plug-in window to the front **first** — [`host.window.focus`](./window.md#host-window-focus), then the click or the read on its foreground event — for every click into the plug-in **and every screen read of it** (a capture, OCR, a pixel of the plug-in's rectangle would otherwise contain the page), and show the page again after: the page is not topmost, so the activated plug-in window is drawn over it. The host does not do this for the module. [`host.window.ownsPoint`](./window.md#host-window-ownspoint) answers `false` for a point the page still covers, so a runtime that asks before it clicks does not click into the page; nothing guards a screen read. The log says the first time a run of shows goes over `avoid`, with why.
 
-**The answers.** `true` when the page is shown and — with `focus` — in front (on a Mac, the front asked for: [macOS](#page-show-macos)). **`true, err` — the true and an error value together — when it had to go over `avoid`** (above), which only a `show` with `focus` that ends in front does: the page is shown and in front, and `err` (`too_large`, `over the rectangle to avoid`) says what was not done — a [partial answer](./errors.md#partial-answers). So `ok` says whether the page is there, and `err` whether everything asked was done: test both. Otherwise `false, err`, `err` an [error value](./errors.md#error-values) whose code is one of these, in the order they are decided — compare the code, never the message, which is the log's:
-
-| code | message | when | the page afterwards |
-|---|---|---|---|
-| `gone` | `this page no longer exists: its module was reloaded` | the page object is from before its module was reloaded | none: the reloaded code describes its own |
-| `not_supported` | `headless` | a [headless run](../module-manager.md#headless-mode): there is no window system to show anything in | not built |
-| `not_supported` | `not supported on this platform yet` | a platform with no page window: any but Windows and macOS, which the application does not run on | not built |
-| `unavailable` | `WebView2 runtime not installed` | Windows without the runtime | not built; the next `show` asks again |
-| `not_ready` | `not ready yet` | the first `show` — it starts the build — and every `show` until the page has loaded | building or loading; `onReady` comes when it has loaded |
-| `failed` | `could not be built` | the build started by an earlier `show` or [`prepare`](#page-prepare) failed — WebView2's environment or the page's controller could not be made (on a Mac, the pages' rule list or the web view), or the page's first document did not load; `err.detail` says why, as the log does | said once: the next `show` starts a new build |
-| `too_large` | `no room beside the rectangle to avoid` | a `show` without `focus`, and no room beside `avoid` (above) | hidden — never over `avoid` without the keyboard; an app page the user has open stays open, where it is |
-| `refused` | `declined by the system` | Windows refused to bring the page to the front; on a Mac, only a refusal that comes at once ([macOS](#page-show-macos)) | **shown and raised, without the keyboard**: the window in front keeps it, as far as Windows answered — Windows has been seen to bring a declined page to the front all the same a moment later ([Windows](#page-show-windows)), so the answer does not say where the keyboard ends up — or, where it would be over `avoid`, **hidden**: a page over the plug-in that the plug-in window, still in front, could not be raised above again; an app page the user has open is then neither moved, raised nor hidden |
+**What it answers** — `true`, `true, err` or `false, err` — is under [Returns](#page-show-returns), and every reason it gives under [Errors](#page-show-errors), in the order they are decided.
 
 A page that was never shown, or was closed, is built by the first `show`, which answers `not_ready`: show it again from `onReady` if it is still wanted — or build it before it is wanted, with [`prepare`](#page-prepare). The build runs at the end of a tick, never inside a Luau call.
 
@@ -161,6 +168,46 @@ host.hotkey.register("Ctrl+Shift+Win+Alt+F7", function()
 end)
 ```
 
+### Returns {#page-show-returns}
+
+:::warning A value and an error together
+**`page:show` can answer `true, err`.** The page is shown and in front, *and* it is over part of `avoid`, because there was no room beside it: `err.code` is `too_large`. That is a [partial answer](./errors.md#partial-answers): `ok` says whether the page is there, and `err` says whether everything asked was done. `if not ok then … end` alone takes it for a complete answer, and `if err then return end` alone throws away a page that is in front. Test both:
+
+```luau
+local pageOverPlugin = false   -- read before any click into the plug-in or read of it
+local ok, err = page:show({ focus = true, avoid = plugin.bounds })
+if not ok then
+  host.log.info("page not shown: " .. err)
+elseif err then
+  -- Shown and in front, but over part of the plug-in (err.code is too_large): bring the
+  -- plug-in window forward before any click into it or read of it.
+  pageOverPlugin = true
+end
+```
+:::
+
+- `true` — the page is shown and, with `focus`, in front, beside `avoid` when one was given. On a Mac with `focus`, it means the front was asked for ([macOS](#page-show-macos)).
+- `true, err` — the page is shown and in front, over part of `avoid`; `err.code` is `too_large`, message `over the rectangle to avoid`. Only a `show` with `focus` that is not declined answers this. On a Mac it says where the page goes once it has the keyboard.
+- `false, err` — the page is not shown as asked: not built yet, not built at all, hidden for want of room, or shown without the front. `err.code` is one of the codes below, and the table says where the page is afterwards.
+
+### Errors {#page-show-errors}
+
+None of these is raised. They are decided in this order, and the first that applies is answered. **Every row comes as `false, err` but the last.** The last, `too_large` with `over the rectangle to avoid`, comes **beside `true`**: `true, err`, the page shown and in front, over part of `avoid` — a [partial answer](./errors.md#partial-answers) (Returns, above). So test `err` even when `ok` is true.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `gone` | return | The page object is from before its module was reloaded. Nothing is shown; the reloaded code describes its own page. | `this page no longer exists: its module was reloaded` | both |
+| `not_supported` | return | A [headless run](../module-manager.md#headless-mode): there is no window system to show anything in. The page is not built. | `headless` | both |
+| `not_supported` | return | A platform with no page window: any but Windows and macOS, which the application does not run on. The page is not built. | `not supported on this platform yet` | other |
+| `not_ready` | return | The first `show`, which starts the build, and every `show` until the page has loaded. `onReady` comes when it has. | `not ready yet` | both |
+| `failed` | return | The build an earlier `show` or [`prepare`](#page-prepare) started failed: WebView2's environment or the page's controller could not be made (on a Mac, the pages' rule list or the web view), or the page's first document did not load. `err.detail` says why, as the log does. Said once: the next `show` starts a new build. | `could not be built` | both |
+| `unavailable` | return | A `show` that would start a build, on Windows without the WebView2 runtime. The page is not built; the next `show` asks again. | `WebView2 runtime not installed` | Windows |
+| `too_large` | return | A `show` without `focus`, and no room beside `avoid` (above): `false, err`. The page is left hidden, or hidden if it was shown: never over `avoid` without the keyboard. An app page the user has open stays open, as and where it is. | `no room beside the rectangle to avoid` | both |
+| `refused` | return | The system declined to bring the page to the front; on a Mac only a refusal that comes at once ([macOS](#page-show-macos)). The page is shown and raised without the keyboard, the window in front keeping it as far as the system answered: Windows has been seen to bring a declined page to the front a moment later ([Windows](#page-show-windows)). Where it would be over `avoid` it is hidden instead. An app page the user has open is neither moved nor hidden; on Windows it is not raised either. | `declined by the system` | both |
+| `too_large` | return | **`true, err`, the partial answer.** A `show` with `focus` that ended in front with no room beside `avoid`. The page is in front, over part of `avoid`. | `over the rectangle to avoid` | both |
+
+**Raises** for a mistake in the call: `opts` that is neither a table nor `nil`; a key other than `focus` and `avoid`; a `focus` that is not a boolean; an `avoid` that is not a table, lacks one of `x`, `y`, `w` and `h` or has one that is not a finite number, or has no area (`w` or `h` not above 0).
+
 ### Windows {#page-show-windows}
 
 The window is a tool window with a title bar and a close box: **no taskbar button and no Alt+Tab entry** (`WS_EX_TOOLWINDOW`), so the only way back to a page is a key the module offers. It is **not topmost**: NVDA speaks for a topmost window that is not in front, and a page's live region would then talk over the plug-in. It is shown without being activated and raised to the top of the ordinary windows (`SetWindowPos`), so it is not left under the window that covered it last, and `focus` then asks Windows with `SetForegroundWindow`, and hands the keyboard to the document (`MoveFocus`). The log's line for each `show` says whether the point in the middle of the page is really the page's (`on top at its centre: yes`) — whether it is covered is measured, not assumed. Moved onto a monitor of another display scaling, the window is resized by Windows for that scaling; the host puts it back at the rectangle it chose, so it still does not cover `avoid`.
@@ -182,7 +229,7 @@ NVDA before 2026.1 did not enter a web view that had just been created until the
 - the event tap sees a key pressed while no window of this application has the keyboard — that key went elsewhere: `… a key went to <application>`; this needs the permission the tap needs;
 - the page is hidden first.
 
-A page this `show` put over `avoid` that did not get the keyboard is hidden again when the event says so, as a declined one is on Windows — and an app page hidden so gives up the Dock icon as any hidden app page does; an app page the user has open goes over `avoid` only once it has the keyboard this `show` asked for, and stays where it was if it does not get it. The window is ordered in front with the request, before any answer: a page that does not get the keyboard has been raised all the same, at the normal level. So an app page the user has open that does not get it — or is answered `refused` (`declined by the system`) — is neither moved nor hidden, but raised, where on Windows it is not raised either (the table above). So, too, the error value comes with the request: `true, err` with `too_large` (`over the rectangle to avoid`) says where the page goes, not that it is there — an app page the user has open goes there only once it has the keyboard, and not at all if it does not get it. `refused` (`declined by the system`) is answered only when the refusal comes at once: this application was the active one already, or the page is one described `activates = false`, and the window is still not the key window after the calls. A module that needs to know follows the page's window coming to the front ([`host.window.onTrigger`](./window.md#host-window-ontrigger)), or the page's script its window's `focus` event. **A tool page described `activates = false`** asks for no activation: the window is made the key window and ordered in front and the web view given the keyboard, and with nothing on its way the answer is decided at the call — `true` with the window the key window (the log's `got the keyboard` line comes with it), `false, err` with `refused` otherwise, and over `avoid` it is then hidden again at once. A page hidden before its answer came leaves the request on its way, and that can still make this application the active one with nothing of its own on screen — so when AppKit says it did, and no window of the application that could take the keyboard is shown, the front goes back where the page would have given it.
+A page this `show` put over `avoid` that did not get the keyboard is hidden again when the event says so, as a declined one is on Windows — and an app page hidden so gives up the Dock icon as any hidden app page does; an app page the user has open goes over `avoid` only once it has the keyboard this `show` asked for, and stays where it was if it does not get it. The window is ordered in front with the request, before any answer: a page that does not get the keyboard has been raised all the same, at the normal level. So an app page the user has open that does not get it — or is answered `refused` (`declined by the system`) — is neither moved nor hidden, but raised, where on Windows it is not raised either ([Errors](#page-show-errors)). So, too, the error value comes with the request: `true, err` with `too_large` (`over the rectangle to avoid`) says where the page goes, not that it is there — an app page the user has open goes there only once it has the keyboard, and not at all if it does not get it. `refused` (`declined by the system`) is answered only when the refusal comes at once: this application was the active one already, or the page is one described `activates = false`, and the window is still not the key window after the calls. A module that needs to know follows the page's window coming to the front ([`host.window.onTrigger`](./window.md#host-window-ontrigger)), or the page's script its window's `focus` event. **A tool page described `activates = false`** asks for no activation: the window is made the key window and ordered in front and the web view given the keyboard, and with nothing on its way the answer is decided at the call — `true` with the window the key window (the log's `got the keyboard` line comes with it), `false, err` with `refused` otherwise, and over `avoid` it is then hidden again at once. A page hidden before its answer came leaves the request on its way, and that can still make this application the active one with nothing of its own on screen — so when AppKit says it did, and no window of the application that could take the keyboard is shown, the front goes back where the page would have given it.
 
 **Where it goes.** As above, in points: a display's work area is its frame without the menu bar and the Dock. Without `avoid`, the first `show` puts the page in the middle of the display the window with the keyboard is on. The log's `on top at its centre` is the window server's answer for the point in the middle of the page.
 
@@ -204,7 +251,7 @@ No capture applies while a window of this application has the keyboard — the e
 
 **Signature:** `page:prepare()` → `true` or `false, Error`
 
-Builds the page without showing it, so that the first `show` does not wait for the engine's cold start: `true` when the page is ready already, and otherwise `false, err` with the answers `show` gives before a page is shown — `gone` (its module was reloaded), `not_supported` (`headless`, `not supported on this platform yet`), `unavailable` (`WebView2 runtime not installed`), `failed` (`could not be built`, said once, as by `show`, with why in `err.detail`), and `not_ready` (`not ready yet`) when it started the build or one is under way. `onReady` comes when the page has loaded; a `show` after that shows it at once. It never shows, moves or focuses the window, and calling it again while the page's build is under way starts nothing.
+Builds the page without showing it, so that the first `show` does not wait for the engine's cold start. It answers as `show` answers before a page is shown ([Returns](#page-prepare-returns)): `not_ready` when it started the build or one is under way, and `true` once the page is ready. `onReady` comes when the page has loaded; a `show` after that shows it at once. It never shows, moves or focuses the window, and calling it again while the page's build is under way starts nothing.
 
 The build is the one `show` starts (see its cost): WebView2's environment, or a Mac's rule list, is not waited for, the page's own part is. So prepare at a moment when a short wait of the event loop costs nothing much — when the module is loaded, or when the window the page is for first comes to the front — rather than inside the action the user is waiting for. A prepared page costs its engine's memory (on Windows test W8) for as long as it is not closed.
 
@@ -225,6 +272,26 @@ host.window.onTrigger(pluginMatcher, function(w)
 end)
 ```
 
+### Returns {#page-prepare-returns}
+
+- `true` — the page is built and loaded already. Nothing is done.
+- `false, err` — the page is not ready. With `not_ready` it is being built or loaded, by this call or an earlier one, and `onReady` comes when it has loaded; with any other code nothing is being built.
+
+### Errors {#page-prepare-errors}
+
+None of these is raised. They are the answers `show` gives before a page is shown, decided in the same order.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `gone` | return | The page object is from before its module was reloaded. | `this page no longer exists: its module was reloaded` | both |
+| `not_supported` | return | A headless run. Nothing is built. | `headless` | both |
+| `not_supported` | return | A platform with no page window. Nothing is built. | `not supported on this platform yet` | other |
+| `not_ready` | return | This call started the build, or a build an earlier `show` or `prepare` started is under way, or the page is loading. | `not ready yet` | both |
+| `failed` | return | The build an earlier `show` or `prepare` started failed; `err.detail` says why. Said once, as by `show`: the next `show` or `prepare` starts a new build. | `could not be built` | both |
+| `unavailable` | return | Windows without the WebView2 runtime, when a build would start. Nothing is built; the next call asks again. | `WebView2 runtime not installed` | Windows |
+
+It never raises; anything passed to it is ignored.
+
 ### Windows {#page-prepare-windows}
 
 As `show`'s build, hidden.
@@ -237,13 +304,37 @@ As `show`'s build, hidden: the window and its web view are made, and the window 
 
 **Signature:** `page:focus()` → `true` or `false, Error`
 
-Brings the shown page to the front and the keyboard into its document, as `show` does with `focus`, and says whether the system accepted — on a Mac, that the front was asked for. Otherwise `false, err` — it does not show a page — with `err.code`: `hidden` (`the page is hidden`), `not_ready` (`the page is not built yet`: never shown, building, or closed), `refused` (`declined by the system`), `gone` (`this page no longer exists: its module was reloaded`), and `not_supported` where no page can be shown — `headless` in a headless run, `not supported on this platform yet` elsewhere. Logged with the window in front afterwards.
+Brings the shown page to the front and the keyboard into its document, as `show` does with `focus`, and says whether the system accepted — on a Mac, that the front was asked for. It never shows a page, places it or hides it: a hidden one answers `hidden` ([Errors](#page-focus-errors)), and is shown with `show`. Logged with the window in front afterwards.
 
 ```luau
-if not page:focus() then
+local ok, err = page:focus()
+if not ok and err.code == host.errors.HIDDEN then
+  ok = page:show()                 -- hidden: show brings it to the front as well
+end
+if not ok then
   host.speech.output("Could not bring the page back.")
 end
 ```
+
+### Returns {#page-focus-returns}
+
+- `true` — the system accepted: the page is in front with the keyboard in its document. On a Mac, the front was asked for ([macOS](#page-focus-macos)).
+- `false, err` — it is not; `err.code` is one of the codes below. A page that was shown stays shown.
+
+### Errors {#page-focus-errors}
+
+None of these is raised. They are decided in this order.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `gone` | return | The page object is from before its module was reloaded. | `this page no longer exists: its module was reloaded` | both |
+| `not_supported` | return | A headless run, where no page is ever shown. | `headless` | both |
+| `not_supported` | return | A platform with no page window. | `not supported on this platform yet` | other |
+| `not_ready` | return | The page is not built: never shown, still building, closed, or taken down after it failed. | `the page is not built yet` | both |
+| `refused` | return | The page is shown, and the system declined to bring it to the front. On a Mac only a refusal that comes at once ([macOS](#page-focus-macos)). The page stays where it is. | `declined by the system` | both |
+| `hidden` | return | The page is built but not shown: hidden by the module, or closed by the user with its close box. | `the page is hidden` | both |
+
+It never raises; anything passed to it is ignored.
 
 ### Windows {#page-focus-windows}
 
@@ -277,6 +368,16 @@ if ok then
 end
 ```
 
+### Returns {#page-hide-returns}
+
+Nothing (`nil`), in every case: a page that is not built, hidden already, or from before its module was reloaded is left as it is, without a word.
+
+### Errors {#page-hide-errors}
+
+None. It never answers an error value.
+
+It never raises; anything passed to it is ignored.
+
 ### Windows {#page-hide-windows}
 
 The window is hidden and WebView2 stops drawing it (`IsVisible` false); its scripts go on running, and `post` still hands it messages. The front is given back with `SetForegroundWindow`, which Windows allows the process that has the front. **The keyboard goes back with it**: when the page took the front ([`show`](#page-show)'s `focus`, [`focus`](#page-focus)), the host noted the control the keyboard was on in that window — a window inside it, its thread's focus as `GetGUIThreadInfo` says — and kept the last one it found for the same window when the keyboard was on nothing there; given the front back, that window's keyboard is landed on that control, as [`host.window.focus`](./window.md#host-window-focus) lands it on a control. A page that gives the front to where another page came from gives it that page's control. And because a module that brings the plug-in forward **first** leaves the page nothing to hand back, `host.window.focus` of the window the page in front came from lands on that control too. Whether the keyboard took is in the log, under `[window]`. Whether Chromium runs a hidden or covered page's handlers at once or later is unmeasured (TODO.md). An app page has kept the front from the moment it takes it with `show`'s `focus` or [`focus`](#page-focus) until its window is deactivated, for whatever reason. A hidden app page leaves the taskbar and Alt+Tab until it is shown again.
@@ -293,11 +394,27 @@ Sends the page a value. It is encoded here, by the host, as [`host.json.encode`]
 
 A page that has loaded is handed it at once, whether it is shown or hidden (whether a hidden or covered page's script handles it at once is unmeasured, TODO.md). Before that — never shown, building, loading, or closed and not yet built again — it waits, in order, and is delivered when the page has loaded, before `onReady` runs; at most 256 wait, and the oldest gives way to a newer one, with a line in the log — that is about the earlier messages, not this call's. `close` drops what is waiting.
 
-**Answers** `true` when the message was handed to the page or waits for it, and `false, err` when it was not: `not_supported` where no page can ever be shown — `headless` in a headless run, `not supported on this platform yet` on a platform with no page window — and the message is dropped; `gone` (`this page no longer exists: its module was reloaded`); `failed` (`a message could not be handed to the page: …`, with the engine's words) when the engine would not take it at once.
-
 ```luau
 page:post({ kind = "preset", name = presetName })
 ```
+
+### Returns {#page-post-returns}
+
+- `true` — the message was handed to the page, or waits for it to load. It says nothing of what the page's script did with it.
+- `false, err` — the message was not handed over and does not wait: it is dropped. `err.code` is one of the codes below.
+
+### Errors {#page-post-errors}
+
+None of these is raised. They are decided in this order, after the value has been encoded.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `gone` | return | The page object is from before its module was reloaded. | `this page no longer exists: its module was reloaded` | both |
+| `not_supported` | return | A headless run, where no page can ever be shown to take it. | `headless` | both |
+| `not_supported` | return | A platform with no page window. | `not supported on this platform yet` | other |
+| `failed` | return | The page has loaded, and WebView2 would not take the message at once; the message has the engine's words. On a Mac a message WebKit could not hand over is found out later, and is a line in the log only ([macOS](#page-post-macos)). | `a message could not be handed to the page: …` | Windows |
+
+**Raises** for a mistake in the call: a value [`host.json.encode`](./json.md#host-json-encode) cannot encode — a function, a userdata, a table that contains itself, NaN, a table mixing string and number keys and the rest it lists — with that call's message, naming `page:post`. That is decided first, so a page from before its module was reloaded raises for it too.
 
 ### Windows {#page-post-windows}
 
@@ -317,6 +434,17 @@ Whether the window is on screen, asked of the window system rather than remember
 if page:isShown() then page:hide() end
 ```
 
+### Returns {#page-isshown-returns}
+
+- `true` — the window is on screen, in front or not.
+- `false` — it is not: hidden, closed by the user, never built, closed, taken down after it failed, or the page object is from before its module was reloaded.
+
+### Errors {#page-isshown-errors}
+
+None. It never answers an error value.
+
+It never raises; anything passed to it is ignored.
+
 ### Windows {#page-isshown-windows}
 
 `IsWindowVisible`. A minimised app page is shown.
@@ -335,6 +463,16 @@ Takes the window and its web view down, and drops the messages waiting for it. T
 page:close()
 ```
 
+### Returns {#page-close-returns}
+
+Nothing (`nil`), in every case: a page that is not built has its waiting messages and its build called off, and one from before its module was reloaded is left alone.
+
+### Errors {#page-close-errors}
+
+None. It never answers an error value.
+
+It never raises; anything passed to it is ignored.
+
 ### Windows {#page-close-windows}
 
 The page's controller is closed, and its window hidden and destroyed. WebView2's processes are shared by every page of the application, and ending them is WebView2's decision.
@@ -347,7 +485,7 @@ The web view and its window are taken down. WebKit's processes are the system's,
 
 **Signature:** `page.window` → `number?`
 
-The window's id from the first time it was shown until it is closed: the id [`host.window.active()`](./window.md#host-window-active) and [`host.window.foreground()`](./window.md#host-window-foreground) report while the page is in front, so a module can tell its own page from the plug-in. `nil` before that. A field, not a method.
+The window's id from the first time it was shown until it is closed: the id [`host.window.active()`](./window.md#host-window-active) and [`host.window.foreground()`](./window.md#host-window-foreground) report while the page is in front, so a module can tell its own page from the plug-in. `nil` before that ([Returns](#page-window-returns)). A field, not a method.
 
 ```luau
 local front = host.window.foreground()
@@ -355,6 +493,13 @@ if front and front.id == page.window then
   host.log.info("the page is in front")
 end
 ```
+
+### Returns {#page-window-returns}
+
+- A number — the window's id, set by the first `show` that puts the window on screen, one answered `refused` included, and kept while the window exists: through `hide`, and through a close by the user, which only hides it.
+- `nil` — before such a `show`; after [`close`](#page-close); after the page failed (`onClose("failed")`) until a `show` puts it on screen again; and on a page object from before its module was reloaded. A `show` answered `too_large` without `focus` puts nothing on screen and sets nothing.
+
+Reading it never raises; assigning to it raises, as it is not the module's to set.
 
 ### Windows {#page-window-windows}
 
@@ -364,15 +509,17 @@ The page's top-level window, an `HWND`, for both kinds. `host.window.active()` r
 
 The page's window as [`host.window`](./window.md#table-shapes-macos) gives this application's own: 2⁴⁰ plus the window server's number for it, for both kinds, answered by AppKit and never through accessibility. `host.window.active()` reports it with the page's title and this application. [`host.window.ownsPoint`](./window.md#host-window-ownspoint) answers `false` for a point a page covers.
 
-## The page's side — platform.post and platform.onmessage {#the-page-s-side}
+## platform.post(value) {#platform-post}
 
-The host puts a small script into every page before the page's own, and it gives the page one object, `platform`:
+**Signature:** `platform.post(value: any)` → `{ ok: true }` or `{ ok: false, error: { code, message } }`
 
-- `platform.post(value)` sends the module a value; it arrives at `onMessage`. The value goes through `JSON.stringify`, so a cycle throws in the page. It **answers** `{ ok: true }` once the message is handed to the engine, and `{ ok: false, error: { code: "too_large", message } }` at once, with nothing sent, for a message whose JSON text is more than 1 MiB in UTF-8 — the host would drop it where it arrives: `message` is `a message of N bytes was not sent — the most one may be is 1048576`, and the page compares `error.code` with `platform.errors.TOO_LARGE`. Nothing else is answered here: a message that is not the page's own, or one the module's VM cannot decode, is dropped where it arrives with a line in the log, and the page is told nothing.
-- `platform.errors` holds the codes of the host's [error values](./errors.md#error-values), as `host.errors` does for a module: `platform.errors.NOT_READY` is `"not_ready"`. It is frozen, and a name it does not have throws a `TypeError` listing the codes — except the four JavaScript itself asks an object for, `then`, `toJSON`, `toString` and `valueOf`, which read as `undefined` as on any object without them, so `JSON.stringify(platform.errors)` gives the codes and `await` or an async function's `return` hands it back as it is. Turning it into a string, `String(platform.errors)` or a template literal, throws, as it does for any object without a prototype. A module that posts an error value — `page:post({ ok = false, error = err })` — hands the page `{ ok: false, error: { code, message, detail } }`, `detail` only when the error has one, and the page compares `error.code` with these, never the message.
-- `platform.onmessage = function (value) { … }` receives what the module posts. Messages that arrive before the page sets it wait for it (up to 256). A handler that throws does not stop the next message.
+Sends the module a value from the page's own script; it arrives at [`onMessage`](#host-gui-webview).
 
-It hides which engine carries the messages, so a page is written once. The same script makes `window.close()` do nothing: a page is closed by its module, not by itself. The page's own script comes from its own files — inline scripts do not run, see below — and puts data into the document as **text**, with `textContent`: names read off the screen, preset names from a file and file names are data somebody else wrote, and put in with `innerHTML` they could become part of the page.
+**The page's side.** The host puts a small script into every page before the page's own, and it gives the page one object, `platform`: this function, [`platform.onmessage`](#platform-onmessage) for what the module posts, and `platform.errors` for the codes of an error value. It hides which engine carries the messages, so a page is written once. The same script makes `window.close()` do nothing: a page is closed by its module, not by itself. The page's own script comes from its own files — inline scripts do not run ([below](#what-a-page-is-served-and-what-it-may-not-do)).
+
+The value goes through `JSON.stringify` in the page, and the module's `onMessage` receives it decoded: an object is a table. `platform.post()` with no value, or `undefined`, sends `null`, which `onMessage` receives as `nil`. A message larger than the host takes is refused here, at once ([Returns](#platform-post-returns)). Nothing else is answered here: a message that is not the page's own, or one the module's VM cannot decode, is dropped where it arrives with a line in the log, and the page is told nothing.
+
+**`platform.errors`** holds the codes of the host's [error values](./errors.md#error-values), as `host.errors` does for a module: `platform.errors.NOT_READY` is `"not_ready"`. It is frozen, and a name it does not have throws a `TypeError` listing the codes — except the four JavaScript itself asks an object for, `then`, `toJSON`, `toString` and `valueOf`, which read as `undefined` as on any object without them, so `JSON.stringify(platform.errors)` gives the codes and `await` or an async function's `return` hands it back as it is. Turning it into a string, `String(platform.errors)` or a template literal, throws, as it does for any object without a prototype. A module that posts an error value — `page:post({ ok = false, error = err })` — hands the page `{ ok: false, error: { code, message, detail } }`, `detail` only when the error has one, and the page compares `error.code` with these, never the message.
 
 ```html
 <!-- ui/index.html -->
@@ -396,6 +543,34 @@ platform.onmessage = (m) => {
 };
 ```
 
+**Keys.** In NVDA's browse mode the page does not get most keys: letters, arrows, Home and End, Page Up and Down belong to NVDA's own navigation, and Enter or Space on a button reach the page as a click, with no key event. So every action is a real button, link or form field handled on `click`; a page has no shortcuts of its own ("N for next"); and the key that opens and leaves the page is the module's hotkey, not a key in the page. `role="application"` would give the page every key and take browse mode away, which is the reason for a page at all. In focus mode — NVDA switches to it in a field — the first Escape only goes back to browse mode, so "Escape closes the page" takes two presses from a search field. Which keys reach a page in each mode is test W4 (TODO.md). On a Mac, what the host does with a key the page leaves unhandled is under [`show`](#page-show-macos).
+
+**What works for a screen reader** (Chromium with NVDA; the same list under WebKit with VoiceOver is unverified, TODO.md): headings (`h1`–`h6`), a `main` landmark, native `button`, `a href`, `input` with a `label`, `select`, `fieldset` with `legend`, lists and tables, and `aria-live="polite"` on an element whose text changes. A live region speaks only while the page is in front: NVDA takes no events from a window that is not. And a page coming to the front is announced — its title, then the element that has the focus — which cuts off a sentence said just before: with NVDA, a status the module posted right after the `show` that brought the page back was not heard (2026-10-11). What must be heard as the page comes back goes where the keyboard lands: the [walkthrough's example](../building-a-page.md#step-5) posts a round trip's result before the `show`, and the page puts it into its status line and the keyboard focus on it (`tabindex="-1"`), so that the page comes back on it. Whether NVDA then says it is not measured yet (TODO.md).
+
+### Returns {#platform-post-returns}
+
+- `{ ok: true }` — the message's JSON text was handed to the engine, on its way to the module. It does not say that `onMessage` ran: a message dropped where it arrives is not told to the page.
+- `{ ok: false, error: { code: "too_large", message } }` — at once, with nothing sent: the message's JSON text is more than 1 MiB (1,048,576 bytes) in UTF-8, which the host would drop where it arrives. The page compares `error.code` with `platform.errors.TOO_LARGE`, never the message.
+- A value `JSON.stringify` makes no text of — a function, a symbol — answers `{ ok: true }` with no text handed over. What the engine and the module make of that is not measured yet; send a value JSON can hold.
+
+### Errors {#platform-post-errors}
+
+None of these is thrown. The one error comes as the `error` field of the answer.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `too_large` | field | The message's JSON text is more than 1,048,576 bytes in UTF-8. Nothing is sent; the size is in the message. | `a message of … bytes was not sent — the most one may be is 1048576` | both |
+
+**Raises** — in the page, as a thrown `TypeError` — for what `JSON.stringify` cannot write: a value that contains itself, or a `BigInt`. A `toJSON` method of the page's own that throws throws through it.
+
+## platform.onmessage {#platform-onmessage}
+
+**Signature:** `platform.onmessage = (value) => { … }`
+
+Receives what the module posts with [`page:post`](#page-post): each value parsed, one call each, in the order they were posted. Messages that reach the page before it sets this wait for it, up to 256; more than that are dropped, with no word in the page or the log. A handler that throws does not stop the next message: its error is thrown again on its own, where the page's console would see it.
+
+The page's own script puts data into the document as **text**, with `textContent`: names read off the screen, preset names from a file and file names are data somebody else wrote, and put in with `innerHTML` they could become part of the page.
+
 A failure goes to the page as it came, and the page compares its code:
 
 ```luau
@@ -414,9 +589,16 @@ platform.onmessage = (m) => {
 };
 ```
 
-**Keys.** In NVDA's browse mode the page does not get most keys: letters, arrows, Home and End, Page Up and Down belong to NVDA's own navigation, and Enter or Space on a button reach the page as a click, with no key event. So every action is a real button, link or form field handled on `click`; a page has no shortcuts of its own ("N for next"); and the key that opens and leaves the page is the module's hotkey, not a key in the page. `role="application"` would give the page every key and take browse mode away, which is the reason for a page at all. In focus mode — NVDA switches to it in a field — the first Escape only goes back to browse mode, so "Escape closes the page" takes two presses from a search field. Which keys reach a page in each mode is test W4 (TODO.md). On a Mac, what the host does with a key the page leaves unhandled is under [`show`](#page-show-macos).
+### Returns {#platform-onmessage-returns}
 
-**What works for a screen reader** (Chromium with NVDA; the same list under WebKit with VoiceOver is unverified, TODO.md): headings (`h1`–`h6`), a `main` landmark, native `button`, `a href`, `input` with a `label`, `select`, `fieldset` with `legend`, lists and tables, and `aria-live="polite"` on an element whose text changes. A live region speaks only while the page is in front: NVDA takes no events from a window that is not. And a page coming to the front is announced — its title, then the element that has the focus — which cuts off a sentence said just before: with NVDA, a status the module posted right after the `show` that brought the page back was not heard (2026-10-11). What must be heard as the page comes back goes where the keyboard lands: the [walkthrough's example](../building-a-page.md#step-5) posts a round trip's result before the `show`, and the page puts it into its status line and the keyboard focus on it (`tabindex="-1"`), so that the page comes back on it. Whether NVDA then says it is not measured yet (TODO.md).
+- Set: the function, which every message from then on is handed to, the waiting ones first. Anything that is not a function sets `null`: messages wait again, as before one was set.
+- Read: the function set, or `null`.
+
+### Errors {#platform-onmessage-errors}
+
+None. It never answers an error value.
+
+It never raises: setting it throws nothing, since anything that is not a function sets `null`.
 
 ## What a page is served, and what it may not do {#what-a-page-is-served-and-what-it-may-not-do}
 
