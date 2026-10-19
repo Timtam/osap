@@ -16,7 +16,9 @@ The same call answers with different things per platform, so read the platform s
 
 All coordinates are physical device pixels on Windows and **points** on macOS (i32 → Luau `number`) unless noted; the two agree only at 100 % scaling — see [`host.screen.size()`](screen#host-screen-size) for why that distinction costs a day when it is missed. `id` fields are native window handles on Windows (a Win32 `HWND` as a Luau integer) and interned counters on macOS; see the platform sections under [Table shapes](#table-shapes).
 
-`list`, `active`, `foreground`, `controls`, `focusChain` and `ownsPoint` are native bindings; `find`, `findAll`, `test`, `onTrigger` and `onFocus` are added on top of them by the Luau prelude.
+`list`, `apps`, `windowsOf`, `active`, `foreground`, `focus`, `controls`, `focusChain`, `ownsPoint` and `recheck` are native bindings; `find`, `findAll`, `test`, `onTrigger` and `onFocus` are added on top of them by the Luau prelude. The prelude also defines `W._hasTriggers()`, `W._triggerSeq()`, `W._wantsInitial(reprime)`, `W._dispatchActivate(win, beforeFirst, waited, upto)`, `W._dispatchInitial(win, reprime, beforeFirst, waited)` and `W._dispatchFocus(waited)`, and the host adds `W._requestInitial()`, which `onTrigger { initial = true }` calls to queue its module for the report. The host's event loop calls the dispatchers to deliver foreground and focus changes, and the initial report, into the registered `onTrigger` and `onFocus` callbacks; a module calls none of them.
+
+**What a call answers.** Only [`focus`](#host-window-focus) answers an [error value](./errors.md#error-values): `false, err` when it could not bring the window forward, its codes under its **Errors**. Every other call here answers what there is, and never an error value: each entry's **Returns** says what its `nil`, `false` or empty list means. Compare `err.code`, never the message: a message may change between versions, and the code does not. Besides the mistakes each entry lists under **Raises**, two raises can meet any call here: reaching for `host.window` in a module that did not declare `window` ([What to declare](#declare)), and the host's guard stopping a callback that ran too long (`stopped by the host: …`, [the limits](../module-runtime-and-lifecycle.md#limits)). An argument of the wrong type raises with the host's conversion message, such as `bad argument #1: error converting Lua nil to isize (expected number or string coercible to number)`; a number with a fraction is cut toward zero where a whole number goes.
 
 ## What to declare {#declare}
 
@@ -134,6 +136,17 @@ end
 local reaper = host.window.list({ pids = { reaperPid } })
 ```
 
+### Returns {#host-window-list-returns}
+
+- `{ Window }` — a list of [window tables](#window-table), in the order the platform lists them. Empty when nothing is listed: no window, no window of the processes in `pids`, or `pids = {}`. Never `nil`.
+- Which windows are listed differs by platform (below). On macOS an application that does not answer in time is left out, and the list does not say so: the log does.
+
+### Errors {#host-window-list-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `filter` that is neither a table nor `nil`; a `pids` that is neither a table nor `nil`; an entry of `pids` that is not a number from 0 to 4294967295. Every other key of `filter` is ignored.
+
 ### Windows {#host-window-list-windows}
 
 `EnumWindows` — local, microseconds, and the filter merely drops entries. There is no cost to leaving it out.
@@ -142,7 +155,7 @@ Only **visible windows with a title** are listed, so `find` and `findAll` never 
 
 ### macOS {#host-window-list-macos}
 
-Every application listed is a call into that process for its `AXWindows`, each with its own timeout, on the thread that carries the event tap. Unfiltered, the listing asks every running application that could own a window, and gives each of them **a quarter of a second** rather than the process-wide second — the third Mac session measured 2.0–2.3 s of every 3 s probe stall going to one unrelated process that never answered, and the tap was switched off each time. An application that misses that short deadline is left out of the listing and **named in the log, but not quarantined**: only a miss at the full timeout marks an application as not answering for the paths that consult that. With `pids`, the named applications are asked at the **full** timeout, because those are the ones the caller is waiting on and a slow-but-alive plugin must not read as absent. An application that takes 100 ms or more is named in the log either way, with how many windows it listed.
+Every application listed is a call into that process for its `AXWindows`, each with its own timeout, on the thread that carries the event tap. Unfiltered, the listing asks every running application that could own a window, and gives each of them **a quarter of a second** rather than the process-wide second — the third Mac session measured 2.0–2.3 s of every 3 s probe stall going to one unrelated process that never answered, and the tap was switched off each time. An application that misses that short deadline is left out of the listing and **named in the log, but not quarantined**: only a miss at the full timeout marks an application as not answering for the paths that consult that. With `pids`, the named applications are asked at the **full** timeout, because those are the ones the caller is waiting on and a slow-but-alive plugin must not read as absent. An application that takes 100 ms or more is named in the log either way, with how many windows it listed. One listing asks at most 256 applications — with `pids`, the first 256 named — and reads at most 64 windows of each. An application in the five-second not-answering quarantine (see [`active()`](#host-window-active)) is not asked at all, and the log says so.
 
 ## host.window.apps() {#host-window-apps}
 
@@ -157,13 +170,21 @@ for _, a in ipairs(host.window.apps()) do
 end
 ```
 
+### Returns {#host-window-apps-returns}
+
+- `{ { pid, name, exe, bundleId } }` — one entry per running application the platform lists (below), `name` the stem of `exe` as a window table's `app.name` is. Empty when there is none. Never `nil`.
+
+### Errors {#host-window-apps-errors}
+
+None. It never answers an error value. It never raises: arguments are ignored.
+
 ### Windows {#host-window-apps-windows}
 
 Derived from the visible top-level windows: their owning processes, one entry per pid. A process with no window is not a place a window search could find anything, so it is not listed.
 
 ### macOS {#host-window-apps-macos}
 
-The workspace's own list of running applications, minus those whose activation policy is *prohibited* (helpers, agents, XPC services — more of them than everything else together, and none can own a window). Hidden applications (Command-H) are included, as they are in `list()`: a module that finds a hidden DAW's plugin window and focuses it is how that DAW comes back.
+The workspace's own list of running applications, its first 512, minus those whose activation policy is *prohibited* (helpers, agents, XPC services — more of them than everything else together, and none can own a window). Hidden applications (Command-H) are included, as they are in `list()`: a module that finds a hidden DAW's plugin window and focuses it is how that DAW comes back.
 
 ## host.window.windowsOf(pid) {#host-window-windowsof}
 
@@ -184,13 +205,23 @@ for _, w in ipairs(host.window.windowsOf(pid)) do
 end
 ```
 
+### Returns {#host-window-windowsof-returns}
+
+- `{ { id, layer, class, x, y, w, h } }` — the process's on-screen windows, with their rectangles in screen coordinates. Empty when it has none on screen, or no process has that `pid`. Never `nil`.
+
+### Errors {#host-window-windowsof-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `pid` that is not a number from 0 to 4294967295.
+
 ### Windows {#host-window-windowsof-windows}
 
 `EnumWindows` filtered to visible windows owned by the process, with the Win32 class in `class`. A `#32768` popup menu is a top-level window owned by the thread that opened it, so it appears here; so does a toolkit's self-drawn popup, which is usually a tool window of its own. `layer` is always 0.
 
 ### macOS {#host-window-windowsof-macos}
 
-`CGWindowListCopyWindowInfo` for on-screen windows, filtered by owning pid. `id` is the `CGWindowID`, `layer` the window server's level — an `NSMenu` sits at 101, an ordinary window at 0. `class` is empty. Whether a given plugin's self-drawn menu is a window of its own or painted inside the plugin's window is exactly what this exists to find out; the runtime's `newWindow` test logs each window that appeared after a menu-opening press, with its level and size. sforzando's menus are windows here, at level 101 each. VPS Avenger's in Logic are not (the first Mac test of its page, 2026-10-14): after its zoom field was clicked no new window of Logic's process came on screen in 8 seconds, while the same list of the window server's paired Logic's plug-in window by frame and owner in that session — JUCE paints a popup that has a parent component inside the plug-in's editor. Such a popup is seen by the pixels only: [`O.menuTests.drawn`](overlay.md#o-menutests).
+`CGWindowListCopyWindowInfo` for on-screen windows, filtered by owning pid; only the first 512 windows of the system's list, front to back, are read, and a window of the process past them is left out. `id` is the `CGWindowID`, `layer` the window server's level — an `NSMenu` sits at 101, an ordinary window at 0. `class` is empty. Whether a given plugin's self-drawn menu is a window of its own or painted inside the plugin's window is exactly what this exists to find out; the runtime's `newWindow` test logs each window that appeared after a menu-opening press, with its level and size. sforzando's menus are windows here, at level 101 each. VPS Avenger's in Logic are not (the first Mac test of its page, 2026-10-14): after its zoom field was clicked no new window of Logic's process came on screen in 8 seconds, while the same list of the window server's paired Logic's plug-in window by frame and owner in that session — JUCE paints a popup that has a parent component inside the plug-in's editor. Such a popup is seen by the pixels only: [`O.menuTests.drawn`](overlay.md#o-menutests).
 
 ## host.window.active() {#host-window-active}
 
@@ -204,6 +235,15 @@ Returns the [window table](#window-table) for the foreground window, or `nil` if
 local w = host.window.active()
 if w then host.log.info("front: " .. w.title) end
 ```
+
+### Returns {#host-window-active-returns}
+
+- A [window table](#window-table) — the foreground window as the epoch last saw it.
+- `nil` — no window is in the foreground, or it is hidden: on Windows not visible, on macOS minimised. On macOS also when its application does not answer and no window of it is remembered (below). The `nil` is kept for the epoch too.
+
+### Errors {#host-window-active-errors}
+
+None. It never answers an error value. It never raises: arguments are ignored.
 
 ### macOS {#host-window-active-macos}
 
@@ -263,8 +303,6 @@ Only identity and visibility — no title, class or geometry. `id` is in the id 
   measured in a debug build with the table it returns. macOS: two accessibility reads of the
   frontmost application, the kind `active()` makes (see below). On the main thread,
   like every host call, and it returns when those have.
-- **Never raises**, and takes no arguments; arguments passed are ignored. `nil` is the only
-  "no answer".
 - **Turns nothing over.** It is a reading: the epoch and every answer kept in it stay as they are.
   On macOS a read that times out does leave one mark behind: the application is put in the
   not-answering quarantine, which other calls consult (see the macOS section).
@@ -282,6 +320,15 @@ if f and a and f.id ~= a.id then
   host.log.info(("keys go to window %d of process %d, not to '%s'"):format(f.id, f.pid, a.title))
 end
 ```
+
+### Returns {#host-window-foreground-returns}
+
+- `{ id, pid, shown, own }` — the foreground window now: its id, its process, whether it is shown, and whether it is this application's own.
+- `nil` — no window is in the foreground, or the platform cannot say which. On Windows that is a moment between two windows, or a window destroyed during the call. On macOS it is a frontmost application that names no focused window, this application in front with none of its windows holding the keyboard, a read that timed out, or an application in the not-answering quarantine (below). `nil` is the only "no answer".
+
+### Errors {#host-window-foreground-errors}
+
+None. It never answers an error value. It never raises: it takes no arguments, and arguments passed are ignored.
 
 ### Windows {#host-window-foreground-windows}
 
@@ -344,13 +391,13 @@ free until it ends.
 
 ## host.window.focus(id) {#host-window-focus}
 
-**Signature:** `host.window.focus(id: number) -> (boolean, Error?)`
+**Signature:** `host.window.focus(id: number) -> true | (false, Error)`
 
 Brings the window with that handle to the front and gives it the keyboard. `id` may also be a
 **control's**, on Windows — one of [`controls()`](#host-window-controls) or
 [`focusChain()`](#host-window-focuschain), or an embedded overlay's
-[`O:hwnd()`](./overlay.md#o-origin): its window is brought to the front, and the keyboard is then
-landed on the control (Windows, below). Returns `true` when the system accepted it, and `false, err` when it did not — an [error value](./errors.md#error-values) whose `err.code` says why: `refused` (`declined by the system`), `gone` (`no such window`: the id names no window, or its application has quit), `hidden` (`the window is hidden`: a hidden window of this application, on a Mac), `not_supported` (`not supported on this platform yet`). Like `host.input.*`, it acts at once, also while the calling module has a
+[`O:hwnd()`](./overlay.md#o-hwnd): its window is brought to the front, and the keyboard is then
+landed on the control (Windows, below). Returns `true` when the system accepted it, and `false, err` when it did not, `err.code` saying why ([Errors](#host-window-focus-errors)). Like `host.input.*`, it acts at once, also while the calling module has a
 [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) or a snapshot request out: a picture asked for
 just before and not taken yet may show the window in front. Read first and focus once the read is
 answered, and the log notes a module that does not, once a session (see
@@ -407,6 +454,37 @@ if not host.window.focus(ov:hwnd()) then
 end
 ```
 
+### Returns {#host-window-focus-returns}
+
+- `true` — the system accepted the request. Not that the keyboard is in the window, and often not even that the change has been made yet: read [`focusChain()`](#host-window-focuschain), or wait for the foreground event (see the platform sections).
+- `false, err` — it did not, and nothing more is done; `err.code` is one of the codes under Errors.
+
+The epoch turns over either way. To tell the user why, compare the code:
+
+```luau
+local w = host.window.find({ title = { contains = "sforzando" } })
+if not w then return end
+local ok, err = host.window.focus(w.id)
+if not ok and err.code == host.errors.GONE then
+  host.speech.output("sforzando's window is closed")
+elseif not ok then
+  host.speech.output("could not get back to sforzando")
+end
+```
+
+### Errors {#host-window-focus-errors}
+
+None of these is raised. Each comes as the second value, beside `false`.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `gone` | return | No window has that id: on Windows `IsWindow` says no, `0` included; on a Mac an id this backend never issued, one it has forgotten, or one whose application has quit. Nothing is asked. | `no such window` | both |
+| `hidden` | return | A hidden window of this application: the module manager once it is closed, a page hidden, or any window of the application while the application is hidden. Nothing is shown; a line in the log says so. | `the window is hidden` | macOS |
+| `refused` | return | The system declined. On Windows `SetForegroundWindow` refused. On a Mac the activation request was not taken, the window of an active application took neither the raise nor the focus flag, or a page described `activates = false` is not the key window as the call returns. | `declined by the system` | both |
+| `not_supported` | return | The build for other systems, which cannot focus a window. | `not supported on this platform yet` | other |
+
+**Raises** for a mistake in the call: an `id` that is not a number (`bad argument #1: error converting Lua nil to isize (expected number or string coercible to number)`). That is the only mistake it raises for.
+
 ### Windows {#host-window-focus-windows}
 
 A minimised window is restored first, then brought to the foreground with `SetForegroundWindow`. `true` means Windows accepted the request — not that the change has been made. For a window of another application the activation can finish only once that window's own thread has processed it, so [`active()`](#host-window-active), [`foreground()`](#host-window-foreground) and `focusChain()` asked straight after the call can still name the window that was in front; the foreground event follows once the change is made, and a module that wants to know where the keyboard went waits for that event rather than reading again at once. `false` with `refused` means Windows refused: it limits which processes may change the foreground (the conditions are listed under `SetForegroundWindow` in Microsoft's documentation), and it does not say which one applied, and nothing more is done. An id that names no window (`IsWindow`) is `gone`, and nothing is asked. Read [`focusChain()`](#host-window-focuschain) afterwards for where the keyboard is inside the window.
@@ -459,13 +537,24 @@ for _, c in ipairs(host.window.controls()) do
 end
 ```
 
+### Returns {#host-window-controls-returns}
+
+- `{ Control }` — the [control tables](#control-table) inside the window, which ones differing by platform (below). The list for a window id is kept for the epoch. With `win` left out, the window in front is asked afresh at every call — not the epoch's [`active()`](#host-window-active) answer, so the two can name different windows.
+- `{}` — no window applies, or it holds nothing listed: `win` left out with no window in front, an id that names no window, a window with no visible child (Windows) or no container (macOS), and on macOS a window of this application's own. Never `nil`.
+
+### Errors {#host-window-controls-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `win` that is neither a table nor `nil`, and a table whose `id` is not a number, a table without `id` included (`error converting Lua nil to isize (expected number or string coercible to number)`). Its other fields are not read.
+
 ### Windows {#host-window-controls-windows}
 
 Every **visible child window**, from `EnumChildWindows`, with no node or depth cap. A Win32 dialog therefore yields its buttons, edit fields and labels as well as its containers.
 
 ### macOS {#host-window-controls-macos}
 
-**Container roles only** — `AXGroup`, `AXScrollArea`, `AXSplitGroup`, `AXTabGroup`, `AXToolbar`, `AXWindow` and their like. Buttons, labels and text fields are deliberately excluded, and the walk stops at 600 nodes, depth 8, or 256 results.
+**Container roles only** — `AXGroup`, `AXScrollArea`, `AXSplitGroup`, `AXTabGroup`, `AXToolbar`, `AXWindow` and their like. Buttons, labels and text fields are deliberately excluded, and the walk stops at 600 nodes, depth 8, 256 results or 300 ms.
 
 So a module that identifies a plug-in by scanning `controls()` for a *leaf* control class finds it on Windows and comes back empty-handed here. Identify by container, or by `host.element.*`.
 
@@ -481,6 +570,15 @@ Returns [control tables](#control-table) from the currently focused element up t
 local chain = host.window.focusChain()
 local focused = chain[1]   -- innermost focused control, if any
 ```
+
+### Returns {#host-window-focuschain-returns}
+
+- `{ Control }` — the chain, innermost first: `chain[1]` is what has the focus, `chain[#chain]` its top-level window. Kept for the epoch.
+- `{}` — the focus could not be read: on Windows when there is no foreground window; on macOS in every state listed below. Never `nil`, and never "the keyboard is in the window".
+
+### Errors {#host-window-focuschain-errors}
+
+None. It never answers an error value. It never raises: arguments are ignored.
 
 ### Windows {#host-window-focuschain-windows}
 
@@ -500,23 +598,13 @@ Depth is still not a fact about the plug-in. A one-link chain says the focus is 
 
 Whether the window `id` belongs to is the one drawn at that screen point.
 
-`opts.listed = true`: `id` is a window as [`host.window.windowsOf`](#host-window-windowsof) lists it, not a `host.window` id — a popup a plug-in draws as a window of its own is known only from that list, and an item in it is clicked only if nothing else is drawn over it (the overlay runtime's [`O:chooseMenuItem`](overlay.md#o-choosemenuitem) asks this way). A listed window is a top-level window already, and the same three answers come back. `listed` other than `true`, `false` or `nil` raises, as does an `opts` that is not a table; a negative `id` with `listed` answers `nil`.
+`opts.listed = true`: `id` is a window as [`host.window.windowsOf`](#host-window-windowsof) lists it, not a `host.window` id — a popup a plug-in draws as a window of its own is known only from that list, and an item in it is clicked only if nothing else is drawn over it (the overlay runtime's [`O:chooseMenuItem`](overlay.md#o-choosemenuitem) asks this way). A listed window is a top-level window already, and the same three answers come back. A negative `id` with `listed` answers `nil`.
 
 Every hotspot in this project clicks a coordinate worked out from a window's own frame, and knowing the point falls *inside* that frame says nothing about what is drawn there. A notification, a tooltip, another application raised over it: the click goes to whichever window owns the pixel. This is how an overlay finds that out before clicking rather than after.
 
 Compared at the **top level**. An overlay's origin is often a child — an embedded plug-in is a control inside its host's window — and the point resolves to whichever child is drawn there, usually a different one. So both sides are taken up to their root, and the question answered is "does this point belong to the same application window".
 
 **`nil` means the platform cannot say, and must be read as permission rather than refusal.** A check with no answer must not block what it cannot judge. Only a definite `false` should stop anything.
-
-### Windows {#host-window-ownspoint-windows}
-
-Implemented with `WindowFromPoint` + `GetAncestor(GA_ROOT)` on both sides. `WindowFromPoint` is the window manager's own hit test, so a click-through window (`WS_EX_TRANSPARENT`) is correctly seen through rather than treated as a cover. `windowsOf` lists windows by their `HWND`, so with `listed` the question is the same one about the same number.
-
-### macOS {#host-window-ownspoint-macos}
-
-`NSWindow.windowNumberAtPoint:belowWindowWithWindowNumber:` — the window server's own hit-test, which names the frontmost window that would receive a mouse-down at the point across every application and skips windows that let clicks through. That is the question a click asks, and the reason the cheap route was not taken: `CGWindowListCopyWindowInfo` answers what is *drawn* there, and a screen reader's cursor ring is drawn over the very control being operated while letting clicks pass, so the drawn-there answer would have refused essentially every press on the machines this exists for.
-
-The window is paired with its `CGWindowID` by owner and frame (`window_id`), once per window. Three answers: the pair matches, `true`; the point belongs to another window — another application's, or another of the same application's, such as a popup of a DAW over its own plug-in window — `false`, with a log line naming that window's application and its window level, so a refused press can be explained; and `nil` wherever the question could not be put — no pairing yet, no window at the point, a window of VoiceOver's own that it did not mark click-through, or any window of this application's but a [page](./gui.md#host-gui-webview) (the announcement window sits over the plugin). A page's window at the point answers `false`, as another application's does: it would take the click. Which window of this application is at the point is AppKit's answer, with no window list read. With `listed`, `id` is the `CGWindowID` itself, which is the numbering `windowsOf` lists in and the hit test answers in: no pairing is needed, and the other answers are the same. Main thread only, which the pump is. Unverified on hardware as of 2026-09-10 without `listed`, and not run at all with it: the probe records which answer it got.
 
 `Overlay:addHotspotButton` and `addHotspotToggle` already ask this before every click; a module only needs it directly when it clicks a coordinate itself.
 
@@ -535,6 +623,28 @@ for _, w in ipairs(host.window.windowsOf(pid)) do
 end
 ```
 
+### Returns {#host-window-ownspoint-returns}
+
+- `true` — the window drawn at the point belongs to the same top-level window as `id`.
+- `false` — another window is drawn there: another application's, or another top-level window of the same application. Only this should stop a click.
+- `nil` — the platform cannot say. On Windows no window is at the point — it is off every screen — or `id` names no window; on macOS any of the cases below; and always in the build for other systems. Read it as permission.
+
+### Errors {#host-window-ownspoint-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: an `id` that is not a number; an `x` or `y` that is not a number within the 32-bit range; an `opts` that is neither a table nor `nil`; a `listed` other than `true`, `false` or `nil` (`host.window.ownsPoint: listed is true or false, not a number`). Every other key of `opts` is ignored.
+
+### Windows {#host-window-ownspoint-windows}
+
+Implemented with `WindowFromPoint` + `GetAncestor(GA_ROOT)` on both sides. `WindowFromPoint` is the window manager's own hit test, so a click-through window (`WS_EX_TRANSPARENT`) is correctly seen through rather than treated as a cover. `windowsOf` lists windows by their `HWND`, so with `listed` the question is the same one about the same number.
+
+### macOS {#host-window-ownspoint-macos}
+
+`NSWindow.windowNumberAtPoint:belowWindowWithWindowNumber:` — the window server's own hit-test, which names the frontmost window that would receive a mouse-down at the point across every application and skips windows that let clicks through. That is the question a click asks, and the reason the cheap route was not taken: `CGWindowListCopyWindowInfo` answers what is *drawn* there, and a screen reader's cursor ring is drawn over the very control being operated while letting clicks pass, so the drawn-there answer would have refused essentially every press on the machines this exists for.
+
+The window is paired with its `CGWindowID` by owner and frame (`window_id`), once per window. Three answers: the pair matches, `true`; the point belongs to another window — another application's, or another of the same application's, such as a popup of a DAW over its own plug-in window — `false`, with a log line naming that window's application and its window level, so a refused press can be explained; and `nil` wherever the question could not be put — no pairing yet, no window at the point, a window of VoiceOver's own that it did not mark click-through, or any window of this application's but a [page](./gui.md#host-gui-webview) (the announcement window sits over the plugin). A page's window at the point answers `false`, as another application's does: it would take the click. Which window of this application is at the point is AppKit's answer, with no window list read. With `listed`, `id` is the `CGWindowID` itself, which is the numbering `windowsOf` lists in and the hit test answers in: no pairing is needed, and the other answers are the same. Main thread only, which the pump is. Unverified on hardware as of 2026-09-10 without `listed`, and not run at all with it: the probe records which answer it got.
+
 ## host.window.find(matcher) {#host-window-find}
 
 **Signature:** `host.window.find(matcher: Matcher) -> Window?`
@@ -547,6 +657,17 @@ Only the applications the matcher names are asked for their windows: the `app` c
 local reaper = host.window.find({ app = { name = "reaper" } })
 ```
 
+### Returns {#host-window-find-returns}
+
+- A [window table](#window-table) — the first window in the listing that the matcher matches.
+- `nil` — none matches, or no running application matches the matcher's `app` clauses, in which case nothing was listed.
+
+### Errors {#host-window-find-errors}
+
+None. It never answers an error value.
+
+**Raises** from inside the call, since the matcher is not checked (see [Matchers](#matchers)): a `matcher` that is `nil`, a number or a boolean (`attempt to index nil with 'app'`) — a string raises nothing and matches every window; an `os` that is not a table, an `app` that is a number or a boolean, and such a block for the platform in use; a field matcher whose value is a table where a string goes, or a `pattern` or `regex` that is not a valid Luau pattern; and whatever a `where` function raises. All but the first raise only when there is a window or an application to test the matcher against, so the same mistake can pass while nothing is listed.
+
 ## host.window.findAll(matcher) {#host-window-findall}
 
 **Signature:** `host.window.findAll(matcher: Matcher) -> { Window }`
@@ -556,6 +677,16 @@ local reaper = host.window.find({ app = { name = "reaper" } })
 ```luau
 local editors = host.window.findAll({ title = { contains = "Notepad" } })
 ```
+
+### Returns {#host-window-findall-returns}
+
+- `{ Window }` — every window in the listing that the matcher matches, in listing order. Empty when none does. Never `nil`.
+
+### Errors {#host-window-findall-errors}
+
+None. It never answers an error value.
+
+**Raises** from inside the call, as [`find`](#host-window-find-errors) does.
 
 ## host.window.test(matcher, win) {#host-window-test}
 
@@ -567,6 +698,16 @@ local editors = host.window.findAll({ title = { contains = "Notepad" } })
 local w = host.window.active()
 if w and host.window.test({ windows = { class = "REAPERwnd" } }, w) then ... end
 ```
+
+### Returns {#host-window-test-returns}
+
+- `true` or `false` — whether `win` satisfies `matcher`. Nothing is asked of the system: only the table is read.
+
+### Errors {#host-window-test-errors}
+
+None. It never answers an error value.
+
+**Raises** from inside the call, as [`find`](#host-window-find-errors) does, and for a `win` that is not a table as soon as the matcher reads one of its fields; a matcher that reads none, such as `{}`, answers `true` for anything.
 
 ## host.window.onTrigger(matcher, opts, cb) {#host-window-ontrigger}
 
@@ -612,6 +753,17 @@ end)
 
 **A trigger belongs to the VM that registers it**, and a `code_module`'s source runs in more than one: once in its own VM and once in every dependent's (see [`host.require`](./require.md#host-require)). A trigger registered at the top level of a shared runtime is therefore registered — and reported — once per VM. Where the trigger is the dependent's business, as a game's is, the runtime exports a function that registers it and each game module's entry calls that function once, in its own VM, with its own data: the trigger, and the poll and hotkey it starts, then belong to the game module, stop while it is disabled and go when it is reloaded. That shape, with a hotkey that works for any number of games on one runtime, is the example under [a runtime shared by game modules](./require.md#a-runtime-shared-by-game-modules). What must exist once per application goes into the runtime's `activate`, which runs in its own VM only. A poll that starts from `initial = true` and stops itself when the game leaves the front is the example under [`host.timer.cancel`](./timer.md#host-timer-cancel).
 
+### Returns {#host-window-ontrigger-returns}
+
+- Nothing. There is no handle; the trigger stays until the module is reloaded.
+- `cb(win)` — on each matching activation, and once for `initial = true`, with the [window table](#window-table). Its return value is ignored.
+
+### Errors {#host-window-ontrigger-errors}
+
+None. It never answers an error value. Its callback is handed none either.
+
+**Raises** for a mistake in the call, at the caller's line, with nothing registered: a `cb` that is not a function (`host.window.onTrigger: the callback is a function, not a nil`); a `matcher` or `opts` that is neither a table nor `nil`; an `initial` that is not `true` or `false`; a matcher's `app`, `os`, platform block or a block's `app` that is not a table, and a `where` that is not a function (`host.window.onTrigger: matcher.app is a table, not a string`). An error the callback raises later is logged, and skips the module's later triggers for that change (above).
+
 ### Windows {#host-window-ontrigger-windows}
 
 A system-wide foreground hook, registered for **every process**, whether or not it cooperates with accessibility, is what fires this. A foreground window **without a title** is never handed to a trigger: it runs a focus round (the `onFocus` callbacks) instead. The focus and name-change hooks beside it only ever run a focus round, so a window whose title becomes matchable after it came forward does not fire `onTrigger` either — re-check such a window from `onFocus`.
@@ -649,9 +801,16 @@ host.window.onFocus(function()
 end)
 ```
 
-### Internal prelude functions
+### Returns {#host-window-onfocus-returns}
 
-`window_prelude.luau` also defines `W._hasTriggers()`, `W._wantsInitial(reprime)`, `W._dispatchActivate(win, beforeFirst)`, `W._dispatchInitial(win, reprime, beforeFirst)` and `W._dispatchFocus()`, and the host adds `W._requestInitial()`, which `onTrigger { initial = true }` calls to queue its module for the report. The host event loop calls the dispatchers to deliver foreground and focus changes, and the initial report, into the registered `onTrigger`/`onFocus` callbacks; modules do not call any of them directly.
+- Nothing. There is no handle; the callback stays until the module is reloaded.
+- `cb()` — on each focus round, with no arguments. Its return value is ignored.
+
+### Errors {#host-window-onfocus-errors}
+
+None. It never answers an error value. Its callback is handed none either.
+
+**Raises** for a mistake in the call, at once and with nothing registered: a `cb` that is not a function (`host.window.onFocus: the callback is a function, not a nil`).
 
 ### Windows {#host-window-onfocus-windows}
 
@@ -687,6 +846,14 @@ if p then
   host.timer.after(1000, host.window.recheck)
 end
 ```
+
+### Returns {#host-window-recheck-returns}
+
+- Nothing. The round runs at the end of the current tick, once however many calls asked for it.
+
+### Errors {#host-window-recheck-errors}
+
+None. It never answers an error value. It never raises: arguments are ignored.
 
 ### Windows {#host-window-recheck-windows}
 

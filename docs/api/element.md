@@ -16,6 +16,8 @@ It is a cross-process query and it is not free: a 53-element window takes about 
 
 The trap is that **not finding something and not being able to see anything are the same `false`.** A DAW-embedded Kontakt 8 is a single leaf; Kontakt's instrument editor is absent from a tree that lists its header and status bar; a probe of a REAPER FX window on macOS found 22 elements of which every one belonged to REAPER. So dump the window before building on any of this, and where a miss could mean either, decide in advance which way to fail — Kontakt's rack-view test counts "the plug-in is not answering" as yes, because a wrong no hides seven controls from somebody who cannot see that they are gone. A program that did not answer at all is told apart, on Windows: that is `nil` and an error value that says why, never `false` (see below).
 
+**What a call answers.** Each entry's **Returns** says what every answer means, and its **Errors** lists the [error values](./errors.md#error-values) it can give, by code. The codes every question shares are listed once, under [`find`'s Errors](#host-element-find-errors), and the other entries name them with a link. Compare `err.code`, never the message: a message may change between versions, and the code does not. On macOS no question answers an error value yet, and a press answers `not_supported`; the build for other systems has no tree, so every question there finds nothing and a press answers `not_supported`. Besides the mistakes each entry lists under **Raises**, two raises can meet any call here: reaching for `host.element` in a module that did not declare `element` ([What to declare](#declare)), and the host's guard stopping a callback that ran too long (`stopped by the host: …`, [the limits](../module-runtime-and-lifecycle.md#limits)). An argument of the wrong type raises with the host's conversion message, such as `bad argument #2: error converting Lua nil to String (expected string or number)`; a number with a fraction is cut toward zero where a whole number goes.
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -35,23 +37,13 @@ Every call on this page but [`pending`](#host-element-pending) takes two more ar
 
 **With a callback** the call returns nothing, at once, wherever it is made, and `cb` is called with exactly what the call would have returned, on a later turn of the event loop, as a [handler](../module-runtime-and-lifecycle.md#handlers) of the module — at once while the module is free, after its earlier events while it is busy — in the lane it was asked from: a question asked from a key, a hotkey, a window or focus change is asked before a poll's. It is **dropped**, `cb` never called, when the module is disabled, reloaded, removed or stopped by the host's guard first — and a question of such a module that was not asked yet is not asked at all: a `press` or a `focusStep` it handed over is not made. Nothing here reads the screen, so an answer carries no `time` or `inputEpoch`. **Without a callback** the call returns the answer, and the event loop waits for it; the platform sections say what that wait lets through.
 
-**Not known is not "no".** A program that does not answer is not a program without the element. When a question could not be answered — the program did not answer in time, runs with higher rights, went away while it was asked — every call answers `nil` and an [error value](./errors.md#error-values) that says why, `nil, err`: `find`, which otherwise answers `true` or `false`, too. A press answers `false, err`. **A dump answers what it found and, beside it, the error value that says why it is not all of the tree** — a [partial answer](./errors.md#partial-answers): the list is there *and* so is `err`, so test `err` to know whether the list is the whole tree; one that read nothing answers `{}, err`. Compare `err.code`, never the message. The codes and the messages, as a module gets them:
-
-- `timeout` — `the program did not answer within 1000 ms`
-- `denied` — `the program runs with higher rights`
-- `gone` — `the program is gone`
-- the earlier question's code — `… to an earlier question, so this one was not asked`, the earlier one's message first: `the program did not answer within 1000 ms to an earlier question, so this one was not asked` (below)
-- `replaced` — `a newer question with the same key was asked before this one` (`opts.key`, below; to a callback only)
-- `busy` — `another accessibility question is being waited for`: a call without a callback made while the event loop already waits for one; nothing in the host makes one
-- `failed` — `the host could not start its accessibility thread: …`, with the system's reason; `the event the host waits on for the answer could not be made`; `the answer was lost`; `the host's accessibility thread failed: …`, with the panic's report (Windows)
-- `refused` — `the window is this application's own, which is not asked about` (Windows, below)
-- `too_large` — `the tree holds more than the 4000 elements a search reads`, and `timeout` — `the search took longer than 5 s`: a walk of the host's own that stopped at its bound before the end of the tree and found nothing (Windows, the calls that name one); and `too_large` — `the tree holds … elements, more than the 2000 a dump lists` beside a dump's list (Windows)
+**Not known is not "no".** A program that does not answer is not a program without the element. When a question could not be answered — the program did not answer in time, runs with higher rights, went away while it was asked — or was not put to the program at all, every call answers `nil` and an [error value](./errors.md#error-values) that says why, `nil, err`: `find`, which otherwise answers `true` or `false`, too. A press answers `false, err`. **A dump answers what it found and, beside it, the error value that says why it is not all of the tree** — a [partial answer](./errors.md#partial-answers): the list is there *and* so is `err`, so test `err` to know whether the list is the whole tree; one that read nothing answers `{}, err`. Compare `err.code`, never the message. The codes every question can give, with their messages and when each comes, are [`find`'s Errors](#host-element-find-errors); an entry's own table adds what only it gives — the bounds of a walk, a dump's cut, a press's refusals. All of them come from Windows: on macOS a question never answers "not known" yet ([macOS](#asking-without-waiting-macos)).
 
 Nothing in the host turns a "not known" into a no, and a module that keeps what it learns must not either: ask again later. The epoch's store keeps the program's own "not known" — the bounds of a walk included — as not known until the epoch turns over; what the host says without putting the question to the program — not asked behind an earlier question, replaced, refused inside a wait, a thread that could not start, a window of this application — it does not keep. An overlay's kept `identify` that meets one raises rather than answer `nil`: the overlay runtime takes a raise as no verdict and never counts it, where it keeps the eighth `nil` in a row as a no ([`O:attachEmbedded`](./overlay.md#o-attachembedded)); Komplete Kontrol's module does so, and raises the same while its answer has not come.
 
 **One question at a time.** The questions are asked one after another, so no program ever has more than one of this application's to answer: the one the event loop waits for first, then those asked from what a person did, then a poll's, each in the order asked — but never a question before one that acts on the same program — `press`, `focusStep`, `focusWithin` — and was asked before it: what it found would be from before that act. Such an act is asked as early as the most urgent question waiting behind it, so a call without a callback made right after a `press` with one waits for the press and then for its own answer, which is from after it. A question the same as one still waiting to be asked — the same call with the same arguments, from any module — is not asked twice: everyone who asked it gets the one answer, unless something acted on the screen between the two ([`host.inputEpoch`](./timer.md#host-inputepoch) turned over, or a question that acts on the same program waits between them). So is one the same as the question being asked right now, unless the input epoch turned over since that one was put, for its answer may be from before. A question that acts is always asked. When a program does not answer one question in time, the questions to it that waited behind that one are answered "not known" at once, without being put to it; a question asked after that is put to it again.
 
-**`opts.key`** names what a question is *for*: a newer question of the same module with the same key — with a callback or without, answered from the epoch's store or asked — takes out those with that key that have not been asked yet. Their callbacks get `nil, err` with `err.code` `replaced` (a press, `false, err`), and a question nobody else waits for is not asked; the one being asked is answered as it is. Nothing can replace a call without a callback while the event loop waits for it. [`host.element.pending(key)`](#host-element-pending) says whether a question with the key, asked with a callback, is out.
+**`opts.key`** names what a question is *for*: a newer question of the same module with the same key — with a callback or without, answered from the epoch's store or asked — takes out those with that key that have not been asked yet. Their callbacks get `nil, err` with `err.code` `replaced` (a press, `false, err`; a dump, `{}, err`), and a question nobody else waits for is not asked; the one being asked is answered as it is. Nothing can replace a call without a callback while the event loop waits for it. [`host.element.pending(key)`](#host-element-pending) says whether a question with the key, asked with a callback, is out.
 
 **What raises:** `opts` that is neither a table nor `nil`, an option other than `key`, a `key` that is not a non-empty string, a callback that is not a function — an explicit `nil` where it goes included, which is almost always a callback that is missing — and anything after the callback, `nil` included. Each message begins with the call's name: `host.element.find: opts.key must be a non-empty string, got 3`; `host.element.find: the callback is nil — pass a function to be called back with the answer, or leave the argument out to wait for it`. A question that gets no answer never raises.
 
@@ -87,6 +79,8 @@ Every question is asked on the host's `accessibility` thread, started at the fir
 Without a callback the event loop waits for the answer — for the question the thread is asking at that moment, if there is one, and for a question that acts on the same program asked before it, and then for its own, which goes before every other question still waiting — in a wait that answers what other threads and programs *send* to the application's windows: a screen reader asking one of them what it holds (`WM_GETOBJECT`, and the messages the system's accessibility proxies send to read a control) is answered while the event loop waits, which it was not while the event loop asked the question itself. Nothing *posted* runs in that wait: timers, keys and every module's events wait, as they did. A wait of 50 ms or more is named in the log as before, with how much of it went by before the thread took the question: `[observe] uia.findAny(Komplete Kontrol) blocked the pump for 1459 ms`, or `… blocked the pump for 5300 ms, 5004 ms of it behind questions asked before it`. That part is another question's, often another module's, and the host's [guard](../module-runtime-and-lifecycle.md#limits) does not count it on the callback's 10 s of wall clock; the rest of the wait it counts, as it counts any slow call.
 
 A window of this application itself — a [`host.gui.webview`](./gui.md) page, the manager — is not asked about: every call answers `nil, err`, code `refused`, message `the window is this application's own, which is not asked about` (a press, `false, err`; a dump, `{}, err`), with a callback or without. Its accessibility is answered on the event loop, in part through calls *posted* to it, which the wait above does not run: the thread would wait for the event loop and the event loop for the thread.
+
+A window that is gone — an `hwnd` that names no window, `0` included — holds nothing, and every question about it says so without a word to any program: `find` answers `false`, a dump `{}`, the others `nil`. Only a press says why, `false, err` with `the window is gone`. A system whose automation object cannot be made at all answers the same way: every question finds nothing, and only a press says why, `this system's accessibility interface could not be reached`.
 
 ### macOS {#asking-without-waiting-macos}
 
@@ -124,6 +118,30 @@ if host.element.find(hwnd, "", 50004) then
 end
 ```
 
+### Returns {#host-element-find-returns}
+
+- `true` — the tree of `hwnd` holds at least one element with that Name and ControlType.
+- `false` — it holds none, as far as the search sees. A window that is gone is `false` too, and so, on macOS, is a search that ran out of its budget or met an application that does not answer ([macOS](#host-element-find-macos)).
+- `nil, err` — not known: the program did not answer, or the question was not put to it (Windows). Not a no: ask again later. `err.code` is one of the codes below.
+- With a callback: nothing at once; `cb(true)`, `cb(false)` or `cb(nil, err)` on a later turn of the event loop ([Asking without waiting](#asking-without-waiting)).
+
+### Errors {#host-element-find-errors}
+
+None of these is raised. They are the codes **every question on this page** can give; the other entries link here, and add their own. All of them come from Windows, where the questions are asked on the host's accessibility thread: on macOS no question answers an error value yet.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `timeout` | both | The program did not answer a call within 1000 ms: it is busy, or hung. Or the question waited behind one to the same program that did not answer in time, and was not put to it; the message then begins with the earlier one's: `the program did not answer within 1000 ms to an earlier question, so this one was not asked`. | `the program did not answer within 1000 ms`, `… to an earlier question, so this one was not asked` | Windows |
+| `denied` | both | The program runs with higher rights than this application. The second message would be a question not asked behind one refused so; no question is left unasked behind it today, only behind a timeout. | `the program runs with higher rights`, `… to an earlier question, so this one was not asked` | Windows |
+| `gone` | both | The program went away while it was asked. The second message is as for `denied`: not given today. | `the program is gone`, `… to an earlier question, so this one was not asked` | Windows |
+| `replaced` | callback | With `opts.key`: a newer question of the module with the same key came before this one was put to the program. It is not asked. | `a newer question with the same key was asked before this one` | Windows |
+| `busy` | return | Without a callback, asked while the event loop already waits for another question — from code that something sent to one of this application's windows ran. Nothing in the host asks one so. | `another accessibility question is being waited for` | Windows |
+| `refused` | both | `hwnd` is a window of this application: a page, the module manager. It is not asked about. | `the window is this application's own, which is not asked about` | Windows |
+| `failed` | both | The host could not start its accessibility thread, and answers every question so for the session; or the thread's code failed while it asked, and the thread goes on. The message carries the system's reason or the failure's report. | `the host could not start its accessibility thread: …`, `the host's accessibility thread failed: …` | Windows |
+| `failed` | return | Without a callback: the event the host waits on could not be made, or the answer did not come back. Neither is known to happen. | `the event the host waits on for the answer could not be made`, `the answer was lost` | Windows |
+
+**Raises** for a mistake in the call: an `hwnd` that is not a number; a `name` that is neither a string nor a number; a `controlType` that is not a number in the 32-bit range; and the `opts` and callback mistakes under [Asking without waiting](#asking-without-waiting). A question that gets no answer never raises.
+
 ### Windows {#host-element-find-windows}
 
 A subtree search performed by UIA itself, with no traversal budget of ours.
@@ -132,7 +150,7 @@ The documented "is a menu open" idiom — an empty name with `host.element.type.
 
 ### macOS {#host-element-find-macos}
 
-A hand-rolled walk capped at **1500 nodes and depth 24**. Exhausting that budget returns the same "not found" a completed search returns, and only a once-per-session log line tells them apart — so a large or deep plug-in tree can make an identity check answer `false` permanently here while succeeding on Windows, with nothing to distinguish that from "this is not the plug-in".
+A hand-rolled walk capped at **1500 nodes, depth 24 and 300 ms**, and at 256 children of any one element. Exhausting that budget returns the same "not found" a completed search returns, and so does an application in the five-second not-answering quarantine, which is not asked at all, and only a once-per-session log line tells them apart — so a large or deep plug-in tree can make an identity check answer `false` permanently here while succeeding on Windows, with nothing to distinguish that from "this is not the plug-in".
 
 The menu idiom is special-cased rather than searched: it asks the *application* whether a menu is open, walking its children and one level into its other windows, and never descends the menu bar itself. `locate` has no such special case.
 
@@ -150,9 +168,26 @@ if pt then
 end
 ```
 
+### Returns {#host-element-locate-returns}
+
+- `{ x, y }` — the screen centre of the first matching element's rectangle, whole numbers in the platform's screen coordinates.
+- `nil` — no element matches, or the first match has no rectangle there (an empty one). A window that is gone is `nil` too, and so, on macOS, is a search past its budget ([macOS](#host-element-locate-macos)).
+- `nil, err` — not known (Windows); `err.code` is under Errors.
+- With a callback: nothing at once; `cb({ x, y })`, `cb(nil)` or `cb(nil, err)` on a later turn.
+
+### Errors {#host-element-locate-errors}
+
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| any of [`find`'s errors](#host-element-find-errors) | both | The program did not answer, or the question was not put to it; each arrives as it does there. | as there | Windows |
+
+**Raises** for a mistake in the call, as [`find`](#host-element-find-errors) does.
+
 ### macOS {#host-element-locate-macos}
 
-Subject to the same **1500 node / depth 24** traversal budget as `host.element.find` — a tree larger than that answers "not here" to every question, indistinguishably from an honest miss.
+Subject to the same **1500 node / depth 24 / 300 ms** traversal budget as `host.element.find` — a tree larger than that answers "not here" to every question, indistinguishably from an honest miss.
 
 ## host.element.type {#host-element-type}
 
@@ -164,6 +199,10 @@ The UIA ControlType ids by name — `host.element.type.Button` (50000), `.Edit`,
 local U = host.element.type
 if host.element.find(hwnd, "Kontakt 8", U.Pane) then … end
 ```
+
+### Returns {#host-element-type-returns}
+
+A table of 39 names, `Button` (50000) to `Separator` (50038), each a number. It is a plain table, made for each module's VM when the module loads, so writing to it changes only that module's copy; reading a name it does not have is `nil`, which a call then raises for as a `controlType` that is not a number.
 
 ### Windows {#host-element-type-windows}
 
@@ -190,6 +229,23 @@ local i = host.element.findAny(ctrl.id, VERSIONS, { U.Window, U.Pane })
 if i then host.log.info("this is " .. VERSIONS[i]) end
 ```
 
+### Returns {#host-element-findany-returns}
+
+- A number — the 1-based index in `names` of the earliest name present as any of `types`. With two present, the one earlier in `names` wins.
+- `nil` — none is present. An empty `names` or `types` asks nothing and is `nil`; so is a window that is gone and, on macOS, a `types` list none of whose types has a role there ([`host.element.type`](#host-element-type-macos)) or a search past its budget.
+- `nil, err` — not known (Windows): the search stops at the first name the program did not answer for, and the names after it are not asked. `err.code` is under Errors.
+- With a callback: nothing at once; `cb(index)`, `cb(nil)` or `cb(nil, err)` on a later turn.
+
+### Errors {#host-element-findany-errors}
+
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| any of [`find`'s errors](#host-element-find-errors) | both | The program did not answer, or the question was not put to it; each arrives as it does there. | as there | Windows |
+
+**Raises** for a mistake in the call: an `hwnd` that is not a number; a `names` that is not a table, or holds a value that is neither a string nor a number; a `types` that is not a table, or holds a value that is not a number in the 32-bit range; and the `opts` and callback mistakes under [Asking without waiting](#asking-without-waiting). Each list is read up to its first `nil`.
+
 ## host.element.pluginLocate(hwnd, containerName, name, controlType, opts?, cb?) {#host-element-pluginlocate}
 
 **Signature:** `host.element.pluginLocate(hwnd: number, containerName: string, name: string, controlType: number, opts: { key: string? }?, cb: function?) -> { x: number, y: number } | nil | (nil, Error)`, and nothing with `cb`
@@ -203,30 +259,51 @@ local pt = host.element.pluginLocate(hwnd, "Kontakt 8", "Kontakt File Menu", 500
 if pt then host.input.click(pt.x, pt.y) end
 ```
 
+### Returns {#host-element-pluginlocate-returns}
+
+- `{ x, y }` — the screen centre of the first target with a rectangle found inside a container, whole numbers. What a walk found stands, even when it stopped before the end of the tree.
+- `nil` — no target: no container of that name (on macOS a non-empty `name` is then looked up on the whole window, below), or no container that holds one with a rectangle. A window that is gone is `nil` too, and so, on macOS, is a search past its budget.
+- `nil, err` — not known (Windows): the program did not answer, the question was not put to it, or a walk stopped at its bound before the end of the tree and found nothing — the part not walked may hold the target. `err.code` is under Errors.
+- With a callback: nothing at once; `cb({ x, y })`, `cb(nil)` or `cb(nil, err)` on a later turn.
+
+### Errors {#host-element-pluginlocate-errors}
+
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| any of [`find`'s errors](#host-element-find-errors) | both | The program did not answer, or the question was not put to it; each arrives as it does there. | as there | Windows |
+| `too_large` | both | A walk read 4000 elements before the end of the tree, and found nothing. | `the tree holds more than the 4000 elements a search reads` | Windows |
+| `timeout` | both | A walk took longer than 5 s before the end of the tree, and found nothing: the program answers every call, slowly. | `the search took longer than 5 s` | Windows |
+
+**Raises** for a mistake in the call: an `hwnd` that is not a number; a `containerName` or `name` that is neither a string nor a number; a `controlType` that is not a number in the 32-bit range; and the `opts` and callback mistakes under [Asking without waiting](#asking-without-waiting).
+
 ### Windows {#host-element-pluginlocate-windows}
 
 A hand-rolled walk of its own, bounded at 4000 nodes and depth 40 — deliberately larger than the ordinary search, because a hosted plug-in fragment is where the deep trees are — and at 5 s for each of its two walks (the containers, then each container's content), against a program that answers every call in time but slowly. A walk stopped at its node budget or its time before the end of the tree, that found nothing, answers `nil, err` — code `too_large`, `the tree holds more than the 4000 elements a search reads`, or `timeout`, `the search took longer than 5 s` — never `nil` alone: the part it did not walk may hold the element. What it found stands. Elements below depth 40 are not looked at, and nothing says so: that is the call's reach, not a cut.
 
 ### macOS {#host-element-pluginlocate-macos}
 
-The general **1500 node / depth 24** budget applies here too; there is no larger allowance for this call. A plug-in tree that this reaches on Windows can be out of reach here, and the miss looks identical to a genuine one.
+The general **1500 node / depth 24 / 300 ms** budget applies here too; there is no larger allowance for this call. A plug-in tree that this reaches on Windows can be out of reach here, and the miss looks identical to a genuine one.
 
 When **no** element named `containerName` exists at all, a non-empty `name` is looked up on the whole window instead, as `locate` would. There is no fragment boundary to cross on this platform, and a plug-in hosted in a DAW need not publish an element named after itself: inside REAPER, Kontakt 8's groups hang straight off the FX window, whose title is `FX: Track 1 "Kontakt 8"`. Two cases still answer `nil`: a container that exists but does not hold the target, and an empty `name`, which on a whole DAW window would mean the DAW's own first button.
 
 ## host.element.rawDump(hwnd, opts?, cb?) {#host-element-rawdump}
 
-**Signature:** `host.element.rawDump(hwnd: number, opts: { key: string? }?, cb: function?) -> ({ { depth: number, name: string, class: string, ctype: number }, … }, Error?)`, and nothing with `cb`
+**Signature:** `host.element.rawDump(hwnd: number, opts: { key: string? }?, cb: function?) -> ({ { depth: number, name: string, class: string, ctype: number, bounds: { x: number, y: number, w: number, h: number } }, … }, Error?)`, and nothing with `cb`
 
-Diagnostic counterpart to `host.element.dump`, walking the **raw** tree instead of a condition-based search, so it crosses into hosted fragments the latter cannot see. Bounded by node budget and depth. Use it to find out whether a plugin exposes any accessible content at all before building on UIA. The list is never `nil`: when the program stopped answering on the way, or the walk reached its bound before the end of the tree, it is what was found until then, **and an error value beside it says why it is not all of the tree** — a [partial answer](./errors.md#partial-answers), the list *and* `err`: `timeout`, `denied` or `gone` for the program, `too_large` or `timeout` for the walk's bound ([Asking without waiting](#asking-without-waiting)). Without `err` the list is the whole tree.
+Diagnostic counterpart to `host.element.dump`, walking the **raw** tree instead of a condition-based search, so it crosses into hosted fragments the latter cannot see. Bounded by node budget, time and depth. Use it to find out whether a plugin exposes any accessible content at all before building on UIA. The list is never `nil`, and it can come **with an error value beside it**: what was read before the walk stopped, and why it stopped ([Returns](#host-element-rawdump-returns)).
 
-Each node also carries `bounds = { x, y, w, h }` in screen coordinates, which the signature above omits and which is usually the reason to reach for this: a rectangle measures things nothing else can — a window's own close button says how tall its title bar is, and that is the difference between an authored coordinate landing on a control and landing a title bar above it.
+Each node carries `bounds = { x, y, w, h }` in screen coordinates, which is usually the reason to reach for this: a rectangle measures things nothing else can — a window's own close button says how tall its title bar is, and that is the difference between an authored coordinate landing on a control and landing a title bar above it.
 
 ```luau
 -- Does this plug-in publish anything at all? The probe dumps the whole tree, because on a
 -- machine nobody here can see, the log is the only way to find out.
 local win = host.window.active()
-local elements = win and host.element.rawDump(win.id) or {}
-host.log.info(string.format("%d element(s) in '%s'", #elements, win and win.title or ""))
+if not win then return end
+local elements, err = host.element.rawDump(win.id)
+host.log.info(string.format("%d element(s) in '%s'%s", #elements, win.title,
+  err and (" — not all of the tree: " .. err) or ""))
 for _, e in ipairs(elements) do
   local b = e.bounds
   host.log.info(string.format("  %sdepth=%d type=%d class='%s' name='%s' at %d,%d %dx%d",
@@ -235,23 +312,59 @@ for _, e in ipairs(elements) do
 end
 ```
 
+### Returns {#host-element-rawdump-returns}
+
+:::warning A list and an error value together
+`rawDump` can answer **a list and an error value at once**: the elements read before the walk stopped, and why it stopped. That is a [partial answer](./errors.md#partial-answers). Use the list either way, and test `err` to know whether it is all of the tree. `if err then return end` throws away what was read, and `#list == 0` cannot tell a small tree from a cut one.
+
+```luau
+local list, err = host.element.rawDump(win.id)
+for _, e in ipairs(list) do host.log.info(e.name) end   -- what was read, all of it or not
+if err then host.log.info("only part of the tree: " .. err) end
+```
+:::
+
+- `{ node }` alone — every element of the raw tree that has a Name or a class, as `{ depth, name, class, ctype, bounds }`. With no error value beside it, the list is the whole tree. It can be empty: nothing in the tree is named, or the window is gone.
+- `{ node }, err` — **a partial answer**: the elements read before the walk stopped, perhaps none, and why it stopped. The program stopped answering (`timeout`, `denied`, `gone`), or the walk reached its bound of 4000 elements or 5 s (`too_large`, `timeout`).
+- `{}, err` — nothing was read, because the question was not put to the program: not asked behind an earlier one, replaced, this application's own window, and the rest of [`find`'s errors](#host-element-find-errors).
+- With a callback: nothing at once; `cb(list)` or `cb(list, err)` on a later turn, with the same values.
+
+On macOS a dump never carries an error value: one cut at its bound is the list read until then, alone ([macOS](#host-element-dump-macos)).
+
+### Errors {#host-element-rawdump-errors}
+
+None of these is raised. The first five come **beside the list read so far**; the rest beside `{}`.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `timeout` | both | The program did not answer a call of the walk within 1000 ms. Beside the elements read before it. | `the program did not answer within 1000 ms` | Windows |
+| `denied` | both | The program runs with higher rights. Beside what was read, usually nothing. | `the program runs with higher rights` | Windows |
+| `gone` | both | The program went away during the walk. Beside the elements read before it. | `the program is gone` | Windows |
+| `too_large` | both | The walk read 4000 elements before the end of the tree. Beside those it listed. | `the tree holds more than the 4000 elements a search reads` | Windows |
+| `timeout` | both | The walk took longer than 5 s before the end of the tree. Beside the elements read until then. | `the search took longer than 5 s` | Windows |
+| the rest of [`find`'s errors](#host-element-find-errors) | both | The question was not put to the program, or the host failed: beside `{}`. Each arrives as it does there. | as there | Windows |
+
+**Raises** for a mistake in the call: an `hwnd` that is not a number, and the `opts` and callback mistakes under [Asking without waiting](#asking-without-waiting).
+
 ## host.element.dump(hwnd, opts?, cb?) {#host-element-dump}
 
 **Signature:** `host.element.dump(hwnd: number, opts: { key: string? }?, cb: function?) -> ({ { depth: number, name: string, class: string, ctype: number, bounds: { x: number, y: number, w: number, h: number } }, … }, Error?)`, and nothing with `cb`
 
 The condition-based counterpart to [`host.element.rawDump`](#host-element-rawdump), and the first thing to run against a window nobody here has seen: every element of `hwnd`'s subtree that carries a Name or a class key, as `{ depth, name, class, ctype, bounds }`. It is what tells you the Name/ControlType pair to key an identity check on, and the rectangles are what a coordinate can be authored against. Where this comes back empty or suspiciously thin against a plug-in hosted inside another application, that is the fragment boundary the condition-based search stops at — reach for `rawDump`, which crosses it.
 
-`bounds` is in screen coordinates. An element the toolkit never places reports all zeros, which is a legitimate answer and not a miss. Every property is fetched across the process boundary per element, so this belongs on a diagnostic hotkey, not on a focus step. As with `rawDump`, **an error value beside the list says why it is not all of the tree** when the program stopped answering on the way, or the tree holds more than the 2000 elements a dump lists (`too_large`, `the tree holds … elements, more than the 2000 a dump lists`): a [partial answer](./errors.md#partial-answers), the list *and* `err`.
+`bounds` is in screen coordinates. An element the toolkit never places reports all zeros, which is a legitimate answer and not a miss. Every property is fetched across the process boundary per element, so this belongs on a diagnostic hotkey, not on a focus step. As with `rawDump`, **the list can come with an error value beside it**, saying why it is not all of the tree ([Returns](#host-element-dump-returns)).
 
 ```luau
 -- Ctrl+Alt+U in tools/inspect: dump the focused window, then every Qt plug-in control in
 -- it — on a machine nobody here can see, the log is the only way to learn what a tree holds.
 local win = host.window.active()
 local function dumpOne(label, id)
+  local list, err = host.element.dump(id)
   host.log.info(string.format("UIA DUMP %s id=%d", label, id))
-  for _, e in ipairs(host.element.dump(id)) do
+  for _, e in ipairs(list) do
     host.log.info(string.format("  type=%-5d class='%s' name='%s'", e.ctype, e.class, e.name))
   end
+  if err then host.log.info("  (not all of the tree: " .. err .. ")") end
 end
 dumpOne("window '" .. win.title .. "'", win.id)
 for _, c in ipairs(host.window.controls()) do
@@ -259,15 +372,50 @@ for _, c in ipairs(host.window.controls()) do
 end
 ```
 
+### Returns {#host-element-dump-returns}
+
+:::warning A list and an error value together
+`dump` can answer **a list and an error value at once**: the elements listed, and why that is not all of the tree. That is a [partial answer](./errors.md#partial-answers). Use the list either way, and test `err` to know whether it is all of the tree.
+
+```luau
+local list, err = host.element.dump(win.id)
+for _, e in ipairs(list) do host.log.info(e.name) end    -- what was listed, all of it or not
+if err and err.code == host.errors.TOO_LARGE then
+  host.log.info("the first 2000 elements only: " .. err)
+end
+```
+:::
+
+- `{ node }` alone — every element of the subtree that has a Name or a class, as `{ depth, name, class, ctype, bounds }`. With no error value beside it, the list is the whole tree. It can be empty: nothing in the tree is named, or the window is gone.
+- `{ node }, err` — **a partial answer**: the elements listed, perhaps none, and why that is not all. The tree holds more than the 2000 elements a dump lists (`too_large`), or the program stopped answering (`timeout`, `denied`, `gone`).
+- `{}, err` — nothing was read, because the question was not put to the program: not asked behind an earlier one, replaced, this application's own window, and the rest of [`find`'s errors](#host-element-find-errors).
+- With a callback: nothing at once; `cb(list)` or `cb(list, err)` on a later turn, with the same values.
+
+On macOS a dump never carries an error value: one cut at its bound is the list read until then, alone ([macOS](#host-element-dump-macos)).
+
+### Errors {#host-element-dump-errors}
+
+None of these is raised. The first four come **beside the list read so far**; the rest beside `{}`.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `too_large` | both | The tree holds more than 2000 elements. The first 2000 are read, and those with a Name or a class listed. | `the tree holds … elements, more than the 2000 a dump lists` | Windows |
+| `timeout` | both | The program did not answer a call within 1000 ms. Beside the elements listed before it. | `the program did not answer within 1000 ms` | Windows |
+| `denied` | both | The program runs with higher rights. Beside what was listed, usually nothing. | `the program runs with higher rights` | Windows |
+| `gone` | both | The program went away while the elements were read. Beside those listed before it. | `the program is gone` | Windows |
+| the rest of [`find`'s errors](#host-element-find-errors) | both | The question was not put to the program, or the host failed: beside `{}`. Each arrives as it does there. | as there | Windows |
+
+**Raises** for a mistake in the call: an `hwnd` that is not a number, and the `opts` and callback mistakes under [Asking without waiting](#asking-without-waiting).
+
 ### Windows {#host-element-dump-windows}
 
-One `FindAll` over the subtree, returning a **flat** list capped at the first 2000 elements: `depth` is `0` on every node here, so nesting has to be read from the rectangles rather than from the field. `rawDump` is the one that reports real depth. A tree larger than that is listed in part, and the second value says so: `"the tree holds 2875 elements, more than the 2000 a dump lists"`.
+One `FindAll` over the subtree, returning a **flat** list capped at the first 2000 elements: `depth` is `0` on every node here, so nesting has to be read from the rectangles rather than from the field. `rawDump` is the one that reports real depth. A tree larger than that is listed in part, and the error value beside the list says so, `too_large`: `the tree holds 2875 elements, more than the 2000 a dump lists`.
 
-`rawDump` here walks at most 4000 elements and 5 s, depth 40, and says the same of a walk that stopped at the first two: `"the tree holds more than the 4000 elements a search reads"`, `"the search took longer than 5 s"`.
+`rawDump` here walks at most 4000 elements and 5 s, depth 40, and says the same of a walk that stopped at the first two, `too_large` or `timeout`: `the tree holds more than the 4000 elements a search reads`, `the search took longer than 5 s`. Elements below depth 40 are not read, and nothing says so.
 
 ### macOS {#host-element-dump-macos}
 
-Accessibility has only one view of the tree, so `dump` and `rawDump` are the same call and return the same list — a `dump` is never the thinner answer it can be on Windows. Bounded at **2000 nodes and depth 24**, and `depth` is the real nesting depth.
+Accessibility has only one view of the tree, so `dump` and `rawDump` are the same call and return the same list — a `dump` is never the thinner answer it can be on Windows. Bounded at **2000 nodes, depth 24 and 5 s**, and `depth` is the real nesting depth. A dump that stops at a bound is the list read until then, with no error value beside it: on this platform a dump never says it is not all of the tree.
 
 `class` is not a class name, because this platform has none: it is the joined `role/subrole/AXIdentifier` key, printed exactly as a module's pattern would match it, so what appears in the log can be pasted straight into the module.
 
@@ -293,13 +441,30 @@ else
 end
 ```
 
+### Returns {#host-element-locatevia-returns}
+
+- `{ x, y }` — the screen centre of the first target inside the first matching container, whole numbers.
+- `nil` — no container matches, the container holds no target, or the target has no rectangle there. Only the first container is searched. A window that is gone is `nil` too, and so, on macOS, is a search past its budget.
+- `nil, err` — not known (Windows); `err.code` is under Errors.
+- With a callback: nothing at once; `cb({ x, y })`, `cb(nil)` or `cb(nil, err)` on a later turn.
+
+### Errors {#host-element-locatevia-errors}
+
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| any of [`find`'s errors](#host-element-find-errors) | both | The program did not answer at either level, or the question was not put to it; each arrives as it does there. | as there | Windows |
+
+**Raises** for a mistake in the call: an `hwnd` that is not a number; a `viaName` or `name` that is neither a string nor a number; a `viaType` or `controlType` that is not a number in the 32-bit range; and the `opts` and callback mistakes under [Asking without waiting](#asking-without-waiting).
+
 ### Windows {#host-element-locatevia-windows}
 
 Both levels are condition-based `FindFirst` calls: the container must itself be reachable by a condition-based search from `hwnd`, and there is no raw-walker pass here — where `pluginLocate` uses the raw walker for both of its levels.
 
 ### macOS {#host-element-locatevia-macos}
 
-Control types are translated to accessibility roles, so an unmapped type at **either** level makes the call impossible — it can never match, and says so only in the log (see [`host.element.type`](#host-element-type)). Each level gets its own **1500 node / depth 24** budget, and an exhausted budget returns the same `nil` an honest miss returns.
+Control types are translated to accessibility roles, so an unmapped type at **either** level makes the call impossible — it can never match, and says so only in the log (see [`host.element.type`](#host-element-type)). Each level gets its own **1500 node / depth 24 / 300 ms** budget, and an exhausted budget returns the same `nil` an honest miss returns.
 
 ## host.element.stateProbe(hwnd, containerName, name, controlType, opts?, cb?) {#host-element-stateprobe}
 
@@ -323,17 +488,36 @@ if st.toggle ~= nil then return st.toggle == 1 end  -- 0 off, 1 on
 return nil
 ```
 
+### Returns {#host-element-stateprobe-returns}
+
+- `{ toggle?, legacyState, checked }` — the element was found. `toggle` is its toggle state, `0` off, `1` on, `2` anything else, and absent when it has none; `legacyState` its state word; `checked` whether bit `0x10` of that word is set. What each holds differs by platform (below).
+- `nil` — no such element. On Windows that includes a window with no container of that name; a window that is gone is `nil` too, and so, on macOS, is a search past its budget.
+- `nil, err` — not known (Windows): the program did not answer, the question was not put to it, or a walk stopped at its bound before the end of the tree and found nothing. `err.code` is under Errors.
+- With a callback: nothing at once; `cb(state)`, `cb(nil)` or `cb(nil, err)` on a later turn.
+
+### Errors {#host-element-stateprobe-errors}
+
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| any of [`find`'s errors](#host-element-find-errors) | both | The program did not answer, or the question was not put to it; each arrives as it does there. | as there | Windows |
+| `too_large` | both | A walk read 4000 elements before the end of the tree, and found nothing. | `the tree holds more than the 4000 elements a search reads` | Windows |
+| `timeout` | both | A walk took longer than 5 s before the end of the tree, and found nothing. | `the search took longer than 5 s` | Windows |
+
+**Raises** for a mistake in the call, as [`pluginLocate`](#host-element-pluginlocate-errors) does.
+
 ### Windows {#host-element-stateprobe-windows}
 
 `legacyState` is a real `LegacyIAccessible` state word, so bits beyond CHECKED (`0x10`) carry information: `0x08` PRESSED, `0x04` FOCUSED, `0x100000` FOCUSABLE. Read them with care — Kontakt's Side and Info panes were seen going `0x100000` → `0x100004` across a press, and that `0x4` is the consequence of our own click rather than a panel state.
 
-The search is confined to elements named `containerName` with control type Window or Pane (the `ni::qt::QuickWindow` class preferred over the window host), and a window with no container of that name answers `nil` without looking further. The same walks as [`pluginLocate`](#host-element-pluginlocate), with the same bounds: one stopped at its bound before the end that found nothing answers `nil, err`.
+The search is confined to elements named `containerName` with control type Window or Pane (the `ni::qt::QuickWindow` class preferred over the window host), and a window with no container of that name answers `nil` without looking further. The same walks as [`pluginLocate`](#host-element-pluginlocate), with the same bounds: one stopped at its bound before the end that found nothing answers `nil, err`. `name` is compared exactly here, so an empty one matches only an element without a name; on macOS it matches any element of the type.
 
 ### macOS {#host-element-stateprobe-macos}
 
 There is no state word here. `toggle` comes from `AXValue` — `0` off, `1` on, `2` for anything else, absent when the element carries no value — and `legacyState` is synthesised from it: `0x10` when `toggle` is `1`, otherwise `0`. Only `checked` is meaningful; the other bits are never set, so a module that reads PRESSED or FOCUSED gets a permanent zero.
 
-If no container of that name exists, the search falls back to the whole window rather than giving up — the container is a fragment boundary on Windows, and is not one here.
+If no container of that name holds the element — none exists, or none has it — the search falls back to the whole window rather than giving up: the container is a fragment boundary on Windows, and is not one here.
 
 ## host.element.classNavPoint(hwnd, className, controlType, child, sibling, opts?, cb?) {#host-element-classnavpoint}
 
@@ -354,6 +538,23 @@ local function browserToggle(hwnd)
     or host.element.classNavPoint(hwnd, "TagCloudAccordionWithBrands", U.Pane, 0, -1)
 end
 ```
+
+### Returns {#host-element-classnavpoint-returns}
+
+- `{ x, y }` — the screen centre of the element the path ends on, whole numbers.
+- `nil` — no element with that class and type, a step of the path that leads nowhere (no such child, a sibling past either end), or an element with no rectangle there. A window that is gone is `nil` too, and so, on macOS, is a search past its budget.
+- `nil, err` — not known (Windows): the program did not answer a step, or the question was not put to it. Not a presence probe's "no". `err.code` is under Errors.
+- With a callback: nothing at once; `cb({ x, y })`, `cb(nil)` or `cb(nil, err)` on a later turn.
+
+### Errors {#host-element-classnavpoint-errors}
+
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| any of [`find`'s errors](#host-element-find-errors) | both | The program did not answer, or the question was not put to it; each arrives as it does there. | as there | Windows |
+
+**Raises** for a mistake in the call: an `hwnd` that is not a number; a `className` that is neither a string nor a number; a `controlType`, `child` or `sibling` that is not a number in the 32-bit range; and the `opts` and callback mistakes under [Asking without waiting](#asking-without-waiting).
 
 ### Windows {#host-element-classnavpoint-windows}
 
@@ -417,6 +618,23 @@ if r and not r.name:find("%S") and r.bounds then
 end
 ```
 
+### Returns {#host-element-focusstep-returns}
+
+- `{ name, ctype, index, count, bounds? }` — the element the focus landed on: its name as published (`""` for none), its control type, its 1-based place in the ring, how many stops the ring holds now, and its rectangle when the platform gave one.
+- `nil` — nothing in the scope took the focus. On Windows also for a window that is gone; on macOS also while the keyboard is in this application, and for a window that is gone or a walk past its budget.
+- `nil, err` — not known (Windows): the program did not answer, or the question was not put to it. The focus may have moved before the program stopped answering; read [`host.window.focusChain()`](./window.md#host-window-focuschain) before saying where it is. `err.code` is under Errors.
+- With a callback: nothing at once; `cb(stop)`, `cb(nil)` or `cb(nil, err)` on a later turn.
+
+### Errors {#host-element-focusstep-errors}
+
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| any of [`find`'s errors](#host-element-find-errors) | both | The program did not answer, or the question was not put to it; each arrives as it does there. | as there | Windows |
+
+**Raises** for a mistake in the call: an `hwnd` that is not a number; a `direction` that is not a number in the 32-bit range; and the `opts` and callback mistakes under [Asking without waiting](#asking-without-waiting).
+
 ### Windows {#host-element-focusstep-windows}
 
 The ring is scoped to the window's first child — ReaHotkey's content area — which drops the frame and the menu bar without a control-type blocklist. Candidates are the descendants the provider reports as keyboard-focusable and not off-screen, and focus is moved with UIA's own `SetFocus`. No traversal budget of ours applies — the whole content subtree is enumerated however large it is.
@@ -427,7 +645,7 @@ The ring is scoped to the window's first child — ReaHotkey's content area — 
 
 While the keyboard is in this application — one of its windows has it, or it is the frontmost application — nothing is moved and the answer is `nil`, with a line in the log: where the keyboard is would have to be asked of this application itself.
 
-The ring is the **whole window**, minus the window's own close, minimise, zoom and full-screen buttons, which are skipped by subrole along with anything under them. Not the first child, as on Windows: on macOS that is whatever the application published first, and in a standalone Kontakt 7 it is Kontakt's logo — a button with no children, which made the ring empty. The menu bar is not inside a window on this platform, so nothing else needs excluding. Focus is moved by setting `AXFocused`, and a candidate qualifies when that attribute is *settable* and the element has a non-zero rectangle. The walk is bounded at **800 nodes and depth 20** — tighter than the other calls here, because it runs per keystroke. Elements below depth 20 are simply not in the ring, with nothing in the log to say so; running out of the 800-node budget does produce one line, once per session.
+The ring is the **whole window**, minus the window's own close, minimise, zoom and full-screen buttons, which are skipped by subrole along with anything under them. Not the first child, as on Windows: on macOS that is whatever the application published first, and in a standalone Kontakt 7 it is Kontakt's logo — a button with no children, which made the ring empty. The menu bar is not inside a window on this platform, so nothing else needs excluding. Focus is moved by setting `AXFocused`, and a candidate qualifies when that attribute is *settable* and the element has a non-zero rectangle. The walk is bounded at **800 nodes, depth 20 and 300 ms** — tighter than the other calls here, because it runs per keystroke. Elements below depth 20 are simply not in the ring, with nothing in the log to say so; running out of the 800-node budget does produce one line, once per session.
 
 `bounds` is the element's `AXPosition` and `AXSize` as the walk read them, in the same request as its name, so it costs nothing more — and it is where the element was **before** the focus moved: one that scrolls itself into view to take the focus is reported where it was. The walk does not look at scroll views, so a row below its list's viewport is in the ring, and is reported where it lies — where something else is drawn. Points, top-left of the primary display, as Accessibility reports them, which can carry a fraction; widen them to whole numbers before reading the region, as the example does. Every candidate needs a non-zero rectangle to be in the ring, so a stop landed on here has `bounds` unless Accessibility reported numbers that are not finite.
 
@@ -449,6 +667,23 @@ else
 end
 ```
 
+### Returns {#host-element-focuswithin-returns}
+
+- `{ name, ctype }` — the element that took the focus: its name as published and its control type. macOS only.
+- `nil` — nothing inside the rectangle took the focus. Always on Windows, where it is not implemented; on macOS also while the keyboard is in this application, and for a window that is gone.
+- `nil, err` — not known (Windows): the question was not put to the program. Nothing is asked of the program there, so no error of the program's comes, only the host's own. `err.code` is under Errors.
+- With a callback: nothing at once; `cb(element)`, `cb(nil)` or `cb(nil, err)` on a later turn.
+
+### Errors {#host-element-focuswithin-errors}
+
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| any of [`find`'s errors](#host-element-find-errors) | both | The question was not put to the program: not asked behind an earlier one to it, replaced, this application's own window, or the host failed. Each arrives as it does there. | as there | Windows |
+
+**Raises** for a mistake in the call: an `hwnd` that is not a number; a `rect` that is not a table, or whose `x`, `y`, `w` or `h` is missing or not a number in the 32-bit range (`error converting Lua nil to i32 (expected number or string coercible to number)`); and the `opts` and callback mistakes under [Asking without waiting](#asking-without-waiting).
+
 ### Windows {#host-element-focuswithin-windows}
 
 Not implemented — returns `nil`. Screen-reader users have OSARA's F6 there, and the plug-in host's own controls are reachable by Tab.
@@ -463,7 +698,7 @@ Walked from the window itself, not from its first child as `focusStep` is: insid
 
 **This one acts.** It asks an element of `hwnd` to perform its own action, the one a screen reader's "activate" uses — a button is pressed, a check box toggled — and **the keyboard focus stays where it is**. The element is found as [`find`](#host-element-find) finds it: the first in the tree with that Name and ControlType, an empty `name` matching any element of the type. No pointer and no click: the window does not have to be in front or uncovered, and the window in front — a page beside the plug-in — keeps the keyboard, so nothing is announced but what the plug-in itself says about the change. It is the first thing to try in a plug-in that publishes its controls (a [`dump`](#host-element-dump) shows their names). One that publishes nothing — Kontakt in a DAW, VPS Avenger — has nothing to press, and a click is what is left ([`host.input.click`](./input.md#host-input-click), with `via` for one that leaves the window in front where it is).
 
-**Answers** `true` when the program accepted the action — not that it did what you wanted: read the result where it shows — and `false, err` otherwise, `err.code` and its message one of: `gone` — `the window is gone`, `the element is gone`, `the program is gone`; `not_found` — `no such element`; `refused` — `the element cannot be pressed` (it offers no action), `the element is not enabled`; `timeout` — `the program did not answer within 1000 ms`; `denied` — `the program runs with higher rights`; `failed` — `the program did not take the action (0x…)` with the system's code, `this system's accessibility interface could not be reached`; `not_supported` — `this system cannot press an element without moving the keyboard focus to it` (see Windows), and on a platform without it `not supported on this platform yet`; and the answers every call on this page can give ([Asking without waiting](#asking-without-waiting)).
+**Answers** `true` when the program accepted the action — not that it did what you wanted: read the result where it shows — and `false, err` when it did not, `err.code` saying why ([Errors](#host-element-press-errors)).
 
 **Where it waits.** Each step is a call into the other program, and a program takes its time to answer — a plug-in's accessibility runs on its DAW's own thread, and some act before they answer, a button that opens a dialog say — so each call is bounded at 1000 ms. As with every call on this page ([Asking without waiting](#asking-without-waiting)): without `cb` the event loop waits for the press; with `cb` the call returns at once, with nothing, and `cb(true)` or `cb(false, err)` runs on a later turn of the event loop, as a handler of the module, after whatever the module is busy with — and not at all when the module is disabled, reloaded, removed or stopped first, when a press still waiting to be made is not made either. A press is never shared with another, nor answered from the epoch's store: every call presses. Either way the call turns over [`host.inputEpoch()`](./timer.md#host-inputepoch), as a click does, before the press is asked, and no question to the same program asked after it is asked before it.
 
@@ -475,9 +710,44 @@ host.element.press(plugin.id, "Bypass", host.element.type.Button, function(press
 end)
 ```
 
+### Returns {#host-element-press-returns}
+
+- `true` — the program accepted the action. Not that it did what you wanted: read the result where it shows.
+- `false, err` — no action was taken, or the program did not accept it; `err.code` is under Errors. After a `timeout` the program may still act on it later.
+- With a callback: nothing at once; `cb(true)` or `cb(false, err)` on a later turn of the event loop.
+
+A module written for both platforms tells the press that cannot be made here by its code, and clicks instead:
+
+```luau
+local U = host.element.type
+local ok, err = host.element.press(plugin.id, "Bypass", U.Button)
+if not ok and err.code == host.errors.NOT_SUPPORTED then
+  local p = host.element.locate(plugin.id, "Bypass", U.Button)   -- no press here: click it
+  if p then host.input.click(p.x, p.y) end
+elseif not ok then
+  host.log.info("Bypass not pressed: " .. err)
+end
+```
+
+### Errors {#host-element-press-errors}
+
+None of these is raised. Each comes beside `false`, as the second value or the callback's second argument.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| any of [`find`'s errors](#host-element-find-errors) | both | As for every question: the program did not answer a step within 1000 ms, runs with higher rights or went away, or the press was not put to it. Each arrives as it does there. | as there | Windows |
+| `gone` | both | No window has that id, `0` included, and nothing is asked. Or the element went away while it was pressed. | `the window is gone`, `the element is gone` | Windows |
+| `not_found` | both | No element in the tree has that Name and ControlType. | `no such element` | Windows |
+| `refused` | both | The element offers no Invoke, no Toggle and no default action, or the program said the action is not supported or not valid now. Or the element is not enabled. | `the element cannot be pressed`, `the element is not enabled` | Windows |
+| `failed` | both | The program answered the action with another error, its code in hex. Or the system's automation object could not be made, so nothing can be asked. | `the program did not take the action (0x…)`, `this system's accessibility interface could not be reached` | Windows |
+| `not_supported` | both | This Windows cannot keep UI Automation from moving the keyboard focus (no `IUIAutomation2`, before Windows 8), so no press is made. | `this system cannot press an element without moving the keyboard focus to it` | Windows |
+| `not_supported` | both | A Mac, where a press is not there yet, and the build for other systems. Nothing is asked. | `not supported on this platform yet` | macOS, other |
+
+**Raises** for a mistake in the call, as [`find`](#host-element-find-errors) does.
+
 ### Windows {#host-element-press-windows}
 
-On the accessibility thread, as every question ([Asking without waiting](#asking-without-waiting)). UI Automation: one `FindFirst` over the subtree, then the element's Invoke pattern (`Invoke`), else its Toggle pattern (`Toggle`), else LegacyIAccessible's default action (`DoDefaultAction`) — the last only when the element names one. UI Automation moves the keyboard focus to an element before it acts on it unless told not to, so every automation object of the host's is made with `AutoSetFocus` off (`IUIAutomation2`, Windows 8 and later); where that cannot be set, a press answers `"this system cannot press an element without moving the keyboard focus to it"` rather than move it. What follows is the program's: JUCE's buttons (6.1 and later, where the plug-in leaves accessibility on) post their click to the plug-in's own thread; the system's proxy for a standard Windows button sends it `BM_CLICK`, which Microsoft says might fail while its dialog is not the active window; a provider that moves the focus itself as it acts still does. One line in the log per press:
+On the accessibility thread, as every question ([Asking without waiting](#asking-without-waiting)). UI Automation: one `FindFirst` over the subtree, then the element's Invoke pattern (`Invoke`), else its Toggle pattern (`Toggle`), else LegacyIAccessible's default action (`DoDefaultAction`) — the last only when the element names one. UI Automation moves the keyboard focus to an element before it acts on it unless told not to, so every automation object of the host's is made with `AutoSetFocus` off (`IUIAutomation2`, Windows 8 and later); where that cannot be set, a press answers `false, err` with `not_supported`, `this system cannot press an element without moving the keyboard focus to it`, rather than move it. What follows is the program's: JUCE's buttons (6.1 and later, where the plug-in leaves accessibility on) post their click to the plug-in's own thread; the system's proxy for a standard Windows button sends it `BM_CLICK`, which Microsoft says might fail while its dialog is not the active window; a provider that moves the focus itself as it acts still does. One line in the log per press:
 
 `[uia] pressed 'Bypass' (type 50000) in window 2755348 by Invoke, the keyboard focus left where it was`
 
@@ -495,7 +765,6 @@ Whether a question of this module with `key`, asked with a callback, is still ou
 
 - `true` from the call that asked until its callback is handed the answer, and while that answer waits in the module's mailbox behind the module's other events — a question replaced by a newer one with the same key too, until its callback has been told so. `false` inside the question's own callback (the answer has been handed over by then), after the module was disabled, reloaded or removed, or stopped by the host's guard, which drops its questions, and for a call made without a callback, which nothing can see while the event loop waits for it.
 - Asks about the module's own questions only: another module's with the same key are not counted.
-- Raises when `key` is not a non-empty string (`host.element.pending: the key must be a non-empty string, got nil`).
 - Costs a look-up in a table the event loop keeps: microseconds, and nothing is asked of any program.
 
 It is "one question at a time" without a flag of the module's own: a flag set before a question stays set when a disable drops the question and its callback never comes, while a dropped question is simply not pending.
@@ -515,6 +784,17 @@ host.timer.every(250, function()
   end)
 end)
 ```
+
+### Returns {#host-element-pending-returns}
+
+- `true` — a question of this module with `key`, asked with a callback, is out: its callback has not been handed the answer yet.
+- `false` — none is: never asked, answered, dropped, or asked without a callback.
+
+### Errors {#host-element-pending-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `key` that is not a string (`host.element.pending: the key must be a non-empty string, got nil`), and an empty one (`host.element.pending: the key is empty`).
 
 ### Windows {#host-element-pending-windows}
 
