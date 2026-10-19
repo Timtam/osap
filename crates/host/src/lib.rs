@@ -10300,13 +10300,6 @@ mod cells_binding_tests {
                 "at the window's current size the region is 10000x5000, 50000000 pixels; the limit is 40000000".into()
             ))
         );
-        // docs/api/screen.md lists it, with the numbers this call made written `…` (the other
-        // reasons are held to the page by image_search.rs, `the_hosts_own_reasons_are_listed`).
-        let listed = c.rect.clone().unwrap_err().to_string().replacen("10000", "…", 1).replacen("5000", "…", 1).replacen("50000000", "…", 1);
-        assert!(
-            include_str!("../../../docs/api/screen.md").contains(&format!("`{listed}`")),
-            "docs/api/screen.md does not list the reason `{listed}`"
-        );
         // A pack's fractions read through `host.json.decode` land where the reader put them:
         // 59/600, written as the shortest text that reads back, starts at column 59, not 58.
         lua.globals().set("decode", lua.create_function(json::decode).unwrap()).unwrap();

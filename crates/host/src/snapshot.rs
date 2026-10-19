@@ -3492,10 +3492,11 @@ mod tests {
         assert_eq!(told(&lua, &wrong[1]), Told::of(&crate::backend::capture_failed()), "no colour is no answer");
     }
 
-    /// Every reason a snapshot call answers with is listed in the reference, word for word.
+    /// Every reason a snapshot call answers with is a Reason of the table, with its words:
+    /// tools/api-index.py holds docs/api/screen.md's Errors tables, and its sections of the reasons
+    /// many calls share, to the same table.
     #[test]
-    fn the_snapshot_reasons_are_listed() {
-        const DOC: &str = include_str!("../../../docs/api/screen.md");
+    fn the_snapshot_reasons_are_reasons_of_the_table() {
         let all = [
             not_inside(),
             point_not_inside(),
@@ -3512,14 +3513,14 @@ mod tests {
             all_requests_refused(),
         ];
         for why in all {
-            assert!(DOC.contains(&format!("`{why}`")), "docs/api/screen.md does not list `{why}`");
+            assert!(crate::errors::REASONS.contains(&why.reason()), "`{why}` is no Reason of the table");
+            assert_eq!(why.message(), why.reason().message, "`{why}` has nothing to fill in");
         }
-        assert!(DOC.contains("`at the window's current size the region is …x…, … pixels; the limit is 40000000`"));
-        assert!(DOC.contains("`at the window's current size the region is …x…, … pixels; the limit is 8294400`"));
-        assert!(DOC.contains("`at the window's current size the change wait watches … pixels, fewer than its minPixels …`"));
-        assert_eq!(too_few_watched(7, 9).message(), "at the window's current size the change wait watches 7 pixels, fewer than its minPixels 9");
-        assert!(DOC.contains("`at the window's current size this module's snapshots would hold … MiB; the limit is 128 MiB per module VM (512 MiB in the whole application). Release the ones you no longer need with s:release()`"));
-        assert!(DOC.contains("`at the window's current size the application's snapshots would hold … MiB; the limit is 512 MiB in the whole application (128 MiB per module VM), and other modules' snapshots count toward it. Release the ones this module no longer needs with s:release()`"));
+        let few = too_few_watched(7, 9);
+        assert_eq!((few.reason(), few.message()), (
+            &crate::errors::screen::TOO_FEW_WATCHED,
+            "at the window's current size the change wait watches 7 pixels, fewer than its minPixels 9",
+        ));
     }
 
     // ── snapshot with a callback ─────────────────────────────────────────────────────────

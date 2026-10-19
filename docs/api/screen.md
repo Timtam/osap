@@ -24,6 +24,8 @@ The matching, unlike the capture, does grow with the area. A template search acr
 
 **Coordinates are device pixels on Windows and points on macOS.** The application declares per-monitor DPI awareness (`PerMonitorV2`), so on Windows every coordinate on this page — and on every other page — is one physical pixel of the display; on macOS it is one point. The two numbers agree only at 100 % scaling. A region measured with a tool that is **not** DPI-aware on a Windows display scaled above 100 % is in that tool's scaled units: multiply it by the scale factor (1.5 at 150 %) before using it here. See [`host.screen.size`](#host-screen-size).
 
+**What a call answers when it cannot.** Every call below has a **Returns** and an **Errors** section ([Reading an Errors table](./errors.md#reading-an-errors-table)). When a read gets no picture, or its work fails, the call answers an error value, `{ code, message, detail? }`, after what it answers when it could not look: `nil`, `{}` for `imageSearchAll`, `false` for a shot. **No call on this page answers a value and an error value together**: an error value always means that nothing was read. Compare `err.code` with a constant, never the message: a message may change between versions, and the code does not. The reasons many calls share are written once, under [Failure reasons](#failure-reasons). Besides the raises each entry lists, any call here can raise two more: the capability gate, when the module did not declare `screen` ([What to declare](#declare)), and the guard's `stopped by the host: …`, when the module has run too long ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -61,9 +63,9 @@ host.timer.every(100, function()
     -- The point a third of the way across the client area, wherever the window is, photographed
     -- off the event loop: the poll waits for nothing, and the module's keys go on meanwhile.
     host.screen.snapshot({ region = { window = win, fraction = { 0.32, 0.31, 0.32, 0.31 } }, key = "menu" },
-      function(s, why)
+      function(s, err)
         -- No picture this time: under fallback = "none", a minimised window, or a limit of the
-        -- requests waiting (the module's 16, the application's 64); `why` says which.
+        -- requests waiting (the module's 16, the application's 64); `err` says which.
         if not s then return end
         local c = host.screen.pixel(s.x, s.y, { snapshot = s })   -- its one pixel, at once
         s:release()
@@ -86,7 +88,7 @@ end)
 
 **Without a head start** — a module that never uses `onTrigger`, or one that reads before any of its triggers has fired — the module's first read starts the opening, and waits for it at most 250 ms, as every read does. A read that gets no picture that way is read the standard way, or fails under `fallback = "none"` (see Windows below).
 
-**With `fallback = "none"`, a read that duplication cannot answer fails, and says why**: `nil` and a reason from `pixel`, `profile`, `imageSearch` and `template{ capture = … }`, `false` and a reason from `save` and `saveMarked`, and the same for every other call in its own shape — each shape and each reason are under [Failure reasons](#failure-reasons). That is for an application where the standard picture is wrong rather than slow: saying a frozen menu item is worse than saying nothing. With the default `fallback = "standard"`, such a read is quietly read the standard way instead, and nothing in the answer says which picture it was: under load, a poll can get standard pictures between live ones (see Windows below).
+**With `fallback = "none"`, a read that duplication cannot answer fails, and says why**: it answers an error value in its own shape — `nil, err` from `pixel`, `profile`, `imageSearch` and `template{ capture = … }`, `false, err` from `save` and `saveMarked`, and the same for every other call — whose code is the reason's, one of the [duplication errors](#duplication-errors). That is for an application where the standard picture is wrong rather than slow: saying a frozen menu item is worse than saying nothing. With the default `fallback = "standard"`, such a read is quietly read the standard way instead, and nothing in the answer says which picture it was: under load, a poll can get standard pictures between live ones (see Windows below).
 
 Poll only while your window is in front. A [`host.timer.every`](./timer.md#host-timer-every) poll runs until it is [cancelled](./timer.md#host-timer-cancel), so gate its callback: return at once unless `host.window.active()` is your window, as the example under [`imageSearchEach`](#host-screen-imagesearcheach) does.
 
@@ -98,7 +100,7 @@ Poll only while your window is in front. A [`host.timer.every`](./timer.md#host-
 
 **Cost.** A read returns the most recently composed frame without waiting for the next one. Nothing captures in the background between reads: each read asks Windows, without waiting, whether a new frame has been composed since the last one, copies it on the graphics card only if there is one, and otherwise reads the copy it already holds — which is then the current screen, since no new frame means nothing was drawn. A frame that carries only a mouse-pointer move does not replace that copy. Only the part of the picture a read asks for is copied off the graphics card. On an idle desktop (the reference machine: GTX 1060, 1920×1080, a test build) it measured about 0.3–1 ms for a region up to 633×418 against the standard path's 16 ms, and 5 ms for the whole screen against 28 ms, with the same bytes from both paths. With a game in front, the game measurement above has only whole calls: a `profile` of the 1280×1024 client area, capture and reduction together, in 6–11 ms. One run on the reference machine with a full-screen Direct3D game in front measured the capture alone at about 33 ms per read at every size. That the latest frame comes back at once also means a read made right after `host.input` may still see the frame from before the input, so re-read after a short wait, as you would anyway.
 
-**How long a read waits.** Every read through duplication is made on the image worker or on the `screen-capture` thread — `host.ocr.recognize`, and the calls of this page in a handler or given a callback; the event loop reads none, since a call made where it [cannot wait](#where-it-waits) raises. A read waits at most **250 ms** for duplication's answer, an opening included, and holds every read queued behind it on that thread meanwhile. A read whose whole wait ran out makes duplication **overdue**: from then on no read asks it until that late answer has come back, and the log says so once when that starts and once when it ends. The reads that did not ask while it was overdue are counted in the observation line but not logged one by one. So under the default fallback a poll can get standard pictures between live ones without a line in the log; under `fallback = "none"` they fail with `an earlier read has not come back yet`.
+**How long a read waits.** Every read through duplication is made on the image worker or on the `screen-capture` thread — `host.ocr.recognize`, and the calls of this page in a handler or given a callback; the event loop reads none, since a call made where it [cannot wait](#where-it-waits) raises. A read waits at most **250 ms** for duplication's answer, an opening included, and holds every read queued behind it on that thread meanwhile. A read whose whole wait ran out makes duplication **overdue**: from then on no read asks it until that late answer has come back, and the log says so once when that starts and once when it ends. The reads that did not ask while it was overdue are counted in the observation line but not logged one by one. So under the default fallback a poll can get standard pictures between live ones without a line in the log; under `fallback = "none"` they fail with `an earlier read has not come back yet` (`busy`).
 
 **When it cannot answer, and when it tries again.** Windows takes duplication away at a display mode change, a switch into or out of full screen (an Alt+Tab to or from a full-screen game can be one) and a desktop switch; stops it while a UAC prompt or the lock screen shows; lets no more than four programs of a session duplicate at once; and refuses it over Remote Desktop and on some laptops with two graphics chips. **The host reopens it by itself; nothing needs switching.** A read that finds the picture lost reopens the duplication at once, within the same read — which is what a full-screen switch needs — and only a loss again straight after counts as a failure. After a failure, duplication is left alone for a while, and the reads in that time get the standard picture, or fail under `fallback = "none"` with the reason:
 - the picture lost, or the secure desktop showing: 250 ms, then 500 ms, 1 s and at most 2 s while it keeps failing; the first read that is answered starts the count again;
@@ -109,7 +111,7 @@ Poll only while your window is in front. A [`host.timer.every`](./timer.md#host-
 
 The log names each reason once, and again only after a read has been answered in between. For a laptop with two graphics chips the reason names the remedy: Windows Settings, System, Display, Graphics, this application, Power saving.
 
-**Three hangs within ten minutes stop it, for a while.** A read still unanswered after 2 s, or an opening still running after 10 s, counts as a hang. Three hangs within ten minutes of each other stop duplication — hangs further apart (a driver reset one day, a slow resume the next) do not add up. While it is stopped every read gets the standard picture, or fails under `fallback = "none"` with `it stopped after three reads hung within ten minutes; …`. It is tried again on a fresh thread after 10 minutes; each time it stops again the wait doubles, to 20 and 40 minutes and at most an hour. The doubling is forgiven — the next stop waits 10 minutes again, said once in the log — when a fresh thread has answered 100 reads in time without a hang, or when the switch below is turned off and on again. A resume, an unlock or a connection to the session resets all of that: the next read tries duplication again at once, with the hang count, any back-off above and the doubling forgotten, and the log says so once (`desktop duplication is asked again after the system event: …`). A display or scale change does the same except that it keeps the doubling — but at most once in ten minutes, and only when there are hangs from the last ten minutes to forget or duplication has stopped (the line then ends `(after a display or scale change, at most once in 10 minutes; the stops before still lengthen the next wait)`). Otherwise a display or scale change leaves the hang count as it is, and a back-off to end on its own: a display whose link keeps dropping — a TV or receiver in standby — sends one every few seconds, and the hangs that come with it must still add up to a stop. A thread still stuck inside the graphics driver when its time comes is not replaced — the retry waits another round, said once — so at most one such thread is ever left behind. Turning the Application settings switch below off and on again tries it at once as well.
+**Three hangs within ten minutes stop it, for a while.** A read still unanswered after 2 s, or an opening still running after 10 s, counts as a hang. Three hangs within ten minutes of each other stop duplication — hangs further apart (a driver reset one day, a slow resume the next) do not add up. While it is stopped every read gets the standard picture, or fails under `fallback = "none"` with `it stopped after three reads hung within ten minutes; …` (`unavailable`). It is tried again on a fresh thread after 10 minutes; each time it stops again the wait doubles, to 20 and 40 minutes and at most an hour. The doubling is forgiven — the next stop waits 10 minutes again, said once in the log — when a fresh thread has answered 100 reads in time without a hang, or when the switch below is turned off and on again. A resume, an unlock or a connection to the session resets all of that: the next read tries duplication again at once, with the hang count, any back-off above and the doubling forgotten, and the log says so once (`desktop duplication is asked again after the system event: …`). A display or scale change does the same except that it keeps the doubling — but at most once in ten minutes, and only when there are hangs from the last ten minutes to forget or duplication has stopped (the line then ends `(after a display or scale change, at most once in 10 minutes; the stops before still lengthen the next wait)`). Otherwise a display or scale change leaves the hang count as it is, and a back-off to end on its own: a display whose link keeps dropping — a TV or receiver in standby — sends one every few seconds, and the hangs that come with it must still add up to a stop. A thread still stuck inside the graphics driver when its time comes is not replaced — the retry waits another round, said once — so at most one such thread is ever left behind. Turning the Application settings switch below off and on again tries it at once as well.
 
 **Opening it takes time.** The first read of a session creates a Direct3D device: 32 ms in the game measurement above, about 0.2 s on the reference machine, and 3.5–4.3 s in three runs of a freshly built test binary. A read waits for the opening up to its 250 ms; one that gets no picture by then reads the standard way, or fails under `fallback = "none"`, and the reads after it while the opening goes on do too; **Opened ahead of time** above says when the host starts the opening before the first read.
 
@@ -117,102 +119,117 @@ The log names each reason once, and again only after a read has been answered in
 
 - **The mouse pointer:** duplication reports it separately and this path does not draw it in, so, as with the standard path, it is normally not in the picture. Windows documents that a pointer can also be drawn into the desktop image itself, and then it is.
 - **Regions touching a rotated monitor** are read the standard way (or fail under `fallback = "none"`).
-- **More than 40 million pixels:** a region that large is refused in a module that reads through duplication, with either fallback (`screen capture failed: the region is larger than 40 million pixels`).
+- **More than 40 million pixels:** a region that large is refused in a module that reads through duplication, with either fallback (`too_large`, `screen capture failed: the region is larger than 40 million pixels`).
 - **HDR:** Windows converts the picture to 8 bits per channel for this path, so its colours may differ from the standard path's. Cut templates with `host.screen.save` from a module that declares the same `capture`.
-- **"Let modules that ask for it read the screen through the graphics card"** in the Application settings tab turns duplication off for every module: a module that allows the fallback reads the standard way, and every read of a `fallback = "none"` module fails with `it is switched off in Application settings`. Turning it off and on again starts duplication afresh — after it stopped for three hangs, after its thread stopped, or while it is stuck inside the graphics driver.
+- **"Let modules that ask for it read the screen through the graphics card"** in the Application settings tab turns duplication off for every module: a module that allows the fallback reads the standard way, and every read of a `fallback = "none"` module fails with `it is switched off in Application settings` (`unavailable`). Turning it off and on again starts duplication afresh — after it stopped for three hangs, after its thread stopped, or while it is stuck inside the graphics driver.
 
 ### macOS {#which-picture-a-read-sees-macos}
 
-`[screen]` is accepted and ignored: a module that declares it reads the screen exactly as one that does not, and none of the duplication reasons under [Failure reasons](#failure-reasons) occurs.
+`[screen]` is accepted and ignored: a module that declares it reads the screen exactly as one that does not, and none of the [duplication errors](#duplication-errors) occurs.
 
 Every read goes to ScreenCaptureKit's rectangle capture where this macOS has it (15.2 and later), and otherwise to the older Core Graphics capture functions where this macOS still has them; a snapshot's `via` says which answered. A ScreenCaptureKit capture that has not answered within 1.5 s is given up — that read has waited the 1.5 s, on whichever thread asked — and ScreenCaptureKit is then not asked for **30 seconds**. After that it is asked once more, a **probe**, while the reads go on to the older functions: where this macOS has them, the probe is sent alongside a read they answer and nothing waits for it; on a macOS without them the probing read waits for it, up to 1.5 s, since nothing else could answer that read. A probe answered within 1.5 s — with a picture or an error — ends the wait; one that is not doubles it, up to **ten minutes**. The Mac waking, the screen being unlocked, this user's session becoming active again, the displays waking or the display configuration changing bring the next probe forward to that moment, once per wait and not sooner than 30 seconds after the timeout that began it; the wait itself goes on until a probe is answered. Meanwhile every read goes to the older functions, and on a macOS without them fails with `screen capture failed`. The log has one `macos` line when a wait starts or grows, one when a probe is brought forward, and one when the wait ends.
 
 ## Failure reasons {#failure-reasons}
 
-When a read gets no picture, the call says why. An **error value** comes as **one value more** than the call has always returned in that case — a read-only table `{ code, message, detail? }` ([`host.errors`](./errors.md)) — so code that reads only the first value reads exactly what it always did; a call that looked adds nothing:
-- `pixel`, `profile`, `imageSearch`, `template{ capture = … }`: `nil, err`. An `imageSearch` that looked and found nothing returns `nil` alone.
-- `imageSearchAll`: the empty list and the error value, `{}, err`. The list is never `nil`; an empty list alone means it looked and found nothing.
-- `save`, `saveMarked`: `false, err`.
-- `cells`, `matchCells`: `nil, err`, as they always have.
-- `snapshot`, `pixels`, and a snapshot's `crop`: `nil, err`.
-- `imageSearchEach`: the callback is called with `nil, err`, then `info`.
-- **Given a callback**, every call above calls it with what it answers, the error value second and `info` third: `cb(nil, err, info)` — `cb({}, err, info)` for `imageSearchAll`, `cb(false, err, info)` for a shot ([With a callback](#with-a-callback)).
+When a read gets no picture, or its work fails, the call says why: it answers an **error value**, a read-only table `{ code, message, detail? }` ([`host.errors`](./errors.md)), after what it answers when it could not look.
+
+- `nil, err` from `pixel`, `pixels`, `snapshot`, a snapshot's `crop`, `profile`, `template`, `imageSearch`, `cells` and `matchCells`. An `imageSearch` that looked and found nothing answers `nil` alone.
+- `{}, err` from `imageSearchAll`. The list is never `nil`; an empty list alone means it looked and found nothing.
+- `false, err` from `save` and `saveMarked`.
+- `cb(nil, err, info)` from `imageSearchEach`.
+- **Given a callback**, every call above hands its callback the same two values, then `info`: `cb(nil, err, info)`, `cb({}, err, info)` for `imageSearchAll`, `cb(false, err, info)` for a shot ([With a callback](#with-a-callback)).
 - `host.ocr.recognize`: a `"failed"` reading whose `error` is the error value ([its page](./ocr.md#host-ocr-recognize)).
 
-A module compares the value's **code**, never its message: `err.code == host.errors.UNAVAILABLE`. The message is a sentence for a person — log it, or say it where silence would leave the user guessing; `tostring(err)` and `"…" .. err` give it — and its wording is the one below, `…` standing for a number or a size. Each is listed with its code in brackets.
+No call on this page answers a value and an error value together: when an error value comes, nothing was read.
 
-**Any read:**
-- `screen capture failed` (`failed`) — the standard path could not read the region: it was empty, too large to allocate for, or the operating system refused the read. On macOS, every failed capture.
-- `screen capture failed: the region is larger than 40 million pixels` (`too_large`) — a module that reads through desktop duplication asked for more, with either fallback.
+A module compares the value's **code**, never its message: `err.code == host.errors.UNAVAILABLE`. The message is a sentence for a person — log it, or say it where silence would leave the user guessing; `tostring(err)` and `"…" .. err` give it. In a message below, `…` stands for a number, a size, a path or the system's own words. A message may change between versions; the code does not.
 
-**Only under `fallback = "none"`**, on Windows: `screen capture failed: desktop duplication could not answer — ` followed by one of these, whose code is the tail's (see [Which picture a read sees](#which-picture-a-read-sees) for what each means and when it is tried again):
-- `it is switched off in Application settings` (`unavailable`)
-- `it stopped after three reads hung within ten minutes; it is tried again after a while, after a resume, an unlock or a display change, or when it is switched off and on again in Application settings` (`unavailable`)
-- `its thread stopped on an internal error; switching it off and on again in Application settings starts it afresh` (`failed`)
-- `its thread could not be started` (`failed`)
-- `the application is closing` (`cancelled`)
-- `an earlier read has not come back yet` (`busy`)
-- `Windows does not support it here (…): over Remote Desktop, or on a laptop with two graphics chips where this application runs on the one that does not drive the display — Windows Settings, System, Display, Graphics, this application, Power saving` (`not_supported`)
-- `four other programs already record the screen — a screen recorder, a screen-sharing call, another reader` (`unavailable`)
-- `the secure desktop is showing (a UAC prompt or the lock screen)` (`denied`)
-- `the picture was lost to a display mode change, a fullscreen switch or a desktop switch` (`failed`)
-- `the graphics driver was reset or updated` (`failed`)
-- `the region touches a rotated monitor, which this version reads only the standard way` (`not_supported`)
-- `the region touches a monitor desktop duplication does not report` (`not_supported`)
-- `no picture has arrived since it was opened` (`not_ready`)
-- `no display output was found` (`not_supported`)
-- `the display delivers pixel format …, which this version cannot read` (`not_supported`)
-- `it failed with …` (`failed`) — any other failure, with its error code.
+Each call's **Errors** table lists every error value it can give. The reasons many calls share are written once, here, in six groups, each reason with its code. A call's table links to the capture, duplication and snapshot-source groups, and lists the reasons of the other three as rows of its own, where its module is most likely to test them.
 
-**A window region or point** (every call that takes the [window form](#region-form)):
-- `the window's client area is empty (…x…)` (`hidden`) — a minimised window, or one not laid out yet: nothing to read this time.
-- `the region lies outside the screen's coordinate range` (`outside`) — cannot happen with a window table `host.window` returned.
+### Capture errors {#capture-errors}
 
-**A read of a snapshot** (see [Reading a snapshot](#reading-a-snapshot)); nothing was captured for these, each `outside`:
-- `the region does not overlap the snapshot` — a call that reads the part of its region inside the snapshot found no part inside it: `profile`, the image searches, `save`, `saveMarked`; and a region of [`host.ocr.recognize`](./ocr.md#host-ocr-recognize), as that region's reading's `error`.
-- `the region is not inside the snapshot` — a call that needs its region wholly inside the snapshot: `template{ capture = …, snapshot = … }`, the cells calls, and a snapshot's `crop`.
-- `the point is not inside the snapshot` — `pixel`, and `pixels` for any one of its points.
+A picture of the screen that could not be taken. Any call that captures a region gives these: `snapshot`, `profile`, `cells`, `matchCells`, `template{ capture }`, the three searches, `save` and `saveMarked` — none of them given a snapshot — and [`host.ocr.recognize`](./ocr.md#host-ocr-recognize). The two that say the application failed come only from the `screen-capture` thread, which takes the pictures of `snapshot`, `profile` and a text read; the image worker's calls answer their own `internal error: …` instead. `pixel` and `pixels` have their own, at their entries.
 
-**The `screen-capture` thread's requests' own**, given to [`snapshot`](#snapshot-with-a-callback)'s callback — to a [`profile`](#host-screen-profile)'s, given a callback or waited for in a handler, which is one of these requests: all of them but those that name a change wait or its `watch` (a waited one has no `key`, so it is never replaced); to a handler that waits in [`snapshot`](#host-screen-snapshot), whose picture is a plain one of them too: the two limits of the plain requests (the module's 16, the application's 64), the two of the host's own code and `the request was cancelled`; and to [`pixel`](#host-screen-pixel) or [`pixels`](#host-screen-pixels), waited for or given a callback, whose points are one of these requests too, with no picture: the same two limits, `the screen capture failed inside the application; the log has the details` and `the request was cancelled`, and given a callback the key's reason:
-- `a newer request with the same key replaced this one` (`replaced`) — the same module asked again with this request's `key`.
-- `too many snapshot requests waiting for this module (16); the oldest was ended` and `too many change waits for this module (4); the oldest was ended` (`too_many`) — this was the module's oldest when it asked for one more.
-- `too many snapshot requests waiting in the whole application (64); this one was not taken` and `too many change waits in the whole application (16); this one was not started` (`too_many`) — the new request, when the application's limit is reached.
-- `a watch region does not overlap the region` (`outside`) — a change wait whose `watch` region, resolved against a window at the call, misses its region.
-- `at the window's current size the change wait watches … pixels, fewer than its minPixels …` (`outside`) — a change wait whose region or `watch`, resolved against a window at the call, leaves it fewer watched pixels than its `minPixels`, so that no picture could count as changed.
-- `no picture was taken before the change wait's timeout` (`timeout`) — a change wait none of whose rounds came back before it ended; one whose captures failed gives the last capture's error instead.
-- `the screen capture failed inside the application; the log has the details` and `the snapshot failed inside the application; the log has the details` (`failed`) — the host's own code failed; the thread goes on.
-- `the request was cancelled` (`cancelled`) — the capture thread stopped a request the event loop still waited for, which no path of the host does; listed so that no reason is left out.
-- `internal error: the profile could not be made` (`failed`) — a `profile` whose reduction failed inside the host, or whose picture could not be handed to the image worker because the application is closing; the worker goes on.
+| code | when | message | platform |
+|---|---|---|---|
+| `failed` | The standard path could not read the region: it was empty, too large to allocate for, or the system refused the read. On macOS, every failed capture, a region wholly off the desktop included. In the build for other systems, every capture. | `screen capture failed` | both, other |
+| `too_large` | A module that reads through desktop duplication asked for more than 40 million pixels, with either fallback. | `screen capture failed: the region is larger than 40 million pixels` | Windows |
+| `failed` | The `screen-capture` thread's own code failed while it took the picture of a `snapshot`, a `profile` or a text read. The thread goes on. | `the screen capture failed inside the application; the log has the details` | both |
+| `failed` | The host's own code failed for one `snapshot` or `profile` after its round's capture. The rest of the round is answered as usual. | `the snapshot failed inside the application; the log has the details` | both |
 
-**The image worker's callbacks' own** — given to the callback of `cells`, `matchCells`, `template`, a snapshot's `crop`, `imageSearch`, `imageSearchAll`, `save` and `saveMarked`, and of `imageSearchEach`:
-- `too many image searches waiting for this module (64); the oldest was ended` (`too_many`) — the module had 64 of these calls with a callback waiting for their answer, together, and asked for one more: its oldest is answered with this on the next tick, and the newest goes ahead. A task that was not started yet is not captured or matched at all. Logged once, then counted, with a line a minute at most while it goes on.
-- `a newer request with the same key replaced this one` (`replaced`) — the same module asked the same call again with this one's `opts.key` ([With a callback](#with-a-callback)).
+### Duplication errors {#duplication-errors}
 
-**One call's own:**
-- `the region is empty (…x…)` (`outside`) — `profile`, for corners with no width or no height, which it has always refused before capturing; with a callback, on the next tick. And a region of [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) with no width or no height, as its reading's `error`.
-- `the capture came back shorter than its own size` (`failed`) — `profile`, `template`, `save`, `saveMarked` and the cells calls: a capture smaller than it said it was.
-- `the capture came back …x…, not the region's …x…` (`failed`) — the cells calls.
-- `at the window's current size …x… is too large; no side may exceed 4096`, or `at the window's current size …x… is … pixels; the limit is 1048576` (`too_large`) — `template{ capture = … }` with a window region past a template's size limit this time; given as corners, the same region raises.
-- `at the window's current size the region is …x…, … pixels; the limit is 40000000` (`too_large`) — the cells calls, `snapshot` and `profile` with a window region past their limit.
-- `at the window's current size the region is …x…, … pixels; the limit is 8294400` (`too_large`) — a change wait of `snapshot` with a window region past its limit.
-- `this module's snapshots would hold … MiB; the limit is 128 MiB per module VM (512 MiB in the whole application). Release the ones you no longer need with s:release()` and `the application's snapshots would hold … MiB; the limit is 512 MiB in the whole application (128 MiB per module VM), and other modules' snapshots count toward it. Release the ones this module no longer needs with s:release()` (`too_large`) — `snapshot`, a snapshot's `crop` and `profile` the [budget](#host-screen-snapshot) has no room for, whatever form their region was given in: other modules' snapshots count toward the application's limit, so the moment decides it. For a window region the message begins `at the window's current size `: `at the window's current size this module's snapshots would hold … MiB; the limit is 128 MiB per module VM (512 MiB in the whole application). Release the ones you no longer need with s:release()` and `at the window's current size the application's snapshots would hold … MiB; the limit is 512 MiB in the whole application (128 MiB per module VM), and other modules' snapshots count toward it. Release the ones this module no longer needs with s:release()`.
-- `this module's templates would hold … MiB; the limit is 32 MiB per module VM. Build templates once, when the module loads, rather than on every poll.` (`too_large`) — `template` the template budget has no room for, whatever its source; for a `capture` given as a window region the message begins `at the window's current size `.
-- `internal error: the search could not be made` (`failed`) — a search whose batch failed inside the host, or that could not be handed to the image worker because the application is closing; `internal error: the cells could not be computed` for a cells read.
-- `internal error: the crop could not be made` (`failed`) — a snapshot's `crop` made on the image worker, whose copy failed inside the host or could not be handed to the image worker because the application is closing.
-- `internal error: the template could not be made` (`failed`) — a `template{ capture }` made on the image worker, likewise; every search given a [`Template`](#host-screen-template) built from bytes or a file whose picture failed to be made inside the host; and a search, `imageSearchEach` included, whose PNG's decode failed inside the host — that search alone, the rest of its batch read as usual, and the next search that names the file decodes it again.
-- `cannot open template '…': …` — a search, `imageSearchEach` included, whose PNG the image worker could not open, with the path as it was resolved and what the image decoder said: `not_found` for a file that is not there — gone since its path was first named, or outside the module's package — `invalid` for one whose picture does not decode, `failed` for one that could not be read (held by another program, no right to read it). Every search given a `Template` built from such a file answers the same and tries the file again, so the handle has its picture once the file can be opened. A path inside the module's package that is not there or not a PNG when it is first named raises instead ([`imageSearch`](#host-screen-imagesearch)); so does `template{ file = … }`, which answers this for a file outside it.
-- `internal error: the picture could not be saved` (`failed`) — `save` or `saveMarked`, whose marking, encoding or writing failed inside the host — or, made on the image worker, that could not be handed to it because the application is closing.
-- `screen.save '…': …` and `screen.saveMarked '…': …` (`failed`) — `save` or `saveMarked` whose file could not be written, with the path and the system's words: a typo in a folder's name says so here, which a failed capture never does.
+A read that desktop duplication could not answer, in a module that declares `[screen] capture = "duplication"` with `fallback = "none"`. Windows only. Every call that reads the screen gives these, `pixel` and `pixels` included, and so does [`host.ocr.recognize`](./ocr.md#host-ocr-recognize). The message is the whole sentence `screen capture failed: desktop duplication could not answer — ` and one of the tails below; the code is the tail's. [Which picture a read sees](#which-picture-a-read-sees-windows) says what each means and when duplication is tried again. On macOS none of them occurs.
+
+- `it is switched off in Application settings` — `unavailable`
+- `it stopped after three reads hung within ten minutes; it is tried again after a while, after a resume, an unlock or a display change, or when it is switched off and on again in Application settings` — `unavailable`
+- `its thread stopped on an internal error; switching it off and on again in Application settings starts it afresh` — `failed`
+- `its thread could not be started` — `failed`
+- `the application is closing` — `cancelled`
+- `an earlier read has not come back yet` — `busy`
+- `Windows does not support it here (0x…): over Remote Desktop, or on a laptop with two graphics chips where this application runs on the one that does not drive the display — Windows Settings, System, Display, Graphics, this application, Power saving` — `not_supported`
+- `four other programs already record the screen — a screen recorder, a screen-sharing call, another reader` — `unavailable`
+- `the secure desktop is showing (a UAC prompt or the lock screen)` — `denied`
+- `the picture was lost to a display mode change, a fullscreen switch or a desktop switch` — `failed`
+- `the graphics driver was reset or updated` — `failed`
+- `the region touches a rotated monitor, which this version reads only the standard way` — `not_supported`
+- `the region touches a monitor desktop duplication does not report` — `not_supported`
+- `no picture has arrived since it was opened` — `not_ready`
+- `no display output was found` — `not_supported`
+- `the display delivers pixel format …, which this version cannot read` — `not_supported`
+- `it failed with 0x…` — `failed`: any other failure, with its error code.
+
+A region of more than 40 million pixels is told so before duplication is asked, with either fallback: the second of the [capture errors](#capture-errors).
+
+### Window-form errors {#window-form-errors}
+
+A [window region](#region-form) or window point with nothing to read this time. Any call given one gives these: `pixel`, `pixels`, `snapshot` and each region of its `change.watch`, a snapshot's `crop`, `profile`, `cells`, `matchCells`, `template{ capture }`, the three searches, `save`, `saveMarked` and each region of [`host.ocr.recognize`](./ocr.md#host-ocr-recognize). An `imageSearchEach` entry whose `within` has none answers `false` in its slot instead. Nothing is captured for them. A call's own table lists both.
+
+| code | when | message | platform |
+|---|---|---|---|
+| `hidden` | The window's client area has no width or no height: a minimised window, or one not laid out yet. | `the window's client area is empty (…x…)` | both |
+| `outside` | The rectangle worked out from the window table lies outside the 32-bit coordinate range. A window table from `host.window` never does. | `the region lies outside the screen's coordinate range` | both |
+
+### Snapshot-source errors {#snapshot-source-errors}
+
+A region that misses the snapshot a call was given as `opts.snapshot`, by the call's rule ([Reading a snapshot](#reading-a-snapshot)). Nothing is captured for them.
+
+| code | when | message | platform |
+|---|---|---|---|
+| `outside` | A call that reads the part of its region inside the snapshot found no part inside it: `profile`, the three searches, `save`, `saveMarked`, and a region of [`host.ocr.recognize`](./ocr.md#host-ocr-recognize). | `the region does not overlap the snapshot` | both |
+| `outside` | A call that needs its region wholly inside the snapshot found it is not: `template{ capture = …, snapshot = … }`, `cells` and `matchCells`. | `the region is not inside the snapshot` | both |
+
+A call gives the one its rule gives, never the other. A snapshot's [`crop`](#snapshot-crop) needs its region inside too, and lists that reason at its entry. `pixel` and `pixels` answer `the point is not inside the snapshot`, at theirs.
+
+### Request-limit errors {#request-limit-errors}
+
+What a request of the `screen-capture` thread can be answered instead of its picture or points: `pixel`, `pixels`, `snapshot` and `profile`, waited for in a handler or given a callback. A `snapshot`'s change wait has two more limits of its own, at [its entry](#host-screen-snapshot-errors). A call's own table lists each of these.
+
+| code | when | message | platform |
+|---|---|---|---|
+| `too_many` | The module had 16 requests waiting and asked for one more: its oldest is ended with this, and the new one goes ahead. | `too many snapshot requests waiting for this module (16); the oldest was ended` | both |
+| `too_many` | 64 requests wait in the whole application, counted once the module's own oldest has ended: the new one is not taken, and ends none of its module's. | `too many snapshot requests waiting in the whole application (64); this one was not taken` | both |
+| `replaced` | Given a callback and `opts.key`: the module asked the same call again with that key ([With a callback](#with-a-callback)). | `a newer request with the same key replaced this one` | both |
+| `cancelled` | The capture thread stopped a request the event loop still waited for, which no path of the host does. Listed so that no reason is left out. | `the request was cancelled` | both |
+
+### Image-worker errors {#image-worker-errors}
+
+What a call of the image worker given a callback can be answered instead of its work: `cells`, `matchCells`, `template`, a snapshot's `crop`, the three searches, `save` and `saveMarked`. A handler waits for one read at a time, so these never reach it. A call's own table lists each of these.
+
+| code | when | message | platform |
+|---|---|---|---|
+| `too_many` | The module had 64 of these calls with a callback waiting for their answer, together, and asked for one more: its oldest is answered with this on the next tick, and the newest goes ahead. A task not started yet is not captured or matched at all. Logged once, then counted, with a line a minute at most while it goes on. | `too many image searches waiting for this module (64); the oldest was ended` | both |
+| `replaced` | With `opts.key`: the module asked the same call again with that key ([With a callback](#with-a-callback)). A snapshot's `crop` takes no key. | `a newer request with the same key replaced this one` | both |
 
 ## Where it waits {#where-it-waits}
 
-**[`snapshot`](#host-screen-snapshot), [`pixel`](#host-screen-pixel), [`pixels`](#host-screen-pixels), [`profile`](#host-screen-profile), [`cells`](#host-screen-cells), [`matchCells`](#host-screen-matchcells), [`template{ capture }`](#host-screen-template), a snapshot's [`crop`](#the-snapshot-handle), [`imageSearch`](#host-screen-imagesearch), [`imageSearchAll`](#host-screen-imagesearchall), [`save`](#host-screen-save) and [`saveMarked`](#host-screen-savemarked) without a callback wait in a handler for the screen, or for the work over a region, and only their module waits meanwhile.** Given a callback they wait nowhere ([With a callback](#with-a-callback)); this section is about the calls without one. A handler is the function the host called for one of the module's events — a hotkey, a captured key, a controller event, a timer, a window trigger, a focus change, the answer of a read, an image search, a snapshot or a profile, a setting's `onChange` called for the settings dialog or for another module's `set` — and anything that function calls, a `pcall` included ([Each callback is a handler](../module-runtime-and-lifecycle.md#handlers)). There the call checks its arguments at the call, as it always has, and has its work done on a thread of the host's own, as the same call given a callback has it done: `snapshot` its picture taken on the `screen-capture` thread, a plain one; `pixel` and `pixels` their points read there; `profile` its picture taken there — none for a snapshot — and reduced on the image worker; `cells` and `matchCells` their region read and reduced, and matched, on the image worker; `template{ capture }` its region captured there, or cut from its snapshot, and made a template; `crop` its part of the snapshot copied there; the two searches their templates opened there, their region captured — or read where it lies in their snapshot — and matched; `save` and `saveMarked` their region captured there — or the part of their snapshot it covers copied — marked, encoded and written to their file. The handler stops at the call until the answer is there. Only its own module waits: its next events wait in its mailbox, in order — keys up to 256, a held key's repeats folded into one — and every other module, speech and the event tap go on. The handler then goes on with what the call returns: the handle — its `time` and `inputEpoch` those of the picture, taken on the thread — the colour or the list of colours, the profile — with its picture's `time` and `inputEpoch` — the grid or the match, the template, the crop, the hit or the list of hits, `true`, or the call's own could-not-look answer — `nil` and an error value, but `{}` and an error value for `imageSearchAll`, and `false` and an error value for a shot, a file that could not be written included. The waiting counts on no clock of the [limits](../module-runtime-and-lifecycle.md#limits). The same holds on Windows and macOS. A call that reads no screen and walks no region answers at once wherever it is called, where it cannot wait too: `pixel` and `pixels` given a snapshot, a window point with no pixel this time (a minimised window's) and an empty list; any of these calls but `snapshot` when a window region has no rectangle this time, a `profile` of an empty region or of a region outside its snapshot, `cells` or `matchCells` of a region not wholly inside theirs, a `crop` or a `template{ capture }` not wholly inside its snapshot, a search, `save` or `saveMarked` of a region with no part inside its snapshot, and a `template` from bytes or a file. Every other call on this page runs on the event loop wherever it is called, as its **Cost** says.
+**[`snapshot`](#host-screen-snapshot), [`pixel`](#host-screen-pixel), [`pixels`](#host-screen-pixels), [`profile`](#host-screen-profile), [`cells`](#host-screen-cells), [`matchCells`](#host-screen-matchcells), [`template{ capture }`](#host-screen-template), a snapshot's [`crop`](#snapshot-crop), [`imageSearch`](#host-screen-imagesearch), [`imageSearchAll`](#host-screen-imagesearchall), [`save`](#host-screen-save) and [`saveMarked`](#host-screen-savemarked) without a callback wait in a handler for the screen, or for the work over a region, and only their module waits meanwhile.** Given a callback they wait nowhere ([With a callback](#with-a-callback)); this section is about the calls without one. A handler is the function the host called for one of the module's events — a hotkey, a captured key, a controller event, a timer, a window trigger, a focus change, the answer of a read, an image search, a snapshot or a profile, a setting's `onChange` called for the settings dialog or for another module's `set` — and anything that function calls, a `pcall` included ([Each callback is a handler](../module-runtime-and-lifecycle.md#handlers)). There the call checks its arguments at the call, as it always has, and has its work done on a thread of the host's own, as the same call given a callback has it done: `snapshot` its picture taken on the `screen-capture` thread, a plain one; `pixel` and `pixels` their points read there; `profile` its picture taken there — none for a snapshot — and reduced on the image worker; `cells` and `matchCells` their region read and reduced, and matched, on the image worker; `template{ capture }` its region captured there, or cut from its snapshot, and made a template; `crop` its part of the snapshot copied there; the two searches their templates opened there, their region captured — or read where it lies in their snapshot — and matched; `save` and `saveMarked` their region captured there — or the part of their snapshot it covers copied — marked, encoded and written to their file. The handler stops at the call until the answer is there. Only its own module waits: its next events wait in its mailbox, in order — keys up to 256, a held key's repeats folded into one — and every other module, speech and the event tap go on. The handler then goes on with what the call returns: the handle — its `time` and `inputEpoch` those of the picture, taken on the thread — the colour or the list of colours, the profile — with its picture's `time` and `inputEpoch` — the grid or the match, the template, the crop, the hit or the list of hits, `true`, or the call's own could-not-look answer — `nil` and an error value, but `{}` and an error value for `imageSearchAll`, and `false` and an error value for a shot, a file that could not be written included. The waiting counts on no clock of the [limits](../module-runtime-and-lifecycle.md#limits). The same holds on Windows and macOS. A call that reads no screen and walks no region answers at once wherever it is called, where it cannot wait too: `pixel` and `pixels` given a snapshot, a window point with no pixel this time (a minimised window's) and an empty list; any of these calls but `snapshot` when a window region has no rectangle this time, a `profile` of an empty region or of a region outside its snapshot, `cells` or `matchCells` of a region not wholly inside theirs, a `crop` or a `template{ capture }` not wholly inside its snapshot, a search, `save` or `saveMarked` of a region with no part inside its snapshot, and a `template` from bytes or a file. Every other call on this page runs on the event loop wherever it is called, as its **Cost** says.
 
 | Call | In a handler | Where it cannot wait |
 | --- | --- | --- |
-| `snapshot` | waits: its picture is taken on the `screen-capture` thread, its charge reserved at the call, as one of the module's 16 snapshot requests, a 17th ending the oldest; with 64 waiting in the whole application it answers `nil` and the reason ([Failure reasons](#failure-reasons)) | raises, whatever it was given (below) |
-| `pixel`, `pixels` | waits: its points are read on the `screen-capture` thread, as one of the module's 16 snapshot requests with no picture and no charge; with 64 waiting in the whole application it answers `nil` and the reason. Given a snapshot: at once | raises (below). Given a snapshot: at once, as in a handler |
-| `profile` | waits: its picture is taken on the `screen-capture` thread — none for a snapshot — and reduced on the image worker, as one of the module's 16 snapshot requests, its picture charged from the call until the answer; with 64 waiting in the whole application it answers `nil` and the reason | raises (below) |
+| `snapshot` | waits: its picture is taken on the `screen-capture` thread, its charge reserved at the call, as one of the module's 16 snapshot requests, a 17th ending the oldest; with 64 waiting in the whole application it answers `nil, err` (`too_many`, [Request-limit errors](#request-limit-errors)) | raises, whatever it was given (below) |
+| `pixel`, `pixels` | waits: its points are read on the `screen-capture` thread, as one of the module's 16 snapshot requests with no picture and no charge; with 64 waiting in the whole application it answers `nil, err` (`too_many`). Given a snapshot: at once | raises (below). Given a snapshot: at once, as in a handler |
+| `profile` | waits: its picture is taken on the `screen-capture` thread — none for a snapshot — and reduced on the image worker, as one of the module's 16 snapshot requests, its picture charged from the call until the answer; with 64 waiting in the whole application it answers `nil, err` (`too_many`) | raises (below) |
 | `cells`, `matchCells` | waits: its region is read — captured through the module's source, or where it lies in its snapshot — reduced and, for `matchCells`, ranked on the image worker; the states are checked and decoded at the call | raises |
 | `template{ capture }` | waits: its region is captured on the image worker, or cut from its snapshot there, and made a template; its charge is reserved at the call. With bytes or a file, or a region not wholly inside its snapshot: at once, the picture of bytes or a file then made on the image worker | raises. With bytes or a file, or a region not wholly inside its snapshot: at once, as in a handler |
 | a snapshot's `crop` | waits: its part is copied on the image worker, its charge reserved at the call | raises, as `Snapshot:crop` |
@@ -240,15 +257,15 @@ Every call's message names the call and its own callback form — `host.screen.p
 -- A module's top level cannot wait: there a call without a callback raises, and the picture is
 -- taken in a handler — here a timer's, at once — or given a callback. Needs "screen" and "timer"
 -- in the manifest.
-local ok, err = pcall(host.screen.pixel, 0, 0)
-host.log.info(tostring(ok) .. " " .. err)   -- false host.screen.pixel cannot wait here: …
-host.screen.pixel(0, 0, nil, function(c, why)   -- with a callback: anywhere
-  host.log.info(c and ("the corner at load: " .. c.hex) or ("no corner: " .. why))
+local ok, msg = pcall(host.screen.pixel, 0, 0)
+host.log.info(tostring(ok) .. " " .. msg)   -- false host.screen.pixel cannot wait here: …
+host.screen.pixel(0, 0, nil, function(c, err)   -- with a callback: anywhere
+  host.log.info(c and ("the corner at load: " .. c.hex) or ("no corner: " .. err))
 end)
 host.timer.after(0, function()
-  local s, why = host.screen.snapshot({ region = { 0, 0, 200, 40 } })   -- waits here
+  local s, err = host.screen.snapshot({ region = { 0, 0, 200, 40 } })   -- waits here
   if not s then
-    host.log.info("no picture: " .. why)
+    host.log.info("no picture: " .. err)
     return
   end
   local corner = host.screen.pixel(0, 0, { snapshot = s })   -- of the snapshot: at once
@@ -267,7 +284,7 @@ end)
 
 A handler that has kept its module busy for 30 seconds or more with keys waiting behind it is said once, as for a read ([Where it waits](./ocr.md#where-it-waits)).
 
-**After a wait, the world may have moved.** While a handler waits, the user can bring another window to the front, and a click made after the answer lands there. An overlay checks with [`O:here()`](./overlay.md#o-here) before the call and [`O:stillHere`](./overlay.md#o-here) after it; other code compares `host.window.active()` before and after.
+**After a wait, the world may have moved.** While a handler waits, the user can bring another window to the front, and a click made after the answer lands there. An overlay checks with [`O:here()`](./overlay.md#o-here) before the call and [`O:stillHere`](./overlay.md#o-stillhere) after it; other code compares `host.window.active()` before and after.
 
 **A wait turns no epoch.** The handler goes on in the dispatch that asked, so the turn of the event loop that hands it its answer leaves [`host.epoch()`](./timer.md#host-epoch) where it was: what the handler kept for the epoch before the call still holds after it, unless another event turned the epoch meanwhile.
 
@@ -286,7 +303,7 @@ o:addCustomButton({ label = "Lit entry", hotkey = "Alt+L", onActivate = function
 end })
 ```
 
-**The image worker's waits** (`cells`, `matchCells`, `template{ capture }`, `crop`, the searches, `save`, `saveMarked`, and `profile`'s reduction) wait for the batch the worker is in the middle of — which may be a large match — and then for the reads of a higher priority: a key's read is a batch of its own, after the one in progress and ahead of the polls queued before it (see the top of this page). A handler waits for one read at a time, so its reads are not counted among the module's 64 image searches ([Failure reasons](#failure-reasons)).
+**The image worker's waits** (`cells`, `matchCells`, `template{ capture }`, `crop`, the searches, `save`, `saveMarked`, and `profile`'s reduction) wait for the batch the worker is in the middle of — which may be a large match — and then for the reads of a higher priority: a key's read is a batch of its own, after the one in progress and ahead of the polls queued before it (see the top of this page). A handler waits for one read at a time, so its reads are not counted among the module's 64 image searches ([Image-worker errors](#image-worker-errors)).
 
 ### Windows {#where-it-waits-windows}
 
@@ -308,7 +325,7 @@ The waited picture is taken by ScreenCaptureKit on the `screen-capture` thread, 
 
 **What raises**, at the call: everything the call raises without a callback, a callback that is neither a function nor `nil` (`host.screen.imageSearch: the callback (third argument) must be a function, got 5`), and a `key` that is not a non-empty string. Nothing that happens at run time raises: it is answered.
 
-**Limits.** `snapshot`, `pixel`, `pixels` and `profile` given a callback are requests of the `screen-capture` thread, under its limits: 16 per module VM and 64 in the application, the module's oldest ended or the newest refused, with the reasons under [Failure reasons](#failure-reasons); an answer known at the call is none of them. The image worker's — `cells`, `matchCells`, `template{ capture }`, `crop`, the searches, `save`, `saveMarked` and `imageSearchEach` — may be 64 per module VM, together; one more ends the module's oldest, answered on the next tick with its call's own could-not-look answer, as a replaced one is, and the reason `too many image searches waiting for this module (64); the oldest was ended`. A poll keeps one out at a time with its key and `pending`, as the example does.
+**Limits.** `snapshot`, `pixel`, `pixels` and `profile` given a callback are requests of the `screen-capture` thread, under its limits: 16 per module VM and 64 in the application, the module's oldest ended or the newest refused, with the error values under [Request-limit errors](#request-limit-errors); an answer known at the call is none of them. The image worker's — `cells`, `matchCells`, `template{ capture }`, `crop`, the searches, `save`, `saveMarked` and `imageSearchEach` — may be 64 per module VM, together; one more ends the module's oldest, answered on the next tick with its call's own could-not-look answer, as a replaced one is, and the error value `too_many`, `too many image searches waiting for this module (64); the oldest was ended` ([Image-worker errors](#image-worker-errors)). A poll keeps one out at a time with its key and `pending`, as the example does.
 
 ```luau
 -- A library's landmark, searched twice a second off the event loop, one search out at a time.
@@ -320,8 +337,8 @@ host.timer.every(500, function()
   if not w or host.screen.pending("landmark") then return end
   host.screen.imageSearch("images/landmark.png",
     { region = { window = w, fraction = { 0, 0, 1, 0.2 } }, tolerance = 8, key = "landmark" },
-    function(hit, why, info)
-      if why then return end   -- could not look: keep what was known
+    function(hit, err, info)
+      if err then return end   -- could not look: keep what was known
       if (hit ~= nil) ~= found then
         found = hit ~= nil
         host.log.info((found and "found" or "lost") .. ", read " .. (host.now() - info.time) .. " ms ago")
@@ -342,13 +359,13 @@ The work is the call's own, on the threads that do it without a callback. `info.
 
 **Signature:** `host.screen.pixel(x: number, y: number, opts: { snapshot: Snapshot? }?) -> (Colour?, Error?)`, or `host.screen.pixel(point: { window: Window, fraction: { number, number } }, opts: { snapshot: Snapshot? }?) -> (Colour?, Error?)`, where `Colour = { r: number, g: number, b: number, hex: string }`; with a callback `host.screen.pixel(x, y, opts: { snapshot: Snapshot?, key: string? }?, cb: (colour: Colour?, err: Error?, info: Info) -> ()) -> ()`, or `host.screen.pixel(point, opts, cb)`, where `Info = { time: number?, inputEpoch: number? }`
 
-Reads the colour of one screen pixel: at the screen coordinates `(x, y)`, or at a point given as fractions of a window's client area. Returns the 8-bit channels `r`, `g`, `b` (0–255) plus `hex`, an uppercase `#RRGGBB` string — one value, and nothing after it. When there is nothing to read it returns `nil` and a reason (see [Failure reasons](#failure-reasons)): in a module that declared `fallback = "none"` when desktop duplication had no picture ([Which picture a read sees](#which-picture-a-read-sees)), for the window form when the window's client area is empty, as a minimised window's is (`the window's client area is empty (0x0)`), and with a snapshot when the point is not in it (`the point is not inside the snapshot`). In a handler the read it waits for is one of the module's snapshot requests: with 64 waiting in the whole application it is not made (`too many snapshot requests waiting in the whole application (64); this one was not taken`), answered on the next turn of the event loop, as the colour would be. Otherwise it always returns a colour.
+Reads the colour of one screen pixel: at the screen coordinates `(x, y)`, or at a point given as fractions of a window's client area. The colour has the 8-bit channels `r`, `g`, `b` (0–255) plus `hex`, an uppercase `#RRGGBB` string. When there is nothing to read this time it answers `nil` and an error value instead ([Returns](#host-screen-pixel-returns)): for the window form when the window's client area is empty, as a minimised window's is; with a snapshot when the point is not in it; for a limit of the requests waiting; and in a module that declared `fallback = "none"` when desktop duplication had no picture ([Which picture a read sees](#which-picture-a-read-sees)). Each is under [Errors](#host-screen-pixel-errors). Otherwise it always answers a colour.
 
 **`opts.snapshot`** reads the pixel from a [snapshot](#host-screen-snapshot) instead of the screen: no screen is touched, and it costs microseconds. `opts` is read strictly: `nil`, or a table whose only key is `snapshot` — and, with a callback, `key`; anything else raises (`host.screen.pixel: opts has a key 'snap'; it takes snapshot`), as does a `snapshot` that is not a Snapshot or was released, and a `key` without a callback (`host.screen.pixel: opts.key is only taken with a callback (the argument after opts)`). The options are read before anything is answered, so a mistake in them raises even when the window form has no pixel this time.
 
 **The window form**, `{ window = w, fraction = { fx, fy } }` (or `fraction = { x = fx, y = fy }`), reads the pixel a [window region](#region-form) starting at `fx, fy` starts with. With `W` and `H` the client area's width and height, the point is `x = client.x + clamp(floor(W * fx), 0, W - 1)` and `y = client.y + clamp(floor(H * fy), 0, H - 1)`, in IEEE doubles as the region form computes. So the point never leaves the client area: a fraction below 0 reads the first column or row, and `1` or more the last. Only `window.client` is read, with no call to the operating system — see the [Region form](#region-form) for what that means for a window table cached for the epoch. The form is read strictly and raises, naming what is wrong (`host.screen.pixel: point.fraction.y is missing; both are needed, x and y`): a key beside `window` and `fraction`, a `fraction` that is not exactly two numbers written one way, a fraction that is not a finite number, a `window` without a `client` of four whole numbers, a table that is not the window form (`{ 100, 200 }` — screen coordinates are two numbers), and a third argument after the table that is not a callback (its options come second, its callback third). `pixel(x, y)` reads its two numbers as it always has: a fraction is cut toward zero, a numeral string is accepted, and anything else raises, a number outside the 32-bit coordinate range included (`host.screen.pixel: x must be a number within the coordinate range (-2147483648 to 2147483647), got 10000000000`).
 
-**Without a snapshot a call is a screen read.** In a [handler](#where-it-waits) it waits: the point is read on the `screen-capture` thread, and only the module waits — its keys queue behind it — while the event loop goes on. Where it cannot wait it raises, and nothing is read ([Where it waits](#where-it-waits)). **Given a callback** — after the options, `pixel(x, y, opts, cb)` or `pixel(point, opts, cb)`, `opts` `nil` when there are none — it waits nowhere: the point is read on that thread all the same, and `cb(colour, why, info)` is called on a later tick, `info` with the moment of the read; a snapshot's pixel comes on the next tick, with the snapshot's moment ([With a callback](#with-a-callback)). It is not the cheap point lookup of a reader that keeps a frame: every call reads anew, and nothing is kept between two calls. Where a poll needs several points, read them with one [`pixels`](#host-screen-pixels), or take one [`snapshot`](#host-screen-snapshot) and read every point from it; for a band of points, one [`profile`](#host-screen-profile) — each one capture, whatever it tests.
+**Without a snapshot a call is a screen read.** In a [handler](#where-it-waits) it waits: the point is read on the `screen-capture` thread, and only the module waits — its keys queue behind it — while the event loop goes on. Where it cannot wait it raises, and nothing is read ([Where it waits](#where-it-waits)). **Given a callback** — after the options, `pixel(x, y, opts, cb)` or `pixel(point, opts, cb)`, `opts` `nil` when there are none — it waits nowhere: the point is read on that thread all the same, and `cb(colour, err, info)` is called on a later tick, `info` with the moment of the read; a snapshot's pixel comes on the next tick, with the snapshot's moment ([With a callback](#with-a-callback)). It is not the cheap point lookup of a reader that keeps a frame: every call reads anew, and nothing is kept between two calls. Where a poll needs several points, read them with one [`pixels`](#host-screen-pixels), or take one [`snapshot`](#host-screen-snapshot) and read every point from it; for a band of points, one [`profile`](#host-screen-profile) — each one capture, whatever it tests.
 
 **Cost.** In a handler the module waits, from asking to the answer, for the read — one compositor frame on the standard path — the captures ahead of it on the `screen-capture` thread and the turn of the event loop that hands the colour over: about 17 to 32 ms on Windows; the event loop spends only what reading the arguments and building the colour cost, as it does given a callback, which nothing waits for. Where it cannot wait it raises at once, and costs microseconds. Given a snapshot, or a window point with no pixel this time, it answers at once and costs microseconds.
 
@@ -356,9 +373,9 @@ Reads the colour of one screen pixel: at the screen coordinates `(x, y)`, or at 
 -- A module's top level cannot wait, so the pixels are read in a handler: here a hotkey's, where
 -- each read waits and only this module waits. Needs "screen", "hotkey" and "window" in the manifest.
 host.hotkey.register("Ctrl+Alt+Shift+P", function()
-    local c, why = host.screen.pixel(100, 200)   -- waits here
+    local c, err = host.screen.pixel(100, 200)   -- waits here
     if c == nil then   -- under fallback = "none", or with 64 requests waiting in the whole application
-        host.log.info("not read: " .. why)
+        host.log.info("not read: " .. err)
         return
     end
     if c.hex == "#FF0000" then
@@ -370,8 +387,9 @@ host.hotkey.register("Ctrl+Alt+Shift+P", function()
     -- client area's top tenth.
     local w = host.window.active()
     if w then
-        local top, whyNot = host.screen.pixel({ window = w, fraction = { 0.5, 0.05 } })   -- waits here
-        host.log.info(top and ("top: " .. top.hex) or ("top not read: " .. whyNot))
+        local top, topErr = host.screen.pixel({ window = w, fraction = { 0.5, 0.05 } })   -- waits here
+        if topErr and topErr.code == host.errors.HIDDEN then return end   -- minimised: read it later
+        host.log.info(top and ("top: " .. top.hex) or ("top not read: " .. topErr))
     end
 end)
 ```
@@ -394,8 +412,8 @@ end })
 local lit = nil
 host.timer.every(200, function()
   if host.screen.pending("lamp") then return end
-  host.screen.pixel(120, 172, { key = "lamp" }, function(c, why)
-    if not c then return end   -- not read this time; `why` says why
+  host.screen.pixel(120, 172, { key = "lamp" }, function(c, err)
+    if not c then return end   -- not read this time; `err` says why
     if (c.r > 200) ~= lit then
       lit = c.r > 200
       host.speech.output(lit and "lamp on" or "lamp off")
@@ -404,11 +422,35 @@ host.timer.every(200, function()
 end)
 ```
 
+### Returns {#host-screen-pixel-returns}
+
+- A `Colour`, `{ r, g, b, hex }` — one value, and nothing after it. A point on no monitor reads black, `(0, 0, 0)`; so does, on a Mac, a point that cannot be read ([macOS](#host-screen-pixel-macos)).
+- `nil, err` — there was nothing to read this time; `err.code` is one of the codes under [Errors](#host-screen-pixel-errors).
+- With a callback: nothing at once; `cb(colour, nil, info)` or `cb(nil, err, info)` on a later tick.
+
+### Errors {#host-screen-pixel-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `hidden` | both | The window form, and the window's client area is empty: a minimised window, or one not laid out yet. Answered at once, wherever the call is made; with a callback on the next tick. | `the window's client area is empty (…x…)` | both |
+| `outside` | both | With `opts.snapshot`, the point is not in the snapshot. Or the window form is outside the coordinate range, which a window table from `host.window` never is. Answered at once, as above. | `the point is not inside the snapshot`, `the region lies outside the screen's coordinate range` | both |
+| `too_many` | both | In a handler or with a callback: 64 requests wait in the whole application, so this one is not taken; or this was the module's oldest of 16 when it asked for one more. Answered on the next turn of the event loop, as the colour would be. | `too many snapshot requests waiting in the whole application (64); this one was not taken`, `too many snapshot requests waiting for this module (16); the oldest was ended` | both |
+| `replaced` | callback | With `opts.key`: the module asked again with the same key. | `a newer request with the same key replaced this one` | both |
+| `failed` | both | The host's own code failed while it read the point; the `screen-capture` thread goes on. | `the screen capture failed inside the application; the log has the details` | both |
+| `cancelled` | both | The capture thread stopped the request, which no path of the host does. | `the request was cancelled` | both |
+| any of the [duplication errors](#duplication-errors) | both | Only in a module that declares `[screen] fallback = "none"`, when desktop duplication could not answer. | `screen capture failed: desktop duplication could not answer — …` | Windows |
+
+**Raises** for a mistake in the call: `x` or `y` that is not a number within the 32-bit coordinate range; a window form with a key beside `window` and `fraction`, a fraction that is missing or not finite, or a window without a `client`; a third argument after the window form that is not a callback; `opts` that is neither a table nor `nil`, or has a key other than `snapshot` (and `key` with a callback); a `snapshot` that is not a Snapshot or was released; a `key` without a callback, or one that is not a non-empty string; a callback that is not a function.
+
+**Raises where it cannot wait**: without a callback or a snapshot, a point with a pixel to read, inside a function that may not wait; see [Where it waits](#where-it-waits).
+
 ### Windows {#host-screen-pixel-windows}
 
 **Every call without a snapshot is a screen read of its own**; nothing is kept between calls. Reads the pixel straight from the screen. What you get is what is there — unless the module declares [`[screen] capture = "duplication"`](#which-picture-a-read-sees), in which case it is read from the duplicated picture. A point that lies on no monitor reads as black (0, 0, 0), the same as a region read gives there, whichever way the module reads.
 
-The cost is per call. The standard path is `GetPixel` on the screen, measured at about 16.7 ms each — one compositor frame — so ten points in one poll are ten frames, about 170 ms: the module's wait, on the `screen-capture` thread. Under a declared `capture = "duplication"` each call is a 1×1 read of the duplicated picture, measured at 0.30 ms on an idle desktop in a test build; still one read per point. That thread may first wait for duplication — up to 250 ms, the module's wait and not the event loop's (see [How long a read waits](#which-picture-a-read-sees)); when duplication cannot answer, the call costs that wait plus the standard `GetPixel`, or returns `nil` and the reason under `fallback = "none"`. The window form adds no call to the operating system: its point is worked out from the table given.
+The cost is per call. The standard path is `GetPixel` on the screen, measured at about 16.7 ms each — one compositor frame — so ten points in one poll are ten frames, about 170 ms: the module's wait, on the `screen-capture` thread. Under a declared `capture = "duplication"` each call is a 1×1 read of the duplicated picture, measured at 0.30 ms on an idle desktop in a test build; still one read per point. That thread may first wait for duplication — up to 250 ms, the module's wait and not the event loop's (see [How long a read waits](#which-picture-a-read-sees)); when duplication cannot answer, the call costs that wait plus the standard `GetPixel`, or answers `nil, err` under `fallback = "none"` ([duplication errors](#duplication-errors)). The window form adds no call to the operating system: its point is worked out from the table given.
 
 ### macOS {#host-screen-pixel-macos}
 
@@ -420,11 +462,11 @@ In a handler and given a callback the point is captured by itself on the `screen
 
 Reads the colour at every point of `points` and returns them as one list, in the order asked — one value, and nothing after it. Without a snapshot the points are read from as few captures as they allow (below), so eight probe points close together cost what one costs. With `opts.snapshot` they are read from that [snapshot](#host-screen-snapshot), touching no screen.
 
-**All or nothing.** When one point cannot be read, the call returns `nil` and a reason instead of a list (see [Failure reasons](#failure-reasons)): a capture failed, a window point's window has an empty client area (`the window's client area is empty (0x0)`), or, with a snapshot, a point is not in it (`the point is not inside the snapshot`).
+**All or nothing.** When one point cannot be read, the call answers `nil` and an error value instead of a list: a capture failed, a window point's window has an empty client area, or, with a snapshot, a point is not in it ([Errors](#host-screen-pixels-errors)).
 
 **Read strictly, at the call, and what raises.** `points` is a list — entries 1, 2, 3, … and nothing else — of at most 4096 points. A point is `{ x, y }` or `{ x = …, y = … }` in screen coordinates, whole numbers inside the 32-bit coordinate range (`10.0` is one, `10.5` is not), written one way; or the window form exactly as [`pixel`](#host-screen-pixel) reads it. `opts` is `nil` or a table whose only key is `snapshot` — and, with a callback, `key`. Anything else raises, naming the point: `host.screen.pixels: points[2].x must be a whole number within the coordinate range (-2147483648 to 2147483647), got 1.5`, `points has 4097 entries; the limit is 4096`, `opts has a key 'region'; it takes snapshot`; so does a `snapshot` that is not a Snapshot or was released. An empty list returns an empty list without reading anything.
 
-**Cost.** In a [handler](#where-it-waits) the points are read on the `screen-capture` thread while the module waits, from asking to the answer, for those captures, the ones ahead of them on that thread and the turn of the event loop that hands the list over; the event loop spends only what reading the arguments and building the list cost. Given a callback ([With a callback](#with-a-callback)) they are read there all the same and nothing waits: `cb(colours, why, info)` comes on a later tick. Where it cannot wait it raises, and nothing is read. When the points lie in a box of at most 2,000,000 pixels (1,000 × 2,000, say), it takes one capture of that box. Points spread wider are grouped by the tile of 2048 × 976 pixels each lies in — fixed tiles, counted from the screen coordinates 0, 0 — and each group is read with one capture of the box around its own points: two points far apart are two 1×1 captures, and points spread over a whole desktop one capture for each tile they reach, none larger than 2,000,000 pixels (8 MB). Each capture is read and let go before the next is taken. A point on no monitor reads black, as it does in a region read, with nothing captured for it. With a snapshot, or for an empty list or a window point with no pixel this time, it answers at once, wherever it is called, and costs microseconds.
+**Cost.** In a [handler](#where-it-waits) the points are read on the `screen-capture` thread while the module waits, from asking to the answer, for those captures, the ones ahead of them on that thread and the turn of the event loop that hands the list over; the event loop spends only what reading the arguments and building the list cost. Given a callback ([With a callback](#with-a-callback)) they are read there all the same and nothing waits: `cb(colours, err, info)` comes on a later tick. Where it cannot wait it raises, and nothing is read. When the points lie in a box of at most 2,000,000 pixels (1,000 × 2,000, say), it takes one capture of that box. Points spread wider are grouped by the tile of 2048 × 976 pixels each lies in — fixed tiles, counted from the screen coordinates 0, 0 — and each group is read with one capture of the box around its own points: two points far apart are two 1×1 captures, and points spread over a whole desktop one capture for each tile they reach, none larger than 2,000,000 pixels (8 MB). Each capture is read and let go before the next is taken. A point on no monitor reads black, as it does in a region read, with nothing captured for it. With a snapshot, or for an empty list or a window point with no pixel this time, it answers at once, wherever it is called, and costs microseconds.
 
 ```luau
 -- A key that says which of three menu entries is lit: one capture for all three lamps, which
@@ -432,9 +474,9 @@ Reads the colour at every point of `points` and returns them as one list, in the
 local LAMPS = { { 120, 140 }, { 120, 172 }, { 120, 204 } }
 local NAMES = { "Start", "Options", "Quit" }
 host.hotkey.register("Ctrl+Alt+Shift+M", function()
-    local lamps, why = host.screen.pixels(LAMPS)   -- waits here
+    local lamps, err = host.screen.pixels(LAMPS)   -- waits here
     if not lamps then
-        host.log.info("menu not read: " .. why)
+        host.log.info("menu not read: " .. err)
         return
     end
     for i, c in ipairs(lamps) do
@@ -443,9 +485,34 @@ host.hotkey.register("Ctrl+Alt+Shift+M", function()
 end)
 ```
 
+### Returns {#host-screen-pixels-returns}
+
+- A list of `Colour`s, `{ { r, g, b, hex }, … }`, one for each point in the order asked — one value, and nothing after it. A point on no monitor reads black. An empty `points` gives an empty list, alone.
+- `nil, err` — one of the points could not be read, so none is answered; `err.code` is one of the codes under [Errors](#host-screen-pixels-errors).
+- With a callback: nothing at once; `cb(colours, nil, info)` or `cb(nil, err, info)` on a later tick.
+
+### Errors {#host-screen-pixels-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `hidden` | both | A window point, and its window's client area is empty: a minimised window, or one not laid out yet. Answered at once, wherever the call is made; with a callback on the next tick. | `the window's client area is empty (…x…)` | both |
+| `outside` | both | With `opts.snapshot`, a point is not in the snapshot. Or a window point is outside the coordinate range, which a window table from `host.window` never is. Answered at once, as above. | `the point is not inside the snapshot`, `the region lies outside the screen's coordinate range` | both |
+| `failed` | both | A capture the points need failed: on Windows the standard path could not read one of the rectangles it plans, and on a Mac a capture failed. In the build for other systems, every read. | `screen capture failed` | both, other |
+| `too_many` | both | In a handler or with a callback: 64 requests wait in the whole application, so this one is not taken; or this was the module's oldest of 16 when it asked for one more. Answered on the next turn of the event loop, as the list would be. | `too many snapshot requests waiting in the whole application (64); this one was not taken`, `too many snapshot requests waiting for this module (16); the oldest was ended` | both |
+| `replaced` | callback | With `opts.key`: the module asked again with the same key. | `a newer request with the same key replaced this one` | both |
+| `failed` | both | The host's own code failed while it read the points; the `screen-capture` thread goes on. | `the screen capture failed inside the application; the log has the details` | both |
+| `cancelled` | both | The capture thread stopped the request, which no path of the host does. | `the request was cancelled` | both |
+| any of the [duplication errors](#duplication-errors) | both | Only in a module that declares `[screen] fallback = "none"`, when desktop duplication could not answer. | `screen capture failed: desktop duplication could not answer — …` | Windows |
+
+**Raises** for a mistake in the call: `points` that is not a list — entries 1, 2, 3, … and nothing else — or has more than 4096 entries; a point that is not `{ x, y }` or `{ x = …, y = … }` of whole numbers within the 32-bit coordinate range, written one way, nor the window form as [`pixel`](#host-screen-pixel) reads it; `opts` that is neither a table nor `nil`, or has a key other than `snapshot` (and `key` with a callback); a `snapshot` that is not a Snapshot or was released; a `key` without a callback, or one that is not a non-empty string; a callback that is not a function.
+
+**Raises where it cannot wait**: without a callback or a snapshot, a non-empty list inside a function that may not wait; see [Where it waits](#where-it-waits).
+
 ### Windows {#host-screen-pixels-windows}
 
-A point that lies on no monitor reads black without anything being captured or asked for it, whichever way the module reads. The other points: through the standard path the planned captures are `BitBlt`s of the screen — not `GetPixel`, which `pixel` uses — each about one compositor frame, 16.7 ms, up to about 1028×666 and about 28 ms for a whole 1920×1080 screen. So a list of close points costs one `pixel`; points spread over a whole 1920×1080 primary screen take up to two captures (it reaches two rows of tiles), and over a 3840×2160 one up to six. Under a declared `capture = "duplication"` each of them is a 1×1 piece of one duplication request, which the `screen-capture` thread waits for up to 250 ms (see [How long a read waits](#which-picture-a-read-sees)). When duplication cannot answer, the points are read the standard way, or the call returns `nil` and the reason under `fallback = "none"`. Coordinates are device pixels.
+A point that lies on no monitor reads black without anything being captured or asked for it, whichever way the module reads. The other points: through the standard path the planned captures are `BitBlt`s of the screen — not `GetPixel`, which `pixel` uses — each about one compositor frame, 16.7 ms, up to about 1028×666 and about 28 ms for a whole 1920×1080 screen. So a list of close points costs one `pixel`; points spread over a whole 1920×1080 primary screen take up to two captures (it reaches two rows of tiles), and over a 3840×2160 one up to six. Under a declared `capture = "duplication"` each of them is a 1×1 piece of one duplication request, which the `screen-capture` thread waits for up to 250 ms (see [How long a read waits](#which-picture-a-read-sees)). When duplication cannot answer, the points are read the standard way, or the call answers `nil, err` under `fallback = "none"` ([duplication errors](#duplication-errors)). Coordinates are device pixels.
 
 ### macOS {#host-screen-pixels-macos}
 
@@ -459,9 +526,7 @@ Takes one picture of `opts.region` now and keeps it — in a [handler](#where-it
 
 **The region** is required and read strictly, as the cells calls read theirs: corners `{ x1, y1, x2, y2 }` as whole numbers, or a window region `{ window = w, fraction = { … } }` resolved at the call (see [Region form](#region-form)). Without a callback `opts` takes `region` and nothing else; given one, also `key`, `at` and `change`. A region may cover at most 40,000,000 pixels.
 
-**Returns** the handle — one value — or `nil` and a reason (see [Failure reasons](#failure-reasons)) when there is nothing to keep this time: the window of a window region has an empty client area (`the window's client area is empty (0x0)`), is so large that the region covers more than 40,000,000 pixels (`at the window's current size the region is …`) or so large that the module's snapshots would pass their budget (`at the window's current size this module's snapshots would hold …`, below), or the capture failed — under `fallback = "none"`, why desktop duplication had no picture. In a handler, the picture it waits for is one of the module's snapshot requests, as one [with a callback](#snapshot-with-a-callback) is: with 64 waiting in the whole application it is not taken (`too many snapshot requests waiting in the whole application (64); this one was not taken`), and as the module's oldest of 16 it is ended by its next request (`too many snapshot requests waiting for this module (16); the oldest was ended`), which only an arbiter's `onActivate` or `onDeactivate` of the module can ask while it waits. These answers come on the next turn of the event loop, as the picture would.
-
-**Raises**, at the call: `opts` that is not a table (`host.screen.snapshot: opts must be a table { region = … }, got nothing`), a key other than `region` — `key`, `at` and `change` are only taken with a callback (`host.screen.snapshot: opts.key is only taken with a callback (the second argument)`) —, a region missing or not exactly the Region form, corners covering more than 40,000,000 pixels (`host.screen.snapshot: the region is 10000x5000, 50000000 pixels; the limit is 40000000`), and a snapshot of corners that would take the module past its budget (below).
+It answers the handle, or `nil` and an error value when there is nothing to keep this time: a window region with an empty client area or past a limit at the window's current size, a budget with no room, a limit of the requests waiting, or a capture that failed ([Returns](#host-screen-snapshot-returns), [Errors](#host-screen-snapshot-errors)). What a window or the other modules do at run time is answered, never raised; only a mistake in the call raises.
 
 **Cost.** One capture, through the module's [source](#which-picture-a-read-sees) — what one `profile` of the region costs without the reduction. In a handler it is taken on the `screen-capture` thread, and the handler waits for it ([Where it waits](#where-it-waits)): from asking to the answer, the capture, the captures ahead of it on that thread and the turn of the event loop that hands it over; the event loop itself spends only what checking the arguments, reserving the charge and building the handle cost. Where it cannot wait it raises at once, and nothing is captured or charged. Every read of the snapshot afterwards touches no screen. In memory it holds `w * h * 4` bytes (more on macOS, below) until it is released or collected; in a handler they are charged from the call.
 
@@ -477,8 +542,8 @@ local function readMenu()
     local w = host.window.active()
     if not (w and host.window.test(GAME, w)) then return end
     -- In the timer's handler: it waits for the picture, and only this module waits.
-    local snap, why = host.screen.snapshot({ region = { 96, 90, 544, 400 } })
-    if not snap then host.log.info("menu not read: " .. why) return end
+    local snap, err = host.screen.snapshot({ region = { 96, 90, 544, 400 } })
+    if not snap then host.log.info("menu not read: " .. err) return end
     local lamps = host.screen.pixels(LAMPS, { snapshot = snap })
     local page = host.screen.imageSearch("images/options-title.png",
         { region = { 96, 90, 544, 118 }, snapshot = snap, tolerance = 8 })
@@ -506,8 +571,8 @@ A snapshot is a value of its own, like a [Template](#host-screen-template):
 - `s.inputEpoch` — [`host.inputEpoch()`](./timer.md#host-inputepoch) as it stood once the picture had been taken: for `snapshot` in a handler and [with a callback](#snapshot-with-a-callback), the value when its picture came back on the `screen-capture` thread, which can be after the call — well after it with a callback. When `host.inputEpoch()` differs from it, the host has turned it over since the picture was taken. Input the host drives itself (`host.input.*`) turns it over before it acts, so that input came after the picture and the picture predates its effect. A controller press or a window coming forward turns it over when the host delivers or notices it, a little after it happened, so its effect may already be in the picture — compare the event's `time` with `s.time`. When the two are the same, that proves nothing about whether the effect of an earlier action had been drawn yet when the picture was taken.
 - `s.via` — which way it was taken: `"gdi"` (the standard Windows path), `"duplication"` (desktop duplication), `"screencapturekit"` or `"coregraphics"` (macOS). Under the default `fallback = "standard"` a module that reads through duplication can get a `"gdi"` picture; this says which one it got.
 - `s.released` — `true` once it has been released.
-- `s:release()` — lets the pixels go now, and gives their bytes back to the budget. A second call does nothing. The fields above stay readable; handing a released snapshot to a call, or cropping it, raises (`host.screen.pixel: opts.snapshot: the snapshot was released`).
-- `s:crop(region, cb?) -> (Snapshot?, Error?)` — a snapshot of its own of a part of `s`: those pixels copied, charged anew against the budget, with `s`'s `time`, `inputEpoch` and `via`. The region is read strictly like `snapshot`'s and must lie wholly inside `s`; otherwise `nil, err` (`outside`, `the region is not inside the snapshot`), and a window region whose window has an empty client area gives `nil` and that reason. It raises for a released `s` and for a region that is not exactly the Region form; a region the budget has no room for is answered `nil` and the error value (`too_large`), as `snapshot`'s is (below). A region larger than `s` is simply not inside it: there is no size limit of its own. In a [handler](#where-it-waits) it waits while the image worker makes the copy, its charge reserved at the call and given back at once if the module is disabled meanwhile, and only the module waits; where it cannot wait it raises, as `Snapshot:crop`, and nothing is copied. Given a callback, `s:crop(region, function(crop, why, info) … end)`, the image worker makes the copy and nothing waits; `info` carries `s`'s `time` and `inputEpoch` ([With a callback](#with-a-callback)). A crop with nothing to copy — no rectangle this time, a region not inside `s`, a region the budget has no room for — is answered at once wherever it is asked, and given a callback on the next tick. It touches no screen: it costs a copy of the part's pixels — on macOS also the matching part of the kept picture at the display's own resolution, drawn anew — and the collector step every charge makes (see the budget, below).
+- `s:release()` — lets the pixels go now, and gives their bytes back to the budget: [`Snapshot:release`](#snapshot-release).
+- `s:crop(region, cb?) -> (Snapshot?, Error?)` — a snapshot of its own of a part of `s`, those pixels copied and charged anew: [`Snapshot:crop`](#snapshot-crop).
 - `tostring(s)` — `Snapshot(640x480 at 96,120, gdi, 1.2 MiB, 35 ms old)`, or `Snapshot(released)`.
 
 **The budget.** One module VM's snapshots may hold **128 MiB** between them, and all modules' together **512 MiB**. A snapshot is charged before its capture — `w * h * 4` bytes, five times that on macOS — and settled to what it really holds once it exists. Over either limit, this module's collector is run twice, and if the snapshot still does not fit the call answers `nil, err`, `too_large`: `this module's snapshots would hold 144.0 MiB; the limit is 128 MiB per module VM (512 MiB in the whole application). Release the ones you no longer need with s:release()`, or `the application's snapshots would hold … MiB; the limit is 512 MiB in the whole application (128 MiB per module VM), and other modules' snapshots count toward it. …` when it is the second. That holds for a region given as corners too: other modules' snapshots count toward the application's limit, so whether a picture fits is the moment's, not the call's, and a poll never puts an error dialog over the window it reads. For a **window region** the sentence comes after `at the window's current size `, as with the 40,000,000-pixel limit. Nothing is charged for a picture so answered. Only the calling module's collector is run, so the application's limit can be reached by other modules' snapshots, which the call cannot free. Every snapshot also steps the collector by about as many bytes as it charges, but at most about what the VM's Luau heap holds: a snapshot as large as the heap or larger costs about one collection of the heap, on the event loop. So a poll that drops its snapshots without releasing them is paced by the collector rather than stopped by the limit — but `release()` is what frees them at once. The budget also bounds one snapshot: in a module that holds no other, at most 33,554,432 pixels on Windows and, charged five times over at the call whatever the display, 6,710,886 points on macOS — fewer than the 40,000,000 a region may cover; a larger one is answered for the budget.
@@ -518,7 +583,7 @@ A snapshot is a value of its own, like a [Template](#host-screen-template):
 
 `host.screen.snapshot(opts, cb)` takes the picture the call without one takes, off the event loop, and hands it to `cb` on a later tick, as every call on this page given a callback does ([With a callback](#with-a-callback)): at once; at a set time (`at`, [below](#taken-at-a-set-time)); or once part of the region has changed (`change`, [below](#waiting-for-the-picture-to-change)). The picture is taken on the `screen-capture` thread that also takes [`host.ocr.recognize`](./ocr.md#host-ocr-recognize)'s (see the top of this page), through the module's [source](#which-picture-a-read-sees).
 
-**The callback** runs exactly once, on the event loop, on the loop's next turn after the answer (every 15 ms): `cb(snap, nil, info)` with a Snapshot exactly like the one the call without a callback returns, or `cb(nil, reason, info)` when there is none (see [Failure reasons](#failure-reasons)) — unless the module is **disabled, reloaded, removed or [stopped by the guard](../module-runtime-and-lifecycle.md#limits)** first: then it is dropped, never called, as a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize)'s is, and the capture thread stops photographing for it. It runs with the priority of the dispatch that asked (see [`host.ocr.recognize`](./ocr.md#host-ocr-recognize), "Order and priority"). A callback that raises is reported like any other module callback error; a module whose VM runs out of memory while the answer — the Snapshot and `info` — is built in it is [stopped](../module-runtime-and-lifecycle.md#limits), as for a text read's reading. `info.time` and `info.inputEpoch` are the snapshot's own `time` and `inputEpoch`, absent when there is no snapshot. `info.waited` is the milliseconds from the call until the picture was taken — or until the request ended without one; `info.frames` is how many pictures were taken for it: 1 for a plain or timed one, one per round that came back for a change wait, 0 when none did — and 0 for a request answered because a newer one with its key replaced it, a limit ended or refused it, or the host's own code failed, whatever had been taken for it before. With `change`, `info` also has `changed`, `settled` and `rebased`. At exit, requests still waiting are dropped: no callback runs after the event loop has stopped. While the module is busy — one of its handlers [waits](../module-runtime-and-lifecycle.md#a-handler-waits) for a read or a `snapshot` — the answer waits behind that handler and the callback runs once the module is free, in the order its events came; whether a newer request with its `key` replaced it is decided then, so one made meanwhile by an event that ran before it — the waiting handler once it went on, say — answers it with the `key` reason below.
+**The callback** runs exactly once, on the event loop, on the loop's next turn after the answer (every 15 ms): `cb(snap, nil, info)` with a Snapshot exactly like the one the call without a callback returns, or `cb(nil, err, info)` when there is none ([Errors](#host-screen-snapshot-errors)) — unless the module is **disabled, reloaded, removed or [stopped by the guard](../module-runtime-and-lifecycle.md#limits)** first: then it is dropped, never called, as a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize)'s is, and the capture thread stops photographing for it. It runs with the priority of the dispatch that asked (see [`host.ocr.recognize`](./ocr.md#host-ocr-recognize), "Order and priority"). A callback that raises is reported like any other module callback error; a module whose VM runs out of memory while the answer — the Snapshot and `info` — is built in it is [stopped](../module-runtime-and-lifecycle.md#limits), as for a text read's reading. `info.time` and `info.inputEpoch` are the snapshot's own `time` and `inputEpoch`, absent when there is no snapshot. `info.waited` is the milliseconds from the call until the picture was taken — or until the request ended without one; `info.frames` is how many pictures were taken for it: 1 for a plain or timed one, one per round that came back for a change wait, 0 when none did — and 0 for a request answered because a newer one with its key replaced it, a limit ended or refused it, or the host's own code failed, whatever had been taken for it before. With `change`, `info` also has `changed`, `settled` and `rebased`. At exit, requests still waiting are dropped: no callback runs after the event loop has stopped. While the module is busy — one of its handlers [waits](../module-runtime-and-lifecycle.md#a-handler-waits) for a read or a `snapshot` — the answer waits behind that handler and the callback runs once the module is free, in the order its events came; whether a newer request with its `key` replaced it is decided then, so one made meanwhile by an event that ran before it — the waiting handler once it went on, say — answers it with the `replaced` error value below.
 
 **`key`.** A newer request of the same module VM with the same `key` answers every older one with that key `nil, err` (`replaced`, `a newer request with the same key replaced this one`) on the next tick — also one whose picture has been taken but not delivered yet, and one whose answer is in the same delivery as the callback that asked again. So of a burst of D-pad presses only the last one's answer is read — though a change wait's answer can show an earlier press's move ([Compare with what you last read](#waiting-for-the-picture-to-change)). Keys here are `snapshot`'s own: a `host.ocr.recognize`, a [`profile`](#host-screen-profile) or a [`pixels`](#host-screen-pixels) with the same key never replaces one, nor the other way round. Without a key a request is never replaced. [`host.screen.pending(key)`](#host-screen-pending) says whether one with a key is still out.
 
@@ -586,7 +651,7 @@ host.gamepad.on("down", function(e)
     pressedAt = host.now()
     host.screen.snapshot({ region = MENU, key = "press",
         change = { from = last, watch = { CURSOR_COLUMN }, timeout = 400, settle = 50 } },
-      function(snap, why, info)
+      function(snap, err, info)
         if not snap then return end   -- a newer press replaced this one, or nothing to read
         local again = snap.time + 150
         if keep(snap) then readMenu(snap) end
@@ -637,7 +702,7 @@ With `change`, the request photographs its region round after round and compares
 
 - **`settle = 0`** (the default): the first picture that has changed is the answer, `changed = true, settled = true` — even when the next one no longer shows the change, and even when it is the first frame of something still being drawn, such as a bubble that fades in.
 - **`settle` of some milliseconds**: the first picture that has changed begins a **still spell**, which lasts until a picture comes in which `minPixels` or more watched pixels differ by more than `tolerance` from the one that began it; that picture begins the next. Once a still spell has lasted `settle`, the newest picture is the answer, `changed = true, settled = true`: for a cursor that slides over several frames, the picture shows where it stopped, and for a bubble that fades in, the bubble fully drawn. A change that undoes itself is not a change: when a still spell comes to rest where the baseline was — a flash, a cursor that moved off and back — the wait looks on, so `changed` is never said of a picture that does not differ from the baseline. So a bubble is the answer once it has stood still for `settle`, and one that is gone again before that counts as a flash. For a help bubble that is up for a few hundred milliseconds, a `settle` of one or two of the game's frames (30–50 ms) answers it fully drawn; `settle = 0` answers the first picture that differs at all.
-- **At the `timeout`**, counted from the call (or from `at`), the newest picture is the answer: `changed` is `true` when a change was seen, was still settling and the newest picture still differs from the baseline; `settled` is `false`. When no round came back at all, `nil` and the last capture's reason, or `no picture was taken before the change wait's timeout`.
+- **At the `timeout`**, counted from the call (or from `at`), the newest picture is the answer: `changed` is `true` when a change was seen, was still settling and the newest picture still differs from the baseline; `settled` is `false`. When no round came back at all, `nil` and the last capture's error value, or `timeout`, `no picture was taken before the change wait's timeout`.
 
 The options, read at the call — each out of its range raises, naming it (`host.screen.snapshot: opts.change.settle must be a whole number from 0 to 500 (the timeout), got 600`):
 
@@ -672,7 +737,7 @@ local BUBBLE = { 400, 140, 544, 220 }
 host.gamepad.on("down", function(e)
     host.screen.snapshot({ region = BUBBLE, key = "bubble",
         change = { timeout = 600, settle = 40 } },
-      function(snap, why, info)
+      function(snap, err, info)
         if not snap then return end
         local p = info.changed and host.screen.profile({ axes = "rows", snapshot = snap })
         if p and p.rows.max[1] > 240 then   -- the bubble's white top edge
@@ -685,37 +750,162 @@ host.gamepad.on("down", function(e)
 end, { buttons = { "dpad_up", "dpad_down", "dpad_left", "dpad_right" } })
 ```
 
+### Returns {#host-screen-snapshot-returns}
+
+- A `Snapshot` — one value, and nothing after it: the handle above.
+- `nil, err` — there was nothing to keep this time; `err.code` is one of the codes under [Errors](#host-screen-snapshot-errors). Nothing is charged for it.
+- With a callback: nothing at once; `cb(snap, nil, info)` or `cb(nil, err, info)` on a later tick, `info` as [above](#snapshot-with-a-callback). A change wait that saw no change still answers a picture, the newest, with `info.changed` `false`; only one none of whose rounds came back answers `nil, err`.
+
+### Errors {#host-screen-snapshot-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says. What a window decides is answered without a capture, on the next turn of the event loop, as the picture would be.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `hidden` | both | A window region, or a window region of a change wait's `watch`, whose window's client area is empty: a minimised window, or one not laid out yet. | `the window's client area is empty (…x…)` | both |
+| `outside` | both | A window region lies outside the coordinate range, which a window table from `host.window` never does. | `the region lies outside the screen's coordinate range` | both |
+| `outside` | callback | A change wait whose `watch` and region, one of them resolved against a window at the call, miss each other, or leave it fewer watched pixels than its `minPixels`, so that no picture could count as changed. The same in corners only raises. | `a watch region does not overlap the region`, `at the window's current size the change wait watches … pixels, fewer than its minPixels …` | both |
+| `too_large` | both | A window region past 40,000,000 pixels at the window's current size. The same corners raise. | `at the window's current size the region is …x…, … pixels; the limit is 40000000` | both |
+| `too_large` | callback | A change wait's window region past 8,294,400 pixels at the window's current size. The same corners raise. | `at the window's current size the region is …x…, … pixels; the limit is 8294400` | both |
+| `too_large` | both | The [budget](#the-snapshot-handle) has no room, after this module's collector ran twice: this module's 128 MiB, or the application's 512 MiB, which other modules' snapshots count toward. Answered for corners too, since the moment decides it. For a window region the message begins `at the window's current size `, which is the leading `…`. | `…this module's snapshots would hold … MiB; the limit is 128 MiB per module VM (512 MiB in the whole application). Release the ones you no longer need with s:release()`, `…the application's snapshots would hold … MiB; the limit is 512 MiB in the whole application (128 MiB per module VM), and other modules' snapshots count toward it. Release the ones this module no longer needs with s:release()` | both |
+| `too_many` | both | 64 requests wait in the whole application, so this one is not taken; or this was the module's oldest of 16 when it asked for one more. A handler's own request is ended so only by one its module asks while it waits, which only an arbiter's `onActivate` or `onDeactivate` of the module can. | `too many snapshot requests waiting in the whole application (64); this one was not taken`, `too many snapshot requests waiting for this module (16); the oldest was ended` | both |
+| `too_many` | callback | A change wait: 16 change waits wait in the whole application, so this one is not started; or this was the module's oldest of 4 when it asked for one more. | `too many change waits in the whole application (16); this one was not started`, `too many change waits for this module (4); the oldest was ended` | both |
+| `replaced` | callback | With `opts.key`: the module asked again with the same key ([`key`](#snapshot-with-a-callback)). | `a newer request with the same key replaced this one` | both |
+| `timeout` | callback | A change wait none of whose rounds came back before its timeout. One whose captures failed answers the last capture's error instead. | `no picture was taken before the change wait's timeout` | both |
+| `cancelled` | both | The capture thread stopped the request, which no path of the host does. | `the request was cancelled` | both |
+| any of the [capture errors](#capture-errors) | both | The picture could not be taken. | `screen capture failed` and the others there | both, other |
+| any of the [duplication errors](#duplication-errors) | both | Only in a module that declares `[screen] fallback = "none"`, when desktop duplication could not answer. | `screen capture failed: desktop duplication could not answer — …` | Windows |
+
+**Raises** for a mistake in the call: `opts` that is not a table (`host.screen.snapshot: opts must be a table { region = … }, got nothing`); a key other than `region` — `key`, `at` and `change` are only taken with a callback (`host.screen.snapshot: opts.key is only taken with a callback (the second argument)`); a region missing or not exactly the Region form; corners covering more than 40,000,000 pixels (`host.screen.snapshot: the region is 10000x5000, 50000000 pixels; the limit is 40000000`), or 8,294,400 with `change`. With a callback, also: a `key` that is not a non-empty string; an `at` that is not a number, or more than 2000 ms after `host.now()`; anything in `change` [out of its range](#waiting-for-the-picture-to-change), a `from` that was released, a `watch` in corners that misses a region in corners, and a `minPixels` more than the wait watches when the region and every `watch` region are corners; a callback that is neither a function nor `nil`.
+
+**Raises where it cannot wait**: without a callback, inside a function that may not wait, whatever it was given; see [Where it waits](#where-it-waits).
+
 ### Windows {#host-screen-snapshot-windows}
 
 The capture is `profile`'s: through the standard path the fixed compositor frame (about 16.7 ms up to about 1028×666, 28 ms for the whole 1920×1080 screen), through desktop duplication 0.3–5 ms on an idle desktop, by size, plus any wait for duplication — at most 250 ms on the `screen-capture` thread, which a handler waits out (see [How long a read waits](#which-picture-a-read-sees)). Through duplication the snapshot is the most recently composed frame, which may predate the newest redraw of a window. Coordinates and pixels are device pixels; the part of a region that leaves every monitor is black. A snapshot holds `w * h * 4` bytes.
 
-With a callback each picture is taken so on the `screen-capture` thread: through the standard path the fixed compositor frame (about 16.7 ms up to about 1028×666, 28 ms for the whole 1920×1080 screen); through desktop duplication the most recently composed frame, 0.3–5 ms on an idle desktop, the thread waiting up to 250 ms for duplication as the image worker does (see [How long a read waits](#which-picture-a-read-sees)) and answering `nil` and the reason under `fallback = "none"` when it cannot. A change wait through the standard path therefore captures back to back, one compositor frame a round, for up to its timeout. Between rounds, and until an `at`, the thread sleeps, and Windows wakes it on its timer: a round or a timed picture can come up to one timer tick late (15.6 ms at Windows' default timer resolution). Through desktop duplication a round that finds no newly composed frame compares the frame it already holds. When duplication cannot answer a round and the module allows the fallback, the round's regions are read the standard way, planned as a standard round is — a region inside another's capture cut from it, unions of up to 2,000,000 pixels — one compositor frame per planned capture. Coordinates are device pixels; the part of a region that leaves every monitor is black.
+With a callback each picture is taken so on the `screen-capture` thread: through the standard path the fixed compositor frame (about 16.7 ms up to about 1028×666, 28 ms for the whole 1920×1080 screen); through desktop duplication the most recently composed frame, 0.3–5 ms on an idle desktop, the thread waiting up to 250 ms for duplication as the image worker does (see [How long a read waits](#which-picture-a-read-sees)) and answering `nil, err` under `fallback = "none"` when it cannot ([duplication errors](#duplication-errors)). A change wait through the standard path therefore captures back to back, one compositor frame a round, for up to its timeout. Between rounds, and until an `at`, the thread sleeps, and Windows wakes it on its timer: a round or a timed picture can come up to one timer tick late (15.6 ms at Windows' default timer resolution). Through desktop duplication a round that finds no newly composed frame compares the frame it already holds. When duplication cannot answer a round and the module allows the fallback, the round's regions are read the standard way, planned as a standard round is — a region inside another's capture cut from it, unions of up to 2,000,000 pixels — one compositor frame per planned capture. Coordinates are device pixels; the part of a region that leaves every monitor is black.
 
 ### macOS {#host-screen-snapshot-macos}
 
 The snapshot is taken at the display's own resolution and drawn down to one pixel per point, which is what every read of it reads: the downsampled values of a Retina display, so compare colours with a tolerance. The picture at the display's own resolution is kept beside them, so on a Retina display a snapshot holds up to about five times `w * h * 4` bytes, and is charged that. The part of a region off the desktop is black; a region wholly off it answers `nil, err` (`failed`, `screen capture failed`). Without the Screen Recording permission the capture does not fail: the snapshot is a picture of the wallpaper.
 
-With a callback each picture is taken so, on the `screen-capture` thread. A round made only of change waits does not feed the log's warning about a region that keeps coming back one flat colour, which every other round does. There is no desktop duplication. Regions whose centres lie on two displays never share a capture, since two displays can differ in scale. A picture from ScreenCaptureKit and one from the older Core Graphics functions are two ways of capturing, as the two Windows paths are: a wait whose rounds switch between them mid-wait takes the new picture as its baseline, `rebased = true`. Which way a round will be taken is not known at the call, so a `from` taken the other way is found out only at the first round. A change wait is charged 28 bytes a point at the call, so one over 4,793,490 points (2560 × 1873, say) raises for the budget even in a module that holds nothing else — or, as a window region, is answered — below the 8,294,400 its region may cover; and a plain or timed request, 20 bytes a point, one over 6,710,886 points. Without the Screen Recording permission every picture is of the wallpaper: a plain request answers one, and a change wait ends at its timeout with `changed = false`.
+With a callback each picture is taken so, on the `screen-capture` thread. A round made only of change waits does not feed the log's warning about a region that keeps coming back one flat colour, which every other round does. There is no desktop duplication. Regions whose centres lie on two displays never share a capture, since two displays can differ in scale. A picture from ScreenCaptureKit and one from the older Core Graphics functions are two ways of capturing, as the two Windows paths are: a wait whose rounds switch between them mid-wait takes the new picture as its baseline, `rebased = true`. Which way a round will be taken is not known at the call, so a `from` taken the other way is found out only at the first round. A change wait is charged 28 bytes a point at the call, so one over 4,793,490 points (2560 × 1873, say) is answered for the budget (`too_large`) even in a module that holds nothing else, below the 8,294,400 its region may cover; and a plain or timed request, 20 bytes a point, one over 6,710,886 points. Without the Screen Recording permission every picture is of the wallpaper: a plain request answers one, and a change wait ends at its timeout with `changed = false`.
+
+## Snapshot\:crop(region, cb?) {#snapshot-crop}
+
+**Signature:** `s:crop(region: Region) -> (Snapshot?, Error?)`; with a callback `s:crop(region: Region, cb: (crop: Snapshot?, err: Error?, info: Info) -> ()) -> ()`, where `Info = { time: number?, inputEpoch: number? }`
+
+A snapshot of its own of a part of the [snapshot](#host-screen-snapshot) `s`: those pixels copied, charged anew against the [budget](#the-snapshot-handle), with `s`'s `time`, `inputEpoch` and `via`. Keep the part a module goes on reading, and release the large picture it came from.
+
+**The region** is read strictly, as `snapshot` reads its own: corners `{ x1, y1, x2, y2 }` as whole numbers, or a window region resolved at the call ([Region form](#region-form)). It must lie wholly inside `s`. A region larger than `s` is simply not inside it: there is no size limit of its own.
+
+**Where it runs.** In a [handler](#where-it-waits) it waits while the image worker makes the copy, and only the module waits. Its charge is reserved at the call, and given back at once if the module is disabled meanwhile. Where it cannot wait it raises, as `Snapshot:crop`, and nothing is copied. **Given a callback**, `s:crop(region, function(crop, err, info) … end)`, the image worker makes the copy and nothing waits; `info` carries `s`'s `time` and `inputEpoch` ([With a callback](#with-a-callback)). A crop takes no key: it has no options. A crop with nothing to copy — no rectangle this time, a region not inside `s`, a region the budget has no room for — is answered at once wherever it is asked, and given a callback on the next tick.
+
+**Cost.** It touches no screen. It costs a copy of the part's pixels — on macOS also the matching part of the kept picture at the display's own resolution, drawn anew — and the collector step every charge makes (see the budget under [The Snapshot handle](#the-snapshot-handle)).
+
+```luau
+-- Keep the title strip of a large picture, and let the rest go. In a hotkey's handler, where the
+-- snapshot and the crop wait. Needs "screen", "hotkey" and "log" in the manifest.
+local title = nil
+host.hotkey.register("Ctrl+Alt+Shift+C", function()
+  local s, err = host.screen.snapshot({ region = { 0, 0, 1280, 720 } })   -- waits here
+  if not s then host.log.info("no picture: " .. err) return end
+  local strip, cropErr = s:crop({ 0, 0, 1280, 40 })   -- and here, for the image worker
+  s:release()
+  if not strip then host.log.info("not cut: " .. cropErr) return end
+  if title then title:release() end
+  title = strip
+  host.log.info("kept " .. tostring(title))   -- Snapshot(1280x40 at 0,0, gdi, 0.2 MiB, 3 ms old)
+end)
+```
+
+### Returns {#snapshot-crop-returns}
+
+- A `Snapshot` — one value, and nothing after it: the part's pixels, with `s`'s `time`, `inputEpoch` and `via`.
+- `nil, err` — nothing was copied, and nothing is charged; `err.code` is one of the codes under [Errors](#snapshot-crop-errors).
+- With a callback: nothing at once; `cb(crop, nil, info)` or `cb(nil, err, info)` on a later tick.
+
+### Errors {#snapshot-crop-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `hidden` | both | A window region, and the window's client area is empty: a minimised window, or one not laid out yet. Answered at once. | `the window's client area is empty (…x…)` | both |
+| `outside` | both | The region is not wholly inside `s`. Or a window region lies outside the coordinate range, which a window table from `host.window` never does. Answered at once. | `the region is not inside the snapshot`, `the region lies outside the screen's coordinate range` | both |
+| `too_large` | both | The [budget](#the-snapshot-handle) has no room for the copy: this module's 128 MiB, or the application's 512 MiB, which other modules' snapshots count toward. For a window region the message begins `at the window's current size `, which is the leading `…`. Answered at once. | `…this module's snapshots would hold … MiB; the limit is 128 MiB per module VM (512 MiB in the whole application). Release the ones you no longer need with s:release()`, `…the application's snapshots would hold … MiB; the limit is 512 MiB in the whole application (128 MiB per module VM), and other modules' snapshots count toward it. Release the ones this module no longer needs with s:release()` | both |
+| `too_many` | callback | The module had 64 of the image worker's calls with a callback waiting, and asked for one more: this was its oldest ([Image-worker errors](#image-worker-errors)). | `too many image searches waiting for this module (64); the oldest was ended` | both |
+| `failed` | both | The copy failed inside the host, or could not be handed to the image worker because the application is closing. | `internal error: the crop could not be made` | both |
+
+**Raises** for a mistake in the call: a `crop` not called on a Snapshot (`Snapshot:crop: call it on a Snapshot, s:crop(region), not on …`); a snapshot that was released (`Snapshot:crop: the snapshot was released`); a region missing or not exactly the Region form, read strictly; a callback that is neither a function nor `nil`.
+
+**Raises where it cannot wait**: without a callback, a crop with something to copy, inside a function that may not wait; see [Where it waits](#where-it-waits).
+
+### Windows {#snapshot-crop-windows}
+
+The copy is of the snapshot's device pixels, made on the image worker's matching pool below normal priority (see the top of this page). The crop holds `w * h * 4` bytes.
+
+### macOS {#snapshot-crop-macos}
+
+The copy is of the snapshot's pixels, one per point, and of the matching part of the picture at the display's own resolution the snapshot keeps, drawn anew. So on a Retina display a crop holds up to about five times `w * h * 4` bytes, and is charged that at the call, as a snapshot is.
+
+## Snapshot\:release() {#snapshot-release}
+
+**Signature:** `s:release() -> ()`
+
+Lets the pixels of the snapshot `s` go now, and gives their bytes back to the [budget](#the-snapshot-handle). A second call does nothing. The fields stay readable, and `s.released` is then `true`. Handing a released snapshot to a call, or cropping it, raises (`host.screen.pixel: opts.snapshot: the snapshot was released`). A read on the image worker that was given the snapshot keeps its pixels until it is answered, uncharged, so a module may release a snapshot as soon as it has handed it to every read.
+
+Without it the pixels go only when the collector finalises the handle. It runs on the event loop, at once, wherever it is called, and costs microseconds.
+
+```luau
+-- In a handler, where the snapshot waits. Needs "screen", "hotkey" and "log" in the manifest.
+host.hotkey.register("Ctrl+Alt+Shift+N", function()
+  local s = host.screen.snapshot({ region = { 96, 90, 544, 400 } })   -- waits here
+  if not s then return end
+  local lamp = host.screen.pixel(120, 140, { snapshot = s })   -- of the snapshot: at once
+  s:release()                       -- the pixels go back to the budget now
+  host.log.info(tostring(s) .. ", lamp " .. (lamp and lamp.hex or "?"))   -- Snapshot(released), lamp #…
+end)
+```
+
+### Returns {#snapshot-release-returns}
+
+Nothing.
+
+### Errors {#snapshot-release-errors}
+
+None. It never answers an error value.
+
+**Raises** only when it is not called on a Snapshot: `s.release()` without the colon, or on another value.
+
+### Windows {#snapshot-release-windows}
+
+The same on every platform: the bytes a snapshot holds go back to the module's and the application's budgets.
+
+### macOS {#snapshot-release-macos}
+
+The same on every platform. The picture at the display's own resolution the snapshot kept goes with it.
 
 ## Reading a snapshot {#reading-a-snapshot}
 
-A call given `{ snapshot = s }` reads the picture `s` holds instead of the screen. It captures nothing, touches no screen, never asks desktop duplication, and never makes the [first-read comparison](#which-picture-a-read-sees). What the call does with the picture — the matching, the reduction, the PNG — costs what it always costs, where it always runs: for `profile`, the cells calls, `template`, `crop`, the searches, `save` and `saveMarked` in a handler, on the image worker while the handler waits ([Where it waits](#where-it-waits)), and given a callback on the image worker while nothing waits ([With a callback](#with-a-callback)); where they cannot wait they raise, as without a snapshot. `pixel` and `pixels` of a snapshot are answered at once wherever they are called. Given a callback, every call below answers what the table says through it, `cb(value, reason, info)` on a later tick, `info` with the snapshot's `time` and `inputEpoch`.
+A call given `{ snapshot = s }` reads the picture `s` holds instead of the screen. It captures nothing, touches no screen, never asks desktop duplication, and never makes the [first-read comparison](#which-picture-a-read-sees). What the call does with the picture — the matching, the reduction, the PNG — costs what it always costs, where it always runs: for `profile`, the cells calls, `template`, `crop`, the searches, `save` and `saveMarked` in a handler, on the image worker while the handler waits ([Where it waits](#where-it-waits)), and given a callback on the image worker while nothing waits ([With a callback](#with-a-callback)); where they cannot wait they raise, as without a snapshot. `pixel` and `pixels` of a snapshot are answered at once wherever they are called. Given a callback, every call below answers what the table says through it, `cb(value, err, info)` on a later tick, `info` with the snapshot's `time` and `inputEpoch`.
 
 | Call | Given as | Rule | When the region or point misses |
 |---|---|---|---|
 | [`pixel`](#host-screen-pixel) | `pixel(x, y, { snapshot = s })`, `pixel(point, { snapshot = s })` | inside | `nil, err` (`outside`, `the point is not inside the snapshot`) |
 | [`pixels`](#host-screen-pixels) | `opts.snapshot` | inside, every point | `nil, err` (`outside`, `the point is not inside the snapshot`) |
 | [`profile`](#host-screen-profile) | `opts.snapshot` | cut; `x, y, w, h` are the part read | `nil, err` (`outside`, `the region does not overlap the snapshot`) |
-| [`imageSearch`](#host-screen-imagesearch), [`imageSearchAll`](#host-screen-imagesearchall) | `opts.snapshot` | cut | `nil, reason`; `{}, reason` |
-| [`imageSearchEach`](#host-screen-imagesearcheach) | `opts.snapshot` | cut; each `within` is cut to the part read | `cb(nil, reason, info)` on a later tick |
+| [`imageSearch`](#host-screen-imagesearch), [`imageSearchAll`](#host-screen-imagesearchall) | `opts.snapshot` | cut | `nil, err`; `{}, err` (`outside`, `the region does not overlap the snapshot`) |
+| [`imageSearchEach`](#host-screen-imagesearcheach) | `opts.snapshot` | cut; each `within` is cut to the part read | `cb(nil, err, info)` on a later tick (`outside`, `the region does not overlap the snapshot`) |
 | [`template`](#host-screen-template) | `{ capture = region, snapshot = s }` | inside | `nil, err` (`outside`, `the region is not inside the snapshot`) |
-| [`cells`](#host-screen-cells), [`matchCells`](#host-screen-matchcells) | `opts.snapshot` | inside | `nil, reason` |
+| [`cells`](#host-screen-cells), [`matchCells`](#host-screen-matchcells) | `opts.snapshot` | inside | `nil, err` (`outside`, `the region is not inside the snapshot`) |
 | [`save`](#host-screen-save), [`saveMarked`](#host-screen-savemarked) | `opts.snapshot` | cut; the PNG is the part read, and marks stay screen coordinates | `false, err` (`outside`, `the region does not overlap the snapshot`) |
-| `s:crop(region, cb?)` | — | inside | `nil, err` (`outside`, `the region is not inside the snapshot`) |
-| [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) | `opts.snapshot` | cut, to the part the recogniser can read; the reading's `x, y, w, h` are the part read | that region's reading is `"failed"`, `error = "the region does not overlap the snapshot"`; the call's other regions are read |
+| [`s:crop(region, cb?)`](#snapshot-crop) | — | inside | `nil, err` (`outside`, `the region is not inside the snapshot`) |
+| [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) | `opts.snapshot` | cut, to the part the recogniser can read; the reading's `x, y, w, h` are the part read | that region's reading is `"failed"`, its `error` an error value (`outside`, `the region does not overlap the snapshot`); the call's other regions are read |
 | [`snapshot` with a callback](#snapshot-with-a-callback) | `change.from` | the baseline of a change wait | a `from` that does not hold every watched region is replaced by the wait's first picture (`rebased`) |
 
-**Cut** reads the part of the region that lies inside the snapshot, and answers the reason when no part does. **Inside** needs the whole region or point inside the snapshot and answers the reason otherwise: a template or a grid of cells cut to fit would be a different template or grid.
+**Cut** reads the part of the region that lies inside the snapshot, and answers `outside` when no part does. **Inside** needs the whole region or point inside the snapshot and answers `outside` otherwise: a template or a grid of cells cut to fit would be a different template or grid.
 
 **Defaults.** A call that reads its region loosely — `profile`, the image searches and a `within`, `save`, `saveMarked`, `template`'s `capture` — takes a region left out as the whole snapshot, and a corner left out (or not a number) as the snapshot's edge, where without a snapshot they are the primary screen and its edges. The strictly read regions (the cells calls, `crop`) have no default, as without one.
 
@@ -760,12 +950,20 @@ Reading a snapshot is the same on every platform: its pixels are one per point, 
 
 **Signature:** `host.screen.size() -> { w: number, h: number }`
 
-Returns the primary screen dimensions in pixels as `{ w, h }`.
+Returns the primary screen dimensions in pixels as `{ w, h }`. It asks the system at every call, on the event loop, and costs microseconds.
 
 ```luau
 local s = host.screen.size()
 host.log.info("screen is " .. s.w .. "x" .. s.h)
 ```
+
+### Returns {#host-screen-size-returns}
+
+A new table `{ w, h }` at every call: the primary screen's width and height, in device pixels on Windows and in points on macOS. In the build for other systems, `{ w = 0, h = 0 }`.
+
+### Errors {#host-screen-size-errors}
+
+None. It never answers an error value. It never raises.
 
 ### Windows {#host-screen-size-windows}
 
@@ -785,9 +983,9 @@ Takes **one** capture of `opts.region` and reduces each of its columns and rows 
 
 `dark` is a luminance threshold, 0–255, default `128`; each axis's `dark` sequence counts the pixels of that column (or row) whose luminance is below it. For finding a **shape** it is the statistic that works where the other two do not: a mean over hundreds of rows dilutes a note-sized object to a couple of units, and a minimum saturates because a busy column already contains something black. A count is proportional to how much of the column the object covers — Melodyne finds its notes with `dark = 190`. A value outside 0–255 silently falls back to `128`, and a fraction is cut to the whole number below it.
 
-Index `1` is the left (or top) edge of the region, so a column index maps back as `x + i - 1`. `x`, `y`, `w`, `h` are the **requested** rectangle — for a window region, the screen rectangle it resolved to: nothing is clipped to the desktop, and a region that runs off the screen comes back with black in the part that is not there. `time` is [`host.now()`](./timer.md#host-now) when the picture was taken and `inputEpoch` [`host.inputEpoch()`](./timer.md#host-inputepoch) once it had been — when the `screen-capture` thread's capture came back; on a snapshot, the snapshot's own. The profile is one value, with nothing after it. Returns `nil` and an error value (see [Failure reasons](#failure-reasons)) when the region is empty (`the region is empty (0x20)`, `outside`), when a window region's window has an empty client area, when a window region is past the pixel limit at the window's current size, when the [snapshot budget](#host-screen-snapshot), which charges the picture while it is held, has no room for it — whatever form the region was given in — when the capture fails, or when the capture came back shorter than its own dimensions. Raises for an `opts.region` that is neither region form; for corners whose picture would be more than 40,000,000 pixels (`host.screen.profile: opts.region: the region is 10000x5000, 50000000 pixels; the limit is 40000000`) — in a handler and given a callback alike, before anything is captured; for an `axes` that is not exactly `"both"`, `"columns"` or `"rows"` — anything else is an error rather than a silent `"both"`; and for a `key` or an `at`, which only the [callback form](#profile-with-a-callback) takes. Any value of theirs but `nil` raises — `false` too — `key` asked about first, before anything is answered: `host.screen.profile: opts.key is only taken with a callback (the second argument)`, and for `at` alone `host.screen.profile: opts.at is only taken with a callback (the second argument)`.
+Index `1` is the left (or top) edge of the region, so a column index maps back as `x + i - 1`. `x`, `y`, `w`, `h` are the **requested** rectangle — for a window region, the screen rectangle it resolved to: nothing is clipped to the desktop, and a region that runs off the screen comes back with black in the part that is not there. `time` is [`host.now()`](./timer.md#host-now) when the picture was taken and `inputEpoch` [`host.inputEpoch()`](./timer.md#host-inputepoch) once it had been — when the `screen-capture` thread's capture came back; on a snapshot, the snapshot's own. It answers `nil` and an error value when there is nothing to profile this time: an empty region, a window with nothing to read, a limit, a budget with no room, or a capture that failed ([Returns](#host-screen-profile-returns), [Errors](#host-screen-profile-errors)). Corners past 40,000,000 pixels, a region in neither form and an `axes` it does not know raise, before anything is captured — and so does a `key` or an `at`, which only the [callback form](#profile-with-a-callback) takes.
 
-**In a [handler](#where-it-waits) it waits**: its picture is taken on the `screen-capture` thread as a plain [snapshot with a callback](#snapshot-with-a-callback) is — none for a snapshot — and reduced on the image worker, as [with a callback](#profile-with-a-callback), while only its module waits; the handler goes on with the profile, built on the event loop as it does. It is one of the module's snapshot requests while it waits, and its picture is charged from the call until the answer, as with a callback (**Limits and the budget**, below) — with 64 waiting in the whole application it answers `nil` and the reason. Where it cannot wait it raises, and nothing is captured or reduced ([Where it waits](#where-it-waits)). A region with nothing to read this time — a window region with no rectangle, an empty region, a region outside its snapshot — is answered at once wherever it is asked.
+**In a [handler](#where-it-waits) it waits**: its picture is taken on the `screen-capture` thread as a plain [snapshot with a callback](#snapshot-with-a-callback) is — none for a snapshot — and reduced on the image worker, as [with a callback](#profile-with-a-callback), while only its module waits; the handler goes on with the profile, built on the event loop as it does. It is one of the module's snapshot requests while it waits, and its picture is charged from the call until the answer, as with a callback (**Limits and the budget**, below) — with 64 waiting in the whole application it answers `nil, err` (`too_many`). Where it cannot wait it raises, and nothing is captured or reduced ([Where it waits](#where-it-waits)). A region with nothing to read this time — a window region with no rectangle, an empty region, a region outside its snapshot — is answered at once wherever it is asked.
 
 Use it to find something whose **position** you do not know: a vertical line is a dark column in a light band, an edge is where the mean steps, a shape's extent is where its run of changed columns begins and ends, and a differently coloured patch shows up in `r`/`g`/`b` while the luminance stays flat. For a feature much smaller than the region, prefer `min`/`max` over `mean`: a two-pixel dark line moves a column's minimum by everything and its mean by a little.
 
@@ -812,8 +1010,8 @@ host.hotkey.register("Ctrl+Alt+Shift+L", function()
     -- The same strip of a window, as fractions of its client area: follows the window.
     local w = host.window.active()
     if w then
-        local q, why = host.screen.profile({ region = { window = w, fraction = { 0, 0.9, 1, 1 } }, axes = "columns" })
-        if not q then host.log.info("not profiled: " .. why) end
+        local q, err = host.screen.profile({ region = { window = w, fraction = { 0, 0.9, 1, 1 } }, axes = "columns" })
+        if not q then host.log.info("not profiled: " .. err) end
     end
 end)
 ```
@@ -822,7 +1020,7 @@ end)
 
 Given a function as its second argument, the call returns at once — nothing — wherever it is made, never waits, and nothing on the event loop touches the screen or walks the pixels: the picture of `opts.region` is taken on the `screen-capture` thread as a plain [snapshot with a callback](#snapshot-with-a-callback) is, at once or at `at` (see the top of this page), through the module's [source](#which-picture-a-read-sees); with `opts.snapshot` nothing is captured. The reduction then runs on the image worker, and only the answer's Luau tables are built on the event loop, as the callback runs. Without a callback — `nil` as the second argument included — the call is the one above, which waits in a handler and where a `key` or an `at` raises, and nothing on this page about the callback applies. A poll profiles with a callback, so that it waits nowhere and its module's keys never wait for it. What every call given a callback shares is under [With a callback](#with-a-callback); what follows is `profile`'s own.
 
-**The callback** runs exactly once, on the event loop, on the loop's next turn after the image worker answered (every 15 ms), as a [handler](../module-runtime-and-lifecycle.md#handlers) of its module: at once while the module is free, after the events before it in its mailbox while it is busy. It gets `cb(profile, nil, info)`: the table the call without a callback returns for the same picture and options — the same `x`, `y`, `w`, `h`, axes and statistics, and its `time`, [`host.now()`](./timer.md#host-now) when the picture was taken, and `inputEpoch`, [`host.inputEpoch()`](./timer.md#host-inputepoch) once it had been taken; on a snapshot both are the snapshot's own (see **How old a picture is** under [Waiting for the picture to change](#waiting-for-the-picture-to-change)) — and `info` with the same two. When there is nothing to profile it gets `cb(nil, err, info)`, `info` empty: every reason the call without a callback answers — on the next tick, for one known at the call — and those of the [snapshot requests](#failure-reasons) but the change wait's, and `internal error: the profile could not be made`. It runs with the priority of the dispatch that asked (see [`host.ocr.recognize`](./ocr.md#host-ocr-recognize), "Order and priority"). It is **dropped** — never called — when the module is disabled, reloaded, removed or [stopped by the guard](../module-runtime-and-lifecycle.md#limits) first, wherever the request is then: its picture is no longer taken, and the image worker skips its reduction if it has not begun it. At exit, requests still waiting are dropped. A callback that raises is reported like any other module callback error; a module whose VM runs out of memory while the answer's tables are built in it is [stopped](../module-runtime-and-lifecycle.md#limits), as for a text read's reading.
+**The callback** runs exactly once, on the event loop, on the loop's next turn after the image worker answered (every 15 ms), as a [handler](../module-runtime-and-lifecycle.md#handlers) of its module: at once while the module is free, after the events before it in its mailbox while it is busy. It gets `cb(profile, nil, info)`: the table the call without a callback returns for the same picture and options — the same `x`, `y`, `w`, `h`, axes and statistics, and its `time`, [`host.now()`](./timer.md#host-now) when the picture was taken, and `inputEpoch`, [`host.inputEpoch()`](./timer.md#host-inputepoch) once it had been taken; on a snapshot both are the snapshot's own (see **How old a picture is** under [Waiting for the picture to change](#waiting-for-the-picture-to-change)) — and `info` with the same two. When there is nothing to profile it gets `cb(nil, err, info)`, `info` empty: every error value the call without a callback answers — on the next tick, for one known at the call — and `replaced` for its `key` ([Errors](#host-screen-profile-errors)). It runs with the priority of the dispatch that asked (see [`host.ocr.recognize`](./ocr.md#host-ocr-recognize), "Order and priority"). It is **dropped** — never called — when the module is disabled, reloaded, removed or [stopped by the guard](../module-runtime-and-lifecycle.md#limits) first, wherever the request is then: its picture is no longer taken, and the image worker skips its reduction if it has not begun it. At exit, requests still waiting are dropped. A callback that raises is reported like any other module callback error; a module whose VM runs out of memory while the answer's tables are built in it is [stopped](../module-runtime-and-lifecycle.md#limits), as for a text read's reading.
 
 **`key`.** A newer `profile` with a callback of the same module VM with the same `key` answers every older one with that key `nil, err` (`replaced`, `a newer request with the same key replaced this one`) on the next tick — also one whose picture is taken and is being reduced, which the image worker then skips if it has not begun it, and one whose answer waits in the module's mailbox. Keys here are `profile`'s own: a [`snapshot`](#snapshot-with-a-callback) or a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) with the same key never replaces one, nor the other way round. [`host.screen.pending(key)`](#host-screen-pending) is `true` while one is out. Without a key a request is never replaced.
 
@@ -830,7 +1028,7 @@ Given a function as its second argument, the call returns at once — nothing �
 
 **On a snapshot** the region is cut to the snapshot at the call, as without a callback, and the request holds the snapshot's pixels until its reduction has run: the module may release the snapshot at once, and the profile is still of it. The request charges nothing for them: they are the snapshot's charge while the module holds it, and once it is released the request holds them uncharged (see **Lifetime** under [`snapshot`](#host-screen-snapshot)).
 
-**Limits and the budget.** From the call until the image worker has answered it — while its picture is taken and while it is reduced — a profile with a callback, and one a handler waits for, is one of its module's [snapshot requests](#snapshot-with-a-callback): 16 per module VM and 64 in the application, the oldest ended or the newest refused with the reasons listed there. Its picture is charged against the [snapshot budget](#host-screen-snapshot) as a plain snapshot request's is — `w * h * 4` bytes, five times that on macOS, settled to what the picture holds — from the call until its callback is called, a wait in the module's mailbox included, and given back at once when the request is ended or dropped; the host steps no collector for it, since no handle is left behind for one to find. A profile of a snapshot is charged nothing.
+**Limits and the budget.** From the call until the image worker has answered it — while its picture is taken and while it is reduced — a profile with a callback, and one a handler waits for, is one of its module's [snapshot requests](#snapshot-with-a-callback): 16 per module VM and 64 in the application, the oldest ended or the newest refused with the error values listed there. Its picture is charged against the [snapshot budget](#host-screen-snapshot) as a plain snapshot request's is — `w * h * 4` bytes, five times that on macOS, settled to what the picture holds — from the call until its callback is called, a wait in the module's mailbox included, and given back at once when the request is ended or dropped; the host steps no collector for it, since no handle is left behind for one to find. A profile of a snapshot is charged nothing.
 
 **What raises**, at the call: everything that raises without a callback, a `key` and an `at` aside, and a second argument that is neither a function nor `nil` (`host.screen.profile: the callback (second argument) must be a function, got 5`), a `key` that is not a non-empty string (`host.screen.profile: opts.key must be a non-empty string, got 5`), an `at` that is not a number or is more than 2000 ms after `host.now()`, and an `at` beside `snapshot` (`host.screen.profile: opts.at belongs with a region to capture; the snapshot's picture is taken already`). A window region that is past the pixel limit at the window's current size or whose client area is empty, a region the budget has no room for, and an empty region, are answered `nil, err` on the next tick instead, without a capture.
 
@@ -844,9 +1042,9 @@ The same strip read twice a second off the event loop, one request out at a time
 local STRIP = { 100, 200, 500, 220 }
 host.timer.every(500, function()
     if host.screen.pending("strip") then return end   -- the last one has not answered yet
-    host.screen.profile({ region = STRIP, axes = "columns", key = "strip" }, function(p, why)
+    host.screen.profile({ region = STRIP, axes = "columns", key = "strip" }, function(p, err)
         if not p then
-            host.log.info("not profiled: " .. why)
+            host.log.info("not profiled: " .. err)
             return
         end
         for i, m in ipairs(p.columns.min) do
@@ -857,6 +1055,35 @@ host.timer.every(500, function()
     end)
 end)
 ```
+
+### Returns {#host-screen-profile-returns}
+
+- A `Profile`, `{ x, y, w, h, columns?, rows?, time, inputEpoch }` — one value, and nothing after it. `columns` and `rows` are there as `axes` asked for them.
+- `nil, err` — there was nothing to profile this time; `err.code` is one of the codes under [Errors](#host-screen-profile-errors). Nothing is charged for it.
+- With a callback: nothing at once; `cb(profile, nil, info)` or `cb(nil, err, info)` on a later tick.
+
+### Errors {#host-screen-profile-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says. What the region decides at the call — an empty region, a window with nothing to read, a region outside its snapshot — is answered at once, wherever the call is made; given a callback, on the next tick.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `hidden` | both | A window region, and the window's client area is empty: a minimised window, or one not laid out yet. | `the window's client area is empty (…x…)` | both |
+| `outside` | both | Corners with no width or no height, turned around or equal, which it has always refused before capturing; a side below none counts as none. Or a window region lies outside the coordinate range, which a window table from `host.window` never does. | `the region is empty (…x…)`, `the region lies outside the screen's coordinate range` | both |
+| any of the [snapshot-source errors](#snapshot-source-errors) | both | With `opts.snapshot`, no part of the region is inside the snapshot: `outside`, `the region does not overlap the snapshot`. | `the region does not overlap the snapshot` | both |
+| `too_large` | both | A window region past 40,000,000 pixels at the window's current size. The same corners raise. | `at the window's current size the region is …x…, … pixels; the limit is 40000000` | both |
+| `too_large` | both | The [snapshot budget](#the-snapshot-handle), which charges the picture while it is held, has no room for it: this module's 128 MiB, or the application's 512 MiB, which other modules' snapshots count toward. For corners too. For a window region the message begins `at the window's current size `, which is the leading `…`. A profile of a snapshot is charged nothing. | `…this module's snapshots would hold … MiB; the limit is 128 MiB per module VM (512 MiB in the whole application). Release the ones you no longer need with s:release()`, `…the application's snapshots would hold … MiB; the limit is 512 MiB in the whole application (128 MiB per module VM), and other modules' snapshots count toward it. Release the ones this module no longer needs with s:release()` | both |
+| `too_many` | both | 64 requests wait in the whole application, so this one is not taken; or this was the module's oldest of 16 when it asked for one more ([Request-limit errors](#request-limit-errors)). | `too many snapshot requests waiting in the whole application (64); this one was not taken`, `too many snapshot requests waiting for this module (16); the oldest was ended` | both |
+| `replaced` | callback | With `opts.key`: the module asked again with the same key. | `a newer request with the same key replaced this one` | both |
+| `cancelled` | both | The capture thread stopped the request, which no path of the host does. | `the request was cancelled` | both |
+| `failed` | both | The reduction failed inside the host, or the picture could not be handed to the image worker because the application is closing. The worker goes on. | `internal error: the profile could not be made` | both |
+| `failed` | both | The capture came back shorter than its own size, which a capture should never do. | `the capture came back shorter than its own size` | both |
+| any of the [capture errors](#capture-errors) | both | The picture could not be taken. | `screen capture failed` and the others there | both, other |
+| any of the [duplication errors](#duplication-errors) | both | Only in a module that declares `[screen] fallback = "none"`, when desktop duplication could not answer. | `screen capture failed: desktop duplication could not answer — …` | Windows |
+
+**Raises** for a mistake in the call: `opts` that is neither a table nor `nil` (`host.screen.profile: opts must be a table, got …`); an `opts.region` that is neither region form; corners whose picture would be more than 40,000,000 pixels (`host.screen.profile: opts.region: the region is 10000x5000, 50000000 pixels; the limit is 40000000`); an `axes` that is not exactly `"both"`, `"columns"` or `"rows"`; an `opts.snapshot` that is not a Snapshot or was released. Without a callback, a `key` or an `at` of any value but `nil`, `key` asked about first (`host.screen.profile: opts.key is only taken with a callback (the second argument)`, and for `at` alone `host.screen.profile: opts.at is only taken with a callback (the second argument)`). With a callback, a `key` that is not a non-empty string, an `at` that is not a number or is more than 2000 ms after `host.now()`, an `at` beside `snapshot`, and a callback that is neither a function nor `nil`. A `dark` outside 0–255 does not raise: it is read as `128`.
+
+**Raises where it cannot wait**: without a callback, inside a function that may not wait, unless there is nothing to profile this time; see [Where it waits](#where-it-waits).
 
 ### Windows {#host-screen-profile-windows}
 
@@ -874,7 +1101,6 @@ Whether a request of this module with `key` is still out: a call on this page gi
 
 - `true` from the call that asked until its callback runs: while its picture is taken, while the image worker works on it, while an answer decided without a picture — a newer request with the key, a limit, a window region with nothing to read — waits for the next tick, and while the answer waits in the module's mailbox behind the module's other events. `false` inside the request's own callback, unless another request with the key is out, and after the module was disabled, reloaded, removed or stopped by the guard, which drops its requests.
 - Asks about every call at once: a `snapshot`, a `profile` and an `imageSearch` with the same key all count, though none replaces another. Asks about the module VM's own requests only: another module's with the same key are not counted. A text read's key is [`host.ocr.pending`](./ocr.md#host-ocr-pending)'s.
-- Raises when `key` is not a non-empty string: `host.screen.pending: the key must be a non-empty string, got nothing`, and `host.screen.pending: the key is empty`.
 - Costs a look through the module's requests on the event loop, microseconds — the image worker's up to 64 of them too; it captures nothing.
 
 It is "one request at a time" without a flag: a flag set before a request stays set when a disable drops the request and its callback never comes, while a dropped request is simply not pending. A handler that waits — for a [text read](./ocr.md#where-it-waits) — until `pending(key)` turns `false` while the answer is behind it in its own mailbox waits for good.
@@ -884,9 +1110,9 @@ It is "one request at a time" without a flag: a flag set before a request stays 
 local MENU = { 96, 120, 544, 400 }
 host.timer.every(200, function()
     if host.screen.pending("menu") then return end   -- the last picture has not been answered yet
-    host.screen.snapshot({ region = MENU, key = "menu" }, function(snap, why)
+    host.screen.snapshot({ region = MENU, key = "menu" }, function(snap, err)
         if not snap then
-            host.log.info("no picture: " .. why)
+            host.log.info("no picture: " .. err)
             return
         end
         local px = host.screen.pixels({ { 120, 140 } }, { snapshot = snap })
@@ -895,6 +1121,16 @@ host.timer.every(200, function()
     end)
 end)
 ```
+
+### Returns {#host-screen-pending-returns}
+
+A boolean: `true` while a request of this module VM with `key` is out, as above, and `false` otherwise.
+
+### Errors {#host-screen-pending-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `key` that is not a string (`host.screen.pending: the key must be a non-empty string, got nothing`), or is empty (`host.screen.pending: the key is empty`).
 
 ### Windows {#host-screen-pending-windows}
 
@@ -912,9 +1148,9 @@ Builds a template in memory, for every search below to take wherever it takes a 
 
 - **`rgba`** with `w` and `h`: `w * h * 4` bytes, row-major from the top-left, in R, G, B, A order. As in a PNG, **alpha 0 is a wildcard** and any other alpha is compared in full.
 - **`rgb`** with `w` and `h`: `w * h * 3` bytes; every pixel is compared.
-- **`capture`**: the given [region](#region-form) of the screen — corners, or a window region resolved at the call — captured now: in a [handler](#where-it-waits) on the image worker, which the handler waits for while only its module waits, and given a callback there too while nothing waits; where it cannot wait it raises. Every pixel is compared (alpha is forced opaque). Returns **`nil` and an error value** (see [Failure reasons](#failure-reasons)) when the capture fails, and when a window region's window has nothing to capture this time: an empty client area, or one so large that the region is past the size limit below. Those are the runtime conditions rather than mistakes, so the ones that do not raise; a `capture` table that is neither region form raises.
+- **`capture`**: the given [region](#region-form) of the screen — corners, or a window region resolved at the call — captured now: in a [handler](#where-it-waits) on the image worker, which the handler waits for while only its module waits, and given a callback there too while nothing waits; where it cannot wait it raises. Every pixel is compared (alpha is forced opaque). It answers **`nil` and an error value** when the capture fails, and when a window region's window has nothing to capture this time: an empty client area, or one so large that the region is past the size limit below ([Errors](#host-screen-template-errors)). Those are the runtime conditions rather than mistakes, so they do not raise; a `capture` table that is neither region form raises.
 - **`capture` with `snapshot = s`**: the region is cut out of that [snapshot](#reading-a-snapshot) instead, and nothing is captured — in a handler on the image worker, as a capture is. It must lie wholly inside the snapshot — a template cut from part of the region would be a different template — or the call returns `nil, err` (`outside`, `the region is not inside the snapshot`) at once, wherever it is made, and the log says nothing; a corner left out is the snapshot's edge. `snapshot` beside anything but `capture` raises (`host.screen.template: snapshot belongs with capture: …`), as does one that is not a Snapshot or was released.
-- **`file`**: a PNG — the one image format the host is built with — resolved exactly as a path given to a search is (see [the path rule](./index.md#paths)). Its header is read at the call, for `w` and `h`: a file inside the module's package that is not there, or not a PNG, raises `cannot open template '…': …` there; one outside the package is answered `nil, err` instead — `not_found`, `invalid` or `failed` ([Failure reasons](#failure-reasons)), since the module's own package is what its author ships. Its pixels are decoded on the image worker, through the cache every search's paths share, and the handle shares that decode. The handle is a **snapshot**: it keeps that decode for as long as it lives, however many other paths pass through the cache, and a re-captured PNG is picked up live only by a search that is given the path. A file whose header reads and whose pixels do not decode, or that is gone by the time the picture is made, makes every search given the handle answer `nil` and `cannot open template '…': …` ([Failure reasons](#failure-reasons)). That is not kept: each such search tries the file again, so a file that was half written, or held by another program, at that moment gives the handle its picture once it can be read — and from then on the handle keeps it.
+- **`file`**: a PNG — the one image format the host is built with — resolved exactly as a path given to a search is (see [the path rule](./index.md#paths)). Its header is read at the call, for `w` and `h`: a file inside the module's package that is not there, or not a PNG, raises `cannot open template '…': …` there; one outside the package is answered `nil, err` instead — `not_found`, `invalid` or `failed` ([Errors](#host-screen-template-errors)), since the module's own package is what its author ships. Its pixels are decoded on the image worker, through the cache every search's paths share, and the handle shares that decode. The handle is a **snapshot**: it keeps that decode for as long as it lives, however many other paths pass through the cache, and a re-captured PNG is picked up live only by a search that is given the path. A file whose header reads and whose pixels do not decode, or that is gone by the time the picture is made, makes every search given the handle answer `nil, err` — `not_found`, `invalid` or `failed`, `cannot open template '…': …` ([`imageSearch`'s errors](#host-screen-imagesearch-errors)). That is not kept: each such search tries the file again, so a file that was half written, or held by another program, at that moment gives the handle its picture once it can be read — and from then on the handle keeps it.
 
 **Bytes and a file are answered at once, their picture made afterwards.** The call checks what it can without converting or decoding anything — the sizes and the byte count, or the file's header — and returns the handle; its picture is made on the image worker: the bytes converted to the matcher's RGBA, or the PNG decoded, and the pixels a search compares counted. That is queued as the handle is made, ahead of any search that uses it, and a search that needs the picture before then makes it itself, so no search ever sees a template half made. Until then `count` is `nil` and `tostring(t)` says `preparing` — `Template(pack 10x36, preparing)`; after, `Template(pack 10x36, 360 compared)`, or, once the image worker or a search has tried a file that cannot be opened or whose pixels do not decode, `Template(x.png 10x36, cannot be used: cannot open template '…': …)` until a search that tries it again can. `w` and `h` are known from the call: the bytes' own, or the header's, then the decoded picture's. A `capture` is made a template before the handle is answered, its `count` known at once.
 
@@ -922,7 +1158,7 @@ Bytes are a Luau `string` or a `buffer`, copied once. A handle built from bytes 
 
 A handle is the one value returned, with nothing after it. A template belongs to the module VM that built it, like any Luau value. It cannot be passed through a legacy data export or stored in `host.settings`. One VM's handles built from bytes or a capture may hold **32 MiB** between them; over that, the collector is run and, if they still do not fit, the call answers `nil, err` (`too_large`, `this module's templates would hold … MiB; the limit is 32 MiB per module VM. Build templates once, when the module loads, rather than on every poll.`) — whatever the source, since what the module holds now decides it. Every such handle is held and charged as RGBA — 4 bytes a pixel, an `rgb` one included — plus a fixed amount per handle (the structure and 48 bytes of match order), so an RGB pack costs about four thirds of its own size. The budget is per VM: a `code_module` runtime that builds a pack while it is evaluated inside each game module's VM pays for it once per VM. `file` handles cost nothing against it. The budget is charged at the call, from `w` and `h`, before the picture is made. Build templates once, not on every poll: one from bytes or a file when the module loads, a `capture` once what it learns is on screen, in a handler or with a callback (see Windows below for a module that reads through desktop duplication). A template from bytes or a file never waits, wherever it is made.
 
-**Given a callback** — `template(spec, function(t, why, info) … end)` — the call waits nowhere: a `capture` is made on the image worker, and its handle, or `nil` and the error value, is handed to the callback on a later tick, `info` with the moment of its picture (a snapshot's own when cut from one); any other spec is answered on the next tick, `info` empty ([With a callback](#with-a-callback)). The spec's `key` is the request's key; the call without a callback raises for one (`host.screen.template: key is only taken with a callback (the second argument)`).
+**Given a callback** — `template(spec, function(t, err, info) … end)` — the call waits nowhere: a `capture` is made on the image worker, and its handle, or `nil` and the error value, is handed to the callback on a later tick, `info` with the moment of its picture (a snapshot's own when cut from one); any other spec is answered on the next tick, `info` empty ([With a callback](#with-a-callback)). The spec's `key` is the request's key; the call without a callback raises for one (`host.screen.template: key is only taken with a callback (the second argument)`).
 
 **Cost.** On the event loop: for bytes, the checks and one copy of the bytes out of the VM; for a file, the path resolved and its header read — the file opened and its first few kilobytes read, nothing decoded. On the image worker: the conversion of bytes, about one pass over the pixels plus the count, and a PNG decode, which grows with the file (a 1209x987 PNG is the largest the repository ships); both happen once per handle, and a PNG once per path until the file changes. A `capture` costs its capture as below, on the image worker in a handler and given a callback.
 
@@ -949,12 +1185,12 @@ if first then host.log.info(tostring(T[first.name])) end
 local marker = nil
 local function learnedMarker()
   if marker == nil then
-    local why
-    marker, why = host.screen.template({ name = "marker", capture = { 120, 80, 132, 92 } })   -- waits here
+    local err
+    marker, err = host.screen.template({ name = "marker", capture = { 120, 80, 132, 92 } })   -- waits here
     if marker then
       host.log.info("learned " .. tostring(marker))   -- Template(marker 12x12, 144 compared)
     else
-      host.log.info("marker not learned yet: " .. why)
+      host.log.info("marker not learned yet: " .. err)
     end
   end
   return marker
@@ -967,9 +1203,40 @@ host.hotkey.register("Ctrl+Alt+Shift+K", function()
 end)
 ```
 
+### Returns {#host-screen-template-returns}
+
+- A `Template` — one value, and nothing after it. From bytes or a file it comes at once, its picture still to be made: `count` is `nil` until it is, and a file whose picture cannot be made then is answered by the searches given the handle, not here.
+- `nil, err` — no template this time; `err.code` is one of the codes under [Errors](#host-screen-template-errors). Nothing is charged for it.
+- With a callback: nothing at once; `cb(template, nil, info)` or `cb(nil, err, info)` on a later tick — a `capture`'s once the image worker made it, any other on the next tick.
+
+### Errors {#host-screen-template-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `hidden` | both | A `capture` given as a window region, and the window's client area is empty: a minimised window, or one not laid out yet. Answered at once. | `the window's client area is empty (…x…)` | both |
+| `outside` | both | A `capture` given as a window region lies outside the coordinate range, which a window table from `host.window` never does. Answered at once. | `the region lies outside the screen's coordinate range` | both |
+| any of the [snapshot-source errors](#snapshot-source-errors) | both | A `capture` with `snapshot = s` that is not wholly inside `s`: `outside`, `the region is not inside the snapshot`. Answered at once, and the log says nothing. | `the region is not inside the snapshot` | both |
+| `too_large` | both | A `capture` given as a window region past a template's size limit at the window's current size: a side past 4096, or more than 1,048,576 pixels. The same corners raise. | `at the window's current size …x… is too large; no side may exceed 4096`, `at the window's current size …x… is … pixels; the limit is 1048576` | both |
+| `too_large` | both | The module's templates from bytes or a capture would hold more than 32 MiB, after its collector ran; whatever the source, since what the module holds now decides it. For a `capture` given as a window region the message begins `at the window's current size `, which is the leading `…`. | `…this module's templates would hold … MiB; the limit is 32 MiB per module VM. Build templates once, when the module loads, rather than on every poll.` | both |
+| `not_found` | both | A `file` outside the module's package that is not there. Inside the package it raises instead. | `cannot open template '…': …` | both |
+| `invalid` | both | A `file` outside the module's package whose header is not a PNG's. | `cannot open template '…': …` | both |
+| `failed` | both | A `file` outside the module's package that could not be read: held by another program, or no right to read it. | `cannot open template '…': …` | both |
+| `failed` | both | A `capture` came back shorter than its own size, which a capture should never do. | `the capture came back shorter than its own size` | both |
+| `failed` | both | A `capture` failed to be made a template inside the host, or could not be handed to the image worker because the application is closing. | `internal error: the template could not be made` | both |
+| `too_many` | callback | A `capture` given a callback: the module had 64 of the image worker's calls with a callback waiting, and asked for one more, and this was its oldest ([Image-worker errors](#image-worker-errors)). | `too many image searches waiting for this module (64); the oldest was ended` | both |
+| `replaced` | callback | With the spec's `key`: the module asked again with the same key. | `a newer request with the same key replaced this one` | both |
+| any of the [capture errors](#capture-errors) | both | A `capture` whose picture could not be taken. | `screen capture failed` and the others there | both, other |
+| any of the [duplication errors](#duplication-errors) | both | A `capture`, only in a module that declares `[screen] fallback = "none"`, when desktop duplication could not answer. | `screen capture failed: desktop duplication could not answer — …` | Windows |
+
+**Raises** for a mistake in the call: a spec that is not a table; a field this version does not know, or a field name that is not a string; a `name` that is not a string, or longer than 64 characters; two sources or none; `rgba` or `rgb` without `w` and `h`, a side outside 1–4096, more than 1,048,576 pixels, a wrong byte count (`rgba is 1436 bytes; 10x36 RGBA needs 1440`), or bytes that are neither a string nor a buffer; `w` or `h` given to a `capture` or a `file`; a `capture` that is not a table, or neither region form, or given as corners past the size limit or empty; `snapshot` beside anything but `capture` (`host.screen.template: snapshot belongs with capture: …`), or one that is not a Snapshot or was released; a `file` that is not a string, or a file inside the module's package that is not there or not a PNG (`cannot open template '…': …`); a `key` without a callback (`host.screen.template: key is only taken with a callback (the second argument)`), or one that is not a non-empty string; a callback that is neither a function nor `nil`.
+
+**Raises where it cannot wait**: without a callback, a `capture` with something to capture, inside a function that may not wait; see [Where it waits](#where-it-waits). Bytes and a file never wait.
+
 ### Windows {#host-screen-template-windows}
 
-Sizes and coordinates are device pixels (see [`host.screen.size`](#host-screen-size)). A `capture` is one screen capture — through the standard path measured at a fixed ~16.7 ms whatever the region's size — on the image worker in a handler, which the module waits for along with the batch ahead of it there, and given a callback; so learn a captured template once, not on a poll. Without a `snapshot` it is always a live read of the screen, never an earlier frame; with one it is that snapshot's picture, and costs a copy of the region's pixels. It reads through the module's [source](#which-picture-a-read-sees) like every other read, and in a module that declares `capture = "duplication"` that alone does not make it the picture the module's searches will see: a `capture` made before duplication has opened — one made at load, or just after the module's window came forward — may be read the standard way, or return `nil` and the reason under `fallback = "none"`, when the opening takes longer than the read waits for it, and the template keeps whichever picture it got for as long as the module keeps it. Under `fallback = "none"` a `pixel` that returned a colour was answered through duplication, so such a module learns its captured templates after one and asks again later when it gets `nil`; under the default fallback nothing tells a module which picture a read got. A game that is not DPI-aware is bitmap-stretched by the desktop compositor at any scaling other than 100% — Microsoft's own documentation says such applications "appear blurry" — so a template made at one scaling setting will not match pixel for pixel at another: give the search a `tolerance`, and one `scales` factor computed from the window's actual size rather than a ladder of guesses.
+Sizes and coordinates are device pixels (see [`host.screen.size`](#host-screen-size)). A `capture` is one screen capture — through the standard path measured at a fixed ~16.7 ms whatever the region's size — on the image worker in a handler, which the module waits for along with the batch ahead of it there, and given a callback; so learn a captured template once, not on a poll. Without a `snapshot` it is always a live read of the screen, never an earlier frame; with one it is that snapshot's picture, and costs a copy of the region's pixels. It reads through the module's [source](#which-picture-a-read-sees) like every other read, and in a module that declares `capture = "duplication"` that alone does not make it the picture the module's searches will see: a `capture` made before duplication has opened — one made at load, or just after the module's window came forward — may be read the standard way, or answer `nil, err` under `fallback = "none"`, when the opening takes longer than the read waits for it, and the template keeps whichever picture it got for as long as the module keeps it. Under `fallback = "none"` a `pixel` that returned a colour was answered through duplication, so such a module learns its captured templates after one and asks again later when it gets `nil`; under the default fallback nothing tells a module which picture a read got. A game that is not DPI-aware is bitmap-stretched by the desktop compositor at any scaling other than 100% — Microsoft's own documentation says such applications "appear blurry" — so a template made at one scaling setting will not match pixel for pixel at another: give the search a `tolerance`, and one `scales` factor computed from the window's actual size rather than a ladder of guesses.
 
 A template from bytes or a file is made on the image worker below normal priority, as its matching is (see the top of this page): on a busy machine its picture, and with it its `count`, comes later, and the first search that uses it makes it itself.
 
@@ -983,9 +1250,9 @@ Captures are in **points** (see [`host.screen.size`](#host-screen-size)), so a t
 
 **Signature:** `host.screen.imageSearch(template: string | Template | {string | Template}, opts: { region: Region?, tolerance: number?, scales: {number}?, snapshot: Snapshot? }?) -> (Hit?, Error?)` where `Hit = { x: number, y: number, w: number, h: number, n: number, name: string? }`; with a callback `host.screen.imageSearch(template, opts: { region: Region?, tolerance: number?, scales: {number}?, snapshot: Snapshot?, key: string? }?, cb: (hit: Hit?, err: Error?, info: Info) -> ()) -> ()`, where `Info = { time: number?, inputEpoch: number? }`
 
-Searches the screen for the first occurrence of `template` — an image path, a [`Template`](#host-screen-template), or a list of them — and returns its match rectangle in **screen pixels**: `x, y` is the top-left of the match and `w, h` the matched size (the template's own, or a scaled one — see `scales`). `n` is the index of the template that matched in a list, and `1` for a single template. `name` is the template's name, or the path exactly as you wrote it. Returns `nil` alone if it looked and did not find the template, and `nil` and an error value when it could not look: the region could not be captured, or a window region's window has an empty client area (see [Failure reasons](#failure-reasons)). A hit is one value, with nothing after it. The search runs top to bottom, then left to right, and the first position that matches wins; there is no score.
+Searches the screen for the first occurrence of `template` — an image path, a [`Template`](#host-screen-template), or a list of them — and returns its match rectangle in **screen pixels**: `x, y` is the top-left of the match and `w, h` the matched size (the template's own, or a scaled one — see `scales`). `n` is the index of the template that matched in a list, and `1` for a single template. `name` is the template's name, or the path exactly as you wrote it. It answers `nil` alone when it looked and did not find the template, and `nil` and an error value when it could not look: the region could not be captured, a template could not be opened, or a window region's window has an empty client area ([Returns](#host-screen-imagesearch-returns), [Errors](#host-screen-imagesearch-errors)). A hit is one value, with nothing after it. The search runs top to bottom, then left to right, and the first position that matches wins; there is no score.
 
-- A path is a **PNG** — the one image format the host is built with; a `.bmp` or `.jpg` raises `cannot open template`. A relative path is resolved against the root of the module whose code makes the call (see [the path rule](./index.md#paths)); **absolute paths are also accepted**, and neither form is checked for `..`.
+- A path is a **PNG** — the one image format the host is built with; a `.bmp` or `.jpg` inside the module's package raises `cannot open template`, and one outside it is answered `invalid`. A relative path is resolved against the root of the module whose code makes the call (see [the path rule](./index.md#paths)); **absolute paths are also accepted**, and neither form is checked for `..`.
 - `opts.region` restricts the search area: corners or a window region (see [Region form](#region-form)); default is the full primary screen. A table that is neither form raises.
 - `opts.snapshot` searches the part of the region inside that [snapshot](#reading-a-snapshot) instead of the screen, capturing nothing; the region then defaults to the whole snapshot, and a hit is still in screen pixels. A region with no part inside it answers `nil, err` (`outside`, `the region does not overlap the snapshot`). The same holds for every search below.
 - `opts.tolerance` is how far each colour channel may differ, 0–255, default `0` = exact. **A position matches only if every template pixel whose alpha is not 0 differs from the screen by at most `tolerance` in each of R, G and B.** A single pixel outside rejects the position. There is no score, correlation or percentage threshold, and the answer is the first position in row order, not the best one. A value outside 0–255 is read as `0`, an exact match, without a word, and a fraction is cut to the whole number below — keep it in range.
@@ -993,7 +1260,7 @@ Searches the screen for the first occurrence of `template` — an image path, a 
 - **Template pixels with alpha = 0 are wildcards** — they are skipped during matching, so you can mask out irrelevant parts of the template. Any other alpha is compared in full: alpha is a mask, never a weight.
 - **A list of templates** — paths and `Template` handles mixed as you like — asks one question drawn several ways: a toggle's on and off, or a glyph as two plug-in versions draw it. The region is captured **once** and the templates are tried against that one frame in list order, the whole region scanned for one before the next is tried, so when two would match, order decides and not position; the first that matches answers, `hit.n` saying which and `hit.name` its name. Separate searches would pay a capture each, and a toggle that changes mid-repaint could fall between two captures and come back as neither. Build the list in a known order and keep a parallel list of labels: `n` turns a hit back into meaning. Every path in the list is checked at the call, wherever it sits; an empty list raises (`host.screen.imageSearch: no template given; the list is empty`), and so does an entry that is neither a path nor a Template (`imageSearch: expected a path or a Template, got a number`).
 - The options are read loosely, unlike a [template spec](#host-screen-template): a key the search does not know — a `threshold` carried over from another matcher, a misspelt `tolerence` — is ignored without an error, and the search runs exact. `opts` itself must be a table or nothing (`host.screen.imageSearch: opts must be a table, got …`).
-- A path inside the module's package is checked the first time the module's code names it — any search, any module: the file opened and its PNG header read, nothing decoded — and the call raises `cannot open template '…': …` when it is not there or is not a PNG. After that the path is taken as it is. A path outside the package is not checked at the call: a file there that cannot be opened is the search's answer, below. The image worker decodes the file when a search first needs it and again whenever its modification time changes, so a template that calibration captures again is picked up by the next search, without a restart; meanwhile every search shares that one decode. The worker keeps the decodes of the 64 most recently used paths across the whole application, the least recently used going first: a module cycling through more templates than that has them re-read and re-decoded from disk, so it builds [`host.screen.template{ file = … }`](#host-screen-template) handles once at load instead, since a handle keeps its decode. A file gone since it was first named, one outside the package that is not there, or one whose header reads and whose pixels do not decode, is answered `nil, err` by the search — `cannot open template '…': …`, `not_found`, `invalid` or `failed` — not raised ([Failure reasons](#failure-reasons)).
+- A path inside the module's package is checked the first time the module's code names it — any search, any module: the file opened and its PNG header read, nothing decoded — and the call raises `cannot open template '…': …` when it is not there or is not a PNG. After that the path is taken as it is. A path outside the package is not checked at the call: a file there that cannot be opened is the search's answer, below. The image worker decodes the file when a search first needs it and again whenever its modification time changes, so a template that calibration captures again is picked up by the next search, without a restart; meanwhile every search shares that one decode. The worker keeps the decodes of the 64 most recently used paths across the whole application, the least recently used going first: a module cycling through more templates than that has them re-read and re-decoded from disk, so it builds [`host.screen.template{ file = … }`](#host-screen-template) handles once at load instead, since a handle keeps its decode. A file gone since it was first named, one outside the package that is not there, or one whose header reads and whose pixels do not decode, is answered `nil, err` by the search — `cannot open template '…': …`, `not_found`, `invalid` or `failed` — not raised ([Errors](#host-screen-imagesearch-errors)). One template of a list that cannot be opened answers the whole search so.
 
 **Where it runs.** In a [handler](#where-it-waits) the call waits while the image worker opens the template, captures its region — or reads its snapshot — and matches, and only its module waits meanwhile; at the call only the path is checked, the first time it is named. Where it cannot wait it raises, and nothing is opened, captured or matched ([Where it waits](#where-it-waits)).
 
@@ -1022,8 +1289,8 @@ host.hotkey.register("Ctrl+Alt+Shift+P", function()
 
   -- in the left third of the active window's client area; nil alone is "not there"
   if now then
-    local found, why = host.screen.imageSearch("assets/icon.png", { region = { window = now, fraction = { 0, 0, 1/3, 1 } } })
-    if why then host.log.info("could not look: " .. why) end
+    local found, err = host.screen.imageSearch("assets/icon.png", { region = { window = now, fraction = { 0, 0, 1/3, 1 } } })
+    if err and err.code ~= host.errors.HIDDEN then host.log.info("could not look: " .. err) end   -- minimised: say nothing
   end
 end)
 ```
@@ -1038,8 +1305,8 @@ host.hotkey.register("Ctrl+Alt+Shift+W", function()
   if not w then return end
   host.screen.imageSearch({ "images/close-v8.png", "images/close-v7.png" },
     { region = { window = w, fraction = { 0.8, 0, 1, 0.1 } }, tolerance = 8 },
-    function(hit, why)
-      if why then host.log.info("could not look: " .. why) return end
+    function(hit, err)
+      if err then host.log.info("could not look: " .. err) return end
       if not hit then return end   -- looked: no close glyph
       host.log.info("close glyph of version " .. VERSIONS[hit.n])
       host.input.click(hit.x + hit.w // 2, hit.y + hit.h // 2)
@@ -1047,19 +1314,49 @@ host.hotkey.register("Ctrl+Alt+Shift+W", function()
 end)
 ```
 
+### Returns {#host-screen-imagesearch-returns}
+
+- A `Hit`, `{ x, y, w, h, n, name? }` — it looked and found the template: one value, and nothing after it.
+- `nil` alone — it looked, and the template is not there.
+- `nil, err` — it could not look; `err.code` is one of the codes under [Errors](#host-screen-imagesearch-errors). So test the second value to tell "not there" from "could not look": a poll keeps what it knew on `err`.
+- With a callback: nothing at once; `cb(hit, nil, info)`, `cb(nil, nil, info)` or `cb(nil, err, info)` on a later tick.
+
+### Errors {#host-screen-imagesearch-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `hidden` | both | A window region, and the window's client area is empty: a minimised window, or one not laid out yet. Nothing is captured. Answered at once, wherever the call is made; with a callback on the next tick. | `the window's client area is empty (…x…)` | both |
+| `outside` | both | A window region lies outside the coordinate range, which a window table from `host.window` never does. Nothing is captured. Answered at once, as above. | `the region lies outside the screen's coordinate range` | both |
+| any of the [snapshot-source errors](#snapshot-source-errors) | both | With `opts.snapshot`, no part of the region is inside the snapshot: `outside`, `the region does not overlap the snapshot`. Answered at once, as above. | `the region does not overlap the snapshot` | both |
+| `not_found` | both | The image worker could not open a template's PNG because it is not there: gone since its path was first named, or outside the module's package. A `Template` built from such a file answers the same, and tries the file again at the next search. One template of a list that cannot be opened answers the whole search. | `cannot open template '…': …` | both |
+| `invalid` | both | A template's PNG whose picture does not decode: cut short, not a PNG, or a format this host is not built with. | `cannot open template '…': …` | both |
+| `failed` | both | A template's PNG that could not be read: held by another program, or no right to read it. | `cannot open template '…': …` | both |
+| `failed` | both | A template's picture failed to be made inside the host: a `Template` built from bytes or a file, or a PNG whose decode failed. That search alone; the rest of its batch is read as usual, and the next search that names the file decodes it again. | `internal error: the template could not be made` | both |
+| `failed` | both | The search's batch failed inside the host, or the search could not be handed to the image worker because the application is closing. The worker goes on. | `internal error: the search could not be made` | both |
+| `too_many` | callback | The module had 64 of the image worker's calls with a callback waiting, and asked for one more: this was its oldest ([Image-worker errors](#image-worker-errors)). It is "could not look", not "not there". | `too many image searches waiting for this module (64); the oldest was ended` | both |
+| `replaced` | callback | With `opts.key`: the module asked the same call again with the same key. | `a newer request with the same key replaced this one` | both |
+| any of the [capture errors](#capture-errors) | both | The region's picture could not be taken. | `screen capture failed` and the others there | both, other |
+| any of the [duplication errors](#duplication-errors) | both | Only in a module that declares `[screen] fallback = "none"`, when desktop duplication could not answer. | `screen capture failed: desktop duplication could not answer — …` | Windows |
+
+**Raises** for a mistake in the call: a `template` that is neither a path, a Template nor a list of them, an empty list (`host.screen.imageSearch: no template given; the list is empty`), or an entry of one that is neither (`imageSearch: expected a path or a Template, got a number`); a path inside the module's package that is not there or not a PNG the first time it is named (`cannot open template '…': …`); `opts` that is neither a table nor `nil` (`host.screen.imageSearch: opts must be a table, got …`); an `opts.region` that is neither region form; an `opts.snapshot` that is not a Snapshot or was released; a `key` without a callback, or one that is not a non-empty string; a callback that is neither a function nor `nil`. Other keys of `opts` are ignored, and a `tolerance` outside 0–255 is read as `0`.
+
+**Raises where it cannot wait**: without a callback, a search with something to read, inside a function that may not wait; see [Where it waits](#where-it-waits).
+
 ### Windows {#host-screen-imagesearch-windows}
 
 The capture is one read through the module's [source](#which-picture-a-read-sees): through the standard path the fixed ~16.7 ms compositor frame whatever the region's size, through desktop duplication 0.3–5 ms on an idle desktop as measured there, plus any wait for duplication — at most 250 ms on the image worker, where a handler's search and one given a callback are made. The match follows on the image worker's matching pool — a snapshot's, which captures nothing, as well — and grows with the area searched and the number of scales. Searches in one batch of the image worker share a capture only when both the region and the source are the same, and the regions that go through desktop duplication are captured together, one request per `fallback` setting; while the worker waits for duplication it holds every read queued behind it — the image worker at the top of this page is one thread for every module. Coordinates are device pixels.
 
 ### macOS {#host-screen-imagesearch-macos}
 
-Without the Screen Recording permission, macOS does **not** fail a capture — it hands back a picture of the desktop wallpaper. So a missing grant does not show up as an error or an empty result; it shows up as a search that never matches, or worse, matches something that was never on the plug-in. If every image search suddenly stops matching on a Mac, check the grant before the template: without it the answer is usually "not found" — `nil` alone, `cb(nil, nil, info)` given a callback — and a reason comes only for a region that cannot be captured at all (empty, too large, or wholly off the desktop) or a window region whose window had an empty client area. The capture is in points, on the image worker, each region one after the other. The image worker's capture measured about 19 ms per batch in the fifth macOS session.
+Without the Screen Recording permission, macOS does **not** fail a capture — it hands back a picture of the desktop wallpaper. So a missing grant does not show up as an error or an empty result; it shows up as a search that never matches, or worse, matches something that was never on the plug-in. If every image search suddenly stops matching on a Mac, check the grant before the template: without it the answer is usually "not found" — `nil` alone, `cb(nil, nil, info)` given a callback — and an error value comes only for a region that cannot be captured at all (empty, too large, or wholly off the desktop) or a window region whose window had an empty client area. The capture is in points, on the image worker, each region one after the other. The image worker's capture measured about 19 ms per batch in the fifth macOS session.
 
 ## host.screen.imageSearchEach(entries, opts?, cb) {#host-screen-imagesearcheach}
 
 **Signature:** `host.screen.imageSearchEach(entries: { string | Template | { template: string | Template, within: Region?, name: string? } }, opts: { region: Region?, tolerance: number?, scales: {number}?, snapshot: Snapshot?, key: string? }?, cb: (list: { Hit | false }?, err: Error?, info: Info) -> ()) -> ()`, `Info` as [`imageSearch`](#host-screen-imagesearch)'s
 
-**One** capture of `opts.region` on the worker thread, and an answer for **every** entry: `cb(list, nil, info)`, where `list[i]` is entry *i*'s [hit](#host-screen-imagesearch) (with `n = i`) or `false`, and `info` has the moment of the picture. `cb(nil, reason, info)` means it could not look — the region could not be captured, or a window region's window had an empty client area at the call (see [Failure reasons](#failure-reasons)) — which a list of `false` never means. With `opts.snapshot` the one picture is that [snapshot](#reading-a-snapshot), as for `imageSearch`: the part of the region inside it is searched, and each `within` is cut to that part. A `within` left out is that whole part, as without a snapshot; a corner left out of a `within` that is given takes the snapshot's edge before the cut.
+**One** capture of `opts.region` on the worker thread, and an answer for **every** entry: `cb(list, nil, info)`, where `list[i]` is entry *i*'s [hit](#host-screen-imagesearch) (with `n = i`) or `false`, and `info` has the moment of the picture. `cb(nil, err, info)` means it could not look — the region could not be captured, a template could not be opened, or a window region's window had an empty client area at the call ([Errors](#host-screen-imagesearcheach-errors)) — which a list of `false` never means. With `opts.snapshot` the one picture is that [snapshot](#reading-a-snapshot), as for `imageSearch`: the part of the region inside it is searched, and each `within` is cut to that part. A `within` left out is that whole part, as without a snapshot; a corner left out of a `within` that is given takes the snapshot's edge before the cut.
 
 It is for the question "which of these states is showing?" — a menu whose cursor can be on one of several rows, a panel that shows one of several pages. `imageSearch` given a list answers only its first match; separate calls share a frame only by the accident of landing in the same batch of the image worker. Here one frame is the contract.
 
@@ -1088,8 +1385,8 @@ host.timer.every(250, function()
   end
   -- The whole client area, as a window region; each `within` in corners, a fixed strip.
   host.screen.imageSearchEach(entries, { region = { window = win, fraction = { 0, 0, 1, 1 } }, tolerance = 12, key = "pages" },
-    function(list, why)
-      if list == nil then return end        -- could not look (`why` says why): keep what we knew
+    function(list, err)
+      if list == nil then return end        -- could not look (`err` says why): keep what we knew
       for _, hit in ipairs(list) do
         if hit then host.speech.output(hit.name .. " menu") return end
       end
@@ -1097,13 +1394,43 @@ host.timer.every(250, function()
 end)
 ```
 
+### Returns {#host-screen-imagesearcheach-returns}
+
+Nothing at once. On a later tick the callback is called once:
+
+- `cb(list, nil, info)` — it looked: `list[i]` is entry *i*'s hit, with `n = i`, or `false` where that entry's template is not there, its `within` lies outside the region or is smaller than its template, or its `within` is a window region with nothing to read this time. A `false` is not an error.
+- `cb(nil, err, info)` — it could not look, for any entry; `err.code` is one of the codes under [Errors](#host-screen-imagesearcheach-errors).
+
+### Errors {#host-screen-imagesearcheach-errors}
+
+None of these is raised. Each comes as an error value to the callback.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `hidden` | callback | A window region, and the window's client area is empty: a minimised window, or one not laid out yet. Nothing is captured. Answered on the next tick. | `the window's client area is empty (…x…)` | both |
+| `outside` | callback | A window region lies outside the coordinate range, which a window table from `host.window` never does. Nothing is captured. Answered on the next tick. | `the region lies outside the screen's coordinate range` | both |
+| any of the [snapshot-source errors](#snapshot-source-errors) | callback | With `opts.snapshot`, no part of the region is inside the snapshot: `outside`, `the region does not overlap the snapshot`. Answered on the next tick. | `the region does not overlap the snapshot` | both |
+| `not_found` | callback | The image worker could not open a template's PNG because it is not there: gone since its path was first named, or outside the module's package. A `Template` built from such a file answers the same, and tries the file again at the next search. One entry's template that cannot be opened answers the whole call. | `cannot open template '…': …` | both |
+| `invalid` | callback | A template's PNG whose picture does not decode: cut short, not a PNG, or a format this host is not built with. | `cannot open template '…': …` | both |
+| `failed` | callback | A template's PNG that could not be read: held by another program, or no right to read it. | `cannot open template '…': …` | both |
+| `failed` | callback | A template's picture failed to be made inside the host: a `Template` built from bytes or a file, or a PNG whose decode failed. That search alone; the rest of its batch is read as usual, and the next search that names the file decodes it again. | `internal error: the template could not be made` | both |
+| `failed` | callback | The search's batch failed inside the host, or the search could not be handed to the image worker because the application is closing. The worker goes on. | `internal error: the search could not be made` | both |
+| `too_many` | callback | The module had 64 of the image worker's calls with a callback waiting, and asked for one more: this was its oldest ([Image-worker errors](#image-worker-errors)). It is "could not look", not a list of `false`. | `too many image searches waiting for this module (64); the oldest was ended` | both |
+| `replaced` | callback | With `opts.key`: the module asked the same call again with the same key. | `a newer request with the same key replaced this one` | both |
+| any of the [capture errors](#capture-errors) | callback | The region's picture could not be taken. | `screen capture failed` and the others there | both, other |
+| any of the [duplication errors](#duplication-errors) | callback | Only in a module that declares `[screen] fallback = "none"`, when desktop duplication could not answer. | `screen capture failed: desktop duplication could not answer — …` | Windows |
+
+**Raises** for a mistake in the call: an empty list (`imageSearchEach: no template given`); an entry that is not a path, a Template or a table with a `template` (`host.screen.imageSearchEach: entries[2] is a table without a template`); a template path inside the module's package that is not there or not a PNG the first time it is named (`cannot open template '…': …`); an `opts.region` or a `within` that is neither region form, or a `within` that is not a table; a `name` that is not a string; an `opts.snapshot` that is not a Snapshot or was released; a `key` that is not a non-empty string; a `cb` that is not a function (`host.screen.imageSearchEach: the callback (third argument) must be a function, got nothing`).
+
+It never waits, so it raises nowhere for the place it is called.
+
 ### Windows {#host-screen-imagesearcheach-windows}
 
 The capture runs on the worker thread, not on the event loop, through the module's [source](#which-picture-a-read-sees) exactly as `imageSearch`'s given a callback does; through the standard path it costs the same fixed compositor frame as any other (~16.7 ms whatever its size), and through duplication the worker waits at most 250 ms for it. The matching is spread across cores, one entry per task, on the matching pool below normal priority (see the top of this page).
 
 ### macOS {#host-screen-imagesearcheach-macos}
 
-The same worker and the same capture as `imageSearch` given a callback. Without the Screen Recording permission the capture succeeds with a picture of the wallpaper, so the answer is **not** `nil, reason` — that only means the capture itself failed (a region that is empty, too large, or wholly off the desktop) or a window region's window had an empty client area — but usually a list of `false`. Usually: a [`capture` template](#host-screen-template) that was itself made without the grant is a picture of the wallpaper, and its entry will match.
+The same worker and the same capture as `imageSearch` given a callback. Without the Screen Recording permission the capture succeeds with a picture of the wallpaper, so the answer is **not** `nil, err` — that only means the capture itself failed (a region that is empty, too large, or wholly off the desktop) or a window region's window had an empty client area — but usually a list of `false`. Usually: a [`capture` template](#host-screen-template) that was itself made without the grant is a picture of the wallpaper, and its entry will match.
 
 ## host.screen.predicate(expr) {#host-screen-predicate}
 
@@ -1133,16 +1460,7 @@ The canonical form is what the host evaluates. The expression is multiplied out 
 - At most 16 comparisons in one alternative; `==` counts as two.
 - Once a comparison's terms are combined, each channel's coefficient is at most ±1,000,000 and the constant at most ±1,000,000,000, which keeps every test inside 32-bit integers.
 
-**Raises** for anything that is not a string, and for every mistake in one, with the column (in characters, from 1) and the text: `host.screen.predicate: the predicate: 'x' is not a channel; use r, g or b (or red, green, blue) (column 13 of "r >= 80 and x > 3")`. Among what is refused:
-- an empty string
-- `!=` (write `x < y or x > y`) and `not`
-- a chained `80 <= r <= 120`
-- a comparison that never looks at the pixel, such as `80 >= 3` or `r - r >= 0`
-- upper-case channel names
-- a number with a leading zero, such as `010`: C# and Luau read it as 10, C and JavaScript as octal 8, so it is refused rather than guessed
-- a parenthesis left open, and parentheses nested more than 32 deep
-
-It never returns `nil`. It runs on the event loop, costs microseconds and touches nothing on screen.
+It runs on the event loop, costs microseconds and touches nothing on screen. A mistake raises, with the column and the text ([Errors](#host-screen-predicate-errors)).
 
 ```luau
 -- A game pack's colour test, pasted from the C# reader it was recorded with, checked once.
@@ -1153,6 +1471,23 @@ host.log.info(WARM)
 -- (r >= 80 and 10*r - 13*g >= 0 and 10*r - 12*b >= 0) or
 --   (r >= 100 and g >= 45 and b <= 150 and r - g >= 0 and g - b >= 0)
 ```
+
+### Returns {#host-screen-predicate-returns}
+
+The predicate in its canonical form, a string. It never returns `nil`.
+
+### Errors {#host-screen-predicate-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: anything that is not a string; and every mistake in one, a source past one of the limits above included, naming it with the column (in characters, from 1) and the text: `host.screen.predicate: the predicate: 'x' is not a channel; use r, g or b (or red, green, blue) (column 13 of "r >= 80 and x > 3")`. Among what is refused:
+- an empty string
+- `!=` (write `x < y or x > y`) and `not`
+- a chained `80 <= r <= 120`
+- a comparison that never looks at the pixel, such as `80 >= 3` or `r - r >= 0`
+- upper-case channel names
+- a number with a leading zero, such as `010`: C# and Luau read it as 10, C and JavaScript as octal 8, so it is refused rather than guessed
+- a parenthesis left open, and parentheses nested more than 32 deep
 
 ### Windows {#host-screen-predicate-windows}
 
@@ -1182,15 +1517,9 @@ A grid like this is a signature, not a picture. A selected menu entry drawn in a
 - `region` takes either form of the [Region form](#region-form), read strictly: no default, no corner left out, no clipping. Corners may cover at most 40,000,000 pixels.
 - `snapshot` reads the region where it lies in that [snapshot](#reading-a-snapshot) instead of capturing it: no screen is touched. The region must lie wholly inside the snapshot — cut to fit, every block of the grid would move.
 
-**Returns `nil` and a reason, and never raises**, for what happens at run time:
-- the window of a `{ window, fraction }` region has an empty client area, as a minimised game does (`"the window's client area is empty (0x0)"`), or one so large that the region covers more than 40,000,000 pixels;
-- the screen could not be read, with the cause as the reason — under `fallback = "none"`, why desktop duplication had no picture (see [Failure reasons](#failure-reasons));
-- the capture came back a different size from the region;
-- with a snapshot, the region is not wholly inside it (`"the region is not inside the snapshot"`).
+**What happens at run time is answered, never raised**: an empty client area, a window region past the size limit at the window's current size, a capture that failed or came back a different size, a region not wholly inside its snapshot. Each is `nil` and an error value ([Errors](#host-screen-cells-errors)). So a poll never puts an error dialog over the game.
 
-So a poll never puts an error dialog over the game.
-
-**Cost:** one screen capture and the reduction — on a snapshot, the reduction alone. In a [handler](#where-it-waits) both run on the image worker while only the module waits, for them and for the batch ahead of them there; where it cannot wait it raises. A region with nothing to read this time — an empty client area, one not inside its snapshot — is answered at once wherever it is asked. The reduction looks at each pixel once and tests every comparison of the predicate on it. On the reference machine (Core i7-8700K, release build) that measured about 8 ns a pixel with an eight-comparison predicate: 0.4 ms for 91×544 pixels, 10 ms for 1280×1024 and 17 ms for 1920×1080, on top of the capture (see below). So this is the call for recording a state or reading one once. **Given a callback** — `cells(opts, cb)` — the capture and the reduction run on the image worker while nothing waits, a window region resolved at the call, and `cb(cells, nil, info)` or `cb(nil, reason, info)` comes on a later tick, `info` with the moment of the picture read ([With a callback](#with-a-callback)).
+**Cost:** one screen capture and the reduction — on a snapshot, the reduction alone. In a [handler](#where-it-waits) both run on the image worker while only the module waits, for them and for the batch ahead of them there; where it cannot wait it raises. A region with nothing to read this time — an empty client area, one not inside its snapshot — is answered at once wherever it is asked. The reduction looks at each pixel once and tests every comparison of the predicate on it. On the reference machine (Core i7-8700K, release build) that measured about 8 ns a pixel with an eight-comparison predicate: 0.4 ms for 91×544 pixels, 10 ms for 1280×1024 and 17 ms for 1920×1080, on top of the capture (see below). So this is the call for recording a state or reading one once. **Given a callback** — `cells(opts, cb)` — the capture and the reduction run on the image worker while nothing waits, a window region resolved at the call, and `cb(cells, nil, info)` or `cb(nil, err, info)` comes on a later tick, `info` with the moment of the picture read ([With a callback](#with-a-callback)).
 
 ```luau
 -- Record the menu's current state for a pack: the grid as hex, logged with where it was read.
@@ -1200,17 +1529,45 @@ local WARM = host.screen.predicate("(r >= 80 and 10*r >= 13*g and 10*r >= 12*b) 
 host.hotkey.register("Ctrl+Alt+Shift+R", function()
     local w = host.window.active()
     if not w then return end
-    local c, why = host.screen.cells({
+    local c, err = host.screen.cells({
         region = { window = w, fraction = { 0.02, 0.33, 0.09, 0.86 } },   -- x1, y1, x2, y2
         cols = 10, rows = 36, predicate = WARM,
     })   -- waits here
     if c then
         host.log.info(string.format("menu at %d,%d %dx%d: %s", c.x, c.y, c.w, c.h, c.cells))
     else
-        host.log.info("menu not read: " .. why)
+        host.log.info("menu not read: " .. err)
     end
 end)
 ```
+
+### Returns {#host-screen-cells-returns}
+
+- `Cells`, `{ cells, x, y, w, h }` — one value, and nothing after it: the grid as hex and the rectangle read.
+- `nil, err` — nothing was read this time; `err.code` is one of the codes under [Errors](#host-screen-cells-errors).
+- With a callback: nothing at once; `cb(cells, nil, info)` or `cb(nil, err, info)` on a later tick.
+
+### Errors {#host-screen-cells-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `hidden` | both | A window region, and the window's client area is empty, as a minimised game's is. Nothing is captured; answered at once, wherever the call is made, and with a callback on the next tick. | `the window's client area is empty (…x…)` | both |
+| `outside` | both | A window region lies outside the coordinate range, which a window table from `host.window` never does. Answered at once, as above. | `the region lies outside the screen's coordinate range` | both |
+| any of the [snapshot-source errors](#snapshot-source-errors) | both | With `opts.snapshot`, the region is not wholly inside the snapshot: `outside`, `the region is not inside the snapshot`. Answered at once, as above. | `the region is not inside the snapshot` | both |
+| `too_large` | both | A window region past 40,000,000 pixels at the window's current size. The same corners raise. Answered at once, as above. | `at the window's current size the region is …x…, … pixels; the limit is 40000000` | both |
+| `failed` | both | The capture came back a different size from the region. | `the capture came back …x…, not the region's …x…` | both |
+| `failed` | both | The capture came back shorter than its own size, which a capture should never do. | `the capture came back shorter than its own size` | both |
+| `failed` | both | The reduction failed inside the host, or the read could not be handed to the image worker because the application is closing. The worker goes on. | `internal error: the cells could not be computed` | both |
+| `too_many` | callback | The module had 64 of the image worker's calls with a callback waiting, and asked for one more: this was its oldest ([Image-worker errors](#image-worker-errors)). | `too many image searches waiting for this module (64); the oldest was ended` | both |
+| `replaced` | callback | With `opts.key`: the module asked the same call again with the same key. | `a newer request with the same key replaced this one` | both |
+| any of the [capture errors](#capture-errors) | both | The region's picture could not be taken, with the cause as the message. | `screen capture failed` and the others there | both, other |
+| any of the [duplication errors](#duplication-errors) | both | Only in a module that declares `[screen] fallback = "none"`, when desktop duplication could not answer. | `screen capture failed: desktop duplication could not answer — …` | Windows |
+
+**Raises** for a mistake in the call: `opts` that is not a table (`host.screen.cells: opts must be a table { region, cols, rows, predicate, snapshot? }, got …`); a key missing or misspelt, or one it does not take; a `cols` or `rows` that is not a whole number from 1 to 256 (``host.screen.cells: opts.cols: invalid value: floating point `10.5`, expected a whole number``), or more than 4096 cells in all; a `region` that is not exactly the Region form, read strictly, or corners covering more than 40,000,000 pixels; a `predicate` that does not parse, as [`predicate`](#host-screen-predicate) raises; an `opts.snapshot` that is not a Snapshot or was released; a `key` without a callback (`host.screen.cells: opts.key is only taken with a callback (the second argument)`), or one that is not a non-empty string; a callback that is neither a function nor `nil`.
+
+**Raises where it cannot wait**: without a callback, a region with something to read, inside a function that may not wait; see [Where it waits](#where-it-waits).
 
 ### Windows {#host-screen-cells-windows}
 
@@ -1243,14 +1600,7 @@ Reads the region exactly as [`cells`](#host-screen-cells) does, and says which o
 
 The decision is the module's to make in Luau, and a menu reader's two thresholds both go there: `m.similarity >= MINIMUM and m.similarity - m.runnerUp >= MARGIN`.
 
-**Raises** for everything [`cells`](#host-screen-cells) raises for — `opts.key` without a callback among them, `(the third argument)` here — and for these, checked before anything is captured:
-- `states` that is not a list of 1 to 1024 entries, or that has other keys;
-- a state that is not hex of the right length (`states[3]: 358 characters; this grid's states are 720 hex digits, two per cell`);
-- a state that is not hex at all (`states are hex (720 characters), not the cells' raw bytes`);
-- a state with a character that is not a hex digit, counted in characters (`states[2]: 'é' at character 5 is not a hex digit`);
-- a state table with a key other than `cells` and `name`.
-
-**Returns `nil` and a reason** exactly where `cells` does.
+A mistake in `opts` or in `states` raises, before anything is captured ([Errors](#host-screen-matchcells-errors)).
 
 **Cost:** that of `cells`, plus two parts that grow with states × cells. Every call checks every state and decodes it from hex on the event loop before anything is captured — nothing is kept from one call to the next — which measured on the reference machine (release build) 0.04 ms for 10 states of 360 cells, 0.4 ms for 100, 4.4 ms for 1024, and 29 ms at the limits, 1024 states of 4096 cells: about 11 ns per cell of every state. Then the grid is compared with every state, which for 360 cells and a hundred states is microseconds. In a [handler](#where-it-waits) the capture, the reduction and the comparison run on the image worker while only the module waits, and the states are checked and decoded at the call; where it cannot wait it raises. A poll passes a callback (below), which waits for nothing — and still checks and decodes the states at the call. No form shares its picture with [`host.ocr.recognize`](./ocr.md#host-ocr-recognize), which captures on a thread of its own: detecting with a cells match and then reading the text is two pictures. Several cells matches, searches and point reads share one picture when they are given one [snapshot](#reading-a-snapshot).
 
@@ -1262,19 +1612,19 @@ local pack = host.json.decode(host.resource.read("data/menu.json"))
 host.hotkey.register("Ctrl+Alt+Shift+S", function()
     local w = host.window.active()
     if not w then return end
-    local m, why = host.screen.matchCells({
+    local m, err = host.screen.matchCells({
         region = { window = w, fraction = pack.region },
         cols = pack.cols, rows = pack.rows, predicate = pack.predicate,
     }, pack.states)   -- waits here
     if not m then
-        host.speech.output("Menu not read: " .. why)
+        host.speech.output("Menu not read: " .. err)
     elseif m.similarity >= 0.97 and m.similarity - m.runnerUp >= 0.01 then
         host.speech.output(m.name)
     end
 end)
 ```
 
-**Given a callback** — `matchCells(opts, states, cb)` — everything is still checked at the call, the states decoded and a window region resolved there from the window table given, not when the worker gets to it; the capture, the reduction and the comparison run on the image worker while nothing waits, and `cb(m, nil, info)` or `cb(nil, reason, info)` comes on a later tick, `info` with the moment of the picture read ([With a callback](#with-a-callback)). Given `opts.snapshot`, the worker reduces the region where it lies in that [snapshot](#reading-a-snapshot) and captures nothing. Reads the image worker takes in one batch (see the top of this page) share one capture when they ask for the same region through the same source, whether they are cells matches or image searches, and from one module or several. Callbacks run in the order the reads were queued. A read's callback is dropped when its module is disabled before the answer comes, as every callback on this page is; a poll that keeps one read out with its `key` and [`pending`](#host-screen-pending) asks again at its first turn once the module is enabled — on the window as it is then, which may have moved, changed size or closed.
+**Given a callback** — `matchCells(opts, states, cb)` — everything is still checked at the call, the states decoded and a window region resolved there from the window table given, not when the worker gets to it; the capture, the reduction and the comparison run on the image worker while nothing waits, and `cb(m, nil, info)` or `cb(nil, err, info)` comes on a later tick, `info` with the moment of the picture read ([With a callback](#with-a-callback)). Given `opts.snapshot`, the worker reduces the region where it lies in that [snapshot](#reading-a-snapshot) and captures nothing. Reads the image worker takes in one batch (see the top of this page) share one capture when they ask for the same region through the same source, whether they are cells matches or image searches, and from one module or several. Callbacks run in the order the reads were queued. A read's callback is dropped when its module is disabled before the answer comes, as every callback on this page is; a poll that keeps one read out with its `key` and [`pending`](#host-screen-pending) asks again at its first turn once the module is enabled — on the window as it is then, which may have moved, changed size or closed.
 
 **Read, then act.** Nothing holds a module's input back for a picture it asked for — not a pending match or image search, nor a pending [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) or [snapshot](#snapshot-with-a-callback): a click made while it waits may land before its picture is taken, so its callback can describe the screen after the click. Act on a match inside its callback, or match on a snapshot taken before the click.
 
@@ -1292,7 +1642,7 @@ host.timer.every(150, function()
     host.screen.matchCells({
         region = { window = w, fraction = pack.region },
         cols = pack.cols, rows = pack.rows, predicate = pack.predicate, key = "menu",
-    }, pack.states, function(m, why)
+    }, pack.states, function(m, err)
         if not m then return end                              -- could not look: keep what we knew
         local name = (m.similarity >= 0.97 and m.similarity - m.runnerUp >= 0.01) and m.name or nil
         if name ~= last then
@@ -1302,6 +1652,39 @@ host.timer.every(150, function()
     end)
 end)
 ```
+
+### Returns {#host-screen-matchcells-returns}
+
+- `CellsMatch`, `{ cells, x, y, w, h, index, name?, similarity, distance, runnerUp, similarities }` — one value, and nothing after it: the winner, as above. There is always a winner; whether it is good enough is the module's to decide.
+- `nil, err` — nothing was read this time, exactly where `cells` answers so; `err.code` is one of the codes under [Errors](#host-screen-matchcells-errors).
+- With a callback: nothing at once; `cb(m, nil, info)` or `cb(nil, err, info)` on a later tick.
+
+### Errors {#host-screen-matchcells-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says. They are [`cells`](#host-screen-cells-errors)' own.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `hidden` | both | A window region, and the window's client area is empty, as a minimised game's is. Nothing is captured; answered at once, wherever the call is made, and with a callback on the next tick. | `the window's client area is empty (…x…)` | both |
+| `outside` | both | A window region lies outside the coordinate range, which a window table from `host.window` never does. Answered at once, as above. | `the region lies outside the screen's coordinate range` | both |
+| any of the [snapshot-source errors](#snapshot-source-errors) | both | With `opts.snapshot`, the region is not wholly inside the snapshot: `outside`, `the region is not inside the snapshot`. Answered at once, as above. | `the region is not inside the snapshot` | both |
+| `too_large` | both | A window region past 40,000,000 pixels at the window's current size. The same corners raise. Answered at once, as above. | `at the window's current size the region is …x…, … pixels; the limit is 40000000` | both |
+| `failed` | both | The capture came back a different size from the region. | `the capture came back …x…, not the region's …x…` | both |
+| `failed` | both | The capture came back shorter than its own size, which a capture should never do. | `the capture came back shorter than its own size` | both |
+| `failed` | both | The reduction or the comparison failed inside the host, or the read could not be handed to the image worker because the application is closing. The worker goes on. | `internal error: the cells could not be computed` | both |
+| `too_many` | callback | The module had 64 of the image worker's calls with a callback waiting, and asked for one more: this was its oldest ([Image-worker errors](#image-worker-errors)). | `too many image searches waiting for this module (64); the oldest was ended` | both |
+| `replaced` | callback | With `opts.key`: the module asked the same call again with the same key. | `a newer request with the same key replaced this one` | both |
+| any of the [capture errors](#capture-errors) | both | The region's picture could not be taken, with the cause as the message. | `screen capture failed` and the others there | both, other |
+| any of the [duplication errors](#duplication-errors) | both | Only in a module that declares `[screen] fallback = "none"`, when desktop duplication could not answer. | `screen capture failed: desktop duplication could not answer — …` | Windows |
+
+**Raises** for a mistake in the call: everything [`cells`](#host-screen-cells) raises for — `opts.key` without a callback among them, `(the third argument)` here — and for these, checked before anything is captured:
+- `states` that is not a list of 1 to 1024 entries, or that has other keys;
+- a state that is not hex of the right length (`states[3]: 358 characters; this grid's states are 720 hex digits, two per cell`);
+- a state that is not hex at all (`states are hex (720 characters), not the cells' raw bytes`);
+- a state with a character that is not a hex digit, counted in characters (`states[2]: 'é' at character 5 is not a hex digit`);
+- a state table with a key other than `cells` and `name`, or a `name` that is not a string.
+
+**Raises where it cannot wait**: without a callback, a region with something to read, inside a function that may not wait; see [Where it waits](#where-it-waits). The states are checked and decoded at the call, wherever it is made.
 
 ### Windows {#host-screen-matchcells-windows}
 
@@ -1327,7 +1710,7 @@ A region is a rectangle on screen, written in one of two forms: by its **corners
 - `fraction` is `{ x1, y1, x2, y2 }`, named or positional like corners, in fractions of the client area's width (`x1`, `x2`) and height (`y1`, `y2`): `{ 0, 0, 1, 1 }` is the whole client area, and `{ 0.5, 0, 1, 1 }` its right half. A reader that stores a region as `XStart, XEnd, YStart, YEnd` writes `{ XStart, YStart, XEnd, YEnd }`.
 - With `W` the client area's width, the columns read start at `floor(W * x1)` and end before `ceil(W * x2)`. The start is then clamped to 0 through `W - 1`, and the end to one past the start through `W`; rows are worked out the same way from the height. So the rectangle never leaves the client area and is never empty: a fraction outside 0 to 1, or an `x2` before `x1`, still reads at least one column. The arithmetic is IEEE double precision, exactly as a C# reader computing with `double` does it. `800 * 0.035` is 28.000000000000004 there, so the end is 29.
 - The numbers themselves never raise for being outside 0 to 1 or in the wrong order, as the clamps above say. What raises, in every call, is the shape: a fraction that is not a finite number (`1/0`, NaN) or not a number, a `fraction` table with a corner missing, with named and positional corners mixed or with any other key, a key beside `window` and `fraction`, and a `window` that is not a table or has no `client` with four whole numbers.
-- A client area without width or height — a minimised window — is a runtime condition, answered and never raised: the call fails the way it fails when it could not look, with the reason `the window's client area is empty (0x0)` ([Failure reasons](#failure-reasons)). `host.ocr.recognize` answers that one region so and reads the others; an `imageSearchEach` entry whose `within` it is answers `false`.
+- A client area without width or height — a minimised window — is a runtime condition, answered and never raised: the call fails the way it fails when it could not look, with the error value `hidden`, `the window's client area is empty (0x0)` ([Window-form errors](#window-form-errors)). `host.ocr.recognize` answers that one region so and reads the others; an `imageSearchEach` entry whose `within` it is answers `false`.
 
 Written as fractions, a region keeps covering the same part of the window when the window is resized, at any display scaling, and on both platforms, with nothing in the module that knows which of those it is running under.
 
@@ -1339,7 +1722,7 @@ Written as fractions, a region keeps covering the same part of the window when t
 
 Round a computed corner yourself, `math.floor(v + 0.5)` for the nearest pixel, or give the region as fractions of the window it belongs to.
 
-**Loosely read corners.** Every other call reads corners as it always has: a table with at least one of `x1`, `y1`, `x2`, `y2` (or entries 1 to 4) is corners, and inside it nothing raises. Named keys take precedence over positional ones, corner by corner. A corner that is missing — or is not a number, such as a misspelt key's `nil` or a string that is not a numeral — takes its default without a word: `x1, y1` become `0`, `x2, y2` the primary screen's width and height (for a call given a snapshot, the snapshot's own edges). Other keys are ignored. A fractional coordinate is cut toward zero, like every coordinate the platform takes: a centre computed as `x + w / 2` lands on the whole pixel toward zero, which for a negative coordinate — a monitor left of or above the primary — is the opposite direction from `//`. Where the nearest pixel matters, round with `math.floor(v + 0.5)`. Corners turned around, or equal, read as an empty region — width and height below zero count as zero — which most calls answer as a read that failed rather than a mistake: `profile` with `nil, err` (`outside`, `the region is empty (0x0)`), the searches, `save` and `saveMarked` with `screen capture failed` (given a snapshot, `the region does not overlap the snapshot`); `template{ capture = … }` raises for it.
+**Loosely read corners.** Every other call reads corners as it always has: a table with at least one of `x1`, `y1`, `x2`, `y2` (or entries 1 to 4) is corners, and inside it nothing raises. Named keys take precedence over positional ones, corner by corner. A corner that is missing — or is not a number, such as a misspelt key's `nil` or a string that is not a numeral — takes its default without a word: `x1, y1` become `0`, `x2, y2` the primary screen's width and height (for a call given a snapshot, the snapshot's own edges). Other keys are ignored. A fractional coordinate is cut toward zero, like every coordinate the platform takes: a centre computed as `x + w / 2` lands on the whole pixel toward zero, which for a negative coordinate — a monitor left of or above the primary — is the opposite direction from `//`. Where the nearest pixel matters, round with `math.floor(v + 0.5)`. Corners turned around, or equal, read as an empty region — width and height below zero count as zero — which most calls answer as a read that failed rather than a mistake: `profile` with `nil, err` (`outside`, `the region is empty (0x0)`), the searches, `save` and `saveMarked` with `failed`, `screen capture failed` (given a snapshot, `outside`, `the region does not overlap the snapshot`); `template{ capture = … }` raises for it.
 
 ```luau
 -- these two regions are equivalent
@@ -1362,8 +1745,8 @@ host.hotkey.register("Ctrl+Alt+Shift+F", function()
 
   -- the same form in every call: a strip across the top of the client area, searched and saved
   local strip = { window = w, fraction = { 0, 0, 1, 0.1 } }
-  local hit, why = host.screen.imageSearch("images/tab.png", { region = strip, tolerance = 8 })   -- waits here
-  if why then host.log.info("could not look: " .. why) end
+  local hit, err = host.screen.imageSearch("images/tab.png", { region = strip, tolerance = 8 })   -- waits here
+  if err then host.log.info("could not look: " .. err) end
   host.screen.save("strip.png", { region = strip })   -- and here
 
   -- and for text: the top tenth of the client area, read off the event loop
@@ -1387,9 +1770,9 @@ Fractions resolve to points of the client area derived from the window's frame (
 
 Captures `opts.region` and writes it to `path` as a PNG — corners or a window region, see [Region form](#region-form); omitted, the whole primary screen. With `opts.snapshot` it writes the part of the region inside that [snapshot](#reading-a-snapshot) instead, capturing nothing — omitted, the whole snapshot — and returns `false, err` (`outside`, `the region does not overlap the snapshot`) when no part is inside it: the picture a module's reads were answered from, for somebody to look at. PNG is the one image format the host is built with, and the format follows the extension, so `path` must end in `.png`, in upper or lower case: any other extension, or none, raises before anything is captured, whether or not the capture would have worked (`host.screen.save: 'C:\…\shot.jpg' does not end in .png; PNG is the one image format the host writes`). This is the evidence call: an author who cannot see the screen has no way to check that a coordinate lands on its button, so the picture goes to somebody who can look at it — `tools/probe` writes one shot of the window beside its text dump for exactly that, and the overlay runtime's calibration crop key (`Ctrl+Alt+Shift+T`, Command+Option+Shift+T on a Mac) uses it to cut a fresh template out of the live plug-in when an old one stopped matching. It costs one capture — about one compositor frame through the standard path on Windows (~16.7 ms) regardless of the region's size, less through desktop duplication (see [Which picture a read sees](#which-picture-a-read-sees)) — plus the PNG encode and the write, which grow with the region: in a [handler](#where-it-waits) the capture on the image worker and the encode and the write on its matching pool, which the handler waits for while only its module waits, given a callback there too while nothing waits; where it cannot wait it raises, and nothing is captured or written. The macOS round trip is unmeasured.
 
-A relative `path` is resolved under the root of the module whose code makes the call (see [the path rule](./index.md#paths)); an absolute path (what `host.path` returns) is used as it stands, and the parent directory is created if it does not exist. Neither is checked for `..`: this writes wherever the path points. `save` and `saveMarked` are the only calls in the platform that write a file a module names, and both write PNG only. Returns `true` on success — one value — and `false` and an error value when the region could not be captured, a window region's window has an empty client area, or the file could not be written (see [Failure reasons](#failure-reasons)). A path that cannot be *written* is `failed` too, and its message says so — `screen.save '<path>': <why>`, in a handler once the wait is over — so a typo in the folder name is not mistaken for a failed capture: `err.code` is `failed` for both, the message names the path only for the file. At the call, before anything is read, a `path` that is not a string, `opts` that is neither a table nor nothing (`host.screen.save: opts must be a table, got …`) and an `opts.region` that is neither region form raise. A shot a handler waits for is not written, and its folder is not made, when nobody waits for it any more once its PNG is encoded — its module disabled, reloaded, stopped by the [guard](../module-runtime-and-lifecycle.md#limits) or removed meanwhile, or its handler cancelled: a module that is gone gets no file written behind it. One whose file is already being written then is still written. The same holds for `saveMarked`.
+A relative `path` is resolved under the root of the module whose code makes the call (see [the path rule](./index.md#paths)); an absolute path (what `host.path` returns) is used as it stands, and the parent directory is created if it does not exist. Neither is checked for `..`: this writes wherever the path points. `save` and `saveMarked` are the only calls in the platform that write a file a module names, and both write PNG only. It answers `true`, or `false` and an error value when the region could not be captured, a window region's window has an empty client area, or the file could not be written ([Returns](#host-screen-save-returns), [Errors](#host-screen-save-errors)). A file that could not be written says so in its message, `screen.save '<path>': <the system's words>`, so a typo in a folder's name is not mistaken for a failed capture: `err.code` is `failed` for both. A shot a handler waits for is not written, and its folder is not made, when nobody waits for it any more once its PNG is encoded — its module disabled, reloaded, stopped by the [guard](../module-runtime-and-lifecycle.md#limits) or removed meanwhile, or its handler cancelled: a module that is gone gets no file written behind it. One whose file is already being written then is still written. The same holds for `saveMarked`.
 
-**Given a callback** — `save(path, opts, cb)`, `opts` `nil` when there are none — the shot is taken, encoded and written on the image worker while nothing waits, and `cb(true, nil, info)` or `cb(false, err, info)` comes on a later tick, `info` with the moment of the picture written ([With a callback](#with-a-callback)) — a file that could not be written included, with the same `screen.save '<path>': <why>`. A shot whose module is disabled, reloaded, stopped or removed before its file is written is not written, as above, and its callback is dropped. The same holds for `saveMarked`.
+**Given a callback** — `save(path, opts, cb)`, `opts` `nil` when there are none — the shot is taken, encoded and written on the image worker while nothing waits, and `cb(true, nil, info)` or `cb(false, err, info)` comes on a later tick, `info` with the moment of the picture written ([With a callback](#with-a-callback)) — a file that could not be written included, with the same `screen.save '<path>': <the system's words>`. A shot whose module is disabled, reloaded, stopped or removed before its file is written is not written, as above, and its callback is dropped. The same holds for `saveMarked`.
 
 ```luau
 -- tools/probe: the one artefact a sighted helper can check in seconds, saved next to the numbers it
@@ -1402,18 +1785,45 @@ host.timer.after(0, function()
     return
   end
   local shot = "probe.png"
-  local saved, why = host.screen.save(shot, {   -- waits here
+  local saved, err = host.screen.save(shot, {   -- waits here
     region = { win.bounds.x, win.bounds.y, win.bounds.x + win.bounds.w, win.bounds.y + win.bounds.h },
   })
   host.log.info(string.format(
-    "capture: %s (%dx%d requested)", saved and shot or ("FAILED: " .. why), win.bounds.w, win.bounds.h
+    "capture: %s (%dx%d requested)", saved and shot or ("FAILED: " .. err), win.bounds.w, win.bounds.h
   ))
 end)
 ```
 
+### Returns {#host-screen-save-returns}
+
+- `true` — the file is written: one value, and nothing after it.
+- `false, err` — nothing was written; `err.code` is one of the codes under [Errors](#host-screen-save-errors).
+- With a callback: nothing at once; `cb(true, nil, info)` or `cb(false, err, info)` on a later tick. A shot whose module goes before its file is written gets no answer at all: the callback is dropped, and the file is not written.
+
+### Errors {#host-screen-save-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `hidden` | both | A window region, and the window's client area is empty: a minimised window, or one not laid out yet. Nothing is captured or written; answered at once, wherever the call is made, and with a callback on the next tick. | `the window's client area is empty (…x…)` | both |
+| `outside` | both | A window region lies outside the coordinate range, which a window table from `host.window` never does. Answered at once, as above. | `the region lies outside the screen's coordinate range` | both |
+| any of the [snapshot-source errors](#snapshot-source-errors) | both | With `opts.snapshot`, no part of the region is inside the snapshot: `outside`, `the region does not overlap the snapshot`. Answered at once, as above. | `the region does not overlap the snapshot` | both |
+| `failed` | both | The file could not be written: a folder that could not be made, no right to write there, a full disk. The message names the path as it was resolved and gives the system's words, so a typo in a folder's name says so here, which a failed capture never does. In a handler, once the wait is over. | `screen.save '…': …` | both |
+| `failed` | both | The marking, encoding or writing failed inside the host, or the shot could not be handed to the image worker because the application is closing. | `internal error: the picture could not be saved` | both |
+| `failed` | both | The capture came back shorter than its own size, which a capture should never do. | `the capture came back shorter than its own size` | both |
+| `too_many` | callback | The module had 64 of the image worker's calls with a callback waiting, and asked for one more: this was its oldest, and its file is not written ([Image-worker errors](#image-worker-errors)). | `too many image searches waiting for this module (64); the oldest was ended` | both |
+| `replaced` | callback | With `opts.key`: the module asked the same call again with the same key, before this file was written. | `a newer request with the same key replaced this one` | both |
+| any of the [capture errors](#capture-errors) | both | The region's picture could not be taken; no file is written. | `screen capture failed` and the others there | both, other |
+| any of the [duplication errors](#duplication-errors) | both | Only in a module that declares `[screen] fallback = "none"`, when desktop duplication could not answer; no file is written. | `screen capture failed: desktop duplication could not answer — …` | Windows |
+
+**Raises** for a mistake in the call, before anything is read: a `path` that is not a string; a path that does not end in `.png`, in upper or lower case (`host.screen.save: 'C:\…\shot.jpg' does not end in .png; PNG is the one image format the host writes`); `opts` that is neither a table nor `nil` (`host.screen.save: opts must be a table, got …`); an `opts.region` that is neither region form; an `opts.snapshot` that is not a Snapshot or was released; a `key` without a callback, or one that is not a non-empty string; a callback that is neither a function nor `nil`.
+
+**Raises where it cannot wait**: without a callback, a shot with something to write, inside a function that may not wait; nothing is captured or written. See [Where it waits](#where-it-waits).
+
 ### Windows {#host-screen-save-windows}
 
-The shot is taken through the module's [source](#which-picture-a-read-sees) like every other read: on the image worker, which waits for desktop duplication up to 250 ms. In a module that declares `capture = "duplication"`, a shot taken while duplication is still opening for longer than that — just after the module's window came forward, say — is taken the standard way, or `save` returns `false` and the reason under `fallback = "none"`, so a template cut from such a shot is not necessarily the kind of picture the module's searches read.
+The shot is taken through the module's [source](#which-picture-a-read-sees) like every other read: on the image worker, which waits for desktop duplication up to 250 ms. In a module that declares `capture = "duplication"`, a shot taken while duplication is still opening for longer than that — just after the module's window came forward, say — is taken the standard way, or `save` answers `false, err` under `fallback = "none"`, so a template cut from such a shot is not necessarily the kind of picture the module's searches read.
 
 ### macOS {#host-screen-save-macos}
 
@@ -1423,7 +1833,7 @@ Without the Screen Recording permission the capture does **not** fail — macOS 
 
 **Signature:** `host.screen.saveMarked(path: string, opts: { region: Region?, marks: { { x: number, y: number } }?, snapshot: Snapshot? }) -> (boolean, Error?)`; with a callback `host.screen.saveMarked(path: string, opts: { region: Region?, marks: { { x: number, y: number } }?, snapshot: Snapshot?, key: string? }, cb: (saved: boolean, err: Error?, info: Info) -> ()) -> ()`, `Info` as [`save`](#host-screen-save)'s
 
-Everything `save` does — a PNG, and only a `.png` path, `true`, or `false` and an error value (`screen.saveMarked '<path>': <why>` for a file it could not write), from the screen or from `opts.snapshot`, and given a callback the same callback form — plus a magenta crosshair drawn at every point in `opts.marks`, given in **screen** coordinates whichever form `opts.region` takes: a window region is resolved to its screen rectangle first (on a snapshot, to the part of it inside the snapshot), and each mark is drawn where its screen point falls in that rectangle. It puts the calibration question into one picture — is my control on its button? — instead of leaving somebody to read coordinates out of a log and find that spot in a plain screenshot by hand, which is the step that hides errors: a set of toggles in this repo sat 16 px off, on the caption row under the buttons, for as long as it existed, because the colours sampled there happened to look plausible. Magenta because these dark plug-in UIs do not use it, so ink cannot be mistaken for interface. Each crosshair is 19 px across, and the *n*th mark gets *n* dots on a row 12 px below its centre, so marks stay tellable apart without any text.
+Everything `save` does — a PNG, and only a `.png` path, `true`, or `false` and an error value (`screen.saveMarked '<path>': <the system's words>` for a file it could not write), from the screen or from `opts.snapshot`, and given a callback the same callback form — plus a magenta crosshair drawn at every point in `opts.marks`, given in **screen** coordinates whichever form `opts.region` takes: a window region is resolved to its screen rectangle first (on a snapshot, to the part of it inside the snapshot), and each mark is drawn where its screen point falls in that rectangle. It puts the calibration question into one picture — is my control on its button? — instead of leaving somebody to read coordinates out of a log and find that spot in a plain screenshot by hand, which is the step that hides errors: a set of toggles in this repo sat 16 px off, on the caption row under the buttons, for as long as it existed, because the colours sampled there happened to look plausible. Magenta because these dark plug-in UIs do not use it, so ink cannot be mistaken for interface. Each crosshair is 19 px across, and the *n*th mark gets *n* dots on a row 12 px below its centre, so marks stay tellable apart without any text.
 
 Four things bite. `opts` is **required** here (`save`'s is optional) — pass at least `{}`; without it the call raises (`host.screen.saveMarked: opts must be a table — pass at least {} — got nothing`). Mark entries are read by **name**: `{ x = 100, y = 200 }`, never positional `{ 100, 200 }`, which reads as screen `(0, 0)`: dropped when the captured region does not reach the screen origin, and otherwise drawn in the corner, which is worse — a crosshair that means nothing. A mark outside the captured region is skipped without a word, so grow the region to cover the marks the way `calibrationShot` does — Komplete Kontrol's standalone menu bar sits 10 px above the client top, and a shot clipped to the client rectangle cut every crosshair off, producing a picture with no marks at all, which reads as "nothing was marked" rather than "the marks are off-frame". And the ink lands on the very thing the mark points at, so when you also need to *look* at those pixels, take the same frame twice.
 
@@ -1447,9 +1857,36 @@ host.screen.saveMarked(host.path("calibration/" .. stem .. ".png"), { region = r
 host.screen.saveMarked(host.path("calibration/" .. stem .. "-clean.png"), { region = region, marks = {} })
 ```
 
+### Returns {#host-screen-savemarked-returns}
+
+- `true` — the file is written, with its marks: one value, and nothing after it.
+- `false, err` — nothing was written; `err.code` is one of the codes under [Errors](#host-screen-savemarked-errors).
+- With a callback: nothing at once; `cb(true, nil, info)` or `cb(false, err, info)` on a later tick, dropped as `save`'s is.
+
+### Errors {#host-screen-savemarked-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says. They are [`save`](#host-screen-save-errors)'s, with the shot's own message for a file it could not write.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `hidden` | both | A window region, and the window's client area is empty: a minimised window, or one not laid out yet. Nothing is captured or written; answered at once, wherever the call is made, and with a callback on the next tick. | `the window's client area is empty (…x…)` | both |
+| `outside` | both | A window region lies outside the coordinate range, which a window table from `host.window` never does. Answered at once, as above. | `the region lies outside the screen's coordinate range` | both |
+| any of the [snapshot-source errors](#snapshot-source-errors) | both | With `opts.snapshot`, no part of the region is inside the snapshot: `outside`, `the region does not overlap the snapshot`. Answered at once, as above. | `the region does not overlap the snapshot` | both |
+| `failed` | both | The file could not be written: a folder that could not be made, no right to write there, a full disk. The message names the path as it was resolved and gives the system's words, so a typo in a folder's name says so here, which a failed capture never does. In a handler, once the wait is over. | `screen.saveMarked '…': …` | both |
+| `failed` | both | The marking, encoding or writing failed inside the host, or the shot could not be handed to the image worker because the application is closing. | `internal error: the picture could not be saved` | both |
+| `failed` | both | The capture came back shorter than its own size, which a capture should never do. | `the capture came back shorter than its own size` | both |
+| `too_many` | callback | The module had 64 of the image worker's calls with a callback waiting, and asked for one more: this was its oldest, and its file is not written ([Image-worker errors](#image-worker-errors)). | `too many image searches waiting for this module (64); the oldest was ended` | both |
+| `replaced` | callback | With `opts.key`: the module asked the same call again with the same key, before this file was written. | `a newer request with the same key replaced this one` | both |
+| any of the [capture errors](#capture-errors) | both | The region's picture could not be taken; no file is written. | `screen capture failed` and the others there | both, other |
+| any of the [duplication errors](#duplication-errors) | both | Only in a module that declares `[screen] fallback = "none"`, when desktop duplication could not answer; no file is written. | `screen capture failed: desktop duplication could not answer — …` | Windows |
+
+**Raises** for a mistake in the call, before anything is read: what `save` raises for, with `host.screen.saveMarked` in the message; and `opts` that is not a table, `nil` included (`host.screen.saveMarked: opts must be a table — pass at least {} — got nothing`). A mark that is not a table is passed over, and a coordinate that is not a whole number is read as `0`: neither raises.
+
+**Raises where it cannot wait**: without a callback, a shot with something to write, inside a function that may not wait; nothing is captured or written. See [Where it waits](#where-it-waits).
+
 ### Windows {#host-screen-savemarked-windows}
 
-The capture is `save`'s: one read through the module's [source](#which-picture-a-read-sees), on the image worker, and under `fallback = "none"` a shot duplication could not answer returns `false` and the reason, with no file written. Marks, region and PNG are all in device pixels, so a crosshair lands on the very pixel its screen point names at any display scaling.
+The capture is `save`'s: one read through the module's [source](#which-picture-a-read-sees), on the image worker, and under `fallback = "none"` a shot duplication could not answer is answered `false, err`, with no file written. Marks, region and PNG are all in device pixels, so a crosshair lands on the very pixel its screen point names at any display scaling.
 
 ### macOS {#host-screen-savemarked-macos}
 
@@ -1459,7 +1896,7 @@ The capture is `save`'s, so the wallpaper-instead-of-error case applies here too
 
 **Signature:** `host.screen.imageSearchAll(template: string | Template, opts: { region: Region?, tolerance: number?, snapshot: Snapshot? }?) -> ({ Hit }, Error?)`; with a callback `host.screen.imageSearchAll(template, opts: { region: Region?, tolerance: number?, snapshot: Snapshot?, key: string? }?, cb: (hits: { Hit }, err: Error?, info: Info) -> ()) -> ()`, `Info` as [`imageSearch`](#host-screen-imagesearch)'s
 
-Returns **every** match of `template` in the region, as an array of [hits](#host-screen-imagesearch) in screen pixels, rather than stopping at the first one like `imageSearch`. `template` is a path or a [`Template`](#host-screen-template), checked and opened as for [`imageSearch`](#host-screen-imagesearch) — a template the image worker cannot open is `{}, err` (`not_found`, `invalid` or `failed`, `cannot open template '…': …`); each hit carries `n = 1` and the template's `name`. `opts.region` is corners or a window region ([Region form](#region-form)), and a table that is neither raises; so does `opts` that is neither a table nor nothing (`host.screen.imageSearchAll: opts must be a table, got …`). The list is never `nil`. It is empty when there is no match, and then comes alone; when the region could not be captured — or a window region's window has an empty client area — it is empty too and a reason comes after it, `{}, reason` (see [Failure reasons](#failure-reasons)), so the two can be told apart by a caller that asks. Its use is deciding whether a template is safe to click blindly: a close-glyph template that matches twice will eventually click the wrong one, and a template that matches nowhere is a control that silently never fires. "Matched exactly once, here" is the answer you want before shipping either, which is why the overlay runtime keeps it on a calibration key rather than in any live path.
+Returns **every** match of `template` in the region, as an array of [hits](#host-screen-imagesearch) in screen pixels, rather than stopping at the first one like `imageSearch`. `template` is a path or a [`Template`](#host-screen-template), checked and opened as for [`imageSearch`](#host-screen-imagesearch) — a template the image worker cannot open is `{}, err` (`not_found`, `invalid` or `failed`, `cannot open template '…': …`); each hit carries `n = 1` and the template's `name`. `opts.region` is corners or a window region ([Region form](#region-form)), and a table that is neither raises; so does `opts` that is neither a table nor nothing (`host.screen.imageSearchAll: opts must be a table, got …`). The list is never `nil`. It is empty when there is no match, and then comes alone; when it could not look — the region could not be captured, the template could not be opened, or a window region's window has an empty client area — it is empty too and an error value comes after it, `{}, err` ([Errors](#host-screen-imagesearchall-errors)), so the two can be told apart by a caller that asks. Its use is deciding whether a template is safe to click blindly: a close-glyph template that matches twice will eventually click the wrong one, and a template that matches nowhere is a control that silently never fires. "Matched exactly once, here" is the answer you want before shipping either, which is why the overlay runtime keeps it on a calibration key rather than in any live path.
 
 It cannot stop early, so it always pays the **full** scan of the region — and matching, unlike the capture, grows with the area: in a [handler](#where-it-waits) on the image worker's matching pool, which the handler waits for while only its module waits; where it cannot wait it raises. Given a callback — `imageSearchAll(template, opts, cb)` — the same scan runs there while nothing waits, and `cb(hits, nil, info)` or `cb({}, err, info)` comes on a later tick ([With a callback](#with-a-callback)). Two further limits are worth knowing before you read a count. It honours `tolerance` but **not** `scales`: the search runs at the template's native size only, so a control your overlay matches through a scale ladder can verify as zero hits here without anything being wrong with it. And de-duplication is per row — after a hit the scan resumes past that hit's right edge on the same row, but the next row starts again from the left, so a slack tolerance can report one button once per row it survives on.
 
@@ -1475,9 +1912,38 @@ for i, h in ipairs(hits) do
 end
 
 -- Zero matches, or could not look? The second value says which.
-local all, why = host.screen.imageSearchAll(image, { region = { window = o, fraction = { 0, 0, 1, 1 } } })
-if why then host.log.info("not searched: " .. why) end
+local all, err = host.screen.imageSearchAll(image, { region = { window = o, fraction = { 0, 0, 1, 1 } } })
+if err then host.log.info("not searched: " .. err) end
 ```
+
+### Returns {#host-screen-imagesearchall-returns}
+
+- A list of `Hit`s, `{ { x, y, w, h, n = 1, name? }, … }`, in the order the scan met them — it looked: one value, and nothing after it. An empty list alone means no match.
+- `{}, err` — it could not look; `err.code` is one of the codes under [Errors](#host-screen-imagesearchall-errors). The list is never `nil`, so test the second value to tell "no match" from "could not look".
+- With a callback: nothing at once; `cb(hits, nil, info)` or `cb({}, err, info)` on a later tick.
+
+### Errors {#host-screen-imagesearchall-errors}
+
+None of these is raised. Each comes as an error value where "arrives" says.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `hidden` | both | A window region, and the window's client area is empty: a minimised window, or one not laid out yet. Nothing is captured. Answered at once, wherever the call is made; with a callback on the next tick. | `the window's client area is empty (…x…)` | both |
+| `outside` | both | A window region lies outside the coordinate range, which a window table from `host.window` never does. Nothing is captured. Answered at once, as above. | `the region lies outside the screen's coordinate range` | both |
+| any of the [snapshot-source errors](#snapshot-source-errors) | both | With `opts.snapshot`, no part of the region is inside the snapshot: `outside`, `the region does not overlap the snapshot`. Answered at once, as above. | `the region does not overlap the snapshot` | both |
+| `not_found` | both | The image worker could not open a template's PNG because it is not there: gone since its path was first named, or outside the module's package. A `Template` built from such a file answers the same, and tries the file again at the next search. | `cannot open template '…': …` | both |
+| `invalid` | both | A template's PNG whose picture does not decode: cut short, not a PNG, or a format this host is not built with. | `cannot open template '…': …` | both |
+| `failed` | both | A template's PNG that could not be read: held by another program, or no right to read it. | `cannot open template '…': …` | both |
+| `failed` | both | A template's picture failed to be made inside the host: a `Template` built from bytes or a file, or a PNG whose decode failed. That search alone; the rest of its batch is read as usual, and the next search that names the file decodes it again. | `internal error: the template could not be made` | both |
+| `failed` | both | The search's batch failed inside the host, or the search could not be handed to the image worker because the application is closing. The worker goes on. | `internal error: the search could not be made` | both |
+| `too_many` | callback | The module had 64 of the image worker's calls with a callback waiting, and asked for one more: this was its oldest ([Image-worker errors](#image-worker-errors)). It is "could not look", not "not there". | `too many image searches waiting for this module (64); the oldest was ended` | both |
+| `replaced` | callback | With `opts.key`: the module asked the same call again with the same key. | `a newer request with the same key replaced this one` | both |
+| any of the [capture errors](#capture-errors) | both | The region's picture could not be taken. | `screen capture failed` and the others there | both, other |
+| any of the [duplication errors](#duplication-errors) | both | Only in a module that declares `[screen] fallback = "none"`, when desktop duplication could not answer. | `screen capture failed: desktop duplication could not answer — …` | Windows |
+
+**Raises** for a mistake in the call: a `template` that is neither a path nor a Template; a path inside the module's package that is not there or not a PNG the first time it is named (`cannot open template '…': …`); `opts` that is neither a table nor `nil` (`host.screen.imageSearchAll: opts must be a table, got …`); an `opts.region` that is neither region form; an `opts.snapshot` that is not a Snapshot or was released; a `key` without a callback, or one that is not a non-empty string; a callback that is neither a function nor `nil`.
+
+**Raises where it cannot wait**: without a callback, a search with something to read, inside a function that may not wait; see [Where it waits](#where-it-waits).
 
 ### Windows {#host-screen-imagesearchall-windows}
 
@@ -1485,4 +1951,4 @@ The capture is one read through the module's [source](#which-picture-a-read-sees
 
 ### macOS {#host-screen-imagesearchall-macos}
 
-The capture is in points, on the image worker. Without the Screen Recording permission it does not fail: the list is the matches in a picture of the wallpaper — usually none, and no reason with it.
+The capture is in points, on the image worker. Without the Screen Recording permission it does not fail: the list is the matches in a picture of the wallpaper — usually none, and no error value with it.

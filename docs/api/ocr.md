@@ -14,6 +14,8 @@ It is also the most expensive of the three. For a tiny read-out the cost is most
 
 Ask for the region you actually want and no wider. The regions of one call are deliberately recognised separately, because of the second engine that rescues a lone digit — on Windows, and on a Mac where the download carries it: it reads beside the primary one every region of up to 400x200 (pixels on Windows, points on a Mac), and its answer is used only when the primary one reads nothing in that region. In a merged strip the primary engine still reads the other values, so the neural answer is not used and a value the primary engine dropped stays dropped — Melodyne's first version merged its two read-outs into a single strip and lost the note name entirely.
 
+**What each call answers** is under its **Returns**, and what it can fail with under its **Errors** ([Reading an Errors table](./errors.md#reading-an-errors-table)). Two calls can answer an [error value](./errors.md): [`recognize`](#host-ocr-recognize), in a failed reading's `error` field, and [`resolveLanguage`](#host-ocr-resolvelanguage). The other two answer their value and nothing else. A message may change between versions; its code does not. Two raises are not repeated at each entry. One is the capability gate, for a module that did not declare `ocr`. The other is `stopped by the host: …`, once the module has run too long ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -50,7 +52,7 @@ The answer is one **reading** for a single region or entry, and `(list, byName)`
 | Field | |
 |---|---|
 | `name` | The entry's name; absent for a bare region. |
-| `x`, `y`, `w`, `h` | The rectangle that was read, in screen coordinates; all four `0` for a region that was not read: a window region, or corners with no area (see `"failed"` below). |
+| `x`, `y`, `w`, `h` | The rectangle that was read, in screen coordinates; all four `0` for a region that was not read: a window region, corners with no area, or a region a snapshot holds none of (see `"failed"` below). |
 | `status` | `"text"`, `"blank"`, `"none"`, `"failed"` or `"stale"` — see below. |
 | `skipped` | `true` when no recogniser was asked because the region had nothing drawn in it: the same as `status == "blank"`. |
 | `newer` | `true` when a newer read with the same `key` was asked for after this one. |
@@ -58,7 +60,7 @@ The answer is one **reading** for a single region or entry, and `(list, byName)`
 | `lines` | The rows, top to bottom: `{ text, x, y, w, h, words }` each. |
 | `words` | Every row's words in reading order: `{ text, x, y, w, h, approx }` each, in screen coordinates. `approx` is `true` for a box the host shared out by the text's length rather than one an engine located, and absent otherwise. |
 | `lang` | The language the read resolved to, as the platform names it (`"de-DE"`), on every reading of a call that was recognised — `"failed"` ones included: a region the recogniser failed on, and a window region that was not read while the call's other regions were. `""` when nothing was recognised: the capture failed, no language asked for is available, the read was refused or pushed out (too many reads waiting, the recogniser not answering), the recogniser failed inside the application, or no region of the call could be read; and on a `"stale"` reading. |
-| `error` | Why, when `status` is `"failed"`, and only then: an [error value](./errors.md). Compare its `code` (`r.error.code == host.errors.TIMEOUT`); log or say its message (`tostring(r.error)`, `"not read: " .. r.error`), which is the sentence this field held before error values. See **Why a reading failed** below. |
+| `error` | Why, when `status` is `"failed"`, and only then: an [error value](./errors.md). Compare its `code` (`r.error.code == host.errors.TIMEOUT`); log or say its message (`tostring(r.error)`, `"not read: " .. r.error`). Every one it can be is under [Errors](#host-ocr-recognize-errors). |
 | `time` | [`host.now()`](./timer.md#host-now) when the picture was taken: when its capture came back, and for a read of a snapshot the snapshot's own `time`. One value for every region of the call. Present exactly when the screen was read — `status` is `"text"`, `"blank"` or `"none"` — and absent on every `"failed"` and `"stale"` reading, whether or not a picture of the call's other regions was taken. |
 | `inputEpoch` | [`host.inputEpoch()`](./timer.md#host-inputepoch) as it stood when the picture was taken, and for a read of a snapshot the snapshot's own. It is read once the capture is back, so input the host drove while the picture was being taken counts as before it: for what turns the counter over, it may say "perhaps with that input" too often, never too seldom. Two acts do not turn it over themselves — `host.input.post`, and `host.window.focus` until the window has come forward — see [`host.inputEpoch`](./timer.md#host-inputepoch). Absent as `time` is. |
 
@@ -67,7 +69,7 @@ What the statuses mean:
 - `"text"` — something was read. `words` is never empty then, whichever recogniser answered.
 - `"blank"` — the region has nothing drawn in it, and no recogniser was asked (see the platform sections); `skipped` is `true`.
 - `"none"` — the recognisers ran and read nothing.
-- `"failed"` — it could not be read: the capture failed, a region was not read (below), no language asked for is available, too many reads were waiting, or the recogniser is not answering. `error` says which, with its code (**Why a reading failed**, below). A **region is not read** when it has no rectangle at the call: a window region whose client area is empty — a minimised window; `error` is `hidden`, `the window's client area is empty (0x0)` — or that, at the window's size then, would take the call past 40 million pixels (see **Limits**; `too_large`); and corners with no width or no height, empty or turned around — worked out from an earlier reading, say — whose `error` is `outside`, `the region is empty (0x10)`, a side below none counted as none, as `host.screen.profile` answers them. The call's other regions are read all the same. When no region of a call can be read, nothing is photographed or recognised: the readings come on the next turn of the loop.
+- `"failed"` — it could not be read: the capture failed, a region was not read (below), no language asked for is available, too many reads were waiting, or the recogniser failed or is not answering. `error` says which, with its code ([Errors](#host-ocr-recognize-errors)). A **region is not read** when it has no rectangle at the call: a window region whose client area is empty — a minimised window; `error` is `hidden`, `the window's client area is empty (0x0)` — or that, at the window's size then, would take the call past 40 million pixels (see **Limits**; `too_large`); and corners with no width or no height, empty or turned around — worked out from an earlier reading, say — whose `error` is `outside`, `the region is empty (0x10)`, a side below none counted as none, as `host.screen.profile` answers them. The call's other regions are read all the same. When no region of a call can be read, nothing is photographed or recognised: the readings come on the next turn of the loop.
 - `"stale"` — a newer read with the same `key` was asked for before this one was recognised, so it never was. `newer` is `true`. It has no `error`: it is the reading's form of the code `replaced`, and nothing failed.
 
 `words` is non-empty exactly when `text` contains something other than white space. A **row** is the host's, not an engine's: engine lines that overlap vertically by at least half the smaller height are one row, left to right, their text joined with a space. That is what makes `lines` the same shape on both platforms — Vision returns two read-outs side by side as two lines a pixel apart, Windows as whatever its engine decided.
@@ -102,16 +104,7 @@ end)
 
 **Order and priority.** Answers for different keys may arrive out of the order they were asked in, because a read asked for while the host dispatches a key, a hotkey, a game-controller event (a press, a release, a stick or trigger moving, a pad connecting or disconnecting, or a [combination](./gamepad.md#host-gamepad-on), one fired after its `holdMs` included — but not the `connected` replayed for a pad that was already there, `synthetic = true`), a window coming forward, a focus change, a trigger's report of the window in front, or a [page](./gui.md#host-gui-webview)'s message or the user closing its window is recognised before reads asked from a [`host.timer.every`](./timer.md#host-timer-every) poll or while the module loads. A [`host.timer.after`](./timer.md#host-timer-after) callback, an image search's callback and a read's own callback run with the priority of the dispatch that asked for them, and so does every [`host.screen`](./screen.md#with-a-callback) call given a callback — the pictures and points of a `snapshot`, a `profile`, a `pixel` or `pixels` are taken with it on the `screen-capture` thread, and its callback runs with it — so a read asked for from that callback, of the snapshot it was handed or of the screen, goes ahead of the polls' too. A page's `onReady` runs with the priority of the `show` or `prepare` that started its build, or with a key's if an interactive `show` or `prepare` asked for the page while it was being built (with a poll's when the page loaded again by itself), and its `onClose("failed")` with a poll's. A poll's read that has waited half a second goes first all the same — to be photographed and to be recognised — so a stream of key presses or controller events cannot hold it back for good. A poll's read that a function of the module waits for becomes an interactive one as soon as something a person does reaches that module — a key, a hotkey, a controller event, a window or focus change, a page's message or the user closing its window, or a timer or an answer one of those asked for — and waits behind it; so does every read that function waits for after it. What the function arms after it — a `host.timer.after`, a read with a callback — stays in the lane it began in, so a poll that re-arms itself stays a poll. A read whose recognition has begun by then is recognised to its end as the poll's read it began as (on a Mac that means it may still leave out its last passes, see [macOS](#host-ocr-recognize-macos)). There is nothing to set: which is which is the host's to infer.
 
-**What raises.** Mistakes in the call, at the call: `what` not a table; a region the [region form](./screen.md#region-form)'s strict reading refuses — a corner missing (`{}` included) or not a whole number, a mixed or unknown key, a window table without `client`, a fraction that is not a finite number; an entry without `region` or with an unknown field; more than 64 regions, or none; corners that cover more than 40 million pixels in one call together; a name used twice; an option other than `lang`, `key` and `snapshot`; a `lang` that is neither a well-formed tag nor a non-empty list of them; a `key` that is not a non-empty string; a `snapshot` that is not a Snapshot, or was released; `cb` neither a function nor left out, `nil` as the third argument included. Each message begins `host.ocr.recognize:` and names what it expects — `host.ocr.recognize: the region.x1 must be a whole number, got 10.5`. The call without a callback also raises where it cannot wait, whatever it was given, with the message for the place ([Where it waits](#where-it-waits)). Nothing that goes wrong routinely raises — corners with no area included, which a module works out from what it read: it arrives as a reading with a `status`, so code that only looks at `.text` sees `""`. The answer is never `nil`.
-
-**Limits.** 64 regions and 40 million pixels per call. Corners past the pixel limit raise, as above. Window regions are counted after the corners, in the order given and at the size they resolve to at the call, because that size is the window's, not the module's: one that would take the call past the limit is answered `"failed"`, and the next may still fit, so the same call does not raise at full screen and work in a smaller window. 16 reads per module waiting or running at once: the 17th makes the oldest one without a key fail with `"too many reads waiting — put regions that belong together in one call (up to 64)"`, or fails itself when every waiting read has a key. 64 jobs waiting or running in the whole application, where a job is one picture and its recognition: reads that share one (below) count once, and the 65th distinct one fails at once. When the recogniser has answered no region for 5 seconds — on a Mac its warm-up at start counts as a job (see [macOS](#host-ocr-recognize-macos)) — every read still out is answered `"failed"` with `"the text recogniser has not answered a region for N s"`, once, on the next turn of the loop: the one being recognised and every one waiting for its picture or for the recogniser, whichever module asked, a callback's and a waiting function's alike, so that no module waits for an answer that will not come. The log says how many: `ocr: the 3 read(s) waiting for the text recogniser were answered "failed": the text recogniser has not answered a region for 5 s`. The recognition that hangs goes on, and should it come back, nobody is answered with it. From then on new reads fail at once with the same reason until the recogniser answers a region; the next hang after that is answered the same way. A long job whose regions keep coming back is not a hang. Two reads asking for the same thing (the same regions, language and way of capturing) before the first is photographed share one picture and one recognition, across modules too. Pictures that are taken and not yet recognised may hold 256 MB in the whole application; above that, the pictures of reads asked from a poll or while a module loads wait to be taken until recognition has caught up, and the others are taken at once.
-
-**Why a reading failed.** A `"failed"` reading's `error` is one of these, its code in brackets; a module compares the code, and the message is for the log or the user:
-- The picture, on Windows: any of `host.screen`'s [capture errors](./screen.md#failure-reasons) — `screen capture failed` (`failed`), past 40 million pixels through desktop duplication (`too_large`), and under `fallback = "none"` the tails of `screen capture failed: desktop duplication could not answer — …`, each with its own code — and on both platforms `the screen capture failed inside the application; the log has the details` (`failed`), a capture that failed inside the host. On macOS the four of [macOS](#host-ocr-recognize-macos) below.
-- A region not read: `the window's client area is empty (…x…)` (`hidden`); `the region lies outside the screen's coordinate range` (`outside`; a window table `host.window` returned never gives it); `not read: at the window's current size this region is …x…, which would take the call past 40000000 pixels` (`too_large`); `the region is empty (…x…)` (`outside`); on a snapshot, `the region does not overlap the snapshot` (`outside`).
-- The language: `language: … is not available here (available: …). …`, `language: none of … is available here (available: …). …` and `language: no text recognition language is available here. …` (`unavailable`), each ending with what to do about it ([Recognition language](#recognition-language)).
-- The queue: `too many reads waiting — put regions that belong together in one call (up to 64)` and `too many reads waiting in the whole application (64); this one was not taken` (`too_many`); `the text recogniser has not answered a region for … s` (`timeout`).
-- The recogniser: `the text recogniser failed inside the application; the log has the details` and `the recogniser gave no answer for this region` (`failed`); on Windows `OCR failed: …` with `Windows.Media.Ocr`'s own words, and `region outside the captured area`, a capture of the regions' bounding box that does not hold one of them, which should not happen (both `failed`); on macOS a request Vision refused, `the text recogniser refused the request: …` (`refused`); and on a platform without a recogniser, `no text recogniser on this platform` (`not_supported`).
+**Limits.** 64 regions and 40 million pixels per call. Corners past the pixel limit raise (**Raises** under [Errors](#host-ocr-recognize-errors)). Window regions are counted after the corners, in the order given and at the size they resolve to at the call, because that size is the window's, not the module's: one that would take the call past the limit is answered `"failed"`, and the next may still fit, so the same call does not raise at full screen and work in a smaller window. 16 reads per module waiting or running at once: the 17th makes the module's oldest read that has no key and is not being recognised yet fail with `"too many reads waiting — put regions that belong together in one call (up to 64)"`, or fails itself when the module has no such read. 64 jobs waiting or running in the whole application, where a job is one picture and its recognition: reads that share one (below) count once, and the 65th distinct one fails at once. When the recogniser has answered no region for 5 seconds — on a Mac its warm-up at start counts as a job (see [macOS](#host-ocr-recognize-macos)) — every read still out is answered `"failed"` with `"the text recogniser has not answered a region for N s"`, once, on the next turn of the loop: the one being recognised and every one waiting for its picture or for the recogniser, whichever module asked, a callback's and a waiting function's alike, so that no module waits for an answer that will not come. The log says how many: `ocr: the 3 read(s) waiting for the text recogniser were answered "failed": the text recogniser has not answered a region for 5 s`. The recognition that hangs goes on, and should it come back, nobody is answered with it. From then on new reads fail at once with the same reason until the recogniser answers a region; the next hang after that is answered the same way. A long job whose regions keep coming back is not a hang. Two reads asking for the same thing (the same regions, language and way of capturing) before the first is photographed share one picture and one recognition, across modules too. Pictures that are taken and not yet recognised may hold 256 MB in the whole application; above that, the pictures of reads asked from a poll or while a module loads wait to be taken until recognition has caught up, and the others are taken at once.
 
 **Cost.** On the event loop: checking the arguments and queueing, microseconds; building the reading tables when the answer comes; and for a function that waits, stopping and resuming it, microseconds too. A read of a snapshot costs the same there — its regions are cut out of the snapshot on the recognise thread, not on the event loop. Everything else is on the two OCR threads: the capture (on Windows a fixed ~17 ms frame through the standard path, whatever the size, and through desktop duplication what [Which picture a read sees](./screen.md#which-picture-a-read-sees) gives — where a module's first read, and each one after it until duplication has answered once, also makes the [first-read comparison](./screen.md#which-picture-a-read-sees) on the capture thread before its picture: a duplication read of up to 250 ms and, when that is answered, a standard capture of about 17 ms) and the recognition (4–6 ms for a small read-out on Windows, tens to hundreds of milliseconds for a large region; on a Mac see [macOS](#host-ocr-recognize-macos), measured per machine). A read that took 100 ms or more from the call to the answer gets one log line naming its regions — `x,y wxh` each, the first four and how many more — and where the time went — waiting for the capture, the capture, waiting for the recogniser, the recognition — at most one per module every 10 seconds.
 
@@ -208,15 +201,83 @@ A handler that has kept its module busy for 30 seconds or more with keys waiting
 
 **A read's answer turns no epoch for the function that waited.** It goes on in the dispatch that asked, so the turn that hands it the reading leaves [`host.epoch()`](./timer.md#host-epoch) where it was; a callback's answer turns it, once for all that arrive together. [`host.screen.snapshot`](./screen.md#where-it-waits) waits in a handler the same way, for its picture, `pixel` and `pixels` for their colours, and `profile`, `cells`, `matchCells`, `template{ capture }`, a snapshot's `crop`, the searches without a callback, `save` and `saveMarked` for their answers.
 
-**After a wait, the world may have moved.** While a handler waits, the user can bring another window to the front, and a click made after the read lands there. An overlay checks with [`O:here()`](./overlay.md#o-here) before the read and [`O:stillHere`](./overlay.md#o-here) after it; other code compares `host.window.active()` before and after.
+**After a wait, the world may have moved.** While a handler waits, the user can bring another window to the front, and a click made after the read lands there. An overlay checks with [`O:here()`](./overlay.md#o-here) before the read and [`O:stillHere`](./overlay.md#o-stillhere) after it; other code compares `host.window.active()` before and after.
 
 **`pending` while a handler waits.** [`host.ocr.pending(key)`](#host-ocr-pending) is `true` while a handler waits for a read with that key, and `false` once it goes on. It is also `true` while the answer of a read with that key and a callback waits in the module's mailbox — behind the waiting handler itself, since the module is busy: a handler that waits until `pending(key)` turns `false` waits for good.
 
 **After `"failed"`, return.** During a hang (see **Limits**) a read asked again at once fails at once, and is handed over on the next turn of the loop. A handler that reads again in a loop after `"failed"` turns once every 15 ms for as long as the recogniser does not answer, and keeps its module busy all the while: return, or ask again from a timer.
 
+### Returns {#host-ocr-recognize-returns}
+
+- **Without a callback, for one region or entry:** one reading, the table above.
+- **Without a callback, for a list**, even a list of one: `list, byName`. `list` holds every reading in the order asked, and `byName` the named ones.
+- **With a callback:** nothing, at once. `cb(reading)` or `cb(list, byName)` follows once, on a later turn of the loop, or never when the module is disabled, reloaded or removed first (**Delivery**). The callback is handed no error value and no `info`.
+
+The answer is never `nil`, and **the call itself never answers an error value.** What went wrong comes in the reading it concerns: `status = "failed"`, and its `error` (see [Errors](#host-ocr-recognize-errors)). A call's readings stand on their own, so a list can hold readings that were read beside readings that failed: a window region not read, say, beside corners that were. Test each reading's `status`, not only the first one's.
+
+A `"stale"` reading has no `error`. A newer read with the same `key` replaced it before it was recognised, so it is the reading's form of the code `replaced`, and nothing failed. A `"blank"` or `"none"` reading has none either: the region was read, and has no text.
+
+```luau
+-- In a handler: two values read together, and each reading answers for itself.
+local list = host.ocr.recognize({
+  { name = "Cutoff", region = { 300, 200, 360, 216 } },
+  { name = "Resonance", region = { 300, 230, 360, 246 } },
+})
+for _, r in ipairs(list) do
+  if r.status == "text" then
+    host.speech.output(r.name .. " " .. r.text, { interrupt = false })
+  elseif r.status == "failed" then
+    host.log.info("[my-module] " .. r.name .. " not read: " .. r.error)
+  end
+end
+```
+
+### Errors {#host-ocr-recognize-errors}
+
+None of these is raised, and none is the call's own answer. Each is the `error` of a `"failed"` reading (arrives `field`), for that region alone unless "when" says more. A region not read at the call fails alone, and the call's other regions are read.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| any of the [capture errors](./screen.md#capture-errors) | field | The picture of the region could not be taken. On Windows the standard way gives `screen capture failed`. On both platforms, `the screen capture failed inside the application; the log has the details` is a capture that failed inside the host. The group's other two never come here: no region of a call is past 40 million pixels, and a read takes no snapshot. A capture macOS could not take is the macOS row below. | `screen capture failed`, `the screen capture failed inside the application; the log has the details` | both |
+| any of the [duplication errors](./screen.md#duplication-errors) | field | Only in a module that declares `[screen] fallback = "none"`: desktop duplication could not answer, and every region of the call fails. The code is the tail's. | `screen capture failed: desktop duplication could not answer — …` | Windows |
+| `hidden` | field | A window region whose client area is empty at the call: a minimised window, or one not laid out yet. | `the window's client area is empty (…x…)` | both |
+| `outside` | field | A window region outside the screen's coordinate range, which a window table from `host.window` never gives. | `the region lies outside the screen's coordinate range` | both |
+| `outside` | field | Corners with no width or no height, empty or turned around: worked out from an earlier reading, say. A side below none counts as none, as `host.screen.profile` answers them. | `the region is empty (…x…)` | both |
+| any of the [snapshot-source errors](./screen.md#snapshot-source-errors) | field | With `opts.snapshot`, a region of which the snapshot holds nothing. Of the group, only `the region does not overlap the snapshot` comes here: a region partly in the snapshot is cut to that part and read. | `the region does not overlap the snapshot` | both |
+| `too_large` | field | A window region that, at the window's size at the call, would take the call past 40 million pixels. A later region that still fits is read. | `not read: at the window's current size this region is …x…, which would take the call past 40000000 pixels` | both |
+| `unavailable` | field | No language asked for is available here, or with `lang` left out none at all: every region of the call. The message names what was asked, what is there, and what to do ([Recognition language](#recognition-language)). | `language: … is not available here (available: …). …`, `language: none of … is available here (available: …). …`, `language: no text recognition language is available here. …` | both |
+| `too_many` | field | The module has 16 reads waiting or running, and asks for one more. Its oldest read that has no key and is not being recognised yet fails, every region of it, and the new one goes ahead. When it has no such read, the new one fails. | `too many reads waiting — put regions that belong together in one call (up to 64)` | both |
+| `too_many` | field | 64 jobs wait or run in the whole application: the new read fails at once, every region of it. | `too many reads waiting in the whole application (64); this one was not taken` | both |
+| `timeout` | field | The recogniser has answered no region for 5 seconds. Every read still out fails, whichever module asked, and so does every new read until the recogniser answers a region again (**Limits**). | `the text recogniser has not answered a region for … s` | both |
+| `failed` | field | The recogniser failed inside the host: every region of the call. | `the text recogniser failed inside the application; the log has the details` | both |
+| `failed` | field | The recogniser answered fewer regions than it was given, which should not happen. | `the recogniser gave no answer for this region` | both |
+| `failed` | field | `Windows.Media.Ocr` failed on the region. The message ends with its own words. | `OCR failed: …` | Windows |
+| `failed` | field | A capture of the regions' bounding box that does not hold this region, which should not happen. | `region outside the captured area` | Windows |
+| `failed` | field | macOS gave no picture of the region. Without the Screen Recording permission it gives a picture of the wallpaper instead, so such a read reads the wallpaper rather than failing. | `screen capture failed — if every read fails, grant this application Screen Recording and restart it` | macOS |
+| `failed` | field | A region of 400x200 points or less whose pixels CoreGraphics could not read back out of the capture. Said in the log once a thread. | `the picture could not be read back` | macOS |
+| `failed` | field | The region could not be cut out of the bounding box's capture, or out of a snapshot's picture. | `could not cut this region out of the shared capture` | macOS |
+| `failed` | field | A read of a snapshot that kept no picture at the display's resolution, which no snapshot on this platform does. | `this snapshot kept no picture at the display's resolution to read text from` | macOS |
+| `refused` | field | Vision refused the pass the reading would be: the first accurate pass, or the last rung the ladder climbed to. The message ends with Vision's own words. Said in the log once a thread; the second recogniser's answer is not used. | `the text recogniser refused the request: …` | macOS |
+| `not_supported` | field | A platform with no text recogniser: every region. | `no text recogniser on this platform` | other |
+
+A region not started because the application is closing never reaches a module: no callback runs once the exit has begun.
+
+**Raises** for a mistake in the call, at the call:
+
+- `what` that is not a table; a list with holes, or with keys that are not numbers; an entry of a list that is not a table.
+- a region the [region form](./screen.md#region-form)'s strict reading refuses: a corner missing (`{}` included) or not a whole number, a mixed or unknown key, a window table without `client`, a fraction that is not a finite number.
+- an entry without `region`, with an unknown field, or with a `name` that is not a non-empty string; a name used twice.
+- more than 64 regions, or none; corners that cover more than 40 million pixels in one call together.
+- `opts` that is neither a table nor `nil`; an option other than `lang`, `key` and `snapshot`; a `lang` that is neither a well-formed tag nor a non-empty list of them; a `key` that is not a non-empty string; a `snapshot` that is not a Snapshot, or was released.
+- `cb` that is neither a function nor left out, `nil` as the third argument included.
+
+Each message begins `host.ocr.recognize:` and names what it expects: `host.ocr.recognize: the region.x1 must be a whole number, got 10.5`.
+
+**Raises where it cannot wait**: the call without a callback, wherever its function cannot wait — outside every handler, inside a function the host calls and waits for or one Luau cannot suspend, or in a coroutine of the module's own — whatever it was given. Nothing is photographed or recognised then. The message names the place; see [Where it waits](#where-it-waits).
+
 ### Windows {#host-ocr-recognize-windows}
 
-The picture comes from the module's [capture source](./screen.md#which-picture-a-read-sees). The standard way photographs the regions' bounding box once and cuts it up when that box is no larger than four times the regions' own area (or 65 536 pixels, whichever is larger) and no larger than 8 million pixels; otherwise, or when the box comes back clipped at a screen edge, each region is photographed on its own — one capture after another on the capture thread, each a compositor frame of its own, so those regions are not from one moment. Desktop duplication takes every region as a piece of one frame in one request, and the capture thread waits up to 250 ms for its answer; with the default `fallback = "standard"` a request it does not answer is photographed the standard way instead. Under `fallback = "none"`, a picture duplication cannot give is a reading with `status = "failed"` and an `error` whose message begins `screen capture failed: desktop duplication could not answer` and whose code is its tail's ([Failure reasons](./screen.md#failure-reasons)).
+The picture comes from the module's [capture source](./screen.md#which-picture-a-read-sees). The standard way photographs the regions' bounding box once and cuts it up when that box is no larger than four times the regions' own area (or 65 536 pixels, whichever is larger) and no larger than 8 million pixels; otherwise, or when the box comes back clipped at a screen edge, each region is photographed on its own — one capture after another on the capture thread, each a compositor frame of its own, so those regions are not from one moment. Desktop duplication takes every region as a piece of one frame in one request, and the capture thread waits up to 250 ms for its answer; with the default `fallback = "standard"` a request it does not answer is photographed the standard way instead. Under `fallback = "none"`, a picture duplication cannot give is a reading with `status = "failed"` and an `error` whose message begins `screen capture failed: desktop duplication could not answer` and whose code is its tail's ([duplication errors](./screen.md#duplication-errors)).
 
 In a module that reads through desktop duplication, the read also makes the comparison the log's `[capture]` line reports (see [Which picture a read sees](./screen.md#which-picture-a-read-sees)) — on the capture thread, just before the read's own picture, not on the event loop: a duplication read, which waits up to 250 ms there, and when it answers a standard capture of the same rectangle (a compositor frame or more) — the first of the call's regions that is not empty at the call (a window region whose window's client area is empty is passed over), or the client area of the window in front when that region is too small to tell the two apart. That happens at the module's first read after it was built, and again at each read until duplication has answered once. One read carries it at a time; a read that ends before its picture is taken leaves it to the module's next read.
 
@@ -232,7 +293,7 @@ A new `Windows.Media.Ocr` engine is created for every region. The two OCR thread
 
 ### macOS {#host-ocr-recognize-macos}
 
-The picture is taken at the display's full backing resolution — twice the points on a Retina display — through the one capture every read makes: one capture of the bounding box by the same rule as on Windows, and one per region when the box would be wasteful or comes back a different size than asked. Without the Screen Recording permission macOS answers with a picture of the wallpaper rather than an error, so such a read reads the wallpaper — usually `"none"` or `"blank"` — rather than failing; a capture that could not be taken at all is `"failed"`, its `error` `failed`: `screen capture failed — if every read fails, grant this application Screen Recording and restart it`. So is a region whose pixels CoreGraphics could not read back out of the capture — `the picture could not be read back`, said in the log once a thread — and one that could not be cut out of the bounding box's capture, `could not cut this region out of the shared capture`; a read of a snapshot that kept no picture at the display's resolution fails `this snapshot kept no picture at the display's resolution to read text from` (`failed`), which no snapshot on this platform does.
+The picture is taken at the display's full backing resolution — twice the points on a Retina display — through the one capture every read makes: one capture of the bounding box by the same rule as on Windows, and one per region when the box would be wasteful or comes back a different size than asked. Without the Screen Recording permission macOS answers with a picture of the wallpaper rather than an error, so such a read reads the wallpaper — usually `"none"` or `"blank"` — rather than failing; a capture that could not be taken at all is `"failed"`, its `error` `failed`: `screen capture failed — if every read fails, grant this application Screen Recording and restart it`. So is a region whose pixels CoreGraphics could not read back out of the capture — `the picture could not be read back`, said in the log once a thread — and one that could not be cut out of the bounding box's capture, `could not cut this region out of the shared capture`; a read of a snapshot that kept no picture at the display's resolution fails `this snapshot kept no picture at the display's resolution to read text from` (`failed`), which no snapshot on this platform does. One failure still reads as `"none"`, with no `error`: a region of 400x200 points or less whose content crop CoreGraphics could not draw into a bitmap.
 
 On a snapshot, the recogniser reads the picture at the display's own resolution the snapshot kept beside its point-sized pixels, as it reads a live read's shared capture, so the read is as sharp as a live one; a region of the snapshot that was off the desktop is not in that picture and is cut away.
 
@@ -270,9 +331,7 @@ Whether a read of this module with `key` is still out: asked with [`recognize`](
 
 **Signature:** `host.ocr.pending(key: string) -> boolean`
 
-- `true` from the call that asked until the answer is handed over, and while a callback's answer waits in the module's mailbox behind the module's other events. `false` inside the read's own callback and in the function that waited, once it goes on — the answer has been handed over by then — after the module was disabled, reloaded or removed, which drops its reads, and once a recogniser that stopped answering has had the read answered `"failed"` (see **Limits** under [`recognize`](#host-ocr-recognize)). A handler that waits until `pending(key)` turns `false` while the answer is behind it in its own mailbox waits for good ([Where it waits](#where-it-waits)).
 - Asks about the module's own reads only: another module's reads with the same key are not counted.
-- Raises when `key` is not a non-empty string (`host.ocr.pending: the key must be a non-empty string, got nil`).
 - Costs a look through the reads the application has waiting, every module's: microseconds.
 
 It is "one read at a time" without a flag: a flag set before a read stays set when a disable drops the read and its callback never comes, while a dropped read is simply not pending.
@@ -292,6 +351,19 @@ host.timer.every(120, function()
 end)
 ```
 
+### Returns {#host-ocr-pending-returns}
+
+- `true` — from the call that asked until the answer is handed over, and while a callback's answer waits in the module's mailbox behind the module's other events.
+- `false` — no read of this module with `key` is out. That is so inside the read's own callback, and in the function that waited once it goes on, since the answer has been handed over by then. It is so after the module was disabled, reloaded or removed, which drops its reads, and once a recogniser that stopped answering has had the read answered `"failed"` (see **Limits** under [`recognize`](#host-ocr-recognize)). And it is so for a key never used.
+
+A handler that waits until `pending(key)` turns `false` while the answer is behind it in its own mailbox waits for good ([Where it waits](#where-it-waits)).
+
+### Errors {#host-ocr-pending-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `key` that is not a non-empty string. `host.ocr.pending: the key must be a non-empty string, got nil`, and `host.ocr.pending: the key is empty` for `""`.
+
 ### Windows {#host-ocr-pending-windows}
 
 No difference between the platforms.
@@ -308,12 +380,21 @@ The languages the platform's recogniser reads, the one a read without `lang` use
 
 Tags as the platform spells them (`"de-DE"`, `"en-US"`, `"zh-Hans"`), each once. The list is read by the recognise thread as the first thing it does after the application starts; a call made before that has finished answers at once from what is known — `{}` — and the log says so, once (`the recognition languages are not known yet; answering from what is known, which is nothing`). A read the recogniser answers comes after the list, since its language is resolved on that thread after it: asked in that read's callback, or in a handler after that read, the list is there. Only a read answered without the recogniser — refused, or a window region with nothing to read — can come sooner. It is read again when a language did not resolve, at most every 30 seconds, so a language installed while the application runs is picked up without a restart.
 
-Never raises, and never waits: it costs a lock and a copy of a short list.
+Never waits: it costs a lock and a copy of a short list.
 
 ```luau
 local langs = host.ocr.languages()
 host.log.info("text recognition reads: " .. table.concat(langs, ", "))
 ```
+
+### Returns {#host-ocr-languages-returns}
+
+- A new list of tags at every call, as the platform spells them, each once. First comes the one a read without `lang` uses.
+- `{}` — the list is not known yet, in the first moments after the application starts; or nothing on this machine reads text; or the build for other systems, always. [`resolveLanguage`](#host-ocr-resolvelanguage) tells the first apart: it answers `not_ready` then.
+
+### Errors {#host-ocr-languages-errors}
+
+None. It never answers an error value. It never raises.
 
 ### Windows {#host-ocr-languages-windows}
 
@@ -329,11 +410,7 @@ Which language a read with this `lang` would use here.
 
 **Signature:** `host.ocr.resolveLanguage(lang: string | { string } | nil)` → `string`, or `nil, Error`
 
-`lang` is what a read takes: a tag, a list of tags in order of preference, or `nil` for the user's language. Returns the platform's tag it resolves to — `"de"` answers `"de-DE"` where that is installed — or `nil` and an [error value](./errors.md) saying why there is none:
-- `not_ready` — `the recognition languages are not known yet`: the list is not known yet (see [`languages`](#host-ocr-languages)). It does not wait for the list, which is known once the recogniser has answered a read.
-- `unavailable` — nothing here reads it, with the message a read in that language fails with: `language: de is not available here (available: en-US, fr-FR). …`, `language: none of … is available here (available: …). …`, or for `nil` on a machine with no language at all `language: no text recognition language is available here. …` ([Recognition language](#recognition-language)).
-
-Raises when `lang` is not a well-formed tag, a non-empty list of them or `nil`. Costs what `languages` does, plus the matching.
+`lang` is what a read takes: a tag, a list of tags in order of preference, or `nil` for the user's language. It answers the platform's tag it resolves to — `"de"` answers `"de-DE"` where that is installed — or why there is none. It does not wait for the list of languages, which is known once the recogniser has answered a read. A language that does not resolve has the list read again, at most every 30 seconds, as a read's does. Costs what `languages` does, plus the matching.
 
 ```luau
 -- Asked a second after the module loads, not while it loads: in the first moments after the
@@ -346,6 +423,22 @@ host.timer.after(1000, function()
   end
 end)
 ```
+
+### Returns {#host-ocr-resolvelanguage-returns}
+
+- A string — the platform's tag, as [`languages`](#host-ocr-languages) spells it.
+- `nil, err` — no tag: the list is not known yet, or nothing here reads it. `err.code` is under Errors. For `unavailable` it is the error value a read in that language fails with.
+
+### Errors {#host-ocr-resolvelanguage-errors}
+
+None of these is raised. Each comes as the second value.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `not_ready` | return | The list of languages is not known yet, in the first moments after the application starts (see [`languages`](#host-ocr-languages)). Ask again later. | `the recognition languages are not known yet` | both |
+| `unavailable` | return | Nothing here reads it: a tag, or every tag of a list, that matches no language here; or `nil` on a machine with no language at all. The message ends with what to do ([Recognition language](#recognition-language)): `language: de is not available here (available: en-US, fr-FR). …`. On the build for other systems every call answers this. | `language: … is not available here (available: …). …`, `language: none of … is available here (available: …). …`, `language: no text recognition language is available here. …` | both, other |
+
+**Raises** for a mistake in the call: a `lang` that is neither a well-formed tag, a non-empty list of them nor `nil` — `"english"`, `"de--DE"`, `""`, `{}` or a number. Each message begins `host.ocr.resolveLanguage:`.
 
 ### Windows {#host-ocr-resolvelanguage-windows}
 

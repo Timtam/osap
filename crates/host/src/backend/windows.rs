@@ -5558,48 +5558,44 @@ mod capture_tests {
     }
 
     /// What a module is told when duplication had no picture is part of the API: every reason
-    /// `unanswered` can give is in docs/api/screen.md word for word, a number in it written
-    /// there as `…`. A reason reworded here and not there fails this test.
+    /// `unanswered` can give is its tail's Reason, with that Reason's words — the numbers it was
+    /// made with where the Reason has `…`. tools/api-index.py holds docs/api/screen.md's
+    /// "Duplication errors" section, tail by tail, to the same Reasons, so a reason reworded here
+    /// and not there fails one of the two.
     #[test]
-    fn every_reason_a_module_is_told_is_listed() {
-        const DOC: &str = include_str!("../../../../docs/api/screen.md");
+    fn every_reason_a_module_is_told_is_its_tails_reason() {
         let all = [
-            (Fallback::SwitchedOff, None),
-            (Fallback::Disabled, None),
-            (Fallback::Crashed, None),
-            (Fallback::NoThread, None),
-            (Fallback::Closing, None),
-            (Fallback::Overdue, None),
-            (Fallback::TooLarge, None),
-            (Fallback::Unsupported(0x887A_0004_u32 as i32), Some("0x887A0004")),
-            (Fallback::TooManyRecorders, None),
-            (Fallback::SecureDesktop, None),
-            (Fallback::AccessLost, None),
-            (Fallback::DeviceRemoved, None),
-            (Fallback::Rotated, None),
-            (Fallback::Topology, None),
-            (Fallback::NoFrameYet, None),
-            (Fallback::NoOutput, None),
-            (Fallback::Format(87), Some("87")),
-            (Fallback::Failed(0x8000_4005_u32 as i32), Some("0x80004005")),
+            Fallback::SwitchedOff,
+            Fallback::Disabled,
+            Fallback::Crashed,
+            Fallback::NoThread,
+            Fallback::Closing,
+            Fallback::Overdue,
+            Fallback::TooLarge,
+            Fallback::Unsupported(0x887A_0004_u32 as i32),
+            Fallback::TooManyRecorders,
+            Fallback::SecureDesktop,
+            Fallback::AccessLost,
+            Fallback::DeviceRemoved,
+            Fallback::Rotated,
+            Fallback::Topology,
+            Fallback::NoFrameYet,
+            Fallback::NoOutput,
+            Fallback::Format(87),
+            Fallback::Failed(0x8000_4005_u32 as i32),
         ];
-        for (why, number) in all {
-            // Its message fits its Reason's pattern, or making it panics in a debug build.
+        for why in all {
+            // Making it already asserts the fit in a debug build; this holds in every build.
             let told = unanswered(why);
             assert_eq!(told.reason(), why.reason());
+            assert!(errors::fits(told.reason().message, told.message()), "{told} is not {:?}", told.reason().message);
             if why != Fallback::TooLarge {
                 assert!(told.message().starts_with(&format!("{DUPLICATION_UNANSWERED} — ")), "{told}");
             }
-            let tail = why.describe();
-            let listed = match number {
-                Some(n) => tail.replacen(n, "…", 1),
-                None => tail.clone(),
-            };
-            assert!(DOC.contains(&listed), "docs/api/screen.md does not list the reason `{listed}` ({why:?})");
         }
-        assert!(DOC.contains(DUPLICATION_UNANSWERED));
         // And the one a region too large for duplication gets, beside it.
-        assert!(DOC.contains(too_large().message()));
+        assert_eq!(too_large().reason(), &errors::screen::CAPTURE_TOO_LARGE);
+        assert_eq!(too_large().message(), errors::screen::CAPTURE_TOO_LARGE.message);
     }
 }
 

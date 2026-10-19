@@ -4224,18 +4224,18 @@ mod tests {
         assert_eq!((info.get::<i64>("time").unwrap(), info.get::<i64>("inputEpoch").unwrap()), (12, 3));
     }
 
-    /// The reasons that are the host's own rather than the capture path's are listed in
-    /// docs/api/screen.md as they are written here (the capture path's are held to the page by
-    /// `every_reason_a_module_is_told_is_listed` in backend/windows.rs).
+    /// The reasons that are the host's own rather than the capture path's are written here as the
+    /// Reason table writes them (the capture path's are held to it by
+    /// `every_reason_a_module_is_told_is_its_tails_reason` in backend/windows.rs), and
+    /// tools/api-index.py holds docs/api/screen.md's Errors tables, and its sections of the
+    /// reasons many calls share, to that table.
     ///
     /// A reason with numbers in it is made by the code that makes it, with numbers the test
-    /// picks, and each of those numbers is then written `…` as the page writes it; a limit the
-    /// page states as itself (4096) is left alone. The cells calls' window-size reason is held
-    /// to the page where its own test makes it (lib.rs, `cells_binding_tests`).
+    /// picks, and each of those numbers is then written `…` as the table writes it; a limit the
+    /// table states as itself (4096) is left alone.
     #[test]
-    fn the_hosts_own_reasons_are_listed() {
-        const DOC: &str = include_str!("../../../docs/api/screen.md");
-        // `msg` with each of `numbers`, in order, written as the page writes a number: `…`.
+    fn the_hosts_own_reasons_are_the_tables() {
+        // `msg` with each of `numbers`, in order, written as the table writes a number: `…`.
         let listed = |msg: &str, numbers: &[&str]| {
             numbers.iter().fold(msg.to_string(), |m, n| {
                 assert!(m.contains(n), "`{n}` is not in `{m}`");
@@ -4261,7 +4261,10 @@ mod tests {
             listed(&size(2000, 1000), &["2000", "1000", "2000000"]),
             listed(&template_store::cannot_open(Path::new("PATH"), &why).to_string(), &["PATH", "WHY"]),
         ] {
-            assert!(DOC.contains(&format!("`{reason}`")), "docs/api/screen.md does not list the reason `{reason}`");
+            assert!(
+                crate::errors::REASONS.iter().any(|r| r.message == reason),
+                "`{reason}` is no message of the Reason table"
+            );
         }
     }
 

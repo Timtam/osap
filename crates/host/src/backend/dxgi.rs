@@ -349,10 +349,11 @@ pub(crate) enum Fallback {
 impl Fallback {
     /// The reason in words, for the log and for what a module under `fallback = "none"` is
     /// told: the tail of every read's reason, after "screen capture failed: desktop duplication
-    /// could not answer — " (`windows.rs`, `unanswered`). Part of the API: docs/api/screen.md
-    /// lists each one word for word under "Failure reasons", and a test in `windows.rs`
-    /// (`every_reason_a_module_is_told_is_listed`) holds the two together: change the wording
-    /// in both or not at all.
+    /// could not answer — " (`windows.rs`, `unanswered`). Part of the API: each is the tail of
+    /// its Reason in errors.rs (`Fallback::reason`), which a test in `windows.rs`
+    /// (`every_reason_a_module_is_told_is_its_tails_reason`) holds it to, and docs/api/screen.md
+    /// lists the Reasons word for word under "Failure reasons", held there by
+    /// tools/api-index.py: change the wording in all three or not at all.
     pub(crate) fn describe(self) -> String {
         match self {
             Fallback::SwitchedOff => "it is switched off in Application settings".into(),
