@@ -10,6 +10,8 @@ This is how a module becomes more than one file. ON:EAR splits into the applicat
 
 Not to be confused with [`host.require`](./require.md#host-require), which imports a different module by id.
 
+**`host.include` answers no [error value](./errors.md#error-values).** It returns what the file returned or raises, and its entry's **Errors** says when. Nothing here is gated, so the one other raise is the guard's ([Return or raise](./errors.md#return-or-raise)): a module that has run too long is stopped with `stopped by the host: …` ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 Nothing — this is available to every module. See [what the capability list is and is not](./index.md#capabilities).
@@ -39,9 +41,27 @@ Semantics worth knowing:
 - Luau's own `require` is not a way to split a module: every file here is loaded under a name `require` does not accept, so a `require("./lib")` raises `require is not supported in this context`. Use `host.include`.
 - An include **cycle** raises an error naming the file rather than overflowing the stack.
 - Reported line numbers match the file.
-- **What raises**, besides the path rules above: a file that cannot be read raises `include '<rel>': <the system's reason>` — `include 'data/pack.luau': The system cannot find the file specified. (os error 2)` on an English Windows, in the language of Windows elsewhere, `… No such file or directory (os error 2)` on macOS — and so does a file that is not UTF-8 (`stream did not contain valid UTF-8`); a syntax error in the file raises Luau's message with the file's line; an error the file raises while it runs comes back out of `host.include` as it is. A failed include is not remembered: the next call tries the file again. An argument that is neither a string nor a number raises.
+- **What raises** is under [Errors](#host-include-errors). A failed include is not remembered: the next call tries the file again.
 - **Text encoding.** The file is UTF-8. One byte-order mark at its very start is skipped, so a file written by a tool that puts one there (.NET's `Encoding.UTF8`, PowerShell 5's `Out-File -Encoding utf8`) loads; the same holds for a module's entry file and a code dependency's. A second mark, or one anywhere else, is left for Luau, which rejects it (`Unicode character U+feff`).
 - **Cost.** The first include of a file in a VM reads it and compiles it synchronously, on the main thread, and then runs it; the time grows with the file, and a module's entry file waits for it. Later includes of the same file in that VM are a table lookup. A code module's files are read and compiled once in each VM its code runs in.
+
+### Returns {#host-include-returns}
+
+- The first value the file returns, or `nil` when it returns none. Values after the first are dropped: a file that ends `return a, b` gives `a` alone.
+- At every later include of that file in this VM, the same value, `nil` included: the file is not run again.
+
+### Errors {#host-include-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call, and nothing is remembered then: the next include of the file tries it again.
+
+- A path the rules above refuse. Outside the module, absolute or empty: `include '…' resolves outside the module directory`. With a `\` or a `:` anywhere: `include '…': '…' is not allowed in an include path — separate folders with '/'`, naming the character.
+- A file that cannot be read: `include '…': …`, with the system's reason — `include 'data/pack.luau': The system cannot find the file specified. (os error 2)` on an English Windows, in the language of Windows elsewhere, `… No such file or directory (os error 2)` on macOS. A file that is not UTF-8 raises `include '…': stream did not contain valid UTF-8`.
+- A syntax error in the file: Luau's message, with the file's line. A `...` at the file's top level is one, since the file becomes the body of a function that receives `host`.
+- An error the file raises while it runs: it comes out of `host.include` as it is.
+- A cycle, a file reached again while it is still being loaded: `include cycle: '…' is already being loaded`.
+- An argument that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8.
 
 ### Windows {#host-include-windows}
 

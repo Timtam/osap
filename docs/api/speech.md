@@ -14,6 +14,8 @@ Where the words actually come out — a screen reader, a speech engine, or Voice
 
 **Braille goes with it.** There is no separate call for a braille display, and that is deliberate rather than an omission: on macOS there is no separate channel to have one for, because VoiceOver brailles whatever it is told to say. A `host.braille` would do something on one platform and nothing on the other, which is an API making a promise it cannot keep. So a line that is spoken is also written to the display, wherever the screen reader has one — on Windows through a single call that does both, on macOS because it always did.
 
+**What each call answers** is under its **Returns**, and what it can fail with under its **Errors** ([Reading an Errors table](./errors.md#reading-an-errors-table)). Only [`use`](#host-speech-use) can answer an [error value](./errors.md). Every other call here answers its value and nothing else. A message may change between versions; its code does not. Two raises are not repeated at each entry. One is the capability gate, for a module that did not declare `speech`. The other is `stopped by the host: …`, once the module has run too long ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -27,7 +29,7 @@ See [what that list is and is not](./index.md#capabilities).
 
 ## host.speech.output(text, opts?) {#host-speech-output}
 
-**Signature:** `host.speech.output(text: string | Error, opts: { interrupt: boolean? }?)` → `nil`
+**Signature:** `host.speech.output(text: string | Error, opts: { interrupt: boolean? }?)` → nothing
 
 Speaks `text`, cutting off what is being said unless `opts.interrupt` is `false`. Leaving `opts` out, passing `{}` and passing `{ interrupt = nil }` all interrupt; `false` queues behind what is being said. Output is **not** echoed to the console — a screen reader reading the terminal would double the speech. The call itself does not check whether the module is enabled: a disabled module's callbacks are not called, but its entry file still runs at load, and a line spoken there is heard.
 
@@ -40,11 +42,26 @@ host.speech.output(item.name, { interrupt = pack.interrupt })
 host.speech.output(host.errors.new("not_found", "no preset of that name"))
 ```
 
-**Nothing the speech engine does raises; wrong arguments do.** A screen reader that refuses a line, stops answering or is not running, and a voice that fails to open, end in the line going another way or in a log line — never in an error in the module's key handler. The arguments are checked at the call, and these raise: a `text` that is not a string — a number is accepted and spoken as its digits, an [error value](./errors.md#error-values) as its message (never its `detail`), and `nil`, a boolean or any other table raise — or a string that is not valid UTF-8; an `opts` that is neither a table nor `nil`; and an `interrupt` that is not `true`, `false` or `nil` (`{ interrupt = 1 }` raises `host.speech.output: interrupt is true or false, not a number`).
+**Nothing the speech engine does raises; wrong arguments do.** A screen reader that refuses a line, stops answering or is not running, and a voice that fails to open, end in the line going another way or in a log line — never in an error in the module's key handler. The arguments are checked at the call (see [Errors](#host-speech-output-errors)).
 
 **Cost.** The call hands the line to a speech thread and returns; it does not wait for the line to be said. It runs on the main thread, like every Lua call.
 
 `interrupt` governs the platform's own queue. On the VoiceOver path, whether an announcement also cuts off what VoiceOver is saying for its own reasons is VoiceOver's decision, not one this API can make.
+
+### Returns {#host-speech-output-returns}
+
+Nothing: the call returns no value, at once. Where the line went, and whether it was said, is not reported to the module. The log says where speech goes whenever that changes.
+
+### Errors {#host-speech-output-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call:
+
+- a `text` that is not a string. A number is accepted and spoken as its digits, and an [error value](./errors.md#error-values) as its message, never its `detail`. `nil`, a boolean and any other table raise.
+- a string that is not valid UTF-8.
+- an `opts` that is neither a table nor `nil`.
+- an `interrupt` that is not `true`, `false` or `nil`: `{ interrupt = 1 }` raises `host.speech.output: interrupt is true or false, not a number`.
 
 ### Windows {#host-speech-output-windows}
 
@@ -116,7 +133,18 @@ end
 
 The answer is a snapshot from a moment ago and a fresh look is started behind it, so the call costs microseconds rather than the 35 ms a look takes — every callback, captured key and hotkey waits for the event loop, and a look while a speech engine is opening was measured at 2.7 seconds. For "which screen readers are running" a moment-old answer is the right kind: it changes when somebody starts or quits one, not between two lines of Luau.
 
-**It can be empty just after start-up, and that is not the same as "nothing can speak here."** The first snapshot is taken behind the scenes rather than at launch, deliberately — a session that says nothing should not pay for opening a synthesiser — so a module that asks immediately may be told there is nothing. Measured: on one macOS machine the list arrived after 282 ms, while on one Windows machine two consecutive runs took 500 ms and **5500 ms** before a plain voice could be chosen. A module that picks a voice should keep looking rather than ask once and believe the answer; `tools/speech-probe` is written that way and says how long it waited.
+**It can be empty just after start-up, and that is not the same as "nothing can speak here."** The first snapshot is taken behind the scenes rather than at launch, deliberately — a session that says nothing should not pay for opening a synthesiser — so a module that asks immediately may be told there is nothing (on a Mac, nothing but `voiceover`). Measured: on one macOS machine the list arrived after 282 ms, while on one Windows machine two consecutive runs took 500 ms and **5500 ms** before a plain voice could be chosen. A module that picks a voice should keep looking rather than ask once and believe the answer; `tools/speech-probe` is written that way and says how long it waited.
+
+### Returns {#host-speech-engines-returns}
+
+A new list at every call, one table per engine, `{ id, name, screenReader, available }`, in the order the platform sections give. Never `nil`.
+
+- Just after start-up the list may not be read yet (above). On Windows it is then `{}`. On a Mac it then holds `voiceover` alone, until the installed voices are read.
+- On the build for other systems, always `{}`.
+
+### Errors {#host-speech-engines-errors}
+
+None. It never answers an error value. It never raises.
 
 ### Windows {#host-speech-engines-windows}
 
@@ -146,7 +174,7 @@ is what the "Offer my Personal Voice to modules" switch does.
 
 **Signature:** `host.speech.use(id: string?)` → `true`, or `false, Error`
 
-Chooses what speaks for **this module**. `nil` returns it to the ordinary path, and always answers `true`.
+Chooses what speaks for **this module**. `nil` returns it to the ordinary path, and always answers `true`. Windows and macOS only: on the build for other systems, `host.speech.use` and [`host.speech.engine`](#host-speech-engine) are `nil`.
 
 ```luau
 -- A module that wants its own voice, so its announcements are not mistaken for the reader's
@@ -156,18 +184,30 @@ if not ok and err.code ~= host.errors.NOT_READY then -- not_ready: ask again in 
 end
 ```
 
-Returns `true` once the choice is made, or `false` and an [error value](./errors.md) when the engine is not there, the choice left as it was:
-- `not_found` — `no speech engine '…' in this build`: no engine of this build, nor any voice in the list, has that id.
-- `not_ready` — `the speech engines are not known yet`: the list has not been read since the application started (see [`engines`](#host-speech-engines)), and the id is one it may hold. Ask again in a moment.
-- `unavailable` — `'…' is not running`, with the engine's name: a screen reader that is not running.
-
-It refuses rather than accepting and quietly speaking somewhere else, because a call that reports success and does something different is a promise not kept. An `id` that is neither a string nor `nil` raises; a number is taken as its digits.
+It refuses rather than accepting and quietly speaking somewhere else, because a call that reports success and does something different is a promise not kept.
 
 **The choice belongs to the module VM**, which is the unit this API can honestly promise. `host.speech` falls through to the VM owner rather than to the module that defined the code, so a `use` written inside a shared framework belongs to whichever module inherited it — and that is the module somebody installed and enabled, which makes it the right owner of the decision.
 
 Two things worth knowing before reaching for it. The first line after a choice may wait for the engine to open, measured at 2.0 s for SAPI and 3.5 s for OneCore; that happens on the new voice's own thread, so nothing else waits with it and the lines queue rather than being lost. And `interrupt` only ever applied to the engine being addressed — two engines are two queues, so a module speaking through its own voice will not cut off what the overlay is saying through the user's. That is the same everyday situation as another application talking over a screen reader, not a new one.
 
 A chosen engine that later stops answering falls through to the ordinary path rather than to silence.
+
+### Returns {#host-speech-use-returns}
+
+- `true` — the choice is made: this module's next line goes to that engine. `host.speech.use(nil)` always answers `true`, and the module is back on the ordinary path.
+- `false, err` — the engine is not there, and the choice is left as it was. `err.code` is one of the codes under Errors.
+
+### Errors {#host-speech-use-errors}
+
+None of these is raised. Each comes as the second value.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `not_found` | return | No engine of this build, nor any voice in the list, has that id. | `no speech engine '…' in this build` | both |
+| `not_ready` | return | The list has not been read since the application started (see [`engines`](#host-speech-engines)), and the id is one it may hold: on Windows one of the nine this build reaches, on a Mac any id but `voiceover`. Ask again in a moment. | `the speech engines are not known yet` | both |
+| `unavailable` | return | The engine is listed and cannot take a line now: a screen reader that is not running, or `voiceover` while VoiceOver is not running. The message names it as `engines` does, such as `'NVDA' is not running`. | `'…' is not running` | both |
+
+**Raises** for a mistake in the call: an `id` that is neither a string, a number nor `nil`. A number is taken as its digits.
 
 ### Windows {#host-speech-use-windows}
 
@@ -203,4 +243,13 @@ host.log.info(mine and ("speaking through " .. mine) or "speaking the usual way"
 ```
 
 It answers what was **chosen**, not what is currently speaking: a choice that cannot be honoured falls through silently to the ordinary path, and this call still reports the choice. What is actually speaking is a question for the log, which names the voice as it opens.
+
+### Returns {#host-speech-engine-returns}
+
+- A string — the id this module chose with [`use`](#host-speech-use), as [`engines`](#host-speech-engines) lists it.
+- `nil` — it chose none, or chose `nil` since.
+
+### Errors {#host-speech-engine-errors}
+
+None. It never answers an error value. It never raises.
 

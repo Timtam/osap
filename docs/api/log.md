@@ -14,6 +14,8 @@ In this project **the log is evidence rather than debugging comfort.** The teste
 
 That makes the thing worth logging the thing that is unanswerable after the fact. The overlay runtime logs the exact words it hands to speech for the one control kind whose value has been in dispute, because only the words that actually left can settle whether the code found what it claimed to.
 
+**`host.log.info` answers no [error value](./errors.md#error-values).** It writes or raises, and its entry's **Errors** says when. Two raises can come from it as from any call ([Return or raise](./errors.md#return-or-raise)): reaching `host.log` from code whose module did not declare `log` raises `module '…' used host.log without declaring it — …` ([What to declare](#declare)), and a module that has run too long is stopped with `stopped by the host: …` ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -43,10 +45,22 @@ local function log(msg) host.log.info("[my-game] " .. msg) end
 log("menu watcher started")
 
 -- An error value logs its message, alone or in a sentence.
-local err = host.errors.new("busy", "the menu is still opening")
+local err = host.errors.new(host.errors.BUSY, "the menu is still opening")
 host.log.info(err)
 log("not read: " .. err)
 ```
+
+### Returns {#host-log-info-returns}
+
+- Nothing: no value comes back. The line has been written when the call returns — on this thread, with no queue — unless the log could not be opened then (above).
+
+### Errors {#host-log-info-errors}
+
+None. It never answers an error value.
+
+A line the log could not take does not raise either: it is lost, as described above.
+
+**Raises** for a mistake in the call: a `msg` that is neither a string, a number nor an error value — a table that is not an error value (`bad argument #1: error converting Lua table to String (expected string or number)`), and `nil` or no argument at all — and a string that is not valid UTF-8.
 
 ### Windows {#host-log-info-windows}
 

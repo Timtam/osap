@@ -25,6 +25,8 @@ return M
 
 Each module runs in its own isolated Luau VM, and **how much crosses a module boundary depends on the dependency kind.** A [`code_module`](../module-package-format.md) dependency has its *code* evaluated inside the dependent's VM, so its **functions** are reachable through `host.require` — that is the inheritance model every base and library module is built on. A legacy, non-code dependency exports only plain data (booleans, numbers, strings and tables of those), because raw values, closures and userdata cannot otherwise cross a VM boundary.
 
+**`host.require` answers no [error value](./errors.md#error-values).** It returns what it was asked for or raises, and its entry's **Errors** says when. Nothing here is gated, so the one other raise is the guard's ([Return or raise](./errors.md#return-or-raise)): a module that has run too long is stopped with `stopped by the host: …` ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 Nothing — this is available to every module. See [what the capability list is and is not](./index.md#capabilities).
@@ -96,6 +98,25 @@ for _, p in ipairs(lib.presets) do ... end
   it appears under the runtime in the module manager. A per-game choice is defined by the game
   module's own entry (see [`host.settings`](./settings.md)).
 
+### Returns {#host-require-returns}
+
+- For a `code_module` this module declares: the value its entry file returned, evaluated in this VM — the same live value at every call, functions intact.
+- For a legacy data dependency: a fresh Luau copy of the plain data its entry returned, at every call.
+- Never `nil`: where there is nothing to return it raises. [`host.tryRequire`](./tryrequire.md#host-tryrequire) answers `nil` there instead.
+
+The data path does not read the manifest. A data export comes back for any module that has loaded, declared here or not; declaring it under `dependencies` is what says this module needs it.
+
+### Errors {#host-require-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call:
+
+- nothing to return — `required module '…' is not loaded or exports nothing`: the module is not installed or did not load; it is a `code_module` this module lists under neither `dependencies` nor `optional_dependencies`, so it was not evaluated into this VM, and a table of functions has no data export; or its entry returned no table of plain data. An optional dependency that may be absent is asked for with [`host.tryRequire`](./tryrequire.md#host-tryrequire) instead.
+- an `id` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8.
+
+A dependency whose code fails as it is evaluated into this VM does not raise here: it fails this module's load, before its entry runs (`error running dependency '…' of '…'`).
+
 ## A runtime shared by game modules {#a-runtime-shared-by-game-modules}
 
 One reader for many games: a `code_module` runtime holds all the code, and each game is a small module that holds only its data and one call.
@@ -116,7 +137,7 @@ version = "1.0.0"
 code_module = true
 
 [capabilities]
-require = ["window", "screen", "speech", "timer", "hotkey"]
+require = ["window", "screen", "speech", "timer", "hotkey", "log"]
 ```
 
 `menu-runtime/src/main.luau`:
@@ -156,9 +177,13 @@ function M.start(pack)
     host.timer.after(0, function()
       local w = host.window.active()
       if not key and w and host.window.test(pack.window, w) then
-        key = host.hotkey.register(pack.repeatKey, function()
+        local id, err = host.hotkey.register(pack.repeatKey, function()
           if last then host.speech.output(last) end
         end)
+        -- An id with an error is a claim that stands but is not held now: keep the id, so
+        -- leave() takes it back, and say why the key does not work yet.
+        key = id
+        if err then host.log.info("[menu-runtime] " .. pack.repeatKey .. ": " .. err) end
       end
     end)
   end
@@ -223,7 +248,10 @@ unconditionally makes one claim per game. The game module that loaded first then
 callback runs, in its own VM with its own pack, whichever game is in front — and every other
 game module opens a **Binding conflict** dialog at start naming the two modules — once, until
 that module is disabled and enabled again (see
-[a registration is a claim](./hotkey.md#a-registration-is-a-claim-not-a-guarantee)).
+[a registration is a claim](./hotkey.md#a-registration-is-a-claim-not-a-guarantee)) — and
+its `register` answers the id together with an error value, `taken`
+(`module '…' holds this combination`): the claim stands, and is not held
+([`host.hotkey.register`](./hotkey.md#host-hotkey-register)).
 Between modules the host's rule decides: a module that holds a combination keeps it, and
 otherwise the one that loaded first gets it. The overlay runtime's press-time choice does not
 help here — it picks among the controls of one overlay, in one module's VM, and games are

@@ -16,6 +16,8 @@ Timers are how a module waits without blocking. `after` covers the settling time
 
 Where a wait is for a *value to change* rather than for a length of time, a guessed delay is wrong in both directions. An overlay has [`O:watch`](./overlay.md#o-watch) for it, which exists only on an overlay and runs only while that overlay is active. A module that is not an overlay — a game module on a shared runtime, say — has no change wait: it polls with [`every`](#host-timer-every), keeps one asynchronous read in flight (the example under [`matchCells`](./screen.md#host-screen-matchcells)) and compares each reading with the last, or, after a press or an input it caused, reads in a burst until a reading differs or a deadline passes: either asking again straight from each asynchronous read's callback, as the menu example under [`host.gamepad.on`](./gamepad.md#host-gamepad-on) does, or with a few `after`s at growing delays.
 
+**No call here answers an [error value](./errors.md#error-values).** Each does what it was asked or raises, and its entry's **Errors** says what raises; `cancel`, `host.epoch`, `host.now` and `host.inputEpoch` raise for nothing of their own. Two raises can come from any call here ([Return or raise](./errors.md#return-or-raise)): reaching `host.timer` from code whose module did not declare `timer` raises `module '…' used host.timer without declaring it — …` ([What to declare](#declare)) — `host.epoch`, `host.now` and `host.inputEpoch` need no declaration — and a module that has run too long is stopped with `stopped by the host: …` ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -31,7 +33,7 @@ See [what that list is and is not](./index.md#capabilities).
 
 **Signature:** `host.timer.after(ms: number, callback: () -> ())` → `number`
 
-Schedules a **one-shot** callback to fire approximately `ms` milliseconds later, driven from the event-loop tick — at the earliest on the first tick at or after that time, so `after(1)` and `after(10)` both wait for the next tick, and an `after(0)` armed from inside a timer callback waits for the next tick too. The callback runs once with no arguments (only if the module is still enabled at fire time) and is then discarded. Returns the timer's token, for [`host.timer.cancel`](#host-timer-cancel). `ms` must be a number of at least 0 (a fraction is cut to the whole number below); a negative one raises. The callback runs with the priority of the dispatch that armed it — a re-read armed from a key press is still somebody waiting — which decides where a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) it asks for waits; an `every` callback always runs as background work.
+Schedules a **one-shot** callback to fire approximately `ms` milliseconds later, driven from the event-loop tick — at the earliest on the first tick at or after that time, so `after(1)` and `after(10)` both wait for the next tick, and an `after(0)` armed from inside a timer callback waits for the next tick too. The callback runs once with no arguments (only if the module is still enabled at fire time) and is then discarded. Returns the timer's token, for [`host.timer.cancel`](#host-timer-cancel). `ms` must be a number of at least 0 (a fraction is cut toward zero); one of −1 or less raises. The callback runs with the priority of the dispatch that armed it — a re-read armed from a key press is still somebody waiting — which decides where a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) it asks for waits; an `every` callback always runs as background work.
 
 **While its module is busy** — one of its handlers [waits](../module-runtime-and-lifecycle.md#a-handler-waits) for a read — an `after` that comes due waits behind it, in the order its module's events came, and runs once the module is free: late, never early. It stays cancellable until it runs: a `cancel` meanwhile, from the waiting handler once it goes on or from anything that runs before the timer, means it never runs.
 
@@ -44,6 +46,18 @@ end)
 -- Changed our mind before it came due:
 host.timer.cancel(pending)
 ```
+
+### Returns {#host-timer-after-returns}
+
+- The timer's token: a whole number above 0, unique for the life of the application and never reused, for [`cancel`](#host-timer-cancel). Throwing it away stops nothing.
+
+### Errors {#host-timer-after-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: an `ms` that is not a number (a string that reads as one counts), or is −1 or less, NaN, infinite, or 2^64 or more; a `callback` that is not a function, a table with a `__call` metamethod included. A fraction is cut toward zero, so `2.7` waits as `2` and `-0.5` as `0`.
+
+An error the callback raises when it runs does not come back here: it is reported as a timer callback's error, in the log and in the Module error dialog.
 
 ### Windows {#host-timer-after-windows}
 
@@ -59,7 +73,7 @@ Drained by the same 15 ms wxWidgets tick; in a headless run by a 15 ms turn of t
 
 **Signature:** `host.timer.every(ms: number, callback: () -> ())` → `number`
 
-Schedules a **recurring** callback to fire approximately every `ms` milliseconds, driven from the event-loop tick, and rounded up to whole ticks as described at the top of this page. `ms` must be a number of at least 0 (a fraction is cut to the whole number below, and an interval below 1 counts as 1); a negative one raises. Unlike a self-rescheduling `host.timer.after` chain, a recurring timer is **re-armed even while the owning module is disabled** (the callback is only *invoked* while enabled), so a poll resumes on re-enable instead of dying. Returns the timer's token; it runs until [`host.timer.cancel`](#host-timer-cancel) is called with it — from inside its own callback too — or until the module is reloaded or removed.
+Schedules a **recurring** callback to fire approximately every `ms` milliseconds, driven from the event-loop tick, and rounded up to whole ticks as described at the top of this page. `ms` must be a number of at least 0 (a fraction is cut toward zero, and an interval below 1 counts as 1); one of −1 or less raises. Unlike a self-rescheduling `host.timer.after` chain, a recurring timer is **re-armed even while the owning module is disabled** (the callback is only *invoked* while enabled), so a poll resumes on re-enable instead of dying. Returns the timer's token; it runs until [`host.timer.cancel`](#host-timer-cancel) is called with it — from inside its own callback too — or until the module is reloaded or removed.
 
 The timer belongs to the module whose VM runs the call. A `code_module` runtime that calls `every` at its top level therefore arms one poll in its own VM and one in the VM of every module that depends on it — directly, or through another `code_module` — each owned, and disabled, with the module whose VM it is (see [`host.require`](./require.md#host-require)). Each of those VMs gets its own token and can cancel its own poll, and only that one.
 
@@ -84,6 +98,18 @@ host.timer.every(150, function()
     end)
 end)
 ```
+
+### Returns {#host-timer-every-returns}
+
+- The timer's token: a whole number above 0, unique for the life of the application and never reused, for [`cancel`](#host-timer-cancel). Throwing it away stops nothing: the timer runs until it is cancelled, or its module is reloaded or removed.
+
+### Errors {#host-timer-every-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: an `ms` that is not a number (a string that reads as one counts), or is −1 or less, NaN, infinite, or 2^64 or more; a `callback` that is not a function, a table with a `__call` metamethod included. A fraction is cut toward zero, and an interval below 1 counts as 1.
+
+An error the callback raises when it runs does not come back here, and does not stop the timer: it is reported as a timer callback's error, in the log and in the Module error dialog, and the next turn runs as usual.
 
 ### Windows {#host-timer-every-windows}
 
@@ -130,6 +156,17 @@ end)
 
 `initial = true` is what starts the poll for a game that is already in front when the module loads or is enabled — see [`onTrigger`](./window.md#host-window-ontrigger). After the first switch away the poll stops, and the next activation of the game starts it again.
 
+### Returns {#host-timer-cancel-returns}
+
+- `true` — a pending timer of this module's was stopped: an `after` never runs, an `every` does not run again.
+- `false` — there was nothing of this module's to stop, for any of the reasons above: `nil` or no whole number, a token never handed out, an `after` that has fired, a timer already cancelled, another module's timer. Nothing changed.
+
+### Errors {#host-timer-cancel-errors}
+
+None. It never answers an error value.
+
+It never raises: every value is taken, and one that is not a token of this module's pending timers answers `false`.
+
 ### Windows {#host-timer-cancel-windows}
 
 No operating-system call: the timer is taken out of the host's own list.
@@ -175,6 +212,16 @@ The epoch is read after the work because work that waits — a [`host.ocr.recogn
 
 Deliberately **not** time-based, and it does not advance on an idle tick. A stale answer here means acting on the wrong screen position, and "it was fresh 50 ms ago" is not a safety property.
 
+### Returns {#host-epoch-returns}
+
+- The counter: a whole number, 0 when the application starts, one counter for every module. It only grows; compare it for equality, since by how much it grew says nothing.
+
+### Errors {#host-epoch-errors}
+
+None. It never answers an error value.
+
+It never raises; arguments are ignored. It needs no declaration.
+
 ### Windows {#host-epoch-windows}
 
 A counter in the host; reading it makes no system call. It also turns over when the machine resumes from sleep or is about to sleep, when the session is locked, unlocked, connected or disconnected, when the displays, a display's scale or the work area change, and when the taskbar is created again because Explorer restarted — with `inputEpoch` below, since what was on the screen before may not be what is there after. A display change that keeps coming — a TV or receiver in standby dropping its link — turns it over every time it comes, although the log counts the repeats rather than writing each.
@@ -197,6 +244,16 @@ local value = readTheSlowThing()
 host.log.info(("read took %d ms"):format(host.now() - t0))
 ```
 
+### Returns {#host-now-returns}
+
+- Whole milliseconds since the application started, 0 or more. Two calls in one millisecond give the same number, and a later call never a smaller one.
+
+### Errors {#host-now-errors}
+
+None. It never answers an error value.
+
+It never raises; arguments are ignored. It needs no declaration.
+
 ### Windows {#host-now-windows}
 
 Rust's monotonic clock (`std::time::Instant`), read in the host; no module-visible system call.
@@ -218,11 +275,23 @@ A picture carries the value of its own moment: a [snapshot](./screen.md#host-scr
 Two of the host's own acts do not turn it over themselves. [`host.input.post`](./input.md#host-input-post) never does, nor `host.epoch` ([why](./input.md#host-input-post)). [`host.window.focus`](./window.md#host-window-focus) turns over `host.epoch` only; this counter turns over when the window has come forward and the event loop has heard of it, a turn of the loop later at the earliest. So a picture taken right after a `post` or a `focus` can carry the value from before it: a module that must know whether its picture came after one of these compares `host.now()` noted after the act with the reading's `time` instead.
 
 ```luau
--- Re-read only when something could actually have moved it.
+-- Re-read only when something could actually have moved it. A read that failed is not
+-- kept, so the next call asks again.
 if cachedAt ~= host.inputEpoch() then
-  cached, cachedAt = host.screen.pixel(x, y), host.inputEpoch()
+  local c = host.screen.pixel(x, y)
+  if c then cached, cachedAt = c, host.inputEpoch() end
 end
 ```
+
+### Returns {#host-inputepoch-returns}
+
+- The counter: a whole number, 0 when the application starts, one counter for every module. It only grows; compare it for equality.
+
+### Errors {#host-inputepoch-errors}
+
+None. It never answers an error value.
+
+It never raises; arguments are ignored. It needs no declaration.
 
 ### Windows {#host-inputepoch-windows}
 

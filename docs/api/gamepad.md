@@ -20,6 +20,8 @@ A game played with a controller has no keyboard focus to hang an overlay on and 
 
 **Where it runs.** Every function here is called on the application's event loop, like the rest of `host`, and every callback runs there too — never on the thread or queue that reads the pads. A callback that takes long holds up everything else the loop does, as any callback does. A [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) asked for from a callback of this namespace — `down`, `up`, `axis`, `connected`, `disconnected` and every combination, one held for its `holdMs` included — counts as one somebody is waiting for and goes ahead of reads asked for by polls; so does one asked for from a [`host.timer.after`](./timer.md#host-timer-after) callback or a [`host.screen`](./screen.md#with-a-callback) call's callback armed there, which inherits it, and so does that call's own work — a snapshot's picture taken ahead of the polls' on the same thread, a search ahead of theirs on the image worker (see **Order and priority** under [`host.ocr.recognize`](./ocr.md#host-ocr-recognize)). The one exception is the `connected` a listener receives for a pad that was already there or arrived while its module was disabled (`synthetic = true`): a read asked for from it waits with the polls.
 
+**What each call answers** is under its **Returns**, and what it can fail with under its **Errors** ([Reading an Errors table](./errors.md#reading-an-errors-table)). `list`, `state` and `on` answer an [error value](./errors.md) when the watcher cannot see pads, the same one from all three; `off` and `status` never do. A message may change between versions; its code does not. Two raises are not repeated at each entry: the capability gate, for a module that did not declare `gamepad`, and `stopped by the host: …`, once the module has run too long ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -47,17 +49,45 @@ PadInfo = { index = 1, id = "xinput:0", name = "Xbox controller",
 
 `index` runs from 1 to 8, lowest free first, and stays with a pad while it is connected; a pad that is unplugged frees its number for the next one, and a ninth pad is not watched (the log says so once). `id` says where the platform sees this connection, not which device it is — see the platform notes below — so do not use it to recognise a pad you have seen before. `buttons` lists every button the pad can report, the derived stick and trigger buttons included. `mapped` is `true` for every pad a platform reports today.
 
-**The first call** of `list`, [`state`](#host-gamepad-state) or [`on`](#host-gamepad-on) anywhere in the application starts watching the pads. **A watcher that cannot see pads is answered, not raised**, by each of the three: `list` answers `{}` and an [error value](./errors.md), `state` and `on` answer `nil` and one, and `on` registers nothing. Every later call answers the same error, for the reason is the machine's. The reasons, their codes in brackets:
-- at the start: `game controllers are not supported on …` (`not_supported`), on a platform without controller support (`linux`, say); `could not start the gamepad thread: …`, `the gamepad thread ended before it was ready`, `could not create the gamepad thread's window (error …)` and `the source panicked while starting: …` (`failed`). The log says `gamepad watcher failed: ` and the reason, once.
-- after it, on Windows (see below): `gamepad watcher failed after starting: could not create the gamepad thread's window (error …)` and `the gamepad thread stopped after a panic: …` (`failed`), the pad thread stopped; `XInput is unavailable, so no Xbox-type pad will be seen: …` (`unavailable`), no XInput DLL. A thread that stopped replaces an XInput that was missing.
-
-`{}` alone means watching works and no pad is connected. Apart from that, `list` does not raise.
+**The first call** of `list`, [`state`](#host-gamepad-state) or [`on`](#host-gamepad-on) anywhere in the application starts watching the pads. **A watcher that cannot see pads is answered, not raised**, by each of the three, and every later call answers the same, for the reason is the machine's: see [Errors](#host-gamepad-list-errors).
 
 ```luau
-for _, pad in ipairs(host.gamepad.list()) do
+local pads, err = host.gamepad.list()
+if err then
+  host.log.info("[my-game] no controller can be seen: " .. err)
+  if err.code == host.errors.UNAVAILABLE then
+    host.speech.output("XInput is missing, so no Xbox controller can be seen")
+  end
+end
+for _, pad in ipairs(pads) do
   host.speech.output(string.format("Pad %d: %s", pad.index, pad.name))
 end
 ```
+
+### Returns {#host-gamepad-list-returns}
+
+- A list of `PadInfo`, sorted by `index` — watching works, and these pads are connected now.
+- `{}` alone — watching works, and no pad is connected.
+- `{}, err` — the watcher cannot see pads. `err.code` is under Errors. Every later call of `list`, `state` or `on` answers the same error, for the rest of the session. The one change: a pad thread that stops later replaces a missing XInput.
+
+### Errors {#host-gamepad-list-errors}
+
+None of these is raised. [`state`](#host-gamepad-state) and [`on`](#host-gamepad-on) answer the same ones.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `not_supported` | return | A build for a system without controller support, such as Linux. Watching never starts. | `game controllers are not supported on …` | other |
+| `failed` | return | The pad thread could not be started. | `could not start the gamepad thread: …` | Windows |
+| `failed` | return | The pad thread ended before it said it was ready. | `the gamepad thread ended before it was ready` | Windows |
+| `failed` | return | Within the first call's 250 ms wait, the pad thread could not create its window. | `could not create the gamepad thread's window (error …)` | Windows |
+| `failed` | return | Starting the watcher panicked. The message has the panic's text. | `the source panicked while starting: …` | both |
+| `failed` | return | After the first call's 250 ms wait, the pad thread could not create its window, and stopped. Calls made before then answered as usual; nothing is read from then on. | `gamepad watcher failed after starting: …` | Windows |
+| `failed` | return | The pad thread stopped after a panic, at any time after the start. Nothing is read from then on. | `the gamepad thread stopped after a panic: …` | Windows |
+| `unavailable` | return | No XInput DLL could be loaded. Watching runs — `status().watcher` is `"running"` — and no pad is ever listed. | `XInput is unavailable, so no Xbox-type pad will be seen: …` | Windows |
+
+A start that failed is written to the log once, as `gamepad watcher failed: ` and the message. A failure after the start writes its message.
+
+It never raises: it takes no arguments.
 
 ### Windows {#host-gamepad-list-windows}
 
@@ -82,8 +112,6 @@ PadState = { pad = 1, buttons = { south = false, dpad_down = true, ... },
 
 `buttons` names every button the pad has, `false` included, so asking about a released button gives `false` rather than `nil`. A button already held when the pad was connected is `true` here, although no `down` was ever sent for it. `time` is when the pad last reported anything.
 
-**Raises** when `pad` is not a number — `nil`, a table, a string that does not read as a number (`"2"` is taken as 2). A watcher that cannot see pads is answered as [`list`](#host-gamepad-list) answers it: `nil` and the error value, whatever `pad` is; this call starts watching too. `nil` alone means there is no pad with that index.
-
 A long press of one button — a [combination](#button-combinations) has `holdMs` for this, a single button does not: act only if `start` is still down 800 ms later.
 
 ```luau
@@ -96,6 +124,22 @@ host.gamepad.on("down", function(e)
   end)
 end, { buttons = { "start" } })
 ```
+
+### Returns {#host-gamepad-state-returns}
+
+- A `PadState` — what the pad with that index is doing now.
+- `nil` alone — no pad has that index now, or `pad` is not a whole number from 1 to 8.
+- `nil, err` — the watcher cannot see pads, whatever `pad` is. `err` is one of [`list`](#host-gamepad-list)'s; this call starts watching too.
+
+### Errors {#host-gamepad-state-errors}
+
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| any of [`list`'s errors](#host-gamepad-list-errors) | return | The watcher cannot see pads: `nil, err`, whatever `pad` is. | as there | both, other |
+
+**Raises** for a mistake in the call: a `pad` that is not a number — `nil`, a table, a string that does not read as a number (`"2"` is taken as 2). That is checked first, so it raises also while the watcher cannot see pads.
 
 ### Windows {#host-gamepad-state-windows}
 
@@ -137,7 +181,7 @@ The options, each for the events it makes sense for:
 
 `maxAge` and `holdMs` count whole milliseconds: a fraction is cut off (`holdMs = 0.5` fires at the press, `maxAge = 1.9` is 1), and a value above 4294967295 (about 49.7 days, `math.huge` included) counts as 4294967295. `maxAge` below 1 raises instead of being cut to 0, because every press is some time old when it is delivered, so 0 would drop them all.
 
-**What raises**, at the call, so a listener that could never fire is never registered: an `event` that is not one of the six; a `callback` that is not a function; `opts` that is neither a table nor `nil`; an option that is not one of this event's (`maxAge` on `axis`, `deadzone` on `down`, a misspelt name); an option name that is not a string; `pad` that is not a whole number from 1 to 8; `buttons` or `axes` that is not a list of names, an empty list, or an unknown name among them — label spellings such as `"A"`, `"Cross"` or `"LB"` are not names; `deadzone` below 0 or from 1 up; `step` outside 0 to 2; `maxAge` below 1, `holdMs` negative, or either not a number; `exact` that is not `true` or `false`; the [combination rules](#button-combinations) for `buttons` on `chord`. Nothing else raises, and nothing about the pads raises later: a listener for a pad that is not there simply waits. A watcher that cannot see pads is no mistake in the call: after the arguments are checked, `on` answers `nil` and the error value, as [`list`](#host-gamepad-list) does, and registers nothing.
+**What raises** is under [Errors](#host-gamepad-on-errors): every mistake in the arguments, at the call, so a listener that could never fire is never registered.
 
 **Cost.** `on` checks its options and registers the listener on the event loop, and never waits for a press or for a pad to appear. The first call of `list`, `state` or `on` in the application also starts watching the pads; what that and every later call cost is in the platform sections below.
 
@@ -179,6 +223,28 @@ end, { buttons = { "dpad_up", "dpad_down", "left_stick_up", "left_stick_down" } 
 ```
 
 A help bubble that appears after a press is the same call with `before = nil`: anything found is new. [`host.screen.snapshot`](screen.md#snapshot-with-a-callback) given a callback does the waiting in one call, off the event loop: with `change` it photographs the menu until the cursor column differs from the picture the module last read (`from`) or, without one, from the wait's own first picture, taken after the press was delivered; and with `at = e.time + 80` it takes a picture a set time after the press itself; its page has this menu written that way.
+
+### Returns {#host-gamepad-on-returns}
+
+- A token, a whole number counted up across the application — the listener is registered, and is called for every matching event while the module is enabled, until [`off`](#host-gamepad-off) or a reload.
+- `nil, err` — the watcher cannot see pads, and nothing is registered. `err` is one of [`list`](#host-gamepad-list)'s.
+
+```luau
+local token, err = host.gamepad.on("down", onPress, { buttons = { "dpad_up", "dpad_down" } })
+if not token then
+  host.log.info("[my-game] the D-pad is not listened to: " .. err)   -- nothing registered
+end
+```
+
+### Errors {#host-gamepad-on-errors}
+
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| any of [`list`'s errors](#host-gamepad-list-errors) | return | The watcher cannot see pads: `nil, err`, and nothing is registered. The arguments are checked first. | as there | both, other |
+
+**Raises** for a mistake in the call, at the call, so a listener that could never fire is never registered: an `event` that is not one of the six; a `callback` that is not a function; `opts` that is neither a table nor `nil`; an option that is not one of this event's (`maxAge` on `axis`, `deadzone` on `down`, a misspelt name); an option name that is not a string; `pad` that is not a whole number from 1 to 8; `buttons` or `axes` that is not a list of names, an empty list, or an unknown name among them — label spellings such as `"A"`, `"Cross"` or `"LB"` are not names; `deadzone` below 0 or from 1 up; `step` outside 0 to 2; `maxAge` below 1, `holdMs` negative, or either not a number; `exact` that is not `true` or `false`; the [combination rules](#button-combinations) for `buttons` on `chord`. The arguments are checked before the watcher, so these raise also while it cannot see pads. Nothing else raises, and nothing about the pads raises later: a listener for a pad that is not there simply waits.
 
 ### Windows {#host-gamepad-on-windows}
 
@@ -235,7 +301,7 @@ The rules:
 
 **Cost.** Judging a combination takes microseconds per button event, on the event loop; a hold that is running or waiting for the tick is looked at on every 15 ms tick, which also takes microseconds.
 
-**What raises**, besides what raises for every event under [`on`](#host-gamepad-on): no `buttons` (and so an `opts` left out), fewer than two names in it, a name twice, two directions of one stick axis, an unknown name, `exact` that is not a boolean, `holdMs` negative or not a number, and the options of other events.
+**What raises**, besides what raises for every event under [`on`](#host-gamepad-on-errors): no `buttons` (and so an `opts` left out), fewer than two names in it, a name twice, two directions of one stick axis, an unknown name, `exact` that is not a boolean, `holdMs` negative or not a number, and the options of other events.
 
 A combination the game uses too, held for 800 ms and only on its own:
 
@@ -260,8 +326,6 @@ A reading is one call of GameController's value-changed handler, which comes on 
 
 Removes the listener `on` returned `token` for, and says whether there was one. It answers `false` for a token already removed, never issued, or another module's — which is left alone. Safe to call from inside the listener itself — the usual way to listen for exactly one event. Costs microseconds and never starts watching the pads.
 
-**Raises** when `token` is not a number, `off(nil)` included.
-
 ```luau
 local token
 token = host.gamepad.on("connected", function(e)
@@ -271,6 +335,17 @@ end)
 ```
 
 Register on your overlay's activation and call `off` on its deactivation, and the pad is only listened to while your overlay is the one in front.
+
+### Returns {#host-gamepad-off-returns}
+
+- `true` — a listener of this module had that token, and is removed.
+- `false` — no listener of this module has that token: it was removed already, never issued, or is another module's, which stays.
+
+### Errors {#host-gamepad-off-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `token` that is not a number, `off(nil)` included.
 
 ### Windows {#host-gamepad-off-windows}
 
@@ -284,12 +359,20 @@ When the last `down`, `up`, `axis` or `chord` listener goes, the App Nap activit
 
 **Signature:** `host.gamepad.status()` → `{ [string]: string }`
 
-What the controller watching is doing, as readable text, for a diagnostic line in a log. It is not for comparing: a module learns that the watcher cannot see pads from what `list`, `state` and `on` answer. `watcher` is `"not started"` until the first `list`, `state` or `on`, `"running"` after that, or `"failed: "` and the reason. The other keys are the platform's, below, and appear once watching has started. Calling this does not start anything, and it never raises.
+What the controller watching is doing, as readable text, for a diagnostic line in a log. It is not for comparing: a module learns that the watcher cannot see pads from what `list`, `state` and `on` answer. `watcher` is `"not started"` until the first `list`, `state` or `on`, `"running"` after that, or `"failed: "` and the reason. The other keys are the platform's, below, and appear once watching has started. Calling this does not start anything.
 
 ```luau
 local s = host.gamepad.status()
 host.log.info("gamepad " .. s.watcher .. ", " .. (s.mode or s.background or ""))
 ```
+
+### Returns {#host-gamepad-status-returns}
+
+A table of strings, every time. `watcher` is always there: `"not started"`, `"running"`, or `"failed: "` and the start's message. The platform's keys come only once watching has started. A failure after the start, a stopped thread or a missing XInput, leaves `watcher` at `"running"`: Windows says it under `thread` or `xinput`.
+
+### Errors {#host-gamepad-status-errors}
+
+None. It never answers an error value. It never raises.
 
 ### Windows {#host-gamepad-status-windows}
 

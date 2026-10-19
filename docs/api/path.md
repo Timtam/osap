@@ -10,6 +10,8 @@ Turns a name relative to your own module's directory into an absolute filesystem
 
 It is also what lets an image cross a module boundary at all. Cinematic Studio Series passes `host.path` results into `kontakt.library`, and they still resolve on the other side.
 
+**`host.path` answers no [error value](./errors.md#error-values).** It returns a path or raises, and its entry's **Errors** says when. Two raises can come from it as from any call ([Return or raise](./errors.md#return-or-raise)): reaching `host.path` from code whose module did not declare `path` raises `module '…' used host.path without declaring it — …` ([What to declare](#declare)), and a module that has run too long is stopped with `stopped by the host: …` ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -39,6 +41,16 @@ its digits). Folders may be separated by `/` on every platform.
 ```luau
 local img = host.path("assets/kontakt.png") -- "C:\...\modules\my-mod\assets\kontakt.png"
 ```
+
+### Returns {#host-path-returns}
+
+- An absolute path, as a string: `rel` joined onto the root of the module whose code makes the call. It names a file whether or not one is there, and may lie outside the module. On Windows it is written with `\` and without `..`; on a Mac a `..` stays in it (the platform sections).
+
+### Errors {#host-path-errors}
+
+None. It never answers an error value.
+
+**Raises** only for a `rel` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8. Nothing about the file is asked, so a missing one raises nothing here: the call that opens it says so.
 
 ### Windows {#host-path-windows}
 

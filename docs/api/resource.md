@@ -12,6 +12,8 @@ For manifests and data files rather than for images: `read` decodes as UTF-8 and
 
 **Not a sandbox.** The path is joined onto the module's root as written: `..` is not removed and an absolute path is used as it stands, so either reaches any file the user can read. Treat a path taken from a data file as you would any other path.
 
+**No call here answers an [error value](./errors.md#error-values).** Each does what it was asked or raises, and its entry's **Errors** says what raises. `read` raises for a file that is not there **wherever the path points**, inside the module's package or outside it; it has no answer for a missing file, so ask `exists` first for one that may be absent. Two raises can come from any call here ([Return or raise](./errors.md#return-or-raise)): reaching `host.resource` from code whose module did not declare `resource` raises `module '…' used host.resource without declaring it — …` ([What to declare](#declare)), and a module that has run too long is stopped with `stopped by the host: …` ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -36,11 +38,37 @@ host.log.info("layout has " .. #layout.controls .. " controls")
 
 **Cost.** The whole file is read synchronously, on the main thread, every time: nothing is cached, and every callback, hotkey and speech line waits until the read has finished. Read a data file once, at load, and keep what it gives.
 
-**What raises.** The error is the operating system's own message, with no path in it — `The system cannot find the file specified. (os error 2)` on an English Windows (in the language of Windows elsewhere), `No such file or directory (os error 2)` on macOS, `stream did not contain valid UTF-8` for a file that is not text — so wrap the call in `pcall` and name the file yourself when the message is for a person. A `rel` that is neither a string nor a number raises too.
+**What raises** is under [Errors](#host-resource-read-errors): a missing file and one that is not text, with the operating system's message and no path in it.
 
 **The text comes back exactly as it is on disk**, a byte-order mark at the start included. [`host.json.decode`](./json.md#host-json-decode) skips one; code of your own that compares the first characters of the text has to skip it itself.
 
 A data file is read by the module that ships it. In a `code_module` dependency, `resource` resolves under the dependency's own root — even while its code runs in your VM — so a game module that feeds a shared runtime reads its own file and hands the runtime the decoded table — see [`host.json.decode`](./json.md#host-json-decode). Handing the runtime a relative path instead would make it read from its own folder.
+
+### Returns {#host-resource-read-returns}
+
+- The file's whole text, as a string, exactly as it is on disk: a byte-order mark at the start and the line ends as written.
+
+### Errors {#host-resource-read-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call, with the operating system's own message and no path in it:
+
+- a file that is not there, or cannot be read: `The system cannot find the file specified. (os error 2)` on an English Windows, in the language of Windows elsewhere, and `No such file or directory (os error 2)` on macOS. A folder raises too: `Access is denied. (os error 5)` on Windows, `Is a directory (os error 21)` on macOS.
+- a file that is not UTF-8 text, a PNG say: `stream did not contain valid UTF-8`.
+- a `rel` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8.
+
+Since no message names the file, wrap the call in `pcall` and name the file yourself when the message is for a person:
+
+```luau
+local ok, text = pcall(host.resource.read, "data/pack.json")
+if not ok then
+  host.log.info("data/pack.json could not be read: " .. tostring(text))
+  return
+end
+```
+
+A file outside the package — a `..` path, an absolute one — raises the same way: unlike a template or a sound ([Return or raise](./errors.md#return-or-raise)), `read` answers no `not_found`.
 
 ### Windows {#host-resource-read-windows}
 
@@ -63,5 +91,17 @@ Its use is naming a file that must not overwrite an earlier one: the overlay run
 ```luau
 local n = 1
 while host.resource.exists(("images/shot-%d.png"):format(n)) do n += 1 end
-host.screen.save(("images/shot-%d.png"):format(n), { region = r })
+local ok, err = host.screen.save(("images/shot-%d.png"):format(n), { region = r })
+if not ok then host.log.info("shot " .. n .. " not saved: " .. err) end
 ```
+
+### Returns {#host-resource-exists-returns}
+
+- `true` — a file or a folder is at `rel`, under the root of the module whose code makes the call.
+- `false` — nothing is there, or the system could not say: a path it refuses to look at, a link that leads nowhere.
+
+### Errors {#host-resource-exists-errors}
+
+None. It never answers an error value.
+
+**Raises** only for a `rel` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8. A path the system refuses is `false`, never a raise.

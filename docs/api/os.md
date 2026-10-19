@@ -19,6 +19,8 @@ What is left for `pick` and `is` is a difference in the **other program** — th
 
 A module that has simply never been tried on the other platform says so with `supported_os` in `module.toml`, where the manager can report it, rather than testing for it at run time.
 
+**No call here answers an [error value](./errors.md#error-values).** `host.os.is` raises only for an argument it cannot read, and `host.os.pick` never raises; each entry's **Errors** says so. Nothing here is gated, so the one other raise is the guard's ([Return or raise](./errors.md#return-or-raise)): a module that has run too long is stopped with `stopped by the host: …` ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 Nothing — this is available to every module. See [what the capability list is and is not](./index.md#capabilities).
@@ -32,6 +34,10 @@ Read-only string: the current OS, from Rust `std::env::consts::OS` (`"windows"`,
 ```luau
 host.log.info("running on " .. host.os.current)
 ```
+
+### Returns {#host-os-current-returns}
+
+- The platform's name, a lower-case string: `"windows"` or `"macos"`, and on the build for other systems the name Rust gives that system, such as `"linux"`. The same in every module, and the same for the whole run.
 
 ### Windows {#host-os-current-windows}
 
@@ -56,6 +62,17 @@ if host.os.is("macos") then
   standalone.inClassic = function() return false end
 end
 ```
+
+### Returns {#host-os-is-returns}
+
+- `true` — `name` is exactly [`host.os.current`](#host-os-current), in the same case.
+- `false` — anything else, a number among them.
+
+### Errors {#host-os-is-errors}
+
+None. It never answers an error value.
+
+**Raises** only for a `name` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8.
 
 ### Windows {#host-os-is-windows}
 
@@ -86,6 +103,17 @@ local INFO_PANE = host.os.pick {
   macos = "Info Pane (Cmd+I): Toggles the visibility of the information hint.",
 }
 ```
+
+### Returns {#host-os-pick-returns}
+
+- For a table with a `windows`, `macos` or `linux` key that is not `nil`: the value under this platform's key, [`host.os.current`](#host-os-current), or `nil` when it has none.
+- Anything else as it is: a table without those keys, a string, a number, `nil`.
+
+### Errors {#host-os-pick-errors}
+
+None. It never answers an error value.
+
+**Raises** only for a table whose own `__index` raises for the keys it looks at, `windows`, `macos` and `linux`: an error value (`an error value has code, message and detail, not 'windows'`), `host.errors` or `O.errors`. Any other value is taken.
 
 ### Windows {#host-os-pick-windows}
 

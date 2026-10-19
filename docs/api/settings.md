@@ -12,6 +12,8 @@ A module sees only its own store, keyed by module id, which also means a code mo
 
 All four calls work on an in-memory store on the main thread, in microseconds; only the save that follows a change touches the disk, on the next pass of the loop (see [`set`](#host-settings-set)).
 
+**No call here answers an [error value](./errors.md#error-values).** Each does what it was asked or raises, and its entry's **Errors** says what raises. Two raises can come from any of them ([Return or raise](./errors.md#return-or-raise)): reaching `host.settings` or `host.config` from code whose module did not declare `settings` raises `module '…' used host.settings without declaring it — …` ([What to declare](#declare)), and a module that has run too long is stopped with `stopped by the host: …` ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -62,6 +64,18 @@ local speed = host.settings.define("speed", 1.0, {
 local mode  = host.settings.define("mode", "fast", { oneOf = { "fast", "safe" } })
 ```
 
+### Returns {#host-settings-define-returns}
+
+- The setting's current value, a `boolean`, `number` or `string`: the stored value when one of the default's kind is stored, otherwise `default`, which is stored then. It is not checked against `min`, `max` or `oneOf` (above).
+
+### Errors {#host-settings-define-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `key` that is neither a string nor a number (a number is read as its digits); a `default` that is not a boolean, a number or a string (`settings value must be a boolean, number, or string`); a string that is not valid UTF-8; an `opts` that is neither a table nor `nil`.
+
+**Nothing inside `opts` raises.** A key other than `label`, `min`, `max` and `oneOf` is ignored, a misspelt one included, and so is a `label` that is neither a string nor a number, a `min` or `max` that does not read as a number, a `oneOf` that is not a table, and each entry of `oneOf` that is neither a string nor a number. A `oneOf` with no entry left sets no choices. So when `set` takes a value you meant to bound, check how `opts` is spelt.
+
 ## host.settings.get(key) {#host-settings-get}
 
 **Signature:** `host.settings.get(key: string) -> boolean | number | string`
@@ -73,6 +87,16 @@ if it has no stored value.
 ```luau
 if host.settings.get("mode") == "safe" then ... end
 ```
+
+### Returns {#host-settings-get-returns}
+
+- The stored value of `key`, a `boolean`, `number` or `string`: the one `define` returned, or what a `set` or the settings dialog stored since.
+
+### Errors {#host-settings-get-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `key` this module never `define`d (`setting 'speeed' was not defined`); a `key` that is neither a string nor a number. A guard no defined key reaches raises too: a key with no stored value (`setting '…' has no value`), which `define` rules out by storing one.
 
 ## host.settings.set(key, value) {#host-settings-set}
 
@@ -92,6 +116,25 @@ host.settings.set("mode", "safe")
 ```
 
 The modules' part of the file is the application's copy, read at start; the `[app]` table — the application's own switches — is taken from the file as it stands at each save, since the Application settings tab writes those to the file itself. So a switch changed in that tab stays as it was set when a module's setting is saved after it. The file is replaced whole on every save: the store is written to a temporary file of its own beside `settings.toml` (named `settings.<random>.toml.tmp`), flushed to disk, and renamed over `settings.toml`. A crash in the middle leaves the old file or the new one, never a cut-off one, and so does a power cut on a volume that can flush. At worst a temporary file is left behind; nothing reads it, and the application removes it at its next start once it is a minute old. A save that fails leaves `settings.toml` as it was and is logged once per session. On a volume that cannot flush, the save goes through without the flush, and that is logged once per session too; a power cut right after such a save can lose it.
+
+### Returns {#host-settings-set-returns}
+
+- Nothing: no value comes back. When `set` returns, the value is in the store, and the `onChange` callbacks registered from this module's own VM have run; the others run after it ([`onChange`](#host-settings-onchange)).
+
+### Errors {#host-settings-set-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call, and then nothing is stored and no callback runs:
+
+- a `key` this module never `define`d — `setting 'speeed' was not defined`;
+- a `value` that is not a boolean, a number or a string — `settings value must be a boolean, number, or string` — or a string that is not valid UTF-8;
+- a `value` of another kind than the default's — `setting 'mode': expected Str, got Number`, the kinds being `Bool`, `Number` and `Str`;
+- a number below `min` or above `max` — `setting 'speed': must be >= 0.25`, `setting 'speed': must be <= 4`;
+- a string that is not one of `oneOf` — `setting 'mode': must be one of ["fast", "safe"]`;
+- a `key` that is neither a string nor a number.
+
+**An error in an `onChange` callback does not come out of `set`.** It is reported as that callback's error, in the log and in the Module error dialog, and `set` goes on to the next callback. A save that fails does not raise either: it leaves `settings.toml` as it was and is logged, as above.
 
 ### Windows {#host-settings-set-windows}
 
@@ -174,15 +217,92 @@ host.settings.onChange("speed", function(new, old)
 end)
 ```
 
-## host.config.get / host.config.set / host.config.define / host.config.onChange {#host-config-get}
+### Returns {#host-settings-onchange-returns}
 
-**Signature:** the same as [`host.settings`](#host-settings-define)'s four: `host.config.define(key, default, opts?)`, `host.config.get(key)`, `host.config.set(key, value)`, `host.config.onChange(key, callback)`.
+- Nothing: no value comes back. The callback is registered, and fires from the next change on.
 
-`host.config` is the **same table** as `host.settings` (a catalog-compatibility
-alias). `host.config.get(key)`, `host.config.set(key, value)`,
-`host.config.define(...)`, and `host.config.onChange(...)` are identical to their
-`host.settings.*` counterparts above.
+### Errors {#host-settings-onchange-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `key` this module never `define`d (`setting 'speeed' was not defined`); a `key` that is neither a string nor a number; a `callback` that is not a function. An error the callback raises when it fires does not come back here: it is reported as a callback error, in the log and in the Module error dialog.
+
+## host.config.define(key, default, opts?) {#host-config-define}
+
+**Signature:** the same as [`host.settings.define`](#host-settings-define)'s.
+
+`host.config` is the **same table** as `host.settings`, a catalog-compatibility alias, so each of its four calls is the `host.settings` call of the same name: the same function, the same store, the same settings dialog. It needs the `settings` capability; nothing declares `config`, and reaching `host.config` without `settings` raises `module '…' used host.config without declaring it — add "settings" …`.
+
+```luau
+local speed = host.config.define("speed", 1.0) -- the same call as host.settings.define
+```
+
+### Returns {#host-config-define-returns}
+
+As [`host.settings.define`](#host-settings-define-returns).
+
+### Errors {#host-config-define-errors}
+
+None. It never answers an error value.
+
+**Raises** as [`host.settings.define`](#host-settings-define-errors) does, with the same messages.
+
+## host.config.get(key) {#host-config-get}
+
+**Signature:** the same as [`host.settings.get`](#host-settings-get)'s.
+
+The same function as `host.settings.get`, under the second name of the table ([`host.config.define`](#host-config-define)).
+
+```luau
+if host.config.get("mode") == "safe" then ... end -- the same as host.settings.get("mode")
+```
+
+### Returns {#host-config-get-returns}
+
+As [`host.settings.get`](#host-settings-get-returns).
+
+### Errors {#host-config-get-errors}
+
+None. It never answers an error value.
+
+**Raises** as [`host.settings.get`](#host-settings-get-errors) does, with the same messages.
+
+## host.config.set(key, value) {#host-config-set}
+
+**Signature:** the same as [`host.settings.set`](#host-settings-set)'s.
+
+The same function as `host.settings.set`, under the second name of the table ([`host.config.define`](#host-config-define)).
 
 ```luau
 host.config.set("speed", 1.5) -- identical to host.settings.set("speed", 1.5)
 ```
+
+### Returns {#host-config-set-returns}
+
+As [`host.settings.set`](#host-settings-set-returns).
+
+### Errors {#host-config-set-errors}
+
+None. It never answers an error value.
+
+**Raises** as [`host.settings.set`](#host-settings-set-errors) does, with the same messages.
+
+## host.config.onChange(key, callback) {#host-config-onchange}
+
+**Signature:** the same as [`host.settings.onChange`](#host-settings-onchange)'s.
+
+The same function as `host.settings.onChange`, under the second name of the table ([`host.config.define`](#host-config-define)): a callback registered through either name fires for a change made through either.
+
+```luau
+host.config.onChange("speed", function(new) host.log.info("speed is now " .. new) end)
+```
+
+### Returns {#host-config-onchange-returns}
+
+As [`host.settings.onChange`](#host-settings-onchange-returns).
+
+### Errors {#host-config-onchange-errors}
+
+None. It never answers an error value.
+
+**Raises** as [`host.settings.onChange`](#host-settings-onchange-errors) does, with the same messages.

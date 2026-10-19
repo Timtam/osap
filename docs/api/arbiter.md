@@ -26,7 +26,7 @@ every focus change, and answers two questions in order:
    host-plus-control spec given to `O:attachEmbedded`. The first binding that matches also
    becomes the coordinate origin for everything the overlay does.
 2. **If so, does my gate agree?** [`O:gate(fn)`](overlay#o-gate) — or the image test that
-   [`O:landmark`](overlay#o-gate) builds from it — narrows the match further, evaluated against
+   [`O:landmark`](overlay#o-landmark) builds from it — narrows the match further, evaluated against
    that origin. A context match means "this window is mine"; a gate means "and what is inside
    it is mine too".
 
@@ -42,6 +42,8 @@ the only way to notice something that appears with no event at all.
 
 **The failure this design is most prone to is silent.** Slots are strings typed independently in modules that never see each other, so a typo does not error — it quietly creates a private slot where that overlay wins every time, or never competes at all. A slot with one participant is perfectly legal, so nothing else can notice. `participants` exists for exactly that, and every failure here is invisible to somebody who cannot see the screen.
 
+**No call here answers an [error value](./errors.md#error-values), and none fails at run time.** An unknown slot or handle is not an error — `setMatching` writes a line to the log, `unregister` says nothing — and an error raised in `onActivate` or `onDeactivate` goes to the log alone ([`register`](#host-arbiter-register-errors)). Each entry's **Errors** says what raises for a mistake in the call. Two raises can come from any call here ([Return or raise](./errors.md#return-or-raise)): reaching `host.arbiter` from code whose module did not declare `arbiter` raises `module '…' used host.arbiter without declaring it — …` ([What to declare](#declare)), and a module that has run too long is stopped with `stopped by the host: …` ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -55,7 +57,7 @@ See [what that list is and is not](./index.md#capabilities).
 
 ## host.arbiter.register(slot, specificity, onActivate, onDeactivate) {#host-arbiter-register}
 
-**Signature:** `host.arbiter.register(slot: string, specificity: number, onActivate: () -> (), onDeactivate: () -> ()) -> handle`
+**Signature:** `host.arbiter.register(slot: string, specificity: number, onActivate: () -> (), onDeactivate: () -> ()) -> number`
 
 Enters a claim for `slot` and returns the handle every other call here takes. The claim starts **not matching**: registering says only that this module wants the slot when its own conditions hold, and `setMatching` is what says they do.
 
@@ -75,6 +77,18 @@ self._claim = host.arbiter.register(
 )
 ```
 
+### Returns {#host-arbiter-register-returns}
+
+- The claim's handle: a whole number above 0, unique for the life of the application and never reused, which `setMatching`, `unregister` and `winner` speak in. The claim starts not matching, so registering moves no slot.
+
+### Errors {#host-arbiter-register-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `slot` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8; a `specificity` that is not a number, or is NaN or an infinity — a fraction is cut toward zero, so `20.5` ranks as `20`; an `onActivate` or `onDeactivate` that is not a function.
+
+**An error in a callback stays in the log.** An error that `onActivate` or `onDeactivate` raises does not come out of the call that moved the slot — another module's `setMatching`, say — and no error dialog shows it: it is written to the log under `[arbiter]`, `onActivate error: …` or `onDeactivate error: …`, and the election goes on. Callbacks that keep moving the slot from inside the election are cut off after 100 elections, with `slot '…' did not settle in 100 passes (callback oscillation?)` in the log.
+
 ## host.arbiter.setMatching(slot, handle, matching) {#host-arbiter-setmatching}
 
 **Signature:** `host.arbiter.setMatching(slot: string, handle, matching: boolean) -> nil`
@@ -92,6 +106,18 @@ Call it on every re-check, not only on a change — the arbiter keeps the last t
 host.arbiter.setMatching(self._slot, self._claim, matched)
 ```
 
+### Returns {#host-arbiter-setmatching-returns}
+
+- Nothing: no value comes back. When it returns, a change of winner it caused has been made, and the `onDeactivate` and `onActivate` that change calls have run. A report that changes nothing elects nothing.
+
+### Errors {#host-arbiter-setmatching-errors}
+
+None. It never answers an error value.
+
+**An unknown slot or handle is not an error.** For a `slot` nobody registered on, or a `handle` that is no claim on it, nothing changes, and the log says `setMatching: unknown slot '…'` or `setMatching: unknown handle … in slot '…'`.
+
+**Raises** for a mistake in the call: a `slot` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8; a `handle` that is not a number (a fraction is cut toward zero). `matching` never raises. It is read as a condition is: `nil` and `false` are false, and anything else is true, `0` and `"false"` among them.
+
 ## host.arbiter.unregister(slot, handle) {#host-arbiter-unregister}
 
 **Signature:** `host.arbiter.unregister(slot: string, handle) -> nil`
@@ -106,18 +132,47 @@ if self._slot and self._claim then
 end
 ```
 
+### Returns {#host-arbiter-unregister-returns}
+
+- Nothing: no value comes back. When it returns, the claim is gone — its `onDeactivate` has run if it held the slot — and the next claim has been elected.
+
+### Errors {#host-arbiter-unregister-errors}
+
+None. It never answers an error value.
+
+**An unknown slot or handle is not an error**: nothing happens, and nothing is logged, so unregistering a claim twice is harmless.
+
+**Raises** for a mistake in the call: a `slot` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8; a `handle` that is not a number.
+
 ## host.arbiter.winner(slot) {#host-arbiter-winner}
 
-**Signature:** `host.arbiter.winner(slot: string) -> string?`
+**Signature:** `host.arbiter.winner(slot: string) -> number?`
 
-The module id currently holding `slot`, or `nil` when nothing matches. Ask it to find out whether somebody else is in front of you rather than to decide whether you are active — your own `onActivate` already told you that.
+The **handle** of the claim currently holding `slot` — the number [`register`](#host-arbiter-register) returned to whichever module made it — or `nil` when nothing matches. It is not a module id. Compare it with your own handle to find out whether somebody else is in front of you, rather than to decide whether you are active — your own `onActivate` already told you that. The module behind a claim is in [`participants`](#host-arbiter-participants), on the entry whose `active` is true.
 
 ```luau
--- Which overlay is holding the slot right now, in a line somebody can check against
--- what they are hearing.
-local owner = host.arbiter.winner("com.platform.kontakt/plugin")
-host.log.info("slot held by: " .. (owner or "nobody"))
+-- Is another claim holding the slot? What the overlay runtime asks before a re-check.
+local holder = host.arbiter.winner(self._slot)
+local someoneElse = holder ~= nil and holder ~= self._claim
+
+-- Which module holds it, in a line somebody can check against what they are hearing.
+local by = "nobody"
+for _, p in ipairs(host.arbiter.participants(self._slot)) do
+  if p.active then by = p.module end
+end
+host.log.info("slot held by: " .. by)
 ```
+
+### Returns {#host-arbiter-winner-returns}
+
+- A handle, a whole number: the claim holding `slot` now — the most specific claim that matches, of a module that is enabled.
+- `nil` — no claim on `slot` matches, or nobody registered on it.
+
+### Errors {#host-arbiter-winner-errors}
+
+None. It never answers an error value.
+
+**Raises** only for a `slot` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8.
 
 ## host.arbiter.winnerSpecificity(slot) {#host-arbiter-winnerspecificity}
 
@@ -129,6 +184,17 @@ The rank of whoever currently holds `slot`, or `nil` when nothing matches. Usefu
 local rank = host.arbiter.winnerSpecificity(self._slot)
 local outranked = rank ~= nil and rank > self._specificity
 ```
+
+### Returns {#host-arbiter-winnerspecificity-returns}
+
+- The specificity of the claim holding `slot`, a whole number, as `register` took it.
+- `nil` — nothing holds the slot, the same moments [`winner`](#host-arbiter-winner) answers `nil`.
+
+### Errors {#host-arbiter-winnerspecificity-errors}
+
+None. It never answers an error value.
+
+**Raises** only for a `slot` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8.
 
 ## host.arbiter.participants(slot) {#host-arbiter-participants}
 
@@ -144,3 +210,14 @@ for _, p in ipairs(host.arbiter.participants(SLOT)) do
     p.module, p.specificity, p.matching and " matching" or "", p.active and " ACTIVE" or ""))
 end
 ```
+
+### Returns {#host-arbiter-participants-returns}
+
+- A list with one table per claim on `slot`, in the order they were registered, a new list at every call. Each holds `module`, the id of the module whose VM registered the claim — for an overlay, the module that built it, not the overlay runtime; `specificity`; `matching`, what the claim last reported; and `active`, whether it holds the slot.
+- `{}` — nobody registered on `slot`, or every claim was withdrawn.
+
+### Errors {#host-arbiter-participants-errors}
+
+None. It never answers an error value.
+
+**Raises** only for a `slot` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8.
