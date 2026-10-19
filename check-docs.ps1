@@ -117,17 +117,194 @@ foreach ($file in $files) {
   }
 }
 
-if ($problems.Count -eq 0) {
-  $scope = if ($All) { "docs/" } else { "docs/api/" }
-  Write-Host "Every host.* name used in $scope is one the host registers."
-  exit 0
+# ---- What modules compare: a reason, a status word, a constant ---------------------------
+# A failure is an error value, `{ code, message, detail? }`, and a module compares its code with a
+# constant: `err.code == host.errors.NOT_READY` (docs/api/errors.md). Before the typed errors it was
+# an English sentence, and code that still compares one — `why == "not ready yet"`, a table keyed by
+# a reason, `why:find("denied")` — is never true and says nothing, which no test sees unless the
+# failure happens in it. So everywhere a module's code is written is read for that shape: the Luau
+# of modules/, tools/ and examples/, and every Luau block of docs/, the design notes included,
+# since an example there is copied as readily. The names are the ones this project gives a reason
+# (`why`, `err`, `reason` and what starts with them); a line that has to compare a word under such
+# a name says so with the comment `-- lint: word`. A heuristic, backed by the tests: it reads
+# names, not values.
+#
+# The words that stay words — a reading's `status`, onClose's and onEnd's `how`, host.keys.check's
+# `reasons` (docs/api/errors.md, "Comparing codes") — have no constants, so a misspelt one is the
+# same silent false. Each literal compared with one is held to the words its page documents. And a
+# constant of `O.errors` or of a page's `platform.errors` that does not exist raises, or reads
+# `undefined`, only when its line runs. The Luau of modules/, tools/ and examples/ is held to its
+# constants by the host's tests (every_error_constant_a_module_names_is_one); the docs' Luau, and
+# every page script, docs' and modules' alike, are held to them here.
+$errorsRs = Get-Content (Join-Path $root "crates/host/src/errors.rs") -Raw
+$errorsLuau = Get-Content (Join-Path $root "modules/overlay-runtime/src/errors.luau") -Raw
+$hostConstants = @([regex]::Matches($errorsRs, 'Code::[A-Za-z]+\s*=>\s*"([A-Z][A-Z0-9_]*)"') | ForEach-Object { $_.Groups[1].Value })
+$runtimeCodes = [regex]::Match($errorsLuau, '(?m)^\s*codes\s*=\s*\{([^}]*)\}')
+$runtimeConstants = @([regex]::Matches($runtimeCodes.Groups[1].Value, '"([a-z_]+)"') | ForEach-Object { $_.Groups[1].Value.ToUpperInvariant() })
+if ($hostConstants.Count -ne 19 -or $runtimeConstants.Count -ne 8) {
+  Write-Host "check-docs.ps1 could not read the codes: $($hostConstants.Count) of host.errors in errors.rs (19 expected), $($runtimeConstants.Count) of the runtime's in errors.luau (8 expected)."
+  exit 1
 }
 
-Write-Host "$($problems.Count) documented call(s) the host does not provide:`n"
-foreach ($p in $problems) {
-  Write-Host "  $($p.Name)  -- $($p.Why)"
-  Write-Host "      $($p.Where)   $($p.Line)"
+# The status words, and the page that documents each set. Every word here must be one its page
+# names, as `word` or "word", so that the two cannot drift apart without a failure.
+$words = [ordered]@{
+  status = @{ Field = "a reading's status"; Page = "docs/api/ocr.md"; Words = @("text", "blank", "none", "failed", "stale") }
+  close  = @{ Field = "onClose's how"; Page = "docs/api/gui.md"; Words = @("user", "failed") }
+  ended  = @{ Field = "onEnd's how"; Page = "docs/api/overlay.md"; Words = @("ended", "done", "given_up") }
+  check  = @{ Field = "host.keys.check's reasons"; Page = "docs/api/keys.md"; Words = @("parse", "reserved", "voiceover", "no_keycode", "tap", "altgr", "composes") }
 }
-Write-Host "`nAn example that raises is worse than no example: it is copied, it fails, and the"
-Write-Host "reader cannot tell whether the platform or their own typing is at fault."
-exit 1
+$lint = @()
+foreach ($set in $words.Values) {
+  $page = Get-Content (Join-Path $root $set.Page) -Raw
+  foreach ($w in $set.Words) {
+    if (-not ($page.Contains('`' + $w + '`') -or $page.Contains('"' + $w + '"'))) {
+      $lint += [pscustomobject]@{ What = "$($set.Field): '$w' is not a word $($set.Page) documents"; Where = "check-docs.ps1"; Line = "" }
+    }
+  }
+}
+
+$reason = '(why|err|reason)\w*'
+$reasonShapes = @(
+  @{ What = "a reason compared with a string"; Re = $reason + '\s*[=~]=\s*["'']' },
+  @{ What = "two reasons compared"; Re = $reason + '\s*[=~]=\s*' + $reason + '\b' },
+  @{ What = "a table looked up by a reason"; Re = '\[' + $reason + '\]' },
+  @{ What = "a string function on a reason"; Re = 'string\.(find|match|gmatch|sub|lower|upper)\(\s*' + $reason },
+  @{ What = "a string method on a reason"; Re = $reason + '\s*:(find|match|gmatch|sub|lower|upper)\(' }
+)
+
+# The `how` a hook is handed is onClose's or onEnd's only inside that hook: a function whose
+# parameters name `how` on a line that names the hook, down to its `end` at that line's
+# indentation, and any line that names the hook itself. Elsewhere `how` is a module's own word —
+# VPS Avenger's acts answer "changed" or "unchanged" — which no page of the API documents.
+function Get-HowWords([string[]]$lines) {
+  $at = @{}
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    $l = $lines[$i]
+    $these = @()
+    if ($l -cmatch 'onEnd') { $these += $words.ended.Words }
+    if ($l -cmatch 'onClose|onPageClose|pageClosed') { $these += $words.close.Words }
+    if ($these.Count -eq 0) { continue }
+    $at[$i] = @(@($at[$i]) + $these | Where-Object { $_ })
+    $head = [regex]::Match($l, 'function\s*[\w.:]*\s*\(([^)]*)\)(.*)$')
+    if (-not $head.Success -or $head.Groups[1].Value -notmatch '(^|[\s,])how([\s,]|$)') { continue }
+    if ($head.Groups[2].Value -cmatch '\bend\b') { continue }   # the whole function on one line
+    $indent = [regex]::Match($l, '^\s*').Length
+    for ($j = $i + 1; $j -lt $lines.Count; $j++) {
+      $e = [regex]::Match($lines[$j], '^(\s*)end\b')
+      if ($e.Success -and $e.Groups[1].Length -le $indent) { break }
+      $at[$j] = @(@($at[$j]) + $these | Where-Object { $_ })
+    }
+  }
+  return $at
+}
+
+function Test-Luau([string]$where, [string[]]$lines, [int[]]$numbers) {
+  $found = @()
+  $how = Get-HowWords $lines
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    $raw = $lines[$i]
+    if ($raw.Contains("-- lint: word")) { continue }
+    $line = [regex]::Replace($raw, '--.*$', '')   # a comment compares nothing
+    $here = "${where}:$($numbers[$i])"
+    foreach ($shape in $reasonShapes) {
+      if ([regex]::IsMatch($line, $shape.Re)) {
+        $found += [pscustomobject]@{ What = $shape.What; Where = $here; Line = $raw.Trim() }
+        break
+      }
+    }
+    $checks = @(
+      @{ Re = '\.status\s*[=~]=\s*"([^"]*)"|"([^"]*)"\s*[=~]=\s*[\w.\[\]]*\.status\b'; Set = $words.status.Words; Field = $words.status.Field },
+      @{ Re = 'table\.find\(\s*[\w.]*reasons\s*,\s*"([^"]*)"|reasons\[[^\]]*\]\s*[=~]=\s*"([^"]*)"'; Set = $words.check.Words; Field = $words.check.Field }
+    )
+    if ($how.ContainsKey($i)) {
+      $checks += @{ Re = '(?<![\w.])how\s*[=~]=\s*"([^"]*)"|"([^"]*)"\s*[=~]=\s*how\b'; Set = $how[$i]; Field = "the hook's how" }
+    }
+    foreach ($c in $checks) {
+      foreach ($m in [regex]::Matches($line, $c.Re)) {
+        $w = if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }
+        if ($c.Set -cnotcontains $w) {
+          $found += [pscustomobject]@{ What = "'$w' is not a word of $($c.Field) ($(($c.Set | Sort-Object -Unique) -join ', '))"; Where = $here; Line = $raw.Trim() }
+        }
+      }
+    }
+    foreach ($m in [regex]::Matches($line, '(?<![\w.])O\.errors\.([A-Za-z_][A-Za-z0-9_]*)')) {
+      $k = $m.Groups[1].Value
+      if ($hostConstants -cnotcontains $k -and $runtimeConstants -cnotcontains $k) {
+        $found += [pscustomobject]@{ What = "O.errors has no $k"; Where = $here; Line = $raw.Trim() }
+      }
+    }
+  }
+  return $found
+}
+
+function Test-PageScript([string]$where, [string[]]$lines, [int[]]$numbers) {
+  $found = @()
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    foreach ($m in [regex]::Matches($lines[$i], '(?<![\w.])platform\.errors\.([A-Za-z_][A-Za-z0-9_]*)')) {
+      if ($hostConstants -cnotcontains $m.Groups[1].Value) {
+        $found += [pscustomobject]@{ What = "platform.errors has no $($m.Groups[1].Value)"; Where = "${where}:$($numbers[$i])"; Line = $lines[$i].Trim() }
+      }
+    }
+  }
+  return $found
+}
+
+function Get-Rel([string]$path) { return $path.Substring($root.Length + 1).Replace('\', '/') }
+
+foreach ($dir in @("modules", "tools", "examples")) {
+  foreach ($f in Get-ChildItem (Join-Path $root $dir) -Recurse -File -Include *.luau, *.js, *.html) {
+    if ($f.FullName -match '[\\/]node_modules[\\/]') { continue }
+    $lines = @((Get-Content $f.FullName -Raw) -split "`n")
+    $numbers = @(1..$lines.Count)
+    if ($f.Extension -eq ".luau") { $lint += Test-Luau (Get-Rel $f.FullName) $lines $numbers }
+    else { $lint += Test-PageScript (Get-Rel $f.FullName) $lines $numbers }
+  }
+}
+foreach ($f in Get-ChildItem $docs -Recurse -Filter *.md) {
+  $lines = @((Get-Content $f.FullName -Raw) -split "`n")
+  $kind = $null; $block = @(); $numbers = @()
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    $open = [regex]::Match($lines[$i], '^```(\w+)\s*$')
+    if (-not $kind -and $open.Success) { $kind = $open.Groups[1].Value; $block = @(); $numbers = @(); continue }
+    if ($kind -and $lines[$i] -match '^```\s*$') {
+      if ($block.Count -gt 0) {
+        if ($kind -eq "luau") { $lint += Test-Luau (Get-Rel $f.FullName) $block $numbers }
+        elseif ($kind -in @("js", "javascript", "html")) { $lint += Test-PageScript (Get-Rel $f.FullName) $block $numbers }
+      }
+      $kind = $null
+      continue
+    }
+    if ($kind) { $block += $lines[$i]; $numbers += ($i + 1) }
+  }
+}
+
+$scope = if ($All) { "docs/" } else { "docs/api/" }
+if ($problems.Count -eq 0) {
+  Write-Host "Every host.* name used in $scope is one the host registers."
+}
+else {
+  Write-Host "$($problems.Count) documented call(s) the host does not provide:`n"
+  foreach ($p in $problems) {
+    Write-Host "  $($p.Name)  -- $($p.Why)"
+    Write-Host "      $($p.Where)   $($p.Line)"
+  }
+  Write-Host "`nAn example that raises is worse than no example: it is copied, it fails, and the"
+  Write-Host "reader cannot tell whether the platform or their own typing is at fault.`n"
+}
+
+if ($lint.Count -eq 0) {
+  Write-Host "No reason is compared as a sentence, every status word compared is a documented one, and every error constant named exists."
+}
+else {
+  Write-Host "$($lint.Count) comparison(s) that are never true, or constant(s) that do not exist:`n"
+  foreach ($p in $lint) {
+    Write-Host "  $($p.What)"
+    Write-Host "      $($p.Where)   $($p.Line)"
+  }
+  Write-Host "`nCompare err.code with a constant of host.errors or O.errors (docs/api/errors.md). A line"
+  Write-Host "that has to compare a word under a reason's name carries the comment -- lint: word."
+}
+
+if ($problems.Count -gt 0 -or $lint.Count -gt 0) { exit 1 }
+exit 0

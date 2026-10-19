@@ -5,7 +5,7 @@ Architecture and feasibility foundation: [docs/architecture-feasibility-study.md
 
 ## API rule: failures are typed, not sentences (2026-10-11, from the maintainer)
 
-- [ ] **Replace every reason given as plain text with an error type.** The maintainer, on seeing
+- [x] **Replace every reason given as plain text with an error type.** The maintainer, on seeing
       `page:show()` answer `false, "not ready yet"`: "das ist höchst fehleranfällig. zukünftig
       stellen wir in allen solchen fällen auf error typen um." Today many calls answer a failure as
       a second value that is an English sentence, and a module that wants to react has to compare
@@ -26,6 +26,105 @@ Architecture and feasibility foundation: [docs/architecture-feasibility-study.md
       same step, so the result is one consistent rule. New APIs built before the conversion (the
       click parameter of W10, host.element.press, the macOS page) keep the current style so the
       conversion catches everything in one sweep.
+
+      **Done** (2026-10-18 to 2026-10-19, the typed-errors series). Every reason is an error value,
+      `{ code, message, detail? }`, made from one table: crates/host/src/errors.rs for the host,
+      modules/overlay-runtime/src/errors.luau for the overlay runtime. `host.errors` holds the
+      host's 19 codes and `O.errors` the runtime's 8 beside them; a page has `platform.errors`. The
+      status words stay words. Every docs/api entry has Returns and Errors, and tools/api-index.py
+      holds each Errors table, and each group's section in docs/api/screen.md, to the table both
+      ways; a runtime row that hands on a host call's errors is held to errors.luau's `passes`, a
+      list kept by hand (below). check-docs.ps1 lints the Luau of modules/,
+      tools/ and examples/ and every Luau block of docs/: a reason compared as a sentence, a status
+      word no page documents, an `O.errors` or `platform.errors` constant that does not exist. The
+      changelog entry is under "For the first release's changelog". What is left:
+
+- [ ] **VPS Avenger's own sentences stay sentences.** About 250 page and speech texts inside
+      modules/vps-avenger, among them the new "… was not clicked: <message>" and "the menu cannot be
+      seen here; nothing was chosen", are compared nowhere outside the module, so they were left as
+      they are (core app first). Convert them if one is ever handed to another module or compared.
+- [ ] **macOS element reads never say "not known".** On a Mac every `host.element` question answers
+      what it found, or nothing, and never an error value: a walk stopped at its 300 ms deadline, an
+      application in the not-answering quarantine, and a dump cut at its 2000 nodes or 5 s all
+      answer as if the tree ended there (docs/api/element.md, the macOS blocks). Answer `nil, err`
+      as Windows does, and a cut dump its list so far with `too_large` or `timeout`.
+- [ ] **Windows element questions without the automation object.** When UI Automation's object
+      cannot be made, or a condition fails, every question but `press` answers "nothing found" with
+      no error value; only `press` says why (`failed`, "this system's accessibility interface could
+      not be reached"). Answer every question so: `element::NO_INTERFACE`'s entries become every
+      question's.
+- [ ] **The input calls that only log.** `move`, `drag`, `scroll`, `text`, `mouseDown` and `mouseUp`
+      keep their rare macOS failures, an event the system would not make, in the log only; on
+      Windows the results of `SendInput`, `SetCursorPos` and `GetCursorPos` are not read at all. And
+      a call can leave half an input behind while it answers a plain `false, err`: a key-down posted
+      without its key-up, and on Windows a posted click's move and press without the release. Decide
+      what each answers, and whether a click refused after its press still posts the release.
+- [ ] **A failed `render()` in backend/macos/ocr.rs reads as `"none"`, with no log line.** A small
+      region whose content crop CoreGraphics cannot draw answers a reading of `status = "none"`, as
+      if it held no text. It should be `"failed"` with an error value, as the macOS readings' other
+      hidden failures became; ocr.md's macOS block says so meanwhile. The inventory of hidden
+      failures missed it.
+- [ ] **The screen groups are coarser than the code.** `capture-errors` brings reasons to calls that
+      never give them: its two "failed inside the application" reasons to the image worker's calls,
+      and its 40-million-pixel and snapshot-round reasons to `host.ocr.recognize`.
+      `snapshot-source-errors` brings both "not inside" and "does not overlap" to every call in it,
+      though each call gives one. The pages say which call gets which, but the both-way check cannot
+      catch a wrong row inside a group. Split the groups, or name those reasons per entry
+      (errors.rs, `GROUPS`).
+- [ ] **Reasons that are never given.** `element::NOT_ASKED_DENIED` and `NOT_ASKED_GONE` (only a
+      timeout leaves the questions behind it unasked) and, on Windows, `ocr::CROP_OUTSIDE` ("region
+      outside the captured area", which looks unreachable, since the bounding box is made from the
+      same rectangles) have rows that say they are not given today. Confirm it, then give them no
+      entries, as `WRONG_THREAD` has, and drop the rows.
+- [ ] **Messages kept word for word that should change.** The host's "cannot wait here" messages
+      name the callback's parameter `why` (task.rs); `hotkey::NO_HANDLER` says "no global shortcut
+      will work in this session", though the handler is installed again at the next refresh; a
+      missing default audio device reads `no audio output device: no audio output device`, because
+      sound.rs puts the error's own text after its own; the runtime's three "its `…` function"
+      messages hold backticks, which a table cell shows only between double backticks.
+- [ ] **Open questions the docs revision found.** Each page says what the code does today; these ask
+      whether it should:
+      - overlay: `trip:handOver` answers `not_in_front` at the call while `onGiveUp` hears
+        `moved_on` for the same moment (hand on the give-up's own error?); `O:calibrationCrop` does
+        not check that the overlay is active (`not_in_front`, as the capture methods answer?);
+        `O:calibrationVerify` raises inside the V key's handler for a crop never written (answer
+        `not_found`?); `O.menuTests.drawn`, a tab control's `onTab` and a trip's fields have no
+        entries of their own.
+      - window: `controls()` without `win` asks the backend afresh instead of taking the epoch's
+        `active()`; Windows `ownsPoint` answers `nil`, which reads as permission, for an id that
+        names no window; `find`, `findAll` and `test` hardly check the matcher, so a string matcher
+        matches every window.
+      - element: Windows `stateProbe` with an empty `name` matches only an element without a name,
+        and every other path any element of the type.
+      - gui and input: the stub's `page:post` answers `true` and posts nothing (`not_supported`, as
+        its `send` answers?); `send` turns over `host.inputEpoch()` when it answers `false` or
+        raises; a page's messages past 256 are dropped without a word; what WebView2, WebKit and the
+        module make of `platform.post` given a function or a symbol is not measured;
+        `platform.errors` has no entry of its own.
+      - keys and hotkey: `host.keys.release` does not check that the token is the calling module's,
+        as `host.gamepad.off` does; the stub's `register` answers a spec that does not parse with
+        `nil, err` instead of raising; that a module cannot register the application's own reload or
+        quit combination rests on RegisterHotKey's documented rule on Windows, not on a measurement,
+        and is not known on macOS.
+      - ocr: `resolveLanguage` on the build for other systems answers `unavailable`, where nothing
+        can do it there (`not_supported`).
+      - require, settings and arbiter: `host.require`'s data path returns any loaded module's data,
+        declared or not; `host.settings.set` lets NaN past `min` and `max`; `host.settings.define`
+        ignores misspelt or wrongly typed `opts` keys; `host.arbiter.setMatching` and `unregister`
+        do not check that the claim is the calling module's; a data dependency's arrays come back
+        with a protected metatable, so `setmetatable`, `table.clone` and `table.freeze` raise on
+        them, which no page says.
+- [ ] **The lint's limits.** check-docs.ps1 takes a hook's `how` only inside the hook, found by its
+      indentation, and does not see a table keyed by host.keys.check's words (the runtime's
+      REFUSES_HOTKEY). `string.format("%s", err)` and `assert(ok, err)` raise for an error value,
+      and are not linted, because the runtime and ik-on-ear format sentences of their own under the
+      name `why`; renaming those to `word` would let the lint take both shapes.
+- [ ] **The runtime's `passes` is kept by hand.** errors.luau's `passes` says which host calls'
+      errors each runtime entry hands on, and api-index.py holds overlay.md's link rows to it both
+      ways; nothing holds `passes` itself to main.luau. A runtime method that starts handing on a
+      host error, with no `passes` entry, has no row and fails nothing. A test that follows each
+      method's returns to the host calls in it would close that, or a `fail`-like helper for
+      handing on that names the entry.
 
 ## The first Mac test of the Avenger page (2026-10-14)
 
@@ -454,6 +553,70 @@ into the changelog with that release.
   and its `profile ×…` clause, which counted the reads made on the event loop; and on Windows two
   reasons of `fallback = "none"`, `it is still opening` and `this turn of the event loop already
   waited its share for it`, which only a read on the event loop could get.
+- **A failure is an error value with a code, not a sentence** (2026-10-19, the typed-errors series;
+  docs/api/errors.md).
+  - Every call that answered `nil`, `false` or `{}` and a sentence now answers the same first value
+    and an error value, `{ code, message, detail? }`. It is read-only. `tostring` and `..` give its
+    message, which is the old sentence word for word, and `host.log.info` and `host.speech.output`
+    take it as it is.
+  - Callbacks get it in the same place, and a text reading's `error` is one.
+  - Compare `err.code` with a constant of the new `host.errors` (`host.errors.NOT_READY`). The
+    overlay runtime adds `O.errors`, and a page has `platform.errors`.
+  - Code that compares the second value with a string, such as `why == "not ready yet"`, no longer
+    matches, and says nothing. Code that only tests it, logs it or concatenates it keeps working.
+    `string.find(why, …)`, `why:find(…)` and the other string functions raise for it, and so do
+    `string.format("%s", err)` (write `%*` or `tostring(err)`) and `assert(ok, err)` (write
+    `tostring(err)`). A module that depends on the overlay runtime is not protected by its version:
+    dependencies are lower bounds.
+  - A partial answer has a value and an error: a dump's list so far (`list, err`), a hotkey claim
+    not held now (`id, err`), a page in front over the rectangle it was to avoid (`true, err`).
+    page:show's `"over the rectangle to avoid"` note is now that error, code `too_large`, with the
+    same words.
+  - New answers where there were none: `page:focus`, `host.window.focus` and `host.speech.use` say
+    why; `page:post`, `host.input.send`, `host.input.post` and `host.sound.play` answer `true` or
+    `false, err`; `host.input.post` on Windows reports a refused post; `host.gamepad` reports a
+    watcher that stopped after starting or has no XInput; the page's `platform.post` answers
+    `{ ok: true }`, or `{ ok: false, error }` with `too_large` for a message past 1 MiB;
+    `host.ocr.resolveLanguage` answers `nil, err` where it answered `nil` — `not_ready` while the
+    recognition languages are not known yet, `unavailable` when no language here reads the tag.
+  - On a Mac, two text readings that read `"none"` and were only logged now read `"failed"`: pixels
+    that could not be read back (`failed`, `the picture could not be read back`), and a request the
+    text recogniser refused (`refused`, `the text recogniser refused the request: …`).
+  - Returned now instead of raised: a page whose module was reloaded (`show`, `prepare`, `post`); a
+    file `screen.save` or `saveMarked` could not write; the snapshot and template budgets, for every
+    region form; `host.gamepad`'s watcher failing to start; `host.keys.capture` without the hook or
+    the tap, which then registers nothing; `host.input.post` and `send` for a key the layout does
+    not type; `host.hotkey.register` for a combination the system keeps or has no key code for;
+    empty corners in `host.ocr.recognize`; a template or sound file outside the module's package.
+  - Raised now instead of returned or silent: `host.settings.onChange` for a key never defined;
+    `O:pageKey` for a spec that is not a string; `O:chooseMenuItem` on an overlay without menu
+    tests; `host.sound.play` for a missing sound inside the package.
+  - `onClose` is `onClose(how, err)`: `how` is still `"user"` or `"failed"`, and an error value
+    comes beside `"failed"`.
+  - `host.keys.check`'s `no-keycode` is now `no_keycode`.
+  - The overlay runtime (0.11) answers error values: `O:chooseMenuItem`, now `false, err` at the
+    call too, and its `onDone`; `O:inPlugin`; `O:pageBack` and `onBack`; `O:pageKey`;
+    `trip:handOver`; `trip:afterMenu`; `O:stillHere`; `O:toScreen` and `O:toScreenRect`;
+    `O.doubleClick`, now `cb(ok, err)` (both clicks are made for no window, so neither is refused
+    today); the calibration and capture methods; `onGiveUp`. `onEnd` is
+    `onEnd(o, trip, how, info, err)`, `how` one of `ended`, `done` and `given_up`, with the
+    give-up's error value fifth. The 0.10 words are these codes now (each entry's Errors in
+    docs/api/overlay.md has every message):
+    - chooseMenuItem and onDone: `inactive` is `not_in_front` (or `moved_on` after the press's
+      reads), `unplaced` and `busy` stay, `refused` is `outside` or `covered`, `due` is `no_menu`,
+      `closed` and `covered` stay, `untaken` is `refused`, `no submenu` is `no_submenu`, `unfit
+      submenu` is `unfit_submenu`, `unfollowed` is `not_ready`, and `key`, `left`, `press` and
+      `moved` are `moved_on`; `no tests` raises.
+    - inPlugin and pageBack: `busy` and `gone` stay, `not in front` is `not_in_front`, `nothing
+      held` is `not_found`, `declined` is `refused` or host.window.focus's own error.
+    - onGiveUp: `another application` is `moved_on`, `key` is `cancelled`, `page closed` is
+      `closed`, `gone` and `failed` stay, `not in front` is `not_in_front`, `outranked` is `taken`.
+    - handOver: `not in front` is `not_in_front`, `busy` stays, `refused: …` is host.keys.capture's
+      own error.
+    - pageKey: `parse` and `tap` are `invalid`, `reserved` is `taken`, `no-keycode` is
+      `not_supported`, `a control's hotkey` is the new `clash`, `refused: …` is
+      host.hotkey.register's own error.
+  - `host.arbiter.winner` is documented as returning the claim's handle, which it always did.
 
 ## Implementation
 

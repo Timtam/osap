@@ -22,7 +22,7 @@ that is wrong within a month.
 
 The same pass stamps an entry's own level-3 headings (its Returns, Errors and OS blocks) from
 its anchor, and `--check` also holds docs/api/errors.md's codes to crates/host/src/errors.rs, and
-every Errors table of a page in CONVERTED to the reasons the host can give, both ways.
+every page's Errors tables to the reasons the host and the overlay runtime can give, both ways.
 """
 import glob
 import io
@@ -116,12 +116,14 @@ def namespace(heading):
         return m.group(1)
     if h.startswith('O:') or h.startswith('O.') or h.startswith('Bindings'):
         return 'Overlay'
-    # The methods of the trip object O:inPlugin hands an act belong with the overlay.
-    if h.startswith('trip:') or h.startswith('trip.'):
-        return 'Overlay'
-    # The methods of the object `host.gui.webview` returns belong with it.
-    if h.startswith('page:') or h.startswith('page.'):
-        return 'host.gui'
+    # The methods of the objects a call hands out belong with the call: the trip O:inPlugin
+    # hands an act and the binding `O.window` makes, with the overlay; the page
+    # `host.gui.webview` returns, and the page's own `platform`, with host.gui; a snapshot, with
+    # host.screen. Without these, `Snapshot:crop` and `platform.post` were filed under Concepts.
+    for prefix, ns in (('trip', 'Overlay'), ('Binding', 'Overlay'), ('page', 'host.gui'),
+                       ('platform', 'host.gui'), ('Snapshot', 'host.screen')):
+        if h.startswith(prefix + ':') or h.startswith(prefix + '.'):
+            return ns
     return 'Concepts'
 
 
@@ -320,6 +322,146 @@ def repoint(path, text, level3):
     return re.sub(r'\]\(([^()\s#]*)#([A-Za-z0-9_-]+)\)', one, text)
 
 
+# How a call fails, said once on the index, before what to declare: whether it answers or
+# raises, the error value, the partial answers a module must read on purpose, and where each
+# page lists them. docs/api/errors.md has the rule in full; this is what a reader of the index
+# must not miss.
+FAILURES = [
+    '## When a call fails {#failures}',
+    '',
+    'A call that cannot do what it was asked tells the module in one of two ways: it **answers '
+    'an error value**, or it **raises**. Which of the two is a rule, the same for every call. '
+    '[host.errors](errors.md) has the rule in full, and the codes.',
+    '',
+    '### Return or raise {#return-or-raise}',
+    '',
+    '- **When the moment decides, the call answers an error value.** The moment is the window, '
+    'the screen, the system, or what another module or program holds. It is an outcome to plan '
+    'for. The call answers its usual value for "nothing" — `nil`, `false` or `{}` — and the '
+    'error value after it: `nil, err`.',
+    '- **When the arguments alone decide, the call raises.** A wrong type, an unknown option, a '
+    'value outside its fixed range, a key spec that does not parse, a file missing from the '
+    'module\'s own package. It is a mistake to fix. The log and the error dialog name the call '
+    'and what was wrong.',
+    '',
+    'Any call can also raise for two reasons that are not its own. The capability gate raises '
+    'for a namespace the module did not declare ([What to declare](#capabilities)). The guard '
+    'raises `stopped by the host: …` in a module that ran too long ([the '
+    'limits](../module-runtime-and-lifecycle.md#limits)). And a call that waits raises where it '
+    'cannot wait, when it is given no callback ([Where it waits](screen.md#where-it-waits)).',
+    '',
+    '### The error value {#the-error-value}',
+    '',
+    'An error value is a read-only table:',
+    '',
+    '- `code` — what kind of failure it is, a lower-case word such as `not_ready`. This is what '
+    'a module compares.',
+    '- `message` — a sentence for the log. It may change between versions; the code does not.',
+    '- `detail` — more for the log, or `nil`. Never compared.',
+    '',
+    'It reads as its message: `tostring(err)` gives it, and so does `"not read: " .. err`. '
+    '`host.log.info(err)` logs it and `host.speech.output(err)` speaks it. It is not a string, '
+    'though. The string functions raise for it, and so does a field it does not have, such as '
+    '`err.cod` ([Error values](errors.md#error-values)).',
+    '',
+    'Compare its code with a constant of [`host.errors`](errors.md#host-errors), never its '
+    'message:',
+    '',
+    '```luau',
+    'local saved = nil   -- the id of a window to come back to',
+    '',
+    'local function comeBack()',
+    '  if not saved then return end',
+    '  local ok, err = host.window.focus(saved)',
+    '  if not ok then',
+    '    host.log.info("[my-module] not focused: " .. err)      -- the message, for the log',
+    '    if err.code == host.errors.GONE then saved = nil end   -- the code, to decide by',
+    '  end',
+    'end',
+    '```',
+    '',
+    '### A value and an error together {#partial-answers}',
+    '',
+    '**Read both values.** Mostly an error value comes with nothing beside it: `nil, err`, '
+    '`false, err` or `{}, err`. Four calls can answer a result **and** an error value at once: '
+    '`page:show`, the two dumps and `host.hotkey.register`. '
+    'The result is the part that was done, and the error value says what was not. This is '
+    'unusual, so each of the four says so in its Returns.',
+    '',
+    '| call | answers | what it means |',
+    '|---|---|---|',
+    '| [`page:show`](gui.md#page-show-returns) with `focus` | `true, err` | The page is shown '
+    'and in front, but over part of `avoid`: there was no room beside it. `err.code` is '
+    '`too_large`. An overlay page\'s `onShown` is handed the same two values. |',
+    '| [`host.element.dump`](element.md#host-element-dump-returns) and '
+    '[`rawDump`](element.md#host-element-rawdump-returns) | `list, err` | The elements read '
+    'before the dump stopped. `err` says why it stopped: the tree was larger than a dump reads, '
+    'the walk took too long, or the program stopped answering. |',
+    '| [`host.hotkey.register`](hotkey.md#host-hotkey-register-returns) | `id, err` | The claim '
+    'is made and kept, but not held right now. Its callback fires once it is held. `err` says '
+    'why it is not. |',
+    '',
+    '`if not ok then` alone takes such an answer for a whole one, and `if err then return end` '
+    'throws away the part that was done. Test each value for what it says:',
+    '',
+    '```luau',
+    'local id, err = host.hotkey.register("Ctrl+Shift+F9", function() host.speech.output("F9") end)',
+    'if id and err then',
+    '  host.log.info("[my-module] Ctrl+Shift+F9 is claimed, but not held now: " .. err)',
+    'elseif err then',
+    '  host.log.info("[my-module] Ctrl+Shift+F9 is not claimed: " .. err)',
+    'end',
+    'local hotkeyId = id   -- kept even when it is not held now: the claim is tried again',
+    '```',
+    '',
+    '[Partial answers](errors.md#partial-answers) has the three in full.',
+    '',
+    '### Where it arrives {#where-it-arrives}',
+    '',
+    '- **The call\'s second value**, most often: `local v, err = call()`.',
+    '- **The callback\'s second argument**, for a call given a callback: `cb(value, err, '
+    'info)`.',
+    '- **A field of the answer**: a text reading has `status = "failed"` and its `error`.',
+    '- **An argument of a hook** the module wrote into a spec, such as a page\'s `onClose(how, '
+    'err)` or a menu choice\'s `onDone`.',
+    '',
+    'A call that hands its work on answers once it has handed it on. What fails after that '
+    'reaches only its callback or hook. A click with `via = "noactivate"` is one '
+    '([`host.input.click`](input.md#host-input-click)). An overlay\'s '
+    '[`O:chooseMenuItem`](overlay.md#o-choosemenuitem), whose `onDone` hears how the choice '
+    'ended, is another.',
+    '',
+    '### Returns and Errors, on every page {#returns-and-errors}',
+    '',
+    'Every call\'s entry has the same two sections, after its description and examples, and '
+    'before its Windows and macOS blocks:',
+    '',
+    '- **Returns** says every form its answer takes: the value, the missing value with an error '
+    'value, and a partial answer where there is one.',
+    '- **Errors** is a table of every error value the call can give: its code, where it '
+    'arrives, when it comes, its message, and the platform. Under the table, **Raises** lists '
+    'the mistakes that raise instead.',
+    '',
+    'A call that never fails says "None. It never answers an error value." [Reading an Errors '
+    'table](errors.md#reading-an-errors-table) explains the columns. Each table is checked '
+    'against the host\'s own list of reasons, and the overlay runtime\'s, in both directions: a '
+    'row the host never gives fails the documentation check, and so does a reason with no row.',
+    '',
+    'These calls answer error values: [`host.gui`](gui.md)\'s pages, '
+    '[`host.window.focus`](window.md#host-window-focus), the questions of '
+    '[`host.element`](element.md), [`host.input`](input.md)\'s `click`, `post` and `send`, '
+    '[`host.keys.capture`](keys.md#host-keys-capture), '
+    '[`host.hotkey.register`](hotkey.md#host-hotkey-register), every call of '
+    '[`host.screen`](screen.md) but `size`, `predicate` and `pending`, a snapshot\'s `crop`, '
+    '[`host.ocr`](ocr.md)\'s readings and `resolveLanguage`, '
+    '[`host.speech.use`](speech.md#host-speech-use), '
+    '[`host.sound.play`](sound.md#host-sound-play), [`host.gamepad`](gamepad.md)\'s `list`, '
+    '`state` and `on`, and the [overlay runtime](overlay.md), with codes of its own in '
+    '[`O.errors`](overlay.md#o-errors). Every other call answers none: it raises for a mistake, '
+    'and its entry says what its `nil` or `false` means.',
+    '',
+]
+
 # What every page's "What to declare" box links to. Said once, here, rather than repeated
 # sixteen times — and said honestly, because the alternative is a reader believing the list is
 # a boundary it is not.
@@ -464,8 +606,9 @@ CAPABILITIES = [
     'its text are two pictures, taken at two moments.',
     '- **Tesseract or other OCR language codes.** `lang` is a language tag such as `"de"` or '
     '`"de-DE"`, matched against what the platform\'s recogniser reads. A three-letter code such '
-    'as `"eng"` is a well-formed tag that no recogniser lists, so it does not raise: the read is '
-    'answered `"failed"`, naming the languages that are there. Write `"en"` — '
+    'as `"eng"` is a well-formed tag that no recogniser lists, so it does not raise: every '
+    'region is answered `"failed"`, with an `error` of code `unavailable` whose message names '
+    'the languages that are there. Write `"en"` — '
     '[Recognition language](ocr.md#recognition-language). '
     '[`host.ocr.recognize`](ocr.md#host-ocr-recognize) recognises off the event loop: given a '
     'callback it answers there, and without one it waits in its handler, holding only its own '
@@ -476,6 +619,10 @@ CAPABILITIES = [
     '[`host.timer.cancel`](timer.md#host-timer-cancel); `Send` is '
     '[`host.input.send`](input.md#host-input-send), virtual keys only; `ImageSearch`\'s second '
     'corner is exclusive here.',
+    '- **Exceptions, or an error code to fetch afterwards** (AutoHotkey\'s `throw` and '
+    '`ErrorLevel`, Windows\' `GetLastError`). A failure of the moment is not thrown and sets '
+    'nothing global: the call answers an error value as its second value, and only a mistake '
+    'in the call raises — [When a call fails](#failures).',
     '- **A keyboard hook that only listens.** A [capture](keys.md#host-keys-capture) takes the '
     'key away; there is no listen-only mode for ordinary keys, only the `"<modifier> tap"` '
     'form watches without taking.',
@@ -524,7 +671,7 @@ def build_index(entries):
            'still loaded — its entry file has run, and its recurring timers and listeners ' +
            'are kept — and its other callbacks stop; see the ' +
            '[module lifecycle](../module-runtime-and-lifecycle.md).', '']
-    out += CAPABILITIES + ['']
+    out += FAILURES + CAPABILITIES + ['']
     for ns in order:
         out.append('## ' + ns)
         out.append('')
@@ -651,7 +798,7 @@ def undocumented(entries):
     return missing
 
 
-# ── Returns and Errors: what a converted page says, held to the Reason table ────────────────
+# ── Returns and Errors: what each page says, held to the Reason table ───────────────────────
 #
 # Every call entry says what it returns and which errors it gives, under `### Returns` and
 # `### Errors` (docs/api/errors.md, "Reading an Errors table"). An Errors table is compared with
@@ -660,9 +807,9 @@ def undocumented(entries):
 # fails, and so does a reason of the entry with no row. That is the only way a wrong or
 # incomplete Errors table can fail CI, so the table is read from the source, not restated here.
 #
-# The pages are revised one at a time. CONVERTED names those whose entries follow the template;
-# the checks below run for them alone, and the set ends when it names every page.
-CONVERTED = set()
+# The pages were revised one at a time, and a CONVERTED set named those whose entries followed
+# the template. It ended when it named every page: the checks below run for every page, so a new
+# page is held to the template from its first line.
 
 # Entries that are not calls, by anchor. A field says what it holds under Returns and has no
 # Errors; a concept needs neither. Every other entry is a call, so a new heading is told to grow
@@ -677,7 +824,7 @@ CONCEPTS = {
     'reading-an-errors-table', 'comparing-codes', 'the-overlay-runtime-s-codes',
     'asking-without-waiting', 'button-combinations', 'button-and-axis-names',
     'what-a-page-is-served-and-what-it-may-not-do', 'key-spec-string-format',
-    'recognition-language', 'where-a-hook-runs', 'ocrlabel', 'o-menutests',
+    'recognition-language', 'where-a-hook-runs', 'ocrlabel', 'o-menutests', 'bindings',
     'plugin-base-library-overlays', 'a-runtime-shared-by-game-modules',
     'which-picture-a-read-sees', 'failure-reasons', 'where-it-waits', 'with-a-callback',
     'reading-a-snapshot', 'region-form', 'a-slow-callback', 'table-shapes', 'matchers',
@@ -686,6 +833,8 @@ CONCEPTS = {
 ERRORS_RS = os.path.join('crates', 'host', 'src', 'errors.rs')
 ERRORS_LUAU = os.path.join('modules', 'overlay-runtime', 'src', 'errors.luau')
 ERRORS_PAGE = os.path.join(API, 'errors.md')
+# The page of the overlay runtime's entries, whose reasons are errors.luau's.
+RUNTIME_PAGE = 'overlay'
 
 # The fixed words of an Errors table's "arrives" and "platform" cells.
 ARRIVES = re.compile(r'(return|callback|both|field|hook [A-Za-z][A-Za-z0-9]*)')
@@ -743,6 +892,22 @@ def runtime_reasons():
     return reasons, len(re.findall(r'\bcode\s*=\s*"', src)) - len(reasons)
 
 
+def runtime_lists():
+    """errors.luau's `codes`, in order, and its `passes`: for each runtime entry, the host entries
+    whose errors it hands on as they came — `["o-…"] = { "host-…", … },` each."""
+    if not os.path.exists(ERRORS_LUAU):
+        return [], {}
+    src = re.sub(r'--.*$', '', open(ERRORS_LUAU, encoding='utf-8').read(), flags=re.M)
+    m = re.search(r'\bcodes\s*=\s*\{(.*?)\}', src, re.S)
+    codes = re.findall(r'"([a-z][a-z0-9_]*)"', m.group(1)) if m else []
+    passes = {}
+    m = re.search(r'\bpasses\s*=\s*\{(.*?)\n  \},', src, re.S)
+    if m:
+        for k, v in re.findall(r'\["([a-z0-9-]+)"\]\s*=\s*\{(.*?)\}', m.group(1), re.S):
+            passes[k] = re.findall(r'"([^"]+)"', v)
+    return codes, passes
+
+
 # The groups of errors.rs: a group's own section, where its reasons are listed once, is a
 # concept like any other.
 GROUP_NAMES = set()
@@ -769,16 +934,28 @@ def sections(text):
     return [(h, '\n'.join(body)) for h, body in out]
 
 
-def table_rows(text):
-    """The rows of every table in `text` whose header is the Errors template's."""
-    rows, inside = [], False
+ERRORS_HEADER = ['code', 'arrives', 'when', 'message', 'platform']
+# A group's own section lists its reasons once, for every call that gives them: no "arrives".
+GROUP_HEADER = ['code', 'when', 'message', 'platform']
+
+
+def table_rows(text, header=ERRORS_HEADER):
+    """The rows of every table in `text` whose header is `header`, the Errors template's unless
+    told otherwise. A table inside fenced code is an example, not a row of the entry's."""
+    rows, inside, fenced = [], False, False
     for line in text.split('\n'):
+        if re.match(r'^\s*(```|~~~)', line):
+            fenced = not fenced
+            inside = False
+            continue
+        if fenced:
+            continue
         cells = [c.strip() for c in line.strip().strip('|').split('|')] if line.lstrip().startswith('|') else None
         if cells is None:
             inside = False
             continue
         if not inside:
-            inside = [c.lower() for c in cells] == ['code', 'arrives', 'when', 'message', 'platform']
+            inside = [c.lower() for c in cells] == header
             continue
         if set(''.join(cells)) <= set('-: '):
             continue
@@ -786,9 +963,10 @@ def table_rows(text):
     return rows
 
 
-def entry_problems(e, body, reasons, groups, codes, pages):
-    """What is wrong with one entry of a converted page. `codes` are the codes a row may name, the
-    host's and the runtime's; `pages` maps every entry's anchor to its page."""
+def entry_problems(e, body, reasons, groups, codes, pages, passes):
+    """What is wrong with one entry. `codes` are the codes a row may name, the host's and the
+    runtime's; `pages` maps every entry's anchor to its page; `passes` maps a runtime entry to the
+    host entries whose errors it hands on (errors.luau's `passes`)."""
     problems = []
     k = kind(e)
     if k == 'concept':
@@ -797,7 +975,11 @@ def entry_problems(e, body, reasons, groups, codes, pages):
     os_at = min([i for i, h in enumerate(heads) if h in ('Windows', 'macOS', 'Both')] or [len(heads)])
     if 'Returns' not in heads[:os_at]:
         problems.append('no `### Returns` before its OS blocks')
-    if k == 'field':
+    mine = reasons_of(e['anchor'], reasons, groups)
+    # A field says what it holds; one that can raise or fail may say so under Errors too, and
+    # that table is held to the reasons like a call's. One that a reason names must have it, or
+    # the reason is compared with nothing.
+    if k == 'field' and 'Errors' not in heads and not mine:
         return problems
     if 'Errors' not in heads[:os_at]:
         problems.append('no `### Errors` before its OS blocks')
@@ -806,9 +988,12 @@ def entry_problems(e, body, reasons, groups, codes, pages):
         problems.append('`### Errors` comes before `### Returns`')
     text = dict(sections(body))['Errors']
     rows = table_rows(text)
-    mine = reasons_of(e['anchor'], reasons, groups)
+    handed = set()
     if not rows and 'None. It never answers an error value.' not in text:
         problems.append('an Errors section with neither the table nor "None. It never answers an error value."')
+    # What raises instead is said under the same lead everywhere, so that it can be found.
+    if k == 'call' and '**Raises' not in text and 'It never raises' not in text:
+        problems.append('an Errors section that says neither "**Raises** …" nor "It never raises."')
     covered = set()
     for row in rows:
         if len(row) != 5:
@@ -822,6 +1007,10 @@ def entry_problems(e, body, reasons, groups, codes, pages):
         link = re.search(r'\]\(([^)#]*)#([A-Za-z0-9_-]+)\)', code)
         if link and not re.fullmatch(r'`[a-z_]+`', code):
             target = link.group(2)
+            # A link stands for a set of reasons, and nothing beside it is read: a code written
+            # next to it would be compared with nothing.
+            if not re.fullmatch(r'(?:(?:any of(?: the)?|the rest of) )?\[[^\]]*\]\([^)]*\)', code):
+                problems.append('a code cell with more than "any of", "any of the" or "the rest of" beside its link: ' + code)
             if target in groups:
                 if e['anchor'] not in groups[target]:
                     problems.append('the group ' + target + ' is not one this entry gives (errors.rs, GROUPS)')
@@ -834,7 +1023,14 @@ def entry_problems(e, body, reasons, groups, codes, pages):
                                     + ', the errors of no entry there')
                     continue
                 theirs = reasons_of(entry, reasons, groups)
-                extra = [r for r in theirs if id(r) not in {id(m) for m in mine}]
+                # The overlay runtime hands on the host's errors — a click's, a capture's, a
+                # page's — and errors.luau lists only its own (its head comment says so), so a
+                # runtime entry's row for a host entry's errors stands for them as they are. Every
+                # other link must bring only reasons of this entry.
+                passed_on = e['page'] == RUNTIME_PAGE and pages.get(entry) != RUNTIME_PAGE
+                if passed_on:
+                    handed.add(entry)
+                extra = [] if passed_on else [r for r in theirs if id(r) not in {id(m) for m in mine}]
                 for r in extra:
                     problems.append('the row for ' + target + ' brings `' + r['message'] + '`, which is no reason of this entry')
                 covered |= {id(r) for r in theirs}
@@ -848,7 +1044,9 @@ def entry_problems(e, body, reasons, groups, codes, pages):
         if m.group(1) not in codes:
             problems.append('the row `' + m.group(1) + '` names no code of host.errors or the runtime\'s')
             continue
-        messages = re.findall(r'`([^`]+)`', message)
+        # A message is a code span; one that holds a backtick itself — the runtime's "its `…`
+        # function raised" — is written between double backticks, as Markdown allows.
+        messages = [a or b for a, b in re.findall(r'``\s?(.+?)\s?``|`([^`]+)`', message)]
         if not messages:
             problems.append('the row `' + m.group(1) + '` has no message in backticks to compare')
         for msg in messages:
@@ -859,6 +1057,14 @@ def entry_problems(e, body, reasons, groups, codes, pages):
     for r in mine:
         if id(r) not in covered:
             problems.append('the reason `' + r['code'] + '` `' + r['message'] + '` has no row')
+    # What the runtime hands on is held to errors.luau's `passes`, both ways: a host entry's
+    # errors the entry hands on with no row, or a row for a host entry it does not hand on.
+    if e['page'] == RUNTIME_PAGE:
+        want = set(passes.get(e['anchor'], ()))
+        for a in sorted(want - handed):
+            problems.append('hands on ' + a + '\'s errors (errors.luau, passes) and has no row for them')
+        for a in sorted(handed - want):
+            problems.append('a row for ' + a + '\'s errors, which errors.luau\'s passes does not say it hands on')
     return problems
 
 
@@ -868,16 +1074,19 @@ def reasons_of(anchor, reasons, groups):
             if anchor in r['entries'] or any(g in groups and anchor in groups[g] for g in r['entries'])]
 
 
-def converted_problems(entries):
-    """Checks 1 to 3 of the typed-errors plan, for the pages in CONVERTED; and, for every page,
-    that each reason and group names entries that exist, since a reason naming anything else is in
-    no entry's table and would never be compared with one."""
+def reason_problems(entries):
+    """Checks 1 to 3 of the typed-errors plan, for every page, and each group's own section; that
+    each reason and group names entries that exist, and calls or fields rather than concepts,
+    since a reason naming anything else is in no entry's table and would never be compared with
+    one; and that errors.luau's `passes` names runtime entries and host entries."""
     order, reasons, groups, unread = host_table()
     GROUP_NAMES.update(groups)
     runtime, runtime_unread = runtime_reasons()
+    _, passes = runtime_lists()
     reasons = reasons + runtime
     codes = set(order) | {r['code'] for r in runtime}
     pages = {e['anchor']: e['page'] for e in entries}
+    kinds = {e['anchor']: kind(e) for e in entries}
     problems = []
     if unread:
         problems.append(ERRORS_RS + ': ' + str(unread) + ' Reason(s) not written the way this tool reads one')
@@ -887,15 +1096,89 @@ def converted_problems(entries):
         for a in r['entries']:
             if a not in pages and a not in groups:
                 problems.append(r['source'] + ': ' + r['name'] + ' names ' + a + ', which is neither an entry nor a group')
+            elif a in pages and kinds[a] == 'concept':
+                problems.append(r['source'] + ': ' + r['name'] + ' names ' + a + ', a concept, which has no Errors to compare it with')
+    for a, theirs in passes.items():
+        if pages.get(a) != RUNTIME_PAGE or kinds[a] == 'concept':
+            problems.append(ERRORS_LUAU + ': passes names ' + a + ', which is no call or field of the runtime\'s')
+        for t in theirs:
+            if t not in pages or pages[t] == RUNTIME_PAGE:
+                problems.append(ERRORS_LUAU + ': passes says ' + a + ' hands on ' + t + ', which is no host entry')
     for g, members in groups.items():
         for a in members:
             if a not in pages:
                 problems.append(ERRORS_RS + ': the group ' + g + ' names ' + a + ', which is no entry')
     for e in entries:
-        if e['page'] not in CONVERTED:
-            continue
-        for p in entry_problems(e, e['body'], reasons, groups, codes, pages):
+        for p in entry_problems(e, e['body'], reasons, groups, codes, pages, passes):
             problems.append(e['page'] + '.md#' + e['anchor'] + ': ' + p)
+    return problems + group_problems(reasons, groups)
+
+
+DUPLICATION_TAIL = re.compile(r'^- `(.+?)` — `([a-z_]+)`(?::.*)?$')
+
+
+def group_problems(reasons, groups):
+    """Each group of errors.rs against its own section, `{#<group>}` on a page of docs/api, in
+    both directions — as an entry's Errors table is held to its reasons, since a row that links to
+    a group stands for these. A section lists its reasons as a table (code, when, message,
+    platform), or, where every message is one sentence and a tail, as `` - `tail` — `code` ``
+    bullets under the sentence's start, written "the whole sentence `…`"."""
+    problems = []
+    texts = {p: open(p, encoding='utf-8').read() for p in sorted(glob.glob(os.path.join(API, '*.md')))}
+    for g in groups:
+        heading = re.compile(r'^#{2,6} .*\{#' + re.escape(g) + r'\}\s*$')
+        where = [(p, t) for p, t in texts.items() if any(heading.match(l) for l in t.split('\n'))]
+        if len(where) != 1:
+            problems.append('the group ' + g + ' has ' + ('no section' if not where else 'more than one section')
+                            + ' {#' + g + '} in docs/api')
+            continue
+        path, text = where[0]
+        lines = text.split('\n')
+        start = next(i for i, l in enumerate(lines) if heading.match(l))
+        level = len(re.match(r'^(#+)', lines[start]).group(1))
+        body, fenced = [], False
+        for l in lines[start + 1:]:
+            if re.match(r'^\s*(```|~~~)', l):
+                fenced = not fenced
+            if not fenced and re.match(r'^#{1,' + str(level) + r'} ', l):
+                break
+            body.append(l)
+        body = '\n'.join(body)
+        here = os.path.basename(path) + '#' + g
+        theirs = [r for r in reasons if g in r['entries']]
+        listed = []
+        for row in table_rows(body, GROUP_HEADER):
+            if len(row) != 4:
+                problems.append(here + ': a row without four cells: ' + ' | '.join(row))
+                continue
+            code, _when, message, platform = row
+            if not all(p.strip() in PLATFORMS for p in platform.split(',')):
+                problems.append(here + ': platform `' + platform + '` is not both, Windows, macOS or other')
+            m = re.fullmatch(r'`([a-z_]+)`', code)
+            msgs = [a or b for a, b in re.findall(r'``\s?(.+?)\s?``|`([^`]+)`', message)]
+            if not m or not msgs:
+                problems.append(here + ': a row that is not a code and a message in backticks: ' + ' | '.join(row))
+                continue
+            listed += [(m.group(1), msg) for msg in msgs]
+        tails = [(l, DUPLICATION_TAIL.match(l)) for l in body.split('\n') if l.startswith('- `')]
+        if tails:
+            start_of = re.search(r'the whole sentence `([^`]+)`', body)
+            if not start_of:
+                problems.append(here + ': tails with no "the whole sentence `…`" that they end')
+            for l, t in tails:
+                if t is None:
+                    problems.append(here + ': a bullet that is not "- `tail` — `code`": ' + l)
+                elif start_of:
+                    listed.append((t.group(2), start_of.group(1) + t.group(1)))
+        covered = set()
+        for code, msg in listed:
+            hit = [r for r in theirs if r['code'] == code and r['message'] == msg]
+            if not hit:
+                problems.append(here + ': `' + code + '` `' + msg + '` is no reason of the group (errors.rs)')
+            covered |= {id(r) for r in hit}
+        for r in theirs:
+            if id(r) not in covered:
+                problems.append(here + ': the reason `' + r['code'] + '` `' + r['message'] + '` is not listed')
     return problems
 
 
@@ -921,6 +1204,27 @@ def codes_problems():
             problems.append('errors.md: the constant of `' + c + '` is `' + k + '`')
         if not meaning.strip():
             problems.append('errors.md: the code `' + c + '` has no meaning')
+    # And the runtime's: overlay.md's O.errors explains errors.luau's codes, and nothing else, in
+    # its order.
+    runtime, _ = runtime_lists()
+    if runtime:
+        text = open(os.path.join(API, RUNTIME_PAGE + '.md'), encoding='utf-8').read()
+        body = text[text.index('{#o-errors}'):]
+        rows = []
+        for line in body.split('\n')[1:]:
+            if line.startswith('## ') or line.startswith('### '):
+                break
+            m = re.match(r'^\| `([a-z_]+)` \| `([A-Z_]+)` \|(.*)\|\s*$', line)
+            if m:
+                rows.append(m.groups())
+        if [c for c, _, _ in rows] != runtime:
+            problems.append(RUNTIME_PAGE + '.md: the table of O.errors is not errors.luau\'s codes, in order: '
+                            + ', '.join(c for c, _, _ in rows) + ' against ' + ', '.join(runtime))
+        for c, k, meaning in rows:
+            if k != c.upper():
+                problems.append(RUNTIME_PAGE + '.md: the constant of `' + c + '` is `' + k + '`')
+            if not meaning.strip():
+                problems.append(RUNTIME_PAGE + '.md: the code `' + c + '` has no meaning')
     return problems
 
 
@@ -984,7 +1288,7 @@ def main():
         for g in gaps:
             print('  ' + g)
 
-    errors = codes_problems() + converted_problems(entries)
+    errors = codes_problems() + reason_problems(entries)
     if errors:
         print('Returns and Errors that do not match crates/host/src/errors.rs:')
         for p in errors:

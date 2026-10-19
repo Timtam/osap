@@ -5,11 +5,91 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 195 entries.
+Every call the platform offers a module, in one place. 235 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
 Every callback registered through any of these runs in the calling module's own Luau VM, and fires only while that module is **enabled** — with two exceptions: a [`host.settings.onChange`](settings.md#host-settings-onchange) callback fires whenever its setting changes, the module manager's Settings dialog included, and an arbiter claim that holds its slot when the module is disabled has its `onDeactivate` called, so an overlay can tear down. A disabled module is still loaded — its entry file has run, and its recurring timers and listeners are kept — and its other callbacks stop; see the [module lifecycle](../module-runtime-and-lifecycle.md).
+
+## When a call fails {#failures}
+
+A call that cannot do what it was asked tells the module in one of two ways: it **answers an error value**, or it **raises**. Which of the two is a rule, the same for every call. [host.errors](errors.md) has the rule in full, and the codes.
+
+### Return or raise {#return-or-raise}
+
+- **When the moment decides, the call answers an error value.** The moment is the window, the screen, the system, or what another module or program holds. It is an outcome to plan for. The call answers its usual value for "nothing" — `nil`, `false` or `{}` — and the error value after it: `nil, err`.
+- **When the arguments alone decide, the call raises.** A wrong type, an unknown option, a value outside its fixed range, a key spec that does not parse, a file missing from the module's own package. It is a mistake to fix. The log and the error dialog name the call and what was wrong.
+
+Any call can also raise for two reasons that are not its own. The capability gate raises for a namespace the module did not declare ([What to declare](#capabilities)). The guard raises `stopped by the host: …` in a module that ran too long ([the limits](../module-runtime-and-lifecycle.md#limits)). And a call that waits raises where it cannot wait, when it is given no callback ([Where it waits](screen.md#where-it-waits)).
+
+### The error value {#the-error-value}
+
+An error value is a read-only table:
+
+- `code` — what kind of failure it is, a lower-case word such as `not_ready`. This is what a module compares.
+- `message` — a sentence for the log. It may change between versions; the code does not.
+- `detail` — more for the log, or `nil`. Never compared.
+
+It reads as its message: `tostring(err)` gives it, and so does `"not read: " .. err`. `host.log.info(err)` logs it and `host.speech.output(err)` speaks it. It is not a string, though. The string functions raise for it, and so does a field it does not have, such as `err.cod` ([Error values](errors.md#error-values)).
+
+Compare its code with a constant of [`host.errors`](errors.md#host-errors), never its message:
+
+```luau
+local saved = nil   -- the id of a window to come back to
+
+local function comeBack()
+  if not saved then return end
+  local ok, err = host.window.focus(saved)
+  if not ok then
+    host.log.info("[my-module] not focused: " .. err)      -- the message, for the log
+    if err.code == host.errors.GONE then saved = nil end   -- the code, to decide by
+  end
+end
+```
+
+### A value and an error together {#partial-answers}
+
+**Read both values.** Mostly an error value comes with nothing beside it: `nil, err`, `false, err` or `{}, err`. Four calls can answer a result **and** an error value at once: `page:show`, the two dumps and `host.hotkey.register`. The result is the part that was done, and the error value says what was not. This is unusual, so each of the four says so in its Returns.
+
+| call | answers | what it means |
+|---|---|---|
+| [`page:show`](gui.md#page-show-returns) with `focus` | `true, err` | The page is shown and in front, but over part of `avoid`: there was no room beside it. `err.code` is `too_large`. An overlay page's `onShown` is handed the same two values. |
+| [`host.element.dump`](element.md#host-element-dump-returns) and [`rawDump`](element.md#host-element-rawdump-returns) | `list, err` | The elements read before the dump stopped. `err` says why it stopped: the tree was larger than a dump reads, the walk took too long, or the program stopped answering. |
+| [`host.hotkey.register`](hotkey.md#host-hotkey-register-returns) | `id, err` | The claim is made and kept, but not held right now. Its callback fires once it is held. `err` says why it is not. |
+
+`if not ok then` alone takes such an answer for a whole one, and `if err then return end` throws away the part that was done. Test each value for what it says:
+
+```luau
+local id, err = host.hotkey.register("Ctrl+Shift+F9", function() host.speech.output("F9") end)
+if id and err then
+  host.log.info("[my-module] Ctrl+Shift+F9 is claimed, but not held now: " .. err)
+elseif err then
+  host.log.info("[my-module] Ctrl+Shift+F9 is not claimed: " .. err)
+end
+local hotkeyId = id   -- kept even when it is not held now: the claim is tried again
+```
+
+[Partial answers](errors.md#partial-answers) has the three in full.
+
+### Where it arrives {#where-it-arrives}
+
+- **The call's second value**, most often: `local v, err = call()`.
+- **The callback's second argument**, for a call given a callback: `cb(value, err, info)`.
+- **A field of the answer**: a text reading has `status = "failed"` and its `error`.
+- **An argument of a hook** the module wrote into a spec, such as a page's `onClose(how, err)` or a menu choice's `onDone`.
+
+A call that hands its work on answers once it has handed it on. What fails after that reaches only its callback or hook. A click with `via = "noactivate"` is one ([`host.input.click`](input.md#host-input-click)). An overlay's [`O:chooseMenuItem`](overlay.md#o-choosemenuitem), whose `onDone` hears how the choice ended, is another.
+
+### Returns and Errors, on every page {#returns-and-errors}
+
+Every call's entry has the same two sections, after its description and examples, and before its Windows and macOS blocks:
+
+- **Returns** says every form its answer takes: the value, the missing value with an error value, and a partial answer where there is one.
+- **Errors** is a table of every error value the call can give: its code, where it arrives, when it comes, its message, and the platform. Under the table, **Raises** lists the mistakes that raise instead.
+
+A call that never fails says "None. It never answers an error value." [Reading an Errors table](errors.md#reading-an-errors-table) explains the columns. Each table is checked against the host's own list of reasons, and the overlay runtime's, in both directions: a row the host never gives fails the documentation check, and so does a reason with no row.
+
+These calls answer error values: [`host.gui`](gui.md)'s pages, [`host.window.focus`](window.md#host-window-focus), the questions of [`host.element`](element.md), [`host.input`](input.md)'s `click`, `post` and `send`, [`host.keys.capture`](keys.md#host-keys-capture), [`host.hotkey.register`](hotkey.md#host-hotkey-register), every call of [`host.screen`](screen.md) but `size`, `predicate` and `pending`, a snapshot's `crop`, [`host.ocr`](ocr.md)'s readings and `resolveLanguage`, [`host.speech.use`](speech.md#host-speech-use), [`host.sound.play`](sound.md#host-sound-play), [`host.gamepad`](gamepad.md)'s `list`, `state` and `on`, and the [overlay runtime](overlay.md), with codes of its own in [`O.errors`](overlay.md#o-errors). Every other call answers none: it raises for a mistake, and its entry says what its `nil` or `false` means.
 
 ## What to declare in module.toml {#capabilities}
 
@@ -54,8 +134,9 @@ Where habits from other tools mislead, and the section that says what happens he
 - **A reader that compares grid signatures by similarity** (a region cut into blocks, each the share of pixels passing a colour test). That is [`host.screen.matchCells`](screen.md#host-screen-matchcells): its colour test is pasted as written, its regions are window fractions, its signatures are hex, and the similarity and the runner-up come back for the module's own thresholds.
 - **A reader that keeps a frame and reads many points from it.** Keep one: [`host.screen.snapshot`](screen.md#host-screen-snapshot) takes a picture that every screen call given `{ snapshot = s }` reads, and [`pixels`](screen.md#host-screen-pixels) reads many points from as few captures as they allow. Without them, on Windows every [`pixel`](screen.md#host-screen-pixel) call is a screen read of its own; on macOS only reads close together in place and time share one.
 - **A reader that captures one frame per poll and runs every test on it.** Take one picture per poll with [`snapshot`](screen.md#snapshot-with-a-callback) given a callback, off the event loop and able to wait until part of the screen changes — a poll that waits in `snapshot` without one keeps the keys of its module waiting — and pass it to every test, [`host.ocr.recognize`](ocr.md#host-ocr-recognize) included: they all read that one picture. Without one, [`matchCells`](screen.md#host-screen-matchcells) and the image searches share a picture only when they ask for the same region, read the same way, and fall into the same batch of the image worker, and two `host.ocr.recognize` calls only when they ask for the same thing before the first is taken; otherwise detecting a state and reading its text are two pictures, taken at two moments.
-- **Tesseract or other OCR language codes.** `lang` is a language tag such as `"de"` or `"de-DE"`, matched against what the platform's recogniser reads. A three-letter code such as `"eng"` is a well-formed tag that no recogniser lists, so it does not raise: the read is answered `"failed"`, naming the languages that are there. Write `"en"` — [Recognition language](ocr.md#recognition-language). [`host.ocr.recognize`](ocr.md#host-ocr-recognize) recognises off the event loop: given a callback it answers there, and without one it waits in its handler, holding only its own module, and raises where it cannot wait ([Where it waits](ocr.md#where-it-waits)).
+- **Tesseract or other OCR language codes.** `lang` is a language tag such as `"de"` or `"de-DE"`, matched against what the platform's recogniser reads. A three-letter code such as `"eng"` is a well-formed tag that no recogniser lists, so it does not raise: every region is answered `"failed"`, with an `error` of code `unavailable` whose message names the languages that are there. Write `"en"` — [Recognition language](ocr.md#recognition-language). [`host.ocr.recognize`](ocr.md#host-ocr-recognize) recognises off the event loop: given a callback it answers there, and without one it waits in its handler, holding only its own module, and raises where it cannot wait ([Where it waits](ocr.md#where-it-waits)).
 - **AutoHotkey.** `ahk_class` belongs inside the `windows` block of a [matcher](window.md#matchers); `SetTimer` is [`host.timer.every`](timer.md#host-timer-every), stopped with [`host.timer.cancel`](timer.md#host-timer-cancel); `Send` is [`host.input.send`](input.md#host-input-send), virtual keys only; `ImageSearch`'s second corner is exclusive here.
+- **Exceptions, or an error code to fetch afterwards** (AutoHotkey's `throw` and `ErrorLevel`, Windows' `GetLastError`). A failure of the moment is not thrown and sets nothing global: the call answers an error value as its second value, and only a mistake in the call raises — [When a call fails](#failures).
 - **A keyboard hook that only listens.** A [capture](keys.md#host-keys-capture) takes the key away; there is no listen-only mode for ordinary keys, only the `"<modifier> tap"` form watches without taking.
 - **A script host with threads or async.** Every callback runs on one thread; one that runs past 2 seconds of processor time or 10 seconds in all is stopped, with its module ([the limits](../module-runtime-and-lifecycle.md#limits)), and below that it holds everything while it runs. The slow work of [`host.ocr.recognize`](ocr.md#host-ocr-recognize) and of every [`host.screen`](screen.md#with-a-callback) call given a callback — [`imageSearchEach`](screen.md#host-screen-imagesearcheach) among them — runs on threads of the host's own and answers in a callback. Without one, a text read answers the handler that waits for it, and so do [`snapshot`](screen.md#where-it-waits), `pixel`, `pixels`, `profile`, `cells`, `matchCells`, `template{ capture }`, a snapshot's `crop`, the searches without a callback, `save` and `saveMarked`: only their own module waits, and each of them raises where it cannot wait ([Where it waits](screen.md#where-it-waits)). `template` from bytes or a file checks its arguments on the loop and answers at once, its picture made on the image worker; a search checks a template path on the loop by its PNG header, the first time the path is named, and the image worker opens it. Which call runs where: [Threads](../module-runtime-and-lifecycle.md#threads).
 - **A manifest that names its target window.** `module.toml` has no window or process field; matching is Luau — see the [manifest](../module-package-format.md).
@@ -67,51 +148,85 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 
 | | |
 |---|---|
-| [`Bindings — O.window / O.embedded / :with / O.hosts / O:bind`](overlay#bindings) | `O.window(matcher, opts?) -> Binding` · `O.embedded(spec, opts?) -> Binding` · `Binding:with(over) -> Binding` · `O.hosts(...)… |
+| [`Binding:with(over)`](overlay#binding-with) | A **copy** of the binding with `over` merged into its target (`control`, `identify`, `title`, …), and `over.opts` merged into its options. |
+| [`Bindings — where an overlay lives`](overlay#bindings) | A **binding** is an inert value saying *where* an overlay lives |
 | [`O.away`](overlay#o-away) | Whether the overlay's group is **away** |
 | [`O.calibrating()`](overlay#o-calibrating) | Whether calibration is switched on |
 | [`O.contentSize(origin)`](overlay#o-contentsize) | The width and height of an origin's **content**, which is what coordinates are measured against |
 | [`O.doubleClick(x, y, opts?, cb?)`](overlay#o-doubleclick) | Two clicks at the same point, far enough apart in time to **be** a double-click. |
+| [`O.embedded(spec, opts?)`](overlay#o-embedded) | A binding to a plug-in **embedded** in a DAW: what `O:attachEmbedded(spec, opts)` does when an overlay is bound by it. |
 | [`O.errors`](overlay#o-errors) | The codes of the runtime's error values, as constants |
+| [`O.hosts(...)`](overlay#o-hosts) | Concatenates host lists and skips `nil`, so that an optional host, a plug-in that may not be installed, can be listed inline. |
 | [`O.layer`](overlay#o-layer) | The specificity ladder within a slot, named |
 | [`O.memoByEpoch(fn)`](overlay#o-memobyepoch) | Memoizes `fn` for the current epoch only |
 | [`O.memoByOrigin(fn, opts?)`](overlay#o-memobyorigin) | Memoizes a per-window property that does not change while that window exists |
 | [`O.menuTests — seeing a plug-in's menus`](overlay#o-menutests) | The tests that tell an overlay its plug-in has a menu open, listed in its `menus` option |
-| [`O.new(label)`](overlay#o-new) | Creates a new overlay object. |
+| [`O.new(label)`](overlay#o-new) | Creates a new overlay object, with no controls and no binding |
 | [`O.state`](overlay#o-state) | A free-form table on every overlay for the owning module's own state, so it does not have to squat in the runtime's reserved `_`-prefixed fields. |
+| [`O.stateGeneration()`](overlay#o-stategeneration) | A count that goes up by one 250 ms after an overlay of this VM comes to the front, once per arrival |
+| [`O.window(matcher, opts?)`](overlay#o-window) | A binding to a **standalone** window: what `O:attach(matcher, opts)` does when an overlay is bound by it. |
 | [`O:activate(index)`](overlay#o-activate) | Activates the control at `index` (defaults to the focused control). |
 | [`O:addCustomButton(opts)`](overlay#o-addcustombutton) | Appends a button that runs a Luau callback on activation. |
+| [`O:addGraphicalButton(opts)`](overlay#o-addgraphicalbutton) | Appends a button that is **found rather than placed** |
 | [`O:addGraphicalToggle(opts)`](overlay#o-addgraphicaltoggle) | Appends a toggle whose on/off state is read by image-matching its region against an "on" and "off" template |
 | [`O:addHotspotButton(opts)`](overlay#o-addhotspotbutton) | Appends a button that, when activated, clicks a fixed origin-relative point. |
 | [`O:addHotspotToggle(opts)`](overlay#o-addhotspottoggle) | Appends a toggle whose on/off state is read from a **single pixel** at its click point (ReaHotkey's `HotspotToggleButton`) |
 | [`O:addOCRButton(opts)`](overlay#o-addocrbutton) | Appends a button whose label/value is read live by OCR over a region; activating re-reads it then clicks the region centre. |
+| [`O:addOCREdit(opts)`](overlay#o-addocredit) | Appends an **edit field read by OCR** |
 | [`O:addPage(spec) — an overlay's page`](overlay#o-addpage) | Gives the overlay a page |
 | [`O:addPassThrough(opts)`](overlay#o-addpassthrough) | Appends a stop that hands Tab to the plug-in's own focusable elements, for a plug-in window that does not move focus on Tab by itself. |
+| [`O:addSlider(opts)`](overlay#o-addslider) | Appends a **graphical slider** — ReaHotkey's `GraphicalHorizontalSlider` — whose value is where its thumb is drawn. |
 | [`O:addStaticText(label)`](overlay#o-addstatictext) | Appends a static text control: Tab-reachable and read aloud on focus. |
 | [`O:addStepper(opts)`](overlay#o-addstepper) | Appends a **value changed with Left and Right**, where the module knows how to change it. |
+| [`O:addTabControl(opts)`](overlay#o-addtabcontrol) | Appends a **tab control** |
+| [`O:adjust(dir)`](overlay#o-adjust) | One step of the **focused** control's value, as Left (`-1`) and Right (`+1`) make it |
 | [`O:afterIdle(key, ms, fn)`](overlay#o-afteridle) | Runs `fn` **once**, `ms` after the last call carrying the same `key`. |
 | [`O:attach(matcher, opts)`](overlay#o-attach) | Binds the overlay as a **standalone** context |
 | [`O:attachEmbedded(spec, opts)`](overlay#o-attachembedded) | Binds the overlay as an **embedded** context: active while keyboard focus is inside a plug-in hosted in a DAW. |
+| [`O:bind(binding, opts?)`](overlay#o-bind) | Attaches the overlay by `binding` |
+| [`O:calibrationCrop(size?)`](overlay#o-calibrationcrop) | What the calibration key Ctrl+Alt+Shift+T does |
+| [`O:calibrationShot()`](overlay#o-calibrationshot) | What the calibration key Ctrl+Alt+Shift+S does on the overlay in front (calibration keys) |
+| [`O:calibrationVerify()`](overlay#o-calibrationverify) | What the calibration key Ctrl+Alt+Shift+V does |
+| [`O:captureAll(dir)`](overlay#o-captureall) | A shot of the whole plug-in's content and a small one round every positioned control, into the folder `dir` (an absolute… |
+| [`O:captureControl(label, path)`](overlay#o-capturecontrol) | Writes the live pixels of the control labelled `label` |
+| [`O:captureFull(path)`](overlay#o-capturefull) | Writes the **whole** plug-in in front |
+| [`O:captureRegion(region, path)`](overlay#o-captureregion) | Writes an authored rectangle `{x1, y1, x2, y2}` of the overlay |
 | [`O:chooseMenuItem(spec) — choosing an item in a plug-in's menu`](overlay#o-choosemenuitem) | Opens a plug-in's own popup menu and chooses an item in it |
+| [`O:cycleTab(dir)`](overlay#o-cycletab) | Chooses the tab `dir` steps from the current one, wrapping, on the overlay's **first** tab control, from anywhere in the… |
+| [`O:enableUiaPassThrough(opts?)`](overlay#o-enableuiapassthrough) | The old spelling of `O:addPassThrough`, from when the pass-through was a mode: it adds the same control with the same `opts`. |
 | [`O:expectChange(name, ...)`](overlay#o-expectchange) | Says that what the module is about to do will change what the probes named show |
 | [`O:focusNext()`](overlay#o-focusnext) | Moves focus to the next control (wrapping) and speaks it, moving the mouse onto OCR controls if `hoverToRead` is set. |
 | [`O:focusPrev()`](overlay#o-focusprev) | Moves focus to the previous control (wrapping) and speaks it. |
 | [`O:frame(fn)`](overlay#o-frame) | Shifts the overlay's whole coordinate frame |
-| [`O:gate(fn) / O:landmark(image)`](overlay#o-gate) | `gate(fn)` sets an extra activation condition ANDed onto the context match |
+| [`O:gate(fn)`](overlay#o-gate) | Sets an extra activation condition ANDed onto the context match |
+| [`O:gotoTab(n, keepFocus?)`](overlay#o-gototab) | Chooses tab `n` of the overlay's **first** tab control and says it — what Ctrl+`n` and a tab's own hotkey do. |
 | [`O:group(pred, build)`](overlay#o-group) | Adds everything `build` adds under a shared condition: `pred` is ANDed onto each control's own `when`, and groups nest. |
-| [`O:here() / O:stillHere(mark, opts?)`](overlay#o-here) | Whether the overlay is still where it was, for an answer that comes later and acts on what it learned |
+| [`O:here()`](overlay#o-here) | Notes where the overlay is now, as a **mark**, for an answer that comes later and acts on what it learned |
+| [`O:hwnd()`](overlay#o-hwnd) | The handle of `O:origin()`: its `id`. |
 | [`O:inPlugin(spec) — a trip into the plug-in`](overlay#o-inplugin) | One action of the page's in the plug-in |
+| [`O:landmark(image, opts?)`](overlay#o-landmark) | A gate satisfied only while `image` — an **absolute** path, via `host.path` — is found within the active context's region. |
 | [`O:menuOpen()`](overlay#o-menuopen) | Whether a menu counts as open over the overlay now: one of its menu tests' word is that one is. |
-| [`O:onActivate(fn) / O:onDeactivate(fn)`](overlay#o-onactivate) | Hooks the module runs each time the overlay comes to the front and each time it leaves it. |
-| [`O:origin() / O:hwnd()`](overlay#o-origin) | The active context's coordinate window — the plugin control when embedded, the window when standalone — and its handle. |
-| [`O:pageBack() / O:pageKey(spec) / O:pageAgain()`](overlay#o-pageback) | The way back from an overlay's page to the plug-in, another page key, and the page described again. |
+| [`O:onActivate(fn)`](overlay#o-onactivate) | A hook the module runs each time the overlay comes to the front; `O:onDeactivate` is its pair. |
+| [`O:onDeactivate(fn)`](overlay#o-ondeactivate) | A hook the module runs each time the overlay leaves the front, the pair of `O:onActivate`, with the same rules |
+| [`O:origin()`](overlay#o-origin) | The active context's coordinate window |
+| [`O:pageAgain()`](overlay#o-pageagain) | Closes an overlay's page and describes it again, for a setting fixed per page object (`activates`, `window`) |
+| [`O:pageBack()`](overlay#o-pageback) | The way back from an overlay's page to the plug-in: what the page key does in the page, and what a page's own "Back" button calls. |
+| [`O:pageKey(spec)`](overlay#o-pagekey) | Registers another page key for an overlay's page and gives up the old one, for a setting. |
 | [`O:probe(name, points, opts?)`](overlay#o-probe) | The pixels a `when` answers from, which the runtime reads in the handler before a scan. |
 | [`O:resume(on)`](overlay#o-resume) | Whether the overlay, coming to the front again on the window it was last in front on, resumes on the control the user was on (`true`, the default |
 | [`O:scale(fn, opts?)`](overlay#o-scale) | Scales every authored coordinate of the overlay by the factor `fn` answers, for a plug-in that zooms its whole interface. |
-| [`O:toScreen(x, y, opts?) / O:toScreenRect(r, opts?)`](overlay#o-toscreen) | Where an authored point, or an authored rectangle `{x1, y1, x2, y2}`, lands on screen now |
-| [`O:typingWhen(fn)`](overlay#o-typingwhen) | `fn() -> boolean`. |
+| [`O:stepTabVertical(dir)`](overlay#o-steptabvertical) | One step along the second axis of the overlay's **first** tab control |
+| [`O:stillHere(mark, opts?)`](overlay#o-stillhere) | Whether what a mark noted still holds: `true`, or `false` and an error value. |
+| [`O:switchTab(dir)`](overlay#o-switchtab) | Chooses the tab `dir` steps from the current one, wrapping |
+| [`O:toScreen(x, y, opts?)`](overlay#o-toscreen) | Where an authored point lands on screen now |
+| [`O:toScreenRect(r, opts?)`](overlay#o-toscreenrect) | Where an authored rectangle `{x1, y1, x2, y2}` lands on screen now |
+| [`O:typingWhen(fn)`](overlay#o-typingwhen) | While `fn` answers exactly `true`, the overlay **holds no keys at all** — not the navigation keys, not Space, not Return. |
 | [`O:watch(spec)`](overlay#o-watch) | Waits for something to **change**, rather than for a length of time. |
+| [`trip:afterDialog(fn)`](overlay#trip-afterdialog) | "The dialog that comes next, then the plug-in again, then `fn`." From the call on, a window of the plug-in's application other… |
+| [`trip:afterMenu(fn)`](overlay#trip-aftermenu) | "The menu my next click opens, then `fn`." A press of a control with `opensMenu` on `trip.overlay`, so called **before** the click |
+| [`trip:done(result)`](overlay#trip-done) | The work of a trip is over |
 | [`trip:handOver(spec) — handing the keyboard to the plug-in`](overlay#trip-handover) | A wait of a trip in which the user works in the plug-in **itself** |
+| [`trip:inFront()`](overlay#trip-infront) | The check a trip's act makes before every click and every read of the plug-in after a wait |
 
 ## host.window
 
@@ -141,6 +256,8 @@ Reading pixels, profiling a region, reducing one to a grid of cells, and finding
 
 | | |
 |---|---|
+| [`Snapshot:crop(region, cb?)`](screen#snapshot-crop) | A snapshot of its own of a part of the snapshot `s` |
+| [`Snapshot:release()`](screen#snapshot-release) | Lets the pixels of the snapshot `s` go now, and gives their bytes back to the budget. |
 | [`host.screen.cells(opts, cb?)`](screen#host-screen-cells) | Captures `opts.region` once and reduces it to a grid of `cols` × `rows` cells. |
 | [`host.screen.imageSearch(template, opts?, cb?)`](screen#host-screen-imagesearch) | Searches the screen for the first occurrence of `template` |
 | [`host.screen.imageSearchAll(template, opts?, cb?)`](screen#host-screen-imagesearchall) | Returns **every** match of `template` in the region, as an array of hits in screen pixels, rather than stopping at the first one like `imageSearch`. |
@@ -203,7 +320,7 @@ Synthesising mouse and keyboard input.
 | [`host.input.mouseUp(x, y, opts?)`](input#host-input-mouseup) | Releases a mouse button at `(x, y)`, ending a press begun with `mouseDown`. |
 | [`host.input.move(x, y)`](input#host-input-move) | Moves the mouse cursor to the given screen coordinates. |
 | [`host.input.post(id, key)`](input#host-input-post) | Delivers a single key to **one window** rather than to whatever has focus. |
-| [`host.input.scroll(x, y, amount)`](input#host-input-scroll) | Moves to `(x, y)` and scrolls the mouse wheel by `notches`, which may be fractional. |
+| [`host.input.scroll(x, y, notches)`](input#host-input-scroll) | Moves to `(x, y)` and scrolls the mouse wheel by `notches`, which may be fractional. |
 | [`host.input.send(combo)`](input#host-input-send) | Sends a keyboard shortcut by pressing the modifiers, tapping the key, and releasing in reverse order. |
 | [`host.input.text(text)`](input#host-input-text) | Types a Unicode string as synthetic keystrokes. |
 
@@ -274,8 +391,10 @@ An HTML page of the module's own, in a window beside the plug-in. Experimental: 
 | [`page:hide()`](gui#page-hide) | Hides the window. |
 | [`page:isShown()`](gui#page-isshown) | Whether the window is on screen, asked of the window system rather than remembered: `false` after the user closed it too. |
 | [`page:post(value)`](gui#page-post) | Sends the page a value. |
-| [`page:prepare()`](gui#page-prepare) | Builds the page without showing it, so that the first `show` does not wait for the engine's cold start |
+| [`page:prepare()`](gui#page-prepare) | Builds the page without showing it, so that the first `show` does not wait for the engine's cold start. |
 | [`page:show(opts)`](gui#page-show) | Shows the page, raised above the ordinary windows without taking the front, and with `focus` (the default) brings it to the… |
+| [`platform.onmessage`](gui#platform-onmessage) | Receives what the module posts with `page:post`: each value parsed, one call each, in the order they were posted. |
+| [`platform.post(value)`](gui#platform-post) | Sends the module a value from the page's own script; it arrives at `onMessage`. |
 
 ## host.timer
 
@@ -302,7 +421,10 @@ Typed, per-module settings, edited by the user in the module manager.
 
 | | |
 |---|---|
-| [`host.config.get / host.config.set / host.config.define / host.config.onChange`](settings#host-config-get) | `host.config` is the **same table** as `host.settings` (a catalog-compatibility |
+| [`host.config.define(key, default, opts?)`](settings#host-config-define) | `host.config` is the **same table** as `host.settings`, a catalog-compatibility alias, so each of its four calls is the `host.settings` call of the same name |
+| [`host.config.get(key)`](settings#host-config-get) | The same function as `host.settings.get`, under the second name of the table (`host.config.define`). |
+| [`host.config.onChange(key, callback)`](settings#host-config-onchange) | The same function as `host.settings.onChange`, under the second name of the table (`host.config.define`) |
+| [`host.config.set(key, value)`](settings#host-config-set) | The same function as `host.settings.set`, under the second name of the table (`host.config.define`). |
 
 ## host.errors
 
@@ -398,7 +520,7 @@ Deciding which of several overlays owns a contested slot.
 | [`host.arbiter.register(slot, specificity, onActivate, onDeactivate)`](arbiter#host-arbiter-register) | Enters a claim for `slot` and returns the handle every other call here takes. |
 | [`host.arbiter.setMatching(slot, handle, matching)`](arbiter#host-arbiter-setmatching) | Reports whether this claim's own conditions hold right now, and re-elects the slot. |
 | [`host.arbiter.unregister(slot, handle)`](arbiter#host-arbiter-unregister) | Withdraws the claim and promotes whoever is next. |
-| [`host.arbiter.winner(slot)`](arbiter#host-arbiter-winner) | The module id currently holding `slot`, or `nil` when nothing matches. |
+| [`host.arbiter.winner(slot)`](arbiter#host-arbiter-winner) | The **handle** of the claim currently holding `slot` |
 | [`host.arbiter.winnerSpecificity(slot)`](arbiter#host-arbiter-winnerspecificity) | The rank of whoever currently holds `slot`, or `nil` when nothing matches. |
 
 ## Concepts
@@ -414,19 +536,18 @@ The shapes and grammars the calls above are written in.
 | [`Button combinations`](gamepad#button-combinations) | A combination fires once when every button of a set is held together on one pad. |
 | [`Comparing codes`](errors#comparing-codes) | **Compare `err.code` with a constant**: `err.code == host.errors.NOT_READY`. |
 | [`Error values`](errors#error-values) | An error value is a table with three fields |
-| [`Failure reasons`](screen#failure-reasons) | When a read gets no picture, the call says why. |
+| [`Failure reasons`](screen#failure-reasons) | When a read gets no picture, or its work fails, the call says why |
 | [`Key spec string format`](keys#key-spec-string-format) | One grammar, read by one parser, for every call that takes a key |
 | [`Matchers`](window#matchers) | A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTrigger`, and to the overlay's bindings. |
-| [`Partial answers`](errors#partial-answers) | A call answers no error value when it did everything it was asked, and an error value when it did not |
+| [`Partial answers`](errors#partial-answers) | A call answers no error value when it did everything it was asked, and an error value when it did not. |
 | [`Plugin base + library overlays (the cell model)`](overlay#plugin-base-library-overlays) | A plugin is not one overlay. |
 | [`Reading a snapshot`](screen#reading-a-snapshot) | A call given `{ snapshot = s }` reads the picture `s` holds instead of the screen. |
-| [`Reading an Errors table`](errors#reading-an-errors-table) | A converted entry has two sections after its prose and examples, before its Windows and macOS blocks |
+| [`Reading an Errors table`](errors#reading-an-errors-table) | Every call's entry has two sections after its prose and examples, before its Windows and macOS blocks |
 | [`Recognition language`](ocr#recognition-language) | What `lang` means, and what leaving it out means. |
 | [`Region form`](screen#region-form) | A region is a rectangle on screen, written in one of two forms: by its **corners**, or as **fractions of a window's client area**. |
 | [`Return or raise`](errors#return-or-raise) | **A call raises when the arguments alone decide**, so the same call fails whatever the state |
 | [`Table shapes`](window#table-shapes) | Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, `host.window.findAll()`, and passed to trigger/test callbacks. |
-| [`The overlay runtime's codes`](errors#the-overlay-runtime-s-codes) | The overlay runtime answers its own failures with error values too, made with `host.errors.new` from its own reasons… |
-| [`The page's side — platform.post and platform.onmessage`](gui#the-page-s-side) | The host puts a small script into every page before the page's own, and it gives the page one object, `platform` |
+| [`The overlay runtime's codes`](errors#the-overlay-runtime-s-codes) | The overlay runtime answers its own failures with error values too, since its version 0.11. |
 | [`What a page is served, and what it may not do`](gui#what-a-page-is-served-and-what-it-may-not-do) | **Its own folder, and nothing else.** A page is served from a scheme of its module's own (`mod-<module id>-<hash>`, the hash… |
 | [`Where a hook runs`](overlay#where-a-hook-runs) | Every callback of a module runs as a handler of the host, one at a time per module, and the runtime calls an overlay's hooks inside them. |
 | [`Where an error value arrives`](errors#where-an-error-value-arrives) | Always in one of five places, which each Errors table names with these words |

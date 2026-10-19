@@ -3,7 +3,10 @@
 -- crates/host/src/errors.rs. One reason is a code, a message — `…` standing for each part filled in
 -- — and the docs entries that give it; tools/api-index.py reads them from here and holds each
 -- entry's Errors table to them, in both directions. An error the runtime only passes on — a
--- click's, a capture's, a page's — is the host's, and is not listed here.
+-- capture's, a page's, a focus's — is the host's, and its reasons are not listed here: `passes`
+-- names, for each entry that hands one on, the host entries whose errors it hands on as they came,
+-- and the tool holds the entry's Errors table to those, a row linking to each and to no other.
+-- The runtime itself never reads `passes`.
 --
 -- `codes` are the runtime's eight codes, which O.errors holds beside the host's (docs/api/errors.md,
 -- "The overlay runtime's codes"); every reason's code is one of them or one of host.errors's.
@@ -15,47 +18,90 @@ return {
 
   reasons = {
     -- ── Placing: O:toScreen, O:toScreenRect, and what the capture methods place ──
-    no_origin = { code = "unplaced", message = "the overlay has no origin now", entries = { "o-toscreen", "o-calibrating" } },
-    scale_raised = { code = "unplaced", message = "its scale function raised: …", entries = { "o-toscreen", "o-calibrating" } },
-    scale_nil = { code = "unplaced", message = "its scale function answered nil", entries = { "o-toscreen", "o-calibrating" } },
+    no_origin = {
+      code = "unplaced",
+      message = "the overlay has no origin now",
+      entries = {
+        "o-toscreen", "o-toscreenrect", "o-calibrationshot", "o-calibrationverify",
+        "o-capturecontrol", "o-captureregion", "o-capturefull", "o-captureall",
+      },
+    },
+    scale_raised = {
+      code = "unplaced",
+      message = "its scale function raised: …",
+      entries = { "o-toscreen", "o-toscreenrect", "o-capturecontrol", "o-captureregion", "o-captureall" },
+    },
+    scale_nil = {
+      code = "unplaced",
+      message = "its scale function answered nil",
+      entries = { "o-toscreen", "o-toscreenrect", "o-capturecontrol", "o-captureregion", "o-captureall" },
+    },
     scale_bad = {
       code = "unplaced",
       message = "its scale function answered …, not a factor above 0",
-      entries = { "o-toscreen", "o-calibrating" },
+      entries = { "o-toscreen", "o-toscreenrect", "o-capturecontrol", "o-captureregion", "o-captureall" },
     },
-    empty_on_screen = { code = "outside", message = "empty on screen", entries = { "o-toscreen" } },
-    region_raised = { code = "unplaced", message = "its `…` function raised: …", entries = { "o-calibrating" } },
-    region_nil = { code = "unplaced", message = "its `…` function answered nil", entries = { "o-calibrating" } },
+    empty_on_screen = { code = "outside", message = "empty on screen", entries = { "o-toscreenrect" } },
+    region_raised = {
+      code = "unplaced",
+      message = "its `…` function raised: …",
+      entries = { "o-capturecontrol" },
+    },
+    region_nil = {
+      code = "unplaced",
+      message = "its `…` function answered nil",
+      entries = { "o-capturecontrol" },
+    },
     region_bad = {
       code = "unplaced",
       message = "its `…` function answered …, not {x1, y1, x2, y2}",
-      entries = { "o-calibrating" },
+      entries = { "o-capturecontrol" },
     },
 
     -- ── O:stillHere, in the order it asks; the first three also where a press waited ──
     no_longer_active = {
       code = "not_in_front",
       message = "the overlay is no longer active",
-      entries = { "o-here", "o-choosemenuitem", "o-inplugin" },
+      entries = { "o-stillhere", "o-choosemenuitem", "trip-aftermenu" },
     },
     came_back = {
       code = "moved_on",
       message = "the overlay left the front and came back since",
-      entries = { "o-here", "o-choosemenuitem", "o-inplugin" },
+      entries = { "o-stillhere", "o-choosemenuitem", "trip-aftermenu" },
     },
     other_window = {
       code = "moved_on",
       message = "the overlay is on another window now",
-      entries = { "o-here", "o-choosemenuitem", "o-inplugin" },
+      entries = { "o-stillhere", "o-choosemenuitem", "trip-aftermenu" },
     },
     -- The runtime's own question (an OCR button's click), which no module can ask: it reaches none.
     control_gone = { code = "gone", message = "the control is not in the overlay any more", entries = {} },
-    focus_moved = { code = "moved_on", message = "the focus has moved on", entries = { "o-here" } },
-    later_key = { code = "moved_on", message = "a later key reached the overlay", entries = { "o-here" } },
-    later_said = { code = "moved_on", message = "a later announcement was made", entries = { "o-here" } },
-    later_spoken = { code = "moved_on", message = "a later announcement was spoken", entries = { "o-here" } },
-    menu_open = { code = "moved_on", message = "a menu is open over the overlay", entries = { "o-here" } },
-    menu_since = { code = "moved_on", message = "a menu opened over the overlay since", entries = { "o-here" } },
+    focus_moved = { code = "moved_on", message = "the focus has moved on", entries = { "o-stillhere" } },
+    later_key = {
+      code = "moved_on",
+      message = "a later key reached the overlay",
+      entries = { "o-stillhere" },
+    },
+    later_said = {
+      code = "moved_on",
+      message = "a later announcement was made",
+      entries = { "o-stillhere" },
+    },
+    later_spoken = {
+      code = "moved_on",
+      message = "a later announcement was spoken",
+      entries = { "o-stillhere" },
+    },
+    menu_open = {
+      code = "moved_on",
+      message = "a menu is open over the overlay",
+      entries = { "o-stillhere" },
+    },
+    menu_since = {
+      code = "moved_on",
+      message = "a menu opened over the overlay since",
+      entries = { "o-stillhere" },
+    },
 
     -- ── The check every click of the overlay gets ──
     outside_origin = {
@@ -179,7 +225,11 @@ return {
     moved_left = { code = "moved_on", message = "the overlay left the front first", entries = { "o-choosemenuitem" } },
 
     -- ── A trip: trip:afterMenu, O:inPlugin, O:pageBack ──
-    menu_overlay_away = { code = "not_in_front", message = "'…' is not in front", entries = { "o-inplugin" } },
+    menu_overlay_away = {
+      code = "not_in_front",
+      message = "'…' is not in front",
+      entries = { "trip-aftermenu" },
+    },
     trip_busy = { code = "busy", message = "a trip of the page is under way", entries = { "o-inplugin", "o-pageback" } },
     page_not_in_front = {
       code = "not_in_front",
@@ -194,12 +244,12 @@ return {
     window_gone = {
       code = "gone",
       message = "the plug-in's window is gone",
-      entries = { "o-inplugin", "o-pageback", "trip-handover" },
+      entries = { "o-inplugin", "o-pageback", "o-addpage", "trip-handover" },
     },
     not_brought = {
       code = "refused",
       message = "the plug-in's window was not brought forward",
-      entries = { "o-inplugin", "o-pageback" },
+      entries = { "o-inplugin", "o-pageback", "o-addpage" },
     },
 
     -- ── A trip given up: onGiveUp's error, and a hand-over's onEnd's ──
@@ -213,7 +263,7 @@ return {
     not_come = {
       code = "not_in_front",
       message = "the plug-in's window did not come within … ms",
-      entries = { "o-inplugin", "trip-handover" },
+      entries = { "o-inplugin" },
     },
     no_keyboard = {
       code = "not_in_front",
@@ -236,25 +286,60 @@ return {
     capture_raised = { code = "failed", message = "capturing … raised: …", entries = { "trip-handover" } },
 
     -- ── O:pageKey ──
-    key_parse = { code = "invalid", message = "… is not a key spec", entries = { "o-pageback" } },
+    key_parse = { code = "invalid", message = "… is not a key spec", entries = { "o-pagekey" } },
     key_tap = {
       code = "invalid",
       message = "… is a modifier tap, which only host.keys.capture can watch",
-      entries = { "o-pageback" },
+      entries = { "o-pagekey" },
     },
-    key_reserved = { code = "taken", message = "… is kept by the system", entries = { "o-pageback" } },
-    key_no_keycode = { code = "not_supported", message = "… has no key code on this platform", entries = { "o-pageback" } },
-    key_clash = { code = "clash", message = "… is the hotkey of … of overlay '…'", entries = { "o-pageback" } },
-    register_raised = { code = "failed", message = "registering … raised: …", entries = { "o-pageback" } },
+    key_reserved = { code = "taken", message = "… is kept by the system", entries = { "o-pagekey" } },
+    key_no_keycode = {
+      code = "not_supported",
+      message = "… has no key code on this platform",
+      entries = { "o-pagekey" },
+    },
+    key_clash = {
+      code = "clash",
+      message = "… is the hotkey of … of overlay '…'",
+      entries = { "o-pagekey" },
+    },
+    register_raised = { code = "failed", message = "registering … raised: …", entries = { "o-pagekey" } },
 
     -- ── The calibration and capture methods ──
-    not_active = { code = "not_in_front", message = "the overlay is not active", entries = { "o-calibrating" } },
-    no_focus = { code = "not_found", message = "no control is focused", entries = { "o-calibrating" } },
+    not_active = {
+      code = "not_in_front",
+      message = "the overlay is not active",
+      entries = { "o-capturecontrol", "o-captureregion", "o-capturefull", "o-captureall" },
+    },
+    no_focus = {
+      code = "not_found",
+      message = "no control is focused",
+      entries = { "o-calibrationcrop", "o-calibrationverify" },
+    },
     no_position = {
       code = "unplaced",
       message = "the focused control has no position to crop around",
-      entries = { "o-calibrating" },
+      entries = { "o-calibrationcrop" },
     },
-    no_control = { code = "not_found", message = "no control labelled '…' with a region", entries = { "o-calibrating" } },
+    no_control = {
+      code = "not_found",
+      message = "no control labelled '…' with a region",
+      entries = { "o-capturecontrol" },
+    },
+  },
+
+  -- The host's errors each entry hands on, by the host entries that give them.
+  passes = {
+    ["o-addpage"] = { "page-show", "host-window-focus", "host-gui-webview" },
+    ["o-inplugin"] = { "host-window-focus" },
+    ["trip-handover"] = { "host-keys-capture" },
+    ["o-pageback"] = { "host-window-focus" },
+    ["o-pagekey"] = { "host-hotkey-register" },
+    ["o-calibrationshot"] = { "host-screen-savemarked" },
+    ["o-calibrationcrop"] = { "host-screen-save" },
+    ["o-calibrationverify"] = { "host-screen-imagesearchall" },
+    ["o-capturecontrol"] = { "host-screen-save" },
+    ["o-captureregion"] = { "host-screen-save" },
+    ["o-capturefull"] = { "host-screen-save" },
   },
 }

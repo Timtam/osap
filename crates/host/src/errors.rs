@@ -7,8 +7,9 @@
 //!
 //! **The Reason table is the single source.** A [`HostError`] can only be made from a Reason of
 //! [`REASONS`], so a reason no table names cannot reach a module, and tools/api-index.py compares
-//! each converted page's Errors tables with the Reasons whose `entries` name them, in both
-//! directions: a row with no Reason behind it fails, and so does a Reason with no row. Three
+//! every docs/api entry's Errors table with the Reasons whose `entries` name it, and each group of
+//! [`GROUPS`] with its own section, in both directions: a row with no Reason behind it fails, and
+//! so does a Reason with no row. Three
 //! things keep every Reason in the table: a Reason is written only in this file (a test fails on
 //! one written anywhere else), every one written here is in [`REASONS`] (a test counts them,
 //! whatever their visibility), and [`HostError::of`] and [`HostError::with`] assert in a debug
@@ -201,7 +202,7 @@ pub mod gui {
     pub const PAGE_MESSAGE_TOO_LARGE: Reason = Reason {
         code: Code::TooLarge,
         message: "a message of … bytes was not sent — the most one may be is 1048576",
-        entries: &["the-page-s-side"],
+        entries: &["platform-post"],
     };
 }
 
@@ -392,7 +393,7 @@ pub mod screen {
     use super::{Code, Reason};
 
     // Capture errors: any call that captures.
-    pub const CAPTURE_FAILED: Reason = Reason { code: Code::Failed, message: "screen capture failed", entries: &["capture-errors"] };
+    pub const CAPTURE_FAILED: Reason = Reason { code: Code::Failed, message: "screen capture failed", entries: &["capture-errors", "host-screen-pixels"] };
     pub const CAPTURE_TOO_LARGE: Reason = Reason { code: Code::TooLarge, message: "screen capture failed: the region is larger than 40 million pixels", entries: &["capture-errors"] };
     pub const CAPTURE_PANICKED: Reason = Reason {
         code: Code::Failed,
@@ -493,7 +494,7 @@ pub mod screen {
     pub const OUT_OF_RANGE: Reason = Reason { code: Code::Outside, message: "the region lies outside the screen's coordinate range", entries: &["window-form-errors"] };
 
     // Snapshot-source errors: any call given `opts.snapshot`; and a snapshot's `crop`.
-    pub const NOT_INSIDE: Reason = Reason { code: Code::Outside, message: "the region is not inside the snapshot", entries: &["snapshot-source-errors", "host-screen-snapshot"] };
+    pub const NOT_INSIDE: Reason = Reason { code: Code::Outside, message: "the region is not inside the snapshot", entries: &["snapshot-source-errors", "snapshot-crop"] };
     pub const NO_OVERLAP: Reason = Reason { code: Code::Outside, message: "the region does not overlap the snapshot", entries: &["snapshot-source-errors"] };
     pub const POINT_NOT_INSIDE: Reason = Reason { code: Code::Outside, message: "the point is not inside the snapshot", entries: &["host-screen-pixel", "host-screen-pixels"] };
 
@@ -520,7 +521,7 @@ pub mod screen {
     pub const IMAGE_TOO_MANY: Reason = Reason {
         code: Code::TooMany,
         message: "too many image searches waiting for this module (64); the oldest was ended",
-        entries: &["image-worker-errors"],
+        entries: &["image-worker-errors", "snapshot-crop"],
     };
 
     // A change wait's.
@@ -553,12 +554,12 @@ pub mod screen {
     pub const MODULE_SNAPSHOTS: Reason = Reason {
         code: Code::TooLarge,
         message: "…this module's snapshots would hold … MiB; the limit is 128 MiB per module VM (512 MiB in the whole application). Release the ones you no longer need with s:release()",
-        entries: &["host-screen-snapshot", "host-screen-profile"],
+        entries: &["host-screen-snapshot", "snapshot-crop", "host-screen-profile"],
     };
     pub const APPLICATION_SNAPSHOTS: Reason = Reason {
         code: Code::TooLarge,
         message: "…the application's snapshots would hold … MiB; the limit is 512 MiB in the whole application (128 MiB per module VM), and other modules' snapshots count toward it. Release the ones this module no longer needs with s:release()",
-        entries: &["host-screen-snapshot", "host-screen-profile"],
+        entries: &["host-screen-snapshot", "snapshot-crop", "host-screen-profile"],
     };
     pub const TEMPLATE_SIDE: Reason = Reason { code: Code::TooLarge, message: "at the window's current size …x… is too large; no side may exceed 4096", entries: &["host-screen-template"] };
     pub const TEMPLATE_PIXELS: Reason = Reason { code: Code::TooLarge, message: "at the window's current size …x… is … pixels; the limit is 1048576", entries: &["host-screen-template"] };
@@ -575,16 +576,7 @@ pub mod screen {
     pub const SHORT_CAPTURE: Reason = Reason {
         code: Code::Failed,
         message: "the capture came back shorter than its own size",
-        entries: &[
-            "host-screen-profile",
-            "host-screen-cells",
-            "host-screen-matchcells",
-            "host-screen-imagesearch",
-            "host-screen-imagesearchall",
-            "host-screen-imagesearcheach",
-            "host-screen-save",
-            "host-screen-savemarked",
-        ],
+        entries: &["host-screen-profile", "host-screen-cells", "host-screen-matchcells", "host-screen-template", "host-screen-save", "host-screen-savemarked"],
     };
     pub const CAPTURE_SIZE: Reason = Reason { code: Code::Failed, message: "the capture came back …x…, not the region's …x…", entries: &["host-screen-cells", "host-screen-matchcells"] };
     /// cells.rs's own checks, which the calls before them make unreachable: never documented.
@@ -602,8 +594,12 @@ pub mod screen {
         entries: &["host-screen-imagesearch", "host-screen-imagesearchall", "host-screen-imagesearcheach"],
     };
     /// A snapshot's `crop`.
-    pub const CROP_FAILED: Reason = Reason { code: Code::Failed, message: "internal error: the crop could not be made", entries: &["host-screen-snapshot"] };
-    pub const TEMPLATE_FAILED: Reason = Reason { code: Code::Failed, message: "internal error: the template could not be made", entries: &["host-screen-template"] };
+    pub const CROP_FAILED: Reason = Reason { code: Code::Failed, message: "internal error: the crop could not be made", entries: &["snapshot-crop"] };
+    pub const TEMPLATE_FAILED: Reason = Reason {
+        code: Code::Failed,
+        message: "internal error: the template could not be made",
+        entries: &["host-screen-template", "host-screen-imagesearch", "host-screen-imagesearchall", "host-screen-imagesearcheach"],
+    };
     pub const SAVE_FAILED: Reason = Reason { code: Code::Failed, message: "internal error: the picture could not be saved", entries: &["host-screen-save", "host-screen-savemarked"] };
 
     // Files (D3): a template outside the module's package, or one that changed after it was first read.
@@ -969,6 +965,7 @@ pub static GROUPS: &[(&str, &[&str])] = &[
             "host-screen-pixel",
             "host-screen-pixels",
             "host-screen-snapshot",
+            "snapshot-crop",
             "host-screen-profile",
             "host-screen-cells",
             "host-screen-matchcells",
@@ -1000,7 +997,6 @@ pub static GROUPS: &[(&str, &[&str])] = &[
     (
         "image-worker-errors",
         &[
-            "host-screen-snapshot",
             "host-screen-cells",
             "host-screen-matchcells",
             "host-screen-template",

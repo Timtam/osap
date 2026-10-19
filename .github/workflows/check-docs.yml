@@ -7,20 +7,29 @@ name: Documentation
 # only because Pages has not been switched on in the repository's settings, which is a
 # different problem; the repository itself has been public since 2026-09-12.
 #
-# The trigger is narrow on purpose. The check compares two things: the examples in `docs/` and
-# the bindings the host registers. Nothing else can change its answer, so nothing else should
-# spend a runner on it.
+# The trigger is narrow on purpose. The check compares the examples in `docs/` with the bindings
+# the host registers, every page's Errors tables with the reasons of errors.rs and the overlay
+# runtime's errors.luau, and the Luau and page scripts of modules/, tools/ and examples/ with the
+# error codes and status words (the lint in check-docs.ps1). Nothing else can change its answer,
+# so nothing else should spend a runner on it.
 
 on:
   push:
     paths:
       - 'docs/**'
       - 'crates/host/src/lib.rs'
+      - 'crates/host/src/element_lua.rs'
       - 'crates/host/src/gamepad_api.rs'
+      - 'crates/host/src/timers.rs'
+      - 'crates/host/src/webview_lua.rs'
       - 'crates/host/src/window_prelude.luau'
-      # host.errors' bindings, and the Reason table every converted page's Errors are held to.
+      # host.errors' bindings, and the Reason table every page's Errors are held to.
       - 'crates/host/src/errors.rs'
       - 'crates/host/src/errors_lua.rs'
+      # The runtime's reasons (errors.luau), and the code the lint reads.
+      - 'modules/**'
+      - 'tools/**'
+      - 'examples/**'
       - 'check-docs.ps1'
       # The checkers' own source. Without this, a change to the scraper could break the check
       # and nothing would run it until the next docs edit — which is exactly what happened.
@@ -30,12 +39,17 @@ on:
     paths:
       - 'docs/**'
       - 'crates/host/src/lib.rs'
+      - 'crates/host/src/element_lua.rs'
       - 'crates/host/src/gamepad_api.rs'
+      - 'crates/host/src/timers.rs'
+      - 'crates/host/src/webview_lua.rs'
       - 'crates/host/src/window_prelude.luau'
       - 'crates/host/src/errors.rs'
       - 'crates/host/src/errors_lua.rs'
+      - 'modules/**'
+      - 'tools/**'
+      - 'examples/**'
       - 'check-docs.ps1'
-      - 'tools/api-index.py'
   workflow_dispatch:
 
 permissions:
@@ -49,7 +63,7 @@ jobs:
       - uses: actions/checkout@v4
       # pwsh is preinstalled on the GitHub runners, so this needs no setup step. The script
       # itself is written with forward slashes for exactly this reason.
-      - name: Check the API reference
+      - name: Check the API reference, and what modules compare
         shell: pwsh
         run: ./check-docs.ps1
 
