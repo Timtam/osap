@@ -31,6 +31,10 @@ end)
 
 Sending a shortcut is the call that catches authors out. On Windows the synthesised key inherits whatever the user is still physically holding, so a key sent from inside a hotkey callback arrives with that hotkey's modifiers attached — which is why the overlay waits for the modifiers to come up before it sends anything.
 
+**What each call answers** is under its **Returns**, and every error value it can give is in the table under its **Errors** ([Reading an Errors table](./errors.md#reading-an-errors-table)). Three calls answer one: [`click`](#host-input-click), [`send`](#host-input-send) and [`post`](#host-input-post), with `true` or `false, err`. The others answer nothing: what the host can tell went wrong in them — rare, and only on a Mac — is a line in the log, and on Windows the system's input says nothing back. A message is what the log shows, and it may change between versions; the code does not.
+
+**Two raises any call here can meet** are said once, here. A module that did not declare `input` ([below](#declare)) raises at its first reach for `host.input`, naming the capability. And any call raises `stopped by the host: …` when its module has run past its [limits](../module-runtime-and-lifecycle.md#limits). The rest each entry lists under **Raises**. **A coordinate** is read as a number — a string that reads as one is taken too — and cut toward zero, as above; one that is neither, NaN, or outside the 32-bit range raises.
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -55,6 +59,16 @@ local p = host.input.cursorPos()
 print(p.x, p.y)
 ```
 
+### Returns {#host-input-cursorpos-returns}
+
+- `{ x, y }` — a new table at every call, in screen coordinates: device pixels on Windows, points on a Mac. Where the system does not give the position, it is `{ x = 0, y = 0 }`: on Windows without a word, since `GetCursorPos`'s failure is not read; on a Mac with a line in the log that calls it a guess. The build for other systems always answers `0, 0`.
+
+### Errors {#host-input-cursorpos-errors}
+
+None. It never answers an error value.
+
+It never raises; anything passed to it is ignored.
+
 ## host.input.move(x, y) {#host-input-move}
 
 Moves the mouse cursor to the given screen coordinates.
@@ -77,6 +91,16 @@ for step = 1, 5 do host.input.move(x, y - step) end
 host.input.mouseUp(x, y - 5)
 ```
 
+### Returns {#host-input-move-returns}
+
+Nothing (`nil`), in every case.
+
+### Errors {#host-input-move-errors}
+
+None. It never answers an error value. On a Mac an event the system would not make is not sent, and the log says so — `CGEventCreateMouseEvent(type …) returned NULL at …; that mouse event was not sent` — with nothing else to tell the module. On Windows neither `SetCursorPos`'s answer nor `SendInput`'s is read, so what Windows blocks — input into a program of higher rights, say — is lost without a word.
+
+**Raises** for a mistake in the call: an `x` or `y` that is not a coordinate (see the top of the page).
+
 ### Windows {#host-input-move-windows}
 
 Without a button held, the pointer is **placed** (`SetCursorPos`): no event goes through the system's input, so no low-level hook or raw input sees it. A control that holds a press and follows the pointer sat still through such placements — ON:EAR's Width slider, measured — which is why a move with a button held is motion instead.
@@ -97,17 +121,15 @@ Clicks at `(x, y)`, through the system's input or, experimentally, without bring
 
 `x`/`y` are integers. The optional `opts.button` selects the button; it is matched case-insensitively, with `"right"` and `"middle"` recognized and anything else (including omitting `opts`) defaulting to **left**.
 
-**Returns** `true` when the click was made — with `via = "noactivate"`, when it was handed to the thread that makes it — and `false, err` when it was not: an [error value](./errors.md#error-values), whose `err.code` is what to compare and whose message is what the log shows. `true` never says that the program did anything with the click: no program answers one. Without `window` a click is never refused, so a module that ignores the answer works as it always did.
+It answers `true` when the click was made — with `via = "noactivate"`, when it was handed to the thread that makes it — and `false, err` when it was not ([Returns](#host-input-click-returns)). `true` never says that the program did anything with the click: no program answers one. Without `window` a click is never refused, so a module that ignores the answer works as it always did.
 
-- **`window`** — the window the click is for: an id from [`host.window`](./window.md) or an overlay's `O:hwnd()`, never a number you made up. With it the click is made only when the point is in that window, or in a window inside it, and nothing else is drawn over it there; otherwise nothing is clicked, and the answer is `false, err`, `err.code` and its message one of `gone` — `the window is gone`, `outside` — `the point is not in the window`, `covered` — `something else is drawn over the point`. Each refusal is a line in the log: `[input] click at 940,310 for window 2755348 (via = "post") refused: something else is drawn over the point`.
+- **`window`** — the window the click is for: an id from [`host.window`](./window.md) or an overlay's `O:hwnd()`, never a number you made up. With it the click is made only when the point is in that window, or in a window inside it, and nothing else is drawn over it there; otherwise nothing is clicked, and the answer is `false, err` with `gone`, `outside` or `covered` ([Errors](#host-input-click-errors)). Each refusal is a line in the log: `[input] click at 940,310 for window 2755348 (via = "post") refused: something else is drawn over the point`.
 - **`via`** — how the click is made, chosen for each call:
   - `"input"`, the default: the pointer moves to the point and the click goes through the system's input, exactly as without `via`. A click into a window that is not in front brings it to the front — the system activates a window that is clicked — so a page that clicks into a plug-in window loses the keyboard to it and has to be brought back: the round trip, which a screen reader announces as the focus leaving and coming back.
   - `"post"`, which needs `window`: the move, the press and the release are posted to the window — as messages to it on Windows, as events handed to its program on a Mac — at the point, the pointer moved there first. The host brings nothing to the front, and the window in front keeps the keyboard. Whether the program reacts is its own business, and so is what it does then: most toolkits read a click from what is posted, one that reads the mouse some other way never sees it, and one can bring its own window forward on a click — REAPER brought its FX window forward on Windows, and a JUCE plug-in asks for its DAW's activation on a Mac (see the platform blocks).
   - `"noactivate"`, which needs `window`, on Windows only — a Mac answers `false, err`, code `not_supported`, message `not supported on this platform yet`, as it is a Windows window style: the window's top-level window is given a style that keeps a click from bringing it to the front, and is then clicked through the system's input, as `"input"` clicks. Only a window another window owns gets the style — a plug-in's floating window — never a program's main window. The style is changed and the click made on a thread of the host's, after the call returns; the window keeps the style until another window with a title comes to the front, the module stops or the application ends, and then has it taken off again; a run that ends without taking it off — a crash — takes it off at its next start.
 - **`move`** — only with `via = "post"`, and **experimental**, for the HTML probe's comparison of the two (`tools/html-probe`, W10 on both platforms): `true` by default, the pointer put at the point before the click — on a Mac without an event of its own; on Windows `SetCursorPos` also makes Windows send the window under the pointer a `WM_MOUSEMOVE` of its own, besides the posted one; `false` leaves the pointer where it is. Some toolkits ask where the real pointer is while they handle a click — JUCE on Windows turns a press into a drag to it — so a posted click without the pointer can be lost; whether any plug-in needs this is what the probe measures, and the option goes again unless one does.
 - **`cb`** — called once, on a later tick of the event loop, with `(true)` or `(false, err)`: for `"input"` and `"post"` the answer the call returned, for `"noactivate"` whether the click was made on its thread — what goes wrong on that thread reaches the callback only, and without one the log alone (Windows). It runs as an event of the module, after whatever the module is busy with, and not at all when the module is disabled, reloaded or removed first; an error in it is reported as any callback's is.
-
-Options that do not fit raise, naming the option: a `via` other than the three, a `via` other than `"input"` without a `window`, `move = false` with another way, a `window` that is not a whole number, a callback that is not a function.
 
 **What the program sees** of a posted click: a move, a press and a release at the point, in its own coordinates whatever its display scaling; the button, with the modifiers as each platform's block says; no double click is made of two calls, though a program that times clicks itself may take two quick ones for one. **Not for** what goes on inside the plug-in after the click — a menu (JUCE closes its own menus when its DAW is not in front, and a system menu needs its window in front), a text field (keys go to the window in front), a dialog, a drag: those take the plug-in to the front, the round trip.
 
@@ -130,19 +152,65 @@ host.input.click(x, y, { window = plugin.id, via = "noactivate" }, function(made
 end)
 ```
 
+### Returns {#host-input-click-returns}
+
+- `true` — the click was made, through the system's input or posted. With `via = "noactivate"`: it was handed to the host's `window-style` thread, which makes it after the call returns, and only a callback hears what came of it. `true` never says that the program did anything with the click.
+- `false, err` — nothing was clicked; `err.code` is one of the codes of the first table below. Without `window` a click is never refused.
+- With a callback: the call answers as above, at once, and `cb(true)` or `cb(false, err)` comes once, on a later tick. For `"input"` and `"post"`, and for a `"noactivate"` refused at the call, it is the answer the call gave; for a `"noactivate"` handed over, what came of it on the thread, with a code of either table. It does not come when the module is disabled, reloaded or removed first.
+
+### Errors {#host-input-click-errors}
+
+None of these is raised. **At the call**, refused before anything is clicked — returned, and handed to the callback too:
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `gone` | both | With `window`: no window has that id now — on a Mac only with `"post"`, as `"input"` there clicks for an unknown id. On Windows, for `"noactivate"`, also its top-level window gone; on a Mac, also a window number the window server has given another program's window since. | `the window is gone` | both |
+| `outside` | both | With `window`: the point is not in the window's rectangle — on a Mac a control's own, for a control's id. On a Mac only with `"post"`. | `the point is not in the window` | both |
+| `outside` | both | `"post"`: the point is on the window's frame or title bar, not in its client area, where a real click is something else. | `the point is on the window's frame, not in its client area` | both |
+| `covered` | both | With `window`: another window is drawn over the point. On a Mac only a window known to be drawn there ([macOS](#host-input-click-macos)). | `something else is drawn over the point` | both |
+| `denied` | both | `"post"`: the window's program runs with higher rights (error 5). | `the window's program runs with higher rights` | Windows |
+| `failed` | both | `"post"`: Windows refused a message with another error, its number in the message. What was posted before it — the move, or the move and the press — stays posted. | `the window did not take the message (error …)` | Windows |
+| `refused` | both | `"noactivate"`: the window's top-level window is a program's main window — nothing owns it, or it is marked for the taskbar — which never gets the style. | `the window belongs to a program's main window, which never gets the no-activate style: only a window another window owns — a plug-in's floating window — does` | Windows |
+| `cancelled` | both | `"noactivate"`: the application has begun to end. | `the application is ending` | Windows |
+| `denied` | both | `"post"`: this application has no Accessibility grant, without which the window server drops posted events without a word. Asked first. | `this application may not post events: Accessibility is not granted to it (System Settings > Privacy & Security > Accessibility)` | macOS |
+| `hidden` | both | `"post"`: the window could not be paired with a number in the window server's list — for a control, the window it is in. | `the window has no number in the window server's list` | macOS |
+| `hidden` | both | `"post"`: the window is not on screen: minimised, hidden, or on another Space. | `the window is not on screen` | macOS |
+| `timeout` | both | `"post"`: the window's place could not be read from its program, or the program did not answer a moment ago. | `the window's program did not answer` | macOS |
+| `not_supported` | both | `"post"`: this macOS lacks `CGEventSetWindowLocation`, which gives a posted click its place in the window. Nothing was posted. | `this macOS cannot give a posted click its place in the window (CGEventSetWindowLocation is missing)` | macOS |
+| `failed` | both | `"post"`: the system would not make one of the three events. Nothing was posted. | `CGEventCreateMouseEvent(type …) returned NULL; nothing was posted` | macOS |
+| `not_supported` | both | `"noactivate"` on a Mac, as it is a Windows window style; `"post"` and `"noactivate"` on the build for other systems. | `not supported on this platform yet` | macOS, other |
+
+**After the hand-over** of a `"noactivate"` click, on the host's `window-style` thread: the call has answered `true`, so these reach the **callback only** — without one, the log alone. Nothing is clicked.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `gone` | callback | The window went before the thread came to it, or its handle names another window now. | `the window is gone` | Windows |
+| `cancelled` | callback | The application began to end before the style was given. | `the application is ending` | Windows |
+| `denied` | callback | The window's program runs with higher rights: it refused the question asked first, or the style (error 5). | `the window's program runs with higher rights` | Windows |
+| `timeout` | callback | The program did not answer the question asked before its style is changed: within 1000 ms, or 500 once the application is ending. | `the window's program did not answer within … ms` | Windows |
+| `failed` | callback | That question failed with another error. | `the window's program did not answer (error …)` | Windows |
+| `failed` | callback | The file of the windows to give their style back could not be written; the message names it, with the system's words. The style is not given. | `the list of windows to give their style back could not be written (…)` | Windows |
+| `failed` | callback | Windows refused the style with another error, and the window does not hold it. | `the window did not take the style (error …)` | Windows |
+| `refused` | callback | The style was set, and the window does not hold it: its program set it back, or never took it. | `the window did not keep the no-activate style` | Windows |
+| `failed` | callback | The host's thread for it could not be started, is gone, or failed in this click: a fault of the host's, with more in the log. | `the host could not start its window-style thread: …`, `the host's window-style thread is gone`, `the host's thread for it failed: …` | Windows |
+
+**Not answered**, and in the log only: on a Mac, a click through the system's input whose event the system would not make, as for [`move`](#host-input-move-errors). On Windows a click through the system's input that Windows blocks — into a program of higher rights — is lost without a word, since `SendInput`'s answer is not read; only a posted click is refused for it.
+
+**Raises** for a mistake in the call, each naming the option: an `x` or `y` that is not a coordinate (see the top of the page); `opts` that is neither a table nor `nil`; a `window` that is not a whole number; a `via` other than `"input"`, `"post"` and `"noactivate"`; a `via` other than `"input"` without a `window`; a `move` that is not a boolean, or `move = false` with a way other than `"post"`; a `cb` that is neither a function nor `nil`. A `button` that is not one of the three names is left, never raised for, and so is any other key of `opts`.
+
 ### Windows {#host-input-click-windows}
 
 **`via = "input"`.** Whatever the user is **physically holding is inherited** by the injected click, so one posted from a hotkey callback while Alt is still down is an Alt+click. The overlay runtime waits for the modifiers to come up before clicking for exactly that reason; a module clicking from its own hotkey handler needs the same care.
 
 **`window`.** The window `WindowFromPoint` names at the point has to be `window` or a window inside it (`IsChild`); `outside` — `the point is not in the window` — goes by `window`'s own rectangle. `WindowFromPoint` does not ask another program's windows whether they let a click through, so a transparent window a toolkit lays over its content — JUCE's over an OpenGL editor — is taken for the window drawn there.
 
-**`via = "post"`.** `WM_MOUSEMOVE` and the button's down and up messages, posted with `PostMessageW` back to back to the window `WindowFromPoint` names at the point — a child window, the plug-in's own, where the plug-in has one: nothing of the click reaches the DAW around it. The point is converted to that window's client coordinates for its DPI mode: a per-monitor aware window reads physical pixels, a system-aware or unaware one its own, scaled by its DPI over its monitor's. With `move` (the default) the pointer is put at the point first with `SetCursorPos`, so that `GetCursorPos` and `GetMessagePos` agree with the click; the move makes Windows send the window under the pointer a `WM_MOUSEMOVE` of its own as well, before the posted one, which `move = false` does not. Nothing goes through the system's input: no hit test is asked of the program, no `WM_MOUSEACTIVATE` is sent, nothing is activated, no low-level hook sees it. The `wParam` carries the button and `MK_CONTROL` and `MK_SHIFT` as `GetAsyncKeyState` has them; every other modifier the program reads only from the keyboard — as for every click, wait for a hotkey's modifiers to come up. Refused as well: a point on the window's frame or title bar, where a real click is another message (`outside` — `the point is on the window's frame, not in its client area`); `denied` — `the window's program runs with higher rights` (an elevated program, error 5 — an injected click into one fails without saying so); `failed` — `the window did not take the message (error N)`. One line in the log per posted click, naming the window it went into and its DPI mode — where a click landing beside its target shows, as it would for a window that is not per-monitor aware on a scaled monitor:
+**`via = "post"`.** `WM_MOUSEMOVE` and the button's down and up messages, posted with `PostMessageW` back to back to the window `WindowFromPoint` names at the point — a child window, the plug-in's own, where the plug-in has one: nothing of the click reaches the DAW around it. The point is converted to that window's client coordinates for its DPI mode: a per-monitor aware window reads physical pixels, a system-aware or unaware one its own, scaled by its DPI over its monitor's. With `move` (the default) the pointer is put at the point first with `SetCursorPos`, so that `GetCursorPos` and `GetMessagePos` agree with the click; the move makes Windows send the window under the pointer a `WM_MOUSEMOVE` of its own as well, before the posted one, which `move = false` does not. Nothing goes through the system's input: no hit test is asked of the program, no `WM_MOUSEACTIVATE` is sent, nothing is activated, no low-level hook sees it. The `wParam` carries the button and `MK_CONTROL` and `MK_SHIFT` as `GetAsyncKeyState` has them; every other modifier the program reads only from the keyboard — as for every click, wait for a hotkey's modifiers to come up. Refused as well ([Errors](#host-input-click-errors)): a point on the window's frame or title bar, where a real click is another message; a program of higher rights — an elevated one, error 5, into which an injected click fails without saying so; and any other error `PostMessageW` answers, by its number. One line in the log per posted click, naming the window it went into and its DPI mode — where a click landing beside its target shows, as it would for a window that is not per-monitor aware on a scaled monitor:
 
 `[input] posted click for window 2755348 ('#32770'): into 3017492 ('JUCE_18f3a2b4c1d') at client 120,45; that window is per-monitor v2, monitor 150 %; pointer moved: yes`
 
 **`via = "noactivate"`.** The top-level window of `window` is given the extended style `WS_EX_NOACTIVATE`, with which the system does not activate a window that is clicked, and the click is made with `SetCursorPos` and `SendInput` as `"input"` makes it. Only an **owned** top-level window gets it — a plug-in's floating window, which its DAW's window owns. One that nothing owns or that is marked for the taskbar (`WS_EX_APPWINDOW`) — a program's main window, a standalone instrument's, a plug-in docked in its DAW's window — is refused at the call (`refused` — `the window belongs to a program's main window, which never gets the no-activate style: …`), since it could lose its taskbar button and its place in Alt+Tab while it held the style. Changing another program's window waits for that program, so it is done on the host's `window-style` thread, never on the event loop: the program is asked first whether it answers (`WM_NULL`, up to 1000 ms), then the style is set with `SetWindowLongPtrW` — which waits for the program **without a bound**: one that answers the question and then hangs holds the thread, and every click and give-back after it, until it answers — and read back: a style that is on is held, whatever the call answered. The click follows on the same thread. **The style is held** — taken off right after the click, the change would reach the program before the click does, and the click would bring the window forward after all — until another window comes to the front, the module that clicked stops (disabled, reloaded, rolled back or stopped by the host) or the application ends, and is then taken off on the same thread, after every click still on its way. Another window means one with a title: the host has no window event for a window without one, so an untitled window in front ends nothing until a titled one follows it. At the end the application hands that thread a last give-back and waits for it up to 2 seconds in all, each program having half a second to answer; a window not given its activation back by then — its program did not answer, or hangs as the style changes — keeps its line in the file below, and the next start gives it back. From the moment the application begins to end, no window is given the style: a click still on its way is refused with `cancelled` — `the application is ending`. A window that has the style of its own is clicked as it is and left alone. A program that brings its window forward itself on a click still can: the click is real input, which gives it the right to.
 
-Every window given the style is written to `held-window-styles.txt` beside the application **before** it is given — its handle, its process and when that process started, its class — and the file is rewritten as the style is taken off, and deleted when no window holds it. A run that ends without taking it off again, a crash or a kill, takes it off at the next start, before any module can click, wherever the window is still the one named and still has the style; until then that window does not come to the front when clicked (the keyboard and the DAW's own commands still bring it forward), and closing it in the DAW ends that too. Refused on the thread, for the callback only — without one it is in the log alone: `gone` — `the window is gone`; `timeout` — `the window's program did not answer within 1000 ms`; `failed` — `the window's program did not answer (error N)`; `denied` — `the window's program runs with higher rights`; `failed` — `the window did not take the style (error N)`; `refused` — `the window did not keep the no-activate style`; `failed` — `the list of windows to give their style back could not be written (…)` with the file and the system's words; `cancelled` — `the application is ending`; and the host's own thread, `failed` — `the host's window-style thread is gone`, `the host could not start its window-style thread: …`, `the host's thread for it failed: …`. Each refusal is a line in the log as well, callback or not — `[input] click at 940,310 for window 2755348 (via = "noactivate") refused: the window did not keep the no-activate style` — and so is what went right:
+Every window given the style is written to `held-window-styles.txt` beside the application **before** it is given — its handle, its process and when that process started, its class — and the file is rewritten as the style is taken off, and deleted when no window holds it. A run that ends without taking it off again, a crash or a kill, takes it off at the next start, before any module can click, wherever the window is still the one named and still has the style; until then that window does not come to the front when clicked (the keyboard and the DAW's own commands still bring it forward), and closing it in the DAW ends that too. Refused on the thread, for the callback only — without one it is in the log alone — for the reasons of the second table under [Errors](#host-input-click-errors): the window gone meanwhile, its program not answering the question or of higher rights, the file above not written, the style not taken or not kept, the application ending, and the host's own thread. Each refusal is a line in the log as well, callback or not — `[input] click at 940,310 for window 2755348 (via = "noactivate") refused: the window did not keep the no-activate style` — and so is what went right:
 
 `[input] window 2755348 ('#32770') of process 4242 given the no-activate style for clicks that leave the window in front where it is`
 
@@ -158,7 +226,7 @@ Every window given the style is written to `held-window-styles.txt` beside the a
 
 **`via = "post"`.** The move, the press and the release are `CGEvent`s handed to the window's process with `CGEventPostToPid`, back to back. That way passes the window server's routing by — no hit test of its own, no activation, no pointer moved — so each event says where it goes: the window's number in the window server (its `CGWindowID`: the window's own, or for an id of something inside a window, that window's), in the two public fields `kCGMouseEventWindowUnderMousePointer` and `kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent` and in the private one AppKit's own events carry it in (51); and the point's place in that window, from its top-left corner, set with the private `CGEventSetWindowLocation`. AppKit in the program hands the events to that window, and the window to the view under the point, while the window's application stays in the background. The events' modifier flags are cleared, as for every click here, so a click from a hotkey's callback is a bare click; each is marked as the host's own in `kCGEventSourceUserData`. With `move` (the default) the pointer is warped to the point first with `CGWarpMouseCursorPosition`, so that a program asking where the pointer is (`[NSEvent mouseLocation]`) finds it on the click. The warp posts no event of its own — the program sees the posted move only — and after a warp macOS holds the mouse's own movement off the pointer for about a quarter of a second. The host joins the two again at once (`CGAssociateMouseAndMouseCursorPosition`, as SDL, GLFW and Wine do after their warps), which gives the user's mouse the pointer back straight away while this application is the active one — Apple describes the call for an application in the foreground. A posted click is mostly made while it is not (a page described `activates = false`, an overlay's key with the DAW in front), and what the call does then is not measured: the user's mouse may stall for that quarter of a second after each such click (TODO.md, MW21). `move = false` leaves the pointer where it is.
 
-Refused, each as on Windows where Windows has it: `gone` — `the window is gone` (no window the host knows by that id, or its number now belongs to another program's window), `outside` — `the point is not in the window` (its rectangle — a control's own for a control's id) and `the point is on the window's frame, not in its client area` (a window's title bar or border, where a click would move or zoom the window), `covered` — `something else is drawn over the point` (the hit test of `window` above). And the Mac's own: `denied` — `this application may not post events: Accessibility is not granted to it (System Settings > Privacy & Security > Accessibility)` — `CGEventPostToPid` answers nothing, and without that privilege the window server drops the events without a word, so the host asks `CGPreflightPostEventAccess` first and refuses rather than answering `true`; the start block's `hid post events` line names the same privilege; `hidden` — `the window has no number in the window server's list` (the window could not be paired with one — the window it is in, for a control) and `the window is not on screen` (minimised, hidden, or on another Space); `timeout` — `the window's program did not answer` (its window's place could not be read, or it did not answer a moment ago); `not_supported` — `this macOS cannot give a posted click its place in the window (CGEventSetWindowLocation is missing)`; and `failed` — `CGEventCreateMouseEvent(type …) returned NULL; nothing was posted`. One line in the log per posted click, naming the process and the window it went into, and the place in the window the events carry — where a click landing beside its target shows:
+Refused as on Windows where Windows has the case — the window gone (no window the host knows by that id, or its number now belongs to another program's window), the point outside its rectangle (a control's own for a control's id) or on its frame (a window's title bar or border, where a click would move or zoom the window), something drawn over it (the hit test of `window` above) — and for reasons of the Mac's own, each in the table under [Errors](#host-input-click-errors). One of them needs its reason here: `CGEventPostToPid` answers nothing, and without the Accessibility privilege the window server drops the events without a word, so the host asks `CGPreflightPostEventAccess` first and answers `denied` rather than `true`; the start block's `hid post events` line names the same privilege. One line in the log per posted click, naming the process and the window it went into, and the place in the window the events carry — where a click landing beside its target shows:
 
 `[input] posted click for window 12: into window number 8812 of process 4242 (Logic Pro X) at 240,160 from the window's top-left corner (340,210 on the screen); pointer moved: yes`
 
@@ -183,6 +251,16 @@ A drag is not a press, a warp and a release. On Windows the pointer is moved wit
 
 If a control needs a sustained press before it will react at all, use `mouseDown`/`mouseUp` with a timer instead — that is why those exist separately.
 
+### Returns {#host-input-drag-returns}
+
+Nothing (`nil`), in every case.
+
+### Errors {#host-input-drag-errors}
+
+None. It never answers an error value. On a Mac an event the system would not make is not sent, and the log says so — `CGEventCreateMouseEvent(type …) returned NULL at …; that mouse event was not sent` — with nothing else to tell the module. On Windows neither `SetCursorPos`'s answer nor `SendInput`'s is read, so what Windows blocks — input into a program of higher rights, say — is lost without a word.
+
+**Raises** for a mistake in the call: a coordinate that is not one (see the top of the page); `opts` that is neither a table nor `nil`. A `button` that is not one of the three names is left, never raised for.
+
 ### Windows {#host-input-drag-windows}
 
 The pointer is moved with injected absolute move events over the virtual desktop — the event a [`move`](#host-input-move) with a button held sends, so a drag lands where it is asked to on any monitor — rather than `SetCursorPos`, interpolated over sixteen steps a few milliseconds apart. The pacing blocks the calling thread for about sixty milliseconds, paid only when something is deliberately dragged.
@@ -191,7 +269,7 @@ The pointer is moved with injected absolute move events over the virtual desktop
 
 A single `Dragged` event is posted between press and release — no interpolation. That asymmetry is deliberate: a scrollbar needs one intermediate event and gets it. A control that only reacts to *continuous* movement would work on Windows and not here, and nothing has yet exercised the difference on a Mac.
 
-## host.input.scroll(x, y, amount) {#host-input-scroll}
+## host.input.scroll(x, y, notches) {#host-input-scroll}
 
 Moves to `(x, y)` and scrolls the mouse wheel by `notches`, which may be fractional.
 
@@ -201,6 +279,21 @@ Moves to `(x, y)` and scrolls the mouse wheel by `notches`, which may be fractio
 
 A notch is 120 units to the operating system, and a control decides for itself what one is worth — ON:EAR's tone knob moves by five of its own units per notch, which is as fine as this could ask for while notches were whole. Half a notch is 60 units, and an application that scales its step by the delta moves by half as much. One that rounds to its own interval instead simply does not move and reports the same value back, which is the honest outcome and says to stop asking for halves.
 
+```luau
+host.input.scroll(960, 540, -3)   -- down three notches
+host.input.scroll(960, 540, 0.5)  -- half a notch up, where the control is finer than a notch
+```
+
+### Returns {#host-input-scroll-returns}
+
+Nothing (`nil`), in every case.
+
+### Errors {#host-input-scroll-errors}
+
+None. It never answers an error value. On a Mac a scroll event the system would not make is not sent, and the log says so — `CGEventCreateScrollWheelEvent2 returned NULL; no scroll sent at …` — with nothing else to tell the module. On Windows `SendInput`'s answer is not read, so a scroll Windows blocks — into a program of higher rights — is lost without a word.
+
+**Raises** for a mistake in the call: an `x` or `y` that is not a coordinate (see the top of the page); a `notches` that is neither a number nor a string that reads as one.
+
 ### Windows {#host-input-scroll-windows}
 
 The unit is native: 120 units to a notch is what `WHEEL_DELTA` counts, so a fractional request is expressed exactly.
@@ -209,25 +302,45 @@ The unit is native: 120 units to a notch is what `WHEEL_DELTA` counts, so a frac
 
 Expressed in Quartz **lines**, which cannot be smaller than one. A caller asking for less than a line gets the smallest whole line rather than nothing — a control that needs a half-step will not get one here until this asks Quartz in pixel units instead. The conversion logs the first scroll of a run, and after that every request that is not a whole notch, saying what was asked for and what was sent; the difference shows up as evidence rather than as a mystery.
 
-```luau
-host.input.scroll(960, 540, -3)   -- down three notches
-host.input.scroll(960, 540, 0.5)  -- half a notch up, where the control is finer than a notch
-```
-
 ## host.input.send(combo) {#host-input-send}
 
 Sends a keyboard shortcut by pressing the modifiers, tapping the key, and releasing in reverse order.
 
 **Signature:** `host.input.send(combo: string) -> (boolean, Error?)`
 
-`combo` is a [key spec](./keys.md#key-spec-string-format), read by the same parser as a hotkey or a capture: `+`-separated parts, the final part being the key and any leading parts modifiers (whitespace around parts is trimmed, case does not matter). The modifiers are the four roles: `ctrl` (also `control`, `cmd`, `command`), `alt` (`option`), `shift` and `win` (`super`, `meta`). On a Mac `ctrl` is Command and `win` is Control, so `host.input.send("Ctrl+S")` is Ctrl+S on Windows and Command+S on a Mac, the application's own Save on both. For the Mac's Control key, write `Meta`. The key is one of the [key names](./keys.md#key-spec-string-format) — letters, digits, `F1`–`F24` and fourteen named keys; there are no numpad keys, punctuation, `Insert` or media keys, and there is no separate key-down or key-up. An empty combo, an unknown modifier, an unknown key or a `"<modifier> tap"` raises a Lua error naming the part. **Returns** `true` once the key is sent, or `false, err` for what only the moment decides: on a Mac, a key no key of the keyboard layout types or that macOS has no key code for (`not_supported`, `'…' (VK …): …`) and an event the system would not make (`failed`, `CGEventCreateKeyboardEvent returned NULL for '…' (keycode …)`); on a platform without input, `not_supported` — `not supported on this platform yet`. On Windows it is always `true`.
+`combo` is a [key spec](./keys.md#key-spec-string-format), read by the same parser as a hotkey or a capture: `+`-separated parts, the final part being the key and any leading parts modifiers (whitespace around parts is trimmed, case does not matter). The modifiers are the four roles: `ctrl` (also `control`, `cmd`, `command`), `alt` (`option`), `shift` and `win` (`super`, `meta`). On a Mac `ctrl` is Command and `win` is Control, so `host.input.send("Ctrl+S")` is Ctrl+S on Windows and Command+S on a Mac, the application's own Save on both. For the Mac's Control key, write `Meta`. The key is one of the [key names](./keys.md#key-spec-string-format) — letters, digits, `F1`–`F24` and fourteen named keys; there are no numpad keys, punctuation, `Insert` or media keys, and there is no separate key-down or key-up. A spec that does not parse raises ([Raises](#host-input-send-errors)); what only the moment decides — on a Mac, a key the keyboard layout cannot type — is answered ([Returns](#host-input-send-returns)). It turns over [`host.inputEpoch()`](./timer.md#host-inputepoch) at the call, before anything is checked: also when it answers `false` or raises.
 
 The key goes through the same keyboard hook as a real one, so a combination that any module has [captured](./keys.md#host-keys-capture) is caught and suppressed again — sending the key you captured does not pass it on. See [`post`](#host-input-post) for that.
 
 ```luau
 host.input.send("Ctrl+S")         -- the application's Save, on either platform
 host.input.send("Ctrl+Shift+Esc")
+
+-- A key the layout may not type on a Mac: say so rather than nothing.
+local ok, err = host.input.send("Ctrl+F21")
+if not ok and err.code == host.errors.NOT_SUPPORTED then
+  host.speech.output("This key cannot be sent here.")
+end
 ```
+
+### Returns {#host-input-send-returns}
+
+- `true` — the key was sent, with its modifiers. It says nothing of what the program in front did with it. On Windows it is always `true`.
+- `false, err` — nothing was sent, or, when the key-up's event is the one the system would not make, the key-down only; `err.code` is one of the codes below.
+
+### Errors {#host-input-send-errors}
+
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `not_supported` | return | No key of the current keyboard layout types the key, or macOS has no key code for it (`F21`–`F24`). The message names the spec, its virtual-key code and why. Nothing is sent. | `'…' (VK …): …` | macOS |
+| `failed` | return | The system would not make the key's event. Nothing is sent after it: when it is the key-up's, the key-down was sent already. | `CGEventCreateKeyboardEvent returned NULL for '…' (keycode …)` | macOS |
+| `not_supported` | return | The build for other systems, which has no input. | `not supported on this platform yet` | other |
+
+**Not answered**: on Windows `SendInput`'s answer is not read, so a key Windows blocks — into a program of higher rights — is lost without a word.
+
+**Raises** for a mistake in the call, naming the part: a `combo` that is not a string (a number is read as its digits: `5` is the key 5); an empty combo; an unknown modifier; an unknown key; a modifier tap (`"Ctrl tap"`), which is something to capture, not a key to send.
 
 ### Windows {#host-input-send-windows}
 
@@ -257,6 +370,16 @@ Control characters are sent as characters too: `"\n"` is the character U+000A an
 host.input.text("Hello, world!")
 host.input.send("Enter")   -- not "\n"
 ```
+
+### Returns {#host-input-text-returns}
+
+Nothing (`nil`), in every case.
+
+### Errors {#host-input-text-errors}
+
+None. It never answers an error value. On a Mac a key event the system would not make ends the typing there, and the log says how far it got — `CGEventCreateKeyboardEvent returned NULL while typing; N of M characters were sent`. On Windows `SendInput`'s answer is not read, so text Windows blocks — into a program of higher rights — is lost without a word.
+
+**Raises** for a mistake in the call: a `text` that is not a string (a number is typed as its digits).
 
 ### Windows {#host-input-text-windows}
 
@@ -293,6 +416,16 @@ host.timer.after(350, function()
   host.timer.after(150, function() host.input.mouseUp(x, y + drag) end)
 end)
 ```
+
+### Returns {#host-input-mousedown-returns}
+
+Nothing (`nil`), in every case: the button is noted as this module's held one even when its event was not sent ([`held`](#host-input-held)).
+
+### Errors {#host-input-mousedown-errors}
+
+None. It never answers an error value. On a Mac an event the system would not make is not sent, and the log says so — `CGEventCreateMouseEvent(type …) returned NULL at …; that mouse event was not sent` — with nothing else to tell the module. On Windows neither `SetCursorPos`'s answer nor `SendInput`'s is read, so what Windows blocks — input into a program of higher rights, say — is lost without a word.
+
+**Raises** for a mistake in the call: an `x` or `y` that is not a coordinate (see the top of the page); `opts` that is neither a table nor `nil`. A `button` that is not one of the three names is left, never raised for.
 
 ### Windows {#host-input-mousedown-windows}
 
@@ -331,6 +464,16 @@ end
 glide()
 ```
 
+### Returns {#host-input-mouseup-returns}
+
+Nothing (`nil`), in every case.
+
+### Errors {#host-input-mouseup-errors}
+
+None. It never answers an error value. On a Mac an event the system would not make is not sent, and the log says so — `CGEventCreateMouseEvent(type …) returned NULL at …; that mouse event was not sent` — with nothing else to tell the module. On Windows neither `SetCursorPos`'s answer nor `SendInput`'s is read, so what Windows blocks — input into a program of higher rights, say — is lost without a word.
+
+**Raises** for a mistake in the call: an `x` or `y` that is not a coordinate (see the top of the page); `opts` that is neither a table nor `nil`. A `button` that is not one of the three names is left, never raised for.
+
 ### Windows {#host-input-mouseup-windows}
 
 The motion event a `host.input.move` with a button held sends, to `(x, y)`, then the button-up event — no `SetCursorPos`. So press, glide and release are one drag on Windows as on a Mac: a control that followed the pointer through the moves gets the release where it is. The host's own release at a disable is the same, at the pointer's place: motion of no distance, then the up. Where the pace of the movement matters, `host.input.drag` paces it.
@@ -359,6 +502,17 @@ local function letGo(x, y)
 end
 ```
 
+### Returns {#host-input-held-returns}
+
+- A list of button names, `"left"`, `"right"` or `"middle"` — in the order this module pressed them, a new table at every call.
+- `{}` — this module holds none. Never `nil`.
+
+### Errors {#host-input-held-errors}
+
+None. It never answers an error value.
+
+It never raises; anything passed to it is ignored.
+
 ### Windows {#host-input-held-windows}
 
 The host's record, as above: the system is not asked, so a button down on the desktop that this module did not press is not listed. (What a `move` asks besides the desktop's state is the backend's own note of its presses, which is not this.)
@@ -371,7 +525,7 @@ The host's record, as on Windows: the session's button state is not asked.
 
 **Signature:** `host.input.post(id: number, key: string) -> (boolean, Error?)`
 
-Delivers a single key to **one window** rather than to whatever has focus. Reach for it when a hotkey has to act *and* still hand the application a key: our own hotkey registration and key capture see synthesised input exactly as they see real input, so `host.input.send` from inside a hotkey callback re-triggers the handler that sent it, forever. A posted key goes to the addressed window (or process) without travelling past that machinery, and is seen by nobody else. `id` is the handle from `host.window.*` or the overlay's `O:hwnd()` — never a number you constructed. `key` is a single [key name](./keys.md#key-spec-string-format) (`A`–`Z`, `0`–`9`, `F1`–`F24`, `Space`, `Enter`/`Return`, `Esc`/`Escape`, `Tab`, `Backspace`, `Delete`/`Del`, the arrows, `Home`, `End`, `PageUp`, `PageDown`, all matched case-insensitively); **there are no modifiers here** — `"Ctrl+S"` is not a key name and raises, as does any name the table does not know. **Returns** `true` once the key is posted, or `false, err` when it was not — the window gone, a program of higher rights, a key the layout cannot type: see the platform blocks.
+Delivers a single key to **one window** rather than to whatever has focus. Reach for it when a hotkey has to act *and* still hand the application a key: our own hotkey registration and key capture see synthesised input exactly as they see real input, so `host.input.send` from inside a hotkey callback re-triggers the handler that sent it, forever. A posted key goes to the addressed window (or process) without travelling past that machinery, and is seen by nobody else. `id` is the handle from `host.window.*` or the overlay's `O:hwnd()` — never a number you constructed. `key` is a single [key name](./keys.md#key-spec-string-format) (`A`–`Z`, `0`–`9`, `F1`–`F24`, `Space`, `Enter`/`Return`, `Esc`/`Escape`, `Tab`, `Backspace`, `Delete`/`Del`, the arrows, `Home`, `End`, `PageUp`, `PageDown`, all matched case-insensitively); **there are no modifiers here** — `"Ctrl+S"` is not a key name and raises, as does any name the table does not know. It answers `true` once the key is posted, or `false, err` when it was not — the window gone, a program of higher rights, a key the layout cannot type ([Returns](#host-input-post-returns)).
 
 Unlike every other call in `host.input` that acts, a posted key does **not** turn over `host.inputEpoch()`, nor `host.epoch()`. So the host's own per-epoch answers are not re-asked either: a `host.window.focusChain()`, `active()` or `host.element.find` that was already asked in this epoch gives the same answer after the post — the one from before the key (see [`host.window`](./window.md)). Anything memoised against that counter — a view state read from pixels, a probe of which sub-tool is active — will not be re-read because you posted a key, so re-read it explicitly after a post sequence, which is what the Melodyne overlay does when it checks with the uncached probe what its presses actually reached.
 
@@ -389,6 +543,37 @@ step = function()
 end
 host.timer.after(PRESS_GAP, step)
 ```
+
+Where the answer matters — a window gone, or a program of higher rights, gets nothing:
+
+```luau
+local ok, err = host.input.post(hwnd, "F5")
+if not ok then
+  host.log.info("F5 not posted: " .. err)
+end
+```
+
+### Returns {#host-input-post-returns}
+
+- `true` — the key-down and the key-up were posted. It says nothing of whether the program read them.
+- `false, err` — the key was not posted, or only its key-down was: a key-up the system refuses or cannot make comes after a key-down it took. `err.code` is one of the codes below.
+
+The build for other systems answers `true` and posts nothing.
+
+### Errors {#host-input-post-errors}
+
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `gone` | return | The handle names no window: `0`, or one Windows refuses as no window's (error 1400). | `the window is gone` | Windows |
+| `denied` | return | The window's program runs with higher rights (error 5). | `the window's program runs with higher rights` | Windows |
+| `failed` | return | Windows refused the post with another error, its number in the message. | `the window did not take the message (error …)` | Windows |
+| `not_supported` | return | The key has no key code here: `F21`–`F24`, or a letter no key of the current keyboard layout types. The message names the key, its virtual-key code and why. | `key '…' (VK …): …` | macOS |
+| `gone` | return | The handle is not one this backend issued — stale, or a number made up — so there is no process to post to. | `key_post: … is not a handle this backend issued, so there is no process to post '…' to` | macOS |
+| `failed` | return | The system would not make the key's event. | `CGEventCreateKeyboardEvent returned NULL for '…' (keycode …)` | macOS |
+
+**Raises** for a mistake in the call: an `id` that is neither a number nor a string that reads as one; a `key` that is not one of the key names, with `unknown key '…'` — a combination such as `"Ctrl+S"` included.
 
 ### Windows {#host-input-post-windows}
 

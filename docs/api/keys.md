@@ -37,6 +37,8 @@ On macOS the hook is an event tap. Without the Accessibility grant the call answ
 
 This page also holds the [key spec](#key-spec-string-format) every call that takes a key reads, and three calls that work on a spec rather than on the keyboard: [`normalize`](#host-keys-normalize) says which key it is, [`describe`](#host-keys-describe) says it in the platform's words, and [`check`](#host-keys-check) says what the platform does with it.
 
+**What each call answers** is under its **Returns**, and what it can fail with under its **Errors** ([Reading an Errors table](./errors.md#reading-an-errors-table)). Only [`capture`](#host-keys-capture) can answer an [error value](./errors.md). Every other call here answers its value and nothing else. A message may change between versions; its code does not. Two raises are not repeated at each entry. One is the capability gate, for a module that did not declare `keys`; `normalize`, `describe` and `check` do not need it. The other is `stopped by the host: …`, once the module has run too long ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -131,7 +133,7 @@ The tap form behaves the same on either platform: armed when a modifier goes dow
 
 The key `spec` stands for, in this platform's spelling. The modifiers come in the platform's order and words: Ctrl, Alt, Shift, Win on Windows and Linux, and Meta, Option, Shift, Cmd on macOS, which is Apple's order (Control, Option, Shift, Command). The key is written as the parser names it (`"Return"`, `"PageUp"`, `"A"`). Two specs are the same key exactly when their normalized forms are equal. The normalized form parses back to the same key on every platform, because a spelling names the same role everywhere. The overlay runtime compares its controls' hotkeys this way, so `"Cmd+S"` beside an inherited `"Ctrl+S"` is one claim, not two registrations of which only one could live.
 
-Returns `nil` for a spec that does not parse; it raises only for an argument that is neither a string nor a number (a number is read as its digits, so `5` is the key 5). String work only — no system call, microseconds. Like every Lua call it runs on the main thread. **Needs no capability**: `normalize`, `describe` and `check` are reachable without declaring `keys`, which is about capturing keystrokes.
+String work only — no system call, microseconds. Like every Lua call it runs on the main thread. **Needs no capability**: `normalize`, `describe` and `check` are reachable without declaring `keys`, which is about capturing keystrokes.
 
 ```luau
 -- Controls that name one key two ways are one claim; keep the first.
@@ -149,6 +151,17 @@ claim("Ctrl+S", "Save")
 claim("Cmd+S", "Store") -- the same key everywhere: Ctrl+S on Windows, Command+S on a Mac
 ```
 
+### Returns {#host-keys-normalize-returns}
+
+- A string — the key `spec` stands for, in this platform's spelling (the platform sections below).
+- `nil` — `spec` does not parse. [`check`](#host-keys-check) says so too, as `parse`.
+
+### Errors {#host-keys-normalize-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `spec` that is neither a string nor a number. A number is read as its digits, so `5` is the key 5.
+
 ### Windows {#host-keys-normalize-windows}
 
 `"Cmd+S"` and `"ctrl + s"` are both `"Ctrl+S"`; `"Ctrl+Shift+Win+Alt+F6"` is `"Ctrl+Alt+Shift+Win+F6"`; `"Option+P"` is `"Alt+P"`, and `"Meta+E"` is `"Win+E"`. The host names hotkeys in its log and in the "Binding unavailable" and "Binding conflict" dialogs in this form, so the reload key reads `Ctrl+Alt+Shift+Win+F5` there.
@@ -163,7 +176,7 @@ claim("Cmd+S", "Store") -- the same key everywhere: Ctrl+S on Windows, Command+S
 
 `spec` in this platform's own words, for telling a user which key to press. `"spoken"`, the default, spells every modifier out — `"Control+Alt+P"`, `"Shift+Command+F9"`, `"Up Arrow"` — and is what the overlay runtime says when a control with a hotkey is focused. `"short"` uses the written abbreviations — `"Ctrl+Alt+P"`, `"Shift+Cmd+F9"`, `"Up"` — for a log line or a label. A tap is `"Alt pressed on its own"` spoken and `"Alt tap"` short.
 
-Returns `nil` for a spec that does not parse. It raises for a `spec` that is neither a string nor a number, for an `opts` that is neither a table nor `nil`, and for a `style` other than the two: another string or a number (`host.keys.describe: style must be "spoken" or "short", …`), or a value that is not a string at all, such as `true` or a table. A `style` of `nil` is `"spoken"`. **A description is not a spec**: on a Mac `"Delete"` is the key the parser calls `Backspace`, so never feed one back into a call that takes a key. String work only, main thread, no capability needed (see [`normalize`](#host-keys-normalize)).
+A `style` of `nil` is `"spoken"`. **A description is not a spec**: on a Mac `"Delete"` is the key the parser calls `Backspace`, so never feed one back into a call that takes a key. String work only, main thread, no capability needed (see [`normalize`](#host-keys-normalize)).
 
 ```luau
 -- Written once, and said the way each platform's user knows it:
@@ -173,6 +186,17 @@ host.hotkey.register(KEY, backIntoPlugin)
 host.speech.output("Press " .. host.keys.describe(KEY) .. " to return to the plug-in")
 host.log.info("[mine] " .. host.keys.describe(KEY, { style = "short" }) .. " is registered")
 ```
+
+### Returns {#host-keys-describe-returns}
+
+- A string — `spec` in this platform's words, in the style asked.
+- `nil` — `spec` does not parse.
+
+### Errors {#host-keys-describe-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `spec` that is neither a string nor a number; an `opts` that is neither a table nor `nil`; a `style` other than the two. That is another string or a number (`host.keys.describe: style must be "spoken" or "short", …`), or a value that is not a string at all, such as `true` or a table.
 
 ### Windows {#host-keys-describe-windows}
 
@@ -202,7 +226,7 @@ The reasons are structural on purpose: they are what the platform does, never wh
 
 `opts.layout = false` leaves the keyboard layout unasked, so `altgr` and `composes` are never reported and nothing but the string is read. The overlay runtime asks that way, at every bind and every hotkey sync, because it needs only the reasons `register` refuses. Default `true`.
 
-Cost: string work, plus — only for the shapes that can be `altgr` or `composes`, and only with `layout` left on — one question to the keyboard layout. Main thread, like every Lua call. It raises for a `spec` that is neither a string nor a number, for an `opts` that is neither a table nor `nil`, and for a `layout` that is not `true`, `false` or `nil` (`host.keys.check: layout is true or false, not a string` for `{ layout = "no" }`); `nil` is the default, `true`. No capability needed (see [`normalize`](#host-keys-normalize)); unlike `normalize` and `describe` it reads something besides the string, the character the current layout types with the chord.
+Cost: string work, plus — only for the shapes that can be `altgr` or `composes`, and only with `layout` left on — one question to the keyboard layout. Main thread, like every Lua call. No capability needed (see [`normalize`](#host-keys-normalize)); unlike `normalize` and `describe` it reads something besides the string, the character the current layout types with the chord.
 
 ```luau
 -- Before announcing a key a user will press.
@@ -214,6 +238,21 @@ elseif c.produces then
   host.log.info(KEY .. " also types " .. c.produces .. " in this layout; holding it takes that away")
 end
 ```
+
+### Returns {#host-keys-check-returns}
+
+A table, every time:
+
+- `ok` — `true` or `false`, as above.
+- `resolved` — [`normalize`](#host-keys-normalize)'s answer, or `nil` when `spec` does not parse.
+- `reasons` — a list of the words in the table above, empty when there is nothing to say. They are **status words**, not error values: compare them as strings (`r == "reserved"`). For a spec that does not parse the list is `{ "parse" }` alone and `ok` is `false`.
+- `produces` and `deadKey` — only with `altgr` or `composes`: the character, and whether it is a dead key. Both are `nil` otherwise.
+
+### Errors {#host-keys-check-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `spec` that is neither a string nor a number; an `opts` that is neither a table nor `nil`; a `layout` that is not `true`, `false` or `nil` (`host.keys.check: layout is true or false, not a string` for `{ layout = "no" }`). A `layout` of `nil` is the default, `true`.
 
 ### Windows {#host-keys-check-windows}
 
@@ -227,7 +266,7 @@ end
 
 **Signature:** `host.keys.capture(spec: string, callback: (mods: { shift: boolean, ctrl: boolean, alt: boolean, win: boolean }) -> ())` → `number` (a release token), or `nil, Error`
 
-Begins intercepting the [key spec](#key-spec-string-format): the keypress is swallowed (not passed to the underlying app) and `callback` is invoked with a `mods` table describing the modifier state at press time. Its fields are the roles, so on a Mac `mods.ctrl` is Command held and `mods.win` is Control held. The callback runs on the next pump tick, for a key-down; the key-up is never reported. What auto-repeat does, and whether the key-up reaches the application, are in the platform sections. Re-capturing the same `(vk, mask)` for this module replaces the previous callback (and mints a new token) — a module holds one capture per combination. Across modules the earliest standing capture whose module's [scope](#host-keys-scope) is the window in front gets the key (see the top of this page). Installs the low-level keyboard hook on first use (idempotent), before the capture is recorded: when the hook cannot be installed the call answers `nil, err` and records nothing, so the key stays the application's — `failed` on Windows (`could not start the keyboard hook's thread: …`, `the keyboard hook's thread ended before it answered`, `SetWindowsHookExW(WH_KEYBOARD_LL) failed (error …)`), and on a Mac `denied` without Accessibility or `failed` (see [macOS](#host-keys-capture-macos)). The next capture tries the hook again. Raises an error for an unknown spec. **Returns a token** to pass to [`host.keys.release`](#host-keys-release); keep it if you'll release this specific capture: when two overlays in one module capture the same key one after the other, the later capture has replaced the earlier, and the earlier overlay's token no longer releases anything.
+Begins intercepting the [key spec](#key-spec-string-format): the keypress is swallowed (not passed to the underlying app) and `callback` is invoked with a `mods` table describing the modifier state at press time. Its fields are the roles, so on a Mac `mods.ctrl` is Command held and `mods.win` is Control held. The callback runs on the next pump tick, for a key-down; the key-up is never reported. What auto-repeat does, and whether the key-up reaches the application, are in the platform sections. Re-capturing the same `(vk, mask)` for this module replaces the previous callback (and mints a new token) — a module holds one capture per combination. Across modules the earliest standing capture whose module's [scope](#host-keys-scope) is the window in front gets the key (see the top of this page). Installs the low-level keyboard hook on first use (idempotent), before the capture is recorded, so a hook that cannot be installed records nothing (see [Returns](#host-keys-capture-returns)). **Returns a token** to pass to [`host.keys.release`](#host-keys-release); keep it if you'll release this specific capture: when two overlays in one module capture the same key one after the other, the later capture has replaced the earlier, and the earlier overlay's token no longer releases anything.
 
 ```luau
 host.keys.capture("Tab", function(mods)
@@ -236,6 +275,38 @@ host.keys.capture("Tab", function(mods)
 end)
 host.keys.capture("Shift+Tab", function() moveFocus(-1) end)
 ```
+
+A capture can be refused, on a Mac without Accessibility for one, so test the token:
+
+```luau
+local tabToken, err = host.keys.capture("Tab", function() ov:focusNext() end)
+if not tabToken then
+  host.log.info("[mine] Tab is not captured: " .. err)       -- the message, for the log
+  if err.code == host.errors.DENIED then
+    host.speech.output("Grant Accessibility to use the overlay's keys")
+  end
+end
+```
+
+### Returns {#host-keys-capture-returns}
+
+- A number, the release token — the capture is recorded, and the hook (Windows) or the event tap (macOS) is in. A token says the capture stands, not that a key will arrive. Another module's earlier capture of the same combination takes the key first, a [scope](#host-keys-scope) or an open menu lets it through, and a Mac whose tap needs Input Monitoring delivers nothing ([macOS](#host-keys-capture-macos)). On the build for other systems, which has no hook, every capture answers a token and no key ever arrives.
+- `nil, err` — nothing was recorded: the hook or the tap could not be installed, so the key stays the application's. `err.code` is under Errors. The next capture tries the hook or the tap again.
+
+### Errors {#host-keys-capture-errors}
+
+None of these is raised. Each comes as `nil, err`, and nothing is recorded.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `failed` | return | The keyboard hook's thread could not be started. | `could not start the keyboard hook's thread: …` | Windows |
+| `failed` | return | The hook's thread ended before it said whether the hook was in. | `the keyboard hook's thread ended before it answered` | Windows |
+| `failed` | return | Windows refused the hook. The error number is Windows' own. | `SetWindowsHookExW(WH_KEYBOARD_LL) failed (error …)` | Windows |
+| `denied` | return | The system refused the event tap. That is almost always the Accessibility right, which this application lacks; the message says what to grant. Every later capture tries again, and answers the same until the right is granted. | `CGEventTapCreate refused (AXIsProcessTrusted = …) — grant this application Accessibility in System Settings > Privacy & Security, and Input Monitoring too if keys are still not captured after that; until then no key can be captured or suppressed` | macOS |
+| `failed` | return | The tap was created, and no run-loop source could be made for it. | `CFMachPortCreateRunLoopSource failed for the event tap` | macOS |
+| `failed` | return | There was no run loop to attach the tap to. | `no CFRunLoop to attach the event tap to` | macOS |
+
+**Raises** for a mistake in the call: a `spec` the parser cannot read, with the parser's message naming the part; a `spec` that is neither a string nor a number; a `callback` that is not a function. Of [`check`](#host-keys-check)'s reasons only `parse` raises. A combination the system keeps is captured as asked ([macOS](#host-keys-capture-macos)).
 
 ### Windows {#host-keys-capture-windows}
 
@@ -276,7 +347,7 @@ Each move writes one `keys` line once the hook's thread has made it: `the keyboa
 
 ### macOS {#host-keys-capture-macos}
 
-Without the Accessibility grant the event tap is refused, and the call answers `nil, err`: `denied`, `CGEventTapCreate refused (AXIsProcessTrusted = …) — grant this application Accessibility …`. The tap's other two failures are `failed`: `CFMachPortCreateRunLoopSource failed for the event tap` and `no CFRunLoop to attach the event tap to`. Worse would be the case where only Input Monitoring is missing, if a Mac's tap needs it — on macOS 26.6 it did not (see [macOS permissions](../macos-permissions.md#input-monitoring)): the tap is created, reports itself as enabled, and never fires — `capture` returns a token, no key ever arrives, and nothing errors. A module that announces "overlay ready" on a successful return can be announcing it into a session where no key will ever reach it. The application notices it once a registered shortcut arrives while the tap has seen no key at all, and its Permissions page then counts Input Monitoring as needed; the module is not told.
+Without the Accessibility grant the event tap is refused, and the call answers `nil, err` with `denied` (see [Errors](#host-keys-capture-errors), which has the tap's other two failures as well). Worse would be the case where only Input Monitoring is missing, if a Mac's tap needs it — on macOS 26.6 it did not (see [macOS permissions](../macos-permissions.md#input-monitoring)): the tap is created, reports itself as enabled, and never fires — `capture` returns a token, no key ever arrives, and nothing errors. A module that announces "overlay ready" on a successful return can be announcing it into a session where no key will ever reach it. The application notices it once a registered shortcut arrives while the tap has seen no key at all, and its Permissions page then counts Input Monitoring as needed; the module is not told.
 
 A refused tap is not remembered as installed, so **every** later capture tries again, and answers `nil, err` again, until the tap can be created. A capture so answered records nothing — the tap is asked for before the key is entered in the captured set — so no key is suppressed for a token the module never got; capture it again once the tap is in.
 
@@ -301,8 +372,18 @@ Undoes the exact capture identified by the `token` [`host.keys.capture`](#host-k
 ```luau
 local tok = host.keys.capture("Tab", onTab)
 -- later:
-host.keys.release(tok)
+if tok then host.keys.release(tok) end   -- nil when the capture was refused
 ```
+
+### Returns {#host-keys-release-returns}
+
+Nothing, whether or not the token named a capture still standing.
+
+### Errors {#host-keys-release-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: a `token` that is not a number — `nil`, a boolean or a table. Nothing checks the token against the calling module: a token another module was given releases that module's capture. Keep tokens to yourself.
 
 ## host.keys.releaseAll() {#host-keys-releaseall}
 
@@ -313,6 +394,14 @@ Removes **all** key captures owned by this module and refreshes the suppression 
 ```luau
 host.keys.releaseAll()
 ```
+
+### Returns {#host-keys-releaseall-returns}
+
+Nothing, whether or not the module held a capture.
+
+### Errors {#host-keys-releaseall-errors}
+
+None. It never answers an error value. It never raises.
 
 ## host.keys.scope(toForeground) {#host-keys-scope}
 
@@ -335,6 +424,14 @@ host.keys.scope(false)
 host.keys.menuOpen(false)
 ```
 
+### Returns {#host-keys-scope-returns}
+
+Nothing. The scope is set at once, also when no window was in front to pin it to (the platform sections say what it is then).
+
+### Errors {#host-keys-scope-errors}
+
+None. It never answers an error value. It never raises: `toForeground` is read the way Luau reads a condition, so `nil` and `false` make the keys global again and any other value pins them.
+
 ### Windows {#host-keys-scope-windows}
 
 The scope is a window handle, `GetForegroundWindow` at call time, and at press time the hook compares each module's against a **live** query for what is in front. It is always current. While the foreground changes hands Windows names no window for a moment; a `scope(true)` then is every window, and the log says so: `key scope: no window was in front when asked, so the scope is every window for now`.
@@ -356,6 +453,14 @@ host.keys.menuOpen(true)
 -- ... user navigates the plugin's native menu ...
 host.keys.menuOpen(false)
 ```
+
+### Returns {#host-keys-menuopen-returns}
+
+Nothing. The flag is set at once, also while the module holds no capture, when it counts only once one is made.
+
+### Errors {#host-keys-menuopen-errors}
+
+None. It never answers an error value. It never raises: `open` is read the way Luau reads a condition, so `nil` and `false` say closed and any other value open.
 
 ---
 
@@ -382,6 +487,14 @@ host.hotkey.register("Alt+V", function()
 end)
 ```
 
+### Returns {#host-keys-modifiersdown-returns}
+
+`true` while any of the four is held, `false` otherwise.
+
+### Errors {#host-keys-modifiersdown-errors}
+
+None. It never answers an error value. It never raises.
+
 ## host.keys.nativeMenuOpen() {#host-keys-nativemenuopen}
 
 **Signature:** `host.keys.nativeMenuOpen()` → `boolean`
@@ -405,6 +518,14 @@ host.timer.every(500, function()
   readTheStrip()
 end)
 ```
+
+### Returns {#host-keys-nativemenuopen-returns}
+
+`true` while a menu the system drew is open in the application in front, `false` otherwise — including for a menu the application draws itself.
+
+### Errors {#host-keys-nativemenuopen-errors}
+
+None. It never answers an error value. It never raises.
 
 ### Windows {#host-keys-nativemenuopen-windows}
 
@@ -433,6 +554,14 @@ for _, k in ipairs(host.keys.passedThrough()) do
   end
 end
 ```
+
+### Returns {#host-keys-passedthrough-returns}
+
+A list of `{ vk, mask, key }` in the order the keys were let through, and empty when none was since the last call. Reading it empties the module's record. The record keeps the first 32: a key let through after that is not recorded until the record is read.
+
+### Errors {#host-keys-passedthrough-errors}
+
+None. It never answers an error value. It never raises.
 
 ### Windows {#host-keys-passedthrough-windows}
 

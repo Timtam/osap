@@ -16,6 +16,8 @@ The spec grammar is shared with `host.keys` and documented there. That includes 
 
 A combination that is also captured with [`host.keys.capture`](./keys.md#host-keys-capture) is a platform question: see the Windows section of [`register`](#host-hotkey-register).
 
+**What each call answers** is under its **Returns**, and what it can fail with under its **Errors** ([Reading an Errors table](./errors.md#reading-an-errors-table)). `register` can answer an [error value](./errors.md), and it is one of the four calls that answer **an error value beside a result** — `page:show`, the two dumps and `register`: an id whose claim is not held now. `unregister` never answers one. A message may change between versions; its code does not. Two raises are not repeated at each entry: the capability gate, for a module that did not declare `hotkey`, and `stopped by the host: …`, once the module has run too long ([the limits](../module-runtime-and-lifecycle.md#limits)).
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -33,48 +35,17 @@ See [what that list is and is not](./index.md#capabilities).
 
 Registers a **global** OS hotkey (active regardless of foreground window) for the [key spec](keys#key-spec-string-format) and returns an integer `id`. The callback is invoked with no arguments each time the hotkey fires (only while the owning module is enabled), as a [handler](../module-runtime-and-lifecycle.md#handlers) of the module — one after another with its other handlers — however the press was delivered; what a held-down combination does is in the platform sections.
 
-`opts.foreground = true` is **experimental**, for the HTML probe's test W2 (TODO.md): the press is left to the operating system's own hotkey delivery, which on Windows is what gives this application the right to bring a window of its own to the front — see the Windows section. It may go again once the probe has answered whether it is needed. `foreground` is `true` or `false`; any other value, and any other key in `opts`, raises.
+**It can answer an id and an error value together**: a claim that is made and stands, but is not held at this moment. Read both values; see [Returns](#host-hotkey-register-returns).
 
-It raises, at once, for a mistake in the call, which no platform could ever hold — each a module author's to fix, and each with a message that says why:
+`opts.foreground = true` is **experimental**, for the HTML probe's test W2 (TODO.md): the press is left to the operating system's own hotkey delivery, which on Windows is what gives this application the right to bring a window of its own to the front — see the Windows section. It may go again once the probe has answered whether it is needed.
 
-- a spec the shared parser cannot read at all (an unknown modifier or key name; the message names the part);
-- a `"<modifier> tap"`, which is something [`host.keys.capture`](./keys.md#host-keys-capture) watches and no system registers.
+**What this platform can never hold is refused at the call**, and nothing is registered: a key it has no code for, `F21`–`F24` on macOS, and a combination **the system keeps for itself** — the `reserved` reason of [`host.keys.check`](./keys.md#host-keys-check): F12 and Win+L on Windows; Command+F5, Command+Q, Command+Tab and the rest of the list there on macOS. The same spec may be fine on the other platform, so the platform decides, not the call, and the answer is `nil, err` rather than a raise. Carbon would register Command+Q without complaint and take quitting away from every application for as long as the module held it, which is why this is a refusal and not a warning.
 
-It answers `nil, err` and registers nothing for a spec **this platform** can never hold — the same spec may be fine on the other one, so the platform decides, not the call:
-
-- a key the platform has no code for: `F21`–`F24` on macOS. `err.code` is `not_supported`, its message `the hotkey '…' (…) cannot be registered: macOS has no key code for …. Choose another key`;
-- a combination **the system keeps for itself** — the `reserved` reason of [`host.keys.check`](./keys.md#host-keys-check): F12 and Win+L on Windows; Command+F5, Command+Q, Command+Tab and the rest of the list there on macOS. `err.code` is `taken`, and the message names the combination and what the system uses it for: `the hotkey '…' (…) is kept by the system and cannot be registered: …. Choose another combination`. Carbon would register Command+Q without complaint and take quitting away from every application for as long as the module held it, which is why this is a refusal and not a warning;
-- every spec, on a platform without hotkeys (the build for other systems): `not_supported`, `hotkeys are not implemented on this platform yet (spec '…')`.
-
-These are exactly the `check` reasons its table marks as refused. Nothing else `check` can report is refused: a chord on VoiceOver's layer, or one that also types a character, registers as asked. A combination that another **application** holds is not known until the claim is made; it is answered beside the id, below.
-
-**`id, err` is a partial answer: the id and an error value together.** The claim is made and stands — it is tried again, as below — but it is **not held at this moment**, so the callback does not fire until it is. Test both values: `id` alone is held now; `id` with `err` is a standing claim, and `err.code` says why it is not held:
-
-- `taken` — another module holds the combination (`module '…' holds this combination`), or another program does: `RegisterHotKey failed for '…' (already in use by another app?)` on Windows, `macOS refused the shortcut '…' (RegisterEventHotKey returned …); another application probably already uses it system-wide` on a Mac;
-- `not_supported` — on a Mac, a letter no key of the current keyboard layout types (`no key of the current keyboard layout types this letter`), held as soon as a layout that types it is selected;
-- `failed` — on a Mac, the Carbon handler every hotkey arrives through could not be installed (`could not install the Carbon hotkey handler (InstallEventHandler returned …); no global shortcut will work in this session`).
-
-A disabled module gets the id alone: its claims are not made until it is enabled. Keep the id either way; [`unregister`](#host-hotkey-unregister) gives up a standing claim as it gives up a held one.
+These are exactly the `check` reasons its table marks as refused. Nothing else `check` can report is refused: a chord on VoiceOver's layer, or one that also types a character, registers as asked. A combination that another **application** holds is not known until the claim is made; it is answered beside the id.
 
 The host records, logs and reports a registration by its [normalized](./keys.md#host-keys-normalize) spec, so the log names the chord it is on this platform: `Ctrl+Shift+Win+Alt+F6` appears as `Ctrl+Alt+Shift+Win+F6` on Windows, and `Cmd+Shift+F6` as `Shift+Cmd+F6` on a Mac. The dialogs use the same form on Windows. On a Mac they say the key in [`describe`](./keys.md#host-keys-describe)'s spoken words, `Shift+Command+F6`, because the spec's word for the Control key there, `Meta`, is not the key's name.
 
 **While its module is busy** — one of its handlers [waits](../module-runtime-and-lifecycle.md#a-handler-waits) for a read — a press waits behind that handler and runs once the module is free, in the order its events came. Up to 256 keys, hotkey presses and controller buttons wait; the next is dropped, with a `[keys]` line. The press runs on the registration it was made for, or, when the module registered the same combination again meanwhile, on the new one — unless the module has [scoped](./keys.md#host-keys-scope) its keys to a window other than the one in front at the press — and the log says so: `[com.example.game] Ctrl+Shift+F9, pressed while the module was busy, went to the module's current registration of it`. When another module holds the combination now, the press is dropped and said (`… pressed while the module was busy, was dropped: the hotkey went to another module meanwhile`); it never runs on another module's hotkey. When the module released the hotkey meanwhile and holds the combination no more, the press goes where a captured key its module let go of goes (see the top of [`host.keys`](./keys.md)): first to the next module that [captures](./keys.md#host-keys-capture) the combination in the window that was in front when the press reached the application, as a key of that module's — a capture is what the hook would have given the key to before the hotkey — said as `[com.example.game] Ctrl+Shift+F9, pressed while the module was busy, went to com.example.synth, the next module that captures it in the window it was pressed in: its registration was released meanwhile`; with none, to the program in front: sent as it was pressed, the same key with the same modifiers, while the window that was in front when the press reached the application still is, and said: `[com.example.game] Ctrl+Shift+F9, pressed while the module was busy, was passed on to the program in front: its registration was released meanwhile`. Otherwise it is dropped, and the line says why: the reasons a captured key's has — another window in front by then, or none known when the press arrived; the key still held down; a modifier, or a screen reader's key, held down that the press was made without; a key that reached the program after the press did, which the press would follow (`… and a key typed after it has reached the program first`); the system not taking the keys sent — or a combination the key spec does not name, which only the system read (`… and its combination is one only the system could read, so it cannot be sent again`). The press is sent on the keycode or scan code its spec names, never another key the system matched it on. Another module's hotkeys are not held up: they run at once.
-
-```luau
--- Written once: Ctrl+Shift+F9 on Windows, Command+Shift+F9 on a Mac.
-local KEY = "Ctrl+Shift+F9"
-local id, err = host.hotkey.register(KEY, function()
-  host.speech.output("Hotkey pressed")
-end)
-local said = host.keys.describe(KEY, { style = "short" })
-if id == nil then
-  host.log.info(said .. " cannot be a hotkey here: " .. err)       -- registered nothing
-elseif err then
-  host.log.info(said .. " is claimed as " .. id .. ", not held now: " .. err)  -- a partial answer
-else
-  host.log.info(said .. " is registered as " .. id)
-end
-```
 
 ### A registration is a claim, not a guarantee
 
@@ -132,6 +103,63 @@ forward (see [the module manager](../module-manager.md#starting-it-again-brings-
 A build from before that rule takes no lock and looks for none, so it can still run beside a
 newer copy and hold keys; quit it from its tray icon.
 
+### Returns {#host-hotkey-register-returns}
+
+:::warning An id and an error value together
+**`register` can answer two values that both count: an `id` and an error value.** That is a [partial answer](./errors.md#partial-answers). The claim is made and stands, so keep the id. But the combination is **not held at this moment**, and a press does not reach the callback until it is. A test of `id` alone takes this answer for a hotkey that works, and `if err then return end` throws away a claim that may be held a minute later. Test the two values apart.
+:::
+
+- `id` — the claim is made and held now: the next press runs the callback. A disabled module gets the id alone for every spec this platform can hold, because its claims are not made until it is enabled; it is not told then whether they are held. A spec this platform can never hold is answered `nil, err` all the same.
+- `id, err` — **a partial answer**: the claim is made and stands, and it is not held now. It is tried again whenever the host next works out who holds which key: at any module's next registration or release, and at every change to the enabled set ([A registration is a claim](#a-registration-is-a-claim-not-a-guarantee)). A parked macOS letter is held as soon as a layout that types it is selected. `err.code` is `taken`, `not_supported` or `failed`, below. [`unregister`](#host-hotkey-unregister) gives the claim up as it gives up a held one.
+- `nil, err` — nothing was registered: this platform can never hold the spec. `err.code` is `taken` or `not_supported`, below.
+
+```luau
+-- Written once: Ctrl+Shift+F9 on Windows, Command+Shift+F9 on a Mac.
+local KEY = "Ctrl+Shift+F9"
+local id, err = host.hotkey.register(KEY, function()
+  host.speech.output("Hotkey pressed")
+end)
+local said = host.keys.describe(KEY, { style = "short" })
+if id == nil then
+  host.log.info(said .. " cannot be a hotkey here: " .. err)                   -- nothing registered
+elseif err then
+  host.log.info(said .. " is claimed as " .. id .. ", not held now: " .. err)  -- partial: keep the id
+else
+  host.log.info(said .. " is registered as " .. id)                            -- held now
+end
+```
+
+### Errors {#host-hotkey-register-errors}
+
+None of these is raised. Each comes as the second value, in one of two answers.
+
+**`nil, err` — nothing is registered.** This platform can never hold the spec.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `taken` | return | The system keeps the combination for itself, the `reserved` reason of [`check`](./keys.md#host-keys-check). The message names the combination and what the system uses it for. | `the hotkey '…' (…) is kept by the system and cannot be registered: …. Choose another combination` | both |
+| `not_supported` | return | A key macOS has no key code for, `F21`–`F24`. | `the hotkey '…' (…) cannot be registered: macOS has no key code for …. Choose another key` | macOS |
+| `not_supported` | return | The build for other systems has no hotkeys. Every spec of an enabled module answers this, and there a spec that does not parse answers it too, from any module, instead of raising. Nothing is kept. A disabled module gets the id alone for a spec that parses, as everywhere, and its claim is refused when it is enabled. | `hotkeys are not implemented on this platform yet (spec '…')` | other |
+
+**`id, err` — the partial answer: the claim is made and stands, and is not held now.** Keep the id.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `taken` | return | Another enabled module holds the combination, or an earlier registration of this module's own does — the module's earliest registration of a combination keeps it. The claim is held once that one lets go. | `module '…' holds this combination` | both |
+| `taken` | return | Windows refused the combination, because another program holds it, or this application's own reload or quit key is on it. The claim refused is this one, or the earlier claim of the combination that would hold it before this one. It is tried again. | `RegisterHotKey failed for '…' (already in use by another app?)` | Windows |
+| `taken` | return | macOS refused the combination, most likely because another application holds it. The claim refused is this one, or the earlier claim of the combination that would hold it before this one. It is tried again. | `macOS refused the shortcut '…' (RegisterEventHotKey returned …); another application probably already uses it system-wide` | macOS |
+| `not_supported` | return | A letter that no key of the current keyboard layout types. The claim is parked, and held as soon as a layout that types the letter is selected. | `no key of the current keyboard layout types this letter` | macOS |
+| `failed` | return | The Carbon handler every hotkey arrives through could not be installed, so no hotkey is held. The claim is tried again, the handler with it. | `could not install the Carbon hotkey handler (InstallEventHandler returned …); no global shortcut will work in this session` | macOS |
+
+The dialogs and log lines of [A registration is a claim](#a-registration-is-a-claim-not-a-guarantee) come as before, beside the error value.
+
+**Raises** for a mistake in the call — each a module author's to fix, and each with a message that says why:
+
+- a spec the shared parser cannot read at all: an unknown modifier or key name, and the message names the part (the build for other systems answers it instead, above);
+- a `"<modifier> tap"`, which is something [`host.keys.capture`](./keys.md#host-keys-capture) watches and no system registers: `the hotkey '…' (…) is a modifier pressed on its own, which cannot be a global hotkey: capture it with host.keys.capture instead`;
+- a `spec` that is neither a string nor a number, or a `callback` that is not a function;
+- an `opts` that is neither a table nor `nil`; a key in it other than `foreground` (`host.hotkey.register: '…' is not an option; the only one is foreground`); a `foreground` that is not `true`, `false` or `nil` (`host.hotkey.register: foreground is true or false, not a …`).
+
 ### Windows {#host-hotkey-register-windows}
 
 `RegisterHotKey`, with auto-repeat suppressed: the callback fires once per press, and holding the combination does not fire it again. Each role is the key of its name: `Ctrl` is Control and `Win` the Windows key.
@@ -154,8 +182,9 @@ A key captured with [`host.keys.capture`](./keys.md#host-keys-capture) by any en
 
 A combination held by another **application**
 (rather than by another module) cannot be taken, and that refusal is surfaced to the user by
-name, logged and answered beside the id (`taken`). The claim still stands, and it is tried again on the next change to the
-enabled set — so quitting the application that holds the key can be enough. The Windows shell
+name, logged and answered beside the id (`taken`). The claim still stands, and it is tried again at any module's next
+registration or release and at the next change to the enabled set — so quitting the application that holds the key can be
+enough. The Windows shell
 is such an application for the four modifiers with a letter: it holds the Office key's W, X, P,
 O, T, Y, N, D and L.
 
@@ -175,11 +204,21 @@ A letter is the key that types it under the current keyboard layout — with Com
 
 **Signature:** `host.hotkey.unregister(id: number)` → `nil`
 
-Releases the OS hotkey and forgets the callback for the `id` returned by `register`. Unknown ids are ignored. The id is not checked against the calling module, so an id another module was given releases that module's hotkey; keep ids to yourself. `nil`, a boolean or a table as `id` raises, and a number with a fraction is cut to its whole part. The combination is then offered to the next standing claim on it at once, in the same call.
+Releases the OS hotkey and forgets the callback for the `id` returned by `register`. Unknown ids are ignored. The id is not checked against the calling module, so an id another module was given releases that module's hotkey; keep ids to yourself. A number with a fraction is cut to its whole part. The combination is then offered to the next standing claim on it at once, in the same call. A claim that is not held — an id that came with an error value — is given up the same way. The application's own reload and quit keys cannot be released: their ids are ignored, as an unknown id is.
 
 ```luau
-host.hotkey.unregister(id)
+if hotkeyId then host.hotkey.unregister(hotkeyId) end   -- held or only claimed, it goes
 ```
+
+### Returns {#host-hotkey-unregister-returns}
+
+Nothing, whether or not the id named a registration.
+
+### Errors {#host-hotkey-unregister-errors}
+
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: an `id` that is not a number — `nil`, a boolean, a table, a function, userdata, or a string that is not a numeral (a numeral string counts).
 
 ### Windows {#host-hotkey-unregister-windows}
 
@@ -188,7 +227,3 @@ host.hotkey.unregister(id)
 ### macOS {#host-hotkey-unregister-macos}
 
 `UnregisterEventHotKey`. A refusal is not reported to the module; it is logged, because it leaves the combination claimed.
-
----
-
-The `host.keys` namespace is a low-level, modifier-aware keyboard hook that **intercepts and suppresses** individual keystrokes (the key does not reach the focused application) and delivers them to your callback. It is distinct from `host.hotkey`: keys are matched on exact modifier state and the captured set is recomputed across all enabled modules whenever it changes.
