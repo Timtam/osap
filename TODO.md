@@ -3,6 +3,35 @@
 Project backlog for the cross-platform automation platform.
 Architecture and feasibility foundation: [docs/architecture-feasibility-study.md](docs/architecture-feasibility-study.md).
 
+## Quick repeats of a key: once, twice, three times (2026-10-20, from the maintainer, waiting for usage)
+
+Asked for by the developer of the avenger_control tool (2026-10-20): bind a key's quick repeats,
+such as Numpad1 pressed once, twice quickly, three times quickly. The maintainer decided the design
+and to build it as soon as the usage allows.
+
+- [ ] **A count on every press, with no delay (the default).** The callbacks of
+      `host.hotkey.register` and `host.keys.capture` get a further argument, `press`, with
+      `press.count`: 1 for the first press, 2 for the second quick one, and so on. It fires at once
+      on every press, as NVDA's scripts get their repeat count (once speaks, twice spells). Existing
+      callbacks are unaffected, since Lua drops an extra argument.
+- [ ] **Only the final count, when asked: `opts.taps = "final"`.** For "once does A, twice B, three
+      times C, and A must not happen first". The callback fires once the sequence is over, with its
+      count. That costs one interval of waiting after the last press, and only for the bindings that
+      ask for it.
+- [ ] **When a count starts again:** after the interval, which is the system's double-click time by
+      default (GetDoubleClickTime on Windows, NSEvent.doubleClickInterval on a Mac), so the user's
+      own setting holds; `opts.within = <ms>` sets it per binding. Also when another key goes down,
+      or when the modifiers change. A held key's auto-repeat never counts; it is already swallowed.
+      The interval is the gesture's own definition, taken from the user's setting, not a guess about
+      a program's state.
+- [ ] **One counter in the host, platform-neutral,** fed by both paths on both platforms:
+      RegisterHotKey and the hook on Windows, Carbon and the event tap on a Mac. Then the overlay
+      runtime passes the count on to its controls' hotkeys.
+- [ ] **Docs:** both entries' Returns and Errors as the template has them, the callback's `press`
+      argument, and a note that on Windows NVDA and JAWS use the numpad in their desktop layout. On
+      a Mac VoiceOver does so only with NumPad Commander on. Tests in the scripted host for each
+      count, the reset rules and `taps = "final"`.
+
 ## API rule: failures are typed, not sentences (2026-10-11, from the maintainer)
 
 - [x] **Replace every reason given as plain text with an error type.** The maintainer, on seeing
