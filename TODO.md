@@ -32,6 +32,20 @@ and to build it as soon as the usage allows.
       a Mac VoiceOver does so only with NumPad Commander on. Tests in the scripted host for each
       count, the reset rules and `taps = "final"`.
 
+## The tray icon left behind on Windows after the quit key (2026-10-21, from users)
+
+- [ ] **On Windows the tray icon stays after the quit key** (Ctrl+Shift+Alt+Win+Q), until the
+      pointer passes over it or it is clicked. Users report it. The likely cause is in
+      `crates/host/src/gui.rs`: the `TaskBarIcon` is `std::mem::forget`-ed after it is set up ("keep
+      the icon + its handlers alive", about line 1868), so its destructor, which removes the icon
+      (`RemoveIcon`, `Shell_NotifyIcon` `NIM_DELETE`), never runs. Every way out leaves the icon to
+      Explorer, which drops a dead one only when the pointer passes over it. After the tray menu's
+      own Quit the pointer is already there, which is why only the key shows it.
+- [ ] **The fix:** keep a handle to the icon and remove it on every way out (the key, the tray's
+      Quit, the window's Quit, a second start's quit request, a logoff), before the main loop ends.
+      Hold the handlers alive as now. Check it with the quit key while the pointer is elsewhere. On
+      a Mac the status item goes with the process; confirm that the same path does no harm there.
+
 ## API rule: failures are typed, not sentences (2026-10-11, from the maintainer)
 
 - [x] **Replace every reason given as plain text with an error type.** The maintainer, on seeing
