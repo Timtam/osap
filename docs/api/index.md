@@ -165,7 +165,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O.state`](overlay#o-state) | A free-form table on every overlay for the owning module's own state, so it does not have to squat in the runtime's reserved `_`-prefixed fields. |
 | [`O.stateGeneration()`](overlay#o-stategeneration) | A count that goes up by one 250 ms after an overlay of this VM comes to the front, once per arrival |
 | [`O.window(matcher, opts?)`](overlay#o-window) | A binding to a **standalone** window: what `O:attach(matcher, opts)` does when an overlay is bound by it. |
-| [`O:activate(index)`](overlay#o-activate) | Activates the control at `index` (defaults to the focused control). |
+| [`O:activate(index, press?)`](overlay#o-activate) | Activates the control at `index` (defaults to the focused control). |
 | [`O:addCustomButton(opts)`](overlay#o-addcustombutton) | Appends a button that runs a Luau callback on activation. |
 | [`O:addGraphicalButton(opts)`](overlay#o-addgraphicalbutton) | Appends a button that is **found rather than placed** |
 | [`O:addGraphicalToggle(opts)`](overlay#o-addgraphicaltoggle) | Appends a toggle whose on/off state is read by image-matching its region against an "on" and "off" template |
@@ -330,7 +330,7 @@ Claiming keys before the focused application sees them, and the key spec every c
 
 | | |
 |---|---|
-| [`host.keys.capture(spec, callback)`](keys#host-keys-capture) | Begins intercepting the key spec |
+| [`host.keys.capture(spec, callback, opts?)`](keys#host-keys-capture) | Begins intercepting the key spec |
 | [`host.keys.check(spec, opts)`](keys#host-keys-check) | What this platform does with a combination, structurally. |
 | [`host.keys.describe(spec, opts)`](keys#host-keys-describe) | `spec` in this platform's own words, for telling a user which key to press. |
 | [`host.keys.menuOpen(open)`](keys#host-keys-menuopen) | Tells the hook a plugin's own (Qt/UIA) menu is open (`true`) or closed (`false`). |

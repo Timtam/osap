@@ -70,6 +70,26 @@ Three things happened implicitly, and they are worth knowing:
 - **The overlay announces the control you land on** as `"label, type"` — `"Say hello, button"`.
 - **You arrive on the first control**, which is focused for real: announced, and holding whatever keys it needs (Space, Enter, a slider's or a tab control's arrows). So the first control decides what the application loses the moment its window comes forward — declare something inert first, such as a static text naming the place, if that matters here. Alt-Tabbing out and back to the *same* window resumes where the user was instead.
 
+### A hotkey pressed twice
+
+`onActivate` gets a second argument when the control's hotkey pressed it: the press, whose `count` is 1 for a first press and 2 for a second quick one ([quick repeats](api/hotkey.md#quick-repeats-once-twice-three-times), runtime 0.12). Each press acts at once, so the first of two has acted when the second comes — make 2 something that builds on 1, as a screen reader's "twice spells" does:
+
+```luau
+ov:addCustomButton({
+  label = "Say hello",
+  hotkey = "Alt+1",
+  onActivate = function(o, press)
+    if press and press.count == 2 then
+      host.speech.output("H, E, L, L, O")
+    else
+      host.speech.output("Hello!")
+    end
+  end,
+})
+```
+
+Space and Return hand `onActivate` no press, so test it before you read it.
+
 ### Order matters
 
 Everything that describes the overlay must come *before* the call that binds it. Binding is what makes it live, and the runtime evaluates the overlay immediately. Getting this wrong is now an error rather than a subtle misbehaviour, but the rule is simple: **declare first, bind last**.

@@ -725,23 +725,24 @@ fn a_recognize_in_a_text_hook_waits_and_its_reading_is_said() {
 // The runtime's version.
 // ---------------------------------------------------------------------------------------------
 
-/// The runtime is 0.11.0 (calibration as its own setting, `O.calibrating()`, a static text's
+/// The runtime is 0.12.0 (calibration as its own setting, `O.calibrating()`, a static text's
 /// `hotkey`, the checks after its own pixels, `O:probe`, letting go in front of this
 /// application's own windows, its accessibility menu tests asked off the event loop, the
 /// check after a calibrating run's waited picture before a press, a slider's after each of its
 /// searches, its searches and pictures through the calls' callback forms, an OCR button's `value`,
 /// an overlay's page, `identify`'s `again` and O:watch's count of readings, and the drawn menu
 /// test with a test's `before`, `O.doubleClick`'s button and callback, a trip's hand-over, a menu
-/// item's submenu with a test's `chained`, and its error values with O.errors), so a module
-/// that depends on `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads
-/// against it, and so does one that asks for 0.4, 0.4.1, 0.5, 0.5.6, 0.6, 0.7, 0.8, 0.9, 0.10 or
-/// 0.11, and neither against anything older.
+/// item's submenu with a test's `chained`, its error values with O.errors, and a hotkey's press
+/// handed on to a control's `onActivate` and a hand-over's `onKey`), so a module that depends on
+/// `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads against it, and
+/// so does one that asks for 0.4, 0.4.1, 0.5, 0.5.6, 0.6, 0.7, 0.8, 0.9, 0.10, 0.11 or 0.12, and
+/// neither against anything older.
 #[test]
-fn the_runtime_is_0_11_so_a_module_that_asks_for_0_2_loads() {
+fn the_runtime_is_0_12_so_a_module_that_asks_for_0_2_loads() {
     let m = module_manifest::ModuleManifest::parse(include_str!("../../../modules/overlay-runtime/module.toml"))
         .expect("the runtime's manifest parses");
     assert_eq!(m.id, "com.platform.overlay");
-    assert_eq!(m.version, "0.11.0");
+    assert_eq!(m.version, "0.12.0");
     for spec in [
         "com.platform.overlay >= 0.2",
         "com.platform.overlay >= 0.3",
@@ -755,6 +756,7 @@ fn the_runtime_is_0_11_so_a_module_that_asks_for_0_2_loads() {
         "com.platform.overlay >= 0.9",
         "com.platform.overlay >= 0.10",
         "com.platform.overlay >= 0.11",
+        "com.platform.overlay >= 0.12",
     ] {
         let req = module_manifest::dep_constraint(spec).unwrap();
         let id = module_manifest::dep_id(spec);
@@ -1030,5 +1032,41 @@ fn the_calibration_and_capture_methods_answer_why_they_did_not() {
         rawset(T.host.screen, "imageSearchAll", function() return { { x = 1, y = 2, w = 3, h = 4 } } end)
         n, verr = T.handled(o.calibrationVerify, o)
         assert(n == 1 and verr == nil, tostring(n))
+    "#);
+}
+
+// ---------------------------------------------------------------------------------------------
+// A control's hotkey hands its press on (0.12).
+// ---------------------------------------------------------------------------------------------
+
+/// The host's count of a hotkey's quick repeats reaches the control the hotkey activates:
+/// `onActivate(o, press)`, a custom button's and a stepper's, after the wait for the modifiers.
+/// Return, and a module's own `O:activate()`, hand on none; `O:activate(i, press)` hands on what
+/// it is given.
+#[test]
+fn a_controls_hotkey_hands_its_press_to_on_activate() {
+    run(r#"
+        local S = T.S
+        local heard = {}
+        local function note(word)
+          return function(_, press) heard[#heard + 1] = word .. " " .. (press and tostring(press.count) or "none") end
+        end
+        local o = T.fields(function(o)
+          o:addCustomButton({ label = "Twice", hotkey = "Alt+W", onActivate = note("twice") })
+          o:addStepper({ label = "Level", hotkey = "Alt+L", text = function() return "3" end,
+            onStep = function() end, onActivate = note("level") })
+        end)
+        S.hotkeyFns["Alt+W"]({ count = 1 })
+        S.hotkeyFns["Alt+W"]({ count = 2 })
+        assert(o.focus == 3, "the hotkey moved the focus to its control: " .. o.focus)
+        S.hotkeyFns["Alt+L"]({ count = 3 })
+        S.hotkeyFns["Alt+L"]()
+        o.focus = 3
+        T.ret()
+        o:activate()
+        o:activate(3, { count = 5 })
+        T.wait(1000)
+        assert(table.concat(heard, " | ") == "twice 1 | twice 2 | level 3 | level none | twice none | twice none | twice 5",
+          table.concat(heard, " | "))
     "#);
 }

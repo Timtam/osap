@@ -252,6 +252,8 @@ A `when` predicate must return exactly `true`; anything else counts as hidden. A
 
 A control's `hotkey` also **moves the overlay's focus** to that control, silently, before activating it — ReaHotkey's `TriggerHotkey` does the same. So after Ctrl+L for "Load instrument" and a dialog closed again, the overlay comes back on "Load instrument", and Tab carries on from there. The control then holds the keys a focused control holds (Space and Return for a button). `hotkeyKeepsFocus = true`, accepted by every constructor that takes a `hotkey`, opts out: Melodyne's "Menu bar" uses it, because focus on a button would take Space, which is Melodyne's play/stop. This changed on 2026-09-19 and affects every overlay with hotkeys on Windows as well (Kontakt, Komplete Kontrol, Soundiron, u-he).
 
+A control's hotkey **hands its press on** (since version 0.12 of the runtime): the host's count of the key's quick repeats, `press.count` ([Quick repeats](hotkey.md#quick-repeats-once-twice-three-times)), reaches a custom button's or a stepper's `onActivate(overlay, press)` — 1 for a first press, 2 for a second quick one — once the hotkey's modifiers are up. The runtime registers its controls' hotkeys with a count at every press (`taps = "every"`): the first press of a double one has acted by the time the second comes, so a control does on 1 what is right whether or not a 2 follows. Space, Return and [`O:activate`](#o-activate) without a press hand `onActivate` none. A module that reads it depends on `"com.platform.overlay >= 0.12"`.
+
 Space or Return on a focused control that has **hidden itself** since focus reached it acts on the visible control that shares its hotkey — Kontakt's "Switch to classic view" and "Switch to play view" share Alt+V and swap places on every press. With no such control, the overlay says "… is not available now" instead of doing nothing without a word.
 
 Two controls **share** a hotkey when their specs name the same key on this platform, however they are written: the runtime compares them through [`host.keys.normalize`](keys.md#host-keys-normalize), so `"Cmd+S"` beside an inherited `"Ctrl+S"` is one claim on every platform (both are the Ctrl role, which is Command on a Mac). The key is spoken on focus in the platform's words through [`host.keys.describe`](keys.md#host-keys-describe) — `"Alt+V"` is "Option+V" on a Mac, and a tab's `hotkeyLabel` is said the same way when it is a key spec. A hotkey the host would refuse — one that is not a key spec, one the system keeps for itself, a modifier tap, or a key the platform has no code for (the reasons [`host.keys.check`](keys.md#host-keys-check) marks "raises") — is reported when the overlay binds, naming the control, left out of the `[keys] … holds:` line with its reason instead of being registered, and not spoken when the control or tab is focused. A hotkey the host claims but cannot hold at that moment — another module, program or the system holds it ([`host.hotkey.register`](hotkey.md#host-hotkey-register)'s `id, err`) — is kept, since the host tries the claim again, and listed in that line as not held now, with the error's message.
@@ -999,9 +1001,9 @@ ov:addHotspotToggle({
 
 ## O\:addCustomButton(opts) {#o-addcustombutton}
 
-**Signature:** `O:addCustomButton(opts) -> Control`, where `opts: { label: string, onActivate: (overlay) -> (), text: ((overlay) -> string?)?, typeLabel: string?, editable: boolean?, opensMenu: boolean?, hotkey: string?, hotkeyKeepsFocus: boolean?, when: ((overlay) -> boolean)? }`
+**Signature:** `O:addCustomButton(opts) -> Control`, where `opts: { label: string, onActivate: (overlay, press: { count: number }?) -> (), text: ((overlay) -> string?)?, typeLabel: string?, editable: boolean?, opensMenu: boolean?, hotkey: string?, hotkeyKeepsFocus: boolean?, when: ((overlay) -> boolean)? }`
 
-Appends a button that runs a Luau callback on activation. `onActivate` receives the overlay itself (so a header control can reach the active context).
+Appends a button that runs a Luau callback on activation. `onActivate` receives the overlay itself (so a header control can reach the active context), and, when the control's `hotkey` pressed it, that press: `press.count` is the key's count of quick repeats, 1, 2, 3 ([`O:group`](#o-group), since version 0.12 of the runtime). Space and Return hand it none.
 
 `onActivate` is called **guarded**. A control whose action throws says so rather than going silent: the host used to catch the error at the key dispatch and write a line, while the person who pressed it heard nothing at all — which is indistinguishable from a control that quietly did its job. It runs in the handler of the key or hotkey, and may read there; one that reads and then acts checks that the overlay is still where it was before it acts ([Where a hook runs](#where-a-hook-runs)).
 
@@ -1012,6 +1014,17 @@ Appends a button that runs a Luau callback on activation. `onActivate` receives 
 `editable` says that activating this control leaves the caret in a text field, so **Space belongs to the application** from then on. Return still activates, because it is the only way back into the field after tabbing away. This is the same rule an `addOCREdit` gets by virtue of its kind; the flag is for controls that reach their field some other way (a coordinate, an accessibility element) and would otherwise swallow the space in "White 80s".
 
 ```luau
+-- Once reads the bank's name, twice quickly reads its whole path. `bankName` and `bankPath` are
+-- the module's own.
+ov:addCustomButton({
+  label = "Bank",
+  hotkey = "Alt+B",
+  onActivate = function(o, press)
+    local twice = press ~= nil and press.count == 2
+    host.speech.output(twice and bankPath(o) or bankName(o))
+  end,
+})
+
 -- Komplete Kontrol's library browser hides the instrument loaded behind it, so the overlay
 -- offers a way to close it -- and offers it only while one is actually open.
 ov:addCustomButton({
@@ -1037,7 +1050,7 @@ None. It never answers an error value. An `onActivate` that raises is logged, `<
 
 ## O\:addStepper(opts) {#o-addstepper}
 
-**Signature:** `O:addStepper(opts) -> Control`, where `opts: { label: string, text: (overlay) -> string?, onStep: (dir: number, overlay) -> false?, onActivate: ((overlay) -> ())?, settle: number?, typeLabel: string?, hotkey: string?, hotkeyKeepsFocus: boolean?, when: ((overlay) -> boolean)? }`
+**Signature:** `O:addStepper(opts) -> Control`, where `opts: { label: string, text: (overlay) -> string?, onStep: (dir: number, overlay) -> false?, onActivate: ((overlay, press: { count: number }?) -> ())?, settle: number?, typeLabel: string?, hotkey: string?, hotkeyKeepsFocus: boolean?, when: ((overlay) -> boolean)? }`
 
 Appends a **value changed with Left and Right**, where the module knows how to change it.
 
@@ -1046,7 +1059,7 @@ Announced as a slider, because that is what it is to the person using it; how it
 Use it where `addSlider` cannot serve. That one finds its thumb by matching an image, which needs a template captured for one plug-in at one size — no use for a rotary drawn as an arc, a bar with two handles, or anything in a window the user can resize. What such a control does have is a value printed beside it and something that moves it, and that is all a stepper is.
 
 - `onStep(dir, overlay)` — `dir` is `-1` for Left and `+1` for Right. Called guarded, in the handler of the arrow key, where it may read ([Where a hook runs](#where-a-hook-runs)); one that raises says `"<label> could not be moved"`. It returns nothing, or `false` for a press that moved nothing and has nothing of its own to say — one that came while an earlier step is still being carried out, whose own announcement is on its way: nothing is watched or announced for it.
-- `onActivate` — optional, and what a **press** means. Without it, Space and Return are still captured on a stepper (it is not an inert control) and then do nothing at all, which is a promise without an action. ON:EAR's two use it for "double-click to put this back to its default", which is one keystroke instead of twenty.
+- `onActivate` — optional, and what a **press** means. Without it, Space and Return are still captured on a stepper (it is not an inert control) and then do nothing at all, which is a promise without an action. ON:EAR's two use it for "double-click to put this back to its default", which is one keystroke instead of twenty. Called `(overlay, press)`, `press` the hotkey's when its `hotkey` pressed it, as a custom button's ([`O:addCustomButton`](#o-addcustombutton)).
 - `settle` — how long to wait **at most** for the value to change before announcing it anyway, in milliseconds, default 600. Not how long to wait: see [`O:watch`](#o-watch). A step that goes through a menu — [`O:chooseMenuItem`](#o-choosemenuitem), whose item is clicked only once the menu is seen — needs a longer one. It is read after each `onStep` returns, from the returned control's `settle` field, so an `onStep` that knows nothing will change — a zoom already at its last step — sets it short on the control before it returns, and the value is said at once.
 
 `text` is read once before each step and each press — the value the announcement waits to see change — and again until it does. What is announced afterwards always comes from reading `text` again, never from what the step intended. A control that reports its own intention rather than the application's state is the failure this project keeps returning to. A `text` that raises reads as nothing: the watch waits until `settle` and the value is said without it (see the top of this page).
@@ -1844,11 +1857,11 @@ None. It never answers an error value.
 
 **Raises** for a call after the overlay is bound: `overlay '<label>': enableUiaPassThrough must be called BEFORE binding it — the binding is what starts it`.
 
-## O\:activate(index) {#o-activate}
+## O\:activate(index, press?) {#o-activate}
 
-**Signature:** `O:activate(index: number?) -> ()`
+**Signature:** `O:activate(index: number?, press: { count: number }?) -> ()`
 
-Activates the control at `index` (defaults to the focused control). Behaviour by kind: `hotspot` clicks `at` and speaks `"label, activated"` — and, with `menuItem`, chooses that item once a menu test sees the menu (see [`O:chooseMenuItem`](#o-choosemenuitem)); `custom` calls `onActivate(self)`; `ocr` reads the region again, off the event loop, says it, and then clicks the region centre, unless the overlay or the user has moved on by then (see [`O:addOCRButton`](#o-addocrbutton)); `gtoggle` clicks the region centre and re-reads state after ~150 ms; `static` says the control again, interrupting, as its hotkey does (see [`O:addStaticText`](#o-addstatictext)); `ocredit` reads and clicks as `ocr` does ([`O:addOCREdit`](#o-addocredit)); `gbutton` searches, then clicks or drags where it was found ([`O:addGraphicalButton`](#o-addgraphicalbutton)); `hotspottoggle` clicks its point and says its state once it has changed ([`O:addHotspotToggle`](#o-addhotspottoggle)); `stepper` runs its `onActivate`, and says the value it then reads. A slider, a tab control and a pass-through stop do nothing here. A control that cannot be placed now (a [scale](#o-scale) with no factor, a region function with no answer) clicks nothing and says so: `"<label> is not available now"`, or for an OCR control the `"cannot be read now"` of its announcement. A hidden control asked by its `index` does nothing; the focused one hidden since acts on the visible control that shares its hotkey, or says `"<label> is not available now"` ([`O:group`](#o-group)). No-op for a missing control.
+Activates the control at `index` (defaults to the focused control). `press` is handed on to the control's `onActivate`: a control's hotkey hands its own press here ([`O:group`](#o-group)), and a module may hand one it got from a key of its own; nothing reads it but `onActivate`. Behaviour by kind: `hotspot` clicks `at` and speaks `"label, activated"` — and, with `menuItem`, chooses that item once a menu test sees the menu (see [`O:chooseMenuItem`](#o-choosemenuitem)); `custom` calls `onActivate(self, press)`; `ocr` reads the region again, off the event loop, says it, and then clicks the region centre, unless the overlay or the user has moved on by then (see [`O:addOCRButton`](#o-addocrbutton)); `gtoggle` clicks the region centre and re-reads state after ~150 ms; `static` says the control again, interrupting, as its hotkey does (see [`O:addStaticText`](#o-addstatictext)); `ocredit` reads and clicks as `ocr` does ([`O:addOCREdit`](#o-addocredit)); `gbutton` searches, then clicks or drags where it was found ([`O:addGraphicalButton`](#o-addgraphicalbutton)); `hotspottoggle` clicks its point and says its state once it has changed ([`O:addHotspotToggle`](#o-addhotspottoggle)); `stepper` runs its `onActivate(self, press)`, and says the value it then reads. A slider, a tab control and a pass-through stop do nothing here. A control that cannot be placed now (a [scale](#o-scale) with no factor, a region function with no answer) clicks nothing and says so: `"<label> is not available now"`, or for an OCR control the `"cannot be read now"` of its announcement. A hidden control asked by its `index` does nothing; the focused one hidden since acts on the visible control that shares its hotkey, or says `"<label> is not available now"` ([`O:group`](#o-group)). No-op for a missing control.
 
 ```luau
 -- Space and Return are bound to this by the runtime, so a module needs it only to press a
@@ -1860,6 +1873,11 @@ end)
 
 -- With an index, counted in `ov.controls`:
 -- ov:activate(1)
+
+-- A key of the module's own that presses control 3 as its hotkey would, count and all.
+host.hotkey.register("Ctrl+Alt+3", function(press)
+  if ov.active then ov:activate(3, press) end
+end)
 ```
 
 ### Returns {#o-activate-returns}
@@ -2879,7 +2897,7 @@ None. It never answers an error value. A dialog that did not come is `fn(o, trip
 
 ## trip\:handOver(spec) — handing the keyboard to the plug-in {#trip-handover}
 
-**Signature:** `trip:handOver(spec: { kind: "typing" | "browse" | "keys", keys: { string }?, onKey: ((overlay, trip, key: string, mods) -> boolean?)?, ends: ((overlay, trip, info, answer: (over: boolean) -> ()) -> ())?, onEnd: (overlay, trip, how: "ended" | "done" | "given_up", info, err: Error?) -> () }) -> true | (false, Error)`, where `info = { key: string?, passed: { string }, ms: number }`
+**Signature:** `trip:handOver(spec: { kind: "typing" | "browse" | "keys", keys: { string }?, onKey: ((overlay, trip, key: string, mods, press: { count: number }) -> boolean?)?, ends: ((overlay, trip, info, answer: (over: boolean) -> ()) -> ())?, onEnd: (overlay, trip, how: "ended" | "done" | "given_up", info, err: Error?) -> () }) -> true | (false, Error)`, where `info = { key: string?, passed: { string }, ms: number }`
 
 A wait of a [trip](#o-inplugin) in which the user works in the plug-in **itself**: types a new name into its own text field, chooses in its own preset browser, or presses keys the module answers one by one. The runtime holds only the keys that end it, and while it holds them the plug-in has the rest of the keyboard; nothing is recorded of what the user types. The page stays where the trip left it — behind the plug-in, not hidden — the group stays [away](#o-away) and quiet, and nothing is said. Since version 0.9 of the runtime: a module that calls it depends on `"com.platform.overlay >= 0.9"`.
 
@@ -2897,7 +2915,7 @@ Called from `act`, a wait's function or one of their callbacks, while the trip i
 
 **Why two captures and a flag.** While a module's menu flag counts for the window in front the hook lets every captured key through to it and records it for `passedThrough`, together with every unmodified Return and Escape; and a flag counts only while its module holds a capture, for the window its captures are scoped to ([`menuOpen`](keys.md#host-keys-menuopen)). The captures make the flag count, the scope keeps it to the plug-in's window, and what goes through is recorded — which is how the runtime knows the user pressed Return in the plug-in's own field without taking the key from it.
 
-**The event.** The record is drained by the VM's menu tick (every 150 ms), which hands the keys it holds to the hand-over and decides nothing by time. The first end key is the event: logged (`… Return went through to the plug-in — the hand-over's end is looked at`), and the end is looked at where the trip can arrive — on the module's next turn, the plug-in's window in front (afresh) and an overlay of the group on the held control, as a wait's arrival. A key that is not an end key is logged as gone through, and is no end. For `"keys"` the event is `onKey` answering `true`; it is asked for each captured key, as a handler, with the plug-in's window in front, and a key pressed with another window in front, or after the event, is not handed to it.
+**The event.** The record is drained by the VM's menu tick (every 150 ms), which hands the keys it holds to the hand-over and decides nothing by time. The first end key is the event: logged (`… Return went through to the plug-in — the hand-over's end is looked at`), and the end is looked at where the trip can arrive — on the module's next turn, the plug-in's window in front (afresh) and an overlay of the group on the held control, as a wait's arrival. A key that is not an end key is logged as gone through, and is no end. For `"keys"` the event is `onKey` answering `true`; it is asked for each captured key, as a handler, with the plug-in's window in front, and a key pressed with another window in front, or after the event, is not handed to it. It is handed the key's `mods` and `press` as the capture's callback got them — `press.count`, the key's count of quick repeats ([`host.keys.capture`](keys.md#host-keys-capture)), since version 0.12 of the runtime.
 
 **A key taken after all.** When a `"typing"` or `"browse"` end key reaches its capture's callback instead — the flag did not count for the window in front, because something cleared it — it never reached the plug-in, so it is no event: the log says so (`… Return was taken, not let through — the menu flag did not count for the window in front (…)`), the scope and the flag are set again with the plug-in's window in front, and `"<label>: Return did not reach the plug-in; press it again."` is said behind the screen reader.
 

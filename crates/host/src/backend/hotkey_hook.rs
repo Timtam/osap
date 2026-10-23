@@ -645,6 +645,15 @@ pub(crate) enum Route {
     Os { time: u32 },
 }
 
+impl Route {
+    /// The press's stamp on the tick clock, whichever way it came.
+    pub(crate) fn time(self) -> u32 {
+        match self {
+            Route::Hook { time, .. } | Route::Passed { time, .. } | Route::Os { time } => time,
+        }
+    }
+}
+
 /// What the pump does with a `WM_HOTKEY`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OsPress {

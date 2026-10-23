@@ -75,6 +75,7 @@ use crate::ocr::lua::{owner_of, ReadAnswer, ReadHost};
 use crate::ocr::sched::Owner;
 use crate::ocr::types::{current_priority, enter_priority, Priority};
 use crate::snapshot::{Answer, PendingSnap};
+use crate::taps::Press;
 use crate::task::{self, Ctx, Ran};
 use crate::webview_lua::PageCall;
 
@@ -128,13 +129,25 @@ pub(crate) enum Event {
     /// module's new registration of the same combination may take the press (`hotkey_target`).
     /// `seq`, the count of key-downs let through when it came in (`backend::Pressed::seq`), decides
     /// with `front` whether a queued press whose registration went may go to the program in front.
-    Hotkey { id: i32, owner: usize, front: Option<isize>, seq: u32, binding: Option<(u32, u8)>, spec: String },
+    /// `press`: its count of quick repeats, taken as it arrived (taps.rs), so one that waits keeps
+    /// the count it had.
+    Hotkey { id: i32, owner: usize, front: Option<isize>, seq: u32, binding: Option<(u32, u8)>, spec: String, press: Press },
     /// A captured key the hook took for module `owner`, for the capture `token`, `pressed` as
     /// `backend::Pressed` says — the window in front then, the count of keys let through, the
     /// physical key; `repeat` is the keyboard's auto-repeat of a held key. `let_go`: the modules
     /// that let go of it before it came to `owner`, in that order — empty for a key from the hook;
-    /// none of them is offered it again (`captures::pass_on_released`).
-    Key { owner: usize, token: i64, vk: u32, mods: u8, repeat: bool, pressed: crate::backend::Pressed, let_go: Vec<usize> },
+    /// none of them is offered it again (`captures::pass_on_released`). `press`: its count of quick
+    /// repeats, as for a hotkey.
+    Key {
+        owner: usize,
+        token: i64,
+        vk: u32,
+        mods: u8,
+        repeat: bool,
+        pressed: crate::backend::Pressed,
+        let_go: Vec<usize>,
+        press: Press,
+    },
     Pad { token: i64, kind: PadKind, event: Box<PadEvent>, delivery: Delivery },
     /// The window that came to the front; `upto`, the newest trigger number when it arrived: a
     /// trigger made after that, by an earlier queued handler, does not get it.

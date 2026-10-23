@@ -1875,6 +1875,24 @@ pub trait Backend {
     /// WHILE its own combination is still pressed, so anything it synthesises afterwards
     /// arrives with those modifiers attached — see the note in the overlay runtime.
     fn modifiers_down(&self) -> bool;
+    /// The user's double-click time: the interval in which quick repeats of a key count on
+    /// (`press.count`, taps.rs) for a binding that names no `within` of its own. Asked at every
+    /// press, so a setting the user changes holds from the next press on. Windows:
+    /// `GetDoubleClickTime`; macOS: `NSEvent.doubleClickInterval`. The default, for a platform with
+    /// neither, is Windows' default, [`DEFAULT_DOUBLE_CLICK`].
+    fn double_click_time(&self) -> std::time::Duration {
+        DEFAULT_DOUBLE_CLICK
+    }
+    /// The moment the last [`Backend::pump_pending`] began taking the presses queued for the host —
+    /// hotkeys first, captured keys after them — so that a press made before it has been handed
+    /// over by the time the pump returns. What a `taps = "final"` sequence's deadline is measured
+    /// against (taps.rs, `tick`), so that a press made before the deadline, and still queued
+    /// while the tick ran, goes on with its sequence instead of following it as a second. `None`
+    /// before the first pump, and for a backend that queues no presses (the default): the tick's
+    /// own moment then.
+    fn input_taken_at(&self) -> Option<std::time::Instant> {
+        None
+    }
     /// What the keyboard layout the user is typing in types for `vk` with the modifiers in
     /// `mask`, and whether that is a dead key — the one question `host.keys.check` needs the
     /// running system for, asked only for the shape [`layout_question`] names. `None` when it
@@ -1931,12 +1949,36 @@ pub struct DroppedInput {
     pub hotkeys: Vec<i32>,
 }
 
+/// The double-click time where the system names none ([`Backend::double_click_time`]): Windows'
+/// default.
+pub const DEFAULT_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A hotkey press as the backend hands it to the host ([`HostEvents::on_hotkey`]), once: a late
+/// hook's report and the system's delivery of the same press are paired before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HotkeyPress {
+    /// How many key-downs the hook or the tap had let through to the program when it came in
+    /// ([`Pressed::seq`]): as the hook matched it, or as the system delivered it.
+    pub seq: u32,
+    /// How many of those are the press's own key-down: 1 on a Mac, whose tap sees a hotkey's
+    /// key-down at the HID level and lets it go on before Carbon matches it (queue.rs,
+    /// `push_hotkey`) — and, with no tap in, counts nothing, so no other key can be in the count
+    /// either. On Windows 0 for a press the hook swallowed, or was not called for, which only
+    /// `RegisterHotKey` delivered; and 1 for one the hook let through on purpose for
+    /// `RegisterHotKey` to deliver (a screen reader's modifier held), whose key-down it counted as it
+    /// let it go on (windows.rs, `settle_hotkey`). What the host's count of quick repeats takes for
+    /// no other key going down (taps.rs).
+    pub own: u32,
+    /// When it was pressed, as near as the platform says: Windows from the key event's or the
+    /// message's stamp on the tick clock, a Mac when Carbon handed it over. What the quick repeats
+    /// are timed by, rather than when the pump got to it.
+    pub at: std::time::Instant,
+}
+
 /// Sink for OS events, implemented by the host to bridge into Luau callbacks.
 pub trait HostEvents {
-    /// Hotkey `id` was pressed; `seq` is how many key-downs the hook or the tap had let through to
-    /// the program when it came in ([`Pressed::seq`]): as the hook matched it, or as the system
-    /// delivered it.
-    fn on_hotkey(&mut self, id: i32, seq: u32);
+    /// Hotkey `id` was pressed, as `press` says.
+    fn on_hotkey(&mut self, id: i32, press: HotkeyPress);
     fn on_window_activate(&mut self, win: WinInfo);
     /// The keyboard focus moved (possibly within the same top-level window).
     fn on_focus_change(&mut self);
@@ -4769,8 +4811,14 @@ mod pass_on_tests {
         assert!(now.contains("super::tap::held_back(code)"));
         assert!(now.contains("front: super::ax::foreground_window_id(),"), "asked afresh, not the tap's idea");
         assert!(now.contains("let_through: super::tap::let_through(),"));
-        // A hotkey press carries the count the tap had when Carbon handed it over.
-        assert!(body(QUEUE, "pub fn push_hotkey(").contains("push((id, super::tap::let_through()))"));
+        // A hotkey press carries the count the tap had when Carbon handed it over, and when.
+        assert!(body(QUEUE, "pub fn push_hotkey(").contains("push((id, super::tap::let_through(), Instant::now()))"));
+        // Handed on with its own key-down in that count, which the quick repeats take for no other
+        // key; and after the moment the tick measures a `"final"` sequence's end by.
+        let drain = body(QUEUE, "pub fn drain(");
+        let taken = drain.find("TAKEN.with(|t| t.set(Some(Instant::now())));").expect("the moment noted");
+        let handed = drain.find("events.on_hotkey(id, crate::backend::HotkeyPress { seq, own: 1, at });").expect("own: 1");
+        assert!(taken < drain.find("in HOTKEYS.with(|q| std::mem::take(").unwrap() && handed < drain.find("events.on_key(").unwrap());
     }
 }
 

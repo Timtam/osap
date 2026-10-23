@@ -15,8 +15,8 @@ use crate::backend::{HostEvents, Taken};
 
 thread_local! {
     /// Hotkey presses, each with the count of key-downs the tap had let through when Carbon
-    /// handed it over (`tap::let_through`).
-    static HOTKEYS: RefCell<Vec<(i32, u32)>> = const { RefCell::new(Vec::new()) };
+    /// handed it over (`tap::let_through`), and when that was.
+    static HOTKEYS: RefCell<Vec<(i32, u32, Instant)>> = const { RefCell::new(Vec::new()) };
     /// Foreground changes, as the window id at the time. Resolved to a `WinInfo` in
     /// `drain` rather than in the callback: reading a window's geometry and its owner's
     /// name is an accessibility round-trip into another process, and that is not something
@@ -27,15 +27,19 @@ thread_local! {
     static FOCUS_DIRTY: Cell<bool> = const { Cell::new(false) };
     /// Deadlines for the re-check ladder — see `drain`.
     static RECHECKS: RefCell<Vec<Instant>> = RefCell::new(Vec::new());
+    /// When the last drain began taking the presses, [`HOTKEYS`] first and [`KEYS`] after them
+    /// ([`taken_at`]).
+    static TAKEN: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 /// A hotkey press, as Carbon hands it over: with the count of key-downs the tap has let through by
 /// the time Carbon's event reaches this thread (`tap::let_through`). The tap, at the HID level,
 /// sees the hotkey's own key-down before Carbon matches it, so that key is in the count; a key typed
 /// after it is not, unless it passed the tap before Carbon's event came — the Mac session confirms
-/// the first (TODO.md, "The pass-on never ran on a Mac").
+/// the first (TODO.md, "The pass-on never ran on a Mac"). The moment is this one: Carbon's handler
+/// runs on this thread, as the tap does, so a press and a captured key are timed alike.
 pub fn push_hotkey(id: i32) {
-    HOTKEYS.with(|q| q.borrow_mut().push((id, super::tap::let_through())));
+    HOTKEYS.with(|q| q.borrow_mut().push((id, super::tap::let_through(), Instant::now())));
 }
 
 pub fn push_activated(window: isize) {
@@ -65,8 +69,14 @@ pub fn push_key(key: Taken) {
 /// drained yet (`Backend::drop_queued_input`).
 pub fn drop_pending() -> crate::backend::DroppedInput {
     let keys = KEYS.with(|q| std::mem::take(&mut *q.borrow_mut())).into_iter().map(|k| (k.vk, k.mask, k.owner)).collect();
-    let hotkeys = HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut())).into_iter().map(|(id, _)| id).collect();
+    let hotkeys = HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut())).into_iter().map(|(id, _, _)| id).collect();
     crate::backend::DroppedInput { keys, hotkeys }
+}
+
+/// When the last [`drain`] began taking the presses (`Backend::input_taken_at`): the tap and Carbon
+/// queue on this thread, so a press queued before it is in that drain.
+pub fn taken_at() -> Option<Instant> {
+    TAKEN.with(Cell::get)
 }
 
 pub fn mark_focus_dirty() {
@@ -138,8 +148,11 @@ fn arm_recheck_ladder() {
 pub fn drain(events: &mut dyn HostEvents) {
     super::system::drain(events);
 
-    for (id, seq) in HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut())) {
-        events.on_hotkey(id, seq);
+    TAKEN.with(|t| t.set(Some(Instant::now())));
+    // The press's own key-down is in `seq` (`push_hotkey`): the count of quick repeats takes it for
+    // no other key going down.
+    for (id, seq, at) in HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut())) {
+        events.on_hotkey(id, crate::backend::HotkeyPress { seq, own: 1, at });
     }
 
     let activated = ACTIVATED.with(|q| std::mem::take(&mut *q.borrow_mut()));

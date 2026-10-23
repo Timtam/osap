@@ -858,9 +858,10 @@ end
 -- passedThrough, captured or not, and so is any other key it captures; otherwise a capture of it,
 -- scoped there or everywhere, takes it, and its callback runs through the mailbox as a captured
 -- key's does (`T.call("key", …)`); otherwise it reaches the application unrecorded. A disabled
--- module's captures are out of the hook. `mods` as a capture's callback gets them (default none).
+-- module's captures are out of the hook. `mods` as a capture's callback gets them (default none), and
+-- `press` after them, the host's count of the key's quick repeats (none unless given).
 -- What became of the key: "passed", "taken" or "application".
-function T.typed(key, mods)
+function T.typed(key, mods, press)
   mods = mods or { shift = false, ctrl = false, alt = false, win = false }
   local plain = not (mods.shift or mods.ctrl or mods.alt or mods.win)
   local front = S.front and S.front.id
@@ -873,7 +874,7 @@ function T.typed(key, mods)
   end
   if captured and inScope then
     S.epoch += 1
-    T.call("key", S.captured[key], mods)
+    T.call("key", S.captured[key], mods, press)
     return "taken"
   end
   return "application"

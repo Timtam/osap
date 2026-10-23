@@ -36,6 +36,10 @@ pub struct StubBackend {
     sends: Cell<bool>,
     /// What `watch_keys` answers when a test refuses the hook: none by default.
     hook_refused: RefCell<Option<HostError>>,
+    /// The double-click time a test set, for `double_click_time`: the default's, 500 ms, until then.
+    double_click: Cell<Option<std::time::Duration>>,
+    /// When a test says the pump took the queued presses, for `input_taken_at`: never, until then.
+    input_taken: Cell<Option<std::time::Instant>>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -92,6 +96,16 @@ impl StubBackend {
     /// or installs it again (`None`).
     pub(crate) fn refuse_hook(&self, why: Option<HostError>) {
         *self.hook_refused.borrow_mut() = why;
+    }
+
+    /// Sets the user's double-click time, as the user changes it in the system's settings.
+    pub(crate) fn set_double_click(&self, d: std::time::Duration) {
+        self.double_click.set(Some(d));
+    }
+
+    /// The pump took the presses queued until `at`, as a backend's pump notes it.
+    pub(crate) fn set_input_taken(&self, at: std::time::Instant) {
+        self.input_taken.set(Some(at));
     }
 }
 
@@ -204,6 +218,13 @@ impl Backend for StubBackend {
     }
     fn modifiers_down(&self) -> bool {
         false
+    }
+    fn double_click_time(&self) -> std::time::Duration {
+        self.double_click.get().unwrap_or(super::DEFAULT_DOUBLE_CLICK)
+    }
+    // No presses to queue: only what a test says.
+    fn input_taken_at(&self) -> Option<std::time::Instant> {
+        self.input_taken.get()
     }
     fn native_menu_open(&self) -> bool {
         false

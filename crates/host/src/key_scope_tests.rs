@@ -19,12 +19,17 @@
 //! `set_front`, and `type_through` for a key typed past every capture to the program) and records
 //! what would be sent (`take_passed`), sending nothing. A key the hook takes carries the stub's
 //! count of keys let through at that moment, as the hook's would ([`at`]).
+//!
+//! **Quick repeats** (taps.rs) are counted at the same delivery: a key timed by when the hook queued
+//! it (`Pressed::queued`, which the tests set), a hotkey by the press the pump hands over
+//! (`hotkey_arrive_in`); the tick that hands a `"final"` binding its sequence is
+//! [`taps::tick`], the pump having taken the presses queued until a moment the test names.
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mlua::{Function, Lua, Value};
 
@@ -35,6 +40,7 @@ use crate::image_search::VmOwner;
 use crate::mailbox::{self, Delivered, Event, MailHost, Mailboxes, Opened, Why};
 use crate::ocr::lua::{OcrState, ReadHost};
 use crate::ocr::service::{Service, ShutdownHandle};
+use crate::taps::{self, Press, Taps};
 use crate::task::{self, Tasks};
 use crate::task_tests::{worker, Fake};
 
@@ -55,6 +61,8 @@ struct Host {
     /// (module, context, message) of every error reported.
     errors: RefCell<Vec<(usize, String, String)>>,
     captures: Captures,
+    /// The count of quick repeats, as the host keeps it (taps.rs).
+    taps: crate::taps::Counter,
     /// Hotkey registrations, as the host keeps them (`Event::Hotkey`, opened by the host's own
     /// `open_hotkey_in`).
     hotkeys: RefCell<HashMap<i32, crate::HotkeyReg>>,
@@ -112,11 +120,11 @@ impl MailHost for Host {
     }
     fn open(&self, idx: usize, _: &Lua, ev: Event) -> Opened {
         match ev {
-            Event::Key { owner, token, vk, mods, repeat, pressed, let_go } => {
-                captures::open_key(self, owner, token, vk, mods, repeat, pressed, let_go)
+            Event::Key { owner, token, vk, mods, repeat, pressed, let_go, press } => {
+                captures::open_key(self, owner, token, vk, mods, repeat, pressed, let_go, press)
             }
-            Event::Hotkey { id, owner, front, seq, binding, spec } => {
-                crate::open_hotkey_in(self, &self.hotkeys, id, owner, front, seq, binding, &spec)
+            Event::Hotkey { id, owner, front, seq, binding, spec, press } => {
+                crate::open_hotkey_in(self, &self.hotkeys, id, owner, front, seq, binding, &spec, press)
             }
             Event::Call { f, args, what, .. } => mailbox::open_call(idx, f, args, what),
             _ => Opened::Gone,
@@ -128,6 +136,9 @@ impl MailHost for Host {
 impl KeyHost for Host {
     fn captures(&self) -> &Captures {
         &self.captures
+    }
+    fn taps(&self) -> &crate::taps::Counter {
+        &self.taps
     }
     fn key_backend(&self) -> &dyn Backend {
         &self.backend
@@ -159,6 +170,7 @@ fn host() -> Rc<Host> {
         epoch: Cell::new(0),
         errors: RefCell::new(Vec::new()),
         captures: Captures::default(),
+        taps: crate::taps::Counter::default(),
         hotkeys: RefCell::new(HashMap::new()),
         backend: StubBackend::default(),
         _loop: crate::loop_guard::mark_for_a_test(),
@@ -568,10 +580,10 @@ fn a_busy_module_s_hotkey_goes_to_its_new_registration_and_never_to_another_modu
     let register = |id: i32, lua: &Lua, owner: usize, word: &str| {
         let f: Function = lua.load(format!("return function() heard[#heard + 1] = '{word}' end")).eval().unwrap();
         let cb = lua.create_registry_value(f).unwrap();
-        let reg = crate::HotkeyReg { module_idx: owner, lua: lua.clone(), cb, spec: "Alt+V".into(), binding, live: true, foreground: false };
+        let reg = crate::HotkeyReg { module_idx: owner, lua: lua.clone(), cb, spec: "Alt+V".into(), binding, live: true, foreground: false, taps: Default::default() };
         h.hotkeys.borrow_mut().insert(id, reg);
     };
-    let press = |id: i32| Event::Hotkey { id, owner: 1, front: Some(W1), seq: 0, binding, spec: "Alt+V".into() };
+    let press = |id: i32| Event::Hotkey { id, owner: 1, front: Some(W1), seq: 0, binding, spec: "Alt+V".into(), press: Press::at_once(1) };
     register(5, &a, 1, "old");
     assert_eq!(event(&h, &a, 1, r#"wait("w")"#), Delivered::Parked);
     assert_eq!(mailbox::deliver(&*h, 1, &a, press(5)), Delivered::Queued);
@@ -763,10 +775,10 @@ fn a_hotkey_its_busy_module_released_goes_to_the_program_in_front() {
     let register = |id: i32, binding: Option<(u32, u8)>| {
         let f: Function = a.load("return function() heard[#heard + 1] = 'hotkey' end").eval().unwrap();
         let cb = a.create_registry_value(f).unwrap();
-        let reg = crate::HotkeyReg { module_idx: 1, lua: a.clone(), cb, spec: "Alt+V".into(), binding, live: true, foreground: false };
+        let reg = crate::HotkeyReg { module_idx: 1, lua: a.clone(), cb, spec: "Alt+V".into(), binding, live: true, foreground: false, taps: Default::default() };
         h.hotkeys.borrow_mut().insert(id, reg);
     };
-    let press = |id: i32, binding| Event::Hotkey { id, owner: 1, front: Some(W1), seq: h.backend.let_through(), binding, spec: "Alt+V".into() };
+    let press = |id: i32, binding| Event::Hotkey { id, owner: 1, front: Some(W1), seq: h.backend.let_through(), binding, spec: "Alt+V".into(), press: Press::at_once(1) };
     // Waits, has hotkey `id` pressed, unregisters it, and runs it with `front` in front.
     let round = |id: i32, binding: Option<(u32, u8)>, front: isize| {
         register(id, binding);
@@ -884,10 +896,10 @@ fn a_key_typed_after_it_reached_the_program_first_and_it_is_not_passed_on() {
     let round = |id: i32, typed: bool| {
         let f: Function = a.load("return function() heard[#heard + 1] = 'hotkey' end").eval().unwrap();
         let cb = a.create_registry_value(f).unwrap();
-        let reg = crate::HotkeyReg { module_idx: 1, lua: a.clone(), cb, spec: "Alt+V".into(), binding: alt_v, live: true, foreground: false };
+        let reg = crate::HotkeyReg { module_idx: 1, lua: a.clone(), cb, spec: "Alt+V".into(), binding: alt_v, live: true, foreground: false, taps: Default::default() };
         h.hotkeys.borrow_mut().insert(id, reg);
         assert_eq!(event(&h, &a, 1, r#"wait("w")"#), Delivered::Parked);
-        let press = Event::Hotkey { id, owner: 1, front: Some(W1), seq: h.backend.let_through(), binding: alt_v, spec: "Alt+V".into() };
+        let press = Event::Hotkey { id, owner: 1, front: Some(W1), seq: h.backend.let_through(), binding: alt_v, spec: "Alt+V".into(), press: Press::at_once(1) };
         assert_eq!(mailbox::deliver(&*h, 1, &a, press), Delivered::Queued);
         if typed {
             h.backend.type_through();
@@ -925,7 +937,7 @@ fn a_key_is_not_passed_on_to_a_screen_reader_or_a_hotkey_and_goes_on_its_own_key
     // B's hotkey holds Ctrl+V at the system: A's Ctrl+V is not sent, whatever else allows it.
     let f: Function = b.load("return function() end").eval().unwrap();
     let cb = b.create_registry_value(f).unwrap();
-    let reg = crate::HotkeyReg { module_idx: 2, lua: b.clone(), cb, spec: "Ctrl+V".into(), binding: Some((ctrl_v, ctrl)), live: true, foreground: false };
+    let reg = crate::HotkeyReg { module_idx: 2, lua: b.clone(), cb, spec: "Ctrl+V".into(), binding: Some((ctrl_v, ctrl)), live: true, foreground: false, taps: Default::default() };
     h.hotkeys.borrow_mut().insert(9, reg);
     assert_eq!(captures::pass_on(&*h, ctrl_v, ctrl, at(&h, W1)), PassedOn::NotSent(NotPassed::HotkeyHolds));
     h.enabled.borrow_mut()[2] = false;
@@ -1052,10 +1064,10 @@ fn a_key_a_busy_module_let_go_of_goes_to_the_next_module_in_its_window_first() {
     let alt_v = backend::parse_key_spec("Alt+V").ok();
     let f: Function = a.load("return function() heard[#heard + 1] = 'A hotkey' end").eval().unwrap();
     let cb = a.create_registry_value(f).unwrap();
-    let reg = crate::HotkeyReg { module_idx: 1, lua: a.clone(), cb, spec: "Alt+V".into(), binding: alt_v, live: true, foreground: false };
+    let reg = crate::HotkeyReg { module_idx: 1, lua: a.clone(), cb, spec: "Alt+V".into(), binding: alt_v, live: true, foreground: false, taps: Default::default() };
     h.hotkeys.borrow_mut().insert(5, reg);
     assert_eq!(event(&h, &a, 1, r#"wait("w")"#), Delivered::Parked);
-    let hotkey = Event::Hotkey { id: 5, owner: 1, front: Some(W1), seq: h.backend.let_through(), binding: alt_v, spec: "Alt+V".into() };
+    let hotkey = Event::Hotkey { id: 5, owner: 1, front: Some(W1), seq: h.backend.let_through(), binding: alt_v, spec: "Alt+V".into(), press: Press::at_once(1) };
     assert_eq!(mailbox::deliver(&*h, 1, &a, hotkey), Delivered::Queued);
     h.hotkeys.borrow_mut().remove(&5);
     assert!(task::test_release(&*h, "w", Value::Nil));
@@ -1138,4 +1150,483 @@ fn a_capture_without_the_hook_answers_nil_and_records_nothing() {
     run(&a, r#"token, err = host.keys.capture("Space", function() end)"#);
     assert!(yes(&a, "return type(token) == 'number' and err == nil"));
     assert_eq!(h.backend.keys().0.len(), 1, "the capture is handed over once the hook is in");
+}
+
+// ── Quick repeats of a key: `press.count`, and `taps = "final"` (taps.rs) ───────────────────────
+
+/// A key-down of `spec` the hook took for module 1 in W1, queued `ms` after `t0` — the moment the
+/// count times it by — a repeat or not, as the pump delivers it.
+fn tap(h: &Host, spec: &str, repeat: bool, t0: Instant, ms: u64) -> Arrived {
+    let (vk, mask) = backend::parse_key_spec(spec).unwrap();
+    let pressed = Pressed { front: W1, seq: h.backend.let_through(), phys: None, queued: Some(t0 + Duration::from_millis(ms)) };
+    captures::arrive(h, vk, mask, 1, repeat, pressed)
+}
+
+/// Registers hotkey `id` on `spec` for module 1, in its VM `lua`, with `taps`: its callback the
+/// Luau function `cb` evaluates to. Held at the system, as a granted registration is.
+fn hotkey(h: &Host, lua: &Lua, id: i32, spec: &str, taps: Taps, cb: &str) {
+    let f: Function = lua.load(cb).eval().unwrap();
+    let cb = lua.create_registry_value(f).unwrap();
+    let binding = backend::parse_key_spec(spec).ok();
+    let reg = crate::HotkeyReg { module_idx: 1, lua: lua.clone(), cb, spec: spec.into(), binding, live: true, foreground: false, taps };
+    h.hotkeys.borrow_mut().insert(id, reg);
+}
+
+/// A press of hotkey `id`, made `ms` after `t0`, `own` of the key-downs let through by then its
+/// own (a Mac's tap counts a hotkey's key-down): as the pump hands it over (`on_hotkey`).
+fn hotkey_press(h: &Host, id: i32, t0: Instant, ms: u64, own: u32) -> Option<taps::Handed> {
+    let press = backend::HotkeyPress { seq: h.backend.let_through(), own, at: t0 + Duration::from_millis(ms) };
+    crate::hotkey_arrive_in(h, &h.hotkeys, id, press)
+}
+
+/// The tick, the pump having taken the presses queued until `ms` after `t0` (`input_taken_at`): a
+/// sequence a `"final"` binding waits for is handed on once due by then.
+fn tick(h: &Host, t0: Instant, ms: u64) {
+    h.backend.set_input_taken(t0 + Duration::from_millis(ms));
+    taps::tick(h);
+}
+
+const KEPT: Arrived = Arrived::Kept;
+
+/// Every press carries its count to its callback at once — 1, 2, 3 for quick presses of one key: a
+/// captured key's `press` after its `mods`, a hotkey's as its only argument — and the count starts
+/// again for a press that comes the interval or more after the one before it. The interval is the
+/// system's double-click time, read at every press, so a setting the user changes holds at the
+/// next; or the binding's own `within`. A callback that takes no `press` runs as it always did.
+#[test]
+fn every_press_carries_its_count_and_the_interval_starts_it_again() {
+    let h = host();
+    let a = vm(&h, 1);
+    h.backend.set_front(W1);
+    run(
+        &a,
+        r#"heard = {}
+        host.keys.capture("Tab", function(mods, press) heard[#heard + 1] = "tab " .. press.count end)
+        host.keys.capture("Space", function() heard[#heard + 1] = "space" end)
+        host.keys.capture("End", function(_, press) heard[#heard + 1] = "end " .. press.count end, { within = 1000 })"#,
+    );
+    let t0 = Instant::now();
+    for ms in [0, 200, 400] {
+        assert_eq!(tap(&h, "Tab", false, t0, ms), RAN);
+    }
+    // 499 ms after the press before it counts on, from that press and not the first; 500 ms is the
+    // interval itself, past it.
+    assert_eq!(tap(&h, "Tab", false, t0, 899), RAN);
+    assert_eq!(tap(&h, "Tab", false, t0, 1399), RAN);
+    assert_eq!(heard(&a), "tab 1 | tab 2 | tab 3 | tab 4 | tab 1");
+    // The user sets 300 ms: read at the next press.
+    h.backend.set_double_click(Duration::from_millis(300));
+    run(&a, "heard = {}");
+    for ms in [2000, 2250, 2600, 2850] {
+        tap(&h, "Tab", false, t0, ms);
+    }
+    assert_eq!(heard(&a), "tab 1 | tab 2 | tab 1 | tab 2");
+    // A binding's own interval, whatever the system's.
+    run(&a, "heard = {}");
+    for ms in [4000, 4900, 5850, 6900] {
+        tap(&h, "End", false, t0, ms);
+    }
+    assert_eq!(heard(&a), "end 1 | end 2 | end 3 | end 1");
+    // An old callback, with no `press`, is unaffected.
+    run(&a, "heard = {}");
+    assert_eq!(tap(&h, "Space", false, t0, 8000), RAN);
+    assert_eq!(heard(&a), "space");
+
+    // A hotkey's callback gets its press as its one argument.
+    hotkey(&h, &a, 7, "Alt+V", Taps::default(), "return function(press) heard[#heard + 1] = 'alt v ' .. press.count end");
+    run(&a, "heard = {}");
+    for ms in [9000, 9100, 9200] {
+        assert_eq!(hotkey_press(&h, 7, t0, ms, 0), Some(taps::Handed::Delivered(Delivered::Ran)));
+    }
+    assert_eq!(heard(&a), "alt v 1 | alt v 2 | alt v 3");
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// The count starts again at a press of another key, captured or a hotkey; of the same key with
+/// other modifiers, another combination; and after a key-down that reached the program in between —
+/// typed past every capture, let through, sent. A hotkey's own key-down in that count, which a Mac's
+/// tap counts before Carbon hands the press over, is no other key; one more is. A registration made
+/// again on the same combination — an overlay at every focus move — counts on, the key being the
+/// combination and not the registration.
+#[test]
+fn the_count_starts_again_at_another_key_other_modifiers_or_a_key_let_through() {
+    let h = host();
+    let a = vm(&h, 1);
+    h.backend.set_front(W1);
+    run(
+        &a,
+        r#"heard = {}
+        local function note(word) return function(_, press) heard[#heard + 1] = word .. " " .. press.count end end
+        host.keys.capture("Tab", note("tab"))
+        host.keys.capture("Shift+Tab", note("shift tab"))
+        host.keys.capture("Space", note("space"))"#,
+    );
+    hotkey(&h, &a, 7, "Alt+V", Taps::default(), "return function(press) heard[#heard + 1] = 'alt v ' .. press.count end");
+    let t0 = Instant::now();
+    tap(&h, "Tab", false, t0, 0);
+    tap(&h, "Tab", false, t0, 100);
+    tap(&h, "Space", false, t0, 200);
+    tap(&h, "Tab", false, t0, 300);
+    assert_eq!(heard(&a), "tab 1 | tab 2 | space 1 | tab 1", "another captured key");
+    run(&a, "heard = {}");
+    tap(&h, "Tab", false, t0, 400);
+    hotkey_press(&h, 7, t0, 450, 0);
+    tap(&h, "Tab", false, t0, 500);
+    assert_eq!(heard(&a), "tab 2 | alt v 1 | tab 1", "a hotkey is another key");
+    run(&a, "heard = {}");
+    tap(&h, "Shift+Tab", false, t0, 600);
+    tap(&h, "Tab", false, t0, 700);
+    assert_eq!(heard(&a), "shift tab 1 | tab 1", "other modifiers");
+    run(&a, "heard = {}");
+    tap(&h, "Tab", false, t0, 800);
+    h.backend.type_through();
+    tap(&h, "Tab", false, t0, 900);
+    assert_eq!(heard(&a), "tab 2 | tab 1", "a key-down reached the program between");
+
+    // Windows: a hotkey's key-down is in no count; a key typed between starts it again.
+    run(&a, "heard = {}");
+    hotkey_press(&h, 7, t0, 2000, 0);
+    hotkey_press(&h, 7, t0, 2100, 0);
+    h.backend.type_through();
+    hotkey_press(&h, 7, t0, 2200, 0);
+    assert_eq!(heard(&a), "alt v 1 | alt v 2 | alt v 1");
+    // A Mac: the tap counts each press's own key-down before Carbon hands the press over.
+    run(&a, "heard = {}");
+    for ms in [3000, 3100, 3200] {
+        h.backend.type_through();
+        hotkey_press(&h, 7, t0, ms, 1);
+    }
+    h.backend.type_through(); // a letter typed
+    h.backend.type_through(); // and the press's own key-down
+    hotkey_press(&h, 7, t0, 3300, 1);
+    assert_eq!(heard(&a), "alt v 1 | alt v 2 | alt v 3 | alt v 1");
+    // Made again under another id between two presses: one combination, one count.
+    run(&a, "heard = {}");
+    hotkey_press(&h, 7, t0, 4000, 0);
+    h.hotkeys.borrow_mut().remove(&7);
+    hotkey(&h, &a, 8, "Alt+V", Taps::default(), "return function(press) heard[#heard + 1] = 'again ' .. press.count end");
+    hotkey_press(&h, 8, t0, 4100, 0);
+    assert_eq!(heard(&a), "alt v 1 | again 2");
+    // A press for an id nobody holds any more is still a key going down.
+    tap(&h, "Tab", false, t0, 4200);
+    hotkey_press(&h, 7, t0, 4250, 0);
+    tap(&h, "Tab", false, t0, 4300);
+    assert_eq!(heard(&a), "alt v 1 | again 2 | tab 1 | tab 1");
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// A held key's auto-repeat never counts and never starts the count again: each repeat carries the
+/// count of the press it repeats, and the next press counts on from that press. For a `"final"`
+/// capture a repeat is no press at all: nothing runs for it, and its sequence is heard once.
+#[test]
+fn a_held_key_s_auto_repeat_never_counts() {
+    let h = host();
+    let a = vm(&h, 1);
+    h.backend.set_front(W1);
+    run(
+        &a,
+        r#"heard = {}
+        host.keys.capture("Down", function(_, press) heard[#heard + 1] = "down " .. press.count end)
+        host.keys.capture("Up", function(_, press) heard[#heard + 1] = "up " .. press.count end, { taps = "final" })"#,
+    );
+    let t0 = Instant::now();
+    tap(&h, "Down", false, t0, 0);
+    tap(&h, "Down", true, t0, 30);
+    tap(&h, "Down", true, t0, 60);
+    tap(&h, "Down", false, t0, 300);
+    tap(&h, "Down", true, t0, 330);
+    tap(&h, "Down", false, t0, 600);
+    assert_eq!(heard(&a), "down 1 | down 1 | down 1 | down 2 | down 2 | down 3");
+    run(&a, "heard = {}");
+    assert_eq!(tap(&h, "Up", false, t0, 2000), KEPT);
+    assert_eq!(tap(&h, "Up", true, t0, 2030), Arrived::Skipped);
+    assert_eq!(tap(&h, "Up", true, t0, 2060), Arrived::Skipped);
+    assert_eq!(tap(&h, "Up", false, t0, 2300), KEPT);
+    tick(&h, t0, 2799);
+    assert_eq!(heard(&a), "", "due 500 ms after the last press, not a repeat");
+    tick(&h, t0, 2800);
+    assert_eq!(heard(&a), "up 2");
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// `taps = "final"`: the callback runs once the sequence is over, with its count — one interval
+/// after its last press, by the tick, never earlier; or at once when a press of another key starts
+/// a count of its own, before that press runs. Its own `within` sets the interval. A hotkey's runs
+/// the same way. A binding without it in the same module runs at every press.
+#[test]
+fn a_final_binding_hears_its_sequence_once_with_its_count() {
+    let h = host();
+    let a = vm(&h, 1);
+    h.backend.set_front(W1);
+    run(
+        &a,
+        r#"heard = {}
+        host.keys.capture("Return", function(_, press) heard[#heard + 1] = "return " .. press.count end, { taps = "final" })
+        host.keys.capture("End", function(_, press) heard[#heard + 1] = "end " .. press.count end, { taps = "final", within = 200 })
+        host.keys.capture("Tab", function(_, press) heard[#heard + 1] = "tab " .. press.count end, { taps = "every" })"#,
+    );
+    let t0 = Instant::now();
+    for ms in [0, 200, 400] {
+        assert_eq!(tap(&h, "Return", false, t0, ms), KEPT);
+    }
+    assert_eq!(h.taps.waiting_due(), Some(t0 + Duration::from_millis(900)), "one interval after the last press");
+    tick(&h, t0, 899);
+    assert_eq!(heard(&a), "");
+    let epoch = h.epoch.get();
+    tick(&h, t0, 900);
+    assert_eq!(heard(&a), "return 3", "once, with its count");
+    assert_eq!(h.epoch.get(), epoch + 1, "the epoch turned for it, as a press's dispatch turns it");
+    tick(&h, t0, 2000);
+    assert_eq!(heard(&a), "return 3", "and only once");
+    assert_eq!(h.taps.waiting_due(), None);
+
+    // Another key ends it at once, and runs after it.
+    run(&a, "heard = {}");
+    tap(&h, "Return", false, t0, 3000);
+    tap(&h, "Return", false, t0, 3200);
+    assert_eq!(tap(&h, "Tab", false, t0, 3300), RAN);
+    assert_eq!(heard(&a), "return 2 | tab 1");
+    // A count that starts again for its own key ends it too: the next sequence is the next.
+    run(&a, "heard = {}");
+    tap(&h, "Return", false, t0, 4000);
+    tap(&h, "Return", false, t0, 4600);
+    assert_eq!(heard(&a), "return 1", "the second press came past the interval");
+    tick(&h, t0, 5100);
+    assert_eq!(heard(&a), "return 1 | return 1");
+    // Its own interval.
+    run(&a, "heard = {}");
+    tap(&h, "End", false, t0, 6000);
+    tap(&h, "End", false, t0, 6150);
+    assert_eq!(h.taps.waiting_due(), Some(t0 + Duration::from_millis(6350)));
+    tick(&h, t0, 6350);
+    assert_eq!(heard(&a), "end 2");
+
+    // A hotkey with taps = "final".
+    let fin = Taps { mode: taps::Mode::Final, within: None };
+    hotkey(&h, &a, 9, "Alt+M", fin, "return function(press) heard[#heard + 1] = 'alt m ' .. press.count end");
+    run(&a, "heard = {}");
+    for ms in [7000, 7300, 7600, 7900] {
+        assert_eq!(hotkey_press(&h, 9, t0, ms, 0), Some(taps::Handed::Kept));
+    }
+    tick(&h, t0, 8399);
+    assert_eq!(heard(&a), "");
+    tick(&h, t0, 8400);
+    assert_eq!(heard(&a), "alt m 4");
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// While its module is busy — a handler waits — a press waits in the mailbox with the count it had
+/// when it arrived, and runs with it once the module is free: what counts is when it was pressed. A
+/// `"final"` sequence that ends meanwhile waits there too, with its count, in its turn.
+#[test]
+fn a_press_that_waits_behind_a_busy_module_keeps_its_count() {
+    let h = host();
+    let a = vm(&h, 1);
+    h.backend.set_front(W1);
+    run(
+        &a,
+        r#"heard = {}
+        host.keys.capture("Tab", function(_, press) heard[#heard + 1] = "tab " .. press.count end)
+        host.keys.capture("Return", function(_, press) heard[#heard + 1] = "return " .. press.count end, { taps = "final" })"#,
+    );
+    hotkey(&h, &a, 7, "Alt+V", Taps::default(), "return function(press) heard[#heard + 1] = 'alt v ' .. press.count end");
+    assert_eq!(event(&h, &a, 1, r#"heard[#heard + 1] = "waits"; wait("w")"#), Delivered::Parked);
+    let queued = Arrived::Delivered(Delivered::Queued);
+    let t0 = Instant::now();
+    for ms in [0, 100, 200] {
+        assert_eq!(tap(&h, "Tab", false, t0, ms), queued);
+    }
+    assert_eq!(tap(&h, "Return", false, t0, 300), KEPT);
+    assert_eq!(tap(&h, "Return", false, t0, 400), KEPT);
+    tick(&h, t0, 900);
+    assert_eq!(h.mail.len(1), 4, "the sequence's end waits in the mailbox too");
+    assert_eq!(hotkey_press(&h, 7, t0, 1000, 0), Some(taps::Handed::Delivered(Delivered::Queued)));
+    assert_eq!(hotkey_press(&h, 7, t0, 1100, 0), Some(taps::Handed::Delivered(Delivered::Queued)));
+    assert_eq!(heard(&a), "waits");
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), "waits | tab 1 | tab 2 | tab 3 | return 2 | alt v 1 | alt v 2");
+    assert!(h.mail.is_empty());
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// A `"final"` sequence stands for all of its presses: one whose capture or hotkey the module let go
+/// of before it was heard is dropped and said, and never passed on to the program as one key, as a
+/// single press would be. A disabled module's is dropped without a word.
+#[test]
+fn a_final_sequence_whose_registration_went_is_dropped_not_passed_on() {
+    let h = host();
+    let a = vm(&h, 1);
+    h.backend.set_front(W1);
+    h.backend.set_sends(true);
+    run(
+        &a,
+        r#"heard = {}
+        ret = host.keys.capture("Return", function(_, press) heard[#heard + 1] = "return " .. press.count end, { taps = "final" })"#,
+    );
+    let t0 = Instant::now();
+    tap(&h, "Return", false, t0, 0);
+    tap(&h, "Return", false, t0, 100);
+    run(&a, "host.keys.release(ret)");
+    tick(&h, t0, 600);
+    assert_eq!(heard(&a), "");
+    assert_eq!(h.backend.take_passed(), vec![], "not passed on");
+    // Released while its busy module waited, the sequence waiting in the mailbox: the same.
+    run(&a, r#"ret = host.keys.capture("Return", function(_, press) heard[#heard + 1] = "return " .. press.count end, { taps = "final" })"#);
+    assert_eq!(event(&h, &a, 1, r#"wait("w"); host.keys.release(ret)"#), Delivered::Parked);
+    tap(&h, "Return", false, t0, 1000);
+    tap(&h, "Return", false, t0, 1100);
+    tick(&h, t0, 1600);
+    assert_eq!(h.mail.len(1), 1);
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), "");
+    assert_eq!(h.backend.take_passed(), vec![]);
+    // A hotkey's, the same.
+    let fin = Taps { mode: taps::Mode::Final, within: None };
+    hotkey(&h, &a, 9, "Alt+M", fin, "return function(press) heard[#heard + 1] = 'alt m ' .. press.count end");
+    hotkey_press(&h, 9, t0, 2000, 0);
+    h.hotkeys.borrow_mut().remove(&9);
+    tick(&h, t0, 2500);
+    assert_eq!(heard(&a), "");
+    assert_eq!(h.backend.take_passed(), vec![]);
+    // A module disabled meanwhile hears nothing.
+    run(&a, r#"host.keys.capture("End", function() heard[#heard + 1] = "end" end, { taps = "final" })"#);
+    tap(&h, "End", false, t0, 3000);
+    h.enabled.borrow_mut()[1] = false;
+    tick(&h, t0, 3500);
+    assert_eq!(heard(&a), "");
+    // A hotkey's whose busy module released it while the sequence waited in its mailbox: not sent
+    // to the program as one Alt+M, as a single press of it would be.
+    h.enabled.borrow_mut()[1] = true;
+    hotkey(&h, &a, 10, "Alt+M", fin, "return function(press) heard[#heard + 1] = 'alt m ' .. press.count end");
+    assert_eq!(event(&h, &a, 1, r#"wait("w2")"#), Delivered::Parked);
+    hotkey_press(&h, 10, t0, 4000, 0);
+    hotkey_press(&h, 10, t0, 4100, 0);
+    tick(&h, t0, 4600);
+    assert_eq!(h.mail.len(1), 1);
+    h.hotkeys.borrow_mut().remove(&10);
+    assert!(task::test_release(&*h, "w2", Value::Nil));
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), "");
+    assert_eq!(h.backend.take_passed(), vec![], "not passed on");
+    assert_eq!(
+        captures::final_dropped_line("m1", "Return", 2, Gone::Released),
+        "[m1] Return, pressed 2 time(s) in a row, was not run: its registration was released before the sequence \
+         was handed over. Said at most once every 10 s per module"
+    );
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// A `"final"` sequence is over by what the pump has taken: a press made before its deadline that
+/// still waited in the backend's queue when the pump took it — the loop then busy with other
+/// callbacks past the deadline — goes on with the sequence at the next pump, and the binding hears
+/// 2, once. And a sequence once heard has ended its count: a press counted after it, though stamped
+/// inside its interval by a clock a few milliseconds off, begins another — 1 and 1, never 1 and
+/// then 2 for one sequence.
+#[test]
+fn a_final_sequence_is_heard_once_with_a_press_that_was_still_queued() {
+    let h = host();
+    let a = vm(&h, 1);
+    h.backend.set_front(W1);
+    run(
+        &a,
+        r#"heard = {}
+        host.keys.capture("Return", function(_, press) heard[#heard + 1] = "return " .. press.count end, { taps = "final" })"#,
+    );
+    let t0 = Instant::now();
+    assert_eq!(tap(&h, "Return", false, t0, 0), KEPT);
+    // The pump took the queues at 470, the second press was queued at 480, and the tick ran at 510,
+    // past the deadline: not over by what the pump had.
+    tick(&h, t0, 470);
+    assert_eq!(heard(&a), "");
+    assert_eq!(tap(&h, "Return", false, t0, 480), KEPT);
+    tick(&h, t0, 520);
+    tick(&h, t0, 979);
+    assert_eq!(heard(&a), "");
+    tick(&h, t0, 980);
+    assert_eq!(heard(&a), "return 2", "once, with both presses");
+
+    // Heard, and then a press stamped inside its interval: another sequence.
+    run(&a, "heard = {}");
+    tap(&h, "Return", false, t0, 2000);
+    tick(&h, t0, 2510);
+    assert_eq!(heard(&a), "return 1");
+    assert_eq!(tap(&h, "Return", false, t0, 2480), KEPT);
+    tick(&h, t0, 2980);
+    assert_eq!(heard(&a), "return 1 | return 1", "never 1 and then 2");
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// A key that ends a `"final"` sequence goes to the capture its module holds once that sequence has
+/// run: the sequence is handed on at the key's arrival and runs at once, and its callback may give
+/// the key back and capture it again — an overlay's focus move does so with its keys — and the key
+/// goes to the new capture, as it would have without the sequence.
+#[test]
+fn a_key_that_ends_a_final_sequence_goes_to_the_capture_its_callback_made() {
+    let h = host();
+    let a = vm(&h, 1);
+    h.backend.set_front(W1);
+    run(
+        &a,
+        r#"heard = {}
+        local function tab(word) return function(_, press) heard[#heard + 1] = word .. " " .. press.count end end
+        tabToken = host.keys.capture("Tab", tab("old tab"))
+        host.keys.capture("Ctrl+1", function(_, press)
+            heard[#heard + 1] = "ctrl 1 " .. press.count
+            host.keys.release(tabToken)
+            tabToken = host.keys.capture("Tab", tab("new tab"))
+        end, { taps = "final" })"#,
+    );
+    let t0 = Instant::now();
+    assert_eq!(tap(&h, "Ctrl+1", false, t0, 0), KEPT);
+    assert_eq!(tap(&h, "Ctrl+1", false, t0, 150), KEPT);
+    assert_eq!(tap(&h, "Tab", false, t0, 300), RAN);
+    assert_eq!(heard(&a), "ctrl 1 2 | new tab 1");
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// A capture made again without `taps = "final"` between two quick presses: the second counts on,
+/// and the sequence the earlier capture kept is handed on first, at once — to the capture the module
+/// holds now — not after the press, by the tick.
+#[test]
+fn a_press_that_goes_on_with_a_kept_sequence_for_every_press_hands_it_on_first() {
+    let h = host();
+    let a = vm(&h, 1);
+    h.backend.set_front(W1);
+    run(
+        &a,
+        r#"heard = {}
+        host.keys.capture("Return", function(_, press) heard[#heard + 1] = "final " .. press.count end, { taps = "final" })"#,
+    );
+    let t0 = Instant::now();
+    assert_eq!(tap(&h, "Return", false, t0, 0), KEPT);
+    run(&a, r#"host.keys.capture("Return", function(_, press) heard[#heard + 1] = "every " .. press.count end)"#);
+    assert_eq!(tap(&h, "Return", false, t0, 200), RAN);
+    assert_eq!(heard(&a), "every 1 | every 2");
+    assert_eq!(h.taps.waiting_due(), None);
+    tick(&h, t0, 1000);
+    assert_eq!(heard(&a), "every 1 | every 2", "nothing left for the tick");
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// `host.keys.capture`'s options as the binding reads them: a bad one raises — before the hook is
+/// asked for, so nothing is captured — naming the call and what was wrong. A good one is kept with
+/// the capture.
+#[test]
+fn a_capture_s_bad_option_raises_and_captures_nothing() {
+    let h = host();
+    let a = vm(&h, 1);
+    for (opts, said) in [
+        ("{ taps = 'twice' }", "host.keys.capture: taps is \"every\" or \"final\", not \"twice\""),
+        ("{ within = 50 }", "host.keys.capture: within is a number of milliseconds from 100 to 5000, not 50"),
+        ("{ within = '300' }", "within is a number of milliseconds from 100 to 5000, not a string"),
+        ("{ final = true }", "host.keys.capture: 'final' is not an option; the options are taps and within"),
+    ] {
+        let e = a.load(format!("host.keys.capture('Tab', function() end, {opts})")).exec().unwrap_err().to_string();
+        assert!(e.contains(said), "{opts}: {e}");
+    }
+    assert!(h.backend.keys().0.is_empty(), "nothing captured");
+    let token: i64 = a.load("return host.keys.capture('Tab', function() end, { taps = 'final', within = 250.5 })").eval().unwrap();
+    assert_eq!(h.captures.taps_of(token), Taps { mode: taps::Mode::Final, within: Some(Duration::from_millis(250)) });
 }

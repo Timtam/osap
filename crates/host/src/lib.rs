@@ -222,6 +222,9 @@ mod template;
 mod template_store;
 /// `host.timer`: pending timers, their tokens, and the firing rules — see the file.
 mod timers;
+/// Quick repeats of a key: the count every press carries, and the sequence a `taps = "final"`
+/// binding hears once it is over — see the file.
+mod taps;
 /// `host.gamepad`: listeners, dispatch rules and bindings — see the file.
 mod gamepad_api;
 /// `host.gui.webview` (experimental): the rules, pure — which answer `show` gives, which file is
@@ -275,12 +278,15 @@ struct HotkeyReg {
     /// set. Liveness that is stored goes stale; liveness that is derived cannot.
     live: bool,
     /// Registered with `{ foreground = true }`: left to the operating system's own hotkey
-    /// delivery rather than matched in the keyboard hook — see `hotkey_foreground`.
+    /// delivery rather than matched in the keyboard hook — see `hotkey_opts`.
     foreground: bool,
+    /// Its options for quick repeats, `taps` and `within` (taps.rs).
+    taps: taps::Taps,
 }
 
-/// `host.hotkey.register`'s options: `{ foreground = true }` or nothing. Experimental, for the
-/// HTML probe's test W2(b) (tools/html-probe).
+/// `host.hotkey.register`'s options: `foreground`, and `taps` and `within` for its quick repeats
+/// (taps.rs, `read_opts`); any other key raises. `foreground = true` is experimental, for the HTML
+/// probe's test W2(b) (tools/html-probe).
 ///
 /// On Windows a hotkey is matched in the host's own keyboard hook as well (hotkey_hook.rs), and
 /// the hook swallows the press, so Windows never turns it into a `WM_HOTKEY`. But `WM_HOTKEY`
@@ -290,23 +296,10 @@ struct HotkeyReg {
 /// hook. Its price is the protection the hook gives: a program that switches `WM_HOTKEY` off
 /// while it is in front (`RIDEV_NOHOTKEYS`, as WinUAE does) silences that one key. On macOS it
 /// changes nothing — a Carbon hotkey is the system's own delivery already.
-fn hotkey_foreground(opts: Option<&Table>) -> mlua::Result<bool> {
+fn hotkey_opts(opts: Option<&Table>) -> mlua::Result<(bool, taps::Taps)> {
     const CALL: &str = "host.hotkey.register";
-    if let Some(t) = opts {
-        for pair in t.clone().pairs::<mlua::Value, mlua::Value>() {
-            let (k, _) = pair?;
-            if !matches!(&k, mlua::Value::String(s) if s.to_str().is_ok_and(|s| &*s == "foreground")) {
-                let name = match &k {
-                    mlua::Value::String(s) => format!("'{}'", s.to_string_lossy()),
-                    other => format!("a {} key", json::luau_type(other)),
-                };
-                return Err(mlua::Error::external(format!(
-                    "{CALL}: {name} is not an option; the only one is foreground"
-                )));
-            }
-        }
-    }
-    opt_bool(opts, "foreground", false, CALL)
+    taps::only_options(opts, CALL, &["foreground", "taps", "within"])?;
+    Ok((opt_bool(opts, "foreground", false, CALL)?, taps::read_opts(opts, CALL)?))
 }
 
 /// One overlay's claim on an arbiter slot: which module/VM owns it, how specific
@@ -396,6 +389,9 @@ struct Shared {
     /// collide on (vk, mask, module_idx), so the first to deactivate would release the key the
     /// second still needs. Keyed by token, one overlay's release can't drop another's.
     captures: captures::Captures,
+    /// The count of quick repeats every hotkey press and captured key carries, and the sequence a
+    /// `taps = "final"` binding waits to hear — see taps.rs.
+    taps: taps::Counter,
     /// Unified portable store: per-module enabled-state + settings.
     store: RefCell<settings::Store>,
     /// module_idx → (setting key → schema), for validation + the GUI. Not persisted.
@@ -2201,8 +2197,12 @@ impl Shared {
     }
 
     /// Fires the timers whose time has come (driven by the loop tick) — see
-    /// `timers::Timers::fire_due` for the order and for what a callback may do to the others.
+    /// `timers::Timers::fire_due` for the order and for what a callback may do to the others. First
+    /// the sequence a `taps = "final"` binding waits to hear, once it is due (taps.rs): the press it
+    /// ended on came before any timer it armed. Due by the moment the pump took the presses queued,
+    /// not by now: one made before the deadline may have waited in the queue until the next pump.
     fn fire_due_timers(&self) {
+        taps::tick(self);
         self.timers.fire_due(
             Instant::now(),
             |idx| match (self.module_on(idx), mailbox::busy(self, idx)) {
@@ -2792,6 +2792,7 @@ mod hotkey_conflict_tests {
             binding,
             live,
             foreground: false,
+            taps: taps::Taps::default(),
         };
         const V: (u32, u8) = (0x56, 0b010);
         const W1: isize = 0x111;
@@ -2840,6 +2841,7 @@ mod hotkey_conflict_tests {
             binding: Some(F8),
             live,
             foreground,
+            taps: taps::Taps::default(),
         };
         const F8: (u32, u8) = (0x77, 0b1111);
         const W1: isize = 0x111;
@@ -2877,6 +2879,7 @@ mod hotkey_conflict_tests {
             binding,
             live,
             foreground: false,
+            taps: taps::Taps::default(),
         };
         let refusal = || HostError::with(&hotkey::REGISTER_REFUSED, "RegisterHotKey failed for 'Ctrl+Alt+H' (already in use by another app?)".into());
         let parked = HostError::of(&hotkey::PARKED);
@@ -5246,6 +5249,7 @@ impl Manager {
             excluded: RefCell::new(Vec::new()),
             hotkeys: RefCell::new(HashMap::new()),
             captures: captures::Captures::default(),
+            taps: taps::Counter::default(),
             store: RefCell::new(store),
             schemas: RefCell::new(Vec::new()),
             on_change: RefCell::new(HashMap::new()),
@@ -6840,7 +6844,7 @@ impl HostEvents for Dispatcher<'_> {
         self.shared.dispatch_gamepad(events);
     }
 
-    fn on_hotkey(&mut self, id: i32, seq: u32) {
+    fn on_hotkey(&mut self, id: i32, press: backend::HotkeyPress) {
         // Somebody is waiting for what this dispatch does: a read or a timer it asks for goes
         // in the interactive lane (ocr/types.rs, `enter_priority`).
         let _prio = ocr::types::enter_priority(ocr::types::Priority::Interactive);
@@ -6873,21 +6877,9 @@ impl HostEvents for Dispatcher<'_> {
             self.shared.quit_by_key();
             return;
         }
-        let found = {
-            let map = self.shared.hotkeys.borrow();
-            map.get(&id)
-                .filter(|reg| self.enabled(reg.module_idx))
-                .map(|reg| (reg.module_idx, reg.lua.clone(), reg.binding, reg.spec.clone()))
-        };
-        if let Some((owner, lua, binding, spec)) = found {
-            // The window in front now, noted only for a module that is busy: if its registration
-            // is made again while the press waits, the new one takes it only when the module's
-            // scope is this window or everywhere (`hotkey_target`). The window the hook or the tap
-            // compares keys with (`key_front`), never `resolve_key_scope`: on a Mac that asks the
-            // frontmost application, on the tap's thread, and notes a pin nobody made.
-            let front = mailbox::busy(self.shared, owner).then(|| self.shared.backend.key_front());
-            mailbox::deliver(self.shared, owner, &lua, Event::Hotkey { id, owner, front, seq, binding, spec });
-        }
+        // Counted, and to the module's mailbox: `hotkey_arrive_in`, which the key-scope tests' holder
+        // runs too.
+        hotkey_arrive_in(self.shared, &self.shared.hotkeys, id, press);
     }
 
     fn on_key(&mut self, vk: u32, mods: u8, owner: u32, repeat: bool, pressed: backend::Pressed) {
@@ -6996,6 +6988,44 @@ pub(crate) fn hotkey_holds(regs: &HashMap<i32, HotkeyReg>, vk: u32, mask: u8) ->
         || regs.values().any(|r| r.live && r.binding == Some((vk, mask)))
 }
 
+/// A hotkey press as it arrives (`HostEvents::on_hotkey`), for the registration `id` in `regs`:
+/// counted (taps.rs) — a key went down, whatever becomes of it: an id no registration has now, a
+/// disabled module's — and handed to its module's mailbox while the module is on, with its count:
+/// at once, or, for a registration with `taps = "final"`, once its sequence is over. `None` when
+/// nothing was handed on. The host's `on_hotkey` and the key-scope tests' holder both run this.
+pub(crate) fn hotkey_arrive_in<H: captures::KeyHost + mailbox::MailHost>(
+    h: &H,
+    regs: &RefCell<HashMap<i32, HotkeyReg>>,
+    id: i32,
+    press: backend::HotkeyPress,
+) -> Option<taps::Handed> {
+    let found = regs.borrow().get(&id).map(|r| (r.module_idx, r.lua.clone(), r.binding, r.spec.clone(), r.taps));
+    let t = found.as_ref().map_or_else(taps::Taps::default, |f| f.4);
+    // By its combination, so a registration made again — an overlay at every focus move — counts
+    // on; by its id only for a spec only the system read.
+    let key = match found.as_ref().and_then(|f| f.2) {
+        Some((vk, mask)) => taps::Key::Combo(vk, mask),
+        None => taps::Key::Id(id),
+    };
+    let within = t.interval(|| h.key_backend().double_click_time());
+    let n = taps::count(h, key, press.at, press.seq, press.own, false, within);
+    // The registration found before the count stands, though a sequence the count handed on may
+    // have run at once and released it: the press was made on this id, and `hotkey_target` decides
+    // again as it runs, as for any registration made again between a press and its delivery.
+    // Looked up again here, a released id would drop the press without a word.
+    let (owner, lua, binding, spec, _) = found.filter(|f| h.key_module_enabled(f.0))?;
+    let fin = t.mode == taps::Mode::Final;
+    // The window in front now, noted for a module that is busy — and for a sequence kept for its
+    // end, whose module may be busy by then: if its registration is made again while the press
+    // waits, the new one takes it only when the module's scope is this window or everywhere
+    // (`hotkey_target`). The window the hook or the tap compares keys with (`key_front`), never
+    // `resolve_key_scope`: on a Mac that asks the frontmost application, on the tap's thread, and
+    // notes a pin nobody made.
+    let front = (fin || mailbox::busy(h, owner)).then(|| h.key_backend().key_front());
+    let ev = Event::Hotkey { id, owner, front, seq: press.seq, binding, spec, press: taps::Press { count: n, ended: fin } };
+    Some(taps::hand_on(h, key, owner, &lua, ev, t.mode, false, press.at + within))
+}
+
 /// The hotkey registration a press of hotkey `id`, for module `owner`, goes to as it runs: `id`
 /// while it is registered for that module, holds its combination at the OS (`live`) and the
 /// module is on; and otherwise — the registration released and made again meanwhile, by an
@@ -7041,7 +7071,10 @@ fn hotkey_target(
 /// the next module that captures the combination in the window in front when it arrived, as that
 /// module's key, or else to the program in front — while that window still is, and no key-down has
 /// reached the program since it came in (`seq`). The host's own `open` and the key-scope tests'
-/// holder both run this, so the tests run the host's rule and not a copy of it.
+/// holder both run this, so the tests run the host's rule and not a copy of it. The callback is
+/// handed the press's count (`press`, taps.rs). A sequence a `"final"` registration heard once it was
+/// over (`press.ended`) stands for all of its presses: one whose registration went is dropped and
+/// said, never passed on as one key.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn open_hotkey_in<H: captures::KeyHost + mailbox::MailHost>(
     h: &H,
@@ -7052,6 +7085,7 @@ pub(crate) fn open_hotkey_in<H: captures::KeyHost + mailbox::MailHost>(
     seq: u32,
     binding: Option<(u32, u8)>,
     spec: &str,
+    press: taps::Press,
 ) -> Opened {
     let target = hotkey_target(
         &regs.borrow(),
@@ -7079,9 +7113,15 @@ pub(crate) fn open_hotkey_in<H: captures::KeyHost + mailbox::MailHost>(
         // when it arrived, or to the program in front while that window still is
         // (`captures::pass_on_released`). No physical key: the system matched the press. Not a
         // repeat, and no module let go of it before this one.
+        captures::Target::Gone(gone) if press.ended => {
+            if gone != captures::Gone::Disabled && h.captures().say_dropped(owner, Instant::now()) {
+                logging::line("keys", &captures::final_dropped_line(&h.key_module_id(owner), spec, press.count, gone));
+            }
+            return Opened::Gone;
+        }
         captures::Target::Gone(captures::Gone::Released) if queued => {
             let pressed = backend::Pressed { front: front.unwrap_or(0), seq, phys: None, queued: None };
-            captures::pass_on_released(h, owner, spec, binding, (false, pressed), Vec::new());
+            captures::pass_on_released(h, owner, spec, binding, (false, pressed, press), Vec::new());
             return Opened::Gone;
         }
         captures::Target::Gone(gone) => {
@@ -7096,17 +7136,30 @@ pub(crate) fn open_hotkey_in<H: captures::KeyHost + mailbox::MailHost>(
             return Opened::Gone;
         }
     };
-    let f = regs.borrow().get(&id).and_then(|r| r.lua.registry_value::<Function>(&r.cb).ok());
+    let f = regs.borrow().get(&id).and_then(|r| r.lua.registry_value::<Function>(&r.cb).ok().map(|f| (f, r.lua.clone())));
     match f {
-        Some(f) => Opened::Run { f, args: mlua::MultiValue::new(), ctx: task::Ctx::new("hotkey", owner) },
+        Some((f, lua)) => {
+            let args = taps::table(&lua, press).map_or_else(|_| mlua::MultiValue::new(), |p| mlua::MultiValue::from_vec(vec![mlua::Value::Table(p)]));
+            Opened::Run { f, args, ctx: task::Ctx::new("hotkey", owner) }
+        }
         None => Opened::Gone,
     }
 }
 
 impl Shared {
     /// A hotkey as it runs (`Event::Hotkey`), by [`open_hotkey_in`].
-    fn open_hotkey(&self, id: i32, owner: usize, front: Option<isize>, seq: u32, binding: Option<(u32, u8)>, spec: &str) -> Opened {
-        open_hotkey_in(self, &self.hotkeys, id, owner, front, seq, binding, spec)
+    #[allow(clippy::too_many_arguments)]
+    fn open_hotkey(
+        &self,
+        id: i32,
+        owner: usize,
+        front: Option<isize>,
+        seq: u32,
+        binding: Option<(u32, u8)>,
+        spec: &str,
+        press: taps::Press,
+    ) -> Opened {
+        open_hotkey_in(self, &self.hotkeys, id, owner, front, seq, binding, spec, press)
     }
 
     /// The tick's phase for the events that waited in busy modules' mailboxes
@@ -7149,9 +7202,11 @@ impl mailbox::MailHost for Shared {
 
     fn open(&self, idx: usize, lua: &Lua, ev: Event) -> Opened {
         match ev {
-            Event::Hotkey { id, owner, front, seq, binding, spec } => self.open_hotkey(id, owner, front, seq, binding, &spec),
-            Event::Key { owner, token, vk, mods, repeat, pressed, let_go } => {
-                captures::open_key(self, owner, token, vk, mods, repeat, pressed, let_go)
+            Event::Hotkey { id, owner, front, seq, binding, spec, press } => {
+                self.open_hotkey(id, owner, front, seq, binding, &spec, press)
+            }
+            Event::Key { owner, token, vk, mods, repeat, pressed, let_go, press } => {
+                captures::open_key(self, owner, token, vk, mods, repeat, pressed, let_go, press)
             }
             Event::Pad { token, event, delivery, .. } => self.open_pad(token, &event, &delivery),
             Event::Activate { win, upto } => self.window_opened(idx, "window trigger", activate_call(lua, &win, Some(upto))),
@@ -7385,10 +7440,14 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
     let sh = h.clone();
     keys.set(
         "capture",
-        lua.create_function(move |lua, (spec, cb): (String, Function)| {
+        lua.create_function(move |lua, (spec, cb, opts): (String, Function, Option<Table>)| {
             host_call!("host.keys.capture");
             // The parser's own error, which names the part it could not read.
             let (vk, mask) = backend::parse_key_spec(&spec).map_err(mlua::Error::external)?;
+            // The quick repeats' `taps` and `within` (taps.rs); a bad option raises, before the hook
+            // is asked for.
+            taps::only_options(opts.as_ref(), "host.keys.capture", &["taps", "within"])?;
+            let taps = taps::read_opts(opts.as_ref(), "host.keys.capture")?;
             // The hook or the tap first: without it no key is captured, so nothing is recorded and
             // the module is answered `nil, err` — `denied` on a Mac that has not granted
             // Accessibility, `failed` otherwise (D30 of the typed-errors plan). It used to raise
@@ -7409,7 +7468,7 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
             // unique token, returned to the caller so `release` can target THIS exact
             // registration and not another overlay's re-capture of the same key.
             let key = lua.create_registry_value(cb)?;
-            let token = sh.captures().capture(idx, vk, mask, lua.clone(), key);
+            let token = sh.captures().capture(idx, vk, mask, lua.clone(), key, taps);
             sh.refresh_captured();
             one_value(mlua::Value::Integer(token))
         })?,
@@ -7496,6 +7555,9 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
 impl captures::KeyHost for Shared {
     fn captures(&self) -> &captures::Captures {
         &self.captures
+    }
+    fn taps(&self) -> &taps::Counter {
+        &self.taps
     }
     fn key_backend(&self) -> &dyn Backend {
         &*self.backend
@@ -7698,8 +7760,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "register",
         lua.create_function(move |lua, (spec, cb, opts): (String, Function, Option<Table>)| {
             host_call!("host.hotkey.register");
-            // `{ foreground = true }`, experimental: see `hotkey_foreground`.
-            let foreground = hotkey_foreground(opts.as_ref())?;
+            // `{ foreground = true }`, experimental, and the quick repeats' `taps` and `within`: see
+            // `hotkey_opts`. A bad option raises before anything is claimed.
+            let (foreground, taps) = hotkey_opts(opts.as_ref())?;
             // What the operating system can never hold is refused here and now, loudly, rather
             // than recorded as a claim: a tap, a key the platform has no code for, and a
             // combination the system keeps for itself. Command+Q on a Mac would REGISTER, and
@@ -7764,6 +7827,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                     // Set by the refresh below; for an unparseable spec, by the OS call above.
                     live: binding.is_none(),
                     foreground,
+                    taps,
                 },
             );
             // Which also reports the clash, so a module that lost the contest is told once
@@ -9324,15 +9388,17 @@ mod source_and_option_tests {
         }
     }
 
-    /// `host.hotkey.register`'s third argument: nothing, or `{ foreground = true | false }`, and
-    /// nothing else — a misspelt option must not register an ordinary hotkey without a word.
+    /// `host.hotkey.register`'s third argument: nothing, or `{ foreground = true | false }` and
+    /// the quick repeats' `taps` and `within`, and nothing else — a misspelt option must not
+    /// register an ordinary hotkey without a word.
     #[test]
     fn a_hotkey_is_left_to_the_system_only_when_asked() {
         let lua = Lua::new();
-        let ask = |src: &str| -> mlua::Result<bool> {
+        let opts = |src: &str| -> mlua::Result<(bool, taps::Taps)> {
             let t: Option<Table> = lua.load(src).eval().unwrap();
-            hotkey_foreground(t.as_ref())
+            hotkey_opts(t.as_ref())
         };
+        let ask = |src: &str| opts(src).map(|o| o.0);
         assert!(!ask("return nil").unwrap());
         assert!(!ask("return {}").unwrap());
         assert!(!ask("return { foreground = false }").unwrap());
@@ -9340,9 +9406,17 @@ mod source_and_option_tests {
         let e = ask("return { foreground = 1 }").unwrap_err().to_string();
         assert!(e.contains("host.hotkey.register: foreground is true or false, not a number"), "{e}");
         let e = ask("return { forground = true }").unwrap_err().to_string();
-        assert!(e.contains("'forground' is not an option; the only one is foreground"), "{e}");
+        assert!(e.contains("'forground' is not an option; the options are foreground, taps and within"), "{e}");
         let e = ask("return { true }").unwrap_err().to_string();
         assert!(e.contains("a number key is not an option"), "{e}");
+        // The quick repeats' options beside it, read as taps.rs reads them.
+        let both = opts("return { foreground = true, taps = 'final', within = 400 }").unwrap();
+        assert_eq!(both, (true, taps::Taps { mode: taps::Mode::Final, within: Some(Duration::from_millis(400)) }));
+        assert_eq!(opts("return nil").unwrap().1, taps::Taps::default());
+        let e = ask("return { taps = 'double' }").unwrap_err().to_string();
+        assert!(e.contains("host.hotkey.register: taps is \"every\" or \"final\", not \"double\""), "{e}");
+        let e = ask("return { within = 20 }").unwrap_err().to_string();
+        assert!(e.contains("host.hotkey.register: within is a number of milliseconds from 100 to 5000, not 20"), "{e}");
     }
 
     /// And the binding hands the option to the claim it keeps, so a refresh claims it the same
@@ -9352,9 +9426,9 @@ mod source_and_option_tests {
         use super::ocr_wiring_tests::body;
         const LIB: &str = include_str!("lib.rs");
         let register = body(LIB, "fn install_host_api(");
-        assert!(register.contains("let foreground = hotkey_foreground(opts.as_ref())?;"));
+        assert!(register.contains("let (foreground, taps) = hotkey_opts(opts.as_ref())?;"));
         assert!(register.contains("sh.backend.register_foreground_hotkey(id, &spec)"));
-        assert!(register.contains("                    foreground,\n"), "HotkeyReg does not keep it");
+        assert!(register.contains("                    foreground,\n                    taps,\n"), "HotkeyReg does not keep them");
         let refresh = body(LIB, "fn refresh_hotkeys(&self)");
         assert!(refresh.contains("self.backend.register_foreground_hotkey(id, &spec)"));
     }
@@ -9387,7 +9461,7 @@ mod source_and_option_tests {
         assert!(refused.contains("backend::KeyRefusal::Mistake(why) => Err(mlua::Error::external(why)),"));
         let captures = body(LIB, "fn install_key_captures<");
         let hook = captures.find("if let Err(e) = sh.key_backend().watch_keys() {").expect("the hook asked for");
-        let recorded = captures.find("sh.captures().capture(idx, vk, mask, lua.clone(), key)").expect("the capture recorded");
+        let recorded = captures.find("sh.captures().capture(idx, vk, mask, lua.clone(), key, taps)").expect("the capture recorded");
         assert!(hook < recorded, "the hook first, so a refusal records nothing");
         assert!(captures[hook..recorded].contains("return errors_lua::with_error(lua, mlua::Value::Nil, &e);"));
     }
@@ -10813,6 +10887,7 @@ mod ocr_wiring_tests {
     const REGION_LUA: &str = include_str!("region_lua.rs");
     const MAILBOX: &str = include_str!("mailbox.rs");
     const TIMERS: &str = include_str!("timers.rs");
+    const TAPS: &str = include_str!("taps.rs");
     const WEBVIEW_LUA: &str = include_str!("webview_lua.rs");
 
     /// The text of the item that starts with `sig`, up to its closing brace at its own
@@ -11573,7 +11648,8 @@ mod ocr_wiring_tests {
     #[test]
     fn every_event_site_goes_through_the_mailbox() {
         for (sig, call) in [
-            ("fn on_hotkey(&mut self", "mailbox::deliver(self.shared, owner, &lua, Event::Hotkey"),
+            ("fn on_hotkey(&mut self", "hotkey_arrive_in(self.shared, &self.shared.hotkeys, id, press);"),
+            ("pub(crate) fn hotkey_arrive_in<", "Some(taps::hand_on(h, key, owner, &lua, ev"),
             ("fn on_key(&mut self", "captures::arrive(self.shared"),
             ("fn on_window_activate(&mut self", "mailbox::deliver(self.shared, idx, &m.lua, ev)"),
             ("fn on_focus_change(&mut self", "mailbox::deliver(self.shared, idx, &m.lua, Event::Focus)"),
@@ -11590,6 +11666,11 @@ mod ocr_wiring_tests {
         assert!(body(SNAP, "pub(crate) fn fire_snaps<").contains("mailbox::deliver(h, idx, &lua, Event::Snapshot"));
         assert!(body(OCR_LUA, "pub(crate) fn fire<H: MailHost>(h: &H)").contains("mailbox::deliver(h, idx, &lua, Event::Read"));
         assert!(body(TIMERS, "pub(crate) fn fire_due(").contains("deliver(Due::Once { token, idx, lua });"));
+        // A press counted, and a sequence a `taps = "final"` binding heard once it was over, the tick's.
+        assert!(body(TAPS, "pub(crate) fn hand_on<").contains("Handed::Delivered(mailbox::deliver(h, owner, lua, ev))"));
+        assert!(body(TAPS, "fn deliver_waiting<").contains("mailbox::deliver(h, w.owner, &w.lua, ev);"));
+        assert!(body(LIB, "fn fire_due_timers(&self)").contains("taps::tick(self);"));
+        assert!(body(TAPS, "pub(crate) fn tick<").contains("let taken = h.key_backend().input_taken_at().unwrap_or_else(Instant::now);"));
         // The one place a module's own onChange runs inside its own set: the caller's VM.
         let set = bindings(body(LIB, "fn install_host_api("), "settings_api").into_iter().find(|b| b.0 == "set").expect("set").1;
         assert!(set.contains("sh.fire_on_change(idx, &key, &v, old.as_ref(), Some(caller));"));
@@ -11721,17 +11802,23 @@ mod ocr_wiring_tests {
         let each = &each[..each.find("\n        }\n").expect("the end of the loop over the hotkeys")];
         let (stamp, settled, on_hotkey) = (
             each.find("matches!(route, Route::Os { time } if super::tick_not_after(time, drop_until as u32))").expect("the stall's drop"),
-            each.find("if settle_hotkey(id, route) {").expect("the pairing"),
-            each.find("events.on_hotkey(id, seq);").expect("not handed on"),
+            each.find("if let Some(own) = settle_hotkey(id, route) {").expect("the pairing"),
+            each.find("events.on_hotkey(id, super::HotkeyPress { seq, own, at: tick_instant(route.time()) });").expect("not handed on"),
         );
+        // The queues are taken after the moment the tick measures a `"final"` sequence's end by.
+        let taken = pump.find("INPUT_TAKEN.with(|t| t.set(Some(Instant::now())));").expect("the moment noted");
+        assert!(taken < pump.find("locked(&HOTKEY_QUEUE).drain(..)").unwrap() && taken < pump.find("locked(&KEY_QUEUE)").unwrap());
         assert!(stamp < settled && settled < on_hotkey, "{each}");
         assert!(each[settled..on_hotkey].contains("if stalled {\n                    late.push(id);\n                } else {"), "{each}");
         assert!(!each.to_lowercase().contains("foreground"), "the pump treats a foreground hotkey apart: {each}");
         assert!(!body(LIB, "fn on_stall_hotkeys_dropped(").contains("foreground"));
         let on = body(LIB, "fn on_hotkey(&mut self");
         assert!(!on.contains("foreground"), "on_hotkey treats a foreground hotkey apart: {on}");
-        assert!(on.contains("mailbox::deliver(self.shared, owner, &lua, Event::Hotkey { id, owner, front, seq, binding, spec });"));
-        for sig in ["fn open_hotkey(", "pub(crate) fn open_hotkey_in<"] {
+        assert!(on.contains("hotkey_arrive_in(self.shared, &self.shared.hotkeys, id, press);"));
+        let arrive = body(LIB, "pub(crate) fn hotkey_arrive_in<");
+        assert!(arrive.contains("Some(taps::hand_on(h, key, owner, &lua, ev, t.mode, false, press.at + within))"));
+        assert!(body(TAPS, "pub(crate) fn hand_on<").contains("Handed::Delivered(mailbox::deliver(h, owner, lua, ev))"));
+        for sig in ["fn open_hotkey(", "pub(crate) fn open_hotkey_in<", "pub(crate) fn hotkey_arrive_in<"] {
             let open = body(LIB, sig);
             assert!(!open.contains("foreground"), "{sig} treats a foreground hotkey apart: {open}");
         }
@@ -12242,11 +12329,17 @@ mod ocr_wiring_tests {
     /// on the tap's thread and notes a pin. And its line says it waited only when it did.
     #[test]
     fn a_hotkey_notes_the_window_in_front_without_asking_the_application() {
-        let on = body(LIB, "fn on_hotkey(&mut self");
-        assert!(on.contains("mailbox::busy(self.shared, owner).then(|| self.shared.backend.key_front())"), "{on}");
-        assert!(!on.contains(concat!("backend.resolve_key", "_scope()")), "{on}");
-        assert!(body(LIB, "fn open_hotkey(").contains("open_hotkey_in(self, &self.hotkeys, id, owner, front, seq, binding, spec)"));
-        assert!(on.contains("Event::Hotkey { id, owner, front, seq, binding, spec }"), "the press's count goes with it");
+        let on = body(LIB, "pub(crate) fn hotkey_arrive_in<");
+        assert!(on.contains("(fin || mailbox::busy(h, owner)).then(|| h.key_backend().key_front())"), "{on}");
+        assert!(!on.contains(concat!("resolve_key", "_scope()")), "{on}");
+        assert!(body(LIB, "fn open_hotkey(").contains("open_hotkey_in(self, &self.hotkeys, id, owner, front, seq, binding, spec, press)"));
+        assert!(
+            on.contains("Event::Hotkey { id, owner, front, seq: press.seq, binding, spec, press: taps::Press { count: n, ended: fin } }"),
+            "the press's count of keys let through goes with it, and its count of quick repeats"
+        );
+        // Noted for a sequence kept for its end as well; handed on as a busy module's press only when
+        // its module is busy by then.
+        assert!(body(TAPS, "fn deliver_waiting<").contains("if !mailbox::busy(h, w.owner) {\n            *front = None;"));
         let open = body(LIB, "pub(crate) fn open_hotkey_in<");
         assert!(open.contains("let queued = front.is_some();"));
         assert!(open.contains("captures::moved_line(&h.key_module_id(owner), spec, queued)"));
@@ -12794,7 +12887,7 @@ mod quit_key_wiring_tests {
         // The key: answered before any module lookup, in the dispatch and after a stall's stop.
         let on = body(LIB, "fn on_hotkey(&mut self");
         let key = on.find("if id == self.shared.quit_hotkey_id.get() {\n            self.shared.quit_by_key();").expect("the key");
-        assert!(key < on.find("mailbox::deliver(").expect("the modules"));
+        assert!(key < on.find("hotkey_arrive_in(").expect("the modules"));
         assert!(body(LIB, "fn answer_own_keys(&self").contains("self.quit_by_key();"));
         let by_key = body(LIB, "fn quit_by_key(&self)");
         let said = by_key.find("self.announce(QUIT_SENTENCE);").expect("the sentence");

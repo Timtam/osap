@@ -1222,3 +1222,29 @@ fn no_identify_and_the_stay_held_through_a_hand_over() {
         T.ok(#S.ended == 1 and S.identifies == 1, "identify not asked again: " .. S.identifies)
     "##);
 }
+
+/// The host's count of a key's quick repeats reaches the module's `onKey`, after the `mods`, as a
+/// capture's callback gets it (runtime 0.12): `press`, or nil where the host hands none.
+#[test]
+fn a_keys_hand_over_hands_on_key_the_press_after_the_mods() {
+    both(r##"
+        local S = T.S
+        T.show(T.W, T.IN)
+        T.synth()
+        T.openPage()
+        S.got = {}
+        T.handOver({ kind = "keys", keys = { "PageUp", "Return" }, ends = false,
+          onKey = function(o, trip, key, mods, press)
+            S.got[#S.got + 1] = key .. " " .. (press and tostring(press.count) or "none")
+            return key == "Return"
+          end })
+        T.ok(T.typed("PageUp", nil, { count = 2 }) == "taken", "taken for the module")
+        T.ok(T.typed("Return") == "taken", "Return for the module too")
+        T.ok(table.concat(S.got, " | ") == "PageUp 2 | Return none", table.concat(S.got, " | "))
+        T.runDue()
+        T.ok(#S.ended == 1 and S.ended[1].as == "ended" and S.ended[1].info.key == "Return", "ended by onKey")
+        T.runDue()
+        T.pageFront()
+        T.allBack()
+    "##);
+}

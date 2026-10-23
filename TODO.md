@@ -3,34 +3,93 @@
 Project backlog for the cross-platform automation platform.
 Architecture and feasibility foundation: [docs/architecture-feasibility-study.md](docs/architecture-feasibility-study.md).
 
-## Quick repeats of a key: once, twice, three times (2026-10-20, from the maintainer, waiting for usage)
+## Quick repeats of a key: once, twice, three times (2026-10-20, from the maintainer; built 2026-10-23)
 
 Asked for by the developer of the avenger_control tool (2026-10-20): bind a key's quick repeats,
 such as Numpad1 pressed once, twice quickly, three times quickly. The maintainer decided the design
 and to build it as soon as the usage allows.
 
-- [ ] **A count on every press, with no delay (the default).** The callbacks of
+- [x] **A count on every press, with no delay (the default).** The callbacks of
       `host.hotkey.register` and `host.keys.capture` get a further argument, `press`, with
       `press.count`: 1 for the first press, 2 for the second quick one, and so on. It fires at once
       on every press, as NVDA's scripts get their repeat count (once speaks, twice spells). Existing
       callbacks are unaffected, since Lua drops an extra argument.
-- [ ] **Only the final count, when asked: `opts.taps = "final"`.** For "once does A, twice B, three
+- [x] **Only the final count, when asked: `opts.taps = "final"`.** For "once does A, twice B, three
       times C, and A must not happen first". The callback fires once the sequence is over, with its
       count. That costs one interval of waiting after the last press, and only for the bindings that
       ask for it.
-- [ ] **When a count starts again:** after the interval, which is the system's double-click time by
+- [x] **When a count starts again:** after the interval, which is the system's double-click time by
       default (GetDoubleClickTime on Windows, NSEvent.doubleClickInterval on a Mac), so the user's
       own setting holds; `opts.within = <ms>` sets it per binding. Also when another key goes down,
       or when the modifiers change. A held key's auto-repeat never counts; it is already swallowed.
       The interval is the gesture's own definition, taken from the user's setting, not a guess about
       a program's state.
-- [ ] **One counter in the host, platform-neutral,** fed by both paths on both platforms:
+- [x] **One counter in the host, platform-neutral,** fed by both paths on both platforms:
       RegisterHotKey and the hook on Windows, Carbon and the event tap on a Mac. Then the overlay
       runtime passes the count on to its controls' hotkeys.
-- [ ] **Docs:** both entries' Returns and Errors as the template has them, the callback's `press`
+- [x] **Docs:** both entries' Returns and Errors as the template has them, the callback's `press`
       argument, and a note that on Windows NVDA and JAWS use the numpad in their desktop layout. On
       a Mac VoiceOver does so only with NumPad Commander on. Tests in the scripted host for each
       count, the reset rules and `taps = "final"`.
+- [x] **Built (2026-10-23).** `crates/host/src/taps.rs` holds the one count: a press is counted as it
+      reaches the event loop — a hotkey in `hotkey_arrive_in` (lib.rs), after Windows has paired a
+      late hook's report with `RegisterHotKey`'s delivery; a captured key in `captures::arrive` —
+      and before its module's mailbox, so a press that waits behind a busy handler keeps its count.
+      It is timed by the press: on Windows by the key event's or `WM_HOTKEY`'s stamp on the tick
+      clock, a captured key by when the hook queued it; on a Mac by when Carbon or the tap handed it
+      over. A count starts again after the interval (from the press before it), at a press of
+      another combination, and when the count of key-downs let through to the program moved between
+      two presses (`Pressed::seq`) — by more than the press's own key-down on a Mac, whose tap counts
+      a hotkey's key-down before Carbon matches it, and on Windows for a press the hook let through
+      on purpose (a screen reader's modifier held), whose key-down the hook counted before
+      `RegisterHotKey` delivered it. A `"final"` sequence is kept until its deadline, which the tick
+      (`taps::tick`, from `fire_due_timers`) measures against the moment the pump took the queued
+      presses (`Backend::input_taken_at`), so a press still queued past the deadline goes on with it;
+      a sequence once heard ends its count, so a later press begins another and never makes it 1 and
+      then 2. A press of another key ends it at once, and the key then goes to the capture its
+      module holds after that sequence ran (its callback may have made the capture again). One whose
+      registration went before it was heard is dropped with a `[keys]` line, never passed on as one
+      key. `within` is 100 to 5000 ms, a fraction cut; a bad `taps` or `within`, or an unknown option,
+      raises. The overlay runtime 0.12.0 hands a control's hotkey press to `onActivate(overlay,
+      press)` (and `O:activate(index, press)`), and a hand-over's key to `onKey(…, mods, press)`.
+      Docs: hotkey.md "Quick repeats", keys.md's `capture`, overlay.md (O:group, the two `onActivate`s,
+      O:activate, `onKey`), building-an-overlay.md "A hotkey pressed twice". Tests: taps.rs (the rule,
+      the options), key_scope_tests.rs (every count, each reset, the system's interval changed,
+      `within`, auto-repeat, `"final"` by the tick and ended by another key, a press still queued at
+      the deadline, a key that ends a sequence whose callback captured it again, a busy module, a
+      registration gone), windows.rs (a press the hook let through has its own key-down, the tick
+      clock's stamp), the runtime's in overlay_runtime_marks_tests.rs and
+      overlay_handover_tests.rs.
+- [ ] **Windows, to try with NVDA** (a test module whose hotkey and whose captured key say
+      `press.count`): one, two and three quick presses say 1, 1 2, 1 2 3, and slow ones 1 each; a
+      slower double-click speed in the Mouse settings lets the presses come further apart, read at
+      the next press; a letter typed between two presses, or Shift+ the key, says 1; a hotkey held
+      down says 1 once; a captured key held down says the count of its press at every repeat; the
+      hotkey pressed three times quickly with the module manager in front (there `RegisterHotKey`
+      delivers it, not the hook) says 1 2 3; so does the hotkey pressed three times quickly while
+      NVDA's key (Insert) is held, which the hook lets through for `RegisterHotKey`, unless NVDA
+      takes that chord itself; should the log show a hotkey line ending "not dispatched a second
+      time" (the hook ran late), the press it is about was said once, with the next count; with
+      `taps = "final"` nothing is said until the presses stop, then the count once, and a press of
+      another key says it at once; presses made while the module waits for a read keep their counts.
+      An overlay control's hotkey pressed twice hands `onActivate` a 2.
+- [ ] **A Mac, to try with VoiceOver**, the same with a Command+Shift+F-key hotkey: three quick
+      presses say 1 2 3, with and without a module capturing a key; with no module capturing a key
+      (Carbon alone, no tap) a letter typed between two presses does not end the count; with a
+      capture in (the tap) it must end it, saying 1 — if it says 2, the tap does not count a
+      hotkey's own key-down before Carbon hands the press over, the letter was taken for it, and
+      `own` in `queue.rs` is to be 0; the double-click speed in System Settings (Accessibility,
+      Pointer Control) is the interval; a captured key held down says its press's count at every
+      repeat.
+- [ ] **Numpad keys in the key spec.** The request's own example, Numpad1, has no name in the key
+      spec (keys.md, "Key names": no numpad keys), so a quick repeat can be bound on it only once
+      the spec names the keypad; to be asked of the maintainer, with the screen readers' claim on the
+      keypad in mind (the note in hotkey.md's "Quick repeats").
+- [ ] **This application's own sent keys end a count.** A key a callback sends with
+      `host.input.send` between two presses reaches the program, so the next press is a 1 again, as
+      for any key let through (documented; `taps = "final"` sends after the sequence). If the module's
+      own keys should not count as "another key going down", the hook and the tap need a mark on
+      `host.input.send`'s events and a count of their own; to be decided by the maintainer.
 
 ## The tray icon left behind on Windows after the quit key (2026-10-21, from users)
 

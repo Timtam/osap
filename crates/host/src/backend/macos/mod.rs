@@ -396,6 +396,25 @@ impl Backend for MacBackend {
         input::modifiers_down()
     }
 
+    /// `NSEvent.doubleClickInterval`: the user's setting, in seconds, read afresh — a class method
+    /// that reads the user's defaults, no question to another process. One that is not a positive
+    /// number of seconds, which is not expected, is read as the default.
+    fn double_click_time(&self) -> std::time::Duration {
+        let secs = objc2_app_kit::NSEvent::doubleClickInterval();
+        if secs.is_finite() && secs > 0.0 {
+            std::time::Duration::from_secs_f64(secs.min(60.0))
+        } else {
+            crate::backend::DEFAULT_DOUBLE_CLICK
+        }
+    }
+
+    /// Set by the drain just before it takes the hotkeys; the captured keys follow in the same
+    /// drain. The tap and Carbon queue on this thread, which the drain holds, so nothing queued
+    /// before the moment can come after it.
+    fn input_taken_at(&self) -> Option<std::time::Instant> {
+        queue::taken_at()
+    }
+
     fn layout_char(&self, vk: u32, mask: u8) -> Option<(String, bool)> {
         layout::character(vk, mask)
     }

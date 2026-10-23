@@ -239,6 +239,9 @@ thread_local! {
     /// (The pump.) The window that was in front when the last "arrived through RegisterHotKey"
     /// line was written, so that it is written once per window rather than once per press.
     static MISS_LOGGED_FOR: Cell<isize> = const { Cell::new(0) };
+    /// (The pump.) When the last pump began taking the queued presses, [`HOTKEY_QUEUE`] first and
+    /// [`KEY_QUEUE`] after it (`Backend::input_taken_at`).
+    static INPUT_TAKEN: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 /// A hotkey has been filed in [`HOOK_HOTKEYS`] at some point, so the hook consults it. Set
@@ -1840,6 +1843,26 @@ impl Backend for WindowsBackend {
         }
     }
 
+    /// `GetDoubleClickTime`: the user's setting, read afresh — one call into user32, no message.
+    /// Windows answers 500 ms for a setting of 0 and at most 5000 ms; 0 is not expected, and is
+    /// read as that default all the same.
+    fn double_click_time(&self) -> std::time::Duration {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
+        match unsafe { GetDoubleClickTime() } {
+            0 => super::DEFAULT_DOUBLE_CLICK,
+            ms => std::time::Duration::from_millis(u64::from(ms)),
+        }
+    }
+
+    /// Set by `pump_pending` just before it takes [`HOTKEY_QUEUE`]; [`KEY_QUEUE`] is taken after it
+    /// in the same pump, so a key the hook queued before the moment is in that pump too. A
+    /// `WM_HOTKEY` posted before it was dispatched by then: posted messages are retrieved before the
+    /// timer that drives the pump. A hotkey press is timed on the tick clock, a few milliseconds
+    /// apart from this one, which the count's own rule covers (taps.rs, `take_due`).
+    fn input_taken_at(&self) -> Option<Instant> {
+        INPUT_TAKEN.with(Cell::get)
+    }
+
     /// `ToUnicodeEx` against the layout of the thread that owns the foreground window — the one
     /// the user is typing into, which need not be ours: layouts are per thread.
     ///
@@ -1911,7 +1934,7 @@ impl Backend for WindowsBackend {
         let pending: Vec<(i32, Route, u32)> = locked(&HOTKEY_QUEUE).drain(..).collect();
         let mut hotkeys = Vec::new();
         for (id, route, _) in pending {
-            if settle_hotkey(id, route) {
+            if settle_hotkey(id, route).is_some() {
                 hotkeys.push(id);
             }
         }
@@ -2072,6 +2095,9 @@ impl Backend for WindowsBackend {
             }
             events.on_system(system);
         }
+        // Before either queue is taken: a press the hook or the window proc queued before this
+        // moment is handed over in this pump (`input_taken_at`).
+        INPUT_TAKEN.with(|t| t.set(Some(Instant::now())));
         let hotkeys: Vec<(i32, Route, u32)> = locked(&HOTKEY_QUEUE).drain(..).collect();
         // After a stop: a `RegisterHotKey` press made during the stall it ended reaches the queue
         // only now, and is dropped by its stamp, as the rest of the stall's presses were. Once, on
@@ -2082,11 +2108,11 @@ impl Backend for WindowsBackend {
         for (id, route, seq) in hotkeys {
             let stalled = drop_until & DROP_ARMED != 0
                 && matches!(route, Route::Os { time } if super::tick_not_after(time, drop_until as u32));
-            if settle_hotkey(id, route) {
+            if let Some(own) = settle_hotkey(id, route) {
                 if stalled {
                     late.push(id);
                 } else {
-                    events.on_hotkey(id, seq);
+                    events.on_hotkey(id, super::HotkeyPress { seq, own, at: tick_instant(route.time()) });
                 }
             }
         }
@@ -2374,6 +2400,19 @@ fn hotkey_window() -> HWND {
         HOTKEY_HWND.store(hwnd as isize, Ordering::Relaxed);
         hwnd
     }
+}
+
+/// The moment a hotkey press was made, from its stamp on the tick clock — the key event's (`time`
+/// of the hook's report) or the message's (`GetMessageTime`): now, less how long ago the stamp
+/// is. What the host times quick repeats by (`HotkeyPress::at`), and not when the pump got to the
+/// press, which a busy event loop delays. A stamp after the clock, read a moment apart, is now.
+fn tick_instant(time: u32) -> Instant {
+    let ago = unsafe { GetTickCount() }.wrapping_sub(time);
+    if ago >= 0x8000_0000 {
+        return Instant::now();
+    }
+    let now = Instant::now();
+    now.checked_sub(std::time::Duration::from_millis(u64::from(ago))).unwrap_or(now)
 }
 
 unsafe extern "system" fn hotkey_wndproc(
@@ -3565,16 +3604,20 @@ unsafe fn send_mask_key() {
     SendInput(2, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
 }
 
-/// The pump's half: whether a hotkey press that reached the queue is dispatched. Says so in
-/// the log when a press came the other way from the one expected, because that is the only
-/// trace either case leaves.
-fn settle_hotkey(id: i32, route: Route) -> bool {
+/// The pump's half: whether a hotkey press that reached the queue is dispatched — and then how
+/// many of the key-downs let through to the program by the time it came in are its own
+/// (`HotkeyPress::own`): 1 for a press the hook let through on purpose and `RegisterHotKey`
+/// delivered (`expected`), whose key-down the hook counted as it let it go on, before the
+/// `WM_HOTKEY` read the count; 0 for one the hook swallowed, or was not called for. `None` when it
+/// is not dispatched. Says so in the log when a press came the other way from the one expected,
+/// because that is the only trace either case leaves.
+fn settle_hotkey(id: i32, route: Route) -> Option<u32> {
     HOTKEY_DEDUPE.with(|d| {
         let mut d = d.borrow_mut();
         match route {
             Route::Hook { time, late } => {
                 if d.hook_press(id, time, late) {
-                    return true;
+                    return Some(0);
                 }
                 crate::logging::line(
                     "keys",
@@ -3583,11 +3626,11 @@ fn settle_hotkey(id: i32, route: Route) -> bool {
                          RegisterHotKey had already delivered; not dispatched a second time"
                     ),
                 );
-                false
+                None
             }
             Route::Passed { time, late } => {
                 d.hook_pass(id, time, late);
-                false
+                None
             }
             Route::Os { time } => match d.os_press(id, time) {
                 OsPress::Duplicate { late } => {
@@ -3600,7 +3643,7 @@ fn settle_hotkey(id: i32, route: Route) -> bool {
                              waiting; not dispatched a second time"
                         ),
                     );
-                    false
+                    None
                 }
                 // The system's first auto-repeat of a press the hook kept from it — dispatched, or
                 // taken by a capture of the same combination — the key still held while the hook
@@ -3626,7 +3669,7 @@ fn settle_hotkey(id: i32, route: Route) -> bool {
                              Windows); not dispatched a second time"
                         ),
                     );
-                    false
+                    None
                 }
                 OsPress::Deliver { expected } => {
                     let hooked = !expected
@@ -3661,7 +3704,9 @@ fn settle_hotkey(id: i32, route: Route) -> bool {
                             ),
                         );
                     }
-                    true
+                    // A press the hook let through: its key-down went on past the hook, which counted
+                    // it before Windows matched the hotkey and posted its message.
+                    Some(u32::from(expected))
                 }
             },
         }
@@ -4815,20 +4860,20 @@ mod hook_carry_over_tests {
         assert!(hotkey_hook::file_if_granted(&mut locked(&HOOK_HOTKEYS), true, 7, F7, 0xF));
 
         fired(10_000, 0);
-        assert!(settle_hotkey(7, Route::Hook { time: 10_000, late: 0 }), "the press");
-        assert!(settle_hotkey(7, Route::Os { time: 10_500 }), "not judged without raw input");
+        assert_eq!(settle_hotkey(7, Route::Hook { time: 10_000, late: 0 }), Some(0), "the press");
+        assert_eq!(settle_hotkey(7, Route::Os { time: 10_500 }), Some(0), "not judged without raw input");
         locked(&HOOK_HOTKEYS).as_mut().unwrap().on_up(F7, 10_600);
 
         KEY_UPS_REPORTED.store(true, Ordering::Relaxed);
         fired(20_000, 0);
-        assert!(settle_hotkey(7, Route::Hook { time: 20_000, late: 0 }), "the press");
-        assert!(!settle_hotkey(7, Route::Os { time: 20_400 }), "taken for its repeat");
+        assert_eq!(settle_hotkey(7, Route::Hook { time: 20_000, late: 0 }), Some(0), "the press");
+        assert_eq!(settle_hotkey(7, Route::Os { time: 20_400 }), None, "taken for its repeat");
         {
             let mut t = locked(&HOOK_HOTKEYS);
             t.as_mut().unwrap().on_up(F7, 20_300);
         }
         fired(20_400, 650);
-        assert!(settle_hotkey(7, Route::Hook { time: 20_400, late: 650 }), "the new press, once");
+        assert_eq!(settle_hotkey(7, Route::Hook { time: 20_400, late: 650 }), Some(0), "the new press, once");
         // Its entry left in the pairing, the hook's report was dropped as its second delivery.
         let mut d = hotkey_hook::Dedupe::default();
         assert_eq!(d.os_press(7, 20_400), OsPress::Deliver { expected: false });
@@ -4836,6 +4881,32 @@ mod hook_carry_over_tests {
 
         *locked(&HOOK_HOTKEYS) = None;
         KEY_UPS_REPORTED.store(reported, Ordering::Relaxed);
+    }
+
+    /// A press the hook let through on purpose — a screen reader's modifier held, the key down
+    /// before the rest of the combination — and `RegisterHotKey` then delivered: its key-down went on
+    /// past the hook, which counted it before the `WM_HOTKEY` read the count, so the press
+    /// is handed over with that key-down as its own (`HotkeyPress::own`) and its quick repeats count
+    /// on. One the system delivered without the hook's note, and one the hook swallowed, have none.
+    #[test]
+    fn a_press_the_hook_let_through_has_its_own_key_down_in_the_count() {
+        let _turn = locked(&RECORDS);
+        assert_eq!(settle_hotkey(9, Route::Passed { time: 30_000, late: 0 }), None, "a note, not a press");
+        assert_eq!(settle_hotkey(9, Route::Os { time: 30_004 }), Some(1), "its own key-down counted");
+        assert_eq!(settle_hotkey(9, Route::Os { time: 31_000 }), Some(0), "no note: the hook was not called");
+        assert_eq!(settle_hotkey(9, Route::Hook { time: 32_000, late: 0 }), Some(0), "swallowed");
+    }
+
+    /// The moment a press was made, from its stamp on the tick clock (`tick_instant`): now less the
+    /// stamp's age. A stamp that reads as after the clock — the two read a moment apart — is now.
+    #[test]
+    fn a_hotkey_press_is_timed_by_its_stamp_on_the_tick_clock() {
+        // SAFETY: a plain call.
+        let tick = unsafe { GetTickCount() };
+        let before = Instant::now();
+        let ago = before.saturating_duration_since(tick_instant(tick.wrapping_sub(1000)));
+        assert!(ago >= std::time::Duration::from_millis(950) && ago <= std::time::Duration::from_millis(1100), "{ago:?}");
+        assert!(tick_instant(tick.wrapping_add(5000)) >= before, "a stamp after the clock is now");
     }
 
     /// What the watch does as a window comes to the front (`hook_watch_thread::front_came`): one of

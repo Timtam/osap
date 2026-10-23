@@ -3078,7 +3078,9 @@ local function notAnnounced(self, c)
     tostring(self.label), tostring(c.label)))
 end
 
-function Overlay:activate(index)
+-- `press`: the press of the control's hotkey that activated it, `{ count = n }` (host.hotkey.register),
+-- handed on to an `onActivate`; nil for Space, Return and a module's own call without one.
+function Overlay:activate(index, press)
   local i = index or self.focus
   local c = self.controls[i]
   if not c then return end
@@ -3222,7 +3224,9 @@ function Overlay:activate(index)
     -- — ON:EAR's "Search" read its field before clicking into it — or did the press a service on
     -- the side, which the module now asks for itself (ON:EAR's tiles learn where their grid sits).
     local was = (c.kind == "stepper" and c.text) and hookValue(self, c, "text") or nil
-    local ok, err = pcall(c.onActivate, self) -- the overlay, so a header control can reach it
+    -- The overlay, so a header control can reach it; and the hotkey's press, so a control can tell
+    -- a quick second press of its key from the first.
+    local ok, err = pcall(c.onActivate, self, press)
     if not ok then
       host.log.info(string.format("%s: '%s' failed while activating: %s",
         tostring(self.label), tostring(c.label), tostring(err)))
@@ -3603,13 +3607,15 @@ function Overlay:_syncControlHotkeys()
     if refused then
       skipped[#skipped + 1] = spec .. " (" .. refused .. ")"
     elseif self:_visibleClaimant(candidates) then
-      local ok, id, err = pcall(host.hotkey.register, spec, ownKey(self, function()
+      -- `press` is the host's count of the key's quick repeats, handed on to the control's
+      -- `onActivate` (O:activate).
+      local ok, id, err = pcall(host.hotkey.register, spec, ownKey(self, function(press)
         -- The claimant is resolved AFTER the wait, not before: the point of resolving at press
         -- time is that the visible set can have changed, and waiting is time in which it can.
         afterModifiersReleased(function()
           local i = self:_visibleClaimant(candidates)
           if i then self:_focusForHotkey(i) end -- visible already, so its `when` is not asked again
-          self:activate(i or candidates[1])
+          self:activate(i or candidates[1], press)
         end)
       end))
       if ok and id ~= nil then self.controlHotkeys[#self.controlHotkeys + 1] = id end
@@ -10306,7 +10312,8 @@ end
 -- page not shown — a disable and an enable bring the captures back in every window, with no flag —
 -- ends the trip, "page closed".
 function pg.handOverKey(P, t, w, key)
-  return function(mods)
+  -- `press`: the host's count of the key's quick repeats, handed on to `onKey`.
+  return function(mods, press)
     if w.released or P.trip ~= t or not t.live then
       local tok = w.tokenOf[key]
       if tok then pcall(host.keys.release, tok) end
@@ -10327,7 +10334,7 @@ function pg.handOverKey(P, t, w, key)
         pg.plog(P, "trip '%s': %s pressed while the hand-over's end is looked at — not handed to the module", t.label, key)
       else
         w.passed[#w.passed + 1] = key
-        local ok, v = pcall(w.onKey, t.overlay, t, key, mods)
+        local ok, v = pcall(w.onKey, t.overlay, t, key, mods, press)
         if not ok then
           pg.plog(P, "onKey failed: %s", tostring(v))
           if P.trip == t and t.live then pg.giveUp(P, t, "failed", false, fail("hook_failed", tostring(v), "onKey")) end

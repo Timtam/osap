@@ -16,6 +16,8 @@ The spec grammar is shared with `host.keys` and documented there. That includes 
 
 A combination that is also captured with [`host.keys.capture`](./keys.md#host-keys-capture) is a platform question: see the Windows section of [`register`](#host-hotkey-register).
 
+**A key pressed twice is a gesture of its own.** Every press tells its callback how many times in a row the key was pressed — `press.count`, 1, 2, 3 — so once can say a value and twice spell it, as a screen reader's own commands do; and a binding that must not act on the first press of a double one asks to hear only the last ([Quick repeats](#quick-repeats-once-twice-three-times)).
+
 **What each call answers** is under its **Returns**, and what it can fail with under its **Errors** ([Reading an Errors table](./errors.md#reading-an-errors-table)). `register` can answer an [error value](./errors.md), and it is one of the four calls that answer **an error value beside a result** — `page:show`, the two dumps and `register`: an id whose claim is not held now. `unregister` never answers one. A message may change between versions; its code does not. Two raises are not repeated at each entry: the capability gate, for a module that did not declare `hotkey`, and `stopped by the host: …`, once the module has run too long ([the limits](../module-runtime-and-lifecycle.md#limits)).
 
 ## What to declare {#declare}
@@ -31,11 +33,13 @@ See [what that list is and is not](./index.md#capabilities).
 
 ## host.hotkey.register(spec, callback, opts?) {#host-hotkey-register}
 
-**Signature:** `host.hotkey.register(spec: string, callback: () -> (), opts: { foreground: boolean? }?)` → `id: number`, `id: number, Error` or `nil, Error`
+**Signature:** `host.hotkey.register(spec: string, callback: (press: { count: number }) -> (), opts: { foreground: boolean?, taps: ("every" | "final")?, within: number? }?)` → `id: number`, `id: number, Error` or `nil, Error`
 
-Registers a **global** OS hotkey (active regardless of foreground window) for the [key spec](keys#key-spec-string-format) and returns an integer `id`. The callback is invoked with no arguments each time the hotkey fires (only while the owning module is enabled), as a [handler](../module-runtime-and-lifecycle.md#handlers) of the module — one after another with its other handlers — however the press was delivered; what a held-down combination does is in the platform sections.
+Registers a **global** OS hotkey (active regardless of foreground window) for the [key spec](keys#key-spec-string-format) and returns an integer `id`. The callback is invoked each time the hotkey fires (only while the owning module is enabled), as a [handler](../module-runtime-and-lifecycle.md#handlers) of the module — one after another with its other handlers — however the press was delivered; what a held-down combination does is in the platform sections. It is handed one argument, `press`: `press.count` is 1 for a first press, 2 for a second quick press of the same combination, and so on ([Quick repeats](#quick-repeats-once-twice-three-times)). A callback written to take no argument runs as it always did.
 
 **It can answer an id and an error value together**: a claim that is made and stands, but is not held at this moment. Read both values; see [Returns](#host-hotkey-register-returns).
+
+`opts.taps = "final"` hears a quick sequence once, when it is over, with its count, instead of at every press; `"every"`, the default, hears every press at once. `opts.within` is the interval of this binding's quick repeats in milliseconds, 100 to 5000, a fraction cut to the whole number below; without it the system's double-click time holds. Both are under [Quick repeats](#quick-repeats-once-twice-three-times).
 
 `opts.foreground = true` is **experimental**, for the HTML probe's test W2 (TODO.md): the press is left to the operating system's own hotkey delivery, which on Windows is what gives this application the right to bring a window of its own to the front — see the Windows section. It may go again once the probe has answered whether it is needed.
 
@@ -46,6 +50,51 @@ These are exactly the `check` reasons its table marks as refused. Nothing else `
 The host records, logs and reports a registration by its [normalized](./keys.md#host-keys-normalize) spec, so the log names the chord it is on this platform: `Ctrl+Shift+Win+Alt+F6` appears as `Ctrl+Alt+Shift+Win+F6` on Windows, and `Cmd+Shift+F6` as `Shift+Cmd+F6` on a Mac. The dialogs use the same form on Windows. On a Mac they say the key in [`describe`](./keys.md#host-keys-describe)'s spoken words, `Shift+Command+F6`, because the spec's word for the Control key there, `Meta`, is not the key's name.
 
 **While its module is busy** — one of its handlers [waits](../module-runtime-and-lifecycle.md#a-handler-waits) for a read — a press waits behind that handler and runs once the module is free, in the order its events came. Up to 256 keys, hotkey presses and controller buttons wait; the next is dropped, with a `[keys]` line. The press runs on the registration it was made for, or, when the module registered the same combination again meanwhile, on the new one — unless the module has [scoped](./keys.md#host-keys-scope) its keys to a window other than the one in front at the press — and the log says so: `[com.example.game] Ctrl+Shift+F9, pressed while the module was busy, went to the module's current registration of it`. When another module holds the combination now, the press is dropped and said (`… pressed while the module was busy, was dropped: the hotkey went to another module meanwhile`); it never runs on another module's hotkey. When the module released the hotkey meanwhile and holds the combination no more, the press goes where a captured key its module let go of goes (see the top of [`host.keys`](./keys.md)): first to the next module that [captures](./keys.md#host-keys-capture) the combination in the window that was in front when the press reached the application, as a key of that module's — a capture is what the hook would have given the key to before the hotkey — said as `[com.example.game] Ctrl+Shift+F9, pressed while the module was busy, went to com.example.synth, the next module that captures it in the window it was pressed in: its registration was released meanwhile`; with none, to the program in front: sent as it was pressed, the same key with the same modifiers, while the window that was in front when the press reached the application still is, and said: `[com.example.game] Ctrl+Shift+F9, pressed while the module was busy, was passed on to the program in front: its registration was released meanwhile`. Otherwise it is dropped, and the line says why: the reasons a captured key's has — another window in front by then, or none known when the press arrived; the key still held down; a modifier, or a screen reader's key, held down that the press was made without; a key that reached the program after the press did, which the press would follow (`… and a key typed after it has reached the program first`); the system not taking the keys sent — or a combination the key spec does not name, which only the system read (`… and its combination is one only the system could read, so it cannot be sent again`). The press is sent on the keycode or scan code its spec names, never another key the system matched it on. Another module's hotkeys are not held up: they run at once.
+
+### Quick repeats: once, twice, three times
+
+**Every press carries its count.** `press.count` is 1, and one more for each press of the same combination that follows the press before it within the interval, with no other key between. The callback runs at once, at every press, with the count it has then — the default, `taps = "every"`: a second quick press runs it again with 2, so a binding that does one thing for one press and another for two does the first thing too, before the second press comes.
+
+```luau
+-- Once says the preset, twice spells it: the second press comes too soon to stop the first.
+-- `presetName` and `spell` are the module's own.
+host.hotkey.register("Ctrl+Alt+P", function(press)
+  local name = presetName()
+  if press.count == 2 then
+    host.speech.output(spell(name))
+  else
+    host.speech.output(name)
+  end
+end)
+```
+
+**`taps = "final"` hears the sequence once, when it is over**, with its count: for "once does A, twice B, three times C", where A must not happen first. The sequence is over one interval after its last press, or as soon as a press of another key — or of the same key after the interval — starts a count of its own, which then runs after it. That costs one interval of waiting after the last press, and only for the bindings that ask for it. A held key's auto-repeat is never a press of it.
+
+```luau
+-- 1: play, 2: stop, 3 or more: back to the start. Nothing happens until the presses stop.
+-- `transport` is the module's own.
+host.hotkey.register("Ctrl+Alt+Space", function(press)
+  if press.count == 1 then transport("play")
+  elseif press.count == 2 then transport("stop")
+  else transport("start") end
+end, { taps = "final" })
+```
+
+**When the count starts again** — the press is a 1:
+
+- after the interval, measured from the press before it: the system's **double-click time** — the user's own setting, read at every press, so a change holds from the next one — or the binding's `within`, 100 to 5000 ms. A press that comes the interval or more after the one before it is a 1;
+- at a press of **another key**: another combination of any module, a hotkey or a [captured key](./keys.md#host-keys-capture) — the same key with **other modifiers** is another combination;
+- after a key-down that **reached the program** in between: typed past every capture and hotkey, let through for a menu or a screen reader, another held key's repeat, or sent — by another program, or by [`host.input.send`](./input.md#host-input-send), this module's own included. So a callback that sends a key ends the count it runs in: with `taps = "final"` it sends after the sequence. The modifiers themselves go down and up between two presses without ending it.
+
+A held key's **auto-repeat** never counts: a hotkey fires once per press however long it is held (the platform sections), and a captured key's repeat carries the count of the press it repeats.
+
+**One count for the whole application**, by combination: a registration of the same combination made again between two presses — the overlay runtime gives its controls' hotkeys back and takes them again at every focus move — counts on, and a press of another module's key ends the count of this one's. A press is counted as it reaches the application, once, however it came — on Windows a press both the keyboard hook and `RegisterHotKey` delivered is paired first — and before its module's mailbox: **a press that waits behind a busy handler keeps the count it had** and runs with it once the module is free. A `"final"` sequence that is over while its module is busy waits there too, in its turn. It is timed by when it was pressed, as near as the platform says (the platform sections), not by when the module got to it.
+
+A `"final"` sequence is handed on by the event loop's tick (every 15 ms), which looks at its deadline as it does at a timer's; nothing waits on the event loop for it. The deadline is measured against the moment the tick took the presses queued until then, not against the tick's own: a press made before the deadline that still waited in the queue — the event loop busy with other modules' callbacks — goes on with the sequence, which is then heard once, with that press in its count. A sequence once heard has ended its count: a press after it begins another, one that the clock, a few milliseconds off, places just inside the interval included — never the same sequence heard as 1 and then as 2. It stands for all of its presses: when the registration it was for is released, or another module holds the combination by the time it is heard, it is dropped and said, `[keys] [com.example.synth] Ctrl+Alt+Space, pressed 3 time(s) in a row, was not run: its registration was released before the sequence was handed over`, at most once every 10 s per module — never passed on to the program as one key, as a single press of a released registration is (above). A module disabled meanwhile hears nothing.
+
+Cost: counted on the event loop as the press is dispatched — a comparison, and the double-click time asked of the system: one call, no screen touch, no question to another program. No timer or thread is added. One sequence waits at a time, the last key's, which the next press of another key ends.
+
+**The numeric keypad is a screen reader's.** On Windows NVDA and JAWS use the numeric keypad for their own commands in their desktop keyboard layout, and a key the screen reader takes never reaches the host, nor its count (see [a screen reader can take a chord](#a-registration-is-a-claim-not-a-guarantee) below). On a Mac VoiceOver uses it only while NumPad Commander is on. The key spec names no keypad key yet ([key names](./keys.md#key-spec-string-format)).
 
 ### A registration is a claim, not a guarantee
 
@@ -113,6 +162,8 @@ newer copy and hold keys; quit it from its tray icon.
 - `id, err` — **a partial answer**: the claim is made and stands, and it is not held now. It is tried again whenever the host next works out who holds which key: at any module's next registration or release, and at every change to the enabled set ([A registration is a claim](#a-registration-is-a-claim-not-a-guarantee)). A parked macOS letter is held as soon as a layout that types it is selected. `err.code` is `taken`, `not_supported` or `failed`, below. [`unregister`](#host-hotkey-unregister) gives the claim up as it gives up a held one.
 - `nil, err` — nothing was registered: this platform can never hold the spec. `err.code` is `taken` or `not_supported`, below.
 
+The callback is handed `press`, a table `{ count = n }`: a whole number from 1, the press's place in its quick sequence; with `taps = "final"`, the number of presses the sequence ended with ([Quick repeats](#quick-repeats-once-twice-three-times)). A new table for every press.
+
 ```luau
 -- Written once: Ctrl+Shift+F9 on Windows, Command+Shift+F9 on a Mac.
 local KEY = "Ctrl+Shift+F9"
@@ -158,11 +209,13 @@ The dialogs and log lines of [A registration is a claim](#a-registration-is-a-cl
 - a spec the shared parser cannot read at all: an unknown modifier or key name, and the message names the part (the build for other systems answers it instead, above);
 - a `"<modifier> tap"`, which is something [`host.keys.capture`](./keys.md#host-keys-capture) watches and no system registers: `the hotkey '…' (…) is a modifier pressed on its own, which cannot be a global hotkey: capture it with host.keys.capture instead`;
 - a `spec` that is neither a string nor a number, or a `callback` that is not a function;
-- an `opts` that is neither a table nor `nil`; a key in it other than `foreground` (`host.hotkey.register: '…' is not an option; the only one is foreground`); a `foreground` that is not `true`, `false` or `nil` (`host.hotkey.register: foreground is true or false, not a …`).
+- an `opts` that is neither a table nor `nil`; a key in it other than `foreground`, `taps` and `within` (`host.hotkey.register: '…' is not an option; the options are foreground, taps and within`); a `foreground` that is not `true`, `false` or `nil` (`host.hotkey.register: foreground is true or false, not a …`); a `taps` other than `"every"`, `"final"` or `nil` (`host.hotkey.register: taps is "every" or "final", not "twice"`); a `within` that is not a number of milliseconds from 100 to 5000 once its fraction is cut — another number, `nan`, or not a number at all (`host.hotkey.register: within is a number of milliseconds from 100 to 5000, not 50`).
 
 ### Windows {#host-hotkey-register-windows}
 
 `RegisterHotKey`, with auto-repeat suppressed: the callback fires once per press, and holding the combination does not fire it again. Each role is the key of its name: `Ctrl` is Control and `Win` the Windows key.
+
+**Quick repeats** are timed by the press's own stamp on the system's tick clock — the key event's, for a press the keyboard hook matched, or the `WM_HOTKEY` message's (`GetMessageTime`) — so a press that waited for a busy event loop is timed when it was made. The interval is `GetDoubleClickTime`, the setting under Mouse properties, 500 ms unless the user changed it. The hook swallows the key-down of a press it matches, and is not called for one only `RegisterHotKey` delivers, so neither key-down is counted as one that reached the program. A press the hook lets through on purpose for `RegisterHotKey` to deliver — a screen reader's modifier held, or the key already down before the rest of the combination — goes on past the hook, which counts its key-down with the keys that went on towards the program; that key-down of its own is taken for no other key, so its quick repeats count on as well. Any other key-down the hook let go on between two presses ends the count (the count that decides it is the one a released registration's press is passed on by, [`host.keys`](./keys.md#host-keys-capture)). A key typed where the hook is not called — in an elevated window, or in one of this application's own — is not seen, and does not end a count.
 
 A hotkey on `Ctrl+Alt+<key>` is `AltGr+<key>` to Windows, so it takes that key's AltGr character away from every application for as long as it is held (the `altgr` reason of [`host.keys.check`](./keys.md#host-keys-check)).
 
@@ -195,6 +248,8 @@ A Carbon event hotkey — deliberately **not** an event tap, so this needs no In
 `F21`–`F24` are answered `nil, err` here (`not_supported`, see above): macOS has no key code for them.
 
 `{ foreground = true }` is accepted and changes nothing: a Carbon hotkey is the system's own delivery already, and there is no hook on its path.
+
+**Quick repeats** are timed when Carbon hands the press to the application's main thread, which also carries the event tap, so a press and a captured key are timed alike, and a press made while that thread was busy is timed late. The interval is `NSEvent.doubleClickInterval`, the double-click speed of the Mac's pointer settings. A key typed between two presses ends the count only while the event tap is in — that is, while some module captures a key with [`host.keys.capture`](./keys.md#host-keys-capture): Carbon alone sees nothing but its own combinations. The tap sees a hotkey's own key-down before Carbon matches it and counts it as let through, so a press may move that count by its own key-down and no more (not checked on a Mac yet).
 
 A chord that holds Control and Option together registers and never arrives while VoiceOver runs with its default modifier; the log says so once per chord, and [`host.keys.check`](./keys.md#host-keys-check) says so before you register. In a spec that is `Meta+Alt`, and the four-modifier chord holds it too. Ctrl+Alt without Win is Command+Option here, which is off it. A key that must be free system-wide is best Command+Shift with a function key (`"Cmd+Shift+F6"`): Command+Shift with a letter is the application-menu layer, and a hotkey there takes it from every application.
 

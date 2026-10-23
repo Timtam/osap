@@ -53,14 +53,15 @@ use mlua::{Function, Lua, MultiValue, RegistryKey, Table, Value};
 use crate::backend::{self, Backend, Captured, KeyOs, NotPassed, OwnerKeys, Pressed};
 use crate::logging;
 use crate::mailbox::{self, Event, MailHost, Opened};
+use crate::taps::{self, Press, Taps};
 use crate::task::Ctx;
 
 /// How often a module's dropped keys are said in the log at most: a key a module no longer
 /// captures, pressed again and again, is one fact, not a line per press.
 const DROPPED_QUIET: Duration = Duration::from_secs(10);
 
-/// One capture: the combination, the module that holds it, its release token, and its callback in
-/// the VM it was made from.
+/// One capture: the combination, the module that holds it, its release token, its callback in
+/// the VM it was made from, and its options for quick repeats (`taps`, `within`: taps.rs).
 pub(crate) struct Reg {
     pub(crate) vk: u32,
     pub(crate) mask: u8,
@@ -68,6 +69,7 @@ pub(crate) struct Reg {
     pub(crate) token: i64,
     pub(crate) lua: Lua,
     pub(crate) cb: RegistryKey,
+    pub(crate) taps: Taps,
 }
 
 /// What one module set: the window its captures are pinned to (0, everywhere) and whether it says
@@ -112,13 +114,18 @@ impl Captures {
 
     /// Files module `owner`'s capture of `(vk, mask)`, replacing its own earlier one, and returns
     /// its token.
-    pub(crate) fn capture(&self, owner: usize, vk: u32, mask: u8, lua: Lua, cb: RegistryKey) -> i64 {
+    pub(crate) fn capture(&self, owner: usize, vk: u32, mask: u8, lua: Lua, cb: RegistryKey, taps: Taps) -> i64 {
         let token = self.next_token.get() + 1;
         self.next_token.set(token);
         let mut regs = self.regs.borrow_mut();
         regs.retain(|r| !(r.vk == vk && r.mask == mask && r.owner == owner));
-        regs.push(Reg { vk, mask, owner, token, lua, cb });
+        regs.push(Reg { vk, mask, owner, token, lua, cb, taps });
         token
+    }
+
+    /// The capture `token`'s options for quick repeats; the default for a token no capture has.
+    pub(crate) fn taps_of(&self, token: i64) -> Taps {
+        self.regs.borrow().iter().find(|r| r.token == token).map_or_else(Taps::default, |r| r.taps)
     }
 
     /// Takes the capture `token` out; whether there was one.
@@ -292,6 +299,8 @@ fn once_per_quiet(said: &mut HashMap<usize, Instant>, owner: usize, now: Instant
 /// the tap is in, which modules are on, and their names. The host's `Shared`, or a test's holder.
 pub(crate) trait KeyHost: 'static {
     fn captures(&self) -> &Captures;
+    /// The count of quick repeats, and the sequence a `"final"` binding waits for (taps.rs).
+    fn taps(&self) -> &taps::Counter;
     fn key_backend(&self) -> &dyn Backend;
     /// Whether module `idx` is enabled: a disabled module's captures, scope and flag are not
     /// handed to the backend, and a key taken for it is not run.
@@ -399,19 +408,52 @@ fn reg_of<H: KeyHost + ?Sized>(h: &H, token: i64) -> Option<(Lua, Function)> {
 pub(crate) enum Arrived {
     /// Handed to its module's mailbox: run at once, or queued while the module is busy.
     Delivered(mailbox::Delivered),
+    /// Kept as its sequence's last press, for a capture with `taps = "final"` (taps.rs).
+    Kept,
+    /// A held key's auto-repeat, for a capture with `taps = "final"`: nothing to run.
+    Skipped,
     /// Not handed over — see [`Gone`].
     Dropped(Gone),
 }
 
 /// A key-down the hook or the tap took for module `owner` arrives, `pressed` in the window
-/// `pressed.front`: handed to the module's mailbox for its capture of the key ([`key_target`]), or
-/// dropped and said — at most once every ten seconds per module, and not for a disabled module.
+/// `pressed.front`: counted as a press — a key went down, whatever becomes of it — and handed to
+/// the module's mailbox for its capture of the key ([`key_target`]) with its count, at once or, for
+/// a capture with `taps = "final"`, once its sequence is over ([`taps::hand_on`]); or dropped and
+/// said — at most once every ten seconds per module, and not for a disabled module. Timed by when
+/// the hook or the tap queued it, as near to the press as the host knows.
+///
+/// Which capture takes it is decided after the count: a `"final"` sequence the press ends is handed
+/// on by the count and may run at once, and its callback may have released and made again the
+/// capture of this very key, as an overlay's focus move does with its keys — the key goes to the
+/// capture made, as it would have without the sequence. The capture before it gives only the
+/// interval the press is counted by, and a press that ended a sequence is a 1 by any interval.
 pub(crate) fn arrive<H: KeyHost + MailHost>(h: &H, vk: u32, mods: u8, owner: usize, repeat: bool, pressed: Pressed) -> Arrived {
-    match key_target(h, owner, vk, mods, pressed.front, None) {
+    let opts_of = |target: Target| match target {
+        Target::Same(token) | Target::Moved(token) => h.captures().taps_of(token),
+        Target::Gone(_) => Taps::default(),
+    };
+    // Asked of the system once at most, whichever capture's interval it is.
+    let system = std::cell::OnceCell::new();
+    let interval = |t: Taps| t.interval(|| *system.get_or_init(|| h.key_backend().double_click_time()));
+    let key = taps::Key::Combo(vk, mods);
+    let at = pressed.queued.unwrap_or_else(Instant::now);
+    let within = interval(opts_of(key_target(h, owner, vk, mods, pressed.front, None)));
+    // The hook and the tap swallow the key-down they take: none of its own is in the count.
+    let n = taps::count(h, key, at, pressed.seq, 0, repeat, within);
+    let target = key_target(h, owner, vk, mods, pressed.front, None);
+    let t = opts_of(target);
+    let within = interval(t);
+    match target {
         Target::Same(token) | Target::Moved(token) => match reg_of(h, token) {
             Some((lua, _)) => {
-                let ev = Event::Key { owner, token, vk, mods, repeat, pressed, let_go: Vec::new() };
-                Arrived::Delivered(mailbox::deliver(h, owner, &lua, ev))
+                let press = Press { count: n, ended: t.mode == taps::Mode::Final };
+                let ev = Event::Key { owner, token, vk, mods, repeat, pressed, let_go: Vec::new(), press };
+                match taps::hand_on(h, key, owner, &lua, ev, t.mode, repeat, at + within) {
+                    taps::Handed::Delivered(d) => Arrived::Delivered(d),
+                    taps::Handed::Kept => Arrived::Kept,
+                    taps::Handed::Skipped => Arrived::Skipped,
+                }
             }
             None => Arrived::Dropped(Gone::Released),
         },
@@ -426,10 +468,12 @@ pub(crate) fn arrive<H: KeyHost + MailHost>(h: &H, vk: u32, mods: u8, owner: usi
 }
 
 /// A key as it runs (`Event::Key`): its capture, or the module's new capture of it, with the
-/// `mods` table the callback gets — or nothing, said once every ten seconds per module. A key whose
-/// capture the module released meanwhile, and did not make again, goes on where it would have gone
-/// had the module never captured it: to the next module that captures it in the window it was
-/// pressed in, or to the program in front ([`pass_on_released`]); `repeat` and `let_go` go with it.
+/// `mods` table and the `press` table the callback gets — or nothing, said once every ten seconds
+/// per module. A key whose capture the module released meanwhile, and did not make again, goes on
+/// where it would have gone had the module never captured it: to the next module that captures it
+/// in the window it was pressed in, or to the program in front ([`pass_on_released`]); `repeat`,
+/// `let_go` and its count go with it. Not a sequence a `"final"` capture heard once it was over
+/// (`press.ended`): it stands for all of its presses, and is dropped and said ([`final_dropped_line`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn open_key<H: KeyHost + MailHost>(
     h: &H,
@@ -440,6 +484,7 @@ pub(crate) fn open_key<H: KeyHost + MailHost>(
     repeat: bool,
     pressed: Pressed,
     let_go: Vec<usize>,
+    press: Press,
 ) -> Opened {
     let target = key_target(h, owner, vk, mods, pressed.front, Some(token));
     let spec = || backend::spec_name_for(KeyOs::CURRENT, vk, mods);
@@ -453,10 +498,18 @@ pub(crate) fn open_key<H: KeyHost + MailHost>(
             }
             t
         }
+        // A sequence heard once it was over, whose capture went before it ran: dropped, not passed
+        // on as one key.
+        Target::Gone(gone) if press.ended => {
+            if gone != Gone::Disabled && h.captures().say_dropped(owner, Instant::now()) {
+                logging::line("keys", &final_dropped_line(&h.key_module_id(owner), &spec(), press.count, gone));
+            }
+            return Opened::Gone;
+        }
         // Here too, only a key that waited: the hook kept it from the program for a capture the
         // module has let go of since.
         Target::Gone(Gone::Released) => {
-            pass_on_released(h, owner, &spec(), Some((vk, mods)), (repeat, pressed), let_go);
+            pass_on_released(h, owner, &spec(), Some((vk, mods)), (repeat, pressed, press), let_go);
             return Opened::Gone;
         }
         Target::Gone(gone) => {
@@ -467,9 +520,9 @@ pub(crate) fn open_key<H: KeyHost + MailHost>(
         }
     };
     let Some((lua, f)) = reg_of(h, token) else { return Opened::Gone };
-    let args = match mods_table(&lua, mods) {
-        Ok(t) => MultiValue::from_vec(vec![Value::Table(t)]),
-        Err(_) => MultiValue::new(),
+    let args = match (mods_table(&lua, mods), taps::table(&lua, press)) {
+        (Ok(m), Ok(p)) => MultiValue::from_vec(vec![Value::Table(m), Value::Table(p)]),
+        _ => MultiValue::new(),
     };
     Opened::Run { f, args, ctx: Ctx::new("key", owner) }
 }
@@ -538,8 +591,8 @@ pub(crate) fn offered_to(
 
 /// A key or a hotkey press, written `spec`, that waited in module `owner`'s mailbox and whose
 /// registration the module released meanwhile without making it again — `key` is its `(vk, mask)`,
-/// `None` for a hotkey only the system read; `held` its repeat flag and its press; `let_go` the
-/// modules that let go of it before it came to `owner`. It goes where it would have gone had the
+/// `None` for a hotkey only the system read; `held` its repeat flag, its press and its count;
+/// `let_go` the modules that let go of it before it came to `owner`. It goes where it would have gone had the
 /// modules that let go of it never captured it: to the next module that captures it in the window
 /// it was pressed in ([`offered_to`]), through that module's mailbox as a key the hook took for it,
 /// with `owner` added to `let_go` so that it never comes back to a module that let it go and
@@ -551,10 +604,10 @@ pub(crate) fn pass_on_released<H: KeyHost + MailHost>(
     owner: usize,
     spec: &str,
     key: Option<(u32, u8)>,
-    held: (bool, Pressed),
+    held: (bool, Pressed, Press),
     mut let_go: Vec<usize>,
 ) -> PassedOn {
-    let (repeat, pressed) = held;
+    let (repeat, pressed, press) = held;
     let say = |outcome: &PassedOn| {
         let (caps, now) = (h.captures(), Instant::now());
         let due = match outcome {
@@ -579,7 +632,7 @@ pub(crate) fn pass_on_released<H: KeyHost + MailHost>(
         // Said before it is handed over: the module it goes to may run it at once.
         let outcome = PassedOn::Offered(h.key_module_id(to));
         say(&outcome);
-        mailbox::deliver(h, to, &lua, Event::Key { owner: to, token, vk, mods: mask, repeat, pressed, let_go });
+        mailbox::deliver(h, to, &lua, Event::Key { owner: to, token, vk, mods: mask, repeat, pressed, let_go, press });
         return outcome;
     }
     let outcome = pass_on(h, vk, mask, pressed);
@@ -698,6 +751,19 @@ fn registration_words(gone: Gone) -> &'static str {
     }
 }
 
+/// The line for a sequence a `"final"` capture or hotkey would have heard once it was over, `count`
+/// presses of `spec`, that was not run: its registration was released, or handed to another module,
+/// or its module's scope moved to another window, before the sequence was handed to it. It stands
+/// for every press of the sequence, so it is not passed on as one key.
+pub(crate) fn final_dropped_line(module: &str, spec: &str, count: u32, gone: Gone) -> String {
+    format!(
+        "[{module}] {spec}, pressed {count} time(s) in a row, was not run: {} before the sequence was \
+         handed over. Said at most once every {} s per module",
+        registration_words(gone),
+        DROPPED_QUIET.as_secs()
+    )
+}
+
 /// The line for a key or hotkey that went to the module's new registration of it: one that waited
 /// in its busy module's mailbox (`queued`), or a hotkey whose registration was made again between
 /// the press and its delivery while its module was free.
@@ -718,7 +784,7 @@ mod tests {
 
     fn reg(c: &Captures, lua: &Lua, owner: usize, vk: u32, mask: u8) -> i64 {
         let cb = lua.create_registry_value(lua.create_function(|_, ()| Ok(())).unwrap()).unwrap();
-        c.capture(owner, vk, mask, lua.clone(), cb)
+        c.capture(owner, vk, mask, lua.clone(), cb, Taps::default())
     }
 
     /// Registration order across modules, one capture per combination and module (a module's
