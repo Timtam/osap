@@ -354,6 +354,102 @@ fn set_tray_label(shown: bool) {
     });
 }
 
+/// What the tray needs of its icon: taking it away, and a notification on it. wxdragon's
+/// `TaskBarIcon` in the application, a counting one in the tests.
+trait TrayIcon {
+    fn remove(&self);
+    fn balloon(&self, title: &str, text: &str) -> bool;
+}
+
+impl TrayIcon for TaskBarIcon {
+    fn remove(&self) {
+        self.remove_icon();
+    }
+
+    fn balloon(&self, title: &str, text: &str) -> bool {
+        self.show_balloon(title, text, 0, 0, None)
+    }
+}
+
+/// The tray icon, held for the life of the process and taken away once, on the way out.
+///
+/// It used to be `mem::forget`-ed and never taken away, and on Windows every way out left it
+/// to Explorer, which drops the icon of a window that is gone only when the pointer passes
+/// over it: after the quit key, with the pointer elsewhere, a dead icon stayed (users,
+/// 2026-10-21; after the tray's own Quit the pointer is already there). Forgetting the wrapper
+/// was not what kept the icon, nor what left it: wxdragon's `Drop` for `TaskBarIcon` destroys
+/// nothing, so the wxTaskBarIcon, whose destructor would remove it, is never deleted. What
+/// makes it dead is wx's cleanup after the window loop, which deletes the icon's hidden window
+/// with the other top-level windows (`wxTaskBarIconWindow`, src/msw/taskbar.cpp;
+/// `wxAppBase::DeleteAllTLWs`), and after that nothing is left to remove it with.
+///
+/// So it is removed while that window still exists. By `quit` in `run_gui`, right before it
+/// ends the window loop: the one place the quit key, the tray's and the window's Quit, a Mac's
+/// Command-Q and a Quit that ended a dialog first all end it, and never inside a dialog's loop,
+/// where that loop would go on without an icon. And as the module window is destroyed, for a
+/// way out that does not pass `quit`: wx deletes the top-level windows in the order they were
+/// made, so the module window, made first, goes before the icon's window. That is a session
+/// end, which wx ends itself, every top-level window deleted and then `exit()`
+/// (`wxApp::OnEndSession`, src/msw/app.cpp), and the end of every quit, which finds the icon
+/// gone already. `removed` makes whichever comes first the only one; the tick can run once more
+/// while the loop drains, and quit again.
+///
+/// Taken away, not destroyed (`TaskBarIcon::destroy`): the tray's Quit runs in the icon's own
+/// menu handler, and the handlers bound to the icon live as long as it does.
+///
+/// On a Mac the status item is left where it is (`removes` false). It goes with the process,
+/// and wxWidgets' `RemoveIcon` there releases the `NSStatusItem` and the target of its click,
+/// inside which the tray's Quit is still running (`-[wxOSXStatusItemTarget clickedAction:]`,
+/// src/osx/cocoa/taskbar.mm).
+///
+/// The icon is the last field, and may be unsized, so that `TRAY` holds any tray behind
+/// `dyn TrayIcon`: a test puts a counting one there and calls the real `remove_tray_icon`.
+struct Tray<I: ?Sized> {
+    /// Whether this platform's icon is taken away at all: not on a Mac (above).
+    removes: bool,
+    removed: Cell<bool>,
+    icon: I,
+}
+
+impl<I> Tray<I> {
+    fn new(icon: I, removes: bool) -> Self {
+        Self { removes, removed: Cell::new(false), icon }
+    }
+}
+
+impl<I: TrayIcon + ?Sized> Tray<I> {
+    /// Takes the icon away the first time; nothing after that.
+    fn remove(&self) {
+        if !self.removed.replace(true) && self.removes {
+            self.icon.remove();
+        }
+    }
+
+    /// Shows a notification on the icon, and says whether it did. Not once the application is
+    /// on its way out (`quitting`), nor once the icon is gone: the icon is taken away before the
+    /// window loop ends, and Windows takes a balloon away with its icon (`NIN_BALLOONHIDE` comes
+    /// "when the icon is deleted", Shell_NotifyIcon's documentation), so the quit key's sentence
+    /// would go before it was read. The host speaks it instead, where a screen reader runs
+    /// (`Shared::announce`), and waits for that on the way out. wxWidgets also refuses a balloon
+    /// without an icon with a failed check (`wxCHECK_MSG` in `ShowBalloon`).
+    fn notify(&self, title: &str, text: &str, quitting: bool) -> bool {
+        !quitting && !self.removed.get() && self.icon.balloon(title, text)
+    }
+}
+
+thread_local! {
+    /// The tray, once it exists. Leaked, so that nothing destroys it, not even a thread-local's
+    /// destructor after wx has deleted the icon's window (`Tray`).
+    static TRAY: Cell<Option<&'static Tray<dyn TrayIcon>>> = const { Cell::new(None) };
+}
+
+/// Takes the tray icon away, once (`Tray`). Nothing before the icon exists.
+fn remove_tray_icon() {
+    if let Some(tray) = TRAY.with(Cell::get) {
+        tray.remove();
+    }
+}
+
 /// The Installed list, which is a different control on each platform.
 ///
 /// Not a preference. On Windows a `wxTreeCtrl` is a real `SysTreeView32`, and with
@@ -1735,6 +1831,8 @@ pub fn run_gui(
                 // First, so a second start from here on is told this copy is quitting (and
                 // waits for it) instead of being told a window will be shown.
                 crate::instance::begin_quit();
+                // While the icon's window still exists, which ends with the loop (`Tray`).
+                remove_tray_icon();
                 app.exit_main_loop()
             }
         };
@@ -1816,12 +1914,25 @@ pub fn run_gui(
 
         // Hand the host the only thing that can show a notification. `show_balloon` is
         // Windows-only and answers false everywhere else without doing anything, which is
-        // exactly the answer the host needs to decide whether to speak instead.
-        let taskbar = std::rc::Rc::new(taskbar);
-        install_notifier(Box::new({
-            let taskbar = taskbar.clone();
-            move |title: &str, text: &str| taskbar.show_balloon(title, text, 0, 0, None)
+        // exactly the answer the host needs to decide whether to speak instead; so is the tray's
+        // answer while the application quits (`Tray::notify`).
+        let tray: &'static Tray<TaskBarIcon> =
+            Box::leak(Box::new(Tray::new(taskbar, !cfg!(target_os = "macos"))));
+        TRAY.with(|t| t.set(Some(tray)));
+        install_notifier(Box::new(move |title: &str, text: &str| {
+            tray.notify(title, text, crate::instance::quit_asked())
         }));
+        // The way out that does not pass `quit`: wx deleting the module window, which it does
+        // before the icon's window (`Tray`). Its own destruction only, as wxdragon's handler
+        // for it checks too: a destroy event is a command event, and a child's can come up.
+        let frame_ptr = frame.handle_ptr();
+        frame.on_destroy(move |event| {
+            if let WindowEventData::General(e) = &event {
+                if e.get_event_object().is_some_and(|w| w.as_ptr() == frame_ptr) {
+                    remove_tray_icon();
+                }
+            }
+        });
 
         // The one signal that the application actually started. On macOS there is no balloon
         // and no Dock icon to notice either, so somebody who cannot see the screen would have
@@ -1865,7 +1976,6 @@ pub fn run_gui(
             show_manager(&frame);
         }
         announce(&start.text);
-        std::mem::forget(taskbar); // keep the icon + its handlers alive
 
         // wxWidgets owns the loop now, so this recurring tick is how our OS events
         // (hotkeys / captured keys / foreground changes) reach Luau. The init
@@ -2635,6 +2745,85 @@ mod quit_step_tests {
         assert_eq!(ended, ["review", "settings"]);
         assert_eq!(loops_ended, 1, "the window loop ends once, with no dialog open");
         assert_eq!(quit_step::<&str>(&[]), QuitStep::EndLoop);
+    }
+}
+
+#[cfg(test)]
+mod tray_tests {
+    use super::*;
+
+    /// Counts what the tray does to its icon.
+    #[derive(Default)]
+    struct Counted {
+        removed: Cell<u32>,
+        balloons: RefCell<Vec<String>>,
+    }
+
+    impl TrayIcon for &Counted {
+        fn remove(&self) {
+            self.removed.set(self.removed.get() + 1);
+        }
+
+        fn balloon(&self, _title: &str, text: &str) -> bool {
+            self.balloons.borrow_mut().push(text.to_string());
+            true
+        }
+    }
+
+    /// Every way out removes the icon, and only the first does it: `quit`, then `quit` again
+    /// from a tick while the loop drains, then the module window's destruction in wx's cleanup.
+    /// A session end wx ends itself comes in at the last of them, and is the first there.
+    #[test]
+    fn the_icon_is_taken_away_once_whichever_way_out_comes_first() {
+        for ways in [3, 1] {
+            let icon = Counted::default();
+            let tray = Tray::new(&icon, true);
+            for _ in 0..ways {
+                tray.remove();
+            }
+            assert_eq!(icon.removed.get(), 1, "{ways} way(s) out");
+        }
+    }
+
+    /// Nothing is shown on an icon that is going: from the moment a quit is asked for (the quit
+    /// key asks before its sentence, so the sentence is spoken), and after the icon is gone.
+    #[test]
+    fn no_notification_on_the_way_out() {
+        let icon = Counted::default();
+        let tray = Tray::new(&icon, true);
+        assert!(tray.notify("Automation Platform", "Running in the system tray.", false));
+        assert!(!tray.notify("Automation Platform", "Automation Platform is quitting.", true));
+        tray.remove();
+        assert!(!tray.notify("Automation Platform", "A module was stopped.", false));
+        assert_eq!(*icon.balloons.borrow(), ["Running in the system tray."]);
+    }
+
+    /// On a Mac the status item goes with the process: the same way out leaves it alone, and
+    /// shows nothing on it after.
+    #[test]
+    fn a_mac_s_status_item_is_left_to_the_process() {
+        let icon = Counted::default();
+        let tray = Tray::new(&icon, false);
+        tray.remove();
+        tray.remove();
+        assert_eq!(icon.removed.get(), 0);
+        assert!(!tray.notify("Automation Platform", "Automation Platform is quitting.", false));
+        assert!(icon.balloons.borrow().is_empty());
+    }
+
+    /// `remove_tray_icon`, the one removal every way out calls, finds the tray where `run_gui`
+    /// puts it (`TRAY`, this thread's, which is the test's own) and takes its icon away once;
+    /// before there is a tray it does nothing.
+    #[test]
+    fn the_one_removal_finds_the_tray() {
+        remove_tray_icon();
+        let icon: &'static Counted = Box::leak(Box::default());
+        let tray: &'static Tray<&'static Counted> = Box::leak(Box::new(Tray::new(icon, true)));
+        TRAY.with(|t| t.set(Some(tray)));
+        remove_tray_icon();
+        assert_eq!(icon.removed.get(), 1, "taken away");
+        remove_tray_icon();
+        assert_eq!(icon.removed.get(), 1, "and only once");
     }
 }
 

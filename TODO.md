@@ -34,17 +34,57 @@ and to build it as soon as the usage allows.
 
 ## The tray icon left behind on Windows after the quit key (2026-10-21, from users)
 
-- [ ] **On Windows the tray icon stays after the quit key** (Ctrl+Shift+Alt+Win+Q), until the
+- [x] **On Windows the tray icon stays after the quit key** (Ctrl+Shift+Alt+Win+Q), until the
       pointer passes over it or it is clicked. Users report it. The likely cause is in
       `crates/host/src/gui.rs`: the `TaskBarIcon` is `std::mem::forget`-ed after it is set up ("keep
       the icon + its handlers alive", about line 1868), so its destructor, which removes the icon
       (`RemoveIcon`, `Shell_NotifyIcon` `NIM_DELETE`), never runs. Every way out leaves the icon to
       Explorer, which drops a dead one only when the pointer passes over it. After the tray menu's
       own Quit the pointer is already there, which is why only the key shows it.
-- [ ] **The fix:** keep a handle to the icon and remove it on every way out (the key, the tray's
+
+      **Cause, read in the sources** (2026-10-23): not the `mem::forget` itself. wxdragon
+      0.9.16's `Drop` for `TaskBarIcon` destroys nothing, so the wxTaskBarIcon, whose destructor
+      calls `RemoveIcon`, was never deleted either way. wx's cleanup after the window loop deletes
+      the icon's hidden window with the other top-level windows (`wxTaskBarIconWindow`,
+      src/msw/taskbar.cpp; `wxAppBase::DeleteAllTLWs`), which makes the icon dead and leaves
+      nothing to remove it with.
+- [x] **The fix:** keep a handle to the icon and remove it on every way out (the key, the tray's
       Quit, the window's Quit, a second start's quit request, a logoff), before the main loop ends.
       Hold the handlers alive as now. Check it with the quit key while the pointer is elsewhere. On
       a Mac the status item goes with the process; confirm that the same path does no harm there.
+
+      **Built** (2026-10-23, branch `wip/tray-exit`): `Tray` in `crates/host/src/gui.rs` holds the
+      icon for the process (leaked, its handlers bound as before) and takes it away once: in `quit`,
+      after `begin_quit` and right before `exit_main_loop`, the one end of the window loop for the
+      quit key, the tray's and the window's Quit, a Mac's Command-Q and a Quit that ended a dialog
+      first, never inside a dialog's loop; and as the module window is destroyed, for a session end
+      wx ends itself (`wxApp::OnEndSession` deletes every top-level window, the module window first
+      since it was made first, then calls `exit()`). Whichever comes first is the only one. There is
+      no quit request from a second start to wire: a second start only asks for the window
+      (`show-manager`). On a Mac the same path leaves the status item to the process: wx's
+      `RemoveIcon` there releases the `NSStatusItem` and its click target, inside which the tray's
+      Quit is still running. The tray shows no notification once a quit is asked for, since Windows
+      takes a balloon away with its icon; so the quit key asks first and then says its sentence,
+      which is now spoken where a screen reader runs, instead of shown, and waited for on the way
+      out (docs/module-manager.md, docs/prism-speech-design.md). Tests: `gui::tray_tests` (once,
+      nothing shown on the way out, a Mac's item left alone, and the one removal,
+      `remove_tray_icon`, run on the tray where `run_gui` puts it) and
+      `quit_key_wiring_tests::every_way_out_takes_the_tray_icon_away_once`.
+- [ ] **Check live (Windows, NVDA):** the quit key with the pointer away from the tray: no icon
+      left in the notification area (its overflow too), and NVDA says "Automation Platform is
+      quitting."; the tray's Quit and File > Quit leave no icon either; Quit with Details or
+      Settings open closes the dialog, then quits, with no icon left; the next start shows one
+      icon. On a Mac, at the next session: the menu-bar item goes on every Quit, and the
+      application ends without "quit unexpectedly".
+- [ ] **A logoff does not get that far.** On Windows the session's query reaches the module
+      window first (`wxApp::OnQueryEndSession`, src/msw/app.cpp: `Close(false)` on every
+      top-level window in turn), and its close handler refuses, as on a Mac (the item "On a Mac,
+      the Dock's Quit and a logout, restart or shutdown do not end the application" below), so
+      this application holds a logoff. Read in the sources, not seen. Should Windows end the
+      session all the same, wx's own end takes the icon away (above); at a logoff Explorer goes
+      too. A fix must not simply stop refusing: wx would then go on to close the icon's hidden
+      window, which destroys it, and a logoff that another program cancels would leave the tray
+      without its window.
 
 ## API rule: failures are typed, not sentences (2026-10-11, from the maintainer)
 
@@ -1292,7 +1332,9 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       the other NSWorkspace notifications in `backend/macos/system.rs`, sets a flag that makes the
       window's close handler quit (`begin_quit`, `exit_main_loop`) instead of refusing. Windows
       asks every top-level window to close at a logout as well (`wxApp::OnQueryEndSession`,
-      `src/msw/app.cpp`); whether it is held there too is not looked at here.
+      `src/msw/app.cpp`); whether it is held there too: "A logoff does not get that far" under
+      "The tray icon left behind on Windows after the quit key" at the top (read in the sources,
+      not seen).
 - [ ] **The neural recogniser around macOS 13.3.** Microsoft builds 1.22 for 13.3, and the
       application does not open the library on an older macOS at all (`RUNTIME_MACOS` in
       `backend/paddle_ocr.rs`; the log says "not available" with the version, and Vision reads
@@ -11199,8 +11241,11 @@ time limit; a module past either is stopped until the next start.
       - Measure the Mac chord on the Mac before it is fixed: it arrives with the default
         VoiceOver modifier, and it neither logs out nor locks the screen (Control-Command-Q,
         the same chord without Shift, does).
-      - Windows: the notification is shown and read although the application, and its tray
-        icon, are gone a moment later; if it is not, the sentence needs another way out.
+      - Done 2026-10-23, live check open: on Windows the sentence is no longer shown as a
+        notification, which Windows takes away with the tray icon as the application goes; it is
+        spoken where a screen reader runs, and waited for on the way out. Checked live with the
+        icon: "Check live (Windows, NVDA)" under "The tray icon left behind on Windows after the
+        quit key" at the top.
       - Mac, VoiceOver running and "Speak through VoiceOver" off (the default): the sentence goes
         to the system voice, whose `pending` drops when `speakUtterance` has queued it
         (speech/avspeech.rs), so the speech wait ends at once and the end of the process may cut

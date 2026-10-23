@@ -807,9 +807,10 @@ impl Shared {
     /// two kinds of user, instead of a voice that talks at people who did not ask for one.
     ///
     /// Speech is only the way out where there is nothing to show it in — macOS has no
-    /// balloon — and even then only if a screen reader is actually listening. With none
-    /// running, the application says nothing at all, which is the right amount for an
-    /// audience that is not there.
+    /// balloon, and on Windows none is shown once the application quits, since the tray icon
+    /// goes before it could be read (`Tray::notify` in gui.rs) — and even then only if a screen
+    /// reader is actually listening. With none running, the application says nothing at all,
+    /// which is the right amount for an audience that is not there.
     ///
     /// Module speech is not routed through here. `host.speech` always speaks: whoever
     /// installed and enabled that module decided so.
@@ -1722,8 +1723,11 @@ impl Shared {
             "manager",
             &format!("{} was pressed: the application quits, as the tray's Quit does", quit_hotkey_shown()),
         );
-        self.announce(QUIT_SENTENCE);
+        // Asked first, so the sentence is spoken rather than shown: the tray icon is taken away
+        // before the window loop ends, and its balloon with it (`Tray` in gui.rs), while what is
+        // handed to speech is waited for on the way out. Still in this turn, before it goes.
         instance::request_quit();
+        self.announce(QUIT_SENTENCE);
     }
 
     /// Every key back to the program in front once the window loop has ended, on the way out:
@@ -12755,8 +12759,8 @@ mod quit_key_wiring_tests {
     /// The quit key ends the application where the window's and the tray's Quit end it: one
     /// `quit` in gui.rs for all three, which inside a modal dialog ends the dialog and asks again
     /// (the steps are tested in gui.rs), the key's request taken by the tick right after the pump
-    /// that answered it, its sentence said before the request, a reload asked for meanwhile not
-    /// answered, and on the way out the settings saved, the keys given back, and then what is
+    /// that answered it, its sentence said right after the request, a reload asked for meanwhile
+    /// not answered, and on the way out the settings saved, the keys given back, and then what is
     /// still waiting to be said handed over. None of it can run in a test — the window loop is
     /// wxWidgets', and `Shared` opens the speech engines — so it is checked where it is written.
     #[test]
@@ -12769,7 +12773,12 @@ mod quit_key_wiring_tests {
             quit.contains("QuitStep::EndDialog(dialog) => {\n                crate::instance::request_quit();\n                dialog.end_modal(ID_CANCEL);\n            }"),
             "inside a dialog: asked again, then the dialog ended\n{quit}"
         );
-        assert!(quit.ends_with("crate::instance::begin_quit();\n                app.exit_main_loop()\n            }"), "{quit}");
+        assert!(
+            quit.ends_with(
+                "crate::instance::begin_quit();\n                // While the icon's window still exists, which ends with the loop (`Tray`).\n                remove_tray_icon();\n                app.exit_main_loop()\n            }"
+            ),
+            "{quit}"
+        );
         // Every dialog is on the list while its loop runs (`modal_spans` checks that every
         // dialog opens through `show_modal_said`).
         let said = body(GUI, "fn show_modal_said(");
@@ -12789,7 +12798,9 @@ mod quit_key_wiring_tests {
         assert!(body(LIB, "fn answer_own_keys(&self").contains("self.quit_by_key();"));
         let by_key = body(LIB, "fn quit_by_key(&self)");
         let said = by_key.find("self.announce(QUIT_SENTENCE);").expect("the sentence");
-        assert!(said < by_key.find("instance::request_quit();").expect("the request"), "said before it goes");
+        // Asked first, so the sentence is spoken rather than shown on an icon that is going (the
+        // tray's side is tested in gui.rs) — and still said in the same turn, before it goes.
+        assert!(by_key.find("instance::request_quit();").expect("the request") < said, "asked, then said");
         // Registered beside the reload key, and its line in the log's start lines after the reload key's.
         let run = body(LIB, "pub fn run(&mut self) -> Result<()>");
         let own = run.find("(self.shared.reload_hotkey_id.get(), reload_hotkey_shown(), \"reloads every module\", \"reload\"),").expect("reload");
@@ -12813,5 +12824,46 @@ mod quit_key_wiring_tests {
         assert!(back.contains("self.backend.set_captured_keys(&[]);"));
         assert!(back.contains(".chain([self.reload_hotkey_id.get(), self.quit_hotkey_id.get()])"));
         assert!(back.contains("self.backend.unregister_hotkey(id);"));
+    }
+
+    /// The tray icon is taken away on every way out, through one removal that acts once
+    /// (`Tray` in gui.rs, where that is tested): in `quit`, the one end of the window loop for
+    /// the quit key, the tray's and the window's Quit, a Mac's Command-Q and a Quit that ended
+    /// a dialog first (above), and as the module window is destroyed, for a session end wx ends
+    /// itself. Nothing else removes or destroys it, and nothing forgets it any more.
+    #[test]
+    fn every_way_out_takes_the_tray_icon_away_once() {
+        // The removal itself is run in gui.rs (`the_one_removal_finds_the_tray`).
+        let gui = body(GUI, "pub fn run_gui(");
+        assert_eq!(gui.matches("remove_tray_icon();").count(), 2, "in quit and as the window goes");
+        let quit = &gui[gui.find("let quit = move || match quit_step(&open_dialogs()) {").expect("quit")..];
+        let end_loop = &quit[quit.find("QuitStep::EndLoop => {").expect("the loop's end")..];
+        let (begun, removed, ended) = (
+            end_loop.find("crate::instance::begin_quit();").expect("begun"),
+            end_loop.find("remove_tray_icon();").expect("removed"),
+            end_loop.find("app.exit_main_loop()").expect("ended"),
+        );
+        assert!(begun < removed && removed < ended, "removed after the quit is said and before the loop ends");
+        assert!(
+            !quit[..quit.find("QuitStep::EndLoop => {").unwrap()].contains("remove_tray_icon"),
+            "not when only a dialog is ended: its loop goes on"
+        );
+        let destroyed = &gui[gui.find("frame.on_destroy(move |event| {").expect("the window's destruction")..];
+        let destroyed = &destroyed[..destroyed.find("\n        });\n").expect("its end")];
+        assert!(destroyed.contains("if e.get_event_object().is_some_and(|w| w.as_ptr() == frame_ptr) {\n                    remove_tray_icon();"));
+        assert!(gui.find("let frame_ptr = frame.handle_ptr();").expect("the window's own pointer") < gui.find("frame.on_destroy(").unwrap());
+        // The tray is held, leaked, from where the icon's handlers are bound, and takes the
+        // notifications, which it refuses while the application quits.
+        assert!(gui.contains("Box::leak(Box::new(Tray::new(taskbar, !cfg!(target_os = \"macos\"))));"));
+        assert!(gui.contains("TRAY.with(|t| t.set(Some(tray)));"));
+        assert!(gui.contains("tray.notify(title, text, crate::instance::quit_asked())"));
+        assert!(!gui.contains("forget(taskbar)") && !gui.contains("show_balloon("), "{gui}");
+        // The only removal, and nothing destroys the icon.
+        assert_eq!(GUI.matches(".remove_icon()").count(), 1, "the one removal, in `TrayIcon for TaskBarIcon`");
+        let removal = body(GUI, "impl TrayIcon for TaskBarIcon {");
+        assert!(removal.contains("self.remove_icon();"));
+        assert!(!GUI.contains("taskbar.destroy(") && !GUI.contains("icon.destroy("), "the icon is never destroyed");
+        let once = body(GUI, "    fn remove(&self) {\n        if !self.removed");
+        assert!(once.contains("if !self.removed.replace(true) && self.removes {\n            self.icon.remove();"));
     }
 }

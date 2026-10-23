@@ -340,9 +340,10 @@ Quits the application from anywhere, on a **system-wide** key — the tray's **Q
 without the tray, for when you cannot find the icon or its menu does not answer. It
 quits exactly as that Quit does: the window loop ends, every module stops with it, the
 text recognisers are released and the log is closed. Before it goes it says one
-sentence, "Automation Platform is quitting.", the way the reload key's report is said:
-as a notification where there is one (Windows), and otherwise spoken, only while a screen
-reader runs (VoiceOver on a Mac).
+sentence, "Automation Platform is quitting.", spoken, only while a screen reader runs
+(VoiceOver on a Mac). Not as a notification, as the reload key's report is on Windows: the
+tray icon is taken away as the window loop ends, and Windows takes a notification away with
+its icon, so nothing is shown on the way out.
 
 With one of the module window's dialogs open — Details, Settings, a question such as
 Uninstall's, or the review before an install or an update — that dialog is closed first,
@@ -351,15 +352,15 @@ application quits. The tray's **Quit** does the same. The message that reports h
 install or an update went is the exception: while it is open the modules wait for it, and
 so does this key, which is answered once the message is closed.
 
-On the way out, whichever Quit it was, the settings are saved first, then every captured
-key and hotkey goes back to the program in front, and then the application waits, 15
+On the way out, whichever Quit it was, the tray icon goes first, as the window loop ends,
+so that none is left in the notification area until the pointer passes over it; on a Mac
+the menu-bar item goes with the application. Then the settings are saved, every captured
+key and hotkey goes back to the program in front, and the application waits, 15
 seconds at most, until what it had handed to speech — a module's last words, and the
 sentence above where it is spoken — has been taken by the screen reader or the voice.
 Taken is not said: a screen reader says it in a process of its own, but on a Mac the
 system voice, which says it unless "Speak through VoiceOver" is on, says it in this one
-and can be cut short as the application ends (not checked on a Mac yet). A notification
-is not waited for; whether Windows still shows it, and a screen reader still reads it,
-once the application has gone has not been checked yet either.
+and can be cut short as the application ends (not checked on a Mac yet).
 
 Pressed while a module's callback holds the application, it is not dropped with the
 keys Windows drops then: the application quits once the callback is stopped, as the reload

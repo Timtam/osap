@@ -69,7 +69,10 @@ running, show otherwise" — it is **show, and speak only where there is nothing
 in**:
 
 1. Show a notification. On Windows a screen reader reads the balloon out and everybody else
-   can see it, so one channel serves both, and the application never speaks at all.
+   can see it, so one channel serves both, and the application never speaks at all. Not
+   once the application is quitting: the tray icon is taken away before the window loop
+   ends, and its balloon with it, so the tray declines and the quit key's sentence, asked for
+   after the quit, goes to step 3 (`Tray` in `crates/host/src/gui.rs`).
 2. `show_balloon` is Windows-only and answers false everywhere else, which is exactly the
    signal for step 3. On macOS there is no balloon and no Dock icon either, so somebody who
    cannot see the screen would otherwise have nothing to go on.
