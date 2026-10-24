@@ -166,6 +166,25 @@ impl HeldBits {
         self.0[word].load(Ordering::Relaxed) & bit != 0
     }
 
+    /// A key-down the hook took as `ck`, the key the captures know it as: whether it repeats one
+    /// that is still held ([`HeldBits::taken_down`]). The keypad's Enter (`keypad_enter`) repeats
+    /// one held under either of its names, Return or NumpadEnter: a capture of NumpadEnter that
+    /// came into scope or went out of it while the key was held makes its next repeat the other
+    /// name ([`super::keypad_enter_as`]), and that is still the same press.
+    fn taken_down_as(&self, ck: u32, keypad_enter: bool) -> bool {
+        let either = keypad_enter && (self.is_held(super::VK_RETURN) || self.is_held(super::VK_NUMPAD_ENTER));
+        self.taken_down(ck) || either
+    }
+
+    /// A key-up of `vk`, whatever happened to it — of both of the keypad's Enter's names
+    /// (`keypad_enter`), since it went down as whichever a capture in scope made it then.
+    fn key_up(&self, vk: u32, keypad_enter: bool) {
+        self.up(vk);
+        if keypad_enter {
+            self.up(super::VK_NUMPAD_ENTER);
+        }
+    }
+
     fn clear(&self) {
         for w in &self.0 {
             w.store(0, Ordering::Relaxed);
@@ -187,6 +206,12 @@ static KEPT_BACK: HeldBits = HeldBits::new();
 /// program in front (`pass_on_key`). The hook lets an event carrying it through untouched, before
 /// anything else: no capture takes it, and it is no press, hold or tap of the user's. "PASS".
 const PASS_ON_MARK: usize = 0x5041_5353;
+/// What `dwExtraInfo` carries on every key event `host.input.send` sends (`key_send`). It changes
+/// nothing about how the hook takes the key — a capture takes it and a hotkey matches it as if it
+/// were typed, and let through it counts in [`LET_THROUGH`] — but a key-down that carries it is
+/// left out of [`TAPS_THROUGH`], so a key a module sends ends no count of quick repeats (taps.rs).
+/// "SEND".
+const SEND_MARK: usize = 0x5345_4E44;
 /// How many key-downs the hook has let go on towards the program, wrapping: every key-down that is
 /// not a modifier's and that it does not swallow — typed keys no capture took, keys let through for
 /// a menu or a screen reader, a held key's repeats, keys another program or this one's `host.input`
@@ -198,13 +223,28 @@ const PASS_ON_MARK: usize = 0x5041_5353;
 /// reached the program first (`crate::backend::NotPassed::Overtaken`). One relaxed add per
 /// key-down.
 static LET_THROUGH: AtomicU32 = AtomicU32::new(0);
+/// The key-downs of [`LET_THROUGH`] that end a count of quick repeats: all but those marked
+/// [`SEND_MARK`], wrapping. Each press carries it beside [`LET_THROUGH`]'s
+/// (`crate::backend::Pressed::taps_seq`). A count of its own rather than a count of the keys sent,
+/// taken from `LET_THROUGH`'s: a press whose counts the pump reads — a `WM_HOTKEY`'s — reads each
+/// with one load, never two counts a key the hook lets go on just then moves one after the other.
+/// One relaxed add per key-down it counts.
+static TAPS_THROUGH: AtomicU32 = AtomicU32::new(0);
+
+/// The two counts of key-downs a press carries: [`LET_THROUGH`]'s and [`TAPS_THROUGH`]'s.
+type Through = (u32, u32);
+
+/// The two counts of key-downs let through so far, as a press carries them ([`Through`]).
+fn through() -> Through {
+    (LET_THROUGH.load(Ordering::Relaxed), TAPS_THROUGH.load(Ordering::Relaxed))
+}
 /// Hotkey presses, drained by the pump: ids the message-only window proc received as
 /// `WM_HOTKEY` on the pump's thread, and ids the keyboard hook matched itself on its own (see
 /// `hotkey_hook`), each with the way it came, so that the pump can tell the two deliveries of
-/// one press apart, and the count of key-downs let through when it came ([`LET_THROUGH`]: as the
+/// one press apart, and the counts of key-downs let through when it came ([`through`]: as the
 /// hook matched it, or as `WM_HOTKEY` reached the window). Drained in place rather than taken, so
 /// its capacity stays.
-static HOTKEY_QUEUE: Mutex<Vec<(i32, Route, u32)>> = Mutex::new(Vec::new());
+static HOTKEY_QUEUE: Mutex<Vec<(i32, Route, Through)>> = Mutex::new(Vec::new());
 /// The end of a stall the host's guard ended in a stop (`drop_queued_input`): a `RegisterHotKey`
 /// press stamped at or before this tick is dropped when the next pump drains it — its `WM_HOTKEY`
 /// was posted to the stalled thread and reaches [`HOTKEY_QUEUE`] only after the stall. The tick in
@@ -304,9 +344,42 @@ const VK_MASK_KEY: u16 = 0xFF;
 /// ([`forget_keys_held_out_of_sight`]), and a captured key let through because of it says so
 /// in the log, with how long ago the modifier was seen going down (`report_capture_passes`).
 static SCREEN_READER_MOD_DOWN: AtomicBool = AtomicBool::new(false);
+/// [`SCREEN_READER_MOD_DOWN`] as Insert and Caps Lock alone set it: the record numpad zero's own
+/// key is asked against ([`reader_recorded`]). Numpad zero is the one of the three keys a spec
+/// names, and the record holds its own key-down too: asked against the whole record, every press
+/// of a capture or a hotkey of it would read as made with a screen reader's key held. Cleared with
+/// the record by any of the three going up, and forgotten with it.
+static SCREEN_READER_MOD_OTHER: AtomicBool = AtomicBool::new(false);
 /// The tick at which the hook last saw a screen reader's modifier go down, for the log line
 /// that says a captured key was let through because of it.
 static SCREEN_READER_MOD_DOWN_AT: AtomicU32 = AtomicU32::new(0);
+
+/// A key event of a screen reader's modifier — Insert, numpad zero or Caps Lock — entered in the
+/// hook's record of them ([`SCREEN_READER_MOD_DOWN`], [`SCREEN_READER_MOD_OTHER`]): a key-down sets
+/// it, a key-up of any of them clears it. Not one `host.input.send` sent (the hook does not call
+/// this for one): a module's numpad zero, down and up, would otherwise clear the record of an
+/// Insert the user holds.
+fn note_reader_key(vk: u32, is_down: bool, now: u32) {
+    if is_down {
+        SCREEN_READER_MOD_DOWN_AT.store(now, Ordering::Relaxed);
+    }
+    SCREEN_READER_MOD_DOWN.store(is_down, Ordering::Relaxed);
+    if vk != 0x60 || !is_down {
+        SCREEN_READER_MOD_OTHER.store(is_down, Ordering::Relaxed);
+    }
+}
+
+/// Whether the hook's record has a screen reader's modifier held, for a key event of `vk`: numpad
+/// zero's own is asked against the record without its own key-down ([`SCREEN_READER_MOD_OTHER`]),
+/// so its repeats are no press made with itself held, and an Insert or a Caps Lock seen going down
+/// before it still sends it to the screen reader.
+fn reader_recorded(vk: u32) -> bool {
+    if vk == 0x60 {
+        SCREEN_READER_MOD_OTHER.load(Ordering::Relaxed)
+    } else {
+        SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed)
+    }
+}
 
 static KEY_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 static FG_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -1576,17 +1649,19 @@ impl Backend for WindowsBackend {
     /// program of higher rights, a handle that names no window, or the error's number — and the
     /// key-up is not posted after a refused key-down.
     fn key_post(&self, hwnd: isize, key: &str) -> Result<(), KeyRefusal> {
-        let vk = parse_key(key)? as u16;
+        let key_code = parse_key(key)?;
+        let vk = os_key(key_code).0 as u16;
         // No handle names no window — and `PostMessageW` would post to this thread's own queue.
         if hwnd == 0 {
             return Err(KeyRefusal::Answer(HostError::of(&errors::common::WINDOW_GONE)));
         }
         // The scan code goes in the lParam because some applications read it rather than the
         // virtual key, and Melodyne decodes keys itself (it imports GetKeyboardState, ToUnicode
-        // and MapVirtualKeyW) rather than leaving it to the defaults.
-        let scan = unsafe { MapVirtualKeyW(vk as u32, 0) } as isize;
-        let lp_down = 1isize | (scan << 16);
-        let lp_up = 1isize | (scan << 16) | (1 << 30) | (1 << 31);
+        // and MapVirtualKeyW) rather than leaving it to the defaults. An extended one with the
+        // extended-key bit (24), as the keyboard delivers it, which is how a program tells the
+        // keypad's Enter from the main one and its Divide from the main row's key of scan code
+        // 0x35 ([`scan_code`]).
+        let (lp_down, lp_up) = post_lparams(scan_code(key_code as u16));
         for (msg, lp) in [(WM_KEYDOWN, lp_down), (WM_KEYUP, lp_up)] {
             // SAFETY: a post to a handle, which a stale one fails.
             if unsafe { PostMessageW(hwnd as HWND, msg, vk as usize, lp) } == 0 {
@@ -1608,15 +1683,19 @@ impl Backend for WindowsBackend {
             )));
         }
         let mod_vks = modifier_vks(mask);
-        let key_vk = vk as u16;
+        let (key_vk, extended) = os_key(vk);
+        let key_vk = key_vk as u16;
+        let ext = if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
+        // Every event marked, so that the hook leaves the key-down out of the count that ends a
+        // count of quick repeats ([`SEND_MARK`]); it takes and matches the key as ever.
         unsafe {
             for &vk in &mod_vks {
-                send_key_event(vk, 0, 0);
+                send_key_event(vk, 0, 0, SEND_MARK);
             }
-            send_key_event(key_vk, 0, 0);
-            send_key_event(key_vk, 0, KEYEVENTF_KEYUP);
+            send_key_event(key_vk, 0, ext, SEND_MARK);
+            send_key_event(key_vk, 0, ext | KEYEVENTF_KEYUP, SEND_MARK);
             for &vk in mod_vks.iter().rev() {
-                send_key_event(vk, 0, KEYEVENTF_KEYUP);
+                send_key_event(vk, 0, KEYEVENTF_KEYUP, SEND_MARK);
             }
         }
         Ok(())
@@ -1625,8 +1704,8 @@ impl Backend for WindowsBackend {
     fn type_text(&self, text: &str) {
         unsafe {
             for u in text.encode_utf16() {
-                send_key_event(0, u, KEYEVENTF_UNICODE);
-                send_key_event(0, u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
+                send_key_event(0, u, KEYEVENTF_UNICODE, 0);
+                send_key_event(0, u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0);
             }
         }
     }
@@ -1786,7 +1865,7 @@ impl Backend for WindowsBackend {
     /// key-down it kept from the system ([`KEPT_BACK`]), which the system cannot report, a screen
     /// reader's key as the hook tells it — its own record or the key down, as for a captured key —
     /// and the hook's count of keys let through ([`LET_THROUGH`]). The key by its virtual key: both
-    /// Enters are `VK_RETURN` to the system, held or not.
+    /// Enters are `VK_RETURN` to the system, held or not, NumpadEnter as well ([`os_key`]).
     fn keyboard_now(&self, vk: u32, _mask: u8, _phys: Option<u16>) -> super::KeyboardNow {
         // SAFETY: reads which window is in front and the asynchronous key state.
         unsafe {
@@ -1804,7 +1883,7 @@ impl Backend for WindowsBackend {
             }
             super::KeyboardNow {
                 front: Some(GetForegroundWindow() as isize),
-                key_held: down(vk as i32) || KEPT_BACK.is_held(vk),
+                key_held: down(os_key(vk).0 as i32) || KEPT_BACK.is_held(vk),
                 mods,
                 reader_mod: SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed) || down(0x2D) || down(0x60) || down(0x14),
                 let_through: LET_THROUGH.load(Ordering::Relaxed),
@@ -1814,9 +1893,7 @@ impl Backend for WindowsBackend {
 
     /// One `SendInput` of every event, marked with [`PASS_ON_MARK`] — see [`pass_on_inputs`].
     fn pass_on_key(&self, vk: u32, _mask: u8, phys: Option<u16>, strokes: &[super::Stroke]) -> Result<(), String> {
-        // SAFETY: MapVirtualKeyW only translates a code.
-        let scan_ex = |k: u16| unsafe { MapVirtualKeyW(u32::from(k), MAPVK_VK_TO_VSC_EX) };
-        let sent = send_marked(&pass_on_inputs(vk, phys, strokes, scan_ex));
+        let sent = send_marked(&pass_on_inputs(vk, phys, strokes, scan_code));
         if sent == strokes.len() {
             return Ok(());
         }
@@ -1824,7 +1901,7 @@ impl Backend for WindowsBackend {
         // front, which Windows does not say: what that part pressed is released, so that nothing
         // stays down.
         let release = super::left_down(strokes, sent);
-        let released = send_marked(&pass_on_inputs(vk, phys, &release, scan_ex));
+        let released = send_marked(&pass_on_inputs(vk, phys, &release, scan_code));
         Err(format!(
             "SendInput took {sent} of its {} key events{}",
             strokes.len(),
@@ -1931,7 +2008,7 @@ impl Backend for WindowsBackend {
     fn drop_queued_input(&self) -> crate::backend::DroppedInput {
         let keys: Vec<(u32, u8, u32)> =
             std::mem::take(&mut *locked(&KEY_QUEUE)).into_iter().map(|k| (k.vk, k.mask, k.owner)).collect();
-        let pending: Vec<(i32, Route, u32)> = locked(&HOTKEY_QUEUE).drain(..).collect();
+        let pending: Vec<(i32, Route, Through)> = locked(&HOTKEY_QUEUE).drain(..).collect();
         let mut hotkeys = Vec::new();
         for (id, route, _) in pending {
             if settle_hotkey(id, route).is_some() {
@@ -2098,21 +2175,21 @@ impl Backend for WindowsBackend {
         // Before either queue is taken: a press the hook or the window proc queued before this
         // moment is handed over in this pump (`input_taken_at`).
         INPUT_TAKEN.with(|t| t.set(Some(Instant::now())));
-        let hotkeys: Vec<(i32, Route, u32)> = locked(&HOTKEY_QUEUE).drain(..).collect();
+        let hotkeys: Vec<(i32, Route, Through)> = locked(&HOTKEY_QUEUE).drain(..).collect();
         // After a stop: a `RegisterHotKey` press made during the stall it ended reaches the queue
         // only now, and is dropped by its stamp, as the rest of the stall's presses were. Once, on
         // the first pump after the stop: posted messages are retrieved before the timer that
         // drives this pump, so they are all here by now.
         let drop_until = DROP_OS_UNTIL.swap(0, Ordering::AcqRel);
         let mut late = Vec::new();
-        for (id, route, seq) in hotkeys {
+        for (id, route, (seq, taps_seq)) in hotkeys {
             let stalled = drop_until & DROP_ARMED != 0
                 && matches!(route, Route::Os { time } if super::tick_not_after(time, drop_until as u32));
             if let Some(own) = settle_hotkey(id, route) {
                 if stalled {
                     late.push(id);
                 } else {
-                    events.on_hotkey(id, super::HotkeyPress { seq, own, at: tick_instant(route.time()) });
+                    events.on_hotkey(id, super::HotkeyPress { seq, taps_seq, own, at: tick_instant(route.time()) });
                 }
             }
         }
@@ -2425,7 +2502,7 @@ unsafe extern "system" fn hotkey_wndproc(
         // Stamped, so the pump can tell a press the keyboard hook already dispatched from a new
         // one: `GetMessageTime` is on the same tick clock as the hook's key events.
         let time = GetMessageTime() as u32;
-        locked(&HOTKEY_QUEUE).push((wparam as i32, Route::Os { time }, LET_THROUGH.load(Ordering::Relaxed)));
+        locked(&HOTKEY_QUEUE).push((wparam as i32, Route::Os { time }, through()));
         return 0;
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -2937,6 +3014,7 @@ pub(super) fn forget_keys_held_out_of_sight() -> Option<u32> {
     CAPTURED_HELD.clear();
     KEPT_BACK.clear();
     ARROW_NOTED_HELD.store(0, Ordering::Relaxed);
+    SCREEN_READER_MOD_OTHER.store(false, Ordering::Relaxed);
     if SCREEN_READER_MOD_DOWN.swap(false, Ordering::Relaxed) {
         // SAFETY: reads the tick clock.
         let now = unsafe { GetTickCount() };
@@ -2980,6 +3058,12 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
         }
         let vk = kb.vkCode;
+        // A key `host.input.send` sent (`key_send`): taken, matched and counted as let through as a
+        // typed key is, and left out of the count that ends a count of quick repeats
+        // (`TAPS_THROUGH`).
+        let sent = kb.dwExtraInfo == SEND_MARK;
+        // The keypad's Enter: `VK_RETURN` to Windows, with the extended-key flag.
+        let keypad_enter = is_keypad_enter(vk, kb.flags);
         let msg = wparam as u32;
         let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
         let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
@@ -3043,12 +3127,9 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             // modifier, so this dispatches on the way past rather than intercepting.
             // Insert, numpad 0 and CapsLock: NVDA's modifier on the desktop and laptop
             // layouts respectively, and JAWS's. Recorded on the way past, whatever anyone
-            // downstream does with it.
-            if vk == 0x2D || vk == 0x60 || vk == 0x14 {
-                if is_down {
-                    SCREEN_READER_MOD_DOWN_AT.store(now, Ordering::Relaxed);
-                }
-                SCREEN_READER_MOD_DOWN.store(is_down, Ordering::Relaxed);
+            // downstream does with it — the user's, not one a module sent.
+            if (vk == 0x2D || vk == 0x60 || vk == 0x14) && !sent {
+                note_reader_key(vk, is_down, now);
             }
             // Which modifier is this, as `key_spec` names it? The hook reports the SIDE that
             // was pressed — left Alt is 0xA4, right Alt 0xA5 — while a spec says "Alt tap"
@@ -3104,7 +3185,8 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                         }
                     };
                     if let Some((owner, front)) = taken {
-                        let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: None, queued: Some(Instant::now()) };
+                        let (seq, taps_seq) = through();
+                        let pressed = Pressed { front, seq, taps_seq, phys: None, queued: Some(Instant::now()) };
                         locked(&KEY_QUEUE).push(Taken { vk: generic, mask: tap, owner, repeat: false, pressed });
                         wake_pump();
                     }
@@ -3132,9 +3214,10 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             }
             // Any key-up ends a hold: the next taken key-down of that key is a press of its own,
             // not the keyboard's auto-repeat (`CAPTURED_HELD`). Every key-up passes here.
+            // The keypad's Enter comes up as both of its names (`HeldBits::key_up`).
             if is_up {
-                CAPTURED_HELD.up(vk);
-                KEPT_BACK.up(vk);
+                CAPTURED_HELD.key_up(vk, keypad_enter);
+                KEPT_BACK.key_up(vk, keypad_enter);
                 arrow_up(vk);
             }
             // The hotkeys' record of which keys are held (`hotkey_hook::Table`) is kept for every
@@ -3150,8 +3233,15 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                     t.on_up(vk, kb.time);
                 }
             }
-            // Match only the exact combo, so "Tab" (mask 0) leaves Alt+Tab alone.
-            let matched = locked(&KEY_STATE).set.iter().any(|c| c.vk == vk && c.mask == mask);
+            // Match only the exact combo, so "Tab" (mask 0) leaves Alt+Tab alone — by the key the
+            // captures know it as (`ck`): the keypad's Enter is NumpadEnter where a capture of that
+            // is in scope, and Return everywhere else (`keypad_enter_as`); every other key is its
+            // virtual key. The system is asked about the key by its own (`vk`), and so are the
+            // hotkeys, which `RegisterHotKey` holds by it.
+            let (ck, matched) = {
+                let st = locked(&KEY_STATE);
+                captured_key(&st.set, &st.owners, vk, keypad_enter, mask, || GetForegroundWindow() as isize)
+            };
             if matched {
                 // A keystroke made with a SCREEN READER'S own modifier held is addressed to
                 // the screen reader, whatever this overlay has claimed.
@@ -3174,8 +3264,13 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 // navigates one holding Insert. The hook's own record can outlive the key —
                 // see SCREEN_READER_MOD_DOWN for how, and what forgets it — so a key let
                 // through because of it is noted with how old the record is.
-                let recorded = SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed);
-                let screen_reader_held = recorded || down(0x2D) || down(0x60) || down(0x14);
+                //
+                // Numpad0 is one of those keys, and the record holds its own key-down now: a
+                // capture of it takes it while neither of the other two is held, recorded or down
+                // (`reader_recorded`).
+                let itself = vk == 0x60;
+                let recorded = reader_recorded(vk);
+                let screen_reader_held = recorded || down(0x2D) || (!itself && down(0x60)) || down(0x14);
                 let owes_up = !is_down && SCREEN_READER_PASSED.with(|s| s.borrow().contains(&vk));
                 if screen_reader_held || owes_up {
                     SCREEN_READER_PASSED.with(|s| {
@@ -3190,7 +3285,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                     });
                     if is_down && screen_reader_held {
                         note_capture_pass(PassNote {
-                            vk,
+                            vk: ck,
                             mask,
                             why: if recorded { PassWhy::ReaderRecorded } else { PassWhy::ReaderDown },
                             foreground: GetForegroundWindow() as isize,
@@ -3202,7 +3297,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                     if hotkeys_filed && is_down {
                         note_captured_down(kb, vk, mask, late, true, false);
                     }
-                    count_let_through(is_down, generic, vk);
+                    count_let_through(is_down, generic, vk, sent);
                     return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
                 }
                 // Intercept a captured nav key only while an overlay should own it (ReaHotkey's
@@ -3215,9 +3310,9 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 let foreground = GetForegroundWindow() as isize;
                 let decided = {
                     let st = locked(&KEY_STATE);
-                    let d = capture_decision(&st.set, &st.owners, vk, mask, foreground, false, popup_menu_open);
+                    let d = capture_decision(&st.set, &st.owners, ck, mask, foreground, false, popup_menu_open);
                     if let (true, Some(Capture::Pass { why, owner })) = (is_down, d) {
-                        let first = st.set.iter().find(|c| c.vk == vk && c.mask == mask);
+                        let first = st.set.iter().find(|c| c.vk == ck && c.mask == mask);
                         let scope = first.map_or(0, |c| scope_of(&st.owners, c.owner));
                         if !menu_key_noted {
                             // Let through because a menu is open. Remembered, not discarded:
@@ -3229,12 +3324,12 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                             match why {
                                 super::PassWhy::MenuFlag => {
                                     for o in menu_flag_owners(&st.set, &st.owners, foreground) {
-                                        note_menu_pass(o, vk, mask);
+                                        note_menu_pass(o, ck, mask);
                                     }
                                 }
                                 super::PassWhy::MenuMode => {
                                     if let Some(o) = owner {
-                                        note_menu_pass(o, vk, mask);
+                                        note_menu_pass(o, ck, mask);
                                     }
                                 }
                                 super::PassWhy::OutOfScope | super::PassWhy::OwnWindow => {}
@@ -3242,7 +3337,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                         }
                         drop(st);
                         if let Some(why) = PassWhy::of(why) {
-                            note_capture_pass(PassNote { vk, mask, why, foreground, scope, reader_ms: 0 });
+                            note_capture_pass(PassNote { vk: ck, mask, why, foreground, scope, reader_ms: 0 });
                         }
                     }
                     d
@@ -3254,11 +3349,12 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                         // the secure desktop in front — and this is its auto-repeat, as much as
                         // one whose key-down a capture took (`hotkey_hook::held_before`).
                         let system_held = hotkey_hook::held_before(late, || down(vk as u16));
-                        let repeat = CAPTURED_HELD.taken_down(vk) || system_held;
-                        // The press as it was: the window, the count of keys let through so far,
+                        let repeat = CAPTURED_HELD.taken_down_as(ck, keypad_enter) || system_held;
+                        // The press as it was: the window, the counts of keys let through so far,
                         // and the key it was pressed on — the keypad's Enter is VK_RETURN too.
-                        let pressed = Pressed { front: foreground, seq: LET_THROUGH.load(Ordering::Relaxed), phys: physical_key(kb), queued: Some(Instant::now()) };
-                        locked(&KEY_QUEUE).push(Taken { vk, mask, owner, repeat, pressed });
+                        let (seq, taps_seq) = through();
+                        let pressed = Pressed { front: foreground, seq, taps_seq, phys: physical_key(kb), queued: Some(Instant::now()) };
+                        locked(&KEY_QUEUE).push(Taken { vk: ck, mask, owner, repeat, pressed });
                         wake_pump();
                         if hotkeys_filed {
                             note_captured_down(kb, vk, mask, late, false, !system_held);
@@ -3268,7 +3364,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                     // suppressed too (see `swallow_captured`).
                     if swallow_captured(is_down, || down(vk as u16)) {
                         if is_down {
-                            KEPT_BACK.taken_down(vk);
+                            KEPT_BACK.taken_down(ck);
                         }
                         return 1;
                     }
@@ -3284,7 +3380,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 return 1;
             }
             // Neither a capture nor a hotkey took it: it goes on towards the program.
-            count_let_through(is_down, generic, vk);
+            count_let_through(is_down, generic, vk, sent);
         }
     }
     CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
@@ -3304,11 +3400,15 @@ fn modifier_generic(vk: u32) -> Option<u32> {
 
 /// A key event the hook lets go on towards the program, counted in [`LET_THROUGH`] when it is a
 /// key-down of a key that is not a modifier (`generic`, [`modifier_generic`]) and not 0xFF, the
-/// hotkeys' masking key and the code of a key with no virtual key of its own. One relaxed add,
-/// and with tracing on an arrow's note for the log ([`note_arrow_let_through`]).
-fn count_let_through(is_down: bool, generic: Option<u32>, vk: u32) {
+/// hotkeys' masking key and the code of a key with no virtual key of its own — and in
+/// [`TAPS_THROUGH`] as well unless `host.input.send` `sent` it ([`SEND_MARK`]). A relaxed add or
+/// two, and with tracing on an arrow's note for the log ([`note_arrow_let_through`]).
+fn count_let_through(is_down: bool, generic: Option<u32>, vk: u32, sent: bool) {
     if is_down && generic.is_none() && vk != u32::from(VK_MASK_KEY) {
         LET_THROUGH.fetch_add(1, Ordering::Relaxed);
+        if !sent {
+            TAPS_THROUGH.fetch_add(1, Ordering::Relaxed);
+        }
         // With tracing on, an arrow's state of the window in front, for the log
         // (`note_arrow_let_through`).
         if let Some(bit) = arrow_bit(vk).filter(|_| crate::appcfg::trace()) {
@@ -3490,7 +3590,7 @@ fn note_captured_down(kb: &KBDLLHOOKSTRUCT, vk: u32, mask: u8, late: u32, passed
         }
     };
     if expected != NO_ID {
-        locked(&HOTKEY_QUEUE).push((expected, Route::Passed { time: kb.time, late }, LET_THROUGH.load(Ordering::Relaxed)));
+        locked(&HOTKEY_QUEUE).push((expected, Route::Passed { time: kb.time, late }, through()));
     }
 }
 
@@ -3530,10 +3630,13 @@ unsafe fn hook_hotkey(kb: &KBDLLHOOKSTRUCT, vk: u32, mask: u8, late: u32) -> boo
         }
         // Asked only for a granted combination: three GetAsyncKeyState calls are cheap, but
         // not free, and every other key goes past without them.
+        // A hotkey on Numpad0, one of those keys, is no press made with itself held: for it the
+        // other two are asked about, recorded or down, as for a capture of it.
         let held = |k: i32| (GetAsyncKeyState(k) as u16 & 0x8000) != 0;
-        let screen_reader_held = SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed)
+        let itself = vk == 0x60;
+        let screen_reader_held = reader_recorded(vk)
             || held(0x2D)
-            || held(0x60)
+            || (!itself && held(0x60))
             || held(0x14);
         match down {
             // Its repeats are let through too: the registered path is handling it, and its
@@ -3568,7 +3671,7 @@ unsafe fn hook_hotkey(kb: &KBDLLHOOKSTRUCT, vk: u32, mask: u8, late: u32) -> boo
     // No lock is held from here on: the masking key below comes back through this hook.
     match act {
         Act::Fire(id) => {
-            locked(&HOTKEY_QUEUE).push((id, Route::Hook { time: kb.time, late }, LET_THROUGH.load(Ordering::Relaxed)));
+            locked(&HOTKEY_QUEUE).push((id, Route::Hook { time: kb.time, late }, through()));
             if hotkey_hook::needs_mask_key(mask) {
                 send_mask_key();
             }
@@ -3579,7 +3682,7 @@ unsafe fn hook_hotkey(kb: &KBDLLHOOKSTRUCT, vk: u32, mask: u8, late: u32) -> boo
         Act::Pass(id) => {
             // Not a dispatch: a note for the pump that the WM_HOTKEY coming for this press is
             // expected, and needs no explaining. No wake either — the WM_HOTKEY wakes it.
-            locked(&HOTKEY_QUEUE).push((id, Route::Passed { time: kb.time, late }, LET_THROUGH.load(Ordering::Relaxed)));
+            locked(&HOTKEY_QUEUE).push((id, Route::Passed { time: kb.time, late }, through()));
             false
         }
         Act::Nothing => false,
@@ -3899,6 +4002,64 @@ fn modifier_vks(mask: u8) -> Vec<u16> {
 /// Maps a friendly key name to a Win32 virtual-key code.
 fn parse_key(key: &str) -> Result<u32, String> {
     super::key_to_vk(key).ok_or_else(|| format!("unknown key '{key}'"))
+}
+
+/// The virtual key a key of the host's goes out as, and whether with the extended-key flag: the
+/// keypad's Enter ([`super::VK_NUMPAD_ENTER`]), which Windows gives no virtual key of its own, is
+/// `VK_RETURN` extended; every other key is its own virtual key, without it.
+fn os_key(vk: u32) -> (u32, bool) {
+    if vk == super::VK_NUMPAD_ENTER {
+        (super::VK_RETURN, true)
+    } else {
+        (vk, false)
+    }
+}
+
+/// Whether a key event the hook is called for, of virtual key `vk` with the hook's `flags`, is the
+/// keypad's Enter: `VK_RETURN` with `LLKHF_EXTENDED`, the flag the main Enter goes without.
+fn is_keypad_enter(vk: u32, flags: u32) -> bool {
+    vk == super::VK_RETURN && flags & LLKHF_EXTENDED != 0
+}
+
+/// The key a key event of the hook's is to the captures (`ck`), and whether a capture in `set` is
+/// of it with the roles in `mask`: the keypad's Enter (`keypad_enter`) is NumpadEnter where a
+/// capture of that is in scope for the window in front, and Return everywhere else
+/// ([`super::keypad_enter_as`]) — `front` asked for it alone; every other key is its own virtual
+/// key. Pure but for `front`, so the tests hand it a set.
+fn captured_key(
+    set: &[Captured],
+    owners: &[OwnerKeys],
+    vk: u32,
+    keypad_enter: bool,
+    mask: u8,
+    front: impl FnOnce() -> isize,
+) -> (u32, bool) {
+    let ck = if keypad_enter { super::keypad_enter_as(set, owners, mask, front()) } else { vk };
+    (ck, set.iter().any(|c| c.vk == ck && c.mask == mask))
+}
+
+/// The scan code a key of the host's (`vk`, as `key_to_vk` numbers it) goes out with, as
+/// `MapVirtualKeyW` with `MAPVK_VK_TO_VSC_EX` gives one: its high byte 0xE0 or 0xE1 for a key it
+/// gives as extended — of the key names, the keypad's Divide (0xE035), whose low byte alone is the
+/// main row's key of 0x35. The arrows, Home, End, Page Up and Down and Delete it gives on the
+/// keypad's codes, not extended (measured 2026-10-24: Up is 0x48). The keypad's Enter has no
+/// virtual key of its own to ask about: it is Return's scan code, extended (0xE01C).
+fn scan_code(vk: u16) -> u32 {
+    if u32::from(vk) == super::VK_NUMPAD_ENTER {
+        0xE01C
+    } else {
+        // SAFETY: MapVirtualKeyW only translates a code.
+        unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC_EX) }
+    }
+}
+
+/// The `lParam`s of a posted key's `WM_KEYDOWN` and `WM_KEYUP` for its scan code ([`scan_code`]):
+/// a repeat count of 1, the scan code's low byte in bits 16–23, the extended-key bit (24) for an
+/// extended key, and for the key-up the previous state and transition bits (30, 31).
+fn post_lparams(scan: u32) -> (isize, isize) {
+    let extended = if matches!(scan >> 8, 0xE0 | 0xE1) { 1 << 24 } else { 0 };
+    let down = 1isize | (((scan & 0xFF) as isize) << 16) | extended;
+    (down, down | (1 << 30) | (1 << 31))
 }
 
 /// Saves a captured image next to the executable for OCR debugging
@@ -4295,7 +4456,7 @@ fn pass_on_inputs(vk: u32, phys: Option<u16>, strokes: &[super::Stroke], scan_ex
                     let key = pass_on_modifier_vk(role);
                     (key, down, scan_ex(key))
                 }
-                super::Stroke::Key { down } => (vk as u16, down, phys.map_or_else(|| scan_ex(vk as u16), u32::from)),
+                super::Stroke::Key { down } => (os_key(vk).0 as u16, down, phys.map_or_else(|| scan_ex(vk as u16), u32::from)),
             };
             let mut flags = if down { 0 } else { KEYEVENTF_KEYUP };
             if matches!(scan >> 8, 0xE0 | 0xE1) {
@@ -4329,12 +4490,15 @@ fn send_marked(events: &[(u16, u16, u32)]) -> usize {
     unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) as usize }
 }
 
-unsafe fn send_key_event(vk: u16, scan: u16, flags: u32) {
+/// One key event through `SendInput`, carrying `extra` in its `dwExtraInfo` — [`SEND_MARK`] for
+/// `host.input.send`'s, 0 for the rest.
+unsafe fn send_key_event(vk: u16, scan: u16, flags: u32, extra: usize) {
     let mut input: INPUT = std::mem::zeroed();
     input.r#type = INPUT_KEYBOARD;
     input.Anonymous.ki.wVk = vk;
     input.Anonymous.ki.wScan = scan;
     input.Anonymous.ki.dwFlags = flags;
+    input.Anonymous.ki.dwExtraInfo = extra;
     SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
 }
 
@@ -5145,7 +5309,7 @@ mod hook_carry_over_tests {
         assert_eq!(send.matches("SendInput(").count(), 1, "one SendInput for the whole sequence");
         let hook = body("unsafe extern \"system\" fn ll_keyboard_proc(");
         let mark = hook.find("if kb.dwExtraInfo == PASS_ON_MARK {").expect("the hook asks for the mark");
-        for later in ["let vk = kb.vkCode;", "HOOK_MODS.with", "SCREEN_READER_MOD_DOWN.store", "CAPTURED_HELD.up", "capture_decision(", "hook_hotkey(", "count_let_through("] {
+        for later in ["let vk = kb.vkCode;", "HOOK_MODS.with", "note_reader_key(", "CAPTURED_HELD.key_up", "capture_decision(", "hook_hotkey(", "count_let_through("] {
             assert!(mark < hook.find(later).unwrap_or_else(|| panic!("{later}")), "{later} comes before the mark is asked");
         }
         let marked = &hook[mark..mark + hook[mark..].find("\n        }\n").unwrap()];
@@ -5154,29 +5318,233 @@ mod hook_carry_over_tests {
         ));
         assert!(!marked.contains("LET_THROUGH") && !marked.contains("count_let_through"), "a key passed on is not counted");
         // Counted where a key-down goes on: past the screen reader's rule, and after the hotkeys.
-        assert_eq!(hook.matches("count_let_through(is_down, generic, vk);").count(), 2);
-        assert!(hook.contains("count_let_through(is_down, generic, vk);\n                    return CallNextHookEx("));
-        assert!(hook.contains("                return 1;\n            }\n            // Neither a capture nor a hotkey took it: it goes on towards the program.\n            count_let_through(is_down, generic, vk);\n        }\n    }\n    CallNextHookEx("));
-        // Taken with each press: a captured key, a tap, a hotkey however it came.
-        assert_eq!(hook.matches("seq: LET_THROUGH.load(Ordering::Relaxed)").count(), 2, "the captured key and the tap");
-        assert!(hook.contains("phys: physical_key(kb), queued: Some(Instant::now()) };\n                        locked(&KEY_QUEUE).push(Taken { vk, mask, owner, repeat, pressed });"));
+        assert_eq!(hook.matches("count_let_through(is_down, generic, vk, sent);").count(), 2);
+        assert!(hook.contains("count_let_through(is_down, generic, vk, sent);\n                    return CallNextHookEx("));
+        assert!(hook.contains("                return 1;\n            }\n            // Neither a capture nor a hotkey took it: it goes on towards the program.\n            count_let_through(is_down, generic, vk, sent);\n        }\n    }\n    CallNextHookEx("));
+        // Taken with each press: a captured key, a tap, a hotkey however it came — both counts.
+        assert_eq!(hook.matches("let (seq, taps_seq) = through();").count(), 2, "the captured key and the tap");
+        assert!(hook.contains("phys: physical_key(kb), queued: Some(Instant::now()) };\n                        locked(&KEY_QUEUE).push(Taken { vk: ck, mask, owner, repeat, pressed });"));
+        assert!(body("fn through()").contains("(LET_THROUGH.load(Ordering::Relaxed), TAPS_THROUGH.load(Ordering::Relaxed))"));
         let code = &SRC[..SRC.find("mod hook_carry_over_tests {").unwrap()];
         assert_eq!(code.matches("locked(&HOTKEY_QUEUE).push((").count(), 4);
-        assert_eq!(code.matches("}, LET_THROUGH.load(Ordering::Relaxed)));").count(), 4, "every hotkey press with its count");
+        assert_eq!(code.matches("}, through()));").count(), 4, "every hotkey press with its count");
         let pass = body("    fn pass_on_key(&self, vk: u32, _mask: u8, phys: Option<u16>, strokes: &[super::Stroke])");
         assert!(pass.contains("super::left_down(strokes, sent)"), "a part sent has what it pressed released");
-        assert!(pass.contains("pass_on_inputs(vk, phys, strokes, scan_ex)"));
+        assert!(pass.contains("pass_on_inputs(vk, phys, strokes, scan_code)"));
         // The record of keys kept from the system: marked where the hook swallows a captured
         // key-down and a hotkey's, cleared by every key-up, and asked by `keyboard_now` — with the
         // screen reader's key as the hook tells it, and the count.
-        assert!(hook.contains("if is_up {\n                CAPTURED_HELD.up(vk);\n                KEPT_BACK.up(vk);"));
-        assert!(hook.contains("if swallow_captured(is_down, || down(vk as u16)) {\n                        if is_down {\n                            KEPT_BACK.taken_down(vk);"));
+        assert!(hook.contains("if is_up {\n                CAPTURED_HELD.key_up(vk, keypad_enter);\n                KEPT_BACK.key_up(vk, keypad_enter);"));
+        assert!(hook.contains("if swallow_captured(is_down, || down(vk as u16)) {\n                        if is_down {\n                            KEPT_BACK.taken_down(ck);"));
         assert!(hook.contains("hook_hotkey(kb, vk, mask, late) {\n                KEPT_BACK.taken_down(vk);\n                return 1;"));
         let now = body("    fn keyboard_now(&self, vk: u32, _mask: u8, _phys: Option<u16>)");
-        assert!(now.contains("down(vk as i32) || KEPT_BACK.is_held(vk)"));
+        assert!(now.contains("down(os_key(vk).0 as i32) || KEPT_BACK.is_held(vk)"));
         assert!(now.contains("reader_mod: SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed) || down(0x2D) || down(0x60) || down(0x14),"));
-        assert!(hook.contains("let screen_reader_held = recorded || down(0x2D) || down(0x60) || down(0x14);"), "the same keys as the hook's own rule");
+        // The same keys as the hook's own rule; for numpad zero's own key the other two are asked
+        // about, recorded or down (`reader_recorded`).
+        assert!(hook.contains("let recorded = reader_recorded(vk);"));
+        assert!(hook.contains("let screen_reader_held = recorded || down(0x2D) || (!itself && down(0x60)) || down(0x14);"));
+        let hotkey = body("unsafe fn hook_hotkey(");
+        assert!(hotkey.contains("let itself = vk == 0x60;"), "a hotkey on numpad zero the same");
+        assert!(hotkey.contains("let screen_reader_held = reader_recorded(vk)\n            || held(0x2D)\n            || (!itself && held(0x60))"));
+        // Recorded for the user's keys alone, not one a module sent.
+        assert!(hook.contains("if (vk == 0x2D || vk == 0x60 || vk == 0x14) && !sent {\n                note_reader_key(vk, is_down, now);\n            }"));
+        assert_eq!(code.matches("SCREEN_READER_MOD_DOWN.store(").count(), 1, "in note_reader_key alone");
         assert!(now.contains("let_through: LET_THROUGH.load(Ordering::Relaxed),"));
+    }
+
+    /// `host.input.send`'s mark: on every event `key_send` sends, the key's own and its modifiers',
+    /// and on no other key event; read by the hook after the pass-on's mark and before anything is
+    /// counted, and changing only the count that ends a count of quick repeats and the record of a
+    /// screen reader's modifier — the key is still taken, matched and counted as let through, as a
+    /// typed key is.
+    #[test]
+    fn host_input_send_s_keys_are_marked_and_end_no_count() {
+        const SRC: &str = include_str!("windows.rs");
+        let body = |sig: &str| {
+            let at = SRC.find(sig).unwrap_or_else(|| panic!("{sig}"));
+            let end = SRC[at..].find(if sig.starts_with("    ") { "\n    }\n" } else { "\n}\n" }).unwrap();
+            &SRC[at..at + end]
+        };
+        assert_ne!(SEND_MARK, PASS_ON_MARK);
+        let send = body("    fn key_send(&self, combo: &str)");
+        assert_eq!(send.matches("send_key_event(").count(), 4);
+        assert_eq!(send.matches(", SEND_MARK);").count(), 4, "every event marked");
+        let text = body("    fn type_text(&self, text: &str)");
+        assert_eq!(text.matches(", 0);").count(), 2, "typed text is not host.input.send");
+        assert!(body("unsafe fn send_key_event(").contains("input.Anonymous.ki.dwExtraInfo = extra;"));
+        let hook = body("unsafe extern \"system\" fn ll_keyboard_proc(");
+        let pass_on = hook.find("if kb.dwExtraInfo == PASS_ON_MARK {").unwrap();
+        let sent = hook.find("let sent = kb.dwExtraInfo == SEND_MARK;").expect("the hook reads the mark");
+        assert!(pass_on < sent && sent < hook.find("count_let_through(").unwrap());
+        assert!(sent < hook.find("note_reader_key(").unwrap(), "a screen reader's key a module sent is not recorded");
+        assert_eq!(hook.matches("SEND_MARK").count(), 1, "nothing else about the key asks it");
+        let counted = body("fn count_let_through(");
+        assert!(counted.contains("LET_THROUGH.fetch_add(1, Ordering::Relaxed);\n        if !sent {\n            TAPS_THROUGH.fetch_add(1, Ordering::Relaxed);\n        }"));
+        let code = &SRC[..SRC.find("mod hook_carry_over_tests {").unwrap()];
+        assert_eq!(code.matches("TAPS_THROUGH.fetch_add(").count(), 1, "moved nowhere else");
+    }
+
+    /// The keypad's Enter goes out as Return's virtual key with the extended-key flag — sent,
+    /// posted and passed on — and is asked about as Return; every other key is its own.
+    #[test]
+    fn the_keypad_s_enter_is_return_extended() {
+        use crate::backend::{Stroke, VK_NUMPAD_ENTER, VK_RETURN};
+        assert_eq!(os_key(VK_NUMPAD_ENTER), (VK_RETURN, true));
+        for vk in [VK_RETURN, 0x60, 0x61, 0x69, 0x6A, 0x6B, 0x6D, 0x6E, 0x6F, 0x26] {
+            assert_eq!(os_key(vk), (vk, false), "{vk:#04x}");
+        }
+        let key = [Stroke::Key { down: true }, Stroke::Key { down: false }];
+        // Passed on with no scan code of its own: Return's key, Return's scan code, extended.
+        let scan_ex = |k: u16| if k == VK_NUMPAD_ENTER as u16 { 0xE01C } else { 0x1C };
+        assert_eq!(
+            pass_on_inputs(VK_NUMPAD_ENTER, None, &key, scan_ex),
+            vec![(0x0D, 0x1C, KEYEVENTF_EXTENDEDKEY), (0x0D, 0x1C, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP)]
+        );
+        // And on the scan code it was pressed on.
+        assert_eq!(pass_on_inputs(VK_NUMPAD_ENTER, Some(0xE01C), &key, |_| 0)[0], (0x0D, 0x1C, KEYEVENTF_EXTENDEDKEY));
+        const SRC: &str = include_str!("windows.rs");
+        // Each method's own body, up to its closing brace: never this test's text.
+        let body = |sig: &str| {
+            let at = SRC.find(sig).unwrap_or_else(|| panic!("{sig}"));
+            &SRC[at..at + SRC[at..].find("\n    }\n").unwrap()]
+        };
+        let send = body("    fn key_send(&self, combo: &str)");
+        assert!(send.contains("let (key_vk, extended) = os_key(vk);"));
+        assert!(send.contains("let ext = if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };"));
+        let post = body("    fn key_post(&self, hwnd: isize, key: &str)");
+        assert!(post.contains("let key_code = parse_key(key)?;\n        let vk = os_key(key_code).0 as u16;"));
+        assert!(post.contains("let (lp_down, lp_up) = post_lparams(scan_code(key_code as u16));"));
+    }
+
+    /// The scan code a key goes out with, passed on or posted: `MapVirtualKeyW`'s, asked here of
+    /// the system itself — keys that sit where they sit on every layout — with the extended-key
+    /// prefix where Windows gives one; the keypad's Enter Return's, extended. A posted key's
+    /// `lParam` carries it, bit 24 set for an extended one.
+    #[test]
+    fn a_key_goes_out_on_its_own_scan_code_extended_where_the_keyboard_s_is() {
+        use crate::backend::{VK_NUMPAD_ENTER, VK_RETURN};
+        assert_eq!(scan_code(VK_NUMPAD_ENTER as u16), 0xE01C);
+        assert_eq!(scan_code(VK_RETURN as u16), 0x1C, "the main Enter");
+        assert_eq!(scan_code(0x6F), 0xE035, "the keypad's Divide, extended");
+        assert_eq!(scan_code(0x60), 0x52, "numpad zero");
+        assert_eq!(scan_code(0x6B), 0x4E, "the keypad's plus");
+        assert_eq!(scan_code(0x26), 0x48, "Up: the keypad's code, not extended, as Windows gives it");
+        assert_eq!(scan_code(0x70), 0x3B, "F1");
+        let (down, up) = post_lparams(0xE035);
+        assert_eq!(down, 1 | (0x35 << 16) | (1 << 24), "the keypad's Divide: bit 24");
+        assert_eq!(up, down | (1 << 30) | (1 << 31));
+        assert_eq!(post_lparams(0xE01C).0, 1 | (0x1C << 16) | (1 << 24), "the keypad's Enter");
+        assert_eq!(post_lparams(0x1C).0, 1 | (0x1C << 16), "the main Enter: no bit 24");
+        assert_eq!(post_lparams(0x3B), (1 | (0x3B << 16), 1 | (0x3B << 16) | (1 << 30) | (1 << 31)), "F1");
+    }
+
+    /// The hook tells the keypad's Enter by its extended-key flag, and names it as the captures in
+    /// scope do: NumpadEnter where a capture of that is in scope for the window in front, Return
+    /// everywhere else, and matches by that name; the main Enter, and every other key, is its own
+    /// virtual key, for which the window in front is not asked. The decision, the notes, the held
+    /// records and the queued press go by that name; the system and the hotkeys are asked by the
+    /// key's own.
+    #[test]
+    fn the_hook_tells_the_keypad_s_enter_by_its_flag_and_names_it_by_the_captures_in_scope() {
+        use crate::backend::{MASK_CTRL, VK_NUMPAD_ENTER, VK_RETURN};
+        assert!(is_keypad_enter(VK_RETURN, LLKHF_EXTENDED));
+        assert!(is_keypad_enter(VK_RETURN, LLKHF_EXTENDED | LLKHF_INJECTED), "sent with the flag");
+        assert!(!is_keypad_enter(VK_RETURN, 0), "the main Enter");
+        assert!(!is_keypad_enter(VK_RETURN, LLKHF_INJECTED));
+        assert!(!is_keypad_enter(0x6F, LLKHF_EXTENDED), "the keypad's Divide is extended, and itself");
+        assert!(!is_keypad_enter(0x26, LLKHF_EXTENDED));
+        let unasked = || -> isize { panic!("the window in front is asked for the keypad's Enter alone") };
+        let front = || 0x1234;
+        let numpad = Captured { vk: VK_NUMPAD_ENTER, mask: 0, owner: 1 };
+        let set = [numpad, Captured { vk: 0x09, mask: 0, owner: 1 }];
+        assert_eq!(captured_key(&set, &[], VK_RETURN, true, 0, front), (VK_NUMPAD_ENTER, true));
+        assert_eq!(captured_key(&set, &[], VK_RETURN, false, 0, unasked), (VK_RETURN, false), "the main Enter");
+        assert_eq!(captured_key(&set, &[], VK_RETURN, true, MASK_CTRL, front), (VK_RETURN, false), "other modifiers");
+        let elsewhere = [OwnerKeys { owner: 1, scope: 0x5678, menu: false }];
+        assert_eq!(captured_key(&set, &elsewhere, VK_RETURN, true, 0, front), (VK_RETURN, false), "scoped elsewhere");
+        // A capture of Return beside it: the main Enter is Return's, the keypad's NumpadEnter's,
+        // and Return's again where the NumpadEnter capture is out of scope.
+        let both = [Captured { vk: VK_RETURN, mask: 0, owner: 2 }, numpad];
+        assert_eq!(captured_key(&both, &[], VK_RETURN, false, 0, unasked), (VK_RETURN, true));
+        assert_eq!(captured_key(&both, &[], VK_RETURN, true, 0, front), (VK_NUMPAD_ENTER, true));
+        assert_eq!(captured_key(&both, &elsewhere, VK_RETURN, true, 0, front), (VK_RETURN, true));
+        assert_eq!(captured_key(&set, &[], 0x09, false, 0, unasked), (0x09, true), "every other key its own");
+
+        const SRC: &str = include_str!("windows.rs");
+        let at = SRC.find("unsafe extern \"system\" fn ll_keyboard_proc(").unwrap();
+        let hook = &SRC[at..at + SRC[at..].find("\n}\n").unwrap()];
+        assert!(hook.contains("let keypad_enter = is_keypad_enter(vk, kb.flags);"));
+        assert!(hook.contains("captured_key(&st.set, &st.owners, vk, keypad_enter, mask, || GetForegroundWindow() as isize)"));
+        assert!(hook.contains("capture_decision(&st.set, &st.owners, ck, mask, foreground, false, popup_menu_open)"));
+        assert!(!hook.contains("capture_decision(&st.set, &st.owners, vk,"));
+        assert!(hook.contains("let first = st.set.iter().find(|c| c.vk == ck && c.mask == mask);"));
+        assert!(!hook.contains("c.vk == vk"), "nothing matched by the virtual key");
+        assert_eq!(hook.matches("note_menu_pass(o, ck, mask);").count(), 2);
+        assert!(hook.contains("let repeat = CAPTURED_HELD.taken_down_as(ck, keypad_enter) || system_held;"));
+        assert!(hook.contains("KEPT_BACK.taken_down(ck);\n                        }\n                        return 1;"));
+        assert!(hook.contains("locked(&KEY_QUEUE).push(Taken { vk: ck, mask, owner, repeat, pressed });"));
+        assert!(hook.contains("let system_held = hotkey_hook::held_before(late, || down(vk as u16));"));
+        assert!(hook.contains("hook_hotkey(kb, vk, mask, late)"));
+    }
+
+    /// The keypad's Enter held: its repeat is a repeat under either of its names, the one it went
+    /// down as or the other, which a capture of NumpadEnter coming into scope or going out of it
+    /// while it was held makes it; its key-up ends both. Every other key is its own bit alone.
+    #[test]
+    fn the_keypad_s_enter_is_held_under_either_name_and_comes_up_as_both() {
+        use crate::backend::{VK_NUMPAD_ENTER, VK_RETURN};
+        let held = HeldBits::new();
+        assert!(!held.taken_down_as(VK_RETURN, true), "taken as Return: a press");
+        assert!(held.taken_down_as(VK_NUMPAD_ENTER, true), "its repeat as NumpadEnter: the same press");
+        assert!(held.taken_down_as(VK_RETURN, true), "and back");
+        held.key_up(VK_RETURN, true);
+        assert!(!held.is_held(VK_RETURN) && !held.is_held(VK_NUMPAD_ENTER), "up as both");
+        assert!(!held.taken_down_as(VK_NUMPAD_ENTER, true), "taken as NumpadEnter: a press");
+        assert!(held.taken_down_as(VK_RETURN, true), "its repeat as Return: the same press");
+        held.key_up(VK_RETURN, true);
+        assert!(!held.is_held(VK_RETURN) && !held.is_held(VK_NUMPAD_ENTER));
+        // The main Enter's key-up ends the main Enter's alone.
+        held.taken_down_as(VK_NUMPAD_ENTER, true);
+        held.taken_down_as(VK_RETURN, false);
+        held.key_up(VK_RETURN, false);
+        assert!(!held.is_held(VK_RETURN) && held.is_held(VK_NUMPAD_ENTER));
+        held.key_up(VK_RETURN, true);
+        // Every other key: its own bit.
+        assert!(!held.taken_down_as(0x09, false));
+        assert!(!held.taken_down_as(0x20, false), "another key held is no repeat of this one");
+        assert!(held.taken_down_as(0x09, false));
+        held.key_up(0x09, false);
+        assert!(!held.is_held(0x09) && held.is_held(0x20));
+    }
+
+    /// The record of a screen reader's modifier, for numpad zero's own key: asked without its own
+    /// key-down, so it is no press made with itself held — repeats included — while an Insert or a
+    /// Caps Lock seen going down before it sends it to the screen reader still, which the system
+    /// cannot say when a later hook swallowed that key. Every other key is asked against the whole
+    /// record, numpad zero's key-down included; any of the three going up clears it, and it is
+    /// forgotten with the rest.
+    #[test]
+    fn numpad_zero_s_own_key_is_asked_against_the_record_without_itself() {
+        let _turn = locked(&RECORDS);
+        forget_keys_held_out_of_sight();
+        note_reader_key(0x60, true, 1);
+        assert!(!reader_recorded(0x60), "numpad zero alone");
+        note_reader_key(0x60, true, 2);
+        assert!(!reader_recorded(0x60), "its repeat");
+        assert!(reader_recorded(0x20), "Space with it held is the screen reader's");
+        note_reader_key(0x60, false, 3);
+        assert!(!reader_recorded(0x20));
+        note_reader_key(0x2D, true, 4);
+        note_reader_key(0x60, true, 5);
+        assert!(reader_recorded(0x60), "Insert seen going down: numpad zero is the screen reader's");
+        assert!(reader_recorded(0x20));
+        note_reader_key(0x60, false, 6);
+        assert!(!reader_recorded(0x60) && !reader_recorded(0x20), "any of the three up clears it");
+        note_reader_key(0x14, true, 7);
+        assert!(reader_recorded(0x60), "Caps Lock as Insert");
+        assert!(forget_keys_held_out_of_sight().is_some());
+        assert!(!reader_recorded(0x60) && !reader_recorded(0x20), "forgotten with the record");
     }
 }
 

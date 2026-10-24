@@ -13,9 +13,12 @@
 //! **When the count starts again** — the press is a 1: after the interval, the system's double-click
 //! time or the binding's `within`, measured from the press before it; at a press of another key,
 //! or of the same key with other modifiers, which is another combination; and when a key-down
-//! reached the program in between — typed, let through, or sent by any program, this one included
-//! (`Pressed::seq`). A held key's auto-repeat counts nothing and starts nothing: it carries the count
-//! of the press it repeats.
+//! reached the program in between — typed, let through, or sent by another program
+//! (`Pressed::taps_seq`). Not one this application sent with `host.input.send`, which the hook and
+//! the tap know by its mark (decided by the maintainer on 2026-10-23): a callback that sends a key
+//! at every press does not end its own count. Text typed with `host.input.text` carries no mark,
+//! and ends it as a typed key does. A held key's auto-repeat counts nothing and starts nothing: it
+//! carries the count of the press it repeats.
 //!
 //! **`taps = "final"`**: the binding hears its sequence once, when it is over, with its count — one
 //! interval after its last press, or at once when another press starts a count of its own. Kept
@@ -112,15 +115,15 @@ pub(crate) struct Last {
     pub count: u32,
     /// When it was pressed.
     pub at: Instant,
-    /// How many key-downs had reached the program by then (`Pressed::seq`).
+    /// How many key-downs that end a count had reached the program by then (`Pressed::taps_seq`).
     pub seq: u32,
 }
 
-/// The count of a press of `key` made at `at`, with `seq` key-downs let through to the program by
-/// then, `own` of them its own key-down, against the last press counted: one more than that press's
-/// while it was the same key, the count of key-downs moved by no more than `own`, and it came less
-/// than `within` after it; 1 otherwise. A press stamped before the last one — the two arrived in
-/// the other order — is no time after it.
+/// The count of a press of `key` made at `at`, with `seq` key-downs that end a count let through to
+/// the program by then (`Pressed::taps_seq`), `own` of them its own key-down, against the last
+/// press counted: one more than that press's while it was the same key, the count of key-downs
+/// moved by no more than `own`, and it came less than `within` after it; 1 otherwise. A press
+/// stamped before the last one — the two arrived in the other order — is no time after it.
 pub(crate) fn next_count(last: Option<Last>, key: Key, at: Instant, seq: u32, own: u32, within: Duration) -> u32 {
     match last {
         Some(l) if l.key == key && seq.wrapping_sub(l.seq) <= own && at.saturating_duration_since(l.at) < within => {

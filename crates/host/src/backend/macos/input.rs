@@ -504,8 +504,9 @@ pub fn key_post(hwnd: isize, key: &str) -> Result<(), KeyRefusal> {
                 // Cleared rather than inherited. A source built on the hardware state hands
                 // the new event whatever modifiers are physically held, and `key_post` is
                 // called from inside a hotkey callback — that is, while the combination that
-                // triggered it is still down. Melodyne wants a bare F-key, not Alt+F-key.
-                CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+                // triggered it is still down. Melodyne wants a bare F-key, not Alt+F-key. A key
+                // of the keypad keeps the keypad's flag, as the keyboard's own event has it.
+                CGEvent::set_flags(Some(&event), CGEventFlags(keys::keypad_flag(code)));
                 note_post_access_once();
                 CGEvent::post_to_pid(entry.pid as libc::pid_t, Some(&event));
             }
@@ -556,13 +557,15 @@ pub fn key_send(combo: &str) -> Result<(), KeyRefusal> {
     // The cost, if a tester finds an application that ignores flag-only modifiers: the fix is
     // to bracket the pair below with `FlagsChanged` events carrying the accumulating and then
     // receding flag set. Nothing else in this file would change.
-    let flags = CGEventFlags(keys::mask_to_cg_flags(mask));
     // The mask also picks the letter table: with Command held (the Ctrl role) a letter is the
     // key the layout's Command table puts it on (`keys::letters_for`).
     let code = keys::vk_to_keycode_for(vk, mask).ok_or_else(|| {
         let said = format!("'{combo}' (VK {vk:#04x}): {}", keys::why_no_keycode(vk));
         KeyRefusal::Answer(HostError::with(&input::SEND_NO_KEYCODE, said))
     })?;
+    // A key of the keypad carries the keypad's flag besides the modifiers', as the keyboard's own
+    // event does: setting the flags replaces the whole set.
+    let flags = CGEventFlags(keys::mask_to_cg_flags(mask) | keys::keypad_flag(code));
 
     let src = source();
     for is_down in [true, false] {
@@ -573,6 +576,9 @@ pub fn key_send(combo: &str) -> Result<(), KeyRefusal> {
                 // flags disagree with its press as a modifier that was let go early, and some
                 // of them then behave as though it were still held.
                 CGEvent::set_flags(Some(&event), flags);
+                // Marked, so that the tap leaves the key-down out of the count that ends a count
+                // of quick repeats (`keys::SEND_MARK`); it takes and matches the key as ever.
+                CGEvent::set_integer_value_field(Some(&event), CGEventField::EventSourceUserData, keys::SEND_MARK);
                 post(&event);
             }
             None => {

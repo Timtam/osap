@@ -295,7 +295,7 @@ return {
     key_reserved = { code = "taken", message = "… is kept by the system", entries = { "o-pagekey" } },
     key_no_keycode = {
       code = "not_supported",
-      message = "… has no key code on this platform",
+      message = "… has no key code of its own on this platform",
       entries = { "o-pagekey" },
     },
     key_clash = {

@@ -367,6 +367,12 @@ pub mod hotkey {
         message: "the hotkey '…' (…) cannot be registered: macOS has no key code for …. Choose another key",
         entries: &["host-hotkey-register"],
     };
+    /// Windows: the keypad's Enter, which has no virtual key of its own for `RegisterHotKey`.
+    pub const NO_VK: Reason = Reason {
+        code: Code::NotSupported,
+        message: "the hotkey '…' (…) cannot be registered: Windows has no virtual key for the keypad's Enter apart from Enter's, and RegisterHotKey would take both. Capture it with host.keys.capture, or choose another key",
+        entries: &["host-hotkey-register"],
+    };
     pub const MODULE_HOLDS: Reason = Reason { code: Code::Taken, message: "module '…' holds this combination", entries: &["host-hotkey-register"] };
     pub const REGISTER_REFUSED: Reason = Reason { code: Code::Taken, message: "RegisterHotKey failed for '…' (already in use by another app?)", entries: &["host-hotkey-register"] };
     pub const MAC_REFUSED: Reason = Reason {
@@ -814,6 +820,7 @@ pub static REASONS: &[&Reason] = &[
     &keys::TAP_NO_RUN_LOOP,
     &hotkey::KEPT_BY_SYSTEM,
     &hotkey::NO_KEYCODE,
+    &hotkey::NO_VK,
     &hotkey::MODULE_HOLDS,
     &hotkey::REGISTER_REFUSED,
     &hotkey::MAC_REFUSED,

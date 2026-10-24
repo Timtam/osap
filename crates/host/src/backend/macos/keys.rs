@@ -154,7 +154,9 @@ const TABLE: &[(u32, u16)] = &[
     (0xDC, 0x2A), // VK_OEM_5      \
     (0xDD, 0x1E), // VK_OEM_6      ]
     (0xDE, 0x27), // VK_OEM_7      '
-    // The keypad, for the tap's benefit as well.
+    // The keypad, the spec's `Numpad0` to `NumpadDivide` and `NumpadEnter`. A Mac's keypad has
+    // no Num Lock: these keys are always themselves.
+    (0x0E, 0x4C), // NumpadEnter (the host's own code, `VK_NUMPAD_ENTER`) -> kVK_ANSI_KeypadEnter
     (0x60, 0x52), // VK_NUMPAD0
     (0x61, 0x53), // VK_NUMPAD1
     (0x62, 0x54), // VK_NUMPAD2
@@ -178,14 +180,14 @@ const TABLE: &[(u32, u16)] = &[
 /// generic virtual key — the hook folds `VK_LMENU`/`VK_RMENU` into `VK_MENU` so that a
 /// capture of "Alt" answers to either — and the host's captured-key table is written in
 /// that vocabulary, so the right-hand keys have to arrive as the same code here. The
-/// keypad's Enter is the same story: Windows calls it `VK_RETURN` with the extended flag,
-/// which the host never looks at.
+/// keypad's Enter is not one of them: it is the host's `NumpadEnter` ([`TABLE`]), which the tap
+/// reads as Return wherever no capture of `NumpadEnter` is in scope, as the Windows hook does
+/// (`crate::backend::keypad_enter_as`).
 const REVERSE_ONLY: &[(u16, u32)] = &[
     (0x3C, 0x10), // kVK_RightShift   -> VK_SHIFT
     (0x36, 0x11), // kVK_RightCommand -> VK_CONTROL (the Ctrl role)
     (0x3D, 0x12), // kVK_RightOption  -> VK_MENU
     (0x3E, 0x5B), // kVK_RightControl -> VK_LWIN (the Win role)
-    (0x4C, 0x0D), // kVK_ANSI_KeypadEnter -> VK_RETURN
 ];
 
 /// Carbon's modifier bits, from HIToolbox `Events.h`.
@@ -209,6 +211,26 @@ pub const CG_FLAG_SHIFT: u64 = 0x0002_0000;
 pub const CG_FLAG_CONTROL: u64 = 0x0004_0000;
 pub const CG_FLAG_ALTERNATE: u64 = 0x0008_0000;
 pub const CG_FLAG_COMMAND: u64 = 0x0010_0000;
+/// `kCGEventFlagMaskNumericPad`: a key of the numeric keypad, as the keyboard's own events carry
+/// it.
+pub const CG_FLAG_NUMERIC_PAD: u64 = 0x0020_0000;
+
+/// The keypad's keycodes: its digits, operators, decimal key and Enter — the keys of the spec's
+/// keypad names ([`TABLE`]) — whose events the keyboard flags as the numeric keypad's.
+const KEYPAD_CODES: [u16; 16] = [0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5B, 0x5C, 0x41, 0x43, 0x45, 0x4B, 0x4C, 0x4E];
+
+/// The flag a key event of `code` carries besides the modifiers' when the keyboard makes it:
+/// [`CG_FLAG_NUMERIC_PAD`] for a key of the keypad, nothing for any other key. What the host
+/// posts for a keypad key carries it too — `host.input.send`, `post` and a key passed on — since
+/// setting a key event's flags replaces the whole set, and a program can tell the keypad's 1 from
+/// the top row's by it.
+pub fn keypad_flag(code: u16) -> u64 {
+    if KEYPAD_CODES.contains(&code) {
+        CG_FLAG_NUMERIC_PAD
+    } else {
+        0
+    }
+}
 
 /// One of the host's modifier roles, as the Mac key it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -571,6 +593,13 @@ pub fn translate_modifier_state(mask: u8) -> u32 {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const PASS_ON_MARK: i64 = 0x5041_5353;
 
+/// What the same field carries on every key event `host.input.send` posts (`input::key_send`). It
+/// changes nothing about how the tap takes the key — a capture takes it and Carbon matches it as if
+/// it were typed, and let through it counts as let through — but a key-down that carries it does
+/// not end a count of quick repeats (`tap::taps_through`). "SEND", as on Windows.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const SEND_MARK: i64 = 0x5345_4E44;
+
 /// One event of a key passed on, as the Mac posts it: a modifier's key as a `FlagsChanged` event,
 /// the key itself as a key-down or key-up, each carrying the Quartz flags of the modifier roles
 /// held from that event on.
@@ -611,7 +640,7 @@ pub fn pass_on_events(code: u16, mask: u8, strokes: &[crate::backend::Stroke]) -
                 let keycode = MODIFIER_KEYS.iter().find(|m| m.mask == role).map_or(0, |m| m.keycodes[0]);
                 PassOnEvent { keycode, modifier: true, down, flags: mask_to_cg_flags(held) }
             }
-            Stroke::Key { down } => PassOnEvent { keycode: code, modifier: false, down, flags: mask_to_cg_flags(held) },
+            Stroke::Key { down } => PassOnEvent { keycode: code, modifier: false, down, flags: mask_to_cg_flags(held) | keypad_flag(code) },
         })
         .collect()
 }
@@ -676,6 +705,10 @@ mod tests {
         ] {
             names.push(n.to_string());
         }
+        names.extend((0..=9).map(|n| format!("Numpad{n}")));
+        for n in ["NumpadEnter", "NumpadAdd", "NumpadSubtract", "NumpadMultiply", "NumpadDivide", "NumpadDecimal"] {
+            names.push(n.to_string());
+        }
 
         for name in &names {
             let vk = key_to_vk(name).unwrap_or_else(|| panic!("key_to_vk lost '{name}'"));
@@ -735,6 +768,44 @@ mod tests {
         // Option, for completeness: every role has its key.
         let s = pass_on_strokes(MASK_ALT, w1, now(0)).unwrap();
         assert_eq!(pass_on_events(tab, MASK_ALT, &s)[0], ev(0x3A, true, true, CG_FLAG_ALTERNATE));
+        // A keypad key's own two events carry the keypad's flag, as the keyboard's do; its
+        // modifiers' do not.
+        let keypad_1 = 0x53;
+        let s = pass_on_strokes(MASK_SHIFT, w1, now(0)).unwrap();
+        assert_eq!(
+            pass_on_events(keypad_1, MASK_SHIFT, &s),
+            vec![
+                ev(0x38, true, true, CG_FLAG_SHIFT),
+                ev(keypad_1, false, true, CG_FLAG_SHIFT | CG_FLAG_NUMERIC_PAD),
+                ev(keypad_1, false, false, CG_FLAG_SHIFT | CG_FLAG_NUMERIC_PAD),
+                ev(0x38, true, false, 0),
+            ]
+        );
+    }
+
+    /// The keypad's keys by the spec's names, each on its `kVK_ANSI_Keypad*` code and back, and
+    /// flagged as the keypad's — its Enter as well, which is the host's `NumpadEnter` here and not
+    /// Return; the tap reads it as Return where no capture of `NumpadEnter` is in scope.
+    #[test]
+    fn the_keypad_has_its_own_keycodes_and_flag() {
+        let pad = [
+            ("Numpad0", 0x52), ("Numpad1", 0x53), ("Numpad2", 0x54), ("Numpad3", 0x55), ("Numpad4", 0x56),
+            ("Numpad5", 0x57), ("Numpad6", 0x58), ("Numpad7", 0x59), ("Numpad8", 0x5B), ("Numpad9", 0x5C),
+            ("NumpadDecimal", 0x41), ("NumpadMultiply", 0x43), ("NumpadAdd", 0x45), ("NumpadDivide", 0x4B),
+            ("NumpadEnter", 0x4C), ("NumpadSubtract", 0x4E),
+        ];
+        for (name, code) in pad {
+            let vk = key_to_vk(name).unwrap();
+            assert_eq!(vk_to_keycode(vk), Some(code), "{name}");
+            assert_eq!(keycode_to_vk(code), Some(vk), "{name}");
+            assert_eq!(keypad_flag(code), CG_FLAG_NUMERIC_PAD, "{name}");
+        }
+        assert_eq!(key_to_vk("NumpadEnter"), Some(crate::backend::VK_NUMPAD_ENTER));
+        assert_eq!(vk_to_keycode(crate::backend::VK_RETURN), Some(0x24), "Return is the main key");
+        for code in [0x24, 0x12, 0x7E, 0x00, 0x30] {
+            assert_eq!(keypad_flag(code), 0, "{code:#04x} is no keypad key");
+        }
+        assert_ne!(SEND_MARK, PASS_ON_MARK);
     }
 
     /// The four modifiers a "<modifier> tap" spec resolves to are keys as well, and the tap
@@ -903,6 +974,8 @@ mod tests {
         ] {
             names.push(n.to_string());
         }
+        names.extend((0..=9).map(|n| format!("Numpad{n}")));
+        names.extend(["NumpadEnter", "NumpadAdd", "NumpadSubtract", "NumpadMultiply", "NumpadDivide", "NumpadDecimal"].map(String::from));
         for name in &names {
             let vk = key_to_vk(name).unwrap();
             assert_eq!(

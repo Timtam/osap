@@ -1518,15 +1518,15 @@ local function spokenKey(spec)
 end
 
 -- The host.keys.check reasons host.hotkey.register will not hold a key for — a spec that does not
--- parse, a combination the system keeps, a key this platform has no code for, and a modifier tap —
--- each with what the declaration report says of it, and O:pageKey's error value (`key_<word>` in
--- errors.luau, whose message is the same words). VoiceOver's layer is not one — it registers, and
--- arrives on a Mac whose VoiceOver modifier is Caps Lock — and neither is a character the layout
--- types with the key.
+-- parse, a combination the system keeps, a key this platform has no code of its own for (Windows'
+-- NumpadEnter has Enter's), and a modifier tap — each with what the declaration report says of
+-- it, and O:pageKey's error value (`key_<word>` in errors.luau, whose message is the same words).
+-- VoiceOver's layer is not one — it registers, and arrives on a Mac whose VoiceOver modifier is
+-- Caps Lock — and neither is a character the layout types with the key.
 local REFUSES_HOTKEY = {
   parse = "is not a key spec",
   reserved = "is kept by the system",
-  no_keycode = "has no key code on this platform",
+  no_keycode = "has no key code of its own on this platform",
   tap = "is a modifier tap, which only host.keys.capture can watch",
 }
 local hotkeyRefusals = {}

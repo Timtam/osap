@@ -192,9 +192,21 @@ static TAP_ARMED: AtomicU32 = AtomicU32::new(0);
 /// first (`crate::backend::NotPassed::Overtaken`). One relaxed add per key-down.
 static LET_THROUGH: AtomicU32 = AtomicU32::new(0);
 
+/// The key-downs of [`LET_THROUGH`] that end a count of quick repeats: all but those
+/// `host.input.send` posted, which carry [`keys::SEND_MARK`], wrapping. Each press carries it
+/// beside `LET_THROUGH`'s (`crate::backend::Pressed::taps_seq`), so that a key a module sends ends
+/// no count while it still overtakes a key waiting to be passed on. One relaxed add per key-down it
+/// counts.
+static TAPS_THROUGH: AtomicU32 = AtomicU32::new(0);
+
 /// The count of key-downs let through so far ([`LET_THROUGH`]).
 pub fn let_through() -> u32 {
     LET_THROUGH.load(Ordering::Relaxed)
+}
+
+/// How many of them end a count of quick repeats ([`TAPS_THROUGH`]).
+pub fn taps_through() -> u32 {
+    TAPS_THROUGH.load(Ordering::Relaxed)
 }
 
 /// How many keys this tap has seen pressed, wrapping: every `KeyDown` that is not the keyboard's
@@ -939,16 +951,23 @@ unsafe extern "C-unwind" fn tap_callback(
     // events are no press, hold or tap of the user's, and it is not counted as let through. Only
     // its key-down ends a pending modifier tap, as the key would have: the program has had a key
     // between that modifier's press and its release. One field read.
-    if CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUserData) == keys::PASS_ON_MARK {
+    let mark = CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUserData);
+    if mark == keys::PASS_ON_MARK {
         if etype == CGEventType::KeyDown {
             TAP_ARMED.store(0, Ordering::Relaxed);
         }
         return pass;
     }
+    // A key `host.input.send` posted (`input::key_send`): taken, matched and counted as let through
+    // as a typed key is, and left out of the count that ends a count of quick repeats.
+    let sent = mark == keys::SEND_MARK;
     // Every key-down returned from here on goes towards the program: counted on its way.
     let through = || {
         if etype == CGEventType::KeyDown {
             LET_THROUGH.fetch_add(1, Ordering::Relaxed);
+            if !sent {
+                TAPS_THROUGH.fetch_add(1, Ordering::Relaxed);
+            }
         }
         pass
     };
@@ -1017,7 +1036,8 @@ unsafe extern "C-unwind" fn tap_callback(
         return through();
     };
     let front = FOREGROUND.load(Ordering::Relaxed);
-    let Some(decided) = decide(vk, mask, front, true) else {
+    // The keypad's Enter is read as NumpadEnter or as Return by `decide`, which answers with it.
+    let Some((vk, decided)) = decide(vk, mask, front, true) else {
         return through(); // the pump was mid-replacement; said by `decide`
     };
     let owner = match decided {
@@ -1048,10 +1068,10 @@ unsafe extern "C-unwind" fn tap_callback(
         }
         Some(Capture::Take { owner }) => owner,
     };
-    // With the key, whether it repeats (read above) and the press as it was: the window, the count
+    // With the key, whether it repeats (read above) and the press as it was: the window, the counts
     // of keys let through so far, and the keycode itself — the keypad's Enter is not Return,
-    // though both are VK_RETURN to the host.
-    let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: Some(keycode), queued: Some(Instant::now()) };
+    // though both are VK_RETURN to the host where no capture of NumpadEnter is in scope.
+    let pressed = Pressed { front, seq: let_through(), taps_seq: taps_through(), phys: Some(keycode), queued: Some(Instant::now()) };
     queue::push_key(Taken { vk, mask, owner, repeat, pressed });
     note_suppressed(keycode);
 
@@ -1129,16 +1149,16 @@ fn modifier_changed(keycode: u16, flags: CGEventFlags) {
     }
     let front = FOREGROUND.load(Ordering::Relaxed);
     match decide(modifier.vk, MASK_TAP, front, false) {
-        Some(Some(Capture::Take { owner })) => {
-            let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: None, queued: Some(Instant::now()) };
+        Some((_, Some(Capture::Take { owner }))) => {
+            let pressed = Pressed { front, seq: let_through(), taps_seq: taps_through(), phys: None, queued: Some(Instant::now()) };
             queue::push_key(Taken { vk: modifier.vk, mask: MASK_TAP, owner, repeat: false, pressed });
             logging::trace("macos", || format!("tap: modifier tap vk {:#04x} for module {owner}", modifier.vk));
         }
-        Some(Some(Capture::Pass { why, .. })) => {
+        Some((_, Some(Capture::Pass { why, .. }))) => {
             logging::trace("macos", || format!("tap: modifier tap not dispatched ({})", pass_words(why)));
         }
         // Nothing claims the tap, or the pump was mid-replacement.
-        Some(None) | None => {}
+        Some((_, None)) | None => {}
     }
 }
 
@@ -1175,10 +1195,16 @@ fn modifier_changed(keycode: u16, flags: CGEventFlags) {
 /// came. So what it holds stays true while our window has the keys, for the moment another
 /// application's window has them again.
 ///
+/// **The keypad's Enter** arrives as the host's `NumpadEnter` ([`keys::keycode_to_vk_for`]) and is
+/// decided as NumpadEnter while a capture of that combination is in scope for `front`, and as
+/// Return everywhere else, as the Windows hook decides it (`crate::backend::keypad_enter_as`):
+/// the key it was decided as comes back with the decision. A menu's record holds it as Return, as
+/// the Windows hook's does, unless a capture of NumpadEnter let it past.
+///
 /// `None`: the pump was replacing the table when the key arrived, and the key goes to the
 /// application. It cannot happen while both live on this thread, and it is a key silently not
 /// captured if it ever does, so it is said.
-fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool) -> Option<Option<Capture>> {
+fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool) -> Option<(u32, Option<Capture>)> {
     let state = match KEY_STATE.try_lock() {
         Ok(state) => state,
         Err(TryLockError::Poisoned(p)) => p.into_inner(),
@@ -1194,12 +1220,16 @@ fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool) -> Option<Option<Cap
         }
     };
     let own = super::own::has_keyboard();
+    let keypad_enter = vk == crate::backend::VK_NUMPAD_ENTER;
+    let vk = if keypad_enter { crate::backend::keypad_enter_as(&state.set, &state.owners, mask, front) } else { vk };
     let decided = capture_decision(&state.set, &state.owners, vk, mask, front, own, watch::native_menu_open);
     if menu_keys && !own {
         let mut noted = false;
-        if is_menu_key(vk) && mask == 0 && state.owners.iter().any(|e| e.menu) {
+        // The keypad's Enter ends a menu as Return does, and is recorded as Return.
+        let menu_vk = if keypad_enter { crate::backend::VK_RETURN } else { vk };
+        if is_menu_key(menu_vk) && mask == 0 && state.owners.iter().any(|e| e.menu) {
             for owner in menu_flag_owners(&state.set, &state.owners, front) {
-                note_menu_pass(owner, vk, mask);
+                note_menu_pass(owner, menu_vk, mask);
                 noted = true;
             }
         }
@@ -1214,7 +1244,7 @@ fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool) -> Option<Option<Cap
             _ => {}
         }
     }
-    Some(decided)
+    Some((vk, decided))
 }
 
 /// The words a let-through says, for the log line.

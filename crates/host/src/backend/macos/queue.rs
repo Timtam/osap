@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 use crate::backend::{HostEvents, Taken};
 
 thread_local! {
-    /// Hotkey presses, each with the count of key-downs the tap had let through when Carbon
-    /// handed it over (`tap::let_through`), and when that was.
-    static HOTKEYS: RefCell<Vec<(i32, u32, Instant)>> = const { RefCell::new(Vec::new()) };
+    /// Hotkey presses, each with the counts of key-downs the tap had let through when Carbon
+    /// handed it over (`tap::let_through`, `tap::taps_through`), and when that was.
+    static HOTKEYS: RefCell<Vec<(i32, u32, u32, Instant)>> = const { RefCell::new(Vec::new()) };
     /// Foreground changes, as the window id at the time. Resolved to a `WinInfo` in
     /// `drain` rather than in the callback: reading a window's geometry and its owner's
     /// name is an accessibility round-trip into another process, and that is not something
@@ -32,14 +32,15 @@ thread_local! {
     static TAKEN: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
-/// A hotkey press, as Carbon hands it over: with the count of key-downs the tap has let through by
-/// the time Carbon's event reaches this thread (`tap::let_through`). The tap, at the HID level,
-/// sees the hotkey's own key-down before Carbon matches it, so that key is in the count; a key typed
-/// after it is not, unless it passed the tap before Carbon's event came — the Mac session confirms
-/// the first (TODO.md, "The pass-on never ran on a Mac"). The moment is this one: Carbon's handler
-/// runs on this thread, as the tap does, so a press and a captured key are timed alike.
+/// A hotkey press, as Carbon hands it over: with the counts of key-downs the tap has let through by
+/// the time Carbon's event reaches this thread (`tap::let_through`, `tap::taps_through`). The tap,
+/// at the HID level, sees the hotkey's own key-down before Carbon matches it, so that key is in the
+/// counts; a key typed after it is not, unless it passed the tap before Carbon's event came — the
+/// Mac session confirms the first (TODO.md, "The pass-on never ran on a Mac"). The moment is this
+/// one: Carbon's handler runs on this thread, as the tap does, so a press and a captured key are
+/// timed alike.
 pub fn push_hotkey(id: i32) {
-    HOTKEYS.with(|q| q.borrow_mut().push((id, super::tap::let_through(), Instant::now())));
+    HOTKEYS.with(|q| q.borrow_mut().push((id, super::tap::let_through(), super::tap::taps_through(), Instant::now())));
 }
 
 pub fn push_activated(window: isize) {
@@ -69,7 +70,7 @@ pub fn push_key(key: Taken) {
 /// drained yet (`Backend::drop_queued_input`).
 pub fn drop_pending() -> crate::backend::DroppedInput {
     let keys = KEYS.with(|q| std::mem::take(&mut *q.borrow_mut())).into_iter().map(|k| (k.vk, k.mask, k.owner)).collect();
-    let hotkeys = HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut())).into_iter().map(|(id, _, _)| id).collect();
+    let hotkeys = HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut())).into_iter().map(|(id, ..)| id).collect();
     crate::backend::DroppedInput { keys, hotkeys }
 }
 
@@ -149,10 +150,10 @@ pub fn drain(events: &mut dyn HostEvents) {
     super::system::drain(events);
 
     TAKEN.with(|t| t.set(Some(Instant::now())));
-    // The press's own key-down is in `seq` (`push_hotkey`): the count of quick repeats takes it for
-    // no other key going down.
-    for (id, seq, at) in HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut())) {
-        events.on_hotkey(id, crate::backend::HotkeyPress { seq, own: 1, at });
+    // The press's own key-down is in the counts (`push_hotkey`): the count of quick repeats takes it
+    // for no other key going down.
+    for (id, seq, taps_seq, at) in HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut())) {
+        events.on_hotkey(id, crate::backend::HotkeyPress { seq, taps_seq, own: 1, at });
     }
 
     let activated = ACTIVATED.with(|q| std::mem::take(&mut *q.borrow_mut()));

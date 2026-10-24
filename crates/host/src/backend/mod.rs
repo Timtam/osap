@@ -1960,7 +1960,10 @@ pub struct HotkeyPress {
     /// How many key-downs the hook or the tap had let through to the program when it came in
     /// ([`Pressed::seq`]): as the hook matched it, or as the system delivered it.
     pub seq: u32,
-    /// How many of those are the press's own key-down: 1 on a Mac, whose tap sees a hotkey's
+    /// How many of those end a count of quick repeats ([`Pressed::taps_seq`]): what the count is
+    /// decided by.
+    pub taps_seq: u32,
+    /// How many of those may be the press's own key-down: 1 on a Mac, whose tap sees a hotkey's
     /// key-down at the HID level and lets it go on before Carbon matches it (queue.rs,
     /// `push_hotkey`) — and, with no tap in, counts nothing, so no other key can be in the count
     /// either. On Windows 0 for a press the hook swallowed, or was not called for, which only
@@ -2012,8 +2015,28 @@ pub trait HostEvents {
     fn on_tick(&mut self) {}
 }
 
-/// Maps a friendly key name ("Tab", "a", "F1", "Right", "Escape") to a Win32
-/// virtual-key code. (VK codes; only used by the Windows backend.)
+/// The keypad's Enter, as the host names it. Windows gives it no virtual key of its own — it is
+/// `VK_RETURN` with the extended-key flag — so the host numbers it 0x0E, a code Windows leaves
+/// unassigned, and the Windows hook and the macOS tap read the keypad's Enter as it only where a
+/// capture of it is in scope ([`keypad_enter_as`]); everywhere else the keypad's Enter is Return,
+/// as it always was. On a Mac it is `kVK_ANSI_KeypadEnter` (`macos/keys.rs`).
+pub const VK_NUMPAD_ENTER: u32 = 0x0E;
+/// `VK_RETURN`: both Enters to Windows, and the main one's code on a Mac.
+pub const VK_RETURN: u32 = 0x0D;
+
+/// The keypad's keys other than its Enter, by the spec's names: Windows' own virtual keys
+/// (`VK_NUMPAD0`–`VK_NUMPAD9` are 0x60 to 0x69 and come first by arithmetic in [`key_to_vk`]).
+const KEYPAD_KEYS: [(&str, u32); 5] = [
+    ("NumpadMultiply", 0x6A), // VK_MULTIPLY
+    ("NumpadAdd", 0x6B),      // VK_ADD
+    ("NumpadSubtract", 0x6D), // VK_SUBTRACT
+    ("NumpadDecimal", 0x6E),  // VK_DECIMAL
+    ("NumpadDivide", 0x6F),   // VK_DIVIDE
+];
+
+/// Maps a friendly key name ("Tab", "a", "F1", "Right", "Escape", "Numpad1") to a Win32
+/// virtual-key code — the host's key vocabulary on every platform, with one code of its own,
+/// [`VK_NUMPAD_ENTER`].
 pub fn key_to_vk(name: &str) -> Option<u32> {
     let k = name.trim();
     if k.chars().count() == 1 {
@@ -2030,6 +2053,16 @@ pub fn key_to_vk(name: &str) -> Option<u32> {
         if (1..=24).contains(&n) {
             return Some(0x70 + (n - 1));
         }
+    }
+    // The keypad: `Numpad` and a digit, its Enter, and its four operators and decimal key.
+    if let Some(rest) = lower.strip_prefix("numpad") {
+        if let [d @ b'0'..=b'9'] = rest.as_bytes() {
+            return Some(0x60 + u32::from(d - b'0'));
+        }
+        if rest == "enter" {
+            return Some(VK_NUMPAD_ENTER);
+        }
+        return KEYPAD_KEYS.iter().find(|(n, _)| n[6..].eq_ignore_ascii_case(rest)).map(|(_, vk)| *vk);
     }
     Some(match lower.as_str() {
         "space" => 0x20,
@@ -2059,8 +2092,15 @@ pub fn vk_name(vk: u32) -> Option<String> {
     if (0x70..=0x87).contains(&vk) {
         return Some(format!("F{}", vk - 0x70 + 1));
     }
+    if (0x60..=0x69).contains(&vk) {
+        return Some(format!("Numpad{}", vk - 0x60));
+    }
+    if let Some((name, _)) = KEYPAD_KEYS.iter().find(|(_, v)| *v == vk) {
+        return Some((*name).to_string());
+    }
     Some(
         match vk {
+            VK_NUMPAD_ENTER => "NumpadEnter",
             0x20 => "Space",
             0x0D => "Return",
             0x1B => "Escape",
@@ -2247,6 +2287,19 @@ pub fn capture_decision(
     Some(Capture::Take { owner })
 }
 
+/// The key the keypad's Enter is, pressed with the roles in `mask` while `front` is in front:
+/// [`VK_NUMPAD_ENTER`] while a capture of that combination is in scope there — the more particular
+/// name wins — and Return otherwise, as both Enters always were. Decided at every key event, a
+/// key-up included, by the Windows hook and the macOS tap before they match anything; one walk of
+/// the captured set.
+pub fn keypad_enter_as(set: &[Captured], owners: &[OwnerKeys], mask: u8, front: isize) -> u32 {
+    if set.iter().any(|c| c.vk == VK_NUMPAD_ENTER && c.mask == mask && in_scope(owners, c.owner, front)) {
+        VK_NUMPAD_ENTER
+    } else {
+        VK_RETURN
+    }
+}
+
 /// macOS: whether the tap swallows a key-down before it is decided: the keyboard's auto-repeat
 /// (`repeat`) of a key whose key-down the tap swallowed for a capture and whose key-up has not come
 /// yet (`down_swallowed`), while one of this application's own windows has the keyboard
@@ -2287,6 +2340,11 @@ pub struct Pressed {
     /// ([`KeyboardNow::let_through`]): a key let through after it, which reached the program
     /// before it, moves the count on.
     pub seq: u32,
+    /// How many of those end a count of quick repeats (taps.rs): all but the ones this application
+    /// sent itself with `host.input.send`, which the hook or the tap knows by their mark. A count
+    /// of its own, read with one load as `seq` is, so that a press is never read halfway through a
+    /// key that moved both.
+    pub taps_seq: u32,
     /// The physical key, where the platform names one apart from the virtual key: Windows the scan
     /// code, with 0xE000 for an extended key (as `MapVirtualKeyW` with `MAPVK_VK_TO_VSC_EX` writes
     /// it), macOS the keycode. `None` for a hotkey, whose press the system matched, and for a key
@@ -2719,6 +2777,23 @@ fn key_word(os: KeyOs, vk: u32, style: Option<KeyStyle>) -> String {
     let Some(style) = style else { return named };
     let mac = os == KeyOs::Macos;
     let spoken = style == KeyStyle::Spoken;
+    // The keypad, as each platform calls it — "Keypad" in Apple's key codes and documentation,
+    // "Numpad" spoken and "Num" written on Windows, its own key names (`GetKeyNameTextW`) — and
+    // the operators by what they do, which no layout changes: "Numpad Plus", "Keypad Decimal".
+    let pad = if mac { "Keypad" } else if spoken { "Numpad" } else { "Num" };
+    let keypad = match vk {
+        0x60..=0x69 => Some((vk - 0x60).to_string()),
+        VK_NUMPAD_ENTER => Some("Enter".to_string()),
+        0x6A => Some("Multiply".to_string()),
+        0x6B => Some("Plus".to_string()),
+        0x6D => Some("Minus".to_string()),
+        0x6E => Some("Decimal".to_string()),
+        0x6F => Some("Divide".to_string()),
+        _ => None,
+    };
+    if let Some(key) = keypad {
+        return format!("{pad} {key}");
+    }
     let word = match vk {
         0x0D if mac => "Return",
         0x0D => "Enter",
@@ -2849,7 +2924,8 @@ pub const REASON_RESERVED: &str = "reserved";
 /// macOS: the combination holds Control and Option together, VoiceOver's modifier — the Win and
 /// Alt roles ([`MAC_VOICEOVER_LAYER`]).
 pub const REASON_VOICEOVER: &str = "voiceover";
-/// macOS: the key has no key code (F21–F24).
+/// The key has no code a hotkey can be registered on: macOS has no key code for F21–F24, and
+/// Windows no virtual key for the keypad's Enter apart from Return's ([`VK_NUMPAD_ENTER`]).
 pub const REASON_NO_KEYCODE: &str = "no_keycode";
 /// A modifier pressed on its own: something `host.keys.capture` watches, and never a hotkey.
 pub const REASON_TAP: &str = "tap";
@@ -3002,6 +3078,11 @@ pub fn check_spec_for(
             check.reasons.push(REASON_NO_KEYCODE);
         }
     }
+    // Windows has no virtual key of the keypad's Enter apart from Return's, and `RegisterHotKey`
+    // takes nothing else: a hotkey on it would be both Enters. A capture takes it alone.
+    if os == KeyOs::Windows && vk == VK_NUMPAD_ENTER && mask & MASK_TAP == 0 {
+        check.reasons.push(REASON_NO_KEYCODE);
+    }
     if let Some(reason) = layout_question(os, mask) {
         if let Some((text, dead)) = layout(vk, mask) {
             check.reasons.push(reason);
@@ -3034,6 +3115,14 @@ pub fn hotkey_refusal_for(os: KeyOs, spec: &str) -> Option<KeyRefusal> {
         REASON_TAP => KeyRefusal::Mistake(format!(
             "the hotkey '{spec}' ({shown}) is a modifier pressed on its own, which cannot be a \
              global hotkey: capture it with host.keys.capture instead"
+        )),
+        REASON_NO_KEYCODE if os == KeyOs::Windows => KeyRefusal::Answer(HostError::with(
+            &hotkey::NO_VK,
+            format!(
+                "the hotkey '{spec}' ({shown}) cannot be registered: Windows has no virtual key for \
+                 the keypad's Enter apart from Enter's, and RegisterHotKey would take both. Capture \
+                 it with host.keys.capture, or choose another key"
+            ),
         )),
         REASON_NO_KEYCODE => KeyRefusal::Answer(HostError::with(
             &hotkey::NO_KEYCODE,
@@ -3451,10 +3540,12 @@ mod key_grammar_tests {
         keys.extend((1..=24).map(|n| format!("F{n}")));
         for k in [
             "Space", "Enter", "Return", "Esc", "Escape", "Tab", "Backspace", "Delete", "Del", "Up",
-            "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown",
+            "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown", "NumpadEnter", "NumpadAdd",
+            "NumpadSubtract", "NumpadMultiply", "NumpadDivide", "NumpadDecimal",
         ] {
             keys.push(k.to_string());
         }
+        keys.extend((0..=9).map(|n| format!("Numpad{n}")));
         let mods = [
             "", "Ctrl+", "Control+", "Cmd+", "Command+", "Alt+", "Option+", "Shift+", "Win+",
             "Super+", "Meta+", "Ctrl+Alt+Shift+Win+", "Meta+Alt+", "Cmd+Shift+",
@@ -3521,6 +3612,57 @@ mod key_grammar_tests {
         assert_eq!(describe_spec_for(Windows, "Hyper+X", Spoken), None);
     }
 
+    /// The keypad's names: `Numpad` and a digit, `NumpadEnter`, and the four operators and the
+    /// decimal key by the W3C `KeyboardEvent.code` names, any case. Windows' own virtual keys, but
+    /// for the Enter, which has none of its own and is the host's 0x0E; one spelling each, which
+    /// `normalize` gives back and `describe` says in the platform's word for the keypad.
+    #[test]
+    fn the_keypad_has_names_of_its_own() {
+        use KeyStyle::{Short, Spoken};
+        for (n, vk) in (0..=9).map(|n| (n, 0x60 + n)) {
+            assert_eq!(key_to_vk(&format!("Numpad{n}")), Some(vk));
+            assert_eq!(key_to_vk(&format!("numpad{n}")), Some(vk));
+            assert_eq!(vk_name(vk), Some(format!("Numpad{n}")));
+        }
+        for (name, vk) in [
+            ("NumpadEnter", VK_NUMPAD_ENTER),
+            ("NumpadMultiply", 0x6A),
+            ("NumpadAdd", 0x6B),
+            ("NumpadSubtract", 0x6D),
+            ("NumpadDecimal", 0x6E),
+            ("NumpadDivide", 0x6F),
+        ] {
+            assert_eq!(key_to_vk(name), Some(vk), "{name}");
+            assert_eq!(key_to_vk(&name.to_ascii_uppercase()), Some(vk), "{name}");
+            assert_eq!(key_to_vk(&format!(" {} ", name.to_ascii_lowercase())), Some(vk), "{name}");
+            assert_eq!(vk_name(vk).as_deref(), Some(name));
+        }
+        assert_eq!(VK_NUMPAD_ENTER, 0x0E, "a code Windows leaves unassigned");
+        for not in ["Numpad", "Numpad10", "Numpad-1", "NumpadPlus", "NumpadMinus", "NumpadDot", "Num1", "Keypad1", "NumpadEqual"] {
+            assert_eq!(key_to_vk(not), None, "{not}");
+        }
+        assert_eq!(vk_name(0x6C), None, "VK_SEPARATOR is no key of the spec");
+        let n = |os, s| normalize_spec_for(os, s);
+        assert_eq!(n(Windows, "ctrl+numpad1").as_deref(), Some("Ctrl+Numpad1"));
+        assert_eq!(n(Macos, "Ctrl+NUMPADENTER").as_deref(), Some("Cmd+NumpadEnter"));
+        assert_ne!(n(Windows, "NumpadEnter"), n(Windows, "Return"), "two keys");
+        assert_ne!(n(Windows, "Numpad1"), n(Windows, "1"));
+        let d = |os, s, st| describe_spec_for(os, s, st).unwrap();
+        assert_eq!(d(Windows, "Numpad1", Spoken), "Numpad 1");
+        assert_eq!(d(Windows, "Numpad1", Short), "Num 1");
+        assert_eq!(d(Windows, "Ctrl+NumpadEnter", Spoken), "Control+Numpad Enter");
+        assert_eq!(d(Windows, "NumpadAdd", Spoken), "Numpad Plus");
+        assert_eq!(d(Windows, "NumpadSubtract", Short), "Num Minus");
+        assert_eq!(d(Windows, "NumpadMultiply", Spoken), "Numpad Multiply");
+        assert_eq!(d(Windows, "NumpadDivide", Spoken), "Numpad Divide");
+        assert_eq!(d(Windows, "NumpadDecimal", Short), "Num Decimal");
+        assert_eq!(d(Linux, "Numpad0", Spoken), "Numpad 0");
+        assert_eq!(d(Macos, "Numpad0", Spoken), "Keypad 0");
+        assert_eq!(d(Macos, "Numpad0", Short), "Keypad 0");
+        assert_eq!(d(Macos, "Ctrl+NumpadEnter", Spoken), "Command+Keypad Enter");
+        assert_eq!(d(Macos, "Shift+NumpadAdd", Short), "Shift+Keypad Plus");
+    }
+
     /// The reserved lists, in role terms: on a Mac Command is `Ctrl` (or `Cmd`) in a spec and
     /// Control is `Win` (or `Meta`), so `"Ctrl+Q"` is Command+Q there and `"Win+Q"` is not.
     #[test]
@@ -3577,6 +3719,17 @@ mod key_grammar_tests {
         }
         assert_eq!(check_spec_for(Macos, "F21", none).reasons, vec![REASON_NO_KEYCODE]);
         assert!(check_spec_for(Windows, "F21", none).ok());
+        // Windows has no virtual key of the keypad's Enter apart from Return's: no hotkey on it.
+        for spec in ["NumpadEnter", "Ctrl+NumpadEnter"] {
+            assert_eq!(check_spec_for(Windows, spec, none).reasons, vec![REASON_NO_KEYCODE], "{spec}");
+            assert!(check_spec_for(Macos, spec, none).reasons.is_empty(), "{spec} on a Mac");
+        }
+        assert_eq!(check_spec_for(Windows, "NumpadEnter tap", none).reasons, vec![REASON_TAP]);
+        for spec in ["Numpad0", "Numpad9", "Shift+NumpadAdd", "NumpadSubtract", "NumpadMultiply", "NumpadDivide", "NumpadDecimal"] {
+            for os in ALL {
+                assert!(check_spec_for(os, spec, none).reasons.is_empty(), "{spec} on {os:?}");
+            }
+        }
         let c = check_spec_for(Windows, "F12", none);
         assert_eq!(c.reasons, vec![REASON_RESERVED]);
         assert!(!c.ok());
@@ -3658,6 +3811,12 @@ mod key_grammar_tests {
         let why = why.to_string();
         assert!(why.contains("no key code for F21"), "{why}");
         assert_eq!(hotkey_refusal_for(Windows, "F21"), None, "Windows has F21");
+        let why = hotkey_refusal_for(Windows, "Ctrl+NumpadEnter").unwrap();
+        assert_eq!(answered(&why), Some(&hotkey::NO_VK));
+        let why = why.to_string();
+        assert!(why.contains("'Ctrl+NumpadEnter' (Ctrl+Num Enter)") && why.contains("host.keys.capture"), "{why}");
+        assert_eq!(hotkey_refusal_for(Macos, "Ctrl+NumpadEnter"), None, "a Mac's keypad Enter has its key code");
+        assert_eq!(hotkey_refusal_for(Windows, "Ctrl+Numpad1"), None);
         assert_eq!(hotkey_refusal_for(Windows, "Ctrl+F12"), None);
         assert_eq!(hotkey_refusal_for(Macos, "Win+Alt+X"), None, "VoiceOver's is said, not refused");
         assert_eq!(hotkey_refusal_for(Windows, "Hyper+X"), None, "the parser answers that one");
@@ -3696,7 +3855,8 @@ mod key_grammar_tests {
             "F12", "Win+L", "Ctrl+Q", "Cmd+Q", "Win+Q", "Ctrl+F5", "Cmd+Alt+F5", "Ctrl+Shift+3",
             "Ctrl+Tab", "Meta+Tab", "Alt tap", "Ctrl tap", "F21", "Ctrl+F24", "Ctrl+Alt+X",
             "Win+Alt+X", "Ctrl+Alt+Q", "Ctrl+Shift+Win+Alt+F6", "Cmd+Shift+F6", "Ctrl+Shift+F9",
-            "Alt+P", "Tab", "Hyper+X", "Mod+S",
+            "Alt+P", "Tab", "Hyper+X", "Mod+S", "NumpadEnter", "Ctrl+NumpadEnter", "Numpad1",
+            "NumpadEnter tap",
         ];
         for os in ALL {
             for s in specs {
@@ -3955,6 +4115,22 @@ mod capture_decision_tests {
 
     fn cap(owner: u32, vk: u32, mask: u8) -> Captured {
         Captured { vk, mask, owner }
+    }
+
+    /// Where the keypad's Enter goes: NumpadEnter while a capture of that combination is in scope
+    /// for the window in front, and Return everywhere else — no such capture, one with other
+    /// modifiers, or one scoped to another window.
+    #[test]
+    fn the_keypad_s_enter_is_numpad_enter_only_where_a_capture_of_it_is_in_scope() {
+        assert_eq!(keypad_enter_as(&[], &[], 0, W1), VK_RETURN);
+        let set = [cap(1, VK_RETURN, 0), cap(2, VK_NUMPAD_ENTER, 0), cap(3, VK_NUMPAD_ENTER, MASK_CTRL)];
+        assert_eq!(keypad_enter_as(&set, &[], 0, W1), VK_NUMPAD_ENTER, "in every window");
+        assert_eq!(keypad_enter_as(&set, &[], MASK_CTRL, W1), VK_NUMPAD_ENTER);
+        assert_eq!(keypad_enter_as(&set, &[], MASK_SHIFT, W1), VK_RETURN, "other modifiers");
+        let owners = [own(2, W2, false)];
+        assert_eq!(keypad_enter_as(&set, &owners, 0, W1), VK_RETURN, "scoped to another window");
+        assert_eq!(keypad_enter_as(&set, &owners, 0, W2), VK_NUMPAD_ENTER);
+        assert_eq!(keypad_enter_as(&set[..1], &[], 0, W1), VK_RETURN, "Return's capture takes both Enters");
     }
 
     fn own(owner: u32, scope: isize, menu: bool) -> OwnerKeys {
@@ -4624,7 +4800,7 @@ mod pass_on_tests {
 
     /// Pressed in `front`, with 7 key-downs let through before it.
     fn at(front: isize) -> Pressed {
-        Pressed { front, seq: 7, phys: None, queued: None }
+        Pressed { front, seq: 7, taps_seq: 7, phys: None, queued: None }
     }
 
     /// The keyboard with `front` in front, the key `key_held` or not, `mods` held, no screen
@@ -4778,7 +4954,8 @@ mod pass_on_tests {
         };
         let cb = body(TAP, "unsafe extern \"C-unwind\" fn tap_callback(");
         let marked = concat!(
-            "if CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUserData) == keys::PASS_ON_MARK {\n",
+            "let mark = CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUserData);\n",
+            "    if mark == keys::PASS_ON_MARK {\n",
             "        if etype == CGEventType::KeyDown {\n",
             "            TAP_ARMED.store(0, Ordering::Relaxed);\n",
             "        }\n",
@@ -4796,7 +4973,27 @@ mod pass_on_tests {
         assert!(rest[key_down..].starts_with("if etype != CGEventType::KeyDown {\n        return pass;\n    }"));
         assert_eq!(rest[key_down..].matches("return through();").count(), 4);
         assert!(rest.contains("        return through(); // not a keyboard event we can name"));
-        assert!(rest.contains("let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: Some(keycode), queued: Some(Instant::now()) };"));
+        assert!(rest.contains("let pressed = Pressed { front, seq: let_through(), taps_seq: taps_through(), phys: Some(keycode), queued: Some(Instant::now()) };"));
+        // `host.input.send`'s mark, read with the pass-on's: a key-down that carries it is counted
+        // as let through, and not as ending a count of quick repeats; nothing else asks it.
+        assert!(rest.starts_with("    // A key `host.input.send` posted"));
+        assert!(rest.contains("let sent = mark == keys::SEND_MARK;"));
+        assert!(rest.contains("LET_THROUGH.fetch_add(1, Ordering::Relaxed);\n            if !sent {\n                TAPS_THROUGH.fetch_add(1, Ordering::Relaxed);\n            }"));
+        assert_eq!(TAP.matches("TAPS_THROUGH.fetch_add(").count(), 1);
+        assert_eq!(cb.matches("SEND_MARK").count(), 1);
+        let send = body(INPUT, "pub fn key_send(");
+        let flags = send.find("CGEvent::set_flags(Some(&event), flags);").unwrap();
+        let marked_at = send.find("CGEvent::set_integer_value_field(Some(&event), CGEventField::EventSourceUserData, keys::SEND_MARK);").expect("every event marked");
+        assert!(flags < marked_at && marked_at < send.find("post(&event);").unwrap(), "in the loop over the key-down and the key-up");
+        assert!(send.contains("let flags = CGEventFlags(keys::mask_to_cg_flags(mask) | keys::keypad_flag(code));"));
+        assert!(body(INPUT, "pub fn key_post(").contains("CGEvent::set_flags(Some(&event), CGEventFlags(keys::keypad_flag(code)));"));
+        assert!(!body(INPUT, "pub fn type_text(").contains("SEND_MARK"), "typed text is not host.input.send");
+        // The keypad's Enter is decided as NumpadEnter or Return, and the decision says which.
+        let decide = body(TAP, "fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool)");
+        assert!(decide.contains("let vk = if keypad_enter { crate::backend::keypad_enter_as(&state.set, &state.owners, mask, front) } else { vk };"));
+        assert!(decide.contains("let menu_vk = if keypad_enter { crate::backend::VK_RETURN } else { vk };"));
+        assert!(decide.contains("Some((vk, decided))"));
+        assert!(cb.contains("let Some((vk, decided)) = decide(vk, mask, front, true) else {"));
         let pass = body(INPUT, "pub fn pass_on(");
         assert!(pass.contains("let code = phys\n        .or_else(|| keys::vk_to_keycode_for(vk, mask))"));
         assert!(pass.contains("let src = pass_source()"));
@@ -4812,12 +5009,12 @@ mod pass_on_tests {
         assert!(now.contains("front: super::ax::foreground_window_id(),"), "asked afresh, not the tap's idea");
         assert!(now.contains("let_through: super::tap::let_through(),"));
         // A hotkey press carries the count the tap had when Carbon handed it over, and when.
-        assert!(body(QUEUE, "pub fn push_hotkey(").contains("push((id, super::tap::let_through(), Instant::now()))"));
+        assert!(body(QUEUE, "pub fn push_hotkey(").contains("push((id, super::tap::let_through(), super::tap::taps_through(), Instant::now()))"));
         // Handed on with its own key-down in that count, which the quick repeats take for no other
         // key; and after the moment the tick measures a `"final"` sequence's end by.
         let drain = body(QUEUE, "pub fn drain(");
         let taken = drain.find("TAKEN.with(|t| t.set(Some(Instant::now())));").expect("the moment noted");
-        let handed = drain.find("events.on_hotkey(id, crate::backend::HotkeyPress { seq, own: 1, at });").expect("own: 1");
+        let handed = drain.find("events.on_hotkey(id, crate::backend::HotkeyPress { seq, taps_seq, own: 1, at });").expect("own: 1");
         assert!(taken < drain.find("in HOTKEYS.with(|q| std::mem::take(").unwrap() && handed < drain.find("events.on_key(").unwrap());
     }
 }

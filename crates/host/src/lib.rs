@@ -7008,7 +7008,7 @@ pub(crate) fn hotkey_arrive_in<H: captures::KeyHost + mailbox::MailHost>(
         None => taps::Key::Id(id),
     };
     let within = t.interval(|| h.key_backend().double_click_time());
-    let n = taps::count(h, key, press.at, press.seq, press.own, false, within);
+    let n = taps::count(h, key, press.at, press.taps_seq, press.own, false, within);
     // The registration found before the count stands, though a sequence the count handed on may
     // have run at once and released it: the press was made on this id, and `hotkey_target` decides
     // again as it runs, as for any registration made again between a press and its delivery.
@@ -7120,7 +7120,7 @@ pub(crate) fn open_hotkey_in<H: captures::KeyHost + mailbox::MailHost>(
             return Opened::Gone;
         }
         captures::Target::Gone(captures::Gone::Released) if queued => {
-            let pressed = backend::Pressed { front: front.unwrap_or(0), seq, phys: None, queued: None };
+            let pressed = backend::Pressed { front: front.unwrap_or(0), seq, ..backend::Pressed::default() };
             captures::pass_on_released(h, owner, spec, binding, (false, pressed, press), Vec::new());
             return Opened::Gone;
         }
@@ -11796,14 +11796,14 @@ mod ocr_wiring_tests {
     fn a_foreground_hotkey_arrives_as_every_hotkey_does() {
         const WINDOWS: &str = include_str!("backend/windows.rs");
         assert!(body(WINDOWS, "unsafe extern \"system\" fn hotkey_wndproc(")
-            .contains("locked(&HOTKEY_QUEUE).push((wparam as i32, Route::Os { time }, LET_THROUGH.load(Ordering::Relaxed)));"));
+            .contains("locked(&HOTKEY_QUEUE).push((wparam as i32, Route::Os { time }, through()));"));
         let pump = body(WINDOWS, "fn pump_pending(&self, events: &mut dyn HostEvents)");
-        let each = &pump[pump.find("for (id, route, seq) in hotkeys {").unwrap_or_else(|| panic!("no loop over the hotkeys: {pump}"))..];
+        let each = &pump[pump.find("for (id, route, (seq, taps_seq)) in hotkeys {").unwrap_or_else(|| panic!("no loop over the hotkeys: {pump}"))..];
         let each = &each[..each.find("\n        }\n").expect("the end of the loop over the hotkeys")];
         let (stamp, settled, on_hotkey) = (
             each.find("matches!(route, Route::Os { time } if super::tick_not_after(time, drop_until as u32))").expect("the stall's drop"),
             each.find("if let Some(own) = settle_hotkey(id, route) {").expect("the pairing"),
-            each.find("events.on_hotkey(id, super::HotkeyPress { seq, own, at: tick_instant(route.time()) });").expect("not handed on"),
+            each.find("events.on_hotkey(id, super::HotkeyPress { seq, taps_seq, own, at: tick_instant(route.time()) });").expect("not handed on"),
         );
         // The queues are taken after the moment the tick measures a `"final"` sequence's end by.
         let taken = pump.find("INPUT_TAKEN.with(|t| t.set(Some(Instant::now())));").expect("the moment noted");

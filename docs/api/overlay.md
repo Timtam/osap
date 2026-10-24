@@ -3181,7 +3181,7 @@ None of these is raised. Each comes as an error value where "arrives" says, in t
 | `invalid` | return | [`host.keys.check`](keys.md#host-keys-check) says `parse`: the spec does not read as a key. | `… is not a key spec` | both |
 | `invalid` | return | It says `tap`: a modifier on its own, which a hotkey cannot be. | `… is a modifier tap, which only host.keys.capture can watch` | both |
 | `taken` | return | It says `reserved`: the system keeps the combination. | `… is kept by the system` | both |
-| `not_supported` | return | It says `no_keycode`: this platform has no key code for it. | `… has no key code on this platform` | both |
+| `not_supported` | return | It says `no_keycode`: this platform gives the key no key code of its own — `F21`–`F24` on a Mac, which have none, and `NumpadEnter` on Windows, which has Enter's. | `… has no key code of its own on this platform` | both |
 | `clash` | return | The key is, by [`host.keys.normalize`](keys.md#host-keys-normalize), the hotkey of a control or a tab of an overlay of the group; the message names it, `control '<label>'` or `tab '<label>'`, and the overlay. | `… is the hotkey of … of overlay '…'` | both |
 | `failed` | return | The registration raised — a spec `check` read and `register` did not: the host's own failure. | `registering … raised: …` | both |
 | any of [host.hotkey.register's errors](hotkey.md#host-hotkey-register-errors) | return | The host will not hold it now: another program, module or the system holds it (`taken`), the layout types no such letter (`not_supported`), and the others register answers. Whether register answered `nil, err` or `id, err`, nothing is kept. | the host's | both |

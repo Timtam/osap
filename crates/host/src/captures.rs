@@ -440,7 +440,7 @@ pub(crate) fn arrive<H: KeyHost + MailHost>(h: &H, vk: u32, mods: u8, owner: usi
     let at = pressed.queued.unwrap_or_else(Instant::now);
     let within = interval(opts_of(key_target(h, owner, vk, mods, pressed.front, None)));
     // The hook and the tap swallow the key-down they take: none of its own is in the count.
-    let n = taps::count(h, key, at, pressed.seq, 0, repeat, within);
+    let n = taps::count(h, key, at, pressed.taps_seq, 0, repeat, within);
     let target = key_target(h, owner, vk, mods, pressed.front, None);
     let t = opts_of(target);
     let within = interval(t);

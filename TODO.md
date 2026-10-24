@@ -30,7 +30,8 @@ and to build it as soon as the usage allows.
 - [x] **Docs:** both entries' Returns and Errors as the template has them, the callback's `press`
       argument, and a note that on Windows NVDA and JAWS use the numpad in their desktop layout. On
       a Mac VoiceOver does so only with NumPad Commander on. Tests in the scripted host for each
-      count, the reset rules and `taps = "final"`.
+      count, the reset rules and `taps = "final"`. (The note on the screen readers' numpad was
+      taken out again on 2026-10-23: the maintainer decided it is not needed.)
 - [x] **Built (2026-10-23).** `crates/host/src/taps.rs` holds the one count: a press is counted as it
       reaches the event loop — a hotkey in `hotkey_arrive_in` (lib.rs), after Windows has paired a
       late hook's report with `RegisterHotKey`'s delivery; a captured key in `captures::arrive` —
@@ -81,15 +82,69 @@ and to build it as soon as the usage allows.
       `own` in `queue.rs` is to be 0; the double-click speed in System Settings (Accessibility,
       Pointer Control) is the interval; a captured key held down says its press's count at every
       repeat.
-- [ ] **Numpad keys in the key spec.** The request's own example, Numpad1, has no name in the key
-      spec (keys.md, "Key names": no numpad keys), so a quick repeat can be bound on it only once
-      the spec names the keypad; to be asked of the maintainer, with the screen readers' claim on the
-      keypad in mind (the note in hotkey.md's "Quick repeats").
-- [ ] **This application's own sent keys end a count.** A key a callback sends with
-      `host.input.send` between two presses reaches the program, so the next press is a 1 again, as
-      for any key let through (documented; `taps = "final"` sends after the sequence). If the module's
-      own keys should not count as "another key going down", the hook and the tap need a mark on
-      `host.input.send`'s events and a count of their own; to be decided by the maintainer.
+- [x] **Numpad keys in the key spec** (decided by the maintainer on 2026-10-23, with no note on the
+      screen readers' use of the keypad; built 2026-10-23). `Numpad0`–`Numpad9`, `NumpadEnter`,
+      `NumpadAdd`, `NumpadSubtract`, `NumpadMultiply`, `NumpadDivide`, `NumpadDecimal`: the W3C
+      `KeyboardEvent.code` names, which a page reads too, one spelling each, any case (`key_to_vk`,
+      `vk_name`, backend/mod.rs). Windows' own virtual keys (`VK_NUMPAD0`.., `VK_ADD`..), and for
+      the keypad's Enter, which has none of its own, the host's 0x0E (`VK_NUMPAD_ENTER`): the hook
+      reads the extended `VK_RETURN` as NumpadEnter while a capture of that combination is in scope
+      for the window in front, and as Return otherwise (`keypad_enter_as`), so a capture of Return
+      still takes both Enters; `send` sends it as `VK_RETURN` extended, `post` with lParam bit 24, a
+      key passed on on Return's scan code, extended. `post` sets bit 24 for every key whose scan
+      code `MapVirtualKeyW` gives as extended, which of the key names is the keypad's Divide as well
+      (0xE035: without the bit a program reading the scan code reads the main row's key). A hotkey on NumpadEnter is refused on Windows
+      (`no_keycode` in `check`, `hotkey::NO_VK`, `not_supported`): `RegisterHotKey` would take both
+      Enters. macOS: the `kVK_ANSI_Keypad*` codes in keys.rs's table, the keypad's Enter
+      `kVK_ANSI_KeypadEnter` no longer folded into Return there but read by the tap's `decide` by
+      the same rule; what the host posts of a keypad key carries `kCGEventFlagMaskNumericPad`
+      (`keys::keypad_flag`: `send`, `post`, a key passed on). `describe` says "Numpad 1"/"Num 1" on
+      Windows and "Keypad 1" on a Mac, the operators by what they do ("Numpad Plus"). Num Lock off
+      on Windows: the digits and the decimal key arrive as the navigation keys printed on them, and
+      the spec then matches those (documented in keys.md's Windows section). A capture of Numpad0,
+      and a hotkey on it, take its key although numpad zero is one of the hook's screen-reader keys:
+      for that key the hook asks its record without the key's own key-down
+      (`SCREEN_READER_MOD_OTHER`), and the system, whether Insert or Caps Lock is held; numpad zero
+      sent with `host.input.send` is not entered in the record. Docs: keys.md
+      (Key names, the Windows and macOS sections of the spec, `describe`, `check`, `capture`),
+      hotkey.md, input.md; the numpad sentences of f8f2bcc taken out of keys.md and hotkey.md.
+      Tests: backend/mod.rs (the names, `normalize`, `describe`, `check`, the refusal,
+      `keypad_enter_as`), macos/keys.rs (the key codes and the flag, the parser's names mapped),
+      windows.rs (`os_key`, the keypad's Enter passed on, sent and posted; the hook's
+      `is_keypad_enter` and `captured_key`, the held records under either of its names, `scan_code`
+      and `post_lparams` against the system's own scan codes, numpad zero's record),
+      key_scope_tests.rs (Numpad1's quick repeats).
+- [x] **This application's own sent keys end no count** (decided by the maintainer on 2026-10-23;
+      built 2026-10-23). `host.input.send`'s events carry a mark of their own (`SEND_MARK`, "SEND",
+      in `dwExtraInfo` on Windows and in `kCGEventSourceUserData` on a Mac), beside the pass-on's.
+      The hook and the tap still take, match and count such a key as a typed one — a capture catches
+      it, a hotkey fires for it, and it counts as let through, so it still overtakes a key a busy
+      module let go of — but they leave its key-down out of a second count, `TAPS_THROUGH`, which
+      each press carries as `Pressed::taps_seq` / `HotkeyPress::taps_seq` beside `seq`, and which
+      the count of quick repeats is decided by (taps.rs). A count of its own, read with one load, so
+      that a `WM_HOTKEY` read on the pump never sees a key half counted. A sent key that a capture
+      or a hotkey takes is a press of its own as before, of another key, and ends the count as any
+      press of another key does. `host.input.text` is left as it was: its characters still end a
+      count (not asked; to be decided if it matters), as hotkey.md and input.md say. Tests: key_scope_tests.rs (a callback that
+      sends at every press counts on, a hotkey's and a `"final"` sequence's as well, a key typed
+      still ends it, a key sent still overtakes a key passed on), windows.rs and backend/mod.rs (the
+      mark on every event `send` makes and on no other, read by the hook and the tap before anything
+      is counted, `TAPS_THROUGH` moved only for an unmarked key-down).
+- [ ] **Windows, to try: the keypad** (with NVDA, a test module): Numpad1 captured, pressed once,
+      twice and three times quickly, says 1, 1 2, 1 2 3; with Num Lock off the key is End to Windows
+      and Numpad1's capture says nothing; a capture of NumpadEnter beside the overlay's Return takes
+      the keypad's Enter alone, and Return still takes the main one; `host.input.send` of Numpad5
+      types 5 in a text field with Num Lock off as well, and of NumpadEnter is the keypad's Enter to
+      a program that tells the two apart (REAPER's key list); `host.input.post` of NumpadDivide is
+      the keypad's divide to a program that reads the scan code; a hotkey's callback that sends a
+      key at every press says 1 2 3 for three quick presses.
+- [ ] **A Mac, to try: the keypad** (with VoiceOver): a capture of Numpad1 and a Command+Shift
+      hotkey on a keypad key count 1 2 3; NumpadEnter captured takes the keypad's Enter and Return
+      the main one, and with no NumpadEnter captured Return takes both; `host.input.send("Numpad1")`
+      types 1 and a program that reads the keypad's flag (Logic's key commands) sees the keypad's
+      key; a key a callback sends at every press of a hotkey, with the tap in, does not end its
+      count; a hotkey on NumpadEnter does not fire while a capture of Return is in scope (the tap
+      takes the key first).
 
 ## The tray icon left behind on Windows after the quit key (2026-10-21, from users)
 
@@ -5146,7 +5201,10 @@ in this order, and what is not built:
       is left are the measurements and live checks listed in those two sections.
 - [ ] **Step 7 — own input tagged, scan codes, hold, new key names** (`host.input.send`; item
       e1 of the small-API design as the critique revised it). Not built:
-  - **Own input tagged.** Every `SendInput` of the host — keys and mouse — carries a tag in
+  - **Own input tagged.** (In part since 2026-10-23: `host.input.send`'s key events carry a mark,
+      which so far only keeps them out of the count of quick repeats and out of the hook's record of
+      a screen reader's modifier — "Quick repeats" above.)
+      Every `SendInput` of the host — keys and mouse — carries a tag in
       `dwExtraInfo`, and every event the host posts on macOS a value in
       `kCGEventSourceUserData`. The keyboard hook and the event tap let a tagged event through
       without capturing it, arming a tap or counting it as a screen reader's modifier, so a
@@ -5167,7 +5225,8 @@ in this order, and what is not built:
       once; a crash cannot release, which the docs must say. On macOS the key goes down now
       and up later, with the modifiers as flags on both events.
   - **New key names:** `Insert`/`Ins`; `Numpad0`–`Numpad9`, `NumpadMultiply`, `NumpadAdd`,
-      `NumpadSubtract`, `NumpadDecimal`, `NumpadDivide`; punctuation by position under the W3C
+      `NumpadSubtract`, `NumpadDecimal`, `NumpadDivide` (the keypad's built 2026-10-23, with
+      `NumpadEnter`: "Quick repeats" above); punctuation by position under the W3C
       `KeyboardEvent.code` names — `Minus`, `Equal`, `BracketLeft`, `BracketRight`,
       `Backslash`, `Semicolon`, `Quote`, `Backquote`, `Comma`, `Period`, `Slash`,
       `IntlBackslash`. The internal id stays the US-layout virtual key. Windows: `capture`

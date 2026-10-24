@@ -28,11 +28,14 @@ pub struct StubBackend {
     /// The count of key-downs let through to the program, as a test moves it on, for
     /// `keyboard_now`.
     let_through: Cell<u32>,
+    /// How many of them end a count of quick repeats: all but the ones `host.input.send` sent.
+    taps_through: Cell<u32>,
     /// Every key passed on, as `(vk, mask, strokes)`, in order.
     passed: RefCell<Vec<(u32, u8, Vec<Stroke>)>>,
     /// The physical key each of them was sent on, in the same order.
     passed_phys: RefCell<Vec<Option<u16>>>,
-    /// Whether a key passed on is taken: no by default, as there is no input to send it to.
+    /// Whether a key passed on, or sent with `host.input.send`, is taken: no by default, as there
+    /// is no input to send it to.
     sends: Cell<bool>,
     /// What `watch_keys` answers when a test refuses the hook: none by default.
     hook_refused: RefCell<Option<HostError>>,
@@ -72,8 +75,21 @@ impl StubBackend {
         self.let_through.get()
     }
 
-    /// A key-down typed and let through to the program: the count moves on by one.
+    /// A key-down typed and let through to the program: both counts move on by one.
     pub(crate) fn type_through(&self) {
+        self.let_through.set(self.let_through.get().wrapping_add(1));
+        self.taps_through.set(self.taps_through.get().wrapping_add(1));
+    }
+
+    /// How many of the key-downs let through end a count of quick repeats (`Pressed::taps_seq`).
+    pub(crate) fn taps_through(&self) -> u32 {
+        self.taps_through.get()
+    }
+
+    /// A key-down `host.input.send` sent, let through to the program: the hook or the tap knows it
+    /// by its mark, so it moves the count of keys let through on and not the one that ends a count
+    /// of quick repeats.
+    pub(crate) fn send_through(&self) {
         self.let_through.set(self.let_through.get().wrapping_add(1));
     }
 
@@ -82,7 +98,7 @@ impl StubBackend {
         std::mem::take(&mut *self.passed_phys.borrow_mut())
     }
 
-    /// Takes a key passed on (`true`), or refuses it, as there is no input to send it to.
+    /// Takes a key passed on or sent (`true`), or refuses it, as there is no input to send it to.
     pub(crate) fn set_sends(&self, sends: bool) {
         self.sends.set(sends);
     }
@@ -155,9 +171,16 @@ impl Backend for StubBackend {
         Ok(())
     }
 
-    // No input to send it to: answered, as a way of acting this platform does not have.
-    fn key_send(&self, _combo: &str) -> Result<(), KeyRefusal> {
-        Err(KeyRefusal::Answer(HostError::of(&common::NOT_YET)))
+    // No input to send it to: answered, as a way of acting this platform does not have — unless a
+    // test takes it, and then it reaches the program as the hook lets a key `host.input.send` sent
+    // go on (`send_through`).
+    fn key_send(&self, combo: &str) -> Result<(), KeyRefusal> {
+        if !self.sends.get() {
+            return Err(KeyRefusal::Answer(HostError::of(&common::NOT_YET)));
+        }
+        super::parse_key_spec(combo)?;
+        self.send_through();
+        Ok(())
     }
     fn type_text(&self, _text: &str) {}
 
