@@ -97,7 +97,7 @@ mod tap_handoff;
 /// The reads an application could not complete inside one accessibility walk, counted for the
 /// log. Pure; see the file.
 mod unanswered;
-mod watch;
+pub(crate) mod watch;
 
 /// The backing-store image a snapshot keeps; `backend::frame` names it as the platform's.
 pub use capture::NativeImage;
@@ -183,6 +183,17 @@ impl Backend for MacBackend {
         if matches!(ask, ElementAsk::Press { .. } | ElementAsk::FocusPut { .. }) {
             return ask.nothing();
         }
+        // An application one of whose walks ran out of time earlier in this turn is not walked
+        // again in it: the question is told so at once (`budget::SlowThisTurn`). A dump, which
+        // a person asks for and which has a deadline of its own, is walked all the same.
+        let walks = !matches!(ask, ElementAsk::Dump { .. } | ElementAsk::RawDump { .. });
+        let pid = ax::pid_of_handle(ask.hwnd());
+        if let Some(pid) = pid.filter(|&p| walks && ax::slow_this_turn(p)) {
+            crate::logging::trace("macos", || format!("{}: not walking pid {pid}, too slow in this turn", ask.call_name()));
+            return ask
+                .nothing()
+                .and_then(|a| a.settled(Some((HostError::of(&crate::errors::element::HOT_TOO_SLOW), false))));
+        }
         question::begin();
         let answer = match ask {
             ElementAsk::Find { hwnd, name, ctype } => ElementAnswer::Found(ax::find(*hwnd, name, *ctype)),
@@ -208,8 +219,12 @@ impl Backend for MacBackend {
             // Answered above, before the question began.
             ElementAsk::Press { .. } | ElementAsk::FocusPut { .. } => return ask.nothing(),
         };
+        let why = question::end();
+        if let (Some(pid), true) = (pid, walks && why == Some(HostError::of(&crate::errors::element::HOT_TOO_SLOW))) {
+            ax::ran_out_this_turn(pid);
+        }
         // No question waits behind another here, so none is left unasked behind this one.
-        answer.settled(question::end().map(|why| (why, false)))
+        answer.settled(why.map(|why| (why, false)))
     }
 
     fn screen_size(&self) -> (i32, i32) {
@@ -495,6 +510,9 @@ impl Backend for MacBackend {
     }
 
     fn pump_pending(&self, events: &mut dyn HostEvents) {
+        // A turn of the event loop begins: an application whose walk ran out of time in the last
+        // one is walked again (`ax::next_turn`).
+        ax::next_turn();
         // Belt and braces. The tap re-enables itself from a run-loop observer, but the
         // moment it most needs to is the moment this thread was too busy to answer — so it
         // is also asked here, where being busy has just finished. Rate-limited inside.

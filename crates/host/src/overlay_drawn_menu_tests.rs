@@ -404,6 +404,117 @@ fn a_highlighted_row_keeps_the_popup_and_a_redraw_under_it_is_the_item_taken() {
     "##);
 }
 
+/// The second Mac test of VPS Avenger (2026-10-24, its finding 7): Avenger stopped drawing while it
+/// opened Logic's file panel, and its popup, frozen, read as a click it had not taken — the item was
+/// clicked four times. A popup drawn exactly as at the item's click is the click still pending: it is
+/// waited for and not clicked again, said once; once it goes the item is chosen, clicked once. Still
+/// drawn so at the bound, the click was not taken.
+#[test]
+fn a_popup_drawn_as_at_the_click_is_the_click_pending_and_not_clicked_again() {
+    run_mac(r##"
+        local S = T.S
+        local o = T.overlayWith({ T.drawnTest() })
+        T.choose(o)
+        T.drawPopup(362, 80, 482, 200)
+        T.tick(3)
+        T.ok(#S.clicks == 2, "the item: " .. #S.clicks)
+        T.tick(6)
+        T.ok(#S.clicks == 2, "not clicked again: " .. T.dump())
+        T.ok(T.count("[menu item] 'Avenger': 'Zoom' — test 'drawn' sees the menu drawn as at the item's click: the "
+          .. "click is waited for, not made again") == 1, T.dump())
+        T.clearPopup()
+        T.tick(4)
+        T.ok(#S.clicks == 2 and T.count("[menu item] 'Avenger': 'Zoom' chosen — clicked 1 time(s) at (372,100); the menu "
+          .. "has closed") == 1, T.dump())
+        -- Frozen until the bound.
+        T.choose(o)
+        T.drawPopup(362, 80, 482, 200)
+        T.tick(70)
+        T.ok(#S.clicks == 4, "the opener and the item once: " .. #S.clicks)
+        T.ok(S.done[#S.done] == "false:refused" and T.count("not chosen — the menu was still there after 1 click(s) on the item at (372,100)") == 1, tostring(S.done[#S.done]))
+    "##);
+}
+
+/// A click made again — the popup drawn again, its row under the pointer highlighted — is the one a
+/// frozen popup is compared with from then on: a plug-in that took that click and stopped drawing
+/// while it acts on it is not clicked a third and a fourth time. Once the popup goes the item is
+/// chosen, clicked twice.
+#[test]
+fn a_popup_frozen_after_a_click_made_again_is_that_click_pending() {
+    run_mac(r##"
+        local S = T.S
+        local o = T.overlayWith({ T.drawnTest() })
+        T.choose(o)
+        T.drawPopup(362, 80, 482, 200)
+        T.tick(3)
+        T.ok(#S.clicks == 2, "the item: " .. #S.clicks)
+        T.drawPopup(362, 95, 482, 106, { 90, 90, 200 })
+        T.tick(2)
+        T.ok(#S.clicks == 3, "clicked again: " .. T.dump())
+        T.tick(10)
+        T.ok(#S.clicks == 3, "not clicked a third time: " .. T.dump())
+        T.ok(T.count("[menu item] 'Avenger': 'Zoom' — test 'drawn' sees the menu drawn as at the item's click: the "
+          .. "click is waited for, not made again") == 1, T.dump())
+        T.clearPopup()
+        T.tick(4)
+        T.ok(#S.clicks == 3 and T.count("[menu item] 'Avenger': 'Zoom' chosen — clicked 2 time(s) at (372,100); the menu "
+          .. "has closed") == 1, T.dump())
+    "##);
+}
+
+/// A window of the plug-in's process that came over the item's point after its click is the item
+/// taken — a dialog the item opened — though the popup under it was drawn again: not clicked again.
+/// One away from the point is not; one listed as soon as the click returns is, since the windows are
+/// listed before it.
+#[test]
+fn a_new_window_of_the_plugin_over_the_items_point_is_the_item_taken() {
+    run(r##"
+        local S = T.S
+        local DIALOG = { id = 950, title = "Load Preset...", class = "#32770", app = { pid = 4242, exe = "reaper.exe" },
+          bounds = { x = 300, y = 60, w = 600, h = 400 }, client = { x = 300, y = 60, w = 600, h = 400 } }
+        local FAR = { id = 951, title = "Elsewhere", class = "#32770", app = { pid = 4242, exe = "reaper.exe" },
+          bounds = { x = 1200, y = 600, w = 100, h = 100 }, client = { x = 1200, y = 600, w = 100, h = 100 } }
+        local o = T.overlayWith({ T.drawnTest() })
+        T.choose(o)
+        T.drawPopup(362, 80, 482, 200)
+        T.tick(3)
+        T.ok(#S.clicks == 2, "the item: " .. #S.clicks)
+        -- Away from the point: the popup drawn again is a click not taken, as before.
+        S.listed = { T.MAIN, T.FX, FAR }
+        T.drawPopup(362, 95, 482, 106, { 90, 90, 200 })
+        T.tick(2)
+        T.ok(#S.clicks == 3, "clicked again: " .. T.dump())
+        -- Over the point.
+        S.listed = { T.MAIN, T.FX, FAR, DIALOG }
+        T.drawPopup(362, 95, 482, 106, { 90, 200, 90 })
+        T.tick(2)
+        T.ok(#S.clicks == 3, "not clicked again: " .. T.dump())
+        T.ok(T.count("[menu item] 'Avenger': 'Zoom' chosen — clicked 2 time(s) at (372,100); a new window of the "
+          .. "plug-in's process, 'Load Preset...' (id 950), is over the item's point") == 1, T.dump())
+    "##);
+    // One that is listed as the item's click returns: the plug-in's windows are taken before it.
+    run(r##"
+        local S = T.S
+        local DIALOG = { id = 950, title = "Load Preset...", class = "#32770", app = { pid = 4242, exe = "reaper.exe" },
+          bounds = { x = 300, y = 60, w = 600, h = 400 }, client = { x = 300, y = 60, w = 600, h = 400 } }
+        local o = T.overlayWith({ T.drawnTest() })
+        T.choose(o)
+        T.drawPopup(362, 80, 482, 200)
+        local click = T.host.input.click
+        rawset(T.host, "input", { click = function(x, y, opts)
+          local r, e = click(x, y, opts)
+          if #S.clicks == 2 then S.listed = { T.MAIN, T.FX, DIALOG } end
+          return r, e
+        end })
+        T.tick(3)
+        T.ok(#S.clicks == 2 and S.listed ~= nil, "the item: " .. #S.clicks)
+        T.drawPopup(362, 95, 482, 106, { 90, 200, 90 })
+        T.tick(2)
+        T.ok(#S.clicks == 2 and T.count("[menu item] 'Avenger': 'Zoom' chosen — clicked 1 time(s) at (372,100); a new "
+          .. "window of the plug-in's process, 'Load Preset...' (id 950), is over the item's point") == 1, T.dump())
+    "##);
+}
+
 /// A choice follows only the test that placed its item. Both tests see the popup — newWindow its
 /// window, drawn the painted area with its shadow, a pixel larger each way (cut at the rectangle's top) — and newWindow places
 /// the item and clicks again a tick later; drawn's answer, a rectangle a little apart, does not
@@ -573,6 +684,8 @@ fn a_choice_follows_the_test_that_placed_its_item_not_another_of_its_name() {
         T.drawPopup(362, 80, 482, 200)
         T.tick(3)
         T.ok(#S.clicks == 2 and T.count("drawn: a popup 120x100 at 362,80") == 1, "both see it: " .. T.dump())
+        -- Drawn again — its row under the pointer highlighted — and still there: not taken.
+        T.drawPopup(362, 95, 482, 106, { 90, 90, 200 })
         T.tick(2)
         T.ok(#S.clicks == 3 and T.count("sees another window in its place") == 0, "clicked again: " .. T.dump())
         T.clearPopup()

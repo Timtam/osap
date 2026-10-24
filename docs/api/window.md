@@ -16,7 +16,7 @@ The same call answers with different things per platform, so read the platform s
 
 All coordinates are physical device pixels on Windows and **points** on macOS (i32 → Luau `number`) unless noted; the two agree only at 100 % scaling — see [`host.screen.size()`](screen#host-screen-size) for why that distinction costs a day when it is missed. `id` fields are native window handles on Windows (a Win32 `HWND` as a Luau integer) and interned counters on macOS; see the platform sections under [Table shapes](#table-shapes).
 
-`list`, `apps`, `windowsOf`, `active`, `foreground`, `focus`, `controls`, `focusChain`, `ownsPoint` and `recheck` are native bindings; `find`, `findAll`, `test`, `onTrigger` and `onFocus` are added on top of them by the Luau prelude. The prelude also defines `W._hasTriggers()`, `W._triggerSeq()`, `W._wantsInitial(reprime)`, `W._dispatchActivate(win, beforeFirst, waited, upto)`, `W._dispatchInitial(win, reprime, beforeFirst, waited)` and `W._dispatchFocus(waited)`, and the host adds `W._requestInitial()`, which `onTrigger { initial = true }` calls to queue its module for the report. The host's event loop calls the dispatchers to deliver foreground and focus changes, and the initial report, into the registered `onTrigger` and `onFocus` callbacks; a module calls none of them.
+`list`, `apps`, `windowsOf`, `active`, `foreground`, `focus`, `controls`, `focusChain`, `ownsPoint` and `recheck` are native bindings; `find`, `findAll`, `test`, `onTrigger` and `onFocus` are added on top of them by the Luau prelude. The prelude also defines `W._hasTriggers()`, `W._triggerSeq()`, `W._wantsInitial(reprime)`, `W._dispatchActivate(win, beforeFirst, waited, upto)`, `W._dispatchInitial(win, reprime, beforeFirst, waited)` and `W._dispatchFocus(waited, info)`, and the host adds `W._requestInitial()`, which `onTrigger { initial = true }` calls to queue its module for the report. The host's event loop calls the dispatchers to deliver foreground and focus changes, and the initial report, into the registered `onTrigger` and `onFocus` callbacks; a module calls none of them.
 
 **What a call answers.** Only [`focus`](#host-window-focus) answers an [error value](./errors.md#error-values): `false, err` when it could not bring the window forward, its codes under its **Errors**. Every other call here answers what there is, and never an error value: each entry's **Returns** says what its `nil`, `false` or empty list means. Compare `err.code`, never the message: a message may change between versions, and the code does not. Besides the mistakes each entry lists under **Raises**, two raises can meet any call here: reaching for `host.window` in a module that did not declare `window` ([What to declare](#declare)), and the host's guard stopping a callback that ran too long (`stopped by the host: …`, [the limits](../module-runtime-and-lifecycle.md#limits)). An argument of the wrong type raises with the host's conversion message, such as `bad argument #1: error converting Lua nil to isize (expected number or string coercible to number)`; a number with a fraction is cut toward zero where a whole number goes.
 
@@ -810,23 +810,28 @@ When watching first starts, one focus round is run for the application already i
 
 ## host.window.onFocus(cb) {#host-window-onfocus}
 
-**Signature:** `host.window.onFocus(cb: () -> ()) -> ()`
+**Signature:** `host.window.onFocus(cb: (info: { entered: Entered? }) -> ()) -> ()`
 
-(prelude) Registers `cb` to fire whenever the keyboard focus moves — including within the same top-level window. Takes no arguments; the callback typically re-reads `host.window.active()` / `focusChain()`. Used to catch focus entering an embedded plugin without a foreground change. Like `onTrigger` it returns no handle, stays until the module is reloaded, and a callback that raises skips the module's later `onFocus` callbacks for that focus change. A `cb` that is not a function raises at once (`host.window.onFocus: the callback is a function, not a nil`), rather than when the focus next moves.
+(prelude) Registers `cb` to fire whenever the keyboard focus moves — including within the same top-level window. The callback typically re-reads `host.window.active()` / `focusChain()`. Used to catch focus entering an embedded plugin without a foreground change.
+
+**The round's `info`.** Each callback is handed one table, `info`, the same one for every callback of the module in that round. Its one field is `entered`: present only in the round a [`host.window.recheck { entered = … }`](#host-window-recheck) asked for, and in no other — not in a round the system reported, not in the next one. It is that call's `{ window, x, y, module, at }`: the window, the point on the screen, the id of the module that made the call (the module whose VM it ran in), and when it was made, in [`host.now()`](./timer.md#host-now)'s milliseconds. Several such calls in one tick are one round, which carries the last one's. A callback that takes no argument ignores it, as Lua drops an extra argument. Like `onTrigger` it returns no handle, stays until the module is reloaded, and a callback that raises skips the module's later `onFocus` callbacks for that focus change. A `cb` that is not a function raises at once (`host.window.onFocus: the callback is a function, not a nil`), rather than when the focus next moves.
 
 **While its module is busy** — one of its handlers [waits](../module-runtime-and-lifecycle.md#a-handler-waits) for a read — focus changes are folded: however many come, one waits behind the events before it, and its callbacks ask the focus as it is when they run.
 
 ```luau
-host.window.onFocus(function()
+host.window.onFocus(function(info)
   local chain = host.window.focusChain()
   -- re-evaluate which plugin (if any) now has focus
+  if info.entered then
+    host.log.info(info.entered.module .. " clicked into window " .. info.entered.window)
+  end
 end)
 ```
 
 ### Returns {#host-window-onfocus-returns}
 
 - Nothing. There is no handle; the callback stays until the module is reloaded.
-- `cb()` — on each focus round, with no arguments. Its return value is ignored.
+- `cb(info)` — on each focus round, with the round's `info` (above): `info.entered` only in the round a `recheck { entered = … }` asked for. Its return value is ignored.
 
 ### Errors {#host-window-onfocus-errors}
 
@@ -848,9 +853,9 @@ And one when an application's five-second not-answering quarantine ends, after a
 
 When an application comes to the front and its window has no title yet — so no activation is reported — a focus round runs then and again 0.2, 0.5, 1, 2, 5.3, 6.5 and 10.5 seconds later, so a window that takes its title a moment later is still seen; the last rungs lie past the five seconds an application that did not answer accessibility is left alone. A new application activation while these are pending does not start them again. The same rounds follow a wake, an unlock or the session coming back when the application the host then finds in front is one no activation was announced for and its window has no title.
 
-## host.window.recheck() {#host-window-recheck}
+## host.window.recheck(opts?) {#host-window-recheck}
 
-**Signature:** `host.window.recheck() -> ()`
+**Signature:** `host.window.recheck(opts?: { entered: { window: integer, x: number, y: number }? }) -> ()`
 
 Asks the host to run a focus-change round at the end of the current tick — after OS events, timers, image results and any [initial window report](#host-window-ontrigger) have run — exactly as if the OS had reported one: the observation epoch turns over (so cached window answers are re-read) and every enabled module's `host.window.onFocus` callbacks fire — including the one the overlay runtime registers, which re-evaluates each overlay's context match and gate. It exists for the case where a module *itself* changed what is detectable on screen and no OS event will follow: Komplete Kontrol auto-closing its library browser reveals the nested Kontakt underneath, and nothing about that is a focus change, so without this nobody notices until the next `pollMatch` tick (~500 ms) — half a second in which the ring sits on the wrong overlay for somebody who cannot see that it moved. The dispatch is **cross-VM**, which is the whole point here: the module that acted is usually not the module that has to notice.
 
@@ -871,13 +876,24 @@ if p then
 end
 ```
 
+**`opts.entered` tells the round of your own click.** `{ window = <id>, x, y }`: the module clicked at the screen point `x, y` into window `window` (a [window table](#window-table)'s `id`), and the system has nothing to say about where the keyboard went. The round this call asks for hands it to every module's `onFocus` callbacks as `info.entered`, with the calling module's id and the time of the call added (see [`onFocus`](#host-window-onfocus)); no other round carries it. The host checks nothing about the window or the point: it is what the module says it did. The overlay runtime is what reads it: in that round, and only in that one, an empty focus chain with that window in front and the point inside a DAW's plug-in panel begins a stay there ([the stay](./overlay.md#o-attachembedded-macos)). daw-hosts' focus key is the caller, after its click into the plug-in's panel: Logic then reports no focus at all, and nothing else would bring the overlay up.
+
+```luau
+-- daw-hosts' focus key, a quarter of a second after its click at cx, cy into window w.
+if host.window.focusChain()[1] == nil then
+  host.window.recheck({ entered = { window = w.id, x = cx, y = cy } })
+end
+```
+
 ### Returns {#host-window-recheck-returns}
 
-- Nothing. The round runs at the end of the current tick, once however many calls asked for it.
+- Nothing. The round runs at the end of the current tick, once however many calls asked for it; with `entered`, the last call's of the tick goes to it.
 
 ### Errors {#host-window-recheck-errors}
 
-None. It never answers an error value. It never raises: arguments are ignored.
+None. It never answers an error value.
+
+**Raises** for a mistake in the call: an `opts` that is neither a table nor `nil` (`host.window.recheck: opts is a table or nil, not a string`), an `entered` that is neither a table nor `nil`, a `window` that is not a whole number, and an `x` or `y` that is not a finite number (`host.window.recheck: opts.entered.x is a number, not a nil`). Nothing is asked then. Other keys of `opts` are not read.
 
 ### Windows {#host-window-recheck-windows}
 

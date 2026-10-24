@@ -41,6 +41,11 @@ mod overlay_host_panel_tests;
 /// The runtime's coordinate scaling (O:scale), and ARC ON:EAR held to its old geometry on it.
 #[cfg(test)]
 mod overlay_scale_tests;
+/// The second Mac test of VPS Avenger's page (2026-10-24), its findings in the overlay runtime and
+/// daw-hosts: Logic's file panels, the focus key's own click, the page from a plug-in window, the
+/// window given back after a dialog, a frozen drawn popup and the ring's hold of keys.
+#[cfg(test)]
+mod overlay_mac_test2_tests;
 /// Choosing an item from a plug-in's own popup menu, once a menu test sees it.
 #[cfg(test)]
 mod overlay_menu_item_tests;
@@ -555,6 +560,9 @@ struct Shared {
     /// Set by `host.window.recheck()`; drained on the tick to fire a cross-VM overlay
     /// re-check (as an OS focus event would), for state changes an overlay itself caused.
     recheck_requested: Cell<bool>,
+    /// The module's own click a `host.window.recheck { entered = … }` of this tick told of, the
+    /// newest: handed to every `onFocus` callback of the round it asked for, and of no other.
+    recheck_entered: RefCell<Option<Rc<Entered>>>,
     /// Modules owed a report of the window already in front — `onTrigger { initial = true }` —
     /// as (module_idx, reprime), at most one entry per module. Filled by the prelude's
     /// `_requestInitial` (reprime false) and by `apply_enabled(true)` (reprime true: every
@@ -1852,6 +1860,7 @@ impl Shared {
         // Asked first, so the sentence is spoken rather than shown: the tray icon is taken away
         // before the window loop ends, and its balloon with it (`Tray` in gui.rs), while what is
         // handed to speech is waited for on the way out. Still in this turn, before it goes.
+        instance::quit_because("the quit key");
         instance::request_quit();
         self.announce(QUIT_SENTENCE);
     }
@@ -5638,6 +5647,7 @@ impl Manager {
             presses: RefCell::new(HashMap::new()),
             vm_gens: RefCell::new(HashMap::new()),
             recheck_requested: Cell::new(false),
+            recheck_entered: RefCell::new(None),
             initial_pending: RefCell::new(Vec::new()),
             notify: RefCell::new(None),
             pages: webview_lua::Pages::default(),
@@ -5974,6 +5984,9 @@ impl Manager {
                         backend.pump_pending(&mut dispatcher);
                         let events_ms = pump_started.elapsed().as_millis();
                         let (act_n, act_ms, focus_ms, _, pad_ms) = shared.ev_counts.get();
+                        // A Mac's subscriptions to an application's notifications, made as it
+                        // comes to the front, each under the messaging timeout: named on their own.
+                        let subscribe_ms = backend::take_subscribe_ms();
                         // What the two named phases do NOT account for, printed rather than
                         // left to be inferred as zero.
                         //
@@ -5988,7 +6001,8 @@ impl Manager {
                         let other_ms = events_ms
                             .saturating_sub(act_ms)
                             .saturating_sub(focus_ms)
-                            .saturating_sub(pad_ms);
+                            .saturating_sub(pad_ms)
+                            .saturating_sub(subscribe_ms);
                         let t = std::time::Instant::now();
                         shared.fire_due_timers();
                         shared.fire_pad_tick();
@@ -6059,8 +6073,9 @@ impl Manager {
                                 &format!(
                                     "one iteration took {pump_ms} ms (os events {events_ms} \
                                      = {act_n}x window-activate {act_ms} + focus-change \
-                                     {focus_ms} + gamepad {pad_ms} + everything else \
-                                     {other_ms}, which is mostly key and hotkey dispatch; \
+                                     {focus_ms} + gamepad {pad_ms} + subscribing to applications' \
+                                     notifications {subscribe_ms} + everything else {other_ms}, \
+                                     which is mostly key and hotkey dispatch; \
                                      timers {timers_ms}, image results {images_ms}, text \
                                      recognition results {ocr_ms} ({} callback(s)), snapshot results \
                                      {snapshots_ms}, outcomes of acting {acted_ms}, queued module events \
@@ -6077,7 +6092,7 @@ impl Manager {
                         // changing plugin UI itself — dispatch it like an OS focus event.
                         // Its callbacks can stop a module too, settled in this same turn.
                         if shared.recheck_requested.replace(false) {
-                            dispatcher.on_focus_change();
+                            dispatcher.recheck_round();
                             shared.settle_stops();
                         }
                         shared.log_housekeeping();
@@ -7149,7 +7164,7 @@ impl HostEvents for Dispatcher<'_> {
         self.dispatch_initial();
         self.shared.settle_stops();
         if self.shared.recheck_requested.replace(false) {
-            self.on_focus_change();
+            self.recheck_round();
             self.shared.settle_stops();
         }
         self.shared.log_housekeeping();
@@ -7348,6 +7363,21 @@ impl HostEvents for Dispatcher<'_> {
     }
 
     fn on_focus_change(&mut self) {
+        self.focus_round(None);
+    }
+}
+
+impl Dispatcher<'_> {
+    /// The round a `host.window.recheck()` of this tick asked for, with the module's own click
+    /// the newest of them told of (`entered`), which goes to this round and to no other.
+    fn recheck_round(&mut self) {
+        let entered = self.shared.recheck_entered.take();
+        self.focus_round(entered);
+    }
+
+    /// A focus round: every enabled module's `onFocus` callbacks, through its mailbox, handed
+    /// `entered` where a recheck told of a module's own click.
+    fn focus_round(&mut self, entered: Option<Rc<Entered>>) {
         // Somebody is waiting for what this dispatch does: a read or a timer it asks for goes
         // in the interactive lane (ocr/types.rs, `enter_priority`).
         let _prio = ocr::types::enter_priority(ocr::types::Priority::Interactive);
@@ -7357,7 +7387,7 @@ impl HostEvents for Dispatcher<'_> {
             if !self.enabled(idx) || !window_has_triggers(&m.lua) {
                 continue;
             }
-            mailbox::deliver(self.shared, idx, &m.lua, Event::Focus);
+            mailbox::deliver(self.shared, idx, &m.lua, Event::Focus { entered: entered.clone() });
         }
         let mut c = self.shared.ev_counts.get();
         c.2 += started.elapsed().as_millis();
@@ -7603,7 +7633,7 @@ impl mailbox::MailHost for Shared {
                 let call = capture_source::prewarm_hook(lua).and_then(|before| initial_call(lua, win.as_deref(), reprime, before));
                 self.window_opened(idx, "window trigger", call)
             }
-            Event::Focus => self.window_opened(idx, "focus change", focus_call(lua)),
+            Event::Focus { entered } => self.window_opened(idx, "focus change", focus_call(lua, entered.as_deref())),
             Event::After { token } => match self.timers.take_queued(token) {
                 Some(f) => Opened::Run { f, args: mlua::MultiValue::new(), ctx: task::Ctx::new("timer", idx) },
                 None => Opened::Gone,
@@ -8653,17 +8683,24 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(t)
         })?,
     )?;
-    // host.window.recheck() — request a cross-VM overlay re-check on the next tick
+    // host.window.recheck(opts?) — request a cross-VM overlay re-check on the next tick
     // (same effect as an OS focus event). For use after an overlay action that changes
     // the plugin's detectable UI WITHOUT a focus event — e.g. Komplete Kontrol
     // auto-closing its browser reveals the nested Kontakt, which nothing else would
     // notice until the library landmark poll (~500 ms). Coalesced: any number of calls
-    // in one tick cost a single re-check.
+    // in one tick cost a single re-check. `opts.entered = { window, x, y }` tells that round's
+    // `onFocus` callbacks of the caller's own click at x,y into that window — daw-hosts' focus
+    // key, after which Logic reports no focus at all (see `Entered`).
     let sh = shared.clone();
     win.set(
         "recheck",
-        lua.create_function(move |_, ()| {
+        lua.create_function(move |_, opts: mlua::Value| {
             host_call!("host.window.recheck");
+            if let Some(e) = recheck_entered(&opts)? {
+                let module = sh.ids.borrow().get(idx).cloned().unwrap_or_default();
+                let at = clock_origin().elapsed().as_millis() as i64;
+                *sh.recheck_entered.borrow_mut() = Some(Rc::new(Entered { window: e.0, x: e.1, y: e.2, module, at }));
+            }
             sh.recheck_requested.set(true);
             Ok(())
         })?,
@@ -10306,15 +10343,71 @@ fn initial_call(
     Ok(Some((f, args)))
 }
 
+/// A module's own click into a window, told of by `host.window.recheck { entered = … }` and handed
+/// to the `onFocus` callbacks of the round that recheck asks for, as `info.entered`: the window,
+/// the point on the screen, the module that clicked (the VM's own) and when it told, in
+/// `host.now()`'s milliseconds. For a reading the system will not give: after a click into a
+/// plug-in's own drawn view, Logic reports no focus at all, and the overlay runtime's rule that an
+/// empty focus chain begins no stay would otherwise keep every overlay down there (the second Mac
+/// test of VPS Avenger, 2026-10-24, its finding 9; the maintainer's decision of that day).
+pub(crate) struct Entered {
+    pub(crate) window: i64,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) module: String,
+    pub(crate) at: i64,
+}
+
+/// `host.window.recheck`'s `opts`: nothing, or a table whose `entered`, when it is there, is
+/// `{ window = <integer>, x = <number>, y = <number> }`. Anything else raises, at the call.
+fn recheck_entered(opts: &mlua::Value) -> mlua::Result<Option<(i64, f64, f64)>> {
+    let bad = |what: String| Err(mlua::Error::external(format!("host.window.recheck: {what}")));
+    let t = match opts {
+        mlua::Value::Nil => return Ok(None),
+        mlua::Value::Table(t) => t,
+        other => return bad(format!("opts is a table or nil, not a {}", json::luau_type(other))),
+    };
+    let e = match t.get::<mlua::Value>("entered")? {
+        mlua::Value::Nil => return Ok(None),
+        mlua::Value::Table(e) => e,
+        other => return bad(format!("opts.entered is a table or nil, not a {}", json::luau_type(&other))),
+    };
+    let window = match e.get::<mlua::Value>("window")? {
+        mlua::Value::Integer(n) => n,
+        mlua::Value::Number(n) if n.fract() == 0.0 && n.abs() < 9.0e15 => n as i64,
+        other => return bad(format!("opts.entered.window is a window's id, not a {}", json::luau_type(&other))),
+    };
+    let mut point = [0.0; 2];
+    for (i, k) in ["x", "y"].into_iter().enumerate() {
+        point[i] = match e.get::<mlua::Value>(k)? {
+            mlua::Value::Integer(n) => n as f64,
+            mlua::Value::Number(n) if n.is_finite() => n,
+            other => return bad(format!("opts.entered.{k} is a number, not a {}", json::luau_type(&other))),
+        };
+    }
+    Ok(Some((window, point[0], point[1])))
+}
+
 /// The call that delivers a focus change into one VM's `onFocus` callbacks; `None`, like
-/// `activate_call`, for a VM that registered none.
-fn focus_call(lua: &Lua) -> mlua::Result<Option<(Function, mlua::MultiValue)>> {
+/// `activate_call`, for a VM that registered none. The callbacks are handed the round's `info`:
+/// `entered`, where a module's `host.window.recheck { entered = … }` asked for it.
+fn focus_call(lua: &Lua, entered: Option<&Entered>) -> mlua::Result<Option<(Function, mlua::MultiValue)>> {
     let Ok(window) = host_window(lua) else { return Ok(None) };
     if !has_triggers(&window)? {
         return Ok(None);
     }
     let f: Function = window.get("_dispatchFocus")?;
-    Ok(Some((f, waited_fn(lua).into_lua_multi(lua)?)))
+    let info = lua.create_table()?;
+    if let Some(e) = entered {
+        let t = lua.create_table()?;
+        t.set("window", e.window)?;
+        t.set("x", e.x)?;
+        t.set("y", e.y)?;
+        t.set("module", e.module.as_str())?;
+        t.set("at", e.at)?;
+        info.set("entered", t)?;
+    }
+    Ok(Some((f, (waited_fn(lua), info).into_lua_multi(lua)?)))
 }
 
 /// An activation delivered at once, as a free module's mailbox runs it: for the tests.
@@ -10329,7 +10422,7 @@ fn dispatch_activate(lua: &Lua, win: &WinInfo) -> mlua::Result<()> {
 /// A focus change delivered at once, as a free module's mailbox runs it: for the tests.
 #[cfg(test)]
 fn dispatch_focus(lua: &Lua) -> mlua::Result<()> {
-    match focus_call(lua)? {
+    match focus_call(lua, None)? {
         Some((f, args)) => f.call::<()>(args),
         None => Ok(()),
     }
@@ -11922,7 +12015,7 @@ mod ocr_wiring_tests {
             "fn on_hotkey(&mut self",
             "fn on_gamepad(&mut self",
             "fn on_window_activate(&mut self",
-            "fn on_focus_change(&mut self",
+            "fn focus_round(&mut self",
             "fn dispatch_initial(&self)",
         ] {
             assert!(
@@ -12348,7 +12441,7 @@ mod ocr_wiring_tests {
             ("pub(crate) fn hotkey_arrive_in<", "Some(taps::hand_on(h, key, owner, &lua, ev"),
             ("fn on_key(&mut self", "captures::arrive(self.shared"),
             ("fn on_window_activate(&mut self", "mailbox::deliver(self.shared, idx, &m.lua, ev)"),
-            ("fn on_focus_change(&mut self", "mailbox::deliver(self.shared, idx, &m.lua, Event::Focus)"),
+            ("fn focus_round(&mut self", "mailbox::deliver(self.shared, idx, &m.lua, Event::Focus { entered: entered.clone() })"),
             ("fn dispatch_initial(&self)", "mailbox::deliver(shared, idx, lua, Event::Initial"),
             ("fn fire_due_timers(&self)", "mailbox::deliver(self, idx, &lua, Event::After { token })"),
             ("fn fire_on_change(", "mailbox::deliver_later(self, owner, &lua, ev)"),
@@ -12669,7 +12762,7 @@ mod ocr_wiring_tests {
             let at = tick.find(round).unwrap_or_else(|| panic!("no recheck round: {round}"));
             assert!(tick[at..].trim_start_matches(round).trim_start().starts_with(settle), "a stop in the recheck round waits a tick: {round}");
         };
-        after_recheck(headless, concat!("self.on_focus", "_change();"), concat!("self.shared.settle", "_stops();"));
+        after_recheck(headless, concat!("self.recheck", "_round();"), concat!("self.shared.settle", "_stops();"));
         assert_eq!(LIB.matches(concat!("shared.settle", "_stops();")).count(), 4, "each tick, and each tick's recheck round");
         // The GUI tick settles them after the page events and the report of the window in front,
         // and its overrun line names their share last.
@@ -12680,7 +12773,7 @@ mod ocr_wiring_tests {
             run.find(concat!("shared.settle", "_stops();")).expect("the GUI tick settles no stop"),
         );
         assert!(pages < settle && initial < settle);
-        after_recheck(run, concat!("dispatcher.on_focus", "_change();"), concat!("shared.settle", "_stops();"));
+        after_recheck(run, concat!("dispatcher.recheck", "_round();"), concat!("shared.settle", "_stops();"));
         assert!(LIB.contains(concat!(", stopped modules {stops_", "ms}) — {hazard}")), "the overrun line does not name the stops' share");
         assert!(body(LIB, "fn sync_enabled_into_store(").contains("stops::stored_enabled("));
         let enable = body(LIB, "fn apply_enabled(");
@@ -13649,7 +13742,11 @@ mod quit_key_wiring_tests {
         let shown = said.find("dialog.show_modal();").expect("shown");
         let popped = said.find("OPEN_DIALOGS.with(|open| open.borrow_mut().pop());").expect("popped");
         assert!(pushed < shown && shown < popped);
-        assert_eq!(gui.matches("MENU_QUIT => quit(),").count(), 2, "the window's Quit and the tray's");
+        assert_eq!(gui.matches("MENU_QUIT => quit(),").count(), 0, "each Quit names itself first");
+        assert!(gui.contains("crate::instance::quit_because(\"the module window's Quit\");"));
+        assert!(gui.contains("crate::instance::quit_because(\"the tray's Quit\");"));
+        // And the way out is said once, as the loop ends.
+        assert!(quit.contains("crate::logging::line(\"host\", &format!(\"quitting — {}\", crate::instance::take_quit_way()));"));
         let tick = &gui[gui.find("timer.on_tick(").expect("the tick")..];
         let after_pump = &tick[tick.find("pump();").expect("the pump")..];
         let taken = after_pump.find("if crate::instance::take_quit_request() {\n                    quit();").expect("the key's request");

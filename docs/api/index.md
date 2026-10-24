@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 241 entries.
+Every call the platform offers a module, in one place. 242 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -203,6 +203,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O:gotoTab(n, keepFocus?)`](overlay#o-gototab) | Chooses tab `n` of the overlay's **first** tab control and says it — what Ctrl+`n` and a tab's own hotkey do. |
 | [`O:group(pred, build)`](overlay#o-group) | Adds everything `build` adds under a shared condition: `pred` is ANDed onto each control's own `when`, and groups nest. |
 | [`O:here()`](overlay#o-here) | Notes where the overlay is now, as a **mark**, for an answer that comes later and acts on what it learned |
+| [`O:holdKeys(spec)`](overlay#o-holdkeys) | Takes a few keys for the module while the overlay is in front, outside any trip of its page |
 | [`O:hwnd()`](overlay#o-hwnd) | The handle of `O:origin()`: its `id`. |
 | [`O:inPlugin(spec) — a trip into the plug-in`](overlay#o-inplugin) | One action of the page's in the plug-in |
 | [`O:landmark(image, opts?)`](overlay#o-landmark) | A gate satisfied only while `image` — an **absolute** path, via `host.path` — is found within the active context's region. |
@@ -251,7 +252,7 @@ Finding windows and the surfaces inside them, and reacting when the focus moves.
 | [`host.window.onFocus(cb)`](window#host-window-onfocus) | Registers `cb` to fire whenever the keyboard focus moves — including within the same top-level window. |
 | [`host.window.onTrigger(matcher, opts, cb)`](window#host-window-ontrigger) | Registers `cb` to fire on every foreground change for which the new active window satisfies `matcher`. |
 | [`host.window.ownsPoint(id, x, y, opts?)`](window#host-window-ownspoint) | Whether the window `id` belongs to is the one drawn at that screen point. |
-| [`host.window.recheck()`](window#host-window-recheck) | Asks the host to run a focus-change round at the end of the current tick |
+| [`host.window.recheck(opts?)`](window#host-window-recheck) | Asks the host to run a focus-change round at the end of the current tick |
 | [`host.window.test(matcher, win)`](window#host-window-test) | Returns whether the given window table satisfies `matcher` (the same logic `find`/`findAll` apply). |
 | [`host.window.windowsOf(pid)`](window#host-window-windowsof) | Every on-screen window a process owns, as the **window manager** lists them rather than as accessibility does. |
 

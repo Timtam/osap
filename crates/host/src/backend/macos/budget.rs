@@ -150,9 +150,100 @@ impl Budget {
     }
 }
 
+/// The applications a walk of a module's question ran out of time in, in this turn of the event
+/// loop: their later questions in the same turn are answered "too slow" at once, without a walk.
+///
+/// The second Mac test (2026-10-24, its finding 5) had Logic's file panel open while seven VMs —
+/// every embedded overlay's — asked their identity questions in it, each walk stopping at its
+/// 300 ms (55c5608) and the next starting from scratch: about 2 s of one turn, on the thread that
+/// carries the event tap, which macOS switches off past its own limit. An application that could
+/// not be walked in 300 ms is not walked again in the turn it showed it; the next turn asks it
+/// afresh. A count of turns, not a clock: nothing here decides how long.
+#[derive(Default)]
+pub(crate) struct SlowThisTurn {
+    /// The applications whose walk ran out of time in this turn.
+    pids: Vec<i32>,
+    /// Questions answered without a walk in this turn, per application, for the turn's one line.
+    skipped: Vec<(i32, u32)>,
+}
+
+impl SlowThisTurn {
+    /// A walk of a question to `pid` ran out of time.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn ran_out(&mut self, pid: i32) {
+        if !self.pids.contains(&pid) {
+            self.pids.push(pid);
+        }
+    }
+
+    /// Whether a question to `pid` is answered "too slow" without a walk: its walk ran out of time
+    /// earlier in this turn. Counted for the turn's line.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn skip(&mut self, pid: i32) -> bool {
+        if !self.pids.contains(&pid) {
+            return false;
+        }
+        match self.skipped.iter_mut().find(|(p, _)| *p == pid) {
+            Some((_, n)) => *n += 1,
+            None => self.skipped.push((pid, 1)),
+        }
+        true
+    }
+
+    /// The next turn begins: everything is asked afresh. What the turn that ended answered without
+    /// a walk, per application, for its one line; empty when nothing was.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn next_turn(&mut self) -> Vec<(i32, u32)> {
+        self.pids.clear();
+        std::mem::take(&mut self.skipped)
+    }
+}
+
+/// The turn's one line: how many questions to each application were answered "too slow" without
+/// a walk, after one of its walks ran out of time in that turn. `exe` names an application.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn slow_turn_line(skipped: &[(i32, u32)], exe: impl Fn(i32) -> String) -> Option<String> {
+    if skipped.is_empty() {
+        return None;
+    }
+    let each: Vec<String> = skipped.iter().map(|(pid, n)| format!("{n} to '{}' (pid {pid})", exe(*pid))).collect();
+    Some(format!(
+        "accessibility: {} question(s) of modules in one turn were answered 'too slow' without a walk — \
+         an earlier walk of the same application ran out of time in that turn: {}",
+        skipped.iter().map(|(_, n)| n).sum::<u32>(),
+        each.join(", ")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Finding 5 of the second Mac test: after one walk of Logic's ran out of time, its later
+    /// questions in the same turn are answered at once, another application's are walked, and the
+    /// next turn walks Logic again — with one line for the turn that skipped.
+    #[test]
+    fn an_application_slow_in_this_turn_is_not_walked_again_in_it() {
+        let mut slow = SlowThisTurn::default();
+        assert!(!slow.skip(6000), "nothing ran out yet");
+        slow.ran_out(6000);
+        slow.ran_out(6000);
+        for _ in 0..6 {
+            assert!(slow.skip(6000), "the six other VMs' questions in the same turn");
+        }
+        assert!(!slow.skip(5000), "another application is walked");
+        let ended = slow.next_turn();
+        assert_eq!(ended, [(6000, 6)]);
+        assert!(!slow.skip(6000), "the next turn asks it afresh");
+        assert!(slow.next_turn().is_empty());
+        let line = slow_turn_line(&ended, |_| "Logic Pro X".into()).unwrap();
+        assert_eq!(
+            line,
+            "accessibility: 6 question(s) of modules in one turn were answered 'too slow' without a walk — an \
+             earlier walk of the same application ran out of time in that turn: 6 to 'Logic Pro X' (pid 6000)"
+        );
+        assert_eq!(slow_turn_line(&[], |_| String::new()), None);
+    }
 
     #[test]
     fn it_spends_exactly_the_nodes_it_was_given() {

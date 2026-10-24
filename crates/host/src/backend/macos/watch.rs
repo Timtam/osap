@@ -128,6 +128,17 @@ struct Retry {
     since: Instant,
 }
 
+/// The milliseconds spent subscribing to applications' accessibility notifications since the pump's
+/// line last took them (`take_subscribe_ms`): one `AXObserverCreate` and its subscriptions per
+/// application, each bounded by the messaging timeout.
+static SUBSCRIBE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The milliseconds spent subscribing since the last call, taken: the pump's line names them on
+/// their own (lib.rs).
+pub(crate) fn take_subscribe_ms() -> u128 {
+    u128::from(SUBSCRIBE_MS.swap(0, std::sync::atomic::Ordering::Relaxed))
+}
+
 thread_local! {
     /// pid to what we know about it. A `Refused` entry that has used up its retries is an
     /// application that will not be asked again, kept so a DAW that cannot be observed costs
@@ -521,6 +532,9 @@ fn ensure_observer(pid: i32, app: &str) {
     let started = Instant::now();
     let made = create_observer(pid, app);
     let took = started.elapsed().as_millis();
+    // For the pump's line, where a subscription under the messaging timeout was counted as key
+    // dispatch (the second Mac test's 941 ms at Logic's start, with no key pressed).
+    SUBSCRIBE_MS.fetch_add(took as u64, std::sync::atomic::Ordering::Relaxed);
     match made {
         Ok(live) => {
             let after = RETRY.with(|r| r.borrow_mut().remove(&pid)).map(|r| r.tries);

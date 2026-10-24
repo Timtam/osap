@@ -3623,6 +3623,9 @@ function Overlay:_syncControlHotkeys()
       -- `press` is the host's count of the key's quick repeats, handed on to the control's
       -- `onActivate` (O:activate).
       local ok, id, err = pcall(host.hotkey.register, spec, ownKey(self, function(press)
+        -- A key a hold holds (O:holdKeys) is the hold's, over the control that claims it.
+        local h = self._hold
+        if h and h.keys[spec] then return self:_holdKey(h, h.keys[spec], nil, press) end
         -- The claimant is resolved AFTER the wait, not before: the point of resolving at press
         -- time is that the visible set can have changed, and waiting is time in which it can.
         afterModifiersReleased(function()
@@ -3708,8 +3711,24 @@ end
 -- once per overlay and code, since the key is asked again at every sync and every move of the focus
 -- that wants it, and the reason does not change between them.
 function Overlay:_captureKey(spec, fn)
-  local token, err = host.keys.capture(spec, fn)
-  if token ~= nil then return token end
+  -- A key a hold of the module's holds (O:holdKeys) goes to the hold, whichever capture of the
+  -- module the host hands it to: the earliest one of the window in front is the overlay's own when
+  -- it captured the key before the hold did.
+  local key = keyOf(spec)
+  local token, err = host.keys.capture(spec, function(...)
+    local h = self._hold
+    if h and h.keys[key] then return self:_holdKey(h, h.keys[key], ...) end
+    return fn(...)
+  end)
+  if token ~= nil then
+    -- The host keeps one capture of a key per module, the newer replacing the older (keys.md): a key
+    -- a hold holds is captured for the hold again at once, so that it stays the hold's whatever the
+    -- overlay lets go of while the hold stands. The token handed back is then a spent one, and the
+    -- hold's end takes the overlay's own again (_retakeOwnKeys).
+    local h = self._hold
+    if h and h.keys[key] then self:_holdTake(h, key) end
+    return token
+  end
   local code = err ~= nil and err.code or "none"
   self._captureSaid = self._captureSaid or {}
   if not self._captureSaid[code] then
@@ -3734,6 +3753,158 @@ function Overlay:_captureKeys(list)
     tokens[#tokens + 1] = token
   end
   return tokens
+end
+
+-- ── Holding keys outside a trip (O:holdKeys, since 0.13) ──
+-- A control's `onActivate` takes a few keys for the module while it does something that takes
+-- more than one key — VPS Avenger's ring holds a knob pressed and turns it with Page Up and Page
+-- Down until Return, as the avenger_control tool does (the maintainer's decision of 2026-10-24) —
+-- with the overlay in front and nothing else of it changed: the overlay's other keys work as ever.
+-- The hold's keys are its own over every other claim of the overlay's: Return then reaches
+-- `onKey` and does not activate the focused control. They come to `onKey(o, key, mods, press)`, a
+-- handler of the module's where a read may wait; `true` from it ends the hold. `onEnd(o, how,
+-- info)` is told once, whatever ends it: "ended" (onKey's `true`; `info.key`), "left" (the overlay
+-- left the front — another window, the page key's page, the module disabled; `info.why`) or
+-- "replaced" (another hold began). The keys go back after it. Nothing is said: the module says
+-- what its hold is for. The trip's own hand-over (trip:handOver) is the same for a trip.
+function Overlay:holdKeys(spec)
+  local who = ("overlay '%s': holdKeys"):format(tostring(self.label))
+  local HOLD_FIELDS = { keys = true, onKey = true, onEnd = true }
+  if type(spec) ~= "table" then error(("%s takes { keys, onKey, onEnd }, got %s"):format(who, type(spec)), 2) end
+  for k in pairs(spec) do
+    if not HOLD_FIELDS[k] then error(("%s has no field '%s' (it has keys, onKey and onEnd)"):format(who, tostring(k)), 2) end
+  end
+  if type(spec.onKey) ~= "function" then
+    error(("%s needs `onKey`, a function(overlay, key, mods, press), got %s"):format(who, type(spec.onKey)), 2)
+  end
+  if type(spec.onEnd) ~= "function" then
+    error(("%s needs `onEnd`, a function(overlay, how, info), got %s"):format(who, type(spec.onEnd)), 2)
+  end
+  local keys = spec.keys
+  local count = 0
+  if type(keys) == "table" then
+    for _ in pairs(keys) do count += 1 end
+  end
+  if type(keys) ~= "table" or count < 1 or count > 8 or count ~= #keys then
+    error(("%s's `keys` must be a list of 1 to 8 key specs"):format(who), 2)
+  end
+  local byKey, seen = {}, {}
+  for _, k in ipairs(keys) do
+    local name = type(k) == "string" and host.keys.normalize(k) or nil
+    if not name then error(("%s's key %s is no key spec"):format(who, tostring(k)), 2) end
+    if seen[name] then error(("%s names one key twice: %s and %s"):format(who, seen[name], k), 2) end
+    seen[name], byKey[name] = k, k
+  end
+  if not self.active or self.away then
+    host.log.info(("[keys] '%s': holdKeys — the overlay is not in front; nothing held"):format(tostring(self.label)))
+    return false, fail("hold_not_in_front")
+  end
+  if self._hold then self:_holdEnd("replaced", {}) end
+  -- `tokens`: the hold's capture of each key, by its name (host.keys.normalize).
+  local h = { keys = byKey, list = table.clone(keys), onKey = spec.onKey, onEnd = spec.onEnd, tokens = {} }
+  -- Pinned before the keys are taken, as in _activate.
+  host.keys.scope(true)
+  for _, k in ipairs(keys) do
+    local ok, tok, err = pcall(host.keys.capture, k, self:_holdKeyFn(h, k))
+    if not ok or tok == nil then
+      for _, held in pairs(h.tokens) do pcall(host.keys.release, held) end
+      -- The keys taken before this one replaced the overlay's own captures of them.
+      self:_retakeOwnKeys(byKey)
+      if not ok then
+        host.log.info(("[keys] '%s': holdKeys — capturing %s raised: %s; nothing held"):format(tostring(self.label),
+          k, tostring(tok)))
+        return false, fail("capture_raised", nil, k, tostring(tok))
+      end
+      host.log.info(("[keys] '%s': holdKeys — %s is not captured: %s; nothing held"):format(tostring(self.label),
+        k, tostring(err)))
+      return false, handOn("o-holdkeys", "host-keys-capture", err)
+    end
+    h.tokens[host.keys.normalize(k)] = tok
+  end
+  self._hold = h
+  host.log.info(("[keys] '%s' holds %s for its module until its onKey ends it"):format(tostring(self.label),
+    table.concat(keys, ", ")))
+  return true
+end
+
+-- The callback of hold `h`'s own capture of `key`: the key handed on with its modifiers and the
+-- count of its quick repeats.
+function Overlay:_holdKeyFn(h, key)
+  return function(mods, press) return self:_holdKey(h, key, mods, press) end
+end
+
+-- Key `key` of hold `h`, from its own capture or from one of the overlay's (_captureKey, the
+-- per-control hotkeys): the module's onKey, as a handler. A key of a hold that has ended is the
+-- overlay's no more and is dropped.
+function Overlay:_holdKey(h, key, mods, press)
+  if self._hold ~= h then return end
+  self._keys += 1
+  local ok, v = pcall(h.onKey, self, key, mods, press)
+  if not ok then
+    host.log.info(("[keys] '%s': holdKeys' onKey failed: %s — the hold ends"):format(tostring(self.label), tostring(v)))
+    if self._hold == h then self:_holdEnd("ended", { key = key, failed = tostring(v) }) end
+    return
+  end
+  if v == true and self._hold == h then self:_holdEnd("ended", { key = key }) end
+end
+
+-- Hold `self._hold` ends `how` (see holdKeys): onEnd told, once, then its keys released, and the
+-- overlay's own captures of them taken again — not when it ends with the front ("left"), whose
+-- _deactivate lets every key go next.
+function Overlay:_holdEnd(how, info)
+  local h = self._hold
+  if not h then return end
+  self._hold = nil
+  host.log.info(("[keys] '%s': its hold of %s ends (%s)"):format(tostring(self.label), table.concat(h.list, ", "), how))
+  local ok, err = pcall(h.onEnd, self, how, info or {})
+  if not ok then
+    host.log.info(("[keys] '%s': holdKeys' onEnd failed: %s"):format(tostring(self.label), tostring(err)))
+  end
+  for _, tok in pairs(h.tokens) do pcall(host.keys.release, tok) end
+  if how ~= "left" then self:_retakeOwnKeys(h.keys) end
+end
+
+-- Hold `h`'s capture of its key `name` made again, over the overlay's capture of it just made
+-- (_captureKey). Where the host cannot make it, the overlay's stands, which hands the key to the
+-- hold as well.
+function Overlay:_holdTake(h, name)
+  local ok, tok = pcall(host.keys.capture, h.keys[name], self:_holdKeyFn(h, h.keys[name]))
+  if ok and tok ~= nil then h.tokens[name] = tok end
+end
+
+-- The overlay's own captures of the keys `held` names (a hold's `keys`, by name) taken again, once
+-- the hold's are let go: the host keeps one capture of a key per module (keys.md), so each capture
+-- the overlay had made of them, before the hold or while it stood, went with the hold's. The per-focus
+-- keys are asked again for the control focused now (_syncNativeKeys); the ones held for as long as
+-- the overlay is in front are taken all again where one was held, since their tokens are not kept by
+-- key — not while a text field has the keyboard or the overlay holds its place over its menu, when it
+-- holds none of them. A control's hotkey is no capture, and nothing is to be done for it.
+function Overlay:_retakeOwnKeys(held)
+  if not self.active or keysOff(self) then return end
+  local function has(spec) return held[keyOf(spec)] ~= nil end
+  for _, f in ipairs({ { "_spaceToken", "Space" }, { "_returnToken", "Return" } }) do
+    if self[f[1]] and has(f[2]) then
+      host.keys.release(self[f[1]])
+      self[f[1]] = false
+    end
+  end
+  for _, f in ipairs({ { "_arrowTokens", "Left", "Right" }, { "_verticalTokens", "Up", "Down" } }) do
+    local toks = self[f[1]]
+    if toks and (has(f[2]) or has(f[3])) then
+      for _, t in ipairs(toks) do host.keys.release(t) end
+      self[f[1]] = false
+    end
+  end
+  if self.capturedKeys and #self.capturedKeys > 0 then
+    for _, e in ipairs(self.capturedSpecs or {}) do
+      if has(e.spec) then
+        self:_suspendCapturedKeys(true)
+        self:_suspendCapturedKeys(false)
+        break
+      end
+    end
+  end
+  self:_syncNativeKeys()
 end
 
 -- `suspended`: the per-control hotkeys start given up, and applyMenuState takes them back — an
@@ -4619,6 +4790,9 @@ function Overlay:_deactivate()
   host.log.info(string.format("[deactivate] '%s' — in front now: '%s' (%s)%s; %s",
     tostring(self.label), tostring(a and a.title or "nothing"),
     tostring(a and a.app and a.app.exe or "?"), f, whyText(why)))
+  -- A hold of keys ends with the front (O:holdKeys): its onEnd is told, then the keys go with the
+  -- overlay's own.
+  if self._hold then self:_holdEnd("left", { why = whyText(why) }) end
   -- Its keys go FIRST, while the scope still pins them to the window it is leaving: unpinned
   -- first, they would take a key pressed in the window that came forward — the hook runs on a
   -- thread of its own — and the key would then be dropped, its capture released.
@@ -5190,6 +5364,21 @@ local function recheckOnNextTurn(self)
   end)
 end
 
+-- The click a module told the host of for the focus round now running — `host.window.recheck`'s
+-- `entered`, which the host hands that round's onFocus callbacks as `info.entered` — or nil. Set
+-- only while an overlay of this VM rechecks in that round, so that no other evaluation (a key, a
+-- poll, a later round) takes it: it is what lets an empty focus chain begin a stay after the
+-- module's own click into the panel, and nothing else does (see "the stay"). One table, as the
+-- file's locals are counted.
+local round = { entered = nil }
+
+-- An overlay's recheck in a focus round, with the round's click in reach while it runs.
+function round.recheck(self, info)
+  round.entered = type(info) == "table" and type(info.entered) == "table" and info.entered or nil
+  self:_recheck()
+  round.entered = nil
+end
+
 function Overlay:_join(slot, specificity, pollMs)
   report(self, { slot = slot, specificity = specificity })
   -- A page's checks, before anything is registered: its key against this overlay's hotkeys, and
@@ -5265,7 +5454,7 @@ function Overlay:_join(slot, specificity, pollMs)
   -- Foreground changes AND focus changes (the latter catches focus moving into
   -- an embedded plugin without a foreground change).
   host.window.onTrigger({}, { on = "activate" }, function() self:_recheck() end)
-  host.window.onFocus(function() self:_recheck() end)
+  host.window.onFocus(function(info) round.recheck(self, info) end)
   recheckOnNextTurn(self)
 end
 
@@ -6019,8 +6208,13 @@ end
 -- An EMPTY chain with the same window in front is no observation of anywhere else: it keeps the
 -- stay, and the panel the stay began with stands for the DAW's, its verdict kept, as the control
 -- a module's function last found in the stay stands for the function's, which is not asked then.
--- It never begins one, which would bring an overlay up on a reading nobody took, and it finds no
--- control a function had not found in the stay before. On a Mac that is what the system
+-- It begins one in a single case: in the focus round a module's own click into the DAW's panel of
+-- that window asked for (`host.window.recheck { entered = … }`, the point inside the panel) —
+-- daw-hosts' focus key, after which Logic reports nothing at all (the second Mac test of VPS
+-- Avenger, 2026-10-24: the key clicked into Avenger and nothing came up until the window was
+-- dragged; the maintainer's decision of that day). Then `identify` is asked, as at any stay's
+-- start. Any other empty chain begins none, which would bring an overlay up on a reading nobody
+-- took, and it finds no control a function had not found in the stay before. On a Mac that is what the system
 -- answers while a view that publishes nothing has the keyboard — after a click into a plug-in's
 -- own drawn view, the user's or a module's, in Logic every time (the first Mac test of VPS
 -- Avenger's page, 2026-10-14, where each such click took the overlay down and ended a pending
@@ -6616,18 +6810,38 @@ function Overlay:attachEmbedded(spec, opts)
     -- nothing too: an origin function that reads the window's surfaces would answer its fallback
     -- then, and the memo above would keep that for the window's life at that size.
     local unread = focusChain[1] == nil
+    local clicked = nil
     if unread then
       if not inStayWindow(active) then
-        endStay()
-        return nil, because("where the keyboard is in '%s' cannot be read (an empty focus chain), and no "
-          .. "stay is in progress there", active.title)
+        -- A module's own click into this window's panel, told of for this round: the one empty
+        -- chain that begins a stay (the stay, above).
+        local e = round.entered
+        if e and e.window == active.id and type(e.x) == "number" and type(e.y) == "number" then
+          local p = hostPanelOf(entry, active)
+          local b = p and p.bounds
+          if b and e.x >= b.x and e.x < b.x + b.w and e.y >= b.y and e.y < b.y + b.h then clicked = p end
+        end
+        if not clicked then
+          endStay()
+          return nil, because("where the keyboard is in '%s' cannot be read (an empty focus chain), and no "
+            .. "stay is in progress there", active.title)
+        end
       end
     elseif not chainKnown(active, focusChain) then
       endStay()
       return nil, because("the focus chain ends in another window than '%s'", active.title)
     end
     local panel
-    if unread then
+    if clicked then
+      panel = clicked
+      panel.stay = stayIn(active, panel)
+      -- And its line, once per stay, for the next Mac log. "the stay goes on there" is not said in
+      -- this one: the stay is this reading's.
+      stay.unreadSaid = stay.n
+      host.log.info(string.format("[overlay] '%s': %s's click into '%s' at %s,%s begins a stay — %s reports "
+        .. "no focus after it", tostring(self.label or "overlay"), tostring(round.entered.module or "a module"),
+        tostring(active.title), tostring(round.entered.x), tostring(round.entered.y), tostring(entry.daw or "the DAW")))
+    elseif unread then
       -- Only for a binding whose entry gives a panel here: one that has none never began a stay.
       panel = originFnOf(entry) and stayPanel(active) or nil
       if not panel then
@@ -6741,6 +6955,8 @@ function Overlay:attachEmbedded(spec, opts)
   -- in the same epoch resolves again and asks it, rather than finding "no control" kept.
   --
   -- The control, or nil and why it is none (pluginControl), the why kept with it for the epoch.
+  -- A focus round that carries a module's own click is asked afresh whatever the epoch keeps: an
+  -- answer made before it in the same epoch, a key's say, did not have the click to go on.
   local function origin(opts)
     local e = host.epoch and host.epoch() or -1
     local memo = originMemo[spec]
@@ -6748,7 +6964,7 @@ function Overlay:attachEmbedded(spec, opts)
       memo = { epoch = -1, value = nil }
       originMemo[spec] = memo
     end
-    if not (opts and opts.fresh) and e == memo.epoch then return memo.value, memo.why end
+    if not (opts and opts.fresh) and round.entered == nil and e == memo.epoch then return memo.value, memo.why end
     deferred = false
     local c, why = pluginControl()
     if deferred then return c, why end
@@ -6821,8 +7037,47 @@ function Overlay:attachEmbedded(spec, opts)
     if c then entryOfControl[c] = entry end
     return c
   end
+  -- The DAW's panel in window `win` for the page key with the overlay not in front (see "An
+  -- overlay's page", the page from the window in front): `win` a plug-in window of this binding's
+  -- hosts whose entry gives a panel there, and `identify` saying the panel shows this plug-in. A stay
+  -- begins in that panel, as at any stay's start, and `identify` is asked as it is then — in the
+  -- page key's handler, where a read may wait. Where the keyboard is is not asked: in Logic it reads
+  -- as nowhere while a plug-in's own drawn view has it. Not for a binding without `identify` (any
+  -- plug-in window of the DAW would do) or with a `control` function (whose control is the one the
+  -- keyboard is in). The panel and the entry, or nil.
+  local function panelOf(win)
+    if not (identify and win and win.client) or type(own) == "function" then return nil end
+    local entry = nil
+    for _, h in ipairs(hosts) do
+      if host.window.test(entryMatcher(h), win) then
+        entry = h
+        break
+      end
+    end
+    local panel = entry and hostPanelOf(entry, win) or nil
+    if not panel then return nil end
+    panel.stay = stayIn(win, panel)
+    local ok
+    if cacheId then
+      ok = panelIdentity(panel, win)
+    else
+      ok = askedEveryTime(panel)
+    end
+    if ok ~= true or not presentIn(panel) then return nil end
+    entryOfControl[panel] = entry
+    return panel, entry
+  end
+  -- The entry of this binding's hosts that takes window `win`, or nil: whether `win` is one of its
+  -- plug-in windows at all (the window of a press given back after a dialog, _menuRefocus).
+  local function hostOf(win)
+    if not win then return nil end
+    for _, h in ipairs(hosts) do
+      if host.window.test(entryMatcher(h), win) then return h end
+    end
+    return nil
+  end
   self.contexts[#self.contexts + 1] = { match = matched, origin = origin, present = presentIn,
-    heldOrigin = heldOrigin }
+    heldOrigin = heldOrigin, panelOf = panelOf, hostOf = hostOf }
   ensureTrigger(self, opts)
 end
 
@@ -7336,6 +7591,19 @@ do
 
   local function rectWords(r) return ("%dx%d at %d,%d"):format(r.w, r.h, r.x, r.y) end
 
+  -- The answer for a popup `s` seen, in reading `p`: its rectangle, and `print` — how the lines
+  -- whose fill changed at the opening read now, their means rounded — so that an item's click can
+  -- tell a popup drawn exactly as at the click (the plug-in has stopped drawing while it acts on it)
+  -- from one drawn again and still open (the click not taken; see _pickFollow).
+  local function answerOf(s, p)
+    local out = table.create(#s.fillRows + #s.fillCols + 1)
+    for _, i in ipairs(s.fillRows) do out[#out + 1] = tostring(math.floor(p.rows.mean[i] + 0.5)) end
+    out[#out + 1] = "|"
+    for _, i in ipairs(s.fillCols) do out[#out + 1] = tostring(math.floor(p.columns.mean[i] + 0.5)) end
+    local r = s.rect
+    return { x = r.x, y = r.y, w = r.w, h = r.h, print = table.concat(out, ",") }
+  end
+
   function O.menuTests.drawn(spec)
     if type(spec) ~= "table" or type(spec.region) ~= "function" then
       error("O.menuTests.drawn takes { name?, region = function(o, press) -> { x1, y1, x2, y2 }?, minW?, minH? }", 2)
@@ -7412,7 +7680,7 @@ do
           if lineDiffers(p.rows, s.profile.rows, i) == 2 then rows += w.rowStep else same += 1 end
         end
         local share = lines > 0 and same / lines or 0
-        if (cols < w.minW or rows < w.minH) and share >= DRAWN_STILL then return s.rect end
+        if (cols < w.minW or rows < w.minH) and share >= DRAWN_STILL then return answerOf(s, p) end
         log(o, "the %s %s has gone at reading %d (%d columns and %d rows not as they were, a popup at "
           .. "least %gx%g; %d of its %d lines as they were) — %s", w.sub and "submenu" or "popup",
           rectWords(s.rect), n, cols, rows, w.minW, w.minH, same, lines,
@@ -7451,7 +7719,7 @@ do
       if c and near(c.rect, r) and alikeShare(c.profile, p, w.cols, w.rows) >= DRAWN_ALIKE then
         w.seen = { rect = r, profile = p, fillCols = ch.fillCols, fillRows = ch.fillRows }
         log(o, "a %s %s, alike at readings %d and %d", w.sub and "submenu" or "popup", rectWords(r), c.n, n)
-        return r
+        return answerOf(w.seen, p)
       end
       if not (c and near(c.rect, r)) then note("not alike yet") end
       w.candidate = { rect = r, profile = p, n = n }
@@ -8339,6 +8607,45 @@ local function menuRectOf(v)
   return nil
 end
 
+-- The windows of the plug-in's process around an item's click, as fields of one table (the file's
+-- locals are counted). The process of the plug-in an item is chosen for, or nil: its control's, or
+-- the window in front's.
+local pickWin = {}
+function pickWin.pid(o)
+  local ok, c = pcall(o.origin, o)
+  local pid = ok and c and c.app and c.app.pid or nil
+  if pid then return pid end
+  local a = host.window.active()
+  return a and a.app and a.app.pid or nil
+end
+
+-- The ids of the titled windows of process `pid` listed now, or nil when they cannot be listed.
+function pickWin.listed(pid)
+  if not pid then return nil end
+  local ok, list = pcall(host.window.list, { pids = { pid } })
+  if not (ok and type(list) == "table") then return nil end
+  local ids = {}
+  for _, w in ipairs(list) do ids[w.id] = true end
+  return ids
+end
+
+-- A window of the plug-in's process over the point of item click `k` that was not listed at the
+-- click, as words, or nil: a dialog the item opened, which covers the point — the item taken
+-- (_pickFollow). One listing, asked only before a click would be made again.
+function pickWin.over(k)
+  if not (k.pid and k.listed) then return nil end
+  local ok, list = pcall(host.window.list, { pids = { k.pid } })
+  if not (ok and type(list) == "table") then return nil end
+  for _, w in ipairs(list) do
+    local b = w.bounds
+    if not k.listed[w.id] and b and k.x >= b.x and k.x < b.x + b.w and k.y >= b.y and k.y < b.y + b.h then
+      return ("a new window of the plug-in's process, '%s' (id %s), is over the item's point"):format(
+        tostring(w.title), tostring(w.id))
+    end
+  end
+  return nil
+end
+
 -- Whether answer `m` shows menu `was`, the one an item was clicked in: the same place and size,
 -- and the same window where both answers name one — two tests on the list can answer the same
 -- menu, one with a window's id and one with only its rectangle.
@@ -8426,6 +8733,9 @@ function Overlay:_pickEnd(word, detail)
   self._pick = nil
   local label = tostring(p.c.label or "That control")
   local k = p.clicked
+  -- A click still pending at the bound — the popup drawn as at the click all that time, and nothing
+  -- of the plug-in's come over it (_pickFollow) — was not taken.
+  if word == "due" and k and k.pending then word = "untaken" end
   local function notChosen(err, said, logged)
     host.log.info((PICK_LOG .. "%s"):format(tostring(self.label), tostring(p.c.label), logged or ("not chosen — " .. err)))
     if said then host.speech.output(said, { interrupt = true }) end
@@ -8508,6 +8818,13 @@ function Overlay:_pickEnd(word, detail)
   -- "refused": refuseOutside's own check refused the point, said it and logged where; `detail` is
   -- its error value, `outside` or `covered`.
   return notChosen(detail, nil, "not chosen — refused, and said")
+end
+
+-- An item of the press's menu was clicked: a window that comes to the front after it, and is held, is
+-- that item's — a dialog — and not the menu (_menuHold, _menuRefocus).
+function Overlay:_menuItemClicked()
+  local st = self._menu
+  if st and st.press then st.press.itemClicked = true end
 end
 
 -- What is drawn at (x, y) over menu `m`, for control `c`: nil and how it was asked when it is the
@@ -8646,14 +8963,20 @@ function Overlay:_pickSeen(t, value, late)
       .. "(%d,%d)"):format(tostring(self.label), tostring(c.label), t.name, where,
       m.kind == "window" and (" (window id " .. tostring(m.id) .. ")") or "", how,
       tostring(item[1]), tostring(item[2]), x, y))
+    -- The plug-in's windows before the click, so that a dialog the item opens, however soon, is a
+    -- window that came after it (pickWin.over). Not for a click that is not followed.
+    local pid = p.retries > 0 and pickWin.pid(self) or nil
+    local listed = pickWin.listed(pid)
     host.input.click(x, y)
+    self:_menuItemClicked()
     if p.retries <= 0 then
       -- Not followed (`retries = 0`): chosen at its click.
       self._pick = nil
       self:_pickDone(p, true, nil)
       return
     end
-    p.clicked = { x = x, y = y, menu = m, tick = menuTick + (between and 1 or 0), clicks = 1, by = t }
+    p.clicked = { x = x, y = y, menu = m, tick = menuTick + (between and 1 or 0), clicks = 1, by = t,
+      pid = pid, listed = listed }
   end
   if not p.shoot then return choose(checked, late) end
   self:_pickShoot(t, m, x, y, choose)
@@ -8749,6 +9072,7 @@ function Overlay:_pickChained(p, t, m, x, y, item, how, between, ok, why, late)
     .. "once test '%s' sees a new popup, for up to %d ms"):format(tostring(self.label), tostring(p.c.label),
     tostring(item[1]), tostring(item[2]), x, y, how, t.name, MENU_LOOK_MS))
   host.input.click(x, y)
+  self:_menuItemClicked()
   -- Stage 2: the item clicked, its submenu awaited. Its own placing starts afresh.
   p.parent = { x = x, y = y, menu = m, by = t, tick = menuTick + ((between or late) and 1 or 0) }
   p.untilMs = host.now() + MENU_LOOK_MS
@@ -8777,6 +9101,7 @@ function Overlay:_pickSub(t, m, late)
     host.log.info((PICK_LOG .. "— choosing the submenu's item (%s,%s) at (%d,%d) (%s)"):format(tostring(self.label),
       tostring(c.label), tostring(item[1]), tostring(item[2]), x, y, how))
     host.input.click(x, y)
+    self:_menuItemClicked()
     if p.retries <= 0 then
       self._pick = nil
       self:_pickDone(p, true, nil)
@@ -8809,12 +9134,34 @@ function Overlay:_pickFollow(t, m, late)
       :format(t.name, m.x, m.y, m.w, m.h))
   end
   if not after then return end
+  -- A popup drawn exactly as at the click — or a reading of it that could not be taken — is the click
+  -- still pending: the plug-in has stopped drawing while it acts on it (VPS Avenger opening Logic's
+  -- file panel, the second Mac test of 2026-10-24, where the item was clicked four times). Waited for,
+  -- up to the bound the tick holds a pick to (MENU_LOOK_MS), and not taken if it is still so then;
+  -- only a popup drawn again and still open is a click the menu did not take, clicked again. A test
+  -- whose answer carries no `print` (newWindow) is followed by its rectangle, as before.
+  if k.menu.print ~= nil and (m.print == nil or m.print == k.menu.print) then
+    if not k.pending then
+      k.pending = true
+      host.log.info((PICK_LOG .. "— test '%s' sees the menu drawn as at the item's click: the click is "
+        .. "waited for, not made again"):format(tostring(self.label), tostring(p.c.label), t.name))
+    end
+    return
+  end
+  -- And a window of the plug-in's process that came over the item's point since the click: the item
+  -- was taken, whatever is still drawn under it.
+  local over = pickWin.over(k)
+  if over then return self:_pickEnd("taken", over) end
   if k.clicks > p.retries then return self:_pickEnd("untaken") end
   if not self.active or self:hwnd() ~= p.pinned then return self:_pickEnd("moved") end
   local covered, err = self:_pickCovered(p.c, m, k.x, k.y)
   if covered then return self:_pickEnd(covered, err) end
   k.clicks += 1
   k.tick = menuTick + (late and 1 or 0)
+  -- This click's picture is the one a frozen popup keeps from here on, and nothing of it is pending
+  -- yet: compared with the first click's, a popup that froze after a click made again would read as
+  -- drawn again, and be clicked once more for every reading.
+  k.menu, k.pending = m, nil
   host.log.info((PICK_LOG .. "— test '%s' still sees the menu at %d,%d %dx%d a tick after the "
     .. "item's click, which it did not take: clicking (%d,%d) again, %d of %d"):format(
     tostring(self.label), tostring(p.c.label), t.name, m.x, m.y, m.w, m.h, k.x, k.y, k.clicks,
@@ -9044,6 +9391,9 @@ function Overlay:_menuHold()
         -- that ends takes the press with it). Only it can have the step after the hold (see
         -- _menuRefocus) — not a dialog the menu leads to, which the hold moves on to below.
         p.menuWindow, p.menuFront = a.id, a
+        -- Held first after an item of the menu was clicked: the item's window, a dialog, not the
+        -- menu (the window given back after it, _menuRefocus).
+        p.dialog = p.itemClicked == true
         -- Nor is it the dialog a trip of its page waits for (trip:afterDialog).
         pages.menuHeld(self, a.id)
       end
@@ -9097,25 +9447,54 @@ function Overlay:_menuRefocus()
   local read, f = pcall(host.window.foreground)
   -- Once per press, brought back or not: the hold ends here either way, and the press with it.
   p.refocused = true
-  if not (read and type(f) == "table" and f.id == p.menuWindow and f.pid == p.pid
-    and f.shown == false) then
+  local hidden = read and type(f) == "table" and f.id == p.menuWindow and f.pid == p.pid and f.shown == false
+  -- THE WINDOW OF THE PRESS AFTER A DIALOG (since 0.13). The window that appeared after the press —
+  -- a dialog an item of its menu opened, held first after that item's click (`p.dialog`), Logic's
+  -- "Load Preset..." from VPS Avenger's drawn MENU; never a menu's own window — has gone, and in that same change the
+  -- keyboard went to another shown window of the same process that is no plug-in window of the
+  -- binding: the DAW's main window, where Logic leaves it when its file panel closes (the second
+  -- Mac test of VPS Avenger, 2026-10-24: "the window that appeared has gone", then nothing brought
+  -- back, and the overlay went down until the focus key). The window of the press is brought back
+  -- as for a hidden menu window, and only while it is listed with its class, title and size.
+  local main = nil
+  if not hidden and p.dialog and read and type(f) == "table" and f.pid == p.pid and f.shown ~= false
+    and f.id ~= p.window and f.id ~= p.menuWindow and p.base and p.base.hostOf then
+    local a = host.window.active()
+    if a and a.id == f.id and not p.base.hostOf(a) then main = a end
+  end
+  if not (hidden or main) then
     host.log.info(("[menu] '%s': no test sees the menu any more; the keyboard goes to %s, and the "
       .. "menu's window %s is id=%s of pid %s — nothing is brought back"):format(
       tostring(self.label), keyboardName(read, f), frontName(p.menuFront), tostring(p.menuWindow),
       tostring(p.pid)))
     return false
   end
-  local why = ("[menu] '%s': no test sees the menu any more, but its window %s still gets the "
+  local why = hidden and ("[menu] '%s': no test sees the menu any more, but its window %s still gets the "
     .. "keyboard and is not shown"):format(tostring(self.label), frontName(p.menuFront))
+    or ("[menu] '%s': the window that appeared after '%s' was pressed, %s, has gone, and the keyboard is "
+      .. "in %s of the same application, which is no plug-in window"):format(tostring(self.label),
+      tostring(p.control), frontName(p.menuFront), frontName(main))
   -- Windows reuses a window's handle once the window is gone: the window of the press must still
   -- be listed for its process, with its class, before it is brought forward. A menu item can close
   -- it or unload the plug-in. host.window.list lists titled windows only, so an untitled window of
-  -- the press is never brought back.
+  -- the press is never brought back. After a dialog its title and size must be the press's too, and
+  -- the dialog must be listed no more: one only behind another window is not gone.
   local listed, list = pcall(host.window.list, { pids = { p.pid } })
   local there = false
   if listed and type(list) == "table" then
     for _, w in ipairs(list) do
-      if w.id == p.window and w.class == p.front.class then
+      if main and w.id == p.menuWindow then
+        host.log.info(("%s — but the window that appeared is still listed, so nothing is brought back"):format(tostring(why)))
+        return false
+      end
+    end
+    for _, w in ipairs(list) do
+      local same = w.id == p.window and w.class == p.front.class
+      if same and main then
+        local fb, wb = p.front.bounds, w.bounds
+        same = w.title == p.front.title and fb ~= nil and wb ~= nil and fb.w == wb.w and fb.h == wb.h
+      end
+      if same then
         there = true
         break
       end
@@ -9128,8 +9507,8 @@ function Overlay:_menuRefocus()
   end
   if not there then
     host.log.info(("%s — the window of the press, %s, is not listed for its process with its "
-      .. "class (gone, untitled, or its id now another window's), so nothing is brought back")
-      :format(why, frontName(p.front)))
+      .. "%s (gone, untitled, or its id now another window's), so nothing is brought back")
+      :format(why, frontName(p.front), main and "class, title and size" or "class"))
     return false
   end
   local ok, answer = pcall(host.window.focus, p.window)
@@ -9446,6 +9825,8 @@ end
 function pg.endAway(P, announce, why, keepAsked)
   if not P.away then return end
   P.away, P.stage, P.held = false, nil, nil
+  -- The page key's hold, where the page was opened from the window in front (pg.fromWindow).
+  pg.keyHoldOut(P)
   P.returnSeq = (P.returnSeq or 0) + 1
   if not keepAsked then P.asked = nil end
   local group = pg.groupOf(P)
@@ -10716,6 +11097,77 @@ function pg.openPage(P)
   pg.showAtKey(P, place)
 end
 
+-- THE PAGE FROM THE WINDOW IN FRONT (since 0.13). The page key with the overlay not in front opens
+-- the page all the same when the window in front is a plug-in window of the page overlay's binding,
+-- with the DAW's panel in it, and the binding's `identify` says the panel shows its plug-in: the
+-- second Mac test of VPS Avenger (2026-10-24) had the key refused in Logic, the keyboard in
+-- Avenger's own drawn view reading as nowhere, until the window was dragged — while the
+-- avenger_control tool opens its panel from the window it finds, not from where the keyboard is.
+-- The group comes up on that panel through a held context, as a trip's arrival does — the window,
+-- the panel, `present` and the gate, and no question of where the keyboard is — and the page opens
+-- as it does from the plug-in. Unlike a trip's arrival `identify` is asked, so that no other
+-- plug-in's window of the DAW opens this page. The hold is the key's: it goes when away ends, and at
+-- once when nothing was shown. True when the key was handled, the page opened or not; false when no
+-- such window is in front, and the key's refusal follows.
+function pg.fromWindow(P)
+  local o = P.owner
+  local a = host.window.active()
+  if not a or P.trip or P.away then return false end
+  local c, entry = nil, nil
+  for _, ctx in ipairs(o.contexts) do
+    if not ctx.held and ctx.panelOf then
+      c, entry = ctx.panelOf(a)
+      if c then break end
+    end
+  end
+  if not c then return false end
+  P.held = { window = pg.windowPlace(a), entry = entry, keyed = true,
+    origin = { id = c.id, class = c.class, bounds = pg.rectOf(c.bounds), stay = c.stay } }
+  for _, g in ipairs(pg.groupOf(P)) do
+    local base = nil
+    for _, ctx in ipairs(g.contexts) do
+      if not ctx.held then
+        base = ctx
+        break
+      end
+    end
+    if base then
+      local held = pg.heldContextOf(P, base)
+      held.keyed = true
+      table.insert(g.contexts, 1, held)
+    end
+  end
+  for _, g in ipairs(pg.groupOf(P)) do g:_recheck() end
+  if not (o.active and not o.away) then
+    pg.keyHoldOut(P)
+    pg.plog(P, "the page key with the overlay not in front: '%s' is its plug-in's window, and the overlay "
+      .. "did not come up on its panel — not opened", tostring(a.title))
+    return false
+  end
+  pg.plog(P, "the page key with the overlay not in front, in its plug-in's window '%s': the overlay comes "
+    .. "up on the DAW's panel there, and the page opens", tostring(a.title))
+  pg.openPage(P)
+  -- Nothing shown, nor waiting to be: the hold goes, and the ordinary match decides again.
+  if not P.asked and not P.wanted then pg.keyHoldOut(P) end
+  return true
+end
+
+-- The page key's hold out of the group (pg.fromWindow): its held contexts, and the place while it is
+-- still the key's. Looked at again on the next turn. Idempotent.
+function pg.keyHoldOut(P)
+  if P.held and P.held.keyed then P.held = nil end
+  for _, g in ipairs(pg.groupOf(P)) do
+    local had = false
+    for i = #g.contexts, 1, -1 do
+      if g.contexts[i].keyed then
+        table.remove(g.contexts, i)
+        had = true
+      end
+    end
+    if had then recheckOnNextTurn(g) end
+  end
+end
+
 -- The page key (§2.2): the recovery first, then the first case that applies.
 function pg.keyPressed(P)
   local o = P.owner
@@ -10748,6 +11200,7 @@ function pg.keyPressed(P)
     pg.plog(P, "the page key in the plug-in: the page opens")
     return pg.openPage(P)
   end
+  if not o.active and pg.fromWindow(P) then return end
   pg.plog(P, "the page key with the overlay not in front — in front: %s", frontName(host.window.active()))
   pg.say(P.spec.notHere or (tostring(o.label) .. " is not in front; its page opens from there."), true)
 end

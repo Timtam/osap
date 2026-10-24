@@ -748,7 +748,7 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
                 ),
             },
             front_words(sh, native.hwnd(), front),
-            if native.on_top_at_centre() { "yes" } else { "NO, something covers it" },
+            if native.on_top_at_centre() { "yes".to_string() } else { format!("NO, {} is there", native.covering_at_centre()) },
         ),
     );
     if explain {

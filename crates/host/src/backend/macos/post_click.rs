@@ -43,6 +43,55 @@ use crate::errors::Reason;
 // - `NOT_ANSWERING`: the window's program did not answer an accessibility question a moment ago
 //   (`ax::is_busy`), or the one this click asked: its window's place could not be read.
 
+/// Whether this process may post events, by the two checks there are: the post-event check
+/// (`CGPreflightPostEventAccess`) and Accessibility (`AXIsProcessTrusted`), which is what grants it.
+/// They can disagree: in the second Mac test (macOS 26.6, 2026-10-24) the post-event check went on
+/// answering "denied" in a process that had got Accessibility during its run, while its clicks were
+/// taken. So a disagreement is no refusal — a click's own effect decides — and only both saying no
+/// is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PostAccess {
+    Granted,
+    /// Accessibility granted, the post-event check still "denied".
+    Disagree,
+    Denied,
+}
+
+impl PostAccess {
+    pub fn of(preflight: bool, trusted: bool) -> PostAccess {
+        match (preflight, trusted) {
+            (true, _) => PostAccess::Granted,
+            (false, true) => PostAccess::Disagree,
+            (false, false) => PostAccess::Denied,
+        }
+    }
+
+    /// Whether a posted click is refused (`NO_POST_ACCESS`): only where neither check allows it.
+    pub fn refuses(self) -> bool {
+        self == PostAccess::Denied
+    }
+
+    /// The log line, said when the state changes. Never "restart": Accessibility reaches the running
+    /// process (`perm.rs`, ACCESSIBILITY_NOTE), and while it is granted nothing a restart would mend
+    /// is known.
+    pub fn line(self) -> &'static str {
+        match self {
+            PostAccess::Granted => "input: post-event access granted",
+            PostAccess::Disagree => {
+                "input: the post-event check reads DENIED while Accessibility is granted — the two \
+                 checks disagree, so the events are posted all the same, and whether a click did \
+                 anything is the click's own effect to show"
+            }
+            PostAccess::Denied => {
+                "input: post-event access DENIED — Accessibility is not granted, so every synthesised \
+                 click and keystroke from here on is discarded by the window server without a word. \
+                 Grant this application Accessibility under System Settings > Privacy & Security; it \
+                 takes effect in the running application."
+            }
+        }
+    }
+}
+
 /// What the event-source user data field (`kCGEventSourceUserData`) carries on every event of a
 /// posted click: the host's own, as `keys::PASS_ON_MARK` marks a key passed on. The key tap sees no
 /// mouse event; the mark is there for whatever reads the events after us — a tap of the program's,
@@ -106,6 +155,21 @@ pub fn line(window: isize, number: u32, pid: i32, exe: &str, at: (f64, f64), scr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The second Mac test's finding 20: the post-event check "denied" with Accessibility granted is
+    /// no refusal and says no restart; only both saying no refuses, and nothing says restart.
+    #[test]
+    fn the_post_event_check_alone_refuses_nothing_and_no_line_says_restart() {
+        assert_eq!(PostAccess::of(true, false), PostAccess::Granted);
+        assert_eq!(PostAccess::of(false, true), PostAccess::Disagree);
+        assert_eq!(PostAccess::of(false, false), PostAccess::Denied);
+        assert!(!PostAccess::Disagree.refuses() && !PostAccess::Granted.refuses() && PostAccess::Denied.refuses());
+        for a in [PostAccess::Granted, PostAccess::Disagree, PostAccess::Denied] {
+            assert!(!a.line().contains("restart"), "{a:?}: {}", a.line());
+            assert!(a.line().starts_with("input: "));
+        }
+        assert!(PostAccess::Disagree.line().contains("disagree"));
+    }
 
     const WINDOW: Frame = Frame { x: 100.0, y: 50.0, w: 400.0, h: 300.0 };
     /// The window above with a title bar of 28 points.

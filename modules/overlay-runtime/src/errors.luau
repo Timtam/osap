@@ -283,7 +283,10 @@ return {
       message = "trip '…' of this module holds the module's keys",
       entries = { "trip-handover" },
     },
-    capture_raised = { code = "failed", message = "capturing … raised: …", entries = { "trip-handover" } },
+    capture_raised = { code = "failed", message = "capturing … raised: …", entries = { "trip-handover", "o-holdkeys" } },
+
+    -- ── O:holdKeys, at the call ──
+    hold_not_in_front = { code = "not_in_front", message = "the overlay is not in front", entries = { "o-holdkeys" } },
 
     -- ── O:pageKey ──
     key_parse = { code = "invalid", message = "… is not a key spec", entries = { "o-pagekey" } },

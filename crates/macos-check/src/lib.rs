@@ -203,6 +203,7 @@ pub fn page_calls() {
     let _: fn(&Native) -> bool = Native::is_shown;
     let _: fn(&Native) -> isize = Native::hwnd;
     let _: fn(&Native) -> bool = Native::on_top_at_centre;
+    let _: fn(&Native) -> String = Native::covering_at_centre;
     let _: fn(&Native, &str) -> Result<(), String> = Native::post_json;
     let _: fn(&Native) -> Option<String> = Native::memory;
 }
@@ -429,6 +430,13 @@ pub fn own_window_calls() -> (fn(), fn() -> bool) {
     (backend::start_own_windows, backend::take_became_active)
 }
 
+/// The answer of a permission's request that the Permissions page's tick takes (`gui.rs`), and the
+/// time spent subscribing to applications' notifications that the pump's line takes (`lib.rs`).
+/// Named for the reason `app_calls` names its calls.
+pub fn answer_and_subscribe_calls() -> (fn() -> Option<backend::PermissionAnswer>, fn() -> u128) {
+    (backend::take_permission_answer, backend::take_subscribe_ms)
+}
+
 /// What the Permissions page and the start announcement say (`backend/grants.rs`) and what they
 /// say of a translocated copy (`portable.rs`), as `gui.rs` calls them. Named for the reason
 /// `permission_calls` names its calls.
@@ -440,6 +448,7 @@ pub fn grants_calls() {
     let _: fn(&[backend::Permission]) -> Vec<grants::Shown> = grants::shown;
     let _: fn(&[grants::Shown], &[backend::Permission]) -> Vec<String> = grants::changes;
     let _: fn(&[grants::Shown], &[backend::Permission]) -> String = grants::rechecked;
+    let _: fn(&[grants::Shown], &[backend::Permission], &backend::PermissionAnswer) -> Vec<String> = grants::answered;
     let _: fn(&[backend::Permission], &str, Option<&str>, bool) -> grants::Start = grants::start;
     let _: fn(&portable::Translocation) -> Option<String> = portable::Translocation::spoken;
     let _: fn(&portable::Translocation) -> Option<String> = portable::Translocation::terminal_line;

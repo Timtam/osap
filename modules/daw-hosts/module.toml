@@ -1,7 +1,10 @@
 id = "com.platform.daw-hosts"
 name = "DAW host definitions"
 # 0.2.3 hands host.window an entry's matcher without the entry's own fields, which it raises for.
-version = "0.2.3"
+# 0.3.0 leaves Logic's file panels out of its plug-in windows (their identifier ends in -panel), and
+# its focus key's own click into a plug-in's panel begins a stay when Logic reports no focus after
+# it (host.window.recheck's `entered`, which the overlay runtime 0.13 reads).
+version = "0.3.0"
 license = "GPL-3.0-or-later"
 
 # A code module: its source is evaluated inside every VM that depends on it, so the matchers

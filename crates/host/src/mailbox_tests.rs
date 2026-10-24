@@ -121,7 +121,7 @@ fn kind_of(ev: &Event) -> &'static str {
         Event::Pad { .. } => "pad",
         Event::Activate { .. } => "activate",
         Event::Initial { .. } => "initial",
-        Event::Focus => "focus",
+        Event::Focus { .. } => "focus",
         Event::After { .. } => "after",
         Event::Every { .. } => "every",
         Event::Read(_) => "read",
@@ -164,7 +164,7 @@ impl MailHost for Host {
                 let hook = lua.globals().get::<Option<Function>>("prewarm").unwrap_or(None);
                 window("window trigger", crate::initial_call(lua, win.as_deref(), reprime, hook))
             }
-            Event::Focus => window("focus change", crate::focus_call(lua)),
+            Event::Focus { entered } => window("focus change", crate::focus_call(lua, entered.as_deref())),
             Event::Setting { reg, key, new, old, setting_of } => {
                 crate::open_on_change(&self.settings, setting_of, reg, &key, &new, old.as_ref())
             }
@@ -522,7 +522,7 @@ fn the_limit_drops_inputs_only() {
     assert_eq!(call(&h, &a, 1, "n = n + 1", true), Delivered::Dropped, "the 257th key");
     assert_eq!(say(&h, &a, 1, "a timer", false), Delivered::Queued, "not an input: never dropped");
     assert_eq!(
-        mailbox::deliver(&*h, 1, &a, Event::Focus),
+        mailbox::deliver(&*h, 1, &a, Event::Focus { entered: None }),
         Delivered::Queued,
         "a window event waits too"
     );
@@ -573,14 +573,26 @@ fn focus_and_axes_fold_into_the_last_one_only() {
     let a = vm(&h, 1);
     run(&a, "host.window.onFocus(function() heard[#heard + 1] = 'focus' end)");
     assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
-    assert_eq!(mailbox::deliver(&*h, 1, &a, Event::Focus), Delivered::Queued);
+    assert_eq!(mailbox::deliver(&*h, 1, &a, Event::Focus { entered: None }), Delivered::Queued);
     say(&h, &a, 1, "key", true);
-    assert_eq!(mailbox::deliver(&*h, 1, &a, Event::Focus), Delivered::Queued, "after the key: a recheck of its own");
-    assert_eq!(mailbox::deliver(&*h, 1, &a, Event::Focus), Delivered::Dropped, "folded into the last");
+    assert_eq!(mailbox::deliver(&*h, 1, &a, Event::Focus { entered: None }), Delivered::Queued, "after the key: a recheck of its own");
+    assert_eq!(mailbox::deliver(&*h, 1, &a, Event::Focus { entered: None }), Delivered::Dropped, "folded into the last");
     assert_eq!(h.mail.len(1), 3);
     assert!(task::test_release(&*h, "w", Value::Nil));
     mailbox::run_queued(&*h);
     assert_eq!(heard(&a), "focus | key | focus");
+
+    // A recheck that told of a module's own click, folded into a plain round queued before it:
+    // the one round that runs is handed the click; a plain round folded into it keeps it.
+    run(&a, "heard = {}; host.window.onFocus(function(info) heard[#heard + 1] = info.entered and ('entered ' .. info.entered.window .. ' at ' .. info.entered.x .. ',' .. info.entered.y .. ' by ' .. info.entered.module) or 'none' end)");
+    assert_eq!(call(&h, &a, 1, "wait('w2')", false), Delivered::Parked);
+    let click = std::rc::Rc::new(crate::Entered { window: 21, x: 205.0, y: 121.0, module: "com.platform.daw-hosts".into(), at: 7 });
+    assert_eq!(mailbox::deliver(&*h, 1, &a, Event::Focus { entered: None }), Delivered::Queued);
+    assert_eq!(mailbox::deliver(&*h, 1, &a, Event::Focus { entered: Some(click) }), Delivered::Dropped, "folded into the last");
+    assert_eq!(mailbox::deliver(&*h, 1, &a, Event::Focus { entered: None }), Delivered::Dropped, "folded, the click kept");
+    assert!(task::test_release(&*h, "w2", Value::Nil));
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), "focus | entered 21 at 205,121 by com.platform.daw-hosts");
 
     // Axes.
     run(&a, "heard = {}");
@@ -642,7 +654,7 @@ fn every_kind_of_handler_waits_at_a_read() {
     // A focus change.
     let a = vm(&h, 3);
     run(&a, &format!("host.window.onFocus(function() {} end)", read("focus", 9863)));
-    assert_eq!(mailbox::deliver(&*h, 3, &a, Event::Focus), Delivered::Parked);
+    assert_eq!(mailbox::deliver(&*h, 3, &a, Event::Focus { entered: None }), Delivered::Parked);
     modules.push((a, "focus 9863,5"));
     // A setting's onChange, from the dialog: in the queued phase.
     let a = vm(&h, 4);

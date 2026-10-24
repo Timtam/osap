@@ -154,7 +154,9 @@ pub(crate) enum Event {
     Activate { win: Box<WinInfo>, upto: i64 },
     /// The report of the window already in front (`onTrigger { initial = true }`).
     Initial { win: Option<Box<WinInfo>>, reprime: bool },
-    Focus,
+    /// A focus round; `entered`, the module's own click a `host.window.recheck` that asked for it
+    /// told of (`crate::Entered`).
+    Focus { entered: Option<std::rc::Rc<crate::Entered>> },
     /// A one-shot timer, still in the timer list and marked queued until it runs.
     After { token: i64 },
     /// A recurring timer: never queued — skipped while its module is busy.
@@ -508,14 +510,24 @@ fn say_limit(module: &str, k: Budget, n: u32, what: &str, ms: u128) {
     }
 }
 
-/// Folds `ev` into what is queued, if it folds: a focus change after a focus change queued last;
+/// Folds `ev` into what is queued, if it folds: a focus change after a focus change queued last,
+/// which takes a click the new one told of;
 /// an axis after the same listener's same axis queued last, whose value it replaces; a held key's
 /// repeat while the last of the same key queued is a repeat too — of this hold: a press of the key
 /// queued after a repeat starts another hold, whose repeats keep one step of their own; a page's
 /// `onReady` after the same page's and build's queued last.
 fn fold(queue: &mut VecDeque<Queued>, ev: &mut Event) -> bool {
     match ev {
-        Event::Focus => matches!(queue.back(), Some(Queued { ev: Event::Focus, .. })),
+        // One round for both: a click a module told of is kept for it, the newest one.
+        Event::Focus { entered } => match queue.back_mut() {
+            Some(Queued { ev: Event::Focus { entered: queued }, .. }) => {
+                if entered.is_some() {
+                    *queued = entered.take();
+                }
+                true
+            }
+            _ => false,
+        },
         Event::Page { page, build, call: PageCall::Ready } => matches!(
             queue.back(),
             Some(Queued { ev: Event::Page { page: p, build: b, call: PageCall::Ready }, .. }) if p == page && b == build

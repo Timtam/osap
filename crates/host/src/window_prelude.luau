@@ -412,8 +412,8 @@ function W.onTrigger(matcher, opts, cb)
 end
 
 -- Focus-change callbacks: fired when the keyboard focus moves, including within
--- the same top-level window (used to detect focus entering an embedded plugin).
--- The callback is checked here for the reason onTrigger's is.
+-- the same top-level window (used to detect focus entering an embedded plugin), each
+-- handed the round's `info`. The callback is checked here for the reason onTrigger's is.
 function W.onFocus(cb)
   if type(cb) ~= "function" then
     error("host.window.onFocus: the callback is a function, not a " .. type(cb), 2)
@@ -555,11 +555,14 @@ function W._dispatchInitial(win, reprime, beforeFirst, waited)
   return fired
 end
 
-function W._dispatchFocus(waited)
+-- `info`: the round's — `entered`, where a module's host.window.recheck told of its own click.
+-- One table for the round, handed to every callback of the VM.
+function W._dispatchFocus(waited, info)
   local started = host.now and host.now() or nil
   local parkedBefore = parked(waited)
+  info = info or {}
   for _, cb in ipairs(focusCbs) do
-    cb()
+    cb(info)
   end
   if started then
     local ms = host.now() - started - (parked(waited) - parkedBefore)

@@ -233,6 +233,9 @@ enum Look {
     Forward,
     /// Re-check now: the count, and what changed or that nothing did — the press asked.
     Recheck,
+    /// A request a permission's button made has answered: what changed, and what to try next where
+    /// it was not granted (`backend::grants::answered`).
+    Answer(crate::backend::PermissionAnswer),
 }
 
 /// Sets a label's text where it differs, and says whether it did: a label set to what it already
@@ -1261,6 +1264,7 @@ pub fn run_gui(
                         Look::Built => Vec::new(),
                         Look::Forward => crate::backend::grants::changes(&shown.borrow(), &all),
                         Look::Recheck => vec![crate::backend::grants::rechecked(&shown.borrow(), &all)],
+                        Look::Answer(a) => crate::backend::grants::answered(&shown.borrow(), &all, &a),
                     };
                     if let (Some(line), Some(text)) = (&vo_line, crate::speech::voiceover_applescript_page()) {
                         if relabel(line, &text) && look != Look::Built {
@@ -1828,6 +1832,9 @@ pub fn run_gui(
                 dialog.end_modal(ID_CANCEL);
             }
             QuitStep::EndLoop => {
+                // Which way out it was, in the log: the window's Quit, the tray's, the quit key,
+                // Command-Q in a page.
+                crate::logging::line("host", &format!("quitting — {}", crate::instance::take_quit_way()));
                 // First, so a second start from here on is told this copy is quitting (and
                 // waits for it) instead of being told a window will be shown.
                 crate::instance::begin_quit();
@@ -1838,7 +1845,10 @@ pub fn run_gui(
         };
         frame.on_menu_selected(move |event| match event.get_id() {
             MENU_HIDE => hide_manager(&frame),
-            MENU_QUIT => quit(),
+            MENU_QUIT => {
+                crate::instance::quit_because("the module window's Quit");
+                quit()
+            }
             _ => {}
         });
 
@@ -1905,7 +1915,10 @@ pub fn run_gui(
                     show_manager(&frame);
                 }
             }
-            MENU_QUIT => quit(),
+            MENU_QUIT => {
+                crate::instance::quit_because("the tray's Quit");
+                quit()
+            }
             _ => {}
         });
 
@@ -2045,6 +2058,15 @@ pub fn run_gui(
                         if frame.is_shown() && notebook.selection() == page as i32 {
                             look(Look::Forward);
                         }
+                    }
+                }
+                // A request a permission's button made has answered, on its own thread: the page
+                // reads the permissions again and says what changed — "granted" at once, where the
+                // press said nothing yet (the second Mac test, 2026-10-24) — whether or not it is
+                // the page shown, since its own button asked.
+                if let Some(answer) = crate::backend::take_permission_answer() {
+                    if let Some(look) = &perm_look {
+                        look(Look::Answer(answer));
                     }
                 }
                 // Only ever unticks: the speech pump switched Personal Voice off after macOS did

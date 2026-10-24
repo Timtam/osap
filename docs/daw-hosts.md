@@ -61,18 +61,19 @@ Measure an origin rather than guess it: from the window's own accessibility elem
 | --- | --- | --- |
 | REAPER | every `#32770` of the process (as ReaHotkey's criteria), and bridged plug-ins' `REAPERb32host` windows; `chrome` its list views, buttons, edits and wrapper | standard windows titled like a plug-in window — `FX: …` (the FX chain) or a format first, `VST3i: …` (a plug-in floated out of it); origin right of the FX list — the leftmost surface that begins left of 240 points and does not span the window — plus 9, and 52 down, in the chain; 22 down in a floating window |
 | Ableton Live | `Vst3PlugWindow`, `AbletonVstPlugClass`, `#32770` of the process | titled windows of `com.ableton.live` — its main window too, until a Mac session says what tells it from a plug-in window, so the focus key leaves this entry out (`focusKey = false`); origin 16 down from the window's top, from its left edge: the starting values of a VPS Avenger tool that marks them not calibrated, unmeasured here |
-| Logic Pro | — | titled `AXDialog` windows of `com.apple.logic10`; origin 2 in and under Logic's header, read off the header when it publishes it, 88 down from the window's top when not |
+| Logic Pro | — | titled `AXDialog` windows of `com.apple.logic10` but its file panels (an identifier ending in `-panel`); origin 2 in and under Logic's header, read off the header when it publishes it, 88 down from the window's top when not |
 
 REAPER's Windows entry takes every dialog of its process because a plug-in's own dialogs are such windows too (Kontakt's "Content Missing" is found there by its own control), so the focus key narrows it with `focusTarget = { title = <the plug-in window titles> }`.
 
 ## Example entries {#example}
 
-Logic's, as daw-hosts has it: macOS only, found by bundle, subrole and a non-blank title, with an origin function of its own.
+Logic's, as daw-hosts has it: macOS only, found by bundle, subrole and a non-blank title, its file panels left out by their identifier (the system's open and save panels are `open-panel` and `save-panel`; a plug-in window's is empty), with an origin function of its own.
 
 ```luau
 local logic = {
   { daw = "Logic Pro",
-    macos = { app = { bundleId = "com.apple.logic10" }, axSubrole = "AXDialog", title = { pattern = "%S" } },
+    macos = { app = { bundleId = "com.apple.logic10" }, axSubrole = "AXDialog", title = { pattern = "%S" },
+      axIdentifier = { ["not"] = { suffix = "-panel" } } },
     pluginOrigin = { macos = logicPluginOrigin } },
 }
 ```
@@ -126,6 +127,6 @@ With a `pluginOrigin` for the entry, the key reads where the keyboard is ([`focu
 - **Inside** the plug-in — the chain is the window alone, or the focused element's centre lies in the plug-in's panel: it asks every overlay to look again and says the title. That is one more evaluation for every overlay, not a fresh start: it undoes an `identify` that could not tell yet, not a verdict the overlay keeps for the stay.
 - **Not readable** — the chain is empty, or ends in another application's window: it says "could not tell whether the keyboard is in" and the title, and clicks nothing.
 - **On the DAW's own controls**, and the entry gives no origin for the window: it says "could not tell where the plugin is in" and the title, and clicks nothing.
-- **On the DAW's own controls**, with an origin: it asks the first focusable element inside the panel to take the focus ([`host.element.focusWithin`](api/element.md#host-element-focuswithin)), and when none does, clicks three points in from the panel's corner. A quarter of a second later it reads again and says the title if the keyboard is inside, "could not move the keyboard into" and the title if it is on the DAW's controls, and "could not tell whether the keyboard is in" and the title if the chain was empty or another application's — after asking and after the click alike.
+- **On the DAW's own controls**, with an origin: it asks the first focusable element inside the panel to take the focus ([`host.element.focusWithin`](api/element.md#host-element-focuswithin)), and when none does, clicks three points in from the panel's corner. A quarter of a second later it reads again and says the title if the keyboard is inside, "could not move the keyboard into" and the title if it is on the DAW's controls, and "could not tell whether the keyboard is in" and the title if the chain was empty or another application's — after asking and after the click alike, but for one case. After its own click, a chain that is empty with the plug-in's window still in front is what Logic reports whenever a plug-in's own drawn view has the keyboard: then the key tells every overlay of its click — [`host.window.recheck { entered = … }`](api/window.md#host-window-recheck), the window and the point — and says the title, and the overlay runtime begins a stay in that panel in the round the click asked for, and in no other ([the stay](api/overlay.md#o-attachembedded-macos); since daw-hosts 0.3.0 and the runtime 0.13, the maintainer's decision of 2026-10-24). Logic's file panels (an identifier ending in `-panel`) are no plug-in windows of its entry, so the key never finds one.
 
 An entry with no `pluginOrigin` for the platform gets the Windows behaviour: the title, and nothing else.

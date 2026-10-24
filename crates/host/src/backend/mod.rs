@@ -83,6 +83,24 @@ pub(crate) use macos::own::take_became_active;
 pub(crate) fn take_became_active() -> bool {
     false
 }
+/// The milliseconds the pump spent subscribing to applications' accessibility notifications since
+/// the last call — see `macos::watch` — for the pump's line.
+#[cfg(target_os = "macos")]
+pub(crate) use macos::watch::take_subscribe_ms;
+/// Nothing is subscribed to so anywhere else.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn take_subscribe_ms() -> u128 {
+    0
+}
+/// The answer to a permission request a button of the Permissions page made, once it has come —
+/// see `macos::perm`, and [`PermissionAnswer`]. For the page, which reads the permissions again then.
+#[cfg(target_os = "macos")]
+pub(crate) use macos::perm::take_permission_answer;
+/// No permission is asked for anywhere else.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn take_permission_answer() -> Option<PermissionAnswer> {
+    None
+}
 /// `host.gui.webview`'s window on a Mac — see `macos::page` — with the interface `webview_win.rs`
 /// has, which `webview_lua.rs` uses as it uses that one; `crates/macos-check` names it, so the two
 /// cannot drift apart unseen on Windows, and `page-check` builds pages with it too.
@@ -303,6 +321,13 @@ pub struct Permission {
     /// be pestering somebody about a feature they never turned on. Input Monitoring is optional
     /// until the run shows captured keys not reaching the overlay (`macos/evidence.rs`).
     pub blocking: bool,
+    /// What to do when the application is in the list and switched on and the permission is still
+    /// missing — an entry of an earlier build's, which an ad-hoc signature's new identity does not
+    /// match (`macos/enrol.rs`, `stale_entry`): said at the end of its line, and by Re-check now
+    /// once its pane was opened. `None` where that cannot be the case.
+    pub stale: Option<String>,
+    /// Whether its settings pane was opened in this run, by its button.
+    pub pane_opened: bool,
 }
 
 /// The permissions this platform needs the user to grant. Empty where there are none.
@@ -334,6 +359,18 @@ pub struct Asked {
 impl Asked {
     /// Nothing was asked: the pane opens, and the pane speaks for itself.
     pub const PANE: Asked = Asked { open_pane: true, say: None };
+}
+
+/// The answer to a request a press of a permission's button made on a thread of its own: which
+/// permission, whether the system answered granted, and what the page says beside what changed
+/// when it did not — the press said nothing yet, so as not to tell somebody to press again for a
+/// permission the next moment proves granted (the second Mac test of 2026-10-24, its finding 19).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PermissionAnswer {
+    pub name: &'static str,
+    pub granted: bool,
+    pub say: Option<&'static str>,
 }
 
 /// Asks the system for a permission, where there is something to ask — see [`Asked`]. Where
@@ -5272,6 +5309,14 @@ mod permission_evidence_wiring_tests {
             assert!(GUI[from..from + 400].contains("look(Look::Forward);"), "{trigger}");
         }
         assert!(GUI.contains("recheck.on_click(move |_| look(Look::Recheck));"));
+        // A button's request that answered on its own thread: the page reads again and says it
+        // (the second Mac test's finding 19), and the press itself says nothing before the answer.
+        let answer = at(GUI, "if let Some(answer) = crate::backend::take_permission_answer() {");
+        assert!(GUI[answer..answer + 200].contains("look(Look::Answer(answer));"));
+        const PERM: &str = include_str!("macos/perm.rs");
+        let ask = body(PERM, "fn ask_for_input_monitoring() -> Asked {");
+        assert!(ask.contains("*PERMISSION_ANSWER.lock().unwrap_or_else(|e| e.into_inner()) = Some(PermissionAnswer {"));
+        assert!(ask.contains("Ok(_) => Asked { open_pane: false, say: None },"));
         // Relabelled in place, and only where the text changed.
         assert!(GUI.contains("relabel(&head, &crate::backend::grants::head(&all));"));
         assert!(GUI.contains("relabel(line, &crate::backend::grants::line(p));"));
@@ -5367,7 +5412,13 @@ mod not_known_tests {
         let at = |s: &str| ask.find(s).unwrap_or_else(|| panic!("{s}"));
         assert!(at("ElementAsk::Press { .. } | ElementAsk::FocusPut { .. }) {") < at("question::begin();"));
         assert!(at("question::begin();") < at("ax::find("));
-        assert!(at("ax::focus_within(") < at("answer.settled(question::end().map(|why| (why, false)))"));
+        assert!(at("ax::focus_within(") < at("let why = question::end();"));
+        assert!(at("let why = question::end();") < at("answer.settled(why.map(|why| (why, false)))"));
+        // An application slow earlier in the turn is told so before the question begins, and a walk
+        // that ran out of time notes it after the question ends (`budget::SlowThisTurn`).
+        assert!(at("ax::slow_this_turn(p)") < at("question::begin();"));
+        assert!(at("let why = question::end();") < at("ax::ran_out_this_turn(pid);"));
+        assert!(body(MOD, "    fn pump_pending(&self, events: &mut dyn HostEvents) {").contains("ax::next_turn();"));
         let root = body(AX, "fn root_of(hwnd: isize, what: &str)");
         assert!(root.contains("Some(e) if skip_busy(e.pid, what) => {") && root.contains("not_known(HostError::of(&element::QUARANTINED));"));
         let busy = body(AX, "pub(super) fn note_busy(pid: i32) {");

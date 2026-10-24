@@ -153,6 +153,23 @@ Input Monitoring: Keys an overlay took have reached it in this run.
 Granted: 2 of the 2 permissions this application needs. Nothing has changed.
 ```
 
+**On an ad-hoc build**, a missing Accessibility — and an Input Monitoring that reads denied — has
+one more sentence at the end of its line, and *Re-check now* says it too once that permission's
+pane was opened from its button and it is still missing: the entry in the list may be an earlier
+build's ([below](#when-the-switch-is-on-and-the-application-still-cannot-use-it)). The second Mac test of 2026-10-24
+spent two sessions with Accessibility switched on for an earlier copy:
+
+```
+Granted: 1 of the 2 permissions this application needs. Nothing has changed. Accessibility: If it is in the list and on already, that entry is an earlier copy's: remove it with the minus button, or run tccutil reset Accessibility com.automationplatform.app in Terminal, then quit and reopen.
+```
+
+The start lines say it as `accessibility earlier copy` and `input monitoring earlier copy`.
+
+**The Input Monitoring button** asks macOS on a thread of its own and says nothing at the press;
+when the answer comes, the page reads the permissions again and says what changed —
+"Input Monitoring: now granted." — and only where the answer was not granted, that pressing the
+button again asks a second way.
+
 When the application runs from a translocated copy, the page says so under its head, with
 what it costs and, in a read-only field labelled "The Terminal line, to copy:", the one line
 that ends it ([below](#a-translocated-copy)).

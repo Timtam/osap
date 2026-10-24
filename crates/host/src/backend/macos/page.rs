@@ -707,6 +707,7 @@ fn key_equivalent(window: &NSWindow, state: &PageState, event: &NSEvent) -> bool
                 "gui",
                 &format!("page '{}': Command-Q in an application page — the application quits, as from its Quit item", state.title),
             );
+            crate::instance::quit_because("Command-Q in a page of this application");
             crate::instance::request_quit();
             true
         }
@@ -1691,10 +1692,31 @@ impl Native {
     /// Whether the window is the one AppKit names at the point in its middle — on top there rather
     /// than covered — for the log.
     pub(crate) fn on_top_at_centre(&self) -> bool {
-        let Some(mtm) = MainThreadMarker::new() else { return false };
+        self.number_at_centre().is_some_and(|n| n == self.window.windowNumber())
+    }
+
+    /// The window AppKit names at the point in the middle of this one, for the log line that says
+    /// it covers the page: its number, and its owner and level from the window server's list. Every
+    /// page show of the second Mac test (2026-10-24) logged "something covers it" while the page had
+    /// the keyboard in 11 to 42 ms, and nothing said what.
+    pub(crate) fn covering_at_centre(&self) -> String {
+        let Some(n) = self.number_at_centre() else {
+            return "nothing that can be asked off the main thread".to_string();
+        };
+        match super::ax::window_owner(n as u32) {
+            Some((pid, layer)) => {
+                format!("window {n} of '{}' (pid {pid}, level {layer})", super::ax::exe_for_pid(pid))
+            }
+            None => format!("window {n}, which the window server's list of windows on screen does not carry"),
+        }
+    }
+
+    /// The number of the window AppKit names at the point in this one's middle, on the main thread.
+    fn number_at_centre(&self) -> Option<isize> {
+        let mtm = MainThreadMarker::new()?;
         let f = self.window.frame();
         let centre = NSPoint::new(f.origin.x + f.size.width / 2.0, f.origin.y + f.size.height / 2.0);
-        NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(centre, 0, mtm) == self.window.windowNumber()
+        Some(NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(centre, 0, mtm))
     }
 
     /// Hands the page one message: JSON the host encoded, as the one argument of a constant script

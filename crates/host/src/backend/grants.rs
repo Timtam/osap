@@ -38,9 +38,10 @@ pub fn shown(perms: &[Permission]) -> Vec<Shown> {
 /// decided it where something was weighed, then what it is for.
 pub fn line(p: &Permission) -> String {
     let optional = if p.blocking { "" } else { ", optional" };
+    let stale = p.stale.as_ref().map(|s| format!(" {s}")).unwrap_or_default();
     match &p.judged {
-        Some(judged) => format!("{} — {}{optional}. {judged} {}", p.name, p.state.word(), p.without),
-        None => format!("{} — {}{optional}. {}", p.name, p.state.word(), p.without),
+        Some(judged) => format!("{} — {}{optional}. {judged} {}{stale}", p.name, p.state.word(), p.without),
+        None => format!("{} — {}{optional}. {}{stale}", p.name, p.state.word(), p.without),
     }
 }
 
@@ -96,11 +97,32 @@ pub fn changes(before: &[Shown], perms: &[Permission]) -> Vec<String> {
     said
 }
 
-/// What `Re-check now` says: the count, then what changed, or that nothing did.
+/// What `Re-check now` says: the count, then what changed, or that nothing did — and, for each
+/// permission still missing after its pane was opened that may have an earlier copy's entry, what
+/// to do about that entry. "Nothing has changed" alone, said twice over two whole sessions of the
+/// second Mac test while Accessibility sat switched on for an earlier build, left nothing to try.
 pub fn rechecked(before: &[Shown], perms: &[Permission]) -> String {
     let changed = changes(before, perms);
     let tail = if changed.is_empty() { "Nothing has changed.".to_string() } else { changed.join(" ") };
-    format!("{} {tail}", count(perms))
+    let stale: String = perms
+        .iter()
+        .filter(|p| p.state == Grant::Missing && p.pane_opened)
+        .filter_map(|p| p.stale.as_ref().map(|s| format!(" {}: {s}", p.name)))
+        .collect();
+    format!("{} {tail}{stale}", count(perms))
+}
+
+/// What the page says when the answer to a request its button made comes in: what changed since
+/// `before`, and then — only where the system did not answer granted — the answer's own `say`, the
+/// next thing to try. Never "press this button again" for a permission that is granted.
+pub fn answered(before: &[Shown], perms: &[Permission], answer: &super::PermissionAnswer) -> Vec<String> {
+    let mut said = changes(before, perms);
+    if !answer.granted {
+        if let Some(say) = answer.say {
+            said.push(say.to_string());
+        }
+    }
+    said
 }
 
 /// The sentence the application starts with, and whether the Permissions page comes forward
@@ -185,6 +207,8 @@ mod tests {
             anchor: "",
             can_ask: true,
             blocking,
+            stale: None,
+            pane_opened: false,
         }
     }
 
@@ -305,6 +329,52 @@ mod tests {
         let after = shown(&perms);
         perms[2].blocking = false;
         assert_eq!(changes(&after, &perms), ["Input Monitoring is optional again."]);
+    }
+
+    /// The second Mac test's finding 1: Accessibility switched on for an earlier ad-hoc build.
+    /// Its line says what to do about that entry; Re-check now says it once the pane was opened
+    /// and the permission is still missing — not before, and not once it is granted.
+    #[test]
+    fn an_earlier_copys_entry_is_said_on_the_line_and_by_recheck_after_the_pane() {
+        let stale = "If it is in the list and on already, that entry is an earlier copy's.";
+        let mut perms = first_session();
+        perms[0].state = Grant::Missing;
+        perms[0].stale = Some(stale.into());
+        assert_eq!(line(&perms[0]), format!("Accessibility — NOT granted. What it is for. {stale}"));
+        let before = shown(&perms);
+        assert_eq!(
+            rechecked(&before, &perms),
+            "Granted: 1 of the 2 permissions this application needs. Nothing has changed.",
+            "the pane not opened yet"
+        );
+        perms[0].pane_opened = true;
+        assert_eq!(
+            rechecked(&before, &perms),
+            format!("Granted: 1 of the 2 permissions this application needs. Nothing has changed. Accessibility: {stale}")
+        );
+        perms[0].state = Grant::Granted;
+        assert_eq!(
+            rechecked(&before, &perms),
+            "Granted: 2 of the 2 permissions this application needs. Accessibility: now granted."
+        );
+    }
+
+    /// Finding 19: the Input Monitoring button's request answered granted at once, and the page had
+    /// already said to press it again. The page says what the answer changed, and the next thing to
+    /// try only where it did not answer granted.
+    #[test]
+    fn a_requests_answer_says_what_changed_and_never_press_again_once_granted() {
+        let mut perms = first_session();
+        let before = shown(&perms);
+        perms[2].state = Grant::Granted;
+        let granted = crate::backend::PermissionAnswer { name: "Input Monitoring", granted: true, say: Some("Press again.") };
+        assert_eq!(answered(&before, &perms, &granted), ["Input Monitoring: now granted."]);
+        let not = crate::backend::PermissionAnswer { granted: false, ..granted };
+        let before = shown(&perms);
+        perms[2].state = Grant::Missing;
+        assert_eq!(answered(&before, &perms, &not), ["Input Monitoring: now NOT granted.", "Press again."]);
+        let before = shown(&perms);
+        assert_eq!(answered(&before, &perms, &not), ["Press again."], "nothing changed: the next thing to try");
     }
 
     #[test]

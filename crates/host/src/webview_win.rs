@@ -1167,12 +1167,31 @@ impl Native {
     /// Whether the point in the middle of the window belongs to it — on top there rather than
     /// covered — asked of Windows, for the log.
     pub(crate) fn on_top_at_centre(&self) -> bool {
+        self.root_at_centre() == Some(self.hwnd)
+    }
+
+    /// The top-level window Windows names at the point in the middle of this one, for the log line
+    /// that says it covers the page: its handle and its process's id.
+    pub(crate) fn covering_at_centre(&self) -> String {
+        match self.root_at_centre() {
+            Some(at) => {
+                let mut pid = 0u32;
+                // SAFETY: a plain query of a handle Windows just named; a stale one answers 0.
+                unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(at as HWND, &mut pid) };
+                format!("window 0x{at:x} of pid {pid}")
+            }
+            None => "no window".to_string(),
+        }
+    }
+
+    /// The top-level window at the point in this one's middle, or `None`.
+    fn root_at_centre(&self) -> Option<isize> {
         let r = self.rect();
         let centre = POINT { x: r.x + r.w / 2, y: r.y + r.h / 2 };
-        // SAFETY: plain queries; the answer is compared, never used as a window.
+        // SAFETY: plain queries; the answer is compared and logged, never used as a window.
         unsafe {
             let at = WindowFromPoint(centre);
-            !at.is_null() && GetAncestor(at, GA_ROOT) as isize == self.hwnd
+            (!at.is_null()).then(|| GetAncestor(at, GA_ROOT) as isize)
         }
     }
 

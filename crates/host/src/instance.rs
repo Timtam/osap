@@ -333,6 +333,26 @@ pub fn take_quit_request() -> bool {
     QUIT_REQUESTED.swap(false, Ordering::SeqCst)
 }
 
+/// How the application is being quit, for the one `[host]` line on the way out (gui.rs, `quit`):
+/// the first way named since the start, kept until it is said. None of the three sessions of the
+/// second Mac test (2026-10-24) said how it ended.
+static QUIT_WAY: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+
+/// Names the way the application is being quit — "the tray's Quit", "the quit key" — before it is
+/// asked to. The first way named stands: a Quit that ended a dialog, asked again, is the same quit.
+pub fn quit_because(way: &'static str) {
+    let mut w = QUIT_WAY.lock().unwrap_or_else(|e| e.into_inner());
+    if w.is_none() {
+        *w = Some(way);
+    }
+}
+
+/// The way the application is being quit, taken for its line; "a way not named" where nothing
+/// named one.
+pub fn take_quit_way() -> &'static str {
+    QUIT_WAY.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or("a way not named")
+}
+
 /// Whether the application is on its way out: a quit asked for and not taken yet, or Quit
 /// chosen ([`begin_quit`]). Clears nothing.
 pub fn quit_asked() -> bool {
@@ -1307,6 +1327,15 @@ mod mac {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The way out is the first one named, said once.
+    #[test]
+    fn the_way_out_is_the_first_named_and_taken_once() {
+        quit_because("the tray's Quit");
+        quit_because("the quit key");
+        assert_eq!(take_quit_way(), "the tray's Quit");
+        assert_eq!(take_quit_way(), "a way not named");
+    }
 
     /// The quit key's request is the window's once: taken by the tick after the pump that asked,
     /// and not again by the next tick.

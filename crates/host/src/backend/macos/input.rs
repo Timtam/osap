@@ -19,8 +19,9 @@
 //! control that was tracking the drag simply never learns that it moved.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
+use objc2_application_services::AXIsProcessTrusted;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::{
     CGAssociateMouseAndMouseCursorPosition, CGError, CGEvent, CGEventField, CGEventFlags, CGEventSource,
@@ -105,30 +106,27 @@ fn source() -> Option<CFRetained<CGEventSource>> {
     })
 }
 
-static POST_ACCESS_LOGGED: AtomicBool = AtomicBool::new(false);
+/// The post-event access last said (`post_click::PostAccess`, as a number: 0 nothing said yet).
+static POST_ACCESS_SAID: AtomicU8 = AtomicU8::new(0);
 
-/// Records once, in the log, whether this process may synthesise input at all.
+/// Records in the log whether this process may synthesise input — at the first event posted, and
+/// again whenever the answer changes, so a grant made during the run is seen.
 ///
 /// `CGEventPost` returns nothing — not a status, not an error — so from in here a refused
 /// event and a delivered one are the same call. The only thing that can be asked is whether
 /// the permission is present, and a tester whose clicks do nothing needs that one sentence
-/// in the log more than anything else this file could record. Asked lazily, on the first
-/// event actually posted, so the answer in the log is the state at the moment it mattered
-/// rather than at startup.
-fn note_post_access_once() {
-    if POST_ACCESS_LOGGED.swap(true, Ordering::Relaxed) {
-        return;
+/// in the log more than anything else this file could record. Asked lazily, at every event
+/// posted, so the answer in the log is the state at the moment it mattered rather than at startup.
+/// By both checks (`PostAccess`): the post-event check alone went on answering "denied" in a process
+/// granted Accessibility during its run (the second Mac test, 2026-10-24), and said "restart" to a
+/// tester whose clicks then worked. Answers what it found.
+fn note_post_access() -> post_click::PostAccess {
+    let access = post_click::PostAccess::of(CGPreflightPostEventAccess(), unsafe { AXIsProcessTrusted() });
+    let code = access as u8 + 1;
+    if POST_ACCESS_SAID.swap(code, Ordering::Relaxed) != code {
+        crate::logging::line("macos", access.line());
     }
-    if CGPreflightPostEventAccess() {
-        crate::logging::line("macos", "input: post-event access granted");
-    } else {
-        crate::logging::line(
-            "macos",
-            "input: post-event access DENIED — every synthesised click and keystroke from here \
-             on will be discarded by the window server without a word. Grant this application \
-             Accessibility under System Settings > Privacy & Security and restart it.",
-        );
-    }
+    access
 }
 
 /// Posts one event into the session, at the same place hardware enters it.
@@ -137,7 +135,7 @@ fn note_post_access_once() {
 /// including our own — which is exactly the behaviour Windows has with `SendInput`, and
 /// exactly the reason `key_post` exists.
 fn post(event: &CGEvent) {
-    note_post_access_once();
+    note_post_access();
     CGEvent::post(CGEventTapLocation::HIDEventTap, Some(event));
 }
 
@@ -325,8 +323,9 @@ pub fn mouse_click(x: i32, y: i32, button: MouseButton) -> Result<(), HostError>
 /// The modifier flags are cleared, as on every click here (`mouse_event`): a Control held from the
 /// hotkey that asked for the click would make it a secondary click.
 pub fn post_click(window: isize, x: i32, y: i32, button: MouseButton, move_pointer: bool) -> Result<String, HostError> {
-    note_post_access_once();
-    if !CGPreflightPostEventAccess() {
+    // Refused only where neither check allows it: the post-event check's "denied" with
+    // Accessibility granted refuses nothing (`PostAccess`).
+    if note_post_access().refuses() {
         return Err(HostError::of(&input::NO_POST_ACCESS));
     }
     let target = super::ax::post_target(window, x, y)?;
@@ -540,7 +539,7 @@ pub fn key_post(hwnd: isize, key: &str) -> Result<(), KeyRefusal> {
             }
         }
     }
-    note_post_access_once();
+    note_post_access();
     for event in &built {
         CGEvent::post_to_pid(entry.pid as libc::pid_t, Some(event));
     }

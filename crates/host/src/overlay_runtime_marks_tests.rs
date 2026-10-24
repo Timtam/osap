@@ -725,7 +725,7 @@ fn a_recognize_in_a_text_hook_waits_and_its_reading_is_said() {
 // The runtime's version.
 // ---------------------------------------------------------------------------------------------
 
-/// The runtime is 0.12.1 (calibration as its own setting, `O.calibrating()`, a static text's
+/// The runtime is 0.13.0 (calibration as its own setting, `O.calibrating()`, a static text's
 /// `hotkey`, the checks after its own pixels, `O:probe`, letting go in front of this
 /// application's own windows, its accessibility menu tests asked off the event loop, the
 /// check after a calibrating run's waited picture before a press, a slider's after each of its
@@ -734,16 +734,17 @@ fn a_recognize_in_a_text_hook_waits_and_its_reading_is_said() {
 /// test with a test's `before`, `O.doubleClick`'s button and callback, a trip's hand-over, a menu
 /// item's submenu with a test's `chained`, its error values with O.errors, and a hotkey's press
 /// handed on to a control's `onActivate` and a hand-over's `onKey`, and a refused hand-over's and
-/// the calibration methods' answers), so a module that depends on `"com.platform.overlay >= 0.2"`
+/// the calibration methods' answers, and the click a module tells a focus round of, the page from a
+/// plug-in window, the window of a press after a dialog, a drawn popup's `print` and `O:holdKeys`), so a module that depends on `"com.platform.overlay >= 0.2"`
 /// — as one that takes a mark has to — still loads against it, and so does one that asks for 0.4,
-/// 0.4.1, 0.5, 0.5.6, 0.6, 0.7, 0.8, 0.9, 0.10, 0.11, 0.12 or 0.12.1, and neither against anything
-/// older.
+/// 0.4.1, 0.5, 0.5.6, 0.6, 0.7, 0.8, 0.9, 0.10, 0.11, 0.12, 0.12.1 or 0.13, and neither against
+/// anything older.
 #[test]
-fn the_runtime_is_0_12_so_a_module_that_asks_for_0_2_loads() {
+fn the_runtime_is_0_13_so_a_module_that_asks_for_0_2_loads() {
     let m = module_manifest::ModuleManifest::parse(include_str!("../../../modules/overlay-runtime/module.toml"))
         .expect("the runtime's manifest parses");
     assert_eq!(m.id, "com.platform.overlay");
-    assert_eq!(m.version, "0.12.1");
+    assert_eq!(m.version, "0.13.0");
     for spec in [
         "com.platform.overlay >= 0.2",
         "com.platform.overlay >= 0.3",
@@ -759,6 +760,7 @@ fn the_runtime_is_0_12_so_a_module_that_asks_for_0_2_loads() {
         "com.platform.overlay >= 0.11",
         "com.platform.overlay >= 0.12",
         "com.platform.overlay >= 0.12.1",
+        "com.platform.overlay >= 0.13",
     ] {
         let req = module_manifest::dep_constraint(spec).unwrap();
         let id = module_manifest::dep_id(spec);

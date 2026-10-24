@@ -199,6 +199,9 @@ pub fn request_accessibility_once() {
             ),
         );
         crate::logging::line("macos", &format!("accessibility: {ACCESSIBILITY_NOTE}"));
+        if let Some(stale) = stale_entry(super::enrol::Service::Accessibility, true) {
+            crate::logging::line("macos", &format!("accessibility: {stale}"));
+        }
     });
 }
 
@@ -519,18 +522,9 @@ fn process_name(pid: i32) -> Option<String> {
 /// the whole identity, so it changing between two runs is exactly why permissions granted
 /// before the rebuild are not honoured after it.
 fn signature_of(bundle_path: &str) -> Vec<(String, String)> {
-    let Ok(out) = std::process::Command::new("/usr/bin/codesign")
-        // verbose=4, not 2. At 2 there is no CDHash line at all, and an ad-hoc signature
-        // prints "Signature=adhoc" with no Authority — which the first version of this
-        // function read as "not signed", and then said so in a tester's log about a bundle
-        // that was signed perfectly well, just not the way we wanted.
-        .args(["-dv", "--verbose=4", bundle_path])
-        .output()
-    else {
+    let Some(text) = codesign_text(bundle_path) else {
         return Vec::new();
     };
-    // codesign reports on stderr even when it succeeds.
-    let text = String::from_utf8_lossy(&out.stderr);
     let mut authority: Option<String> = None;
     let mut cdhash: Option<String> = None;
     let mut ident: Option<String> = None;
@@ -575,6 +569,48 @@ fn signature_of(bundle_path: &str) -> Vec<(String, String)> {
     out_pairs
 }
 
+/// What `codesign` says about this bundle, asked once per process: the start block's signature
+/// lines and [`ad_hoc`] read the same answer, and the bundle does not change under a running
+/// process. `None` where the tool could not be run.
+fn codesign_text(bundle_path: &str) -> Option<&'static str> {
+    static TEXT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TEXT.get_or_init(|| {
+        std::process::Command::new("/usr/bin/codesign")
+            // verbose=4, not 2. At 2 there is no CDHash line at all, and an ad-hoc signature
+            // prints "Signature=adhoc" with no Authority — which the first version of this
+            // function read as "not signed", and then said so in a tester's log about a bundle
+            // that was signed perfectly well, just not the way we wanted.
+            .args(["-dv", "--verbose=4", bundle_path])
+            .output()
+            .ok()
+            // codesign reports on stderr even when it succeeds.
+            .map(|out| String::from_utf8_lossy(&out.stderr).into_owned())
+    })
+    .as_deref()
+}
+
+/// Whether this bundle's signature is ad-hoc: its identity is its content, so every build is a
+/// new application to the privacy lists, while an earlier build's entry stays in them, switched
+/// on, and applies to nothing. Asks `codesign` once per process (`codesign_text`); false for a
+/// bare binary, and where it could not be asked.
+fn ad_hoc() -> bool {
+    let Some(path) = NSRunningApplication::currentApplication().bundleURL().and_then(|u| u.path()) else {
+        return false;
+    };
+    codesign_text(&path.to_string()).is_some_and(|t| t.lines().any(|l| l.trim() == "Signature=adhoc"))
+}
+
+/// The stale-entry sentence for `service` on an ad-hoc build, for the log (`log`) or the page;
+/// `None` on any other build, where an earlier build's entry is the same application's.
+fn stale_entry(service: super::enrol::Service, log: bool) -> Option<String> {
+    ad_hoc().then(|| super::enrol::stale_entry(service, &bundle_id(), log))
+}
+
+/// Whether the Accessibility and the Input Monitoring panes were opened in this run, by their
+/// buttons: Re-check now names an earlier copy's entry only after that (`grants::rechecked`).
+static ACCESSIBILITY_PANE_OPENED: AtomicBool = AtomicBool::new(false);
+static INPUT_MONITORING_PANE_OPENED: AtomicBool = AtomicBool::new(false);
+
 /// What the privacy settings are actually CALLED on the machine this is running on.
 ///
 /// Ventura renamed System Preferences to System Settings and turned "Security & Privacy"
@@ -602,7 +638,17 @@ fn prompt_is_unreliable() -> bool {
     NSProcessInfo::processInfo().operatingSystemVersion().majorVersion < 13
 }
 
-use crate::backend::{Asked, Grant, Permission};
+use crate::backend::{Asked, Grant, Permission, PermissionAnswer};
+
+/// The answer of the last request a permission's button made on a thread of its own, waiting for
+/// the GUI's tick (`take_permission_answer`).
+static PERMISSION_ANSWER: std::sync::Mutex<Option<PermissionAnswer>> = std::sync::Mutex::new(None);
+
+/// The answer a button's request left since the last tick, taken: the Permissions page reads the
+/// permissions again then and says what changed (gui.rs). Any thread sets it; the GUI's takes it.
+pub(crate) fn take_permission_answer() -> Option<PermissionAnswer> {
+    PERMISSION_ANSWER.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
 
 /// The four permissions, as they stand right now.
 ///
@@ -623,16 +669,19 @@ pub fn permissions() -> Vec<Permission> {
     let screen = screen_recording();
     let listen = listen_state();
     let keys = super::tap::keys_seen();
+    let trusted = is_trusted(false);
     vec![
         Permission {
             name: "Accessibility",
-            state: if is_trusted(false) { Grant::Granted } else { Grant::Missing },
+            state: if trusted { Grant::Granted } else { Grant::Missing },
             without: "Nothing can be read or clicked. Every window and control comes back \
                       empty, and no overlay ever activates.",
             judged: None,
             anchor: ACCESSIBILITY_PANE,
             can_ask: true,
             blocking: true,
+            stale: if trusted { None } else { stale_entry(super::enrol::Service::Accessibility, false) },
+            pane_opened: ACCESSIBILITY_PANE_OPENED.load(Ordering::Relaxed),
         },
         Permission {
             name: "Screen Recording",
@@ -649,6 +698,10 @@ pub fn permissions() -> Vec<Permission> {
             anchor: SCREEN_RECORDING_PANE,
             can_ask: true,
             blocking: true,
+            // Its own line names the case already (`enrol::fallback_line`), with the restart it
+            // also needs.
+            stale: None,
+            pane_opened: false,
         },
         Permission {
             name: "Input Monitoring",
@@ -667,6 +720,13 @@ pub fn permissions() -> Vec<Permission> {
             anchor: INPUT_MONITORING_PANE,
             can_ask: true,
             blocking: super::evidence::listen_needed(listen == Listen::Granted, keys),
+            // Denied is in the list and off — or on, for an earlier build. Unknown is not in it.
+            stale: if listen == Listen::Denied {
+                stale_entry(super::enrol::Service::ListenEvent, false)
+            } else {
+                None
+            },
+            pane_opened: INPUT_MONITORING_PANE_OPENED.load(Ordering::Relaxed),
         },
         Permission {
             name: "Automation, for VoiceOver",
@@ -686,6 +746,8 @@ pub fn permissions() -> Vec<Permission> {
             anchor: AUTOMATION_PANE,
             can_ask: true,
             blocking: false,
+            stale: None,
+            pane_opened: false,
         },
     ]
 }
@@ -748,6 +810,11 @@ pub fn open_pane(anchor: &str) -> bool {
         return false;
     };
     let opened = NSWorkspace::sharedWorkspace().openURL(&url);
+    if opened && anchor == ACCESSIBILITY_PANE {
+        ACCESSIBILITY_PANE_OPENED.store(true, Ordering::Relaxed);
+    } else if opened && anchor == INPUT_MONITORING_PANE {
+        INPUT_MONITORING_PANE_OPENED.store(true, Ordering::Relaxed);
+    }
     crate::logging::line(
         "macos",
         &format!(
@@ -840,6 +907,7 @@ fn ask_for_input_monitoring() -> Asked {
         ListenStep::Documented | ListenStep::Hid => {}
     }
     INPUT_MONITORING_RUNG.store(super::enrol::listen_after(step, done) as u8, Ordering::SeqCst);
+    let say = if step == ListenStep::Documented { SAY_LISTEN_FIRST } else { SAY_LISTEN_LAST };
     let spawned = std::thread::Builder::new()
         .name("input-monitoring-request".into())
         .spawn(move || {
@@ -863,12 +931,17 @@ fn ask_for_input_monitoring() -> Asked {
                     super::enrol::listen_change(before, after)
                 ),
             );
+            // To the page, which reads the permissions again at its next tick and says what changed
+            // — and what to try next only where the answer was not granted.
+            *PERMISSION_ANSWER.lock().unwrap_or_else(|e| e.into_inner()) = Some(PermissionAnswer {
+                name: "Input Monitoring",
+                granted: granted || after == Listen::Granted,
+                say: Some(say),
+            });
         });
     match spawned {
-        Ok(_) => Asked {
-            open_pane: false,
-            say: Some(if step == ListenStep::Documented { SAY_LISTEN_FIRST } else { SAY_LISTEN_LAST }),
-        },
+        // Nothing said at the press: the answer says it (above), the moment it has come.
+        Ok(_) => Asked { open_pane: false, say: None },
         Err(e) => {
             pane_only(&format!("the request could not be started ({e})"));
             Asked::PANE
@@ -1186,6 +1259,9 @@ pub fn environment_report() -> Vec<(String, String)> {
             "accessibility fix",
             format!("{} > Accessibility; {ACCESSIBILITY_NOTE}", privacy_pane()),
         );
+        if let Some(stale) = stale_entry(super::enrol::Service::Accessibility, true) {
+            push("accessibility earlier copy", stale);
+        }
     }
 
     // The dangerous one. Absence is not an error anywhere in the capture path: the picture
@@ -1241,6 +1317,9 @@ pub fn environment_report() -> Vec<(String, String)> {
                     privacy_pane()
                 ),
             );
+            if let Some(stale) = stale_entry(super::enrol::Service::ListenEvent, true) {
+                push("input monitoring earlier copy", stale);
+            }
         }
         Listen::Unknown => {
             push(

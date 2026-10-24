@@ -306,6 +306,39 @@ pub(crate) fn fallback_line(more_to_ask: bool, pane: &str, bundle_id: &str, mont
     )
 }
 
+/// The privacy services the stale-entry sentence names, as `tccutil` calls them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Service {
+    Accessibility,
+    /// Input Monitoring.
+    ListenEvent,
+}
+
+impl Service {
+    fn tcc(self) -> &'static str {
+        match self {
+            Service::Accessibility => "Accessibility",
+            Service::ListenEvent => "ListenEvent",
+        }
+    }
+}
+
+/// The sentence for a permission still missing on an AD-HOC build (the second Mac test of
+/// 2026-10-24, its finding 1): two whole sessions went by with Accessibility switched on in the
+/// list for an earlier build, whose entry an ad-hoc signature's new identity does not match, and
+/// Re-check said only "Nothing has changed". Screen Recording's last line names the case
+/// ([`fallback_line`]); this is the same for Accessibility and Input Monitoring. `log`: with the
+/// command in backticks, as the log's other commands are; without them for the Permissions page,
+/// whose text is read aloud, where it also says where to run it.
+pub(crate) fn stale_entry(service: Service, bundle_id: &str, log: bool) -> String {
+    let command = format!("tccutil reset {} {bundle_id}", service.tcc());
+    let run = if log { format!("run `{command}`") } else { format!("run {command} in Terminal") };
+    format!(
+        "If it is in the list and on already, that entry is an earlier copy's: remove it with the \
+         minus button, or {run}, then quit and reopen."
+    )
+}
+
 /// Who started this process, in the terms the permission dialogs care about.
 ///
 /// launchd is the parent of anything opened with `open` or from the Finder, and then macOS asks
@@ -519,6 +552,23 @@ mod tests {
         assert!(!line.contains("second way"), "{line}");
         assert!(line.contains("tccutil reset ScreenCapture x.y"), "{line}");
         assert!(line.contains("macOS 12"), "{line}");
+    }
+
+    /// Finding 1 of the second Mac test: the earlier copy's entry, named for Accessibility and for
+    /// Input Monitoring with the service `tccutil` knows each by and the bundle, in backticks in the
+    /// log only.
+    #[test]
+    fn the_stale_entry_names_the_service_the_bundle_and_the_minus_button() {
+        let log = stale_entry(Service::Accessibility, "com.automationplatform.app", true);
+        assert_eq!(
+            log,
+            "If it is in the list and on already, that entry is an earlier copy's: remove it with \
+             the minus button, or run `tccutil reset Accessibility com.automationplatform.app`, then \
+             quit and reopen."
+        );
+        let page = stale_entry(Service::ListenEvent, "x.y", false);
+        assert!(page.contains("run tccutil reset ListenEvent x.y in Terminal,"), "{page}");
+        assert!(!page.contains('`'), "read aloud on the page: {page}");
     }
 
     #[test]

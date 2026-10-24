@@ -78,7 +78,16 @@ name = "Overlay runtime"
 # of it depends on "com.platform.overlay >= 0.12.1". It tests a binding's DAW entries by their
 # matcher keys alone, the entry's own fields left out, as host.window.test raises for a key no
 # matcher has.
-version = "0.12.1"
+# 0.13.0 (the second Mac test of VPS Avenger, 2026-10-24): an empty focus chain begins a stay in the
+# focus round a module's own click into the DAW's panel asked for (host.window.recheck's `entered`,
+# daw-hosts' focus key) and in no other; the page key with the overlay not in front opens the page
+# from a plug-in window of the binding whose `identify` says yes (O:addPage, case 5); the window of
+# a press is brought back after a dialog it opened closed into the DAW's main window; a drawn popup
+# answers its `print`, and one drawn as at an item's click is the click pending, not untaken, while
+# a new window of the plug-in over the item's point is the item taken; and O:holdKeys takes keys for
+# the module while the overlay is in front, Return included. A module that calls O:holdKeys depends
+# on "com.platform.overlay >= 0.13".
+version = "0.13.0"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

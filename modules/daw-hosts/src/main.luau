@@ -281,13 +281,21 @@ local ableton = {
 -- plug-in module cannot tell its own window from the title here and must look inside it, which
 -- is what every module's `identify` does on the panel the runtime builds from
 -- `logicPluginOrigin`. The non-blank title keeps Logic's untitled dialogs out (an alert is also
--- AXDialog); a titled dialog of Logic's own that is not a plug-in window is not ruled out by
--- anything measured yet, which matters to the focus key only when both are open (it takes the
--- first it finds), and to an embedded overlay only as a cost: it asks its own identity question
--- there, once for each time the keyboard comes in.
+-- AXDialog). Its file panels are kept out by their identifier: a plug-in window's is empty (the
+-- probe above), and the system's open and save panels are `open-panel` and `save-panel` — seen
+-- as `AXWindow/AXDialog/open-panel` for another application's panel in the second Mac test's
+-- log (2026-10-24), where Logic's own "Load Preset..." panel, a titled AXDialog of Logic's, was
+-- taken for a plug-in window: every embedded overlay asked its identity question in it for the 80
+-- seconds it was open, and their accessibility walks stalled the event loop for 10.8 s. That
+-- panel's own class is not in the log; the probe's line for it (Shift+Cmd+F9 with it open) is
+-- what confirms the suffix. Another titled dialog of Logic's that is not a plug-in window is not
+-- ruled out by anything measured yet, which matters to the focus key only when both are open (it
+-- takes the first it finds), and to an embedded overlay only as a cost: it asks its own identity
+-- question there, once for each time the keyboard comes in.
 local logic = {
   { daw = "Logic Pro",
-    macos = { app = { bundleId = "com.apple.logic10" }, axSubrole = "AXDialog", title = { pattern = "%S" } },
+    macos = { app = { bundleId = "com.apple.logic10" }, axSubrole = "AXDialog", title = { pattern = "%S" },
+      axIdentifier = { ["not"] = { suffix = "-panel" } } },
     pluginOrigin = { macos = logicPluginOrigin } },
 }
 
@@ -596,7 +604,8 @@ local function focusPluginWindow()
         end)
         return
       end
-      host.input.click(w.client.x + p[1] + 3, w.client.y + p[2] + 3)
+      local cx, cy = w.client.x + p[1] + 3, w.client.y + p[2] + 3
+      host.input.click(cx, cy)
       host.timer.after(250, function()
         local after = whereIsTheKeyboard(w, panel)
         host.log.info(("[daw-hosts] keyboard was on the host's chrome after focusing '%s'; nothing in its panel took focus by asking; after a click at content (%d,%d) it is: %s"):format(
@@ -610,6 +619,19 @@ local function focusPluginWindow()
           host.speech.output(title)
         elseif after == "chrome" then
           host.speech.output("could not move the keyboard into " .. title)
+        elseif host.window.focusChain()[1] == nil and (host.window.active() or {}).id == w.id then
+          -- Nothing read after this key's own click, with the window still in front: what Logic
+          -- answers whenever a plug-in's own drawn view has the keyboard — after every click into
+          -- VPS Avenger in the second Mac test (2026-10-24), where the key said "could not tell"
+          -- and nothing came up until the window was dragged. The click is the reading (the
+          -- maintainer's decision of that day): every overlay is told of it, and the overlay
+          -- runtime begins a stay in that panel on this round alone — any other empty chain still
+          -- begins none. The title, as the other ways in say it; an overlay that comes up names
+          -- its own control.
+          host.log.info(("[daw-hosts] nothing is read after the click into '%s'; asking every overlay to look again, told of the click at %d,%d"):format(
+            title, cx, cy))
+          host.window.recheck({ entered = { window = w.id, x = cx, y = cy } })
+          host.speech.output(title)
         else
           host.speech.output("could not tell whether the keyboard is in " .. title)
         end

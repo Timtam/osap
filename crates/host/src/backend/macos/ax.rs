@@ -66,7 +66,7 @@ use objc2_foundation::NSString;
 
 use crate::errors::{element, HostError};
 
-use super::budget::{Budget, Walk};
+use super::budget::{Budget, SlowThisTurn, Walk};
 use super::question::not_known;
 use super::front_memory::{Memory, Recall};
 use super::handles;
@@ -1547,7 +1547,7 @@ fn number_owns_point(ours: u32, x: i32, y: i32, what: &str) -> Option<bool> {
 
 /// Who owns a window number, and at what level. From the on-screen list; `None` for a
 /// number the list does not carry.
-fn window_owner(number: u32) -> Option<(i32, i32)> {
+pub(super) fn window_owner(number: u32) -> Option<(i32, i32)> {
     let list = CGWindowListCopyWindowInfo(
         CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
         0,
@@ -2972,6 +2972,37 @@ pub fn window_focus_chain() -> Vec<ControlInfo> {
 // ---------------------------------------------------------------------------------------
 // The uia_* family
 // ---------------------------------------------------------------------------------------
+
+thread_local! {
+    /// The applications whose walk of a module's question ran out of time in this turn of the
+    /// event loop (`budget::SlowThisTurn`). Main thread only, as every walk here is.
+    static SLOW_THIS_TURN: RefCell<SlowThisTurn> = RefCell::new(SlowThisTurn::default());
+}
+
+/// The process of the window or control behind handle `hwnd`, while the handle is live.
+pub(super) fn pid_of_handle(hwnd: isize) -> Option<i32> {
+    handles::get(hwnd).map(|e| e.pid)
+}
+
+/// A walk of a module's question to `pid` ran out of time: its later questions in this turn are
+/// answered without one.
+pub(super) fn ran_out_this_turn(pid: i32) {
+    SLOW_THIS_TURN.with(|s| s.borrow_mut().ran_out(pid));
+}
+
+/// Whether a module's question to `pid` is answered "too slow" without a walk in this turn.
+pub(super) fn slow_this_turn(pid: i32) -> bool {
+    SLOW_THIS_TURN.with(|s| s.borrow_mut().skip(pid))
+}
+
+/// A turn of the event loop begins (`pump_pending`): every application is walked afresh, and the
+/// turn that ended says, in one line, what it answered without a walk.
+pub(super) fn next_turn() {
+    let skipped = SLOW_THIS_TURN.with(|s| s.borrow_mut().next_turn());
+    if let Some(line) = super::budget::slow_turn_line(&skipped, exe_for_pid) {
+        crate::logging::line("macos", &line);
+    }
+}
 
 /// Where a query starts: the element behind the handle.
 fn root_of(hwnd: isize, what: &str) -> Option<CFRetained<AXUIElement>> {

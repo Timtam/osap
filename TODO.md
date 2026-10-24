@@ -661,6 +661,177 @@ and to build it as soon as the usage allows.
       does not follow: an error stored in a table's field or an upvalue and handed on from another
       function, and one passed through a helper defined in another function.
 
+## The second Mac test of the Avenger page (2026-10-24)
+
+The second Mac test of the Avenger page (build acd8b8d, an M2 Max on macOS 26.6.1, Logic, VPS
+Avenger at 80 % on one 1920x1080 display at backing scale 1.00, three sessions in one log), with the
+maintainer's own points and the avenger_control developer's comparison report beside it. The
+findings are numbered as in the session's findings file; the report's points as R1 to R12. The
+overlay runtime goes to 0.13.0 and daw-hosts to 0.3.0 with these. The core part, in the plan's
+order:
+
+- [ ] **DirectML.dll ships with its terms (the maintainer's decision of 2026-10-24).** The Windows
+      package keeps `DirectML.dll` (1.15.4, from `ort`'s download of ONNX Runtime ms@1.22.0) and
+      carries Microsoft's terms for it. **Built, and held back on the local branch
+      `wip/directml-licence`** (one commit on main 93b9844): `crates/host/licences/directml/SOURCE.txt`
+      names the release (`version=1.15.4`), its NuGet package (Microsoft.AI.DirectML 1.15.4) and the
+      SHA-256 of the DLL `ort` delivers; `package.ps1` takes `LICENSE.txt` and
+      `ThirdPartyNotices.txt` from that folder into `licences\directml-LICENSE.txt` and
+      `licences\directml-ThirdPartyNotices.txt`, refuses to package — before it builds — while
+      either is missing or SOURCE.txt names no version or hash, refuses a DLL whose FileVersion is
+      another release's or whose hash is not SOURCE.txt's, and says in `licences\README.txt` that
+      the DLL is Microsoft's redistributable, Windows only, under its own terms and not the GPL.
+      Checked: `package.ps1 -NoBuild -NoZip` on a copy with placeholder terms ships both and the
+      README paragraph, and refuses no terms, another version, another hash and no hash. Held back
+      because without the two files it refuses every package, the CI's package step included.
+      **Left: the two files themselves.** They are in the NuGet package only, and downloading it
+      (nuget.org, Microsoft.AI.DirectML 1.15.4, about 30 MB) waits for the maintainer's go (the
+      plan's question 4): take `LICENSE.txt` and `ThirdPartyNotices.txt` from it unchanged into
+      `crates/host/licences/directml/` on that branch, compare its `bin\x64-win\DirectML.dll` with
+      SOURCE.txt's hash, and merge it.
+- [x] **The stale entry for Accessibility and Input Monitoring (finding 1).** Two sessions went by
+      with Accessibility switched on in the list for an earlier ad-hoc build, and Re-check said only
+      "Nothing has changed". **Built.** On an ad-hoc build (`codesign`'s `Signature=adhoc`, asked
+      once a process) a missing Accessibility, and an Input Monitoring that reads denied, get the
+      sentence "If it is in the list and on already, that entry is an earlier copy's: remove it
+      with the minus button, or run `tccutil reset Accessibility com.automationplatform.app` (or
+      `ListenEvent`), then quit and reopen." — in the start lines (`accessibility earlier copy`,
+      `input monitoring earlier copy`, and after the prompt's own lines), at the end of its line on
+      the Permissions page, and in Re-check now's answer once its pane was opened from its button
+      and it is still missing. Tests: `enrol.rs` (the sentence), `grants.rs` (the line and
+      Re-check). **Left:** step 1 of the Mac tester's guide (`docs/macos-test-protocol.de.txt`, not
+      in the repository; where it lives is the maintainer's choice) gets the same line.
+- [x] **Logic's file panels are no plug-in windows (finding 5).** daw-hosts' Logic entry took
+      "Load Preset..." for one, and seven VMs ran their identification in it. **Built (daw-hosts
+      0.3.0):** `axIdentifier = { ["not"] = { suffix = "-panel" } }` in Logic's macOS block (a
+      plug-in window's identifier is empty; the system's open and save panels are `open-panel` and
+      `save-panel`). Test: `overlay_mac_test2_tests.rs`, `logics_file_panel_is_not_a_plugin_window`.
+      **The Mac tester confirms** with the probe (Shift+Cmd+F9) on the open Load Preset panel that
+      its class ends in `/open-panel`, and that no `identify` line comes while it is open.
+- [x] **An application whose walk ran out of time is not walked again in that turn (finding 5,
+      R4).** **Built.** After a walk of a module's question (a search, `focusStep`, `focusWithin`)
+      ran out of its 300 ms in an application, its later questions in the same turn of the event
+      loop answer `timeout`, "the search took longer than 300 ms", at once (`budget::SlowThisTurn`,
+      `ax::slow_this_turn`, checked in `element_ask`, reset at the start of `pump_pending`), with
+      one line for the turn that skipped (`accessibility: N question(s) of modules in one turn were
+      answered 'too slow' without a walk …`). A dump is walked all the same. Documented in
+      element.md. Tests: `macos_budget` (the bookkeeping), `not_known_tests` (the wiring).
+      **The Mac tester confirms:** with Logic's panel open, no pump line of seconds.
+- [x] **The focus key's own click begins a stay (finding 9, the maintainer's decision (a)).**
+      **Built.** `host.window.recheck(opts?)` takes `opts.entered = { window, x, y }`; the round it
+      asks for hands every onFocus callback `info.entered`, with the calling module and the time,
+      and no other round does (folded rounds keep it). daw-hosts calls it in the click branch when
+      Logic reports an empty chain after its click with the window still in front, and says the
+      title. The runtime begins a stay on an empty chain in that round only, the window in front
+      the one named and the point in the binding's panel: `identify` asked, the line `[overlay]
+      '<label>': com.platform.daw-hosts's click into 'Inst 1' at x,y begins a stay — Logic Pro
+      reports no focus after it`. Any other empty chain begins none. Docs: window.md (recheck,
+      onFocus), overlay.md (the stay). Tests: `mailbox_tests.rs` (the fold),
+      `overlay_mac_test2_tests.rs` (the click begins a stay; no other empty chain does). The plan's
+      question 2 — click also when the chain is empty BEFORE the press — is not built: decided
+      only for the key's own click after a readable chain. **The Mac tester confirms:** Shift+Cmd+F6
+      in Avenger brings the overlay up at the first press, without dragging the window.
+- [x] **The page key opens the page from the plug-in window in front (M6, R5).** **Built
+      (O:addPage, case 5).** With the overlay not in front, the page key looks at the window in
+      front: a plug-in window of the page overlay's binding, with the DAW's panel in it, whose
+      `identify` says yes on that panel — asked in the key's handler, as at a stay's start — and the
+      group comes up on the panel through a hold of the key's (a held context, as a trip's arrival),
+      and the page opens. Where the keyboard is is not asked. Not for a binding without `identify`
+      or with a `control` function; never on Windows (no DAW panel there). The hold goes when away
+      ends, and at once when nothing was shown. Tests: `overlay_mac_test2_tests.rs` (the page from
+      the window; over Logic's header; identify no, another application, no identify; Windows).
+      **The Mac tester confirms:** the page key right after a click into Avenger (keyboard read as
+      nowhere) opens the page.
+- [x] **The plug-in window comes back after a dialog closes (finding 8).** **Built.** When the
+      window held first after an item of the press's menu was clicked — a dialog the item opened,
+      Logic's Load Preset panel — has gone, is listed no more, and the keyboard is in another shown
+      window of the same process that the binding's entries do not take as a plug-in window
+      (Logic's main window), the window of the press is brought back, once per press, while it is
+      listed with its class, title and size. A menu's own window closing over the main window still
+      brings nothing back, as before. Tests: `overlay_mac_test2_tests.rs` (brought back; not to
+      another plug-in window, not while the panel is listed, not once resized, not without an
+      item's click). **The Mac tester confirms:** after loading a preset in the ring's Load preset
+      dialog, the overlay is back in Avenger without Shift+Cmd+F6.
+- [x] **A frozen drawn popup is a click pending, not one the menu missed (finding 7).**
+      **Built.** `O.menuTests.drawn`'s answer carries `print`, how the popup's lines read; after an
+      item's click, a popup drawn exactly as at the click — or a reading that could not be taken —
+      is waited for, never clicked again, up to the press's bound, and `untaken` if still so then;
+      only a popup drawn again and still open is clicked again, and the click made again is the one
+      a popup frozen after it is compared with. Before any click made again, a new window of the
+      plug-in's process over the item's point (`host.window.list`, against its list taken just
+      before the item's click) is the item taken. `retries` keeps its meaning. Tests:
+      `overlay_drawn_menu_tests.rs` (frozen, then gone; frozen to the bound; frozen after a click
+      made again; a new window over the point, one listed as the click returns included).
+      `avenger_osc_macros_tests::macro_tabs_are_counted_before_a_click_and_read_after` scripted a
+      popup that does not take Delete as a picture that never changes, which is now a click pending:
+      it expects Delete clicked once and `untaken` at the press's bound, then Escape, where it
+      expected four clicks in 11 ticks. **The Mac tester confirms:** the ring's Load preset clicks its
+      item once (`[menu item] … clicked 1 time(s)`); a second click at most, if the picture of the
+      popup a Mac takes shows the pointer, which then sits on the item after the click.
+- [x] **`O:holdKeys`: keys held for the module outside a trip (for the ring's knobs, the
+      maintainer's decision (b)).** **Built (runtime 0.13.0).** `O:holdKeys{ keys, onKey, onEnd }`
+      from a control's `onActivate` while the overlay is in front: the keys (1 to 8) reach `onKey`
+      over every claim of the overlay's own — Return does not activate the focused control, a
+      control's hotkey of the same key is the hold's — the overlay's other keys work on; `true` from
+      `onKey` ends it, and `onEnd` is told once, "ended", "left" (the front left: another window,
+      the page, a disable) or "replaced"; the keys go after it, and the overlay takes its own
+      captures of them again, since the host keeps one capture of a key per module (a key the overlay
+      captures again while the hold stands is taken back for the hold at once). `true`, or `false` and
+      `not_in_front`, the host's capture error or `failed`. Docs: overlay.md, O:holdKeys. Test:
+      `overlay_mac_test2_tests.rs`, `hold_keys_takes_the_keys_over_the_overlays_own_and_gives_them_back`.
+- [x] **Large regions at 1x enlarged, and the small ladder by line (finding 4, the host part).**
+      **Built.** A region larger than 400x200 handed on as captured is enlarged three times, or
+      twice within 4 million pixels, without a crop, when the capture is at one pixel a point (a
+      scale under 1.125: a Mac's backing scale 1, a Windows monitor at 100 %; 125 % is read as
+      captured) or, on a Mac at 2x, its
+      tallest line of ink is under 16 pixels (`policy::pass_through_up`). A small region's upscale on
+      a Mac comes from its tallest line of ink (`paddle_pre::tallest_line`), not its whole block, held
+      to the same budget; `ocr-bench` hands its pictures the same way. Windows' small path is
+      unchanged (it enlarges at least three times). On Windows it costs, measured 2026-10-24 on an
+      i7-8700K in a release build: a 344x268 region 110 ms instead of 22, a 900x700 one 261 instead
+      of 58 (the enlargement 41 and 146 ms of it); the 900x700 one read 73 words instead of 31. Docs:
+      ocr.md, both blocks, with that cost. Tests: `ocr::policy`, `ocr::paddle_pre`. **Not enough
+      alone for the expansion grid:** its names are about 5 pixels tall at 80 % (6 at 100 %, the
+      report's `Avenger 80 closed.png` and `Avenger 100 closed.png`), 15 pixels three times over;
+      a crop of that grid read 2 words on Windows enlarged, none as captured. A10's regions a row
+      at a time are what read it. **The Mac tester confirms:** the trace says `handed on as
+      captured … enlarged 3x` for Avenger's List / Expansion View area at 80 % on the 1x display.
+- [x] **Look-alike letters from another script in Latin reads (finding 12).** **Built, in part**
+      (the rest in the next entry).
+      Where the language handed to Vision is written in the Latin script (CLDR's likely subtags,
+      `lang::latin_script`), a line whose best candidate holds a letter of another script
+      (`lang::non_latin_letter`, Unicode's Script property) takes the first of Vision's next two
+      candidates that holds none, with its own word boxes; otherwise the best is kept. One line once
+      a region. Docs: ocr.md, macOS. Test: `ocr::lang`. **The Mac tester confirms:** the macro names
+      read "Macro 2", "Macro 3" (the log's `letters of another script` line says which was taken).
+- [ ] **Look-alike letters: the two other ways the plan named (finding 12).** Not built: Paddle's
+      reading in Vision's place (it carries no word boxes, so a region's words would go), and a fold
+      by Unicode's confusable skeleton — `unicode-security`, which is not in the lock and would be a
+      new download; and its skeleton does not cover "т" for "r" anyway. Only if the Mac tester still
+      hears letters of another script after the candidates.
+- [x] **The Input Monitoring button says its own answer (finding 19).** **Built.** The request
+      thread posts its answer (`take_permission_answer`); the GUI's tick has the Permissions page
+      read the permissions again and say what changed, and — only where the answer was not granted —
+      the next thing to try. The press itself says nothing before the answer. Tests: `grants.rs`
+      (`answered`), the wiring test in `backend/mod.rs`.
+- [x] **No false "post-event access DENIED, restart it" (finding 20).** **Built.** The post-event
+      check and Accessibility both decide (`post_click::PostAccess`): "denied" with Accessibility
+      granted is a disagreement, logged as one, and no refusal; a `via = "post"` click is refused
+      only when both say no; the line is said again whenever the state changes; no line says
+      restart. Docs: input.md. Test: `macos_post_click`.
+- [x] **Three log lines (findings 26, 27, 28).** **Built.** The page's "on top at its centre: NO"
+      names the window there (on a Mac its number, owner and level; on Windows its handle and pid);
+      the pump's line counts a Mac's subscriptions to an application's notifications on their own
+      (`subscribing to applications' notifications N`); and `[host] quitting — the tray's Quit` (the
+      module window's Quit, the quit key, Command-Q in a page) as the window loop ends. A signal
+      ends the process without that line: there is no signal handler. Tests: `instance.rs` (the way
+      out), the quit test in `lib.rs`.
+- [ ] **The event tap on its own run loop (finding 5, R4: keys not captured during a stall).** The
+      maintainer decides whether it goes in now (the plan's question 3). Not built.
+- [ ] **The focus guard while VoiceOver moves through the page (finding 29).** Only if the tester
+      confirms that VoiceOver jumped back while moving through the page (findings' question 14).
+      Not built.
+
 ## The first Mac test of the Avenger page (2026-10-14)
 
 The first Mac test of the Avenger page (build 97d668c, an M2 Max on macOS 26.6.1, Logic, one
@@ -2032,6 +2203,10 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       `licences\`, and `ort`'s download has neither. Whether a GPL-3.0 package may carry the file
       at all, and on which terms, is for the maintainer to decide; then `package.ps1` ships the
       text beside the others, or the file goes.
+      **Decided 2026-10-24:** the DLL stays, and its terms go with it. The change that has
+      `package.ps1` take them from `crates/host/licences/directml/` and check the DLL against
+      `SOURCE.txt` there waits for the two files from the NuGet package (see "The second Mac test of
+      the Avenger page").
 - [x] **The bench's rounds**, set after the first CI run of this size so that the Intel Mac stays
       under 30 minutes (`Plan::speed_pictures`, `samples`); every section prints its time. The CI
       job's limit is 45 minutes until then. The pipeline's verdicts lean on the engine's control

@@ -487,24 +487,22 @@ fn macro_tabs_are_counted_before_a_click_and_read_after() {
           T.lastPost("error").text)
         posts = T.page().posts
         T.ok(posts[#posts - 1].kind == "focus" and posts[#posts - 1].id == "macro-tab-4", tostring(posts[#posts - 1].id))
-        -- A popup that does not take Delete: clicked again up to the retries, then closed with Escape,
-        -- and the tab is not clicked.
+        -- A popup that does not take Delete, drawn as at the click from then on: the click is pending
+        -- (overlay runtime 0.13), made once and given up at the press's bound, then the popup closed
+        -- with Escape, and the tab is not clicked.
         T.event()
         T.words({ ["macro tabs"] = "MACRO 1 MACRO 2" })
         T.repaint({ osc = 1, selected = "osc", index = 1, macroShown = 2 })
         T.tripFrom({ action = "delete_macro_tab", args = {}, focused = true }, W)
         clicks = #S.clicks
         T.paintAvenger(98, 84, 1.6, { osc = 1, selected = "osc", index = 1, macroShown = 2, popup = { 724, 437, 800, 495 } })
-        -- Seen on the third tick; each answer that clicks again comes from a callback, so the next is
-        -- looked at two ticks on (the runtime's "between two ticks"): clicks at 3, 5, 7 and 9, given up
-        -- at 11.
-        T.tick(11)
-        T.ok(#S.clicks == clicks + 4 and T.clickAt() == "1256,858", "Delete clicked four times: " .. (#S.clicks - clicks))
+        T.tick(80)
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "1256,858", "Delete clicked once: " .. (#S.clicks - clicks))
         T.ok(S.sent[#S.sent] == "Escape" and T.count("[avenger] 'Delete Last Tab': its popup was left open (refused) — "
           .. "pressing Escape to close it") == 1, T.dump())
         T.repaint({ osc = 1, selected = "osc", index = 1, macroShown = 2 })
         T.settle(4)
-        T.ok(#S.clicks == clicks + 4, "the tab not clicked to close it")
+        T.ok(#S.clicks == clicks + 1, "the tab not clicked to close it")
         T.ok(T.lastPost("error").text == "Delete Last Tab: the menu did not take the choice", T.lastPost("error").text)
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
