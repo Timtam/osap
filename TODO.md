@@ -4860,12 +4860,42 @@ update flows of `crates/host/src/gui.rs`.
       unpacking, a manifest that differed from the review, or a download without `module.toml`
       left the user without the installed version. Each module is staged now (see the review
       round above); module discovery skips dot-folders.
-- [ ] **A failed multi-module install is not rolled back.** Dependencies are written first, so a
-      failure leaves nothing that cannot load, but it can leave dependencies nobody uses.
-- [ ] **Leftover staging folders are not cleaned up.** A crash mid-install, or a staging folder
-      whose removal failed (logged), leaves `modules/.staging-…` behind. Nothing loads it; it
-      has to be deleted by hand. Removing old ones at start-up would need a way to tell them
-      from an install running in another process (the CLI beside the manager).
+- [x] **A failed multi-module install is not rolled back** (built 2026-10-24). Dependencies were
+      written first, so a failure left nothing that could not load, but it could leave dependencies
+      nobody used. An install is all or nothing now (`install_plan_into`, registry.rs): every
+      module is downloaded, unpacked and checked in one staging folder first (`stage_one`, into
+      `modules/.staging-…/<folder>/new`), and only then are they moved in, dependencies first
+      (`swap_in`). A move that fails takes the modules moved in before it out again, the last
+      first, with the versions they replaced put back, and the message ends *Nothing in modules/
+      was changed.* A take-back that fails as well ends the taking back: the modules moved in
+      before it stay with it (they come before it in dependency order, so nothing that stays lacks
+      a dependency), the staging folder is kept while an installed version is still in it, and
+      the message says what stayed and where. Tested with the fake GitHub (a failed download, an
+      archive that breaks a rule, and an update whose new dependency is ready but which itself
+      differs from its review leave nothing behind; the staging folder stays only while it holds
+      the installed version) and with a `rename` that refuses chosen moves: the installed folder
+      held open, a new version that cannot move in with and without the installed one going back,
+      a take-back that fails with and without an installed version left in the staging folder, and
+      a folder that changed after the plan's check. docs/module-manager.md says it.
+- [x] **Leftover staging folders are not cleaned up** (built 2026-10-24). A crash mid-install, or a
+      staging folder whose removal failed (logged), left `modules/.staging-…` behind for good. At
+      start-up (`sweep_staging_at_start`, called by `run_set` beside the settings sweep) every
+      staging folder that has not changed for an hour (`STALE_STAGING`) is removed, and the log
+      says how many. The hour is what tells a leftover from an install running in another process
+      (the CLI beside the manager): a running install changes its staging folder once per module
+      it downloads (`stage_one` makes the module's folder after the download), and a download
+      gives up well within the hour — a compile-time assertion holds `STALE_STAGING` above twice
+      the request timeouts, counting the redirect to the archive as a second request. The time is
+      read from the folder itself (`symlink_metadata`): on Windows the listing of `modules/` keeps
+      a folder's time from before folders were made in it, and an install running for an hour
+      looked like a leftover. A staging folder that holds a version moved aside (`<folder>/old`, or
+      the `old` of earlier builds' layout) of a module that is not installed now is that module's
+      only copy and is kept, with a log line at every start saying to move it into `modules/`
+      under the name of the folder it came from (in the old layout read from a `.source.toml`).
+      Unit-tested with a clock an hour later, and with folders whose own time was set two hours
+      back. Not chosen: a lock file in each staging folder (`File::lock`) — exact, but a second
+      rule for the folders of earlier builds, and untried on the file systems a portable copy may
+      sit on (exFAT, a network share).
 
 ## Timers, JSON encode and the window already in front (2026-09-22)
 

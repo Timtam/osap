@@ -565,7 +565,7 @@ pub const MAX_NAME_BYTES: usize = 400;
 /// [`MAX_UNPACKED_BYTES`] — and the disk itself: an archive that turns out larger than the
 /// budget, or a write that fails, stops the unpacking part-way, with `dest` removed rather
 /// than left half-written. So a caller that must not lose what is in `dest` unpacks somewhere
-/// new and swaps, as installing and updating do (`registry.rs`, `install_one`).
+/// new and swaps, as installing and updating do (`registry.rs`, `stage_one` and `swap_in`).
 ///
 /// A symbolic link in the archive is written as a plain file holding the link's target: no
 /// link is ever created, so nothing written later can be steered through one.

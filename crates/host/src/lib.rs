@@ -6335,6 +6335,7 @@ fn run_set(sources: module_set::Sources) -> Result<()> {
     // Every folder under `modules/` that will not load, and why. The launcher read that list
     // before the log was open, so the reasons it met went nowhere.
     registry::log_unloadable();
+    registry::sweep_staging_at_start();
     settings::sweep_leftovers_at_start();
     match &instance {
         Some(p) => p.log_notes(),
@@ -11160,7 +11161,8 @@ fn find_module_dir(parent: &Path, id: &str) -> Option<PathBuf> {
         for entry in std::fs::read_dir(dir).ok()?.flatten() {
             let p = entry.path();
             // A dot-folder is not a module: an install's staging folder (registry.rs,
-            // `install_one`), or a system's hidden folder. The same rule as the installed list.
+            // `install_plan_into`), or a system's hidden folder. The same rule as the installed
+            // list.
             if p.is_dir() && !entry.file_name().to_string_lossy().starts_with('.') {
                 if let Ok(m) = LoadedModule::load_dir(&p) {
                     if m.manifest.id == id {

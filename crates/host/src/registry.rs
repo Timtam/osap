@@ -734,10 +734,10 @@ pub fn resolve_tree(full_name: &str, branch: Option<&str>) -> Result<InstallPlan
 }
 
 /// Installs what [`resolve_tree`] planned: every module in `plan`, the optional ones only
-/// when `with_optional`. Dependencies go in before the modules that need them, so a download
-/// that fails part-way leaves nothing installed that cannot load. Each module is unpacked and
-/// checked in a staging folder before it replaces anything — see `install_one`. Returns the
-/// installed modules in the order they were written.
+/// when `with_optional`, or none of them. Each module is downloaded, unpacked and checked in a
+/// staging folder before any of them replaces anything, and dependencies go in before the
+/// modules that need them — see `install_plan_into`. Returns the installed modules in the
+/// order they were written.
 pub fn install_resolved(plan: &InstallPlan, with_optional: bool) -> Result<Vec<LoadedModule>> {
     install_plan_into(&GitHub::live(), plan, with_optional, &modules_dir())
 }
@@ -750,24 +750,48 @@ pub fn resolve_update(m: &InstalledModule) -> Result<UpdatePlan> {
     GitHub::live().resolve_update(m, &all)
 }
 
-/// Applies an update [`resolve_update`] planned: the new version and every module it now needs.
-/// Returns what was written, in the order it was written.
+/// Applies an update [`resolve_update`] planned: the new version and every module it now needs,
+/// or none of them, as [`install_resolved`] does. Returns what was written, in the order it was
+/// written.
 pub fn install_update(plan: &UpdatePlan) -> Result<Vec<LoadedModule>> {
     install_plan_into(&GitHub::live(), &plan.install, false, &modules_dir())
 }
 
 /// The one writer behind [`install_resolved`] and [`install_update`].
+///
+/// An install is all or nothing. Every module is downloaded, unpacked and checked in a staging
+/// folder first (`stage_one`), and only once all of them are ready is any of them moved into
+/// `modules/` (`swap_in`), where a move that fails takes back the ones before it. An install
+/// whose third module failed to download used to leave the first two installed, with nothing
+/// that needed them.
 fn install_plan_into(
     gh: &GitHub,
     plan: &InstallPlan,
     with_optional: bool,
     modules_dir: &Path,
 ) -> Result<Vec<LoadedModule>> {
+    let rename = |from: &Path, to: &Path| std::fs::rename(from, to);
+    install_plan_renaming(gh, plan, with_optional, modules_dir, &rename)
+}
+
+/// [`install_plan_into`], with the `rename` that `swap_in` moves folders with: `std::fs::rename`,
+/// but in the tests.
+fn install_plan_renaming(
+    gh: &GitHub,
+    plan: &InstallPlan,
+    with_optional: bool,
+    modules_dir: &Path,
+    rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<Vec<LoadedModule>> {
     let order = install_order(plan, with_optional);
+    let unchanged = match order.as_slice() {
+        [one] => format!("Nothing in modules/{} was changed.", repo_name(&one.repo)),
+        _ => "Nothing in modules/ was changed.".to_string(),
+    };
     // Every folder is checked before anything is downloaded, so a plan that would overwrite
-    // another module fails whole rather than after its dependencies were written. The plan
-    // was checked against the installed list when it was made; this is the file system's
-    // answer now, which also sees a folder that holds no module at all.
+    // another module fails before a download is spent on it. The plan was checked against the
+    // installed list when it was made; this is the file system's answer now, which also sees a
+    // folder that holds no module at all.
     let mut folders: HashSet<String> = HashSet::new();
     for p in &order {
         if !folders.insert(repo_name(&p.repo).to_lowercase()) {
@@ -776,95 +800,32 @@ fn install_plan_into(
                 repo_name(&p.repo)
             );
         }
-        check_destination(&modules_dir.join(repo_name(&p.repo)), &p.manifest.id)?;
+        check_destination(&modules_dir.join(repo_name(&p.repo)), &p.manifest.id)
+            .map_err(|e| then_say(&format!("{e:#}"), &unchanged))?;
     }
-    let mut done = Vec::new();
-    for p in order {
-        done.push(install_one(gh, p, modules_dir)?);
-    }
-    Ok(done)
-}
-
-/// Downloads one planned module and puts it in place of whatever version is installed.
-///
-/// Nothing is written to `modules/<repo>` until the new version is complete and checked. It is
-/// unpacked into a staging folder beside it (`modules/.staging-…`, which module discovery
-/// skips, like every folder whose name starts with a dot), given its `.source.toml`, loaded,
-/// and its `module.toml` compared with the one reviewed. Only then is the installed folder
-/// renamed into the staging folder and the new one renamed into its place — two renames on one
-/// volume — and the staging folder, holding the old version, removed. Any failure before the
-/// swap removes the staging folder alone, so an update that fails leaves the installed version
-/// exactly as it was; that used to cost the user the module (unpacking removed the installed
-/// folder first, and a manifest that failed the comparison was removed after it).
-///
-/// On Windows the first rename fails while a file in the installed folder is open, and the
-/// update then fails with the installed version in place, where deleting it file by file
-/// could have stopped half-way.
-fn install_one(gh: &GitHub, p: &PlannedModule, modules_dir: &Path) -> Result<LoadedModule> {
-    let folder = repo_name(&p.repo);
-    let dest = modules_dir.join(folder);
-    let bytes = gh.download(&p.repo, &p.sha)?;
     std::fs::create_dir_all(modules_dir)
         .with_context(|| format!("creating {}", modules_dir.display()))?;
-    // Removed, with whatever is in it, when it goes out of scope — on every path out of here.
+    // Removed, with whatever is in it, when it goes out of scope — on every path out of here
+    // but the one that keeps it.
     let staging = tempfile::Builder::new()
-        .prefix(".staging-")
+        .prefix(STAGING_PREFIX)
         .tempdir_in(modules_dir)
         .with_context(|| format!("creating a staging folder in {}", modules_dir.display()))?;
-    let unchanged = || format!("Nothing in modules/{folder} was changed.");
-    let new = staging.path().join("new");
-    module_manifest::unpack_zip(&bytes, &new, ArchiveLayout::OneFolder)
-        .with_context(|| format!("unpacking {}. {}", p.repo, unchanged()))?;
-    write_source(
-        &new,
-        &Source { repo: p.repo.clone(), branch: p.branch.clone(), sha: p.sha.clone() },
-    )?;
-    let mut loaded = LoadedModule::load_dir(&new)
-        .with_context(|| format!("{} is not a valid module. {}", p.repo, unchanged()))?;
-    // The same commit, so the same file — unless something between here and GitHub
-    // disagrees. What was reviewed is what may be installed.
-    if let Some(what) = differs(&p.manifest, &loaded.manifest) {
-        anyhow::bail!(
-            "{} was not installed: its downloaded module.toml differs from the one reviewed \
-             ({what}). {}",
-            p.repo,
-            unchanged()
-        );
+    let mut staged = Vec::with_capacity(order.len());
+    for p in order {
+        let dir = staging.path().join(repo_name(&p.repo));
+        staged.push(stage_one(gh, p, &dir).map_err(|e| then_say(&format!("{e:#}"), &unchanged))?);
     }
-    // Once more, right before replacing: the folder may have changed since the plan's check.
-    check_destination(&dest, &p.manifest.id)?;
-    let old = staging.path().join("old");
-    let had_old = dest.exists();
-    if had_old {
-        std::fs::rename(&dest, &old).with_context(|| {
-            format!(
-                "could not move the installed modules/{folder} aside to replace it — is a file \
-                 in it open? {}",
-                unchanged()
-            )
-        })?;
-    }
-    if let Err(e) = std::fs::rename(&new, &dest) {
-        if had_old && std::fs::rename(&old, &dest).is_err() {
-            // Both renames failed, which leaves the old version where it can still be found:
-            // `keep` keeps the staging folder rather than deleting it with the old version
-            // inside.
-            let kept = staging.keep();
-            return Err(e).with_context(|| {
-                format!(
-                    "could not move {} into modules/{folder}, nor the installed version back; \
-                     the installed version is in {}",
-                    p.repo,
-                    kept.join("old").display()
-                )
-            });
+    if let Err(failed) = swap_in(&staged, modules_dir, &unchanged, rename) {
+        if failed.keep {
+            // An installed version is still in there, and the message says where.
+            let _ = staging.keep();
         }
-        return Err(e).with_context(|| {
-            format!("could not move {} into modules/{folder}. {}", p.repo, unchanged())
-        });
+        return Err(failed.error);
     }
-    // The old version goes with the staging folder. A failure to remove it leaves a dot-folder
-    // that nothing loads; it is logged so that it can be found.
+    // The old versions go with the staging folder. A failure to remove it leaves a dot-folder
+    // that nothing loads; it is logged so that it can be found, and the next start removes it
+    // (`sweep_staging`).
     let path = staging.path().to_path_buf();
     if let Err(e) = staging.close() {
         crate::logging::line(
@@ -872,8 +833,302 @@ fn install_one(gh: &GitHub, p: &PlannedModule, modules_dir: &Path) -> Result<Loa
             &format!("could not remove the staging folder {}: {e}", path.display()),
         );
     }
-    loaded.root = dest;
-    Ok(loaded)
+    Ok(staged
+        .into_iter()
+        .map(|s| {
+            let mut loaded = s.loaded;
+            loaded.root = modules_dir.join(repo_name(&s.plan.repo));
+            loaded
+        })
+        .collect())
+}
+
+/// How an install's staging folder is named: `modules/.staging-<random>`. Module discovery
+/// skips it, like every folder whose name starts with a dot.
+const STAGING_PREFIX: &str = ".staging-";
+
+/// One message: `said`, followed by the sentence `then`.
+fn then_say(said: &str, then: &str) -> anyhow::Error {
+    let gap = if said.ends_with(['.', '?', '!']) { " " } else { ". " };
+    anyhow::anyhow!("{said}{gap}{then}")
+}
+
+/// One module of an install, ready in `dir` — a folder of the install's staging folder, named
+/// like the module's folder under `modules/`: the new version in `dir/new`, and the installed
+/// version, once `swap_in` has moved it aside, in `dir/old`.
+struct Staged<'a> {
+    plan: &'a PlannedModule,
+    loaded: LoadedModule,
+    dir: PathBuf,
+}
+
+impl Staged<'_> {
+    /// The module's folder under `modules/`.
+    fn folder(&self) -> &str {
+        repo_name(&self.plan.repo)
+    }
+}
+
+/// Downloads one planned module into `dir/new` and checks it there: unpacked, given its
+/// `.source.toml`, loaded, and its `module.toml` compared with the one reviewed. Writes nothing
+/// outside `dir`, so an update that fails here leaves the installed version exactly as it was;
+/// that used to cost the user the module (unpacking removed the installed folder first, and a
+/// manifest that failed the comparison was removed after it).
+fn stage_one<'a>(gh: &GitHub, p: &'a PlannedModule, dir: &Path) -> Result<Staged<'a>> {
+    let bytes = gh.download(&p.repo, &p.sha)?;
+    // Made only after the download, so the staging folder changes once per module downloaded:
+    // that is how the start-up sweep tells an install still running from a leftover.
+    std::fs::create_dir(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let new = dir.join("new");
+    module_manifest::unpack_zip(&bytes, &new, ArchiveLayout::OneFolder)
+        .with_context(|| format!("unpacking {}", p.repo))?;
+    write_source(
+        &new,
+        &Source { repo: p.repo.clone(), branch: p.branch.clone(), sha: p.sha.clone() },
+    )?;
+    let loaded = LoadedModule::load_dir(&new)
+        .with_context(|| format!("{} is not a valid module", p.repo))?;
+    // The same commit, so the same file — unless something between here and GitHub
+    // disagrees. What was reviewed is what may be installed.
+    if let Some(what) = differs(&p.manifest, &loaded.manifest) {
+        anyhow::bail!(
+            "{} was not installed: its downloaded module.toml differs from the one reviewed \
+             ({what}).",
+            p.repo
+        );
+    }
+    Ok(Staged { plan: p, loaded, dir: dir.to_path_buf() })
+}
+
+/// Why `swap_in` stopped — the message, which says what the install left where — and whether
+/// the staging folder must be kept, because a version that was installed is still in it.
+struct SwapFailed {
+    error: anyhow::Error,
+    keep: bool,
+}
+
+/// Moves each staged module, in order, into its folder under `modules_dir` in place of the
+/// version installed there: two renames on one volume, the installed folder into the module's
+/// staging folder and the new one into its place.
+///
+/// A module that cannot be moved in stops the install, and the ones moved in before it are
+/// taken out again, the last first, each with the version it replaced put back. So either the
+/// whole install is in place or none of it is — unless a rename that takes something back fails
+/// as well, and then the message says where everything is. A module that cannot be taken out
+/// ends the taking back: the modules are in dependency order, so those before it stay too, and
+/// nothing that stays lacks a dependency.
+///
+/// On Windows the first rename fails while a file in the installed folder is open, and the
+/// update then fails with the installed version in place, where deleting it file by file
+/// could have stopped half-way. `rename` is `std::fs::rename`, but in the tests.
+fn swap_in(
+    staged: &[Staged],
+    modules_dir: &Path,
+    unchanged: &str,
+    rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), SwapFailed> {
+    // The modules moved in so far, and whether each replaced an installed version.
+    let mut moved: Vec<(&Staged, bool)> = Vec::new();
+    let aside = |folder: &str, old: &Path| {
+        format!("the version of modules/{folder} installed before is in {}", old.display())
+    };
+    for s in staged {
+        let dest = modules_dir.join(s.folder());
+        let (new, old) = (s.dir.join("new"), s.dir.join("old"));
+        let mut left: Vec<String> = Vec::new();
+        let mut keep = false;
+        let had_old = dest.exists();
+        // Once more, right before replacing: the folder may have changed since the plan's check.
+        let why = if let Err(e) = check_destination(&dest, &s.plan.manifest.id) {
+            format!("{e:#}")
+        } else if let Err(e) = if had_old { rename(&dest, &old) } else { Ok(()) } {
+            format!(
+                "could not move the installed modules/{} aside to replace it — is a file in it \
+                 open?: {e}",
+                s.folder()
+            )
+        } else if let Err(e) = rename(&new, &dest) {
+            if had_old && rename(&old, &dest).is_err() {
+                keep = true;
+                left.push(aside(s.folder(), &old));
+            }
+            format!("could not move {} into modules/{}: {e}", s.plan.repo, s.folder())
+        } else {
+            moved.push((s, had_old));
+            continue;
+        };
+        // Taking back what was moved in, the last first.
+        let mut stay: Vec<String> = Vec::new();
+        for &(m, had_old) in moved.iter().rev() {
+            let dest = modules_dir.join(m.folder());
+            let (new, old) = (m.dir.join("new"), m.dir.join("old"));
+            if !stay.is_empty() || rename(&dest, &new).is_err() {
+                stay.push(format!("modules/{}", m.folder()));
+                if had_old {
+                    // Kept for now. The module is installed, so this version is not its only
+                    // copy: the start-up sweep removes it with the staging folder, unless another
+                    // version in there is one.
+                    keep = true;
+                    left.push(aside(m.folder(), &old));
+                }
+            } else if had_old && rename(&old, &dest).is_err() {
+                keep = true;
+                left.push(aside(m.folder(), &old));
+            }
+        }
+        if !stay.is_empty() {
+            let stay = stay.join(", ");
+            left.insert(0, format!("{stay} could not be taken out again and stay installed"));
+        }
+        let then = if left.is_empty() {
+            unchanged.to_string()
+        } else {
+            format!("Undoing the install did not finish: {}.", left.join("; "))
+        };
+        return Err(SwapFailed { error: then_say(&why, &then), keep });
+    }
+    Ok(())
+}
+
+/// How long a staging folder must have gone unchanged before the start-up sweep takes it for a
+/// leftover. An install running in another process — the command line beside the manager —
+/// changes its staging folder once per module it downloads (`stage_one`), and a download gives
+/// up within the timeouts above: two requests, since GitHub answers the first with a redirect,
+/// each with its own connection and answer timeouts (ureq starts them afresh for the second),
+/// and then the archive's. An hour is more than twice the longest a download can take.
+const STALE_STAGING: Duration = Duration::from_secs(60 * 60);
+const _: () = assert!(
+    STALE_STAGING.as_secs()
+        > 2 * (2 * (3 * CONNECT_TIMEOUT.as_secs() + RESPONSE_TIMEOUT.as_secs())
+            + DOWNLOAD_TIMEOUT.as_secs())
+);
+
+/// What `sweep_staging` did: how many staging folders it removed, each version that was
+/// installed it found set aside and kept with its staging folder, and each removal that failed
+/// (the folder, and why).
+#[derive(Debug, Default)]
+struct Swept {
+    removed: usize,
+    kept: Vec<KeptCopy>,
+    failed: Vec<(PathBuf, String)>,
+}
+
+/// A version an install moved aside, kept by `sweep_staging` as its module's only copy.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct KeptCopy {
+    /// Where it is: `<staging folder>/<folder>/old`, or `<staging folder>/old`.
+    old: PathBuf,
+    /// The module's id.
+    id: String,
+    /// The folder under `modules/` it was moved out of, when that can be told: in the layout of
+    /// earlier builds the folder is not part of the path, and is read from a `.source.toml`.
+    folder: Option<String>,
+}
+
+impl Swept {
+    /// What the start-up sweep logs, a line each.
+    fn log_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self.removed > 0 {
+            lines.push(format!(
+                "removed {} staging folder(s) that interrupted installs left in modules/",
+                self.removed
+            ));
+        }
+        for k in &self.kept {
+            // Under the name it had: an update installs into that folder, and of two folders
+            // with one module only the first listed loads.
+            let how = match &k.folder {
+                Some(folder) => format!("move that folder into modules/ and rename it {folder}"),
+                None => "move that folder into modules/ and rename it after the module".to_string(),
+            };
+            lines.push(format!(
+                "kept {}: it holds {}, which an install moved aside and did not put back, and \
+                 which is not installed now. To use the module again, {how}",
+                k.old.display(),
+                k.id
+            ));
+        }
+        for (dir, e) in &self.failed {
+            lines.push(format!("could not remove the staging folder {}: {e}", dir.display()));
+        }
+        lines
+    }
+}
+
+/// Removes, once at start-up, the staging folders installs left in `modules/` (see
+/// `sweep_staging`), and logs what it removed and what it kept. Called by `host::run_set` once
+/// the log is open.
+pub fn sweep_staging_at_start() {
+    for line in sweep_staging(&modules_dir(), std::time::SystemTime::now()).log_lines() {
+        crate::logging::line("manager", &line);
+    }
+}
+
+/// Removes the staging folders in `dir` that installs left behind — after a crash, or when
+/// removing one failed — once they have gone unchanged for [`STALE_STAGING`] at `now`; a
+/// younger one may belong to an install running in another process. Without this they stayed
+/// for good, skipped at every start, until somebody deleted them by hand.
+///
+/// A staging folder that holds an installed version set aside (`<folder>/old`, or `old` in the
+/// staging folders of earlier builds) of a module that is not installed now is kept: the
+/// install stopped between its two renames, and that folder is the module's only copy. One
+/// whose module is installed — the new version, or the old one put back — goes.
+fn sweep_staging(dir: &Path, now: std::time::SystemTime) -> Swept {
+    let mut swept = Swept::default();
+    let Ok(entries) = std::fs::read_dir(dir) else { return swept };
+    let mut installed_ids: Option<HashSet<String>> = None;
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(STAGING_PREFIX) {
+            continue;
+        }
+        let staging = entry.path();
+        // Read from the folder itself, not from the listing (`entry.metadata()`): on Windows the
+        // listing keeps a folder's time from before folders were made in it, so an install
+        // running for an hour looked like a leftover. Not followed: a link of that name is
+        // somebody else's and left alone.
+        let Ok(meta) = std::fs::symlink_metadata(&staging) else { continue };
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age >= STALE_STAGING);
+        if !meta.is_dir() || !stale {
+            continue;
+        }
+        // `old` in the layout of earlier builds, and `<folder>/old`, which names its folder.
+        let set_aside: Vec<(PathBuf, Option<String>)> = std::iter::once((staging.join("old"), None))
+            .chain(std::fs::read_dir(&staging).into_iter().flatten().flatten().map(|e| {
+                (e.path().join("old"), Some(e.file_name().to_string_lossy().into_owned()))
+            }))
+            .collect();
+        let mut keep = false;
+        for (old, folder) in set_aside {
+            let Ok(m) = LoadedModule::load_dir(&old) else { continue };
+            let ids = installed_ids
+                .get_or_insert_with(|| installed_in(dir).into_iter().map(|m| m.id).collect());
+            if !ids.contains(&m.manifest.id) {
+                keep = true;
+                // Earlier builds installed into the folder named after the repository: the one
+                // the version that was to replace it came from, beside it in `new`, or failing
+                // that its own.
+                let folder = folder.or_else(|| {
+                    read_source(&staging.join("new"))
+                        .or_else(|| read_source(&old))
+                        .map(|s| repo_name(&s.repo).to_string())
+                });
+                swept.kept.push(KeptCopy { old, id: m.manifest.id, folder });
+            }
+        }
+        if keep {
+            continue;
+        }
+        match std::fs::remove_dir_all(&staging) {
+            Ok(()) => swept.removed += 1,
+            Err(e) => swept.failed.push((staging, e.to_string())),
+        }
+    }
+    swept
 }
 
 /// Refuses to install `id` into `dest` when something else is there: another module, or a
@@ -894,7 +1149,7 @@ fn check_destination(dest: &Path, id: &str) -> Result<()> {
         ),
         Err(_) => anyhow::bail!(
             "{id} would be installed into {}, which exists and is not a module that can be read. \
-             Move that folder away first; nothing was installed.",
+             Move that folder away first.",
             dest.display()
         ),
     }
@@ -1286,7 +1541,7 @@ fn installed_in_with(dir: &Path, force_log: bool) -> Vec<InstalledModule> {
     for entry in entries.flatten() {
         let dir = entry.path();
         // A folder whose name starts with a dot is not a module: an install's staging folder
-        // (`install_one`), or a system's hidden folder.
+        // (`install_plan_into`), or a system's hidden folder.
         if !dir.is_dir() || entry.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
@@ -1919,6 +2174,7 @@ mod github_tests {
         };
         let err = install_plan_into(&fake.github(), &plan, false, tmp.path()).expect_err("taken");
         assert!(err.to_string().contains("not a module that can be read"), "{err:#}");
+        assert!(err.to_string().ends_with("first. Nothing in modules/ was changed."), "{err:#}");
         assert!(fake.asked().is_empty(), "nothing downloaded, the dependency neither");
         assert!(!tmp.path().join("a").exists());
         assert_eq!(std::fs::read(wip.join("module.toml")).unwrap(), b"id = \"com.me.wip\"\nname = ");
@@ -2164,6 +2420,524 @@ mod github_tests {
             searches(&fake.asked()),
             vec![search_url("topic%3Aosap-module", 1), search_url("topic%3Aosap-module", 2)]
         );
+    }
+
+    /// The names in `dir`, sorted.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_failed_install_of_several_modules_installs_none_of_them() {
+        let fake = Fake::default();
+        let gh = fake.github();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = manifest("com.t.root", &[], &["com.t.a", "com.t.b"], &[]);
+        let a = manifest("com.t.a", &[], &[], &[]);
+        let b = manifest("com.t.b", &[], &[], &[]);
+        let serve = |name: &str, members: &[(&str, &[u8])]| {
+            let top: Vec<(String, &[u8])> =
+                members.iter().map(|(n, d)| (format!("o-{name}-1/{n}"), *d)).collect();
+            let top: Vec<(&str, &[u8])> = top.iter().map(|(n, d)| (n.as_str(), *d)).collect();
+            fake.route(format!("{API}/repos/o/{name}/zipball/{}", sha_of(name)), zip_of(&top));
+        };
+        serve("a", &[("module.toml", a.as_bytes())]);
+        serve("b", &[("module.toml", b.as_bytes())]);
+        let plan = InstallPlan {
+            modules: vec![
+                planned("o/root", "main", &root, false),
+                planned("o/a", "main", &a, false),
+                planned("o/b", "main", &b, false),
+            ],
+            unavailable_optional: Vec::new(),
+        };
+
+        // The module asked for, written last, cannot be downloaded: its two dependencies were,
+        // and are not installed either.
+        let err = install_plan_into(&gh, &plan, false, tmp.path()).expect_err("root missing");
+        assert!(err.to_string().contains("downloading o/root"), "{err:#}");
+        assert!(err.to_string().ends_with("Nothing in modules/ was changed."), "{err:#}");
+        assert!(fake.asked().iter().any(|u| u.contains("/o/b/zipball/")), "b was downloaded");
+        assert!(names_in(tmp.path()).is_empty(), "{:?}", names_in(tmp.path()));
+
+        // A dependency that breaks an archive rule, before the module asked for is downloaded.
+        serve("root", &[("module.toml", root.as_bytes())]);
+        serve("b", &[("module.toml", b.as_bytes()), ("aux.luau", b"")]);
+        let err = install_plan_into(&gh, &plan, false, tmp.path()).expect_err("device name");
+        assert!(err.to_string().contains("unpacking o/b"), "{err:#}");
+        assert!(err.to_string().ends_with("Nothing in modules/ was changed."), "{err:#}");
+        assert!(names_in(tmp.path()).is_empty(), "{:?}", names_in(tmp.path()));
+
+        // An update that needs a new module: the new module is ready, but the update itself
+        // differs from its review. Neither goes in, and the installed version stays as it was,
+        // with nothing beside it.
+        serve("b", &[("module.toml", b.as_bytes())]);
+        install_plan_into(
+            &gh,
+            &InstallPlan {
+                modules: vec![planned("o/b", "main", &b, false)],
+                unavailable_optional: Vec::new(),
+            },
+            false,
+            tmp.path(),
+        )
+        .expect("b alone");
+        let b2 = b.replace("version = \"1.0.0\"", "version = \"2.0.0\"");
+        let b2 = b2.replace("dependencies = []", "dependencies = [\"com.t.a\"]");
+        let served = b2.replace("require = []", "require = [\"input\"]");
+        serve("b", &[("module.toml", served.as_bytes())]);
+        let update = InstallPlan {
+            modules: vec![planned("o/b", "main", &b2, false), planned("o/a", "main", &a, false)],
+            unavailable_optional: Vec::new(),
+        };
+        let err = install_plan_into(&gh, &update, false, tmp.path()).expect_err("b differs");
+        assert!(err.to_string().contains("o/b was not installed"), "{err:#}");
+        assert!(fake.asked().last().is_some_and(|u| u.contains("/o/b/zipball/")), "a went first");
+        assert_eq!(names_in(tmp.path()), ["b"]);
+        assert_eq!(std::fs::read_to_string(tmp.path().join("b/module.toml")).unwrap(), b);
+
+        // With everything published, all of it goes in, the dependencies first.
+        serve("a", &[("module.toml", a.as_bytes())]);
+        serve("b", &[("module.toml", b.as_bytes())]);
+        std::fs::remove_dir_all(tmp.path().join("b")).unwrap();
+        let done = install_plan_into(&gh, &plan, false, tmp.path()).expect("install");
+        let ids: Vec<&str> = done.iter().map(|m| m.manifest.id.as_str()).collect();
+        assert_eq!(ids, ["com.t.a", "com.t.b", "com.t.root"]);
+        assert_eq!(done[2].root, tmp.path().join("root"));
+        assert_eq!(names_in(tmp.path()), ["a", "b", "root"]);
+    }
+
+    /// `modules` with `b` and `root` installed at version 1, and an install of the new module `a`
+    /// and of version 2 of `b`, which now needs `a`, and of `root` staged in
+    /// `modules/.staging-t`, as `stage_one` leaves them. Returns the plans the staged modules
+    /// borrow.
+    fn staged_world(modules: &Path) -> Vec<PlannedModule> {
+        let b_v1 = manifest("com.t.b", &[], &[], &[]);
+        let root_v1 = manifest("com.t.root", &[], &[], &[]);
+        for (folder, text) in [("b", &b_v1), ("root", &root_v1)] {
+            std::fs::create_dir_all(modules.join(folder).join("src")).unwrap();
+            std::fs::write(modules.join(folder).join("module.toml"), text).unwrap();
+            std::fs::write(modules.join(folder).join("src/old.luau"), b"return 'old'").unwrap();
+        }
+        let v2 = |text: &str| text.replace("version = \"1.0.0\"", "version = \"2.0.0\"");
+        let texts = [
+            manifest("com.t.a", &[], &[], &[]),
+            v2(&manifest("com.t.b", &[], &["com.t.a"], &[])),
+            v2(&root_v1),
+        ];
+        let plans: Vec<PlannedModule> = ["o/a", "o/b", "o/root"]
+            .iter()
+            .zip(&texts)
+            .map(|(repo, text)| planned(repo, "main", text, false))
+            .collect();
+        for (p, text) in plans.iter().zip(&texts) {
+            let new = modules.join(".staging-t").join(repo_name(&p.repo)).join("new");
+            std::fs::create_dir_all(&new).unwrap();
+            std::fs::write(new.join("module.toml"), text).unwrap();
+        }
+        plans
+    }
+
+    fn staged_from<'a>(plans: &'a [PlannedModule], modules: &Path) -> Vec<Staged<'a>> {
+        plans
+            .iter()
+            .map(|p| {
+                let dir = modules.join(".staging-t").join(repo_name(&p.repo));
+                Staged { plan: p, loaded: LoadedModule::load_dir(dir.join("new")).unwrap(), dir }
+            })
+            .collect()
+    }
+
+    /// A rename that refuses each move from one path to another in `refused`, as Windows
+    /// refuses to move a folder with an open file in it.
+    fn refusing(refused: Vec<(PathBuf, PathBuf)>) -> impl Fn(&Path, &Path) -> std::io::Result<()> {
+        move |from, to| {
+            if refused.iter().any(|(f, t)| f == from && t == to) {
+                let kind = std::io::ErrorKind::PermissionDenied;
+                Err(std::io::Error::new(kind, "refused by the test"))
+            } else {
+                std::fs::rename(from, to)
+            }
+        }
+    }
+
+    /// Whether `modules/<folder>` is version 1, whole.
+    fn is_v1(modules: &Path, folder: &str) -> bool {
+        std::fs::read_to_string(modules.join(folder).join("module.toml"))
+            .is_ok_and(|t| t.contains("version = \"1.0.0\""))
+            && modules.join(folder).join("src/old.luau").is_file()
+    }
+
+    #[test]
+    fn a_move_that_fails_takes_back_the_modules_moved_before_it() {
+        let unchanged = "Nothing in modules/ was changed.";
+
+        // The installed root cannot be moved aside (a file in it is open): a and b, already
+        // moved in, are taken out again, and b's version 1 is put back.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = tmp.path();
+        let plans = staged_world(m);
+        let staged = staged_from(&plans, m);
+        let st = m.join(".staging-t");
+        let rename = refusing(vec![(m.join("root"), st.join("root").join("old"))]);
+        let failed = swap_in(&staged, m, unchanged, &rename).expect_err("root is held");
+        let msg = failed.error.to_string();
+        assert!(msg.contains("could not move the installed modules/root aside"), "{msg}");
+        assert!(msg.ends_with(unchanged), "{msg}");
+        assert!(!failed.keep);
+        assert_eq!(names_in(m), [".staging-t", "b", "root"]);
+        assert!(is_v1(m, "b") && is_v1(m, "root"));
+        assert!(st.join("a/new/module.toml").is_file() && st.join("b/new/module.toml").is_file());
+
+        // The new root cannot be moved in, nor the installed one back: the installed version is
+        // in the staging folder, which is kept, and the message says where.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = tmp.path();
+        let plans = staged_world(m);
+        let staged = staged_from(&plans, m);
+        let st = m.join(".staging-t");
+        let rename = refusing(vec![
+            (st.join("root").join("new"), m.join("root")),
+            (st.join("root").join("old"), m.join("root")),
+        ]);
+        let failed = swap_in(&staged, m, unchanged, &rename).expect_err("root cannot move");
+        let msg = failed.error.to_string();
+        assert!(msg.contains("could not move o/root into modules/root"), "{msg}");
+        assert!(
+            msg.ends_with(&format!(
+                "Undoing the install did not finish: the version of modules/root installed \
+                 before is in {}.",
+                st.join("root").join("old").display()
+            )),
+            "{msg}"
+        );
+        assert!(failed.keep);
+        assert_eq!(names_in(m), [".staging-t", "b"]);
+        assert!(is_v1(m, "b"));
+        assert!(st.join("root/old/src/old.luau").is_file());
+
+        // The new root cannot be moved in, and the installed one goes back.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = tmp.path();
+        let plans = staged_world(m);
+        let staged = staged_from(&plans, m);
+        let st = m.join(".staging-t");
+        let rename = refusing(vec![(st.join("root").join("new"), m.join("root"))]);
+        let failed = swap_in(&staged, m, unchanged, &rename).expect_err("root cannot move");
+        assert!(failed.error.to_string().ends_with(unchanged), "{:#}", failed.error);
+        assert!(!failed.keep);
+        assert_eq!(names_in(m), [".staging-t", "b", "root"]);
+        assert!(is_v1(m, "b") && is_v1(m, "root"));
+
+        // b cannot be taken out again: it stays, and so does a, which comes before it. b's
+        // version 1 is in the staging folder, which is kept.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = tmp.path();
+        let plans = staged_world(m);
+        let staged = staged_from(&plans, m);
+        let st = m.join(".staging-t");
+        let rename = refusing(vec![
+            (m.join("root"), st.join("root").join("old")),
+            (m.join("b"), st.join("b").join("new")),
+        ]);
+        let failed = swap_in(&staged, m, unchanged, &rename).expect_err("root is held");
+        let msg = failed.error.to_string();
+        assert!(
+            msg.ends_with(&format!(
+                "Undoing the install did not finish: modules/b, modules/a could not be taken out \
+                 again and stay installed; the version of modules/b installed before is in {}.",
+                st.join("b").join("old").display()
+            )),
+            "{msg}"
+        );
+        assert!(failed.keep);
+        assert_eq!(names_in(m), [".staging-t", "a", "b", "root"]);
+        assert!(std::fs::read_to_string(m.join("b/module.toml")).unwrap().contains("2.0.0"));
+        assert!(st.join("b/old/src/old.luau").is_file());
+        assert!(is_v1(m, "root"));
+
+        // a cannot be taken out again, after b was: a stays, b is version 1 again, and with no
+        // installed version in it the staging folder goes.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = tmp.path();
+        let plans = staged_world(m);
+        let staged = staged_from(&plans, m);
+        let st = m.join(".staging-t");
+        let rename = refusing(vec![
+            (m.join("root"), st.join("root").join("old")),
+            (m.join("a"), st.join("a").join("new")),
+        ]);
+        let failed = swap_in(&staged, m, unchanged, &rename).expect_err("root is held");
+        let msg = failed.error.to_string();
+        assert!(
+            msg.ends_with(
+                "Undoing the install did not finish: modules/a could not be taken out again and \
+                 stay installed."
+            ),
+            "{msg}"
+        );
+        assert!(!failed.keep);
+        assert_eq!(names_in(m), [".staging-t", "a", "b", "root"]);
+        assert!(is_v1(m, "b") && is_v1(m, "root"));
+
+        // The folder changed after the plan's check: somebody's work in progress is in
+        // modules/b now. a is taken out, and the folder is left alone.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = tmp.path();
+        let plans = staged_world(m);
+        let staged = staged_from(&plans, m);
+        std::fs::write(m.join("b/module.toml"), b"mine").unwrap();
+        let failed = swap_in(&staged, m, unchanged, &refusing(Vec::new())).expect_err("taken");
+        let msg = failed.error.to_string();
+        assert!(msg.contains("not a module that can be read"), "{msg}");
+        assert!(msg.ends_with(&format!("first. {unchanged}")), "{msg}");
+        assert_eq!(names_in(m), [".staging-t", "b", "root"]);
+        assert_eq!(std::fs::read(m.join("b/module.toml")).unwrap(), b"mine");
+        assert!(m.join("b/src/old.luau").is_file() && is_v1(m, "root"));
+        // The same, with a that cannot be taken out: the message does not say both.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = tmp.path();
+        let plans = staged_world(m);
+        let staged = staged_from(&plans, m);
+        std::fs::write(m.join("b/module.toml"), b"mine").unwrap();
+        let rename = refusing(vec![(m.join("a"), m.join(".staging-t/a/new"))]);
+        let failed = swap_in(&staged, m, unchanged, &rename).expect_err("taken");
+        let msg = failed.error.to_string();
+        assert!(
+            msg.ends_with(
+                "Move that folder away first. Undoing the install did not finish: modules/a \
+                 could not be taken out again and stay installed."
+            ),
+            "{msg}"
+        );
+
+        // And with nothing refused, all three are in place, the old versions in the staging
+        // folder.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = tmp.path();
+        let plans = staged_world(m);
+        let staged = staged_from(&plans, m);
+        assert!(swap_in(&staged, m, unchanged, &refusing(Vec::new())).is_ok());
+        assert_eq!(names_in(m), [".staging-t", "a", "b", "root"]);
+        for folder in ["b", "root"] {
+            let text = std::fs::read_to_string(m.join(folder).join("module.toml")).unwrap();
+            assert!(text.contains("2.0.0"), "{folder}");
+            assert!(m.join(".staging-t").join(folder).join("old/src/old.luau").is_file());
+        }
+    }
+
+    /// The staging folder in `dir`, the only one.
+    fn the_staging_folder(dir: &Path) -> PathBuf {
+        let found: Vec<String> =
+            names_in(dir).into_iter().filter(|n| n.starts_with(STAGING_PREFIX)).collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        dir.join(&found[0])
+    }
+
+    #[test]
+    fn a_failed_install_keeps_its_staging_folder_while_an_installed_version_is_in_it() {
+        let fake = Fake::default();
+        let gh = fake.github();
+        let tmp = tempfile::tempdir().unwrap();
+        let m = tmp.path();
+        let v1 = manifest("com.t.root", &[], &[], &[]);
+        let v2 = v1.replace("version = \"1.0.0\"", "version = \"2.0.0\"");
+        let url = format!("{API}/repos/o/root/zipball/{}", sha_of("root"));
+        let plan_for = |text: &str| InstallPlan {
+            modules: vec![planned("o/root", "main", text, false)],
+            unavailable_optional: Vec::new(),
+        };
+        fake.route(
+            url.clone(),
+            zip_of(&[("o-root-1/module.toml", v1.as_bytes()), ("o-root-1/src/old.luau", b"")]),
+        );
+        install_plan_into(&gh, &plan_for(&v1), false, m).expect("version 1");
+        fake.route(url, zip_of(&[("o-root-2/module.toml", v2.as_bytes())]));
+        let refuse = |when: fn(&Path, &Path, &Path) -> bool| {
+            move |from: &Path, to: &Path| {
+                if when(m, from, to) {
+                    let kind = std::io::ErrorKind::PermissionDenied;
+                    Err(std::io::Error::new(kind, "refused by the test"))
+                } else {
+                    std::fs::rename(from, to)
+                }
+            }
+        };
+
+        // The installed version cannot be moved aside: nothing is kept.
+        let held = refuse(|m, from, _| from == m.join("root"));
+        let err = install_plan_renaming(&gh, &plan_for(&v2), false, m, &held).expect_err("held");
+        assert!(err.to_string().ends_with("Nothing in modules/root was changed."), "{err:#}");
+        assert!(no_staging_left(m));
+        assert_eq!(names_in(m), ["root"]);
+
+        // Neither the new version nor the installed one can be moved in: the installed one is
+        // the module's only copy, and its staging folder stays.
+        let blocked = refuse(|m, _, to| to == m.join("root"));
+        let err = install_plan_renaming(&gh, &plan_for(&v2), false, m, &blocked).expect_err("in");
+        let old = the_staging_folder(m).join("root").join("old");
+        assert!(
+            err.to_string().ends_with(&format!(
+                "Undoing the install did not finish: the version of modules/root installed \
+                 before is in {}.",
+                old.display()
+            )),
+            "{err:#}"
+        );
+        assert!(old.join("src/old.luau").is_file());
+        assert!(!m.join("root").exists());
+        // The start-up sweep keeps it, and says where it goes.
+        let later = std::time::SystemTime::now() + STALE_STAGING + Duration::from_secs(60);
+        let swept = sweep_staging(m, later);
+        let folder = Some("root".to_string());
+        assert_eq!(swept.kept, [KeptCopy { old, id: "com.t.root".to_string(), folder }]);
+        let lines = swept.log_lines();
+        assert!(lines[0].ends_with("move that folder into modules/ and rename it root"), "{lines:?}");
+    }
+
+    /// Sets the time the folder `dir` itself last changed.
+    fn set_folder_time(dir: &Path, t: std::time::SystemTime) {
+        #[cfg(windows)]
+        let folder = {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+            };
+            // A folder opens only with backup semantics.
+            std::fs::OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(dir)
+        };
+        #[cfg(not(windows))]
+        let folder = std::fs::File::open(dir);
+        folder.unwrap().set_modified(t).unwrap();
+    }
+
+    #[test]
+    fn a_staging_folder_an_install_is_still_filling_is_not_a_leftover() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = tmp.path();
+        let long_ago = std::time::SystemTime::now() - 2 * STALE_STAGING;
+        for name in [".staging-running", ".staging-left"] {
+            std::fs::create_dir(m.join(name)).unwrap();
+            set_folder_time(&m.join(name), long_ago);
+        }
+        // The install that made `.staging-running` two hours ago has downloaded its next module,
+        // and made its folder as `stage_one` does. On Windows the listing of modules/ still says
+        // two hours: only the folder itself knows.
+        std::fs::create_dir(m.join(".staging-running/next")).unwrap();
+        let swept = sweep_staging(m, std::time::SystemTime::now());
+        assert_eq!((swept.removed, swept.kept.len(), swept.failed.len()), (1, 0, 0));
+        assert_eq!(names_in(m), [".staging-running"]);
+    }
+
+    #[test]
+    fn leftover_staging_folders_go_at_start_unless_one_holds_the_only_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = tmp.path();
+        let module = |dir: &str, id: &str| {
+            std::fs::create_dir_all(m.join(dir)).unwrap();
+            std::fs::write(m.join(dir).join("module.toml"), manifest(id, &[], &[], &[])).unwrap();
+        };
+        let source = |dir: &str, repo: &str| {
+            std::fs::create_dir_all(m.join(dir)).unwrap();
+            let sha = sha_of(repo);
+            write_source(&m.join(dir), &Source { repo: repo.into(), branch: "main".into(), sha })
+                .unwrap();
+        };
+        module("root", "com.t.root");
+        // An update whose staging folder could not be removed: the old version, surplus.
+        module(".staging-done/root/old", "com.t.root");
+        // A download that never went in.
+        module(".staging-download/gone/new", "com.t.gone");
+        // A crash between the two renames: the only copy of an installed module.
+        module(".staging-crash/lost/old", "com.t.lost");
+        module(".staging-crash/lost2/new", "com.t.lost2");
+        // The layout of earlier builds, `new` and `old` straight in the staging folder: the
+        // folder the old version came from is the repository named in `new/.source.toml`, or
+        // in its own, or not known.
+        module(".staging-legacy/old", "com.t.legacy");
+        module(".staging-legacy2/old", "com.t.root");
+        module(".staging-legacy2/new", "com.t.root");
+        module(".staging-legacy3/old", "com.t.older");
+        source(".staging-legacy3/old", "o/was-older");
+        source(".staging-legacy3/new", "o/older");
+        module(".staging-legacy4/old", "com.t.own");
+        source(".staging-legacy4/old", "o/own");
+        std::fs::create_dir_all(m.join(".staging-empty")).unwrap();
+        // Not staging folders.
+        std::fs::create_dir_all(m.join(".hidden/old")).unwrap();
+        std::fs::write(m.join(".staging-file"), b"").unwrap();
+        let all = names_in(m);
+
+        // All of them are younger than an hour, and might be another process's install.
+        let swept = sweep_staging(m, std::time::SystemTime::now());
+        assert_eq!((swept.removed, swept.kept.len(), swept.failed.len()), (0, 0, 0));
+        assert!(swept.log_lines().is_empty());
+        assert_eq!(names_in(m), all);
+
+        let later = std::time::SystemTime::now() + STALE_STAGING + Duration::from_secs(60);
+        let mut swept = sweep_staging(m, later);
+        assert_eq!(swept.removed, 4, "{swept:?}");
+        assert!(swept.failed.is_empty(), "{swept:?}");
+        swept.kept.sort();
+        let kept = |old: &str, id: &str, folder: Option<&str>| KeptCopy {
+            old: m.join(old),
+            id: id.to_string(),
+            folder: folder.map(str::to_string),
+        };
+        assert_eq!(
+            swept.kept,
+            [
+                kept(".staging-crash/lost/old", "com.t.lost", Some("lost")),
+                kept(".staging-legacy/old", "com.t.legacy", None),
+                kept(".staging-legacy3/old", "com.t.older", Some("older")),
+                kept(".staging-legacy4/old", "com.t.own", Some("own")),
+            ]
+        );
+        let lines = swept.log_lines();
+        assert_eq!(
+            lines[0],
+            "removed 4 staging folder(s) that interrupted installs left in modules/"
+        );
+        assert_eq!(
+            lines[1],
+            format!(
+                "kept {}: it holds com.t.lost, which an install moved aside and did not put back, \
+                 and which is not installed now. To use the module again, move that folder into \
+                 modules/ and rename it lost",
+                swept.kept[0].old.display()
+            )
+        );
+        assert!(lines[2].ends_with("rename it after the module"), "{}", lines[2]);
+        assert_eq!(lines.len(), 5);
+        assert_eq!(
+            names_in(m),
+            [
+                ".hidden",
+                ".staging-crash",
+                ".staging-file",
+                ".staging-legacy",
+                ".staging-legacy3",
+                ".staging-legacy4",
+                "root"
+            ]
+        );
+        // Said again at every start, until the folder is moved.
+        let again = sweep_staging(m, later);
+        assert_eq!((again.removed, again.kept.len()), (0, 4));
+        // Moved as said, it is the module again, under its old name.
+        std::fs::rename(m.join(".staging-crash/lost/old"), m.join("lost")).unwrap();
+        let listed: Vec<String> = installed_in(m).into_iter().map(|x| x.id).collect();
+        assert!(listed.contains(&"com.t.lost".to_string()), "{listed:?}");
+        assert_eq!(sweep_staging(m, later).removed, 1, "the crash's folder goes now");
     }
 
     fn installed_row(id: &str, caps: &[&str], deps: &[&str]) -> InstalledModule {

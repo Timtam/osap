@@ -471,21 +471,47 @@ the review.
 
 Each module is **pinned** to the commit whose `module.toml` the review showed, and that commit
 is what is downloaded — a repository that changes between the review and the download does not
-change what is installed. Dependencies are written before the module that needs them, so a
-download that fails part-way leaves nothing installed that cannot load — though the
-dependencies already written stay installed.
+change what is installed.
 
-Each module is unpacked into a staging folder beside the others, `modules/.staging-…`, and
-checked there: it must be a readable module, and its `module.toml` must equal the one reviewed
-in every field. Only then is the folder of the same name, if there is one, moved aside and the
-new one moved into its place; the old one is deleted with the staging folder. So a module that
-fails anywhere on the way — a download that breaks off, an archive that breaks a rule, a
-manifest that differs — leaves nothing of itself behind, and the version installed before it,
-if any, exactly as it was; the message says *Nothing in modules/… was changed*. A staging
-folder left behind — by a crash, or because a file in it could not be deleted, which the log
-then names — is skipped at start-up like every folder whose name starts with `.`, and can be
-deleted by hand. A freshly installed module is **hot-loaded** into the running app — usable
-without a restart — and its new dependencies with it.
+An install is **all or nothing**. Every module of it is first downloaded and unpacked into one
+staging folder beside the others, `modules/.staging-…`, and checked there: it must be a
+readable module, and its `module.toml` must equal the one reviewed in every field. Only when
+every module has passed is any of them moved into `modules/`, dependencies before the modules
+that need them, each in place of the folder of the same name if there is one; that folder is
+moved aside into the staging folder and deleted with it at the end. So an install that fails
+anywhere on the way — a download that breaks off, an archive that breaks a rule, a manifest
+that differs, in any of its modules — leaves none of its modules behind, and every version
+installed before it exactly as it was; the message ends with *Nothing in modules/… was
+changed.* If moving a module in fails — on Windows, while a file in the folder it replaces is
+open — the modules moved in before it are taken out again, the last first, and the versions
+they replaced are put back, with the same message. Should one of those moves fail as well, the
+message ends with *Undoing the install did not finish:* and names what stayed installed and
+where a version that was installed before is now; the staging folder is kept while such a
+version is in it. A module that cannot be taken out stops the taking back: it and the modules
+moved in before it stay — they come before it in dependency order, so nothing that stays lacks
+a dependency.
+
+A staging folder left behind — by a crash, or because a file in it could not be deleted, which
+the log then names — is skipped like every folder whose name starts with `.`. **At start-up**
+the application removes each one that has not changed for an hour, and the log says how many:
+*removed 2 staging folder(s) that interrupted installs left in modules/*. A younger one is left
+alone, as it may belong to an install running in another process — the command line beside the
+manager, say: a running install changes its staging folder with every module it downloads, and
+a download gives up well within the hour (the limits are below). One that holds a version an
+install moved aside and did not put back, of a module that is not installed now, is kept
+however old it is, since that is the module's only copy. The log names it at every start, with
+the path as the system writes it — *kept `C:\…\modules\.staging-…\root\old`: it holds
+com.example.root, which an install moved aside and did not put back, and which is not installed
+now. To use the module again, move that folder into modules/ and rename it root* — the name of
+the folder it was moved out of: an update installs into that folder, and under another name
+the module would then be in `modules/` twice, only one of them loaded. For a staging folder of
+an earlier build that name is read from a `.source.toml`; when there is none, the line says to
+rename the folder after the module. A version moved aside whose module is installed — in its
+new version, or put back — goes with its staging folder. The hour is fixed; there is no setting
+for it.
+
+A freshly installed module is **hot-loaded** into the running app — usable without a restart —
+and its new dependencies with it.
 
 A module whose manifest declares `supported_os` without this system is **flagged in that
 same review** — *"it can be installed, but it will not be loaded here"* — and installed
@@ -531,10 +557,11 @@ newly needs are installed and hot-loaded before the updated module is reloaded �
 every module that depends on it through `dependencies`, directly or not, as **Reload** does;
 the message names them.
 
-An update that fails leaves the installed version in place, as a failed install does (see the
-staging folder above). On Windows a folder cannot be moved while a file in it is open, so an
-update fails, changing nothing, while the running module holds one of its files open — a
-sound it is playing, say; it can be tried again once that is over.
+An update that fails leaves the installed version in place and installs none of the modules it
+newly needs, as a failed install does (see the staging folder above). On Windows a folder
+cannot be moved while a file in it is open, so an update fails, changing nothing, while the
+running module holds one of its files open — a sound it is playing, say; it can be tried again
+once that is over.
 
 A module installed from a branch whose name holds characters a URL does not carry as they
 are — `fix#12`, say — is checked for updates with the branch percent-encoded in the address.
