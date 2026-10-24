@@ -150,7 +150,7 @@ function Dr.decide(pl, got, byName, v, log, marks)
   log("drums: " .. table.concat(words, "; "))
   local s, why, means = selected(pl, got["slot names"])
   v.kitSelected = s
-  log(string.format("drums: the name column's background %s — selected: %s", means or "not read", why))
+  log(string.format("drums: the name column's background %s — selected: %s", means or "not read", tostring(why)))
   for i = 1, #T.PART_LABELS do mark({ T.NAME_COLUMN[1] + 4, T.rowY(i) }) end
   if byName then
     v.kitNames = {}

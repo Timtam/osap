@@ -441,7 +441,7 @@ end
 -- the overlay leaving the front, Save preset, which keeps the name).
 function DB.forget(why, own)
   if anchor and cat then
-    host.log.info(string.format("[avenger] the database's position (%s) is forgotten: %s", where(anchor), why))
+    host.log.info(string.format("[avenger] the database's position (%s) is forgotten: %s", where(anchor), tostring(why)))
   end
   anchor = nil
   from = nil

@@ -230,49 +230,146 @@ and to build it as soon as the usage allows.
       host's 19 codes and `O.errors` the runtime's 8 beside them; a page has `platform.errors`. The
       status words stay words. Every docs/api entry has Returns and Errors, and tools/api-index.py
       holds each Errors table, and each group's section in docs/api/screen.md, to the table both
-      ways; a runtime row that hands on a host call's errors is held to errors.luau's `passes`, a
-      list kept by hand (below). check-docs.ps1 lints the Luau of modules/,
+      ways; a runtime row that hands on a host call's errors is held to the `handOn` calls of
+      main.luau (below). check-docs.ps1 lints the Luau of modules/,
       tools/ and examples/ and every Luau block of docs/: a reason compared as a sentence, a status
-      word no page documents, an `O.errors` or `platform.errors` constant that does not exist. The
+      word no page documents, an `O.errors` or `platform.errors` constant that does not exist, and
+      (since 2026-10-24) a reason formatted with `%s` or handed to `assert`. The
       changelog entry is under "For the first release's changelog". What is left:
 
 - [ ] **VPS Avenger's own sentences stay sentences.** About 250 page and speech texts inside
       modules/vps-avenger, among them the new "… was not clicked: <message>" and "the menu cannot be
       seen here; nothing was chosen", are compared nowhere outside the module, so they were left as
       they are (core app first). Convert them if one is ever handed to another module or compared.
-- [ ] **macOS element reads never say "not known".** On a Mac every `host.element` question answers
+- [x] **macOS element reads never say "not known".** On a Mac every `host.element` question answers
       what it found, or nothing, and never an error value: a walk stopped at its 300 ms deadline, an
       application in the not-answering quarantine, and a dump cut at its 2000 nodes or 5 s all
       answer as if the tree ended there (docs/api/element.md, the macOS blocks). Answer `nil, err`
       as Windows does, and a cut dump its list so far with `too_large` or `timeout`.
-- [ ] **Windows element questions without the automation object.** When UI Automation's object
+
+      **Built** (2026-10-24, stage B of wip/keys-and-followups), blind. A module's question notes
+      why it is not answered in full while it is asked (backend/macos/question.rs, borrowed into
+      the tests): the quarantine where `root_of` does not ask (`timeout`, `the program did not
+      answer a moment ago, so it is not asked for 5 s`), a read the application did not answer
+      (`note_busy`, `timeout`, `the program did not answer: it is busy, starting or not
+      responding`), and a walk stopped at its bound (budget.rs, `Budget::cut`: 1500 elements or
+      300 ms for a search, 800 for focusStep and focusWithin, 2000 or 5 s for a dump). `element_ask`
+      settles the answer as uia.rs does (`ElementAnswer::settled`, shared now): what was found
+      stands, nothing found is `nil, err`, a dump its list and `err`. The quarantine's answer is no
+      answer of the program's and is not kept for the epoch (element.rs, `asked`). Found on the way
+      and fixed: a walk past its deadline went on with the next sibling and was refused again only
+      64 nodes later, so the deadline dropped one node in 64 and the walk ran to its count; out of
+      time now stays out of time. The Windows reasons every question gives became the group
+      `question-errors` (element.md, "The errors every question can give"), so that `press`, which
+      a Mac does not have, can link to them without a Mac's. **What a Mac has to show** (none of it
+      has run): a find or a findAny against an application that is busy or starting answers `nil,
+      err` with the first message above and the next one within 5 s with the quarantine's; that a
+      healthy plug-in (sforzando, Kontakt in REAPER, Avenger in Logic) still answers its identity
+      checks — no `the program did not answer` on every recheck from a single element that answers
+      `kAXErrorCannotComplete`; whether Kontakt 8's tree in REAPER meets the 1500 elements or the
+      300 ms (`too_large` or `timeout` now, where it was `false`), and that its overlay comes up all
+      the same; a probe's dump of a large tree with its `err` beside the list and the dump line's
+      "STOPPED ON …"; focusStep in Kontakt standalone still steps; and, since the deadline fix cuts
+      the host's own control walk too (300 ms, where it ran on to its 600 nodes), `host.window.controls`
+      and embedded detection in Logic and REAPER on a slow (Intel) Mac — Avenger in Logic, Kontakt in
+      REAPER: that the plug-in is still found, and whether `window_controls`' line says "STOPPED ON
+      TIME" (it says how many nodes the walk read) where the list used to come back whole.
+- [x] **Windows element questions without the automation object.** When UI Automation's object
       cannot be made, or a condition fails, every question but `press` answers "nothing found" with
       no error value; only `press` says why (`failed`, "this system's accessibility interface could
       not be reached"). Answer every question so: `element::NO_INTERFACE`'s entries become every
       question's.
-- [ ] **The input calls that only log.** `move`, `drag`, `scroll`, `text`, `mouseDown` and `mouseUp`
+
+      **Built** (2026-10-24, stage B). uia.rs takes the automation object through `reached` and
+      every condition, walker and true condition through `local`, which note `NO_INTERFACE` for the
+      question in progress: nothing found is `nil, err`, a dump `{}, err`, and a walk stops there.
+      A name of findAny whose condition cannot be built ends the search as an unanswered one does
+      (it went on to the next name). Only the press keeps its own words for the missing object.
+      `NO_INTERFACE` is one of `question-errors`. Not provoked on a machine: it needs a Windows whose
+      UI Automation cannot be created.
+- [x] **The input calls that only log.** `move`, `drag`, `scroll`, `text`, `mouseDown` and `mouseUp`
       keep their rare macOS failures, an event the system would not make, in the log only; on
       Windows the results of `SendInput`, `SetCursorPos` and `GetCursorPos` are not read at all. And
       a call can leave half an input behind while it answers a plain `false, err`: a key-down posted
       without its key-up, and on Windows a posted click's move and press without the release. Decide
       what each answers, and whether a click refused after its press still posts the release.
-- [ ] **A failed `render()` in backend/macos/ocr.rs reads as `"none"`, with no log line.** A small
+
+      **Built** (2026-10-24, stage B). Every call that acts answers `true` or `false, err`. Windows:
+      `SetCursorPos` read (`failed`, `Windows did not put the pointer there (error …)`, nothing
+      pressed or scrolled after it), `SendInput` read (`Windows did not take the input (error …)`,
+      and for `text` `… after … of … characters …`), a call's events in one `SendInput` where nothing
+      is paced between them, and a call Windows stopped taking part-way sends the releases it owes
+      on their own (windows.rs, `owed`, `send_with`): a key-down without its key-up, a press without
+      its release, is never left. `click` through the input and `send` answer those too, and the
+      no-activate click's thread. `GetCursorPos` read: `0, 0` with a line once. macOS: every event
+      of a call made before the first is posted (`CGEventPost` answers nothing), a character's two
+      before either, so a NULL sends nothing (`CGEventCreateMouseEvent(type …) returned NULL;
+      nothing was sent`, `CGEventCreateScrollWheelEvent2 …`, `… while typing; … of … characters
+      were sent`); key_send and key_post build both events first. The held record follows what was
+      made: a mouseDown not made holds nothing, a mouseUp, click or drag not made leaves a held
+      button held, and the host's own release at a stop logs one the system refused. **Decided**: a
+      posted click or key refused after its press is not posted again — what refused it (a window
+      gone, a full queue) refuses a second post — and the error's `detail` says what stayed posted.
+      Found on the way: `O.doubleClick` handed on `host.input.click`'s errors with no row and no
+      `passes` entry — a click through the input can fail now — and has its row. After review: a
+      no-activate click let go of a held button at the call, before the click was made on its thread,
+      so a click that failed there left the button down and out of `held()`; the record now waits
+      for the outcome (acting.rs, `Release`; lib.rs, `held_after`, which also keeps the button held
+      when a mouseDown came between the hand-over and the outcome). A click's or a drag's press
+      whose release Windows refuses twice is still down: it answers `failed`, `Windows took the press
+      but not its release (error …): the button is still down` (`input::LEFT_DOWN`), and the host
+      holds the button for the module as a mouseDown's, or lets go of it at once for a module that
+      no longer runs; the docs no longer say no call leaves anything down. `text` on Windows counts a
+      character once its press was taken, since the press delivers it (it reported one too few). Not answered still:
+      input Windows drops on its way into a program of higher rights (UIPI), which `SendInput`
+      counts as taken. **Windows try**: a module that moves, clicks or types while the lock screen
+      or a UAC prompt is up answers `false` with an error number (5 expected), and nothing is left
+      held; `cursorPos` there logs once; whether a drag begun just before the lock screen comes up
+      ever answers `the button is still down`, and its button is then in `held()`. **What a Mac has to show**: clicks, drags, the
+      press-glide-release, scrolls, `send` and `text` land as before (the events are only built
+      earlier).
+- [x] **A failed `render()` in backend/macos/ocr.rs reads as `"none"`, with no log line.** A small
       region whose content crop CoreGraphics cannot draw answers a reading of `status = "none"`, as
       if it held no text. It should be `"failed"` with an error value, as the macOS readings' other
       hidden failures became; ocr.md's macOS block says so meanwhile. The inventory of hidden
       failures missed it.
-- [ ] **The screen groups are coarser than the code.** `capture-errors` brings reasons to calls that
+
+      **Built** (2026-10-24, stage B). `Rungs::climb` answers `Err(ocr::NOT_DRAWN)`, `the picture
+      could not be drawn for the recogniser`, with a line once a thread (`warn_once`), and the read
+      fails with it. The whole-region retry's render, a later rung, still reads as that rung
+      reading nothing: the first rung's answer stands. Nothing a Mac can provoke; a small region
+      still reading is all it has to show.
+- [x] **The screen groups are coarser than the code.** `capture-errors` brings reasons to calls that
       never give them: its two "failed inside the application" reasons to the image worker's calls,
       and its 40-million-pixel and snapshot-round reasons to `host.ocr.recognize`.
       `snapshot-source-errors` brings both "not inside" and "does not overlap" to every call in it,
       though each call gives one. The pages say which call gets which, but the both-way check cannot
       catch a wrong row inside a group. Split the groups, or name those reasons per entry
       (errors.rs, `GROUPS`).
-- [ ] **Reasons that are never given.** `element::NOT_ASKED_DENIED` and `NOT_ASKED_GONE` (only a
+
+      **Built** (2026-10-24, stage B), by naming per entry what only some give. `capture-errors` is
+      the ten screen calls' `screen capture failed`, every one of them; the 40 million pixels name
+      only the three searches, `save` and `saveMarked`, since every other call holds its region to
+      that or less before it captures (after review; windows.rs's
+      `only_the_calls_that_do_not_hold_their_region_meet_the_40_million` holds the limits to it);
+      the `screen-capture` thread's own failure names `snapshot`, `profile`, a text read, `pixel` and
+      `pixels`, the round's `snapshot` and `profile`; a text read names `screen capture failed`
+      itself. `snapshot-source-errors` is `does not overlap`, for the calls that read the part
+      inside; `not inside` names `cells`, `matchCells`, `template` and a snapshot's `crop`. Each of
+      those entries has its rows; errors.rs's test `a_group_gives_its_reasons_to_every_call_it_names`
+      holds the split. After review, the element group too: `focusWithin` asks a Windows program
+      nothing, so it is out of `question-errors` and its table lists the host's own reasons, the only
+      ones it gives there. The other groups were not found coarse.
+- [x] **Reasons that are never given.** `element::NOT_ASKED_DENIED` and `NOT_ASKED_GONE` (only a
       timeout leaves the questions behind it unasked) and, on Windows, `ocr::CROP_OUTSIDE` ("region
       outside the captured area", which looks unreachable, since the bounding box is made from the
       same rectangles) have rows that say they are not given today. Confirm it, then give them no
       entries, as `WRONG_THREAD` has, and drop the rows.
+
+      **Built** (2026-10-24, stage B). Confirmed: uia.rs notes a failure as unanswered only for
+      `UIA_E_TIMEOUT` and element.rs leaves questions behind only an unanswered one; a region cut
+      from its bounding box is inside it, as windows.rs's `ocr_crop_tests` shows over 2000 random
+      sets. Their entries are empty, each says why, and the rows are gone (element.md, ocr.md).
 - [ ] **Messages kept word for word that should change.** The host's "cannot wait here" messages
       name the callback's parameter `why` (task.rs); `hotkey::NO_HANDLER` says "no global shortcut
       will work in this session", though the handler is installed again at the next refresh; a
@@ -316,12 +413,41 @@ and to build it as soon as the usage allows.
       REFUSES_HOTKEY). `string.format("%s", err)` and `assert(ok, err)` raise for an error value,
       and are not linted, because the runtime and ik-on-ear format sentences of their own under the
       name `why`; renaming those to `word` would let the lint take both shapes.
-- [ ] **The runtime's `passes` is kept by hand.** errors.luau's `passes` says which host calls'
+
+      **Mostly built** (2026-10-24, stage B). A `%s` or `%q` given a reason's name — the format read
+      where the call has it, `string.format("…", …)` or `("…"):format(…)`, its string on the line
+      before too — and `assert` given one as its message are linted (`Test-Formats`); the 17 places
+      that formatted a sentence under `why` with `%s` — the runtime, ik-on-ear and five of VPS
+      Avenger's — pass it through `tostring` now, the idiom the code has elsewhere and errors.md
+      names, rather than a rename, so no scope had to be followed. A table looked up by a word of a
+      check's `reasons` has its literal's keys held to the words (REFUSES_HOTKEY). A hook given a
+      function by name (`onClose = closed`) makes that function's `how` the hook's. Left: a `how`
+      handed on to another function, and a format put together from parts (`(PREFIX .. "%s")`),
+      whose specifiers are not read.
+- [x] **The runtime's `passes` is kept by hand.** errors.luau's `passes` says which host calls'
       errors each runtime entry hands on, and api-index.py holds overlay.md's link rows to it both
       ways; nothing holds `passes` itself to main.luau. A runtime method that starts handing on a
       host error, with no `passes` entry, has no row and fails nothing. A test that follows each
       method's returns to the host calls in it would close that, or a `fail`-like helper for
       handing on that names the entry.
+
+      **Built** (2026-10-24, stage B), both ways. main.luau hands every host error on through
+      `handOn(entries, from, err)`, which answers `err` itself; errors.luau's `passes` is gone, and
+      api-index.py reads the `handOn` calls instead. And it follows the returns: in every top-level
+      function of main.luau, the error value of a host call that answers one — the call's second
+      value, the third through `pcall`, a local function of the function that answers a host call —
+      that leaves by `return`, a hook or a callback without `handOn` naming that call fails the
+      check, and so does a function named for an entry that hands on as another. Ten mutations of
+      main.luau were all caught. Its first catch was `O.doubleClick` (item c). After review it
+      follows more shapes, which it missed: every outermost function, `name = function` and those in
+      a `do` block (`O.menuTests.drawn`) included; a plain assignment (`ok, err = host…`); a host
+      callback's second parameter (`host.input.click(…, function(ok, err) cb(ok, err) end)`); and it
+      fails a call whose whole answer leaves at once (`return host.…(…)`, `cb(host.…(…))`) or is
+      packed into a table. An error made into something else on the way — `tostring(err)`, a
+      comparison, `err.code`, the argument of a local function that answers nothing — does not
+      leave. Eleven shapes in api-index.py (`HAND_ON_SHAPES`) are held at every `--check`. What it
+      does not follow: an error stored in a table's field or an upvalue and handed on from another
+      function, and one passed through a helper defined in another function.
 
 ## The first Mac test of the Avenger page (2026-10-14)
 
@@ -814,6 +940,23 @@ into the changelog with that release.
       `not_supported`, `a control's hotkey` is the new `clash`, `refused: …` is
       host.hotkey.register's own error.
   - `host.arbiter.winner` is documented as returning the claim's handle, which it always did.
+
+- **Every `host.input` call that acts answers `true` or `false, err`** (2026-10-24, the typed
+  errors' follow-ups). `move`, `drag`, `scroll`, `text`, `mouseDown` and `mouseUp` answered nothing
+  and answer `true`, or `false` and an error value where Windows did not take the input or put the
+  pointer there, or a Mac would not make an event; `click` through the input and `send` answer those
+  too on Windows, where they were always `true`. A `mouseDown` that is not made no longer counts as
+  held (`host.input.held()`), and a `mouseUp`, `click` or `drag` that is not made leaves a held
+  button held; a `click` or `drag` whose press Windows took and whose release it refused twice
+  answers `the button is still down` and puts the button in `held()`. Code that tested `== nil`
+  after them reads `true` now.
+- **A Mac's `host.element` answers `nil` and why** (2026-10-24), as Windows has since 2026-10-12: an
+  application that did not answer a read, one not asked for 5 s after it, and a walk stopped at its
+  bound that found nothing answer `nil, err` — `find` too, where it answered `false` — and a dump its
+  list and the reason. A walk past its 300 ms or 5 s stops there now. On Windows a question whose
+  automation object or condition cannot be made answers `nil` and `failed`, where it found nothing.
+- **A Mac's text read whose content crop cannot be drawn is `"failed"`** (2026-10-24), with the
+  error `the picture could not be drawn for the recogniser`, where it was `"none"`.
 
 ## Implementation
 

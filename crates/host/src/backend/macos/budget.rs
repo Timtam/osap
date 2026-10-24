@@ -11,10 +11,31 @@
 //! is bounded at six hundred seconds, which is not a bound anybody can use. The Windows
 //! backend learned this on 2026-09-04: after its per-call timeout went in, one window still
 //! took thirty seconds to walk, because a budget that counts nodes cannot see a clock.
+//!
+//! **A walk stopped at a bound is not "not there".** What a module is told of a question whose
+//! walk stopped before the end of the tree is the bound, as an error value ([`Budget::cut`]), so
+//! that nothing found reads as "not known" and a dump says it is not all of the tree (`ax.rs`).
 
 use std::time::{Duration, Instant};
 
+use crate::errors::{element, HostError};
+
+/// What a walk is for, which says what a module is told when it stops at one of its bounds
+/// ([`Budget::cut`]): each kind has its own bounds in `ax.rs`, and the messages name them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Walk {
+    /// A question's search: 1500 elements and 300 ms (`QUERY_NODES`, `HOT_DEADLINE`).
+    Search,
+    /// `focusStep`'s and `focusWithin`'s: 800 elements and 300 ms (`FOCUS_NODES`).
+    Focus,
+    /// A dump's: 2000 elements and 5 s (`DUMP_NODES`, `DUMP_DEADLINE`).
+    Dump,
+    /// The host's own walks, which answer no module's question: a window's controls.
+    Host,
+}
+
 pub(crate) struct Budget {
+    walk: Walk,
     nodes: i32,
     until: Instant,
     /// Which bound stopped it, so the log can tell "this tree is bigger than we look at" from
@@ -22,19 +43,22 @@ pub(crate) struct Budget {
     /// and opposite responses: the first wants a larger count, the second cannot be helped by
     /// any count at all.
     ran_out_of_time: bool,
+    /// A node was asked for with none left to spend: the tree went on past the count. A tree of
+    /// exactly the count spends its last node and stops nothing.
+    ran_out_of_nodes: bool,
 }
 
 impl Budget {
     // Called by the walks in `ax.rs`, which exist on macOS only; borrowed elsewhere for the tests,
     // which hand the clock in.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub(crate) fn new(nodes: i32, within: Duration) -> Self {
-        Self::starting_at(nodes, within, Instant::now())
+    pub(crate) fn new(walk: Walk, nodes: i32, within: Duration) -> Self {
+        Self::starting_at(walk, nodes, within, Instant::now())
     }
 
     /// The same thing with the clock handed in, so the tests do not have to sleep.
-    fn starting_at(nodes: i32, within: Duration, now: Instant) -> Self {
-        Self { nodes, until: now + within, ran_out_of_time: false }
+    fn starting_at(walk: Walk, nodes: i32, within: Duration, now: Instant) -> Self {
+        Self { walk, nodes, until: now + within, ran_out_of_time: false, ran_out_of_nodes: false }
     }
 
     /// Spends one node. `false` when there is nothing left to spend.
@@ -51,8 +75,16 @@ impl Budget {
     /// A consequence worth knowing rather than discovering: a tree of fewer than 64 nodes
     /// never consults the clock at all. That is the intended trade — such a walk cannot be
     /// slow enough to matter — and sforzando's entire window came to sixteen.
+    ///
+    /// Out of time stays out of time. It once refused only the node at the clock check, so the
+    /// walk went on with that node's next sibling and was refused again only 64 nodes later: the
+    /// deadline dropped one node in 64, with its subtree, and the walk ran on to its count.
     fn spend_at(&mut self, now: Instant) -> bool {
+        if self.ran_out_of_time {
+            return false;
+        }
         if self.nodes <= 0 {
+            self.ran_out_of_nodes = true;
             return false;
         }
         self.nodes -= 1;
@@ -77,6 +109,27 @@ impl Budget {
     pub(crate) fn ran_out_of_time(&self) -> bool {
         self.ran_out_of_time
     }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn ran_out_of_nodes(&self) -> bool {
+        self.ran_out_of_nodes
+    }
+
+    /// What a module is told of a walk of a question that stopped at a bound before the end of the
+    /// tree: its time first, which no larger count would help; `None` for a walk that reached the
+    /// end, and for the host's own walks.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn cut(&self) -> Option<HostError> {
+        let reason = match (self.walk, self.ran_out_of_time, self.ran_out_of_nodes) {
+            (Walk::Host, _, _) | (_, false, false) => return None,
+            (Walk::Dump, true, _) => &element::TOO_SLOW,
+            (Walk::Search | Walk::Focus, true, _) => &element::HOT_TOO_SLOW,
+            (Walk::Search, false, true) => &element::SEARCH_CUT,
+            (Walk::Focus, false, true) => &element::FOCUS_CUT,
+            (Walk::Dump, false, true) => &element::MAC_DUMP_CUT,
+        };
+        Some(HostError::of(reason))
+    }
 }
 
 #[cfg(test)]
@@ -86,7 +139,7 @@ mod tests {
     #[test]
     fn it_spends_exactly_the_nodes_it_was_given() {
         let t = Instant::now();
-        let mut b = Budget::starting_at(5, Duration::from_secs(60), t);
+        let mut b = Budget::starting_at(Walk::Search, 5, Duration::from_secs(60), t);
         for i in 0..5 {
             assert!(b.spend_at(t), "node {i} should have been affordable");
         }
@@ -98,7 +151,7 @@ mod tests {
     #[test]
     fn a_walk_past_its_deadline_stops_and_says_so() {
         let t = Instant::now();
-        let mut b = Budget::starting_at(1000, Duration::from_millis(300), t);
+        let mut b = Budget::starting_at(Walk::Search, 1000, Duration::from_millis(300), t);
         // Up to the first clock check, which is when the count reaches a multiple of 64.
         let late = t + Duration::from_millis(301);
         let mut spent = 0;
@@ -116,7 +169,7 @@ mod tests {
     fn time_is_only_consulted_every_64_nodes() {
         let t = Instant::now();
         let late = t + Duration::from_secs(10);
-        let mut b = Budget::starting_at(100, Duration::from_millis(1), t);
+        let mut b = Budget::starting_at(Walk::Search, 100, Duration::from_millis(1), t);
         // 100 -> 99 … the first multiple of 64 below 100 is 64, so thirty-five nodes are
         // spent even though the deadline passed before the walk began. That is the
         // granularity, stated rather than discovered.
@@ -134,7 +187,7 @@ mod tests {
         let long_past = t + Duration::from_secs(600);
         // Sixteen nodes — sforzando's whole window — with a deadline that expired ten minutes
         // ago. It still completes, because nothing that short can be slow enough to matter.
-        let mut b = Budget::starting_at(16, Duration::from_millis(1), t);
+        let mut b = Budget::starting_at(Walk::Search, 16, Duration::from_millis(1), t);
         let mut spent = 0;
         while b.spend_at(long_past) {
             spent += 1;
@@ -146,10 +199,115 @@ mod tests {
     #[test]
     fn an_exhausted_budget_stays_exhausted() {
         let t = Instant::now();
-        let mut b = Budget::starting_at(1, Duration::from_secs(60), t);
+        let mut b = Budget::starting_at(Walk::Search, 1, Duration::from_secs(60), t);
         assert!(b.spend_at(t));
         assert!(!b.spend_at(t));
         assert!(!b.spend_at(t), "and asking again does not make it affordable");
         assert_eq!(b.nodes_left(), 0, "it never goes negative");
+    }
+
+    /// Past its deadline a walk stays stopped: the siblings after the refused node are refused too,
+    /// without a node spent, rather than walked until the next clock check.
+    #[test]
+    fn a_walk_out_of_time_stays_out_of_time() {
+        let t = Instant::now();
+        let late = t + Duration::from_millis(301);
+        let mut b = Budget::starting_at(Walk::Search, 1000, Duration::from_millis(300), t);
+        while b.spend_at(late) {}
+        assert!(b.ran_out_of_time());
+        let left = b.nodes_left();
+        for _ in 0..200 {
+            assert!(!b.spend_at(late), "a sibling after the deadline is not walked");
+        }
+        assert_eq!(b.nodes_left(), left, "and spends nothing");
+        assert!(!b.ran_out_of_nodes());
+    }
+
+    /// What a module is told of each bound of each walk: nothing for a walk that reached the end —
+    /// a tree of exactly the count included — or for the host's own; time before nodes; and the
+    /// numbers in the words are the bounds ax.rs gives each walk.
+    #[test]
+    fn a_walk_stopped_at_a_bound_says_which() {
+        let t = Instant::now();
+        let ran = |walk: Walk, nodes: i32, spend: usize, at: Instant| {
+            let mut b = Budget::starting_at(walk, nodes, Duration::from_millis(300), t);
+            for _ in 0..spend {
+                b.spend_at(at);
+            }
+            b
+        };
+        for walk in [Walk::Search, Walk::Focus, Walk::Dump, Walk::Host] {
+            assert_eq!(ran(walk, 16, 16, t).cut(), None, "{walk:?}: a tree of exactly the count is all walked");
+            assert_eq!(ran(walk, 16, 3, t).cut(), None);
+        }
+        let over = |walk| ran(walk, 16, 17, t).cut();
+        assert_eq!(over(Walk::Search), Some(HostError::of(&element::SEARCH_CUT)));
+        assert_eq!(over(Walk::Focus), Some(HostError::of(&element::FOCUS_CUT)));
+        assert_eq!(over(Walk::Dump), Some(HostError::of(&element::MAC_DUMP_CUT)));
+        assert_eq!(over(Walk::Host), None, "the host's own walks answer no question");
+        let late = t + Duration::from_secs(10);
+        let slow = |walk| ran(walk, 200, 200, late).cut();
+        assert_eq!(slow(Walk::Search), Some(HostError::of(&element::HOT_TOO_SLOW)));
+        assert_eq!(slow(Walk::Focus), Some(HostError::of(&element::HOT_TOO_SLOW)));
+        assert_eq!(slow(Walk::Dump), Some(HostError::of(&element::TOO_SLOW)));
+        assert_eq!(slow(Walk::Host), None);
+
+        // The words are the bounds: each constant of ax.rs, as the walk of its kind is made with it.
+        const AX: &str = include_str!("ax.rs");
+        let constant = |name: &str| {
+            let at = AX.find(&format!("const {name}: ")).unwrap_or_else(|| panic!("ax.rs has no {name}"));
+            AX[at..].split_once(" = ").unwrap().1.split_once(';').unwrap().0.trim().to_string()
+        };
+        assert_eq!(constant("QUERY_NODES"), "1500");
+        assert_eq!(constant("FOCUS_NODES"), "800");
+        assert_eq!(constant("DUMP_NODES"), "2000");
+        assert_eq!(constant("HOT_DEADLINE"), "Duration::from_millis(300)");
+        assert_eq!(constant("DUMP_DEADLINE"), "Duration::from_secs(5)");
+        assert!(element::SEARCH_CUT.message.contains("the 1500 elements"));
+        assert!(element::FOCUS_CUT.message.contains("the 800 elements"));
+        assert!(element::MAC_DUMP_CUT.message.contains("the 2000 elements"));
+        assert!(element::HOT_TOO_SLOW.message.ends_with("300 ms"));
+        assert!(element::TOO_SLOW.message.ends_with("5 s"));
+        // Every walk of a question is made with its kind's bounds, and the control walk is the
+        // host's own.
+        for (kind, nodes, deadline) in [
+            ("Walk::Search", "QUERY_NODES", "HOT_DEADLINE"),
+            ("Walk::Focus", "FOCUS_NODES", "HOT_DEADLINE"),
+            ("Walk::Dump", "DUMP_NODES", "DUMP_DEADLINE"),
+            ("Walk::Host", "CONTROL_NODES", "HOT_DEADLINE"),
+        ] {
+            assert!(AX.contains(&format!("Budget::new({kind}, {nodes}, {deadline})")), "{kind}");
+        }
+        let made = AX.matches("Budget::new(").count();
+        let kinds = ["Walk::Search", "Walk::Focus", "Walk::Dump", "Walk::Host"];
+        let named = kinds.iter().map(|k| AX.matches(&format!("Budget::new({k}, ")).count()).sum::<usize>();
+        assert_eq!(made, named, "every walk says what it is for");
+        assert_eq!(AX.matches("Budget::new(Walk::Search, nodes, HOT_DEADLINE)").count(), 1, "first_match, with QUERY_NODES");
+        // And each walk is the kind of the function that makes it: a question's walk made as the
+        // host's would lose its "not known" without a word, so the whole list is held. The
+        // function a walk is made in is the last `fn` at column 0 before it.
+        let mut walks: Vec<(String, &str)> = Vec::new();
+        for (at, _) in AX.match_indices("Budget::new(") {
+            let head = AX[..at].rmatch_indices("\nfn ").chain(AX[..at].rmatch_indices("\npub fn ")).map(|(i, _)| i).max().unwrap();
+            let name = AX[head..].split('(').next().unwrap().rsplit(' ').next().unwrap().to_string();
+            let kind = *kinds.iter().find(|k| AX[at..].starts_with(&format!("Budget::new({k}, "))).unwrap();
+            walks.push((name, kind));
+        }
+        let want: Vec<(String, &str)> = [
+            ("window_controls", "Walk::Host"),
+            ("find", "Walk::Search"),
+            ("find_any", "Walk::Search"),
+            ("first_match", "Walk::Search"),
+            ("plugin_containers", "Walk::Search"),
+            ("dump", "Walk::Dump"),
+            ("class_nav_point", "Walk::Search"),
+            ("class_nav_point", "Walk::Search"),
+            ("focus_step", "Walk::Focus"),
+            ("focus_within", "Walk::Focus"),
+        ]
+        .into_iter()
+        .map(|(f, k)| (f.to_string(), k))
+        .collect();
+        assert_eq!(walks, want, "a walk's kind, by the function that makes it");
     }
 }

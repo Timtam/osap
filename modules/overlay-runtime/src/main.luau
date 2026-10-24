@@ -23,7 +23,7 @@ local O = {}
 -- becomes an error value where it leaves for the module: a return, onDone, onGiveUp, onEnd, onBack.
 -- A sentence that is only logged and handed on (a factor that cannot be had, a click refused) is
 -- made one where it is worded, and reads the same in every log line through tostring and `..`. An
--- error of the host's is handed on as it came, the same table.
+-- error of the host's is handed on as it came, the same table, through `handOn` (below).
 local fail
 do
   local errors = host.include("src/errors.luau")
@@ -59,6 +59,17 @@ do
       error(("O.errors has no '%s'; its codes are %s and every one of host.errors's"):format(tostring(k), known), 2)
     end,
   })))
+end
+
+-- An error of the host's that leaves for a module as it came — returned, or handed to a hook or a
+-- callback — goes through `handOn(entries, from, err)`, which answers `err` itself, the same table.
+-- `entries` is the runtime's docs entry that hands it on, or a list of them where a helper serves
+-- several, and `from` the host's entry whose error it is. The runtime never reads either:
+-- tools/api-index.py does, and every call of this is the list of which host calls' errors each entry
+-- hands on, held both ways to overlay.md's rows. The same tool fails an error of a host call that
+-- leaves a function without it.
+local function handOn(_entries, _from, err)
+  return err
 end
 
 -- Image-match robustness. ReaHotkey matches templates exactly (variation 0); we add a
@@ -139,6 +150,7 @@ function O.doubleClick(x, y, opts, cb)
   if ok == false then
     host.log.info(("overlay: a double-click's first click at (%s,%s) was not made — %s; no second is sent")
       :format(tostring(x), tostring(y), tostring(err)))
+    err = handOn("o-doubleclick", "host-input-click", err)
     if cb then
       if host.timer then host.timer.after(0, function() cb(false, err) end) else cb(false, err) end
     end
@@ -147,12 +159,13 @@ function O.doubleClick(x, y, opts, cb)
   if host.timer then
     host.timer.after(DOUBLE_CLICK_GAP, function()
       local ok2, err2 = click()
-      if cb then cb(ok2, err2) end
+      if cb then cb(ok2, handOn("o-doubleclick", "host-input-click", err2)) end
     end)
     return true
   end
   host.log.info("overlay: no timer, so a double-click went out as two immediate clicks")
   local ok2, err2 = click()
+  err2 = handOn("o-doubleclick", "host-input-click", err2)
   if cb then cb(ok2, err2) end
   return ok2, err2
 end
@@ -1859,7 +1872,7 @@ local function sliderStep(self, c, dir)
     local fine, why = stillHereAt(self, mark)
     if fine then return false end
     host.log.info(string.format("[overlay] %s: '%s' not going on %s — %s",
-      tostring(self.label), tostring(c.label), after, why))
+      tostring(self.label), tostring(c.label), after, tostring(why)))
     return true
   end
   local thumb = sliderThumb(self, c)
@@ -2062,7 +2075,7 @@ local function ensureRevealed(self, c, done)
     local fine, why = stillHereAt(self, mark)
     if fine then return false end
     host.log.info(string.format("[overlay] %s: '%s' not going on %s — %s",
-      tostring(self.label), tostring(c.label), after, why))
+      tostring(self.label), tostring(c.label), after, tostring(why)))
     return true
   end
   local p = host.screen.pixel(px, py)
@@ -2343,7 +2356,7 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   local function stillThere(hook)
     local fine, why = stillHereAt(self, mark, AFTER_HOOK)
     if not fine then
-      host.log.info(string.format("[read] '%s' not spoken after its %s: %s", tostring(c.label or ""), hook, why))
+      host.log.info(string.format("[read] '%s' not spoken after its %s: %s", tostring(c.label or ""), hook, tostring(why)))
       if andThen then andThen(false, why) end
     end
     return fine
@@ -2903,7 +2916,7 @@ local function readUnnamedStop(self, c, r, ctrl)
       why = "under 2 across or down"
     end
     host.log.info(string.format("%s; its rectangle %s,%s %sx%s is %s, nothing to read", head,
-      tostring(b.x), tostring(b.y), tostring(b.w), tostring(b.h), why))
+      tostring(b.x), tostring(b.y), tostring(b.w), tostring(b.h), tostring(why)))
     return
   end
   if not self._passThroughKey then
@@ -3263,7 +3276,7 @@ function Overlay:activate(index, press)
       local fine, why = false, dropped
       if not dropped then fine, why = stillHereAt(self, mark, { control = true, keys = true }) end
       if not fine then
-        host.log.info(string.format("[read] '%s': not clicking — %s", tostring(c.label), why))
+        host.log.info(string.format("[read] '%s': not clicking — %s", tostring(c.label), tostring(why)))
         return
       end
       -- The press counts here, just before its click, as a single point's does: newWindow's
@@ -3402,7 +3415,7 @@ function Overlay:activate(index, press)
     local fine, why = stillHereAt(self, mark)
     if not fine then
       host.log.info(string.format("[overlay] %s: '%s' not clicking after reading its pixel — %s",
-        tostring(self.label), tostring(c.label), why))
+        tostring(self.label), tostring(c.label), tostring(why)))
       return
     end
     -- And the point asked again after the read: a tooltip or a notification drawn over it
@@ -5554,7 +5567,7 @@ freshenProbes = function(self, noSync)
   if why then
     if self._probesFailed ~= why then
       self._probesFailed = why
-      host.log.info(("[probe] '%s': %d probe(s) not read — %s"):format(tostring(self.label), #due, why))
+      host.log.info(("[probe] '%s': %d probe(s) not read — %s"):format(tostring(self.label), #due, tostring(why)))
     end
     for _, d in ipairs(due) do d.p.tried = d.key .. "#" .. tostring(epoch) end
     return
@@ -6205,7 +6218,7 @@ function Overlay:attachEmbedded(spec, opts)
     end
     host.log.info(string.format(
       "[%s] embedded binding is inactive on %s: %s",
-      self.label or "overlay", host.os.current, why
+      self.label or "overlay", host.os.current, tostring(why)
     ))
     return self
   end
@@ -8121,10 +8134,10 @@ function Overlay:_menuOpening(c, x, y)
       if shots then shots.drop() end
       if calibrating then
         host.log.info(("[calibrate] '%s' '%s': not acting after the menu shot — %s")
-          :format(tostring(self.label), tostring(c and c.label or "control"), why))
+          :format(tostring(self.label), tostring(c and c.label or "control"), tostring(why)))
       else
         host.log.info(("[menu] '%s' '%s': not acting after the picture before the press — %s")
-          :format(tostring(self.label), tostring(c and c.label or "control"), why))
+          :format(tostring(self.label), tostring(c and c.label or "control"), tostring(why)))
       end
       return false, fail(key)
     end
@@ -9101,7 +9114,7 @@ function Overlay:_menuRefocus()
   end
   local ok, answer = pcall(host.window.focus, p.window)
   local accepted = ok and answer == true
-  host.log.info(("%s — bringing back %s, where '%s' was pressed: %s"):format(why,
+  host.log.info(("%s — bringing back %s, where '%s' was pressed: %s"):format(tostring(why),
     frontName(p.front), tostring(p.control),
     accepted and "accepted" or (ok and "declined" or ("declined (" .. tostring(answer) .. ")"))))
   return accepted
@@ -10534,7 +10547,7 @@ function Trip:handOver(spec)
       else
         pg.plog(P, "trip '%s': the keyboard is not handed over — %s is not captured: %s", self.label, k, tostring(err))
       end
-      return false, err
+      return false, handOn("trip-handover", "host-keys-capture", err)
     end
     w.tokens[#w.tokens + 1] = tok
     w.tokenOf[k] = tok
@@ -10602,7 +10615,10 @@ function pg.backTo(P)
   local gone = pg.goneWhy(P)
   if gone then return declined(fail("window_gone", gone)) end
   local okF, accepted, ferr = pcall(host.window.focus, P.held.origin.id)
-  if not (okF and accepted == true) then return declined(pg.notBrought(okF, accepted, ferr)) end
+  if not (okF and accepted == true) then
+    -- O:pageBack's answer, and onBack's: the way back from the page key is the same.
+    return declined(handOn({ "o-pageback", "o-addpage" }, "host-window-focus", pg.notBrought(okF, accepted, ferr)))
+  end
   P.page:hide()
   pg.startReturn(P)
   pg.plog(P, "the way back: control id %s of window id %s asked to the front, the page hidden",
@@ -10626,7 +10642,7 @@ function pg.showAtKey(P, place)
       P.asked = nil
       P.stage = "page"
     end
-    pg.hookCall(P, "onShown", P.spec.onShown, o, true, err)
+    pg.hookCall(P, "onShown", P.spec.onShown, o, true, handOn("o-addpage", "page-show", err))
     return
   end
   if err ~= nil and err.code == host.errors.NOT_READY then
@@ -10638,7 +10654,7 @@ function pg.showAtKey(P, place)
   -- Windows may grant a declined show a moment later: the place stays asked for.
   if not (err ~= nil and err.code == host.errors.REFUSED) then P.asked = nil end
   if P.spec.onShown then
-    pg.hookCall(P, "onShown", P.spec.onShown, o, false, err)
+    pg.hookCall(P, "onShown", P.spec.onShown, o, false, handOn("o-addpage", "page-show", err))
   else
     pg.say(pg.notShownWords(err), true)
   end
@@ -10756,7 +10772,7 @@ function pg.pageClosed(P, how, err)
       tostring(P.held.origin.id), (okF and accepted == true) and "accepted" or "declined")
   end
   if how == "failed" and P.away and not pg.pageHasKeyboard(P) then pg.awayByFront(P, "the page failed") end
-  pg.hookCall(P, "onClose", P.spec.onClose, P.owner, how, err)
+  pg.hookCall(P, "onClose", P.spec.onClose, P.owner, how, handOn("o-addpage", "host-gui-webview", err))
 end
 
 -- The page built before it is wanted (page:prepare), on the module's turn after the page's overlay
@@ -11049,7 +11065,7 @@ function Overlay:inPlugin(spec)
         return refused("gone", fail("window_gone", "nothing of its application is listed any more"))
       end
     end
-    return refused("declined", pg.notBrought(okF, accepted, ferr))
+    return refused("declined", handOn("o-inplugin", "host-window-focus", pg.notBrought(okF, accepted, ferr)))
   end
   local now = host.now()
   local t = setmetatable({
@@ -11094,7 +11110,7 @@ function Overlay:pageKey(spec)
   if err ~= nil then
     if id ~= nil then host.hotkey.unregister(id) end
     pg.plog(P, "the page key stays %s: %s is not held — %s", tostring(P.key.spec), spec, tostring(err))
-    return false, err
+    return false, handOn("o-pagekey", "host-hotkey-register", err)
   end
   if P.key.id ~= nil then host.hotkey.unregister(P.key.id) end
   pg.plog(P, "the page key is %s now, was %s", spec, tostring(P.key.spec))
@@ -11502,7 +11518,7 @@ function Overlay:calibrationShot()
   for _, l in ipairs(calibrationUia(o)) do host.log.info("[calibrate]" .. l) end
   for _, l in ipairs(lines) do host.log.info("[calibrate]" .. l) end
   if ok == true then return true end
-  return false, err
+  return false, handOn("o-calibrationshot", "host-screen-savemarked", err)
 end
 
 -- The MENU SHOTS, in a calibrating run: a control with `opensMenu` was activated, so its menu
@@ -11692,7 +11708,7 @@ function Overlay:calibrationCrop(size)
     "[calibrate] cropped %s around (%d,%d) -> %s (%s)", tostring(c.label), x, y, path, tostring(ok)
   ))
   if ok == true then return true end
-  return false, err
+  return false, handOn("o-calibrationcrop", "host-screen-save", err)
 end
 
 -- Counts every match of the focused control's template across the coordinate window.
@@ -11716,7 +11732,7 @@ function Overlay:calibrationVerify()
   if err ~= nil then
     host.log.info(string.format("[calibrate] %s: no matches counted for %s — %s", tostring(c.label),
       tostring(image), tostring(err)))
-    return nil, err
+    return nil, handOn("o-calibrationverify", "host-screen-imagesearchall", err)
   end
   host.log.info(string.format(
     "[calibrate] %s: %d match(es) for %s", tostring(c.label), #hits, tostring(image)
@@ -11750,7 +11766,7 @@ function Overlay:captureControl(label, path)
         label, region[1], region[2], region[3], region[4], path, tostring(ok)
       ))
       if ok == true then return true end
-      return false, err
+      return false, handOn("o-capturecontrol", "host-screen-save", err)
     end
   end
   host.log.info("captureControl: no control labelled '" .. tostring(label) .. "' with a region")
@@ -11774,7 +11790,7 @@ function Overlay:captureRegion(region, path)
     "captureRegion (%d,%d,%d,%d) -> %s ok=%s", r[1], r[2], r[3], r[4], path, tostring(ok)
   ))
   if ok == true then return true end
-  return false, err
+  return false, handOn("o-captureregion", "host-screen-save", err)
 end
 
 -- Captures the WHOLE active plugin control (its client rect) to `path` — the full
@@ -11793,7 +11809,7 @@ function Overlay:captureFull(path)
     o.client.x, o.client.y, o.bounds.w, o.bounds.h, path, tostring(ok)
   ))
   if ok == true then return true end
-  return false, err
+  return false, handOn("o-capturefull", "host-screen-save", err)
 end
 
 -- Dev calibration: dump a content-frame-exact shot of the whole plugin content

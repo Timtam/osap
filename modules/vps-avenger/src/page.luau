@@ -652,7 +652,7 @@ end
 local function noSetting(label, name)
   local why = (type(name) ~= "string" or name == "") and "no setting was named"
     or (name .. " is no setting of this page")
-  host.log.info(string.format("[avenger] [page] '%s' from the page: %s", label, why))
+  host.log.info(string.format("[avenger] [page] '%s' from the page: %s", label, tostring(why)))
   answer(label .. ": " .. why)
 end
 

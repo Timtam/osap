@@ -276,26 +276,39 @@ pub(super) fn post_click(window: isize, x: i32, y: i32, button: MouseButton, mov
     let at = target(window, x, y)?;
     let ((cx, cy), mode, monitor_dpi) = client_place(at, x, y)?;
     // SAFETY: local calls; the posts go to a window `target` checked, and fail if it went since.
-    unsafe {
-        if move_pointer {
-            SetCursorPos(x, y);
-        }
+    let pointer = unsafe {
+        // Read: a pointer Windows did not put there is said in the line, with its error, and the
+        // click is posted all the same, as with `move = false`.
+        let pointer = if !move_pointer {
+            None
+        } else if SetCursorPos(x, y) != 0 {
+            Some(Ok(()))
+        } else {
+            Some(Err(GetLastError()))
+        };
         let ctrl = GetAsyncKeyState(i32::from(VK_CONTROL)) < 0;
         let shift = GetAsyncKeyState(i32::from(VK_SHIFT)) < 0;
         let lp = mouse_lparam(cx, cy);
         let (down, up) = button_messages(button);
-        for (msg, wp) in [
+        // A message refused after the press was posted is not followed by the release: Windows
+        // refuses a post for a window gone or a queue full, which a second post meets as well. What
+        // stayed posted is the error's detail (`stayed_posted`).
+        for (posted, (msg, wp)) in [
             (WM_MOUSEMOVE, mouse_wparam(None, ctrl, shift)),
             (down, mouse_wparam(Some(button), ctrl, shift)),
             (up, mouse_wparam(None, ctrl, shift)),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             if PostMessageW(at, msg, wp, lp) == 0 {
                 let why = refused(Took::Message, GetLastError());
                 logging::line("input", &format!("posted click for window {window}: refused at 0x{msg:04x}: {why}"));
-                return Err(why);
+                return Err(why.with_detail(stayed_posted(posted).to_string()));
             }
         }
-    }
+        pointer
+    };
     logging::line(
         "input",
         &format!(
@@ -305,10 +318,21 @@ pub(super) fn post_click(window: isize, x: i32, y: i32, button: MouseButton, mov
             at as isize,
             class_of(at),
             monitor_dpi * 100 / 96,
-            if move_pointer { "yes" } else { "no" }
+            match pointer {
+                Some(Ok(())) => "yes".to_string(),
+                Some(Err(e)) => format!("no, Windows did not put it there (error {e})"),
+                None => "no".to_string(),
+            }
         ),
     );
     Ok(())
+}
+
+/// What a posted click left posted when Windows refused its message number `refused` of its three
+/// — the move, the press, the release — for the error's `detail`: a press refused at its release
+/// stays posted without one, which the program reads as a button still down.
+fn stayed_posted(refused: usize) -> &'static str {
+    ["nothing was posted", "the move stayed posted", "the move and the press stayed posted, the press without its release"][refused]
 }
 
 // ── The no-activate style ─────────────────────────────────────────────────────────────────────
@@ -561,15 +585,9 @@ fn hold_and_click(who: &Identity, front: isize, owner: usize, x: i32, y: i32, bu
         return Err(HostError::of(&WINDOW_GONE));
     }
     hold(who, front, owner)?;
-    let (down, up) = super::windows::button_flags(button);
-    // SAFETY: the system's input, as every click of the host's.
-    unsafe {
-        SetCursorPos(x, y);
-        super::windows::send_mouse_event(down, 0);
-        super::windows::send_mouse_event(up, 0);
-    }
-    // Its release lets go of a button pressed before it, as every click's (windows.rs, PRESSED).
-    super::windows::note_button(button, false);
+    // The system's input, as every click of the host's — its release lets go of a button pressed
+    // before it, as every click's (windows.rs, PRESSED) — and what Windows did not take, answered.
+    super::windows::click_input(x, y, button)?;
     logging::line("input", &format!("clicked window {} ('{}') at {x},{y} without activating it", who.hwnd, who.class));
     Ok(())
 }
@@ -819,6 +837,21 @@ pub(super) fn left_over_job() -> Option<ActJob> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A posted click refused part-way says what stayed posted, in order: nothing, the move, or the
+    /// move and the press without its release.
+    #[test]
+    fn a_refused_post_says_what_stayed_posted() {
+        assert_eq!(stayed_posted(0), "nothing was posted");
+        assert_eq!(stayed_posted(1), "the move stayed posted");
+        assert_eq!(stayed_posted(2), "the move and the press stayed posted, the press without its release");
+        const SRC: &str = include_str!("click_win.rs");
+        let post = crate::ocr_wiring_tests::body(SRC, "pub(super) fn post_click(");
+        assert!(post.contains(
+            "(WM_MOUSEMOVE, mouse_wparam(None, ctrl, shift)),\n            (down, mouse_wparam(Some(button), ctrl, shift)),\n            (up, mouse_wparam(None, ctrl, shift)),"
+        ));
+        assert!(post.contains("return Err(why.with_detail(stayed_posted(posted).to_string()));"));
+    }
 
     #[test]
     fn a_point_is_scaled_into_the_windows_own_dpi() {

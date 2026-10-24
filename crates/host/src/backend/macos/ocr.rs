@@ -205,10 +205,11 @@ impl Note {
     }
 }
 
-/// [`recognize_captured`], and what the read did ([`Note`]). Two failures are answered rather than
-/// read as nothing (D33 of the typed-errors plan): pixels CoreGraphics could not read back, and a
-/// read whose answer was a pass Vision refused — the first accurate pass, or the last rung the
-/// ladder climbed to — with Vision's reason. Both are said in the log once a thread, as before.
+/// [`recognize_captured`], and what the read did ([`Note`]). Three failures are answered rather
+/// than read as nothing (D33 of the typed-errors plan): pixels CoreGraphics could not read back, a
+/// small region's content crop it could not draw for Vision (`Rungs::climb`), and a read whose
+/// answer was a pass Vision refused — the first accurate pass, or the last rung the ladder climbed
+/// to — with Vision's reason. Each is said in the log once a thread.
 #[allow(clippy::too_many_arguments)]
 fn recognize_noted(
     native: &CGImage,
@@ -326,7 +327,7 @@ fn recognize_noted(
             w,
             h,
         };
-        let (result, climbed) = rungs.climb(neural.as_mut());
+        let (result, climbed) = rungs.climb(neural.as_mut())?;
         (result, climbed, neural.map(|n| (n, rgba, px_w, px_h)))
     };
 
@@ -663,11 +664,20 @@ impl Rungs<'_, '_> {
     /// is [`Rungs::accurate`] with the fast rung last: an accurate pass over the crop, the whole
     /// region when that read nothing and the plan cropped, then the enlarged crop and the fast
     /// model within the budget. The application's, wherever the neural recogniser has loaded, is
-    /// [`Rungs::merged`], with `neural` asked already. A crop that could not be rendered reads as
-    /// nothing, and no rung runs.
-    fn climb(&self, neural: Option<&mut Neural>) -> (Option<VisionRead>, Climbed) {
+    /// [`Rungs::merged`], with `neural` asked already. A crop that could not be rendered is no
+    /// reading of nothing: no rung runs, and the read fails with why, said once a thread in the log.
+    fn climb(&self, neural: Option<&mut Neural>) -> Result<(Option<VisionRead>, Climbed), HostError> {
         let Some((tight, buf)) = render(self.native, self.plan) else {
-            return (None, Climbed::default());
+            let (pw, ph) = self.plan.out_size();
+            warn_once(
+                "ocr-render",
+                &format!(
+                    "ocr: could not draw the {}x{} pt region's content crop ({pw}x{ph} px) for the recogniser; \
+                     the read fails",
+                    self.w, self.h
+                ),
+            );
+            return Err(HostError::of(&reasons::NOT_DRAWN));
         };
         if self.debug {
             let (pw, ph) = self.plan.out_size();
@@ -695,7 +705,7 @@ impl Rungs<'_, '_> {
         // use-after-free that only shows up on the machine nobody here owns: so after every pass
         // over it.
         drop(buf);
-        out
+        Ok(out)
     }
 
     /// The accurate ladder from its first rung, over the rendered content crop `tight`; the fast

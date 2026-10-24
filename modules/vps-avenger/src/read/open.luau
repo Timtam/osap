@@ -608,7 +608,7 @@ function Open.part(snap, name, opts)
       if fine then
         editorFields[#editorFields + 1] = key
       else
-        skipped[#skipped + 1] = string.format("'%s' not asked — %s", key, why)
+        skipped[#skipped + 1] = string.format("'%s' not asked — %s", key, tostring(why))
       end
     end
   end

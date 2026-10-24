@@ -1543,35 +1543,27 @@ impl Backend for WindowsBackend {
         }
     }
 
+    /// Where the system does not give the position — another desktop has the input, the lock
+    /// screen — `0, 0`, said in the log once (`cursor_or_origin`).
     fn cursor_pos(&self) -> (i32, i32) {
-        unsafe {
-            let mut p: POINT = std::mem::zeroed();
-            GetCursorPos(&mut p);
-            (p.x, p.y)
-        }
+        let mut p: POINT = unsafe { std::mem::zeroed() };
+        // SAFETY: a read of the pointer's place into a local.
+        let read = unsafe { GetCursorPos(&mut p) } != 0;
+        cursor_or_origin(read.then_some((p.x, p.y)), || unsafe { GetLastError() })
     }
 
     /// With a button held — one this backend pressed, or one down on the desktop — motion through
     /// the system's input ("The pointer moved as motion"); otherwise the pointer placed.
-    fn mouse_move(&self, x: i32, y: i32) {
-        unsafe {
-            if button_held_now() {
-                send_motion(x, y);
-            } else {
-                SetCursorPos(x, y);
-            }
+    fn mouse_move(&self, x: i32, y: i32) -> Result<(), HostError> {
+        if button_held_now() {
+            send_inputs(&[(motion_input(x, y, virtual_desk()), Holds::Neither)], &[]).answer()
+        } else {
+            place(x, y)
         }
     }
 
-    fn mouse_click(&self, x: i32, y: i32, button: MouseButton) {
-        let (down, up) = button_flags(button);
-        unsafe {
-            SetCursorPos(x, y);
-            send_mouse_event(down, 0);
-            send_mouse_event(up, 0);
-        }
-        // Its own release lets go of a button pressed before it.
-        note_button(button, false);
+    fn mouse_click(&self, x: i32, y: i32, button: MouseButton) -> Result<(), HostError> {
+        click_input(x, y, button)
     }
 
     /// A drag with actual MOVEMENT in it, spread over time.
@@ -1594,55 +1586,59 @@ impl Backend for WindowsBackend {
     /// and is only ever paid when somebody deliberately adjusts something. macOS has posted a
     /// real drag event between its press and release all along; this brings Windows level.
     ///
-    /// Every step is `send_motion`'s, over the virtual desktop, so a drag on any monitor lands
-    /// where it is asked to.
-    fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton) {
+    /// Every step is motion over the virtual desktop (`motion_input`), so a drag on any monitor
+    /// lands where it is asked to.
+    ///
+    /// What Windows does not take ends it: placed nowhere or not pressed, nothing is pressed; a
+    /// step not taken ends the steps, and the release is sent then all the same. The answer is the
+    /// first event Windows did not take — but a release refused even on its own, which leaves the
+    /// button down, says so first ([`drag_answer`]).
+    fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton) -> Result<(), HostError> {
         let (down, up) = button_flags(button);
-        unsafe {
-            SetCursorPos(x1, y1);
-            send_motion(x1, y1);
-            send_mouse_event(down, 0);
-            const STEPS: i32 = 16;
-            for i in 1..=STEPS {
-                let t = f64::from(i) / f64::from(STEPS);
-                send_motion(
-                    (f64::from(x1) + f64::from(x2 - x1) * t).round() as i32,
-                    (f64::from(y1) + f64::from(y2 - y1) * t).round() as i32,
-                );
+        let held = button_code(button);
+        place(x1, y1)?;
+        send_inputs(&[(motion_input(x1, y1, virtual_desk()), Holds::Neither), (mouse_input(down, 0), Holds::Down(held))], &[])
+            .answer()?;
+        let stepped = drag_steps((x1, y1), (x2, y2), |at| {
+            let taken = send_inputs(&[(motion_input(at.0, at.1, virtual_desk()), Holds::Neither)], &[]).answer();
+            if taken.is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(4));
             }
-            send_mouse_event(up, 0);
-        }
-        // Its own release lets go of a button pressed before it.
-        note_button(button, false);
+            taken
+        });
+        let up = send_inputs(&[(mouse_input(up, 0), Holds::Up(held))], &[held]);
+        drag_answer(stepped, released(button, &up))
     }
 
-    /// The pointer placed, then the press — noted, so that the moves after it are motion.
-    fn mouse_down(&self, x: i32, y: i32, button: MouseButton) {
+    /// The pointer placed, then the press — noted, so that the moves after it are motion. Placed
+    /// nowhere, nothing is pressed.
+    fn mouse_down(&self, x: i32, y: i32, button: MouseButton) -> Result<(), HostError> {
         let (down, _) = button_flags(button);
-        unsafe {
-            SetCursorPos(x, y);
-            send_mouse_event(down, 0);
-        }
+        place(x, y)?;
+        send_inputs(&[(mouse_input(down, 0), Holds::Down(button_code(button)))], &[]).answer()?;
         note_button(button, true);
+        Ok(())
     }
 
-    /// Motion to (x, y), then the release — no placement: so a press, a glide of moves and the
-    /// release are one drag, and the release lands on the control that followed it.
-    fn mouse_up(&self, x: i32, y: i32, button: MouseButton) {
+    /// Motion to (x, y), then the release, in one `SendInput` — no placement: so a press, a glide
+    /// of moves and the release are one drag, and the release lands on the control that followed
+    /// it. A motion Windows did not take is followed by the release on its own, where the pointer
+    /// is; the answer says the motion was not taken.
+    fn mouse_up(&self, x: i32, y: i32, button: MouseButton) -> Result<(), HostError> {
         let (_, up) = button_flags(button);
-        unsafe {
-            send_motion(x, y);
-            send_mouse_event(up, 0);
+        let held = button_code(button);
+        let sent = send_inputs(&[(motion_input(x, y, virtual_desk()), Holds::Neither), (mouse_input(up, 0), Holds::Up(held))], &[held]);
+        if sent.let_go.contains(&held) {
+            note_button(button, false);
         }
-        note_button(button, false);
+        sent.answer()
     }
 
-    fn mouse_scroll(&self, x: i32, y: i32, delta: i32) {
-        unsafe {
-            SetCursorPos(x, y);
-            send_mouse_event(MOUSEEVENTF_WHEEL, delta); // already in WHEEL_DELTA units
-        }
+    /// The pointer placed, then the wheel. Placed nowhere, nothing is scrolled.
+    fn mouse_scroll(&self, x: i32, y: i32, delta: i32) -> Result<(), HostError> {
+        place(x, y)?;
+        // Already in WHEEL_DELTA units.
+        send_inputs(&[(mouse_input(MOUSEEVENTF_WHEEL, delta), Holds::Neither)], &[]).answer()
     }
 
     /// The key-down and the key-up posted; a post Windows refuses is answered by its error — a
@@ -1687,25 +1683,45 @@ impl Backend for WindowsBackend {
         let key_vk = key_vk as u16;
         let ext = if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
         // Every event marked, so that the hook leaves the key-down out of the count that ends a
-        // count of quick repeats ([`SEND_MARK`]); it takes and matches the key as ever.
-        unsafe {
-            for &vk in &mod_vks {
-                send_key_event(vk, 0, 0, SEND_MARK);
-            }
-            send_key_event(key_vk, 0, ext, SEND_MARK);
-            send_key_event(key_vk, 0, ext | KEYEVENTF_KEYUP, SEND_MARK);
-            for &vk in mod_vks.iter().rev() {
-                send_key_event(vk, 0, KEYEVENTF_KEYUP, SEND_MARK);
-            }
+        // count of quick repeats ([`SEND_MARK`]); it takes and matches the key as ever. One
+        // `SendInput`, in order: one Windows stops taking part-way has the releases of the keys it
+        // pressed sent on their own (`send_inputs`), so no modifier is left down.
+        let mut events = Vec::with_capacity(2 * mod_vks.len() + 2);
+        for &vk in &mod_vks {
+            events.push((key_input(vk, 0, 0, SEND_MARK), Holds::Down(u32::from(vk))));
         }
-        Ok(())
+        events.push((key_input(key_vk, 0, ext, SEND_MARK), Holds::Down(u32::from(key_vk))));
+        events.push((key_input(key_vk, 0, ext | KEYEVENTF_KEYUP, SEND_MARK), Holds::Up(u32::from(key_vk))));
+        for &vk in mod_vks.iter().rev() {
+            events.push((key_input(vk, 0, KEYEVENTF_KEYUP, SEND_MARK), Holds::Up(u32::from(vk))));
+        }
+        send_inputs(&events, &[]).answer().map_err(KeyRefusal::Answer)
     }
 
-    fn type_text(&self, text: &str) {
-        unsafe {
-            for u in text.encode_utf16() {
-                send_key_event(0, u, KEYEVENTF_UNICODE, 0);
-                send_key_event(0, u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0);
+    /// Every UTF-16 unit's down and up, in one `SendInput`. One Windows stops taking part-way ends
+    /// the typing there — a unit it took the down of has its up sent on its own — and the answer
+    /// says how many characters were typed.
+    fn type_text(&self, text: &str) -> Result<(), HostError> {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let events: Vec<(INPUT, Holds)> = units
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &u)| {
+                // Keyed by the unit's place, so a repeated letter's halves are told apart.
+                let held = i as u32;
+                [
+                    (key_input(0, u, KEYEVENTF_UNICODE, 0), Holds::Down(held)),
+                    (key_input(0, u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0), Holds::Up(held)),
+                ]
+            })
+            .collect();
+        let sent = send_inputs(&events, &[]);
+        match sent.error {
+            None => Ok(()),
+            Some(error) => {
+                let (typed, of) = typed_of(text, sent.taken);
+                crate::logging::line("input", &format!("typing: Windows took {} of {} events; {typed} of {of} characters were typed", sent.taken, events.len()));
+                Err(HostError::with(&errors::input::TEXT_NOT_TAKEN, format!("Windows did not take the input after {typed} of {of} characters (error {error})")))
             }
         }
     }
@@ -4413,18 +4429,237 @@ fn motion_input(x: i32, y: i32, desk: (i32, i32, i32, i32)) -> INPUT {
     }
 }
 
-/// The pointer moved to (x, y) as motion through the system's input: `motion_input`, sent.
-unsafe fn send_motion(x: i32, y: i32) {
-    let input = motion_input(x, y, virtual_desk());
-    SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
-}
-
-pub(super) unsafe fn send_mouse_event(flags: u32, data: i32) {
-    let mut input: INPUT = std::mem::zeroed();
+/// A button's or the wheel's event with no place of its own: `flags`, and `data` for the wheel.
+fn mouse_input(flags: u32, data: i32) -> INPUT {
+    // SAFETY: an all-zero INPUT is a valid one; the mouse fields are set below.
+    let mut input: INPUT = unsafe { std::mem::zeroed() };
     input.r#type = INPUT_MOUSE;
     input.Anonymous.mi.dwFlags = flags;
     input.Anonymous.mi.mouseData = data as u32; // wheel delta reinterpreted
-    SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
+    input
+}
+
+// ── What a call's input answers ─────────────────────────────────────────────────────────────
+// `SendInput` says how many of its events Windows took — none when another desktop has the input,
+// the lock screen or a UAC prompt, with the reason in `GetLastError` — and `SetCursorPos` whether
+// it put the pointer there. Every call of `host.input` that goes through the system's input reads
+// both and answers what it did not get (`errors::input::NOT_TAKEN`, `NOT_PLACED`). Windows does not
+// say when it drops input into a program of higher rights (User Interface Privilege Isolation):
+// that input is counted as taken. A call's events go in one `SendInput` where nothing is paced
+// between them, which Windows does not interleave with other input; and a call never leaves what it
+// pressed down because Windows stopped taking its events part-way: the releases it owes are sent on
+// their own (`owed`), and the answer is still the event it did not take.
+
+/// What one event of a call does to what is held: presses a button or a key, lets go of one, or
+/// neither — a move, a wheel. By the button's ([`button_code`]) or the key's own number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Holds {
+    Down(u32),
+    Up(u32),
+    Neither,
+}
+
+/// A button's number for [`Holds`], apart from every key's.
+fn button_code(button: MouseButton) -> u32 {
+    0x1_0000 + u32::from(bit(button))
+}
+
+/// The events after the first `taken` of `events` that let go of what the first `taken` pressed —
+/// or of what `held` was down before the call — and did not let go of: the releases a call whose
+/// events Windows stopped taking part-way still sends, so it leaves nothing down. Their places, in
+/// order.
+fn owed(events: &[Holds], taken: usize, held: &[u32]) -> Vec<usize> {
+    let taken = taken.min(events.len());
+    let mut down: Vec<u32> = held.to_vec();
+    for e in &events[..taken] {
+        match *e {
+            Holds::Down(k) => down.push(k),
+            Holds::Up(k) => down.retain(|d| *d != k),
+            Holds::Neither => {}
+        }
+    }
+    let mut out = Vec::new();
+    for (i, e) in events.iter().enumerate().skip(taken) {
+        if let Holds::Up(k) = *e {
+            if down.contains(&k) {
+                down.retain(|d| *d != k);
+                out.push(i);
+            }
+        }
+    }
+    out
+}
+
+/// What [`send_inputs`] came to: how many of the events Windows took, its error when it did not
+/// take them all, and what was let go of — by the events it took and the releases owed it sent.
+#[derive(Debug, PartialEq, Eq)]
+struct Sent {
+    taken: usize,
+    error: Option<u32>,
+    let_go: Vec<u32>,
+}
+
+impl Sent {
+    /// The call's answer: `Ok` when Windows took every event.
+    fn answer(&self) -> Result<(), HostError> {
+        match self.error {
+            None => Ok(()),
+            Some(e) => Err(HostError::with(&errors::input::NOT_TAKEN, format!("Windows did not take the input (error {e})"))),
+        }
+    }
+}
+
+/// `events` in one `SendInput`, each with what it holds — `held` were down before — through
+/// [`send_with`].
+fn send_inputs(events: &[(INPUT, Holds)], held: &[u32]) -> Sent {
+    send_with(events, held, |inputs| {
+        // SAFETY: `inputs` holds `inputs.len()` initialised INPUTs for the length of the call.
+        let took = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) } as usize;
+        // SAFETY: the calling thread's last error, read at once.
+        (took, if took < inputs.len() { unsafe { GetLastError() } } else { 0 })
+    })
+}
+
+/// [`send_inputs`] with the system's `SendInput` handed in — how many it took of what it was given,
+/// and the last error — so the rule can be tested: everything at once; when Windows took fewer, the
+/// releases owed ([`owed`]) on their own, one `SendInput` each, and a line in the log.
+fn send_with(events: &[(INPUT, Holds)], held: &[u32], mut send: impl FnMut(&[INPUT]) -> (usize, u32)) -> Sent {
+    if events.is_empty() {
+        return Sent { taken: 0, error: None, let_go: Vec::new() };
+    }
+    let inputs: Vec<INPUT> = events.iter().map(|(i, _)| *i).collect();
+    let holds: Vec<Holds> = events.iter().map(|(_, h)| *h).collect();
+    let (taken, error) = send(&inputs);
+    let taken = taken.min(inputs.len());
+    let mut let_go: Vec<u32> = holds[..taken].iter().filter_map(|h| if let Holds::Up(k) = h { Some(*k) } else { None }).collect();
+    if taken == inputs.len() {
+        return Sent { taken, error: None, let_go };
+    }
+    let owes = owed(&holds, taken, held);
+    let mut sent_owed = 0;
+    for &i in &owes {
+        if send(std::slice::from_ref(&inputs[i])).0 == 1 {
+            sent_owed += 1;
+            if let Holds::Up(k) = holds[i] {
+                let_go.push(k);
+            }
+        }
+    }
+    crate::logging::line(
+        "input",
+        &format!(
+            "Windows took {taken} of {} input events (error {error}); {sent_owed} of the {} release(s) it owed sent on their own",
+            inputs.len(),
+            owes.len()
+        ),
+    );
+    Sent { taken, error: Some(error), let_go }
+}
+
+/// The pointer put at (x, y) (`SetCursorPos`) — or what Windows answered when it did not.
+fn place(x: i32, y: i32) -> Result<(), HostError> {
+    // SAFETY: a call that moves the pointer; it fails, with a last error, rather than misbehave.
+    if unsafe { SetCursorPos(x, y) } != 0 {
+        return Ok(());
+    }
+    let e = unsafe { GetLastError() };
+    Err(HostError::with(&errors::input::NOT_PLACED, format!("Windows did not put the pointer there (error {e})")))
+}
+
+/// `host.input.click` through the system's input, on the event loop or click_win.rs's thread: the
+/// pointer placed, then the press and the release in one `SendInput`. Placed nowhere, or the press
+/// not taken, nothing is clicked; a press Windows took without its release has the release sent on
+/// its own ([`released`]).
+pub(super) fn click_input(x: i32, y: i32, button: MouseButton) -> Result<(), HostError> {
+    let (down, up) = button_flags(button);
+    let held = button_code(button);
+    place(x, y)?;
+    let sent = send_inputs(&[(mouse_input(down, 0), Holds::Down(held)), (mouse_input(up, 0), Holds::Up(held))], &[]);
+    if sent.taken == 0 {
+        return sent.answer();
+    }
+    released(button, &sent)
+}
+
+/// The sixteen steps of a drag from `from` to `to`, each place handed to `step`, which sends it:
+/// the first step not taken ends them, and is the answer.
+fn drag_steps(from: (i32, i32), to: (i32, i32), mut step: impl FnMut((i32, i32)) -> Result<(), HostError>) -> Result<(), HostError> {
+    const STEPS: i32 = 16;
+    for i in 1..=STEPS {
+        let t = f64::from(i) / f64::from(STEPS);
+        let at = (
+            (f64::from(from.0) + f64::from(to.0 - from.0) * t).round() as i32,
+            (f64::from(from.1) + f64::from(to.1 - from.1) * t).round() as i32,
+        );
+        step(at)?;
+    }
+    Ok(())
+}
+
+/// A drag's answer, from its steps' and its release's: a button still down first, since the host
+/// holds the button on that answer alone (lib.rs, `held_after`); then the first event not taken.
+fn drag_answer(stepped: Result<(), HostError>, released: Result<(), HostError>) -> Result<(), HostError> {
+    match released {
+        Err(left) if left.reason() == &errors::input::LEFT_DOWN => Err(left),
+        released => stepped.and(released),
+    }
+}
+
+/// The answer of a call whose press of `button` Windows took, by what became of its release
+/// (`sent`): let go of — which lets go of a button pressed before it too ([`PRESSED`]) — and the
+/// call's own answer; or, when Windows refused the release with the call and again on its own, the
+/// button still down — noted so, so the moves after it are motion — and `LEFT_DOWN`, which the
+/// host takes to hold the button for the module (lib.rs, `held_after`).
+fn released(button: MouseButton, sent: &Sent) -> Result<(), HostError> {
+    let answer = release_answer(button_code(button), sent);
+    let down = matches!(&answer, Err(e) if e.reason() == &errors::input::LEFT_DOWN);
+    note_button(button, down);
+    if down {
+        crate::logging::line("input", &format!("the {button:?} button was pressed and Windows refused its release twice: it is still down"));
+    }
+    answer
+}
+
+/// [`released`]'s answer for the press of `held` ([`button_code`]), pure: what `sent` let go of
+/// decides.
+fn release_answer(held: u32, sent: &Sent) -> Result<(), HostError> {
+    if sent.let_go.contains(&held) {
+        return sent.answer();
+    }
+    let e = sent.error.unwrap_or(0);
+    Err(HostError::with(&errors::input::LEFT_DOWN, format!("Windows took the press but not its release (error {e}): the button is still down")))
+}
+
+/// How many of `text`'s characters a `type_text` of it typed when Windows took `taken` of its events
+/// — a UTF-16 unit's down, then its up — and how many it has: a character is typed once the down of
+/// every unit of it was taken, since a `KEYEVENTF_UNICODE` down delivers its unit (`VK_PACKET`, then
+/// `WM_CHAR`), and the up owed after it is sent on its own.
+fn typed_of(text: &str, taken: usize) -> (usize, usize) {
+    let mut events = 0;
+    let mut typed = 0;
+    for c in text.chars() {
+        // The last unit's down is the character's last event but one.
+        events += 2 * c.len_utf16();
+        if events - 1 <= taken {
+            typed += 1;
+        }
+    }
+    (typed, text.chars().count())
+}
+
+/// The pointer's place as `GetCursorPos` gave it, or `0, 0` where it gave none, with a line in the
+/// log the first time — `error` the system's reason, read only then.
+fn cursor_or_origin(read: Option<(i32, i32)>, error: impl FnOnce() -> u32) -> (i32, i32) {
+    static SAID: AtomicBool = AtomicBool::new(false);
+    read.unwrap_or_else(|| {
+        if !SAID.swap(true, Ordering::Relaxed) {
+            crate::logging::line(
+                "input",
+                &format!("Windows did not give the pointer's place (error {}); reporting it at 0,0, which is a guess", error()),
+            );
+        }
+        (0, 0)
+    })
 }
 
 /// The key a modifier role is pressed on when a key is passed on: the left one of its pair, as a
@@ -4490,16 +4725,17 @@ fn send_marked(events: &[(u16, u16, u32)]) -> usize {
     unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) as usize }
 }
 
-/// One key event through `SendInput`, carrying `extra` in its `dwExtraInfo` — [`SEND_MARK`] for
+/// One key event for `SendInput`, carrying `extra` in its `dwExtraInfo` — [`SEND_MARK`] for
 /// `host.input.send`'s, 0 for the rest.
-unsafe fn send_key_event(vk: u16, scan: u16, flags: u32, extra: usize) {
-    let mut input: INPUT = std::mem::zeroed();
+fn key_input(vk: u16, scan: u16, flags: u32, extra: usize) -> INPUT {
+    // SAFETY: an all-zero INPUT is a valid one; the keyboard fields are set below.
+    let mut input: INPUT = unsafe { std::mem::zeroed() };
     input.r#type = INPUT_KEYBOARD;
     input.Anonymous.ki.wVk = vk;
     input.Anonymous.ki.wScan = scan;
     input.Anonymous.ki.dwFlags = flags;
     input.Anonymous.ki.dwExtraInfo = extra;
-    SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
+    input
 }
 
 /// Crop a sub-image out of a capture. `x`/`y` are relative to the capture's own top-left.
@@ -5368,11 +5604,11 @@ mod hook_carry_over_tests {
         };
         assert_ne!(SEND_MARK, PASS_ON_MARK);
         let send = body("    fn key_send(&self, combo: &str)");
-        assert_eq!(send.matches("send_key_event(").count(), 4);
-        assert_eq!(send.matches(", SEND_MARK);").count(), 4, "every event marked");
+        assert_eq!(send.matches("key_input(").count(), 4);
+        assert_eq!(send.matches(", SEND_MARK), Holds::").count(), 4, "every event marked");
         let text = body("    fn type_text(&self, text: &str)");
-        assert_eq!(text.matches(", 0);").count(), 2, "typed text is not host.input.send");
-        assert!(body("unsafe fn send_key_event(").contains("input.Anonymous.ki.dwExtraInfo = extra;"));
+        assert_eq!(text.matches(", 0), Holds::").count(), 2, "typed text is not host.input.send");
+        assert!(body("fn key_input(").contains("input.Anonymous.ki.dwExtraInfo = extra;"));
         let hook = body("unsafe extern \"system\" fn ll_keyboard_proc(");
         let pass_on = hook.find("if kb.dwExtraInfo == PASS_ON_MARK {").unwrap();
         let sent = hook.find("let sent = kb.dwExtraInfo == SEND_MARK;").expect("the hook reads the mark");
@@ -6036,6 +6272,22 @@ mod capture_tests {
         assert_eq!(too_large().reason(), &errors::screen::CAPTURE_TOO_LARGE);
         assert_eq!(too_large().message(), errors::screen::CAPTURE_TOO_LARGE.message);
     }
+
+    /// The 40 million pixels are a region's, and the calls that hold their region to a limit of
+    /// their own before they capture never meet them: a snapshot's and a profile's, a grid's, a
+    /// captured template's. So `CAPTURE_TOO_LARGE` names only the searches, `save` and `saveMarked`.
+    #[test]
+    fn only_the_calls_that_do_not_hold_their_region_meet_the_40_million() {
+        let fits = |pixels: i64| dxgi::fits(1, pixels as i32);
+        assert!(fits(40_000_000) && !fits(40_000_001), "a region's limit");
+        assert!(fits(crate::backend::frame::MAX_FRAME_PIXELS), "snapshot, profile");
+        assert!(fits(crate::cells::MAX_REGION_PIXELS as i64), "cells, matchCells");
+        assert!(fits(crate::template::MAX_PIXELS as i64), "template{{ capture }}");
+        assert!(!errors::screen::CAPTURE_TOO_LARGE.entries.iter().any(|e| {
+            ["host-screen-snapshot", "host-screen-profile", "host-screen-cells", "host-screen-matchcells", "host-screen-template", "host-ocr-recognize"]
+                .contains(e)
+        }));
+    }
 }
 
 /// The pointer moved as motion while a button is held (the VPS Avenger port's HG1): the events
@@ -6143,9 +6395,10 @@ mod pointer_motion_tests {
         use crate::ocr_wiring_tests::body;
         let mv = body(SRC, "fn mouse_move(&self, x: i32, y: i32)");
         let held = mv.find("if button_held_now() {").expect("the move asks whether a button is held");
-        let motion = mv.find("send_motion(x, y);").expect("the move is motion");
-        let placed = mv.find("SetCursorPos(x, y);").expect("the move is a placement otherwise");
+        let motion = mv.find("send_inputs(&[(motion_input(x, y, virtual_desk()), Holds::Neither)], &[]).answer()").expect("the move is motion");
+        let placed = mv.find("place(x, y)").expect("the move is a placement otherwise");
         assert!(held < motion && motion < placed, "{mv}");
+        assert!(body(SRC, "fn place(x: i32, y: i32) -> Result<(), HostError>").contains("SetCursorPos(x, y)"));
         let asked = body(SRC, "fn button_held_now() -> bool");
         assert!(asked.contains("moves_as_motion(PRESSED.load(Ordering::SeqCst), states)"));
         // The desktop's left, right and middle buttons, each asked.
@@ -6161,18 +6414,19 @@ mod pointer_motion_tests {
         }
         assert!(!desk.contains("SM_CXSCREEN") && !desk.contains("SM_CYSCREEN"), "{desk}");
         let up = body(SRC, "fn mouse_up(&self, x: i32, y: i32, button: MouseButton)");
-        let m = up.find("send_motion(x, y);").expect("the release is motion first");
-        let u = up.find("send_mouse_event(up, 0);").expect("then the up");
-        assert!(m < u && !up.contains("SetCursorPos"), "{up}");
-        assert!(up.contains("note_button(button, false);"));
+        let m = up.find("(motion_input(x, y, virtual_desk()), Holds::Neither)").expect("the release is motion first");
+        let u = up.find("(mouse_input(up, 0), Holds::Up(held))").expect("then the up");
+        assert!(m < u && !up.contains("place(") && !up.contains("SetCursorPos"), "{up}");
+        assert!(up.contains("if sent.let_go.contains(&held) {\n            note_button(button, false);"));
         let drag = body(SRC, "fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton)");
-        assert!(drag.contains("send_motion(x1, y1);") && drag.contains("send_motion(\n"), "{drag}");
-        assert!(drag.contains("note_button(button, false);"));
+        assert!(drag.contains("(motion_input(x1, y1, virtual_desk()), Holds::Neither)") && drag.contains("(motion_input(at.0, at.1, virtual_desk()), Holds::Neither)"), "{drag}");
+        assert!(drag.contains("drag_answer(stepped, released(button, &up))"));
+        assert!(body(SRC, "fn released(button: MouseButton, sent: &Sent)").contains("note_button(button, down);"));
         assert!(!SRC.contains(&["move", "_injected"].concat()), "the primary display's normalisation is gone");
         assert!(body(SRC, "fn mouse_down(&self, x: i32, y: i32, button: MouseButton)").contains("note_button(button, true);"));
-        assert!(body(SRC, "fn mouse_click(&self, x: i32, y: i32, button: MouseButton)").contains("note_button(button, false);"));
-        assert!(body(SRC, "unsafe fn send_motion(x: i32, y: i32)").contains("motion_input(x, y, virtual_desk())"));
-        assert!(body(CLICK, "fn hold_and_click(").contains("super::windows::note_button(button, false);"));
+        assert!(body(SRC, "fn mouse_click(&self, x: i32, y: i32, button: MouseButton)").contains("click_input(x, y, button)"));
+        assert!(body(SRC, "pub(super) fn click_input(x: i32, y: i32, button: MouseButton)").contains("released(button, &sent)"));
+        assert!(body(CLICK, "fn hold_and_click(").contains("super::windows::click_input(x, y, button)?;"));
     }
 }
 
@@ -6211,5 +6465,260 @@ mod answer_tests {
         let answered = post.find("return Err(KeyRefusal::Answer(why));").expect("and answered");
         assert!(post.contains("for (msg, lp) in [(WM_KEYDOWN, lp_down), (WM_KEYUP, lp_up)] {"), "{post}");
         assert!(posted < refused && refused < answered, "{post}");
+    }
+}
+
+/// A region cut out of the bounding box it was captured in never misses it: the box is the union of
+/// the regions, `offset_in` admits only a region inside it, and a capture of another size than the
+/// box is not cut (`capture_for_read`). So `ocr::CROP_OUTSIDE` is never given, and names no entry.
+#[cfg(test)]
+mod ocr_crop_tests {
+    use super::*;
+
+    #[test]
+    fn a_region_cut_from_its_bounding_box_is_always_inside_it() {
+        let mut seed = 0x2545_F491_u32;
+        let mut next = |m: i32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % m as u32) as i32
+        };
+        let mut cut = 0;
+        for _ in 0..2000 {
+            let n = 2 + next(4) as usize;
+            let rects: Vec<Rect> = (0..n).map(|_| Rect::from_tuple((next(400) - 100, next(300) - 50, next(120), next(40)))).collect();
+            let Plan::BoundingBox(b) = plan::capture_plan(&rects) else { continue };
+            let big = CapturedImage { w: b.w as u32, h: b.h as u32, rgba: vec![0; (b.w * b.h * 4) as usize] };
+            for r in &rects {
+                match plan::offset_in(r, &b) {
+                    Some((ox, oy)) if !r.is_empty() => {
+                        assert!(crop(&big, ox, oy, r.w, r.h).is_some(), "{r:?} in {b:?}");
+                        cut += 1;
+                    }
+                    _ => assert!(r.is_empty(), "every region with an area is inside its box: {r:?} in {b:?}"),
+                }
+            }
+        }
+        assert!(cut > 1000, "{cut}");
+        assert!(crate::errors::ocr::CROP_OUTSIDE.entries.is_empty());
+    }
+}
+
+/// What a call through the system's input answers when Windows does not take all of it: the event
+/// it stopped at, and the releases it owes sent on their own, so that nothing it pressed is left
+/// down; with everything taken, nothing more is sent.
+#[cfg(test)]
+mod input_answer_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    fn ev(h: Holds) -> (INPUT, Holds) {
+        (mouse_input(0, 0), h)
+    }
+
+    #[test]
+    fn a_call_owes_the_releases_of_what_it_pressed_and_windows_took() {
+        use Holds::{Down, Neither, Up};
+        // send: Ctrl down, A down, A up, Ctrl up.
+        let send = [Down(17), Down(65), Up(65), Up(17)];
+        assert_eq!(owed(&send, 4, &[]), Vec::<usize>::new(), "all taken");
+        assert_eq!(owed(&send, 0, &[]), Vec::<usize>::new(), "nothing taken, nothing pressed");
+        assert_eq!(owed(&send, 1, &[]), vec![3], "Ctrl went down: its release");
+        assert_eq!(owed(&send, 2, &[]), vec![2, 3], "Ctrl and A: both, in order");
+        assert_eq!(owed(&send, 3, &[]), vec![3]);
+        // A click: the release of a press that went; a mouseUp's release, of a press before it.
+        assert_eq!(owed(&[Down(1), Up(1)], 1, &[]), vec![1]);
+        assert_eq!(owed(&[Neither, Up(1)], 0, &[1]), vec![1], "the release a mouseUp is for");
+        assert_eq!(owed(&[Neither, Up(1)], 1, &[1]), vec![1]);
+        assert_eq!(owed(&[Neither, Up(1)], 1, &[]), Vec::<usize>::new(), "nothing held, nothing owed");
+        // Text: the unit whose down went.
+        let text = [Down(0), Up(0), Down(1), Up(1)];
+        assert_eq!(owed(&text, 3, &[]), vec![3]);
+        assert_eq!(owed(&text, 2, &[]), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn what_windows_does_not_take_is_answered_and_nothing_is_left_down() {
+        // Everything taken: one SendInput, nothing more.
+        let calls = RefCell::new(Vec::new());
+        let all = send_with(&[ev(Holds::Down(1)), ev(Holds::Up(1))], &[], |i| {
+            calls.borrow_mut().push(i.len());
+            (i.len(), 0)
+        });
+        assert_eq!(all, Sent { taken: 2, error: None, let_go: vec![1] });
+        assert_eq!(*calls.borrow(), vec![2]);
+        assert_eq!(all.answer(), Ok(()));
+        // The press taken, the release not: the release on its own, and the answer the error.
+        let calls = RefCell::new(Vec::new());
+        let half = send_with(&[ev(Holds::Down(1)), ev(Holds::Up(1))], &[], |i| {
+            calls.borrow_mut().push(i.len());
+            if calls.borrow().len() == 1 { (1, 5) } else { (1, 0) }
+        });
+        assert_eq!(*calls.borrow(), vec![2, 1], "the owed release, alone");
+        assert_eq!(half, Sent { taken: 1, error: Some(5), let_go: vec![1] });
+        let err = half.answer().unwrap_err();
+        assert_eq!((err.reason(), err.message()), (&errors::input::NOT_TAKEN, "Windows did not take the input (error 5)"));
+        // Nothing taken, and the owed release refused too: nothing let go of.
+        let none = send_with(&[ev(Holds::Neither), ev(Holds::Up(1))], &[1], |_| (0, 5));
+        assert_eq!(none, Sent { taken: 0, error: Some(5), let_go: vec![] });
+        // Nothing to send sends nothing.
+        assert_eq!(send_with(&[], &[], |_| panic!("asked")), Sent { taken: 0, error: None, let_go: vec![] });
+    }
+
+    /// A press Windows took answers by its release: let go of, the call's own answer — `Ok`, or the
+    /// error of the release sent again on its own —; refused with the call and again on its own,
+    /// `LEFT_DOWN`, the button still down, which the host holds for the module.
+    #[test]
+    fn a_press_whose_release_windows_refuses_twice_is_still_down() {
+        let held = button_code(MouseButton::Left);
+        let click = [ev(Holds::Down(held)), ev(Holds::Up(held))];
+        let all = send_with(&click, &[], |i| (i.len(), 0));
+        assert_eq!(release_answer(held, &all), Ok(()));
+        let calls = RefCell::new(0);
+        let owed = send_with(&click, &[], |_| {
+            *calls.borrow_mut() += 1;
+            if *calls.borrow() == 1 { (1, 5) } else { (1, 0) }
+        });
+        let e = release_answer(held, &owed).unwrap_err();
+        assert_eq!(e.reason(), &errors::input::NOT_TAKEN, "let go of, on its own");
+        let calls = RefCell::new(0);
+        let twice = send_with(&click, &[], |_| {
+            *calls.borrow_mut() += 1;
+            if *calls.borrow() == 1 { (1, 5) } else { (0, 5) }
+        });
+        assert_eq!(*calls.borrow(), 2, "the release was sent again, on its own");
+        let e = release_answer(held, &twice).unwrap_err();
+        assert_eq!((e.reason(), e.message()), (&errors::input::LEFT_DOWN, "Windows took the press but not its release (error 5): the button is still down"));
+        // A drag's release, of the press it made before: the same.
+        let up = send_with(&[ev(Holds::Up(held))], &[held], |_| (0, 5));
+        assert_eq!(release_answer(held, &up).unwrap_err().reason(), &errors::input::LEFT_DOWN);
+    }
+
+    /// A drag's sixteen steps go from the start to the end, and the first one Windows does not take
+    /// ends them, as the answer; a button left down by the release is the drag's answer before it.
+    #[test]
+    fn a_drag_s_step_not_taken_ends_the_steps() {
+        let mut at = Vec::new();
+        assert_eq!(drag_steps((0, 0), (160, -32), |p| { at.push(p); Ok(()) }), Ok(()));
+        assert_eq!(at.len(), 16);
+        assert_eq!((at[0], at[15]), ((10, -2), (160, -32)));
+        let refused = || HostError::with(&errors::input::NOT_TAKEN, "Windows did not take the input (error 5)".into());
+        let mut n = 0;
+        let r = drag_steps((0, 0), (160, 0), |_| {
+            n += 1;
+            if n == 3 { Err(refused()) } else { Ok(()) }
+        });
+        assert_eq!((r, n), (Err(refused()), 3), "no step after the one not taken");
+        // The answer: a button left down first, whatever a step answered; then the first not taken.
+        let left = || HostError::with(&errors::input::LEFT_DOWN, "Windows took the press but not its release (error 5): the button is still down".into());
+        let up_alone = || HostError::with(&errors::input::NOT_TAKEN, "Windows did not take the input (error 6)".into());
+        assert_eq!(drag_answer(Err(refused()), Err(left())), Err(left()));
+        assert_eq!(drag_answer(Ok(()), Err(left())), Err(left()));
+        assert_eq!(drag_answer(Err(refused()), Err(up_alone())), Err(refused()));
+        assert_eq!(drag_answer(Ok(()), Err(up_alone())), Err(up_alone()));
+        assert_eq!(drag_answer(Err(refused()), Ok(())), Err(refused()));
+        assert_eq!(drag_answer(Ok(()), Ok(())), Ok(()));
+    }
+
+    /// The pointer calls' order, which no test can drive: placed first, and placed nowhere, nothing
+    /// else is sent; a mouseUp's release is of the button held before it, so one not taken with the
+    /// movement is sent again on its own; a drag's and a click's release answer through `released`.
+    #[test]
+    fn the_pointer_calls_place_first_and_owe_their_releases() {
+        const SRC: &str = include_str!("windows.rs");
+        let body = |sig: &str| crate::ocr_wiring_tests::body(SRC, sig);
+        // The first statement after the `let`s is the placement, with `?`.
+        let first = |b: &str| {
+            b.lines()
+                .skip(1)
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with("//") && !l.starts_with("let "))
+                .unwrap()
+                .to_string()
+        };
+        for (sig, place) in [
+            ("fn mouse_down(&self, x: i32, y: i32, button: MouseButton)", "place(x, y)?;"),
+            ("fn mouse_scroll(&self, x: i32, y: i32, delta: i32)", "place(x, y)?;"),
+            ("pub(super) fn click_input(x: i32, y: i32, button: MouseButton)", "place(x, y)?;"),
+            ("fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton)", "place(x1, y1)?;"),
+        ] {
+            assert_eq!(first(body(sig)), place, "{sig}");
+        }
+        let down = body("fn mouse_down(&self, x: i32, y: i32, button: MouseButton)");
+        assert!(down.contains("send_inputs(&[(mouse_input(down, 0), Holds::Down(button_code(button)))], &[]).answer()?;\n        note_button(button, true);"));
+        let up = body("fn mouse_up(&self, x: i32, y: i32, button: MouseButton)");
+        assert!(up.contains(
+            "send_inputs(&[(motion_input(x, y, virtual_desk()), Holds::Neither), (mouse_input(up, 0), Holds::Up(held))], &[held]);"
+        ));
+        let drag = body("fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton)");
+        assert!(drag.contains("let up = send_inputs(&[(mouse_input(up, 0), Holds::Up(held))], &[held]);\n        drag_answer(stepped, released(button, &up))"));
+        assert!(drag.contains("let stepped = drag_steps((x1, y1), (x2, y2), |at| {"));
+        let click = body("pub(super) fn click_input(x: i32, y: i32, button: MouseButton)");
+        assert!(click.contains("if sent.taken == 0 {\n        return sent.answer();\n    }\n    released(button, &sent)"));
+        assert!(body("fn released(button: MouseButton, sent: &Sent)").contains("note_button(button, down);"));
+    }
+
+    #[test]
+    fn typed_text_counts_whole_characters() {
+        assert_eq!(typed_of("abc", 6), (3, 3));
+        assert_eq!(typed_of("abc", 5), (3, 3), "the third's down delivered it; its up is owed");
+        assert_eq!(typed_of("abc", 3), (2, 3), "the second's down delivered it");
+        assert_eq!(typed_of("abc", 2), (1, 3));
+        assert_eq!(typed_of("abc", 1), (1, 3));
+        assert_eq!(typed_of("abc", 0), (0, 3));
+        // A character outside the basic plane is two units, four events: typed once the second
+        // unit's down is taken, its first alone is half a character.
+        assert_eq!(typed_of("a\u{1F600}b", 4), (1, 3));
+        assert_eq!(typed_of("a\u{1F600}b", 5), (2, 3));
+        assert_eq!(typed_of("a\u{1F600}b", 6), (2, 3));
+        assert_eq!(typed_of("a\u{1F600}b", 7), (3, 3));
+        let e = HostError::with(&errors::input::TEXT_NOT_TAKEN, "Windows did not take the input after 1 of 3 characters (error 5)".into());
+        assert_eq!(e.code(), errors::Code::Failed);
+    }
+
+    #[test]
+    fn a_pointer_place_windows_does_not_give_is_the_origin() {
+        assert_eq!(cursor_or_origin(Some((12, -40)), || panic!("asked")), (12, -40));
+        assert_eq!(cursor_or_origin(None, || 5), (0, 0));
+    }
+
+    /// Every call that goes through the system's input answers it: no `SendInput` or
+    /// `SetCursorPos` whose answer is dropped is left, and the calls build their events with the
+    /// builders that `send_inputs` sends.
+    #[test]
+    fn no_input_s_answer_is_dropped() {
+        const SRC: &str = include_str!("windows.rs");
+        const CLICK: &str = include_str!("click_win.rs");
+        let code = &SRC[..SRC.find("\n#[cfg(test)]\nmod ").unwrap()];
+        assert!(!code.contains("fn send_mouse_event(") && !code.contains("fn send_key_event(") && !code.contains("fn send_motion("));
+        let sent = code.matches("SendInput(").count();
+        // send_inputs, send_marked (the keys passed on, which reads its count) and the mask key.
+        assert_eq!(sent, 3, "a SendInput whose answer is not read");
+        assert!(code.contains("let took = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) } as usize;"));
+        // Every placement answers: the one in `place`, the one a posted click moves the pointer with.
+        assert_eq!(code.matches("SetCursorPos(").count(), 1);
+        assert!(code.contains("if unsafe { SetCursorPos(x, y) } != 0 {"));
+        // A posted click's placement is read too: the click is posted either way, and its line says
+        // whether the pointer moved.
+        assert!(CLICK.contains("} else if SetCursorPos(x, y) != 0 {"));
+        assert!(!CLICK.contains("SetCursorPos(x, y);"));
+        let body = |sig: &str| crate::ocr_wiring_tests::body(SRC, sig);
+        for sig in [
+            "fn mouse_move(&self, x: i32, y: i32)",
+            "fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton)",
+            "fn mouse_down(&self, x: i32, y: i32, button: MouseButton)",
+            "fn mouse_up(&self, x: i32, y: i32, button: MouseButton)",
+            "fn mouse_scroll(&self, x: i32, y: i32, delta: i32)",
+            "fn key_send(&self, combo: &str)",
+        ] {
+            assert!(body(sig).contains(".answer()"), "{sig}");
+        }
+        assert!(body("fn type_text(&self, text: &str)").contains("let sent = send_inputs(&events, &[]);"));
+        // Placed nowhere, nothing is pressed or scrolled: the placement comes first, with `?`.
+        for sig in ["fn mouse_down(&self, x: i32, y: i32, button: MouseButton)", "fn mouse_scroll(&self, x: i32, y: i32, delta: i32)", "pub(super) fn click_input("] {
+            let b = body(sig);
+            assert!(b.find("place(").unwrap() < b.find("send_inputs(").unwrap() && b.contains("?;"), "{sig}");
+        }
     }
 }

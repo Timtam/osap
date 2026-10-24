@@ -176,6 +176,12 @@ mod macos_front_memory;
 #[path = "macos/budget.rs"]
 mod macos_budget;
 
+/// And the note a module's accessibility question is told by when it is not answered in full: the
+/// first reason, only inside the question.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/question.rs"]
+mod macos_question;
+
 /// And how late a key reached the event tap: a timestamp in units nobody here has seen, read
 /// two ways, which is exactly the kind of arithmetic that should run before a Mac relies on it.
 #[cfg(all(test, not(target_os = "macos")))]
@@ -1391,6 +1397,21 @@ impl ElementAnswer {
                 | ElementAnswer::Put(false)
         )
     }
+
+    /// The answer once it is known whether the question was answered in full: `why` is what kept it
+    /// from that — a call the program did not answer, a walk stopped at its bound, a question not put
+    /// — and whether the program did not answer in time ([`ElementFailure::unanswered`]). What was
+    /// found stands: it is there. Nothing found is "not known", with why, since the part not
+    /// answered or not walked may have held it. A dump keeps what it found and says why that is not
+    /// all — the first reason, should it have one already. Each backend that asks says why in its
+    /// own way (uia.rs, macos/ax.rs).
+    pub fn settled(self, why: Option<(HostError, bool)>) -> ElementOutcome {
+        match (self, why) {
+            (ElementAnswer::Nodes(nodes, had), Some((why, _))) => Ok(ElementAnswer::Nodes(nodes, had.or(Some(why)))),
+            (a, Some((why, unanswered))) if a.is_nothing() => Err(ElementFailure { why, unanswered }),
+            (a, _) => Ok(a),
+        }
+    }
 }
 
 /// A question that got no answer: what is not known is not "not there". The program did not
@@ -1752,9 +1773,17 @@ pub trait Backend {
     fn cursor_pos(&self) -> (i32, i32);
     /// The pointer to (x, y); moves as motion while a button is held, where the platform tells
     /// the two apart (Windows: an injected motion event against a placement, `windows.rs`).
-    fn mouse_move(&self, x: i32, y: i32);
-    fn mouse_click(&self, x: i32, y: i32, button: MouseButton);
-    fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton);
+    ///
+    /// This and the calls below that go through the system's input answer what the system did not
+    /// take or make (`errors::input`): `Err` when a part of the call was not made. A Mac builds a
+    /// call's events before it posts the first, so a failure there sends nothing; Windows sends the
+    /// releases a call owes, again on their own, when it stopped taking its events part-way — and
+    /// a click's or a drag's press whose release it refuses that second time too is still down,
+    /// answered `errors::input::LEFT_DOWN`, which the host holds for the module (lib.rs,
+    /// `held_after`). `Err` leaves a button as held as it was where the call is a release.
+    fn mouse_move(&self, x: i32, y: i32) -> Result<(), HostError>;
+    fn mouse_click(&self, x: i32, y: i32, button: MouseButton) -> Result<(), HostError>;
+    fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton) -> Result<(), HostError>;
 
     /// Press a mouse button and LEAVE IT DOWN, and release it, as separate acts.
     ///
@@ -1767,12 +1796,12 @@ pub trait Backend {
     /// pump: holding, gliding and settling is the better part of a second, and nothing else —
     /// speech, hotkeys, detection — may stop for that long. Split, a caller composes the
     /// gesture from timers and the pump keeps running between the parts.
-    fn mouse_down(&self, x: i32, y: i32, button: MouseButton);
-    fn mouse_up(&self, x: i32, y: i32, button: MouseButton);
+    fn mouse_down(&self, x: i32, y: i32, button: MouseButton) -> Result<(), HostError>;
+    fn mouse_up(&self, x: i32, y: i32, button: MouseButton) -> Result<(), HostError>;
     /// `delta` is in WHEEL UNITS, where 120 is one notch — the unit the operating system
     /// itself uses. Notches were the unit here until a control turned out to move too far for
     /// one of them to be a usable step.
-    fn mouse_scroll(&self, x: i32, y: i32, delta: i32);
+    fn mouse_scroll(&self, x: i32, y: i32, delta: i32) -> Result<(), HostError>;
     /// Sends a key combo like "Ctrl+S".
     /// Deliver a key to a specific window as a MESSAGE, bypassing the input queue.
     ///
@@ -1797,7 +1826,7 @@ pub trait Backend {
     /// made, is answered.
     fn key_send(&self, combo: &str) -> Result<(), KeyRefusal>;
     /// Types Unicode text.
-    fn type_text(&self, text: &str);
+    fn type_text(&self, text: &str) -> Result<(), HostError>;
 
     /// Registers a global hotkey identified by `id` from a spec like "Ctrl+Alt+H". A spec this
     /// backend's parser refuses is a mistake ([`KeyRefusal::Mistake`]); a combination the system
@@ -4984,7 +5013,8 @@ mod pass_on_tests {
         let send = body(INPUT, "pub fn key_send(");
         let flags = send.find("CGEvent::set_flags(Some(&event), flags);").unwrap();
         let marked_at = send.find("CGEvent::set_integer_value_field(Some(&event), CGEventField::EventSourceUserData, keys::SEND_MARK);").expect("every event marked");
-        assert!(flags < marked_at && marked_at < send.find("post(&event);").unwrap(), "in the loop over the key-down and the key-up");
+        assert!(flags < marked_at && marked_at < send.find("built.push(event);").unwrap(), "in the loop over the key-down and the key-up");
+        assert!(send.find("built.push(event);").unwrap() < send.find("post_all(&built);").unwrap(), "posted once both are built");
         assert!(send.contains("let flags = CGEventFlags(keys::mask_to_cg_flags(mask) | keys::keypad_flag(code));"));
         assert!(body(INPUT, "pub fn key_post(").contains("CGEvent::set_flags(Some(&event), CGEventFlags(keys::keypad_flag(code)));"));
         assert!(!body(INPUT, "pub fn type_text(").contains("SEND_MARK"), "typed text is not host.input.send");
@@ -5129,5 +5159,169 @@ mod permission_evidence_wiring_tests {
         let start = at(GUI, "let start = crate::backend::grants::start(");
         assert!(GUI[start..start + 300].contains("moved.spoken().as_deref(),"));
         assert!(!GUI.contains("p.blocking && p.state == crate::backend::Grant::Missing"), "the start's own count is gone");
+    }
+}
+
+/// What a question not answered in full answers, on both platforms: what was found stands, nothing
+/// found is "not known" with why, and a dump its list with why beside it. And where a Mac says why —
+/// its quarantine, a read its application did not answer, a walk stopped at its bound — held where
+/// it is written, since only a Mac runs it.
+#[cfg(test)]
+mod not_known_tests {
+    use super::*;
+    use crate::errors::element;
+
+    fn node() -> DumpNode {
+        DumpNode { depth: 1, name: "FILE".into(), class: "AXButton//".into(), ctype: 50000, x: 1, y: 2, w: 3, h: 4 }
+    }
+
+    #[test]
+    fn what_was_found_stands_and_nothing_found_is_not_known() {
+        let why = || Some((HostError::of(&element::QUARANTINED), false));
+        for found in [
+            ElementAnswer::Found(true),
+            ElementAnswer::Index(Some(1)),
+            ElementAnswer::Point(Some((4, 5))),
+            ElementAnswer::State(Some((-1, 0))),
+            ElementAnswer::Within(Some(("Play".into(), 50000))),
+            ElementAnswer::Put(true),
+            ElementAnswer::Pressed,
+        ] {
+            assert_eq!(found.clone().settled(why()), Ok(found.clone()), "{found:?}");
+            assert_eq!(found.clone().settled(None), Ok(found));
+        }
+        for nothing in [
+            ElementAnswer::Found(false),
+            ElementAnswer::Index(None),
+            ElementAnswer::Point(None),
+            ElementAnswer::State(None),
+            ElementAnswer::Step(None),
+            ElementAnswer::Within(None),
+            ElementAnswer::Put(false),
+        ] {
+            assert_eq!(nothing.clone().settled(None), Ok(nothing.clone()), "a whole answer of nothing is no");
+            assert_eq!(
+                nothing.clone().settled(why()),
+                Err(ElementFailure { why: HostError::of(&element::QUARANTINED), unanswered: false }),
+                "{nothing:?}"
+            );
+            let late = Some((HostError::of(&element::TIMEOUT), true));
+            assert_eq!(nothing.settled(late), Err(ElementFailure { why: HostError::of(&element::TIMEOUT), unanswered: true }));
+        }
+        // A dump: its list, and why beside it; the reason it has already is the one kept.
+        let cut = Some((HostError::of(&element::MAC_DUMP_CUT), false));
+        assert_eq!(
+            ElementAnswer::Nodes(vec![node()], None).settled(cut.clone()),
+            Ok(ElementAnswer::Nodes(vec![node()], Some(HostError::of(&element::MAC_DUMP_CUT))))
+        );
+        assert_eq!(
+            ElementAnswer::Nodes(Vec::new(), None).settled(why()),
+            Ok(ElementAnswer::Nodes(Vec::new(), Some(HostError::of(&element::QUARANTINED)))),
+            "{{}}, err: nothing was read"
+        );
+        assert_eq!(
+            ElementAnswer::Nodes(vec![node()], Some(HostError::of(&element::TIMEOUT))).settled(cut),
+            Ok(ElementAnswer::Nodes(vec![node()], Some(HostError::of(&element::TIMEOUT))))
+        );
+        assert_eq!(ElementAnswer::Nodes(vec![node()], None).settled(None), Ok(ElementAnswer::Nodes(vec![node()], None)));
+    }
+
+    /// A Mac's question begins before its first read and is settled with what its reads noted; a
+    /// press and the host's put are answered before it begins. The application in the quarantine
+    /// is noted where it is not asked, one that did not answer a read where the read failed, and a
+    /// walk's bound where the walk stopped — the walk's own words, from what it is for (budget.rs).
+    #[test]
+    fn a_mac_question_says_why_it_was_not_answered_in_full() {
+        const MOD: &str = include_str!("macos/mod.rs");
+        const AX: &str = include_str!("macos/ax.rs");
+        // A function of the file, to its closing brace; the method, to its own.
+        let body = |src: &'static str, sig: &str| {
+            let at = src.find(sig).unwrap_or_else(|| panic!("{sig}"));
+            let end = src[at..].find("\n}\n").unwrap();
+            &src[at..at + end]
+        };
+        let ask = {
+            let at = MOD.find("fn element_ask(&self, ask: &ElementAsk) -> ElementOutcome {").unwrap();
+            &MOD[at..at + MOD[at..].find("\n    }\n").unwrap()]
+        };
+        let at = |s: &str| ask.find(s).unwrap_or_else(|| panic!("{s}"));
+        assert!(at("ElementAsk::Press { .. } | ElementAsk::FocusPut { .. }) {") < at("question::begin();"));
+        assert!(at("question::begin();") < at("ax::find("));
+        assert!(at("ax::focus_within(") < at("answer.settled(question::end().map(|why| (why, false)))"));
+        let root = body(AX, "fn root_of(hwnd: isize, what: &str)");
+        assert!(root.contains("Some(e) if skip_busy(e.pid, what) => {") && root.contains("not_known(HostError::of(&element::QUARANTINED));"));
+        let busy = body(AX, "pub(super) fn note_busy(pid: i32) {");
+        assert!(busy.contains("not_known(HostError::of(&element::NOT_ANSWERING));"));
+        // Every read that meets an application not answering goes through note_busy.
+        for sig in ["pub(super) fn attribute(", "pub(super) fn attribute_element_checked(", "pub(super) fn element_gone("] {
+            assert!(body(AX, sig).contains("note_busy(element_pid(el));"), "{sig}");
+        }
+        let walk = body(AX, "fn walk(\n");
+        let refused = walk.find("if !budget.spend() {").unwrap();
+        assert!(walk[refused..].starts_with("if !budget.spend() {\n        // A module's question is told which bound"));
+        assert!(walk[refused..refused + 300].contains("if let Some(why) = budget.cut() {\n            not_known(why);"));
+        // Every question starts at root_of, so a quarantined application is noted for each.
+        for f in ["pub fn find(", "pub fn find_any(", "pub fn locate(", "pub fn locate_via(", "pub fn plugin_locate(", "pub fn dump(", "pub fn state_probe(", "pub fn class_nav_point(", "pub fn focus_step(", "pub fn focus_within("] {
+            assert!(body(AX, f).contains("root_of(hwnd, "), "{f}");
+        }
+    }
+}
+
+/// A Mac's small region whose content crop CoreGraphics cannot draw is a failed reading with why,
+/// and a line in the log — never a reading of nothing. Held where it is written: only a Mac runs it.
+#[cfg(test)]
+mod mac_ocr_render_tests {
+    #[test]
+    fn a_crop_that_cannot_be_drawn_fails_the_read() {
+        const OCR: &str = include_str!("macos/ocr.rs");
+        let at = OCR.find("    fn climb(&self, neural: Option<&mut Neural>) -> Result<(Option<VisionRead>, Climbed), HostError> {").unwrap();
+        let climb = &OCR[at..at + OCR[at..].find("\n    }\n").unwrap()];
+        let refused = climb.find("let Some((tight, buf)) = render(self.native, self.plan) else {").unwrap();
+        let drawn = &climb[refused..refused + climb[refused..].find("\n        };").unwrap()];
+        assert!(drawn.contains("warn_once(\n                \"ocr-render\","), "said in the log, once a thread");
+        assert!(drawn.ends_with("return Err(HostError::of(&reasons::NOT_DRAWN));"));
+        assert!(climb.trim_end().ends_with("Ok(out)"));
+        assert!(OCR.contains("let (result, climbed) = rungs.climb(neural.as_mut())?;"), "the read's answer");
+        assert_eq!(crate::errors::ocr::NOT_DRAWN.code, crate::errors::Code::Failed);
+    }
+}
+
+/// A Mac's input calls answer an event the system would not make, and never leave a button or a key
+/// down for it: every event of a call is made before the first is posted, a character's two before
+/// either. Held where it is written: only a Mac runs it.
+#[cfg(test)]
+mod mac_input_answer_tests {
+    #[test]
+    fn a_mac_call_makes_every_event_before_it_posts_one() {
+        const INPUT: &str = include_str!("macos/input.rs");
+        let body = |sig: &str| {
+            let at = INPUT.find(sig).unwrap_or_else(|| panic!("{sig}"));
+            &INPUT[at..at + INPUT[at..].find("\n}\n").unwrap()]
+        };
+        for (sig, made) in [
+            ("pub fn mouse_move(x: i32, y: i32) -> Result<(), HostError> {", 1),
+            ("pub fn mouse_click(x: i32, y: i32, button: MouseButton) -> Result<(), HostError> {", 3),
+            ("pub fn mouse_drag(x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton) -> Result<(), HostError> {", 4),
+            ("pub fn mouse_down(x: i32, y: i32, button: MouseButton) -> Result<(), HostError> {", 2),
+            ("pub fn mouse_up(x: i32, y: i32, button: MouseButton) -> Result<(), HostError> {", 2),
+        ] {
+            let b = body(sig);
+            assert_eq!(b.matches("_event(").count(), made, "{sig}");
+            assert_eq!(b.matches(")?").count(), made, "every event made, or the call answers why: {sig}");
+            assert!(b.find("post_all(&").unwrap() > b.rfind(")?").unwrap(), "posted once all are made: {sig}");
+            assert!(!b.contains("post(&"), "{sig}");
+        }
+        let scroll = body("pub fn mouse_scroll(x: i32, y: i32, lines: i32) -> Result<(), HostError> {");
+        assert!(scroll.contains("let glide = glide_event(x, y)?;") && scroll.contains("post_all(&[glide, event]);"));
+        assert!(scroll.contains("Err(HostError::of(&input::NULL_SCROLL_EVENT))"));
+        let made = body("fn mouse_event(");
+        assert!(made.contains("Err(HostError::with(&input::NULL_MOUSE_SENT, said))") && !made.contains("post("));
+        let text = body("pub fn type_text(text: &str) -> Result<(), HostError> {");
+        assert!(text.contains("pair.push(event);") && text.contains("post_all(&pair);"));
+        assert!(text.find("return Err(HostError::with(&input::TEXT_CUT, said));").unwrap() < text.find("post_all(&pair);").unwrap());
+        for sig in ["pub fn key_send(", "pub fn key_post("] {
+            let b = body(sig);
+            assert!(b.find("built.push(event);").unwrap() < b.find("for event in &built").or_else(|| b.find("post_all(&built);")).unwrap(), "{sig}");
+        }
     }
 }

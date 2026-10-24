@@ -84,6 +84,9 @@ pub(crate) mod perm;
 /// `host.input.click`'s `via = "post"`, its part with nothing macOS in it — see the file.
 mod post_click;
 mod queue;
+/// What a module's accessibility question is told when it is not answered in full. Pure; see the
+/// file.
+mod question;
 /// Sleep and wake, the lock, the session, the displays, applications quitting — heard, queued
 /// and handed to the host as `SystemEvent`s. See the file.
 mod system;
@@ -167,10 +170,15 @@ impl Backend for MacBackend {
     // Asked on the event loop, as every accessibility question here always was: this platform has
     // no thread of its own for them (`element_runner` is the trait's `None`). Accessibility's own
     // per-call bound (`MESSAGING_TIMEOUT`, ax.rs) and the not-answering quarantine stay what they
-    // were, and a question that ran into either reads as "not found" here, as before — the answer
-    // is never "not known" on this platform yet. A press is not there yet.
+    // were. A question that met either, or a walk stopped at its bound, is "not known" as on
+    // Windows: what it found stands, nothing found is `nil, err`, and a dump says why it is not all
+    // (`question.rs`, `ElementAnswer::settled`). A press is not there yet.
     fn element_ask(&self, ask: &ElementAsk) -> ElementOutcome {
-        Ok(match ask {
+        if matches!(ask, ElementAsk::Press { .. } | ElementAsk::FocusPut { .. }) {
+            return ask.nothing();
+        }
+        question::begin();
+        let answer = match ask {
             ElementAsk::Find { hwnd, name, ctype } => ElementAnswer::Found(ax::find(*hwnd, name, *ctype)),
             ElementAsk::FindAny { hwnd, names, types } => ElementAnswer::Index(ax::find_any(*hwnd, names, types)),
             ElementAsk::Locate { hwnd, name, ctype } => ElementAnswer::Point(ax::locate(*hwnd, name, *ctype)),
@@ -191,8 +199,11 @@ impl Backend for MacBackend {
             }
             ElementAsk::FocusStep { hwnd, direction } => ElementAnswer::Step(ax::focus_step(*hwnd, *direction)),
             ElementAsk::FocusWithin { hwnd, x, y, w, h } => ElementAnswer::Within(ax::focus_within(*hwnd, *x, *y, *w, *h)),
+            // Answered above, before the question began.
             ElementAsk::Press { .. } | ElementAsk::FocusPut { .. } => return ask.nothing(),
-        })
+        };
+        // No question waits behind another here, so none is left unasked behind this one.
+        answer.settled(question::end().map(|why| (why, false)))
     }
 
     fn screen_size(&self) -> (i32, i32) {
@@ -232,12 +243,12 @@ impl Backend for MacBackend {
         input::cursor_pos()
     }
 
-    fn mouse_move(&self, x: i32, y: i32) {
-        input::mouse_move(x, y);
+    fn mouse_move(&self, x: i32, y: i32) -> Result<(), crate::errors::HostError> {
+        input::mouse_move(x, y)
     }
 
-    fn mouse_click(&self, x: i32, y: i32, button: MouseButton) {
-        input::mouse_click(x, y, button);
+    fn mouse_click(&self, x: i32, y: i32, button: MouseButton) -> Result<(), crate::errors::HostError> {
+        input::mouse_click(x, y, button)
     }
 
     /// The events handed to the window's process, routed inside it by the window's number and
@@ -248,19 +259,19 @@ impl Backend for MacBackend {
         input::post_click(window, x, y, button, move_pointer).map(|line| crate::logging::line("input", &line))
     }
 
-    fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton) {
-        input::mouse_drag(x1, y1, x2, y2, button);
+    fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton) -> Result<(), crate::errors::HostError> {
+        input::mouse_drag(x1, y1, x2, y2, button)
     }
 
-    fn mouse_down(&self, x: i32, y: i32, button: MouseButton) {
-        input::mouse_down(x, y, button);
+    fn mouse_down(&self, x: i32, y: i32, button: MouseButton) -> Result<(), crate::errors::HostError> {
+        input::mouse_down(x, y, button)
     }
 
-    fn mouse_up(&self, x: i32, y: i32, button: MouseButton) {
-        input::mouse_up(x, y, button);
+    fn mouse_up(&self, x: i32, y: i32, button: MouseButton) -> Result<(), crate::errors::HostError> {
+        input::mouse_up(x, y, button)
     }
 
-    fn mouse_scroll(&self, x: i32, y: i32, delta: i32) {
+    fn mouse_scroll(&self, x: i32, y: i32, delta: i32) -> Result<(), crate::errors::HostError> {
         // The trait counts what Windows counts — 120 units to a notch — and Quartz counts
         // lines, so this is where the two meet. Kept on the Windows unit because that is the
         // finer of the two: a fraction of a notch is expressible there and not here, and a
@@ -305,7 +316,7 @@ impl Backend for MacBackend {
             );
         }
 
-        input::mouse_scroll(x, y, lines);
+        input::mouse_scroll(x, y, lines)
     }
 
     fn key_post(&self, hwnd: isize, key: &str) -> Result<(), super::KeyRefusal> {
@@ -316,8 +327,8 @@ impl Backend for MacBackend {
         input::key_send(combo)
     }
 
-    fn type_text(&self, text: &str) {
-        input::type_text(text);
+    fn type_text(&self, text: &str) -> Result<(), crate::errors::HostError> {
+        input::type_text(text)
     }
 
     fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), KeyRefusal> {

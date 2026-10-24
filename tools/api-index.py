@@ -449,7 +449,7 @@ FAILURES = [
     '',
     'These calls answer error values: [`host.gui`](gui.md)\'s pages, '
     '[`host.window.focus`](window.md#host-window-focus), the questions of '
-    '[`host.element`](element.md), [`host.input`](input.md)\'s `click`, `post` and `send`, '
+    '[`host.element`](element.md), every call of [`host.input`](input.md) that acts, '
     '[`host.keys.capture`](keys.md#host-keys-capture), '
     '[`host.hotkey.register`](hotkey.md#host-hotkey-register), every call of '
     '[`host.screen`](screen.md) but `size`, `predicate` and `pending`, a snapshot\'s `crop`, '
@@ -869,8 +869,9 @@ def host_table():
     unread = declared - len(reasons)
     block = src[src.index('pub static GROUPS'):]
     block = block[:block.index('\n];')]
-    groups = {m.group(1): re.findall(r'"([^"]+)"', m.group(2))
-              for m in re.finditer(r'\(\s*"([a-z0-9-]+)",\s*&\[(.*?)\],?\s*\)', block, re.S)}
+    # A group's members are a list of strings, or the name of a `const` list of this file.
+    groups = {m.group(1): re.findall(r'"([^"]+)"', m.group(2)) if m.group(2) is not None else lists[m.group(3)]
+              for m in re.finditer(r'\(\s*"([a-z0-9-]+)",\s*(?:&\[(.*?)\]|(\w+)),?\s*\)', block, re.S)}
     order = [codes[c] for c in re.findall(r'Code::(\w+),', src[src.index('pub const ALL'):src.index('];', src.index('pub const ALL'))])]
     return order, reasons, groups, unread
 
@@ -892,20 +893,378 @@ def runtime_reasons():
     return reasons, len(re.findall(r'\bcode\s*=\s*"', src)) - len(reasons)
 
 
+RUNTIME_MAIN = os.path.join('modules', 'overlay-runtime', 'src', 'main.luau')
+
+# `handOn(entries, from, err)` in the runtime's main.luau: `entries` a string or a table of them.
+HAND_ON = re.compile(r'\bhandOn\(\s*(\{[^}]*\}|"[^"]+")\s*,\s*"([^"]+)"')
+
+
 def runtime_lists():
-    """errors.luau's `codes`, in order, and its `passes`: for each runtime entry, the host entries
-    whose errors it hands on as they came — `["o-…"] = { "host-…", … },` each."""
+    """errors.luau's `codes`, in order, and what the runtime hands on: for each runtime entry, the
+    host entries whose errors it hands on as they came — every `handOn(entries, from, err)` of
+    main.luau, read here rather than kept in a list by hand."""
     if not os.path.exists(ERRORS_LUAU):
         return [], {}
     src = re.sub(r'--.*$', '', open(ERRORS_LUAU, encoding='utf-8').read(), flags=re.M)
     m = re.search(r'\bcodes\s*=\s*\{(.*?)\}', src, re.S)
     codes = re.findall(r'"([a-z][a-z0-9_]*)"', m.group(1)) if m else []
     passes = {}
-    m = re.search(r'\bpasses\s*=\s*\{(.*?)\n  \},', src, re.S)
-    if m:
-        for k, v in re.findall(r'\["([a-z0-9-]+)"\]\s*=\s*\{(.*?)\}', m.group(1), re.S):
-            passes[k] = re.findall(r'"([^"]+)"', v)
+    for entries, origin in HAND_ON.findall(runtime_code()):
+        for e in re.findall(r'"([^"]+)"', entries):
+            passes.setdefault(e, [])
+            if origin not in passes[e]:
+                passes[e].append(origin)
     return codes, passes
+
+
+def runtime_code():
+    """main.luau with its comments blanked, so a comment that names `handOn(` is no call of it."""
+    if not os.path.exists(RUNTIME_MAIN):
+        return ''
+    return re.sub(r'--.*$', '', open(RUNTIME_MAIN, encoding='utf-8').read(), flags=re.M)
+
+
+# Where a function of the runtime starts: `function name(`, `local function name(` or
+# `name = function(`, at any indentation.
+FUNCTION_START = re.compile(r'^([ \t]*)(?:local\s+)?(?:function\s+([A-Za-z_][\w.:]*)\s*\(|([A-Za-z_][\w.]*)\s*=\s*function\s*\()')
+
+
+def chunks(lines):
+    """The runtime's outermost functions: (first line, last line, header) for each function inside
+    no other — `function …`, `local function …` or `name = function(…)`, at column 0 or in a `do`
+    block — to the `end` at its own indentation. One whose next line is no deeper ended on its own
+    line."""
+    out, i = [], 0
+    while i < len(lines):
+        m = FUNCTION_START.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        indent, last = m.group(1), i
+        for k in range(i + 1, len(lines)):
+            t = lines[k]
+            if not t.strip():
+                continue
+            if re.match(r'^' + indent + r'end\b', t):
+                last = k
+                break
+            if len(t) - len(t.lstrip()) <= len(indent):
+                break
+        out.append((i, last, lines[i]))
+        i = last + 1
+    return out
+
+
+def blank_strings(line):
+    """`line` with what is inside its string literals blanked, the quotes kept: so a bracket in a
+    sentence is no bracket of the code. The same length, so a place in one is a place in the other."""
+    out, quote, i = [], None, 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            if ch == '\\' and i + 1 < len(line):
+                out.append('  ')
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+                out.append(ch)
+            else:
+                out.append(' ')
+        else:
+            if ch in '"\'`':
+                quote = ch
+            out.append(ch)
+        i += 1
+    return ''.join(out)
+
+
+def closing(text, at):
+    """The place of the bracket that closes the one at `text[at]`, or None."""
+    pairs = {'(': ')', '{': '}', '[': ']'}
+    stack = []
+    for i in range(at, len(text)):
+        ch = text[i]
+        if ch in pairs:
+            stack.append(pairs[ch])
+        elif ch in ')}]':
+            if not stack or stack.pop() != ch:
+                return None
+            if not stack:
+                return i
+    return None
+
+
+# A call whose answer may carry a host error: `host.….…(`, `pcall(host.…, `, a page's `:show(…)`
+# and its kind, or a name — a local function of the chunk that answers a host call.
+CALL_SITE = re.compile(r'(?<![\w.:])(pcall\(\s*)?(host\.[A-Za-z0-9_.]+|[A-Za-z_][A-Za-z0-9_.]*:(?:show|prepare|focus|post)|[A-Za-z_][A-Za-z0-9_]*)\s*([(,])')
+
+
+def entry_of(callee, aliases):
+    """The docs entry `callee` is: a host function's, a page method's, or an alias's; or None."""
+    page = re.search(r':(show|prepare|focus|post)$', callee)
+    if page:
+        return 'page-' + page.group(1)
+    if callee.startswith('host.'):
+        return re.sub(r'[^a-z0-9]+', '-', callee.lower())
+    return aliases.get(callee)
+
+
+def host_call_of(rhs, aliases):
+    """The docs entry of the host call `rhs` starts with — `host.screen.save(…)`, `pcall(host.…, …)`,
+    a page's `:show(…)`, or a local function of the same chunk that answers a host call — and whether
+    it is through `pcall`; or None."""
+    m = CALL_SITE.match(rhs)
+    if not m or (m.group(1) is None and m.group(3) != '('):
+        return None
+    origin = entry_of(m.group(2), aliases)
+    return (origin, m.group(1) is not None) if origin else None
+
+
+# A callee that hands what it is given to a module: a hook or a callback.
+LEAVING_CALLEE = re.compile(r'(?:^|[.:])(?:hookCall|cb|onDone|onEnd|onGiveUp|onShown|onBack|onClose)$')
+# A callee that makes something else of what it is given: a sentence, a type's name, a line.
+REMAKES = re.compile(r'^(?:tostring|type|typeof|print|error|assert|format|string\.format|host\.log\.\w+|log)$')
+
+
+def leaves_at(t, pos, end, silent):
+    """How the value at `t[pos:end]` fares: 'leaves' when it leaves the function as it is — in a
+    `return`'s values, or among a hook's or a callback's arguments, a table or a helper's call
+    around it on the way (what a helper answers may carry it); 'handed' when a `handOn(` around it
+    hands it on, and its place in `t`; None when it does not leave, or only made into something
+    else — a part of it (`err.code`), a comparison, a sentence (`tostring(err)`), or the argument of
+    a local function `silent` that answers nothing."""
+    after, before = t[end:].lstrip(), t[:pos].rstrip()
+    if re.match(r'^(\.(?!\.)|:|\[|==|~=|<|>|\.\.)', after) or re.search(r'(==|~=|<|>|\bnot|#|\.\.)$', before):
+        return None
+    depth = 0
+    for i in range(pos - 1, -1, -1):
+        ch = t[i]
+        if ch in ')}]':
+            depth += 1
+        elif ch in '({[':
+            if depth > 0:
+                depth -= 1
+                continue
+            if ch != '(':
+                continue  # a table made of it: it goes where the table goes
+            callee = re.search(r'([A-Za-z_][\w.:]*)\s*$', t[:i])
+            name = callee.group(1) if callee else ''
+            if name == 'handOn':
+                return 'handed', i - len(name)
+            if LEAVING_CALLEE.search(name):
+                return 'leaves', None
+            if REMAKES.match(name.split(':')[-1]) or name in silent:
+                return None
+    return ('leaves', None) if re.search(r'(^|[^\w.])return\b', before) else None
+
+
+def body_end(lines, j):
+    """The last line of the block that line `j` opens: the first later line no deeper than `j` —
+    the `end` of a callback written over several lines — or the last line."""
+    indent = len(lines[j]) - len(lines[j].lstrip())
+    for k in range(j + 1, len(lines)):
+        t = lines[k]
+        if t.strip() and len(t) - len(t.lstrip()) <= indent:
+            return k
+    return len(lines) - 1
+
+
+def hand_on_problems(answering, code=None):
+    """What the runtime hands on without saying so — in `code`, main.luau's unless given. In every
+    outermost function of it, the error value of a host call that answers one (`answering`, the
+    entries with reasons) that leaves the function, by `return` or to a hook or a callback, goes
+    through `handOn(…, from, …)` on that line or once before it (`err = handOn(…)`), and `from` is
+    that call's entry. The error value is the second value of the call — bound by `local` or by a
+    plain assignment, the third through `pcall` — or the second parameter of a callback the call is
+    given. A call whose whole answer leaves at once (`return host.…(…)`, `cb(host.…(…))`) or is
+    packed into a table (`{ host.…(…) }`, `table.pack(…)`) fails: its error cannot be followed. A
+    local function of the chunk whose body answers a host call is that call (`local function
+    click() return host.input.click(…) end`). And a function named for a runtime entry —
+    `Overlay:captureFull`, `O.doubleClick`, `Trip:handOver` — names that entry among those it hands
+    on to. What travels through a helper's parameters is seen where the helper's answer leaves,
+    which is where `handOn` goes."""
+    if code is None:
+        if not os.path.exists(RUNTIME_MAIN):
+            return []
+        code = runtime_code()
+    lines = code.split('\n')
+    plain = [blank_strings(l) for l in lines]
+    problems = []
+
+    for first, last, header in chunks(plain):
+        body = plain[first:last + 1]
+        raw = lines[first:last + 1]
+
+        def at(k):
+            return RUNTIME_MAIN + ':' + str(first + k + 1) + ': '
+
+        # The chunk's local functions: one that answers a host call is that call; one that answers
+        # nothing carries nothing out of its arguments.
+        aliases, alias_lines, silent = {}, set(), set()
+        for j, l in enumerate(body):
+            m = re.match(r'^(\s*)local function ([A-Za-z_][A-Za-z0-9_]*)\(', l)
+            if not m:
+                continue
+            end = next((k for k in range(j + 1, len(body)) if re.match(r'^' + m.group(1) + r'end\b', body[k])), j)
+            if not any(re.search(r'\breturn\s+(?!end\b)\S', body[k][len(m.group(0)):] if k == j else body[k])
+                       for k in range(j, end + 1)):
+                silent.add(m.group(2))
+            for k in range(j, end + 1):
+                h = re.search(r'\breturn\s+(host\.[A-Za-z0-9_.]+)\s*\(', body[k])
+                if h:
+                    aliases[m.group(2)] = re.sub(r'[^a-z0-9]+', '-', h.group(1).lower())
+                    alias_lines.update(range(j, end + 1))
+                    break
+        named = re.match(r'^\s*(?:function\s+)?(Overlay|O|Trip)[:.]([A-Za-z0-9_]+)\s*(?:=\s*function\s*)?\(', header)
+        own = (('trip-' if named.group(1) == 'Trip' else 'o-') + named.group(2).lower()) if named else None
+        if own:
+            for entries, _ in HAND_ON.findall('\n'.join(raw)):
+                if own not in re.findall(r'"([^"]+)"', entries):
+                    problems.append(at(0) + header.strip() + ' hands an error on as ' + entries + ', not as ' + own)
+
+        def follow(var, origin, j, start, stop):
+            """`var`, `origin`'s error value, bound on body line `j` — what follows its column
+            `start` is in its reach — to body line `stop`: wherever it leaves, a `handOn` naming
+            `origin` hands it on, there or once before (`err = handOn(…)`)."""
+            word = re.compile(r'(?<![\w.:])' + re.escape(var) + r'(?!\w)')
+            for k in range(j, min(stop, len(body) - 1) + 1):
+                t = body[k] if k > j else ' ' * start + body[k][start:]
+                r = raw[k] if k > j else ' ' * start + raw[k][start:]
+                if k > j and re.match(r'^\s*local\b.*(?<![\w.])' + re.escape(var) + r'\s*(,|=)', t):
+                    return  # bound again: another value from here on
+                if k > j and re.match(r'^\s*' + re.escape(var) + r'\s*=\s*handOn\(', t):
+                    given = HAND_ON.search(r)
+                    if given and given.group(2) != origin:
+                        problems.append(at(k) + 'hands on ' + origin + '\'s error as ' + given.group(2) + '\'s')
+                    return  # handed on: what leaves from here on is said to
+                again = re.match(r'^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*=(?!=)', t)
+                if k > j and again and var in [n.strip() for n in again.group(1).split(',')]:
+                    return  # assigned again: another value from here on
+                for found in word.finditer(t):
+                    fate = leaves_at(t, found.start(), found.end(), silent)
+                    if fate is None:
+                        continue
+                    if fate[0] == 'leaves':
+                        problems.append(at(k) + origin + '\'s error leaves without handOn: ' + raw[k].strip())
+                        break
+                    given = HAND_ON.match(r, fate[1])
+                    if given and given.group(2) != origin:
+                        problems.append(at(k) + 'hands on ' + origin + '\'s error as ' + given.group(2) + '\'s')
+                        break
+
+        for j, l in enumerate(body):
+            # Bound: `local ok, err = host.…(…)`, or `ok, err = …` without `local`.
+            m = re.match(r'^\s*(?:local\s+)?([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)+)\s*=\s*(.*)$', l)
+            call = host_call_of(m.group(2), aliases) if m else None
+            if call and call[0] in answering:
+                origin, pcalled = call
+                names = [n.strip() for n in m.group(1).split(',')]
+                if len(names) > (2 if pcalled else 1):
+                    follow(names[2 if pcalled else 1], origin, j, len(l), len(body) - 1)
+            # Every call on the line: the callbacks it is given, and its answer left whole or packed.
+            text = None
+            for c in CALL_SITE.finditer(l):
+                if c.group(1) is None and c.group(3) != '(':
+                    continue
+                origin = entry_of(c.group(2), aliases)
+                if origin not in answering:
+                    continue
+                open_at = c.start() + c.group(1).index('(') if c.group(1) else c.end() - 1
+                text = '\n'.join(body[j:]) if text is None else text
+                close_at = closing(text, open_at)
+                if close_at is None:
+                    continue
+                # A callback given to it: its second parameter is the error value, in its body.
+                depth = 0
+                for i in range(open_at + 1, close_at):
+                    ch = text[i]
+                    if ch in '({[':
+                        depth += 1
+                    elif ch in ')}]':
+                        depth -= 1
+                    elif depth == 0 and text.startswith('function', i) and not re.match(r'\w', text[i - 1]):
+                        p = re.match(r'function\s*\(([^)]*)\)', text[i:])
+                        params = [n.strip() for n in p.group(1).split(',')] if p else []
+                        if len(params) > 1 and re.match(r'^[A-Za-z_]\w*$', params[1]):
+                            line_of = j + text[:i].count('\n')
+                            col = len(text[:i + p.end()].split('\n')[-1])
+                            follow(params[1], origin, line_of, col, body_end(body, line_of))
+                if j in alias_lines:
+                    continue
+                before = l[:c.start()].rstrip()
+                after = text[close_at + 1:].lstrip(' \t')
+                # Packed: `{ host.…(…) }` or `table.pack(host.…(…))`: its error cannot be followed.
+                if re.search(r'(\{|\btable\.pack\()$', before) and not re.match(r'^[.:\[]', after):
+                    problems.append(at(j) + origin + '\'s answer is packed into a table, where its error cannot be followed: '
+                                    + raw[j].strip())
+                    continue
+                # Its whole answer leaves at once: the last value of a `return`, or the last argument
+                # of a hook or a callback.
+                if not re.match(r'^(\)|\n|$|end\b|else\b|elseif\b|;)', after):
+                    continue
+                whole = bool(re.search(r'(^|[^\w.])return(\s+.*,)?$', before)) and not after.startswith(')')
+                if not whole and after.startswith(')') and (before.endswith(',') or before.endswith('(')):
+                    depth, i = 0, len(before) - 1
+                    while i >= 0:
+                        ch = before[i]
+                        if ch in ')}]':
+                            depth += 1
+                        elif ch in '({[':
+                            if depth == 0:
+                                break
+                            depth -= 1
+                        i -= 1
+                    callee = re.search(r'([A-Za-z_][\w.:]*)\s*$', before[:i]) if i >= 0 and before[i] == '(' else None
+                    whole = bool(callee and LEAVING_CALLEE.search(callee.group(1)))
+                if whole:
+                    problems.append(at(j) + origin + '\'s whole answer leaves at once, where its error cannot be handed on: '
+                                    + raw[j].strip())
+    return problems
+
+
+# Shapes the hand-on check must fail, and some it must pass: held at every `--check`, so a change
+# to the check that stops seeing one is seen itself. `host.input.click` answers errors here.
+HAND_ON_SHAPES = [
+    # A host callback's error parameter, handed to the module's callback.
+    ('fail', 'function O.a(cb)\n  host.input.click(1, 2, nil, function(ok, err2) if cb then cb(ok, err2) end end)\nend'),
+    # The same over several lines, through pcall, to a hook.
+    ('fail', 'function O.a()\n  local ok, why = pcall(host.input.click, 1, 2,\n    function(done, err)\n'
+             '      hookCall(self, "onDone", f, done, err)\n    end)\nend'),
+    # A plain assignment.
+    ('fail', 'function O.a()\n  local ok, err\n  ok, err = host.input.click(1, 2)\n  return ok, err\nend'),
+    # A function written `name = function`.
+    ('fail', 'freshen = function(self)\n  local ok, err = host.input.click(1, 2)\n  return ok, err\nend'),
+    # A function inside a `do` block.
+    ('fail', 'do\n  function O.menuTests.drawn(spec)\n    local ok, err = host.input.click(1, 2)\n    return ok, err\n  end\nend'),
+    # The whole answer returned, beside a call handed on as it should be.
+    ('fail', 'function O.a()\n  local ok, err = host.input.click(1, 2)\n  if not ok then return false, handOn("o-a", "host-input-click", err) end\n'
+             '  return host.input.click(3, 4)\nend'),
+    # The whole answer to a callback.
+    ('fail', 'function O.a(cb)\n  cb(host.input.click(1, 2))\nend'),
+    # Packed into a table.
+    ('fail', 'function O.a()\n  local r = { host.input.click(1, 2) }\n  return table.unpack(r)\nend'),
+    # Handed on under another host call's name.
+    ('fail', 'function O.a()\n  local ok, err = host.input.click(1, 2)\n  return ok, handOn("o-a", "host-input-drag", err)\nend'),
+    # Every way handed on, an alias's answer among them; and a single value, which carries no error.
+    ('pass', 'function O.a(cb)\n  local function click() return host.input.click(1, 2) end\n  local ok, err = click()\n'
+             '  host.input.click(1, 2, nil, function(ok2, err2) if cb then cb(ok2, handOn("o-a", "host-input-click", err2)) end end)\n'
+             '  if not ok then return false, handOn("o-a", "host-input-click", err) end\n'
+             '  return (host.input.click(3, 4))\nend'),
+    ('pass', 'function O.a()\n  local ok, err = host.input.click(1, 2)\n  err = handOn("o-a", "host-input-click", err)\n'
+             '  if ok then return true end\n  return false, err\nend'),
+]
+
+
+def hand_on_self_problems():
+    """The shapes of `HAND_ON_SHAPES` the check does not answer as it must."""
+    out = []
+    for i, (want, code) in enumerate(HAND_ON_SHAPES):
+        got = hand_on_problems({'host-input-click', 'host-input-drag'}, code)
+        if (want == 'fail') != bool(got):
+            out.append('tools/api-index.py: the hand-on check ' + ('passes' if want == 'fail' else 'fails') + ' shape '
+                       + str(i + 1) + ' of HAND_ON_SHAPES' + ('' if want == 'fail' else ': ' + '; '.join(got)))
+    return out
 
 
 # The groups of errors.rs: a group's own section, where its reasons are listed once, is a
@@ -966,7 +1325,7 @@ def table_rows(text, header=ERRORS_HEADER):
 def entry_problems(e, body, reasons, groups, codes, pages, passes):
     """What is wrong with one entry. `codes` are the codes a row may name, the host's and the
     runtime's; `pages` maps every entry's anchor to its page; `passes` maps a runtime entry to the
-    host entries whose errors it hands on (errors.luau's `passes`)."""
+    host entries whose errors it hands on (main.luau's `handOn` calls)."""
     problems = []
     k = kind(e)
     if k == 'concept':
@@ -1057,14 +1416,14 @@ def entry_problems(e, body, reasons, groups, codes, pages, passes):
     for r in mine:
         if id(r) not in covered:
             problems.append('the reason `' + r['code'] + '` `' + r['message'] + '` has no row')
-    # What the runtime hands on is held to errors.luau's `passes`, both ways: a host entry's
+    # What the runtime hands on is held to main.luau's `handOn` calls, both ways: a host entry's
     # errors the entry hands on with no row, or a row for a host entry it does not hand on.
     if e['page'] == RUNTIME_PAGE:
         want = set(passes.get(e['anchor'], ()))
         for a in sorted(want - handed):
-            problems.append('hands on ' + a + '\'s errors (errors.luau, passes) and has no row for them')
+            problems.append('hands on ' + a + '\'s errors (main.luau, handOn) and has no row for them')
         for a in sorted(handed - want):
-            problems.append('a row for ' + a + '\'s errors, which errors.luau\'s passes does not say it hands on')
+            problems.append('a row for ' + a + '\'s errors, which main.luau hands on through no handOn')
     return problems
 
 
@@ -1078,7 +1437,8 @@ def reason_problems(entries):
     """Checks 1 to 3 of the typed-errors plan, for every page, and each group's own section; that
     each reason and group names entries that exist, and calls or fields rather than concepts,
     since a reason naming anything else is in no entry's table and would never be compared with
-    one; and that errors.luau's `passes` names runtime entries and host entries."""
+    one; and that what the runtime hands on (`handOn` in main.luau) names runtime entries and host
+    entries, and is all it hands on."""
     order, reasons, groups, unread = host_table()
     GROUP_NAMES.update(groups)
     runtime, runtime_unread = runtime_reasons()
@@ -1100,10 +1460,12 @@ def reason_problems(entries):
                 problems.append(r['source'] + ': ' + r['name'] + ' names ' + a + ', a concept, which has no Errors to compare it with')
     for a, theirs in passes.items():
         if pages.get(a) != RUNTIME_PAGE or kinds[a] == 'concept':
-            problems.append(ERRORS_LUAU + ': passes names ' + a + ', which is no call or field of the runtime\'s')
+            problems.append(RUNTIME_MAIN + ': handOn names ' + a + ', which is no call or field of the runtime\'s')
         for t in theirs:
             if t not in pages or pages[t] == RUNTIME_PAGE:
-                problems.append(ERRORS_LUAU + ': passes says ' + a + ' hands on ' + t + ', which is no host entry')
+                problems.append(RUNTIME_MAIN + ': handOn says ' + a + ' hands on ' + t + ', which is no host entry')
+    answering = {e['anchor'] for e in entries if e['page'] != RUNTIME_PAGE and reasons_of(e['anchor'], reasons, groups)}
+    problems += hand_on_problems(answering) + hand_on_self_problems()
     for g, members in groups.items():
         for a in members:
             if a not in pages:

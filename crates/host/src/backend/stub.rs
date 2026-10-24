@@ -159,14 +159,27 @@ impl Backend for StubBackend {
     fn cursor_pos(&self) -> (i32, i32) {
         (0, 0)
     }
-    fn mouse_move(&self, _x: i32, _y: i32) {}
-    fn mouse_click(&self, _x: i32, _y: i32, _button: MouseButton) {}
-    fn mouse_drag(&self, _x1: i32, _y1: i32, _x2: i32, _y2: i32, _button: MouseButton) {}
-    fn mouse_down(&self, _x: i32, _y: i32, _button: MouseButton) {}
+    // No input here: every pointer call answers that it was made, as `post` does, and makes nothing.
+    fn mouse_move(&self, _x: i32, _y: i32) -> Result<(), HostError> {
+        Ok(())
+    }
+    fn mouse_click(&self, _x: i32, _y: i32, _button: MouseButton) -> Result<(), HostError> {
+        Ok(())
+    }
+    fn mouse_drag(&self, _x1: i32, _y1: i32, _x2: i32, _y2: i32, _button: MouseButton) -> Result<(), HostError> {
+        Ok(())
+    }
+    fn mouse_down(&self, _x: i32, _y: i32, _button: MouseButton) -> Result<(), HostError> {
+        Ok(())
+    }
 
-    fn mouse_up(&self, _x: i32, _y: i32, _button: MouseButton) {}
+    fn mouse_up(&self, _x: i32, _y: i32, _button: MouseButton) -> Result<(), HostError> {
+        Ok(())
+    }
 
-    fn mouse_scroll(&self, _x: i32, _y: i32, _delta: i32) {}
+    fn mouse_scroll(&self, _x: i32, _y: i32, _delta: i32) -> Result<(), HostError> {
+        Ok(())
+    }
     fn key_post(&self, _hwnd: isize, _key: &str) -> Result<(), KeyRefusal> {
         Ok(())
     }
@@ -182,7 +195,9 @@ impl Backend for StubBackend {
         self.send_through();
         Ok(())
     }
-    fn type_text(&self, _text: &str) {}
+    fn type_text(&self, _text: &str) -> Result<(), HostError> {
+        Ok(())
+    }
 
     // No hotkey to hold: answered, as a way of being called this platform does not have.
     fn register_hotkey(&self, _id: i32, spec: &str) -> Result<(), KeyRefusal> {

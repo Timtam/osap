@@ -3,10 +3,10 @@
 -- crates/host/src/errors.rs. One reason is a code, a message — `…` standing for each part filled in
 -- — and the docs entries that give it; tools/api-index.py reads them from here and holds each
 -- entry's Errors table to them, in both directions. An error the runtime only passes on — a
--- capture's, a page's, a focus's — is the host's, and its reasons are not listed here: `passes`
--- names, for each entry that hands one on, the host entries whose errors it hands on as they came,
--- and the tool holds the entry's Errors table to those, a row linking to each and to no other.
--- The runtime itself never reads `passes`.
+-- capture's, a page's, a focus's — is the host's, and its reasons are not listed here: main.luau
+-- hands each on through `handOn(entries, from, err)`, which names the entry and the host entry it
+-- came from, and the tool reads those calls and holds each entry's Errors table to them, a row
+-- linking to each host entry and to no other.
 --
 -- `codes` are the runtime's eight codes, which O.errors holds beside the host's (docs/api/errors.md,
 -- "The overlay runtime's codes"); every reason's code is one of them or one of host.errors's.
@@ -326,20 +326,5 @@ return {
       message = "no control labelled '…' with a region",
       entries = { "o-capturecontrol" },
     },
-  },
-
-  -- The host's errors each entry hands on, by the host entries that give them.
-  passes = {
-    ["o-addpage"] = { "page-show", "host-window-focus", "host-gui-webview" },
-    ["o-inplugin"] = { "host-window-focus" },
-    ["trip-handover"] = { "host-keys-capture" },
-    ["o-pageback"] = { "host-window-focus" },
-    ["o-pagekey"] = { "host-hotkey-register" },
-    ["o-calibrationshot"] = { "host-screen-savemarked" },
-    ["o-calibrationcrop"] = { "host-screen-save" },
-    ["o-calibrationverify"] = { "host-screen-imagesearchall" },
-    ["o-capturecontrol"] = { "host-screen-save" },
-    ["o-captureregion"] = { "host-screen-save" },
-    ["o-capturefull"] = { "host-screen-save" },
   },
 }

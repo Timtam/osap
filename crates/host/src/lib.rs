@@ -511,6 +511,9 @@ struct Shared {
     /// (`release_held_buttons`). A held button belongs to the whole desktop, so this lets go of
     /// it for everyone.
     held_buttons: RefCell<BTreeMap<usize, Vec<MouseButton>>>,
+    /// How many buttons each module has pressed with `host.input.mouseDown`, by module index: what
+    /// a no-activate click's outcome is held against, as it comes after the call (`after_release`).
+    presses: RefCell<HashMap<usize, u64>>,
     /// module_idx → the generation of the VM it runs now (see `image_search::VmOwner`). A map,
     /// not a fifth parallel vector: `populate_vm` overwrites the entry for its index, so a
     /// rollback has nothing here to keep aligned.
@@ -1662,12 +1665,38 @@ impl Shared {
         logging::line("arbiter", &format!("{which} of {id} {what}"));
     }
 
-    /// Notes that module `idx` pressed `button` with `host.input.mouseDown` and has not let go.
+    /// Notes that module `idx` pressed `button` with `host.input.mouseDown` and has not let go —
+    /// or that a click or a drag of it left the button down (`after_release`).
     fn hold_button(&self, idx: usize, button: MouseButton) {
+        *self.presses.borrow_mut().entry(idx).or_default() += 1;
         let mut held = self.held_buttons.borrow_mut();
         let v = held.entry(idx).or_default();
         if !v.contains(&button) {
             v.push(button);
+        }
+    }
+
+    /// How many buttons module `idx` has pressed so far ([`Shared::hold_button`]).
+    fn presses_of(&self, idx: usize) -> u64 {
+        self.presses.borrow().get(&idx).copied().unwrap_or(0)
+    }
+
+    /// What module `idx`'s click or drag of `button`, which ends with its release, did to the
+    /// buttons it holds, by what it `made` ([`held_after`]): a click made at the call, or a drag,
+    /// with `presses` `None`; a no-activate click's outcome, which comes later, with the module's
+    /// presses at the hand-over. A press left down by a module that no longer runs is let go of at
+    /// once, as its stop would have.
+    fn after_release(&self, idx: usize, button: MouseButton, made: &Result<(), HostError>, presses: Option<u64>) {
+        let pressed_since = presses.is_some_and(|p| self.presses_of(idx) != p);
+        let running = self.enabled.borrow().get(idx).copied().unwrap_or(false);
+        match held_after(made, pressed_since, running) {
+            Held::LetGo => self.let_go_button(idx, button),
+            Held::Hold => self.hold_button(idx, button),
+            Held::Keep => {}
+            Held::ReleaseNow => {
+                self.hold_button(idx, button);
+                self.release_held_buttons(idx, "its click was made after it stopped running");
+            }
         }
     }
 
@@ -1757,11 +1786,17 @@ impl Shared {
         let mut names = Vec::new();
         for b in buttons {
             let name = button_name(b);
-            self.backend.mouse_up(x, y, b);
-            logging::line(
-                "input",
-                &format!("[{id}] released the {name} mouse button it had pressed with host.input.mouseDown: {why}"),
-            );
+            match self.backend.mouse_up(x, y, b) {
+                Ok(()) => logging::line(
+                    "input",
+                    &format!("[{id}] released the {name} mouse button it had pressed with host.input.mouseDown: {why}"),
+                ),
+                // Tried once: the module is stopping, and nothing is left to try it again.
+                Err(e) => logging::line(
+                    "input",
+                    &format!("[{id}] could not release the {name} mouse button it had pressed with host.input.mouseDown ({why}): {e}"),
+                ),
+            }
             names.push(name);
         }
         names
@@ -1798,8 +1833,13 @@ impl Shared {
     fn fire_acted(&self) {
         self.fire_focus_puts();
         for due in self.acting.take_due() {
+            // What a no-activate click made decides what its module holds, answered or not.
+            if let Some(r) = due.release {
+                self.after_release(r.idx, r.button, &due.result, Some(r.presses));
+            }
+            let Some(answer) = due.answer else { continue };
             let _prio = ocr::types::enter_priority(due.prio);
-            let acting::Answer { idx, lua, cb, what } = due.answer;
+            let acting::Answer { idx, lua, cb, what } = answer;
             mailbox::deliver(self, idx, &lua, Event::Acted { cb, result: due.result, what });
         }
         for due in self.elements.take_due() {
@@ -5283,6 +5323,7 @@ impl Manager {
             module_changes: RefCell::new(Vec::new()),
             module_rows: RefCell::new(None),
             held_buttons: RefCell::new(BTreeMap::new()),
+            presses: RefCell::new(HashMap::new()),
             vm_gens: RefCell::new(HashMap::new()),
             recheck_requested: Cell::new(false),
             initial_pending: RefCell::new(Vec::new()),
@@ -8445,6 +8486,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(t)
         })?,
     )?;
+    // host.input.move(x, y) -> true | false, err — and so do mouseDown, mouseUp, drag, scroll and
+    // text: what the system did not take or make is answered (backend `mouse_move`).
     let sh = shared.clone();
     input.set(
         "move",
@@ -8453,8 +8496,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             // At once: a picture of this module's still out may show it (said once in the log).
             sh.note_acting(lua, "host.input.move");
             sh.bump_input_epoch();
-            sh.backend.mouse_move(x, y);
-            Ok(())
+            acting::outcome_values(lua, sh.backend.mouse_move(x, y))
         })?,
     )?;
     // host.input.click(x, y, opts?, cb?) -> true | false, err. Three ways, the module's choice per
@@ -8487,10 +8529,11 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                     // At once: a picture of this module's still out may show it (said once in the log).
                     sh.note_acting(lua, "host.input.click");
                     sh.bump_input_epoch();
-                    sh.let_go_button(idx, button);
                     // Made on the thread, after the call returns; the outcome goes to the callback
-                    // from there.
-                    sh.acting.run(acting::Lane::Style, job, answer);
+                    // from there, and decides what the module holds once it is known: a held button
+                    // stays held until then (`fire_acted`).
+                    let release = acting::Release { idx, button, presses: sh.presses_of(idx) };
+                    sh.acting.run_releasing(acting::Lane::Style, job, answer, release);
                     return acting::outcome_values(lua, Ok(()));
                 }
                 Ok(None) => match (c.via, c.window) {
@@ -8508,10 +8551,11 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                         // the log).
                         sh.note_acting(lua, "host.input.click");
                         sh.bump_input_epoch();
-                        sh.backend.mouse_click(x, y, button);
-                        // Its own release lets go of a button held down before it.
-                        sh.let_go_button(idx, button);
-                        Ok(())
+                        let made = sh.backend.mouse_click(x, y, button);
+                        // Its own release lets go of a button held down before it; one not made
+                        // leaves it as it was, and a press left down is held (`after_release`).
+                        sh.after_release(idx, button, &made, None);
+                        made
                     }
                 },
             };
@@ -8547,11 +8591,13 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             sh.note_acting(lua, "host.input.mouseDown");
             sh.bump_input_epoch();
             let button = button_from(opts.as_ref());
-            sh.backend.mouse_down(x, y, button);
+            let pressed = sh.backend.mouse_down(x, y, button);
             // Held until its mouseUp — or until the module stops running, when the host lets go
-            // of it (`release_held_buttons`).
-            sh.hold_button(idx, button);
-            Ok(())
+            // of it (`release_held_buttons`). One not pressed is not held.
+            if pressed.is_ok() {
+                sh.hold_button(idx, button);
+            }
+            acting::outcome_values(lua, pressed)
         })?,
     )?;
     let sh = shared.clone();
@@ -8563,9 +8609,13 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             sh.note_acting(lua, "host.input.mouseUp");
             sh.bump_input_epoch();
             let button = button_from(opts.as_ref());
-            sh.backend.mouse_up(x, y, button);
-            sh.let_go_button(idx, button);
-            Ok(())
+            let released = sh.backend.mouse_up(x, y, button);
+            // A release not made may leave the button down: it stays held, for the module to let
+            // go of again or the host when the module stops.
+            if released.is_ok() {
+                sh.let_go_button(idx, button);
+            }
+            acting::outcome_values(lua, released)
         })?,
     )?;
     // host.input.held() -> { "left" | "right" | "middle" } — the buttons this module pressed with
@@ -8590,10 +8640,11 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             sh.note_acting(lua, "host.input.drag");
             sh.bump_input_epoch();
             let button = button_from(opts.as_ref());
-            sh.backend.mouse_drag(x1, y1, x2, y2, button);
-            // Its own release lets go of a button held down before it.
-            sh.let_go_button(idx, button);
-            Ok(())
+            let dragged = sh.backend.mouse_drag(x1, y1, x2, y2, button);
+            // Its own release lets go of a button held down before it; one not made leaves it, and
+            // a press left down is held (`after_release`).
+            sh.after_release(idx, button, &dragged, None);
+            acting::outcome_values(lua, dragged)
         })?,
     )?;
     let sh = shared.clone();
@@ -8614,8 +8665,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             sh.note_acting(lua, "host.input.scroll");
             sh.bump_input_epoch();
             let delta = (notches * 120.0).round() as i32;
-            sh.backend.mouse_scroll(x, y, delta);
-            Ok(())
+            acting::outcome_values(lua, sh.backend.mouse_scroll(x, y, delta))
         })?,
     )?;
     // host.input.send(combo) -> true | false, err — a spec that does not parse raises.
@@ -8638,8 +8688,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             // At once: a picture of this module's still out may show it (said once in the log).
             sh.note_acting(lua, "host.input.text");
             sh.bump_input_epoch();
-            sh.backend.type_text(&text);
-            Ok(())
+            acting::outcome_values(lua, sh.backend.type_text(&text))
         })?,
     )?;
     host.set("input", input)?;
@@ -9744,6 +9793,43 @@ fn button_name(button: MouseButton) -> &'static str {
         MouseButton::Left => "left",
         MouseButton::Right => "right",
         MouseButton::Middle => "middle",
+    }
+}
+
+/// What a click or a drag of a button, which ends with its release, does to its module's record of
+/// that button ([`held_after`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Held {
+    /// Let go of: the release was made.
+    LetGo,
+    /// Held: the press was made and its release refused, so the button is down.
+    Hold,
+    /// As it was.
+    Keep,
+    /// Let go of now: down, for a module that no longer runs.
+    ReleaseNow,
+}
+
+/// The rule of [`Shared::after_release`]. `made`, what came of the call; `pressed_since`, whether
+/// the module pressed a button with mouseDown between the call and its outcome, which only a
+/// no-activate click, made on a thread after the call, can have; `running`, whether the module
+/// still runs. A release made lets go — unless a press came since, which may have come after the
+/// release, so the button stays held, and the host's release at the stop is at worst one of a
+/// button already up. A press made whose release Windows refused (`LEFT_DOWN`) is held, as a
+/// mouseDown's. Anything else not made leaves the record as it was: nothing pressed, or a release
+/// not made, which leaves a held button held.
+fn held_after(made: &Result<(), HostError>, pressed_since: bool, running: bool) -> Held {
+    match made {
+        Ok(()) if pressed_since => Held::Keep,
+        Ok(()) => Held::LetGo,
+        Err(e) if e.reason() == &errors::input::LEFT_DOWN => {
+            if running {
+                Held::Hold
+            } else {
+                Held::ReleaseNow
+            }
+        }
+        Err(_) => Held::Keep,
     }
 }
 
@@ -10928,7 +11014,7 @@ mod ocr_wiring_tests {
             "sh.backend.mouse_click_noactivate(w, x, y, button, idx)",
             "sh.backend.click_check(w, x, y)",
             "sh.backend.mouse_click_posted(w, x, y, button, c.move_pointer)",
-            "sh.acting.run(acting::Lane::Style, job, answer);",
+            "sh.acting.run_releasing(acting::Lane::Style, job, answer, release);",
             "sh.acting.answer_now(answer, result.clone());",
         ] {
             assert!(click.contains(part), "host.input.click: `{part}`");
@@ -12108,8 +12194,9 @@ mod ocr_wiring_tests {
         assert!(held("mouseDown").contains("sh.hold_button(idx, button);"));
         // `held` answers the same record, for the module asking.
         assert!(held("held").contains("held_names(&sh.held_buttons.borrow(), idx)"));
-        for name in ["mouseUp", "click", "drag"] {
-            assert!(held(name).contains("sh.let_go_button(idx, button);"), "host.input.{name} does not let go of its button");
+        assert!(held("mouseUp").contains("sh.let_go_button(idx, button);"), "host.input.mouseUp does not let go of its button");
+        for name in ["click", "drag"] {
+            assert!(held(name).contains("sh.after_release(idx, button, &"), "host.input.{name} does not let go of its button");
         }
         assert!(body(LIB, "fn after_toggle(").contains("self.release_held_buttons(idx, \"it was disabled\");"));
         assert!(body(LIB, "fn purge_module(").contains("self.release_held_buttons(idx, \"it was reloaded\");"));
@@ -12119,6 +12206,79 @@ mod ocr_wiring_tests {
         assert!(populate.contains("vm_guard::name_chunk(lua, &dep_name, dep_id, dep_rel);"));
         assert!(populate.contains("vm_guard::name_chunk(lua, &entry.display().to_string(), id, &module.manifest.entry);"));
         assert!(body(LIB, "fn install_include(").contains("vm_guard::name_chunk(lua, &key, &owner,"));
+    }
+
+    /// The calls that act through the system's input answer what it did not take or make — `true`,
+    /// or `false, err` — and keep the record of held buttons by what was made: a press not made is
+    /// not held, and a release not made leaves its button held, for the module to let go of again
+    /// or the host as the module stops; a release the host makes itself and the system refuses is
+    /// said in the log.
+    #[test]
+    fn the_input_calls_answer_and_keep_the_record_by_what_was_made() {
+        let api = body(LIB, "fn install_host_api(");
+        let input = bindings(api, "input");
+        let of = |name: &str| input.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.input.{name}")).1;
+        for name in ["move", "mouseDown", "mouseUp", "drag", "scroll", "text"] {
+            assert!(of(name).contains("acting::outcome_values(lua, "), "host.input.{name} answers nothing");
+            assert!(!of(name).contains("Ok(())"), "host.input.{name} answers nothing");
+        }
+        assert!(of("mouseDown").contains("if pressed.is_ok() {\n                sh.hold_button(idx, button);"));
+        assert!(of("mouseUp").contains("if released.is_ok() {\n                sh.let_go_button(idx, button);"));
+        assert!(of("drag").contains("sh.after_release(idx, button, &dragged, None);"));
+        assert!(of("click").contains("let made = sh.backend.mouse_click(x, y, button);"));
+        assert!(of("click").contains("sh.after_release(idx, button, &made, None);"));
+        // A no-activate click lets go of nothing at the call: its outcome decides, on a later tick,
+        // with the module's presses at the hand-over.
+        let click = of("click");
+        let handed = &click[click.find("Ok(Some(job)) => {").unwrap()..click.find("Ok(None) => match").unwrap()];
+        assert!(!handed.contains("let_go_button") && !handed.contains("after_release"), "{handed}");
+        assert!(handed.contains("let release = acting::Release { idx, button, presses: sh.presses_of(idx) };"));
+        assert!(handed.contains("sh.acting.run_releasing(acting::Lane::Style, job, answer, release);"));
+        let fired = body(LIB, "fn fire_acted(&self)");
+        let at = fired.find("self.after_release(r.idx, r.button, &due.result, Some(r.presses));").expect("the outcome decides what is held");
+        assert!(at < fired.find("let Some(answer) = due.answer else { continue };").unwrap(), "answered or not");
+        assert!(body(LIB, "fn hold_button(&self, idx: usize, button: MouseButton)").contains("*self.presses.borrow_mut().entry(idx).or_default() += 1;"));
+        // And the rule's word is what is done to the record (`held_after` is tested on its own).
+        let after = body(LIB, "fn after_release(&self, idx: usize, button: MouseButton, made: &Result<(), HostError>, presses: Option<u64>)");
+        assert!(after.contains("let pressed_since = presses.is_some_and(|p| self.presses_of(idx) != p);"));
+        assert!(after.contains("match held_after(made, pressed_since, running) {"));
+        assert!(after.contains("Held::LetGo => self.let_go_button(idx, button),"));
+        assert!(after.contains("Held::Hold => self.hold_button(idx, button),"));
+        assert!(after.contains("Held::Keep => {}"));
+        assert!(after.contains("Held::ReleaseNow => {\n                self.hold_button(idx, button);\n                self.release_held_buttons(idx, "));
+        let release = body(LIB, "fn release_held_buttons(&self, idx: usize, why: &str)");
+        assert!(release.contains("match self.backend.mouse_up(x, y, b) {") && release.contains("could not release the {name} mouse button"));
+        // The stub makes nothing and says it made it, as its `post` does.
+        use crate::backend::{Backend, MouseButton};
+        let stub = crate::backend::stub::StubBackend::default();
+        assert_eq!(stub.mouse_move(1, 2), Ok(()));
+        assert_eq!(stub.mouse_click(1, 2, MouseButton::Left), Ok(()));
+        assert_eq!(stub.mouse_drag(1, 2, 3, 4, MouseButton::Left), Ok(()));
+        assert_eq!(stub.mouse_down(1, 2, MouseButton::Right), Ok(()));
+        assert_eq!(stub.mouse_up(1, 2, MouseButton::Right), Ok(()));
+        assert_eq!(stub.mouse_scroll(1, 2, 60), Ok(()));
+        assert_eq!(stub.type_text("hello"), Ok(()));
+    }
+
+    /// What a click or a drag does to the record of what its module holds, by what it made: a
+    /// release made lets go, unless a press came between a no-activate click and its outcome; a
+    /// press whose release Windows refused is held, or let go of at once for a module that no longer
+    /// runs; anything else not made leaves the record as it was.
+    #[test]
+    fn a_click_or_a_drag_keeps_the_record_by_what_it_made() {
+        use super::{held_after, Held};
+        use crate::errors::{input, HostError};
+        let left = Err(HostError::with(&input::LEFT_DOWN, "Windows took the press but not its release (error 5): the button is still down".into()));
+        let not_taken = Err(HostError::with(&input::NOT_TAKEN, "Windows did not take the input (error 5)".into()));
+        let not_placed = Err(HostError::with(&input::NOT_PLACED, "Windows did not put the pointer there (error 5)".into()));
+        assert_eq!(held_after(&Ok(()), false, true), Held::LetGo);
+        assert_eq!(held_after(&Ok(()), true, true), Held::Keep, "a press since may have come after the release");
+        assert_eq!(held_after(&left, false, true), Held::Hold);
+        assert_eq!(held_after(&left, true, true), Held::Hold);
+        assert_eq!(held_after(&left, false, false), Held::ReleaseNow);
+        assert_eq!(held_after(&not_taken, false, true), Held::Keep);
+        assert_eq!(held_after(&not_placed, false, true), Held::Keep);
+        assert_eq!(held_after(&Err(HostError::of(&crate::errors::common::WINDOW_GONE)), false, true), Held::Keep);
     }
 
     /// `host.input.held()` answers the asking module's own buttons from the host's record, in the

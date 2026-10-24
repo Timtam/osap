@@ -483,7 +483,7 @@ end
 -- count is refused in Avenger, once the dots are read.
 local function refuse(action, why)
   local label = E.LABELS[action]
-  log(string.format("'%s' not sent to VPS Avenger: %s", label, why))
+  log(string.format("'%s' not sent to VPS Avenger: %s", label, tostring(why)))
   E.post({ kind = "error", text = label .. ": " .. why })
 end
 

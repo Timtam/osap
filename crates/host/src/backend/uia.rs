@@ -12,7 +12,9 @@
 //! [`UIA_TIMEOUT_MS`], it runs with higher rights, it went away — is noted for the question in
 //! progress ([`noted`]), and a question that found nothing after such a call is answered "not
 //! known" with the reason ([`settle`]), never "no". A walk stops at the first such call: a program
-//! that did not answer one question is not asked the next one of the same walk.
+//! that did not answer one question is not asked the next one of the same walk. So does a question
+//! that could not be put at all — the automation object not made, a condition it could not build
+//! ([`reached`], [`local`]): it is "not known" too, `element::NO_INTERFACE`, as a press is told.
 
 use std::cell::{Cell, RefCell};
 
@@ -39,9 +41,9 @@ thread_local! {
     // Whether this thread's automation object leaves the keyboard focus where it is when it acts
     // (`automation`): an action is made only when it does.
     static ACTS_IN_PLACE: Cell<bool> = const { Cell::new(false) };
-    // The first call of the question in progress that the program did not answer — what a module
-    // is told, and whether it was the timeout. Cleared by `run` before each question and taken
-    // after it (`settle`).
+    // The first failure of the question in progress — a call the program did not answer, or one of
+    // the automation object's own (`reached`, `local`) — what a module is told, and whether it was
+    // the timeout. Cleared by `run` before each question and taken after it (`settle`).
     static FAILED: RefCell<Option<(HostError, bool)>> = const { RefCell::new(None) };
     // The first bound a walk of the question in progress stopped at before the end of the tree —
     // its node budget or its time — as a module is told it. Cleared by `run` before each question
@@ -258,16 +260,44 @@ fn noted<T>(r: windows::core::Result<T>) -> Option<T> {
         Err(e) => {
             let code = e.code().0 as u32;
             if e.code().is_err() && unanswered(code) {
-                FAILED.with(|f| {
-                    let mut f = f.borrow_mut();
-                    if f.is_none() {
-                        *f = Some((failure(code as i32), code == TIMEOUT));
-                    }
-                });
+                note_failed(failure(code as i32), code == TIMEOUT);
             }
             None
         }
     }
+}
+
+/// The thread's automation object as [`automation`] made it, or `None` — noted for the question in
+/// progress, since without it nothing can be asked, which is not "nothing there"
+/// ([`element::NO_INTERFACE`]).
+fn reached(made: &Option<IUIAutomation>) -> Option<&IUIAutomation> {
+    if made.is_none() {
+        note_failed(HostError::of(&element::NO_INTERFACE), false);
+    }
+    made.as_ref()
+}
+
+/// `r`'s value, or `None` — a call of the automation object's own, which asks no program: a
+/// condition, a walker. One that failed is noted for the question in progress as
+/// [`element::NO_INTERFACE`]: the question could not be put as asked.
+fn local<T>(r: windows::core::Result<T>) -> Option<T> {
+    match r {
+        Ok(v) => Some(v),
+        Err(_) => {
+            note_failed(HostError::of(&element::NO_INTERFACE), false);
+            None
+        }
+    }
+}
+
+/// A failure of the question in progress, and whether it was the timeout: the first one only.
+fn note_failed(why: HostError, timeout: bool) {
+    FAILED.with(|f| {
+        let mut f = f.borrow_mut();
+        if f.is_none() {
+            *f = Some((why, timeout));
+        }
+    });
 }
 
 /// Whether a call of the question in progress went unanswered: a walk stops there, and a list of
@@ -284,11 +314,7 @@ fn stopped() -> bool {
 /// is what stopped the walk. Only that makes the questions behind this one go unasked
 /// (`unanswered`, element.rs); a tree too large or too slow to walk answered every call.
 fn settle(answer: ElementAnswer, failed: Option<(HostError, bool)>, cut: Option<HostError>) -> ElementOutcome {
-    match (answer, failed.or(cut.map(|why| (why, false)))) {
-        (ElementAnswer::Nodes(nodes, _), Some((why, _))) => Ok(ElementAnswer::Nodes(nodes, Some(why))),
-        (a, Some((why, unanswered))) if a.is_nothing() => Err(ElementFailure { why, unanswered }),
-        (a, _) => Ok(a),
-    }
+    answer.settled(failed.or(cut.map(|why| (why, false))))
 }
 
 /// One question, on the accessibility thread: the [`super::ElementRunner`]'s `run`. A window that is
@@ -336,7 +362,7 @@ pub fn run(ask: &ElementAsk) -> ElementOutcome {
 fn find_element(hwnd: isize, name: &str, control_type: i32) -> Option<IUIAutomationElement> {
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
-        let automation = borrow.as_ref()?;
+        let automation = reached(&borrow)?;
 
         let element = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
 
@@ -344,15 +370,13 @@ fn find_element(hwnd: isize, name: &str, control_type: i32) -> Option<IUIAutomat
         // a name is given; an empty name means "any element of this type" (e.g.
         // detecting an open Menu). VARIANTs free their data on drop.
         let v_ctype: VARIANT = control_type.into();
-        let cond_ctype = automation
-            .CreatePropertyCondition(UIA_ControlTypePropertyId, &v_ctype)
-            .ok()?;
+        let cond_ctype = local(automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &v_ctype))?;
         let cond = if name.is_empty() {
             cond_ctype
         } else {
             let v_name: VARIANT = BSTR::from(name).into();
-            let cond_name = automation.CreatePropertyCondition(UIA_NamePropertyId, &v_name).ok()?;
-            automation.CreateAndCondition(&cond_name, &cond_ctype).ok()?
+            let cond_name = local(automation.CreatePropertyCondition(UIA_NamePropertyId, &v_name))?;
+            local(automation.CreateAndCondition(&cond_name, &cond_ctype))?
         };
 
         // FindFirst is on the element; TreeScope_Subtree includes the element
@@ -381,7 +405,7 @@ fn element_find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<usiz
     }
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
-        let automation = borrow.as_ref()?;
+        let automation = reached(&borrow)?;
         let element = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
 
         // OR over the control types, ANDed with the name when one is given. One
@@ -392,10 +416,10 @@ fn element_find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<usiz
         let mut cond_type: Option<IUIAutomationCondition> = None;
         for t in types {
             let v: VARIANT = (*t).into();
-            let c = automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &v).ok()?;
+            let c = local(automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &v))?;
             cond_type = Some(match cond_type {
                 None => c,
-                Some(prev) => automation.CreateOrCondition(&prev, &c).ok()?,
+                Some(prev) => local(automation.CreateOrCondition(&prev, &c))?,
             });
         }
         let cond_type = cond_type?;
@@ -405,12 +429,10 @@ fn element_find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<usiz
                 cond_type.clone()
             } else {
                 let v: VARIANT = BSTR::from(name.as_str()).into();
-                let cond_name =
-                    automation.CreatePropertyCondition(UIA_NamePropertyId, &v).ok()?;
-                match automation.CreateAndCondition(&cond_name, &cond_type) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                }
+                let cond_name = local(automation.CreatePropertyCondition(UIA_NamePropertyId, &v))?;
+                // A name that cannot be asked ends the search, as one the program did not answer
+                // for does: the names after it are not asked, and none found is not known.
+                local(automation.CreateAndCondition(&cond_name, &cond_type))?
             };
             if noted(element.FindFirst(TreeScope_Subtree, &cond)).is_some() {
                 return Some(i + 1);
@@ -452,23 +474,19 @@ fn element_locate_via(
 ) -> Option<(i32, i32)> {
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
-        let automation = borrow.as_ref()?;
+        let automation = reached(&borrow)?;
         let root = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
 
         // Build a Name(+Type) condition; an empty name means "any of this type".
         let make_cond = |nm: &str, ct: i32| -> Option<IUIAutomationCondition> {
             let v_ct: VARIANT = ct.into();
-            let cond_ct = automation
-                .CreatePropertyCondition(UIA_ControlTypePropertyId, &v_ct)
-                .ok()?;
+            let cond_ct = local(automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &v_ct))?;
             if nm.is_empty() {
                 Some(cond_ct)
             } else {
                 let v_nm: VARIANT = BSTR::from(nm).into();
-                let cond_nm = automation
-                    .CreatePropertyCondition(UIA_NamePropertyId, &v_nm)
-                    .ok()?;
-                automation.CreateAndCondition(&cond_nm, &cond_ct).ok()
+                let cond_nm = local(automation.CreatePropertyCondition(UIA_NamePropertyId, &v_nm))?;
+                local(automation.CreateAndCondition(&cond_nm, &cond_ct))
             }
         };
 
@@ -595,10 +613,7 @@ fn element_dump(hwnd: isize) -> Vec<DumpNode> {
     let mut out: Vec<DumpNode> = Vec::new();
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
-        let automation = match borrow.as_ref() {
-            Some(a) => a,
-            None => return,
-        };
+        let Some(automation) = reached(&borrow) else { return };
         let root = match noted(automation.ElementFromHandle(HWND(hwnd as *mut _))) {
             Some(e) => e,
             None => return,
@@ -606,10 +621,7 @@ fn element_dump(hwnd: isize) -> Vec<DumpNode> {
         // FindAll(Subtree, TrueCondition) — a flat list of all descendants, and
         // unlike the raw TreeWalker it crosses UIA fragment boundaries (e.g. into a
         // Kontakt rendered inside Komplete Kontrol). No depth; capped to stay bounded.
-        let cond = match automation.CreateTrueCondition() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
+        let Some(cond) = local(automation.CreateTrueCondition()) else { return };
         let arr = match noted(root.FindAll(TreeScope_Subtree, &cond)) {
             Some(a) => a,
             None => return,
@@ -654,9 +666,9 @@ fn element_class_nav_point(
 ) -> Option<(i32, i32)> {
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
-        let automation = borrow.as_ref()?;
+        let automation = reached(&borrow)?;
         let root = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
-        let walker = automation.RawViewWalker().ok()?;
+        let walker = local(automation.RawViewWalker())?;
         let mut el = find_by_class(&walker, &root, class_substr, ctype, 0)?;
         // WalkTree `n` (nth child): first child, then n-1 next siblings.
         if child >= 1 {
@@ -767,10 +779,7 @@ fn element_raw_dump(hwnd: isize) -> Vec<DumpNode> {
     let mut out: Vec<DumpNode> = Vec::new();
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
-        let automation = match borrow.as_ref() {
-            Some(a) => a,
-            None => return,
-        };
+        let Some(automation) = reached(&borrow) else { return };
         let root = match noted(automation.ElementFromHandle(HWND(hwnd as *mut _))) {
             Some(e) => e,
             None => return,
@@ -824,10 +833,7 @@ fn element_raw_dump(hwnd: isize) -> Vec<DumpNode> {
 
         // The way it was done before, kept as the answer for whatever the cache cannot do.
         // Slow, and correct on every provider this project has ever met.
-        let walker = match automation.RawViewWalker() {
-            Ok(w) => w,
-            Err(_) => return,
-        };
+        let Some(walker) = local(automation.RawViewWalker()) else { return };
         let mut budget = Budget::new(4000);
         raw_walk(&walker, &root, 0, &mut budget, &mut |el, depth| {
             let name = noted(el.CurrentName()).map(|b| b.to_string()).unwrap_or_default();
@@ -907,9 +913,9 @@ fn element_plugin_locate(
 ) -> Option<(i32, i32)> {
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
-        let automation = borrow.as_ref()?;
+        let automation = reached(&borrow)?;
         let root = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
-        let walker = automation.RawViewWalker().ok()?;
+        let walker = local(automation.RawViewWalker())?;
 
         for container in &containers_of(&walker, &root, container_name) {
             let mut hit: Option<(i32, i32)> = None;
@@ -963,9 +969,9 @@ fn element_state_probe(
 ) -> Option<(i32, i32)> {
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
-        let automation = borrow.as_ref()?;
+        let automation = reached(&borrow)?;
         let root = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
-        let walker = automation.RawViewWalker().ok()?;
+        let walker = local(automation.RawViewWalker())?;
 
         for container in &containers_of(&walker, &root, container_name) {
             let mut found: Option<(i32, i32)> = None;
@@ -1058,7 +1064,7 @@ unsafe fn find_by_class(
 fn element_focus_step(hwnd: isize, direction: i32) -> Option<super::FocusStep> {
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
-        let automation = borrow.as_ref()?;
+        let automation = reached(&borrow)?;
         let root = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
 
         // Scope to the window's content area — its first child in the control view, i.e.
@@ -1077,7 +1083,7 @@ fn element_focus_step(hwnd: isize, direction: i32) -> Option<super::FocusStep> {
         // The scope's VISIBLE, keyboard-focusable descendants in control-view order — the
         // same set NVDA would Tab through. TrueCondition + Rust-side filter avoids a bool
         // VARIANT and matches element_dump's proven path.
-        let cond = automation.CreateTrueCondition().ok()?;
+        let cond = local(automation.CreateTrueCondition())?;
         let arr = noted(scope.FindAll(TreeScope_Descendants, &cond))?;
         let len = arr.Length().unwrap_or(0);
         let mut items: Vec<IUIAutomationElement> = Vec::new();
@@ -1173,7 +1179,7 @@ fn element_focus_step(hwnd: isize, direction: i32) -> Option<super::FocusStep> {
 fn element_focus_put(hwnd: isize) -> bool {
     let took = AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
-        let automation = borrow.as_ref()?;
+        let automation = reached(&borrow)?;
         let el = noted(automation.ElementFromHandle(HWND(hwnd as *mut _)))?;
         noted(el.SetFocus())
     });
@@ -1261,6 +1267,55 @@ mod tests {
         assert!(stopped());
         assert_eq!(FAILED.with(|f| f.borrow_mut().take()), Some((HostError::of(&element::TIMEOUT), true)));
         assert_eq!(noted::<u32>(Ok(7)), Some(7));
+    }
+
+    /// A question that cannot be put — no automation object, or a condition it cannot build — is
+    /// not known, `failed`, as a press is told: every question goes through `reached` and builds its
+    /// conditions and walkers through `local`, and only a press keeps its own words for the object.
+    #[test]
+    fn a_question_that_cannot_be_put_is_not_known() {
+        FAILED.with(|f| *f.borrow_mut() = None);
+        assert!(reached(&None).is_none());
+        assert!(stopped(), "a walk stops there");
+        assert_eq!(FAILED.with(|f| f.borrow_mut().take()), Some((HostError::of(&element::NO_INTERFACE), false)));
+        let refused: windows::core::Result<u32> = Err(windows::core::Error::from_hresult(windows::core::HRESULT(0x8007_000E_u32 as i32)));
+        assert_eq!(local(refused), None);
+        assert_eq!(FAILED.with(|f| f.borrow_mut().take()), Some((HostError::of(&element::NO_INTERFACE), false)), "not the timeout: nothing behind it goes unasked");
+        assert_eq!(local::<u32>(Ok(3)), Some(3));
+        assert!(!stopped());
+        assert_eq!(
+            settle(ElementAnswer::Found(false), Some((HostError::of(&element::NO_INTERFACE), false)), None),
+            Err(ElementFailure { why: HostError::of(&element::NO_INTERFACE), unanswered: false })
+        );
+        const SRC: &str = include_str!("uia.rs");
+        let code = &SRC[..SRC.find("\n#[cfg(test)]\nmod tests {").unwrap()];
+        // The press alone takes the object as it is, to say why in its own way.
+        assert_eq!(code.matches("borrow.as_ref()").count(), 1);
+        let press = &code[code.find("fn element_press(").unwrap()..code.find("/// An element's on-screen rectangle").unwrap()];
+        assert!(press.contains("let Some(automation) = borrow.as_ref() else {\n            return Err((HostError::of(&element::NO_INTERFACE), false));"));
+        assert_eq!(code.matches("reached(&borrow)").count(), 10, "every function that asks, but the press");
+        // No condition, walker or element the object makes is dropped as nothing found; the cache
+        // request alone falls back, to the walk.
+        let press_at = code.find("fn element_press(").unwrap()..code.find("/// An element's on-screen rectangle").unwrap();
+        for made in ["CreatePropertyCondition", "CreateAndCondition", "CreateOrCondition", "CreateTrueCondition", "RawViewWalker()"] {
+            for (at, _) in code.match_indices(made) {
+                let line = code[..at].rsplit('\n').next().unwrap().to_string() + &code[at..at + code[at..].find('\n').unwrap()];
+                assert!(!line.contains(".ok()"), "{line}");
+                // Made through `local` — the press aside, which says why in its own words — so a
+                // condition not made is noted, and never skipped past (`Err(_) => continue`).
+                if !press_at.contains(&at) && !line.trim_start().starts_with("//") {
+                    assert!(code[..at].ends_with("local(automation."), "{line}");
+                }
+            }
+        }
+        // findAny: a name whose condition cannot be built ends the search, as an unanswered one
+        // does — the names after it are not asked.
+        let any = crate::ocr_wiring_tests::body(code, "fn element_find_any(");
+        assert!(any.contains(
+            "let cond_name = local(automation.CreatePropertyCondition(UIA_NamePropertyId, &v))?;\n                // A name that cannot be asked ends the search"
+        ));
+        assert!(any.contains("local(automation.CreateAndCondition(&cond_name, &cond_type))?\n            };"));
+        assert!(!any.contains("continue"), "no name is skipped past");
     }
 
     /// What was found stands whatever else went unanswered; nothing found after a call that went

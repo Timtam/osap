@@ -64,12 +64,31 @@ pub(crate) struct Answer {
     pub what: &'static str,
 }
 
-/// An outcome that came back, for its module's mailbox: the [`Answer`], the priority of the
-/// dispatch that asked, and the outcome — `Err` with what the module is told.
+/// A no-activate click's button, for its module's record of the buttons it holds, which the
+/// click's outcome decides once it is known (lib.rs, `Shared::after_release`): module `idx`'s
+/// `button`, and how many buttons the module had pressed when the click was handed over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Release {
+    pub idx: usize,
+    pub button: MouseButton,
+    pub presses: u64,
+}
+
+/// An outcome that came back: for its module's mailbox, the [`Answer`] when there is one and the
+/// priority of the dispatch that asked; the [`Release`] it decides; and the outcome — `Err` with
+/// what the module is told.
 pub(crate) struct Due {
-    pub answer: Answer,
+    pub answer: Option<Answer>,
+    pub release: Option<Release>,
     pub prio: Priority,
     pub result: Result<(), HostError>,
+}
+
+/// What an outcome is waited for by: an answer, a release, or both.
+struct Waiting {
+    answer: Option<Answer>,
+    release: Option<Release>,
+    prio: Priority,
 }
 
 /// A lane's way to its thread: each job with its number.
@@ -79,9 +98,10 @@ type ToThread = Sender<(u64, ActJob)>;
 /// the threads hold only their own end of a channel.
 pub(crate) struct Acting {
     next: Cell<u64>,
-    /// The answers owed, by the job's number. A job handed over without one is not in here: what
-    /// became of it is in the log, where the job writes it — and its thread, should it panic.
-    waiting: RefCell<HashMap<u64, (Answer, Priority)>>,
+    /// The answers and releases owed, by the job's number. A job handed over without either is not
+    /// in here: what became of it is in the log, where the job writes it — and its thread, should
+    /// it panic.
+    waiting: RefCell<HashMap<u64, Waiting>>,
     done_tx: Sender<(u64, Result<(), HostError>)>,
     done_rx: Receiver<(u64, Result<(), HostError>)>,
     /// Each lane's way to its thread, once that thread is started.
@@ -97,7 +117,16 @@ impl Acting {
     /// Hands `job` to `lane`'s thread; `answer`, when given, gets its outcome on a later tick. A
     /// thread that cannot be started answers the job as not done, with the reason.
     pub(crate) fn run(&self, lane: Lane, job: ActJob, answer: Option<Answer>) {
-        let token = self.token(answer);
+        self.run_with(lane, job, answer, None);
+    }
+
+    /// [`Acting::run`] for a click, whose outcome also decides `release` on the tick it comes back.
+    pub(crate) fn run_releasing(&self, lane: Lane, job: ActJob, answer: Option<Answer>, release: Release) {
+        self.run_with(lane, job, answer, Some(release));
+    }
+
+    fn run_with(&self, lane: Lane, job: ActJob, answer: Option<Answer>, release: Option<Release>) {
+        let token = self.token(answer, release);
         let sent = self.sender(lane).and_then(|tx| {
             tx.send((token, job))
                 .map_err(|_| HostError::with(&STYLE_THREAD_GONE, format!("the host's {} thread is gone", lane.thread())))
@@ -142,16 +171,17 @@ impl Acting {
     /// An outcome known at the call, for `answer`: delivered on the next tick, as one from a
     /// thread is, so a callback is never called inside the call that handed it over.
     pub(crate) fn answer_now(&self, answer: Answer, result: Result<(), HostError>) {
-        let token = self.token(Some(answer));
+        let token = self.token(Some(answer), None);
         let _ = self.done_tx.send((token, result));
     }
 
-    /// The next job's number, with its answer noted — under the priority of the dispatch that asks.
-    fn token(&self, answer: Option<Answer>) -> u64 {
+    /// The next job's number, with its answer and its release noted — under the priority of the
+    /// dispatch that asks.
+    fn token(&self, answer: Option<Answer>, release: Option<Release>) -> u64 {
         let token = self.next.get() + 1;
         self.next.set(token);
-        if let Some(a) = answer {
-            self.waiting.borrow_mut().insert(token, (a, current_priority()));
+        if answer.is_some() || release.is_some() {
+            self.waiting.borrow_mut().insert(token, Waiting { answer, release, prio: current_priority() });
         }
         token
     }
@@ -186,13 +216,13 @@ impl Acting {
         Ok(tx)
     }
 
-    /// The outcomes that came back since the last tick that somebody waits for, in the order they
-    /// came. The others are dropped here: what became of them is in the log.
+    /// The outcomes that came back since the last tick that an answer or a release waits for, in
+    /// the order they came. The others are dropped here: what became of them is in the log.
     pub(crate) fn take_due(&self) -> Vec<Due> {
         let mut out = Vec::new();
         while let Ok((token, result)) = self.done_rx.try_recv() {
-            if let Some((answer, prio)) = self.waiting.borrow_mut().remove(&token) {
-                out.push(Due { answer, prio, result });
+            if let Some(Waiting { answer, release, prio }) = self.waiting.borrow_mut().remove(&token) {
+                out.push(Due { answer, release, prio, result });
             }
         }
         out
@@ -395,15 +425,27 @@ mod tests {
         acting.run(Lane::Style, Box::new(move || { o2.lock().unwrap().push(2); Err(HostError::of(&NOT_KEPT)) }), None);
         acting.run(Lane::Style, Box::new(|| panic!("{}a job that fails", crate::EXPECTED_PANIC)), answer("panics"));
         acting.answer_now(Answer { idx: 4, lua: lua.clone(), cb: cb(), what: "at once" }, Err(HostError::of(&COVERED)));
+        // A click's release comes back with its outcome, answered or not.
+        let release = Release { idx: 5, button: MouseButton::Right, presses: 2 };
+        acting.run_releasing(Lane::Style, Box::new(|| Err(HostError::of(&NOT_KEPT))), None, release);
         crate::quiet_expected_panics();
         let mut due = Vec::new();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while due.len() < 3 && std::time::Instant::now() < until {
+        while due.len() < 4 && std::time::Instant::now() < until {
             due.extend(acting.take_due());
             std::thread::yield_now();
         }
-        let mut got: Vec<(&str, usize, Result<(), HostError>)> =
-            due.into_iter().map(|d| (d.answer.what, d.answer.idx, d.result)).collect();
+        let (released, due): (Vec<Due>, Vec<Due>) = due.into_iter().partition(|d| d.answer.is_none());
+        assert_eq!(released.len(), 1);
+        assert_eq!((released[0].release, &released[0].result), (Some(release), &Err(HostError::of(&NOT_KEPT))));
+        assert!(due.iter().all(|d| d.release.is_none()));
+        let mut got: Vec<(&str, usize, Result<(), HostError>)> = due
+            .into_iter()
+            .map(|d| {
+                let a = d.answer.unwrap();
+                (a.what, a.idx, d.result)
+            })
+            .collect();
         got.sort_by_key(|g| g.0);
         assert_eq!(got.len(), 3, "{got:?}");
         assert_eq!((got[0].0, got[0].1, &got[0].2), ("at once", 4, &Err(HostError::of(&COVERED))));

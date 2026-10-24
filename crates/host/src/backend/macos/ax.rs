@@ -13,6 +13,12 @@
 //! `None` for an element whose rectangle is collapsed or off-screen, so nothing ever clicks
 //! the centre of a zero-size box.
 //!
+//! **Not known is not "not there".** A module's question (`host.element`, asked through
+//! `element_ask` in `mod.rs`) that met an application that did not answer one of its reads, an
+//! application in the not-answering quarantine, or a walk stopped at its bound, is noted while it
+//! is asked (`question.rs`): what it found stands, nothing found is answered `nil, err`, and a dump
+//! its list so far with why — as UI Automation's answers are on Windows (`uia.rs`).
+//!
 //! Two macOS-specific facts shape the rest.
 //!
 //! **Every read here is a synchronous IPC call into another process.** A tree walk is not a
@@ -58,9 +64,10 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::NSString;
 
-use crate::errors::HostError;
+use crate::errors::{element, HostError};
 
-use super::budget::Budget;
+use super::budget::{Budget, Walk};
+use super::question::not_known;
 use super::front_memory::{Memory, Recall};
 use super::handles;
 use crate::backend::{ControlInfo, DumpNode, WinInfo};
@@ -370,12 +377,15 @@ fn note_remembered(pid: i32, age: Duration) {
 pub(super) const BUSY_PENALTY: Duration = Duration::from_millis(5000);
 
 /// Note that an application is not answering. Also fed by a refused observer subscription
-/// (`watch::create_observer`), which asks the same process the same way.
+/// (`watch::create_observer`), which asks the same process the same way. Inside a module's
+/// question it makes that question "not known" (`question.rs`).
 pub(super) fn note_busy(pid: i32) {
     if pid > 0 {
         BUSY_UNTIL.with(|b| b.borrow_mut().insert(pid, Instant::now() + BUSY_PENALTY));
+        not_known(HostError::of(&element::NOT_ANSWERING));
     }
 }
+
 
 /// Is this application still in the penalty box? Expired entries are dropped as they are
 /// found, so the map cannot grow beyond the applications that have recently misbehaved.
@@ -914,6 +924,11 @@ fn walk(
     visit: &mut impl FnMut(&AXUIElement, &Snap, i32) -> WalkStep,
 ) -> bool {
     if !budget.spend() {
+        // A module's question is told which bound: nothing it found is "not known" then, and a
+        // dump is not all of the tree (`Budget::cut`).
+        if let Some(why) = budget.cut() {
+            not_known(why);
+        }
         // Said out loud, once, and not at trace level. A walk that ran out returns exactly
         // what a walk that finished and found nothing returns, so without this line a plugin
         // whose tree is larger than the bound answers "that element is not here" to every
@@ -2625,7 +2640,7 @@ pub fn window_controls(hwnd: isize) -> Vec<ControlInfo> {
     // hands in a window, which is what it does.
     let owner = entry.owner;
     let mut out: Vec<ControlInfo> = Vec::new();
-    let mut budget = Budget::new(CONTROL_NODES, HOT_DEADLINE);
+    let mut budget = Budget::new(Walk::Host, CONTROL_NODES, HOT_DEADLINE);
     walk(
         &entry.element,
         0,
@@ -2886,7 +2901,11 @@ fn root_of(hwnd: isize, what: &str) -> Option<CFRetained<AXUIElement>> {
         // every one of them starts here and then walks. A module reaches them with a handle
         // it got from `active()`, so a remembered window would otherwise hand each of them
         // an application already known not to be answering.
-        Some(e) if skip_busy(e.pid, what) => None,
+        Some(e) if skip_busy(e.pid, what) => {
+            // Not asked: a question to it is not known, never "not there".
+            not_known(HostError::of(&element::QUARANTINED));
+            None
+        }
         Some(e) => Some(e.element),
         None => {
             crate::logging::trace("macos", || format!("{what}: {hwnd} is not a live handle"));
@@ -2912,7 +2931,7 @@ pub fn find(hwnd: isize, name: &str, control_type: i32) -> bool {
     }
     let t = Instant::now();
     let mut hit = false;
-    let mut budget = Budget::new(QUERY_NODES, HOT_DEADLINE);
+    let mut budget = Budget::new(Walk::Search, QUERY_NODES, HOT_DEADLINE);
     walk(&root, 0, QUERY_DEPTH, &mut budget, &mut |_, snap, _| {
         if role_matches(snap, roles) && snap.matches_name(name) {
             hit = true;
@@ -3007,7 +3026,7 @@ pub fn find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
     let root = root_of(hwnd, "find_any")?;
     let t0 = Instant::now();
     let mut best: Option<usize> = None;
-    let mut budget = Budget::new(QUERY_NODES, HOT_DEADLINE);
+    let mut budget = Budget::new(Walk::Search, QUERY_NODES, HOT_DEADLINE);
     walk(&root, 0, QUERY_DEPTH, &mut budget, &mut |_, snap, _| {
         if !role_matches(snap, &roles) {
             return WalkStep::Descend;
@@ -3056,7 +3075,7 @@ fn first_match(
     let mut found: Option<(CFRetained<AXUIElement>, Snap)> = None;
     // A hot query like the others: it runs on the pump, so it gets the deadline that says
     // the event tap is about to be switched off rather than the diagnostic one.
-    let mut budget = Budget::new(nodes, HOT_DEADLINE);
+    let mut budget = Budget::new(Walk::Search, nodes, HOT_DEADLINE);
     walk(root, 0, depth, &mut budget, &mut |el, snap, _| {
         if role_matches(snap, roles) && snap.matches_name(name) {
             found = Some((el.retain(), snap.clone()));
@@ -3110,7 +3129,7 @@ fn plugin_containers(root: &AXUIElement, container_name: &str) -> Vec<CFRetained
     let window_roles = roles_for_type(50032).unwrap_or(&[]);
     let pane_roles = roles_for_type(50033).unwrap_or(&[]);
     let mut found: Vec<(bool, CFRetained<AXUIElement>)> = Vec::new();
-    let mut budget = Budget::new(QUERY_NODES, HOT_DEADLINE);
+    let mut budget = Budget::new(Walk::Search, QUERY_NODES, HOT_DEADLINE);
     walk(root, 0, QUERY_DEPTH, &mut budget, &mut |el, snap, _| {
         // An exact name match, not `Snap::matches_name`: an empty container name means "a
         // container with no name", the way it does on Windows, and not "any container".
@@ -3221,7 +3240,8 @@ pub fn dump(hwnd: isize) -> Vec<DumpNode> {
         // application is in the five-second busy quarantine, and both of ITS notices are
         // traced rather than logged. So an empty answer arrived with no explanation anywhere,
         // and the probe's own escape clause ("if the dump line above says it was complete")
-        // pointed at a line that was never written.
+        // pointed at a line that was never written. The module is told the quarantine as well,
+        // beside the empty list (`root_of`); a handle that is not live is a window that is gone.
         crate::logging::line(
             "macos",
             &format!(
@@ -3232,7 +3252,7 @@ pub fn dump(hwnd: isize) -> Vec<DumpNode> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    let mut budget = Budget::new(DUMP_NODES, DUMP_DEADLINE);
+    let mut budget = Budget::new(Walk::Dump, DUMP_NODES, DUMP_DEADLINE);
     walk(&root, 0, DUMP_DEPTH, &mut budget, &mut |_, snap, depth| {
         let name = if snap.title.is_empty() {
             snap.description.clone()
@@ -3277,7 +3297,7 @@ pub fn dump(hwnd: isize) -> Vec<DumpNode> {
     // that will never be pointed at the tree.
     let whole = if budget.ran_out_of_time() {
         " — STOPPED ON TIME, so this is PART of the tree and not all of it"
-    } else if budget.nodes_left() <= 0 {
+    } else if budget.ran_out_of_nodes() {
         " — STOPPED ON THE NODE BUDGET, so this is PART of the tree and not all of it"
     } else {
         // Not "complete". Neither bound was reached, which is a smaller claim: `walk` also
@@ -3376,7 +3396,7 @@ pub fn class_nav_point(
     let roles = roles_or_log(ctype)?;
     let root = root_of(hwnd, "class_nav_point")?;
     let mut found: Option<CFRetained<AXUIElement>> = None;
-    let mut budget = Budget::new(QUERY_NODES, HOT_DEADLINE);
+    let mut budget = Budget::new(Walk::Search, QUERY_NODES, HOT_DEADLINE);
     walk(&root, 0, QUERY_DEPTH, &mut budget, &mut |el, snap, _| {
         if role_matches(snap, roles) && snap.identifier.contains(class_substr) {
             found = Some(el.retain());
@@ -3394,7 +3414,7 @@ pub fn class_nav_point(
         // object name against it could only ever succeed by accident, and on a German
         // machine not even that. The batched snapshot has already fetched this one, so the
         // pass costs no extra round trip per element.
-        let mut budget = Budget::new(QUERY_NODES, HOT_DEADLINE);
+        let mut budget = Budget::new(Walk::Search, QUERY_NODES, HOT_DEADLINE);
         walk(&root, 0, QUERY_DEPTH, &mut budget, &mut |_el, snap, _| {
             if role_matches(snap, roles) && snap.description.contains(class_substr) {
                 found = Some(_el.retain());
@@ -3483,7 +3503,7 @@ pub fn focus_step(hwnd: isize, direction: i32) -> Option<crate::backend::FocusSt
     let scope = root.clone();
 
     let mut items: Vec<(CFRetained<AXUIElement>, Snap)> = Vec::new();
-    let mut budget = Budget::new(FOCUS_NODES, HOT_DEADLINE);
+    let mut budget = Budget::new(Walk::Focus, FOCUS_NODES, HOT_DEADLINE);
     walk(&scope, 0, FOCUS_DEPTH, &mut budget, &mut |el, snap, depth| {
         if depth == 0 {
             return WalkStep::Descend; // the scope itself is not a stop on the ring
@@ -3627,7 +3647,7 @@ pub fn focus_within(hwnd: isize, x: i32, y: i32, w: i32, h: i32) -> Option<(Stri
         cx >= x as f64 && cx <= (x + w) as f64 && cy >= y as f64 && cy <= (y + h) as f64
     };
     let mut items: Vec<(CFRetained<AXUIElement>, Snap)> = Vec::new();
-    let mut budget = Budget::new(FOCUS_NODES, HOT_DEADLINE);
+    let mut budget = Budget::new(Walk::Focus, FOCUS_NODES, HOT_DEADLINE);
     walk(&root, 0, FOCUS_DEPTH, &mut budget, &mut |el, snap, depth| {
         if depth == 0 {
             return WalkStep::Descend;

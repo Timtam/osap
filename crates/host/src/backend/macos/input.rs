@@ -200,9 +200,11 @@ fn held_button() -> Option<MouseButton> {
     }
 }
 
-/// Builds and posts one mouse event. `clicks` sets the click-state field, which is what
-/// distinguishes a press from the tail of a double-click; a plain click wants 1.
-fn post_mouse(etype: CGEventType, x: i32, y: i32, button: CGMouseButton, clicks: Option<i64>) {
+/// Builds one mouse event, for a call to post with the others it makes once every one of them is
+/// built: a call whose event the system would not make posts nothing, and so never leaves a
+/// button down (`post_all`). `clicks` sets the click-state field, which is what distinguishes a
+/// press from the tail of a double-click; a plain click wants 1.
+fn mouse_event(etype: CGEventType, x: i32, y: i32, button: CGMouseButton, clicks: Option<i64>) -> Result<CFRetained<CGEvent>, HostError> {
     let point = CGPoint::new(x as f64, y as f64);
     let src = source();
     match CGEvent::new_mouse_event(src.as_deref(), etype, point, button) {
@@ -224,28 +226,35 @@ fn post_mouse(etype: CGEventType, x: i32, y: i32, button: CGMouseButton, clicks:
                     n,
                 );
             }
-            post(&event);
+            Ok(event)
         }
-        None => crate::logging::line(
-            "macos",
-            &format!(
-                "CGEventCreateMouseEvent(type {}) returned NULL at {x},{y}; that mouse event was \
-                 not sent",
-                etype.0
-            ),
-        ),
+        None => {
+            crate::logging::line(
+                "macos",
+                &format!("CGEventCreateMouseEvent(type {}) returned NULL at {x},{y}; nothing of that input was sent", etype.0),
+            );
+            let said = format!("CGEventCreateMouseEvent(type {}) returned NULL; nothing was sent", etype.0);
+            Err(HostError::with(&input::NULL_MOUSE_SENT, said))
+        }
     }
 }
 
-/// Moves the pointer to `(x, y)` and posts the movement, choosing the drag form of the event
-/// when a button is held.
-fn glide_to(x: i32, y: i32) {
+/// Posts a call's events, every one of them built already: `CGEventPost` answers nothing, so once
+/// they are built nothing of the call can fail.
+fn post_all(events: &[CFRetained<CGEvent>]) {
+    for event in events {
+        post(event);
+    }
+}
+
+/// The movement to `(x, y)`, the drag form of the event when a button is held.
+fn glide_event(x: i32, y: i32) -> Result<CFRetained<CGEvent>, HostError> {
     match held_button() {
         Some(b) => {
             let (_, _, dragged) = button_events(&b);
-            post_mouse(dragged, x, y, cg_button(&b), Some(1));
+            mouse_event(dragged, x, y, cg_button(&b), Some(1))
         }
-        None => post_mouse(CGEventType::MouseMoved, x, y, CGMouseButton::Left, None),
+        None => mouse_event(CGEventType::MouseMoved, x, y, CGMouseButton::Left, None),
     }
 }
 
@@ -270,12 +279,14 @@ pub fn cursor_pos() -> (i32, i32) {
     }
 }
 
-pub fn mouse_move(x: i32, y: i32) {
+pub fn mouse_move(x: i32, y: i32) -> Result<(), HostError> {
     crate::logging::trace("macos", || format!("mouse_move {x},{y}"));
-    glide_to(x, y);
+    let glide = glide_event(x, y)?;
+    post_all(&[glide]);
+    Ok(())
 }
 
-pub fn mouse_click(x: i32, y: i32, button: MouseButton) {
+pub fn mouse_click(x: i32, y: i32, button: MouseButton) -> Result<(), HostError> {
     crate::logging::trace("macos", || {
         format!("mouse_click {x},{y} {}", button_name(&button))
     });
@@ -287,9 +298,13 @@ pub fn mouse_click(x: i32, y: i32, button: MouseButton) {
     // position they were never told about lands on whatever they still believe is under the
     // pointer. This leg is not asked whether a button is held: a click is by definition not
     // part of a held gesture, and this is the hottest input path in the system.
-    post_mouse(CGEventType::MouseMoved, x, y, CGMouseButton::Left, None);
-    post_mouse(down, x, y, cg, Some(1));
-    post_mouse(up, x, y, cg, Some(1));
+    let built = [
+        mouse_event(CGEventType::MouseMoved, x, y, CGMouseButton::Left, None)?,
+        mouse_event(down, x, y, cg, Some(1))?,
+        mouse_event(up, x, y, cg, Some(1))?,
+    ];
+    post_all(&built);
+    Ok(())
 }
 
 /// `host.input.click`'s `via = "post"`: the move, the press and the release at (x, y) handed to the
@@ -307,7 +322,7 @@ pub fn mouse_click(x: i32, y: i32, button: MouseButton) {
 /// warped to the point with `move_pointer`; then the three posts, back to back. Never sleeps, and
 /// never waits for the program: a post is a message into its event stream.
 ///
-/// The modifier flags are cleared, as on every click here (`post_mouse`): a Control held from the
+/// The modifier flags are cleared, as on every click here (`mouse_event`): a Control held from the
 /// hotkey that asked for the click would make it a secondary click.
 pub fn post_click(window: isize, x: i32, y: i32, button: MouseButton, move_pointer: bool) -> Result<String, HostError> {
     note_post_access_once();
@@ -375,47 +390,53 @@ fn warp(point: CGPoint) -> Result<bool, i32> {
     }
 }
 
-pub fn mouse_drag(x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton) {
+pub fn mouse_drag(x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton) -> Result<(), HostError> {
     crate::logging::trace("macos", || {
         format!("mouse_drag {x1},{y1} -> {x2},{y2} {}", button_name(&button))
     });
     let (down, up, dragged) = button_events(&button);
     let cg = cg_button(&button);
-    glide_to(x1, y1);
-    post_mouse(down, x1, y1, cg, Some(1));
     // No dwell between the press and the move, matching Windows. The single intermediate
     // drag event is what a scrollbar needs; a control that only reveals itself after a
     // sustained press is served by `mouse_down`/`mouse_up` and a timer instead, which is
     // the whole reason those two exist separately.
-    post_mouse(dragged, x2, y2, cg, Some(1));
-    post_mouse(up, x2, y2, cg, Some(1));
+    let built = [
+        glide_event(x1, y1)?,
+        mouse_event(down, x1, y1, cg, Some(1))?,
+        mouse_event(dragged, x2, y2, cg, Some(1))?,
+        mouse_event(up, x2, y2, cg, Some(1))?,
+    ];
+    post_all(&built);
+    Ok(())
 }
 
-pub fn mouse_down(x: i32, y: i32, button: MouseButton) {
+pub fn mouse_down(x: i32, y: i32, button: MouseButton) -> Result<(), HostError> {
     crate::logging::trace("macos", || {
         format!("mouse_down {x},{y} {}", button_name(&button))
     });
     let (down, _, _) = button_events(&button);
-    glide_to(x, y);
-    post_mouse(down, x, y, cg_button(&button), Some(1));
+    let built = [glide_event(x, y)?, mouse_event(down, x, y, cg_button(&button), Some(1))?];
+    post_all(&built);
+    Ok(())
 }
 
-pub fn mouse_up(x: i32, y: i32, button: MouseButton) {
+pub fn mouse_up(x: i32, y: i32, button: MouseButton) -> Result<(), HostError> {
     crate::logging::trace("macos", || {
         format!("mouse_up {x},{y} {}", button_name(&button))
     });
     let (_, up, _) = button_events(&button);
     // Moving before releasing is what makes "press here, glide there, let go" work when the
-    // caller composes it out of down, a timer and up: `glide_to` sees our own button still
-    // held and posts a drag, so the release lands on a control that has been following the
+    // caller composes it out of down, a timer and up: `glide_event` sees our own button still
+    // held and makes a drag, so the release lands on a control that has been following the
     // pointer all the way rather than on one that never heard it leave.
-    glide_to(x, y);
-    post_mouse(up, x, y, cg_button(&button), Some(1));
+    let built = [glide_event(x, y)?, mouse_event(up, x, y, cg_button(&button), Some(1))?];
+    post_all(&built);
+    Ok(())
 }
 
-pub fn mouse_scroll(x: i32, y: i32, lines: i32) {
+pub fn mouse_scroll(x: i32, y: i32, lines: i32) -> Result<(), HostError> {
     crate::logging::trace("macos", || format!("mouse_scroll {x},{y} by {lines} line(s)"));
-    glide_to(x, y);
+    let glide = glide_event(x, y)?;
     let src = source();
     // `lines` arrives already converted — see the trait implementation, which is where the
     // two units meet. The trait counts what Windows counts, 120 units to a detent, because
@@ -436,7 +457,7 @@ pub fn mouse_scroll(x: i32, y: i32, lines: i32) {
             // Setting it explicitly means the target does not depend on the move posted just
             // above having been processed first.
             CGEvent::set_location(Some(&event), CGPoint::new(x as f64, y as f64));
-            // Cleared for the same reason `post_mouse` clears, and here because leaving one
+            // Cleared for the same reason `mouse_event` clears, and here because leaving one
             // synthesised mouse event inheriting the chord is worse than leaving all of
             // them: Shift plus a wheel is a horizontal scroll to AppKit and a fine step to
             // several plug-in frameworks, so a module scrolling from its own hotkey handler
@@ -444,12 +465,13 @@ pub fn mouse_scroll(x: i32, y: i32, lines: i32) {
             // caller does that today — both reach `scroll` from bare captures — which is why
             // this is symmetry rather than a fix for something measured.
             CGEvent::set_flags(Some(&event), CGEventFlags::empty());
-            post(&event);
+            post_all(&[glide, event]);
+            Ok(())
         }
-        None => crate::logging::line(
-            "macos",
-            &format!("CGEventCreateScrollWheelEvent2 returned NULL; no scroll sent at {x},{y}"),
-        ),
+        None => {
+            crate::logging::line("macos", &format!("CGEventCreateScrollWheelEvent2 returned NULL; no scroll sent at {x},{y}"));
+            Err(HostError::of(&input::NULL_SCROLL_EVENT))
+        }
     }
 }
 
@@ -498,6 +520,9 @@ pub fn key_post(hwnd: isize, key: &str) -> Result<(), KeyRefusal> {
         );
     }
     let src = source();
+    // Both built before either is posted, so an event the system would not make posts nothing and
+    // leaves no key down.
+    let mut built = Vec::with_capacity(2);
     for is_down in [true, false] {
         match CGEvent::new_keyboard_event(src.as_deref(), code, is_down) {
             Some(event) => {
@@ -507,14 +532,17 @@ pub fn key_post(hwnd: isize, key: &str) -> Result<(), KeyRefusal> {
                 // triggered it is still down. Melodyne wants a bare F-key, not Alt+F-key. A key
                 // of the keypad keeps the keypad's flag, as the keyboard's own event has it.
                 CGEvent::set_flags(Some(&event), CGEventFlags(keys::keypad_flag(code)));
-                note_post_access_once();
-                CGEvent::post_to_pid(entry.pid as libc::pid_t, Some(&event));
+                built.push(event);
             }
             None => {
                 let said = format!("CGEventCreateKeyboardEvent returned NULL for '{key}' (keycode {code})");
                 return Err(KeyRefusal::Answer(HostError::with(&input::NULL_KEY_EVENT, said)));
             }
         }
+    }
+    note_post_access_once();
+    for event in &built {
+        CGEvent::post_to_pid(entry.pid as libc::pid_t, Some(event));
     }
     crate::logging::trace("macos", || {
         format!("key_post '{key}' (keycode {code}) to pid {}", entry.pid)
@@ -568,6 +596,9 @@ pub fn key_send(combo: &str) -> Result<(), KeyRefusal> {
     let flags = CGEventFlags(keys::mask_to_cg_flags(mask) | keys::keypad_flag(code));
 
     let src = source();
+    // Both built before either is posted, so an event the system would not make sends nothing and
+    // leaves no key down.
+    let mut built = Vec::with_capacity(2);
     for is_down in [true, false] {
         match CGEvent::new_keyboard_event(src.as_deref(), code, is_down) {
             Some(event) => {
@@ -579,7 +610,7 @@ pub fn key_send(combo: &str) -> Result<(), KeyRefusal> {
                 // Marked, so that the tap leaves the key-down out of the count that ends a count
                 // of quick repeats (`keys::SEND_MARK`); it takes and matches the key as ever.
                 CGEvent::set_integer_value_field(Some(&event), CGEventField::EventSourceUserData, keys::SEND_MARK);
-                post(&event);
+                built.push(event);
             }
             None => {
                 let said = format!("CGEventCreateKeyboardEvent returned NULL for '{combo}' (keycode {code})");
@@ -587,6 +618,7 @@ pub fn key_send(combo: &str) -> Result<(), KeyRefusal> {
             }
         }
     }
+    post_all(&built);
     crate::logging::trace("macos", || {
         format!("key_send '{combo}' -> keycode {code} flags {:#x}", flags.0)
     });
@@ -649,7 +681,9 @@ pub fn pass_on(vk: u32, mask: u8, phys: Option<u16>, strokes: &[crate::backend::
     Ok(())
 }
 
-pub fn type_text(text: &str) {
+/// Every character's down and up built before they are posted, so an event the system would not
+/// make ends the typing between two characters, never inside one: the answer says how far it got.
+pub fn type_text(text: &str) -> Result<(), HostError> {
     // The keyboard layout is bypassed entirely, exactly as `KEYEVENTF_UNICODE` does on
     // Windows: the events carry keycode 0 and a Unicode payload that overrides it, so what
     // arrives is the character asked for rather than whatever the user's current layout puts
@@ -664,6 +698,7 @@ pub fn type_text(text: &str) {
         // nothing. Encoding per character keeps a surrogate pair together in one payload.
         let mut buf = [0u16; 2];
         let units: &[u16] = ch.encode_utf16(&mut buf);
+        let mut pair = Vec::with_capacity(2);
         for is_down in [true, false] {
             match CGEvent::new_keyboard_event(src.as_deref(), 0, is_down) {
                 Some(event) => {
@@ -682,24 +717,23 @@ pub fn type_text(text: &str) {
                             units.as_ptr(),
                         );
                     }
-                    post(&event);
+                    pair.push(event);
                 }
                 None => {
-                    crate::logging::line(
-                        "macos",
-                        &format!(
-                            "CGEventCreateKeyboardEvent returned NULL while typing; {sent} of {} \
-                             characters were sent",
-                            text.chars().count()
-                        ),
+                    let said = format!(
+                        "CGEventCreateKeyboardEvent returned NULL while typing; {sent} of {} characters were sent",
+                        text.chars().count()
                     );
-                    return;
+                    crate::logging::line("macos", &said);
+                    return Err(HostError::with(&input::TEXT_CUT, said));
                 }
             }
         }
+        post_all(&pair);
         sent += 1;
     }
     crate::logging::trace("macos", || format!("type_text sent {sent} character(s)"));
+    Ok(())
 }
 
 /// Are any of Command / Option / Control / Shift held right now? Read from the hardware

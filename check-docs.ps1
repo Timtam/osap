@@ -122,7 +122,8 @@ foreach ($file in $files) {
 # constant: `err.code == host.errors.NOT_READY` (docs/api/errors.md). Before the typed errors it was
 # an English sentence, and code that still compares one — `why == "not ready yet"`, a table keyed by
 # a reason, `why:find("denied")` — is never true and says nothing, which no test sees unless the
-# failure happens in it. So everywhere a module's code is written is read for that shape: the Luau
+# failure happens in it; and `string.format("%s", err)` and `assert(ok, err)` raise for one, which
+# no test sees either. So everywhere a module's code is written is read for those shapes: the Luau
 # of modules/, tools/ and examples/, and every Luau block of docs/, the design notes included,
 # since an example there is copied as readily. The names are the ones this project gives a reason
 # (`why`, `err`, `reason` and what starts with them); a line that has to compare a word under such
@@ -175,15 +176,28 @@ $reasonShapes = @(
 
 # The `how` a hook is handed is onClose's or onEnd's only inside that hook: a function whose
 # parameters name `how` on a line that names the hook, down to its `end` at that line's
-# indentation, and any line that names the hook itself. Elsewhere `how` is a module's own word —
-# VPS Avenger's acts answer "changed" or "unchanged" — which no page of the API documents.
+# indentation, and any line that names the hook itself. A hook given a function by its name —
+# `onClose = closed` — makes that function's `how` the hook's too, wherever it is defined in the
+# file. Elsewhere `how` is a module's own word — VPS Avenger's acts answer "changed" or
+# "unchanged" — which no page of the API documents. A `how` handed on to another function is not
+# followed.
 function Get-HowWords([string[]]$lines) {
   $at = @{}
+  $named = @{}
+  foreach ($l in $lines) {
+    foreach ($m in [regex]::Matches($l, '\b(onEnd|onClose|onPageClose)\s*=\s*([A-Za-z_]\w*)\s*(?=,|\}|$)')) {
+      $fn = $m.Groups[2].Value
+      if ($fn -cin @("function", "nil", "true", "false")) { continue }
+      $named[$fn] = if ($m.Groups[1].Value -ceq "onEnd") { $words.ended.Words } else { $words.close.Words }
+    }
+  }
   for ($i = 0; $i -lt $lines.Count; $i++) {
     $l = $lines[$i]
     $these = @()
     if ($l -cmatch 'onEnd') { $these += $words.ended.Words }
     if ($l -cmatch 'onClose|onPageClose|pageClosed') { $these += $words.close.Words }
+    $def = [regex]::Match($l, '\bfunction\s+(?:[\w.]+[.:])?([A-Za-z_]\w*)\s*\(')
+    if ($def.Success -and $named.ContainsKey($def.Groups[1].Value)) { $these += $named[$def.Groups[1].Value] }
     if ($these.Count -eq 0) { continue }
     $at[$i] = @(@($at[$i]) + $these | Where-Object { $_ })
     $head = [regex]::Match($l, 'function\s*[\w.:]*\s*\(([^)]*)\)(.*)$')
@@ -199,8 +213,95 @@ function Get-HowWords([string[]]$lines) {
   return $at
 }
 
-function Test-Luau([string]$where, [string[]]$lines, [int[]]$numbers) {
+# The arguments of the call whose `(` is at `$open` in `$text`, as written, to its matching `)` —
+# strings, brackets and nesting kept whole. Each caller gathers them with @( ), a list however
+# many there are.
+function Get-CallArgs([string]$text, [int]$open) {
+  $out = @(); $cur = ""; $depth = 0; $quote = $null
+  for ($k = $open + 1; $k -lt $text.Length; $k++) {
+    $ch = $text[$k]
+    if ($quote) {
+      $cur += $ch
+      if ($ch -eq '\' -and $k + 1 -lt $text.Length) { $k++; $cur += $text[$k] }
+      elseif ($ch -eq $quote) { $quote = $null }
+      continue
+    }
+    if ($ch -eq '"' -or $ch -eq "'") { $quote = $ch; $cur += $ch; continue }
+    if ($ch -eq '(' -or $ch -eq '{' -or $ch -eq '[') { $depth++ }
+    elseif ($ch -eq ')' -or $ch -eq '}' -or $ch -eq ']') {
+      if ($depth -eq 0) { $out += $cur.Trim(); return $out }
+      $depth--
+    }
+    elseif ($ch -eq ',' -and $depth -eq 0) { $out += $cur.Trim(); $cur = ""; continue }
+    $cur += $ch
+  }
+  return $out
+}
+
+# What raises for an error value that a sentence would pass: `%s` and `%q` of string.format take a
+# string only, and so does Luau's `assert` for its message (docs/api/errors.md, "Error values").
+# The format string is read where the call has it — `string.format("…", …)`, `("…"):format(…)`,
+# its string on the line before — and each argument matched with its specifier. A sentence under a
+# reason's name is passed through `tostring` too, so that the two never look alike.
+function Test-Formats([string]$where, [string[]]$lines, [int[]]$numbers) {
   $found = @()
+  $kept = for ($i = 0; $i -lt $lines.Count; $i++) {
+    if ($lines[$i].Contains("-- lint: word")) { "" } else { [regex]::Replace($lines[$i], '--.*$', '') }
+  }
+  $text = $kept -join "`n"
+  $lineAt = { param($pos) ([regex]::Matches($text.Substring(0, $pos), "`n")).Count }
+  $calls = @(
+    # The literal is the whole format, not a part of one put together: its specifiers are the call's.
+    @{ Re = 'string\.format\(\s*(["''])((?:\\.|(?!\1).)*)\1\s*,'; Fmt = 2; Open = 'string.format(' },
+    @{ Re = '\(\s*(["''])((?:\\.|(?!\1).)*)\1\s*\)\s*:\s*format\('; Fmt = 2; Open = ':format(' }
+  )
+  foreach ($c in $calls) {
+    foreach ($m in [regex]::Matches($text, $c.Re)) {
+      $fmt = $m.Groups[$c.Fmt].Value
+      $open = if ($c.Open -eq ':format(') { $m.Index + $m.Length - 1 } else { $text.IndexOf('(', $m.Index) }
+      $all = @(Get-CallArgs $text $open)
+      # @( ): a list of one would be its one string, indexed by character.
+      $given = @(if ($c.Open -eq ':format(') { $all } else { $all | Select-Object -Skip 1 })
+      $specs = @([regex]::Matches($fmt, '%(?:%|[-+ #0]*\d*(?:\.\d+)?([A-Za-z*]))') | Where-Object { $_.Value -ne '%%' } | ForEach-Object { $_.Groups[1].Value })
+      for ($k = 0; $k -lt $given.Count -and $k -lt $specs.Count; $k++) {
+        if ($given[$k] -match ('^' + $reason + '$') -and $specs[$k] -cin @("s", "q")) {
+          $n = & $lineAt $m.Index
+          $found += [pscustomobject]@{ What = "%$($specs[$k]) of '$($given[$k])', which raises for an error value: write %* or tostring($($given[$k]))"; Where = "${where}:$($numbers[$n])"; Line = $lines[$n].Trim() }
+        }
+      }
+    }
+  }
+  foreach ($m in [regex]::Matches($text, '(?<![\w.:])assert\(')) {
+    $all = @(Get-CallArgs $text ($m.Index + $m.Length - 1))
+    if ($all.Count -ge 2 -and $all[1] -match ('^' + $reason + '$')) {
+      $n = & $lineAt $m.Index
+      $found += [pscustomobject]@{ What = "assert with '$($all[1])' as its message, which raises for an error value: write tostring($($all[1]))"; Where = "${where}:$($numbers[$n])"; Line = $lines[$n].Trim() }
+    }
+  }
+  # host.keys.check's words as a table's keys: a table looked up by a word of a check's `reasons`
+  # has its literal's keys held to the words, as a comparison with one is.
+  $vars = @([regex]::Matches($text, 'for\s+\w+\s*,\s*([A-Za-z_]\w*)\s+in\s+ipairs\(\s*host\.keys\.check\([^\n]*?\)\s*\.reasons\s*\)') | ForEach-Object { $_.Groups[1].Value })
+  foreach ($v in ($vars | Sort-Object -Unique)) {
+    foreach ($t in @([regex]::Matches($text, '([A-Za-z_]\w*)\[\s*' + [regex]::Escape($v) + '\s*\]') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)) {
+      $lit = [regex]::Match($text, '(?<![\w.])(?:local\s+)?' + [regex]::Escape($t) + '\s*=\s*\{')
+      if (-not $lit.Success) { continue }
+      $body = @(Get-CallArgs $text ($lit.Index + $lit.Length - 1))
+      foreach ($field in $body) {
+        $key = [regex]::Match($field, '^(?:([A-Za-z_]\w*)|\[\s*"([^"]*)"\s*\])\s*=')
+        if (-not $key.Success) { continue }
+        $w = if ($key.Groups[1].Success) { $key.Groups[1].Value } else { $key.Groups[2].Value }
+        if ($words.check.Words -cnotcontains $w) {
+          $n = & $lineAt $lit.Index
+          $found += [pscustomobject]@{ What = "'$w', a key of $t, is not a word of $($words.check.Field) ($(($words.check.Words | Sort-Object) -join ', '))"; Where = "${where}:$($numbers[$n])"; Line = $lines[$n].Trim() }
+        }
+      }
+    }
+  }
+  return $found
+}
+
+function Test-Luau([string]$where, [string[]]$lines, [int[]]$numbers) {
+  $found = @(Test-Formats $where $lines $numbers)
   $how = Get-HowWords $lines
   for ($i = 0; $i -lt $lines.Count; $i++) {
     $raw = $lines[$i]

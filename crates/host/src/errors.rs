@@ -215,8 +215,29 @@ pub mod window {
     pub const HIDDEN: Reason = Reason { code: Code::Hidden, message: "the window is hidden", entries: &["host-window-focus"] };
 }
 
-/// Every call that puts a question to the accessibility thread.
+/// Every call of `host.element` that puts a question to a program on Windows: the members of the
+/// group `question-errors`, the reasons every such question can give. `focusWithin` is asked on the
+/// accessibility thread too, but asks the program nothing there (uia.rs answers it `None`), so it
+/// gives only the host's own of them, which name it.
 pub const QUESTIONS: &[&str] = &[
+    "host-element-find",
+    "host-element-locate",
+    "host-element-findany",
+    "host-element-locatevia",
+    "host-element-classnavpoint",
+    "host-element-focusstep",
+    "host-element-pluginlocate",
+    "host-element-stateprobe",
+    "host-element-dump",
+    "host-element-rawdump",
+    "host-element-press",
+];
+
+/// The questions that walk the tree within the 4000-node and 5-second bounds on Windows.
+pub const WALKS: &[&str] = &["host-element-pluginlocate", "host-element-stateprobe", "host-element-rawdump"];
+
+/// The questions a Mac asks an application's tree: every one but `press`, which is not there yet.
+pub const MAC_QUESTIONS: &[&str] = &[
     "host-element-find",
     "host-element-locate",
     "host-element-findany",
@@ -228,42 +249,128 @@ pub const QUESTIONS: &[&str] = &[
     "host-element-stateprobe",
     "host-element-dump",
     "host-element-rawdump",
-    "host-element-press",
 ];
 
-/// The questions that walk the tree within the 4000-node and 5-second bounds.
-pub const WALKS: &[&str] = &["host-element-pluginlocate", "host-element-stateprobe", "host-element-rawdump"];
+/// The Mac's searches, each walk of them bounded at 1500 elements and 300 ms (macos/ax.rs,
+/// `QUERY_NODES` and `HOT_DEADLINE`).
+pub const MAC_SEARCHES: &[&str] = &[
+    "host-element-find",
+    "host-element-locate",
+    "host-element-findany",
+    "host-element-locatevia",
+    "host-element-classnavpoint",
+    "host-element-pluginlocate",
+    "host-element-stateprobe",
+];
+
+/// The Mac's walks bounded at 300 ms: its searches, and the focus's two at 800 elements
+/// (`FOCUS_NODES`).
+pub const MAC_HOT_WALKS: &[&str] = &[
+    "host-element-find",
+    "host-element-locate",
+    "host-element-findany",
+    "host-element-locatevia",
+    "host-element-classnavpoint",
+    "host-element-pluginlocate",
+    "host-element-stateprobe",
+    "host-element-focusstep",
+    "host-element-focuswithin",
+];
 
 /// `host.element`.
 pub mod element {
-    use super::{Code, Reason, QUESTIONS, WALKS};
+    use super::{Code, Reason, MAC_HOT_WALKS, MAC_QUESTIONS, MAC_SEARCHES, WALKS};
 
-    pub const TIMEOUT: Reason = Reason { code: Code::Timeout, message: "the program did not answer within 1000 ms", entries: QUESTIONS };
-    pub const DENIED: Reason = Reason { code: Code::Denied, message: "the program runs with higher rights", entries: QUESTIONS };
-    pub const PROGRAM_GONE: Reason = Reason { code: Code::Gone, message: "the program is gone", entries: QUESTIONS };
+    // The reasons every question can give on Windows: the group `question-errors` — and those the
+    // host gives without asking the program, `focusWithin` too.
+    pub const TIMEOUT: Reason = Reason { code: Code::Timeout, message: "the program did not answer within 1000 ms", entries: &["question-errors"] };
+    pub const DENIED: Reason = Reason { code: Code::Denied, message: "the program runs with higher rights", entries: &["question-errors"] };
+    pub const PROGRAM_GONE: Reason = Reason { code: Code::Gone, message: "the program is gone", entries: &["question-errors"] };
     /// A question behind one the program did not answer, with that one's code: its timeout.
-    pub const NOT_ASKED_TIMEOUT: Reason = Reason { code: Code::Timeout, message: "… to an earlier question, so this one was not asked", entries: QUESTIONS };
-    /// The same, behind one refused for higher rights.
-    pub const NOT_ASKED_DENIED: Reason = Reason { code: Code::Denied, message: "… to an earlier question, so this one was not asked", entries: QUESTIONS };
-    /// The same, behind one whose program went.
-    pub const NOT_ASKED_GONE: Reason = Reason { code: Code::Gone, message: "… to an earlier question, so this one was not asked", entries: QUESTIONS };
+    pub const NOT_ASKED_TIMEOUT: Reason = Reason {
+        code: Code::Timeout,
+        message: "… to an earlier question, so this one was not asked",
+        entries: &["question-errors", "host-element-focuswithin"],
+    };
+    /// The same, behind one refused for higher rights: never given, since only a timeout leaves the
+    /// questions behind it unasked (element.rs, `Queue::finish`, and uia.rs, `noted`).
+    pub const NOT_ASKED_DENIED: Reason = Reason { code: Code::Denied, message: "… to an earlier question, so this one was not asked", entries: &[] };
+    /// The same, behind one whose program went: never given, for the same reason.
+    pub const NOT_ASKED_GONE: Reason = Reason { code: Code::Gone, message: "… to an earlier question, so this one was not asked", entries: &[] };
     /// With `opts.key` and a callback only.
-    pub const REPLACED: Reason = Reason { code: Code::Replaced, message: "a newer question with the same key was asked before this one", entries: QUESTIONS };
+    pub const REPLACED: Reason = Reason {
+        code: Code::Replaced,
+        message: "a newer question with the same key was asked before this one",
+        entries: &["question-errors", "host-element-focuswithin"],
+    };
     /// Without a callback, asked inside another one's wait.
-    pub const NESTED: Reason = Reason { code: Code::Busy, message: "another accessibility question is being waited for", entries: QUESTIONS };
-    pub const THREAD_NOT_STARTED: Reason = Reason { code: Code::Failed, message: "the host could not start its accessibility thread: …", entries: QUESTIONS };
-    pub const OWN_WINDOW: Reason = Reason { code: Code::Refused, message: "the window is this application's own, which is not asked about", entries: QUESTIONS };
-    pub const NO_SIGNAL: Reason = Reason { code: Code::Failed, message: "the event the host waits on for the answer could not be made", entries: QUESTIONS };
-    pub const LOST: Reason = Reason { code: Code::Failed, message: "the answer was lost", entries: QUESTIONS };
-    pub const THREAD_FAILED: Reason = Reason { code: Code::Failed, message: "the host's accessibility thread failed: …", entries: QUESTIONS };
+    pub const NESTED: Reason = Reason { code: Code::Busy, message: "another accessibility question is being waited for", entries: &["question-errors", "host-element-focuswithin"] };
+    pub const THREAD_NOT_STARTED: Reason = Reason {
+        code: Code::Failed,
+        message: "the host could not start its accessibility thread: …",
+        entries: &["question-errors", "host-element-focuswithin"],
+    };
+    pub const OWN_WINDOW: Reason = Reason {
+        code: Code::Refused,
+        message: "the window is this application's own, which is not asked about",
+        entries: &["question-errors", "host-element-focuswithin"],
+    };
+    pub const NO_SIGNAL: Reason = Reason {
+        code: Code::Failed,
+        message: "the event the host waits on for the answer could not be made",
+        entries: &["question-errors", "host-element-focuswithin"],
+    };
+    pub const LOST: Reason = Reason { code: Code::Failed, message: "the answer was lost", entries: &["question-errors", "host-element-focuswithin"] };
+    pub const THREAD_FAILED: Reason = Reason { code: Code::Failed, message: "the host's accessibility thread failed: …", entries: &["question-errors", "host-element-focuswithin"] };
+    /// UI Automation's object could not be made on the accessibility thread, or a condition of the
+    /// question could not be built: nothing can be asked.
+    pub const NO_INTERFACE: Reason = Reason {
+        code: Code::Failed,
+        message: "this system's accessibility interface could not be reached",
+        entries: &["question-errors"],
+    };
     /// The Windows backend's own answer on the event loop, where no question is asked: never
     /// reaches a module.
     pub const WRONG_THREAD: Reason = Reason { code: Code::Failed, message: "accessibility questions are asked on the host's accessibility thread", entries: &[] };
     pub const TOO_MANY_NODES: Reason = Reason { code: Code::TooLarge, message: "the tree holds more than the 4000 elements a search reads", entries: WALKS };
-    pub const TOO_SLOW: Reason = Reason { code: Code::Timeout, message: "the search took longer than 5 s", entries: WALKS };
+    /// A Windows walk past its 5 s, and a Mac's dump past its own 5 s (macos/ax.rs, `DUMP_DEADLINE`).
+    pub const TOO_SLOW: Reason = Reason {
+        code: Code::Timeout,
+        message: "the search took longer than 5 s",
+        entries: &["host-element-pluginlocate", "host-element-stateprobe", "host-element-rawdump", "host-element-dump"],
+    };
     /// A dump's list so far beside it: a partial answer.
     pub const DUMP_CUT: Reason = Reason { code: Code::TooLarge, message: "the tree holds … elements, more than the 2000 a dump lists", entries: &["host-element-dump"] };
-    pub const NO_INTERFACE: Reason = Reason { code: Code::Failed, message: "this system's accessibility interface could not be reached", entries: &["host-element-press"] };
+
+    // A Mac's (macos/ax.rs): a question it did not get to the end of. Each answers `nil, err` where
+    // the question found nothing, and a dump its list so far beside it.
+    /// A read of the question's that the application did not answer: it is busy, starting or not
+    /// responding (`kAXErrorCannotComplete`).
+    pub const NOT_ANSWERING: Reason = Reason {
+        code: Code::Timeout,
+        message: "the program did not answer: it is busy, starting or not responding",
+        entries: MAC_QUESTIONS,
+    };
+    /// An application that did not answer a moment ago is not asked again for 5 s (macos/ax.rs,
+    /// `BUSY_PENALTY`): the question is not put to it.
+    pub const QUARANTINED: Reason = Reason {
+        code: Code::Timeout,
+        message: "the program did not answer a moment ago, so it is not asked for 5 s",
+        entries: MAC_QUESTIONS,
+    };
+    pub const SEARCH_CUT: Reason = Reason { code: Code::TooLarge, message: "the tree holds more than the 1500 elements a search reads", entries: MAC_SEARCHES };
+    pub const FOCUS_CUT: Reason = Reason {
+        code: Code::TooLarge,
+        message: "the window holds more than the 800 elements a focus search reads",
+        entries: &["host-element-focusstep", "host-element-focuswithin"],
+    };
+    pub const HOT_TOO_SLOW: Reason = Reason { code: Code::Timeout, message: "the search took longer than 300 ms", entries: MAC_HOT_WALKS };
+    /// Beside the list read so far: a partial answer.
+    pub const MAC_DUMP_CUT: Reason = Reason {
+        code: Code::TooLarge,
+        message: "the tree holds more than the 2000 elements a dump reads",
+        entries: &["host-element-dump", "host-element-rawdump"],
+    };
     pub const MOVES_FOCUS: Reason = Reason {
         code: Code::NotSupported,
         message: "this system cannot press an element without moving the keyboard focus to it",
@@ -334,6 +441,54 @@ pub mod input {
         entries: &["host-input-post", "host-input-send"],
     };
     pub const SEND_NO_KEYCODE: Reason = Reason { code: Code::NotSupported, message: "'…' (VK …): …", entries: &["host-input-send"] };
+    /// Windows' `SendInput` took fewer of a call's events than it was given, with its last error.
+    pub const NOT_TAKEN: Reason = Reason {
+        code: Code::Failed,
+        message: "Windows did not take the input (error …)",
+        entries: &[
+            "host-input-move",
+            "host-input-click",
+            "host-input-drag",
+            "host-input-mousedown",
+            "host-input-mouseup",
+            "host-input-scroll",
+            "host-input-send",
+        ],
+    };
+    /// Windows took a click's or a drag's press and refused its release, sent with the call and
+    /// again on its own: the button is down, and the host holds it for the module, as a
+    /// mouseDown's (lib.rs, `held_after`).
+    pub const LEFT_DOWN: Reason = Reason {
+        code: Code::Failed,
+        message: "Windows took the press but not its release (error …): the button is still down",
+        entries: &["host-input-click", "host-input-drag"],
+    };
+    /// Windows' `SetCursorPos` refused, with its last error: nothing after it is sent.
+    pub const NOT_PLACED: Reason = Reason {
+        code: Code::Failed,
+        message: "Windows did not put the pointer there (error …)",
+        entries: &["host-input-move", "host-input-click", "host-input-drag", "host-input-mousedown", "host-input-scroll"],
+    };
+    /// `host.input.text` on Windows, typed as far as `SendInput` took its events.
+    pub const TEXT_NOT_TAKEN: Reason = Reason {
+        code: Code::Failed,
+        message: "Windows did not take the input after … of … characters (error …)",
+        entries: &["host-input-text"],
+    };
+    /// macOS: a mouse event of the call the system would not make — every one is made before the
+    /// first is posted, so nothing of the call was sent.
+    pub const NULL_MOUSE_SENT: Reason = Reason {
+        code: Code::Failed,
+        message: "CGEventCreateMouseEvent(type …) returned NULL; nothing was sent",
+        entries: &["host-input-move", "host-input-click", "host-input-drag", "host-input-mousedown", "host-input-mouseup", "host-input-scroll"],
+    };
+    pub const NULL_SCROLL_EVENT: Reason = Reason { code: Code::Failed, message: "CGEventCreateScrollWheelEvent2 returned NULL; nothing was sent", entries: &["host-input-scroll"] };
+    /// macOS: `host.input.text`, typed up to the character whose event the system would not make.
+    pub const TEXT_CUT: Reason = Reason {
+        code: Code::Failed,
+        message: "CGEventCreateKeyboardEvent returned NULL while typing; … of … characters were sent",
+        entries: &["host-input-text"],
+    };
 }
 
 /// `host.keys.capture`, without the hook or the tap.
@@ -394,19 +549,42 @@ pub mod hotkey {
 
 /// `host.screen`. Most reasons are shared by many calls, so the docs name five groups once
 /// (capture, window form, snapshot source, request limits, image worker), and a sixth for desktop
-/// duplication's, which a module meets only under `[screen] fallback = "none"`.
+/// duplication's, which a module meets only under `[screen] fallback = "none"`. A reason only some
+/// of a group's calls give names those calls instead: the `screen-capture` thread's own failures,
+/// desktop duplication's 40 million pixels, and the snapshot reason of the calls that need the
+/// whole region inside it.
 pub mod screen {
     use super::{Code, Reason};
 
-    // Capture errors: any call that captures.
-    pub const CAPTURE_FAILED: Reason = Reason { code: Code::Failed, message: "screen capture failed", entries: &["capture-errors", "host-screen-pixels"] };
-    pub const CAPTURE_TOO_LARGE: Reason = Reason { code: Code::TooLarge, message: "screen capture failed: the region is larger than 40 million pixels", entries: &["capture-errors"] };
+    // Capture errors: any call of this namespace that captures a region; and a text read's.
+    pub const CAPTURE_FAILED: Reason = Reason {
+        code: Code::Failed,
+        message: "screen capture failed",
+        entries: &["capture-errors", "host-screen-pixels", "host-ocr-recognize"],
+    };
+    /// Desktop duplication's 40 million pixels (dxgi.rs, `fits`, per region): only the calls that
+    /// do not hold their region to that or less before they capture — the searches, `save` and
+    /// `saveMarked`. A snapshot's and a profile's region is held to `frame::MAX_FRAME_PIXELS`, a
+    /// grid's to `cells::MAX_REGION_PIXELS`, a captured template's to `template::MAX_PIXELS`, and a
+    /// text read reads at most that many in all (`ocr::CALL_TOO_LARGE` comes first): windows.rs's
+    /// `only_the_calls_that_do_not_hold_their_region_meet_the_40_million` holds the limits to it.
+    pub const CAPTURE_TOO_LARGE: Reason = Reason {
+        code: Code::TooLarge,
+        message: "screen capture failed: the region is larger than 40 million pixels",
+        entries: &["host-screen-imagesearch", "host-screen-imagesearchall", "host-screen-imagesearcheach", "host-screen-save", "host-screen-savemarked"],
+    };
+    /// The `screen-capture` thread's: its pictures and its points, never the image worker's.
     pub const CAPTURE_PANICKED: Reason = Reason {
         code: Code::Failed,
         message: "the screen capture failed inside the application; the log has the details",
-        entries: &["capture-errors", "host-screen-pixel", "host-screen-pixels"],
+        entries: &["host-screen-snapshot", "host-screen-profile", "host-ocr-recognize", "host-screen-pixel", "host-screen-pixels"],
     };
-    pub const ROUND_FAILED: Reason = Reason { code: Code::Failed, message: "the snapshot failed inside the application; the log has the details", entries: &["capture-errors"] };
+    /// A snapshot round's (ocr/snap_queue.rs): a snapshot's or a profile's.
+    pub const ROUND_FAILED: Reason = Reason {
+        code: Code::Failed,
+        message: "the snapshot failed inside the application; the log has the details",
+        entries: &["host-screen-snapshot", "host-screen-profile"],
+    };
 
     // Duplication errors, Windows only: the whole sentence, its code from its tail (dxgi.rs, `Fallback::describe`).
     pub const DUPLICATION_SWITCHED_OFF: Reason = Reason {
@@ -499,8 +677,13 @@ pub mod screen {
     pub const CLIENT_EMPTY: Reason = Reason { code: Code::Hidden, message: "the window's client area is empty (…x…)", entries: &["window-form-errors"] };
     pub const OUT_OF_RANGE: Reason = Reason { code: Code::Outside, message: "the region lies outside the screen's coordinate range", entries: &["window-form-errors"] };
 
-    // Snapshot-source errors: any call given `opts.snapshot`; and a snapshot's `crop`.
-    pub const NOT_INSIDE: Reason = Reason { code: Code::Outside, message: "the region is not inside the snapshot", entries: &["snapshot-source-errors", "snapshot-crop"] };
+    // Snapshot-source errors: a call given `opts.snapshot` that reads the part of its region inside
+    // it; and those that need the whole region inside, a snapshot's `crop` among them.
+    pub const NOT_INSIDE: Reason = Reason {
+        code: Code::Outside,
+        message: "the region is not inside the snapshot",
+        entries: &["host-screen-cells", "host-screen-matchcells", "host-screen-template", "snapshot-crop"],
+    };
     pub const NO_OVERLAP: Reason = Reason { code: Code::Outside, message: "the region does not overlap the snapshot", entries: &["snapshot-source-errors"] };
     pub const POINT_NOT_INSIDE: Reason = Reason { code: Code::Outside, message: "the point is not inside the snapshot", entries: &["host-screen-pixel", "host-screen-pixels"] };
 
@@ -641,8 +824,11 @@ pub mod screen {
 pub mod ocr {
     use super::{Code, Reason};
 
-    /// Windows' crop of a region out of the bounding box it was captured in.
-    pub const CROP_OUTSIDE: Reason = Reason { code: Code::Failed, message: "region outside the captured area", entries: &["host-ocr-recognize"] };
+    /// Windows' crop of a region out of the bounding box it was captured in: never given, since the
+    /// box is made from the same rectangles (`plan::offset_in` admits only a region inside it, and a
+    /// capture of another size than the box is not cropped) — kept for the crop's own check
+    /// (windows.rs, `capture_for_read`).
+    pub const CROP_OUTSIDE: Reason = Reason { code: Code::Failed, message: "region outside the captured area", entries: &[] };
     pub const MAC_CAPTURE_FAILED: Reason = Reason {
         code: Code::Failed,
         message: "screen capture failed — if every read fails, grant this application Screen Recording and restart it",
@@ -698,6 +884,8 @@ pub mod ocr {
     };
     /// macOS: pixels CoreGraphics could not read back (D33).
     pub const NOT_READ_BACK: Reason = Reason { code: Code::Failed, message: "the picture could not be read back", entries: &["host-ocr-recognize"] };
+    /// macOS: a small region's content crop CoreGraphics could not draw for Vision.
+    pub const NOT_DRAWN: Reason = Reason { code: Code::Failed, message: "the picture could not be drawn for the recogniser", entries: &["host-ocr-recognize"] };
     /// macOS: a request Vision refused (D33).
     pub const VISION_REFUSED: Reason = Reason { code: Code::Refused, message: "the text recogniser refused the request: …", entries: &["host-ocr-recognize"] };
     pub const LANGUAGES_NOT_KNOWN: Reason = Reason { code: Code::NotReady, message: "the recognition languages are not known yet", entries: &["host-ocr-resolvelanguage"] };
@@ -776,10 +964,16 @@ pub static REASONS: &[&Reason] = &[
     &element::LOST,
     &element::THREAD_FAILED,
     &element::WRONG_THREAD,
+    &element::NO_INTERFACE,
     &element::TOO_MANY_NODES,
     &element::TOO_SLOW,
     &element::DUMP_CUT,
-    &element::NO_INTERFACE,
+    &element::NOT_ANSWERING,
+    &element::QUARANTINED,
+    &element::SEARCH_CUT,
+    &element::FOCUS_CUT,
+    &element::HOT_TOO_SLOW,
+    &element::MAC_DUMP_CUT,
     &element::MOVES_FOCUS,
     &element::NO_ELEMENT,
     &element::CANNOT_PRESS,
@@ -812,6 +1006,13 @@ pub static REASONS: &[&Reason] = &[
     &input::POST_NO_PROCESS,
     &input::NULL_KEY_EVENT,
     &input::SEND_NO_KEYCODE,
+    &input::NOT_TAKEN,
+    &input::LEFT_DOWN,
+    &input::NOT_PLACED,
+    &input::TEXT_NOT_TAKEN,
+    &input::NULL_MOUSE_SENT,
+    &input::NULL_SCROLL_EVENT,
+    &input::TEXT_CUT,
     &keys::HOOK_THREAD,
     &keys::HOOK_ENDED,
     &keys::HOOK_REFUSED,
@@ -907,6 +1108,7 @@ pub static REASONS: &[&Reason] = &[
     &ocr::LANGUAGE_UNAVAILABLE,
     &ocr::LANGUAGES_UNAVAILABLE,
     &ocr::NOT_READ_BACK,
+    &ocr::NOT_DRAWN,
     &ocr::VISION_REFUSED,
     &ocr::LANGUAGES_NOT_KNOWN,
     &speech::NO_ENGINE,
@@ -928,10 +1130,13 @@ pub static REASONS: &[&Reason] = &[
 
 /// Each group a Reason may name instead of an entry, and the entries that give every reason of
 /// it. The docs write a group's reasons once, at the group's anchor, and an entry's Errors table
-/// links there ("any of the capture errors"): a group row stands for all of them. Read by the
-/// tests and, as text, by tools/api-index.py; the host itself never needs it.
+/// links there ("any of the capture errors"): a group row stands for all of them, so every entry of
+/// a group gives every reason of it — a reason that only some give names those entries instead.
+/// The members are a list of strings or the name of a `const` list of this file. Read by the tests
+/// and, as text, by tools/api-index.py; the host itself never needs it.
 #[cfg_attr(not(test), allow(dead_code))]
 pub static GROUPS: &[(&str, &[&str])] = &[
+    ("question-errors", QUESTIONS),
     (
         "capture-errors",
         &[
@@ -945,7 +1150,6 @@ pub static GROUPS: &[(&str, &[&str])] = &[
             "host-screen-imagesearcheach",
             "host-screen-save",
             "host-screen-savemarked",
-            "host-ocr-recognize",
         ],
     ),
     (
@@ -989,9 +1193,6 @@ pub static GROUPS: &[(&str, &[&str])] = &[
         "snapshot-source-errors",
         &[
             "host-screen-profile",
-            "host-screen-cells",
-            "host-screen-matchcells",
-            "host-screen-template",
             "host-screen-imagesearch",
             "host-screen-imagesearchall",
             "host-screen-imagesearcheach",
@@ -1231,6 +1432,57 @@ mod tests {
             assert_eq!(literals(&text, "Reason", REASON_FIELDS), 0, "{} writes a Reason: it belongs in errors.rs", f.display());
             assert_eq!(literals(&text, "HostError", &["reason", "message", "detail"]), 0, "{} builds a HostError by hand", f.display());
         }
+    }
+
+    /// A group gives each of its reasons to every call it names, so a reason only some of them give
+    /// names those calls instead: the `screen-capture` thread's own two its calls only, desktop
+    /// duplication's 40 million pixels only the calls that do not hold their region to fewer
+    /// first, and a call given a snapshot the one reason
+    /// of its rule. And the reasons no path gives name nothing: a question not asked behind one
+    /// refused or gone (only a timeout leaves those behind it unasked), and Windows' crop of a read
+    /// out of its bounding box (windows.rs, `ocr_crop_tests`).
+    #[test]
+    fn a_group_gives_its_reasons_to_every_call_it_names() {
+        let members = |e: &'static str| GROUPS.iter().find(|(g, _)| *g == e).map_or_else(|| vec![e], |(_, m)| m.to_vec());
+        let of = |r: &Reason| -> HashSet<&'static str> { r.entries.iter().flat_map(|e| members(e)).collect() };
+        let set = |s: &[&'static str]| -> HashSet<&'static str> { s.iter().copied().collect() };
+        let thread = set(&["host-screen-snapshot", "host-screen-profile", "host-ocr-recognize", "host-screen-pixel", "host-screen-pixels"]);
+        assert_eq!(of(&screen::CAPTURE_PANICKED), thread);
+        assert_eq!(of(&screen::ROUND_FAILED), set(&["host-screen-snapshot", "host-screen-profile"]));
+        assert_eq!(of(&screen::CAPTURE_TOO_LARGE), set(&["host-screen-imagesearch", "host-screen-imagesearchall", "host-screen-imagesearcheach", "host-screen-save", "host-screen-savemarked"]));
+        assert!(of(&screen::CAPTURE_FAILED).contains("host-ocr-recognize"));
+        let inside = of(&screen::NOT_INSIDE);
+        assert_eq!(inside, set(&["host-screen-cells", "host-screen-matchcells", "host-screen-template", "snapshot-crop"]));
+        assert!(inside.is_disjoint(&of(&screen::NO_OVERLAP)), "a call gives the one its rule gives");
+        for never in [&element::NOT_ASKED_DENIED, &element::NOT_ASKED_GONE, &ocr::CROP_OUTSIDE, &element::WRONG_THREAD] {
+            assert!(never.entries.is_empty(), "{:?}", never.message);
+        }
+        // The questions: every one gives the Windows reasons through the group, and a Mac's to all but
+        // the press, which is not there yet. focusWithin asks a Windows program nothing, so only the
+        // host's own reach it there: what the program answers, or the automation object, never.
+        for program in [&element::TIMEOUT, &element::DENIED, &element::PROGRAM_GONE, &element::NO_INTERFACE] {
+            assert_eq!(of(program), set(QUESTIONS), "{:?}", program.message);
+        }
+        assert!(!QUESTIONS.contains(&"host-element-focuswithin"));
+        let mut asked = set(QUESTIONS);
+        asked.insert("host-element-focuswithin");
+        for host in [
+            &element::NOT_ASKED_TIMEOUT,
+            &element::REPLACED,
+            &element::NESTED,
+            &element::THREAD_NOT_STARTED,
+            &element::OWN_WINDOW,
+            &element::NO_SIGNAL,
+            &element::LOST,
+            &element::THREAD_FAILED,
+        ] {
+            assert_eq!(of(host), asked, "{:?}", host.message);
+        }
+        let mac = of(&element::NOT_ANSWERING);
+        let mut all_but_press = asked.clone();
+        all_but_press.remove("host-element-press");
+        assert_eq!(mac, all_but_press);
+        assert!(mac == of(&element::QUARANTINED));
     }
 
     /// An entry is a level-2 heading of an API page, as tools/api-index.py reads one: a Reason

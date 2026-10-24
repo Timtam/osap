@@ -31,7 +31,7 @@ end)
 
 Sending a shortcut is the call that catches authors out. On Windows the synthesised key inherits whatever the user is still physically holding, so a key sent from inside a hotkey callback arrives with that hotkey's modifiers attached — which is why the overlay waits for the modifiers to come up before it sends anything.
 
-**What each call answers** is under its **Returns**, and every error value it can give is in the table under its **Errors** ([Reading an Errors table](./errors.md#reading-an-errors-table)). Three calls answer one: [`click`](#host-input-click), [`send`](#host-input-send) and [`post`](#host-input-post), with `true` or `false, err`. The others answer nothing: what the host can tell went wrong in them — rare, and only on a Mac — is a line in the log, and on Windows the system's input says nothing back. A message is what the log shows, and it may change between versions; the code does not.
+**What each call answers** is under its **Returns**, and every error value it can give is in the table under its **Errors** ([Reading an Errors table](./errors.md#reading-an-errors-table)). Every call that acts answers `true` when its input was made and `false, err` when a part of it was not: what Windows did not take or a Mac would not make, and for [`click`](#host-input-click) and [`post`](#host-input-post) also a window that refuses. `cursorPos` and `held` answer what they read. `true` says the input was made, never what a program did with it — and on Windows input that the system drops on its way into a program of higher rights is counted as made, since Windows does not say so. **What a failure leaves pressed**: on a Mac nothing, since a call makes every event before it posts the first. On Windows a call whose events Windows stopped taking part-way sends the releases of what it pressed again, each on its own; only when Windows refuses that second time too does a key or a button stay down. A [`click`](#host-input-click)'s or a [`drag`](#host-input-drag)'s button left so answers `failed` with `the button is still down`, and the host holds it for the module as a [`mouseDown`](#host-input-mousedown)'s: [`held`](#host-input-held) lists it, and the host lets go of it when the module stops. A [posted click](#host-input-click-windows) refused after its press leaves the press posted without a release, which the error's `detail` says. A message is what the log shows, and it may change between versions; the code does not.
 
 **Two raises any call here can meet** are said once, here. A module that did not declare `input` ([below](#declare)) raises at its first reach for `host.input`, naming the capability. And any call raises `stopped by the host: …` when its module has run past its [limits](../module-runtime-and-lifecycle.md#limits). The rest each entry lists under **Raises**. **A coordinate** is read as a number — a string that reads as one is taken too — and cut toward zero, as above; one that is neither, NaN, or outside the 32-bit range raises.
 
@@ -61,7 +61,7 @@ print(p.x, p.y)
 
 ### Returns {#host-input-cursorpos-returns}
 
-- `{ x, y }` — a new table at every call, in screen coordinates: device pixels on Windows, points on a Mac. Where the system does not give the position, it is `{ x = 0, y = 0 }`: on Windows without a word, since `GetCursorPos`'s failure is not read; on a Mac with a line in the log that calls it a guess. The build for other systems always answers `0, 0`.
+- `{ x, y }` — a new table at every call, in screen coordinates: device pixels on Windows, points on a Mac. Where the system does not give the position — on Windows while another desktop has the input, the lock screen or a UAC prompt — it is `{ x = 0, y = 0 }`, with a line in the log that calls it a guess: once a session on Windows, each time on a Mac. The build for other systems always answers `0, 0`.
 
 ### Errors {#host-input-cursorpos-errors}
 
@@ -73,9 +73,9 @@ It never raises; anything passed to it is ignored.
 
 Moves the mouse cursor to the given screen coordinates.
 
-**Signature:** `host.input.move(x: number, y: number) -> nil`
+**Signature:** `host.input.move(x: number, y: number) -> (boolean, Error?)`
 
-Both arguments are integers. Returns `nil`.
+Both arguments are integers. Answers `true` once the pointer is there, `false, err` when the system did not put it there ([Returns](#host-input-move-returns)).
 
 ```luau
 host.input.move(960, 540)
@@ -93,11 +93,18 @@ host.input.mouseUp(x, y - 5)
 
 ### Returns {#host-input-move-returns}
 
-Nothing (`nil`), in every case.
+- `true` — the pointer was put there, or moved there as motion. The build for other systems answers `true` and moves nothing.
+- `false, err` — it was not; `err.code` is under Errors. The pointer stays where it was.
 
 ### Errors {#host-input-move-errors}
 
-None. It never answers an error value. On a Mac an event the system would not make is not sent, and the log says so — `CGEventCreateMouseEvent(type …) returned NULL at …; that mouse event was not sent` — with nothing else to tell the module. On Windows neither `SetCursorPos`'s answer nor `SendInput`'s is read, so what Windows blocks — input into a program of higher rights, say — is lost without a word.
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `failed` | return | Without a button held: `SetCursorPos` refused, with its error — another desktop has the input, the lock screen or a UAC prompt, say. | `Windows did not put the pointer there (error …)` | Windows |
+| `failed` | return | With a button held: `SendInput` did not take the motion, with its error. | `Windows did not take the input (error …)` | Windows |
+| `failed` | return | The system would not make the movement's event. Nothing was sent, and the log says where. | `CGEventCreateMouseEvent(type …) returned NULL; nothing was sent` | macOS |
 
 **Raises** for a mistake in the call: an `x` or `y` that is not a coordinate (see the top of the page).
 
@@ -155,7 +162,7 @@ end)
 ### Returns {#host-input-click-returns}
 
 - `true` — the click was made, through the system's input or posted. With `via = "noactivate"`: it was handed to the host's `window-style` thread, which makes it after the call returns, and only a callback hears what came of it. `true` never says that the program did anything with the click.
-- `false, err` — nothing was clicked; `err.code` is one of the codes of the first table below. Without `window` a click is never refused.
+- `false, err` — the click was not made; `err.code` is one of the codes of the first table below. Without `window` a click is never refused, though the system can fail to take it. Through the system's input, a press Windows took without its release has the release sent again on its own; refused that second time too, the button is still down, and it is held for the module from then on, as one pressed with [`mouseDown`](#host-input-mousedown) — for `"noactivate"` once the outcome has come back. A posted click refused at its release leaves its move and its press posted, and the press has no release: its `detail` says so, and the program may take the button for down until a release of the user's or of another click. A button held with `mouseDown` stays held when the click was not made, and with `"noactivate"` until the click is made, on the tick its outcome comes back.
 - With a callback: the call answers as above, at once, and `cb(true)` or `cb(false, err)` comes once, on a later tick. For `"input"` and `"post"`, and for a `"noactivate"` refused at the call, it is the answer the call gave; for a `"noactivate"` handed over, what came of it on the thread, with a code of either table. It does not come when the module is disabled, reloaded or removed first.
 
 ### Errors {#host-input-click-errors}
@@ -169,7 +176,7 @@ None of these is raised. **At the call**, refused before anything is clicked —
 | `outside` | both | `"post"`: the point is on the window's frame or title bar, not in its client area, where a real click is something else. | `the point is on the window's frame, not in its client area` | both |
 | `covered` | both | With `window`: another window is drawn over the point. On a Mac only a window known to be drawn there ([macOS](#host-input-click-macos)). | `something else is drawn over the point` | both |
 | `denied` | both | `"post"`: the window's program runs with higher rights (error 5). | `the window's program runs with higher rights` | Windows |
-| `failed` | both | `"post"`: Windows refused a message with another error, its number in the message. What was posted before it — the move, or the move and the press — stays posted. | `the window did not take the message (error …)` | Windows |
+| `failed` | both | `"post"`: Windows refused a message with another error, its number in the message. What was posted before it — the move, or the move and the press — stays posted, and the error's `detail` says which: a refused post is not tried again, since what refused it — a window gone, a full message queue — refuses a second one. | `the window did not take the message (error …)` | Windows |
 | `refused` | both | `"noactivate"`: the window's top-level window is a program's main window — nothing owns it, or it is marked for the taskbar — which never gets the style. | `the window belongs to a program's main window, which never gets the no-activate style: only a window another window owns — a plug-in's floating window — does` | Windows |
 | `cancelled` | both | `"noactivate"`: the application has begun to end. | `the application is ending` | Windows |
 | `denied` | both | `"post"`: this application has no Accessibility grant, without which the window server drops posted events without a word. Asked first. | `this application may not post events: Accessibility is not granted to it (System Settings > Privacy & Security > Accessibility)` | macOS |
@@ -179,6 +186,10 @@ None of these is raised. **At the call**, refused before anything is clicked —
 | `not_supported` | both | `"post"`: this macOS lacks `CGEventSetWindowLocation`, which gives a posted click its place in the window. Nothing was posted. | `this macOS cannot give a posted click its place in the window (CGEventSetWindowLocation is missing)` | macOS |
 | `failed` | both | `"post"`: the system would not make one of the three events. Nothing was posted. | `CGEventCreateMouseEvent(type …) returned NULL; nothing was posted` | macOS |
 | `not_supported` | both | `"noactivate"` on a Mac, as it is a Windows window style; `"post"` and `"noactivate"` on the build for other systems. | `not supported on this platform yet` | macOS, other |
+| `failed` | both | `"input"`: `SetCursorPos` refused, with its error — another desktop has the input, say. Nothing is clicked. | `Windows did not put the pointer there (error …)` | Windows |
+| `failed` | both | `"input"`: `SendInput` did not take the press and the release, with its error. A press it took has its release sent again on its own, which Windows took: nothing is left down. | `Windows did not take the input (error …)` | Windows |
+| `failed` | both | `"input"`: Windows took the press and refused its release, with the click and again on its own. The button is still down, and held for the module ([`held`](#host-input-held)), which the host lets go of when the module stops. | `Windows took the press but not its release (error …): the button is still down` | Windows |
+| `failed` | both | `"input"`: the system would not make one of the click's three events. Nothing was sent. | `CGEventCreateMouseEvent(type …) returned NULL; nothing was sent` | macOS |
 
 **After the hand-over** of a `"noactivate"` click, on the host's `window-style` thread: the call has answered `true`, so these reach the **callback only** — without one, the log alone. Nothing is clicked.
 
@@ -193,8 +204,11 @@ None of these is raised. **At the call**, refused before anything is clicked —
 | `failed` | callback | Windows refused the style with another error, and the window does not hold it. | `the window did not take the style (error …)` | Windows |
 | `refused` | callback | The style was set, and the window does not hold it: its program set it back, or never took it. | `the window did not keep the no-activate style` | Windows |
 | `failed` | callback | The host's thread for it could not be started, is gone, or failed in this click: a fault of the host's, with more in the log. | `the host could not start its window-style thread: …`, `the host's window-style thread is gone`, `the host's thread for it failed: …` | Windows |
+| `failed` | callback | The style was given, and `SetCursorPos` refused to put the pointer at the point: nothing is clicked. | `Windows did not put the pointer there (error …)` | Windows |
+| `failed` | callback | The style was given, and `SendInput` did not take the press and the release; a press it took has its release sent again on its own, which Windows took. | `Windows did not take the input (error …)` | Windows |
+| `failed` | callback | The style was given, and Windows took the press and refused its release, twice. The button is still down, and held for the module from this tick, or let go of at once when the module has stopped running meanwhile. | `Windows took the press but not its release (error …): the button is still down` | Windows |
 
-**Not answered**, and in the log only: on a Mac, a click through the system's input whose event the system would not make, as for [`move`](#host-input-move-errors). On Windows a click through the system's input that Windows blocks — into a program of higher rights — is lost without a word, since `SendInput`'s answer is not read; only a posted click is refused for it.
+**Not answered**: input Windows drops on its way into a program of higher rights. `SendInput` counts it as taken, so a click through the system's input into such a program answers `true`; only a posted click is refused for it, `denied`.
 
 **Raises** for a mistake in the call, each naming the option: an `x` or `y` that is not a coordinate (see the top of the page); `opts` that is neither a table nor `nil`; a `window` that is not a whole number; a `via` other than `"input"`, `"post"` and `"noactivate"`; a `via` other than `"input"` without a `window`; a `move` that is not a boolean, or `move = false` with a way other than `"post"`; a `cb` that is neither a function nor `nil`. A `button` that is not one of the three names is left, never raised for, and so is any other key of `opts`.
 
@@ -238,9 +252,9 @@ Refused as on Windows where Windows has the case — the window gone (no window 
 
 Presses the mouse button at `(x1, y1)`, drags to `(x2, y2)`, and releases — with real, paced movement in between.
 
-**Signature:** `host.input.drag(x1: number, y1: number, x2: number, y2: number, opts: { button?: "left" | "right" | "middle" }?) -> nil`
+**Signature:** `host.input.drag(x1: number, y1: number, x2: number, y2: number, opts: { button?: "left" | "right" | "middle" }?) -> (boolean, Error?)`
 
-All four coordinates are integers. `opts.button` behaves exactly as in `click` (defaults to left). Returns `nil`.
+All four coordinates are integers. `opts.button` behaves exactly as in `click` (defaults to left). Answers `true` once the drag is made, `false, err` when a part of it was not ([Returns](#host-input-drag-returns)).
 
 ```luau
 host.input.drag(100, 100, 400, 300)
@@ -253,11 +267,19 @@ If a control needs a sustained press before it will react at all, use `mouseDown
 
 ### Returns {#host-input-drag-returns}
 
-Nothing (`nil`), in every case.
+- `true` — the press, the movement and the release were made. The build for other systems answers `true` and makes nothing.
+- `false, err` — a part of it was not; `err.code` is under Errors. On a Mac nothing is sent at all. On Windows a press that was not taken presses nothing, and a step not taken ends the movement there and is followed by the release all the same, sent again on its own when Windows does not take it; refused that second time too, the button is still down, and the error says so: it is held for the module from then on, as one pressed with [`mouseDown`](#host-input-mousedown). A button held with `mouseDown` stays held when the drag answered `false`.
 
 ### Errors {#host-input-drag-errors}
 
-None. It never answers an error value. On a Mac an event the system would not make is not sent, and the log says so — `CGEventCreateMouseEvent(type …) returned NULL at …; that mouse event was not sent` — with nothing else to tell the module. On Windows neither `SetCursorPos`'s answer nor `SendInput`'s is read, so what Windows blocks — input into a program of higher rights, say — is lost without a word.
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `failed` | return | `SetCursorPos` refused to put the pointer at the start: nothing is pressed. | `Windows did not put the pointer there (error …)` | Windows |
+| `failed` | return | `SendInput` did not take the press, a step or the release, with its error — the first one it did not take. After a press it took, the release is sent all the same, and again on its own when Windows does not take it. | `Windows did not take the input (error …)` | Windows |
+| `failed` | return | Windows refused the release, with the drag and again on its own: the button is still down, and held for the module ([`held`](#host-input-held)), which the host lets go of when the module stops. Said before a step not taken. | `Windows took the press but not its release (error …): the button is still down` | Windows |
+| `failed` | return | The system would not make one of the drag's four events. Nothing was sent. | `CGEventCreateMouseEvent(type …) returned NULL; nothing was sent` | macOS |
 
 **Raises** for a mistake in the call: a coordinate that is not one (see the top of the page); `opts` that is neither a table nor `nil`. A `button` that is not one of the three names is left, never raised for.
 
@@ -273,9 +295,9 @@ A single `Dragged` event is posted between press and release — no interpolatio
 
 Moves to `(x, y)` and scrolls the mouse wheel by `notches`, which may be fractional.
 
-**Signature:** `host.input.scroll(x: number, y: number, notches: number) -> nil`
+**Signature:** `host.input.scroll(x: number, y: number, notches: number) -> (boolean, Error?)`
 
-`x` and `y` are integers. `notches` is in wheel notches and **need not be a whole number**; positive scrolls up, negative scrolls down. Returns `nil`.
+`x` and `y` are integers. `notches` is in wheel notches and **need not be a whole number**; positive scrolls up, negative scrolls down. Answers `true` once the wheel's event is made, `false, err` when it was not ([Returns](#host-input-scroll-returns)).
 
 A notch is 120 units to the operating system, and a control decides for itself what one is worth — ON:EAR's tone knob moves by five of its own units per notch, which is as fine as this could ask for while notches were whole. Half a notch is 60 units, and an application that scales its step by the delta moves by half as much. One that rounds to its own interval instead simply does not move and reports the same value back, which is the honest outcome and says to stop asking for halves.
 
@@ -286,11 +308,19 @@ host.input.scroll(960, 540, 0.5)  -- half a notch up, where the control is finer
 
 ### Returns {#host-input-scroll-returns}
 
-Nothing (`nil`), in every case.
+- `true` — the pointer was put at the point and the wheel turned there. It says nothing of how far the control moved. The build for other systems answers `true` and scrolls nothing.
+- `false, err` — it was not; `err.code` is under Errors. On Windows a pointer not put at the point scrolls nothing.
 
 ### Errors {#host-input-scroll-errors}
 
-None. It never answers an error value. On a Mac a scroll event the system would not make is not sent, and the log says so — `CGEventCreateScrollWheelEvent2 returned NULL; no scroll sent at …` — with nothing else to tell the module. On Windows `SendInput`'s answer is not read, so a scroll Windows blocks — into a program of higher rights — is lost without a word.
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `failed` | return | `SetCursorPos` refused to put the pointer at the point: nothing is scrolled. | `Windows did not put the pointer there (error …)` | Windows |
+| `failed` | return | `SendInput` did not take the wheel's event, with its error. | `Windows did not take the input (error …)` | Windows |
+| `failed` | return | The system would not make the movement to the point. Nothing was sent. | `CGEventCreateMouseEvent(type …) returned NULL; nothing was sent` | macOS |
+| `failed` | return | The system would not make the wheel's event. Nothing was sent, and the log says where. | `CGEventCreateScrollWheelEvent2 returned NULL; nothing was sent` | macOS |
 
 **Raises** for a mistake in the call: an `x` or `y` that is not a coordinate (see the top of the page); a `notches` that is neither a number nor a string that reads as one.
 
@@ -327,8 +357,8 @@ end
 
 ### Returns {#host-input-send-returns}
 
-- `true` — the key was sent, with its modifiers. It says nothing of what the program in front did with it. On Windows it is always `true`.
-- `false, err` — nothing was sent, or, when the key-up's event is the one the system would not make, the key-down only; `err.code` is one of the codes below.
+- `true` — the key was sent, with its modifiers. It says nothing of what the program in front did with it.
+- `false, err` — it was not; `err.code` is one of the codes below. On a Mac nothing is sent. On Windows a key or a modifier Windows took the press of has its release sent again on its own; only one Windows refuses that second time too stays down, and the log's line says how many of the releases went. The host holds no record of keys, so nothing lets go of such a key later.
 
 ### Errors {#host-input-send-errors}
 
@@ -337,10 +367,11 @@ None of these is raised.
 | code | arrives | when | message | platform |
 |---|---|---|---|---|
 | `not_supported` | return | No key of the current keyboard layout types the key, or macOS has no key code for it (`F21`–`F24`). The message names the spec, its virtual-key code and why. Nothing is sent. | `'…' (VK …): …` | macOS |
-| `failed` | return | The system would not make the key's event. Nothing is sent after it: when it is the key-up's, the key-down was sent already. | `CGEventCreateKeyboardEvent returned NULL for '…' (keycode …)` | macOS |
+| `failed` | return | The system would not make the key-down's or the key-up's event: both are made before either is sent, so nothing is sent. | `CGEventCreateKeyboardEvent returned NULL for '…' (keycode …)` | macOS |
+| `failed` | return | `SendInput` did not take every event — the modifiers' presses, the key's press and release, the modifiers' releases, in one call — with its error. The releases of what it took the press of are sent on their own. | `Windows did not take the input (error …)` | Windows |
 | `not_supported` | return | The build for other systems, which has no input. | `not supported on this platform yet` | other |
 
-**Not answered**: on Windows `SendInput`'s answer is not read, so a key Windows blocks — into a program of higher rights — is lost without a word.
+**Not answered**: a key Windows drops on its way into a program of higher rights, which `SendInput` counts as taken.
 
 **Raises** for a mistake in the call, naming the part: a `combo` that is not a string (a number is read as its digits: `5` is the key 5); an empty combo; an unknown modifier; an unknown key; a modifier tap (`"Ctrl tap"`), which is something to capture, not a key to send.
 
@@ -348,7 +379,7 @@ None of these is raised.
 
 Each role is the key of its name. The modifiers are synthesised as real key presses around the key — pressed in the order Ctrl, Alt, Shift, Win, whatever order the spec wrote them in, and released in reverse — and whatever the user is **physically holding is inherited**. Called from a hotkey callback while Alt is still down, `host.input.send("Escape")` arrives as Alt+Escape — which is why `host.keys.modifiersDown()` exists and why modules defer a synthesised key until the user has let go.
 
-Every key is sent by **virtual-key code only**: `SendInput` with scan code 0, without `KEYEVENTF_SCANCODE` and without the extended-key flag — so the arrows, Home, End, Page Up/Down and Delete go out as their non-extended forms. The keypad's keys go as their own virtual keys (`VK_NUMPAD0`–`VK_NUMPAD9`, `VK_ADD`, `VK_SUBTRACT`, `VK_MULTIPLY`, `VK_DIVIDE`, `VK_DECIMAL`), whatever Num Lock says; its Enter, which has no virtual key of its own, is the one key sent with the extended-key flag: `VK_RETURN` extended, as the keypad sends it, which is how a program tells it from the main Enter. Each press and release is its own `SendInput` call, back to back with no delay between them, so there is no hold time. Every event carries a mark in its `dwExtraInfo`, which the hook knows a sent key by. An application that reads scan codes, DirectInput or Raw Input — many games — may ignore the key, or read it as a different one.
+Every key is sent by **virtual-key code only**: `SendInput` with scan code 0, without `KEYEVENTF_SCANCODE` and without the extended-key flag — so the arrows, Home, End, Page Up/Down and Delete go out as their non-extended forms. The keypad's keys go as their own virtual keys (`VK_NUMPAD0`–`VK_NUMPAD9`, `VK_ADD`, `VK_SUBTRACT`, `VK_MULTIPLY`, `VK_DIVIDE`, `VK_DECIMAL`), whatever Num Lock says; its Enter, which has no virtual key of its own, is the one key sent with the extended-key flag: `VK_RETURN` extended, as the keypad sends it, which is how a program tells it from the main Enter. Every press and release goes in one `SendInput` call, which Windows does not interleave with other input, so there is no hold time. Every event carries a mark in its `dwExtraInfo`, which the hook knows a sent key by. An application that reads scan codes, DirectInput or Raw Input — many games — may ignore the key, or read it as a different one.
 
 ### macOS {#host-input-send-macos}
 
@@ -362,9 +393,9 @@ A letter is the key that types it under the current keyboard layout — with Com
 
 Types a Unicode string as synthetic keystrokes.
 
-**Signature:** `host.input.text(text: string) -> nil`
+**Signature:** `host.input.text(text: string) -> (boolean, Error?)`
 
-`text` is sent character-by-character as Unicode input, not as key presses. Returns `nil`.
+`text` is sent character-by-character as Unicode input, not as key presses. Answers `true` once every character is sent, `false, err` when the typing stopped before the end ([Returns](#host-input-text-returns)).
 
 Its characters carry no mark, as [`send`](#host-input-send)'s keys do: each is a key that reached the program, and ends a count of quick repeats ([`press.count`](./hotkey.md#quick-repeats-once-twice-three-times)) as a typed key does. A callback that has to count on sends its key with `send`.
 
@@ -377,17 +408,25 @@ host.input.send("Enter")   -- not "\n"
 
 ### Returns {#host-input-text-returns}
 
-Nothing (`nil`), in every case.
+- `true` — every character was sent. An empty `text` sends nothing and answers `true`; so does the build for other systems.
+- `false, err` — the typing stopped before the end: the characters before it were sent, and the message says how many. On a Mac a character's two events are made before either is sent, so none is half typed. On Windows a character counts as typed once Windows took its press — the press is what delivers it —, and its release is sent again on its own; a character outside the basic plane is two units, and one whose second unit Windows did not take arrives as its first half alone, which the count leaves out.
 
 ### Errors {#host-input-text-errors}
 
-None. It never answers an error value. On a Mac a key event the system would not make ends the typing there, and the log says how far it got — `CGEventCreateKeyboardEvent returned NULL while typing; N of M characters were sent`. On Windows `SendInput`'s answer is not read, so text Windows blocks — into a program of higher rights — is lost without a word.
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `failed` | return | `SendInput` took only part of the text's events — every character's press and release, in one call — with its error. | `Windows did not take the input after … of … characters (error …)` | Windows |
+| `failed` | return | The system would not make a character's event: the characters before it were sent. The log has the same line. | `CGEventCreateKeyboardEvent returned NULL while typing; … of … characters were sent` | macOS |
+
+**Not answered**: text Windows drops on its way into a program of higher rights, which `SendInput` counts as taken.
 
 **Raises** for a mistake in the call: a `text` that is not a string (a number is typed as its digits).
 
 ### Windows {#host-input-text-windows}
 
-Each UTF-16 unit is sent with `SendInput` as a `KEYEVENTF_UNICODE` event (virtual key `VK_PACKET`), down and up. An application that reads scan codes, DirectInput or Raw Input — many games — does not see it.
+Each UTF-16 unit is sent as a `KEYEVENTF_UNICODE` event (virtual key `VK_PACKET`), down and up, every unit of the text in one `SendInput`. An application that reads scan codes, DirectInput or Raw Input — many games — does not see it.
 
 ### macOS {#host-input-text-macos}
 
@@ -395,13 +434,13 @@ Each character is posted as a keyboard event pair with key code 0 and the charac
 
 ## host.input.mouseDown(x, y, opts?) {#host-input-mousedown}
 
-**Signature:** `host.input.mouseDown(x: number, y: number, opts: { button?: "left" | "right" | "middle" }?) -> nil`
+**Signature:** `host.input.mouseDown(x: number, y: number, opts: { button?: "left" | "right" | "middle" }?) -> (boolean, Error?)`
 
 Presses a mouse button at `(x, y)` and **leaves it down**. This is the half of a gesture that `click` and `drag` cannot express, because both of those press and release in the same breath: a control that only reveals itself while the button is *sustained* — the flyout of extra tools behind Melodyne's tool icon is the case that prompted this API, a gesture that later turned out to be undocumented and was replaced by a key — never appears for either of them. It is split into two calls rather than offered as a timed variant deliberately: holding, gliding and settling is the better part of a second, and a call that slept for that long would sleep in the event pump, stopping speech, hotkeys and detection with it. Split, the caller composes the gesture out of `host.timer` callbacks and the pump keeps running between the parts. There is no screen read here and nothing is asked about what is under the point, so the call itself is cheap.
 
 While your module runs, nothing releases the button for you. A held button belongs to the whole desktop, not to your module, so **every** continuation must end in a `mouseUp` — including the ones that give up because the overlay moved to another window mid-gesture. Pin the window handle before the press and re-check it in each callback, exactly as the timed sequences elsewhere in the runtime do; `opts.button` must match on the way up as it did on the way down. A `mouseUp`, a `drag` or a `click` through the system's input of the same button ends the hold; a posted click (`via = "post"`) does not.
 
-The host releases a button your module holds only when the module stops running: when it is disabled, reloaded, [stopped by the host](../module-runtime-and-lifecycle.md#limits) (a callback that ran too long or out of memory), when its load is rolled back, and when the application ends. It releases it where the pointer is at that moment, so the pointer does not move, and writes a line such as `[input] [com.tool.guard-probe] released the left mouse button it had pressed with host.input.mouseDown: it was stopped by the host`. The release is the desktop's, like the press: it lets go of the button for whatever program is under the pointer. A module that goes on after such a release — enabled again, with a gesture's end still to come — asks [`host.input.held()`](#host-input-held) which buttons are still its own before it lets go.
+The host releases a button your module holds only when the module stops running: when it is disabled, reloaded, [stopped by the host](../module-runtime-and-lifecycle.md#limits) (a callback that ran too long or out of memory), when its load is rolled back, and when the application ends. It releases it where the pointer is at that moment, so the pointer does not move, and writes a line such as `[input] [com.tool.guard-probe] released the left mouse button it had pressed with host.input.mouseDown: it was stopped by the host` — or, when the system did not take the release, `… could not release the left mouse button …` with why. The release is the desktop's, like the press: it lets go of the button for whatever program is under the pointer. A module that goes on after such a release — enabled again, with a gesture's end still to come — asks [`host.input.held()`](#host-input-held) which buttons are still its own before it lets go.
 
 ```luau
 -- Press the tool icon and hold it, so a flyout that only exists while the button is down has
@@ -423,11 +462,18 @@ end)
 
 ### Returns {#host-input-mousedown-returns}
 
-Nothing (`nil`), in every case: the button is noted as this module's held one even when its event was not sent ([`held`](#host-input-held)).
+- `true` — the button is down at the point, and noted as this module's held one ([`held`](#host-input-held)) until its `mouseUp`. The build for other systems answers `true`, presses nothing and notes the button all the same.
+- `false, err` — nothing was pressed, and nothing is noted: there is nothing to let go of. `err.code` is under Errors.
 
 ### Errors {#host-input-mousedown-errors}
 
-None. It never answers an error value. On a Mac an event the system would not make is not sent, and the log says so — `CGEventCreateMouseEvent(type …) returned NULL at …; that mouse event was not sent` — with nothing else to tell the module. On Windows neither `SetCursorPos`'s answer nor `SendInput`'s is read, so what Windows blocks — input into a program of higher rights, say — is lost without a word.
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `failed` | return | `SetCursorPos` refused to put the pointer at the point: nothing is pressed. | `Windows did not put the pointer there (error …)` | Windows |
+| `failed` | return | `SendInput` did not take the press, with its error. | `Windows did not take the input (error …)` | Windows |
+| `failed` | return | The system would not make the movement or the press: both are made before either is sent, so nothing was sent. | `CGEventCreateMouseEvent(type …) returned NULL; nothing was sent` | macOS |
 
 **Raises** for a mistake in the call: an `x` or `y` that is not a coordinate (see the top of the page); `opts` that is neither a table nor `nil`. A `button` that is not one of the three names is left, never raised for.
 
@@ -441,7 +487,7 @@ A movement event is posted before the press — or a **drag** event if a button 
 
 ## host.input.mouseUp(x, y, opts?) {#host-input-mouseup}
 
-**Signature:** `host.input.mouseUp(x: number, y: number, opts: { button?: "left" | "right" | "middle" }?) -> nil`
+**Signature:** `host.input.mouseUp(x: number, y: number, opts: { button?: "left" | "right" | "middle" }?) -> (boolean, Error?)`
 
 Releases a mouse button at `(x, y)`, ending a press begun with `mouseDown`. The coordinates are the point the gesture *ends* on, which is usually not the point it started on: a press-hold-glide-release picks its entry by where the release happens. `opts.button` selects which button is released, matched case-insensitively with `"right"` and `"middle"` recognized and anything else — including omitting `opts` — meaning **left**; release the button you actually pressed, since nothing pairs the two calls up for you.
 
@@ -470,17 +516,23 @@ glide()
 
 ### Returns {#host-input-mouseup-returns}
 
-Nothing (`nil`), in every case.
+- `true` — the pointer moved to the point and the button was released there; it is no longer in [`held`](#host-input-held). The build for other systems answers `true` and releases nothing.
+- `false, err` — a part of it was not made, and **the button may still be down**: it stays in `held()`, so the module can let go of it again, and the host lets go of it when the module stops, as of every button it holds. On Windows a movement not taken is followed by the release on its own, where the pointer is; on a Mac nothing was sent. `err.code` is under Errors.
 
 ### Errors {#host-input-mouseup-errors}
 
-None. It never answers an error value. On a Mac an event the system would not make is not sent, and the log says so — `CGEventCreateMouseEvent(type …) returned NULL at …; that mouse event was not sent` — with nothing else to tell the module. On Windows neither `SetCursorPos`'s answer nor `SendInput`'s is read, so what Windows blocks — input into a program of higher rights, say — is lost without a word.
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `failed` | return | `SendInput` did not take the movement or the release, with its error; a release not taken with the movement is sent again on its own. | `Windows did not take the input (error …)` | Windows |
+| `failed` | return | The system would not make the movement or the release: both are made before either is sent, so nothing was sent. | `CGEventCreateMouseEvent(type …) returned NULL; nothing was sent` | macOS |
 
 **Raises** for a mistake in the call: an `x` or `y` that is not a coordinate (see the top of the page); `opts` that is neither a table nor `nil`. A `button` that is not one of the three names is left, never raised for.
 
 ### Windows {#host-input-mouseup-windows}
 
-The motion event a `host.input.move` with a button held sends, to `(x, y)`, then the button-up event — no `SetCursorPos`. So press, glide and release are one drag on Windows as on a Mac: a control that followed the pointer through the moves gets the release where it is. The host's own release at a disable is the same, at the pointer's place: motion of no distance, then the up. Where the pace of the movement matters, `host.input.drag` paces it.
+The motion event a `host.input.move` with a button held sends, to `(x, y)`, then the button-up event, in one `SendInput` — no `SetCursorPos`. So press, glide and release are one drag on Windows as on a Mac: a control that followed the pointer through the moves gets the release where it is. The host's own release at a disable is the same, at the pointer's place: motion of no distance, then the up. Where the pace of the movement matters, `host.input.drag` paces it.
 
 ### macOS {#host-input-mouseup-macos}
 
@@ -490,7 +542,7 @@ The move before the release is posted as a **drag** event, because the backend s
 
 **Signature:** `host.input.held() -> { "left" | "right" | "middle" }`
 
-Lists the mouse buttons **this module** pressed with [`mouseDown`](#host-input-mousedown) and has not let go of. They come in the order it pressed them, `{}` for none — never `nil` — in a new table at every call. It is the host's own record: a `mouseUp` or a `drag` of a button takes it off, as does a `click` of it through the system's input (`via = "input"` or `"noactivate"`), though not a posted one (`via = "post"`), which leaves the button held; and the host empties it as it lets go of the module's buttons itself — when the module is disabled, reloaded, [stopped by the host](../module-runtime-and-lifecycle.md#limits) or its load is rolled back ([`mouseDown`](#host-input-mousedown)).
+Lists the mouse buttons **this module** pressed with [`mouseDown`](#host-input-mousedown) and has not let go of. They come in the order it pressed them, `{}` for none — never `nil` — in a new table at every call. It is the host's own record: a `mouseUp` or a `drag` of a button takes it off, as does a `click` of it through the system's input (`via = "input"`, or `"noactivate"` once the click is made, on the tick its outcome comes back), though not a posted one (`via = "post"`), which leaves the button held; a `click` or a `drag` whose release Windows refused twice puts its button on it, as the button is still down (`the button is still down`); and the host empties it as it lets go of the module's buttons itself — when the module is disabled, reloaded, [stopped by the host](../module-runtime-and-lifecycle.md#limits) or its load is rolled back ([`mouseDown`](#host-input-mousedown)).
 
 It is **not the desktop's state**, and asks the system nothing: a button the user holds is not in it, nor another module's, and a button the user let go of with the real mouse while the module held it stays in it until the module's `mouseUp`. It acts on nothing — no input is made, and [`host.inputEpoch()`](./timer.md#host-inputepoch) stays as it was. It takes no arguments and costs a look at a table, on the event loop.
 
@@ -560,7 +612,7 @@ end
 ### Returns {#host-input-post-returns}
 
 - `true` — the key-down and the key-up were posted. It says nothing of whether the program read them.
-- `false, err` — the key was not posted, or only its key-down was: a key-up the system refuses or cannot make comes after a key-down it took. `err.code` is one of the codes below.
+- `false, err` — the key was not posted, or on Windows only its key-down was: a key-up Windows refuses comes after a key-down it took, and is not tried again, since what refused it — a window gone, a full message queue — refuses a second one. On a Mac both events are made before either is posted, so nothing is posted. `err.code` is one of the codes below.
 
 The build for other systems answers `true` and posts nothing.
 
@@ -575,7 +627,7 @@ None of these is raised.
 | `failed` | return | Windows refused the post with another error, its number in the message. | `the window did not take the message (error …)` | Windows |
 | `not_supported` | return | The key has no key code here: `F21`–`F24`, or a letter no key of the current keyboard layout types. The message names the key, its virtual-key code and why. | `key '…' (VK …): …` | macOS |
 | `gone` | return | The handle is not one this backend issued — stale, or a number made up — so there is no process to post to. | `key_post: … is not a handle this backend issued, so there is no process to post '…' to` | macOS |
-| `failed` | return | The system would not make the key's event. | `CGEventCreateKeyboardEvent returned NULL for '…' (keycode …)` | macOS |
+| `failed` | return | The system would not make the key-down's or the key-up's event. Nothing is posted. | `CGEventCreateKeyboardEvent returned NULL for '…' (keycode …)` | macOS |
 
 **Raises** for a mistake in the call: an `id` that is neither a number nor a string that reads as one; a `key` that is not one of the key names, with `unknown key '…'` — a combination such as `"Ctrl+S"` included.
 

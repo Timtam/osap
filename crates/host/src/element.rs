@@ -97,6 +97,18 @@ fn not_asked(earlier: &HostError) -> HostError {
     HostError::with(r, format!("{earlier} to an earlier question, so this one was not asked"))
 }
 
+/// Whether the backend that asks on the event loop (macOS) put the question to the program: all but
+/// one it did not ask because the application did not answer a moment ago ([`reason::QUARANTINED`]),
+/// which is the host's answer, not the program's, and is not kept for the epoch ([`Due::program`]).
+fn asked(outcome: &ElementOutcome) -> bool {
+    let why = match outcome {
+        Err(f) => Some(&f.why),
+        Ok(ElementAnswer::Nodes(_, why)) => why.as_ref(),
+        Ok(_) => None,
+    };
+    why.is_none_or(|w| w.reason() != &reason::QUARANTINED)
+}
+
 /// Which questions the thread asks first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Lane {
@@ -498,7 +510,11 @@ impl Elements {
     pub(crate) fn ask(&self, backend: &dyn Backend, ask: ElementAsk, input_epoch: u64, guard: Option<&Arc<Guard>>) -> Waited {
         match backend.element_runner() {
             Some(runner) => self.ask_on(runner, ask, input_epoch, guard),
-            None => Waited { outcome: backend.element_ask(&ask), program: true, behind: Duration::ZERO },
+            None => {
+                let outcome = backend.element_ask(&ask);
+                let program = asked(&outcome);
+                Waited { outcome, program, behind: Duration::ZERO }
+            }
         }
     }
 
@@ -916,6 +932,24 @@ mod tests {
         assert_eq!(q.next(), Some((find(1, "Kontakt 8"), 10)));
         assert_eq!(tokens(&q.finish(false).0), vec![1, 2], "both askers, one answer");
         assert_eq!(q.next(), None);
+    }
+
+    /// Where the backend asks on the event loop (a Mac), a question it did not put to the program —
+    /// an application in the quarantine — is the host's answer and not kept for the epoch; every
+    /// other answer is the program's, a "not known" of its own included.
+    #[test]
+    fn a_question_the_backend_did_not_put_is_no_answer_of_the_programs() {
+        let failed = |r: &'static crate::errors::Reason| -> ElementOutcome { Err(ElementFailure { why: HostError::of(r), unanswered: false }) };
+        assert!(!asked(&failed(&reason::QUARANTINED)));
+        assert!(!asked(&Ok(ElementAnswer::Nodes(Vec::new(), Some(HostError::of(&reason::QUARANTINED))))));
+        for r in [&reason::NOT_ANSWERING, &reason::SEARCH_CUT, &reason::FOCUS_CUT, &reason::HOT_TOO_SLOW, &reason::TIMEOUT] {
+            assert!(asked(&failed(r)), "{:?}", r.message);
+        }
+        assert!(asked(&Ok(ElementAnswer::Found(false))));
+        assert!(asked(&Ok(ElementAnswer::Nodes(Vec::new(), Some(HostError::of(&reason::MAC_DUMP_CUT))))));
+        const SRC: &str = include_str!("element.rs");
+        let ask = &SRC[SRC.find("    pub(crate) fn ask(&self, backend: &dyn Backend").unwrap()..SRC.find("    /// [`Elements::ask`] on the thread of `runner`.").unwrap()];
+        assert!(ask.contains("let outcome = backend.element_ask(&ask);\n                let program = asked(&outcome);"));
     }
 
     /// The question being asked is shared only while nothing acted on the screen since it was put;

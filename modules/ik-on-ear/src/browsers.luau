@@ -99,7 +99,7 @@ local function chooser(spec)
     if there ~= paneWasThere then
       paneWasThere = there
       host.log.info(("[on-ear] %s: '%s' %s — %s")
-        :format(spec.name, spec.pane, there and "is on screen" or "is gone", why))
+        :format(spec.name, spec.pane, there and "is on screen" or "is gone", tostring(why)))
     end
     return there
   end)
