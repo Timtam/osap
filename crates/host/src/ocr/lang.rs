@@ -18,6 +18,9 @@
 //! `crates/macos-check`.
 
 use fluent_langneg::{negotiate_languages, LanguageIdentifier, NegotiationStrategy};
+use icu_locid_transform::LocaleExpander;
+use icu_properties::props::Script;
+use icu_properties::CodePointMapData;
 
 use crate::errors::{ocr, HostError};
 
@@ -194,9 +197,51 @@ pub fn fast_reads(tag: &str, langs: &Languages) -> bool {
     langs.fast.iter().any(|f| f == tag)
 }
 
+/// Whether `tag` names a language written in the Latin script: its likely script, by CLDR's likely
+/// subtags (`"en"` is `"en-Latn-US"`, `"sr"` is `"sr-Cyrl-RS"`), or the script it names (`"sr-Latn"`).
+/// A tag that does not parse is none. What a read's look-alike letters are judged against (the
+/// second Mac test of 2026-10-24: Vision, asked for en-US, read "Macтo 2" and "Масrо 3").
+// Vision's reads on a Mac ask it (macos/ocr.rs); elsewhere only the tests do.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn latin_script(tag: &str) -> bool {
+    let Ok(mut id) = parse(tag) else { return false };
+    LocaleExpander::new().maximize(&mut id);
+    id.script.is_some_and(|s| s.as_str() == "Latn")
+}
+
+/// Whether `s` holds a letter of another script than Latin: one whose Unicode Script is neither
+/// Latin nor Common (digits, punctuation, symbols) nor Inherited (combining marks). The Cyrillic
+/// "т", "а" and "о" of a misread "Macro" are; "é", "ß" and "2" are not.
+// Vision's reads on a Mac ask it (macos/ocr.rs); elsewhere only the tests do.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn non_latin_letter(s: &str) -> bool {
+    let scripts = CodePointMapData::<Script>::new();
+    s.chars().any(|c| {
+        c.is_alphabetic() && !matches!(scripts.get(c), Script::Latin | Script::Common | Script::Inherited)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scripts of the second Mac test's misreads: Latin languages by their likely script, and the
+    /// look-alike letters Vision put into English names.
+    #[test]
+    fn latin_languages_and_letters_of_other_scripts_are_told() {
+        for tag in ["en", "en-US", "de-DE", "fr", "pt-BR", "vi", "tr", "sr-Latn", "pl"] {
+            assert!(latin_script(tag), "{tag}");
+        }
+        for tag in ["ru", "uk-UA", "zh-Hans", "ja", "ko", "ar", "el", "he", "sr", "sr-Cyrl", "th", "not a tag"] {
+            assert!(!latin_script(tag), "{tag}");
+        }
+        for s in ["Macтo 2", "Масrо 3", "MаcrоBtn 2", "Ωmega"] {
+            assert!(non_latin_letter(s), "{s}");
+        }
+        for s in ["Macro 2", "Größe", "café", "x 1/16 -3.5 dB", "naïve", ""] {
+            assert!(!non_latin_letter(s), "{s}");
+        }
+    }
 
     fn langs(available: &[&str], preferred: &[&str]) -> Languages {
         Languages {

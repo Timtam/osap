@@ -131,3 +131,69 @@ pub const ROUND_SLOW: Duration = Duration::from_millis(50);
 pub fn is_small(w: i32, h: i32) -> bool {
     w <= SMALL_W && h <= SMALL_H
 }
+
+/// The largest processed image, in pixels, a read enlarges a region to: a region handed on as
+/// captured (larger than [`SMALL_W`] x [`SMALL_H`]) is enlarged only while the result stays
+/// within it, and a small region's upscale is held to it. Four million is a 2000x2000 picture,
+/// about what Vision and `Windows.Media.Ocr` read in the time a small read's ladder allows.
+pub const ENLARGE_BUDGET: usize = 4_000_000;
+
+/// A line of ink shorter than this, in captured pixels, is small for a recogniser: what a region
+/// handed on as captured is enlarged for, besides a capture at one pixel a point.
+pub const SMALL_LINE_PX: usize = 16;
+
+/// A display scale under this is one pixel a point: a Mac's backing scale 1, a Windows monitor at
+/// 100 % (an effective DPI under 108). Windows' 125 % is not, nor anything above it.
+pub const ONE_PIXEL_A_POINT_UNDER: f64 = 1.125;
+
+/// The integer factor a region `w` x `h` pixels handed on as captured is enlarged by, without a
+/// crop: 3, or 2 where 3 would pass [`ENLARGE_BUDGET`], when the capture is at one pixel a point
+/// (`scale` under [`ONE_PIXEL_A_POINT_UNDER`]) or its tallest line of ink is shorter than
+/// [`SMALL_LINE_PX`]; 1 otherwise, and where even 2 would pass the budget. The second Mac test of
+/// VPS Avenger (2026-10-24) read a 344x268 area at backing scale 1 as captured — its names about 5
+/// pixels tall, the "Factory" label in the report's `Avenger 80 closed.png` (6 in `Avenger 100
+/// closed.png`) — into nine garbage words, seven times over. Three times 5 is still a line under
+/// [`SMALL_LINE_PX`]: such a grid is read whole only as well as that allows, and row by row better.
+pub fn pass_through_up(w: usize, h: usize, scale: f64, tallest_line: Option<usize>) -> usize {
+    let small_text = scale < ONE_PIXEL_A_POINT_UNDER || tallest_line.is_some_and(|l| l > 0 && l < SMALL_LINE_PX);
+    if !small_text {
+        return 1;
+    }
+    within_budget(w, h, 3)
+}
+
+/// `up`, or the largest factor below it that keeps `w` x `h` pixels within [`ENLARGE_BUDGET`] once
+/// enlarged by it; at least 1.
+pub fn within_budget(w: usize, h: usize, up: usize) -> usize {
+    let area = w.saturating_mul(h).max(1);
+    let mut f = up.max(1);
+    while f > 1 && area.saturating_mul(f * f) > ENLARGE_BUDGET {
+        f -= 1;
+    }
+    f
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tester's 344x268 area at backing scale 1: three times; on a Windows monitor at 125 %, as
+    /// captured. The same at 2x with lines of 20 pixels: as captured. A whole 1398x1021 window at 1x: past the budget even twice, so as
+    /// captured. Small lines on a Retina capture: enlarged too.
+    #[test]
+    fn a_region_handed_on_as_captured_is_enlarged_at_1x_or_for_small_lines_within_the_budget() {
+        assert_eq!(pass_through_up(344, 268, 1.0, None), 3);
+        assert_eq!(pass_through_up(688, 536, 2.0, Some(20)), 1);
+        assert_eq!(pass_through_up(688, 536, 2.0, None), 1);
+        assert_eq!(pass_through_up(688, 536, 2.0, Some(12)), 3, "small lines on a Retina capture");
+        assert_eq!(pass_through_up(900, 700, 2.0, Some(12)), 2, "900x700 three times is past the budget");
+        assert_eq!(pass_through_up(1398, 1021, 1.0, None), 1, "a whole window");
+        assert_eq!(pass_through_up(900, 700, 1.0, None), 2);
+        assert_eq!(pass_through_up(344, 268, 1.25, None), 1, "Windows at 125 %");
+        assert_eq!(pass_through_up(344, 268, 1.1, None), 3, "Windows at 110 %, 105.6 DPI");
+        assert_eq!(within_budget(100, 100, 6), 6);
+        assert_eq!(within_budget(800, 400, 6), 3);
+        assert_eq!(within_budget(400, 200, 10), 7, "the largest small region");
+        assert_eq!(within_budget(4000, 4000, 3), 1);
+    }
+}

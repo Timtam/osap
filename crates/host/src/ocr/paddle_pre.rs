@@ -264,6 +264,38 @@ pub fn ink_lines(rows: &[bool], min_gap: usize) -> usize {
     lines
 }
 
+/// How tall the tallest line of ink is, in rows: the lines are those [`ink_lines`] counts — runs of
+/// ink rows parted by at least `min_gap` rows without ink — each from its first ink row to its last.
+/// 0 with no ink. What a small region's upscale is taken from (the second Mac test, 2026-10-24): the
+/// whole ink block of a region of three lines came to 64 pixels at 1x, and so to no enlargement at
+/// all, with every line 10 pixels tall.
+// Only a Mac's content crop measures lines; elsewhere only the tests use it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn tallest_line(rows: &[bool], min_gap: usize) -> usize {
+    let min_gap = min_gap.max(1);
+    let (mut tallest, mut start, mut last, mut gap) = (0usize, None::<usize>, 0usize, 0usize);
+    for (i, &ink) in rows.iter().enumerate() {
+        if ink {
+            match start {
+                Some(_) if gap < min_gap => {}
+                Some(s) => {
+                    tallest = tallest.max(last - s + 1);
+                    start = Some(i);
+                }
+                None => start = Some(i),
+            }
+            last = i;
+            gap = 0;
+        } else if start.is_some() {
+            gap += 1;
+        }
+    }
+    if let Some(s) = start {
+        tallest = tallest.max(last - s + 1);
+    }
+    tallest
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,5 +529,21 @@ mod tests {
         assert_eq!(ink_lines(&rows("#####...#"), 4), 1);
         assert_eq!(ink_lines(&rows("##.##.##..##"), 0), 4, "a gap of 0 counts as 1");
         assert_eq!(ink_lines(&rows("##...##...##"), 3), 3);
+    }
+
+    /// The tallest line, each from its first ink row to its last, lines parted as ink_lines parts
+    /// them: three lines of 10 rows are 10, not their block of 36.
+    #[test]
+    fn the_tallest_line_is_one_line_not_the_block() {
+        let rows = |s: &str| s.chars().map(|c| c == '#').collect::<Vec<bool>>();
+        assert_eq!(tallest_line(&rows(""), 3), 0);
+        assert_eq!(tallest_line(&rows("...."), 3), 0);
+        assert_eq!(tallest_line(&rows("..####.."), 3), 4);
+        let three = format!("{0}...{0}...{0}", "#".repeat(10));
+        assert_eq!(tallest_line(&rows(&three), 3), 10);
+        assert_eq!(tallest_line(&rows(&three), 4), 36, "a gap under the margin joins them");
+        // The dot of an i two rows above its stem stays with it.
+        assert_eq!(tallest_line(&rows("#..#####...##"), 3), 8);
+        assert_eq!(tallest_line(&rows("##...######"), 3), 6);
     }
 }

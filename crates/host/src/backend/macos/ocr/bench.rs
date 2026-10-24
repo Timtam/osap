@@ -73,7 +73,7 @@ use objc2_vision::VNRecognizeTextRequest;
 use image::RgbImage;
 
 use super::{
-    cgimage_to_rgba, content_margin, intel_mac, new_request, paddle_crop, perform, picture_from_png, qos_word,
+    cgimage_to_rgba, content_margin, intel_mac, new_request, paddle_crop, pass_through, perform, picture_from_png, qos_word,
     recognize_noted, render, run_vision, supported_revisions, thread_qos, upscale_toward, warm_up_page, Ladder, Plan,
     ACCURATE, FAST, LADDER_BUDGET, REVISION_OVERRIDE, TARGET_CONTENT_PX,
 };
@@ -178,13 +178,17 @@ fn decode(f: &'static Fixture) -> Result<Handed, String> {
 
 /// What a pass over `native` is handed when the ink is enlarged toward `target` pixels: for a small
 /// region the content crop as `recognize_captured` makes it (`content_margin`, `Plan::content`,
-/// `render`), for a larger one the picture itself.
+/// `render`), for a larger one the picture itself, or that enlarged where its text is small, as a
+/// read hands it (`pass_through`).
 fn hand(native: &Handed, f: &Fixture, target: usize) -> Result<Handed, String> {
     if f.w_pt > SMALL_W || f.h_pt > SMALL_H {
         if target != TARGET_CONTENT_PX {
-            return Err("a region this large is handed to Vision as it is, never enlarged".to_string());
+            return Err("a region this large is handed to Vision as a read hands it, never enlarged toward a target".to_string());
         }
-        return Ok(Handed { image: native.image.clone(), _buf: None });
+        return Ok(match pass_through(&native.image, f.scale as f64).1 {
+            Some((image, buf)) => Handed { image, _buf: Some(buf) },
+            None => Handed { image: native.image.clone(), _buf: None },
+        });
     }
     let (rgba, w, h) =
         cgimage_to_rgba(&native.image).ok_or_else(|| "its pixels could not be read back".to_string())?;
@@ -193,7 +197,7 @@ fn hand(native: &Handed, f: &Fixture, target: usize) -> Result<Handed, String> {
         return Err("the blank guard finds nothing to read in it".to_string());
     }
     if target != TARGET_CONTENT_PX {
-        plan.up = upscale_toward(target, plan.ink_h);
+        plan.up = upscale_toward(target, plan.line_h);
     }
     let (image, buf) = render(&native.image, &plan).ok_or_else(|| "it could not be rendered".to_string())?;
     Ok(Handed { image, _buf: Some(buf) })
@@ -288,7 +292,7 @@ fn timed(
     objc2::rc::autoreleasepool(|_| {
         let t = Instant::now();
         let request = make()?;
-        let r = perform(image, &request, &|_| (0, 0, 1, 1));
+        let r = perform(image, &request, &|_| (0, 0, 1, 1), false);
         let ms = ms_since(t);
         Ok(match r {
             Ok((text, _, _)) => (Sample { ms, text: Some(text), passes: 1, skipped: false }, None),
@@ -807,7 +811,7 @@ fn probe_child(v: usize) -> i32 {
         },
         tweak => match request_for(tweak) {
             Err(why) => Probe::No(why),
-            Ok((request, pinned)) => match perform(&pic.prod.image, &request, &|_| (0, 0, 1, 1)) {
+            Ok((request, pinned)) => match perform(&pic.prod.image, &request, &|_| (0, 0, 1, 1), false) {
                 Ok(_) => Probe::Ran { pinned },
                 Err(why) => Probe::No(format!("Vision refused it: {why}")),
             },

@@ -67,6 +67,12 @@ same-file = "1.0.6"
 # platform's engine offers, with CLDR's likely subtags so "de" finds "de-DE" and "zh-TW" finds
 # "zh-Hant". Borrowed by crates/macos-check through that file, so it is declared there too.
 fluent-langneg = { version = "0.14.2", features = ["cldr"] }
+# Whether a recognition language is written in the Latin script (ocr/lang.rs, `latin_script`):
+# CLDR's likely subtags, which `fluent-langneg`'s "cldr" brings already, at the version in the lock.
+icu_locid_transform = "1.5"
+# Which script a letter of a reading belongs to (ocr/lang.rs, `non_latin_letter`): Unicode's Script
+# property, already in the lock at this version under `url`'s IDNA.
+icu_properties = "2.2"
 # `host.gui.webview` (webview.rs): the Content-Type a page's file is served with, from its
 # extension. WebView2 refuses a module script served with a type that is not JavaScript's. Pure,
 # so crates/macos-check borrows webview.rs and declares it too.

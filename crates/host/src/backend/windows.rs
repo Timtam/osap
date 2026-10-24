@@ -898,14 +898,29 @@ fn capture_for_read(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Ocr
 /// starts no further region, and so no further neural recognition either.
 fn ocr_recognise(
     shot: &OcrShot,
-    _regions: &[(i32, i32, i32, i32)],
+    regions: &[(i32, i32, i32, i32)],
     ctx: &Recognise,
 ) -> Vec<Result<OcrText, HostError>> {
     crate::loop_guard::off_loop("the recognise stage of a text read");
-    ctx.each(shot.iter(), |piece| match piece {
-        Ok(img) => recognize_image(img, ctx.lang),
+    // The display scale under each region, for a region handed on as captured
+    // (`policy::pass_through_up`): the effective DPI of the monitor its middle lies on, over 96.
+    // One enumeration of the monitors for the call — local calls, microseconds.
+    let monitors = monitors_with_dpi();
+    ctx.each(shot.iter().zip(regions.iter()), |(piece, r)| match piece {
+        Ok(img) => recognize_image(img, ctx.lang, region_scale(&monitors, *r)),
         Err(e) => Err(e.clone()),
     })
+}
+
+/// The display scale under region `(x, y, w, h)`, in physical pixels: the effective DPI of the
+/// monitor its middle lies on, over 96. `None` off every monitor, or where Windows would not say.
+fn region_scale(monitors: &[MonitorDpi], (x, y, w, h): (i32, i32, i32, i32)) -> Option<f64> {
+    let (cx, cy) = (x + w / 2, y + h / 2);
+    monitors
+        .iter()
+        .find(|((l, t, r, b), _)| cx >= *l && cx < *r && cy >= *t && cy < *b)
+        .and_then(|(_, dpi)| *dpi)
+        .map(|dpi| dpi as f64 / 96.0)
 }
 
 /// The OCR languages installed on this machine, and the user's own list, as Windows spells them.
@@ -4799,7 +4814,9 @@ fn crop(src: &CapturedImage, x: i32, y: i32, w: i32, h: i32) -> Option<CapturedI
 /// Split out of `ocr` so that a caller with SEVERAL regions can pay for one capture instead of
 /// one per region — measured at ~17 ms against 4-6 ms for the recognition itself, so the
 /// capture was two thirds of a two-region read.
-fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, HostError> {
+/// `scale`: the display scale under the region, for one handed on as captured (`ocr_recognise`);
+/// `None` where it is not known, and such a region is read as captured.
+fn recognize_image(cap: &CapturedImage, lang: Option<&str>, scale: Option<f64>) -> Result<OcrText, HostError> {
         crate::loop_guard::off_loop("Windows.Media.Ocr");
         let debug = crate::appcfg::ocr_debug();
         if debug {
@@ -4827,7 +4844,27 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, H
         let paddle = small.then(|| super::paddle_ocr::ask(cap)).flatten();
 
         let t_tight = std::time::Instant::now();
-        let tight = if small { Some(tighten(cap)) } else { None };
+        // A region handed on as captured is not cropped, but ENLARGED where its text is small: at
+        // a display scale of 100 % — one pixel a point — three times, or two, within the budget
+        // (`policy::pass_through_up`, as a Mac does at backing scale 1). Mapped back as a crop's
+        // words are, from an offset of nothing. It costs: measured 2026-10-24 on an i7-8700K, a
+        // release build, 110 ms against 22 for a 344x268 region, 261 against 58 for a 900x700 one,
+        // the Lanczos enlargement 41 and 146 ms of it — where the 900x700 one read 73 words, not 31.
+        let enlarged = (!small)
+            .then(|| scale.map(|k| crate::ocr::policy::pass_through_up(cap.w as usize, cap.h as usize, k, None)))
+            .flatten()
+            .filter(|&f| f > 1)
+            .map(|f| Tightened {
+                img: upscale(cap, f as u32),
+                off_x: 0,
+                off_y: 0,
+                scale: f as u32,
+                pad: OCR_PAD,
+                cw: cap.w,
+                ch: cap.h,
+                blank: false,
+            });
+        let tight = if small { Some(tighten(cap)) } else { enlarged };
         let tight_ms = t_tight.elapsed().as_secs_f64() * 1000.0;
         let img: &CapturedImage = tight.as_ref().map(|t| &t.img).unwrap_or(cap);
         if debug {
@@ -4933,7 +4970,7 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, H
 /// [`recognize_image`] with no language — the system recogniser, the neural one beside it, the
 /// blank guard. Crate-internal; the bench is its only caller.
 pub(super) fn bench_system_read(cap: &CapturedImage) -> Result<OcrText, String> {
-    recognize_image(cap, None).map_err(|e| e.to_string())
+    recognize_image(cap, None, None).map_err(|e| e.to_string())
 }
 
 /// Every Windows function that photographs for a read or recognises asks the loop guard first,
@@ -4974,7 +5011,7 @@ mod loop_guard_tests {
                 let frame = move || Frame::from_image(Rect::new(0, 0, 4, 4), cap(), std::time::Instant::now(), FrameVia::Gdi, None);
                 let ctx = Recognise { lang: None, fast_ok: false, preempt: None, stop: None, region_done: None };
                 let calls: Vec<Call<'static>> = vec![
-                    ("recognize_image", Box::new(move || drop(recognize_image(&cap(), None)))),
+                    ("recognize_image", Box::new(move || drop(recognize_image(&cap(), None, None)))),
                     ("ocr_capture", Box::new(|| drop(ocr_capture(&[(0, 0, 4, 4)], CaptureSource::Standard)))),
                     ("ocr_recognise", Box::new(move || drop(ocr_recognise(&vec![Ok(cap())], &[(0, 0, 4, 4)], &ctx)))),
                     ("ocr_shot_of", Box::new(move || {

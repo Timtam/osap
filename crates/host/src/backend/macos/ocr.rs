@@ -153,7 +153,7 @@ const LADDER_BUDGET: std::time::Duration = std::time::Duration::from_millis(250)
 /// treatment is observable from Lua (it changes which of two adjacent read-outs is legible),
 /// so the two platforms have to draw the line in the same place — one constant, in
 /// `ocr/policy.rs`, for both.
-use crate::ocr::policy::{SMALL_H, SMALL_W};
+use crate::ocr::policy::{pass_through_up, within_budget, ONE_PIXEL_A_POINT_UNDER, SMALL_H, SMALL_W};
 
 /// The slack the content crop leaves round the ink, in capture pixels. A physical distance, not
 /// a pixel count: three pixels of slack round the ink at 1x is one and a half at 2x, and the
@@ -231,24 +231,50 @@ fn recognize_noted(
     // back — made no pass, and says nothing about its cost.
     let idle = idle_now();
     journal_open();
+    // A read that ended early leaves none of its look-alike lines to the next.
+    LOOK_ALIKES.with(|l| l.borrow_mut().clear());
 
     let small = w <= SMALL_W && h <= SMALL_H;
     let (result, climbed, merged) = if !small {
         // A whole window, or something like it. Multi-word layout and speed matter more
         // than the last per-glyph pixel, and cropping to content would be meaningless.
-        let plan = Plan::identity(nw, nh);
+        //
+        // Not cropped, but ENLARGED where the text in it is small (`policy::pass_through_up`): at
+        // one pixel a point, or with its tallest line of ink under 16 pixels — what the second Mac
+        // test met, a 344x268 area of names about 5 pixels tall (`Avenger 80 closed.png`) read as
+        // captured into garbage. Three times, or two, while the picture stays within the budget; a
+        // whole window seldom does.
+        let (plan, enlarged, line) = pass_through(native, scale);
+        crate::logging::trace("macos", || {
+            format!(
+                "ocr: {w}x{h} pt handed on as captured, {nw}x{nh} px at scale {scale:.2}{}",
+                if plan.up > 1 {
+                    format!(", enlarged {}x (tallest line {})", plan.up, line.map_or("not measured".into(), |l| format!("{l} px")))
+                } else {
+                    String::new()
+                }
+            )
+        });
         if debug {
-            // Vision is handed the capture itself here, so the raw image and the processed
-            // one are the same file.
-            if let Some((rgba, dw, dh)) = cgimage_to_rgba(native) {
-                debug_dump("ocr-debug.bmp", &rgba, dw, dh);
+            // Vision is handed the capture itself here, or that enlarged, so the raw image and the
+            // processed one are the same file.
+            match &enlarged {
+                Some((_, buf)) => {
+                    let (pw, ph) = plan.out_size();
+                    debug_dump("ocr-debug.bmp", buf, pw, ph);
+                }
+                None => {
+                    if let Some((rgba, dw, dh)) = cgimage_to_rgba(native) {
+                        debug_dump("ocr-debug.bmp", &rgba, dw, dh);
+                    }
+                }
             }
         }
-        (
-            run_vision(native, lang, ACCURATE, Stage::AsCaptured, &|bb| map_box(&plan, scale, bb)),
-            Climbed::default(),
-            None,
-        )
+        let image: &CGImage = enlarged.as_ref().map_or(native, |(img, _)| img);
+        let read = run_vision(image, lang, ACCURATE, Stage::AsCaptured, &|bb| map_box(&plan, scale, bb));
+        // The buffer behind the enlarged image, kept until Vision has read it.
+        drop(enlarged);
+        (read, Climbed::default(), None)
     } else {
         let Some((rgba, px_w, px_h)) = cgimage_to_rgba(native) else {
             warn_once(
@@ -378,6 +404,7 @@ fn recognize_noted(
     }
     note_cost(ms, w, h, idle, passes.iter().any(|p| p.beside), answered);
     note_slow(ms, (x, y, w, h), capture, &passes, answered);
+    look_alike_line((x, y, w, h));
     if let Some((neural, rgba, px_w, px_h)) = merged {
         // Vision's ladder read nothing where the recogniser answered alone.
         let ladder_text = if by_paddle { "" } else { text.as_str() };
@@ -843,7 +870,7 @@ impl Rungs<'_, '_> {
                     crate::logging::trace("macos", || {
                         "ocr: tightened pass read nothing, trying the whole region".to_string()
                     });
-                    let whole = Plan::whole_with_ink(self.rgba, self.px_w, self.px_h, plan.ink_h);
+                    let whole = Plan::whole_with_ink(self.rgba, self.px_w, self.px_h, plan.ink_h, plan.line_h);
                     render(self.native, &whole).and_then(|(img, buf)| {
                         if self.debug {
                             let (pw, ph) = whole.out_size();
@@ -1198,6 +1225,7 @@ pub fn recognise_shot(
                         up: 1,
                         pad: 0,
                         ink_h: 1,
+                        line_h: 1,
                         ink_w: 1,
                         lines: 0,
                         bg: [0.0; 3],
@@ -1697,9 +1725,10 @@ fn bigger_then_faster(
         y0: tight.y0,
         cw: tight.cw,
         ch: tight.ch,
-        up: (tight.up * 2).min(10),
+        up: within_budget(tight.cw, tight.ch, (tight.up * 2).min(10)),
         pad: OCR_PAD * 2,
         ink_h: tight.ink_h,
+        line_h: tight.line_h,
         ink_w: tight.ink_w,
         lines: tight.lines,
         bg: tight.bg,
@@ -1768,7 +1797,7 @@ fn run_vision(
     let paddle_then = paddle_ocr::running();
     let began = Instant::now();
     let request = new_request(lang, level);
-    let out = match perform(image, &request, map) {
+    let out = match perform(image, &request, map, lang.is_some_and(crate::ocr::lang::latin_script)) {
         Ok(read) => Some(read),
         Err(why) => {
             warn_once("ocr-perform", &format!("ocr: Vision refused the request — {why}"));
@@ -1846,10 +1875,16 @@ thread_local! {
 
 /// One pass of `request` over `image`, and its answer; `Err` carries Vision's reason for
 /// refusing it, which `run_vision` logs.
+/// `latin`: the language asked for is written in the Latin script, so a line whose best candidate
+/// holds a letter of another script — Vision, asked for en-US, read "Macтo 2" and "Масrо 3" in the
+/// second Mac test (2026-10-24) — takes the first of its next candidates that holds none
+/// (`LOOK_ALIKE_CANDIDATES`), and keeps its best where none of them does. Either is noted for the
+/// read's line (`LOOK_ALIKES`).
 fn perform(
     image: &CGImage,
     request: &VNRecognizeTextRequest,
     map: &dyn Fn(CGRect) -> (i32, i32, i32, i32),
+    latin: bool,
 ) -> Result<VisionRead, String> {
     let options: Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::new();
     let handler = unsafe {
@@ -1870,11 +1905,24 @@ fn perform(
     // No results at all is the ordinary "there was no text here" answer, not a failure.
     let mut lines: Vec<Line> = Vec::new();
     for observation in request.results().into_iter().flatten() {
-        let candidates = observation.topCandidates(1);
-        let Some(top) = candidates.firstObject() else {
+        let candidates = observation.topCandidates(if latin { LOOK_ALIKE_CANDIDATES } else { 1 });
+        let Some(mut top) = candidates.firstObject() else {
             continue;
         };
-        let line = top.string().to_string();
+        let mut line = top.string().to_string();
+        if latin && crate::ocr::lang::non_latin_letter(&line) {
+            let best = line.clone();
+            let other = candidates
+                .iter()
+                .skip(1)
+                .find(|c| !crate::ocr::lang::non_latin_letter(&c.string().to_string()));
+            let taken = other.is_some();
+            if let Some(c) = other {
+                line = c.string().to_string();
+                top = c;
+            }
+            LOOK_ALIKES.with(|l| l.borrow_mut().push((best, taken.then(|| line.clone()))));
+        }
         if line.is_empty() {
             continue;
         }
@@ -1929,6 +1977,57 @@ fn perform(
         ordered.iter().map(|l| OcrLine { text: l.text.clone(), words: l.words.clone() }).collect();
     let words = ordered.into_iter().flat_map(|l| l.words).collect();
     Ok((text, words, out_lines))
+}
+
+/// How many candidates of a line are looked at for one without letters of another script, where the
+/// language asked for is written in the Latin script (`perform`).
+const LOOK_ALIKE_CANDIDATES: usize = 3;
+
+thread_local! {
+    /// The lines of this read whose best candidate held a letter of another script than the Latin
+    /// language asked for: that candidate, and the one taken instead, or `None` where none of the
+    /// next ones held only Latin letters (`perform`). Taken by the read's line (`look_alike_line`).
+    static LOOK_ALIKES: RefCell<Vec<(String, Option<String>)>> = const { RefCell::new(Vec::new()) };
+    /// The regions a look-alike line was said for, so each is said once per thread.
+    static LOOK_ALIKES_SAID: RefCell<HashSet<(i32, i32, i32, i32)>> = RefCell::new(HashSet::new());
+}
+
+/// How many regions' look-alike lines are kept said at most; past it the set starts again.
+const LOOK_ALIKES_SAID_CAP: usize = 256;
+
+/// The read of region `(x, y, w, h)` is done: one line, the first time a region's read met letters of
+/// another script, naming what Vision read and what was taken.
+fn look_alike_line(region: (i32, i32, i32, i32)) {
+    let met = LOOK_ALIKES.with(|l| std::mem::take(&mut *l.borrow_mut()));
+    if met.is_empty() {
+        return;
+    }
+    let first = LOOK_ALIKES_SAID.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.len() >= LOOK_ALIKES_SAID_CAP {
+            s.clear();
+        }
+        s.insert(region)
+    });
+    if !first {
+        return;
+    }
+    let (x, y, w, h) = region;
+    let each: Vec<String> = met
+        .iter()
+        .map(|(best, taken)| match taken {
+            Some(t) => format!("'{best}' read as '{t}'"),
+            None => format!("'{best}' kept, no other candidate without them"),
+        })
+        .collect();
+    crate::logging::line(
+        "macos",
+        &format!(
+            "ocr: letters of another script than the language's in the {w}x{h} pt region at {x},{y}: {} \
+             (said once a region)",
+            each.join("; ")
+        ),
+    );
 }
 
 /// One observation: a run of text Vision read, and where it put it.
@@ -2021,9 +2120,13 @@ struct Plan {
     up: usize,
     /// Background border around the upscaled crop, in processed pixels.
     pad: usize,
-    /// How tall the ink was, before any margin. Carried so a later rung can upscale for the
-    /// glyph rather than for the rectangle it was found in.
+    /// How tall the ink was, before any margin: with `ink_w` and `lines`, whether the region is
+    /// the neural recogniser's to read (`paddle_pre::fits`).
     ink_h: usize,
+    /// How tall its tallest line of ink was (`paddle_pre::tallest_line`): what the upscale is taken
+    /// from, here and in a later rung — the glyph's height rather than the rectangle's it was found
+    /// in, or the block's of several lines.
+    line_h: usize,
     /// How wide the ink was, before any margin: with `ink_h` and `lines`, whether the region is
     /// the neural recogniser's to read (`paddle_pre::fits`).
     ink_w: usize,
@@ -2056,6 +2159,7 @@ impl Plan {
             up: 1,
             pad: 0,
             ink_h: nh,
+            line_h: nh,
             ink_w: nw,
             lines: 0,
             bg: [0.0; 3],
@@ -2066,7 +2170,7 @@ impl Plan {
 
     /// The whole capture, upscaled and framed but not cropped.
     fn whole(rgba: &[u8], nw: usize, nh: usize) -> Plan {
-        Plan::whole_with_ink(rgba, nw, nh, nh)
+        Plan::whole_with_ink(rgba, nw, nh, nh, nh)
     }
 
     /// The whole region, but upscaled for ink of a known height rather than for the region's.
@@ -2076,16 +2180,18 @@ impl Plan {
     /// second attempt and a weaker one. Measured on the two fields this was chased through:
     /// a 22-point region got `64/22 = 2` where its 20-point neighbour got 3, so the safety
     /// net was thinnest exactly where it was needed. `nh` remains the answer for the only
-    /// other caller, the flat-colour fallback, where no ink was found to measure.
-    fn whole_with_ink(rgba: &[u8], nw: usize, nh: usize, ink_h: usize) -> Plan {
+    /// other caller, the flat-colour fallback, where no ink was found to measure. `line_h`, the
+    /// tallest line's, is what the upscale is taken from, held to the budget.
+    fn whole_with_ink(rgba: &[u8], nw: usize, nh: usize, ink_h: usize, line_h: usize) -> Plan {
         Plan {
             x0: 0,
             y0: 0,
             cw: nw,
             ch: nh,
-            up: upscale_for(ink_h),
+            up: within_budget(nw, nh, upscale_for(line_h)),
             pad: OCR_PAD,
             ink_h,
+            line_h,
             ink_w: nw,
             lines: 0,
             bg: corner_background(rgba, nw, nh),
@@ -2163,6 +2269,7 @@ impl Plan {
         // will not agree, and nothing changes.
         let mut bg = bg;
         let mut lines = paddle_pre::ink_lines(&rows[y0..=y1], margin);
+        let mut line_h = paddle_pre::tallest_line(&rows[y0..=y1], margin);
         let panel = ink_inside_panel(rgba, nw, x0, y0, x1, y1, bg);
         if matches!(panel, Panel::Empty) {
             // A value field with no value in it. The crop found the WELL, so `cropped` would
@@ -2193,6 +2300,7 @@ impl Plan {
                 });
                 bg = inner_bg;
                 lines = paddle_pre::ink_lines(&inner_rows[iy0 - y0..=iy1 - y0], margin);
+                line_h = paddle_pre::tallest_line(&inner_rows[iy0 - y0..=iy1 - y0], margin);
                 x0 = ix0;
                 y0 = iy0;
                 x1 = ix1;
@@ -2208,6 +2316,11 @@ impl Plan {
         // roughly 33 px. This file's own header promises about 64 (`TARGET_CONTENT_PX`), so
         // every lone digit was being handed over at half the height the preprocessing aims for.
         // From the ink it is 64/11 = 5, and the glyph arrives at 55.
+        //
+        // And from the tallest LINE of it, not the block (the second Mac test, 2026-10-24): three
+        // lines of names 10 pixels tall at 1x are a block of about 40, which came to 64/40 = 1 — a
+        // small region of several lines was never enlarged. From the line it is 6, held to the
+        // budget (`policy::within_budget`) for a crop of 400x200.
         let ink_h = y1 - y0 + 1;
         let ink_w = x1 - x0 + 1;
         let x0 = x0.saturating_sub(margin);
@@ -2220,9 +2333,10 @@ impl Plan {
             y0,
             cw,
             ch,
-            up: upscale_for(ink_h),
+            up: within_budget(cw, ch, upscale_for(line_h.max(1))),
             pad: OCR_PAD,
             ink_h,
+            line_h,
             ink_w,
             lines,
             bg,
@@ -2315,6 +2429,48 @@ enum Panel {
     /// A box, and the bounds of what is drawn on it, plus the box's own colour, and which of the
     /// box's rows (from its top) hold any of it.
     Ink(usize, usize, usize, usize, [f64; 3], Vec<bool>),
+}
+
+/// What a region handed on as captured is read as: the capture, or the capture enlarged where its
+/// text is small (`policy::pass_through_up`) — the plan, the enlarged picture with the buffer behind
+/// it when there is one, and the tallest line of ink when it was measured. The line is measured only
+/// on a capture of more than one pixel a point that could be enlarged at all within the budget: at
+/// one pixel a point the capture alone decides. One function, because `ocr-bench` hands its pictures
+/// as a read does.
+fn pass_through(native: &CGImage, scale: f64) -> (Plan, Option<(CFRetained<CGImage>, Vec<u8>)>, Option<usize>) {
+    let nw = CGImage::width(Some(native));
+    let nh = CGImage::height(Some(native));
+    let mut plan = Plan::identity(nw, nh);
+    let line = (scale >= ONE_PIXEL_A_POINT_UNDER && within_budget(nw, nh, 2) > 1)
+        .then(|| cgimage_to_rgba(native))
+        .flatten()
+        .map(|(rgba, w, h)| paddle_pre::tallest_line(&ink_rows(&rgba, w, h), content_margin(scale)));
+    plan.up = pass_through_up(nw, nh, scale, line);
+    let enlarged = (plan.up > 1).then(|| render(native, &plan)).flatten();
+    if enlarged.is_none() {
+        plan.up = 1;
+    }
+    (plan, enlarged, line)
+}
+
+/// Which pixel rows of a capture hold ink: a pixel far from the four corners' colour, by the content
+/// crop's own rule (`Plan::content`). For the tallest line of a region handed on as captured.
+fn ink_rows(rgba: &[u8], nw: usize, nh: usize) -> Vec<bool> {
+    let bg = corner_background(rgba, nw, nh);
+    let (bgr, bgg, bgb) = (bg[0] * 255.0, bg[1] * 255.0, bg[2] * 255.0);
+    let threshold_sq = 55.0f64 * 55.0;
+    if nw == 0 {
+        return Vec::new();
+    }
+    rgba.chunks_exact(nw * 4)
+        .take(nh)
+        .map(|row| {
+            row.chunks_exact(4).any(|px| {
+                let (dr, dg, db) = (px[0] as f64 - bgr, px[1] as f64 - bgg, px[2] as f64 - bgb);
+                dr * dr + dg * dg + db * db > threshold_sq
+            })
+        })
+        .collect()
 }
 
 /// The integer upscale that brings content of this height to roughly the target.

@@ -52,6 +52,9 @@ hex = "0.4.3"
 # ocr/lang.rs is borrowed: which recognition language a read gets. The same version and feature as
 # host's [dependencies].
 fluent-langneg = { version = "0.14.2", features = ["cldr"] }
+# ocr/lang.rs's script questions: as host's [dependencies].
+icu_locid_transform = "1.5"
+icu_properties = "2.2"
 # webview.rs is borrowed: `host.gui.webview`'s rules, and the answer a Mac gives today. It encodes
 # and decodes URL paths, types a page's files and hashes a module's id into its origin; all three
 # are in host's [dependencies] (percent-encoding at the version ureq brings, mime_guess and sha2
