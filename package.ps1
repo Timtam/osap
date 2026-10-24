@@ -52,7 +52,8 @@ if ($Commit -notmatch '^[A-Za-z0-9._+-]{1,64}$') {
 # as both ask: ONNX Runtime's MIT licence with Microsoft's notices for what it is built from, and
 # the model's Apache-2.0 licence with the notice that says which model it is. `ort`'s download
 # carries neither of ONNX Runtime's files, so they are kept in the repository; a package without
-# one of the four is not one that may be handed on, so it is refused, as a missing DLL is below.
+# one of them, or without DirectML's two below, is not one that may be handed on, so it is
+# refused, as a missing DLL is below.
 #
 # ONNX Runtime's notices are one release's, the release the ort-sys they were taken for links
 # (crates\host\licences\onnxruntime\SOURCE.txt). Another ort-sys in Cargo.lock links another
@@ -65,17 +66,37 @@ $recogniserLicences = @(
   @{ From = (Join-Path $models "LICENSE-Apache-2.0.txt");    To = "paddleocr-model-Apache-2.0.txt" },
   @{ From = (Join-Path $models "NOTICE.txt");                To = "paddleocr-model-NOTICE.txt" }
 )
+# And DirectML's, Windows only: DirectML.dll goes out beside the executable (below), under
+# Microsoft's own terms for it, the LICENSE.txt and ThirdPartyNotices.txt of the NuGet package of
+# its release, which `ort`'s download does not carry either (crates\host\licences\directml\SOURCE.txt
+# says where they come from). Checked with the others, before anything is built.
+$dmlTerms = Join-Path $root "crates\host\licences\directml"
+$recogniserLicences += @(
+  @{ From = (Join-Path $dmlTerms "LICENSE.txt");           To = "directml-LICENSE.txt" },
+  @{ From = (Join-Path $dmlTerms "ThirdPartyNotices.txt"); To = "directml-ThirdPartyNotices.txt" }
+)
 $absent = @($recogniserLicences | Where-Object { -not (Test-Path $_.From -PathType Leaf) } | ForEach-Object { $_.From })
 $ortSourceFile = Join-Path $ortNotices "SOURCE.txt"
 if (-not (Test-Path $ortSourceFile -PathType Leaf)) { $absent += $ortSourceFile }
+$dmlSourceFile = Join-Path $dmlTerms "SOURCE.txt"
+if (-not (Test-Path $dmlSourceFile -PathType Leaf)) { $absent += $dmlSourceFile }
 if ($absent) {
   throw "the neural text recogniser's licences are not all there, and a package without them may not be handed on:`n  " + ($absent -join "`n  ")
 }
-$ortSource = @{}
-foreach ($line in Get-Content $ortSourceFile) {
-  if ($line -match '^\s*#') { continue }
-  if ($line -match '^\s*([a-z-]+)=(.*)$') { $ortSource[$Matches[1]] = $Matches[2].Trim() }
+# key=value, one a line, `#` a comment: both SOURCE.txt files.
+function Read-SourceFile([string]$path) {
+  $kv = @{}
+  foreach ($line in Get-Content $path) {
+    if ($line -match '^\s*#') { continue }
+    if ($line -match '^\s*([a-z0-9-]+)=(.*)$') { $kv[$Matches[1]] = $Matches[2].Trim() }
+  }
+  return $kv
 }
+$dmlSource = Read-SourceFile $dmlSourceFile
+if (-not $dmlSource["version"] -or $dmlSource["sha256"] -notmatch '^[0-9A-Fa-f]{64}$') {
+  throw "$dmlSourceFile names no DirectML release (version=) or no SHA-256 of its DLL (sha256=), so whose its terms are is not known"
+}
+$ortSource = Read-SourceFile $ortSourceFile
 if (-not $ortSource["version"] -or -not $ortSource["ort-sys"]) {
   throw "$ortSourceFile names no ONNX Runtime (version=) or no ort-sys (ort-sys=), so whose its notices are is not known"
 }
@@ -136,6 +157,23 @@ foreach ($item in $required) {
 }
 if ($missing) {
   throw "not in target\release, so the package would be broken:`n  " + ($missing -join "`n  ")
+}
+# The DirectML.dll shipped is the one its terms are for: the release SOURCE.txt names, by the
+# FileVersion it carries (1.15.4+241025-…), and that very file, by its hash. Another `ort` can
+# bring another DirectML, whose package's terms are to be taken instead, and both lines changed.
+$dmlShipped = Join-Path $stage "DirectML.dll"
+$dmlVersion = (Get-Item $dmlShipped).VersionInfo.FileVersion
+$dmlHash = (Get-FileHash $dmlShipped -Algorithm SHA256).Hash
+if (-not "$dmlVersion".StartsWith("$($dmlSource['version'])+") -and "$dmlVersion" -ne $dmlSource['version']) {
+  throw ("DirectML.dll in target\release is version '$dmlVersion', and the terms in " +
+    "crates\host\licences\directml are those of DirectML $($dmlSource['version']): replace LICENSE.txt " +
+    "and ThirdPartyNotices.txt with those of the NuGet package Microsoft.AI.DirectML of its release, " +
+    "and version= and sha256= in SOURCE.txt")
+}
+if ($dmlHash -ne $dmlSource['sha256'].ToUpperInvariant()) {
+  throw ("DirectML.dll in target\release (SHA-256 $dmlHash) is not the file crates\host\licences\directml\" +
+    "SOURCE.txt names ($($dmlSource['sha256'])), although its version is: compare it with the DLL of the " +
+    "NuGet package Microsoft.AI.DirectML $($dmlSource['version']) before changing sha256=")
 }
 
 # The modules, minus what only a developer needs. `calibration` is the big one: 123 captured
@@ -230,6 +268,12 @@ onnxruntime-ThirdPartyNotices.txt; it is linked into automation-platform.exe, fr
 https://github.com/microsoft/onnxruntime. Its model, inside the executable as well, is
 PaddleOCR's, used under the Apache License 2.0 (paddleocr-model-Apache-2.0.txt), from
 https://github.com/PaddlePaddle/PaddleOCR; paddleocr-model-NOTICE.txt says which.
+
+DirectML.dll, beside the executable, is Microsoft's DirectML $($dmlSource['version']), the
+redistributable library through which the neural text recogniser uses the graphics card. It is
+Windows only, and it is not covered by the GPL: it is used under Microsoft's own terms for it,
+in directml-LICENSE.txt, with the notices in directml-ThirdPartyNotices.txt, both from the
+NuGet package Microsoft.AI.DirectML $($dmlSource['version']), $($dmlSource['nuget']).
 
 The VPS Avenger preset database (modules\vps-avenger-presets\data) comes from the
 avenger_control project, whose developer gave it to this project without restriction; it is
