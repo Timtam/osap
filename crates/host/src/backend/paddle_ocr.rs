@@ -1666,4 +1666,30 @@ fn init()").expect("the Mac's init");
         *lock_even_if_poisoned(&m) += 1;
         assert_eq!(*lock_even_if_poisoned(&m), 42);
     }
+
+    /// The Windows package's ONNX Runtime licence and notices (`licences/onnxruntime`) are one
+    /// release's, taken for the `ort-sys` that links it: another `ort-sys` in Cargo.lock links
+    /// another ONNX Runtime. package.ps1 refuses that too, and ships the recogniser's four licence
+    /// files, by these names, or no package at all. Checked where it is written: the packaging
+    /// does not run under `cargo test`.
+    #[test]
+    fn the_windows_package_carries_the_notices_of_the_onnx_runtime_it_links() {
+        const SOURCE: &str = include_str!("../../licences/onnxruntime/SOURCE.txt");
+        const LOCK: &str = include_str!("../../../../Cargo.lock");
+        const PACKAGE: &str = include_str!("../../../../package.ps1");
+        let key = |k: &str| {
+            SOURCE.lines().filter(|l| !l.starts_with('#')).find_map(|l| l.strip_prefix(k)?.strip_prefix('='))
+        };
+        let lock: Vec<&str> = LOCK.lines().collect();
+        let at = lock.iter().position(|l| *l == "name = \"ort-sys\"").expect("Cargo.lock builds ort-sys");
+        let locked = lock[at + 1].strip_prefix("version = \"").and_then(|v| v.strip_suffix('"'));
+        assert_eq!(key("ort-sys"), locked, "the notices are another ort-sys's: take those of the ONNX Runtime it links");
+        assert!(key("version").is_some_and(|v| !v.is_empty()));
+        assert!(include_str!("../../licences/onnxruntime/LICENSE").starts_with("MIT License"));
+        assert!(include_str!("../../licences/onnxruntime/ThirdPartyNotices.txt").starts_with("THIRD PARTY SOFTWARE NOTICES"));
+        for shipped in ["onnxruntime-MIT.txt", "onnxruntime-ThirdPartyNotices.txt", "paddleocr-model-Apache-2.0.txt", "paddleocr-model-NOTICE.txt"] {
+            assert!(PACKAGE.contains(&format!("To = \"{shipped}\"")), "package.ps1 ships {shipped}");
+        }
+        assert!(PACKAGE.contains("name = \"ort-sys\""), "package.ps1 reads Cargo.lock's ort-sys");
+    }
 }

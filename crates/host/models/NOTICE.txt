@@ -1,18 +1,35 @@
 The neural text recogniser's model
 
-ppocr-rec.onnx is an English text recognition model of PaddleOCR's PP-OCR mobile series, and
-ppocr-dict.txt is its dictionary: the characters it can read, one a line. PaddleOCR is the
-PaddlePaddle project's, published under the Apache License, Version 2.0, whose text is
-LICENSE-Apache-2.0.txt beside this file:
+ppocr-rec.onnx is PaddleOCR's en_PP-OCRv5_mobile_rec, the English text recognition model of the
+PP-OCRv5 series, and ppocr-dict.txt is its dictionary, ppocrv5_en_dict.txt: the characters it can
+read, one a line. PaddleOCR is the PaddlePaddle project's, published under the Apache License,
+Version 2.0, whose text is LICENSE-Apache-2.0.txt beside this file. The model came out with
+PaddleOCR 3.2.0 (2025-08-21), in PaddlePaddle's own format:
 
     https://github.com/PaddlePaddle/PaddleOCR
+    https://huggingface.co/PaddlePaddle/en_PP-OCRv5_mobile_rec
 
-The model is not in the form PaddleOCR publishes it: it was converted from PaddlePaddle's own
-format to ONNX with paddle2onnx (https://github.com/PaddlePaddle/Paddle2ONNX), as the names in
-its graph say: "PaddlePaddle Graph in PIR mode", the program format of PaddlePaddle 3, and nodes
-named p2o.*. Which model of the series exactly was not recorded when it came into this
-repository (2026-06-21).
+The file here is not in that format. It is the conversion to ONNX that monkt/paddleocr-onnx
+publishes on Hugging Face, also under the Apache License 2.0, as languages/english/rec.onnx, with
+the dictionary beside it as languages/english/dict.txt, both as its commit e354f8b of 2025-10-07
+left them:
+
+    https://huggingface.co/monkt/paddleocr-onnx
+
+The two files here are those byte for byte, by the digests Hugging Face gives for them, and the
+dictionary is also PaddleOCR's ppocr/utils/dict/ppocrv5_en_dict.txt byte for byte:
+
+    ppocr-rec.onnx  7830888 bytes  SHA-256 4e16deb22c4da6468bdca539b2cd3c8687825538b67109177c47d359ab994cd7
+    ppocr-dict.txt     1416 bytes  SHA-256 e025a66d31f327ba0c232e03f407ae8d105e1e709e7ccb3f408aa778c24e70d6
+
+The conversion was made with paddle2onnx (https://github.com/PaddlePaddle/Paddle2ONNX), as the
+graph says: "PaddlePaddle Graph in PIR mode", the program format of PaddlePaddle 3, values named
+p2o.*, ONNX opset 14 and an input 48 pixels high. (The config.json beside it there says opset 11
+and 32; the graph is what the application feeds.) Which revision of PaddleOCR's model it was
+converted from is not said there. The two files came into this repository on 2026-06-21, without
+their source; it was found on 2026-10-24, by the digests.
 
 Automation Platform reads small regions of the screen with it: on Windows it is inside the
 executable, and a macOS package carries it as AutomationPlatform.app/Contents/Resources/
-ppocr-rec.onnx, with this notice and the licence in its licences folder.
+ppocr-rec.onnx. Both packages carry this notice and the licence in their licences folder, as
+paddleocr-model-NOTICE.txt and paddleocr-model-Apache-2.0.txt.

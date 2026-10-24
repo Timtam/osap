@@ -47,6 +47,54 @@ if ($Commit -notmatch '^[A-Za-z0-9._+-]{1,64}$') {
   throw "-Commit '$Commit' is not a commit: letters, digits and -._+ only, at most 64"
 }
 
+# The neural text recogniser's licences, asked for before anything is built. ONNX Runtime is
+# linked into the executable and the model is embedded in it, so their licences go out with it,
+# as both ask: ONNX Runtime's MIT licence with Microsoft's notices for what it is built from, and
+# the model's Apache-2.0 licence with the notice that says which model it is. `ort`'s download
+# carries neither of ONNX Runtime's files, so they are kept in the repository; a package without
+# one of the four is not one that may be handed on, so it is refused, as a missing DLL is below.
+#
+# ONNX Runtime's notices are one release's, the release the ort-sys they were taken for links
+# (crates\host\licences\onnxruntime\SOURCE.txt). Another ort-sys in Cargo.lock links another
+# ONNX Runtime, so a package of that build with these notices is refused too.
+$ortNotices = Join-Path $root "crates\host\licences\onnxruntime"
+$models = Join-Path $root "crates\host\models"
+$recogniserLicences = @(
+  @{ From = (Join-Path $ortNotices "LICENSE");               To = "onnxruntime-MIT.txt" },
+  @{ From = (Join-Path $ortNotices "ThirdPartyNotices.txt"); To = "onnxruntime-ThirdPartyNotices.txt" },
+  @{ From = (Join-Path $models "LICENSE-Apache-2.0.txt");    To = "paddleocr-model-Apache-2.0.txt" },
+  @{ From = (Join-Path $models "NOTICE.txt");                To = "paddleocr-model-NOTICE.txt" }
+)
+$absent = @($recogniserLicences | Where-Object { -not (Test-Path $_.From -PathType Leaf) } | ForEach-Object { $_.From })
+$ortSourceFile = Join-Path $ortNotices "SOURCE.txt"
+if (-not (Test-Path $ortSourceFile -PathType Leaf)) { $absent += $ortSourceFile }
+if ($absent) {
+  throw "the neural text recogniser's licences are not all there, and a package without them may not be handed on:`n  " + ($absent -join "`n  ")
+}
+$ortSource = @{}
+foreach ($line in Get-Content $ortSourceFile) {
+  if ($line -match '^\s*#') { continue }
+  if ($line -match '^\s*([a-z-]+)=(.*)$') { $ortSource[$Matches[1]] = $Matches[2].Trim() }
+}
+if (-not $ortSource["version"] -or -not $ortSource["ort-sys"]) {
+  throw "$ortSourceFile names no ONNX Runtime (version=) or no ort-sys (ort-sys=), so whose its notices are is not known"
+}
+# Asked here, and again after the build: the build can rewrite Cargo.lock (an `ort` raised in
+# Cargo.toml is locked only by the next cargo command), so the lock read here need not be the
+# one the executable is built from.
+function Assert-OrtSysOfNotices {
+  $lock = Get-Content (Join-Path $root "Cargo.lock") -Raw
+  $ortSys = if ($lock -match '(?m)^name = "ort-sys"\r?\nversion = "([^"]+)"') { $Matches[1] } else { $null }
+  if (-not $ortSys) { throw "Cargo.lock builds no ort-sys, so which ONNX Runtime the executable links is not known" }
+  if ($ortSys -ne $ortSource["ort-sys"]) {
+    throw ("ONNX Runtime's notices in crates\host\licences\onnxruntime are those of ONNX Runtime " +
+      "$($ortSource['version']), for ort-sys $($ortSource['ort-sys']), and Cargo.lock builds ort-sys " +
+      "${ortSys}: replace LICENSE and ThirdPartyNotices.txt with those of the ONNX Runtime it links " +
+      "(ort-sys's dist.txt names the release), from that release's tag, and both lines in SOURCE.txt")
+  }
+}
+Assert-OrtSysOfNotices
+
 if (-not $NoBuild) {
   # wxDragon needs this; set here rather than expecting a configured shell, exactly as
   # run-dev.ps1 does.
@@ -61,6 +109,7 @@ if (-not $NoBuild) {
   Push-Location $root
   try { cargo build --release } finally { Pop-Location }
   if ($LASTEXITCODE -ne 0) { throw "build failed" }
+  Assert-OrtSysOfNotices
 }
 
 # What has to be there, by name. Checked rather than copied blindly, because a missing one
@@ -131,6 +180,8 @@ if (Test-Path (Join-Path $root "docs-site\build")) {
 $licences = Join-Path $stage "licences"
 New-Item -ItemType Directory -Path $licences -Force | Out-Null
 Copy-Item (Join-Path $root "LICENSE") (Join-Path $licences "automation-platform-GPL-3.0.txt")
+# By the names a macOS package gives them (package-macos.sh), checked at the top.
+foreach ($item in $recogniserLicences) { Copy-Item $item.From (Join-Path $licences $item.To) }
 
 $vendor = Join-Path $root "crates\prism-sys\vendor"
 if (Test-Path (Join-Path $vendor "LICENSE")) {
@@ -172,6 +223,13 @@ That commit is what this build was compiled from. prism in turn carries the libr
 whose licences are in the prism\ folder beside this file — fmt 12.2.1, highway 1.4.0,
 simdutf 9.0.0, concurrentqueue, dr_wav, moderncom, djinni, NVGT, and NV Access's NVDA
 controller RPC definitions — and its own NOTICE is in prism-NOTICE.txt.
+
+The neural text recogniser runs on ONNX Runtime $($ortSource['version']) by Microsoft, used under the
+MIT licence (onnxruntime-MIT.txt), which is built from the projects whose notices are in
+onnxruntime-ThirdPartyNotices.txt; it is linked into automation-platform.exe, from
+https://github.com/microsoft/onnxruntime. Its model, inside the executable as well, is
+PaddleOCR's, used under the Apache License 2.0 (paddleocr-model-Apache-2.0.txt), from
+https://github.com/PaddlePaddle/PaddleOCR; paddleocr-model-NOTICE.txt says which.
 
 The VPS Avenger preset database (modules\vps-avenger-presets\data) comes from the
 avenger_control project, whose developer gave it to this project without restriction; it is

@@ -434,6 +434,26 @@ mod tests {
         assert_eq!(d[0], "0");
     }
 
+    /// The model and its dictionary are the files `models/NOTICE.txt` names, by their SHA-256: a
+    /// model taken from elsewhere is a notice to rewrite. The dictionary as stored, with LF, which
+    /// a checkout that writes CRLF does not change.
+    #[test]
+    fn the_model_and_the_dictionary_are_the_ones_the_notice_names() {
+        use sha2::{Digest, Sha256};
+        const NOTICE: &str = include_str!("../../models/NOTICE.txt");
+        let named = |file: &str| {
+            NOTICE
+                .lines()
+                .find_map(|l| l.trim().strip_prefix(file)?.split("SHA-256 ").nth(1).map(str::trim))
+                .unwrap_or_else(|| panic!("NOTICE.txt gives {file}'s SHA-256"))
+        };
+        let model = include_bytes!("../../models/ppocr-rec.onnx");
+        assert_eq!(hex::encode(Sha256::digest(model)), named("ppocr-rec.onnx"));
+        let dict = include_str!("../../models/ppocr-dict.txt").replace("\r\n", "\n");
+        assert_eq!(hex::encode(Sha256::digest(dict.as_bytes())), named("ppocr-dict.txt"));
+        assert!(NOTICE.contains("en_PP-OCRv5_mobile_rec"), "and names the model");
+    }
+
     #[test]
     fn same_ignores_spaces_and_dash_and_quote_forms_and_nothing_else() {
         assert!(same("0.00 dB", "0.00dB"));

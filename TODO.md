@@ -1857,6 +1857,10 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       `links = "onnxruntime"` in the whole project, across every target, so the Mac's `ort` is the
       same version as Windows'. The way on: both together to rc.13, the Mac with its `api-22`
       feature; rc.13 needs Rust 1.88.
+      The Windows package's ONNX Runtime notices go along (since 2026-10-24, package 13):
+      `crates/host/licences/onnxruntime` holds those of the release ort-sys 2.0.0-rc.10 links, and
+      `package.ps1` and a test refuse another ort-sys in Cargo.lock until its own notices and
+      `SOURCE.txt` are there.
 - [ ] **The dylib on a tester's Mac: first start, translocation, quarantine.** Whether the bundled
       dylib loads in a download opened with its quarantine flag still set, and after "Open
       Anyway": it may stay in quarantine. Does loading then fail quietly — the log's "not
@@ -1948,8 +1952,30 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       against the plug-in's value range and against what Windows.Media.Ocr and the recogniser read
       (`tools/ocr-fixtures/real.toml`); `k8-voices` is misread by both Windows recognisers, and
       today's ladder on a Mac may well misread it too (a warning in CI).
-- [ ] **Licences in the Windows package**: ONNX Runtime linked in and the model embedded, without
+- [x] **Licences in the Windows package**: ONNX Runtime linked in and the model embedded, without
       their notices (`package.ps1` ships the GPL text and prism's). A task of its own.
+      **Built (2026-10-24, package 13).** `package.ps1` ships `licences\onnxruntime-MIT.txt`,
+      `onnxruntime-ThirdPartyNotices.txt`, `paddleocr-model-Apache-2.0.txt` and
+      `paddleocr-model-NOTICE.txt`, the names a macOS package gives them, with a paragraph in
+      `licences\README.txt`, and refuses to package, before it builds, when one of them is
+      missing. ONNX Runtime's two files are kept in `crates/host/licences/onnxruntime`, since
+      `ort`'s download carries neither: Microsoft's, unchanged, from the tag v1.22.0, the release
+      ort-sys 2.0.0-rc.10 links (`ms@1.22.0` in its `dist.txt`). `SOURCE.txt` there names that
+      ort-sys; `package.ps1` and a test (`backend/paddle_ocr.rs`) refuse another one in
+      Cargo.lock. Built before package 2 rather than after it for that reason: an `ort` update
+      now has to bring the notices of its ONNX Runtime along. Checked: `package.ps1 -NoBuild
+      -NoZip` with placeholder binaries ships the four and refuses a missing notice, a missing
+      `SOURCE.txt`, one without its version, another ort-sys and a Cargo.lock without one, and
+      takes a Cargo.lock with CRLF.
+- [ ] **`DirectML.dll` goes out without its licence** (found 2026-10-24, package 13). The Windows
+      package carries `DirectML.dll` 1.15.4 beside the executable, from `ort`'s download, for the
+      second OCR engine. Its terms are Microsoft's "Microsoft Software License Terms" for DirectML,
+      the `LICENSE.txt` of the NuGet package Microsoft.AI.DirectML 1.15.4 (nuget.org shows it):
+      copies may be distributed in applications, for use on Windows and Xbox only, and Microsoft's
+      notices may not be removed. Neither that text nor its third-party notices are in
+      `licences\`, and `ort`'s download has neither. Whether a GPL-3.0 package may carry the file
+      at all, and on which terms, is for the maintainer to decide; then `package.ps1` ships the
+      text beside the others, or the file goes.
 - [x] **The bench's rounds**, set after the first CI run of this size so that the Intel Mac stays
       under 30 minutes (`Plan::speed_pictures`, `samples`); every section prints its time. The CI
       job's limit is 45 minutes until then. The pipeline's verdicts lean on the engine's control
@@ -1969,10 +1995,19 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       measuring thread's priority now)? — the Apple-silicon recognise thread's counted fast pass,
       made after the answer (5 to 12 ms on the arm64 runners), and whether the debug pictures'
       limits (8 a region, 64 regions and 32 MiB a list, two lists) suit a test round.
-- [ ] **Name the neural recogniser's model exactly.** `crates/host/models/NOTICE.txt` says what is
+- [x] **Name the neural recogniser's model exactly.** `crates/host/models/NOTICE.txt` says what is
       known: an English recognition model of PaddleOCR's PP-OCR mobile series, converted to ONNX
       with paddle2onnx from a PaddlePaddle 3 program (its graph's names say so). Which model, and
       from which release, was not recorded when it came in (2026-06-21); the notice should say.
+      **Done (2026-10-24, package 13).** It is PaddleOCR's `en_PP-OCRv5_mobile_rec`, which came
+      with PaddleOCR 3.2.0 (2025-08-21), in the ONNX conversion that `monkt/paddleocr-onnx`
+      publishes on Hugging Face: its `languages/english/rec.onnx` has this file's SHA-256, and its
+      `dict.txt` and PaddleOCR's `ppocrv5_en_dict.txt` are both ours byte for byte, compared by the
+      digests Hugging Face and GitHub list, without downloading the model; the model's name is in
+      that folder's `config.json`. NOTICE.txt says so, with both digests, and a test
+      (`ocr/paddle_pre.rs`) holds the two files to them. Which revision of PaddleOCR's model was
+      converted the conversion does not say, and its `config.json` gives opset 11 and a height of
+      32 where the graph has 14 and 48.
 - [ ] **wxDragon on wxWidgets 3.3.4 — look regularly** (2026-10-11): 3.3.4 gives VoiceOver better
       names on macOS. As of 2026-10-11 wxdragon-sys 0.9.22 on crates.io and wxDragon's main branch
       still build wxWidgets 3.3.3, and this application is on 0.9.16. Where to look: the newest
@@ -4265,9 +4300,14 @@ arrived with the game in front. So desktop duplication is the working source for
       passed a few times; then make them assertions.
 - [ ] Set the constants at the top of `dxgi.rs` from M1, M2, M9, M11 and M16 (they are the
       design's estimates).
-- [ ] `tools/inspect` OCRs through GDI whatever the module being inspected declares, so an
+- [x] `tools/inspect` OCRs through GDI whatever the module being inspected declares, so an
       author inspecting a game that GDI reads frozen reads the frozen picture. Say so in its
       output, or let it take the source of the module it inspects.
+      **Built (2026-10-24, package 13): it says so.** Its `INSPECT` log line ends `read the
+      standard way (GDI on Windows)`, and its header says why and points to
+      `tools/capture-liveness` and `tools/capture-liveness-dxgi` for telling the two apart. Taking
+      the inspected module's source is not something a module can do: the source is the calling
+      module's, fixed by its own manifest, and no call names another module's.
 - [x] `tools/capture-liveness-dxgi` — the DXGI variant of `tools/capture-liveness` that the
       2026-09-25 measurement was made with — is committed (2026-09-25). It goes to a tester
       on its own, because `package.ps1` ships only `modules/`.
@@ -4661,9 +4701,16 @@ shows them:
 - [x] Two pushes in quick succession each get a complete run with both downloads. Nothing
       cancels a run any more; the old macOS workflow cancelled a superseded one.
       Done: runs 39125723422 and 39126002847 overlapped, both complete, triage 2026-10-24.
-- [ ] "Re-run failed jobs" after a red import check or capture probe (both run after the macOS
+- [x] "Re-run failed jobs" after a red import check or capture probe (both run after the macOS
       upload) gets past the upload, which now overwrites the download the first attempt left in
       the run instead of failing on its name. The same for re-running the Windows job.
+      Done (2026-10-24, package 13), in run 40095762182 on `wip/pkg13-packaging` (fa1e39d). Its
+      first attempt was cancelled once the macOS job had uploaded, which left that job red after
+      its upload, as a red import check leaves it. "Re-run failed jobs" (attempt 2) ran the macOS
+      job and the jobs after it again: it reused attempt 1's build, its upload deleted attempt 1's
+      download (ID 12561386350) and wrote its own (12560884119), and newer-macos downloaded that
+      one, by its digest. A re-run of the Windows job alone (attempt 4) did the same with the
+      Windows download: ID 12561368580 deleted, 12561703183 written.
 
 The earlier runs of "Windows build" and "macOS build" keep their history and their downloads until
 those expire. Nothing triggers the two files on their own any more.
@@ -5042,11 +5089,23 @@ Everything else here stands.
       raise for it) and would be asked of the layout even with `layout = false`.
       Decided by the maintainer on 2026-10-24 (triage): no; `register` and `send` already answer
       `not_supported`.
-- [ ] **`examples/overlay-attach` and the README still use Ctrl+Alt+1 and Ctrl+Alt+3**
+- [x] **`examples/overlay-attach` and the README still use Ctrl+Alt+1 and Ctrl+Alt+3**
       (`examples/overlay-attach/src/main.luau`, `README.md`, the overlay demo). Ctrl+Alt is
       AltGr on Windows, where a layout can type a character with 1 or 3 (`check` says `altgr`).
       On a Mac they are Command+Option+1/3 since the roles, off VoiceOver's layer. A key the
       overlay captures only while it is active would suit an example better.
+      **Built (2026-10-24, package 13).** `Alt+1` and `Alt+3`, Option+1/3 on a Mac, in the example
+      and in the README, and the example's header says why not Ctrl+Alt. A control's hotkey is
+      held only while its overlay is active, so they are taken only while Notepad is in front. Not
+      changed: `docs/api/overlay.md`'s `O:activate` example registers `Ctrl+Alt+3` for the whole
+      session, and `tools/inspect` holds `Ctrl+Alt+I`, `C` and `U` (the next item).
+- [ ] **The Ctrl+Alt keys left in `docs/api/overlay.md` and `tools/inspect`** (package 13,
+      2026-10-24). `docs/api/overlay.md`'s `O:activate` example registers `Ctrl+Alt+3` with
+      `host.hotkey.register`, held for the whole session, in an example authors copy: a German
+      layout types ³ with AltGr+3, and the hotkey takes it from the user everywhere (`check`
+      says `altgr`). `tools/inspect` registers `Ctrl+Alt+I`, `C` and `U` the same way on
+      Windows, for as long as it runs. Move both to keys `check` does not say `altgr` for, or
+      to ones held only while an overlay is active, as `examples/overlay-attach` now does.
 - [x] **Letters by layout on macOS** (decided 2026-09-21 for step 3; xplat critique issue 1).
       Built in step 3 as well: see "macOS: letters follow the keyboard layout" in the next
       section, and what to verify on a Mac there. Letters in sends follow the layout with it
@@ -5265,12 +5324,15 @@ the `Mod`/`Global` tokens of the same morning.
   - Examples: `hotkey`'s `Ctrl+Alt+H` would be Command+Option+H, Hide Others in most
       applications' menu and taken from all of them while registered, so the example picks
       `Cmd+Shift+F7` on a Mac (Windows keeps `Ctrl+Alt+H`): it fires with F-keys set as standard
-      function keys, or with fn held, and says "Shift+Command+F7". `keys`' `Ctrl+Alt+O`,
-      `settings`' `Ctrl+Alt+S` and `overlay-attach`'s `Ctrl+Alt+1`/`3` are Command+Option.
+      function keys, or with fn held, and says "Shift+Command+F7". `keys`' `Ctrl+Alt+O` and
+      `settings`' `Ctrl+Alt+S` are Command+Option.
   - Unchanged on a Mac: every `Alt+…` key (Option, as before, in Komplete Kontrol, Kontakt,
       Melodyne, Soundiron and u-he), the reload key and daw-hosts' key (Command+Shift+F5/F6).
       `hotkey-test-a`/`b`'s `Ctrl+Alt+Win+F8` also stays: Command+Option+Control+F8, still on
-      VoiceOver's layer, a test tool.
+      VoiceOver's layer, a test tool. `overlay-attach`'s keys are `Alt+1` and `Alt+3` since
+      2026-10-24 (package 13; `Ctrl+Alt+1`/`3` before), so Option+1 and Option+3, which type a
+      character in most layouts (`check` says `composes`): with the overlay active they fire
+      and the character is not typed.
 - [x] **Review follow-ups (2026-09-22).** A spec that spells the Ctrl role both ways
       (`"Control+Command+F"`, `"Ctrl+Cmd+F"`) is a parse error naming the two words and `Meta`,
       rather than one key a Mac author did not mean (Command+F instead of Control+Command+F); no
@@ -6485,8 +6547,23 @@ gh's own jq against the real runs. Only a run shows:
       "Unpack it the way a tester does" prints it with `commit=` and `binary=`, and the
       downloaded README's `Build:` line and the log header say both commits, with no line after
       the header saying the file was not used. Done: run 39084811059, triage 2026-10-24.
-- [ ] "Re-run all jobs" on a run: the macOS upload replaces the first attempt's file (overwrite
+- [x] "Re-run all jobs" on a run: the macOS upload replaces the first attempt's file (overwrite
       by the file's name), and `newer-macos` downloads the new one.
+      Done (2026-10-24, package 13), attempt 3 of run 40095762182, though not by the overwrite:
+      the run's downloads were gone when the re-run began. The reuse step found none ("no earlier
+      run with a macOS download still in it", the run being its branch's only one) and built the
+      Mac executable again; neither upload logged a deletion, each wrote a new file (macOS
+      12560669221, Windows 12561368580), and both newer-macos legs downloaded the new macOS one,
+      by its digest. So the reuse step's comment, "On a re-run it can hold the one an earlier
+      attempt uploaded", holds for "Re-run failed jobs" and a single job's re-run, not for "Re-run
+      all jobs" (the next item).
+- [ ] **The reuse step's comment on re-runs** (`.github/workflows/macos-build.yml`, "Reuse the
+      last build when the Rust has not moved"): "On a re-run it can hold the one an earlier
+      attempt uploaded" is true for "Re-run failed jobs" and a single job's re-run, which keep
+      the run's downloads, and not for "Re-run all jobs", whose attempt found them gone and built
+      again (attempt 3 of run 40095762182, the item above). Say so in the comment: the 2026-10-24
+      triage's package 4, the first in its order to change `macos-build.yml`, or 11 or 15, which
+      change it too, if one of them is built first.
 
 ## The keyboard hook over days of uptime (2026-09-27)
 

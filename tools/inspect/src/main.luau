@@ -1,8 +1,15 @@
 -- OCR window inspector (dev tool): Ctrl+Alt+I OCRs the focused window's full
 -- client area and logs every recognized word with its CLIENT-relative
 -- coordinates, for calibrating overlay regions and revealing where hardcoded
--- (e.g. ReaHotkey) coordinates land. With AUTOMATION_PLATFORM_OCR_DEBUG=1 the
--- captured image is also saved next to the executable.
+-- (e.g. ReaHotkey) coordinates land. With "Save the images OCR was given" on in
+-- the Application settings the captured image is also saved next to the executable.
+--
+-- It reads the screen the standard way, GDI on Windows, since its manifest has no
+-- [screen] table, and its log line says so. A module that declares
+-- `[screen] capture = "duplication"` reads the same window through desktop
+-- duplication, and the two can differ: a game GDI reads frozen is frozen here too,
+-- whatever the module of that game reads. tools/capture-liveness and
+-- tools/capture-liveness-dxgi tell the two apart.
 
 host.hotkey.register("Ctrl+Alt+I", function()
   local win = host.window.active()
@@ -13,7 +20,7 @@ host.hotkey.register("Ctrl+Alt+I", function()
   local b = win.bounds
   local res = host.ocr.recognize({ region = { b.x, b.y, b.x + b.w, b.y + b.h } })
   host.log.info(string.format(
-    "INSPECT '%s' [%s] clientOrigin=(%d,%d) frame=%dx%d words=%d",
+    "INSPECT '%s' [%s] clientOrigin=(%d,%d) frame=%dx%d words=%d, read the standard way (GDI on Windows)",
     win.title, win.class, win.client.x, win.client.y, b.w, b.h, #res.words
   ))
   for _, wd in ipairs(res.words) do
