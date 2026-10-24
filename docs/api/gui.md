@@ -551,10 +551,9 @@ platform.onmessage = (m) => {
 
 - `{ ok: true }` — the message's JSON text was handed to the engine, on its way to the module. It does not say that `onMessage` ran: a message dropped where it arrives is not told to the page.
 - `{ ok: false, error: { code: "too_large", message } }` — at once, with nothing sent: the message's JSON text is more than 1 MiB (1,048,576 bytes) in UTF-8, which the host would drop where it arrives. The page compares `error.code` with `platform.errors.TOO_LARGE`, never the message.
-- A value `JSON.stringify` makes no text of — a function, a symbol — is handed to the engine's channel as `undefined`, and `post` answers `{ ok: true }` unless that channel throws. **Not measured yet**: whether it throws, and what the host and the module's `onMessage` are then handed. `page-check` has a case for it since 2026-10-24, which has not run yet (its lines `platform.post given a function: …` and `… a symbol: …`, [building on macOS](../building-on-macos.md#page-check)), and nothing measures it in WebView2 (TODO.md). Send a value JSON can hold: `platform.post(String(value))`, or a table of what the module needs.
 
 ```js
-// Not platform.post(handler): a function is no message. Name what the module is to do instead.
+// Not platform.post(handler), which throws: a function is no message. Name what the module is to do.
 platform.post({ action: "next" });
 ```
 
@@ -566,7 +565,9 @@ None of these is thrown. The one error comes as the `error` field of the answer.
 |---|---|---|---|---|
 | `too_large` | field | The message's JSON text is more than 1,048,576 bytes in UTF-8. Nothing is sent; the size is in the message. | `a message of … bytes was not sent — the most one may be is 1048576` | both |
 
-**Raises** — in the page, as a thrown `TypeError` — for what `JSON.stringify` cannot write: a value that contains itself, or a `BigInt`. A `toJSON` method of the page's own that throws throws through it.
+**Raises** — in the page, as a thrown `TypeError`, with nothing sent — for what `JSON.stringify` cannot write: a value that contains itself, or a `BigInt`; and for a value it writes no text for — a function, a symbol, an object whose `toJSON` answers `undefined` — with `platform.post: JSON makes no text of this function; post a value JSON can hold` (`… of this symbol; …`, `… of this object; …`). A `toJSON` method of the page's own that throws throws through it. Send a value JSON can hold: `platform.post(String(value))`, or a table of what the module needs.
+
+Until 2026-10-24 a function or a symbol was handed to the engine's channel as `undefined` and `post` answered `{ ok: true }`. On a Mac that ended the application: WebKit hands the host such a message without a body, and the web view library the host uses ends the process on one (page-check measured it on CI's Macs, macOS 15 and 26, [building on macOS](../building-on-macos.md#page-check)). For the same reason a page's script does not call the engine's channel itself, past `platform`; TODO.md has the item.
 
 ## platform.errors {#platform-errors}
 

@@ -443,7 +443,8 @@ and to build it as soon as the usage allows.
       Windows `ownsPoint` answers `false` for an id that names no window (`IsWindow`), with `listed`
       too, so every caller in the tree that says `covered` (the runtime's `refuseOutside`,
       `_pickCovered` and prime, Avenger's clicks and warning box, the page example) says `…, or its
-      window is gone` as well. `find`, `findAll`, `test` and `onTrigger` check the whole matcher at the caller's line: a
+      window is gone` as well.
+      `find`, `findAll`, `test` and `onTrigger` check the whole matcher at the caller's line: a
       matcher that is not a table, a key no matcher has at any level (the other platforms' blocks
       too) and a key of the wrong type raise, and `test` raises for a `win` that is not a table
       (window_prelude.luau, `matcherProblem`). A DAW entry carries fields of its own beside its
@@ -458,7 +459,8 @@ and to build it as soon as the usage allows.
       wait for `onmessage` are said in the log, once at the first drop and with their count when a
       handler takes the rest, through the shim's note, which Windows' page takes for its log now as a
       Mac's did. `platform.post` given a function or a symbol has a case in page-check (`odd_posts`,
-      data), not run yet: gui.md says it is not measured (the item below). `platform.errors` has an
+      data), whose first run ended the application on every Mac: the shim throws a `TypeError` for
+      such a value now (the item below). `platform.errors` has an
       entry of its own in gui.md (api-index.py's FIELDS).
 
       **The keys, hotkey, ocr, require, settings and arbiter questions, built** (2026-10-24, the
@@ -484,15 +486,29 @@ and to build it as soon as the usage allows.
       item below); `mouseUp` keeps `false` and a click given a `window` answers `denied` for a
       program of higher rights (the input item above); the lint keeps `tostring` (the lint's item
       below).
-- [ ] **What `platform.post` makes of a function or a symbol.** `JSON.stringify` writes no text for
-      either, so the shim hands the engine's channel `undefined` and answers `{ ok: true }` unless
-      the channel throws. page-check has a case for it since 2026-10-24, as data, which has not run yet: its lines
-      `web view | platform.post given a function: …` and `… a symbol: …` say what the page answered
-      or threw and every message the host was handed between the page's two markers, written out,
-      with whether it is JSON. Read them in the next run of the macOS workflow and write into gui.md
-      (`platform.post`'s Returns) the raise or the value that arrives, in place of "Not measured
-      yet". WebView2 is measured by nothing: a button of the HTML probe (tools/html-probe) that
-      posts both, with the maintainer at the machine, would say it on Windows.
+- [x] **What `platform.post` makes of a function or a symbol.** `JSON.stringify` writes no text for
+      either, so the shim handed the engine's channel `undefined` and answered `{ ok: true }`.
+
+      **Measured and built** (2026-10-24, the thirty answers). page-check's case (`odd_posts`, data)
+      ran on CI's three Macs (run 40063741106: macOS 15.7.9 arm64 and x86_64, WebKit 20621; macOS
+      26.6.2, WebKit 21624), and on every one the application ended at the function's post: WebKit
+      hands the host a `WKScriptMessage` without a body for `undefined`, and wry's
+      `WryWebViewDelegate::did_receive` reads it with objc2-web-kit 0.3.2's `body()`, which panics on
+      `NULL` (`unexpected NULL returned from -[WKScriptMessage body]`) inside the delegate's
+      callback, and the process ends. So the shim throws a `TypeError` for a value `JSON.stringify` writes no text for — a
+      function, a symbol, an object whose `toJSON` answers `undefined` — before anything is sent
+      (webview.rs `SHIM_TAIL`, both engines, so WebView2 needs no measurement of it), and gui.md
+      says so under `platform.post`'s Raises. page-check's lines say what the page threw and that
+      the host was handed no message; an application that ends there fails the job.
+- [ ] **A page script that calls `window.ipc.postMessage()` itself ends the application on a Mac.**
+      The shim no longer sends `undefined` (the item above), but a page's own script can call
+      wry's `window.ipc.postMessage(undefined)`, or `window.webkit.messageHandlers.ipc.postMessage()`,
+      past `platform.post`, and wry aborts on the message without a body (`did_receive` calls
+      `msg.body()`, which objc2-web-kit declares non-null). Neither can be taken from the page: wry
+      defines `window.ipc` frozen and not configurable, and WebKit's handler is the page's. Report it
+      to wry (the body read as nullable, a message without one dropped) and take the fix with the
+      move to 0.57.1; until then a module's page must not call the channel itself. On Windows what
+      wry makes of a non-string message is not measured.
 - [ ] **A data dependency's arrays: plain frozen copies?** `host.require` and `host.tryRequire`
       hand a legacy data dependency's lists out with the conversion's protected metatable (mlua's
       array metatable, `__metatable = false`), so `getmetatable` answers `false` and
@@ -1132,9 +1148,11 @@ into the changelog with that release.
   that is no string, or one with an entry that is not a string, keys beside its list or no entry.
   Each was ignored but three, which were taken: a number `label` as its digits, a `min` or `max`
   string that reads as a number as that number, and number entries of `oneOf` as their digits; an
-  empty `oneOf` set no choices, and the keys beside its list were dropped. On the build for
-  other systems `host.hotkey.register` raises for a spec that does not parse, as Windows and a
-  Mac do, where it answered `nil, err`.
+  empty `oneOf` set no choices, and the keys beside its list were dropped. In a page,
+  `platform.post` throws a `TypeError` for a value `JSON.stringify` writes no text for — a
+  function, a symbol — where it answered `{ ok: true }` and on a Mac the application ended. On the
+  build for other systems `host.hotkey.register` raises for a spec that does not parse, as Windows
+  and a Mac do, where it answered `nil, err`.
 
 ## Implementation
 

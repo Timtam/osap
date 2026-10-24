@@ -1246,8 +1246,12 @@ fn tool_page(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally, tool
 /// `platform.post` given a value `JSON.stringify` writes no text for — a function, a symbol: what
 /// the page says it answered or threw, and what the host was handed between the page's two markers
 /// around it, each text as it came and whether it is JSON — which a module's `onMessage` is handed —
-/// or not, which the host drops with a line in the log. Data, not a check: what it measures is to be
-/// written into gui.md (`platform.post`'s Returns; TODO.md).
+/// or not, which the host drops with a line in the log. Data, not a check. Its first run, on
+/// 2026-10-24, ended the application on all three of CI's Macs: WebKit handed the host a message with
+/// no body, and wry, which carries the messages, aborts on one. The shim has thrown a `TypeError`
+/// for such a value since, with nothing sent (gui.md, `platform.post`'s Raises), so the line says
+/// that and `no message`; an application that ends here again still fails the job, which waits for
+/// page-check's last line.
 fn odd_posts(app: &NSApplication, tool: &page::Native, n: u64) {
     for kind in ["function", "symbol"] {
         let from = inbox_mark();

@@ -1180,13 +1180,18 @@ const SHIM_WEBKIT_FOCUS: &str = r#"  let last = null;
 "#;
 
 /// The end of every [`platform_shim`]: the `platform` object itself, frozen. `post` answers
-/// `{ ok: true }` once the message is handed to the channel, or [`post_script`]'s refusal.
+/// `{ ok: true }` once the message is handed to the channel, or [`post_script`]'s refusal. A value
+/// `JSON.stringify` writes no text for — a function, a symbol, an object whose `toJSON` answers
+/// `undefined` — throws a `TypeError` with nothing sent: handed on, it reached the channel as
+/// `undefined`, and on a Mac WebKit handed the host a message with no body, on which wry, which
+/// carries the messages, ended the application (page-check, 2026-10-24, on all three of CI's Macs).
 const SHIM_TAIL: &str = r#"  const platform = Object.create(null);
   Object.defineProperties(platform, {
     errors: { value: errors },
     post: {
       value: (value) => {
         const text = JSON.stringify(value === undefined ? null : value);
+        if (text === undefined) throw new TypeError("platform.post: JSON makes no text of this " + typeof value + "; post a value JSON can hold");
         const refused = tooLarge(text);
         if (refused) return refused;
         ipc.postMessage(text);
@@ -2158,6 +2163,8 @@ mod tests {
     const POST_OF_STAGE_1: &str = "        ipc.postMessage(JSON.stringify(value === undefined ? null : value));\n";
     const POST_ANSWERED: &str = concat!(
         "        const text = JSON.stringify(value === undefined ? null : value);\n",
+        r#"        if (text === undefined) throw new TypeError("platform.post: JSON makes no text of this " + typeof value + "; post a value JSON can hold");"#,
+        "\n",
         "        const refused = tooLarge(text);\n",
         "        if (refused) return refused;\n",
         "        ipc.postMessage(text);\n",
@@ -2187,6 +2194,26 @@ mod tests {
             .replacen("    errors: { value: errors },\n", "", 1)
             .replacen(POST_ANSWERED, POST_OF_STAGE_1, 1);
         assert_eq!(without, WINDOWS_SHIM_OF_STAGE_1);
+    }
+
+    /// A value `JSON.stringify` writes no text for is thrown back at the page before anything is
+    /// handed to the channel, in both shims: on a Mac a message of `undefined` ended the
+    /// application (see [`SHIM_TAIL`]). Every other way into the channel hands it a string: the
+    /// text that passed this check, or a note, which is a string put together.
+    #[test]
+    fn a_value_json_writes_no_text_for_is_thrown_back_and_never_sent() {
+        for engine in [Engine::WebView2, Engine::WebKit] {
+            let shim = platform_shim(engine);
+            let thrown = shim.find("if (text === undefined) throw new TypeError(").expect("the check");
+            assert!(thrown < shim.find("ipc.postMessage(text);").unwrap(), "{engine:?}: before it is sent");
+            let sends: Vec<&str> =
+                shim.match_indices("ipc.postMessage(").filter_map(|(i, _)| shim[i..].lines().next()).collect();
+            assert_eq!(
+                sends,
+                [r#"ipc.postMessage("\u0001platform: " + text); } catch (err) {}"#, "ipc.postMessage(text);"],
+                "{engine:?}"
+            );
+        }
     }
 
     /// `platform.post`'s refusal is the host's Reason in the page's words: its code, its message's
