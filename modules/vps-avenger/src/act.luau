@@ -134,6 +134,10 @@ end
 --   watch(vb, click) -> { rect }?   the boxes the change is looked for in (default: the part)
 --   same(vb, va) -> boolean?   nothing this action changes changed; nil — or no `same` — where
 --             nothing read says it: the change wait's verdict decides
+--   holds(va) -> boolean?   a read after the click is an answer at all: false for one taken while
+--             Avenger redraws (the Drums tab no longer read selected after a drumkit's step); one
+--             that does not hold is looked on from, as an unchanged one is, and at the bound the
+--             action ends with that said and what was read before it kept
 --   answer(vb, va, how) -> result   how: "changed", "unchanged" (at the bound), "chosen" (a menu
 --             that changes nothing shown, or a file dialog seen), "no dialog" (none within the
 --             runtime's bound) or "unread" (no picture after the click)
@@ -156,7 +160,7 @@ function Act.run(o, spec, done, trip)
   local region = Open.partRegion(pl, spec.part)
   if not region then
     log("nothing clicked — the %s is not on the screen", spec.part)
-    return done({ error = "that part of VPS Avenger is not on the screen" })
+    return done({ error = Open.offScreen(pl, { spec.part }) or "that part of VPS Avenger is not on the screen" })
   end
   local mark = o:here()
   -- Still where the action began, after a wait; said in the log when not. A trip's check ends the
@@ -175,8 +179,9 @@ function Act.run(o, spec, done, trip)
     log("nothing clicked — no picture of %s: %s", corners(region), tostring(okS and whyS or snap))
     return done({ error = "VPS Avenger cannot be read now" })
   end
+  -- The window the reads' values are kept by, taken once, while the plug-in is in front.
   local readOpts = { pl = pl, text = spec.text, preset = R.lastName(), macroCount = spec.macroCount,
-    fields = spec.fields, expected = spec.expected }
+    fields = spec.fields, expected = spec.expected, window = Open.window() }
   local okB, vb, keysB = pcall(Open.part, snap, spec.part, readOpts)
   if not okB then
     snap:release()
@@ -201,7 +206,8 @@ function Act.run(o, spec, done, trip)
   end
 
   local afterOpts = { pl = pl, text = spec.textAfter, preset = readOpts.preset,
-    macroCount = vb.macroCount or spec.macroCount, fields = spec.fields, expected = spec.expected }
+    macroCount = vb.macroCount or spec.macroCount, fields = spec.fields, expected = spec.expected,
+    window = readOpts.window }
   local deadline = nil
   local last = nil -- { keys, values } of the latest read after the click
 
@@ -252,8 +258,24 @@ function Act.run(o, spec, done, trip)
         snap:release()
         return movedOn()
       end
-      last = { keys = keys, values = va }
       local changed = info and info.changed == true
+      -- A read that does not hold is no answer, whatever changed: looked on from within the bound,
+      -- and at the bound the read before is what stands.
+      if spec.holds then
+        local okH, holds = pcall(spec.holds, va)
+        if not (okH and holds) then
+          if changed and host.now() < deadline then
+            log("the picture changed and what it shows does not hold, %d ms after the click — looking on from that "
+              .. "picture", Act.CHANGE_WITHIN - (deadline - host.now()))
+            return round(s)
+          end
+          s:release()
+          snap:release()
+          log("what VPS Avenger showed after the click did not hold by the bound — the read before is kept")
+          return done({ part = before, error = "VPS Avenger was still redrawing; what it shows now was not read" })
+        end
+      end
+      last = { keys = keys, values = va }
       -- Nothing read says whether what the action changes changed: the change wait's verdict.
       local okSame, same = true, nil
       if spec.same then okSame, same = pcall(spec.same, vb, va) end
@@ -379,7 +401,7 @@ end
 -- error; `log(fmt, …)` the caller's log.
 function Act.partBefore(pl, part, text, log, fields)
   local region = Open.partRegion(pl, part)
-  if not region then return nil, nil, "that part of VPS Avenger is not on the screen" end
+  if not region then return nil, nil, Open.offScreen(pl, { part }) or "that part of VPS Avenger is not on the screen" end
   local okS, snap, why = pcall(host.screen.snapshot, { region = region })
   if not (okS and snap) then
     log("'%s': nothing clicked — no picture of it: %s", part, tostring(okS and why or snap))

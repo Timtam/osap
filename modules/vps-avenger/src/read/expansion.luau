@@ -1,6 +1,6 @@
 -- The expansion browser, read off the page's picture: its view (List, or 1 to 8 per Row) while it
--- shows the expansions; whether an expansion is open instead, and which; and whether the
--- favourites view (FAV) is on.
+-- shows the expansions, where Avenger draws it; whether an expansion is open instead, and which;
+-- and whether the favourites view (FAV) is on.
 --
 -- SOURCE: the avenger_control project's detect_expansion_state and its helpers (its actions.py)
 -- and its detect_expansion_favorite_view (clicker/__init__.py), taken over with its developer's
@@ -13,18 +13,40 @@
 -- took the first of its roster; the grid is told by the catalog's expansions and Avenger's own list
 -- read this session, not by the roster the page shows, which may hold none of the names a scrolled
 -- grid shows; and a text that settles nothing is "not read", where the project kept what it had
--- last known.
+-- last known. Since the second Mac test of the page (2026-10-24) the browser is first told by the
+-- open expansion's name in its header (src/read/browser.luau, Br.state), and FAV by its star column.
 
 local P = host.include("src/read/picture.luau")
 local X = host.include("src/tables/expansion.luau")
 
 local E = {}
 
--- FAV is on when its brightest pixel's (r + g + b) / 3 is 190 or more, or 105 of the project's
--- pixels are brighter than 150.
-E.PEAK = host.screen.predicate("r + g + b >= 570")
+-- A star's bright pixels, (r + g + b) / 3 above 150 (src/read/browser.luau, Br.stars).
 E.BRIGHT = host.screen.predicate("r + g + b >= 451")
-local FAV_BRIGHT = 105
+-- FAV is told by the star column — this module's own: FAV's label is drawn the same in every state
+-- (98, 110 and 98 light pixels of its 1000 on the second Mac test's pictures), where the project
+-- read its brightest pixel and its bright ones. With FAV on, Avenger draws a star in every preset's
+-- row: a marked one light, (r + g + b) / 3 of 150 or more (E.LIGHT; 322 such pixels in the column's
+-- 6940, `Expansions/Avenger, 100, Open African House,Fav Stars On, Marked Presets 1,4,8,9.png`),
+-- and an unmarked one dim, of 45 or more (E.DRAWN). With FAV off nothing of a star is drawn, and
+-- only the selected preset's row is lit, all over (`… Fav Stars Off.png`). A star is looked for in
+-- the MIDDLE of its box, STAR_MIDDLE across and down round the row's middle, off a grid of one cell
+-- per pixel row of the column (at most 256): a star fills 0.15 to 0.45 of it (that grid's cells are
+-- the column's width), the lit row 0.85 to 1, and with FAV off every other row none of it — also
+-- with Avenger's corner placed 1.5 units off either way, where the lit row reaches 0.06 to 0.14
+-- into the next row's whole 9-unit box, which read FAV on when the whole box was read. So FAV is
+-- on where the column holds
+-- light pixels, or a star's middle holds a share of drawn ones from STAR_DRAWN_MIN to STAR_DRAWN_MAX
+-- — a star, not a lit row — and off where neither: with FAV on and none of the shown presets
+-- marked, the dim stars still say it, a category of two rows with the first selected included.
+-- Asked only while an expansion is open: the grid's tiles light the same column. The light pixels'
+-- grid is of one column, four cells to a row of the presets, as Br.stars reads the stars
+-- (src/read/browser.luau); the whole read is a few hundred turns.
+E.LIGHT = host.screen.predicate("r + g + b >= 450")
+E.DRAWN = host.screen.predicate("r + g + b >= 135")
+local STAR_DRAWN_MIN, STAR_DRAWN_MAX = 0.05, 0.6
+local STAR_MIDDLE = 5
+local STAR_CELLS = 4
 
 -- Words in an open expansion's categories and presets, of which a text has to hold two to be an
 -- open expansion's (the project's markers); an expansion's name has to be this long to count as
@@ -40,36 +62,63 @@ E.NAME_MIN = NAME_MIN
 local OPEN_SCORE = 6
 
 function E.ask(pl, out)
-  local r = pl:box(X.FAVORITE_VIEW, X.FAVORITE_VIEW_STATE)
+  local r = pl:rect(X.STAR_COLUMN)
   if not r then return end
-  out[#out + 1] = P.cells("fav peak", r, E.PEAK, pl.k)
-  out[#out + 1] = P.cells("fav bright", r, E.BRIGHT, pl.k)
+  out[#out + 1] = { name = "fav stars", kind = "cells", rect = r, cols = 1, rows = X.PRESET_VISIBLE_ROWS * STAR_CELLS,
+    pred = E.LIGHT }
+  out[#out + 1] = { name = "fav star shapes", kind = "cells", rect = r, cols = 1, rows = math.clamp(r[4] - r[2], 1, 256),
+    pred = E.DRAWN }
 end
 
--- FAV into `v.favoriteView`.
-function E.favorite(pl, got, v, log, marks)
-  local r = pl:box(X.FAVORITE_VIEW, X.FAVORITE_VIEW_STATE)
-  local peak, bright = got["fav peak"], got["fav bright"]
-  local ps, _, any = nil, nil, false
-  if peak and r then ps, _, any = peak:share(r) end
-  local bs = bright and r and bright:share(r)
+-- How many of the column's rows hold a star drawn in the middle of their box, by grid `g` of
+-- E.DRAWN, and of how many in the picture; nil where none is.
+local function starsDrawn(pl, g)
+  local sx = pl:exact(X.PRESET_FAVORITE_X, 0)
+  local half = STAR_MIDDLE / 2 * pl.k
+  local drawn, boxes = 0, 0
+  for i = 0, X.PRESET_VISIBLE_ROWS - 1 do
+    local _, y = pl:exact(0, X.PRESET_Y0 + i * X.PRESET_Y_STEP)
+    local s = g:share({ math.floor(sx - half + 0.5), math.floor(y - half + 0.5), math.floor(sx + half + 0.5),
+      math.floor(y + half + 0.5) })
+    if s ~= nil then
+      boxes += 1
+      if s >= STAR_DRAWN_MIN and s <= STAR_DRAWN_MAX then drawn += 1 end
+    end
+  end
+  if boxes == 0 then return nil end
+  return drawn, boxes
+end
+
+-- FAV into `v.favoriteView`, read only while `open` (an expansion read open): nil otherwise.
+function E.favorite(pl, got, v, log, marks, open)
   local x, y = pl:point(X.FAVORITE_VIEW[1], X.FAVORITE_VIEW[2])
   marks[#marks + 1] = { x = x, y = y }
-  if ps == nil or bs == nil then
-    log("expansion: FAV not read")
+  if not open then
+    log("expansion: FAV not read — no expansion reads open")
     return
   end
-  local n = pl:toolPixels(r)
-  v.favoriteView = any or bs * n >= FAV_BRIGHT
-  log(string.format("expansion: FAV %s of its pixels at 190 or brighter (%s), %s brighter than 150 (the project's %.0f of "
-    .. "%.0f, on from %d) — %s", P.pct(ps), any and "some" or "none", P.pct(bs), bs * n, n, FAV_BRIGHT,
+  local g, d, r = got["fav stars"], got["fav star shapes"], pl:rect(X.STAR_COLUMN)
+  local share, _, any = nil, nil, false
+  if g and r then share, _, any = g:share(r) end
+  local drawn, boxes = nil, nil
+  if d then drawn, boxes = starsDrawn(pl, d) end
+  if share == nil or drawn == nil then
+    local missing = share == nil and "fav stars" or "fav star shapes"
+    log("expansion: FAV not read (" .. tostring(got[missing] and "its column is not in the picture" or got.why[missing]) .. ")")
+    return
+  end
+  v.favoriteView = any or drawn > 0
+  log(string.format("expansion: FAV — the star column %s light (the project's %.0f pixels of %.0f), a star drawn in the "
+    .. "middle of %d of the %d rows' boxes — %s", P.pct(share), share * pl:toolPixels(r), pl:toolPixels(r), drawn, boxes,
     v.favoriteView and "ON" or "OFF"))
 end
 
--- The view's caption as an OCR entry.
+-- The view's caption and the header's name as OCR entries.
 function E.entries(pl, out)
   local r = pl:rect(X.VIEW_TEXT)
   if r then out[#out + 1] = { name = "expansion view", region = r } end
+  r = pl:rect(X.NAME_TEXT)
+  if r then out[#out + 1] = { name = "expansion name", region = r } end
 end
 
 -- The view a caption reads as, or nil: "List", or the first of 1 to 8 in a caption with "row" in

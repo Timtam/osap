@@ -21,9 +21,9 @@
 --                         read before and after as text
 --   central_drum_sq_sequence_menu_item {item}   SEQUENCE MENU with the right button; its item opens
 --                         a file dialog, waited for, and DRUM SQ read once more after it
---   central_drum_sq_length {steps}   LENGTH double-clicked, its length read, then dragged from what
---                         it reads to the length asked and read again (the tool wrote the length
---                         asked, and dragged as if the double-click had set 64)
+--   central_drum_sq_length {steps}   LENGTH double-clicked, which sets 64, then dragged from there
+--                         to the length asked, as the tool does; LENGTH is a knob with no length
+--                         drawn, so the length set is kept and shown as set, not read
 --   reset_central_drum_sq_control {control}   a double-click on VEL AMOUNT or SHUFFLE: the change
 --                         wait's verdict, no value claimed
 --
@@ -278,17 +278,16 @@ end
 
 -- central_drum_sq_length {steps}: in trip `trip`'s act on overlay `o`, a handler where reads wait,
 -- and `trip:inFront()` after every wait — false has ended the trip, and its give-up says the rest:
---   1. DRUM SQ pictured and read with LENGTH, the picture held; nothing clicked off DRUM SQ;
---   2. LENGTH double-clicked where the tool double-clicks it, both clicks left;
---   3. a change wait on LENGTH from that picture, and LENGTH read again — what the double-click set,
---      which the tool took to be 64 and dragged from (taken so only where it cannot be read);
---   4. a drag from LENGTH's point by `C.SQ_LENGTH_STEP` points per four steps from what was read to
---      the length asked, down for a shorter one and up for a longer one (host.input.drag), none where
---      it reads the length asked already;
---   5. a change wait from the picture after the double-click, and LENGTH read once more: the answer.
--- The length is noted as not read in the state once the double-click has gone out, which a give-up
--- posts, and the read after the drag overwrites; where no read comes after, the part answered is the
--- last one read with its LENGTH taken out, never a LENGTH read before it last changed.
+--   1. DRUM SQ pictured and read, the picture held; nothing clicked off DRUM SQ;
+--   2. LENGTH double-clicked where the tool double-clicks it, both clicks left: 64 steps, the tool's;
+--   3. a change wait on LENGTH's knob from that picture;
+--   4. a drag from LENGTH's point by `C.SQ_LENGTH_STEP` points per four steps from 64 to the length
+--      asked, down (host.input.drag) — none for 64;
+--   5. a change wait from the picture after the double-click.
+-- LENGTH is a knob with no length drawn anywhere (read/drumsq.luau), so nothing reads the length:
+-- the answer is the length set — kept as a fact of the session for the preset read now and shown
+-- as set, not read (state.luau, `sqLengthSet`), as the tool wrote the length it dragged to — where
+-- the knob changed after the last click; "unchanged" where it did not, and the length not kept.
 function Sq.length(o, trip, steps, label)
   local function log(fmt, ...)
     host.log.info(("[avenger] [length] " .. fmt):format(...))
@@ -302,26 +301,8 @@ function Sq.length(o, trip, steps, label)
   if not (region and field) then return trip:done({ error = "that part of VPS Avenger is not on the screen" }) end
   local watch = { { math.max(field[1], region[1]), math.max(field[2], region[2]), math.min(field[3], region[3]),
     math.min(field[4], region[4]) } }
-  local opts = { pl = pl, fields = { "sq_length" } }
   local held = {}   -- the pictures held: before, mid
   local words = {}  -- the log's, in order
-
-  -- Part `drumsq` read off picture `s`: { keys, values }, or nil.
-  local function readOff(s)
-    local ok, v, keys = pcall(Open.part, s, "drumsq", opts)
-    if ok then return { keys = keys, values = v } end
-    log("the read failed: %s", tostring(v))
-    return nil
-  end
-  local function stepsWords(n) return n and tostring(n) or "not read" end
-  -- Part `p` (readOff's) without its LENGTH: read before the double-click or the drag, it says the
-  -- rest of DRUM SQ as it is and LENGTH as not read.
-  local function unread(p)
-    if not p then return nil end
-    local values = table.clone(p.values)
-    values.sqLength = nil
-    return { keys = p.keys, values = values }
-  end
 
   -- 1. Before.
   local okS, snap, whyS = pcall(host.screen.snapshot, { region = region })
@@ -330,37 +311,37 @@ function Sq.length(o, trip, steps, label)
     return trip:done({ error = "VPS Avenger cannot be read now" })
   end
   held.before = snap
-  local before = readOff(snap)
+  local okB, vb, keysB = pcall(Open.part, snap, "drumsq", { pl = pl })
   if not trip:inFront() then return release(held) end
-  if not before then
+  if not okB then
     release(held)
+    log("the read failed: %s", tostring(vb))
     return trip:done({ error = "reading VPS Avenger failed" })
   end
-  local vb = before.values
+  local before = { keys = keysB, values = vb }
   local why, focus = Sq.refusal(vb)
   if why then
     release(held)
     log("nothing clicked — %s", why)
     return trip:done({ part = before, error = why, focus = focus })
   end
-  words[#words + 1] = "before " .. stepsWords(vb.sqLength)
+  -- The preset the length is kept for: the name last read in this window.
+  local w = E.plugin()
+  local known = w and S.values(w.id)
+  local preset = known and known.preset
 
-  -- 6. The answer, from the read last made (`after`, or nil: none).
-  local function answer(after, last)
-    log("%s; after %s", table.concat(words, "; "), stepsWords(after and after.values.sqLength))
-    local part = after or unread(last or before)
-    local n = after and after.values.sqLength
-    if n == nil then return trip:done({ part = part, error = "the length cannot be read now" }) end
-    if n ~= steps then
-      return trip:done({ part = part,
-        note = "LENGTH reads " .. string.sub(Sq.lengthWords(n), 8) .. ", not " .. steps .. " steps" })
+  -- 6. The answer: the length set where LENGTH's knob changed after the last click.
+  local function answer(changed)
+    log("%s — %s", table.concat(words, "; "), changed and ("set to " .. steps .. " steps") or "LENGTH did not change")
+    if not changed then
+      return trip:done({ part = before, note = "unchanged after the click; the length is not known" })
     end
-    if vb.sqLength == steps then return trip:done({ part = part, note = "unchanged, " .. Sq.lengthWords(n) }) end
-    trip:done({ part = part, said = Sq.lengthWords(n), focus = "central-drum-sq-length" })
+    return trip:done({ part = before, facts = { sqLengthSet = preset and { preset = preset, steps = steps } or false },
+      said = Sq.lengthWords(steps) .. ", set", focus = "central-drum-sq-length" })
   end
 
-  -- A change wait on LENGTH from picture `from`, then `next(picture or nil, changed)` — the trip
-  -- still in front.
+  -- A change wait on LENGTH's knob from picture `from`, then `next(picture or nil, changed)` — the
+  -- trip still in front.
   local function waitFrom(from, next)
     local asked, err = pcall(host.screen.snapshot, { region = region, change = { from = from, watch = watch,
       timeout = CHANGE_WITHIN, tolerance = 16, minPixels = 4 } }, function(s, whyW, info)
@@ -377,13 +358,13 @@ function Sq.length(o, trip, steps, label)
     end
   end
 
-  -- 4 and 5: the drag from what the double-click left (`mid`, in steps), and the read after it.
-  local function drag(middle, mid)
-    local d = (mid - steps) / 4 * C.SQ_LENGTH_STEP
+  -- 4 and 5: the drag from what the double-click set, and the change after it.
+  local function drag(changedBefore)
+    local d = (C.SQ_LENGTH_RESET - steps) / 4 * C.SQ_LENGTH_STEP
     if math.abs(d) <= 0.05 then
       words[#words + 1] = "no drag"
       release(held)
-      return answer(middle)
+      return answer(changedBefore)
     end
     local x0, y0 = E.ring.pointOf(o, label, C.SQ_LENGTH, true)
     local x1, y1 = nil, nil
@@ -392,50 +373,35 @@ function Sq.length(o, trip, steps, label)
       release(held)
       local said = x0 and y1 or y0
       log("%s; not dragged — %s", table.concat(words, "; "), tostring(said))
-      return trip:done({ part = middle or unread(before), sentence = said })
+      return trip:done({ part = before, sentence = said })
     end
     host.input.drag(x0, y0, x1, y1)
     words[#words + 1] = string.format("dragged %.1f points (%d,%d)→(%d,%d)", d, x0, y0, x1, y1)
     if not trip:inFront() then return release(held) end
-    waitFrom(held.mid, function(s)
+    waitFrom(held.mid, function(s, changed)
+      if s then s:release() end
       release(held)
-      if not s then return answer(nil, middle) end
-      local after = readOff(s)
-      s:release()
-      if not trip:inFront() then return end
-      answer(after, middle)
+      answer(changed)
     end)
   end
 
-  -- 2 and 3: the double-click, and LENGTH read after it — not where its second click was not made.
+  -- 2 and 3: the double-click, and the change after it — not where its second click was not made.
   local function afterDouble(okD, saidD)
     if not okD then
       release(held)
       if not trip:inFront() then return end
       return trip:done({ part = before, sentence = saidD })
     end
-    -- What LENGTH is from here on is not known until it is read: a give-up posts it so.
-    local w = E.plugin()
-    if w then S.part(w.id, { "sqLength" }, {}) end
+    -- What LENGTH is from here on is not known until the action is done: a give-up posts it so.
+    if w then S.note(w.id, "sqLengthSet", nil) end
     waitFrom(held.before, function(s, changed)
       held.before:release()
       held.before = nil
-      local middle = nil
-      if s then
-        held.mid = s
-        middle = readOff(s)
-        if not trip:inFront() then return release(held) end
-      end
-      local mid = middle and middle.values.sqLength
-      words[#words + 1] = string.format("the double-click — %s, read %s", changed and "changed" or "unchanged",
-        stepsWords(mid))
+      words[#words + 1] = string.format("the double-click — %s", changed and "changed" or "unchanged")
       -- No picture to wait from after it: the drag would have no baseline, and nothing is dragged.
-      if not held.mid then return answer(nil) end
-      if not mid then
-        log("the length after the double-click is not read — taken as %d, the tool's", C.SQ_LENGTH_RESET)
-        mid = C.SQ_LENGTH_RESET
-      end
-      drag(middle, mid)
+      if not s then return answer(false) end
+      held.mid = s
+      drag(changed)
     end)
   end
 
@@ -444,6 +410,14 @@ function Sq.length(o, trip, steps, label)
     release(held)
     return trip:done({ part = before, sentence = said })
   end
+end
+
+-- Each read after a click counts only where it reads DRUM SQ as the central tab (Sq.refusal;
+-- src/actions/drums.luau, Drums.holding).
+for _, name in ipairs({ "central_drum_sq_pattern_player", "central_drum_sq_auto_follow",
+  "select_central_drum_sq_pattern", "toggle_central_drum_sq_pattern", "central_drum_sq_pattern_menu_item",
+  "central_drum_sq_speed", "central_drum_sq_sequence_menu_item", "reset_central_drum_sq_control" }) do
+  Sq[name] = Drums.holding(Sq[name], Sq.refusal)
 end
 
 -- What actions.luau hands over: { ring = main.luau's helpers, plugin = () -> the window the page was

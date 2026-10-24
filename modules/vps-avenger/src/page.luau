@@ -32,7 +32,7 @@
 --                 expansion opened from the page is the one at its place in the list last posted
 --   the watcher   while the page is hidden, DRUM SQ's selected pattern said as AUTO FOLLOW moves it
 --                 (watch.luau), paced by the `drumSqCadence` setting
---   the settings  five (P.SETTINGS), which the module's settings dialog shows and the page's own
+--   the settings  six (P.SETTINGS), which the module's settings dialog shows and the page's own
 --                 Settings section — the tool's Windows-only block made general — writes with
 --                 set_setting and reset_settings, no trip; whichever wrote, the settings are posted
 --                 to the page after the change, and at every `ready`, so the two always agree
@@ -49,22 +49,27 @@
 local P = {}
 
 -- ── Settings ─────────────────────────────────────────────────────────────────
--- Five, in the module's settings dialog (the plan's §2.9): the page key, the expansions list, the
--- sounds, the Mac page mode, and how often DRUM SQ's watcher takes its picture (watch.luau).
+-- Six, in the module's settings dialog (the plan's §2.9): the page key, the expansions list, the
+-- sounds, the Mac page mode, how often DRUM SQ's watcher takes its picture (watch.luau), and the
+-- Expansion View VPS Avenger shows where it draws no label to read — set from the page, or
+-- confirmed there (read/browser.luau, Br.view), as the tool kept its AVGExpansionView.
 local KEY_DEFAULT = host.os.pick({
   macos = "Ctrl+Shift+Win+F1", -- Command is Ctrl and Control is Win in a key spec on a Mac
   windows = "Ctrl+Shift+Alt+F1",
   linux = "Ctrl+Shift+Alt+F1",
 })
--- The tool's rosters of expansions, its default first ("Factory Standard": the ones every owner of
--- Avenger has, its preset_db.py) — the two that name no person. "Complete" is every expansion of
--- the preset database (DB.roster): the tool's catalog and the five it does not name.
-P.ROSTERS = { "Factory Standard", "Complete" }
+-- The tool's rosters of expansions, exactly as it offers them (its preset_db.py, ROSTER_KEY_OPTIONS,
+-- each label without "Expansions "), its default first: "Factory Standard", the ones every owner of
+-- Avenger has; "Complete", the tool's catalog; and the two personal rosters the tool offers, by the
+-- names it gives them — the maintainer's decision of 2026-10-24, an exception to the rule that no
+-- person is named, for exactly these two (DB.roster).
+P.ROSTERS = { "Factory Standard", "Complete", "Nyhdroe", "Joyman" }
+local X = host.include("src/tables/expansion.luau")
 
 local function onOff(v) return v and "on" or "off" end
 local function whole(v) return type(v) == "number" and v == math.floor(v) end
 
--- The five, in the dialog's order, from one table: `opts` what host.settings.define is given (the
+-- The six, in the dialog's order, from one table: `opts` what host.settings.define is given (the
 -- dialog's label, its bounds or choices), `words` the page's name for it, which its answers begin
 -- with, `say(v)` a value in words, and `check(v)` why `v` cannot be stored, or nil — the page's
 -- messages are checked with it before anything is set, and a stored value at load: `define` hands
@@ -108,12 +113,20 @@ P.SETTINGS = {
       end
       return nil
     end },
+  { key = "expansionView", default = "8 per Row", words = "Expansion View",
+    opts = { label = "Expansion View VPS Avenger shows (where it draws no label to read)", oneOf = X.VIEW_OPTIONS },
+    say = tostring,
+    check = function(v)
+      if v == nil then return "no view was named" end
+      if type(v) ~= "string" or not table.find(X.VIEW_OPTIONS, v) then return tostring(v) .. " is not one of VPS Avenger's views" end
+      return nil
+    end },
 }
 local byKey = {}
 for _, s in ipairs(P.SETTINGS) do byKey[s.key] = s end
 -- Reset's order: the Mac mode last, since it describes the page again (O:pageAgain) and the page the
 -- reset came from is closed with it.
-local RESET_ORDER = { "roster", "sounds", "drumSqCadence", "pageKey", "pageLeavesDawActive" }
+local RESET_ORDER = { "roster", "expansionView", "sounds", "drumSqCadence", "pageKey", "pageLeavesDawActive" }
 
 -- ── The actions ──────────────────────────────────────────────────────────────
 -- Every action the page sends (ui/panel.js, ACTIONS), by the tool's names, with the words its
@@ -141,6 +154,8 @@ P.LABELS = {
   mark_expansion_preset_favorite = "Mark as favorite",
   toggle_expansion_favorite_view = "The favorites view",
   align_open_expansion = "Correct open Expansion",
+  confirm_osc_count = "Confirm OSC Count",
+  confirm_expansion_view = "Confirm Expansion View",
   read_expansion_list = "Reading Avenger's list",
   set_setting = "Settings",
   reset_settings = "Reset Saved Settings",
@@ -226,6 +241,7 @@ local E = nil -- what main.luau hands over (P.start)
 local O = host.require("com.platform.overlay")
 local S = host.include("src/state.luau")
 local Reads = host.include("src/read/open.luau")
+local Br = host.include("src/read/browser.luau")
 local Watch = host.include("src/watch.luau")
 
 local ready = false -- this page object's document has loaded
@@ -322,6 +338,16 @@ end
 local lastShown = nil
 local function shownExpansions()
   local shown = S.expansions(roster())
+  -- A roster's expansion the database has no data for stays in its list, as the tool keeps it, and
+  -- is marked so (DB.roster).
+  if shown and not shown.avenger then
+    local have = {}
+    for _, n in ipairs(E.DB.expansionNames() or {}) do have[n] = true end
+    shown.noData = {}
+    for i, n in ipairs(shown.names) do
+      if not have[n] then shown.noData[i] = true end
+    end
+  end
   lastShown = shown and shown.names or nil
   return shown
 end
@@ -340,8 +366,13 @@ local function notShown(err)
   return "The page did not come to the front: " .. tostring(err) .. "."
 end
 
--- In the error region when the picture was cut at the screen's edge (read/open.luau).
-local function cutWords(zoom)
+-- In the error region when the picture was cut at the screen's edge (read/open.luau): the parts
+-- that leave it, and the way to bring them back (Open.offScreen) — or, where none of the page's
+-- parts is named, that part of Avenger does.
+local function cutWords(zoom, parts)
+  if parts then
+    return string.upper(string.sub(parts, 1, 1)) .. string.sub(parts, 2) .. ". What lies past the edge was not read."
+  end
   return (zoom and ("At " .. zoom .. " percent, part") or "Part")
     .. " of VPS Avenger lies past the edge of the screen: what lies there was not read."
 end
@@ -363,7 +394,8 @@ local function open(o)
   local mark = o:here()
   local before = S.values(win.id)
   local ok, values, why, words = pcall(Reads.read, o, { zoom = E.zoomOf(origin), mark = mark,
-    expected = before and before.selectedExpansion or nil, expectedFromDatabase = before and before.selectedFromDatabase })
+    expected = before and before.selectedExpansion or nil, expectedFromDatabase = before and before.selectedFromDatabase,
+    window = win.id })
   if not ok then
     host.log.info("[avenger] [page] not shown: the reads could not be made — " .. tostring(values))
     say(Reads.FAILED)
@@ -386,7 +418,7 @@ local function open(o)
     values.preset and ("'" .. values.preset .. "'") or "not read", values.zoom and (values.zoom .. " %") or "not read"))
   plugin, keyAt = win, t0
   postState(win.id)
-  post({ kind = "error", text = values.cut and cutWords(values.zoom) or "" })
+  post({ kind = "error", text = values.cut and cutWords(values.zoom, values.offScreen) or "" })
   if shownOnce then
     post({ kind = "restoreFocus" })
   else
@@ -441,7 +473,7 @@ local function answerReady()
   post({ kind = "state", state = S.snapshot(id, shownExpansions(), { age = at ~= nil and at ~= given }) })
 end
 
--- The settings as the page's Settings section shows them (ui/panel.js, applySettings): the five
+-- The settings as the page's Settings section shows them (ui/panel.js, applySettings): the six
 -- values as stored, the expansions lists to choose from, and the key in effect and the default
 -- key in this platform's words. About 200 bytes.
 local function settingsMessage()
@@ -451,7 +483,7 @@ local function settingsMessage()
     defaultKeyWords = describeKey(KEY_DEFAULT) }
 end
 
--- The end of every one of the five settings' callbacks: the settings to the page, so that what the
+-- The end of every one of the six settings' callbacks: the settings to the page, so that what the
 -- dialog changed shows there — once its document is there to be told; and while the page's own
 -- change is made, once, after it (`asking`).
 local function postSettings()
@@ -656,7 +688,7 @@ local function noSetting(label, name)
   answer(label .. ": " .. why)
 end
 
--- set_setting {key, value}: one of the five, checked (P.SETTINGS), stored where it is not the value
+-- set_setting {key, value}: one of the six, checked (P.SETTINGS), stored where it is not the value
 -- already stored — the callbacks then do what a change does — and answered.
 P.HANDLERS.set_setting = function(_, args)
   local s = type(args.key) == "string" and byKey[args.key] or nil
@@ -720,7 +752,7 @@ end
 -- presets.luau, ring = main.luau's own clicks, reads and choices, for the trips (actions.luau) }.
 function P.start(env)
   E = env
-  -- The five, and a stored value outside its schema set back to its default (P.SETTINGS); the page
+  -- The six, and a stored value outside its schema set back to its default (P.SETTINGS); the page
   -- key's stored value is checked as a key, below.
   for _, s in ipairs(P.SETTINGS) do
     local v = host.settings.define(s.key, s.default, s.opts)
@@ -754,7 +786,7 @@ function P.start(env)
   }
   env.header:addPage(spec)
 
-  -- Every one of the five settings' callbacks ends with the settings posted (postSettings), the
+  -- Every one of the six settings' callbacks ends with the settings posted (postSettings), the
   -- dialog's OK — which sets every setting, changed or not — included.
   host.settings.onChange("pageKey", function(new)
     if new == key then return postSettings() end
@@ -825,6 +857,19 @@ function P.start(env)
   -- After the watcher's own, which arms it at the new pace: the settings posted once it has.
   host.settings.onChange("sounds", postSettings)
   host.settings.onChange("drumSqCadence", postSettings)
+  -- The view stored, posted with the state where the grid reads in a view not read — said as set or
+  -- confirmed only where the page's own action stored it (Br.settingChanged).
+  host.settings.onChange("expansionView", function(new, old)
+    Br.settingChanged(new)
+    local id = plugin and plugin.id
+    local v = S.values(id)
+    if v and v.expansionOpen == false and v.expansionViewFrom ~= nil then
+      local view, how = Br.view()
+      S.set(id, { expansionView = view, expansionViewFrom = how })
+    end
+    if new ~= old and ready then answerReady() end
+    postSettings()
+  end)
   host.log.info("[avenger] [page] " .. keyWords() .. " shows the Avenger Control page beside an identified VPS Avenger")
 end
 

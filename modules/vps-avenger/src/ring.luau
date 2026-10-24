@@ -3,7 +3,8 @@
 -- the page's trips (src/actions/osc.luau, src/actions/macros.luau, src/act.luau):
 --
 --   Oscillator            a stepper over OSC 1 to n, Drums and Trig: the tab read as selected
---   Mute, Solo            the selected tab's, on or off as read; Return clicks it
+--   Mute, Solo            the selected tab's, on or off as read — a Mute under another tab's Solo
+--                         said as silenced by it (read/strip.luau, Strip.silencedBy); Return clicks it
 --   Add oscillator        Return adds one, none at eight
 --   the Drums tab's group (the plan's slice 8), shown only once the strip read in this stay reads the
 --   Drums tab selected, through the specs of src/actions/drums.luau:
@@ -21,13 +22,21 @@
 --       Pattern chain, Auto follow   on or off as read; Return clicks it
 --       Pattern           a stepper over A and the patterns read on: the pattern read as selected
 --       Pattern B, Pattern C, Pattern D   on or off as read; Return turns it on or off
---   Level, Pan, Transpose, Fine tune, Random pitch   the selected oscillator's knobs as read;
---                         Return resets the knob with a double-click (the right button for Pan and
---                         Random Pitch). Turning them is the page's (the plan's slice 7,
---                         src/amount.luau); the ring's is TODO.md's ("The ring's knobs turned")
+--   Level, Pan, Transpose, Fine tune, Random pitch   the selected oscillator's knobs as read, each
+--                         followed by its own reset — Reset level, Reset pan, Reset transpose, Reset
+--                         fine tune, Reset random pitch — as the tool's panel has them, separate
+--                         buttons: a double-click on the knob (the right button for Pan and Random
+--                         Pitch), then the knob read. The tool's knob button holds the knob and
+--                         turns it with Page Up and Page Down, Return letting go; the ring can hold
+--                         those keys only with the overlay's hold of keys outside a trip
+--                         (O:holdKeys, overlay runtime 0.13), which it does not use yet, so until
+--                         then Return on the knob resets it too, and turning it is the page's
+--                         (src/amount.luau)
 --   Macro tab             a stepper over the macro tabs: the tab read as shown, of how many
 --   Add macro tab, Delete last macro tab
---   Macro 1 to 3          a knob's name and amount as read; Return resets it
+--   Macro 1 to 3          a knob's name and amount as read, each followed by Reset macro 1 to 3, the
+--                         tool's separate reset: a double-click, then the amount read; Return on the
+--                         knob resets it too, until the ring can hold keys (above)
 --   Macro button 1, 2     a button's name, on or off as read; Return clicks it
 --
 -- A part is read when one of its controls is first announced or pressed in a stay — the overlay's
@@ -35,8 +44,10 @@
 -- each of the ring's own actions on it, whose read after the click is what the control says next.
 -- Forgotten when the overlay leaves the front, where the preset may have changed with nothing read
 -- since (main.luau's `unseen`, ◀ and ▶), and at every trip of the page's, which acts on Avenger
--- while the ring is away. One action at a time: a press while one is out sends nothing, and says
--- nothing of its own; the one out says what it read.
+-- while the ring is away. One action at a time: a press while one is out sends nothing and says so
+-- once, "<control>: still working on the last press", without cutting into speech — the second Mac
+-- test's three Oscillator presses dropped in silence; the one out says what it read. Everything the
+-- ring says is in the log too ("[avenger] [ring] said: …"), its refusals among it.
 --
 -- The tabs' menus, the macro knobs' reset modes and the macro buttons' menus are the page's only
 -- (the plan's question Q5-2): a stepper over their items would have no value read to say. So are a
@@ -60,6 +71,7 @@ local Drums = host.include("src/actions/drums.luau")
 local Sq = host.include("src/actions/drumsq.luau")
 local D = host.include("src/tables/drums.luau")
 local C = host.include("src/tables/centre.luau")
+local Strip = host.include("src/read/strip.luau")
 
 local Ring = {}
 
@@ -67,13 +79,20 @@ local R = nil -- main.luau's ring helpers (Ring.build)
 
 -- What was read in this stay: the values, and which parts. `gen` counts the actions, so that an
 -- action that ends after the cache was forgotten writes nothing into the new one. `centralAt`: when
--- the central tab was last read into it (host.now).
-local cache = { values = {}, parts = {}, gen = 0 }
+-- the central tab was last read into it (host.now). `off`: by part, what a part that lay off the
+-- screen at its last try says (read/open.luau, Open.offScreen).
+local cache = { values = {}, parts = {}, gen = 0, off = {} }
 local pending = nil -- the gen of the action out, or nil
 
 function Ring.forget()
-  cache = { values = {}, parts = {}, gen = cache.gen + 1 }
+  cache = { values = {}, parts = {}, gen = cache.gen + 1, off = {} }
   pending = nil
+end
+
+-- What a control of part `part` says where nothing of it was read: that the part lies off the
+-- screen, and how to bring it back, where it does — else `default` ("not read").
+local function unread(part, default)
+  return cache.off[part] or default or "not read"
 end
 
 -- Whether an action of the ring's is out.
@@ -100,8 +119,10 @@ end
 
 local log = function(s) host.log.info("[avenger] [ring] " .. s) end
 
-local function say(words)
-  host.speech.output(words, { interrupt = true })
+-- `words` said, and written to the log; `quiet`: without cutting into what is being said.
+local function say(words, quiet)
+  log("said: " .. words)
+  host.speech.output(words, { interrupt = not quiet })
 end
 
 -- What part `name`'s read gives, merged: each key it read replaced, as state.luau's S.part does.
@@ -127,6 +148,7 @@ local function ensure(o, name, text)
   if not (origin and k) then return nil end
   local pl = P.placer(origin, k, (H.zoom(origin)))
   local region = Open.partRegion(pl, name)
+  cache.off[name] = not region and Open.offScreen(pl, { name }) or nil
   if not region then return nil end
   local mark = o:here()
   local ok, snap = pcall(host.screen.snapshot, { region = region })
@@ -194,6 +216,7 @@ end
 local function busy(label)
   if pending then
     log(string.format("'%s': an action of the ring is still out — this press is not sent", label))
+    say(label .. ": still working on the last press", true)
     return true
   end
   return false
@@ -209,7 +232,7 @@ local function oscillatorStepper(ov)
     text = function(o)
       if pending then return nil end
       local v = ensure(o, "strip")
-      if not v then return "not read" end
+      if not v then return unread("strip") end
       return Osc.tabWords(v) or "not read"
     end,
     onStep = function(dir, o)
@@ -219,7 +242,8 @@ local function oscillatorStepper(ov)
       local kind, index = nil, nil
       if v then kind, index = selectedTab(v) end
       if not (n and kind) then
-        say(n and "Oscillator: the selected tab cannot be read now" or "Oscillator: the oscillator tabs cannot be counted now")
+        say("Oscillator: " .. (v and n and "the selected tab cannot be read now"
+          or unread("strip", "the oscillator tabs cannot be counted now")))
         return false
       end
       local at = kind == "osc" and index or (kind == "drums" and n + 1 or n + 2)
@@ -234,6 +258,9 @@ local function oscillatorStepper(ov)
         spec = built("Oscillator", Osc.select_osc_tab, { index = to })
       elseif to == n + 1 then
         spec = built("Oscillator", Osc.select_drums_tab, {})
+        -- The slots' names are twelve text regions, too slow on an Intel Mac to read on a step
+        -- (above): the ring reads none.
+        if spec then spec.textAfter = nil end
       else
         spec = built("Oscillator", Osc.select_trig_tab, {})
       end
@@ -251,7 +278,7 @@ local function switch(ov, title)
     text = function(o)
       if pending then return nil end
       local v = ensure(o, "strip")
-      if not v then return "not read" end
+      if not v then return unread("strip") end
       local kind, index = selectedTab(v)
       local on
       if kind == "osc" then
@@ -260,15 +287,20 @@ local function switch(ov, title)
       elseif kind then
         on = v[kind .. title]
       end
+      local who = kind == "osc" and ("OSC " .. index) or (kind == "drums" and "Drums" or "Trig")
+      -- Under another tab's Solo, a Mute says nothing of its own (read/strip.luau, Strip.silencedBy).
+      local silenced = lower == "mute" and kind and Strip.silencedBy(v, kind, index)
+      if silenced then return who .. ", " .. silenced end
       if on == nil then return "not read" end
-      return (kind == "osc" and ("OSC " .. index) or (kind == "drums" and "Drums" or "Trig")) .. ", " .. (on and "on" or "off")
+      return who .. ", " .. (on and "on" or "off")
     end,
     onActivate = function(o)
       if busy(title) then return end
       local v = ensure(o, "strip")
       local kind, index = nil, nil
       if v then kind, index = selectedTab(v) end
-      if not kind then return say(title .. ": the selected tab cannot be read now") end
+      if not kind then return say(title .. ": " .. (v and "the selected tab cannot be read now" or unread("strip",
+        "the selected tab cannot be read now"))) end
       local build = Osc["toggle_" .. kind .. "_" .. lower]
       local spec = built(title, build, { index = index })
       if spec then run(o, title, spec) end
@@ -287,7 +319,21 @@ local function addOscillator(ov)
   })
 end
 
--- A knob of the selected oscillator, its value as read; Return resets it.
+-- A knob's reset, `label` ("Reset level"), after the knob: the tool's separate button, the same
+-- spec as the knob's Return (Osc.reset_osc_control, Macros.reset_macro_amount).
+local function resetButton(ov, label, build, args)
+  ov:addCustomButton({
+    label = label,
+    onActivate = function(o)
+      if busy(label) then return end
+      local spec = built(label, build, args)
+      if spec then run(o, label, spec) end
+    end,
+  })
+end
+
+-- A knob of the selected oscillator, its value as read; Return resets it (above), and so does the
+-- reset after it.
 local function oscKnob(ov, label, key)
   local field = Osc.CONTROLS[key].field
   ov:addCustomButton({
@@ -295,7 +341,7 @@ local function oscKnob(ov, label, key)
     text = function(o)
       if pending then return nil end
       local v = ensure(o, "knobs")
-      if not v then return "not read" end
+      if not v then return unread("knobs") end
       if v.selectedType ~= "osc" then
         return v.selectedType and "no oscillator selected" or "not read"
       end
@@ -309,6 +355,7 @@ local function oscKnob(ov, label, key)
       if spec then run(o, label, spec) end
     end,
   })
+  resetButton(ov, "Reset " .. string.lower(label), Osc.reset_osc_control, { control = key })
 end
 
 -- ── The Drums tab ────────────────────────────────────────────────────────────
@@ -321,13 +368,13 @@ local function drumButton(ov, label, part, text, act)
     text = function(o)
       if pending then return nil end
       local v = ensure(o, part)
-      if not v then return "not read" end
+      if not v then return unread(part) end
       return text(v)
     end,
     onActivate = function(o)
       if busy(label) then return end
       local v = ensure(o, part)
-      if not v then return say(label .. ": VPS Avenger cannot be read now") end
+      if not v then return say(label .. ": " .. unread(part, "VPS Avenger cannot be read now")) end
       local build, args, why = act(v)
       if not build then return say(label .. ": " .. why) end
       local spec = built(label, build, args)
@@ -346,13 +393,13 @@ local function drumStepper(ov, label, part, count, at, words, step)
     text = function(o)
       if pending then return nil end
       local v = ensure(o, part)
-      if not v then return "not read" end
+      if not v then return unread(part) end
       return words(v)
     end,
     onStep = function(dir, o)
       if busy(label) then return false end
       local v = ensure(o, part)
-      local now, why = nil, "VPS Avenger cannot be read now"
+      local now, why = nil, unread(part, "VPS Avenger cannot be read now")
       if v then now, why = at(v) end
       if not now then
         say(label .. ": " .. why)
@@ -511,7 +558,8 @@ local function macroTabStepper(ov)
     text = function(o)
       if pending then return nil end
       local v = ensure(o, "macros", true)
-      if not (v and v.macroCount) then return "not read" end
+      if not v then return unread("macros") end
+      if not v.macroCount then return "not read" end
       if not v.macroSelected then return "of " .. v.macroCount .. ", the one shown not read" end
       return v.macroSelected .. " of " .. v.macroCount
     end,
@@ -519,8 +567,8 @@ local function macroTabStepper(ov)
       if busy("Macro tab") then return false end
       local v = ensure(o, "macros", true)
       if not (v and v.macroCount and v.macroSelected) then
-        say(v and v.macroCount and "Macro tab: the macro tab shown cannot be read now"
-          or "Macro tab: the macro tabs cannot be counted now")
+        say("Macro tab: " .. (v and v.macroCount and "the macro tab shown cannot be read now"
+          or unread("macros", "the macro tabs cannot be counted now")))
         return false
       end
       local to = v.macroSelected + dir
@@ -547,7 +595,7 @@ local function macroButtonOf(ov, label, build, args)
   })
 end
 
--- Macro knob `i`: its name and amount as read; Return resets it.
+-- Macro knob `i`: its name and amount as read; Return resets it, and so does the reset after it.
 local function macroKnob(ov, i)
   local label = "Macro " .. i
   ov:addCustomButton({
@@ -555,7 +603,7 @@ local function macroKnob(ov, i)
     text = function(o)
       if pending then return nil end
       local v = ensure(o, "macros", true)
-      if not v then return "not read" end
+      if not v then return unread("macros") end
       local name = v.macroLabels and v.macroLabels[i]
       local a = v.macroAmounts and v.macroAmounts[i]
       return (name and (name .. ", ") or "") .. (a and (a .. " percent") or "amount not read")
@@ -566,6 +614,7 @@ local function macroKnob(ov, i)
       if spec then run(o, label, spec) end
     end,
   })
+  resetButton(ov, "Reset macro " .. i, Macros.reset_macro_amount, { index = i })
 end
 
 -- Macro button `i`: its name, on or off as read; Return clicks it.
@@ -576,7 +625,7 @@ local function macroButton(ov, i)
     text = function(o)
       if pending then return nil end
       local v = ensure(o, "macros", true)
-      if not v then return "not read" end
+      if not v then return unread("macros") end
       local name = v.macroLabels and v.macroLabels[3 + i]
       local on = v.macroButtons and v.macroButtons[i]
       return (name and (name .. ", ") or "") .. (on == nil and "not read" or (on and "on" or "off"))

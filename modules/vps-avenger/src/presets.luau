@@ -563,19 +563,28 @@ function DB.catalogName(text)
   return cat.exact[t] ~= nil or cat.byFold[folded(t)] ~= nil
 end
 
--- The expansions of roster `name`, in the catalog's order, for the page's list of expansions:
--- "Factory Standard", the ones every owner of Avenger has, or "Complete", every expansion the
--- database has (129 in 1.1.0: the project's catalog's, and the five it does not name at their
--- alphabetical places, where the catalog's order puts them). The catalog's list, never Avenger's
--- own — the page marks it as the database's —
--- or nil and why there is none. It reads the index only (P.index, decoded once), not the lookups
--- the name searches build.
+-- The expansions of roster `name`, for the page's list of expansions: one of the four the
+-- project's tool offers (page.luau, P.ROSTERS), from the index's `rosters` (data 1.3.0), each in
+-- its own order — an expansion it lists that the database has no data for kept in it, as the tool
+-- keeps it. Before 1.3.0, "Factory Standard" from `factoryStandard` and any other as every
+-- expansion the database has. The database's list, never Avenger's own — the page marks it as the
+-- database's — or nil and why there is none. It reads the index only (P.index, decoded once), not
+-- the lookups the name searches build.
 function DB.roster(name)
   if not P then return nil, "not installed" end
   local ok, idx, why = pcall(P.index)
   if not ok then idx, why = nil, tostring(idx) end
   if not idx then return nil, tostring(why or "no index") end
   local out = {}
+  if type(idx.rosters) == "table" then
+    for _, r in ipairs(idx.rosters) do
+      if type(r) == "table" and r.name == name and type(r.expansions) == "table" then
+        for k, n in ipairs(r.expansions) do out[k] = n end
+        return out
+      end
+    end
+    return nil, "the database has no roster " .. tostring(name)
+  end
   if name == "Factory Standard" then
     for k, n in ipairs(idx.factoryStandard or {}) do out[k] = n end
   else
@@ -590,7 +599,8 @@ end
 
 -- The preset `read` (a name read off the screen) placed in the catalog, as Preset info places
 -- it, the anchor with it: { expansion, index (its place in the expansion's list), name (the
--- catalog's spelling), how ("exact", "folded" or "fuzzy"), osc = { the tabs' names }, macros =
+-- catalog's spelling), how ("exact", "folded" or "fuzzy"), own (true after Load or Save as, where
+-- the name may be the user's own file's: SNAPPING), osc = { the tabs' names }, macros =
 -- { { a tab's five names: three knobs, two buttons }, … } } — the names as DB.info says them,
 -- Avenger's own ("OSC 2", "Macro 4") where the sound designer named none; `osc` and `macros` are
 -- left out when the expansion's file cannot be read. nil and why when the name is not placed.
@@ -609,7 +619,7 @@ function DB.place(read)
     return nil, "in the catalog more than once"
   end
   local e = expansionOf(p)
-  local out = { expansion = e, index = I(p), name = tidy(nameAt(p)), how = res.how }
+  local out = { expansion = e, index = I(p), name = tidy(nameAt(p)), how = res.how, own = ownName }
   local ok, x, bad = pcall(P.expansion, e)
   if not ok then x, bad = nil, tostring(x) end
   if x then

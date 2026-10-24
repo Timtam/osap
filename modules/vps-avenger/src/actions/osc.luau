@@ -25,6 +25,7 @@
 
 local T = host.include("src/tables/strip.luau")
 local OSC = host.include("src/tables/osc.luau")
+local Strip = host.include("src/read/strip.luau")
 local Open = host.include("src/read/open.luau")
 local Knob = host.include("src/read/knob.luau")
 
@@ -120,12 +121,14 @@ function A.select_osc_tab(args, label)
   }
 end
 
--- Drums or Trig, at its tab's point.
-local function fixedTab(x)
+-- Drums or Trig, at its tab's point; with `names`, the part's text read after the click — the Drums
+-- tab's slots' names, which the page shows (the ring leaves them off: ring.luau).
+local function fixedTab(x, names)
   return function(_, label)
     return {
       label = label,
       part = "tab",
+      textAfter = names,
       decide = function() return { at = { x, T.TAB_Y } } end,
       watch = function() return { TABS_ROW, KNOBS } end,
       same = sameSelection,
@@ -133,7 +136,7 @@ local function fixedTab(x)
     }
   end
 end
-A.select_drums_tab = fixedTab(T.DRUMS_TAB_X)
+A.select_drums_tab = fixedTab(T.DRUMS_TAB_X, true)
 A.select_trig_tab = fixedTab(T.TRIG_TAB_X)
 
 function A.add_osc(_, label)
@@ -160,8 +163,9 @@ function A.add_osc(_, label)
 end
 
 -- A Mute or Solo LED: `key` the values' list or switch, `title` its word, `point(vb)` where it is
--- (nil and why where it cannot be placed), `who` the tab's words.
-local function toggle(label, key, index, title, who, point)
+-- (nil and why where it cannot be placed), `who` the tab's words, `kind` the tab's ("osc", "drums",
+-- "trig"). A Mute read while another tab's Solo is on is said as silenced by it (Strip.silencedBy).
+local function toggle(label, key, index, title, who, point, kind)
   local function valueOf(v)
     if not v then return nil end
     if index then return v[key] and v[key][index] end
@@ -184,7 +188,8 @@ local function toggle(label, key, index, title, who, point)
       local a = valueOf(va)
       local named = (who and (who .. " ") or "") .. title
       if a == nil then return { error = (who and (who .. "'s ") or "") .. title .. " cannot be read now" } end
-      local words = named .. " " .. (a and "ON" or "OFF")
+      local silenced = title == "Mute" and Strip.silencedBy(va, kind, index)
+      local words = named .. (silenced and (", " .. silenced) or (" " .. (a and "ON" or "OFF")))
       if how == "unchanged" then return { note = "unchanged, " .. words, said = words .. ", unchanged" } end
       return { said = words }
     end,
@@ -201,21 +206,21 @@ local function oscToggle(kind)
       local n, why = counted(vb, i)
       if not n then return nil, why end
       return { T.tabX(i, n) + dx, T.MUTE_Y }
-    end)
+    end, "osc")
   end
 end
 A.toggle_osc_mute = oscToggle("mute")
 A.toggle_osc_solo = oscToggle("solo")
 
-local function fixedToggle(key, title, p)
+local function fixedToggle(key, title, p, kind)
   return function(_, label)
-    return toggle(label, key, nil, title, nil, function() return p end)
+    return toggle(label, key, nil, title, nil, function() return p end, kind)
   end
 end
-A.toggle_drums_mute = fixedToggle("drumsMute", "Mute", T.DRUMS_MUTE)
-A.toggle_drums_solo = fixedToggle("drumsSolo", "Solo", T.DRUMS_SOLO)
-A.toggle_trig_mute = fixedToggle("trigMute", "Mute", T.TRIG_MUTE)
-A.toggle_trig_solo = fixedToggle("trigSolo", "Solo", T.TRIG_SOLO)
+A.toggle_drums_mute = fixedToggle("drumsMute", "Mute", T.DRUMS_MUTE, "drums")
+A.toggle_drums_solo = fixedToggle("drumsSolo", "Solo", T.DRUMS_SOLO, "drums")
+A.toggle_trig_mute = fixedToggle("trigMute", "Mute", T.TRIG_MUTE, "trig")
+A.toggle_trig_solo = fixedToggle("trigSolo", "Solo", T.TRIG_SOLO, "trig")
 
 -- What an OSC tab's menu changes: its names, the dots, the switches and the selected tab's knobs —
 -- the names read before the click as after it (`text`), so that a Paste or an Initialize that
@@ -312,7 +317,7 @@ function A.reset_osc_control(args, label)
       if vb.selectedType ~= "osc" then return nil, "the selected tab cannot be read now" end
       return { at = p, double = true, button = OSC.RIGHT_BUTTON[key] and "right" or nil }
     end,
-    -- The knob's picture (Knob.BOX): the reader looks within 18 of the project's pixels (9 points
+    -- The knob's picture (Knob.BOX): the reader looks within 16 of the project's pixels (16 points
     -- at 50 %).
     watch = function() return { box(p, Knob.BOX.osc) } end,
     same = function(vb, va)

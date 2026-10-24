@@ -53,7 +53,8 @@
     'select_central_drum_sq_pattern', 'toggle_central_drum_sq_pattern',
     'central_drum_sq_pattern_menu_item', 'central_drum_sq_control',
     'reset_central_drum_sq_control', 'central_drum_sq_length', 'central_drum_sq_speed',
-    'align_open_expansion', 'read_expansion_list', 'set_setting', 'reset_settings'
+    'align_open_expansion', 'read_expansion_list', 'set_setting', 'reset_settings',
+    'confirm_osc_count', 'confirm_expansion_view'
   ];
   // To the module; nothing when the page is opened in a browser, to be looked at.
   const post = (value) => {
@@ -96,6 +97,8 @@
   // spelt (true where it did); and the open expansion named only by the database.
   let currentExpansionsFromAvenger = false;
   let currentExpansionMarks = [];
+  // A roster's expansion the database has no presets for (the tool keeps it in its list).
+  let currentExpansionsWithoutData = [];
   let currentSelectedFromDatabase = false;
   // An open expansion's categories and presets are the preset database's lists.
   let currentExpansionListsFromDatabase = false;
@@ -127,6 +130,8 @@
   let centralDrumSqPatternCopied = false;
   let centralDrumSqPatternStates = { b: null, c: null, d: null };
   let centralDrumSqLengthSteps = null;
+  // LENGTH is never read: the length shown is the one the page's LENGTH set, marked so.
+  let centralDrumSqLengthSet = false;
   let macroPanelOpen = true;
   let openOscMenuId = '';
   let openMacroMenuId = '';
@@ -190,6 +195,9 @@
       btn.textContent = item.name;
       // A name the database spelt for a poor read: said so, its text still the name the search filters by.
       if (currentExpansionMarks[item.index] === true) btn.setAttribute('aria-label', `${item.name}, from the database`);
+      if (currentExpansionsWithoutData[item.index] === true) {
+        btn.setAttribute('aria-label', `${item.name}, no presets in the database`);
+      }
       btn.dataset.action = 'open_expansion';
       btn.dataset.index = String(item.index);
       btn.addEventListener('click', () => {
@@ -319,14 +327,22 @@
     currentExpansionsFromDatabase = Array.isArray(s.expansions) && !!s.expansions_from_database;
     currentExpansionsFromAvenger = Array.isArray(s.expansions) && !!s.expansions_from_avenger;
     currentExpansionMarks = Array.isArray(s.expansions_marks) ? s.expansions_marks.map((v) => v === true) : [];
+    currentExpansionsWithoutData = Array.isArray(s.expansions_without_data)
+      ? s.expansions_without_data.map((v) => v === true)
+      : [];
     currentExpansionView = readText(s.expansion_view);
+    // A view not read — VPS Avenger draws no label for it — says how it came to be: set from this
+    // page, confirmed here, or as stored.
+    const viewFrom = readText(s.expansion_view_from);
+    const viewHow = viewFrom === 'set' ? ', set' : (viewFrom === 'confirmed' ? ', confirmed' : (viewFrom ? ', as stored' : ''));
     const viewTrigger = $('expansion-view-menu-trigger');
     if (viewTrigger) {
-      const words = currentExpansionView == null ? 'Expansion View, not read' : `Expansion View ${currentExpansionView}`;
+      const words = currentExpansionView == null ? 'Expansion View, not read' : `Expansion View ${currentExpansionView}${viewHow}`;
       viewTrigger.textContent = words;
       viewTrigger.setAttribute('aria-label', words);
     }
     updateButtonMenuSelection('expansion-view-menu-items', currentExpansionView);
+    updateButtonMenuSelection('settings-expansion-view-items', currentExpansionView);
     renderExpansions();
     {
       // Not read: shown as the expansions' list is, the view saying it was not read.
@@ -417,6 +433,8 @@
         names_from_database: Array.isArray(s.osc_panel.names_from_database)
           ? s.osc_panel.names_from_database.map((v) => v === true)
           : [],
+        // Where a count the dots did not give came from: 'confirmed' or 'database'.
+        count_from: s.osc_panel.count_from ? String(s.osc_panel.count_from) : null,
         copied: s.osc_panel.copied ? String(s.osc_panel.copied) : '',
         selected_type: s.osc_panel.selected_type ? String(s.osc_panel.selected_type) : null,
         selected_index: readInt(s.osc_panel.selected_index),
@@ -434,11 +452,8 @@
         drum_lock: readFlag(s.osc_panel.drum_lock),
         drum_mode: s.osc_panel.drum_mode ? String(s.osc_panel.drum_mode) : null,
         drumkit_part_selected: s.osc_panel.drumkit_part_selected ? String(s.osc_panel.drumkit_part_selected) : '',
-        drumkit_part_labels: readSlots(s.osc_panel.drumkit_part_labels, (label) => String(label || '')) || [
-          'Crash', 'Open Hi-Hat', 'Ride', 'Closed Hi-Hat 2',
-          'Percussion 2', 'Closed Hi-Hat 1', 'Percussion 1', 'Snare 2',
-          'Clap', 'Snare 1', 'Rimshot', 'Bassdrum'
-        ],
+        // The names read, holes where one was not: never the factory names in their place.
+        drumkit_part_labels: readSlots(s.osc_panel.drumkit_part_labels, (label) => String(label || '')) || [],
         drumkit_mute_states: readSlots(s.osc_panel.drumkit_mute_states, readFlag) || [],
         drumkit_solo_states: readSlots(s.osc_panel.drumkit_solo_states, readFlag) || [],
         drumkit_lock_states: readSlots(s.osc_panel.drumkit_lock_states, readFlag) || [],
@@ -454,9 +469,12 @@
         drum_sq_pattern_selected: s.osc_panel.drum_sq_pattern_selected ? String(s.osc_panel.drum_sq_pattern_selected) : null,
         drum_sq_pattern_states: Array.isArray(s.osc_panel.drum_sq_pattern_states) ? s.osc_panel.drum_sq_pattern_states.map(readFlag).slice(0, 3) : [],
         drum_sq_length_steps: readInt(s.osc_panel.drum_sq_length_steps),
+        drum_sq_length_set: s.osc_panel.drum_sq_length_set === true,
         drum_sq_pattern_copied: readFlag(s.osc_panel.drum_sq_pattern_copied),
         trig_mute: readFlag(s.osc_panel.trig_mute),
-        trig_solo: readFlag(s.osc_panel.trig_solo)
+        trig_solo: readFlag(s.osc_panel.trig_solo),
+        // The tabs whose Solo reads on: every other tab's Mute is said as silenced by them.
+        solo_by: Array.isArray(s.osc_panel.solo_by) ? s.osc_panel.solo_by.map(String) : []
       };
       // The tab read, or none: it is read only with the Drums tab selected.
       centralPanelTab = ['editor', 'arp', 'drum_sq', 'step_sq'].includes(oscPanel.central_panel_tab)
@@ -475,6 +493,7 @@
         c: readFlag(drumSqPatternStates[1]),
         d: readFlag(drumSqPatternStates[2])
       };
+      centralDrumSqLengthSet = oscPanel.drum_sq_length_set;
       setCentralDrumSqLengthSteps(oscPanel.drum_sq_length_steps);
       // PASTE follows the module's word that a COPY of this session was taken in Avenger's menu,
       // never the page's own click.
@@ -762,6 +781,13 @@
         : `${String(name)}${fromDatabase[i] === true ? ', from the database' : ''}`
     }));
     if (!known) cols.push({ type: 'unread', label: 'OSC tabs, not read' });
+    // A count the dots did not give is said as where it came from, never as read.
+    if (known && oscPanel.count_from) {
+      cols.push({
+        type: 'unread',
+        label: `${count} OSC tab${count === 1 ? '' : 's'}, ${oscPanel.count_from === 'confirmed' ? 'as confirmed' : 'from the database'}`
+      });
+    }
     if (known && count < 8) cols.push({ type: 'add', label: 'Add OSC' });
     cols.push({ type: 'drums', label: 'Drums' });
     cols.push({ type: 'trig', label: 'Trig' });
@@ -948,10 +974,22 @@
     return null;
   }
 
+  // Avenger lights every other tab's Mute while a Solo is on, as a Mute pressed: under a Solo a
+  // Mute is said as silenced by it, never ON (src/read/strip.luau, Strip.silencedBy).
+  function silencedWords(col) {
+    const by = Array.isArray(oscPanel.solo_by) ? oscPanel.solo_by : [];
+    if (by.length === 0 || oscButtonState(col, 'solo') === true) return null;
+    if (by.length === 1) return `silenced by ${by[0]}'s Solo`;
+    return `silenced by the Solos of ${by.slice(0, -1).join(', ')} and ${by[by.length - 1]}`;
+  }
+
   function makeOscStateButton(col, kind, action, args, id) {
     const title = kind === 'mute' ? 'Mute' : 'Solo';
     const on = oscButtonState(col, kind);
-    const label = on == null ? `${title}, not read` : `${title} ${on ? 'ON' : 'OFF'}`;
+    const silenced = kind === 'mute' ? silencedWords(col) : null;
+    const label = silenced
+      ? `${title}, ${silenced}`
+      : (on == null ? `${title}, not read` : `${title} ${on ? 'ON' : 'OFF'}`);
     return makeCellButton(label, action, args, id);
   }
 
@@ -2292,9 +2330,12 @@
           'Select sequence mode.'
         ]
       ], 'drums-three-controls');
+      // Named for what they step — never just Back and Next, the preset's words: the sequence in
+      // SEQUENCE mode without the lock, the drumkit otherwise.
+      const stepsSequence = !oscPanel.drum_lock && drumMode === 'sq';
       appendDrumsRow([
-        ['drums-kit-back', 'Back', 'previous_drumkit', {}, drumBackHelp],
-        ['drums-kit-next', 'Next', 'next_drumkit', {}, drumNextHelp]
+        ['drums-kit-back', stepsSequence ? 'Previous sequence' : 'Previous drumkit', 'previous_drumkit', {}, drumBackHelp],
+        ['drums-kit-next', stepsSequence ? 'Next sequence' : 'Next drumkit', 'next_drumkit', {}, drumNextHelp]
       ]);
       items.appendChild(group);
 
@@ -2312,12 +2353,13 @@
         'Rimshot',
         'Bassdrum'
       ];
-      const drumkitCurrentLabels = Array.isArray(oscPanel.drumkit_part_labels)
-        ? drumkitLabels.map((fallback, index) => {
-            const value = String(oscPanel.drumkit_part_labels[index] || '').trim();
-            return value || fallback;
-          })
-        : drumkitLabels.slice();
+      // A slot whose name was not read goes by its role in the kit, and its row says the name was
+      // not read: the factory names are never shown as this kit's.
+      const drumkitNamesRead = drumkitLabels.map((_, index) => Array.isArray(oscPanel.drumkit_part_labels)
+        && String(oscPanel.drumkit_part_labels[index] || '').trim() !== '');
+      const drumkitCurrentLabels = drumkitLabels.map((role, index) => (drumkitNamesRead[index]
+        ? String(oscPanel.drumkit_part_labels[index]).trim()
+        : role));
       const drumkitColumns = [
         ['browse', 'Browse'],
         ['back', 'Back'],
@@ -2535,7 +2577,7 @@
         const th = document.createElement('th');
         th.scope = 'row';
         th.appendChild(makeCellButton(
-          `${label}${selected ? ' SELECTED' : ''}`,
+          `${label}${drumkitNamesRead[index] ? '' : ', name not read'}${selected ? ' SELECTED' : ''}`,
           'select_drumkit_part',
           { index: index + 1 },
           `drumkit-part-${index + 1}`
@@ -2884,11 +2926,12 @@
     });
   }
 
-  // The length button's words: "not read" for a length not read.
+  // The length button's words: "not read" for a length not read, and "set, not read" for the one
+  // the page's LENGTH set — LENGTH is a knob with no length drawn, which nothing reads.
   function centralDrumSqLengthWords(steps) {
     if (steps == null) return 'LENGTH, not read';
     const beats = Math.max(1, Math.min(16, steps / 4));
-    return `LENGTH ${beats} BEAT${beats === 1 ? '' : 'S'}, ${steps} STEPS`;
+    return `LENGTH ${beats} BEAT${beats === 1 ? '' : 'S'}, ${steps} STEPS${centralDrumSqLengthSet ? ', set, not read' : ''}`;
   }
 
   function setCentralDrumSqLengthSteps(value) {
@@ -3352,6 +3395,26 @@
     'expansion-view-menu-items',
     expansionViewOptions,
     'set_expansion_view',
+    'view',
+    (value) => String(value),
+    () => currentExpansionView
+  );
+  // The Settings section's Confirm OSC Count and Confirm Expansion View (the tool's): what the module
+  // posts back shows what was confirmed.
+  setupButtonMenu(
+    'settings-osc-count-trigger',
+    'settings-osc-count-items',
+    [1, 2, 3, 4, 5, 6, 7, 8],
+    'confirm_osc_count',
+    'count',
+    (n) => `${n} OSC${n === 1 ? '' : 's'}`,
+    () => null
+  );
+  setupButtonMenu(
+    'settings-expansion-view-trigger',
+    'settings-expansion-view-items',
+    expansionViewOptions,
+    'confirm_expansion_view',
     'view',
     (value) => String(value),
     () => currentExpansionView

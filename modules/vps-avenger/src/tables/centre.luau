@@ -131,6 +131,7 @@ T.VALUES = {
   eq1_type = { 429, 370 },
   eq2_type = { 612, 370 },
   loop_stretch = T.LOOP_STRETCH,
+  -- LENGTH's knob with its caption, which no length is drawn in: watched by LENGTH's action.
   sq_length = { 491, 416 },
   sq_speed = { 593, 416 },
 }
@@ -223,6 +224,14 @@ T.SQ_PATTERN_STATE = { 30, 8 }
 T.SQ_PATTERN_STATE_Y_ADJUST = 0
 T.SQ_PATTERN_SELECTED = { 30, 9 }
 T.SQ_PATTERN_SELECTED_Y_ADJUST = 0
+-- This module's own, measured on `Drum SQ/Pattern Chain/01 …`, `03 …`, `04 …` and
+-- `07 C Selected, On.png` at 50 %: a pattern's box runs from about 254 to 261.5, and the selected
+-- one has a bright top and bottom row (170 to 175 over a fill of 128 when it is on, 126 to 138 over
+-- 56 when off) that the others lack: their rows lead only by their letter's, 6 to 15
+-- (read/drumsq.luau). Which one is selected is read in the rows from 252 to 264 of the middle 24 of
+-- its box across.
+T.SQ_PATTERN_ROWS = { 252, 264 }
+T.SQ_PATTERN_ROWS_ACROSS = 24
 -- The pattern menu and its items, and SPEED's menu.
 T.SQ_PATTERN_MENU = { 489, 259 }
 T.SQ_PATTERN_MENU_X = 489

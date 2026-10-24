@@ -26,8 +26,10 @@ T.BROWSER = { 5, 40, 233, 240 }
 T.VIEW = { 15, 50 }
 T.CLOSE = { 15, 50 }
 
--- What the control reads as: one of these while the browser is closed; an icon while an
--- expansion is open. Read from (9, 43), 78 across and 16 down.
+-- What the control reads as on an Avenger that draws the view's label there: one of these while
+-- the browser is closed. Read from (9, 43), 78 across and 16 down. The second Mac test's Avenger
+-- draws an icon there, open or closed (`Expansions/Avenger 100 closed.png` and every
+-- `Avenger NN closed.png`): the view is then the one set or confirmed (src/read/browser.luau).
 T.VIEW_OPTIONS = {
   "List",
   "1 per Row",
@@ -40,6 +42,14 @@ T.VIEW_OPTIONS = {
   "8 per Row",
 }
 T.VIEW_TEXT = { 9, 43, 9 + 78, 43 + 16 }
+
+-- The open expansion's name, centred in the browser's header — this module's own, measured on the
+-- second Mac test's pictures: "African House" from 69 to 122 and from 43 to 58 at 100 %
+-- (`Expansions/Avenger, 100, Open African House,Fav Stars Off.png`), "Factory" from 73 to 114 at
+-- 50 % (`Expansions/VPS Avenger Open Expansion.png`); with no expansion open nothing light lies
+-- between 20 and 146 there at 50, 80 or 100 %, and the BPM ramp starts at 147. Read from 22, clear
+-- of the back arrow left of it, to 144.
+T.NAME_TEXT = { 22, 43, 144, 58 }
 
 -- The view menu: List at y 60, then 1 to 8 per Row from y 74, 11.5 apart, at x 27.
 T.VIEW_MENU_X = 27

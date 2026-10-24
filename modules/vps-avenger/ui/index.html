@@ -474,8 +474,8 @@
   The tool's Windows-only block ("Windows-only fallback controls") made the page's Settings
   section, on both systems: its disclosure and group, its Correct open Expansion, and the settings
   the tool kept in its Mac status menu and its Windows tray — Expansions List, the page key (its
-  Change Panel Shortcut and Reset to Default) and Reset Saved Settings — with the port's own three:
-  the sounds, the Mac page mode and DRUM SQ's watcher. Its other button, the REAPER window's left
+  Change Panel Shortcut and Reset to Default), Confirm OSC Count, Confirm Expansion View and Reset
+  Saved Settings — with the port's own three: the sounds, the Mac page mode and DRUM SQ's watcher. Its other button, the REAPER window's left
   edge, is not here: the platform's DAW entries derive that edge. Each control writes one of the
   module's settings, the ones its settings dialog shows; what the controls show comes back from
   the module only (panel.js, applySettings), never set at the click. No live region of its own:
@@ -502,6 +502,38 @@
             title="Correct the panel to the expansion currently open in VPS Avenger.">
       Correct open Expansion
     </button>
+    <!--
+      The tool's Confirm OSC Count and Confirm Expansion View, from its status menu: each tells the
+      module what VPS Avenger shows, and clicks nothing in it. The count is kept for the preset shown
+      until its name changes, and taken only where the oscillator tabs' dots give none; the view is
+      kept as a setting of the module's.
+    -->
+    <button type="button"
+            id="settings-osc-count-trigger"
+            aria-expanded="false"
+            aria-controls="settings-osc-count-items"
+            title="Tell the page how many oscillator tabs VPS Avenger shows, where it cannot count them. Kept for the preset shown until its name changes.">
+      Confirm OSC Count
+    </button>
+    <div id="settings-osc-count-items"
+         class="osc-menu-items"
+         role="group"
+         tabindex="0"
+         aria-label="Confirm OSC Count"
+         hidden></div>
+    <button type="button"
+            id="settings-expansion-view-trigger"
+            aria-expanded="false"
+            aria-controls="settings-expansion-view-items"
+            title="Tell the page which Expansion View VPS Avenger shows, without changing it.">
+      Confirm Expansion View
+    </button>
+    <div id="settings-expansion-view-items"
+         class="osc-menu-items"
+         role="group"
+         tabindex="0"
+         aria-label="Confirm Expansion View"
+         hidden></div>
     <button type="button"
             id="settings-roster-trigger"
             aria-expanded="false"
@@ -574,7 +606,7 @@
        tabindex="0"><strong>Warning</strong></p>
     <p id="confirm-reset-warning"
        class="dialog-message"
-       tabindex="0">This will reset the Expansions List, the page key, the sounds, Leave the DAW Active and the DRUM SQ Auto Follow reads to their defaults.</p>
+       tabindex="0">This will reset the Expansions List, the Expansion View, the page key, the sounds, Leave the DAW Active and the DRUM SQ Auto Follow reads to their defaults.</p>
     <p id="confirm-reset-question"
        class="dialog-message"
        tabindex="0">Are you sure?</p>

@@ -9,7 +9,8 @@
 //! written from it. The pattern menu's COPY is kept as a fact the page's PASTE follows, set only once
 //! Avenger's menu took it; PASTE and CLEAR are answered by the change wait on the steps. SPEED opens
 //! with the left button and its field is read; the sequence menu waits for its file dialog and reads
-//! DRUM SQ after it. LENGTH is double-clicked, read, dragged from what it reads and read again. The
+//! DRUM SQ after it. LENGTH is double-clicked to 64 and dragged to the length asked, which is kept as
+//! set, never read — LENGTH is a knob, and no length is drawn. The
 //! watcher looks only while the page is hidden and the overlay up, is armed by a read and disarmed by
 //! its own, skips a turn while its last read is out, ranks only the patterns read on, and says a
 //! letter only when it changes; its cadence is a setting. No picture is held at the end of any of it.
@@ -348,22 +349,23 @@ fn the_sequence_menu_waits_for_its_dialog_and_reads_drum_sq_after() {
     "##));
 }
 
-/// LENGTH, asked 32 steps: double-clicked at (491, 416) — (884, 750) — both clicks left; its change
-/// waited for and LENGTH read, 64; dragged from there 32 / 4 × 6.6 points down — to (884, 834) — with
-/// host.input.drag; read again, 32: said, posted, the page back on LENGTH. 32 again, read 48 after
-/// the double-click: dragged from 48 to (884, 792), and 32 after: unchanged; read 16: dragged UP to
-/// (884, 707), where the tool
-/// dragged only down. Not read: from the tool's 64, logged. Read 40 after the drag: noted. 64 asked
-/// and 64 read after the double-click: no drag. Not a number: refused with no trip; 30 is 32.
+/// LENGTH, asked 32 steps: double-clicked at (491, 416) — (884, 750) — both clicks left, which sets
+/// 64 (the tool's); its change waited for on the knob; dragged from 64 by 32 / 4 × 6.6 points down —
+/// to (884, 834) — with host.input.drag; its change waited for again: the length set, said, posted
+/// as set — LENGTH is a knob with no length drawn, which is never read (the second Mac test of the
+/// page, 2026-10-24: "sq length 'LEN E'") — and the page back on LENGTH. The page key reads no
+/// LENGTH, and the length set is posted again while the preset read is the one it was set for. 16
+/// steps: 79.2 points down; 64: no drag. A knob that does not change after the drag: unchanged, and
+/// no length kept. Not a number: refused with no trip; 30 is 32.
 #[test]
-fn the_length_is_double_clicked_dragged_from_what_it_reads_and_read_again() {
+fn the_length_is_double_clicked_to_64_dragged_to_the_length_asked_and_kept_as_set() {
     run_mac(&scenario(r##"
-        local _, _, W = T.pageOn(T.sq(), { ["sq length"] = "12 BEATS" })
-        T.ok(T.lastPost("state").state.osc_panel.drum_sq_length_steps == 48, "48 steps read at the key: "
-          .. tostring(T.lastPost("state").state.osc_panel.drum_sq_length_steps))
+        local _, _, W = T.pageOn(T.sq(), { ["preset"] = "SQ Feel It" })
+        T.ok(T.lastPost("state").state.osc_panel.drum_sq_length_steps == nil and not T.asked("sq length", 0),
+          "no LENGTH read at the key")
         local shade = 60
-        -- LENGTH asked `steps`: `mid` read after the double-click, `after` after the drag.
-        local function length(steps, mid, after)
+        -- LENGTH asked `steps`, the knob redrawn after the double-click and, with `moves`, after the drag.
+        local function length(steps, moves)
           T.event()
           local clicks, drags = #S.clicks, #T.inputs("drag")
           T.tripFrom({ action = "central_drum_sq_length", args = { steps = steps }, focused = true }, W)
@@ -371,114 +373,92 @@ fn the_length_is_double_clicked_dragged_from_what_it_reads_and_read_again() {
           T.tick()
           T.ok(#S.clicks == clicks + 2 and T.clickAt() == "884,750", "the second click")
           shade += 10
-          T.words({ ["sq length"] = mid })
           S.onDrag = function()
+            if moves == false then return end
             shade += 10
-            T.words({ ["sq length"] = after })
             T.repaint(T.sq(nil, { fields = { sq_length = shade } }))
           end
           T.repaint(T.sq(nil, { fields = { sq_length = shade } }))
           T.tick()
           T.settle(4)
+          if moves == false then
+            T.run(2400)
+            T.settle(2)
+          end
           S.onDrag = nil
           local d = T.inputs("drag")
           return #d > drags and d[#d] or nil
         end
-        local d = length(32, "16 BEATS", "8 BEATS")
+        local d = length(32)
         T.ok(d and d[2] == 884 and d[3] == 750 and d[4] == 884 and d[5] == 834 and d.button == "left",
           "dragged from 64: " .. (d and (d[4] .. "," .. d[5]) or "none"))
         local o = T.lastPost("state").state.osc_panel
-        T.ok(o.drum_sq_length_steps == 32 and T.lastPost().id == "central-drum-sq-length" and T.lastPost("error").text == "",
-          tostring(o.drum_sq_length_steps))
-        T.ok(T.count("[avenger] [length] before 48; the double-click — changed, read 64; dragged 52.8 points (884,750)→(884,834); "
-          .. "after 32") == 1, T.dump())
-        -- Read 32 before — the first's after — and 32 after: unchanged, though dragged.
-        d = length(32, "12 BEATS", "8 BEATS")
-        T.ok(d and d[5] == 792, "dragged from 48: " .. (d and (d[4] .. "," .. d[5]) or "none"))
-        T.ok(T.lastPost("error").text == "The DRUM SQ length: unchanged, LENGTH 8 BEATS, 32 STEPS", T.lastPost("error").text)
-        -- Read 16 after the double-click: dragged UP to 32, 26.4 points — (884, 707).
-        d = length(32, "4 BEATS", "8 BEATS")
-        T.ok(d and d[3] == 750 and d[5] == 707, "dragged up from 16: " .. (d and (d[4] .. "," .. d[5]) or "none"))
-        d = length(32, "", "8 BEATS")
-        T.ok(d and d[5] == 834 and T.count("the length after the double-click is not read — taken as 64, the tool's") == 1,
-          "dragged from the tool's 64: " .. T.dump())
-        d = length(32, "16 BEATS", "10 BEATS")
-        T.ok(T.lastPost("error").text == "The DRUM SQ length: LENGTH reads 10 BEATS, 40 STEPS, not 32 steps",
-          T.lastPost("error").text)
-        d = length(64, "16 BEATS", "16 BEATS")
-        T.ok(d == nil and T.count("; no drag; after 64") == 1, "no drag: " .. T.dump())
+        T.ok(o.drum_sq_length_steps == 32 and o.drum_sq_length_set == true and T.lastPost().id == "central-drum-sq-length"
+          and T.lastPost("error").text == "", tostring(o.drum_sq_length_steps))
+        T.ok(T.count("[avenger] [length] the double-click — changed; dragged 52.8 points (884,750)→(884,834) — set to 32 steps")
+          == 1, T.dump())
+        -- The page key again, the same preset read: the length set, posted as set.
+        T.back(W)
+        T.openPage()
         T.event()
-        local clicks, from = #S.clicks, #S.pageOrder
+        o = T.lastPost("state").state.osc_panel
+        T.ok(o.drum_sq_length_steps == 32 and o.drum_sq_length_set == true, "kept for the preset")
+        -- 16: 79.2 points down, (884, 876).
+        d = length(16)
+        T.ok(d and d[5] == 876 and T.lastPost("state").state.osc_panel.drum_sq_length_steps == 16,
+          "dragged down to 16: " .. (d and d[5] or "none"))
+        d = length(64)
+        T.ok(d == nil and T.count("; no drag — set to 64 steps") == 1
+          and T.lastPost("state").state.osc_panel.drum_sq_length_steps == 64, "no drag: " .. T.dump())
+        -- Nothing drawn after the drag: unchanged, and no length kept.
+        d = length(32, false)
+        T.ok(d ~= nil and T.lastPost("error").text == "The DRUM SQ length: unchanged after the click; the length is not known"
+          and T.lastPost("state").state.osc_panel.drum_sq_length_steps == nil, T.lastPost("error").text)
+        T.event()
+        local clicks, posts = #S.clicks, #S.pageOrder
         T.pageMsg({ action = "central_drum_sq_length", args = { steps = "x" }, focused = true })
         T.ok(#S.clicks == clicks and T.lastPost("error").text == "The DRUM SQ length: no length was named"
-          and not string.find(T.pageSince(from), "focus", 1, true), T.lastPost("error").text)
-        d = length(30, "16 BEATS", "8 BEATS")
+          and not string.find(T.pageSince(posts), "focus", 1, true), T.lastPost("error").text)
+        d = length(30)
         T.ok(d and d[5] == 834 and T.lastPost().id == "central-drum-sq-length", "30 is 32: " .. (d and d[5] or "none"))
         T.ok(T.held() == 0 and #S.heldButtons == 0, "every picture released: " .. T.held())
     "##));
 }
 
-/// LENGTH is never posted as it read before it last changed. A read that fails after the drag: "the
-/// length cannot be read now", and the state has no LENGTH — not the one read after the
-/// double-click; reads that fail from the double-click on: none either, not the one read before it.
-/// The drag's end covered by another window: not dragged, and LENGTH as read after the double-click,
-/// or none where that read failed. Another application in front after the double-click, from LENGTH
-/// read 32, the trip given up: no LENGTH posted — not that 32 — and no drag.
+/// The length set is posted only for the preset it was set for, and not at all where the trip did
+/// not get past the double-click: another name read at the page key posts none; the drag's end
+/// covered by another window — not dragged, the sentence said, none; another application in front
+/// after the double-click — the trip given up, none, and no drag.
 #[test]
-fn the_length_is_posted_as_not_read_where_no_read_came_after_its_change() {
+fn the_length_set_is_posted_only_for_its_preset_and_only_once_dragged() {
     run_mac(&scenario(r##"
-        local _, _, W = T.pageOn(T.sq(), { ["sq length"] = "12 BEATS" })
-        local Open = S.included["modules/vps-avenger/src/read/open.luau"][1]
-        local part = Open.part
-        local function failing() error("a read that fails", 0) end
-        -- `breakAt`: "drag" — the read after the drag fails; "double" — every read after the
-        -- double-click does.
-        local function length(steps, breakAt)
+        local _, _, W = T.pageOn(T.sq(), { ["preset"] = "SQ Feel It" })
+        local function length(steps)
           T.event()
           T.tripFrom({ action = "central_drum_sq_length", args = { steps = steps }, focused = true }, W)
           T.tick()
-          if breakAt == "double" then Open.part = failing end
-          T.words({ ["sq length"] = "16 BEATS" })
-          S.onDrag = function()
-            if breakAt == "drag" then Open.part = failing end
-            T.words({ ["sq length"] = "8 BEATS" })
-            T.repaint(T.sq(nil, { fields = { sq_length = 90 } }))
-          end
+          S.onDrag = function() T.repaint(T.sq(nil, { fields = { sq_length = 90 } })) end
           T.repaint(T.sq(nil, { fields = { sq_length = 80 } }))
           T.tick()
           T.settle(4)
           S.onDrag = nil
-          Open.part = part
         end
-        length(32, "drag")
-        T.ok(T.lastPost("error").text == "The DRUM SQ length: the length cannot be read now"
-          and T.lastPost("state").state.osc_panel.drum_sq_length_steps == nil
-          and T.lastPost("state").state.osc_panel.drum_sq_pattern_chain == true,
-          tostring(T.lastPost("state").state.osc_panel.drum_sq_length_steps) .. " " .. T.lastPost("error").text)
-        T.ok(#T.inputs("drag") == 1, "dragged from what the double-click left")
-        T.words({ ["sq length"] = "12 BEATS" })
-        length(32, "double")
-        T.ok(T.lastPost("error").text == "The DRUM SQ length: the length cannot be read now"
-          and T.lastPost("state").state.osc_panel.drum_sq_length_steps == nil, T.lastPost("error").text)
-        T.ok(T.count("the length after the double-click is not read — taken as 64, the tool's") == 1, T.dump())
-        -- The drag's end covered by another window: not dragged, LENGTH as the double-click left it,
-        -- read 64; with that read failing too, none.
-        S.owns = function(_, _, y) return y <= 760 end
-        T.words({ ["sq length"] = "12 BEATS" })
         length(32)
-        T.ok(#T.inputs("drag") == 2 and T.lastPost("error").text == "something else is covering The DRUM SQ length, or its window is gone"
-          and T.lastPost("state").state.osc_panel.drum_sq_length_steps == 64, T.lastPost("error").text)
-        T.words({ ["sq length"] = "12 BEATS" })
-        length(32, "double")
-        T.ok(#T.inputs("drag") == 2 and T.lastPost("error").text == "something else is covering The DRUM SQ length, or its window is gone"
+        T.ok(T.lastPost("state").state.osc_panel.drum_sq_length_steps == 32, "set")
+        -- Another preset's name read at the key: none.
+        T.back(W)
+        T.words({ ["preset"] = "PD Soft Pad" })
+        T.openPage()
+        T.event()
+        T.ok(T.lastPost("state").state.osc_panel.drum_sq_length_steps == nil, "not for another preset")
+        -- The drag's end covered by another window: not dragged, none.
+        S.owns = function(_, _, y) return y <= 760 end
+        length(32)
+        T.ok(#T.inputs("drag") == 1 and T.lastPost("error").text == "something else is covering The DRUM SQ length, or its window is gone"
           and T.lastPost("state").state.osc_panel.drum_sq_length_steps == nil, T.lastPost("error").text)
         S.owns = true
-        -- Another application after the double-click, from LENGTH read 32.
-        T.words({ ["sq length"] = "12 BEATS" })
-        length(32)
-        T.ok(T.lastPost("state").state.osc_panel.drum_sq_length_steps == 32, "32 read after the drag")
+        -- Another application after the double-click.
         T.event()
-        T.words({ ["sq length"] = "12 BEATS" })
         T.tripFrom({ action = "central_drum_sq_length", args = { steps = 32 }, focused = true }, W)
         T.tick()
         T.ok(#S.clicks >= 2 and T.clickAt() == "884,750", "double-clicked")
@@ -490,7 +470,7 @@ fn the_length_is_posted_as_not_read_where_no_read_came_after_its_change() {
         -- The change wait from the picture before the double-click answers at its bound, and lets
         -- the picture go.
         T.run(2400)
-        T.ok(T.held() == 0 and #S.heldButtons == 0 and #T.inputs("drag") == 3, "every picture released: " .. T.held())
+        T.ok(T.held() == 0 and #S.heldButtons == 0 and #T.inputs("drag") == 1, "every picture released: " .. T.held())
     "##));
 }
 
@@ -530,18 +510,20 @@ fn drum_sq_knobs_are_pressed_and_reset() {
     "##));
 }
 
-/// Choosing a central tab reads what it shows with it: DRUM SQ's LENGTH where DRUM SQ reads, the
-/// sample editor's tab where EDITOR reads on the Drums tab; ARP neither.
+/// Choosing a central tab reads what it shows with it: DRUM SQ where DRUM SQ reads — its LENGTH not
+/// as text, which shows no length — the sample editor's tab where EDITOR reads on the Drums tab; ARP
+/// neither.
 #[test]
-fn select_central_tab_reads_the_editor_and_the_length_where_they_are_shown() {
+fn select_central_tab_reads_the_editor_and_drum_sq_where_they_are_shown() {
     run_mac(&scenario(r##"
-        local _, _, W = T.pageOn(T.drums({ central = "arp" }), { ["sq length"] = "8 BEATS" })
+        local _, _, W = T.pageOn(T.drums({ central = "arp" }))
         local from = #S.recognized
         T.tripFrom({ action = "select_central_tab", args = { tab = "drum_sq" }, focused = true }, W)
         T.ok(T.clickAt() == "639,474", "DRUM SQ: " .. T.clickAt())
         T.repaint(T.sq())
         T.settle()
-        T.ok(T.asked("sq length", from) and T.lastPost("state").state.osc_panel.drum_sq_length_steps == 32, "LENGTH read")
+        T.ok(not T.asked("sq length", from) and T.lastPost("state").state.osc_panel.drum_sq_pattern_selected == "a"
+          and T.lastPost("state").state.osc_panel.drum_sq_length_steps == nil, "DRUM SQ read, no LENGTH")
         T.event()
         T.tripFrom({ action = "select_central_tab", args = { tab = "editor" }, focused = true }, W)
         T.repaint(T.drums({ sampleTab = "amp" }))
@@ -564,7 +546,7 @@ fn select_central_tab_reads_the_editor_and_the_length_where_they_are_shown() {
 
 /// The page key reads DRUM SQ with PATTERN CHAIN and AUTO FOLLOW on and A selected; back in Avenger,
 /// each turn of the watcher takes ONE picture with a callback, of the central tabs' row and the
-/// patterns' row — (488, 466)-(869, 506) — and asks its seven questions of it with callbacks, each
+/// patterns' row — (488, 466)-(869, 506) — and asks its eight questions of it with callbacks, each
 /// under a key of its own. A still selected: nothing said. B selected: "B" said once, interrupting;
 /// B again: nothing; C: "C".
 #[test]
@@ -597,7 +579,7 @@ fn the_watcher_speaks_the_pattern_only_when_it_changes_while_the_page_is_hidden(
         for _, k in ipairs(keys) do distinct[k] = true end
         local n = 0
         for _ in pairs(distinct) do n += 1 end
-        T.ok(#keys == 7 and n == 7, "seven questions, each its own key: " .. table.concat(keys, ", "))
+        T.ok(#keys == 8 and n == 8, "eight questions, each its own key: " .. table.concat(keys, ", "))
         T.ok(#S.speech == said and T.count("[avenger] [watch] armed — DRUM SQ, PATTERN CHAIN and AUTO FOLLOW read on, "
           .. "pattern A selected; every 250 ms") == 1, T.dump())
         T.repaint(sq("b"))
@@ -722,7 +704,7 @@ fn the_watcher_is_skipped_while_its_last_read_is_out() {
         T.ok(T.watchPictures(asked) == 1, "one picture while it is out")
         S.holdScreenOut = true
         T.tick()
-        T.ok(#S.screenOut == 7, "its questions out: " .. #S.screenOut)
+        T.ok(#S.screenOut == 8, "its questions out: " .. #S.screenOut)
         T.call("timer", S.polls[250])
         T.call("timer", S.polls[250])
         T.ok(T.watchPictures(asked) == 1, "still one while its questions are out")
@@ -885,7 +867,7 @@ fn the_watchers_answers_are_dropped_once_it_may_no_longer_look() {
         S.holdScreenOut = true
         T.ok(T.call("timer", S.polls[250]) == "Ran", "the next turn ran")
         T.tick()
-        T.ok(#keys == 7 and #S.screenOut == 7, "its questions out: " .. #S.screenOut)
+        T.ok(#keys == 8 and #S.screenOut == 8, "its questions out: " .. #S.screenOut)
         header.menuOpen = function() return true end
         S.holdScreenOut = false
         T.tick()
@@ -914,7 +896,7 @@ fn the_cadence_setting_arms_the_timer_again() {
 }
 
 /// A turn of the watcher waits for nothing on the event loop — every read with a callback — and the
-/// Luau work of its answers, its picture's and its seven questions' callbacks, at 200 % on a Windows
+/// Luau work of its answers, its picture's and its eight questions' callbacks, at 200 % on a Windows
 /// display at 150 % — a factor of 6, where its picture is 1429 by 150 pixels, 214,350 of them — stays
 /// under a bound a loop over them in Luau would pass many times over.
 #[test]
@@ -1041,6 +1023,37 @@ fn on_windows_at_150_percent_drum_sq_is_clicked_through_the_factor() {
         T.repaint(T.sq({ chain = false, follow = true, selected = "a" }))
         T.tick(3)
         T.ok(T.lastPost("state").state.osc_panel.drum_sq_pattern_chain == false, "read OFF")
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// DRUM SQ's patterns drawn as Avenger draws them (`sqDrawn`, measured on the second Mac test's
+/// `Drum SQ/Pattern Chain/…` pictures): each box from 254 to 261.5 over the dark rows between them,
+/// the selected one's top and bottom rows brighter than its fill. The selected pattern is the one
+/// whose two brightest rows lead its median row — A on and selected, where the project's outline on
+/// a box 9 tall read "none by 1069.8" (the second Mac test of the page, 2026-10-24); B off and
+/// selected; C on and selected with B on too — every box's letter leading by about 0.4 of the
+/// selected one's, as on the pictures. Nothing selected where no box's rows lead, nor where a second
+/// box leads by more than half the first's (two outlined, as while Avenger redraws).
+#[test]
+fn drum_sqs_selected_pattern_is_the_one_whose_bright_rows_lead() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.pageOn(T.drums({ central = "drum_sq", sqDrawn = { on = { a = true }, selected = "a" } }))
+        local o = T.lastPost("state").state.osc_panel
+        T.ok(o.drum_sq_pattern_selected == "a", "A on and selected: " .. tostring(o.drum_sq_pattern_selected))
+        T.ok(T.count("selected: a, by ") == 1, T.dump())
+        local function again(drawn)
+          T.back(W)
+          T.paintAvenger(98, 84, 1.6, T.drums({ central = "drum_sq", sqDrawn = drawn }))
+          T.openPage()
+          T.event()
+          return T.lastPost("state").state.osc_panel.drum_sq_pattern_selected
+        end
+        T.ok(again({ on = { a = true }, selected = "b" }) == "b", "B off and selected")
+        T.ok(again({ on = { a = true, b = true, c = true }, selected = "c" }) == "c", "C on and selected")
+        T.ok(again({ on = { a = true } }) == nil and T.count("selected: none: ") == 1, "none: " .. T.dump())
+        T.ok(again({ on = { a = true }, selected = "a", also = "c" }) == nil and T.count(", over half of it") == 1,
+          "two outlined: " .. T.dump())
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }

@@ -219,7 +219,7 @@ function A.reset_macro_amount(args, label, known)
     part = "macros",
     macroCount = known and known.macroCount,
     decide = function() return { at = p, double = true } end,
-    -- The knob's picture (Knob.BOX): the reader looks within 28 of the project's pixels (14 points
+    -- The knob's picture (Knob.BOX): the reader looks within 28 of the project's pixels (28 points
     -- at 50 %).
     watch = function() return { box(p, Knob.BOX.macro) } end,
     same = function(vb, va)

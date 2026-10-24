@@ -1,7 +1,6 @@
 -- DRUM SQ, read off the page's picture while it is the central tab: whether PATTERN CHAIN and AUTO
 -- FOLLOW are on, which of the patterns B, C and D are on, and which pattern is selected; and where
--- an action names them, its LENGTH and SPEED as text, which the project never read (it wrote the
--- length it dragged to, and no speed).
+-- an action names it, its SPEED as text, which the project never read (it wrote no speed).
 --
 -- SOURCE: the avenger_control project's detect_central_drum_sq_pattern_states and
 -- detect_central_drum_sq_selected_pattern (its clicker/__init__.py), and its check that the
@@ -21,20 +20,27 @@ local CHAIN_MEAN = 90
 local FOLLOW_MEAN = 100
 -- Darker than this everywhere, the picture is not DRUM SQ's, and nothing is taken from it.
 local DARK_MEANS = 20
--- A selected pattern that is switched off has an outline brighter than its inside: by at least 4,
--- and 5 more than any other switched-off pattern's. A selected pattern that is on: the brightest
--- outline of those on, at least 80, and 8 brighter than the next.
-local OFF_SCORE, OFF_MARGIN = 4, 5
-local ON_BORDER, ON_MARGIN = 80, 8
--- The outline is the project's two pixels round its box.
-local BORDER_PIXELS = 2
 
--- The patterns' row: from PATTERN CHAIN's box's left to D's right, as tall as the selected box.
+-- THE PATTERN SELECTED, by a rule of this module's own: the project's outline against a box 9
+-- tall put the outline on the dark rows between the boxes (the second Mac test of the page,
+-- 2026-10-24: "none by 1069.8"). In each pattern's rows (tables/centre.luau, SQ_PATTERN_ROWS) its
+-- LEAD is the mean of its two brightest rows over its median row: the selected one's bright top and
+-- bottom rows over its fill. The selected one leads by at least SELECTED_LEAD, and every other by
+-- at most OTHERS_SHARE of that. Measured on the nine `Drum SQ/Pattern Chain/…` pictures: the
+-- selected one 37.8 to 71.5, the others 6.3 to 15.3 — the letter drawn in every box — and with A
+-- selected and on, B to D off, those 0.40 of its lead at most; the same with Avenger's corner
+-- placed 2 points up or down.
+local SELECTED_LEAD = 20
+local OTHERS_SHARE = 0.5
+
+-- The patterns' row: from PATTERN CHAIN's box's left to D's right, as tall as the selected box and
+-- the rows its selection is read in.
 local function rowOf()
   local chain = C.SQ_PATTERN_PLAYER
   local d = C.SQ_PATTERNS.d
   local h = C.SQ_PATTERN_SELECTED[2]
-  return { chain[1] - C.SQ_PATTERN_PLAYER_STATE[1] / 2, d[2] - h / 2, d[1] + C.SQ_PATTERN_SELECTED[1] / 2, d[2] + h / 2 }
+  return { chain[1] - C.SQ_PATTERN_PLAYER_STATE[1] / 2, math.min(d[2] - h / 2, C.SQ_PATTERN_ROWS[1]),
+    d[1] + C.SQ_PATTERN_SELECTED[1] / 2, math.max(d[2] + h / 2, C.SQ_PATTERN_ROWS[2]) }
 end
 Q.ROW = rowOf()
 
@@ -42,13 +48,10 @@ Q.ROW = rowOf()
 local BAND8 = { Q.ROW[1], C.SQ_PATTERNS.a[2] - C.SQ_PATTERN_STATE[2] / 2, Q.ROW[3],
   C.SQ_PATTERNS.a[2] + C.SQ_PATTERN_STATE[2] / 2 }
 
--- The selected boxes' row in pixels of the picture, and its outline's width there.
-local function selectedRow(pl)
-  local a, d = C.SQ_PATTERNS.a, C.SQ_PATTERNS.d
-  local half = C.SQ_PATTERN_SELECTED[1] / 2
-  local r = pl:rect({ a[1] - half, Q.ROW[2], d[1] + half, Q.ROW[4] })
-  local b = math.max(1, math.floor(BORDER_PIXELS / pl.t + 0.5))
-  return r, b
+-- Pattern `key`'s rows, read for the selection: a table rectangle.
+local function rowsOf(key)
+  local p, half = C.SQ_PATTERNS[key], C.SQ_PATTERN_ROWS_ACROSS / 2
+  return { p[1] - half, C.SQ_PATTERN_ROWS[1], p[1] + half, C.SQ_PATTERN_ROWS[2] }
 end
 
 function Q.ask(pl, out)
@@ -57,48 +60,30 @@ function Q.ask(pl, out)
   add(P.cells("sq active", row, S.ACTIVE, pl.k))
   add(P.cells("sq bright", row, S.BRIGHT, pl.k))
   add(P.profile("sq band", pl:rect(BAND8)))
-  local r, b = selectedRow(pl)
-  if r and r[4] - r[2] > 2 * b then
-    add(P.profile("sq top", { r[1], r[2], r[3], r[2] + b }))
-    add(P.profile("sq inner", { r[1], r[2] + b, r[3], r[4] - b }))
-    add(P.profile("sq bottom", { r[1], r[4] - b, r[3], r[4] }))
-  end
+  for _, key in ipairs(C.SQ_PATTERN_ORDER) do add(P.profile("sq rows " .. key, pl:rect(rowsOf(key)), "both")) end
 end
 
--- The sum of brightness, and the pixel count, of profile `prof` between screen x1 and x2.
-local function sumOf(prof, x1, x2)
-  if not prof or x2 <= x1 then return 0, 0 end
-  local m, cols = P.bandMean(prof, x1, x2)
-  if not m then return 0, 0 end
-  return m * cols * prof.h, cols * prof.h
+-- A pattern's lead (above) off its rows' profile `prof`, or nil where it was not read.
+local function leadOf(prof)
+  local rows = prof and prof.rows
+  if not (rows and prof.h >= 3) then return nil end
+  local means = table.create(prof.h)
+  for i = 1, prof.h do means[i] = (rows.r[i] + rows.g[i] + rows.b[i]) / 3 end
+  table.sort(means)
+  local n = #means
+  local median = n % 2 == 1 and means[(n + 1) // 2] or (means[n // 2] + means[n // 2 + 1]) / 2
+  return (means[n] + means[n - 1]) / 2 - median
 end
 
--- DRUM SQ's LENGTH and SPEED, read as text where an action names them (read/open.luau's
--- `fields`): their keys, and their names in the text read.
-Q.FIELDS = { sq_length = "sq length", sq_speed = "sq speed" }
-Q.FIELD_KEYS = { sq_length = "sqLength", sq_speed = "sqSpeed" }
+-- DRUM SQ's SPEED, read as text where an action names it (read/open.luau's `fields`): its key,
+-- and its name in the text read. LENGTH is a knob with its caption right of it, and no length is
+-- drawn anywhere (measured on `Drum SQ/Pattern Chain/01 …`): it is not read
+-- (src/actions/drumsq.luau, Sq.length; TODO.md, D10).
+Q.FIELDS = { sq_speed = "sq speed" }
+Q.FIELD_KEYS = { sq_speed = "sqSpeed" }
 
--- The length a field's text says, in steps: a number with "beat" beside it, times four; else a
--- number that is a length in steps, 4 to 64 in fours. What the field shows is not known (TODO.md,
--- D10), so a reading that is neither is no length.
-function Q.lengthOf(text)
-  local t = string.lower(R.tidy(text))
-  local beats = string.match(t, "(%d+)%s*beat")
-  if beats then
-    local n = tonumber(beats) * 4
-    if n >= 4 and n <= 64 then return n end
-    return nil
-  end
-  for d in string.gmatch(t, "%d+") do
-    local n = tonumber(d)
-    if n >= 4 and n <= 64 and n % 4 == 0 then return n end
-  end
-  return nil
-end
-
--- The fields asked (`fields`, Q.FIELDS' keys) off the text read (`byName`): `v.sqLength` in steps,
--- `v.sqSpeed` as the page's key ("1_8"), each nil where it was not read. Only where DRUM SQ is the
--- central tab read.
+-- The fields asked (`fields`, Q.FIELDS' keys) off the text read (`byName`): `v.sqSpeed` as the
+-- page's key ("1_8"), nil where it was not read. Only where DRUM SQ is the central tab read.
 function Q.fields(byName, v, log, fields)
   local words = {}
   for _, key in ipairs(fields) do
@@ -106,13 +91,9 @@ function Q.fields(byName, v, log, fields)
     local t = r and r.status == "text" and R.tidy(r.text) or ""
     local value, how = nil, nil
     if t ~= "" then
-      if key == "sq_length" then
-        value = Q.lengthOf(t)
-      else
-        local ratio
-        value, ratio = R.noteValue(t, C.VALUE_WORDS.sq_speed)
-        how = string.format(" (%.2f alike)", ratio or 0)
-      end
+      local ratio
+      value, ratio = R.noteValue(t, C.VALUE_WORDS.sq_speed)
+      how = string.format(" (%.2f alike)", ratio or 0)
     end
     v[Q.FIELD_KEYS[key]] = value
     words[#words + 1] = string.format("%s %s%s", Q.FIELDS[key], t ~= "" and ("'" .. R.forLog(t) .. "' -> "
@@ -155,72 +136,46 @@ function Q.decide(pl, got, v, log, marks, opts)
     return
   end
 
-  -- Which pattern is selected: each box's outline against its inside, from three profiles.
-  local top, inner, bottom = got["sq top"], got["sq inner"], got["sq bottom"]
-  local _, b = selectedRow(pl)
-  local scores, borders, active, words = {}, {}, {}, {}
-  for _, key in ipairs(C.SQ_PATTERN_ORDER) do
-    local p = C.SQ_PATTERNS[key]
-    local at = { p[1], p[2] + C.SQ_PATTERN_SELECTED_Y_ADJUST }
-    local on = S.lit(pl, ga, gb, at, C.SQ_PATTERN_SELECTED)
-    local r = pl:box(at, C.SQ_PATTERN_SELECTED)
-    if r and top and inner and bottom and on ~= nil then
-      local ts, tn = sumOf(top, r[1], r[3])
-      local bs, bn = sumOf(bottom, r[1], r[3])
-      local ls, ln = sumOf(inner, r[1], r[1] + b)
-      local rs, rn = sumOf(inner, r[3] - b, r[3])
-      local is, inn = sumOf(inner, r[1] + b, r[3] - b)
-      local bn2 = tn + bn + ln + rn
-      if bn2 > 0 and inn > 0 then
-        local border, inside = (ts + bs + ls + rs) / bn2, is / inn
-        scores[key], borders[key], active[key] = border - inside, border, on
-        words[#words + 1] = string.format("%s outline %.1f, inside %.1f, mean %.1f%s", key, border, inside,
-          (ts + bs + ls + rs + is) / (bn2 + inn), on and ", on" or "")
-      end
-    end
-    mark(at)
-  end
-  -- With `onlyOn`, A and the patterns read on in this picture; otherwise all four.
+  -- Which pattern is selected: the one that leads (above) — with `onlyOn`, of A and the patterns
+  -- read on in this picture; otherwise of all four.
   local allowed = { a = true, b = true, c = true, d = true }
   if opts and opts.onlyOn then
     allowed = { a = true, b = states[1] == true, c = states[2] == true, d = states[3] == true }
   end
-  -- Highest first, and of two alike the one first in A to D, as the project's stable sort has it.
-  local function ranked(values, wanted)
-    local out = {}
-    for i, key in ipairs(C.SQ_PATTERN_ORDER) do
-      if values[key] ~= nil and active[key] == wanted and allowed[key] then
-        out[#out + 1] = { key = key, v = values[key], i = i }
+  local words, best, second = {}, nil, nil
+  for _, key in ipairs(C.SQ_PATTERN_ORDER) do
+    local lead = leadOf(got["sq rows " .. key])
+    words[#words + 1] = string.format("%s %s", key, lead and string.format("%.1f", lead) or "not read")
+    if lead and allowed[key] then
+      if not best or lead > best.lead then
+        second, best = best, { key = key, lead = lead }
+      elseif not second or lead > second.lead then
+        second = { key = key, lead = lead }
       end
     end
-    table.sort(out, function(x, y)
-      if x.v ~= y.v then return x.v > y.v end
-      return x.i < y.i
-    end)
-    return out
+    mark(C.SQ_PATTERNS[key])
   end
-  local selected, confidence = nil, 0
-  local off = ranked(scores, false)
-  if off[1] then
-    confidence = off[1].v - (off[2] and off[2].v or -999)
-    if off[1].v >= OFF_SCORE and confidence >= OFF_MARGIN then selected = off[1].key end
-  end
-  if not selected then
-    local on = ranked(borders, true)
-    if on[1] then
-      confidence = on[1].v - (on[2] and on[2].v or -999)
-      if on[1].v >= ON_BORDER and confidence >= ON_MARGIN then selected = on[1].key end
-    end
+  local selected, why
+  if not best then
+    why = "not read"
+  elseif best.lead < SELECTED_LEAD then
+    why = string.format("none: %s leads by %.1f, under %d", best.key, best.lead, SELECTED_LEAD)
+  elseif second and second.lead > best.lead * OTHERS_SHARE then
+    why = string.format("none: %s leads by %.1f and %s by %.1f, over half of it", best.key, best.lead, second.key,
+      second.lead)
+  else
+    selected = best.key
+    why = second and string.format("%s, by %.1f, the next %s by %.1f", best.key, best.lead, second.key, second.lead)
+      or string.format("%s, by %.1f, the only one looked at", best.key, best.lead)
   end
 
   v.drumSq = { states = states, selected = selected }
   if chainMean then v.drumSq.chain = chainMean >= CHAIN_MEAN end
   if followMean then v.drumSq.follow = followMean >= FOLLOW_MEAN end
-  log(string.format("drum sq: PATTERN CHAIN mean %s (on from %d), AUTO FOLLOW %s (on from %d); %s; selected%s: %s "
-    .. "— %s by %.1f", chainMean and string.format("%.1f", chainMean) or "not read", CHAIN_MEAN,
+  log(string.format("drum sq: PATTERN CHAIN mean %s (on from %d), AUTO FOLLOW %s (on from %d); %s; the patterns' "
+    .. "leads %s; selected%s: %s", chainMean and string.format("%.1f", chainMean) or "not read", CHAIN_MEAN,
     followMean and string.format("%.1f", followMean) or "not read", FOLLOW_MEAN, table.concat(stateWords, "; "),
-    (opts and opts.onlyOn) and " among A and the patterns read on" or "",
-    #words > 0 and table.concat(words, "; ") or "not read", selected or "none", confidence))
+    table.concat(words, ", "), (opts and opts.onlyOn) and " among A and the patterns read on" or "", why))
 end
 
 return Q

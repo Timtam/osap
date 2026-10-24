@@ -4,10 +4,15 @@
 -- rows, placed in the preset database's lists; and the rows' favourite stars.
 --
 -- ONE TEXT READ PER PICTURE, with named regions (Br.read): the view's caption ("expansion view"),
--- the area ("browser area") where the grid is expected, and the two columns ("categories",
--- "presets") where an open expansion is — two regions, never one: the host joins engine lines that
--- overlap vertically into one row (docs/api/ocr.md), so a category and a preset at the same height
--- would come back as one line.
+-- the open expansion's name in the header ("expansion name"), the area ("browser area") where the
+-- grid is expected, and the two columns ("categories", "presets") where an open expansion is — two
+-- regions, never one: the host joins engine lines that overlap vertically into one row
+-- (docs/api/ocr.md), so a category and a preset at the same height would come back as one line.
+--
+-- THE VIEW. Where Avenger draws the view's label it is read; the second Mac test's Avenger draws an
+-- icon (tables/expansion.luau), and the view is then the one set from the page or confirmed there —
+-- the `expansionView` setting, as the project kept its AVGExpansionView (Br.view) — and is said as
+-- that, never as read.
 --
 -- THE GRID (Br.tiles). Each word goes to the column its middle lies in (tables/expansion.luau,
 -- T.columns); in a column, the words of one of the host's rows make a fragment; two fragments one
@@ -66,6 +71,7 @@ end
 -- table rectangle.
 Br.REGIONS = {
   caption = { "expansion view", X.VIEW_TEXT },
+  name = { "expansion name", X.NAME_TEXT },
   area = { "browser area", X.AREA },
   categories = { "categories", X.CATEGORY_TEXT },
   presets = { "presets", X.PRESET_TEXT },
@@ -179,25 +185,81 @@ local function lookUp(list, t, min)
   return hit, why
 end
 
+-- ── The view ─────────────────────────────────────────────────────────────────
+
+-- How the view stored was last stored this session: { view, how = "set" (Set Expansion View chose
+-- it in Avenger) or "confirmed" (Confirm Expansion View) }; nil — "stored" — for a view the setting
+-- kept from before, or one changed since by anything else (Br.settingChanged).
+Br.viewHow = nil
+
+-- The view Avenger shows where its caption is not read: the setting's, and how it came to be.
+function Br.view()
+  local stored, h = host.settings.get("expansionView"), Br.viewHow
+  return stored, (h and h.view == stored) and h.how or "stored"
+end
+
+-- The view stored: `view` (one of X.VIEW_OPTIONS), `how` "set" or "confirmed".
+function Br.storeView(view, how)
+  Br.viewHow = { view = view, how = how }
+  if host.settings.get("expansionView") ~= view then host.settings.set("expansionView", view) end
+  log("the view stored: %s, %s", view, how)
+end
+
+-- The setting changed to `new` (page.luau, its onChange): to anything but the view Br.storeView
+-- stored — in the settings dialog, by Reset Saved Settings — and the view is the setting's from
+-- then on, "stored", never "set" or "confirmed".
+function Br.settingChanged(new)
+  local h = Br.viewHow
+  if h and h.view ~= new then Br.viewHow = nil end
+end
+
 -- ── The state ────────────────────────────────────────────────────────────────
 
 -- What the browser shows, from readings `byName` (Br.read's) and the expansion an action expects
--- open (`expected`, or nil): the port of the project's detect_expansion_state, in its order —
---   1. the caption reads a view: the grid, no expansion open — { view, open = false };
---   2. the text (the area's, or the two columns' joined) names an expansion by what it lists — the
+-- open (`expected`, or nil) —
+--   1. the caption reads a view (an Avenger that draws its label): the grid, no expansion open —
+--      { view, open = false };
+--   2. the header's name: nothing drawn there (`blank`, the host's crop found no content), the grid
+--      — { view = the one stored, viewFrom (Br.view's how), open = false }; a name the catalog or
+--      Avenger's own list has (the same words, the same ignoring case, or the closest by similarity
+--      that stands out), that expansion open — { open = true, name }. Something drawn there and no
+--      text recognised (`none`) settles nothing: a name the recogniser missed is no grid, and Set
+--      Expansion View's click there would close the expansion. Nor does a header region the host
+--      reads without its crop (docs/api/ocr.md) — wider than 400, at a factor over 3.28, from 165 %
+--      on a Mac — which is never `blank`: the steps below decide then;
+--   then the port of the project's detect_expansion_state, where neither settles it:
+--   3. the text (the area's, or the two columns' joined) names an expansion by what it lists — the
 --      expected one first, scored by its presets and categories (DB.scoreOpen), then any by its
 --      presets (DB.openExpansion): { open = true, name, score } — where two list it as much, which
 --      one is open is not read: { open = true };
---   3. one of the catalog's expansions or of Avenger's own list is named in it: the grid —
+--   4. one of the catalog's expansions or of Avenger's own list is named in it: the grid —
 --      { open = false };
---   4. two of the project's markers: an expansion open, which one not read — { open = true };
---   5. nil: not read — where the project kept what it had last known.
+--   5. two of the project's markers: an expansion open, which one not read — { open = true };
+--   6. nil: not read — where the project kept what it had last known.
 -- And the log's words.
 function Br.state(byName, expected)
   local caption = Br.text(byName["expansion view"])
   local view = E.parseView(caption)
   if view then
     return { view = view, open = false }, string.format("the view reads '%s' — %s, no expansion open", caption, view)
+  end
+  local header = byName["expansion name"]
+  if header then
+    local name = Br.text(header)
+    if not name and header.status == "blank" then
+      local stored, how = Br.view()
+      return { view = stored, viewFrom = how, open = false }, string.format("the header reads no name — no expansion "
+        .. "open, the view %s %s", stored, how)
+    end
+    if not name then log("the header reads no name, and is not blank (%s) — not taken as closed", tostring(header.status)) end
+    if name then
+      local hit = lookUp(Br.names(), name, Br.NAME_MIN)
+      if hit then
+        return { open = true, name = hit.name }, string.format("the header reads '%s' — %s open (%s)", name, hit.name,
+          hit.how)
+      end
+      log("the header reads '%s', no expansion's name — what the columns list decides", R.forLog(name))
+    end
   end
   local area = Br.text(byName["browser area"])
   local text = area
@@ -400,17 +462,28 @@ local function listOf(names)
   return l
 end
 
+-- A category's row read as `text` without the faded initials Avenger draws behind its name: "AR"
+-- behind "Arp" leads the reading (`Expansions/Avenger, 100, Open African House,…`) — two capitals,
+-- the name's own first two letters. Anything else as read. The preset rows keep theirs: a preset's
+-- name begins with its category's initials ("AR Band Pass Slide").
+function Br.dropInitials(text)
+  local initials, rest = string.match(text, "^(%u%u)%s+(%S.*)$")
+  if initials and string.upper(string.sub(rest, 1, 2)) == initials then return rest end
+  return text
+end
+
 -- Rows `rows` (Br.rows') placed in `names` — an open expansion's categories or presets
 -- (DB.lists) — each { name, read, index (in `names`, from 1), how, ratio, x, y, box }, or { read,
 -- why } for a row that is no name of it. With `categories` (the presets' categories, DB.lists'
 -- presetCategories), a name the list holds twice is placed in the category most of the other rows
--- read as; without, or where that does not tell, it is not placed. `what` names the list in the log.
+-- read as; without, or where that does not tell, it is not placed. `what` names the list in the log;
+-- for "categories", a row's faded initials are dropped first (Br.dropInitials).
 function Br.lines(rows, names, categories, what)
   local list = listOf(names)
   local out, words = {}, {}
   local votes, twice = {}, {}
   for _, row in ipairs(rows) do
-    local hit, why = lookUp(list, row.text, 4)
+    local hit, why = lookUp(list, what == "categories" and Br.dropInitials(row.text) or row.text, 4)
     local e = { read = row.text, box = row.box, x = math.floor((row.box[1] + row.box[3]) / 2 + 0.5),
       y = math.floor((row.box[2] + row.box[4]) / 2 + 0.5) }
     if hit then
@@ -496,8 +569,9 @@ local function cellsOf(snap, req)
   return P.grid(req, value)
 end
 
--- FAV, read off snapshot `snap` as the page key reads it (read/expansion.luau, E.favorite): true,
--- false, or nil for not read. `marks` gets its point, for a calibration picture.
+-- FAV, read off snapshot `snap` as the page key reads it (read/expansion.luau, E.favorite) — an
+-- expansion is open where this is asked: true, false, or nil for not read. `marks` gets its point,
+-- for a calibration picture.
 function Br.fav(snap, pl, marks)
   local asks = {}
   E.ask(pl, asks)
@@ -507,7 +581,7 @@ function Br.fav(snap, pl, marks)
     if g then got[req.name] = g else got.why[req.name] = why end
   end
   local v = {}
-  E.favorite(pl, got, v, function(s) log("%s", s) end, marks or {})
+  E.favorite(pl, got, v, function(s) log("%s", s) end, marks or {}, true)
   return v.favoriteView
 end
 
@@ -555,57 +629,46 @@ end
 -- ── The `browser` part (src/act.luau) ────────────────────────────────────────
 -- The browser read off picture `snap` for an action of Act.run's — the view chosen, Close, FAV —
 -- with `opts` = { pl, expected = the expansion known open, or nil, fields = { "area" | "presets" } }:
--- FAV's pixels, the caption as text, and — where the caption reads no view — with "area" the area
--- read for an open expansion (Br.state), with "presets" the preset rows and their stars where FAV
--- reads on. The values (state.luau's) and the keys read: a caption that reads a view says the grid is
--- shown and every open expansion's value is gone with it; one that reads none says only what was read.
+-- the caption and the header's name as text (Br.state), and — where neither settles it — with "area"
+-- the area read for an open expansion; FAV's star column where an expansion reads open, and with
+-- "presets" the preset rows and their stars where FAV reads on. The values (state.luau's) and the
+-- keys read: a read of the grid says every open expansion's value is gone with it; one that does not
+-- settle it says only what was read.
 local OPEN_KEYS = { "lists", "loadedIndex", "favoriteView", "favoriteStates", "categoryShown", "pageCategory",
   "selectedFromDatabase" }
 
 function Br.part(snap, pl, opts)
   local fields = {}
   for _, f in ipairs(opts.fields or {}) do fields[f] = true end
-  local v, keys = {}, { "expansionView" }
-  local fav = Br.fav(snap, pl)
-  local which = { "caption" }
-  if fields.presets and fav and opts.expected then which[#which + 1] = "presets" end
-  local byName = Br.read(snap, pl, which)
-  local caption = Br.text(byName["expansion view"])
-  v.expansionView = E.parseView(caption)
-  if v.expansionView then
+  local v, keys = {}, { "expansionView", "expansionViewFrom" }
+  local byName = Br.read(snap, pl, { "caption", "name" })
+  local st, why = Br.state(byName, opts.expected)
+  if not st and fields.area then
+    local area = Br.read(snap, pl, { "area" })
+    byName["browser area"] = area["browser area"]
+    st, why = Br.state(byName, opts.expected)
+  end
+  log("%s", why)
+  if not st then return v, keys end
+  keys[#keys + 1] = "expansionOpen"
+  keys[#keys + 1] = "selectedExpansion"
+  if not st.open then
+    v.expansionView, v.expansionViewFrom = st.view, st.viewFrom
     v.expansionOpen, v.selectedExpansion = false, ""
-    for _, k in ipairs({ "expansionOpen", "selectedExpansion" }) do keys[#keys + 1] = k end
     for _, k in ipairs(OPEN_KEYS) do keys[#keys + 1] = k end
-    log("the view reads '%s' — %s, no expansion open", tostring(caption), v.expansionView)
     return v, keys
   end
+  v.expansionOpen, v.selectedExpansion = true, st.name or ""
+  local fav = Br.fav(snap, pl)
   v.favoriteView = fav
   keys[#keys + 1] = "favoriteView"
-  if fields.area then
-    local area = Br.read(snap, pl, { "area" })
-    local st, why = Br.state({ ["expansion view"] = byName["expansion view"], ["browser area"] = area["browser area"] },
-      opts.expected)
-    log("%s", why)
-    if st then
-      v.expansionOpen = st.open
-      v.selectedExpansion = st.open and (st.name or "") or ""
-      keys[#keys + 1] = "expansionOpen"
-      keys[#keys + 1] = "selectedExpansion"
-      -- The grid told by its names with the caption unread: nothing of an open expansion is left.
-      if not st.open then
-        for _, k in ipairs(OPEN_KEYS) do
-          if k ~= "favoriteView" then keys[#keys + 1] = k end
-        end
-        v.favoriteView = nil
-      end
-    end
-  end
   if fav == false then
     keys[#keys + 1] = "favoriteStates"
-  elseif fav and byName["presets"] then
-    local okL, lists = pcall(DB.lists, opts.expected)
-    if okL and lists then
-      local lines = Br.lines(Br.rows(byName["presets"]), lists.presets, lists.presetCategories, "preset rows")
+  elseif fav and fields.presets and opts.expected then
+    local rows = Br.read(snap, pl, { "presets" })
+    local okL, lists = pcall(DB.lists, st.name or opts.expected)
+    if okL and lists and rows["presets"] then
+      local lines = Br.lines(Br.rows(rows["presets"]), lists.presets, lists.presetCategories, "preset rows")
       Br.stars(snap, pl, lines)
       v.favoriteStates = Br.starStates(lines)
       keys[#keys + 1] = "favoriteStates"

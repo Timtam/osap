@@ -74,12 +74,13 @@ S.marked = {}
 
 -- The ring's controls of the oscillator strip, the Drums tab and the macros, after Zoom
 -- (src/ring.luau): the Drums tab's group shown only while the strip reads the Drums tab, and DRUM
--- SQ's in it only while the central tab reads DRUM SQ.
+-- SQ's in it only while the central tab reads DRUM SQ; each knob followed by its reset, the tool's.
 T.RING_LABELS = "Oscillator|Mute|Solo|Add oscillator|Drum pattern|Drum mode|Drum lock|Drum slot|Slot mute|"
-  .. "Slot solo|Central tab|Pattern chain|Auto follow|Pattern|Pattern B|Pattern C|Pattern D|Level|Pan|"
-  .. "Transpose|Fine tune|Random pitch|Macro tab|Add macro tab|Delete last macro tab|Macro 1|Macro 2|Macro 3|"
-  .. "Macro button 1|Macro button 2"
-T.RING_CONTROLS = 30
+  .. "Slot solo|Central tab|Pattern chain|Auto follow|Pattern|Pattern B|Pattern C|Pattern D|Level|Reset level|"
+  .. "Pan|Reset pan|Transpose|Reset transpose|Fine tune|Reset fine tune|Random pitch|Reset random pitch|"
+  .. "Macro tab|Add macro tab|Delete last macro tab|Macro 1|Reset macro 1|Macro 2|Reset macro 2|Macro 3|"
+  .. "Reset macro 3|Macro button 1|Macro button 2"
+T.RING_CONTROLS = 38
 
 -- The arbiter is the shared one with the rule a module with a dialog layer needs
 -- (`overlay_host_panel_tests::SPECIFICITY_ARBITER`), its claims Avenger's.
@@ -411,7 +412,10 @@ end
 -- tables (src/tables), from Avenger's corner (cx, cy) at factor k, over a dark background. What
 -- is drawn is `spec`'s:
 --   osc = n            n OSC tabs, each with its green dot
+--   dots               { { x, w, colour }, … } at 50 %: the dots as listed, in place of the green ones
 --   selected, index    the tab whose bottom strip is dark: "osc" (and which), "drums" or "trig"
+--   strips             { [i] = shade, drums = shade, trig = shade }: those bottom strips in shades of
+--                      their own, as a picture taken while Avenger redraws them
 --   mute, solo         { [i] = true } for the OSC tabs lit red
 --   drumsMute, drumsSolo, trigMute, trigSolo   lit red
 --   pattern, lock, mode   the Drums tab: its pattern switch red, its lock green, and "sq" or
@@ -419,6 +423,7 @@ end
 --                      brighter is SEQUENCE)
 --   central            the central tab whose bottom strip is dark
 --   sq = { chain, follow, on = { b = true }, selected }   DRUM SQ's boxes
+--   sqDrawn = { on = { a = true }, selected }   DRUM SQ's patterns as Avenger draws them
 --   macroShown         the macro tab whose bottom strip is dark
 --   buttons = { on, on }, amounts = { a, a, a }   the macro buttons lit, the knobs' pointers
 --   volume, transpose, fine   the selected oscillator's knobs' pointers
@@ -426,13 +431,15 @@ end
 --   lasting            { x1, y1, x2, y2 } at 50 %: a panel a click drew that outlasts its popup
 --   slots = { selected, lighter, mute, solo, lock, loop }   the drumkit table: the selected slot's
 --                      name cell (and `lighter`'s) lighter, the slots' buttons lit red ({ [i] = true })
---   popup              { x1, y1, x2, y2 } at 50 %: Avenger's popup over it all, painted inside it
+--   popup              { x1, y1, x2, y2, pointer = { x, y }? } at 50 %: Avenger's popup over it all,
+--                      painted inside it; `pointer`, the mouse pointer drawn over it with its tip at
+--                      x, y, as a Mac's picture of the popup can show it after a click
 --   submenu            { x1, y1, x2, y2 } at 50 %: a popup of its own, painted after `popup`
 --   editor             { x1, y1, x2, y2, fill = colour?, outline = colour?, selection = colour? } at
 --                      50 %: Avenger's text editor open over a name field, light by default, over
 --                      everything but a popup
---   sampleTab          the sample editor's tab whose bottom strip is dark (as `central`), over the
---                      editor's grey tab row: "sample", "amp", "pitch" or "eq"
+--   sampleTab          the sample editor's tab whose caption is the brightest, over the editor's
+--                      grey tab row: "sample", "amp", "pitch" or "eq"
 --   sampleOn           the shown tab's switch lit blue, the tool's blue (EQ's box on "eq")
 --   fields             { key = shade }: a field's box (tables/centre.luau's valueRect, or the
 --                      envelope's name with "envelope_name") in grey `shade`, so that another shade
@@ -449,8 +456,10 @@ function T.paintAvenger(cx, cy, k, spec)
     shapes[#shapes + 1] = { kind = "rect", x1 = cx + k * x1, y1 = cy + k * y1, x2 = cx + k * x2, y2 = cy + k * y2, c = c }
   end
   local function box(p, w, h, c) rect(p[1] - w / 2, p[2] - h / 2, p[1] + w / 2, p[2] + h / 2, c) end
+  -- Round a point half a pixel right of and below the knob's middle as placed: there its pixels lie
+  -- evenly round it as the project measures them, from each pixel's corner (read/knob.luau).
   local function pointer(p, angle, r1, r2, width)
-    shapes[#shapes + 1] = { kind = "ray", cx = cx + k * p[1], cy = cy + k * p[2], angle = angle, r1 = r1 * k,
+    shapes[#shapes + 1] = { kind = "ray", cx = cx + k * p[1] + 0.5, cy = cy + k * p[2] + 0.5, angle = angle, r1 = r1 * k,
       r2 = r2 * k, width = width * k, c = { 235, 235, 235 } }
   end
   local RED, LIT, DARK, GREY = { 210, 40, 40 }, { 190, 190, 190 }, { 15, 15, 15 }, { 90, 90, 90 }
@@ -465,13 +474,27 @@ function T.paintAvenger(cx, cy, k, spec)
   elseif spec.selected == "trig" then
     rect(ST.TRIG_SELECTION[1], 36, ST.TRIG_SELECTION[2], 40, DARK)
   end
+  for key, shade in pairs(spec.strips or {}) do
+    local c = { shade, shade, shade }
+    if key == "drums" then
+      rect(ST.DRUMS_SELECTION[1], 36, ST.DRUMS_SELECTION[2], 40, c)
+    elseif key == "trig" then
+      rect(ST.TRIG_SELECTION[1], 36, ST.TRIG_SELECTION[2], 40, c)
+    else
+      local t = ST.tabSpan(key, n, 0, 0)
+      rect(t[1], 36, t[3], 40, c)
+    end
+  end
   for i = 1, n or 0 do
     local t = ST.tabSpan(i, n, 0, 0)
-    rect(t[1] + 2, 34.5, t[1] + 5, 37.5, { 100, 220, 180 })
+    if not spec.dots then rect(t[1] + 2, 34.5, t[1] + 5, 37.5, { 100, 220, 180 }) end
     local x = ST.tabX(i, n)
     if spec.mute and spec.mute[i] then box({ x + ST.MUTE_X_OFFSET, ST.MUTE_Y }, 13, 8, RED) end
     if spec.solo and spec.solo[i] then box({ x + ST.SOLO_X_OFFSET, ST.MUTE_Y }, 13, 8, RED) end
   end
+  -- `dots` in place of the tabs' green ones: { x, w, colour } at 50 % — a dot's left and its width,
+  -- as tall from 34 — as Avenger's are drawn (read/strip.luau).
+  for _, d in ipairs(spec.dots or {}) do rect(d[1], 34, d[1] + d[2], 34 + d[2], d[3]) end
   if spec.drumsMute then box(ST.DRUMS_MUTE, 13, 8, RED) end
   if spec.drumsSolo then box(ST.DRUMS_SOLO, 13, 8, RED) end
   if spec.trigMute then box(ST.TRIG_MUTE, 13, 8, RED) end
@@ -505,6 +528,30 @@ function T.paintAvenger(cx, cy, k, spec)
       box(CE.SQ_PATTERNS[sq.selected], 28, 7, sq.on and sq.on[sq.selected] and RED or { 30, 30, 30 })
     end
   end
+  -- DRUM SQ's patterns as Avenger draws them (`sqDrawn`, in place of `sq`'s): each box from 254 to
+  -- 261.5 over the dark rows between them, its fill 128 when on and 56 when off, its letter's bars
+  -- lighter (156 and 126), so that a box's brightest rows lead by about 7 when on and 17 when off —
+  -- an off one about 0.4 of the lead of a selected one that is on, as the letters do on the
+  -- pictures; and the selected one's top and bottom rows 172 and 132 — the second Mac test's
+  -- pictures' (read/drumsq.luau). `also`: a second box outlined, as while Avenger redraws.
+  local drawn = spec.sqDrawn
+  if drawn then
+    rect(330, 250, 490, 268, { 35, 35, 35 })
+    for _, key in ipairs({ "a", "b", "c", "d" }) do
+      local p = CE.SQ_PATTERNS[key]
+      local on = drawn.on and drawn.on[key]
+      local fill = on and 128 or 56
+      rect(p[1] - 15, 254, p[1] + 15, 261.5, { fill, fill, fill })
+      local letter = on and 156 or 126
+      rect(p[1] - 3, 255.5, p[1] + 3, 256.5, { letter, letter, letter })
+      rect(p[1] - 3, 258.5, p[1] + 3, 259.5, { letter, letter, letter })
+      if drawn.selected == key or drawn.also == key then
+        local edge = on and 172 or 132
+        rect(p[1] - 15, 254, p[1] + 15, 255, { edge, edge, edge })
+        rect(p[1] - 15, 260.5, p[1] + 15, 261.5, { edge, edge, edge })
+      end
+    end
+  end
   if spec.sqDark then rect(330, 250, 490, 268, { 5, 5, 5 }) end
   -- The macros: the tabs' band and the one shown, the buttons, the knobs' pointers.
   rect(MA.TAB_SPANS[1][1], 429, MA.TAB_SPANS[4][3], 443, GREY)
@@ -522,8 +569,10 @@ function T.paintAvenger(cx, cy, k, spec)
     pointer({ MA.FIELDS["macro" .. i][1], MA.AMOUNT_Y }, 135 + a / 100 * 270, 5, 13, 2.5)
   end
   -- The selected oscillator's knobs.
-  if spec.volume then pointer({ 346, 68 }, 135 + spec.volume / 200 * 270, 1.5, 7.5, 1.5) end
-  local function semitones(p, st) pointer(p, 135 + 5 + (st + 48) / 96 * 260, 1.5, 7.5, 1.5) end
+  -- 2 wide: a bare pointer of about 12 bright pixels at 50 % and 48 at 100 %, as Avenger's (the
+  -- project's PAN_BASE_PIXELS, 12.5 at 50 %).
+  if spec.volume then pointer({ 346, 68 }, 135 + spec.volume / 200 * 270, 1.5, 7.5, 2) end
+  local function semitones(p, st) pointer(p, 135 + 5 + (st + 48) / 96 * 260, 1.5, 7.5, 2) end
   if spec.transpose then semitones({ 346, 114 }, spec.transpose) end
   if spec.fine then semitones({ 346, 160 }, spec.fine / 100 * 48) end
   if spec.fav then box(EX.FAVORITE_VIEW, 25, 10, { 220, 220, 220 }) end
@@ -539,8 +588,20 @@ function T.paintAvenger(cx, cy, k, spec)
   if spec.sampleTab then
     local q = CE.EDITOR_TABS_ROW
     rect(q[1], q[2], q[3], q[4], GREY)
-    local p = CE.EDITOR_TABS[spec.sampleTab]
-    rect(p[1] - 18, 261, p[1] + 18, 265, DARK)
+    -- As Avenger draws them (the second Mac test's `Sample Editor/…` pictures): each tab's caption,
+    -- over bottom strips that darken from Sample to EQ whatever is selected. A caption is letters:
+    -- strokes a unit wide, 3 apart, over softer pixels round them — the selected one's strokes the
+    -- brightest (205 against 145) and its soft pixels the darker (105 against 125), so that the
+    -- mean of every pixel brighter than 95 leads by about 5 and only its brightest pixels tell it
+    -- (read/sample.luau, topLumas).
+    for key, shade in pairs({ sample = 62, amp = 57, pitch = 45, eq = 34 }) do
+      local t = CE.EDITOR_TABS[key]
+      rect(t[1] - 18, 261, t[1] + 18, 265, { shade, shade, shade })
+      local selected = key == spec.sampleTab
+      local soft, core = selected and 105 or 125, selected and 205 or 145
+      rect(t[1] - 8, 256.5, t[1] + 8, 260.5, { soft, soft, soft })
+      for x = t[1] - 7, t[1] + 6, 3 do rect(x, 256.5, x + 1, 260.5, { core, core, core }) end
+    end
     if spec.sampleOn then
       box(spec.sampleTab == "eq" and CE.EQ_ENABLE_STATE or CE.ENABLE_STATE, 5, 5, { 120, 160, 210 })
     end
@@ -579,6 +640,8 @@ function T.paintAvenger(cx, cy, k, spec)
     for row = q[2] + 4, q[4] - 6, 11.5 do rect(q[1] + 4, row, q[3] - 8, row + 3, { 210, 210, 210 }) end
   end
   if spec.popup then popup(spec.popup) end
+  local tip = spec.popup and spec.popup.pointer
+  if tip then rect(tip[1], tip[2], tip[1] + 5, tip[2] + 7, { 250, 250, 250 }) end
   -- A submenu of it, painted the same way, after it (`submenu`).
   if spec.submenu then popup(spec.submenu) end
   -- The expansion browser's model, where a scenario has one (avenger_browser_tests.rs): its shapes
@@ -595,9 +658,26 @@ function T.words(words)
   S.ocr = function(_, name) return S.words[name] or "" end
 end
 
+-- Whether picture `p` (S.picture's form) draws anything in screen rectangle `r` but its
+-- background: a shape whose box meets it.
+function T.drawnIn(p, r)
+  for _, s in ipairs(p and p.shapes or {}) do
+    local x1, y1, x2, y2
+    if s.kind == "rect" then
+      x1, y1, x2, y2 = s.x1, s.y1, s.x2, s.y2
+    else
+      local reach = (s.r2 or s.r or 0) + (s.width or 0)
+      x1, y1, x2, y2 = s.cx - reach, s.cy - reach, s.cx + reach, s.cy + reach
+    end
+    if x1 < r[3] and x2 > r[1] and y1 < r[4] and y2 > r[2] then return true end
+  end
+  return false
+end
+
 -- A text read the module waits for, answered at once: a region's text is S.ocr(region, name, snap)
 -- — a string, or a whole reading; `snap` the snapshot read, if any — and a list is answered (list,
--- byName), as the host answers one.
+-- byName), as the host answers one. An empty string is "blank" where the picture draws nothing in
+-- the region — the host's crop finds no content (docs/api/ocr.md) — and "none" where it does.
 -- Every region asked is noted in S.recognized, with its name.
 function T.listReads()
   T.answerWaits(function(what, opts)
@@ -616,7 +696,8 @@ function T.listReads()
         reading = table.clone(said)
       else
         local words = said ~= "" and { { text = said, x = r[1], y = r[2], w = r[3] - r[1], h = r[4] - r[2] } } or {}
-        reading = { text = said, words = words, lines = {}, skipped = false, status = said == "" and "none" or "text" }
+        local status = said ~= "" and "text" or (T.drawnIn(snap and snap.picture or S.picture, r) and "none" or "blank")
+        reading = { text = said, words = words, lines = {}, skipped = status == "blank", status = status }
       end
       reading.name = name
       return reading
@@ -1795,7 +1876,9 @@ fn in_logic_load_and_initialize_from_the_ring_are_chosen_after_logic_reports_not
         T.ok(T.clickAt() == "488,171", T.clickAt())
         T.closePopups()
         T.tick(2)
-        T.ok(T.count("[menu item] 'VPS Avenger': 'Load preset' chosen — clicked 1 time(s) at (488,171)") == 1, T.dump())
+        -- Clicked once and not followed: the item opens a file dialog (main.luau, ONE_CLICK).
+        T.ok(T.count("[menu item] 'VPS Avenger': 'Load preset' — test ") == 1
+          and T.count("choosing item (96,19) at (488,171)") == 1, T.dump())
         -- Initialize's row: 120 + 68 x 1.6 = 228.8 -> 229.
         T.pressAt(header, 7)
         T.show(L, {})
@@ -3374,7 +3457,8 @@ fn previous_and_next_are_unavailable_on_init_preset_and_a_press_clicks_nothing()
         T.pressAt(header, 3)
         T.ok(T.lastSaid() == refused("Next preset"), T.said())
         T.choose(header, 4, 490, 116, 192, 96)
-        T.ok(T.count("[menu item] 'VPS Avenger': 'Load preset' chosen") == 1, T.dump())
+        -- Chosen at its click, not followed (main.luau, ONE_CLICK).
+        T.ok(T.count("[menu item] 'VPS Avenger': 'Load preset' — test ") == 1, T.dump())
         T.ok(tabFrom("Previous preset") == "Next preset" and T.lastSaid() == "Next preset, button", T.said())
         clicks = #S.clicks
         T.pressAt(header, 3)

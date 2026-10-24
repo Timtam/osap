@@ -122,6 +122,19 @@ function A.refusal(vb)
   return nil
 end
 
+-- Builder `build` with its spec's `holds` (src/act.luau): a read after the click counts only where
+-- `refusal` finds nothing in it — the part as the action needs it, the Drums tab read selected. A
+-- read taken while Avenger redraws reads every tab's strip brighter (the second Mac test of the
+-- page, 2026-10-24: Trig read selected after Next drumkit, and the page lost its Drums section), and
+-- is looked on from.
+function A.holding(build, refusal)
+  return function(...)
+    local spec, why = build(...)
+    if spec and spec.holds == nil then spec.holds = function(va) return refusal(va) == nil end end
+    return spec, why
+  end
+end
+
 -- A slot's index, 1 to 12, or nil.
 local function slotArg(v)
   local i = whole(v)
@@ -510,7 +523,7 @@ function A.select_central_tab(args, label)
     label = label,
     part = "central",
     -- What the tab shows read with it: DRUM SQ's LENGTH, the sample editor's tab and view.
-    fields = { "sq_length", "browser" },
+    fields = { "browser" },
     decide = function() return { at = at } end,
     watch = function() return { Centre.ROW, DrumSq.ROW } end,
     same = function(vb, va) return va.central ~= nil and va.central == vb.central end,
@@ -522,6 +535,11 @@ function A.select_central_tab(args, label)
       return { said = w .. " selected", focus = "central-tab-" .. tab }
     end,
   }
+end
+
+for _, name in ipairs({ "toggle_drum_pattern", "select_drum_mode", "previous_drumkit", "next_drumkit",
+  "select_drumkit_part", "toggle_drumkit_button", "drumkit_menu_item", "drumkit_column", "reset_drumkit_control" }) do
+  A[name] = A.holding(A[name], A.refusal)
 end
 
 return A

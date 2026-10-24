@@ -6,9 +6,9 @@
 -- own interface; the numbers as the project wrote them, starting values nobody here has checked
 -- (geometry.luau, "Where the numbers come from").
 --
--- The detection numbers below are in the PROJECT'S PIXELS: its captures were a Retina display's
--- backing pixels, two per point each way (read/knob.luau, RETINA), at the zoom of the moment. The
--- knob reader converts them; they are kept here as the project has them.
+-- The detection numbers below are in the PROJECT'S PIXELS: its captures were one pixel per point
+-- (read/picture.luau, "The project's pixels"), at the zoom of the moment. The knob reader converts
+-- them; they are kept here as the project has them.
 
 local T = {}
 

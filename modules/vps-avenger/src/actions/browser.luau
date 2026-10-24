@@ -8,12 +8,17 @@
 -- loaded (its name taken from the database). Here:
 --
 --   set_expansion_view {view}   through src/act.luau: the view field opened with the LEFT button, the
---                         view's row chosen in its painted list (popups.luau, Pp.VIEW_LIST), the
---                         caption read again; nothing clicked where an expansion is open — the same
---                         point would close it — nor where the view read is the one asked
---   close_expansion       through src/act.luau: the field clicked only where no view is read and the
---                         area reads an expansion open — the tool clicked it whatever was shown, and
---                         with the grid shown that click opens the view list; then the caption read
+--                         view's row chosen in its painted list (popups.luau, Pp.VIEW_LIST), and the
+--                         view stored as set once the list took it — the tool's AVGExpansionView —
+--                         since this Avenger draws no view's label to read (src/read/browser.luau,
+--                         Br.view); nothing clicked where an expansion reads open — the same point
+--                         would close it — or where nothing tells whether one is, nor where a view's
+--                         label reads the one asked
+--   confirm_expansion_view {view}   no trip: the view stored as confirmed (the tool's
+--                         action_confirm_expansion_view), nothing clicked
+--   close_expansion       through src/act.luau: the field clicked only where the header reads an
+--                         expansion open — the tool clicked it whatever was shown, and with the grid
+--                         shown that click opens the view list; then the header read again
 --   toggle_expansion_favorite_view {enabled}   through src/act.luau: FAV clicked, its pixels read
 --                         before and after, and with FAV on the rows' stars
 --   open_expansion {index, page_start, visible_index}   the grid read; the name looked for in it, the
@@ -32,9 +37,10 @@
 --   read_expansion_list   the port's own: Avenger's grid read from its top to its end, kept for the
 --                         session (S.avengerList) and shown in place of the database's roster
 --   align_open_expansion  Correct open Expansion (the plan's slice 10): no click — the name and ONE
---                         picture of the caption and the columns read with no expansion expected, so
---                         the one the page had cannot score first; what that does not settle is
---                         "cannot be told now" (the tool read twice, 0.45 s apart, over its roster)
+--                         picture of the caption, the header's name and the columns read with no
+--                         expansion expected, so the one the page had cannot score first; what that
+--                         does not settle is "cannot be told now" (the tool read twice, 0.45 s apart,
+--                         over its roster)
 --
 -- MOVING A LIST (B.step, B.seek). The maintainer's decision (TODO.md, stage 4): the lists are read and
 -- clicked by the word and moved by the wheel, measured. A step is one wheel notch at the list's
@@ -94,12 +100,12 @@ B.ALL = "__all__"
 -- The page's words.
 local OPEN_NOW = "an expansion is open in VPS Avenger; press Close Expansion to close it first"
 local NONE_OPEN = "no expansion is open in VPS Avenger"
-local VIEW_UNREAD = "the Expansion View cannot be read now"
+local VIEW_UNREAD = "whether an expansion is open in VPS Avenger cannot be read now"
 
 -- Every value of the browser's (state.luau's): a read that shows the grid, or another expansion,
 -- says each of them.
-local KEYS = { "expansionView", "expansionOpen", "selectedExpansion", "lists", "loadedIndex", "favoriteView",
-  "favoriteStates", "categoryShown", "pageCategory", "selectedFromDatabase" }
+local KEYS = { "expansionView", "expansionViewFrom", "expansionOpen", "selectedExpansion", "lists", "loadedIndex",
+  "favoriteView", "favoriteStates", "categoryShown", "pageCategory", "selectedFromDatabase" }
 
 local function whole(v)
   local n = tonumber(v)
@@ -107,6 +113,15 @@ local function whole(v)
 end
 
 -- ── Through src/act.luau ─────────────────────────────────────────────────────
+
+-- The view's words, with how it came to be where it was not read (Br.view).
+local function viewWords(view, from)
+  if from == "set" then return "Expansion View " .. view .. ", set" end
+  if from == "confirmed" then return "Expansion View " .. view .. ", confirmed" end
+  if from == "stored" then return "Expansion View " .. view .. ", as stored" end
+  return "Expansion View " .. view
+end
+B.viewWords = viewWords
 
 function B.set_expansion_view(args, label)
   local view = args.view
@@ -117,23 +132,29 @@ function B.set_expansion_view(args, label)
     part = "browser",
     fields = { "area" },
     decide = function(vb)
-      if vb.expansionView == nil then
-        if vb.expansionOpen == true then return nil, OPEN_NOW end
-        return nil, VIEW_UNREAD
-      end
-      if vb.expansionView == view then return nil, "unchanged, Expansion View " .. view end
-      return { at = X.VIEW, menu = { button = "left", item = at, retries = 3 } }
+      if vb.expansionOpen == true then return nil, OPEN_NOW end
+      if vb.expansionOpen == nil then return nil, VIEW_UNREAD end
+      -- A view's label read as the one asked; a view stored is clicked all the same, as the tool did.
+      if vb.expansionView == view and vb.expansionViewFrom == nil then return nil, "unchanged, Expansion View " .. view end
+      return { at = X.VIEW, menu = { button = "left", item = at, retries = 3, read = false } }
     end,
-    watch = function() return { X.VIEW_TEXT } end,
-    same = function(vb, va) return va.expansionView ~= nil and va.expansionView == vb.expansionView end,
-    answer = function(_, va, how)
-      local now = va and va.expansionView
-      if now == nil then return { error = VIEW_UNREAD } end
-      if how == "unchanged" then return { note = "unchanged, Expansion View " .. now } end
-      if now ~= view then return { note = "Expansion View reads " .. now .. ", not " .. view } end
-      return { said = "Expansion View " .. now }
+    answer = function(_, _, how)
+      if how ~= "chosen" then return { error = "the view was not chosen" } end
+      Br.storeView(view, "set")
+      return { part = { keys = { "expansionView", "expansionViewFrom" }, values = { expansionView = view,
+        expansionViewFrom = "set" } }, said = viewWords(view, "set") }
     end,
   }
+end
+
+-- confirm_expansion_view {view}: the page's Confirm Expansion View — no trip, no click.
+function B.confirmView(args)
+  local view = args.view
+  if not (type(view) == "string" and X.viewMenuPoint(view)) then
+    return nil, tostring(view) .. " is not one of VPS Avenger's views"
+  end
+  Br.storeView(view, "confirmed")
+  return { expansionView = view, expansionViewFrom = "confirmed" }
 end
 
 function B.close_expansion(_, label, known)
@@ -144,15 +165,15 @@ function B.close_expansion(_, label, known)
     expected = known and known.selectedExpansion or nil,
     decide = function(vb)
       -- With the grid shown, this point opens the view list: the tool clicked it all the same.
-      if vb.expansionView then return nil, NONE_OPEN end
+      if vb.expansionOpen == false then return nil, NONE_OPEN end
       if vb.expansionOpen ~= true then return nil, VIEW_UNREAD end
       return { at = X.CLOSE }
     end,
-    watch = function() return { X.VIEW_TEXT, X.AREA } end,
-    same = function(_, va) return va.expansionView == nil end,
+    watch = function() return { X.VIEW_TEXT, X.NAME_TEXT, X.AREA } end,
+    same = function(_, va) return va.expansionOpen ~= false end,
     answer = function(_, va)
-      if va and va.expansionView then
-        return { said = "closed; Expansion View " .. va.expansionView, focus = "expansion-search-results" }
+      if va and va.expansionOpen == false then
+        return { said = "closed; " .. viewWords(va.expansionView, va.expansionViewFrom), focus = "expansion-search-results" }
       end
       if va and va.expansionOpen == true then return { error = "VPS Avenger still shows the expansion open" } end
       return { error = VIEW_UNREAD }
@@ -177,7 +198,8 @@ function B.toggle_expansion_favorite_view(args, label, known)
     fields = { "presets" },
     expected = known and known.selectedExpansion or nil,
     decide = function(vb)
-      if vb.expansionView then return nil, NONE_OPEN end
+      if vb.expansionOpen == false then return nil, NONE_OPEN end
+      if vb.expansionOpen ~= true then return nil, VIEW_UNREAD end
       if want ~= nil and vb.favoriteView == want then return nil, "unchanged, FAV " .. (want and "ON" or "OFF") end
       return { at = X.FAVORITE_VIEW }
     end,
@@ -488,13 +510,13 @@ local function partOf(st, known)
   local v = {}
   if not st then return nil end
   if st.open == false then
-    v.expansionView, v.expansionOpen, v.selectedExpansion = st.view, false, ""
+    v.expansionView, v.expansionViewFrom, v.expansionOpen, v.selectedExpansion = st.view, st.viewFrom, false, ""
     return { keys = KEYS, values = v }
   end
   v.expansionOpen = true
   v.selectedExpansion = st.name or ""
   if st.name and st.name == known.selectedExpansion then
-    return { keys = { "expansionView", "expansionOpen", "selectedExpansion" }, values = v }
+    return { keys = { "expansionView", "expansionViewFrom", "expansionOpen", "selectedExpansion" }, values = v }
   end
   if st.name then
     local ok, lists = pcall(DB.lists, st.name)
@@ -636,7 +658,7 @@ end
 -- open_expansion: in trip `trip`'s act on overlay `o`, a handler where reads wait, and `trip:inFront()`
 -- after every wait — false has ended the trip, and its give-up says the rest.
 function B.open(o, trip, args, name, label, known)
-  local ctx = look(o, trip, { "caption", "area" }, known.selectedExpansion, label)
+  local ctx = look(o, trip, { "caption", "name", "area" }, known.selectedExpansion, label)
   if not ctx then return end
   local st, pl = ctx.st, ctx.pl
   local function refuse(why, part)
@@ -646,8 +668,9 @@ function B.open(o, trip, args, name, label, known)
   end
   if not st then return refuse(VIEW_UNREAD) end
   if st.open then return refuse(OPEN_NOW, partOf(st, known)) end
-  -- The view the words are placed by is the one read now, never one remembered: a grid in another
-  -- view would split its names across the wrong columns.
+  -- The view the words are placed by is the one its label reads now, or else the one stored — set
+  -- from the page or confirmed there (read/browser.luau, Br.view): a grid in another view would split
+  -- its names across the wrong columns, which is why the page says how the view came to be.
   local view = st.view
   if not view then return refuse(VIEW_UNREAD, partOf(st, known)) end
   local tiles = Br.tiles(ctx.byName["browser area"], view, pl)
@@ -690,9 +713,10 @@ function B.open(o, trip, args, name, label, known)
     trip:done(result)
   end
 
-  -- After the click: the caption and the columns read, FAV, and the expansion the columns list.
+  -- After the click: the caption, the header's name and the columns read, FAV, and the expansion the
+  -- header names — or, where it names none, the one the columns list.
   local function readOpen(s)
-    local byName = Br.read(s, pl, { "caption", "categories", "presets" })
+    local byName = Br.read(s, pl, { "caption", "name", "categories", "presets" })
     local st2, words = Br.state(byName, name)
     log("'%s': after the click, %s", label, words)
     local r = { st = st2 }
@@ -724,9 +748,9 @@ function B.open(o, trip, args, name, label, known)
       categoryShown = r.category, pageCategory = r.category, loadedIndex = loadedIn(E.ring.lastName(), st2.name) }
     if r.fav and r.lines then v.favoriteStates = Br.starStates(r.lines) end
     if st2.name ~= name then
-      v.selectedFromDatabase = true
-      return finish({ part = { keys = KEYS, values = v }, error = "VPS Avenger opened " .. st2.name .. ", by the presets it "
-        .. "lists (from the database)" })
+      v.selectedFromDatabase = st2.score ~= nil or nil
+      return finish({ part = { keys = KEYS, values = v }, error = "VPS Avenger opened " .. st2.name
+        .. (st2.score ~= nil and ", by the presets it lists (from the database)" or ", as its header reads") })
     end
     finish({ part = { keys = KEYS, values = v }, focus = "open-expansion-name" })
   end
@@ -737,7 +761,7 @@ function B.open(o, trip, args, name, label, known)
       pic:release()
       return finish({ sentence = said })
     end
-    lookOn(trip, ctx, pic, { X.VIEW_TEXT, X.AREA }, readOpen, function(r) return r.st ~= nil and r.st.open == true end,
+    lookOn(trip, ctx, pic, { X.VIEW_TEXT, X.NAME_TEXT, X.AREA }, readOpen, function(r) return r.st ~= nil and r.st.open == true end,
       opened)
   end
   gridPicture(ctx.snap, ctx, view, tiles)
@@ -798,7 +822,7 @@ local function chooseCategory(o, trip, ctx, label, lists, target, pic, cats, nex
         return onFail({ sentence = said })
       end
       lookOn(trip, ctx, s, { X.CATEGORY_TEXT, X.PRESET_TEXT }, function(s2)
-        local b = Br.read(s2, ctx.pl, { "caption", "categories", "presets" })
+        local b = Br.read(s2, ctx.pl, { "caption", "name", "categories", "presets" })
         local _, c = presetRows(s2, ctx.pl, b["presets"], lists, false)
         return { byName = b, category = c }
       end, function(r) return r.category == name end, function(r, changed, s2)
@@ -842,7 +866,7 @@ end
 function B.category(o, trip, target, label, known)
   local lists, expansion = known.lists, known.selectedExpansion
   local name = lists.categories[target]
-  local ctx = look(o, trip, { "caption", "categories", "presets" }, expansion, label)
+  local ctx = look(o, trip, { "caption", "name", "categories", "presets" }, expansion, label)
   if not ctx then return end
   local why = notOpen(ctx.st, expansion)
   if why then
@@ -899,7 +923,7 @@ function B.preset(o, trip, forget, kind, arg, label, known)
     was = E.ring.nameNow(o) or E.ring.lastName()
     if not trip:inFront() then return end
   end
-  local ctx = look(o, trip, { "caption", "categories", "presets" }, expansion, label)
+  local ctx = look(o, trip, { "caption", "name", "categories", "presets" }, expansion, label)
   if not ctx then return end
   local pl = ctx.pl
   local fav = Br.fav(ctx.snap, pl)
@@ -1072,7 +1096,7 @@ function B.all(o, trip, label, known)
   local name = E.ring.nameNow(o)
   if not trip:inFront() then return end
   local expansion = known.selectedExpansion
-  local ctx = look(o, trip, { "caption", "categories", "presets" }, expansion, label)
+  local ctx = look(o, trip, { "caption", "name", "categories", "presets" }, expansion, label)
   if not ctx then return end
   local st = ctx.st
   local why = notOpen(st, expansion)
@@ -1121,10 +1145,11 @@ end
 
 local CANNOT_TELL = "whether an expansion is open in VPS Avenger, and which, cannot be told now"
 
--- align_open_expansion: no click. Every read after the page key and every action of the browser's
--- scores the expansion the page has open first, and takes it on one preset name its columns share
--- (read/expansion.luau, E.fromArea), so an expansion that opened in its place stays named read after
--- read; this read expects none, and the database names what the columns list over its whole catalog
+-- align_open_expansion: no click. The header's name says which expansion is open where it is read
+-- as one (read/browser.luau, Br.state); where it is not, every read after the page key and every
+-- action of the browser's scores the expansion the page has open first, and takes it on one preset
+-- name its columns share (read/expansion.luau, E.fromArea), so an expansion that opened in its place
+-- stays named read after read; this read expects none, and the database names what the columns list over its whole catalog
 -- (the tool scored its roster) — or, where two expansions list what was read as much, names neither,
 -- and which one is open cannot be read (the tool took the first). The name read first, as All reads
 -- it (the tool placed the preset loaded in what it found); then the caption and the columns, once —
@@ -1136,7 +1161,7 @@ local CANNOT_TELL = "whether an expansion is open in VPS Avenger, and which, can
 function B.align(o, trip, label, known)
   local name = E.ring.nameNow(o)
   if not trip:inFront() then return end
-  local ctx = look(o, trip, { "caption", "categories", "presets" }, nil, label)
+  local ctx = look(o, trip, { "caption", "name", "categories", "presets" }, nil, label)
   if not ctx then return end
   local st, s, pl = ctx.st, ctx.snap, ctx.pl
   local set = E.named(name)
@@ -1158,11 +1183,12 @@ function B.align(o, trip, label, known)
   local marks = {}
   local fav = Br.fav(s, pl, marks)
   local v = { expansionOpen = true, selectedExpansion = y, favoriteView = fav, loadedIndex = loadedIn(name, y),
-    -- Named by what it lists, the database's naming — unless the page had it open by the word
-    -- clicked, as the key's read keeps it (read/open.luau).
-    selectedFromDatabase = not (y == known.selectedExpansion and not known.selectedFromDatabase) or nil }
-  local keys = { "expansionView", "expansionOpen", "selectedExpansion", "lists", "loadedIndex", "favoriteView",
-    "favoriteStates", "categoryShown", "selectedFromDatabase" }
+    -- Named by what it lists, the database's naming — unless the header read its name, or the page had
+    -- it open by the word clicked, as the key's read keeps it (read/open.luau).
+    selectedFromDatabase = st.score ~= nil and not (y == known.selectedExpansion and not known.selectedFromDatabase)
+      or nil }
+  local keys = { "expansionView", "expansionViewFrom", "expansionOpen", "selectedExpansion", "lists", "loadedIndex",
+    "favoriteView", "favoriteStates", "categoryShown", "selectedFromDatabase" }
   local okL, lists = pcall(DB.lists, y)
   local lines = nil
   if okL and lists then
@@ -1275,7 +1301,7 @@ end
 -- reached, the reads at both read something, no read lost its place, and every place told one name
 -- (S.setAvengerList); otherwise nothing is kept, and the answer says which.
 function B.list(o, trip, label, known)
-  local ctx = look(o, trip, { "caption", "area" }, known.selectedExpansion, label)
+  local ctx = look(o, trip, { "caption", "name", "area" }, known.selectedExpansion, label)
   if not ctx then return end
   local st, pl = ctx.st, ctx.pl
   local function refuse(why, part)

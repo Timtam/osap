@@ -23,12 +23,23 @@ T.NAME_BOTTOM = 42
 -- the strip out, Drums from 551 to 601 and Trig from 602 to 631.
 T.SELECTION_TOP = 30
 T.SELECTION_BOTTOM = 40
+-- Where the selected tab's dark strip is read: in the bottom rows above y 39.5 — this module's own,
+-- half a point above the selection's bottom, which is the strip's own lower edge. Measured on
+-- `OSC Tabs/Avenger 100, 8 OSCs, OSC 3 selected.png`: the selected tab leads by 16.8 there, by 5.4
+-- half a point lower and by 0.1 a point lower. It holds with Avenger's corner placed half a point
+-- off.
+T.SELECTION_BAND_BOTTOM = 39.5
 T.DRUMS_SELECTION = { 551, 601 }
 T.TRIG_SELECTION = { 602, 631 }
 
--- The dots, one in each OSC tab: looked for from 3 below the selection's top (the project's
--- OSC_TAB_SELECTION_TOP + 3.0) to its bottom, from the panel's left to the names' right.
+-- The dots, one in each OSC tab, its left edge at the tab's left and its middle 3.25 right of it:
+-- looked for from 3 below the selection's top (the project's OSC_TAB_SELECTION_TOP + 3.0) to its
+-- bottom, and from 3 left of the panel's left — so that the first tab's dot is whole with Avenger's
+-- corner placed 1.5 off — to the names' right with eight oscillators. Drums' and Trig's dots, from
+-- 553 and 604, lie right of it. Measured on `OSC Tabs/Avenger 100, 8 OSCs, OSC 1 selected.png`.
 T.DOT_TOP = T.SELECTION_TOP + 3
+T.DOT_BAND = { T.PANEL_LEFT - 3, T.DOT_TOP, T.NAME_RIGHT_WITH_ADD, T.SELECTION_BOTTOM }
+T.DOT_MIDDLE = T.PANEL_LEFT + 3.25
 
 -- The tabs and their menus are clicked at y 35; Mute and Solo at y 26, 7 left and 7 right of the
 -- tab's middle, each read in a box 13 wide and 8 tall. The ARP row is at y 62.

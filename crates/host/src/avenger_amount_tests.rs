@@ -99,10 +99,10 @@ fn macro_amount_presses_the_knob_hands_over_four_keys_and_moves_one_point_times_
         local before = S.picture
         local asked = T.recordSnapshots()
         T.tripFrom({ action = "macro_amount", args = { index = 1 }, focused = true }, W)
-        -- (720, 464)-(752, 496) at 1.6 from (98, 84): 1250,826 to 1301,878.
-        T.ok(#asked == 1 and not asked[1].cb and T.region(asked[1].region) == "1250,826,1301,878",
+        -- (706, 450)-(766, 510) at 1.6 from (98, 84): 1228,804 to 1324,900.
+        T.ok(#asked == 1 and not asked[1].cb and T.region(asked[1].region) == "1228,804,1324,900",
           "the knob's box pictured first: " .. #asked)
-        T.ok(T.held() == 1 and T.liveRegions() == "1250,826,1301,878", "held through the hand-over: " .. T.liveRegions())
+        T.ok(T.held() == 1 and T.liveRegions() == "1228,804,1324,900", "held through the hand-over: " .. T.liveRegions())
         T.ok(#S.pointLists == lists + 1 and S.pointLists[#S.pointLists] <= 400, "one list of points")
         for _, k in ipairs({ "PageUp", "PageDown", "Return", "Escape" }) do T.ok(S.holding[k], k .. " captured") end
         for i = flags + 1, #S.menuOpen do T.ok(S.menuOpen[i] ~= true, "no flag written") end
@@ -135,9 +135,9 @@ fn macro_amount_presses_the_knob_hands_over_four_keys_and_moves_one_point_times_
         for _, a in ipairs(asked) do if a.change then waits[#waits + 1] = a end end
         T.ok(#asked == 2 and #waits == 1, "one change wait: " .. #asked)
         local cw = waits[1].change
-        T.ok(T.region(waits[1].region) == "1250,826,1301,878" and cw.settle == 50 and cw.timeout == 2000
+        T.ok(T.region(waits[1].region) == "1228,804,1324,900" and cw.settle == 50 and cw.timeout == 2000
           and cw.tolerance == 16 and cw.minPixels == 4, "the box")
-        T.ok(cw.from ~= nil and cw.from.picture == before and T.region(cw.from.region) == "1250,826,1301,878",
+        T.ok(cw.from ~= nil and cw.from.picture == before and T.region(cw.from.region) == "1228,804,1324,900",
           "from the picture before the press")
         T.ok(#S.pointLists == lists + 2 and S.pointLists[#S.pointLists] <= 400, "one list of points after")
         T.ok(T.count("[avenger] [amount] 'macro 1': read Cutoff 70 percent (Cutoff 40 percent before) — changed true") == 1,
@@ -262,7 +262,7 @@ fn return_with_no_move_reads_at_once_and_claims_nothing() {
         T.tripFrom({ action = "macro_amount", args = { index = 1 }, focused = true }, W)
         T.key("Return")
         T.settle()
-        T.ok(#asked == 2 and asked[2].cb and asked[2].change == nil and T.region(asked[2].region) == "1250,826,1301,878",
+        T.ok(#asked == 2 and asked[2].cb and asked[2].change == nil and T.region(asked[2].region) == "1228,804,1324,900",
           "a plain picture after: " .. #asked)
         T.ok(T.lastPost("state").state.macro_panel.amount_values[1] == 40 and T.lastPost("error").text == ""
           and T.lastPost().id == "macro-1-slot-1-amount", tostring(T.lastPost("error").text))
@@ -374,8 +374,8 @@ fn osc_volume_reads_the_strip_first_and_the_level_knob_after() {
         local asked = T.recordSnapshots()
         local lists = #S.pointLists
         T.tripFrom({ action = "osc_control", args = { control = "volume" }, focused = true }, W)
-        -- The strip (230, 18)-(640, 145), then Level's box (334, 56)-(358, 80), at 1.6 from (98, 84).
-        T.ok(#asked == 2 and T.region(asked[1].region) == "466,113,1122,316" and T.region(asked[2].region) == "632,174,671,212",
+        -- The strip (230, 18)-(640, 145), then Level's box (328, 50)-(364, 86), at 1.6 from (98, 84).
+        T.ok(#asked == 2 and T.region(asked[1].region) == "466,113,1122,316" and T.region(asked[2].region) == "623,164,680,222",
           "the strip, then the knob: " .. #asked)
         local d = T.inputs("down")
         T.ok(#d == 1 and T.xy(d[1]) == "652,193" and d[1].button == "left", T.xy(d[1]))
@@ -414,9 +414,10 @@ fn osc_volume_reads_the_strip_first_and_the_level_knob_after() {
 /// Pan and Random Pitch press and let go with the right button, as the tool does, and the host's
 /// record is asked for the right one; their sentences say the control's key with a space. The read
 /// after Return posts both of its knob's values: Pan's press Level's volume and pan, Random Pitch's
-/// — Fine Tune's knob, read once — Fine Tune and Random Pitch, the latter as the project reads it,
-/// the Fine Tune pointer turned off the top counted beside the upright one (knob.luau, fineKnob);
-/// Fine Tune's own press says "fine tune".
+/// — Fine Tune's knob, read once — Fine Tune and Random Pitch, the latter as the project reads it:
+/// the Fine Tune pointer turned off the top is counted beside the upright one (knob.luau, fineKnob),
+/// but a pointer no larger than a bare one has no bright pixels past it, so it reads 0; Fine Tune's
+/// own press says "fine tune".
 #[test]
 fn pan_and_random_pitch_press_and_release_the_right_button() {
     run_mac(&scenario(r##"
@@ -436,7 +437,8 @@ fn pan_and_random_pitch_press_and_release_the_right_button() {
           T.settle()
           local u = T.inputs("up")
           T.ok(u[#u].button == button and #S.heldButtons == 0, control .. ": let go of the " .. tostring(u[#u].button))
-          T.ok(#S.pointLists == lists + 2, control .. ": one ring before, one after: " .. (#S.pointLists - lists))
+          T.ok(#S.pointLists == lists + 3, control .. ": the strip's dots and one ring before, one ring after: "
+            .. (#S.pointLists - lists))
           T.ok(T.lastPost().id == focus, control .. ": " .. tostring(T.lastPost().id))
           return T.lastPost("state").state.osc_panel
         end
@@ -450,7 +452,7 @@ fn pan_and_random_pitch_press_and_release_the_right_button() {
         local o = turn("pan", "right", "pan", "osc-pan", osc({ volume = 100 }))
         T.ok(o.pan_values[1] == 0 and o.volume_values[1] == 100, "both of Level's values: " .. tostring(o.volume_values[1]))
         o = turn("random_pitch", "right", "random pitch", "osc-random-pitch", osc({ volume = 100, fine = 25 }))
-        T.ok(o.fine_tune_values[1] == 25 and o.random_pitch_values[1] == 100 and o.volume_values[1] == 100,
+        T.ok(o.fine_tune_values[1] == 25 and o.random_pitch_values[1] == 0 and o.volume_values[1] == 100,
           "both of the third knob's values: " .. tostring(o.fine_tune_values[1]) .. ", " .. tostring(o.random_pitch_values[1]))
         o = turn("fine_tune", "left", "fine tune", "osc-fine-tune", osc({ volume = 100, fine = -50 }))
         T.ok(o.fine_tune_values[1] == -50 and o.transpose_values[1] == 0, "fine tune read: " .. tostring(o.fine_tune_values[1]))
@@ -524,7 +526,8 @@ fn the_filter_moves_along_x_within_368_to_509_and_reads_nothing() {
         T.ok(last() == "911,183", last())
         T.key("Return")
         T.settle()
-        T.ok(#T.inputs("up") == 1 and #asked == 1 and #S.pointLists == lists, "let go, nothing read")
+        -- The one list of points is the strip's, read before the press: its dots' colours.
+        T.ok(#T.inputs("up") == 1 and #asked == 1 and #S.pointLists == lists + 1, "let go, nothing read")
         T.ok(T.lastPost("error").text == "" and T.lastPost().id == "osc-low-pass", tostring(T.lastPost().id))
         T.ok(T.lastPost("state").state.osc_panel.mute_states[1] == true, "the strip as read before the press, posted")
         T.event()
@@ -721,10 +724,10 @@ fn a_refused_hand_over_or_press_point_presses_nothing() {
 // ---------------------------------------------------------------------------------------------
 
 /// Knob.read on a picture of one knob's box alone (Knob.BOX), at 50, 100 and 200 % on a Mac and at
-/// 100 % on a Windows display at 150 % (factor 3): each reads what was painted, off ONE list of
-/// points — 140, 256, 256 and 200 for a macro knob, 196 for each oscillator knob, as P.ring's
-/// arithmetic gives them — its stride in the words and its marks inside the box. A knob painted with
-/// no pointer is not read.
+/// 100 % on a Windows display at 150 % (factor 3): each reads what was painted, its bright pixels
+/// found by one grid of the square round its ring and only the colours of the cells that hold one
+/// asked — ONE list of points — and its marks inside the box. A knob painted with no pointer asks no
+/// colours, and is not read.
 #[test]
 fn the_knob_reader_reads_one_knob_off_its_own_box_at_50_100_and_200_percent() {
     run_mac(&scenario(r##"
@@ -732,10 +735,10 @@ fn the_knob_reader_reads_one_knob_off_its_own_box_at_50_100_and_200_percent() {
         local K = S.included["modules/vps-avenger/src/read/knob.luau"][1]
         local P = S.included["modules/vps-avenger/src/read/picture.luau"][1]
         local cases = {
-          { name = "Mac 50 %", k = 1, zoom = 50, macro = 140, mstride = 2, osc = 196, ostride = 1 },
-          { name = "Mac 100 %", k = 2, zoom = 100, macro = 256, mstride = 3, osc = 196, ostride = 2 },
-          { name = "Mac 200 %", k = 4, zoom = 200, macro = 256, mstride = 6, osc = 196, ostride = 4 },
-          { name = "Windows 150 %, 100 %", k = 3, zoom = 100, macro = 200, mstride = 5, osc = 196, ostride = 3 },
+          { name = "Mac 50 %", k = 1, zoom = 50 },
+          { name = "Mac 100 %", k = 2, zoom = 100 },
+          { name = "Mac 200 %", k = 4, zoom = 200 },
+          { name = "Windows 150 %, 100 %", k = 3, zoom = 100 },
         }
         local origin = { client = { x = 100, y = 100, w = 4000, h = 3000 }, class = "JUCE_1a05739a091" }
         for _, c in ipairs(cases) do
@@ -747,48 +750,133 @@ fn the_knob_reader_reads_one_knob_off_its_own_box_at_50_100_and_200_percent() {
             local snap = T.snap(r)
             snap.picture = S.picture
             local lists, marks = #S.pointLists, {}
-            local fields, words = K.read(pl, snap, which, marks)
+            -- In a handler, where the grids of its square wait.
+            local fields, words = T.handled(K.read, pl, snap, which, marks)
             snap:release()
-            T.ok(#S.pointLists == lists + 1, c.name .. " " .. which .. ": one list of points")
             for _, m in ipairs(marks) do
               T.ok(m.x >= r[1] and m.x < r[3] and m.y >= r[2] and m.y < r[4], c.name .. " " .. which .. ": a mark outside")
             end
-            return fields, words, S.pointLists[#S.pointLists]
+            return fields, words, #S.pointLists - lists, S.pointLists[#S.pointLists]
           end
-          local function stride(words, n)
-            return string.find(words, n == 1 and "every pixel" or ("one in " .. n .. " pixels each way"), 1, true) ~= nil
+          -- The colours asked are those of the cells that hold a bright pixel: the list's length,
+          -- the bright ones among them.
+          local function bright(words, n)
+            local b, asked = string.match(words, "(%d+) bright of the ring's %d+ pixels %((%d+) asked")
+            return b ~= nil and tonumber(asked) == n and tonumber(b) >= 8 and tonumber(b) <= n
           end
           for _, a in ipairs({ 0, 50, 100 }) do
-            local f, w, n = read({ amounts = { a, 0, 0 } }, "macro1")
-            T.ok(f.amount == a and n == c.macro and stride(w, c.mstride),
-              string.format("%s macro %d: %s, %d points, %s", c.name, a, tostring(f.amount), n, w))
+            local f, w, lists, n = read({ amounts = { a, 0, 0 } }, "macro1")
+            T.ok(f.amount == a and lists == 1 and bright(w, n),
+              string.format("%s macro %d: %s, %d list(s), %s", c.name, a, tostring(f.amount), lists, w))
           end
           for _, v in ipairs({ 0, 150, 200 }) do
-            local f, w, n = read({ volume = v }, "volume")
-            T.ok(f.volume == v and f.pan == 0 and n == c.osc and stride(w, c.ostride),
-              string.format("%s volume %d: %s, %d points, %s", c.name, v, tostring(f.volume), n, w))
+            local f, w, lists, n = read({ volume = v }, "volume")
+            T.ok(f.volume == v and f.pan == 0 and lists == 1 and bright(w, n),
+              string.format("%s volume %d: %s, %d list(s), %s", c.name, v, tostring(f.volume), lists, w))
           end
           for _, st in ipairs({ -48, 24, 48 }) do
-            local f, _, n = read({ transpose = st }, "transpose")
-            T.ok(f.transpose == st and n == c.osc, string.format("%s transpose %d: %s", c.name, st, tostring(f.transpose)))
+            local f, _, lists = read({ transpose = st }, "transpose")
+            T.ok(f.transpose == st and lists == 1, string.format("%s transpose %d: %s", c.name, st, tostring(f.transpose)))
           end
           for _, ct in ipairs({ -50, 0, 100 }) do
-            local f, _, n = read({ fine = ct }, "fine_tune")
-            T.ok(f.fineTune == ct and f.randomPitch ~= nil and n == c.osc,
+            local f, _, lists = read({ fine = ct }, "fine_tune")
+            T.ok(f.fineTune == ct and f.randomPitch ~= nil and lists == 1,
               string.format("%s fine %d: %s", c.name, ct, tostring(f.fineTune)))
           end
-          local f, w = read({}, "macro2")
-          T.ok(f.amount == nil and string.find(w, "too few", 1, true), c.name .. ": no pointer, not read: " .. w)
-          f, w = read({}, "random_pitch")
-          T.ok(f.fineTune == nil and f.randomPitch == nil and string.find(w, "too few", 1, true), c.name .. ": " .. w)
+          local f, w, lists = read({}, "macro2")
+          T.ok(f.amount == nil and lists == 0 and string.find(w, "too few", 1, true), c.name .. ": no pointer, not read: " .. w)
+          f, w, lists = read({}, "random_pitch")
+          T.ok(f.fineTune == nil and f.randomPitch == nil and lists == 0 and string.find(w, "too few", 1, true),
+            c.name .. ": " .. w)
         end
         T.ok(T.held() == 0, "every picture released")
     "##));
 }
 
-/// The page key's read with an oscillator selected reads six lists of points — the three macro
-/// knobs, Level, Transpose and the third knob ONCE for Fine Tune and Random Pitch — where it read
-/// seven; its values and its words as before.
+/// The knob reader on rings with the counts measured on the second Mac test's `Sliders/…` pictures
+/// at 100 % (s = 2, one pixel per point), every pixel painted where it lies from the knob's middle,
+/// as the project measures it from the pixel's corner: a bare upright pointer is the 50 bright
+/// pixels of `Pan/5 Avenger Pan C.png`, Volume 100 % and Pan 0; Pan 50, 75 and 100 % have 73, 87
+/// and 100 with 8 beside the pointer, 25 % has 60 with 2 beside it and reads 0, as the project's
+/// does; Random 50 and 100 % have 73 and 100 with 9 beside the upright, left, and Alternate 100 % the
+/// same right; a Fine Tune pointer at -50 cents of 53 bright pixels, turned off the top, reads -50
+/// and Random Pitch 0. The reader as it was — the project's pixels taken as two per point, a few
+/// hundred points of the ring, from each pixel's middle — read these Pans as 100 and these Randoms as
+/// 100.
+#[test]
+fn the_knob_reader_reads_the_projects_counts_pixel_for_pixel() {
+    run_mac(&scenario(r##"
+        T.avengerAt80("Init Preset")
+        local K = S.included["modules/vps-avenger/src/read/knob.luau"][1]
+        local P = S.included["modules/vps-avenger/src/read/picture.luau"][1]
+        local origin = { client = { x = 100, y = 100, w = 4000, h = 3000 }, class = "JUCE_1a05739a091" }
+        local pl = P.placer(origin, 2, 100)
+        -- The knob's middle on screen, a whole pixel here: (100 + 2 x, 100 + 2 y).
+        local function read(which, pixels)
+          local p, box = K.place(which)
+          local ex, ey = 100 + 2 * p[1], 100 + 2 * p[2]
+          local shapes = {}
+          for _, q in ipairs(pixels) do
+            local x, y = ex + q[1], ey + q[2]
+            shapes[#shapes + 1] = { kind = "rect", x1 = x, y1 = y, x2 = x + 1, y2 = y + 1, c = { 230, 230, 230 } }
+          end
+          S.picture = { bg = { 24, 24, 24 }, shapes = shapes }
+          local snap = T.snap(pl:rect(box))
+          snap.picture = S.picture
+          local fields, words = T.handled(K.read, pl, snap, which, {})
+          snap:release()
+          return fields, words
+        end
+        -- A pointer straight up, 2 wide — dx -1 and 0 — from 4 to 28 above the middle: 50 pixels; with
+        -- `side` pixels 8 to the left (or right) of it, from 10 up, and `more` beside it at dx 1 and
+        -- then -2, which count as bright but not beside it.
+        local function upright(side, more, right)
+          local out = {}
+          for dy = -28, -4 do
+            out[#out + 1] = { -1, dy }
+            out[#out + 1] = { 0, dy }
+          end
+          for i = 1, side do out[#out + 1] = { right and 8 or -8, -9 - i } end
+          for i = 1, more do
+            if i <= 25 then out[#out + 1] = { 1, -3 - i } else out[#out + 1] = { -2, -3 - (i - 25) } end
+          end
+          return out
+        end
+        T.ok(#upright(8, 15) == 73 and #upright(8, 29) == 87 and #upright(8, 42) == 100 and #upright(2, 8) == 60,
+          "the counts painted")
+        local f, w = read("pan", upright(0, 0))
+        T.ok(f.volume == 100 and f.pan == 0, "bare: " .. w)
+        for _, c in ipairs({ { 8, 15, false, -50 }, { 8, 29, false, -75 }, { 8, 42, true, 100 }, { 2, 8, false, 0 } }) do
+          f, w = read("pan", upright(c[1], c[2], c[3]))
+          T.ok(f.pan == c[4] and f.volume == 100, string.format("pan %d: %s", c[4], w))
+        end
+        for _, c in ipairs({ { 9, 14, false, -50 }, { 9, 41, false, -100 }, { 9, 41, true, 100 } }) do
+          f, w = read("random_pitch", upright(c[1], c[2], c[3]))
+          T.ok(f.randomPitch == c[4] and f.fineTune == 0, string.format("random %d: %s", c[4], w))
+        end
+        -- Fine Tune at -50 cents: -24 of its 48 semitones, 70° round from 135°, at 205°: a line 2 wide
+        -- from 4 out, 53 pixels.
+        local line, seen = {}, {}
+        local a = math.rad(205)
+        for r = 4, 60 do
+          for _, d in ipairs({ 0, 1 }) do
+            local x, y = math.floor(math.cos(a) * r + 0.5) + d, math.floor(math.sin(a) * r + 0.5)
+            local key = x .. "," .. y
+            if #line < 53 and not seen[key] then
+              seen[key] = true
+              line[#line + 1] = { x, y }
+            end
+          end
+        end
+        f, w = read("fine_tune", line)
+        T.ok(#line == 53 and f.fineTune == -50 and f.randomPitch == 0, "fine -50: " .. w)
+        T.ok(T.held() == 0, "every picture released")
+    "##));
+}
+
+/// The page key's read with an oscillator selected reads three lists of points — the strip's dots'
+/// colours, the three macro knobs' off their one grid, and Level, Transpose and the third knob off
+/// another, the third ONCE for Fine Tune and Random Pitch; its values and its words as before.
 #[test]
 fn the_open_read_reads_fine_tunes_ring_once() {
     run_mac(&scenario(r##"
@@ -799,7 +887,7 @@ fn the_open_read_reads_fine_tunes_ring_once() {
         T.words(T.OSC_WORDS)
         local lists = #S.pointLists
         T.openPage()
-        T.ok(#S.pointLists == lists + 6, "six lists: " .. (#S.pointLists - lists))
+        T.ok(#S.pointLists == lists + 3, "three lists: " .. (#S.pointLists - lists))
         local o = T.lastPost("state").state.osc_panel
         T.ok(o.volume_values[1] == 150 and o.pan_values[1] == 0 and o.transpose_values[1] == 24 and o.fine_tune_values[1] == 0
           and o.random_pitch_values[1] == 0, "the knobs read")
@@ -811,13 +899,15 @@ fn the_open_read_reads_fine_tunes_ring_once() {
 }
 
 /// The read after Return at the largest oscillator knob — at 200 % on a Windows display at 150 %,
-/// factor 6, the third knob's ring of 292 points — spends few turns of Luau's loops and calls, fewer
-/// than the 20,736 pixels of the knob's box, so a loop over them in Luau would pass the bound; its one
-/// list of points is under 400.
+/// factor 6, the third knob's ring of about 28,700 pixels — spends its turns of Luau's loops and
+/// calls on the pointer's bright pixels — its one list of points the 636 colours of the cells that hold one: fewer
+/// turns than the ring's pixels, so a loop over them in Luau would pass the bound.
 #[test]
 fn the_amounts_read_loops_over_a_few_hundred_points_in_luau() {
     run(&r##"
         local S = T.S
+        -- A screen that holds all of Avenger, so that the strip's selection is read.
+        S.screenSize = { w = 6000, h = 4000 }
         local j = T.onWindows(200, 1.5)
         local header = T.avenger()
         T.answer(T.lastRead("vps-avenger header"), T.header(248, 60, 6, 200))
@@ -849,16 +939,16 @@ fn the_amounts_read_loops_over_a_few_hundred_points_in_luau() {
         T.ok(T.typed("Return") == "taken", "Return")
         T.tick(3)
         K.read = read
-        T.ok(#spent == 2 and S.pointLists[#S.pointLists] == 292, "two reads, 292 points: " .. #spent .. " "
+        T.ok(#spent == 2 and S.pointLists[#S.pointLists] == 636, "two reads, 636 points: " .. #spent .. " "
           .. tostring(S.pointLists[#S.pointLists]))
-        -- Measured 2026-10-17: @MEASURED@ turns each.
+        -- Measured 2026-10-24, every bright pixel scored against the rays near it: @MEASURED@ turns each.
         for _, n in ipairs(spent) do
           T.ok(n < @BOUND@, string.format("a knob's read spent %d turns: %s", n, table.concat(spent, ", ")))
         end
         T.ok(T.lastPost("state").state.osc_panel.fine_tune_values[1] == 25, "read")
     "##
-    .replace("@MEASURED@", "4,498 and 4,426")
-    .replace("@BOUND@", "7000"));
+    .replace("@MEASURED@", "23,659 and 25,052")
+    .replace("@BOUND@", "27000"));
 }
 
 /// On Windows at 150 % display scaling, Avenger's own child window at (248, 60), factor 2.4: the
@@ -929,9 +1019,9 @@ fn a_calibrating_run_saves_the_knobs_pictures_once_per_knob_and_zoom() {
         T.ok(shots() == "amount-macro-1-before-80pct,amount-macro-1-after-80pct", shots())
         for _, m in ipairs(S.marked) do
           if string.find(m.path, "amount-macro-1-", 1, true) then
-            T.ok(T.region(m.region) == "1250,826,1301,878" and #m.marks >= 1, "the box with the reader's marks")
+            T.ok(T.region(m.region) == "1228,804,1324,900" and #m.marks >= 1, "the box with the reader's marks")
             for _, k in ipairs(m.marks) do
-              T.ok(k[1] >= 1250 and k[1] < 1301 and k[2] >= 826 and k[2] < 878, "a mark inside the box")
+              T.ok(k[1] >= 1228 and k[1] < 1324 and k[2] >= 804 and k[2] < 900, "a mark inside the box")
             end
           end
         end
@@ -943,6 +1033,40 @@ fn a_calibrating_run_saves_the_knobs_pictures_once_per_knob_and_zoom() {
         T.ok(shots() == "amount-macro-1-before-80pct,amount-macro-1-after-80pct,amount-low_pass-before-80pct,"
           .. "amount-low_pass-after-80pct", shots())
         T.ok(T.count("[avenger] [calibrate] the before picture of 'macro 1' -> ") == 1, T.dump())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// A knob's ring the picture holds only part of is not read: Avenger at 80 % on a screen 860 tall
+/// cuts the macro knobs' rings, from y 807 to 897, at its bottom edge — the second Mac test's window
+/// reached below its screen — and what is left of a ring is no count of the project's, where the
+/// reader took an amount off it. The page says the macros are below the screen. On a screen that
+/// holds them, the three read.
+#[test]
+fn a_ring_the_screens_edge_cuts_is_not_read() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.avengerAt80("LD Lead 1")
+        T.pageReady()
+        S.screenSize = { w = 2560, h = 860 }
+        T.paintAvenger(98, 84, 1.6, T.macroSpec(50))
+        T.words(T.MACRO_WORDS)
+        T.openPage()
+        T.event()
+        local m = T.lastPost("state").state.macro_panel
+        local a = m and m.amount_values or {}
+        T.ok(a[1] == nil and a[2] == nil and a[3] == nil, "none read: " .. T.jsonEncode(a))
+        T.ok(T.count("knob 1 not read: the ring is not wholly in the picture") == 1, T.dump())
+        T.ok(string.find(T.lastPost("error").text, "macros are below the screen", 1, true) ~= nil,
+          T.lastPost("error").text)
+        -- On a screen that holds them: read, the three off one grid.
+        S.screenSize = { w = 2560, h = 1440 }
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageKey()
+        T.event()
+        T.openPage()
+        T.event()
+        a = T.lastPost("state").state.macro_panel.amount_values
+        T.ok(a[1] == 50 and a[2] == 0 and a[3] == 0, "read: " .. T.jsonEncode(a))
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }

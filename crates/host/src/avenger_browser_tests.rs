@@ -124,12 +124,18 @@ end
 --         = { [preset] = true } (lit the tool's blue, not bright), perNotch, reversed, wheelDead,
 --         stuck = Close does nothing, categoryDead = a category click selects nothing, categoryLate =
 --         ms a category click paints a hover first and selects only after, showsCategory = the
---         category shown whatever is clicked, misread = { [category] = as read } }
+--         category shown whatever is clicked, misread = { [category] = as read }, header = what the
+--         header's name reads instead of `name` (false: nothing recognised, over the name drawn
+--         there; the grid's header is blank), lit = the place (from 1) of the
+--         preset row shown lit all over, as Avenger draws the selected one, litReach = how far it
+--         reaches up and down from the row's middle (6; 9 reaches into the next row's star box, as
+--         Avenger's corner placed a unit or more high does) }
 -- S.browserLater: Avenger answering later — { at, fn }, each fn run on the first turn at or after
 -- `at`, before the host's answers of that turn.
 -- Painted under the popups (T.paintAvenger): each tile and row a small box of its own colour beside
 -- its words, FAV and the stars lit; read as text (T.browserReads, kept with the picture): the caption,
--- the area (also the page key's "expansion area"), the two columns. Every click, notch and track click
+-- the header's name (X.NAME_TEXT: blank on the grid, the open expansion's name), the area (also the
+-- page key's "expansion area"), the two columns. Every click, notch and track click
 -- the module makes moves it and paints it again.
 function T.openOf(name, extra, files)
   local cats, presets = T.listsOf(name, files)
@@ -238,7 +244,13 @@ function T.browserShapes(shapes, cx, cy, k)
     local o = b.open
     for _, c in ipairs(T.shownCategories()) do rect(18, c.ty - 3, 22, c.ty + 3, colour(c.index)) end
     for _, p in ipairs(T.shownPresets()) do
+      if o.lit == p.index then
+        local h = o.litReach or 6
+        rect(72, p.ty - h, 226, p.ty + h, { 62, 62, 62 })
+      end
       rect(74, p.ty - 3, 78, p.ty + 3, colour(p.index + 100))
+      -- With FAV on, every row's star drawn dim (read/expansion.luau, E.DRAWN), a marked one lit.
+      if o.fav then rect(218, p.ty - 2, 222, p.ty + 2, { 64, 64, 64 }) end
       if o.fav and o.stars[p.name] then rect(215.5, p.ty - 4.5, 224.5, p.ty + 4.5, { 235, 235, 235 }) end
       if o.fav and o.blueStars and o.blueStars[p.name] then rect(215.5, p.ty - 4.5, 224.5, p.ty + 4.5, { 60, 90, 200 }) end
     end
@@ -256,6 +268,8 @@ function T.browserReads(cx, cy, k)
     local caption = g.caption
     if caption == nil then caption = g.view end
     out["expansion view"] = caption and readingOf({ lineOf(wordsAt(caption, 48, 51, 70, cx, cy, k)) }) or readingOf({})
+    -- Nothing drawn in the header over the grid: the host's crop finds no content.
+    out["expansion name"] = { status = "blank", text = "", words = {}, lines = {}, skipped = true }
     local byRow = {}
     for _, t in ipairs(T.shownTiles()) do
       for n, line in ipairs(t.lines) do
@@ -274,6 +288,9 @@ function T.browserReads(cx, cy, k)
     out["categories"], out["presets"] = readingOf({}), readingOf({})
   else
     out["expansion view"] = readingOf({})
+    local header = b.open.header
+    if header == nil then header = b.open.name end
+    out["expansion name"] = header and readingOf({ lineOf(wordsAt(header, 83, 50.5, 110, cx, cy, k)) }) or readingOf({})
     local cl, pl = {}, {}
     for _, c in ipairs(T.shownCategories()) do
       local text = b.open.misread and b.open.misread[c.name] or c.name
@@ -556,14 +573,18 @@ fn scenario(s: &str) -> String {
 
 /// Expansion View: the field at (15, 50) — (122, 164) — clicked with the LEFT button, the view list
 /// seen painted inside Pp.VIEW_LIST, List's row at (27, 60) — (141, 180) — chosen in it, and 8 per
-/// Row's at (27, 154.5) — (141, 331) — another time; the caption read again: the view asked posted,
-/// no expansion open and none selected. Another view read after: the note. The view read already:
-/// nothing clicked, "unchanged". A popup that never takes its row: the field clicked again.
+/// Row's at (27, 154.5) — (141, 331) — another time. This Avenger draws an icon where the view's
+/// label was (`Expansions/Avenger 100 closed.png`): the key posts the view stored, the setting's
+/// default, and a view chosen is stored as set once the list takes it — the tool's AVGExpansionView —
+/// posted as set, no expansion open and none selected. On an Avenger that draws the label, the view
+/// read as the one asked: nothing clicked, "unchanged". A popup that never takes its row: the field
+/// clicked again.
 #[test]
-fn the_view_list_is_opened_by_its_field_and_the_caption_is_read_after() {
+fn the_view_list_is_opened_by_its_field_and_the_view_chosen_is_stored_as_set() {
     run_mac(&scenario(r##"
-        local _, _, W = T.browserPage(T.grid("8 per Row"))
-        T.ok(T.st().expansion_view == "8 per Row" and T.st().expansion_open == false, "the key read the view")
+        local _, _, W = T.browserPage(T.grid("8 per Row", nil, { caption = false }))
+        T.ok(T.st().expansion_view == "8 per Row" and T.st().expansion_view_from == "stored"
+          and T.st().expansion_open == false, "the key: the view stored, " .. tostring(T.st().expansion_view_from))
         local function choose(view, popup, after)
           T.tripFrom({ action = "set_expansion_view", args = { view = view }, focused = true }, W)
           local c = S.clicks[#S.clicks]
@@ -578,15 +599,38 @@ fn the_view_list_is_opened_by_its_field_and_the_caption_is_read_after() {
         end
         local item = choose("List", { 8, 52, 80, 166 }, "List")
         T.ok(item == "141,180", "List's row: " .. item)
-        T.ok(T.st().expansion_view == "List" and T.st().expansion_open == false and T.st().selected_expansion == ""
-          and T.lastPost().kind == "restoreFocus", "posted: " .. tostring(T.st().expansion_view))
+        T.ok(T.st().expansion_view == "List" and T.st().expansion_view_from == "set" and T.st().expansion_open == false
+          and T.st().selected_expansion == "" and T.lastPost().kind == "restoreFocus",
+          "posted: " .. tostring(T.st().expansion_view))
+        T.ok(S.settings.expansionView == "List" and T.count("the view stored: List, set") == 1, "stored: "
+          .. tostring(S.settings.expansionView))
         T.ok(T.count("[menu] ") > 0 and T.count("drawn: armed on 'Expansion View'") >= 1, T.dump())
         T.event()
-        item = choose("8 per Row", { 8, 52, 80, 166 }, "4 per Row")
+        item = choose("8 per Row", { 8, 52, 80, 166 }, "8 per Row")
         T.ok(item == "141,331", "8 per Row's row: " .. item)
-        T.ok(T.err() == "Expansion View: Expansion View reads 4 per Row, not 8 per Row", T.err())
-        T.ok(T.st().expansion_view == "4 per Row", "the view read is posted")
-        -- The view read already: nothing clicked.
+        T.ok(T.st().expansion_view == "8 per Row" and T.st().expansion_view_from == "set"
+          and S.settings.expansionView == "8 per Row", "set: " .. tostring(T.st().expansion_view))
+        -- The setting changed in the settings dialog: the view is the setting's, as stored, no longer
+        -- said as set — posted at once, and read so again.
+        T.event()
+        T.setting("expansionView", "4 per Row")
+        T.ok(T.st().expansion_view == "4 per Row" and T.st().expansion_view_from == "stored",
+          "changed in the dialog: " .. tostring(T.st().expansion_view) .. ", " .. tostring(T.st().expansion_view_from))
+        -- And back to the view set before, in the dialog: the setting's all the same, never set again.
+        T.setting("expansionView", "8 per Row")
+        T.ok(T.st().expansion_view == "8 per Row" and T.st().expansion_view_from == "stored",
+          "back in the dialog: " .. tostring(T.st().expansion_view) .. ", " .. tostring(T.st().expansion_view_from))
+        T.setting("expansionView", "4 per Row")
+        S.browser.grid.view = "4 per Row"
+        T.repaint({})
+        T.back(W)
+        T.openPage()
+        T.event()
+        T.ok(T.st().expansion_view == "4 per Row" and T.st().expansion_view_from == "stored",
+          "read again: " .. tostring(T.st().expansion_view_from))
+        -- An Avenger that draws the view's label, reading the one asked: nothing clicked.
+        S.browser.grid.caption, S.browser.grid.view = nil, "4 per Row"
+        T.repaint({})
         T.event()
         local clicks = #S.clicks
         T.tripFrom({ action = "set_expansion_view", args = { view = "4 per Row" }, focused = true }, W)
@@ -611,27 +655,43 @@ fn the_view_list_is_opened_by_its_field_and_the_caption_is_read_after() {
     "##));
 }
 
-/// An open expansion — the caption an icon, the columns its lists — refuses a view with nothing
-/// clicked: the same point would close it. A caption reading a view refuses Close with nothing
-/// clicked: that click would open the view list.
+/// An open expansion — its name in the header, the columns its lists — refuses a view with nothing
+/// clicked: the same point would close it. The header blank refuses Close with nothing clicked: that
+/// click would open the view list. Where nothing tells — the header holds something it reads no name
+/// in, a name the recogniser missed, and the columns nothing — both refuse, and neither clicks.
 #[test]
-fn no_view_is_chosen_and_no_expansion_closed_where_the_caption_says_otherwise() {
+fn no_view_is_chosen_and_no_expansion_closed_where_the_header_says_otherwise() {
     run_mac(&scenario(r##"
         local _, _, W = T.browserPage({ mode = "open", open = T.openOf("Synthwave") })
         T.ok(T.st().expansion_open == true and T.st().selected_expansion == "Synthwave"
-          and T.st().selected_expansion_from_database == true, "the key: Synthwave open, named by the database")
+          and T.st().selected_expansion_from_database == nil, "the key: Synthwave open, named by the header")
         local clicks = #S.clicks
         T.tripFrom({ action = "set_expansion_view", args = { view = "List" }, focused = true }, W)
         T.settle()
         T.ok(#S.clicks == clicks and T.err() == "Expansion View: an expansion is open in VPS Avenger; press Close Expansion "
           .. "to close it first", T.err())
         T.event()
-        S.browser = T.grid("8 per Row")
+        S.browser = T.grid("8 per Row", nil, { caption = false })
         T.repaint({})
         T.tripFrom({ action = "close_expansion", args = {}, focused = true }, W)
         T.settle()
         T.ok(#S.clicks == clicks and T.err() == "Close Expansion: no expansion is open in VPS Avenger", T.err())
-        T.ok(T.st().expansion_view == "8 per Row" and T.st().expansion_open == false, "the grid posted")
+        T.ok(T.st().expansion_view == "8 per Row" and T.st().expansion_view_from == "stored"
+          and T.st().expansion_open == false, "the grid posted")
+        -- Nothing tells.
+        T.event()
+        S.browser = { mode = "open", open = { name = "?", header = false, categories = {}, presets = {}, firstCategory = 0,
+          firstRow = 0, fav = false, stars = {} } }
+        T.repaint({})
+        local UNREAD = "whether an expansion is open in VPS Avenger cannot be read now"
+        T.tripFrom({ action = "close_expansion", args = {}, focused = true }, W)
+        T.settle()
+        T.ok(#S.clicks == clicks and T.err() == "Close Expansion: " .. UNREAD, T.err())
+        T.ok(T.count("the header reads no name, and is not blank (none) — not taken as closed") >= 1, T.dump())
+        T.event()
+        T.tripFrom({ action = "set_expansion_view", args = { view = "List" }, focused = true }, W)
+        T.settle()
+        T.ok(#S.clicks == clicks and T.err() == "Expansion View: " .. UNREAD, T.err())
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }
@@ -785,9 +845,36 @@ fn a_name_off_the_grid_is_found_a_notch_at_a_time() {
     "##));
 }
 
-/// On the shipped database (T.SHIPPED): the list "Complete" holds all 129 expansions, and Quantum
-/// State — one of the five the catalog does not name — is its 103rd, between Psy 2 and Retrowave
-/// 80s, as the catalog's order puts it. Avenger's grid in 4 per Row shows the 81st to 96th: its
+/// On the shipped database (T.SHIPPED): the four lists the tool offers, from the index's `rosters`
+/// (DB.roster) — Factory Standard 3, Complete the tool's 124, not every expansion of the database as
+/// before 1.3.0, Nyhdroe 129 and Joyman 63 — one of Joyman's marked as having no presets in the
+/// database, and no other list marking any.
+#[test]
+fn the_four_lists_on_the_shipped_database_are_the_tools() {
+    run_mac(&scenario(r##"
+        local names = {}
+        for i, x in ipairs(T.jsonDecode(T.SHIPPED["data/index.json"]).expansions) do names[i] = x.name end
+        T.browserPage(T.grid("4 per Row", names), { files = T.SHIPPED, roster = "Factory Standard" })
+        local function counted()
+          local st = T.st()
+          local none = 0
+          for _, v in ipairs(st.expansions_without_data or {}) do if v then none += 1 end end
+          return #st.expansions, none
+        end
+        local n, none = counted()
+        T.ok(n == 3 and none == 0, "Factory Standard: " .. n .. ", " .. none .. " without data")
+        for _, c in ipairs({ { "Complete", 124, 0 }, { "Nyhdroe", 129, 0 }, { "Joyman", 63, 1 }, { "Factory Standard", 3, 0 } }) do
+          T.setting("roster", c[1])
+          n, none = counted()
+          T.ok(n == c[2] and none == c[3], string.format("%s: %d, %d without data", c[1], n, none))
+        end
+    "##));
+}
+
+/// On the shipped database (T.SHIPPED): the list "Nyhdroe" — one of the tool's personal rosters —
+/// holds all 129 expansions, and Quantum State — one of the five the tool's catalog does not name —
+/// is its 103rd, between Psy 2 and Retrowave 80s (`Expansions/Avenger 200 closed.png` shows them in
+/// that order). Avenger's grid in 4 per Row shows the 81st to 96th: its
 /// place lies after them, so two notches down, and its words are clicked; its columns read name it
 /// by its presets, and its lists from its file are posted — eleven categories, the rows placed in
 /// Arp. Preset info on one of its presets says where it is, its oscillator and its macros; the log
@@ -799,11 +886,11 @@ fn an_expansion_the_catalog_does_not_name_is_listed_found_and_read_on_the_shippe
         for i, x in ipairs(T.jsonDecode(T.SHIPPED["data/index.json"]).expansions) do names[i] = x.name end
         local model = T.grid("4 per Row", names, { firstRow = 20,
           opens = { ["Quantum State"] = T.openOf("Quantum State", nil, T.SHIPPED) } })
-        local _, _, W = T.browserPage(model, { files = T.SHIPPED })
+        local _, _, W = T.browserPage(model, { files = T.SHIPPED, roster = "Nyhdroe" })
         local list = T.st().expansions
         local i = T.indexIn("Quantum State")
         T.ok(#list == 129 and i == 102 and list[i] == "Psy 2" and list[i + 2] == "Retrowave 80s",
-          "Complete: " .. #list .. " expansions, Quantum State at " .. i)
+          "Nyhdroe: " .. #list .. " expansions, Quantum State at " .. i)
         -- What the page sends for it (panel.js, a list of 129 or more).
         T.tripFrom({ action = "open_expansion", args = { index = i, page_start = 96, visible_index = 30 }, focused = true }, W)
         T.settle(8)
@@ -991,15 +1078,16 @@ fn tiles_are_named_by_their_column_and_a_name_on_two_lines_is_one() {
     "##));
 }
 
-/// What opened is what the columns list: another expansion's presets — the error, and that one
-/// posted, marked as named by the database; an open expansion the database does not name — the
+/// What opened is what the columns list where the header's name reads none ("~"): another
+/// expansion's presets — the error, and that one posted, marked as named by the database; an open expansion the database does not name — the
 /// tool's words for an unknown open expansion; nothing changed — "nothing VPS Avenger shows changed".
 #[test]
 fn the_expansion_opened_is_said_by_what_it_lists() {
     run_mac(&scenario(r##"
         local strange = { name = "?", categories = { "Arp", "Bass" }, presets = { Arp = { "Unknown One" }, Bass = { "Unknown Two" } },
           category = "Arp", firstCategory = 0, firstRow = 0, fav = false, stars = {} }
-        local model = T.grid("8 per Row", nil, { opens = { ["Dark Techno"] = T.openOf("Retro Synths"), ["Deep House"] = strange } })
+        local model = T.grid("8 per Row", nil, { opens = { ["Dark Techno"] = T.openOf("Retro Synths", { header = "~" }),
+          ["Deep House"] = strange } })
         local _, _, W = T.browserPage(model)
         T.tripFrom({ action = "open_expansion", args = { index = T.indexIn("Dark Techno") }, focused = true }, W)
         T.settle(4)
@@ -1090,42 +1178,29 @@ fn a_grid_in_no_order_known_never_has_its_wheel_turned_round() {
     "##));
 }
 
-/// The key read 8 per Row; then Avenger shows List with its caption not read, Dark Techno on the
-/// screen. Opening it — its words split across 8 per Row's columns if the view remembered were
-/// taken — is refused with nothing moved or clicked, the view posted as not read; so is reading
-/// Avenger's list; and Close, where the caption is not read and the area reads the grid, clicks
-/// nothing either.
+/// The key read 8 per Row by its label; then Avenger shows List with no label to read, Dark Techno on
+/// the screen. The view is the one stored (read/browser.luau, Br.view): Confirm Expansion View says
+/// List, with no trip and nothing clicked, posted as confirmed and stored; then Dark Techno is opened
+/// by its words in List's column, and its name in the header says it open.
 #[test]
-fn the_grid_is_placed_by_the_view_read_now_never_one_remembered() {
+fn the_grid_is_placed_by_the_view_read_or_else_the_one_stored() {
     run_mac(&scenario(r##"
         local _, _, W = T.browserPage(T.grid("8 per Row", nil, { opens = { ["Dark Techno"] = T.openOf("Dark Techno") } }))
-        T.ok(T.st().expansion_view == "8 per Row", "the key read 8 per Row")
+        T.ok(T.st().expansion_view == "8 per Row" and T.st().expansion_view_from == nil, "the key read 8 per Row")
         local g = S.browser.grid
         g.view, g.caption, g.firstRow = "List", false, 2
         T.repaint({})
+        T.event()
+        local from = #S.pageOrder
+        T.pageMsg({ action = "confirm_expansion_view", args = { view = "List" }, focused = true })
+        T.ok(#S.clicks == 0 and not string.find(T.pageSince(from), "focus", 1, true), "no trip, no click")
+        T.ok(T.st().expansion_view == "List" and T.st().expansion_view_from == "confirmed"
+          and S.settings.expansionView == "List", "confirmed: " .. tostring(T.st().expansion_view_from))
         T.event()
         T.tripFrom({ action = "open_expansion", args = { index = T.indexIn("Dark Techno") }, focused = true }, W)
-        T.settle(4)
-        T.ok(#S.scrolls == 0 and #S.clicks == 0, "nothing moved or clicked: " .. #S.scrolls .. " " .. #S.clicks)
-        T.ok(T.err() == "Opening an expansion: the Expansion View cannot be read now", T.err())
-        T.ok(T.st().expansion_view == nil and T.st().expansion_open == false, "the view posted as not read")
-        T.event()
-        T.tripFrom({ action = "close_expansion", args = {}, focused = true }, W)
-        T.settle(4)
-        T.ok(#S.clicks == 0 and T.err() == "Close Expansion: the Expansion View cannot be read now", T.err())
-        T.ok(T.held() == 0, "every picture released: " .. T.held())
-    "##));
-    run_mac(&scenario(r##"
-        local _, _, W = T.browserPage(T.grid("8 per Row"))
-        T.ok(T.st().expansion_view == "8 per Row", "the key read 8 per Row")
-        local g = S.browser.grid
-        g.view, g.caption, g.firstRow = "List", false, 2
-        T.repaint({})
-        T.event()
-        T.tripFrom({ action = "read_expansion_list", args = {}, focused = true }, W)
-        T.settle(4)
-        T.ok(#S.scrolls == 0 and #S.clicks == 0, "nothing moved: " .. #S.scrolls .. " " .. #S.clicks)
-        T.ok(T.err() == "Reading Avenger's list: the Expansion View cannot be read now", T.err())
+        T.settle(6)
+        T.ok(S.browser.mode == "open" and T.st().expansion_open == true and T.st().selected_expansion == "Dark Techno",
+          "opened: " .. tostring(T.st().selected_expansion) .. " " .. T.err())
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }
@@ -1547,8 +1622,9 @@ fn a_favorite_is_not_marked_where_fav_is_not_read() {
         local _, _, W = T.browserPage({ mode = "open", open = T.openOf("Synthwave", { fav = true }) })
         local cells = rawget(T.host.screen, "cells")
         rawset(T.host.screen, "cells", function(opts, cb)
-          -- FAV's box at 80 %, (417, 156)-(457, 172), and nothing else this trip asks above y 176.
-          if opts.region[4] <= 176 then return nil, T.E("failed", "the scenario's: not answered") end
+          -- The star column FAV is read by at 80 %, (442, 173)-(458, 450), and nothing else this trip
+          -- asks right of x 440.
+          if opts.region[1] >= 440 then return nil, T.E("failed", "the scenario's: not answered") end
           return cells(opts, cb)
         end)
         local clicks = #S.clicks
@@ -1597,6 +1673,59 @@ fn a_star_lit_blue_is_a_favorite() {
         T.ok(st.expansion_favorite_view == true and st.favorite_preset_states["1"] == true
           and st.favorite_preset_states["0"] == false, T.jsonEncode(st.favorite_preset_states or {}))
         T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// A category's faded initials, which Avenger draws behind its name and a read takes in ("AR Arp",
+/// `Expansions/Avenger, 100, Open African House,…`), are dropped from a category's row before it is
+/// placed: "AR Arp" and "BA Bass" are Arp and Bass, the same words. Two capitals that are not the
+/// name's first letters stay, and a preset's row keeps its own: a preset's name begins with them.
+#[test]
+fn a_categorys_faded_initials_are_dropped_from_its_row() {
+    run_mac(&scenario(r##"
+        T.browserPage({ mode = "open", open = T.openOf("Synthwave") })
+        local Br = S.included["modules/vps-avenger/src/read/browser.luau"][1]
+        T.ok(Br.dropInitials("AR Arp") == "Arp" and Br.dropInitials("BA Bass") == "Bass" and Br.dropInitials("PA Leads")
+          == "PA Leads" and Br.dropInitials("Arp") == "Arp" and Br.dropInitials("AR") == "AR", "the initials")
+        local function row(text, y) return { text = text, box = { 100, y, 160, y + 10 } } end
+        local lines = Br.lines({ row("AR Arp", 0), row("BA Bass", 20), row("Leads", 40) }, { "Arp", "Bass", "Leads", "Pads" },
+          nil, "categories")
+        T.ok(lines[1].index == 1 and lines[1].how == "exact" and lines[2].index == 2 and lines[2].how == "exact"
+          and lines[3].index == 3, T.jsonEncode(lines))
+        local presets = Br.lines({ row("AR Arp Line", 0) }, { "Arp Line", "AR Arp Line" }, nil, "preset rows")
+        T.ok(presets[1].index == 2 and presets[1].how == "exact", "a preset's own: " .. T.jsonEncode(presets))
+    "##));
+}
+
+/// FAV told by the star column (read/expansion.luau, E.favorite), as the second Mac test's pictures
+/// draw it (`Expansions/Avenger, 100, Open African House,Fav Stars On, Marked Presets 1,4,8,9.png`
+/// and `… Fav Stars Off.png`): with FAV on and no preset marked, every row's dim star says ON; with
+/// it off, the selected row lit all over — its star's box full, no star — says OFF, and so it does
+/// where the lit row reaches into the next row's box (Avenger's corner placed a unit or more high,
+/// about a tenth of that box): a star is looked for in its box's middle. With FAV on, the first of
+/// the category's two rows lit, the second's star says ON; with a star marked, ON and the star read.
+/// The grid shown: FAV not read at all.
+#[test]
+fn fav_is_told_by_the_stars_drawn_never_by_a_lit_row() {
+    for (open, fav) in [
+        ("{ fav = true }", "true"),
+        ("{ fav = false, lit = 1 }", "false"),
+        ("{ fav = false, lit = 1, litReach = 9 }", "false"),
+        ("{ fav = true, lit = 1, litReach = 9 }", "true"),
+        (r#"{ fav = true, lit = 1, stars = { ["X17 Arp Line 02"] = true } }"#, "true"),
+    ] {
+        run_mac(&scenario(&r##"
+            T.browserPage({ mode = "open", open = T.openOf("Synthwave", @OPEN@) })
+            local st = T.st()
+            T.ok(st.expansion_open == true and st.expansion_favorite_view == @FAV@,
+              "FAV: " .. tostring(st.expansion_favorite_view) .. " " .. T.dump())
+            T.ok(T.count("[avenger] [read] expansion: FAV — the star column ") == 1, T.dump())
+        "##.replace("@OPEN@", open).replace("@FAV@", fav)));
+    }
+    run_mac(&scenario(r##"
+        T.browserPage(T.grid("8 per Row"))
+        T.ok(T.st().expansion_favorite_view == nil and T.count("expansion: FAV not read — no expansion reads open") == 1,
+          T.dump())
     "##));
 }
 
@@ -1680,17 +1809,18 @@ const SHARED: &str = r##"
         T.BROWSER_FIXTURE = files
 "##;
 
-/// Synthwave clicked, and Avenger opened Dark Techno, whose rows hold one name Synthwave has too: the
-/// open's read and every key after it expect Synthwave, which scores by that one name, so the page
-/// keeps saying Synthwave. Correct open Expansion clicks nothing, scrolls nothing, reads the name and
-/// ONE picture of the browser — the caption and the two columns once — with no expansion expected,
+/// Synthwave clicked, and Avenger opened Dark Techno, whose rows hold one name Synthwave has too,
+/// its header's name read as no name ("~"): the open's read and every key after it expect
+/// Synthwave, which scores by that one name, so the page keeps saying Synthwave. Correct open
+/// Expansion clicks nothing, scrolls nothing, reads the name and ONE picture of the browser — the
+/// caption, the header's name and the two columns once — with no expansion expected,
 /// so the expansion the columns list wins: Dark Techno, posted as the database named it, with its
 /// lists, the category its rows read as for the page's (another expansion than the page had), and
 /// the preset placed in it; the note, and the log names what the page had.
 #[test]
 fn correct_open_expansion_reads_with_nothing_expected_and_clicks_nothing() {
     run_mac(&scenario(&format!("{SHARED}{}", r##"
-        local model = T.grid("8 per Row", nil, { opens = { Synthwave = T.openOf("Dark Techno") } })
+        local model = T.grid("8 per Row", nil, { opens = { Synthwave = T.openOf("Dark Techno", { header = "~" }) } })
         local _, _, W = T.browserPage(model, { files = files })
         T.tripFrom({ action = "open_expansion", args = { index = T.indexIn("Synthwave") }, focused = true }, W)
         T.settle(4)
@@ -1711,8 +1841,8 @@ fn correct_open_expansion_reads_with_nothing_expected_and_clicks_nothing() {
           local n = S.recognized[i].name or "the name"
           named[n] = (named[n] or 0) + 1
         end
-        T.ok(named["expansion view"] == 1 and named.categories == 1 and named.presets == 1 and named["browser area"] == nil
-          and named["the name"] == 1, T.jsonEncode(named))
+        T.ok(named["expansion view"] == 1 and named["expansion name"] == 1 and named.categories == 1 and named.presets == 1
+          and named["browser area"] == nil and named["the name"] == 1, T.jsonEncode(named))
         T.ok(S.snaps == snaps + 1, "one picture: " .. (S.snaps - snaps))
         local st = T.st()
         T.ok(st.expansion_open == true and st.selected_expansion == "Dark Techno" and st.selected_expansion_from_database == true,
@@ -1826,38 +1956,71 @@ fn correct_open_expansion_says_unchanged_none_open_or_cannot_tell() {
     "##));
 }
 
-/// The bound on Correct open Expansion's Luau work, the runtime's trip around it included: 6,089
-/// turns when measured (the fixture's twenty expansions scored, the rows placed, the state posted).
-const ALIGN_TURNS: u64 = 6100;
+/// The bounds on Correct open Expansion's Luau work, the runtime's trip around it included, when
+/// measured: 4,805 turns with the expansion named by its header's name (read/browser.luau, Br.state),
+/// 11,300 with the header naming none and the fixture's twenty expansions scored instead — each with
+/// the rows placed, FAV and the state posted.
+const ALIGN_TURNS: u64 = 4900;
+const ALIGN_SCORED_TURNS: u64 = 11400;
 
 /// One press is one picture and one text read of it, answered in the same turn as the arrival —
 /// no second read later, which the tool made 0.45 s on where its first settled nothing — and the
 /// Luau work of the whole trip, the catalog's scoring included, stays far under a loop over the
-/// browser picture's 92,536 pixels at 80 %.
+/// browser picture's 92,536 pixels at 80 %. Named by its header, the expansion is read, not the
+/// database's; by what it lists, the database's.
 #[test]
 fn correct_open_expansion_reads_once_and_waits_for_no_time() {
     let s = r##"
         local _, _, W = T.browserPage({ mode = "open", open = T.openOf("Synthwave") })
-        S.browser.open = T.openOf("Dark Techno")
-        T.repaint({})
-        T.event()
-        local snaps, after, t0 = S.snaps, #S.after, T.interrupts()
-        T.tripFrom({ action = "align_open_expansion", args = {}, focused = true }, W)
-        local spent = T.interrupts() - t0
-        T.ok(T.err() == "Correct open Expansion: corrected to Dark Techno, from the database", "answered at the arrival: " .. T.err())
-        T.ok(S.snaps == snaps + 1, "one picture: " .. (S.snaps - snaps))
-        T.settle(4)
-        T.ok(S.snaps == snaps + 1, "and no other later: " .. (S.snaps - snaps))
-        T.ok(spent <= @BOUND@ and spent < 92536, string.format("the trip spent %d turns; it may spend %d", spent, @BOUND@))
-        print(string.format("ALIGN TURNS: %d", spent))
+        local function align(open, words, bound)
+          S.browser.open = open
+          T.repaint({})
+          T.event()
+          local snaps, t0 = S.snaps, T.interrupts()
+          T.tripFrom({ action = "align_open_expansion", args = {}, focused = true }, W)
+          local spent = T.interrupts() - t0
+          T.ok(T.err() == "Correct open Expansion: " .. words, "answered at the arrival: " .. T.err())
+          T.ok(S.snaps == snaps + 1, "one picture: " .. (S.snaps - snaps))
+          T.settle(4)
+          T.ok(S.snaps == snaps + 1, "and no other later: " .. (S.snaps - snaps))
+          T.ok(spent <= bound and spent < 92536, string.format("the trip spent %d turns; it may spend %d", spent, bound))
+          print(string.format("ALIGN TURNS: %d", spent))
+          T.event()
+        end
+        align(T.openOf("Dark Techno"), "corrected to Dark Techno", @BOUND@)
+        T.ok(T.st().selected_expansion == "Dark Techno" and T.st().selected_expansion_from_database == nil, "read")
+        align(T.openOf("Synthwave", { header = "~" }), "corrected to Synthwave, from the database", @SCORED@)
+        T.ok(T.st().selected_expansion == "Synthwave" and T.st().selected_expansion_from_database == true, "the database's")
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##
-    .replace("@BOUND@", &(ALIGN_TURNS + 3000).to_string());
+    .replace("@BOUND@", &(ALIGN_TURNS + 3000).to_string())
+    .replace("@SCORED@", &(ALIGN_SCORED_TURNS + 3000).to_string());
     run_mac(&scenario(&s));
 }
 
+/// Synthwave clicked, and Avenger opened Dark Techno: its header's name says so (X.NAME_TEXT;
+/// `Expansions/Avenger, 100, Open African House,Fav Stars Off.png` shows the name there), whatever
+/// the rows score — the page says Dark Techno, read, not the database's, and that it is not the one
+/// clicked.
+#[test]
+fn an_expansion_opened_in_place_of_the_one_clicked_is_named_by_its_header() {
+    run_mac(&scenario(r##"
+        local model = T.grid("8 per Row", nil, { caption = false, opens = { Synthwave = T.openOf("Dark Techno") } })
+        local _, _, W = T.browserPage(model)
+        T.tripFrom({ action = "open_expansion", args = { index = T.indexIn("Synthwave") }, focused = true }, W)
+        T.settle(4)
+        T.ok(S.browser.clicked[1] == "Synthwave", "clicked: " .. tostring(S.browser.clicked[1]))
+        T.ok(T.st().expansion_open == true and T.st().selected_expansion == "Dark Techno"
+          and T.st().selected_expansion_from_database == nil, "named by the header: " .. tostring(T.st().selected_expansion))
+        T.ok(T.err() == "Opening an expansion: VPS Avenger opened Dark Techno, as its header reads", T.err())
+        T.ok(T.count("the header reads 'Dark Techno' — Dark Techno open (exact)") >= 1, T.dump())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
 /// Two expansions that list the same names: Dark Techno's two Arp presets carry Synthwave's names, in
-/// the index and in its file. Dark Techno clicked, and Avenger opened Synthwave: the open's read
+/// the index and in its file. Dark Techno clicked, and Avenger opened Synthwave, its header's name
+/// read as no name: the open's read
 /// expects Dark Techno, which scores by those names, so the page says Dark Techno. Correct open
 /// Expansion, expecting none, finds the two listing what was read as much — the tool took the first
 /// of its roster — and names neither: which one is open cannot be read, and every value of the
@@ -1875,7 +2038,7 @@ fn correct_open_expansion_names_neither_of_two_that_list_what_was_read_as_much()
         dark.presets[2].name = "X17 Arp Line 02"
         files["data/expansions/e5.json"] = T.jsonEncode(dark)
         T.BROWSER_FIXTURE = files
-        local model = T.grid("8 per Row", nil, { opens = { ["Dark Techno"] = T.openOf("Synthwave") } })
+        local model = T.grid("8 per Row", nil, { opens = { ["Dark Techno"] = T.openOf("Synthwave", { header = "~" }) } })
         local _, _, W = T.browserPage(model, { files = files })
         T.tripFrom({ action = "open_expansion", args = { index = T.indexIn("Dark Techno") }, focused = true }, W)
         T.settle(4)
@@ -2204,6 +2367,9 @@ fn a_calibrating_run_writes_the_browsers_pictures_once_per_view_and_zoom() {
         T.event()
         T.tripFrom({ action = "open_expansion", args = { index = T.indexIn("Acid Breaks") }, focused = true }, W)
         T.settle(4)
-        T.ok(#pictures() == 2, "the same view and zoom again: none")
+        -- The key's own picture of the browser (read/open.luau, Open.PICTURES) at the open between.
+        local after = pictures()
+        T.ok(#after == 3 and after[3].name == "browser-80pct.png", "the same view and zoom again: none of the "
+          .. "actions' — " .. T.jsonEncode(after))
     "##));
 }

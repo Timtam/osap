@@ -284,7 +284,10 @@ end
 -- MENU's item `item` (`ringLabel` as the ring names it), then `andThen(o, trip, was)` once the
 -- choice has been taken, `forget` (go) told first; the popup closed again when a choice was given
 -- up with it left open. Asked of the header alone: on the warning box nothing is (Act.menuHere).
-local function menuChoice(w, trip, forget, ringLabel, item, andThen)
+-- `retries`: O:chooseMenuItem's, nil for its default — 0 for an item that opens a file dialog,
+-- clicked once as the ring's are (main.luau, ONE_CLICK): Avenger's popup stays drawn, frozen, while
+-- the dialog opens, and a click again lands in the dialog.
+local function menuChoice(w, trip, forget, ringLabel, item, andThen, retries)
   if not Act.menuHere(w) then return trip:done({ error = Act.NO_MENU_HERE }) end
   local was = nameBefore(w)
   if not trip:inFront() then return end
@@ -293,6 +296,7 @@ local function menuChoice(w, trip, forget, ringLabel, item, andThen)
     label = ringLabel,
     at = G.MENU,
     menuItem = R.menuItemAt(ringLabel, item, pick),
+    retries = retries,
     onDone = function(m, chosen, err)
       if not chosen then
         R.closeLeftOpen(m, pick, err, ringLabel, G.MENU)
@@ -310,9 +314,9 @@ local function menuChoice(w, trip, forget, ringLabel, item, andThen)
   end
 end
 
--- Load and Save as: the file dialog Avenger opens is the user's; the trip waits for it and for
--- Avenger in front again, then watches the name. No dialog within the runtime's bound is said, and
--- the name read all the same.
+-- Load and Save as: their item clicked once (menuChoice); the file dialog Avenger opens is the
+-- user's; the trip waits for it and for Avenger in front again, then watches the name. No dialog
+-- within the runtime's bound is said, and the name read all the same.
 local function fileItem(action, ringLabel, item)
   return function(o)
     go(o, action, function(w, trip, forget)
@@ -324,7 +328,7 @@ local function fileItem(action, ringLabel, item)
             t2:done({ set = named(now), note = (not seen) and "no file dialog was seen" or nil })
           end, ringLabel)
         end)
-      end)
+      end, 0)
     end)
   end
 end
@@ -356,7 +360,8 @@ A.HANDLERS.pick_initialize_preset = function(o)
         local w2 = E.plugin()
         local before = S.values(w2 and w2.id)
         local okR, values, whyNot = pcall(Reads.read, m, { zoom = origin and E.zoomOf(origin), mark = m:here(),
-          expected = before and before.selectedExpansion or nil, expectedFromDatabase = before and before.selectedFromDatabase })
+          expected = before and before.selectedExpansion or nil, expectedFromDatabase = before and before.selectedFromDatabase,
+          window = w2 and w2.id })
         if not (okR and values) then
           log("Initialize Preset: VPS Avenger was not read again — " .. tostring(okR and whyNot or values))
           return t:done({ error = "VPS Avenger cannot be read again now" })
@@ -645,6 +650,51 @@ end
 A.HANDLERS.align_open_expansion = function(o)
   local k = known()
   go(o, "align_open_expansion", function(w, trip) Bw.align(w, trip, E.LABELS.align_open_expansion, k) end)
+end
+
+-- Confirm Expansion View (the tool's action_confirm_expansion_view, in its status menu; here in the
+-- page's Settings section): no trip and no click — the view the user says VPS Avenger shows, stored
+-- as confirmed (src/actions/browser.luau, B.confirmView), and the state posted with it where no
+-- expansion reads open: the user's word over what was read before, which the next read replaces
+-- where a view's label is drawn to read.
+A.HANDLERS.confirm_expansion_view = function(_, args)
+  local set, why = Bw.confirmView(args)
+  if not set then return refuse("confirm_expansion_view", why) end
+  local w = E.plugin()
+  local id = w and w.id
+  local v = S.values(id)
+  if id and not (v and v.expansionOpen == true) then S.set(id, set) end
+  log("Confirm Expansion View: " .. set.expansionView)
+  E.postState(id)
+  E.post({ kind = "error", text = "" })
+  E.post({ kind = "restoreFocus" })
+end
+
+-- Confirm OSC Count (the tool's action_confirm_osc_count, in its status menu; here in the page's
+-- Settings section): no trip and no click — the count the user says Avenger's window shows, kept
+-- for the preset read last there until a name read there differs (state.luau, S.confirmOsc). It is
+-- the count where the dots give none, marked as confirmed (read/open.luau, Open.countElsewhere);
+-- where they give one, theirs is taken, and the page is told so. Refused where no name was read:
+-- the count is kept by it.
+A.HANDLERS.confirm_osc_count = function(_, args)
+  local n = whole(args.count)
+  if not (n and n >= 1 and n <= 8) then return refuse("confirm_osc_count", "no count from 1 to 8 was sent") end
+  local w = E.plugin()
+  local id = w and w.id
+  local v = S.values(id)
+  if not (v and v.preset) then
+    return refuse("confirm_osc_count", "the preset's name has not been read, and the count is kept by it")
+  end
+  S.confirmOsc(id, v.preset, n)
+  local read = v.oscCount ~= nil and v.oscCountFrom == nil
+  if not read then S.set(id, { oscCount = n, oscCountFrom = "confirmed" }) end
+  log(string.format("Confirm OSC Count: %d for '%s'%s", n, v.preset,
+    read and string.format(" — the dots read %d, which is taken", v.oscCount) or ""))
+  E.postState(id)
+  E.post({ kind = "error", text = (read and v.oscCount ~= n)
+    and string.format("%s: the dots read %d oscillators, and that count is taken", E.LABELS.confirm_osc_count, v.oscCount)
+    or "" })
+  E.post({ kind = "focus", id = "oscillator-area-heading" })
 end
 
 -- No trip, as the tool's: the database's category for the name last read. The page's category and

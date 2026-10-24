@@ -60,7 +60,8 @@ local Pp = {}
 -- list's 11.5 tall and 30 across for a menu, and three rows for the zoom list, which zoomEntry
 -- (main.luau) refuses below that anyway.
 Pp.ZOOM_LIST = { rect = { 12, 18, 72, 262 }, min = { 20, 34.5 } }
-Pp.MENU = { rect = { 245, 18, 335, 78 }, min = { 30, 23 } }
+-- MENU's from 240: the second Mac test found the popup at the old edge, 245.0, cut by it.
+Pp.MENU = { rect = { 240, 18, 335, 78 }, min = { 30, 23 } }
 Pp.REDO = { rect = { 290, 18, 430, 200 }, min = { 30, 23 } }
 Pp.VIEW_LIST = { rect = { 5, 44, 110, 175 }, min = { 20, 34.5 } }
 -- From the click, at 50 %.

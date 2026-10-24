@@ -327,6 +327,14 @@ local function unseen()
   Ring.forget()
 end
 
+-- The name last read, for the reads that place it in the database (read/open.luau) — nil from the
+-- moment the preset may have changed with nothing read since (`unseen`): the second Mac test's ring
+-- placed "Init Preset" right after Resurrection was loaded from MENU. `names.last` itself stays, for
+-- the watch's `was`.
+local function lastName()
+  return names.init ~= nil and names.last or nil
+end
+
 local function tidy(text)
   local t = string.gsub(text or "", "%s+", " ")
   t = string.gsub(t, "^ ", "")
@@ -615,6 +623,14 @@ end
 -- preset; Save keeps the name, so whether it is the user's own stays as it was.
 local OWN_NAME = { ["Load preset"] = true, ["Save preset as"] = true, ["Initialize preset"] = false }
 
+-- The items that open a file dialog, clicked once (O:chooseMenuItem's `retries = 0`): Avenger's
+-- popup stays drawn, frozen, while the dialog opens — the second Mac test clicked Load preset four
+-- times, and a second click lands in the dialog. The runtime waits on a popup frozen as at the
+-- click since 0.13, but a click it follows and still finds so at the press's bound is given up as
+-- not taken, and the popup is then closed by a click on MENU (closeLeftOpen), which would land in
+-- the dialog too; so these are chosen at their click, as the project's tool clicks them once.
+local ONE_CLICK = { ["Load preset"] = true, ["Save preset as"] = true }
+
 -- `arms`: the item opens Avenger's warning box, which is looked for once the choice has been
 -- taken.
 local function menuEntry(ov, label, item, arms)
@@ -638,6 +654,7 @@ local function menuEntry(ov, label, item, arms)
         label = label,
         at = G.MENU,
         menuItem = menuItemAt(label, item, pick),
+        retries = ONE_CLICK[label] and 0 or nil,
         onDone = function(w, chosen, err)
           if chosen then
             -- Every item may load, rename, overwrite or blank the preset: the database's position
@@ -821,7 +838,7 @@ header:addCustomButton({
 })
 zoomStepper(header)
 -- The oscillator strip and the macros, after Zoom (ring.luau).
-Ring.build(header, { lastName = function() return names.last end })
+Ring.build(header, { lastName = lastName })
 -- Away from the overlay, the preset can be changed in ways it does not see — the DAW's own
 -- preset menu, a file dialog, another project: the database's position goes with it.
 header:onDeactivate(function()
@@ -848,7 +865,7 @@ Page.start({
     doublePoint = doublePoint,
     wheelAt = wheelAt,
     nameNow = nameNow,
-    lastName = function() return names.last end,
+    lastName = lastName,
     noteName = noted,
     unseen = unseen,
     atInit = function() return names.init == true end,

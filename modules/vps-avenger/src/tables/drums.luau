@@ -25,9 +25,12 @@ T.MODE_SELECTION_BOTTOM = 138
 T.MODE_DRUM_SELECTION = { 556, 588 }
 T.MODE_SQ_SELECTION = { 595, 627 }
 
--- The drumkit's Back and Next.
-T.KIT_BACK = { 617, 225 }
-T.KIT_NEXT = { 623, 225 }
+-- The drumkit's Back and Next, ◀ and ▶: the project's (617, 225) and (623, 225) put Back on ◀'s
+-- flat edge, half a point from the gap between them; here the middles of both, measured on
+-- `Drum SQ/Avenger 100% Pattern On.png` — ◀ from 614 to 617.5, ▶ from 621.5 to 625, both from 222
+-- to 226.5.
+T.KIT_BACK = { 616, 224.5 }
+T.KIT_NEXT = { 623, 224.5 }
 
 -- The twelve slots, from y 49 down in steps of 15.5; the slot's name is clicked at x 282.
 T.PART_X = 282
@@ -87,8 +90,13 @@ T.COLUMN_X = {
 T.BUTTON_STATE = { 13, 8 }
 -- Half a slot's row, either way of its point.
 T.SLOT_HALF = T.PART_Y_STEP / 2
--- The name column: from just inside the panel's left (244) to just before Loop's box (325 − 13/2).
-T.NAME_COLUMN = { 248, 318 }
+-- The name column: the slots' name cells, right of the piano keys the rows are labelled with (B, A#,
+-- … C, from 243.5 to 269), to just before Loop's box (325 − 13/2). Measured on
+-- `Drum SQ/Avenger 100% Pattern On.png`: the keys end at 269, the cells start at 269.5 and the names
+-- at 273.5. From 248 the selection's background measured the keys — the black ones dark, so five
+-- rows stood out alike — and the names' text read took the black keys' "#" (the second Mac test of
+-- the page, 2026-10-24).
+T.NAME_COLUMN = { 271, 318 }
 -- The rows of a slot's band above and below its name, its background only: from 4.5 to 7.75 points
 -- from the row's middle, each way.
 T.NAME_ROWS = { 4.5, 7.75 }

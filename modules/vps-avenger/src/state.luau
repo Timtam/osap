@@ -22,8 +22,8 @@
 -- action or the page key read it; the macro tabs, the tab shown, its names, buttons and knobs. A
 -- value read that the page has no place for — a menu's field, DRUM SQ's speed, the envelope's
 -- preset name — stays in the values, for the module's answers and the ring. A slot's name not read
--- is a hole, which the page shows as the slot's factory name: the slot's role in the kit, as the
--- tool always showed it.
+-- is a hole, which the page shows by the slot's role in the kit, said as not read — never as the
+-- kit's name, as the tool showed its factory names.
 --
 -- The browser's (src/actions/browser.luau, src/read/browser.luau): its view, an open expansion and
 -- the expansion the database names by what its columns list (`selectedFromDatabase` where only the
@@ -38,15 +38,17 @@
 local S = {}
 
 local R = host.include("src/read/ocr.luau")
+local Strip = host.include("src/read/strip.luau")
 
 -- One table per plug-in window, by its id: { values = { key -> value }, at = when they were read
 -- (host.now), partAt = when a part of them was last read again, facts = { key -> value } }. At most
 -- WINDOWS_MAX, the oldest dropped: one window is in front at a time. `facts` are what an action of
 -- this session did that no read can show — the OSC tab Copy was chosen for (`oscCopied`, its name
 -- as read, or "OSC <i>"), which the page's Paste follows: Avenger's own clipboard cannot be read;
--- and the DRUM SQ pattern a COPY of the pattern menu was taken for (`sqCopied`, { pattern, part }),
--- which its PASTE items follow (`drum_sq_pattern_copied`, a key of the port's). A read of the whole
--- of Avenger keeps them.
+-- the DRUM SQ pattern a COPY of the pattern menu was taken for (`sqCopied`, { pattern, part }),
+-- which its PASTE items follow (`drum_sq_pattern_copied`, a key of the port's); and the length
+-- LENGTH's action set (`sqLengthSet`, { preset, steps }), posted while the preset read is that one.
+-- A read of the whole of Avenger keeps them.
 local WINDOWS_MAX = 8
 local byWindow, order = {}, {}
 
@@ -115,6 +117,29 @@ end
 -- A fact of this session in window `id` (above): `value`, or nil to forget it.
 function S.note(id, key, value)
   forWindow(id).facts[key] = value
+end
+
+-- ── The count confirmed ──────────────────────────────────────────────────────
+-- How many oscillators the user said window `id` shows (the page's Confirm OSC Count, the
+-- project's action_confirm_osc_count), for the preset whose name was read then: kept until a
+-- name read there differs, as the project kept its override by the preset. Where the dots give no
+-- count it is the count (read/open.luau, Open.countElsewhere), marked "confirmed" wherever it is
+-- shown, never as read; where they give one, theirs is taken.
+function S.confirmOsc(id, preset, count)
+  forWindow(id).facts.oscConfirmed = { preset = preset, count = count }
+end
+
+-- The count confirmed for preset `preset` in window `id`, or nil — none, or one for another name,
+-- which is then forgotten. A name not read (nil) keeps it, and answers nil.
+function S.oscConfirmed(id, preset)
+  local st = id and byWindow[id] or nil
+  local c = st and st.facts.oscConfirmed
+  if not (c and preset) then return nil end
+  if c.preset ~= preset then
+    st.facts.oscConfirmed = nil
+    return nil
+  end
+  return c.count
 end
 
 -- What was last read in window `id`, as it stands (nil: nothing yet) — for words, never changed
@@ -189,6 +214,9 @@ local function oscPanel(v, facts)
   local n = v.oscCount
   local out = {
     count = n,
+    -- Where a count the dots did not give came from (read/open.luau, Open.countElsewhere): the
+    -- page marks it as such, a key of the port's.
+    count_from = v.oscCountFrom,
     copied = facts and facts.oscCopied or nil,
     names = list(v.oscNames, n),
     mute_states = list(v.oscMute, n),
@@ -199,6 +227,9 @@ local function oscPanel(v, facts)
     drums_solo = v.drumsSolo,
     trig_mute = v.trigMute,
     trig_solo = v.trigSolo,
+    -- The tabs whose Solo reads on, by their labels (read/strip.luau, Strip.soloBy): the page says
+    -- every other tab's Mute as silenced by them, a key of the port's.
+    solo_by = #Strip.soloBy(v) > 0 and Strip.soloBy(v) or nil,
     drum_pattern = v.drumPattern,
     drum_lock = v.drumLock,
     drum_mode = v.drumMode,
@@ -234,7 +265,13 @@ local function oscPanel(v, facts)
     out.drum_sq_pattern_selected = sq.selected
     out.drum_sq_pattern_states = list(sq.states, 3)
   end
-  out.drum_sq_length_steps = v.sqLength
+  -- LENGTH is never read (read/drumsq.luau): the length LENGTH's action set for the preset read
+  -- now, marked as set (`drum_sq_length_set`, a key of the port's), as the tool wrote it.
+  local set = facts and facts.sqLengthSet
+  if set and v.preset ~= nil and set.preset == v.preset then
+    out.drum_sq_length_steps = set.steps
+    out.drum_sq_length_set = true
+  end
   if facts and facts.sqCopied then out.drum_sq_pattern_copied = true end
   -- The sample editor: its tab and view as read, and the tab's switch where the slot it was read
   -- for still reads selected (ownSlot) — the page shows each tab's switch from a list of twelve, by
@@ -322,6 +359,9 @@ function S.snapshot(id, shown, opts)
     preset_steps_unavailable = stepsWhy(v),
     zoom = v.zoom,
     expansion_view = v.expansionView,
+    -- Where the view was not read, how it came to be (read/browser.luau, Br.view): "set",
+    -- "confirmed" or "stored", a key of the port's.
+    expansion_view_from = v.expansionViewFrom,
     expansion_open = v.expansionOpen,
     selected_expansion = v.selectedExpansion,
     expansion_favorite_view = v.favoriteView,
@@ -357,6 +397,13 @@ function S.snapshot(id, shown, opts)
       end
     else
       out.expansions_from_database = true
+      -- Every entry true or false, as the marks are: a roster's expansion the database has no data
+      -- for (page.luau), a key of the port's.
+      if anyOf(shown.noData, #shown.names) then
+        local none = table.create(#shown.names)
+        for i = 1, #shown.names do none[i] = shown.noData[i] == true end
+        out.expansions_without_data = none
+      end
     end
   end
   if opts and opts.age and st and st.at then

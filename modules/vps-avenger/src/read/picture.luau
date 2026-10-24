@@ -17,20 +17,20 @@
 -- Luau then works on the answers only: grids of at most 4096 cells, profiles of one value per
 -- pixel column, and lists of points.
 --
--- THE PROJECT'S PIXELS. Its captures were a Retina display's backing pixels, two for every point
--- each way (its ocr.py), and its counts and sizes are in those pixels at the zoom of the moment.
--- A picture here is one pixel per point on a Mac (docs/api/screen.md, "Reading a snapshot"), and
--- one physical pixel on Windows, where a display scaled to 150 % draws Avenger 1.5 times as
--- large. So a count is measured as a SHARE of its region, and turned into the count the project
--- would have seen there by the region's size in the project's pixels — and the log says both, so
--- that a tester's run says whether the project's numbers hold on his display (TODO.md, GM7).
+-- THE PROJECT'S PIXELS. Its counts and sizes are in the pixels of its own captures at the zoom of
+-- the moment, and those were one pixel per point: its knob constants are counts in such pictures
+-- (a bare pointer, PAN_BASE_PIXELS × s², is the 50 bright pixels of
+-- `Sliders/Pan/5 Avenger Pan C.png` at 100 %), whatever the backing scale of the display it ran
+-- on. A picture here is one pixel per point on a Mac too, at any backing scale (docs/api/screen.md,
+-- "Reading a snapshot"), and one physical pixel on Windows, where a display scaled to 150 % draws
+-- Avenger 1.5 times as large. So a count is measured as a SHARE of its region, and turned into the
+-- count the project would have seen there by the region's size in the project's pixels — and the
+-- log says both, so that a tester's run says whether the project's numbers hold on his display
+-- (TODO.md, GM7).
 
 local G = host.include("src/geometry.luau")
 
 local P = {}
-
--- The project's pixels per point, each way: a Retina display's backing pixels.
-P.RETINA = 2
 
 -- ── Placing ──────────────────────────────────────────────────────────────────
 -- A placer: the overlay's origin and factor as they were when the picture was taken, so a read
@@ -45,9 +45,9 @@ function P.placer(origin, k, zoom)
   -- The project's scale, the zoom over 50: its sizes grow with it. Where the zoom is not known,
   -- the factor is the best there is.
   pl.s = zoom and zoom / G.AUTHORED_ZOOM or k
-  -- The project's pixels per pixel of the picture, each way: two on a Mac at any zoom; on
-  -- Windows two over the display's scaling, which the factor holds besides the zoom.
-  pl.t = P.RETINA * pl.s / k
+  -- The project's pixels per pixel of the picture, each way: one on a Mac at any zoom and backing
+  -- scale; on Windows one over the display's scaling, which the factor holds besides the zoom.
+  pl.t = pl.s / k
   return pl
 end
 
@@ -102,12 +102,87 @@ function P.cells(name, rect, pred, k, rows)
   return { name = name, kind = "cells", rect = rect, cols = cols, rows = rows, pred = pred }
 end
 
--- A grid of one row over `rect`, one cell per pixel column (at most 256): a run of cells that
--- pass is something the test finds, as wide as the run.
-function P.columns(name, rect, pred)
+-- A grid of `pred` over screen rectangle `rect` whose cells are c by c pixels, for the smallest c
+-- that keeps it within the grids' limits (256 a side, 4096 in all): the one grid P.lit reads every
+-- pixel that passes off. nil for no rectangle.
+function P.litCells(name, rect, pred)
   if not rect then return nil end
-  local w = rect[3] - rect[1]
-  return { name = name, kind = "cells", rect = rect, cols = math.min(256, w), rows = 1, pred = pred }
+  local w, h = rect[3] - rect[1], rect[4] - rect[2]
+  local c = 1
+  while math.ceil(w / c) > 256 or math.ceil(h / c) > 256 or math.ceil(w / c) * math.ceil(h / c) > 4096 do c += 1 end
+  return { name = name, kind = "cells", rect = rect, cols = math.ceil(w / c), rows = math.ceil(h / c), pred = pred }
+end
+
+-- The runs of pixels `pixels` (P.lit's) along their rows: { y, x1, x2 }, x2 past the run's last
+-- pixel, in order of their rows and their starts — sorted as numbers, which the sort compares
+-- itself.
+function P.runsOf(pixels)
+  local x0, y0 = math.huge, math.huge
+  for _, q in ipairs(pixels) do
+    if q[1] < x0 then x0 = q[1] end
+    if q[2] < y0 then y0 = q[2] end
+  end
+  local keys = table.create(#pixels)
+  for i, q in ipairs(pixels) do keys[i] = (q[2] - y0) * 1048576 + (q[1] - x0) end
+  table.sort(keys)
+  local runs = {}
+  for _, key in ipairs(keys) do
+    local y, x = key // 1048576 + y0, key % 1048576 + x0
+    local last = runs[#runs]
+    if last and last[1] == y and last[3] == x then
+      last[3] = x + 1
+    elseif not (last and last[1] == y and last[3] > x) then
+      runs[#runs + 1] = { y, x, x + 1 }
+    end
+  end
+  return runs
+end
+
+-- The 8-connected parts of `runs` (P.runsOf's, in its order), each { pixels, x1, y1, x2, y2 (past
+-- its last pixel each way), runs = its runs }: runs of neighbouring rows that overlap or meet at a
+-- corner are one. One step a pair of runs on neighbouring rows.
+function P.components(runs)
+  local parent = table.create(#runs, 0)
+  for i = 1, #runs do parent[i] = i end
+  local function root(i)
+    while parent[i] ~= i do
+      parent[i] = parent[parent[i]]
+      i = parent[i]
+    end
+    return i
+  end
+  -- The runs of the row before, from `prevFrom` to `prevTo`, swept left to right with the row's own:
+  -- one that ends before a run begins touches none after it either.
+  local prevFrom, prevTo, rowFrom = 1, 0, 1
+  for i, r in ipairs(runs) do
+    if i > 1 and r[1] ~= runs[i - 1][1] then
+      if runs[i - 1][1] == r[1] - 1 then prevFrom, prevTo = rowFrom, i - 1 else prevFrom, prevTo = 1, 0 end
+      rowFrom = i
+    end
+    while prevFrom <= prevTo and runs[prevFrom][3] < r[2] do prevFrom += 1 end
+    local j = prevFrom
+    while j <= prevTo and runs[j][2] <= r[3] do
+      local a, b = root(i), root(j)
+      if a ~= b then parent[a] = b end
+      j += 1
+    end
+  end
+  local byRoot, out = {}, {}
+  for i, r in ipairs(runs) do
+    local k = root(i)
+    local c = byRoot[k]
+    if not c then
+      c = { pixels = 0, x1 = r[2], y1 = r[1], x2 = r[3], y2 = r[1] + 1, runs = {} }
+      byRoot[k] = c
+      out[#out + 1] = c
+    end
+    c.pixels += r[3] - r[2]
+    c.x1, c.x2 = math.min(c.x1, r[2]), math.max(c.x2, r[3])
+    c.y1, c.y2 = math.min(c.y1, r[1]), math.max(c.y2, r[1] + 1)
+    c.runs[#c.runs + 1] = r
+  end
+  table.sort(out, function(a, b) return a.x1 < b.x1 end)
+  return out
 end
 
 -- A column profile of `rect` — of its rows as well with `axes` "both" (the drumkit's name column,
@@ -146,13 +221,6 @@ for i = 0, 9 do HEX[48 + i] = i end
 for i = 0, 5 do
   HEX[97 + i] = 10 + i
   HEX[65 + i] = 10 + i
-end
-
--- Cell (col, row), from 1: 0 to 255.
-function Grid:at(c, r)
-  local i = ((r - 1) * self.cols + c - 1) * 2 + 1
-  local hi, lo = string.byte(self.hex, i, i + 1)
-  return HEX[hi] * 16 + HEX[lo]
 end
 
 -- The blocks of `n` over `len` that pixels a to b (exclusive) may touch: block s holds pixel x
@@ -200,26 +268,70 @@ function Grid:share(r)
   return sum / area, area, any
 end
 
--- The runs of a one-row grid: { from, to, pixels } for every run of cells whose share is above
--- 0, `from` and `to` in screen pixels, `pixels` the pixels that pass in it.
-function Grid:runs()
-  local out, cur = {}, nil
-  local h = self.rect[4] - self.rect[2]
-  for col = 1, self.cols do
-    local v = self:at(col, 1)
-    local xs = self.xs[col]
-    if v > 0 then
-      if not cur then
-        cur = { from = self.rect[1] + xs[1], to = self.rect[1] + xs[2], pixels = 0 }
-        out[#out + 1] = cur
-      end
-      cur.to = self.rect[1] + xs[2]
-      cur.pixels += v / 255 * (xs[2] - xs[1]) * h
-    else
-      cur = nil
+-- The hex of each share a cell of `n` pixels can have, n from `totals` (a set), as host.screen.cells
+-- writes it — round(255 × passing / n), halves to even — but none.
+local function shares(totals)
+  local seen, out = {}, {}
+  for n in pairs(totals) do
+    for k = 1, n do
+      local v = string.format("%02x", P.round(255 * k / n))
+      if not seen[v] then seen[v], out[#out + 1] = true, v end
     end
   end
   return out
+end
+
+-- EVERY PIXEL that passes, of grid `g` (P.litCells'): the cells that hold one are found by the
+-- string library's plain search of the answer for each share a cell can have — a step a cell found,
+-- whatever the grid's size — and only their pixels are asked for their colours (host.screen.pixels
+-- of snapshot `snap`, answered at once) and tested by `test(colour)`, the grid's predicate written
+-- out in Luau. The pixels, { x, y, colour } in screen pixels in no order, and how many colours were
+-- asked; or nil and why the colours were not read.
+function P.lit(g, snap, test)
+  local hex, cols = g.hex, g.cols
+  -- The cells' sizes: the blocks are of at most two widths and two heights.
+  local wx, wy, totals = {}, {}, {}
+  for _, b in ipairs(g.xs) do wx[b[2] - b[1]] = true end
+  for _, b in ipairs(g.ys) do wy[b[2] - b[1]] = true end
+  for a in pairs(wx) do
+    for b in pairs(wy) do totals[a * b] = true end
+  end
+  local found, cells = {}, {}
+  for _, v in ipairs(shares(totals)) do
+    local at = 1
+    while true do
+      local i = string.find(hex, v, at, true)
+      if not i then break end
+      -- A match that starts on a cell's second digit spans two cells, and is none of them.
+      if i % 2 == 1 and not found[i] then
+        found[i] = true
+        cells[#cells + 1] = (i - 1) // 2
+      end
+      at = i + 1
+    end
+  end
+  table.sort(cells)
+  local pts = {}
+  for _, cell in ipairs(cells) do
+    local xb, yb = g.xs[cell % cols + 1], g.ys[cell // cols + 1]
+    for y = g.rect[2] + yb[1], g.rect[2] + yb[2] - 1 do
+      for x = g.rect[1] + xb[1], g.rect[1] + xb[2] - 1 do pts[#pts + 1] = { x, y } end
+    end
+  end
+  local out = {}
+  for from = 1, #pts, 4096 do
+    local part = table.move(pts, from, math.min(#pts, from + 4095), 1, {})
+    local ok, colours, why = pcall(host.screen.pixels, part, { snapshot = snap })
+    if not ok then return nil, tostring(colours) end
+    if type(colours) ~= "table" then return nil, tostring(why) end
+    for k, c in ipairs(colours) do
+      if test(c) then
+        local q = part[k]
+        out[#out + 1] = { q[1], q[2], c }
+      end
+    end
+  end
+  return out, #pts
 end
 
 -- A column profile's mean brightness between screen x1 and x2, as the project counts it — the
@@ -268,24 +380,6 @@ function P.spread(r, max)
   local out = {}
   for y = r[2] + stride // 2, r[4] - 1, stride do
     for x = r[1] + stride // 2, r[3] - 1, stride do out[#out + 1] = { x, y } end
-  end
-  return out, stride
-end
-
--- Points on a regular grid over the ring between radius `rmin` and `rmax` round screen point
--- (cx, cy), at most about `max` of them: the points, and the stride. A point stands for stride²
--- pixels of the ring.
-function P.ring(cx, cy, rmin, rmax, max)
-  local area = math.pi * (rmax * rmax - rmin * rmin)
-  local stride = math.max(1, math.ceil(math.sqrt(area / max)))
-  local n = math.ceil(rmax / stride)
-  local out = {}
-  for j = -n, n do
-    for i = -n, n do
-      local dx, dy = i * stride, j * stride
-      local d = math.sqrt(dx * dx + dy * dy)
-      if d >= rmin and d <= rmax then out[#out + 1] = { cx + dx, cy + dy } end
-    end
   end
   return out, stride
 end

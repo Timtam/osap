@@ -431,4 +431,12 @@ function Sa.reset_sample_editor_control(args, label)
   }
 end
 
+-- Each read after a click counts only where it shows the editor as the click needs it (Sa.refusal;
+-- src/actions/drums.luau, Drums.holding).
+for _, name in ipairs({ "select_sample_editor_tab", "toggle_sample_editor_enable", "sample_editor_play_mode",
+  "sample_editor_grid", "sample_editor_eq_type", "sample_editor_loop_stretch", "sample_editor_panel_button",
+  "reset_sample_editor_control" }) do
+  Sa[name] = Drums.holding(Sa[name], Sa.refusal)
+end
+
 return Sa

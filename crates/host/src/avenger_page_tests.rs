@@ -44,8 +44,9 @@ const MAC_KEY: &str = "Ctrl+Shift+Win+F1";
 
 /// Described once at load, as a tool page that activates; built as Avenger is identified, before
 /// any key; and described again — the old one closed — when the Mac page mode changes, and only
-/// then. The five settings of the plan's §2.9, with their defaults — the expansions list the
-/// tool's own default, "Factory Standard".
+/// then. The six settings — the plan's §2.9 and the Expansion View stored — with their defaults:
+/// the expansions list the tool's own default, "Factory Standard", of the tool's four, and the view
+/// "8 per Row", the tool's AVGExpansionView's.
 #[test]
 fn the_page_is_described_once_and_again_when_the_mac_page_mode_changes() {
     run_mac(r##"
@@ -57,9 +58,12 @@ fn the_page_is_described_once_and_again_when_the_mac_page_mode_changes() {
           "a tool page from the module's own folder, which activates")
         T.ok(T.page().prepares == 1 and #T.page().shows == 0, "built as Avenger was identified, and not shown")
         T.ok(S.settings.roster == "Factory Standard" and S.settings.pageKey == "@KEY@" and S.settings.sounds == true
-          and S.settings.pageLeavesDawActive == false and S.settings.drumSqCadence == 250, "the defaults")
-        T.ok(table.concat(S.settingDefs.roster.opts.oneOf, "|") == "Factory Standard|Complete",
+          and S.settings.pageLeavesDawActive == false and S.settings.drumSqCadence == 250
+          and S.settings.expansionView == "8 per Row", "the defaults")
+        T.ok(table.concat(S.settingDefs.roster.opts.oneOf, "|") == "Factory Standard|Complete|Nyhdroe|Joyman",
           "the rosters, the tool's default first")
+        T.ok(table.concat(S.settingDefs.expansionView.opts.oneOf, "|") == "List|1 per Row|2 per Row|3 per Row|4 per Row|"
+          .. "5 per Row|6 per Row|7 per Row|8 per Row", "the views")
         T.ok(S.settingDefs.drumSqCadence.opts.min == 100 and S.settingDefs.drumSqCadence.opts.max == 1000, "its bounds")
         T.ok(S.pageKeys["@KEY@"] ~= nil, "the key")
         -- The Mac page mode on: the page closed and described again, without activation.
@@ -110,7 +114,10 @@ fn the_key_shows_the_page_beside_avenger_and_in_the_page_goes_back_to_it() {
         T.ok(st.preset == "LD Lead 1" and st.zoom == 80, tostring(st.preset) .. " " .. tostring(st.zoom))
         T.ok(st.expansions == nil and st.read_age_seconds == nil, "no database, and read just now")
         T.ok(st.osc_panel.count == nil and st.osc_panel.selected_type == nil and st.macro_panel.count == nil
-          and st.macro_panel.selected_index == nil and st.expansion_view == nil, "the rest not read")
+          and st.macro_panel.selected_index == nil, "the rest not read")
+        -- Nothing read in the browser's header: no expansion open, the view the one stored.
+        T.ok(st.expansion_open == false and st.expansion_view == "8 per Row" and st.expansion_view_from == "stored",
+          "the view stored")
         T.ok(T.lastPost("error").text == "" and T.lastPost("focus").id == "preset-name", "cleared, and the name")
         local shown = T.page().shows[1]
         T.ok(shown.focus == true and shown.avoid.x == W.bounds.x and shown.avoid.y == W.bounds.y
@@ -370,7 +377,11 @@ fn the_reads_of_one_picture_give_the_tools_state_keys() {
         local snaps, from, asked = S.snaps, #S.pageOrder, S.cellsAsked + S.profilesAsked
         T.pageKey()
         T.ok(S.snaps == snaps + 1, "one picture, in the key's handler")
-        T.ok(#S.screenOut == 0 and S.cellsAsked + S.profilesAsked == asked + 26,
+        -- The picture's 26 (read/open.luau, the asks: among them DRUM SQ's patterns' rows, one
+        -- profile each, and FAV's two grids of the star column), a grid for the three macro knobs'
+        -- rings and one for the oscillator's three (read/drumsq.luau, read/expansion.luau,
+        -- read/knob.luau).
+        T.ok(#S.screenOut == 0 and S.cellsAsked + S.profilesAsked == asked + 28,
           "every question waited for in the key's handler: " .. (S.cellsAsked + S.profilesAsked - asked))
         T.ok(T.pageSince(from) == "post state,post error,post focus,show,sound sounds/Open.wav", T.pageSince(from))
         asked = S.cellsAsked + S.profilesAsked
@@ -378,10 +389,12 @@ fn the_reads_of_one_picture_give_the_tools_state_keys() {
         T.ok(S.snaps == snaps + 1 and S.cellsAsked + S.profilesAsked == asked, "nothing asked again")
         local texts = 0
         for _, r in ipairs(S.recognized) do if r.snapshot then texts += 1 end end
-        T.ok(texts == 12, "one text read of the picture, a region per name: " .. texts)
+        -- The browser's header's name among them (read/expansion.luau, E.entries).
+        T.ok(texts == 13, "one text read of the picture, a region per name: " .. texts)
         local st = T.lastPost("state").state
+        -- FAV is read only while an expansion reads open (read/expansion.luau, E.favorite).
         T.ok(st.preset == "LD Lead 1" and st.zoom == 80 and st.expansion_view == "8 per Row"
-          and st.expansion_open == false and st.selected_expansion == "" and st.expansion_favorite_view == true,
+          and st.expansion_open == false and st.selected_expansion == "" and st.expansion_favorite_view == nil,
           "the header and the browser")
         local o = st.osc_panel
         T.ok(o.count == 3 and table.concat(o.names, "|") == "Bass|OSC 2|Lead" and o.names_from_database == nil,
@@ -407,7 +420,7 @@ fn the_reads_of_one_picture_give_the_tools_state_keys() {
         for _, line in ipairs({ "[avenger] [read] strip: 3 dots", "[avenger] [read] strip: the tabs' names 1 'Bass'; 2 '0SC 2' -> 'OSC 2'",
           "[avenger] [read] strip: the tabs' bottom strips, darkest selected:", "OSC 1 Mute 100.0 % red",
           "[avenger] [read] macros: button 1 highlight ", "ON; button 2 highlight 0.0 %", "[avenger] [read] oscillator: Level ",
-          "[avenger] [read] expansion: FAV ", "[avenger] [read] words: preset 'LD Lead 1'",
+          "[avenger] [read] expansion: FAV not read — no expansion reads open", "[avenger] [read] words: preset 'LD Lead 1'",
           "[avenger] [read] 26 questions of one picture; the picture ", "[avenger] [page] shown beside" }) do
           T.ok(T.count(line) == 1, "the log: " .. line)
         end
@@ -477,7 +490,7 @@ fn on_windows_at_150_percent_display_scaling_the_same_picture_reads_the_same() {
             tostring(o.fine_tune_values[2])))
         T.ok(m.count == 2 and m.selected_index == 2 and m.button_states[1] == true and m.button_states[2] == false
           and m.amount_values[1] == 40 and m.amount_values[2] == 0 and m.amount_values[3] == 100, "the macros")
-        T.ok(st.expansion_favorite_view == true, "FAV")
+        T.ok(st.expansion_view == "8 per Row" and st.expansion_favorite_view == nil, "the view, and no FAV with the grid shown")
     "##.replace("@WORDS@", WORDS));
 }
 
@@ -547,6 +560,8 @@ fn what_a_read_could_not_find_is_not_read() {
         "Volume, not read", "Pan, not read", "Transpose, not read", "Fine Tune, not read",
         "Amount, not read", "PATTERN CHAIN, not read", "AUTO FOLLOW, not read", "LENGTH, not read",
         "FAV, not read", "FAV view, not read", "Central tab, not read",
+        // Under a Solo (src/read/strip.luau, Strip.silencedBy).
+        "silenced by ${by[0]}'s Solo", "silenced by the Solos of ",
     ] {
         assert!(PANEL_JS.contains(words), "panel.js has no '{words}'");
     }
@@ -557,15 +572,19 @@ fn what_a_read_could_not_find_is_not_read() {
         T.words({})
         T.openPage()
         local st = T.lastPost("state").state
-        T.ok(st.preset == nil and st.zoom == 80 and st.expansion_view == nil and st.expansion_open == nil
-          and st.selected_expansion == nil, "the header and the browser not read, but the zoom")
+        T.ok(st.preset == nil and st.zoom == 80, "the header not read, but the zoom")
+        -- Nothing read in the browser's header is the grid shown (read/browser.luau, Br.state): the
+        -- view posted is the one stored, and said as that.
+        T.ok(st.expansion_open == false and st.selected_expansion == "" and st.expansion_view == "8 per Row"
+          and st.expansion_view_from == "stored", "the browser: the view stored")
         local o, m = st.osc_panel, st.macro_panel
         T.ok(o.count == nil and o.names == nil and o.mute_states == nil and o.selected_type == nil
           and o.volume_values == nil, "the strip not read")
         T.ok(o.drums_mute == false and o.trig_solo == false, "a switch on a picture shows off")
         T.ok(m.count == nil and m.selected_index == nil and m.tabs == nil and m.amount_values[1] == nil,
           "the macros not read")
-        T.ok(T.count("[avenger] [read] expansion: the view reads nothing — the area read: nothing read") == 1, T.dump())
+        T.ok(T.count("[avenger] [read] expansion: the header reads no name — no expansion open, the view 8 per Row stored")
+          == 1, T.dump())
         T.ok(T.count("[avenger] [read] strip: the tabs read whole — no count") == 1, T.dump())
     "##);
     run_mac(r##"
@@ -583,36 +602,68 @@ fn what_a_read_could_not_find_is_not_read() {
     "##);
 }
 
-/// The browser's caption reading no view, its area is read as text — a second read of the same
+/// The browser told by its header (read/browser.luau, Br.state): the header's name read as an
+/// expansion's, that one open, with the database's lists, marked, and the preset placed in it the
+/// one loaded — and no area read. Nothing read in the header: no expansion open, the view the one
+/// stored, "8 per Row" by default (this Avenger draws no view's label: `Expansions/Avenger 100
+/// closed.png`). The header reading no name: the area is read as text — a second read of the same
 /// picture, the only one — and with the preset database the presets it names give the open
-/// expansion; its categories and presets are the database's lists, marked, and the preset placed
-/// in it is the one loaded. Without the database, two words of an open expansion's say an
-/// expansion is open, which one not read. A caption that reads a view reads no area.
+/// expansion; without the database, two words of an open expansion's say an expansion is open,
+/// which one not read. A caption that reads a view reads no area.
 #[test]
-fn an_open_expansion_is_read_from_the_browsers_area() {
+fn an_open_expansion_is_read_from_its_header_or_else_the_browsers_area() {
     run_mac(r##"
         local S = T.S
         T.presets()
         T.avengerAt80("Init Preset")
         T.pageReady()
-        T.words({ preset = "LD Lead 2", ["expansion area"] = "Leads LD Lead 1 LD Lead 2 LD Lead 3" })
+        T.words({ preset = "LD Lead 2", ["expansion name"] = "Delta" })
         T.openPage()
         local st = T.lastPost("state").state
-        T.ok(st.expansion_open == true and st.selected_expansion == "Delta" and st.expansion_view == nil, "Delta open")
+        T.ok(st.expansion_open == true and st.selected_expansion == "Delta" and st.expansion_view == nil
+          and st.selected_expansion_from_database == nil, "Delta open, by its header")
+        T.ok(table.concat(st.expansion_categories, "|") == "Leads" and st.expansion_lists_from_database == true,
+          "its lists, the database's")
+        T.ok(st.loaded_expansion_preset_index == 1 and st.expansion == "Delta", "the preset loaded")
+        for _, r in ipairs(S.recognized) do T.ok(r.name ~= "browser area", "no area read") end
+        T.ok(T.count("the header reads 'Delta' — Delta open (exact)") == 1, T.dump())
+    "##);
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.words({ preset = "LD Lead 2", ["browser area"] = "Leads LD Lead 1 LD Lead 2 LD Lead 3" })
+        T.openPage()
+        local st = T.lastPost("state").state
+        T.ok(st.expansion_open == false and st.expansion_view == "8 per Row" and st.expansion_view_from == "stored"
+          and st.selected_expansion == "", "closed, the view stored: " .. tostring(st.expansion_view_from))
+        for _, r in ipairs(S.recognized) do T.ok(r.name ~= "browser area", "no area read") end
+    "##);
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.words({ preset = "LD Lead 2", ["expansion name"] = "~", ["browser area"] = "Leads LD Lead 1 LD Lead 2 LD Lead 3" })
+        T.openPage()
+        local st = T.lastPost("state").state
+        T.ok(st.expansion_open == true and st.selected_expansion == "Delta" and st.expansion_view == nil
+          and st.selected_expansion_from_database == true, "Delta open, by the database")
         T.ok(table.concat(st.expansion_categories, "|") == "Leads"
           and table.concat(st.expansion_presets, "|") == "LD Lead 1|LD Lead 2|LD Lead 3"
           and table.concat(st.expansion_preset_categories, "|") == "Leads|Leads|Leads"
           and st.expansion_lists_from_database == true, "its lists, the database's")
         T.ok(st.loaded_expansion_preset_index == 1 and st.expansion == "Delta", "the preset loaded")
         local asked = false
-        for _, r in ipairs(S.recognized) do if r.name == "expansion area" and r.snapshot then asked = true end end
-        T.ok(asked and T.count("the area read: Delta, by its presets named (18)") == 1, T.dump())
+        for _, r in ipairs(S.recognized) do if r.name == "browser area" and r.snapshot then asked = true end end
+        T.ok(asked and T.count("Delta, by its presets named (18)") == 1, T.dump())
     "##);
     run_mac(r##"
         local S = T.S
         T.avengerAt80("Init Preset")
         T.pageReady()
-        T.words({ ["expansion area"] = "Bass Leads Pads" })
+        T.words({ ["expansion name"] = "~", ["browser area"] = "Bass Leads Pads" })
         T.openPage()
         local st = T.lastPost("state").state
         T.ok(st.expansion_open == true and st.selected_expansion == "" and st.expansion_categories == nil, "open, not named")
@@ -621,11 +672,11 @@ fn an_open_expansion_is_read_from_the_browsers_area() {
         local S = T.S
         T.avengerAt80("Init Preset")
         T.pageReady()
-        T.words({ ["expansion view"] = "4 per Row", ["expansion area"] = "Bass Leads Pads" })
+        T.words({ ["expansion view"] = "4 per Row", ["browser area"] = "Bass Leads Pads" })
         T.openPage()
         local st = T.lastPost("state").state
-        T.ok(st.expansion_view == "4 per Row" and st.expansion_open == false, "the view")
-        for _, r in ipairs(S.recognized) do T.ok(r.name ~= "expansion area", "no area read") end
+        T.ok(st.expansion_view == "4 per Row" and st.expansion_view_from == nil and st.expansion_open == false, "the view")
+        for _, r in ipairs(S.recognized) do T.ok(r.name ~= "browser area", "no area read") end
     "##);
 }
 
@@ -664,9 +715,11 @@ fn one_press_at_a_time_and_a_page_is_not_shown_after_the_user_moved_on() {
 }
 
 /// In a calibrating run, the open writes one marked picture per part read and zoom, of the picture
-/// the reads were answered from — strip, macros, knob, centre, drumsq, drums, sample and
-/// sq-controls, each `-<zoom>pct.png` — with a crosshair on every point read, written with
+/// the reads were answered from — strip, macros, knob, centre, drumsq, drums, sample, sq-controls
+/// and browser, each `-<zoom>pct.png` — with a crosshair on every point read, written with
 /// callbacks; a second open at the same zoom writes none, and without calibration none is written.
+/// Where the browser is settled — here by its header, which reads no name — no
+/// `browser-unsettled` is written; where nothing settles it, one is, once per zoom.
 #[test]
 fn a_calibrating_run_writes_a_marked_picture_per_part_and_zoom() {
     run_mac(r##"
@@ -700,35 +753,47 @@ fn a_calibrating_run_writes_a_marked_picture_per_part_and_zoom() {
           names[#names + 1] = string.match(m.path, "calibration/(.+)$")
         end
         T.ok(table.concat(names, " ") == "strip-80pct.png macros-80pct.png knob-80pct.png centre-80pct.png drumsq-80pct.png "
-          .. "drums-80pct.png sample-80pct.png sq-controls-80pct.png", table.concat(names, " "))
+          .. "drums-80pct.png sample-80pct.png sq-controls-80pct.png browser-80pct.png", table.concat(names, " "))
         T.ok(T.count("[avenger] [calibrate] strip picture, (") == 1 and T.count("[avenger] [calibrate] drumsq picture") == 1,
           T.dump())
         back()
         T.openPage()
         T.tick()
-        T.ok(#pictures() == 8, "the same zoom again: none")
+        T.ok(#pictures() == 9, "the same zoom again: none")
+        -- The header reading no expansion's name and the area nothing: unsettled, written once.
+        back()
+        T.words({ ["expansion name"] = "~" })
+        T.openPage()
+        T.tick()
+        back()
+        T.openPage()
+        T.tick()
+        T.ok(#pictures() == 10 and string.find(pictures()[10].path, "calibration/browser-unsettled-80pct.png", 1, true),
+          tostring(pictures()[10] and pictures()[10].path))
     "##);
 }
 
 /// The turns of Luau's loops and calls each read of the open may spend at 200 % (T.interrupts),
 /// by the reader's file and function: the most either scenario below spent when measured on
 /// 2026-10-12 (the drumkit table's on 2026-10-17: its 48 boxes, of 52 by 32 pixels each, 79,872 in
-/// all), plus a margin of READ_MARGIN — fewer turns than the pixels of the smallest box any
+/// all; the strip's count, the knobs' and DRUM SQ's on 2026-10-24: the dots' band 34,384 pixels, the
+/// three oscillator knobs' rings 38,265 and the macro knobs' 108,573, each three off one grid since
+/// the second review of that day), plus a margin of READ_MARGIN — fewer turns than the pixels of the smallest box any
 /// read looks at there (AUTO FOLLOW's, 44 by 32 pixels; the lock and the pattern switch, 40 by 40;
 /// a Mute, 52 by 32; FAV, 100 by 40), so that a loop in Luau over any box's pixels, at least one
 /// turn a pixel, is more than its read may spend. A read not listed may spend READ_MARGIN.
 const READ_MARGIN: u64 = 1000;
 const READ_TURNS: &[(&str, u64)] = &[
-    ("strip count", 1065),
+    ("strip count", 23423),
     ("strip decide", 9258),
     ("centre decide", 721),
-    ("drumsq decide", 18957),
-    ("drums decide", 22064),
+    ("drumsq decide", 7270),
+    ("drums decide", 22065),
     ("macros selected", 611),
     ("macros buttons", 995),
     ("expansion favorite", 2133),
-    ("knob macro", 7590),
-    ("knob osc", 10416),
+    ("knob macros", 24834),
+    ("knob osc", 36324),
 ];
 
 /// What the scenarios below share: the reads' functions counted (`spent`, by "file function"), and
@@ -754,7 +819,7 @@ local function counted()
   count("drums", { "decide" })
   count("macros", { "selected", "buttons", "labels", "count" })
   count("expansion", { "favorite", "fromArea", "parseView" })
-  count("knob", { "macro", "osc", "oscMiddles" })
+  count("knob", { "macro", "macros", "osc", "oscMiddles" })
 end
 local function within(bounds)
   local words = {}
@@ -774,16 +839,16 @@ fn read_turns() -> String {
     format!("{{ {fields} }}")
 }
 
-/// No loop over pixels on the event loop: at 200 % — the largest Avenger, whose macro knob alone
-/// spans 280 by 280 pixels (78,400 of them) — the whole open, from the key to the show, turns
-/// Luau's loops and calls about 34,000 times with an oscillator selected and 72,000 with the Drums
-/// tab, DRUM SQ and the drumkit table, whose switches and slots only that reads: each under a bound
-/// with a margin for small
-/// changes that a loop over the strip's dots band (about 32,700 pixels at 200 %) or the macro
-/// buttons (about 21,000) passes; and each read spends at most what READ_TURNS lets it, which a
-/// loop over its smallest box passes. The points it reads are a few hundred at a time, and the
-/// grids the host's own limit. On Windows, on a display at 100 % scaling and a screen that holds
-/// all of Avenger, so that every part is read — and the reads come out as at 80 %.
+/// No loop over pixels on the event loop: at 200 % — the largest Avenger, whose macro knob's ring
+/// alone is 36,191 pixels — the whole open, from the key to the show, turns Luau's loops and calls
+/// about 95,000 times with an oscillator selected and with the Drums tab, DRUM SQ and the drumkit
+/// table: each under a bound with a margin for small changes that a loop over the strip's dots band
+/// (about 34,400 pixels at 200 %) or the macro buttons (about 21,000) passes; and each read spends
+/// at most what READ_TURNS lets it, which a loop over its smallest box passes. Most of it is the
+/// dots' and the pointers' own pixels, every one of which the project's readers count (read/strip.luau,
+/// read/knob.luau): the colours of the cells that hold one, at most a few thousand points. The grids
+/// are the host's own limit. On Windows, on a display at 100 % scaling and a screen that holds all
+/// of Avenger, so that every part is read — and the reads come out as at 80 %.
 #[test]
 fn the_open_reads_loop_over_no_pixels_in_luau() {
     let scenario = |paint: &str, check: &str, limit: &str| {
@@ -824,7 +889,7 @@ fn the_open_reads_loop_over_no_pixels_in_luau() {
           most = math.max(most, n)
           all += n
         end
-        T.ok(most <= 400 and all <= 3000, string.format("points: at most %d at a time, %d in all", most, all))
+        T.ok(most <= 2000 and all <= 5000, string.format("points: at most %d at a time, %d in all", most, all))
         local each = within(@READS@)
         T.ok(turns < @LIMIT@, string.format("%d turns of Luau's loops and calls for the open, over %d grids of %d cells, "
           .. "%d profiles and %d points; the reads: %s", turns, S.cellsAsked, S.cellsTotal, S.profilesAsked, all, each))
@@ -837,7 +902,8 @@ fn the_open_reads_loop_over_no_pixels_in_luau() {
     };
     // Measured 2026-10-12: 34,873 turns, of 12 grids of 4400 cells, 7 profiles and 1552 points; on
     // 2026-10-17, with the drumkit table's grids asked too, 33,731 of 16 grids of 9236 cells, 8 profiles
-    // and 1356 points.
+    // and 1356 points; on 2026-10-24, with every pixel of the dots and the knobs' pointers counted,
+    // 94,614, the points 1750 at most and 4023 in all.
     run(&scenario(
         r#"{ osc = 8, selected = "osc", index = 5, mute = { [8] = true }, solo = { [1] = true }, trigSolo = true,
           macroShown = 3, buttons = { true, true }, amounts = { 30, 60, 90 }, volume = 50, transpose = -24, fine = 0 }"#,
@@ -846,11 +912,12 @@ fn the_open_reads_loop_over_no_pixels_in_luau() {
         T.ok(o.volume_values[5] == 50 and o.transpose_values[5] == -24 and o.fine_tune_values[5] == 0,
           string.format("the knobs at 200 %%: %s %s %s", tostring(o.volume_values[5]), tostring(o.transpose_values[5]),
             tostring(o.fine_tune_values[5])))"#,
-        "40000",
+        "110000",
     ));
     // Measured 2026-10-12: 47,999 turns, of 12 grids of 4400 cells, 7 profiles and 1028 points; on
     // 2026-10-17, with the drumkit table read — its 48 boxes, the selection and the names — 71,569 of 16
-    // grids of 9236 cells, 8 profiles and 1028 points.
+    // grids of 9236 cells, 8 profiles and 1028 points; on 2026-10-24, with every pixel of the dots and
+    // the knobs' pointers counted and DRUM SQ's selection by its rows, 95,610.
     run(&scenario(
         r#"{ osc = 8, selected = "drums", pattern = true, lock = true, mode = "sq", central = "drum_sq",
           sq = { chain = true, follow = false, on = { b = true }, selected = "a" }, macroShown = 3,
@@ -858,7 +925,7 @@ fn the_open_reads_loop_over_no_pixels_in_luau() {
         r#"T.ok(o.selected_type == "drums" and o.drum_pattern == true and o.drum_lock == true and o.drum_mode == "sq"
           and o.central_panel_tab == "drum_sq" and o.drum_sq_pattern_chain == true and o.drum_sq_pattern_selected == "a"
           and o.drum_sq_pattern_states[1] == true, "the Drums tab and DRUM SQ at 200 %")"#,
-        "77000",
+        "111000",
     ));
 }
 
@@ -867,7 +934,8 @@ fn the_open_reads_loop_over_no_pixels_in_luau() {
 /// one may hold there (6,710,886 points) — and what lies past the edge is not read: the macros,
 /// whose tab captions are no text of the picture, and Trig's Solo, cut by the edge. The questions
 /// are asked of what the picture holds of their regions, so the rest reads as at 80 %; the log says
-/// where the picture was cut, and the page's error region that part of Avenger was not read.
+/// where the picture was cut, and the page's error region which parts leave the screen, which way,
+/// and how to bring them back (read/open.luau, Open.offScreen).
 #[test]
 fn on_a_mac_avenger_larger_than_the_screen_is_read_as_far_as_the_screen_shows_it() {
     run_mac(r##"
@@ -903,8 +971,9 @@ fn on_a_mac_avenger_larger_than_the_screen_is_read_as_far_as_the_screen_shows_it
         T.ok(o.volume_values[5] == 50 and o.transpose_values[5] == -24 and o.fine_tune_values[5] == 0, "the knobs")
         T.ok(m.count == nil and m.selected_index == nil and m.amount_values[1] == nil and m.amount_values[3] == nil
           and m.button_states[1] == nil, "the macros, past the edge, not read")
-        T.ok(T.lastPost("error").text == "At 200 percent, part of VPS Avenger lies past the edge of the screen: what lies "
-          .. "there was not read.", T.lastPost("error").text)
+        T.ok(T.lastPost("error").text == "The oscillator strip is past the screen's right edge; the central panel and the "
+          .. "macros are below the screen and past its right edge; move the plug-in's window up and left. What lies past "
+          .. "the edge was not read.", T.lastPost("error").text)
     "##);
 }
 
@@ -1166,6 +1235,44 @@ fn load_with_escape_in_its_dialog_and_save_as_read_the_name_after_the_dialog() {
         T.runDue()
         T.nameReads("My Lead")
         T.ok(S.front == T.PAGE_WIN and T.lastPost("state").state.preset == "My Lead", "the new name")
+    "##);
+}
+
+/// Load and Save as from the page click their item ONCE (actions.luau, menuChoice's `retries`), as
+/// the ring's do: Avenger's popup stays drawn, frozen, while its file dialog opens, which the menu's
+/// test takes for a click it missed — the second Mac test's Load was clicked four times, the clicks
+/// after the first landing in the dialog. The popup left up for eight turns: no click again.
+#[test]
+fn the_pages_load_and_save_as_click_their_item_once_under_a_popup_left_up() {
+    run_mac(r##"
+        local S = T.S
+        local _, _, W = T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.nameIs("LD Lead 1")
+        T.openPage()
+        T.event()
+        local open = { id = 950, title = "Open", class = "AXWindow/AXDialog/", app = T.MAC_REAPER,
+          bounds = { x = 300, y = 200, w = 700, h = 450 }, client = { x = 300, y = 228, w = 700, h = 422 } }
+        for _, c in ipairs({ { "pick_load_preset", "586,135" }, { "pick_save_preset_as", "586,172" } }) do
+          T.tripFrom({ action = c[1], args = {}, focused = true }, W)
+          T.popup(300, 490, 116, 192, 96)
+          T.tick(1)
+          T.ok(T.clickAt() == c[2], c[1] .. "'s row: " .. T.clickAt())
+          local clicks = #S.clicks
+          T.tick(8)
+          T.ok(#S.clicks == clicks, c[1] .. ": " .. (#S.clicks - clicks) .. " click(s) more under the popup")
+          T.closePopups()
+          T.tick(2)
+          S.listed = { W, open }
+          T.show(open)
+          T.runDue()
+          S.listed = { W }
+          T.show(W)
+          T.runDue()
+          T.nameReads("LD Lead 1")
+          T.ok(S.front == T.PAGE_WIN, c[1] .. ": the page back")
+          T.event()
+        end
     "##);
 }
 
@@ -1749,13 +1856,16 @@ const TOOL_PAGE_ACTIONS: &[&str] = &[
 /// is daw-hosts' to derive (modules/daw-hosts: DAW knowledge only there).
 const DROPPED: &[&str] = &["toggle_windows_reaper_rect_x"];
 
-/// The port's own: Read Avenger's List (slice 9) and the Settings section's two (slice 10).
-const PORT_OWN: &[&str] = &["read_expansion_list", "set_setting", "reset_settings"];
+/// The port's own: Read Avenger's List (slice 9), the Settings section's two (slice 10), and the
+/// tool's Confirm OSC Count and Confirm Expansion View, from its status menu, in the Settings
+/// section (the second Mac test of the page, 2026-10-24).
+const PORT_OWN: &[&str] = &["read_expansion_list", "set_setting", "reset_settings", "confirm_osc_count",
+    "confirm_expansion_view"];
 
 /// The page's list against what it sends: every name the script quotes as an action and every
 /// `data-action` of the markup is on ACTIONS, every name on ACTIONS is sent from somewhere — a
 /// quote outside the list, or the markup — and the list is the tool's 81 page actions less the one
-/// the port drops, with the port's own three: the port is closed. Then the module: every name on
+/// the port drops, with the port's own five: the port is closed. Then the module: every name on
 /// ACTIONS has the words of its answer, and either a handler or a place on the explicit list of
 /// actions not built yet, never both — and that list is empty; and nothing the module lists is a
 /// name the page does not send. Sent while the page has the keyboard, each one not built would be
@@ -1764,7 +1874,7 @@ const PORT_OWN: &[&str] = &["read_expansion_list", "set_setting", "reset_setting
 fn every_action_the_page_sends_is_on_its_list_and_answered_by_the_module() {
     let actions = page_actions();
     assert_eq!(TOOL_PAGE_ACTIONS.len(), 81, "the tool's page sends 81 actions");
-    assert_eq!(actions.len(), 83, "the tool's 81, less the one dropped, and the port's three: {actions:?}");
+    assert_eq!(actions.len(), 85, "the tool's 81, less the one dropped, and the port's five: {actions:?}");
     let mut sorted = actions.clone();
     sorted.sort();
     sorted.dedup();

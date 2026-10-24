@@ -1,6 +1,6 @@
 id = "com.platform.vps-avenger"
 name = "VPS Avenger"
-version = "0.9.1"
+version = "0.10.0"
 license = "GPL-3.0-or-later"
 # The runtime's page support (O:addPage, O:inPlugin) came with version 0.6; `identify`'s `again`
 # and O:watch's count of readings, which the header's read and the name after ◀ and ▶ use, with 0.7;
@@ -29,9 +29,10 @@ optional_dependencies = ["com.platform.vps-avenger-presets"]
 #           twelve drum slots' names among them (src/read/drums.luau) — and a name renamed in
 #           Avenger's editor, read back off a picture (src/handover.luau); the sample editor's
 #           menus' fields, the envelope's preset name, the sample browser's rows and a field typed
-#           into (src/read/sample.luau, src/handover.luau), and DRUM SQ's LENGTH and SPEED
-#           (src/read/drumsq.luau); the expansion browser's caption, its grid of expansions and an
-#           open expansion's categories and preset rows, once per picture (src/read/browser.luau)
+#           into (src/read/sample.luau, src/handover.luau), and DRUM SQ's SPEED
+#           (src/read/drumsq.luau); the expansion browser's caption, the open expansion's name in
+#           its header, its grid of expansions and an open expansion's categories and preset rows,
+#           once per picture (src/read/browser.luau)
 #   input   the clicks on ◀ and ▶, UNDO and the redo list's right click, an opener clicked again
 #           (or Escape, for a right click's) to close a popup a choice left open, and the warning
 #           box's YES the page answers; the oscillator strip's and the macros' clicks, right clicks
@@ -64,19 +65,20 @@ optional_dependencies = ["com.platform.vps-avenger-presets"]
 #           for a knob turned, its picture before the press and the change wait after Return, its
 #           points read (src/amount.luau); the drumkit table's grids and its name column's profile
 #           (src/read/drums.luau), and for a drum slot's Browse its name's picture and a change wait
-#           after Return (src/handover.luau); the sample editor's tabs' profile and its switches'
-#           grid (src/read/sample.luau); LENGTH's change waits (src/actions/drumsq.luau); DRUM SQ's
-#           watcher's picture, its key's pending, and its questions with callbacks (src/watch.luau);
-#           the expansion browser's pictures, FAV's and the stars' grids, and the change waits after a
-#           click and after every step of a list (src/actions/browser.luau, src/read/browser.luau);
+#           after Return (src/handover.luau); the sample editor's tabs' captions' grid and points,
+#           and its switches' grid (src/read/sample.luau); LENGTH's change waits
+#           (src/actions/drumsq.luau); DRUM SQ's watcher's picture, its key's pending, and its
+#           questions with callbacks (src/watch.luau); the expansion browser's pictures, the star
+#           column's and the stars' grids, and the change waits after a click and after every step
+#           of a list (src/actions/browser.luau, src/read/browser.luau);
 #           the calibration pictures of the header, the warning box, the page's reads, the editor,
 #           the knobs, the watcher and the browser, in a calibrating run only
 #   path    where those pictures are written
 #   gui     the page: the avenger_control project's panel, beside Avenger (src/page.luau, ui/);
 #           its key is the overlay runtime's (O:addPage)
-#   settings  the page's: its key, the expansions list, its sounds, the Mac page mode, and the
-#           Drum SQ watcher's cadence — in the module's settings dialog and in the page's own
-#           Settings section, which writes the same settings (src/page.luau)
+#   settings  the page's: its key, the expansions list, its sounds, the Mac page mode, the Drum
+#           SQ watcher's cadence and the Expansion View stored — in the module's settings dialog
+#           and in the page's own Settings section, which writes the same settings (src/page.luau)
 #   sound   Open.wav and Close.wav as the page comes and goes, and Slider.wav at a knob's limit
 #           (sounds/, the project's)
 #   timer   DRUM SQ's watcher, at the `drumSqCadence` setting's pace (src/watch.luau); the overlay

@@ -1,7 +1,7 @@
 //! VPS Avenger's page, its own Settings section (the plan's slice 10:
 //! `modules/vps-avenger/src/page.luau`, `ui/`), loaded for real against the scripted host of
 //! `overlay_avenger_tests.rs`: the avenger_control tool's Windows-only Settings block made the page's
-//! section on both systems, writing the module's five settings — the ones its settings dialog shows —
+//! section on both systems, writing the module's six settings — the ones its settings dialog shows —
 //! with `set_setting` and `reset_settings`, and told them back with a `settings` message.
 //!
 //! What the plan says is pinned here. The page's `ready` gets the state, then the settings; every
@@ -24,10 +24,10 @@ const MAC_KEY: &str = "Ctrl+Shift+Win+F1";
 /// The helpers: whether the dialog and the page agree, the page's own messages, the way back.
 const SET: &str = r##"
 local S = T.S
-T.KEYS = { "roster", "pageKey", "sounds", "pageLeavesDawActive", "drumSqCadence" }
+T.KEYS = { "roster", "pageKey", "sounds", "pageLeavesDawActive", "drumSqCadence", "expansionView" }
 
 -- The dialog and the page agree: the last settings message posted to the page in use holds the
--- store's five values; the store's key is the one page key registered; the page object's
+-- store's six values; the store's key is the one page key registered; the page object's
 -- `activates` is the Mac mode's opposite; the watcher's timer runs at the store's pace.
 function T.agree(what)
   local m = T.lastPost("settings")
@@ -83,7 +83,7 @@ fn scenario(s: &str) -> String {
     format!("{SET}\n{}", s.replace("@KEY@", MAC_KEY))
 }
 
-/// The page's own `ready` gets the state, then one settings message: the five defaults, the
+/// The page's own `ready` gets the state, then one settings message: the six defaults, the
 /// expansions lists to choose from, the key in effect and the default key in words — small. The
 /// host's onReady of a reload posts the state only (the reloaded document sends its own `ready`),
 /// and that `ready` gets the settings again.
@@ -97,8 +97,9 @@ fn ready_gets_the_state_then_the_settings() {
         T.ok(#got == 2 and got[1].kind == "state" and got[2].kind == "settings", "the state, then the settings: " .. #got)
         local m = got[2]
         T.ok(m.values.roster == "Factory Standard" and m.values.pageKey == "@KEY@" and m.values.sounds == true
-          and m.values.pageLeavesDawActive == false and m.values.drumSqCadence == 250, "the five defaults")
-        T.ok(table.concat(m.rosters, "|") == "Factory Standard|Complete", "the lists to choose from")
+          and m.values.pageLeavesDawActive == false and m.values.drumSqCadence == 250
+          and m.values.expansionView == "8 per Row", "the six defaults")
+        T.ok(table.concat(m.rosters, "|") == "Factory Standard|Complete|Nyhdroe|Joyman", "the lists to choose from")
         T.ok(m.keyWords == "@KEY@" and m.defaultKeyWords == "@KEY@", "the keys in words")
         T.ok(#T.jsonEncode(m) < 1024, "small: " .. #T.jsonEncode(m))
         T.agree("ready")
@@ -150,8 +151,8 @@ fn a_setting_from_the_page_is_stored_and_answered_with_the_settings() {
 
 /// Whatever the settings dialog changes is posted to the page, and the two agree after each; the
 /// Mac mode from the dialog describes the page again, which is told nothing before its own `ready`.
-/// The dialog's OK with nothing changed — every one of the five set to its value — is answered by
-/// five equal settings messages, says nothing and describes nothing.
+/// The dialog's OK with nothing changed — every one of the six set to its value — is answered by
+/// six equal settings messages, says nothing and describes nothing.
 #[test]
 fn the_dialog_and_the_page_always_agree() {
     run_mac(&scenario(r##"
@@ -171,7 +172,7 @@ fn the_dialog_and_the_page_always_agree() {
         local said, pages, n = #S.speech, #S.pages, #T.page().posts
         for _, k in ipairs(T.KEYS) do T.setting(k, S.settings[k]) end
         local got = T.postsSince(n, "settings")
-        T.ok(#got == 5, "five settings messages: " .. #got)
+        T.ok(#got == 6, "six settings messages: " .. #got)
         for _, m in ipairs(got) do
           for _, k in ipairs(T.KEYS) do T.ok(m.values[k] == S.settings[k], "equal: " .. k) end
         end
@@ -398,6 +399,7 @@ fn reset_sets_every_setting_to_its_default_the_mac_mode_last() {
         T.setting("sounds", false)
         T.setting("drumSqCadence", 400)
         T.setting("pageLeavesDawActive", true)
+        T.setting("expansionView", "List")
         S.pageLoaded = false
         S.front, S.chain = W, { W }
         T.event()
@@ -421,7 +423,8 @@ fn reset_sets_every_setting_to_its_default_the_mac_mode_last() {
           local k = string.match(S.logs[i], "%[avenger%] %[page%] reset: (%a+) ")
           if k then order[#order + 1] = k end
         end
-        T.ok(table.concat(order, ",") == "roster,sounds,drumSqCadence,pageKey,pageLeavesDawActive", table.concat(order, ","))
+        T.ok(table.concat(order, ",") == "roster,expansionView,sounds,drumSqCadence,pageKey,pageLeavesDawActive",
+          table.concat(order, ","))
         T.ok(St.avengerList ~= nil, "Avenger's list left as it is")
         T.pageMsg({ action = "ready" })
         T.agree("after the reset")

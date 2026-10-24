@@ -667,8 +667,11 @@ The second Mac test of the Avenger page (build acd8b8d, an M2 Max on macOS 26.6.
 Avenger at 80 % on one 1920x1080 display at backing scale 1.00, three sessions in one log), with the
 maintainer's own points and the avenger_control developer's comparison report beside it. The
 findings are numbered as in the session's findings file; the report's points as R1 to R12. The
-overlay runtime goes to 0.13.0 and daw-hosts to 0.3.0 with these. The core part, in the plan's
-order:
+report's reference pictures were measured locally and are never put in the repository (tests use
+synthetic numbers; comments name a picture by its file name only). The fix pass has two parts, by
+the plan's numbering: the core's (C1 to C16), with which the overlay runtime goes to 0.13.0 and
+daw-hosts to 0.3.0, and the avenger module's (A1 to A19), with which vps-avenger goes to 0.10.0 and
+vps-avenger-presets to 1.3.0. The core part, in the plan's order:
 
 - [ ] **DirectML.dll ships with its terms (the maintainer's decision of 2026-10-24).** The Windows
       package keeps `DirectML.dll` (1.15.4, from `ort`'s download of ONNX Runtime ms@1.22.0) and
@@ -831,6 +834,137 @@ order:
 - [ ] **The focus guard while VoiceOver moves through the page (finding 29).** Only if the tester
       confirms that VoiceOver jumped back while moving through the page (findings' question 14).
       Not built.
+
+The avenger part, in the plan's order:
+
+- [x] **A1. The fixed Retina factor.** The project's pixels per pixel of the picture are the zoom's
+      scale over the factor (read/picture.luau, `pl.t`): one on a Mac at any zoom and backing
+      scale, where a fixed factor of two counted every box four times over. **The Mac tester
+      confirms:** the reads' "(the project's N of M …)" counts are a box's pixels at 1x.
+- [x] **A2. The oscillator count after a Mute (finding 1).** The dots are counted in every colour
+      Avenger draws them — playing, silenced by a Mute, under a Solo — off one grid over their band
+      and the pixels of its lit cells only, as parts; a part cut by the band's edge is dropped, and
+      a count is taken only where every dot lands on a tab's place for that count (within a quarter
+      of a step), never where a tab's name says more. Where the dots give none: the count of the
+      page's new **Confirm OSC Count** (Settings; the tool's action_confirm_osc_count), kept for the
+      preset read until another name is read, by the window the page keeps its values by (on Windows
+      the DAW's, not the plug-in's own child window), else the preset database's for a preset placed
+      by its words, never by similarity — each marked as such on the page. Tests in
+      avenger_osc_macros_tests.rs. **The Mac tester confirms:** with an oscillator muted, and with
+      one soloed, the strip still reads ("strip: N oscillators by their spacing"); Confirm OSC Count
+      fills in where it does not.
+- [x] **A3. The knob reader re-validated.** Every pixel of a ring, measured from the pixel's
+      corner as the tool does, off its grid's lit cells' pixels (equal to the tool's reading on all
+      33 Sliders pictures): one grid for the three macro knobs and one for the oscillator's three,
+      so the page key waits for two, not six. A ring the picture does not hold whole is not read —
+      a window below the screen's edge cut the macro knobs'. **The Mac tester confirms:** Level,
+      Pan, Transpose, Fine Tune, Random Pitch and the macro amounts read as Avenger shows them, at
+      100 % and at 200 %.
+- [x] **A4. The selected tab: one stands out, the rest are alike.** The darkest strip is the
+      selected tab only where it leads by 5 and by at least the others' spread. **The Mac tester
+      confirms:** "darkest selected: … by …, the others within …" names the tab shown.
+- [x] **A5. Reads taken during a redraw.** An action's read after its click that shows a redraw
+      (the Drums tab no longer read selected after a drumkit's step) is no answer: looked on from
+      (src/act.luau, `holds`), and at the bound "VPS Avenger was still redrawing; what it shows now
+      was not read". **The Mac tester confirms:** Back and Next of the drumkit say the kit, never
+      "the Drums tab is not selected".
+- [x] **A6. The Drums tab: names, Back and Next (finding 5).** The names' column from 271 and the
+      kit's Back and Next at (616, 224.5) and (623, 224.5) (`Drum SQ/Avenger 100% Pattern On.png`);
+      the names read with the tab, a row whose name was not read said as that; Back and Next named
+      "Previous/Next drumkit" or "Previous/Next sequence" by the mode. **The Mac tester confirms:**
+      Previous steps back as Next steps on, in both modes; the slots' names read.
+- [x] **A7. DRUM SQ's selected pattern.** The pattern whose two brightest rows lead its median row
+      by 20 or more, every other's by at most half of that: on the `Drum SQ/Pattern Chain/…`
+      pictures the selected one 37.8 to 71.5, the others 6.3 to 15.3 (the letter in every box),
+      0.40 of it at most. **The Mac tester confirms:** the "sq rows" lines name the
+      pattern shown.
+- [x] **A8. DRUM SQ's LENGTH.** Set from the page by a double-click (64) and a drag to the steps
+      asked, and said "set, not read": its text is not read. **The Mac tester confirms:** Length
+      set lands on the steps asked.
+- [x] **A9. The sample editor's tab.** Told by its caption: every pixel of each caption's box read,
+      the mean of its brightest 3 %, the selected one's the brightest by 10 or more (186 to 201
+      against 159 at most on the `Sample Editor/Avenger 50% …` pictures, 15 apart at the least with
+      the corner 2 points off; 217 against 199 at 95 %). Points every second or third pixel, and the
+      mean of all its text pixels, led by 2 to 8 only. **The Mac tester confirms:** "editor:
+      the tabs' captions …" names the tab shown.
+- [x] **A10. The expansion browser (findings 2 and 4), its parts 1, 2, 3 and 5.** Open or closed
+      from the header's name (X.NAME_TEXT): a name of the catalog's or Avenger's own list read there
+      is that expansion open; nothing drawn there (the host's `blank`) is the grid — this Avenger
+      draws an icon where the view's label was. Something drawn there that no name is read in
+      (`none`, a name the recogniser missed, or a header too large for the host's crop, from 165 %
+      on a Mac) settles nothing: the area decides then. On the grid the view is the one stored: a
+      new module setting, "8 per Row" by default, stored as set by Set Expansion View once the list
+      takes the choice, or by the page's new **Confirm Expansion View**, and shown as "set",
+      "confirmed" or "as stored", never as read. The area is read only where neither the header nor
+      a label settles it. FAV from the star column, only while an expansion reads open: on where a
+      star is drawn — a marked one light, an unmarked one dim (with FAV on and nothing marked it
+      still reads on) — off where none; a star is looked for in the middle of its box, which the
+      selected, lit row does not reach (with the corner 1.5 units off it reaches 0.06 to 0.14 into
+      the next row's whole box, and read FAV on). A category's faded initials ("AR" behind "Arp")
+      are dropped before it is placed. The page key's calibration pictures gain
+      `browser-<zoom>pct.png`, and `browser-unsettled-…` where nothing settled it. Close clicks only
+      where an expansion reads open: where nothing tells, it refuses (below, A10 part 3's last
+      case). A view stored as set or confirmed and then changed in the settings dialog or reset is
+      "as stored" from then on. **The Mac tester confirms:** the log's "the header reads '…' — …
+      open" and "the header reads no name"; opening an expansion, loading an expansion preset,
+      Close, FAV and a star; Set and Confirm Expansion View.
+- [ ] **A10, part 3's last case: Close where nothing tells whether an expansion is open — the
+      maintainer's decision.** The plan clicks there all the same, and closes the view list the
+      click opens on the grid "with the drawn test"; built, it refuses (Correct open Expansion
+      first). The drawn test is armed only by a press of O:chooseMenuItem's (popups.luau,
+      Pp.region), never by a plain click, so the list would be seen by nothing; and no picture of
+      the view list is in the report to read it by. With the area read where the header settles
+      nothing, the case needs the header and the area both unread.
+- [ ] **A10, part 4: one text region per row.** The grid's tile rows, the categories and the
+      presets each read as a region per row, so the host crops and enlarges them. Not done: 23 more
+      Vision requests a read on an Intel Mac, measured nowhere yet; the header now spares the area
+      read in most cases, and the core part's enlargement of large regions (above) does not read
+      the grid alone. Decide after the next Mac test's log.
+- [ ] **A10, part 6: opening by position where the names are not read.** The tile's index in the
+      chosen list, the stored view and the tool's page tables (its `_expansion_8_page_starts` and
+      siblings), confirmed after the click by the header's name. Not done (L).
+- [x] **A11. The lists exactly as the tool offers them (finding 3).** Factory Standard, Complete
+      (the tool's 124), and the tool's two personal rosters by their names, Nyhdroe and Joyman — the
+      maintainer's decision of 2026-10-24, the one exception to naming a person; every other roster
+      stays out. The converter's allowlist, the data module 1.3.0 (`rosters` added, format 1), the
+      setting and the page; an expansion a roster lists without data is kept and marked "no presets
+      in the database". **The Mac tester confirms:** Expansions List offers the four, and each
+      shows its expansions.
+- [x] **A12, its first half: a Reset after each knob.** Reset level, Reset pan, Reset transpose,
+      Reset fine tune, Reset random pitch and Reset macro 1 to 3, the tool's separate buttons: a
+      double-click (the right button for Pan and Random Pitch), then the read. **The Mac tester
+      confirms:** each resets its knob and says the value read.
+- [ ] **A12, its second half: the knob held with Page Up and Page Down, Return confirming.** Not
+      built. The hold it needs is the core part's `O:holdKeys` (above, runtime 0.13.0); the ring
+      does not use it yet, so Return on a knob resets it, as before.
+- [x] **A13. The ring says a busy press.** "<control>: still working on the last press", once a
+      press, without cutting into speech; everything the ring says is in the log ("[avenger] [ring]
+      said: …"). **The Mac tester confirms:** fast presses of Oscillator are said, never dropped
+      in silence.
+- [x] **A14. The last name read is kept only while it holds.** The reads place no name once the
+      preset may have changed with nothing read since (main.luau, `lastName`). **The Mac tester
+      confirms:** after a Load the ring no longer places "Init Preset".
+- [x] **A15. MENU's file items and its popup.** Load preset and Save preset as are clicked once
+      (`retries = 0`), from the ring and from the page: Avenger's popup stays drawn while the
+      dialog opens. Kept with the core part's wait on a frozen popup (above): a click that is
+      followed and still finds the popup so at the press's bound is given up, and the popup closed
+      by a click on MENU, which would land in the dialog. MENU's popup is looked for from 240.
+      **The Mac tester confirms:** one click of Load's row (one `choosing item` line, no `clicked
+      N time(s)`), and the popup found whole.
+- [ ] **A16. The ring's Load says the loaded preset.** Not built. The plug-in window brought back
+      after the dialog is the core part's (above); the ring's Load does not watch the name after it
+      yet.
+- [x] **A17. A part off the screen is said as that.** "the macros are below the screen; move the
+      plug-in's window up" — by the page's error region, the ring's controls and every action's
+      refusal; past the right edge alike. **The Mac tester confirms:** with the window low on the
+      screen, the page and the ring say which part, and moving the window up brings it back.
+- [x] **A18. A Mute under a Solo.** Avenger lights every other tab's Mute while a Solo is on, as
+      a Mute pressed: those are said "silenced by OSC 1's Solo", never on, on the page and by the
+      ring. **The Mac tester confirms:** Solo on OSC 1, OSC 2's Mute is said silenced.
+- [ ] **A19. The page key's second.** Partly: the area's read is gone where the header settles the
+      browser. Asking the questions with callbacks in parallel is not done: the page's `open`
+      answers in its handler, where they are waited for — it needs the runtime's page to take a
+      later answer.
 
 ## The first Mac test of the Avenger page (2026-10-14)
 

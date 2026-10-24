@@ -78,6 +78,51 @@ fn a_size_from_the_page_is_chosen_in_a_zoom_list_painted_inside_avenger() {
     "##));
 }
 
+/// MENU's Load preset from the ring, in a popup painted from (242, 20) — left of 245, the old edge
+/// of the area it is looked for in, where the second Mac test found it cut — and left drawn after
+/// the click, as Avenger's popup stays while its file dialog opens: found whole, and its row clicked
+/// ONCE (`retries = 0`), never again into the dialog, frozen or drawn again; that test clicked it
+/// four times. Save preset as alike. Initialize preset, which opens no dialog, is followed: a popup
+/// frozen as at its click is the click pending (overlay runtime 0.13), not clicked again; drawn
+/// again — the pointer over its row — and still open, it is clicked again.
+#[test]
+fn menus_file_items_are_clicked_once_in_a_popup_found_from_240() {
+    run_mac(&scenario(r##"
+        local header = T.avengerAt80("LD Lead 1")
+        local base = { osc = 1, selected = "osc", index = 1 }
+        T.paintAvenger(98, 84, 1.6, base)
+        -- The clicks after the item's: while the popup stays frozen, and once it is drawn again.
+        local function choose(label)
+          T.pressAt(header, T.indexOf(header, label))
+          T.paintAvenger(98, 84, 1.6, { osc = 1, selected = "osc", index = 1, popup = { 242, 20, 322, 70 } })
+          T.tick(3)
+          -- 242 is 485.2 on screen, 485: 241.9 from Avenger's corner.
+          T.ok(T.count("[avenger] '" .. label .. "': MENU's popup at (241.9,20.0) 80.0x50.0 from Avenger's corner") == 1,
+            T.dump())
+          local clicks = #S.clicks
+          T.tick(6)
+          local frozen = #S.clicks - clicks
+          local c = S.clicks[#S.clicks]
+          T.paintAvenger(98, 84, 1.6, { osc = 1, selected = "osc", index = 1,
+            popup = { 242, 20, 322, 70, pointer = { (c[1] - 98) / 1.6, (c[2] - 84) / 1.6 } } })
+          T.tick(4)
+          local again = #S.clicks - clicks - frozen
+          T.repaint(base)
+          T.tick(4)
+          return frozen, again
+        end
+        local frozen, again = choose("Load preset")
+        T.ok(frozen == 0 and again == 0 and T.clickAt() == "549,135", "Load once, at its row: " .. T.clickAt())
+        T.ok(T.count("'Load preset' — test 'drawn' sees the menu at 485,116 128x80") == 1
+          and T.count("choosing item (64,19) at (549,135)") == 1, T.dump())
+        frozen, again = choose("Save preset as")
+        T.ok(frozen == 0 and again == 0, "Save as once: " .. frozen .. " " .. again)
+        frozen, again = choose("Initialize preset")
+        T.ok(frozen == 0 and again == 1, "Initialize pending while frozen, clicked again once drawn again: " .. frozen
+          .. " " .. again .. " " .. T.dump())
+    "##));
+}
+
 /// MENU's Load from the ring, its popup painted below MENU: chosen at Load's row in the middle of
 /// the area seen; and the redo list from the page, which holds the trip for as long as it is seen
 /// and lets it go on once it has gone — then the name.
@@ -94,7 +139,8 @@ fn menu_from_the_ring_and_the_redo_list_from_the_page_in_popups_painted_inside_a
         T.ok(T.clickAt() == "562,135", "Load's row: " .. T.clickAt())
         T.repaint({ osc = 1, selected = "osc", index = 1 })
         T.tick(3)
-        T.ok(T.count("[menu item] 'VPS Avenger': 'Load preset' chosen — clicked 1 time(s) at (562,135)") == 1, T.dump())
+        -- Chosen at its click, not followed: the item opens a file dialog (main.luau, ONE_CLICK).
+        T.ok(T.count("choosing item (64,19) at (562,135)") == 1, T.dump())
         -- The redo list from the page.
         T.pageReady()
         T.nameIs("LD Lead 1")
@@ -608,7 +654,9 @@ fn on_windows_at_150_percent_a_led_is_clicked_through_the_factor_and_read() {
 /// Some of the ring's controls after Zoom: the Oscillator stepper reads the strip as it is first
 /// announced, steps to the next tab with the same click as the page's, and says the tab read after
 /// it; Mute says the selected tab's switch and clicks it; Level resets the knob and says the value
-/// read; Macro button 1 says its name and state and clicks it. A part is read once in a stay.
+/// read, and so does Reset level after it, the tool's separate reset button, with the same
+/// double-click; Reset pan with the right button; Macro button 1 says its name and state and clicks
+/// it. A part is read once in a stay.
 #[test]
 fn the_rings_strip_and_macro_controls_say_what_was_read_and_click_as_the_page_does() {
     run_mac(&scenario(r##"
@@ -639,10 +687,36 @@ fn the_rings_strip_and_macro_controls_say_what_was_read_and_click_as_the_page_do
         i = T.indexOf(header, "Level")
         T.pressAt(header, i)
         T.tick(1)
+        local level = T.clickAt()
         T.repaint({ osc = 3, selected = "osc", index = 2, mute = { [2] = true }, volume = 100, transpose = 0, fine = 0,
           macroShown = 1, buttons = { false, false } })
         T.tick(3)
         T.ok(T.lastSaid() == "Volume 100 percent", T.said())
+        -- Reset level, after the knob: the same double-click, said as the knob's.
+        T.repaint({ osc = 3, selected = "osc", index = 2, mute = { [2] = true }, volume = 150, transpose = 0, fine = 0,
+          macroShown = 1, buttons = { false, false } })
+        i = T.indexOf(header, "Reset level")
+        T.ok(header.controls[i - 1].label == "Level", "after the knob")
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Reset level, button", T.said())
+        local clicks = #S.clicks
+        T.pressAt(header, i)
+        T.tick(1)
+        T.ok(#S.clicks == clicks + 2 and T.clickAt() == level and S.clicks[#S.clicks].button == nil
+          and S.clicks[#S.clicks - 1].button == nil, "a double-click on the knob, the left button: " .. T.clickAt())
+        T.repaint({ osc = 3, selected = "osc", index = 2, mute = { [2] = true }, volume = 100, transpose = 0, fine = 0,
+          macroShown = 1, buttons = { false, false } })
+        T.tick(3)
+        T.ok(T.lastSaid() == "Volume 100 percent", T.said())
+        -- Reset pan: the right button.
+        clicks = #S.clicks
+        T.pressAt(header, T.indexOf(header, "Reset pan"))
+        T.tick(1)
+        T.ok(#S.clicks == clicks + 2 and S.clicks[#S.clicks].button == "right" and S.clicks[#S.clicks - 1].button == "right",
+          "Pan with the right button")
+        T.tick(16)
+        T.ok(T.lastSaid() == "Pan 0, unchanged", T.said())
         -- Macro button 1.
         i = T.indexOf(header, "Macro button 1")
         header.focus = i - 1
@@ -653,6 +727,96 @@ fn the_rings_strip_and_macro_controls_say_what_was_read_and_click_as_the_page_do
           macroShown = 1, buttons = { true, false } })
         T.tick(3)
         T.ok(T.lastSaid() == "Hold ON", T.said())
+    "##));
+}
+
+/// The selected tab is the darkest bottom strip only where it stands out — by 5 and by at least the
+/// spread of the others (read/strip.luau): with no tab drawn selected, every strip alike, none is
+/// taken, where the darkest of equals was the first; with one drawn selected, that one. A picture
+/// taken while Avenger redraws, as the second Mac test's: Trig the darkest by 7, over the others
+/// 21 apart — none.
+#[test]
+fn the_selected_tab_is_one_that_stands_out_or_none() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.pageOn({ osc = 3 })
+        local o = T.lastPost("state").state.osc_panel
+        T.ok(o.count == 3 and o.selected_type == nil and o.selected_index == nil, "none: " .. tostring(o.selected_type))
+        T.ok(T.count("— none: OSC 1 by 0.0, the others within 0.0") == 1, T.dump())
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageKey()
+        T.event()
+        T.paintAvenger(98, 84, 1.6, { osc = 3, selected = "osc", index = 2 })
+        T.openPage()
+        o = T.lastPost("state").state.osc_panel
+        T.ok(o.selected_type == "osc" and o.selected_index == 2, "OSC 2: " .. tostring(o.selected_index))
+        -- Mid-redraw.
+        T.event()
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageKey()
+        T.event()
+        T.paintAvenger(98, 84, 1.6, { osc = 3, strips = { 69, 80, 90, drums = 85, trig = 62 } })
+        T.openPage()
+        o = T.lastPost("state").state.osc_panel
+        T.ok(o.selected_type == nil and T.count("— none: Trig by 7.0, the others within 21.0") == 1,
+          tostring(o.selected_type) .. " " .. T.dump())
+    "##));
+}
+
+/// Under a Solo, Avenger lights every other tab's Mute as a Mute pressed: with OSC 1's Solo on and
+/// OSC 2's and OSC 3's Mute lit, the ring's Mute on OSC 2 says it silenced by OSC 1's Solo, never on;
+/// its press, which changes nothing that can be read, says the same, unchanged; the page is posted
+/// the tabs whose Solo is on (`solo_by`), by which it words the other Mutes. With the Solo off, a
+/// Mute is on or off again. A tab whose own Solo is on has its Mute its own: OSC 2 soloed beside
+/// OSC 1, its Mute lit, says it on; Drums' Solo is among the Solos posted.
+#[test]
+fn a_mute_under_another_tabs_solo_is_said_as_silenced_by_it() {
+    run_mac(&scenario(r##"
+        local header, _, W = T.avengerAt80("LD Lead 1")
+        local SOLO = { osc = 3, selected = "osc", index = 2, solo = { [1] = true }, mute = { [2] = true, [3] = true } }
+        T.paintAvenger(98, 84, 1.6, SOLO)
+        T.words({})
+        local i = T.indexOf(header, "Mute")
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Mute, OSC 2, silenced by OSC 1's Solo, button", T.said())
+        T.pressAt(header, i)
+        T.tick(16)
+        T.ok(T.lastSaid() == "OSC 2 Mute, silenced by OSC 1's Solo, unchanged", T.said())
+        -- The page's key: the tabs whose Solo is on.
+        T.event()
+        T.pageReady()
+        T.openPage()
+        local o = T.lastPost("state").state.osc_panel
+        T.ok(o.solo_by and table.concat(o.solo_by, "|") == "OSC 1" and o.mute_states[2] == true, "the page: "
+          .. table.concat(o.solo_by or {}, "|"))
+        -- The Solo off: OSC 2's Mute is its own again.
+        T.event()
+        T.paintAvenger(98, 84, 1.6, { osc = 3, selected = "osc", index = 2, mute = { [2] = true } })
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageKey()
+        T.event()
+        T.run(400)
+        -- The press reads the strip again, before and after its click.
+        T.pressAt(header, i)
+        T.tick(16)
+        T.ok(T.lastSaid() == "OSC 2 Mute ON, unchanged", T.said())
+        T.openPage()
+        T.ok(T.lastPost("state").state.osc_panel.solo_by == nil, "no Solo on")
+        -- OSC 2's own Solo on beside OSC 1's and Drums': its Mute its own.
+        T.event()
+        T.paintAvenger(98, 84, 1.6, { osc = 3, selected = "osc", index = 2, solo = { [1] = true, [2] = true },
+          mute = { [2] = true }, drumsSolo = true })
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageKey()
+        T.event()
+        T.run(400)
+        T.pressAt(header, i)
+        T.tick(16)
+        T.ok(T.lastSaid() == "OSC 2 Mute ON, unchanged", "its own Solo on: " .. T.said())
+        T.openPage()
+        local by = T.lastPost("state").state.osc_panel.solo_by
+        T.ok(table.concat(by or {}, "|") == "OSC 1|OSC 2|Drums", "the Solos: " .. table.concat(by or {}, "|"))
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }
 
@@ -751,9 +915,14 @@ fn the_rings_macro_tabs_and_one_action_at_a_time() {
         T.pressAt(header, T.indexOf(header, "Add macro tab"))
         T.ok(#S.clicks == clicks and T.count("[avenger] [ring] 'Add macro tab': an action of the ring is still out — this "
           .. "press is not sent") == 1, T.dump())
+        -- Said once a press, without cutting in, and in the log.
+        local last = S.speech[#S.speech]
+        T.ok(last.text == "Add macro tab: still working on the last press" and last.interrupt == false, T.said())
+        T.ok(T.count("[avenger] [ring] said: Add macro tab: still working on the last press") == 1, T.dump())
         paint(1, { buttons = { true, false } })
         T.tick(3)
         T.ok(T.lastSaid() == "Hold ON" and #S.clicks == clicks, T.said())
+        T.ok(S.speech[#S.speech].interrupt == true and T.count("[avenger] [ring] said: Hold ON") == 1, T.dump())
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }
@@ -765,6 +934,7 @@ fn the_rings_macro_tabs_and_one_action_at_a_time() {
 fn the_drums_and_trig_tabs_are_selected_and_their_menus_and_switches_used() {
     run_mac(&scenario(r##"
         local _, _, W = T.pageOn({ osc = 2, selected = "osc", index = 1 })
+        T.words({ ["slot 1"] = "CR Wide" })
         T.tripFrom({ action = "select_drums_tab", args = {}, focused = true }, W)
         T.ok(T.clickAt() == "1020,140", "Drums at (576, 35): " .. T.clickAt())
         T.repaint({ osc = 2, selected = "drums", pattern = true, central = "editor" })
@@ -772,6 +942,10 @@ fn the_drums_and_trig_tabs_are_selected_and_their_menus_and_switches_used() {
         local o = T.lastPost("state").state.osc_panel
         T.ok(o.selected_type == "drums" and o.drum_pattern == true and o.central_panel_tab == "editor",
           tostring(o.selected_type) .. " " .. tostring(o.central_panel_tab))
+        -- The slots' names read with it, which the page shows.
+        local labels = o.drumkit_part_labels
+        T.ok(labels and (labels[1] or labels["1"]) == "CR Wide", "the names read: " .. T.jsonEncode(labels or {}))
+        T.words({})
         T.event()
         T.tripFrom({ action = "select_trig_tab", args = {}, focused = true }, W)
         T.ok(T.clickAt() == "1084,140", "Trig at (616, 35): " .. T.clickAt())
@@ -832,9 +1006,10 @@ fn an_actions_reads_and_the_drawn_test_loop_over_no_pixels_in_luau() {
         T.tick(3)
         Open.part = part
         T.ok(#spent == 2 and T.lastPost("state").state.osc_panel.selected_index == 6, "two reads: " .. #spent)
-        -- Measured 2026-10-17: 20,072 turns each, of a part 1640 by 1000 pixels at 200 %.
+        -- Measured 2026-10-17: 20,072 turns each, of a part 1640 by 1000 pixels at 200 %; 2026-10-24,
+        -- with every pixel of the strip's dots and the knobs' pointers counted, 67,597.
         for _, n in ipairs(spent) do
-          T.ok(n < 25000, string.format("a part read spent %d turns: %s", n, table.concat(spent, ", ")))
+          T.ok(n < 75000, string.format("a part read spent %d turns: %s", n, table.concat(spent, ", ")))
         end
         -- The drawn test's readings of the zoom list's rectangle, at 200 %: the turns of a tick that
         -- answers one, the item still waiting.
@@ -848,4 +1023,298 @@ fn an_actions_reads_and_the_drawn_test_loop_over_no_pixels_in_luau() {
         -- Measured 2026-10-17: 4,667 turns.
         T.ok(tick < 8000, string.format("a tick with a drawn reading spent %d turns", tick))
     "##);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The oscillators counted (the second Mac test of the page, 2026-10-24).
+// ---------------------------------------------------------------------------------------------
+
+/// The dots' colours as Avenger draws them, measured on the second Mac test's pictures
+/// (`OSC Tabs/Mutesolo/…`): a playing oscillator's green, a silent one's pink — muted, or silenced
+/// by another tab's Solo — and a soloed one's orange; and the dots themselves, 4 points across from
+/// the tab's left, `step` points apart.
+const DOTS: &str = r##"
+T.PLAYING, T.SILENT, T.SOLO = { 179, 253, 224 }, { 248, 138, 175 }, { 246, 192, 151 }
+function T.dotsAt(step, n, colours)
+  local out = {}
+  for i = 1, n do out[i] = { 244 + (i - 1) * step, 4, colours and colours[i] or T.PLAYING } end
+  return out
+end
+"##;
+
+/// Eight oscillators at 80 % — the dots 38.3 points apart, as on the pictures — with OSC 3 muted,
+/// its dot pink: eight counted by their spacing, where the project's green alone left a gap (the
+/// second Mac test of the page, 2026-10-24: one Mute and no oscillator could be read). OSC 3's Solo
+/// is clicked at the eight tabs' place, (346, 26) — not the seven's (353.5, 26). Seven pink and one
+/// orange — OSC 5 soloed — are eight as well; two dots 147 points apart are two.
+#[test]
+fn the_dots_count_the_oscillators_in_every_colour_by_their_spacing() {
+    run_mac(&format!("{OPEN}\n{DOTS}\n{}", r##"
+        local _, _, W = T.pageOn({ osc = 8, selected = "osc", index = 1, mute = { [3] = true },
+          dots = T.dotsAt(38.3, 8, { [3] = T.SILENT }) })
+        local o = T.lastPost("state").state.osc_panel
+        T.ok(o.count == 8 and o.count_from == nil and o.mute_states[3] == true, "eight, read: " .. tostring(o.count))
+        T.ok(T.count("8 oscillators by their spacing") == 1 and T.count("tab 3 silent") == 1, T.dump())
+        -- (346, 26) at 1.6 from (98, 84): 651.6 -> 652, 125.6 -> 126.
+        T.tripFrom({ action = "toggle_osc_solo", args = { index = 3 }, focused = true }, W)
+        T.ok(T.clickAt() == "652,126", "OSC 3's Solo at the eight tabs' place: " .. T.clickAt())
+        T.settle(16)
+        -- Seven silent and OSC 5's orange.
+        local silent = {}
+        for i = 1, 8 do silent[i] = i == 5 and T.SOLO or T.SILENT end
+        T.event()
+        T.paintAvenger(98, 84, 1.6, { osc = 8, selected = "osc", index = 1, dots = T.dotsAt(38.3, 8, silent) })
+        T.tripFrom({ action = "select_osc_tab", args = { index = 8 }, focused = true }, W)
+        T.ok(T.count("tab 5 solo") == 1 and T.count("tab 8 silent") >= 1, T.dump())
+        T.repaint({ osc = 8, selected = "osc", index = 8, dots = T.dotsAt(38.3, 8, silent) })
+        T.settle()
+        o = T.lastPost("state").state.osc_panel
+        T.ok(o.count == 8 and o.selected_index == 8, "eight under a Solo: " .. tostring(o.count))
+        -- Two, 147 apart.
+        T.event()
+        T.paintAvenger(98, 84, 1.6, { osc = 2, selected = "osc", index = 2, dots = T.dotsAt(147, 2) })
+        T.tripFrom({ action = "select_osc_tab", args = { index = 1 }, focused = true }, W)
+        T.repaint({ osc = 2, selected = "osc", index = 1, dots = T.dotsAt(147, 2) })
+        T.settle()
+        T.ok(T.lastPost("state").state.osc_panel.count == 2 and T.count("2 oscillators by their spacing") >= 1, T.dump())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// What the dots do not settle is not read, and nothing is clicked by it: eight dots 41 points apart
+/// — the seven tabs' step — put the eighth past the seventh tab; seven dots 41 apart with the seventh
+/// tab's name read "OSC 8" are a count short.
+#[test]
+fn dots_that_fit_no_count_and_a_count_its_names_contradict_are_not_taken() {
+    run_mac(&format!("{OPEN}\n{DOTS}\n{}", r##"
+        local _, _, W = T.pageOn({ osc = 7, selected = "osc", index = 1, dots = T.dotsAt(41, 8) })
+        local o = T.lastPost("state").state.osc_panel
+        T.ok(o.count == nil, "no count: " .. tostring(o.count))
+        T.ok(T.count("the dot at x 951.0 lands at tab 7.97 of 7, 41 apart") == 1, T.dump())
+        local clicks = #S.clicks
+        T.tripFrom({ action = "toggle_osc_mute", args = { index = 3 }, focused = true }, W)
+        T.settle(2)
+        T.ok(#S.clicks == clicks and T.lastPost("error").text == "An oscillator's Mute: the oscillator tabs cannot be counted now",
+          T.lastPost("error").text)
+        -- Seven, the seventh tab's name OSC 8.
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageKey()
+        T.event()
+        T.paintAvenger(98, 84, 1.6, { osc = 7, selected = "osc", index = 1, dots = T.dotsAt(41, 7) })
+        T.words({ ["osc 6"] = "SC 6 OS", ["osc 7"] = "OSC 8" })
+        T.openPage()
+        T.event()
+        o = T.lastPost("state").state.osc_panel
+        T.ok(o.count == nil and o.names == nil and o.mute_states == nil, "a count short, not taken")
+        T.ok(T.count("a tab's name reads OSC 8 — the dots' count of 7 is short, and not taken") == 1, T.dump())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// More of what the dots do not settle, and what they settle despite it: two dots 200 points apart —
+/// a gap within a quarter of no count's step, 146 and 293 the nearest — give no count; a part the
+/// band's right edge cuts is no dot, and the three dots 97 apart beside it are three. Where the dots
+/// give none, the preset database's count is taken only for a name it places by its words: a name it
+/// places by similarity alone is placed, and counts nothing.
+#[test]
+fn a_gap_no_step_fits_a_part_the_band_cuts_and_a_name_placed_by_similarity_count_nothing() {
+    run_mac(&format!("{OPEN}\n{DOTS}\n{}", r##"
+        T.presets()
+        local _, _, W = T.pageOn({ osc = 2, selected = "osc", index = 1, dots = T.dotsAt(200, 2) })
+        local o = T.lastPost("state").state.osc_panel
+        T.ok(o.count == nil and T.count("their middle gap of 200.0 fits no count's step (the nearest 146, 2 tabs')") == 1,
+          tostring(o.count) .. " " .. T.dump())
+        local function again(spec, words)
+          S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+          T.pageKey()
+          T.event()
+          T.paintAvenger(98, 84, 1.6, spec)
+          T.words(words or {})
+          T.openPage()
+          T.event()
+          return T.lastPost("state").state
+        end
+        local dots = T.dotsAt(97, 3)
+        dots[4] = { 546, 4, T.PLAYING }
+        o = again({ osc = 3, selected = "osc", index = 1, dots = dots }).osc_panel
+        T.ok(o.count == 3 and o.count_from == nil and T.count("— cut by the band's edge") == 1,
+          "three: " .. tostring(o.count) .. " " .. T.dump())
+        local st = again({ osc = 3, selected = "osc", index = 1, dots = {} }, { preset = "AR Band Pass Slida" })
+        T.ok(st.expansion == "Alpha" and st.osc_panel.count == nil, "placed by similarity, not counted: "
+          .. tostring(st.expansion) .. " " .. tostring(st.osc_panel.count))
+        T.ok(T.count("by the preset database") == 0, T.dump())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// A part below the screen is said as that, with the way back (read/open.luau, Open.offScreen) —
+/// the second Mac test's window reached below its 1080-point screen, and those parts read "not
+/// read": Avenger at 80 % on a screen 700 tall, the macros from y 764 down. The ring's Macro 1 says
+/// it, Macro button 1's press says it and clicks nothing, and so does the page's action; the page's
+/// key names the parts in its error region. The strip, on the screen, reads as ever.
+#[test]
+fn a_part_below_the_screen_is_said_as_that_with_the_way_back() {
+    run_mac(&scenario(r##"
+        local header, _, W = T.avengerAt80("LD Lead 1")
+        T.paintAvenger(98, 84, 1.6, { osc = 2, selected = "osc", index = 1, macroShown = 1, buttons = { false, false } })
+        T.words({})
+        S.screenSize = { w = 2560, h = 700 }
+        local BELOW = "the macros are below the screen; move the plug-in's window up"
+        local i = T.indexOf(header, "Macro 1")
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Macro 1, " .. BELOW .. ", button", T.said())
+        local clicks = #S.clicks
+        T.pressAt(header, T.indexOf(header, "Macro button 1"))
+        T.tick(2)
+        T.ok(#S.clicks == clicks and T.lastSaid() == "Macro button 1: " .. BELOW, T.said())
+        i = T.indexOf(header, "Mute")
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Mute, OSC 1, off, button", "the strip on the screen: " .. T.said())
+        -- The page: its key, and an action on the macros.
+        T.pageReady()
+        T.openPage()
+        T.ok(T.lastPost("error").text == "The central panel and the macros are below the screen; move the plug-in's window "
+          .. "up. What lies past the edge was not read.", T.lastPost("error").text)
+        T.event()
+        T.tripFrom({ action = "toggle_macro_button", args = { index = 1 }, focused = true }, W)
+        T.settle()
+        T.ok(#S.clicks == clicks and string.find(T.lastPost("error").text, ": " .. BELOW, 1, true) ~= nil,
+          T.lastPost("error").text)
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// The ring's reads place the name last read in the database only while the preset cannot have
+/// changed since: with the dots not drawn, the strip's count is the database's for the name read;
+/// after Undo — the preset may be another, nothing read since — the read made again places no name,
+/// and counts nothing from the database (the second Mac test placed "Init Preset" after a load).
+#[test]
+fn the_rings_reads_place_no_name_after_the_preset_may_have_changed() {
+    run_mac(&format!("{OPEN}\n{DOTS}\n{}", r##"
+        T.presets()
+        local header = T.avengerAt80("AR Band Pass Slide")
+        T.paintAvenger(98, 84, 1.6, { osc = 3, selected = "osc", index = 1, dots = {} })
+        T.words({})
+        local i = T.indexOf(header, "Oscillator")
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.count("[avenger] [read] strip: 3 oscillators, by the preset database") == 1, T.dump())
+        T.pressAt(header, T.indexOf(header, "Undo"))
+        T.tick(3)
+        local snaps = S.snaps
+        header.focus = i - 1
+        T.tab()
+        T.ok(S.snaps > snaps, "read again")
+        T.ok(T.count("[avenger] [read] strip: 3 oscillators, by the preset database") == 1, "no name placed: " .. T.dump())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// Where the dots give no count: the preset database's, for a preset it places by its words as they
+/// stand — marked so — and the count the page's Confirm OSC Count says, kept for the preset read
+/// then until a name read differs, marked as confirmed; where the dots give one, theirs is taken and
+/// the page is told so. Confirm OSC Count clicks nothing, and is refused before a name was read.
+#[test]
+fn a_count_from_the_database_or_confirmed_fills_in_where_the_dots_give_none() {
+    run_mac(&format!("{OPEN}\n{DOTS}\n{}", r##"
+        T.presets()
+        local NO_DOTS = { osc = 3, selected = "osc", index = 1, dots = {} }
+        local _, _, W = T.pageOn(NO_DOTS, { preset = "AR Band Pass Slide" })
+        local o = T.lastPost("state").state.osc_panel
+        T.ok(o.count == 3 and o.count_from == "database", "the database's three: " .. tostring(o.count))
+        T.ok(T.count("[avenger] [read] strip: 3 oscillators, by the preset database") == 1, T.dump())
+        -- A preset the database does not have, and Confirm OSC Count.
+        local function again(words, spec)
+          S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+          T.pageKey()
+          T.event()
+          T.paintAvenger(98, 84, 1.6, spec or NO_DOTS)
+          T.words(words)
+          T.openPage()
+          T.event()
+          return T.lastPost("state").state.osc_panel
+        end
+        o = again({ preset = "My Own Lead" })
+        T.ok(o.count == nil, "not counted")
+        local clicks = #S.clicks
+        T.event()
+        T.pageMsg({ action = "confirm_osc_count", args = { count = 4 }, focused = true })
+        o = T.lastPost("state").state.osc_panel
+        T.ok(#S.clicks == clicks and o.count == 4 and o.count_from == "confirmed", "confirmed: " .. tostring(o.count))
+        o = again({ preset = "My Own Lead" })
+        T.ok(o.count == 4 and o.count_from == "confirmed", "kept for its preset: " .. tostring(o.count))
+        -- The dots read three: theirs.
+        o = again({ preset = "My Own Lead" }, { osc = 3, selected = "osc", index = 1 })
+        T.ok(o.count == 3 and o.count_from == nil
+          and T.count("the dots read 3 oscillators, 4 as confirmed for this preset — the dots' count is taken") == 1, T.dump())
+        T.event()
+        T.pageMsg({ action = "confirm_osc_count", args = { count = 4 }, focused = true })
+        T.ok(T.lastPost("state").state.osc_panel.count == 3
+          and T.lastPost("error").text == "Confirm OSC Count: the dots read 3 oscillators, and that count is taken",
+          tostring(T.lastPost("error").text))
+        -- Another name read: forgotten.
+        o = again({ preset = "Another Lead" })
+        T.ok(o.count == nil, "forgotten with the name")
+        -- No name read: refused.
+        o = again({})
+        T.event()
+        T.pageMsg({ action = "confirm_osc_count", args = { count = 2 }, focused = true })
+        T.ok(T.lastPost().text == "Confirm OSC Count: the preset's name has not been read, and the count is kept by it",
+          tostring(T.lastPost().text))
+        T.pageMsg({ action = "confirm_osc_count", args = { count = 9 }, focused = true })
+        T.ok(T.lastPost().text == "Confirm OSC Count: no count from 1 to 8 was sent", tostring(T.lastPost().text))
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// On Windows Avenger is a child window of the DAW's, the overlay's origin: the page keeps its
+/// values by the DAW's window in front, and so does the count confirmed — a trip's read and the next
+/// key find it there, and OSC 3's Mute is clicked at the four tabs' place. Read by the child's own
+/// window, the count confirmed was found nowhere.
+#[test]
+fn on_windows_a_confirmed_count_is_found_by_the_window_the_page_keeps() {
+    run(&format!("{OPEN}\n{}", r##"
+        local j = T.onWindows(80, 1.5)
+        local header = T.avenger()
+        T.answer(T.lastRead("vps-avenger header"), T.header(248, 60, 2.4, 80))
+        T.event()
+        T.ok(header.active, "identified")
+        T.run(400)
+        T.pageReady()
+        local NO_DOTS = { osc = 4, selected = "osc", index = 1, dots = {} }
+        T.paintAvenger(248, 60, 2.4, NO_DOTS)
+        T.words({ preset = "My Own Lead" })
+        T.openPage()
+        T.event()
+        T.ok(T.lastPost("state").state.osc_panel.count == nil, "not counted")
+        T.ok(j.id ~= T.WFX.id, "the origin is the child")
+        T.pageMsg({ action = "confirm_osc_count", args = { count = 4 }, focused = true })
+        T.ok(T.lastPost("state").state.osc_panel.count == 4, "confirmed")
+        -- A trip's read: the count confirmed, OSC 3's Mute at the four tabs' place.
+        local ST = T.source("modules/vps-avenger/src/tables/strip.luau")(T.host)
+        local x = math.floor(248 + 2.4 * (ST.tabX(3, 4) + ST.MUTE_X_OFFSET) + 0.5)
+        local y = math.floor(60 + 2.4 * ST.MUTE_Y + 0.5)
+        S.focusAtOnce = false
+        S.focusLands = function() S.front, S.chain = T.WFX, { j, T.WFX } end
+        T.pageMsg({ action = "toggle_osc_mute", args = { index = 3 }, focused = true })
+        T.land()
+        T.runDue()
+        T.ok(T.clickAt() == x .. "," .. y, "OSC 3's Mute at the four tabs' place: " .. T.clickAt() .. " " .. T.dump())
+        T.ok(T.count("strip: 4 oscillators, as confirmed for this preset") >= 1, T.dump())
+        T.repaint({ osc = 4, selected = "osc", index = 1, dots = {}, mute = { [3] = true } })
+        T.tick(3)
+        T.ok(T.lastPost("state").state.osc_panel.mute_states[3] == true, "read ON")
+        -- The next key: the count kept.
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = T.WFX, { j, T.WFX } end
+        T.pageKey()
+        T.event()
+        T.paintAvenger(248, 60, 2.4, NO_DOTS)
+        T.openPage()
+        T.event()
+        local o = T.lastPost("state").state.osc_panel
+        T.ok(o.count == 4 and o.count_from == "confirmed", "kept for its preset: " .. tostring(o.count))
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
 }

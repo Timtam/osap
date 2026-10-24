@@ -75,8 +75,10 @@ fn scenario(s: &str) -> String {
 // What the page key reads.
 // ---------------------------------------------------------------------------------------------
 
-/// The page key on the Drums tab with EDITOR: the editor's tab by its dark bottom strip, the view,
-/// and Amp's switch for the slot read as selected — the other tabs' lists left out, no browser read.
+/// The page key on the Drums tab with EDITOR: the editor's tab by its brightest caption — Amp, over
+/// bottom strips that darken towards EQ, as Avenger draws them (the second Mac test of the page,
+/// 2026-10-24: EQ always read) — the view, and Amp's switch for the slot read as selected — the
+/// other tabs' lists left out, no browser read.
 /// No tab read and the browser's rows in the words: the sample browser, its rows asked. On an
 /// oscillator tab none of the editor's keys, and nothing of it asked.
 #[test]
@@ -88,7 +90,7 @@ fn the_page_key_reads_the_sample_editor_on_the_drums_tab_with_editor() {
           and o.sample_editor_amp_states[1] == nil and o.sample_editor_pitch_states == nil and o.sample_editor_eq_states == nil,
           tostring(o.sample_editor_tab) .. " " .. tostring(o.sample_editor_view))
         T.ok(not T.asked("browser"), "no browser read where a tab reads")
-        T.ok(T.count("[avenger] [read] editor: the tabs' bottom strips ") == 1
+        T.ok(T.count("[avenger] [read] editor: the tabs' captions ") == 1
           and T.count("[avenger] [read] editor: Amp's switch ") == 1, T.dump())
         T.ok(T.count("— amp") == 1, T.dump())
         -- The browser.
@@ -262,7 +264,8 @@ fn a_sample_editor_action_away_from_the_editor_clicks_nothing() {
 
 /// Amp at (300, 260) — (578, 500) — clicked on the Sample tab and read selected after, its switch
 /// read with it for slot 3; Pitch clicked and EQ read instead: EQ said, the mismatch noted; EQ again
-/// with nothing drawn: unchanged at the bound; a click after which no tab reads: "cannot be read now".
+/// with nothing drawn: unchanged at the bound; a click after which no tab reads: no answer, looked on
+/// from as a redraw (src/act.luau, `holds`), and at the bound what it shows said as not read.
 #[test]
 fn an_editor_tab_is_clicked_and_its_switch_read_after() {
     run_mac(&scenario(r##"
@@ -291,9 +294,9 @@ fn an_editor_tab_is_clicked_and_its_switch_read_after() {
         T.event()
         T.tripFrom({ action = "select_sample_editor_tab", args = { tab = "sample" }, focused = true }, W)
         T.repaint(T.drums({ slots = { selected = 3 } }))
-        T.settle()
-        T.ok(T.lastPost("error").text == "Choosing a sample editor tab: the sample editor's tab cannot be read now",
-          T.lastPost("error").text)
+        T.tick(16)
+        T.ok(T.lastPost("error").text == "Choosing a sample editor tab: VPS Avenger was still redrawing; what it shows now "
+          .. "was not read", T.lastPost("error").text)
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }
@@ -846,9 +849,11 @@ fn the_editor_reads_loop_over_no_pixels_in_luau() {
         T.tick(3)
         Open.part = part
         T.ok(#spent == 2 and T.lastPost("state").state.osc_panel.sample_editor_amp_states[3] == true, "two reads: " .. #spent)
-        -- Measured 2026-10-17: 38,194 each; the table's 48 boxes alone are 179,712 pixels.
+        -- Measured 2026-10-17: 38,194 each; 2026-10-24, with every pixel of the strip's dots counted,
+        -- 52,144, and with the editor's captions' bright pixels read one by one (read/sample.luau),
+        -- 67,978; the table's 48 boxes alone are 179,712 pixels, the four captions' boxes 51,840.
         for _, n in ipairs(spent) do
-          T.ok(n < 45000, string.format("a part read spent %d turns: %s", n, table.concat(spent, ", ")))
+          T.ok(n < 75000, string.format("a part read spent %d turns: %s", n, table.concat(spent, ", ")))
         end
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
