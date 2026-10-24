@@ -1533,6 +1533,7 @@ dependencies = [
  "os_info",
  "percent-encoding",
  "same-file",
+ "serde_json",
  "sha2 0.11.0",
  "toml",
  "tracing",

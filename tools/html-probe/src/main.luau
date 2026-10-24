@@ -252,12 +252,13 @@ local NOT_COUNTED = { Control = true, Shift = true, Alt = true, Meta = true, OS 
 
 -- Whether `w` is a plug-in window of a DAW daw-hosts knows: an entry's matcher takes it, and the
 -- entry's `focusTarget` too where it has one (REAPER's matcher takes every dialog of its process).
+-- The matcher is the entry without its own fields (`daw.matcher`), which host.window.test raises for.
 local function isPluginWindow(w)
   if not w then
     return false
   end
   for _, entry in ipairs(daw.all) do
-    if host.window.test(entry, w) and (entry.focusTarget == nil or host.window.test(entry.focusTarget, w)) then
+    if host.window.test(daw.matcher(entry), w) and (entry.focusTarget == nil or host.window.test(entry.focusTarget, w)) then
       return true
     end
   end

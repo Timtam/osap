@@ -84,7 +84,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering}
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Security::{
-    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel, TokenUIAccess,
     TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -1694,7 +1694,9 @@ unsafe fn desktop_name(desktop: HDESK) -> Option<Vec<u16>> {
     Some(buf[..len].to_vec())
 }
 
-fn level_of_pid(pid: u32) -> Option<u32> {
+/// The integrity level of process `pid` ([`process_level`]), `None` when it could not be read.
+/// Also a click's check of the window it is made into (click_win.rs, `higher_rights`).
+pub(super) fn level_of_pid(pid: u32) -> Option<u32> {
     // SAFETY: the handle is checked and closed. PROCESS_QUERY_LIMITED_INFORMATION is granted
     // for an elevated process of the same user as well; for a protected or a system process it
     // may not be, and then the level is unknown and the key is not counted.
@@ -1711,7 +1713,7 @@ fn level_of_pid(pid: u32) -> Option<u32> {
 
 /// The RID of a process's mandatory integrity label: 0x1000 low, 0x2000 medium, 0x2010 medium
 /// with UIAccess, 0x3000 high, 0x4000 system.
-unsafe fn process_level(process: HANDLE) -> Option<u32> {
+pub(super) unsafe fn process_level(process: HANDLE) -> Option<u32> {
     let mut token: HANDLE = std::ptr::null_mut();
     if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
         return None;
@@ -1740,6 +1742,26 @@ unsafe fn process_level(process: HANDLE) -> Option<u32> {
         return None;
     }
     Some(*GetSidSubAuthority(sid, count as u32 - 1))
+}
+
+/// Whether a process's token holds UIAccess, with which its input reaches a process of higher
+/// rights (`TokenUIAccess`). `false` when it could not be read.
+pub(super) unsafe fn process_ui_access(process: HANDLE) -> bool {
+    let mut token: HANDLE = std::ptr::null_mut();
+    if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
+        return false;
+    }
+    let mut ui_access = 0u32;
+    let mut got = 0u32;
+    let ok = GetTokenInformation(
+        token,
+        TokenUIAccess,
+        (&mut ui_access as *mut u32).cast(),
+        std::mem::size_of::<u32>() as u32,
+        &mut got,
+    );
+    CloseHandle(token);
+    ok != 0 && ui_access != 0
 }
 
 #[cfg(test)]

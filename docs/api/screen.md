@@ -236,18 +236,18 @@ What a call of the image worker given a callback can be answered instead of its 
 **Where it cannot wait**, the call without a callback raises, at the line that called it — unless it touches nothing it would wait for (above), which is answered at once there too. Nothing is captured, no region is worked over and no file is written, and the event loop is never held for the screen. A `pcall` around the call returns the message. Those places are: outside every handler — a module's top level, an included file's, a function the host calls between the module's events; where Luau cannot stop the function — a metamethod, a `table.sort` comparator, a `string.gsub` function, the iterator of a `for` loop, an `xpcall` error handler; a function the host called and waits for — an arbiter's `onActivate` or `onDeactivate`, an `onChange` fired by the module's own `host.settings.set`, the top level of a file included from a handler; and a coroutine of the module's own, or one the [overlay runtime](./overlay.md#o-new) made for a hook that must not wait. The same holds on Windows and macOS, and for [`host.ocr.recognize`](./ocr.md#where-it-waits). The message names the call, the place and what to write there; `pixel`'s three:
 
 ```
-host.screen.pixel cannot wait here: this runs outside every event of the module — its top level, an included file's, or a function the host calls between its events. Call it from a handler, such as host.timer.after(0, …), or pass a callback, host.screen.pixel(x, y, opts, function(colour, why) … end)
+host.screen.pixel cannot wait here: this runs outside every event of the module — its top level, an included file's, or a function the host calls between its events. Call it from a handler, such as host.timer.after(0, …), or pass a callback, host.screen.pixel(x, y, opts, function(colour, err) … end)
 ```
 
 ```
-host.screen.pixel cannot wait here: this function runs inside one the host calls and waits for, or one Luau cannot suspend — an arbiter's onActivate or onDeactivate, an onChange fired by your own host.settings.set, the top level of an included file, a metamethod, a table.sort comparator, a string.gsub function, the iterator of a for loop, an xpcall error handler. Pass a callback, host.screen.pixel(x, y, opts, function(colour, why) … end), or make the call in the event's own function
+host.screen.pixel cannot wait here: this function runs inside one the host calls and waits for, or one Luau cannot suspend — an arbiter's onActivate or onDeactivate, an onChange fired by your own host.settings.set, the top level of an included file, a metamethod, a table.sort comparator, a string.gsub function, the iterator of a for loop, an xpcall error handler. Pass a callback, host.screen.pixel(x, y, opts, function(colour, err) … end), or make the call in the event's own function
 ```
 
 ```
-host.screen.pixel cannot wait in a coroutine the module made, or one the overlay runtime made for a hook that must not read (when, present, menu tests, an identify asked on every evaluation): only the host's own coroutine for an event waits. In a hook, measure it in a handler and let the hook read what was measured (see "Where a hook runs" in docs/api/overlay.md); in a coroutine of your own, pass a callback, host.screen.pixel(x, y, opts, function(colour, why) … end), or call it from the event's own function
+host.screen.pixel cannot wait in a coroutine the module made, or one the overlay runtime made for a hook that must not read (when, present, menu tests, an identify asked on every evaluation): only the host's own coroutine for an event waits. In a hook, measure it in a handler and let the hook read what was measured (see "Where a hook runs" in docs/api/overlay.md); in a coroutine of your own, pass a callback, host.screen.pixel(x, y, opts, function(colour, err) … end), or call it from the event's own function
 ```
 
-Every call's message names the call and its own callback form — `host.screen.profile cannot wait here: … pass a callback, host.screen.profile(opts, function(profile, why) … end)`, and `Snapshot:crop` for a snapshot's `crop`, with `s:crop(region, function(crop, why) … end)`. A pixel an overlay's `when` needs is a [probe](./overlay.md#o-probe)'s. The calls that can be answered at once read their arguments first, so a mistake in them raises as the mistake; `snapshot`, which always waits, raises the place's message whatever it was given.
+Every call's message names the call and its own callback form — `host.screen.profile cannot wait here: … pass a callback, host.screen.profile(opts, function(profile, err) … end)`, and `Snapshot:crop` for a snapshot's `crop`, with `s:crop(region, function(crop, err) … end)`. A pixel an overlay's `when` needs is a [probe](./overlay.md#o-probe)'s. The calls that can be answered at once read their arguments first, so a mistake in them raises as the mistake; `snapshot`, which always waits, raises the place's message whatever it was given.
 
 ```luau
 -- A module's top level cannot wait: there a call without a callback raises, and the picture is
@@ -274,9 +274,9 @@ end)
 
 **A poll that waits holds its module's keys.** A `host.timer.every` or `after` handler that waits for the screen keeps the module's keys waiting meanwhile: the capture, those ahead of it on its thread, the work on the image worker and the batches ahead of it there, and the turn of the event loop that hands the answer over. A poll passes its call a callback, and keeps one request out with a `key` ([With a callback](#with-a-callback)): one that takes a picture on every turn passes `snapshot` a callback, and one that reads several things of one moment reads them from that picture in its callback (`{ snapshot = s }`). The log says so, once per module and place in a session, when a timer's handler waited while keys queued behind it:
 
-`[com.example.game] a timer waited 63 ms for host.screen.snapshot at com.example.game/src/main.luau:41; 3 key(s) (Tab ×2, Down) waited behind it — a poll should not wait: host.screen.snapshot(opts, function(snap, why) … end)`
+`[com.example.game] a timer waited 63 ms for host.screen.snapshot at com.example.game/src/main.luau:41; 3 key(s) (Tab ×2, Down) waited behind it — a poll should not wait: host.screen.snapshot(opts, function(snap, err) … end)`
 
-`[com.example.game] a timer waited 24 ms for host.screen.pixels at com.example.game/src/main.luau:30; 2 key(s) (Tab ×2) waited behind it — a poll should not wait: host.screen.pixels(points, opts, function(colours, why) … end)`
+`[com.example.game] a timer waited 24 ms for host.screen.pixels at com.example.game/src/main.luau:30; 2 key(s) (Tab ×2) waited behind it — a poll should not wait: host.screen.pixels(points, opts, function(colours, err) … end)`
 
 A handler that has kept its module busy for 30 seconds or more with keys waiting behind it is said once, as for a read ([Where it waits](./ocr.md#where-it-waits)).
 

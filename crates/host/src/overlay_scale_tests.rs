@@ -334,7 +334,7 @@ fn regions_and_name_regions_scale_and_may_be_functions() {
         o:activate(2)
         assert(#S.clicks == clicks, "a region function with no answer: nothing clicked")
         assert(S.speech[#S.speech].text == "Moving, button, cannot be read now", T.said())
-        assert(T.count("[read] 'Moving' not read: its `region` function answered nil") == 1, T.dump())
+        assert(T.count("[read] 'Moving' not read: its region function answered nil") == 1, T.dump())
         -- A name read from a scaled region, on arrival.
         o.focus = 2
         T.tab()

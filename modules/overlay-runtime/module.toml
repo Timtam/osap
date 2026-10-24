@@ -70,7 +70,15 @@ name = "Overlay runtime"
 # control's `onActivate(overlay, press)` gets the press of the hotkey that activated it, and
 # O:activate takes it as a second argument; a hand-over's `onKey(overlay, trip, key, mods, press)`
 # gets its key's. A module that reads it depends on "com.platform.overlay >= 0.12".
-version = "0.12.0"
+# 0.12.1 answers a trip:handOver refused because the plug-in is not in front with the give-up's own
+# error value, the one onGiveUp hears (`moved_on` where another application's window is in front,
+# which was `not_in_front`); O:calibrationCrop answers `not_in_front` on an overlay that is not
+# active, and O:calibrationVerify `not_found` for a crop never written, where its search raised;
+# a region function's three messages name the field without backticks. A module that relies on any
+# of it depends on "com.platform.overlay >= 0.12.1". It tests a binding's DAW entries by their
+# matcher keys alone, the entry's own fields left out, as host.window.test raises for a key no
+# matcher has.
+version = "0.12.1"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

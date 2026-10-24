@@ -459,7 +459,7 @@ fn a_covered_point_a_declined_focus_or_another_window_clicks_nothing() {
         T.arrive(T.NOTEPAD)
         T.ok(T.since(from) == "ownsPoint,post result,show", "the result first, then the page: " .. T.since(from))
         T.ok(#S.clicks == 0 and #S.reads == 0, "nothing clicked through a window drawn over it, nothing read")
-        T.ok(S.front == T.PAGE and T.status() == "Something covers Notepad there; nothing was clicked.", T.status())
+        T.ok(S.front == T.PAGE and T.status() == "Something covers Notepad there, or it has closed; nothing was clicked.", T.status())
         S.owns = true
         -- Declined.
         S.focusAnswer = false

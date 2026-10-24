@@ -1398,18 +1398,7 @@ impl Backend for WindowsBackend {
     /// question worth asking is not "is this the same window" but "does this point belong to
     /// the same application window", so both sides go up to their root first.
     fn window_owns_point(&self, hwnd: isize, x: i32, y: i32) -> Option<bool> {
-        unsafe {
-            let at = WindowFromPoint(POINT { x, y });
-            if at.is_null() {
-                return None; // nothing there to compare against, which is not an accusation
-            }
-            let theirs = GetAncestor(at, GA_ROOT);
-            let ours = GetAncestor(hwnd as HWND, GA_ROOT);
-            if theirs.is_null() || ours.is_null() {
-                return None;
-            }
-            Some(theirs == ours)
-        }
+        owns_point(hwnd as HWND, x, y)
     }
 
     /// `windows_of` lists top-level windows by their HWND, so a listed window's id is a handle
@@ -1421,8 +1410,16 @@ impl Backend for WindowsBackend {
     /// Stricter than `window_owns_point`, which compares top-level windows: the point has to be
     /// in `window` itself or a window inside it, so a click for a plug-in's own window is not made
     /// on the DAW's list beside it. And it says which of three things is wrong.
+    ///
+    /// Then the rights of the program the click goes into: one of higher rights drops the click on
+    /// its way in, which `SendInput` does not say, so it is refused here with the posted click's
+    /// `denied` (until 2026-10-24 it answered `true` and nothing was clicked).
     fn click_check(&self, window: isize, x: i32, y: i32) -> Result<(), HostError> {
-        super::click_win::target(window, x, y).map(|_| ())
+        let at = super::click_win::target(window, x, y)?;
+        if super::click_win::higher_rights(at) {
+            return Err(HostError::of(&crate::errors::input::HIGHER));
+        }
+        Ok(())
     }
 
     fn mouse_click_posted(&self, window: isize, x: i32, y: i32, button: MouseButton, move_pointer: bool) -> Result<(), HostError> {
@@ -1669,33 +1666,41 @@ impl Backend for WindowsBackend {
         Ok(())
     }
 
-    fn key_send(&self, combo: &str) -> Result<(), KeyRefusal> {
-        // The shared parser, so a spec means here what it means to a hotkey. Its modifiers are
-        // roles, which on Windows are the keys of their names.
-        let (vk, mask) = super::parse_key_spec(combo)?;
-        if mask & super::MASK_TAP != 0 {
-            return Err(KeyRefusal::Mistake(format!(
-                "'{combo}' is a modifier tap, which is something to capture, not a key to send"
-            )));
+    fn key_send(&self, combo: &str) -> super::KeySend {
+        // Built first, so that a mistake sends nothing; then sent, with whether anything went out
+        // beside the answer (`key_sent`).
+        let built = (|| -> Result<Vec<(INPUT, Holds)>, KeyRefusal> {
+            // The shared parser, so a spec means here what it means to a hotkey. Its modifiers are
+            // roles, which on Windows are the keys of their names.
+            let (vk, mask) = super::parse_key_spec(combo)?;
+            if mask & super::MASK_TAP != 0 {
+                return Err(KeyRefusal::Mistake(format!(
+                    "'{combo}' is a modifier tap, which is something to capture, not a key to send"
+                )));
+            }
+            let mod_vks = modifier_vks(mask);
+            let (key_vk, extended) = os_key(vk);
+            let key_vk = key_vk as u16;
+            let ext = if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
+            // Every event marked, so that the hook leaves the key-down out of the count that ends
+            // a count of quick repeats ([`SEND_MARK`]); it takes and matches the key as ever. One
+            // `SendInput`, in order: one Windows stops taking part-way has the releases of the keys
+            // it pressed sent on their own (`send_inputs`), so no modifier is left down.
+            let mut events = Vec::with_capacity(2 * mod_vks.len() + 2);
+            for &vk in &mod_vks {
+                events.push((key_input(vk, 0, 0, SEND_MARK), Holds::Down(u32::from(vk))));
+            }
+            events.push((key_input(key_vk, 0, ext, SEND_MARK), Holds::Down(u32::from(key_vk))));
+            events.push((key_input(key_vk, 0, ext | KEYEVENTF_KEYUP, SEND_MARK), Holds::Up(u32::from(key_vk))));
+            for &vk in mod_vks.iter().rev() {
+                events.push((key_input(vk, 0, KEYEVENTF_KEYUP, SEND_MARK), Holds::Up(u32::from(vk))));
+            }
+            Ok(events)
+        })();
+        match built {
+            Ok(events) => key_sent(&send_inputs(&events, &[])),
+            Err(mistake) => super::KeySend::all_or_nothing(Err(mistake)),
         }
-        let mod_vks = modifier_vks(mask);
-        let (key_vk, extended) = os_key(vk);
-        let key_vk = key_vk as u16;
-        let ext = if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
-        // Every event marked, so that the hook leaves the key-down out of the count that ends a
-        // count of quick repeats ([`SEND_MARK`]); it takes and matches the key as ever. One
-        // `SendInput`, in order: one Windows stops taking part-way has the releases of the keys it
-        // pressed sent on their own (`send_inputs`), so no modifier is left down.
-        let mut events = Vec::with_capacity(2 * mod_vks.len() + 2);
-        for &vk in &mod_vks {
-            events.push((key_input(vk, 0, 0, SEND_MARK), Holds::Down(u32::from(vk))));
-        }
-        events.push((key_input(key_vk, 0, ext, SEND_MARK), Holds::Down(u32::from(key_vk))));
-        events.push((key_input(key_vk, 0, ext | KEYEVENTF_KEYUP, SEND_MARK), Holds::Up(u32::from(key_vk))));
-        for &vk in mod_vks.iter().rev() {
-            events.push((key_input(vk, 0, KEYEVENTF_KEYUP, SEND_MARK), Holds::Up(u32::from(vk))));
-        }
-        send_inputs(&events, &[]).answer().map_err(KeyRefusal::Answer)
     }
 
     /// Every UTF-16 unit's down and up, in one `SendInput`. One Windows stops taking part-way ends
@@ -3894,6 +3899,32 @@ fn window_info(hwnd_val: isize, require_title: bool) -> Option<WinInfo> {
     }
 }
 
+/// `host.window.ownsPoint` here: whether the window drawn at (x, y) has the same top-level window as
+/// `hwnd`. A handle that names no window owns nothing, so it is `Some(false)` wherever the point is
+/// — `None`, read as permission, would let a click through for a window that is gone. `None` only
+/// where there is nothing to compare against: no window at the point (off every screen). Local
+/// calls that validate their handles, and none sends a window a message.
+fn owns_point(hwnd: HWND, x: i32, y: i32) -> Option<bool> {
+    // SAFETY: each call validates the handle it is given and answers null or false for one that is
+    // not a window.
+    unsafe {
+        if hwnd.is_null() || IsWindow(hwnd) == 0 {
+            return Some(false);
+        }
+        let at = WindowFromPoint(POINT { x, y });
+        if at.is_null() {
+            return None; // nothing there to compare against, which is not an accusation
+        }
+        let theirs = GetAncestor(at, GA_ROOT);
+        let ours = GetAncestor(hwnd, GA_ROOT);
+        if theirs.is_null() || ours.is_null() {
+            // Destroyed between the calls: gone, as above, or nothing at the point any more.
+            return if IsWindow(hwnd) == 0 { Some(false) } else { None };
+        }
+        Some(theirs == ours)
+    }
+}
+
 /// `host.window.foreground()`'s answer for `hwnd`, the foreground window: its process, and
 /// whether it is shown. Every call validates the handle and none sends the window a message,
 /// so it is safe on any value and a hung application cannot hold it up. `None` for a null
@@ -4507,6 +4538,12 @@ impl Sent {
             Some(e) => Err(HostError::with(&errors::input::NOT_TAKEN, format!("Windows did not take the input (error {e})"))),
         }
     }
+}
+
+/// What a `host.input.send` that reached `SendInput` came to: its answer, and whether a key event
+/// went out — any Windows took. A send it took none of sent nothing, and owes no release.
+fn key_sent(sent: &Sent) -> super::KeySend {
+    super::KeySend { answer: sent.answer().map_err(KeyRefusal::Answer), went_out: sent.taken > 0 }
 }
 
 /// `events` in one `SendInput`, each with what it holds — `held` were down before — through
@@ -5862,6 +5899,27 @@ mod foreground_tests {
             .expect("one of these is no window");
         assert_eq!(foreground_of(gone), None);
     }
+
+    /// A handle that names no window owns no point: `false` — never the `nil` a caller reads as
+    /// permission — wherever the point is, on a screen or off every one. It was `nil` until the
+    /// answer of 2026-10-24. Local: nothing is asked of any window.
+    #[test]
+    fn a_handle_that_is_no_window_owns_no_point() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::IsWindow;
+        assert_eq!(owns_point(std::ptr::null_mut(), 0, 0), Some(false));
+        let gone = [0x7fff_fff1usize, 0x7ffe_1235, 0x7ffd_2469, 0x5a5a_a5a5, 0x3c3c_c3c3]
+            .into_iter()
+            .map(|v| v as HWND)
+            .find(|&h| unsafe { IsWindow(h) } == 0)
+            .expect("one of these is no window");
+        for (x, y) in [(0, 0), (10, 10), (-1_000_000, -1_000_000)] {
+            assert_eq!(owns_point(gone, x, y), Some(false), "{x},{y}");
+        }
+        // The backend's answer, with `listed` too: a listed window's id is a handle here.
+        let b = WindowsBackend::new();
+        assert_eq!(b.window_owns_point(gone as isize, 0, 0), Some(false));
+        assert_eq!(b.listed_window_owns_point(gone as u64, 0, 0), Some(false));
+    }
 }
 
 /// The shared parser's mask, converted to what `RegisterHotKey` and `SendInput` are given. The
@@ -6538,6 +6596,25 @@ mod input_answer_tests {
         assert_eq!(owed(&text, 2, &[]), Vec::<usize>::new());
     }
 
+    /// A send went out when Windows took any of its events — all of them, or a part with the error —
+    /// and not when it took none: what turns `host.inputEpoch()` over (`KeySend`).
+    #[test]
+    fn a_send_went_out_when_windows_took_any_of_its_events() {
+        let answer = |e: u32| Err(KeyRefusal::Answer(HostError::with(&errors::input::NOT_TAKEN, format!("Windows did not take the input (error {e})"))));
+        let all = Sent { taken: 4, error: None, let_go: vec![65, 17] };
+        assert_eq!(key_sent(&all), super::super::KeySend { answer: Ok(()), went_out: true });
+        let part = Sent { taken: 2, error: Some(5), let_go: vec![65, 17] };
+        assert_eq!(key_sent(&part), super::super::KeySend { answer: answer(5), went_out: true });
+        let none = Sent { taken: 0, error: Some(5), let_go: Vec::new() };
+        assert_eq!(key_sent(&none), super::super::KeySend { answer: answer(5), went_out: false });
+        // A mistake is found before anything is built, and sends nothing.
+        let b = WindowsBackend::new();
+        let tap = b.key_send("Ctrl tap");
+        assert!(matches!(tap.answer, Err(KeyRefusal::Mistake(_))) && !tap.went_out, "{tap:?}");
+        let unparsed = b.key_send("Ctrl+");
+        assert!(matches!(unparsed.answer, Err(KeyRefusal::Mistake(_))) && !unparsed.went_out, "{unparsed:?}");
+    }
+
     #[test]
     fn what_windows_does_not_take_is_answered_and_nothing_is_left_down() {
         // Everything taken: one SendInput, nothing more.
@@ -6710,10 +6787,12 @@ mod input_answer_tests {
             "fn mouse_down(&self, x: i32, y: i32, button: MouseButton)",
             "fn mouse_up(&self, x: i32, y: i32, button: MouseButton)",
             "fn mouse_scroll(&self, x: i32, y: i32, delta: i32)",
-            "fn key_send(&self, combo: &str)",
         ] {
             assert!(body(sig).contains(".answer()"), "{sig}");
         }
+        // A send's answer, and what of it went out, are read in `key_sent`.
+        assert!(body("fn key_send(&self, combo: &str)").contains("key_sent(&send_inputs(&events, &[]))"));
+        assert!(body("fn key_sent(sent: &Sent)").contains("sent.answer()"));
         assert!(body("fn type_text(&self, text: &str)").contains("let sent = send_inputs(&events, &[]);"));
         // Placed nowhere, nothing is pressed or scrolled: the placement comes first, with `?`.
         for sig in ["fn mouse_down(&self, x: i32, y: i32, button: MouseButton)", "fn mouse_scroll(&self, x: i32, y: i32, delta: i32)", "pub(super) fn click_input("] {

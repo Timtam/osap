@@ -921,28 +921,38 @@ fn hand_over_raises_outside_acting_with_a_wait_or_another_hand_over_pending_and_
 }
 
 /// The plug-in not in front at the call: `trip:inFront()` gives the trip up, and handOver answers
-/// `false, err` (`not_in_front`) with nothing captured or written.
+/// `false` and the give-up's own error value, the one `onGiveUp` is handed for the same moment —
+/// `moved_on` with another application's window in front, `not_in_front` with nothing in front —
+/// with nothing captured or written, and the trip no longer live.
 #[test]
-fn hand_over_with_the_plugin_not_in_front_ends_the_trip_and_answers_not_in_front() {
-    run(r##"
+fn hand_over_with_the_plugin_not_in_front_answers_the_give_ups_own_error() {
+    for (front, code, message) in [
+        ("T.OTHER", "moved_on", "a window of another application came to the front, or one of this application's that is not the page"),
+        ("nil", "not_in_front", "the plug-in's window does not have the keyboard"),
+    ] {
+        run(&format!(
+            r##"
         local S = T.S
         T.show(T.W, T.IN)
         T.synth()
         T.openPage()
         S.actFn = function(o, trip)
-          S.front, S.chain = T.OTHER, { T.OTHER }
+          S.front = {front}
+          S.chain = S.front and {{ S.front }} or {{}}
           local n = #S.menuOpen
           S.handed = table.pack(trip:handOver(T.spec()))
-          S.wrote, S.heldInAct = #S.menuOpen - n, next(S.holding)
+          S.wrote, S.heldInAct, S.liveAfter = #S.menuOpen - n, next(S.holding), trip.live
         end
         T.trip()
         T.land()
         T.runDue()
-        T.ok(S.handed[1] == false and T.is(S.handed[2], "not_in_front", "the plug-in's window does not have the keyboard"),
-          T.what(S.handed[2]))
-        T.ok(S.heldInAct == nil and S.wrote == 0, "nothing captured, no flag")
-        T.ok(S.giveUps[1] == "moved_on" and #S.ended == 0, "the trip given up; no onEnd: no hand-over began")
-    "##);
+        T.ok(S.handed[1] == false and T.is(S.handed[2], "{code}", "{message}"), T.what(S.handed[2]))
+        T.ok(S.heldInAct == nil and S.wrote == 0 and S.liveAfter == false, "nothing captured, no flag, the trip over")
+        T.ok(#S.giveUps == 1 and rawequal(S.giveUpErrs[1], S.handed[2]) and #S.ended == 0,
+          "onGiveUp handed the same error value; no onEnd: no hand-over began")
+    "##
+        ));
+    }
 }
 
 /// A capture the host cannot make (a Mac without the Accessibility grant): handOver answers

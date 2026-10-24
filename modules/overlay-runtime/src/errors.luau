@@ -44,17 +44,17 @@ return {
     empty_on_screen = { code = "outside", message = "empty on screen", entries = { "o-toscreenrect" } },
     region_raised = {
       code = "unplaced",
-      message = "its `…` function raised: …",
+      message = "its … function raised: …",
       entries = { "o-capturecontrol" },
     },
     region_nil = {
       code = "unplaced",
-      message = "its `…` function answered nil",
+      message = "its … function answered nil",
       entries = { "o-capturecontrol" },
     },
     region_bad = {
       code = "unplaced",
-      message = "its `…` function answered …, not {x1, y1, x2, y2}",
+      message = "its … function answered …, not {x1, y1, x2, y2}",
       entries = { "o-capturecontrol" },
     },
 
@@ -111,7 +111,7 @@ return {
     },
     covered_point = {
       code = "covered",
-      message = "'…' at (…,…) is inside our window's frame but another window is drawn there — not clicking",
+      message = "'…' at (…,…) is inside our window's frame but another window is drawn there, or the window is gone — not clicking",
       entries = { "o-choosemenuitem" },
     },
 
@@ -168,12 +168,12 @@ return {
     item_unplaced = { code = "unplaced", message = "the item cannot be placed now: …", entries = { "o-choosemenuitem" } },
     item_covered = {
       code = "covered",
-      message = "(…,…) is inside the menu's window id …, but another window is drawn there",
+      message = "(…,…) is inside the menu's window id …, but another window is drawn there, or that window is gone",
       entries = { "o-choosemenuitem" },
     },
     item_covered_listed = {
       code = "covered",
-      message = "(…,…) is inside the menu's window … of the window list, but another window is drawn there",
+      message = "(…,…) is inside the menu's window … of the window list, but another window is drawn there, or that window is gone",
       entries = { "o-choosemenuitem" },
     },
     untaken = {
@@ -309,7 +309,7 @@ return {
     not_active = {
       code = "not_in_front",
       message = "the overlay is not active",
-      entries = { "o-capturecontrol", "o-captureregion", "o-capturefull", "o-captureall" },
+      entries = { "o-calibrationcrop", "o-capturecontrol", "o-captureregion", "o-capturefull", "o-captureall" },
     },
     no_focus = {
       code = "not_found",
@@ -325,6 +325,11 @@ return {
       code = "not_found",
       message = "no control labelled '…' with a region",
       entries = { "o-capturecontrol" },
+    },
+    no_crop = {
+      code = "not_found",
+      message = "no crop of '…' was written: … is not there",
+      entries = { "o-calibrationverify" },
     },
   },
 }

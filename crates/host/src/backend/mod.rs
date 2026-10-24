@@ -1215,6 +1215,25 @@ pub enum KeyRefusal {
     Answer(HostError),
 }
 
+/// What `host.input.send` came to ([`Backend::key_send`]): its answer, and whether any of its
+/// events went out — which is what turns `host.inputEpoch()` over, and only that. Windows can take
+/// part of a send's events and refuse the rest: `false, err` then, with part of it gone out. Every
+/// other refusal sends nothing, and so does every mistake.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeySend {
+    pub answer: Result<(), KeyRefusal>,
+    pub went_out: bool,
+}
+
+impl KeySend {
+    /// An answer that sent everything when it is `Ok` and nothing when it is not: every backend's
+    /// but a Windows send taken in part.
+    pub fn all_or_nothing(answer: Result<(), KeyRefusal>) -> KeySend {
+        let went_out = answer.is_ok();
+        KeySend { answer, went_out }
+    }
+}
+
 impl From<String> for KeyRefusal {
     fn from(why: String) -> Self {
         KeyRefusal::Mistake(why)
@@ -1613,12 +1632,14 @@ pub trait Backend {
         None
     }
 
-    /// Whether a click at (x, y) may be made for `window` — `host.input.click`'s `window`: the
-    /// window is there, the point is in it, and nothing else is drawn over it. `Err` with what the
-    /// module is told. Asks nothing of any program, so it is cheap on the event loop.
+    /// Whether a click through the system's input at (x, y) may be made for `window` —
+    /// `host.input.click`'s `window`: the window is there, the point is in it, and nothing else is
+    /// drawn over it. `Err` with what the module is told. Asks nothing of any program, so it is
+    /// cheap on the event loop.
     ///
     /// The default goes by [`window_owns_point`](Self::window_owns_point) and refuses only its
-    /// definite "no", with `input::COVERED`; Windows says which of three things it is.
+    /// definite "no", with `input::COVERED`; Windows says which of three things it is, and refuses a
+    /// window whose program runs with higher rights, `input::HIGHER`, as the input would not reach it.
     fn click_check(&self, window: isize, x: i32, y: i32) -> Result<(), HostError> {
         match self.window_owns_point(window, x, y) {
             Some(false) => Err(HostError::of(&input::COVERED)),
@@ -1823,8 +1844,8 @@ pub trait Backend {
 
     /// Sends a key combo like "Ctrl+S" as synthetic input. A spec that does not parse raises
     /// ([`KeyRefusal::Mistake`]); a key the layout cannot type, or an event that could not be
-    /// made, is answered.
-    fn key_send(&self, combo: &str) -> Result<(), KeyRefusal>;
+    /// made, is answered. Beside the answer, whether any event went out ([`KeySend`]).
+    fn key_send(&self, combo: &str) -> KeySend;
     /// Types Unicode text.
     fn type_text(&self, text: &str) -> Result<(), HostError>;
 

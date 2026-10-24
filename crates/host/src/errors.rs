@@ -160,7 +160,7 @@ pub mod common {
     pub const NOT_YET: Reason = Reason {
         code: Code::NotSupported,
         message: "not supported on this platform yet",
-        entries: &["page-show", "page-prepare", "page-focus", "page-post", "host-window-focus", "host-element-press", "host-input-click", "host-input-send"],
+        entries: &["page-show", "page-prepare", "page-focus", "page-post", "host-window-focus", "host-element-press", "host-input-click", "host-input-send", "host-input-post"],
     };
     /// The system would not bring the window to the front.
     pub const DECLINED: Reason = Reason {
@@ -528,6 +528,12 @@ pub mod hotkey {
         message: "the hotkey '…' (…) cannot be registered: Windows has no virtual key for the keypad's Enter apart from Enter's, and RegisterHotKey would take both. Capture it with host.keys.capture, or choose another key",
         entries: &["host-hotkey-register"],
     };
+    /// The application's own reload or quit key, which no module may claim (lib.rs, `own_key_refusal`).
+    pub const APP_KEY: Reason = Reason {
+        code: Code::Taken,
+        message: "the hotkey '…' (…) is Automation Platform's own key, which …, and cannot be registered. Choose another combination",
+        entries: &["host-hotkey-register"],
+    };
     pub const MODULE_HOLDS: Reason = Reason { code: Code::Taken, message: "module '…' holds this combination", entries: &["host-hotkey-register"] };
     pub const REGISTER_REFUSED: Reason = Reason { code: Code::Taken, message: "RegisterHotKey failed for '…' (already in use by another app?)", entries: &["host-hotkey-register"] };
     pub const MAC_REFUSED: Reason = Reason {
@@ -539,10 +545,11 @@ pub mod hotkey {
     pub const PARKED: Reason = Reason { code: Code::NotSupported, message: "no key of the current keyboard layout types this letter", entries: &["host-hotkey-register"] };
     pub const STUB: Reason = Reason { code: Code::NotSupported, message: "hotkeys are not implemented on this platform yet (spec '…')", entries: &["host-hotkey-register"] };
     /// macOS: the Carbon handler every hotkey is delivered through could not be installed, so
-    /// no claim is held until one installs it.
+    /// no claim is held until one installs it: every refresh tries the claims not held again, and
+    /// the first of them tries the handler again (`Shared::refresh_hotkeys`).
     pub const NO_HANDLER: Reason = Reason {
         code: Code::Failed,
-        message: "could not install the Carbon hotkey handler (InstallEventHandler returned …); no global shortcut will work in this session",
+        message: "could not install the Carbon hotkey handler (InstallEventHandler returned …); no global shortcut works until it is installed, which the next refresh tries again",
         entries: &["host-hotkey-register"],
     };
 }
@@ -846,7 +853,12 @@ pub mod ocr {
         message: "the text recogniser failed inside the application; the log has the details",
         entries: &["host-ocr-recognize"],
     };
-    pub const NO_RECOGNISER: Reason = Reason { code: Code::NotSupported, message: "no text recogniser on this platform", entries: &["host-ocr-recognize"] };
+    /// The build for other systems: every read, and `resolveLanguage` for every language.
+    pub const NO_RECOGNISER: Reason = Reason {
+        code: Code::NotSupported,
+        message: "no text recogniser on this platform",
+        entries: &["host-ocr-recognize", "host-ocr-resolvelanguage"],
+    };
     pub const NO_ANSWER: Reason = Reason { code: Code::Failed, message: "the recogniser gave no answer for this region", entries: &["host-ocr-recognize"] };
     /// A region not started because the application closed: no callback runs after that, so it
     /// never reaches a module.
@@ -904,7 +916,8 @@ pub mod speech {
 pub mod sound {
     use super::{Code, Reason};
 
-    pub const NO_DEVICE: Reason = Reason { code: Code::Unavailable, message: "no audio output device: …", entries: &["host-sound-play"] };
+    /// The audio system's words, where it said any, are the detail (`sound::no_device`).
+    pub const NO_DEVICE: Reason = Reason { code: Code::Unavailable, message: "no audio output device", entries: &["host-sound-play"] };
     pub const NOT_FOUND: Reason = Reason { code: Code::NotFound, message: "cannot play '…': …", entries: &["host-sound-play"] };
     pub const INVALID: Reason = Reason { code: Code::Invalid, message: "cannot play '…': …", entries: &["host-sound-play"] };
     pub const FAILED: Reason = Reason { code: Code::Failed, message: "cannot play '…': …", entries: &["host-sound-play"] };
@@ -1022,6 +1035,7 @@ pub static REASONS: &[&Reason] = &[
     &hotkey::KEPT_BY_SYSTEM,
     &hotkey::NO_KEYCODE,
     &hotkey::NO_VK,
+    &hotkey::APP_KEY,
     &hotkey::MODULE_HOLDS,
     &hotkey::REGISTER_REFUSED,
     &hotkey::MAC_REFUSED,

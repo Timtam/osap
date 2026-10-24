@@ -40,7 +40,6 @@
 -- every kind of rename; here each kind reads its own field. Its rename dialog was dead code, and is
 -- left out of the page.
 
-local O = host.require("com.platform.overlay")
 local G = host.include("src/geometry.luau")
 local H = host.include("src/header.luau")
 local S = host.include("src/state.luau")
@@ -255,7 +254,7 @@ function Hv.rename(o, trip, F)
         release(held)
         if not trip:inFront() then return end
         local handed, errH = trip:handOver({ kind = "typing", ends = ends, onEnd = onEnd })
-        if handed or errH.code == O.errors.NOT_IN_FRONT then return end
+        if handed or not trip.live then return end -- not live: given up, and onGiveUp posts it
         log("'%s': the keyboard was not handed over (%s); VPS Avenger's editor is open", F.kind, tostring(errH))
         over({ error = Hv.NO_KEYBOARD .. "; its editor is still open" })
       end)
@@ -460,7 +459,7 @@ function Hv.browse(o, trip, forget)
     host.speech.output(Hv.BROWSE, { interrupt = false })
     return
   end
-  if err.code == O.errors.NOT_IN_FRONT then return end
+  if not trip.live then return end -- given up already: onGiveUp posts it
   trip:done({ error = Hv.NO_KEYBOARD })
 end
 
@@ -574,7 +573,7 @@ local function browseName(o, trip, F)
   local handed, errH = trip:handOver({ kind = "browse", onEnd = onEnd })
   if not handed then
     release(held)
-    if errH.code == O.errors.NOT_IN_FRONT then return end
+    if not trip.live then return end -- given up already: onGiveUp posts it
     slog("nothing clicked — the keyboard was not handed over (%s)", tostring(errH))
     return trip:done({ part = before, error = Hv.NO_KEYBOARD })
   end
@@ -731,7 +730,7 @@ function Hv.browseEnvelope(o, trip, button, label)
   local handed, errH = trip:handOver({ kind = "browse", onEnd = onEnd })
   if not handed then
     release(held)
-    if errH.code == O.errors.NOT_IN_FRONT then return end
+    if not trip.live then return end -- given up already: onGiveUp posts it
     slog("nothing clicked — the keyboard was not handed over (%s)", tostring(errH))
     return trip:done({ part = before, error = Hv.NO_KEYBOARD })
   end

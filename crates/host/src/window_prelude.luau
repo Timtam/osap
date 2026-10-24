@@ -139,6 +139,160 @@ local function matches(m, win)
   return true
 end
 
+-- What is wrong with a matcher, in words, or nil. Every call that takes one — find, findAll,
+-- test and onTrigger — raises with it at the caller's line, because the arguments alone decide
+-- it (D2): a matcher is a declaration, and a mistake in one never fails in a way anybody would
+-- guess from the matcher. A string matcher, or `app = "game.exe"` (a string where a table goes),
+-- constrains nothing, so it matched every window; a misspelt key or a `class` at the top level was
+-- read by nobody, so it constrained nothing either; a field matcher with a misspelt mode matched
+-- nothing, without a word. So every key is one of the grammar's, at every level, and of its type.
+-- The blocks for the other platforms are checked too, so that a mistake in one shows on whichever
+-- platform the module is tried on. Plain table work, a few microseconds a matcher.
+local TOP_KEYS = { "title", "app", "os", "windows", "macos", "linux", "where" }
+local BLOCK_KEYS = { "title", "app", "class", "axRole", "axSubrole", "axIdentifier" }
+local APP_KEYS = { "name", "exe", "bundleId", "pid" }
+local MODES = { "not", "exact", "contains", "prefix", "suffix", "pattern", "regex" }
+
+local function listed(keys)
+  return table.concat(keys, ", ", 1, #keys - 1) .. " and " .. keys[#keys]
+end
+
+local function known(keys, k)
+  return table.find(keys, k) ~= nil
+end
+
+-- A key in words: `'titel'`, `1`, or what it is when it is neither a string nor a number.
+local function keyWords(k)
+  if type(k) == "string" then return "'" .. k .. "'" end
+  if type(k) == "number" then return tostring(k) end
+  return "a " .. type(k) .. " key"
+end
+
+-- The first key of `t` that `keys` does not name, as the problem `<path> has no key …`.
+local function unknownKey(t, keys, path, its)
+  for k in pairs(t) do
+    if type(k) ~= "string" or not known(keys, k) then
+      return path .. " has no key " .. keyWords(k) .. "; " .. its .. listed(keys)
+    end
+  end
+  return nil
+end
+
+local function typed(v, path, want)
+  if v ~= nil and type(v) ~= want then
+    return path .. " is a " .. want .. ", not a " .. type(v)
+  end
+  return nil
+end
+
+-- A field matcher: a string, or a table of one match mode — `not` holding a field matcher, the
+-- others a string — or a table keyed by platform, each holding a field matcher that is not keyed
+-- by platform again (`for_this_os` resolves one level).
+local function fieldProblem(v, path, platformsAllowed)
+  if type(v) == "string" then return nil end
+  if type(v) ~= "table" then
+    return path .. " is a string or a table, not a " .. type(v)
+  end
+  if platformsAllowed and os_keyed(v) then
+    local bad = unknownKey(v, PLATFORMS, path, "a field matcher keyed by platform has ")
+    if bad then return bad end
+    for _, p in ipairs(PLATFORMS) do
+      if v[p] ~= nil then
+        local inner = fieldProblem(v[p], path .. "." .. p, false)
+        if inner then return inner end
+      end
+    end
+    return nil
+  end
+  local bad = unknownKey(v, MODES, path, "a field matcher's keys are ")
+  if bad then return bad end
+  if v["not"] ~= nil then
+    local inner = fieldProblem(v["not"], path .. ".not", true)
+    if inner then return inner end
+  end
+  for _, mode in ipairs(MODES) do
+    if mode ~= "not" then
+      local wrong = typed(v[mode], path .. "." .. mode, "string")
+      if wrong then return wrong end
+    end
+  end
+  return nil
+end
+
+local function appProblem(a, path)
+  if type(a) ~= "table" then return path .. " is a table, not a " .. type(a) end
+  local bad = unknownKey(a, APP_KEYS, path, "its keys are ")
+  if bad then return bad end
+  for _, k in ipairs({ "name", "exe", "bundleId" }) do
+    if a[k] ~= nil then
+      local inner = fieldProblem(a[k], path .. "." .. k, true)
+      if inner then return inner end
+    end
+  end
+  return typed(a.pid, path .. ".pid", "number")
+end
+
+local function blockProblem(b, path)
+  if type(b) ~= "table" then return path .. " is a table, not a " .. type(b) end
+  local bad = unknownKey(b, BLOCK_KEYS, path, "a platform block's keys are ")
+  if bad then return bad end
+  if b.app ~= nil then
+    local inner = appProblem(b.app, path .. ".app")
+    if inner then return inner end
+  end
+  for _, k in ipairs(BLOCK_KEYS) do
+    if k ~= "app" and b[k] ~= nil then
+      local inner = fieldProblem(b[k], path .. "." .. k, true)
+      if inner then return inner end
+    end
+  end
+  return nil
+end
+
+local function matcherProblem(m)
+  if type(m) ~= "table" then return "the matcher is a table, not a " .. type(m) end
+  -- AutoHotkey's ahk_class has a place of its own here, and it is not the top level.
+  if m.class ~= nil then
+    return "matcher has no key 'class'; a window class goes in the block of its platform: windows = { class = … }"
+  end
+  local bad = unknownKey(m, TOP_KEYS, "matcher", "its keys are ")
+  if bad then return bad end
+  if m.title ~= nil then
+    local inner = fieldProblem(m.title, "matcher.title", true)
+    if inner then return inner end
+  end
+  if m.app ~= nil then
+    local inner = appProblem(m.app, "matcher.app")
+    if inner then return inner end
+  end
+  if m.os ~= nil then
+    if type(m.os) ~= "table" then return "matcher.os is a table, not a " .. type(m.os) end
+    for k, p in pairs(m.os) do
+      if type(k) ~= "number" then
+        return "matcher.os has no key " .. keyWords(k) .. "; it is a list of platform names, { \"windows\", \"macos\" }"
+      end
+      local wrong = typed(p, "matcher.os[" .. k .. "]", "string")
+      if wrong then return wrong end
+    end
+  end
+  for _, p in ipairs(PLATFORMS) do
+    if m[p] ~= nil then
+      local inner = blockProblem(m[p], "matcher." .. p)
+      if inner then return inner end
+    end
+  end
+  return typed(m.where, "matcher.where", "function")
+end
+
+-- Raises with what is wrong with `m`, at the line that called `call`.
+local function checkMatcher(m, call)
+  local problem = matcherProblem(m)
+  if problem then
+    -- Level 3: this function, the call that checks, and then its caller.
+    error(call .. ": " .. problem, 3)
+  end
+end
+
 -- The windows a matcher could possibly match, listed from the applications it names and
 -- from nobody else.
 --
@@ -170,6 +324,7 @@ local function candidates(m)
 end
 
 function W.find(m)
+  checkMatcher(m, "host.window.find")
   for _, win in ipairs(candidates(m)) do
     if matches(m, win) then return win end
   end
@@ -177,6 +332,7 @@ function W.find(m)
 end
 
 function W.findAll(m)
+  checkMatcher(m, "host.window.findAll")
   local out = {}
   for _, win in ipairs(candidates(m)) do
     if matches(m, win) then
@@ -186,8 +342,13 @@ function W.findAll(m)
   return out
 end
 
--- Tests whether a window matches a declarative matcher (used by host.overlay:attach).
+-- Tests whether a window matches a declarative matcher (used by host.overlay:attach). Checked at
+-- every call, as find's is: a test is plain table work, and the check a few more lookups.
 function W.test(matcher, win)
+  checkMatcher(matcher, "host.window.test")
+  if type(win) ~= "table" then
+    error("host.window.test: the window is a table, not a " .. type(win), 2)
+  end
   return matches(matcher, win)
 end
 
@@ -202,32 +363,6 @@ local triggers = {}
 local triggerSeq = 0
 
 local focusCbs = {}
-
--- The keys of a matcher whose type decides what it means, checked when a trigger registers.
--- Each of these, given the wrong type, fails in a way nobody would guess from the matcher:
--- `app = "game.exe"` (a string where a table goes) constrains nothing, so the trigger fires for
--- every window; a platform block that is a string constrains nothing on its own platform; an
--- `os` that is not a list raises from inside the dispatch when a window comes forward, as an
--- error in some later event; a `where` that is not a function is skipped. A trigger is
--- registered once and fires on every foreground change, which is why it raises here, at the
--- caller's line. `find`, `findAll` and `test` do not check (window.md, Matchers).
-local function check_matcher_shape(m, call)
-  local function need(v, what, want)
-    if v ~= nil and type(v) ~= want then
-      -- Level 4: `need`, this function, the registering call, and then its caller.
-      error(call .. ": matcher." .. what .. " is a " .. want .. ", not a " .. type(v), 4)
-    end
-  end
-  need(m.app, "app", "table")
-  need(m.os, "os", "table")
-  need(m.where, "where", "function")
-  for _, p in ipairs(PLATFORMS) do
-    need(m[p], p, "table")
-    if m[p] ~= nil then
-      need(m[p].app, p .. ".app", "table")
-    end
-  end
-end
 
 -- `initial = true` also reports the window already in front — once, on the next tick, and not
 -- from inside this call: a callback often uses locals the file assigns further down, and a
@@ -245,11 +380,9 @@ function W.onTrigger(matcher, opts, cb)
   if cb == nil and type(opts) == "function" then
     opts, cb = nil, opts
   end
-  if matcher ~= nil and type(matcher) ~= "table" then
-    error("host.window.onTrigger: the matcher is a table, not a " .. type(matcher), 2)
-  end
+  -- nil is every window here, as `{}` is.
   if matcher ~= nil then
-    check_matcher_shape(matcher, "host.window.onTrigger")
+    checkMatcher(matcher, "host.window.onTrigger")
   end
   if opts ~= nil and type(opts) ~= "table" then
     error("host.window.onTrigger: opts is a table or nil, not a " .. type(opts), 2)

@@ -1,6 +1,7 @@
 id = "com.platform.daw-hosts"
 name = "DAW host definitions"
-version = "0.2.2"
+# 0.2.3 hands host.window an entry's matcher without the entry's own fields, which it raises for.
+version = "0.2.3"
 license = "GPL-3.0-or-later"
 
 # A code module: its source is evaluated inside every VM that depends on it, so the matchers

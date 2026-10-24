@@ -1004,7 +1004,6 @@ pub struct Words {
 ///   with VoiceOver's "keyboard focus follows the VoiceOver cursor", the user's own navigation
 ///   moves the page's focus with no key reaching the page. Events only; no timer decides anything.
 pub fn platform_shim(engine: Engine) -> String {
-    let cap = MAX_QUEUED_POSTS;
     let mut s = String::from(SHIM_HEAD);
     match engine {
         Engine::WebView2 => {
@@ -1012,17 +1011,17 @@ pub fn platform_shim(engine: Engine) -> String {
                 "  const ipc = window.ipc;\n  const channel = window.chrome && window.chrome.webview;\n  if (!ipc || !channel) return;\n",
             );
             s.push_str(SHIM_HANDLER);
-            s.push_str(&format!(
-                "  channel.addEventListener(\"message\", (event) => {{\n    if (handler) hand(event.data);\n    else if (waiting.length < {cap}) waiting.push(event.data);\n  }});\n"
-            ));
+            s.push_str(&shim_wait());
+            s.push_str(
+                "  channel.addEventListener(\"message\", (event) => {\n    if (handler) hand(event.data);\n    else wait(event.data);\n  });\n",
+            );
         }
         #[cfg(any(test, target_os = "macos"))]
         Engine::WebKit => {
             s.push_str("  const ipc = window.ipc;\n  if (!ipc) return;\n");
             s.push_str(SHIM_HANDLER);
-            s.push_str(&format!(
-                "  const take = (value) => {{\n    if (handler) hand(value);\n    else if (waiting.length < {cap}) waiting.push(value);\n  }};\n"
-            ));
+            s.push_str(&shim_wait());
+            s.push_str("  const take = (value) => {\n    if (handler) hand(value);\n    else wait(value);\n  };\n");
             s.push_str("  Object.defineProperty(window, \"__platformDeliver\", { value: (text) => take(JSON.parse(text)) });\n");
             s.push_str(SHIM_WEBKIT_FOCUS);
         }
@@ -1110,6 +1109,30 @@ const SHIM_HEAD: &str = r#"(() => {
   } catch (err) {}
 "#;
 
+/// The shim's `note` to the host's log, through the page's own message channel behind
+/// [`SHIM_NOTE`], and `wait`, which keeps a message of the module's that came before `onmessage` was
+/// set: at most [`MAX_QUEUED_POSTS`], the cap the host keeps. One past them is dropped, and said —
+/// once, at the first drop since `onmessage` last took what waited, and then as a count when it
+/// takes them ([`SHIM_TAIL`]): one line in the log for a run of drops, not one per message.
+fn shim_wait() -> String {
+    format!(
+        r#"  const note = (text) => {{
+    try {{ ipc.postMessage("\u0001platform: " + text); }} catch (err) {{}}
+  }};
+  let dropped = 0;
+  const wait = (value) => {{
+    if (waiting.length < {cap}) {{
+      waiting.push(value);
+    }} else {{
+      if (dropped === 0) note("a message of the module's was dropped: {cap} wait already for platform.onmessage, the most that wait");
+      dropped += 1;
+    }}
+  }};
+"#,
+        cap = MAX_QUEUED_POSTS
+    )
+}
+
 /// The handler `onmessage` sets, the messages waiting for it, and the call that keeps one
 /// handler's error from stopping the next message.
 const SHIM_HANDLER: &str = r#"  let handler = null;
@@ -1120,12 +1143,9 @@ const SHIM_HANDLER: &str = r#"  let handler = null;
 "#;
 
 /// WebKit's: the keyboard put back in the page and the guard (see [`platform_shim`]). Its notes
-/// go to the host's log through the page's own message channel, behind [`SHIM_NOTE`].
+/// go to the host's log through `note` ([`shim_wait`]).
 #[cfg(any(test, target_os = "macos"))]
-const SHIM_WEBKIT_FOCUS: &str = r#"  const note = (text) => {
-    try { ipc.postMessage("\u0001platform: " + text); } catch (err) {}
-  };
-  let last = null;
+const SHIM_WEBKIT_FOCUS: &str = r#"  let last = null;
   let armed = false;
   let lost = false;
   const usable = (el) => !!el && el.isConnected && el !== document.body && el.getClientRects().length > 0;
@@ -1178,6 +1198,10 @@ const SHIM_TAIL: &str = r#"  const platform = Object.create(null);
       set: (fn) => {
         handler = typeof fn === "function" ? fn : null;
         while (handler && waiting.length) hand(waiting.shift());
+        if (handler && dropped > 0) {
+          note(dropped + " message(s) of the module's were dropped in all before platform.onmessage was set");
+          dropped = 0;
+        }
       },
     },
   });
@@ -1198,15 +1222,15 @@ pub const WEBKIT_DELIVER: &str = "return window.__platformDeliver(m);";
 pub const WEBKIT_RESTORE_FOCUS: &str =
     "return window.__platformRestoreFocus ? window.__platformRestoreFocus() : \"not a document of the page's own\";";
 
-/// What a note of the WebKit shim's own begins with, on the page's message channel: a control
-/// character no message of `platform.post` can begin with — that is always `JSON.stringify`'s
-/// text — so the host tells the two apart ([`shim_note`]) and a note never reaches the module.
-#[cfg(any(test, target_os = "macos"))]
+/// What a note of the shim's own begins with, on the page's message channel: a control character
+/// no message of `platform.post` can begin with — that is always `JSON.stringify`'s text — so the
+/// host tells the two apart ([`shim_note`]) and a note never reaches the module.
+#[cfg(any(test, windows, target_os = "macos"))]
 pub const SHIM_NOTE: &str = "\u{1}platform: ";
 
 /// The shim's note in a message the page's channel carried, or `None` for a message of the
 /// page's own.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(test, windows, target_os = "macos"))]
 pub fn shim_note(text: &str) -> Option<&str> {
     text.strip_prefix(SHIM_NOTE)
 }
@@ -2090,8 +2114,9 @@ mod tests {
 
     /// The script WebView2's pages got from stage 1 until the shim was built from parts, as it
     /// was: the Windows shim is held to it byte for byte but for `platform.errors` and `post`'s
-    /// answer, which the typed errors added, so building the Mac's beside it changes nothing else
-    /// for a page on Windows.
+    /// answer, which the typed errors added, and the note of the messages dropped before
+    /// `onmessage` was set (2026-10-24), so building the Mac's beside it changes nothing else for a
+    /// page on Windows.
     const WINDOWS_SHIM_OF_STAGE_1: &str = r#"(() => {
   "use strict";
   if (window.top !== window || window.platform) return;
@@ -2139,14 +2164,26 @@ mod tests {
         "        return { ok: true };\n",
     );
 
+    /// The setter's count of the messages dropped while none was set ([`SHIM_TAIL`]).
+    const DRAINED: &str = concat!(
+        "        if (handler && dropped > 0) {\n",
+        "          note(dropped + \" message(s) of the module's were dropped in all before platform.onmessage was set\");\n",
+        "          dropped = 0;\n",
+        "        }\n",
+    );
+
     #[test]
     fn the_windows_shim_is_the_one_stage_1_shipped_and_the_codes_and_posts_answer() {
         let shim = platform_shim(Engine::WebView2);
-        let (codes, post) = (errors_script(), post_script());
+        let (codes, post, wait) = (errors_script(), post_script(), shim_wait());
         assert!(shim.contains(&codes) && shim.contains(&post) && shim.contains(POST_ANSWERED));
+        assert!(shim.contains(&wait) && shim.contains(DRAINED));
         let without = shim
             .replacen(&codes, "", 1)
             .replacen(&post, "", 1)
+            .replacen(&wait, "", 1)
+            .replacen("    else wait(event.data);\n", "    else if (waiting.length < 256) waiting.push(event.data);\n", 1)
+            .replacen(DRAINED, "", 1)
             .replacen("    errors: { value: errors },\n", "", 1)
             .replacen(POST_ANSWERED, POST_OF_STAGE_1, 1);
         assert_eq!(without, WINDOWS_SHIM_OF_STAGE_1);
@@ -2227,6 +2264,33 @@ mod tests {
         for part in [SHIM_HEAD, SHIM_HANDLER, SHIM_TAIL] {
             assert!(shim.contains(part) && windows.contains(part));
         }
+    }
+
+    /// A message of the module's past the 256 that wait for `onmessage` is dropped in both shims,
+    /// and said through the shim's note: once at the first drop, then the count when `onmessage`
+    /// takes the ones that waited, and the count starts again. They were dropped without a word
+    /// until 2026-10-24.
+    #[test]
+    fn a_message_dropped_before_onmessage_is_said_at_the_first_and_counted_when_they_are_taken() {
+        let wait = shim_wait();
+        assert!(wait.contains(&format!("if (waiting.length < {MAX_QUEUED_POSTS}) {{\n      waiting.push(value);")), "{wait}");
+        let first = wait.find("if (dropped === 0) note(\"a message of the module's was dropped: 256 wait already for platform.onmessage, the most that wait\");").expect("the first drop said");
+        assert!(first < wait.find("dropped += 1;").unwrap(), "said before it is counted, so once");
+        assert!(wait.contains(r#"ipc.postMessage("\u0001platform: " + text)"#), "a note of the shim's own");
+        let tail_drain = SHIM_TAIL.find(DRAINED).expect("the count when they are taken");
+        assert!(SHIM_TAIL.find("while (handler && waiting.length) hand(waiting.shift());").unwrap() < tail_drain, "after they are handed");
+        for engine in [Engine::WebView2, Engine::WebKit] {
+            let shim = platform_shim(engine);
+            assert!(shim.contains(&wait), "{engine:?}");
+            assert_eq!(shim.matches("const note = (text) =>").count(), 1, "{engine:?}: one note");
+            assert!(shim.find(&wait).unwrap() < shim.find("else wait(").unwrap(), "{engine:?}: defined before it is used");
+            assert!(!shim.contains("waiting.length < 256) waiting.push"), "{engine:?}: no queue of its own");
+        }
+        // The host takes a note for its log, never for the module.
+        assert_eq!(
+            shim_note("\u{1}platform: a message of the module's was dropped: 256 wait already for platform.onmessage, the most that wait"),
+            Some("a message of the module's was dropped: 256 wait already for platform.onmessage, the most that wait")
+        );
     }
 
     /// No message of the page's own is a note: `platform.post` sends `JSON.stringify`'s text, and

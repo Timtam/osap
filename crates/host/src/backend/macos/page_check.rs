@@ -21,7 +21,8 @@
 //! build — counted in `NSApplication` itself, whose two activation calls are wrapped for the rest
 //! of this process (`count_activations`) — and loaded; the page's own script running and an inline
 //! one not; a message's round trip and twenty in order; its own file fetched and one outside
-//! blocked; a navigation away refused; `window.close()` doing nothing. Then, shown with the
+//! blocked; a navigation away refused; `window.close()` doing nothing; and, as data, what
+//! `platform.post` makes of a function and a symbol (`odd_posts`). Then, shown with the
 //! keyboard under a main menu with what wxWidgets' Apple menu has, whose items only count:
 //! Command-A and Command-C copying its field's text, Command-V pasting, Return on its button giving
 //! one message, Command-Q, Command-H and Option-Command-H doing nothing, and Command-W hiding it —
@@ -98,8 +99,9 @@ before (start one first, TextEdit for instance) and over once more the way host.
 it, a panel that does not activate the application, and the activation policy switched while a
 panel is shown. Then builds pages with the page window host.gui.webview uses and checks what the
 host promises of them: the rule list, also on its own, the page's own script and no inline one,
-messages both ways, its own file and nothing outside, no navigation away, and the keys in a page
-with the keyboard (Command-A, C and V in a field, Return on a button, Command-Q and Command-H doing
+messages both ways (and, as data, what platform.post makes of a function and a symbol), its own
+file and nothing outside, no navigation away, and the keys in a page with the keyboard (Command-A,
+C and V in a field, Return on a button, Command-Q and Command-H doing
 nothing in a tool page, Command-W hiding it, and a click posted into its button as host.input.click
 with via = \"post\" posts one, landing where it was asked for), also in a tool page described
 activates = false, which must ask for no activation and answer its show at the call, and which it
@@ -1198,6 +1200,9 @@ fn tool_page(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally, tool
         },
     );
 
+    // What platform.post makes of a function and a symbol: data.
+    odd_posts(app, tool, 1);
+
     // A posted click while the page does not have the keyboard: data.
     posted_unkeyed(app, tool, 1);
 
@@ -1236,6 +1241,53 @@ fn tool_page(app: &NSApplication, mtm: MainThreadMarker, tally: &mut Tally, tool
     }));
     app.setMainMenu(None);
     drop(counter);
+}
+
+/// `platform.post` given a value `JSON.stringify` writes no text for — a function, a symbol: what
+/// the page says it answered or threw, and what the host was handed between the page's two markers
+/// around it, each text as it came and whether it is JSON — which a module's `onMessage` is handed —
+/// or not, which the host drops with a line in the log. Data, not a check: what it measures is to be
+/// written into gui.md (`platform.post`'s Returns; TODO.md).
+fn odd_posts(app: &NSApplication, tool: &page::Native, n: u64) {
+    for kind in ["function", "symbol"] {
+        let from = inbox_mark();
+        let t = Instant::now();
+        tell(tool, &format!("post-odd {kind}"));
+        let (before, after) = (format!("odd-before {kind}"), format!("odd-after {kind} "));
+        let answered = wait_message(app, n, from, t + SECTION, |m| m.starts_with(&after));
+        let texts: Vec<String> = INBOX.with(|i| {
+            i.borrow()
+                .iter()
+                .skip(from)
+                .filter_map(|(_, e)| match e {
+                    PageEvent::Message { page: p, text, .. } if *p == n => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        let start = texts.iter().position(|m| plain(m) == Some(before.as_str()));
+        let end = texts.iter().position(|m| plain(m).is_some_and(|m| m.starts_with(&after)));
+        let handed = match (start, end) {
+            (Some(s), Some(e)) if s < e && e == s + 1 => "no message".to_string(),
+            (Some(s), Some(e)) if s < e => texts[s + 1..e].iter().map(|m| handed_text(m)).collect::<Vec<_>>().join(", "),
+            _ => "nothing that can be measured: the markers did not both come".to_string(),
+        };
+        say(&format!(
+            "web view | platform.post given a {kind}: the page says it {}; the host was handed {handed}",
+            answered.map(|(_, m)| m.trim_start_matches(after.as_str()).to_string()).unwrap_or_else(|| "said nothing".to_string())
+        ));
+    }
+}
+
+/// A message's text as the host was handed it, for [`odd_posts`]'s line: written out, and whether
+/// a module's `onMessage` would be handed it.
+fn handed_text(text: &str) -> String {
+    let json = serde_json::from_str::<serde_json::Value>(text).is_ok();
+    format!(
+        "{:?} ({})",
+        webview::escape_controls(text),
+        if json { "JSON: onMessage is handed it" } else { "not JSON: dropped with a line in the log" }
+    )
 }
 
 /// Where to click page `n`'s button, as the page measures it: the middle of its rectangle as a

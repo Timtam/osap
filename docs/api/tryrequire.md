@@ -41,13 +41,13 @@ end
 
 - For a `code_module` this module declares, under `optional_dependencies` or `dependencies`, and that is loaded: the value its entry file returned, evaluated in this VM — the same live value at every call, functions intact.
 - For a legacy data dependency that is loaded: a fresh Luau copy of the plain data its entry returned, at every call.
-- `nil` alone — the id is neither evaluated into this VM nor has a data export. The module is not installed or did not load; or it is a `code_module` this module does not declare, whose code is evaluated only into modules that list it, and a table of functions has no data export; or its entry returned no table of plain data. List a `code_module` under `optional_dependencies` (or `dependencies`) for it to come back with its functions.
+- `nil` alone — the id is neither evaluated into this VM nor a declared dependency with a data export. The module is not installed or did not load; or nothing here declares it — neither this module nor a `code_module` evaluated into its VM lists it under `optional_dependencies` or `dependencies` — whether it is a `code_module`, whose code is evaluated only into modules that list it, or a data dependency that has loaded; or its entry returned no table of plain data. List it under `optional_dependencies` (or `dependencies`) for it to come back.
 
-As with [`host.require`](./require.md#host-require-returns), the data path does not read the manifest: a data export comes back for any module that has loaded, declared here or not.
+As with [`host.require`](./require.md#host-require-returns), both paths read the declarations; where `require` raises for an id nobody here declares, this answers `nil`. A data dependency's arrays come back with a protected metatable, as `require`'s do.
 
 ### Errors {#host-tryrequire-errors}
 
-None. It never answers an error value. Where [`host.require`](./require.md#host-require-errors) raises that there is nothing to return, this answers `nil`.
+None. It never answers an error value. Where [`host.require`](./require.md#host-require-errors) raises that there is nothing to return, or that nobody here declares the id, this answers `nil`.
 
 **Raises** for a mistake in the call: an `id` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8.
 

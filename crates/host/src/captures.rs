@@ -128,6 +128,11 @@ impl Captures {
         self.regs.borrow().iter().find(|r| r.token == token).map_or_else(Taps::default, |r| r.taps)
     }
 
+    /// The module whose capture `token` is, while it stands; `None` for a token no capture has.
+    pub(crate) fn owner_of(&self, token: i64) -> Option<usize> {
+        self.regs.borrow().iter().find(|r| r.token == token).map(|r| r.owner)
+    }
+
     /// Takes the capture `token` out; whether there was one.
     pub(crate) fn release(&self, token: i64) -> bool {
         let mut regs = self.regs.borrow_mut();

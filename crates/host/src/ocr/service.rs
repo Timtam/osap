@@ -513,6 +513,12 @@ impl<S: Send + 'static> Service<S> {
         Some((failed, why))
     }
 
+    /// Whether this platform has a text recogniser at all: `false` on the build for other systems,
+    /// where every read fails with `ocr::NO_RECOGNISER` and no language can ever be read.
+    pub fn has_recogniser(&self) -> bool {
+        self.worker.present
+    }
+
     /// The languages the recognise thread published, waiting for them at most `bound` — they
     /// are its first act, so only the first moments after start can wait. The bindings ask with
     /// `Duration::ZERO` and never wait (`ocr::lua::known_langs`); a test waits for them.

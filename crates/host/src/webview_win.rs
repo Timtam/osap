@@ -169,8 +169,8 @@ pub(crate) fn take_events() -> Vec<PageEvent> {
 /// thing in a loop would otherwise push the rest of the session out of it.
 const MAX_REFUSAL_LINES: u32 = 20;
 
-/// One page's refusals: its title for the lines, and how many there were. Shared by the web
-/// view's handlers, some of which wry wants `Send`.
+/// One page's refusals, or its shim's notes: its title for the lines, and how many there were.
+/// Shared by the web view's handlers, some of which wry wants `Send`.
 #[derive(Clone)]
 struct Refusals {
     title: Arc<str>,
@@ -189,7 +189,7 @@ impl Refusals {
         } else if n == MAX_REFUSAL_LINES {
             crate::logging::line(
                 "gui",
-                &format!("page '{}': {what} — the page's further refusals are counted, not logged", self.title),
+                &format!("page '{}': {what} — the page's further lines of this kind are counted, not logged", self.title),
             );
         }
     }
@@ -708,6 +708,8 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
 
     let origin = webview::origin_for(&spec.scheme);
     let refusals = Refusals::new(&spec.title);
+    // The shim's own notes, as a Mac's are: the messages it dropped before `onmessage` was set.
+    let notes = Refusals::new(&spec.title);
     let (root, scheme, served) = (spec.root.clone(), spec.scheme.clone(), refusals.clone());
     let (ipc_origin, ipc_refusals) = (origin.clone(), refusals.clone());
     let (nav_origin, nav_refusals) = (origin.clone(), refusals.clone());
@@ -721,7 +723,8 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
         .with_ipc_handler(move |request: http::Request<String>| {
             // Main frame only: WebView2 reports a frame's messages on the frame, never here. And
             // only from the page's own documents, and no larger than a message may be — checked
-            // here, before it waits for the tick.
+            // here, before it waits for the tick. A note of the shim's own (`webview::SHIM_NOTE`)
+            // goes to the log, never to the module.
             let source = request.uri().to_string();
             if !webview::own_origin(&source, &ipc_origin) {
                 ipc_refusals.say(&format!("a message from {source} was dropped: not the page's own origin"));
@@ -734,6 +737,10 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
                     text.len(),
                     webview::MAX_MESSAGE_BYTES
                 ));
+                return;
+            }
+            if let Some(note) = webview::shim_note(&text) {
+                notes.say(&format!("its platform object says: {}", webview::escape_controls(note)));
                 return;
             }
             push(PageEvent::Message { page, build, text });
@@ -1513,5 +1520,21 @@ mod tests {
         for style in [tool, app] {
             assert!(!style.intersects(FrameStyle::StayOnTop | FrameStyle::NoTaskbar | FrameStyle::FloatOnParent), "{style:?}");
         }
+    }
+
+    /// A note of the shim's own — the messages it dropped before `onmessage` was set — goes to the
+    /// log, as a Mac's does, and never to the module: the message handler takes it out after the
+    /// origin and the size are checked, before anything is handed on. Until 2026-10-24 the Windows
+    /// shim sent none.
+    #[test]
+    fn the_shims_notes_go_to_the_log_and_not_to_the_module() {
+        const SRC: &str = include_str!("webview_win.rs");
+        let at = SRC.find(".with_ipc_handler(").unwrap();
+        let handler = &SRC[at..at + SRC[at..].find(".with_initialization_script(").unwrap()];
+        let size = handler.find("if text.len() > webview::MAX_MESSAGE_BYTES {").expect("the size checked");
+        let note = handler.find("if let Some(note) = webview::shim_note(&text) {").expect("the notes taken out");
+        let said = handler.find("notes.say(&format!(\"its platform object says: {}\", webview::escape_controls(note)));").expect("said");
+        let pushed = handler.find("push(PageEvent::Message { page, build, text });").unwrap();
+        assert!(size < note && note < said && said < pushed, "{handler}");
     }
 }

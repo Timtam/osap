@@ -325,7 +325,7 @@ Now the buttons. A click into Notepad is not made while the page is in front: th
 1. **Ask the target window to the front** — [`host.window.focus(id)`](api/window.md#host-window-focus). `true` means Windows accepted the request, not that it has happened; `false` means it refused, and nothing is clicked.
 2. **Act on its foreground event.** [`host.window.onTrigger`](api/window.md#host-window-ontrigger) reports the window coming to the front — never wait a guessed time instead. Check that it is still in front when the callback runs: an event can wait behind others, and the user may have gone on.
 3. **Work the point out from the window's origin.** The top left of the window's client area, `w.client.x` and `w.client.y`, is the window's origin — the one an overlay's coordinates are relative to, too; add your offset to it. Coordinates are [screen coordinates](api/index.md#coordinates) — physical pixels on Windows, points on a Mac — and a click cuts a fraction toward zero, so work in whole numbers. Notepad's text grows with its window, so the example uses fractions of the client area; a plug-in, whose layout does not grow, gets offsets in pixels.
-4. **Ask what is drawn there** — [`host.window.ownsPoint`](api/window.md#host-window-ownspoint). `false` means another window covers the point (a notification, a tooltip, the page itself): click nothing. `nil` means the platform cannot say, and is read as permission.
+4. **Ask what is drawn there** — [`host.window.ownsPoint`](api/window.md#host-window-ownspoint). `false` means another window covers the point (a notification, a tooltip, the page itself), or, on Windows, the window is gone: click nothing. `nil` means the platform cannot say, and is read as permission.
 5. **Click** — [`host.input.click(x, y)`](api/input.md#host-input-click).
 6. **Read, with a callback** — [`host.ocr.recognize(region, cb)`](api/ocr.md#host-ocr-recognize). The picture is taken at the call, after the click; the corners are whole numbers. The callback form never holds your module.
 7. **Bring the page back in the read's answer** — if the target window is still in front — beside the window and with the keyboard, the result posted to the page just **before** the `show`, while the target window still has the keyboard: the page puts the keyboard focus on it, so that the page comes back on the result ([Step 3](#step-3)).
@@ -419,7 +419,7 @@ local function arrived(w)
   mine.stage = "read"
   local x, y = pointIn(w, mine.point)
   if host.window.ownsPoint(w.id, x, y) == false then
-    comeBack(w, "Something covers Notepad there; nothing was clicked.")
+    comeBack(w, "Something covers Notepad there, or it has closed; nothing was clicked.")
     return
   end
   host.input.click(x, y)
@@ -873,7 +873,7 @@ local handed, err = trip:handOver({
     end)
   end,
 })
-if not handed and err.code ~= O.errors.NOT_IN_FRONT then
+if not handed and trip.live then -- not live: given up already, and onGiveUp posts it
   trip:done({ error = "the keyboard cannot be handed over: " .. err })
 end
 ```

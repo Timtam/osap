@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 235 entries.
+Every call the platform offers a module, in one place. 241 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -161,6 +161,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O.memoByEpoch(fn)`](overlay#o-memobyepoch) | Memoizes `fn` for the current epoch only |
 | [`O.memoByOrigin(fn, opts?)`](overlay#o-memobyorigin) | Memoizes a per-window property that does not change while that window exists |
 | [`O.menuTests — seeing a plug-in's menus`](overlay#o-menutests) | The tests that tell an overlay its plug-in has a menu open, listed in its `menus` option |
+| [`O.menuTests.drawn(spec)`](overlay#o-menutests-drawn) | Makes a menu test for a popup **painted** inside the plug-in |
 | [`O.new(label)`](overlay#o-new) | Creates a new overlay object, with no controls and no binding |
 | [`O.state`](overlay#o-state) | A free-form table on every overlay for the owning module's own state, so it does not have to squat in the runtime's reserved `_`-prefixed fields. |
 | [`O.stateGeneration()`](overlay#o-stategeneration) | A count that goes up by one 250 ms after an overlay of this VM comes to the front, once per arrival |
@@ -222,6 +223,10 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O:toScreenRect(r, opts?)`](overlay#o-toscreenrect) | Where an authored rectangle `{x1, y1, x2, y2}` lands on screen now |
 | [`O:typingWhen(fn)`](overlay#o-typingwhen) | While `fn` answers exactly `true`, the overlay **holds no keys at all** — not the navigation keys, not Space, not Return. |
 | [`O:watch(spec)`](overlay#o-watch) | Waits for something to **change**, rather than for a length of time. |
+| [`tabs:onTab(n)`](overlay#tabs-ontab) | A `when` for the controls of tab `n` of that tab control |
+| [`trip.label`](overlay#trip-label) | The trip's label, `spec.label` of the `O:inPlugin` that started it |
+| [`trip.live`](overlay#trip-live) | Whether the trip is still under way |
+| [`trip.overlay`](overlay#trip-overlay) | The overlay to act through |
 | [`trip:afterDialog(fn)`](overlay#trip-afterdialog) | "The dialog that comes next, then the plug-in again, then `fn`." From the call on, a window of the plug-in's application other… |
 | [`trip:afterMenu(fn)`](overlay#trip-aftermenu) | "The menu my next click opens, then `fn`." A press of a control with `opensMenu` on `trip.overlay`, so called **before** the click |
 | [`trip:done(result)`](overlay#trip-done) | The work of a trip is over |
@@ -236,7 +241,7 @@ Finding windows and the surfaces inside them, and reacting when the focus moves.
 |---|---|
 | [`host.window.active()`](window#host-window-active) | Returns the window table for the foreground window, or `nil` if there is none or it is hidden |
 | [`host.window.apps()`](window#host-window-apps) | The running applications, described the way a window table's `app` field describes them |
-| [`host.window.controls(win?)`](window#host-window-controls) | Returns the child control tables of `win` (its `id` is used), or of the active window when omitted. |
+| [`host.window.controls(win?)`](window#host-window-controls) | Returns the child control tables of `win` (its `id` is used), or of the active window when omitted |
 | [`host.window.find(matcher)`](window#host-window-find) | Returns the first window that satisfies `matcher`, or `nil`. |
 | [`host.window.findAll(matcher)`](window#host-window-findall) | Returns all windows that satisfy `matcher`, listed the same narrowed way as `find`. |
 | [`host.window.focus(id)`](window#host-window-focus) | Brings the window with that handle to the front and gives it the keyboard. |
@@ -393,6 +398,7 @@ An HTML page of the module's own, in a window beside the plug-in. Experimental: 
 | [`page:post(value)`](gui#page-post) | Sends the page a value. |
 | [`page:prepare()`](gui#page-prepare) | Builds the page without showing it, so that the first `show` does not wait for the engine's cold start. |
 | [`page:show(opts)`](gui#page-show) | Shows the page, raised above the ordinary windows without taking the front, and with `focus` (the default) brings it to the… |
+| [`platform.errors`](gui#platform-errors) | The codes of the host's error values, in the page's own script |
 | [`platform.onmessage`](gui#platform-onmessage) | Receives what the module posts with `page:post`: each value parsed, one call each, in the order they were posted. |
 | [`platform.post(value)`](gui#platform-post) | Sends the module a value from the page's own script; it arrives at `onMessage`. |
 

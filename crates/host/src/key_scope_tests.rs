@@ -1331,7 +1331,7 @@ fn a_key_this_application_sent_ends_no_count() {
     // `host.input.send`, as the backend sends it: here it reaches the program, as the hook lets a
     // sent key go on.
     let hh = h.clone();
-    let send = a.create_function(move |_, spec: String| Ok(hh.backend.key_send(&spec).is_ok())).unwrap();
+    let send = a.create_function(move |_, spec: String| Ok(hh.backend.key_send(&spec).answer.is_ok())).unwrap();
     a.globals().set("send", send).unwrap();
     run(
         &a,
@@ -1698,4 +1698,37 @@ fn a_capture_s_bad_option_raises_and_captures_nothing() {
     assert!(h.backend.keys().0.is_empty(), "nothing captured");
     let token: i64 = a.load("return host.keys.capture('Tab', function() end, { taps = 'final', within = 250.5 })").eval().unwrap();
     assert_eq!(h.captures.taps_of(token), Taps { mode: taps::Mode::Final, within: Some(Duration::from_millis(250)) });
+}
+
+/// A module releases its own captures only: the token of a capture another module holds raises,
+/// naming that module, and the capture stands; the module's own token releases
+/// as before. A token no capture holds now — released already, or replaced by a later capture —
+/// releases nothing and raises nothing, whoever it was given to. Until 2026-10-24 the other
+/// module's token released that module's capture.
+#[test]
+fn a_module_releases_its_own_captures_only() {
+    let h = host();
+    let a = vm(&h, 1);
+    let b = vm(&h, 2);
+    h.backend.set_front(W1);
+    run(&a, r#"heard = {}; atab = host.keys.capture("Tab", function() heard[#heard + 1] = "A tab" end)"#);
+    run(&b, r#"heard = {}; btab = host.keys.capture("Space", function() heard[#heard + 1] = "B space" end)"#);
+    let btab: i64 = b.load("return btab").eval().unwrap();
+    a.globals().set("btab", btab).unwrap();
+    let e = a.load("host.keys.release(btab)").set_name("=mod.luau").exec().unwrap_err().to_string();
+    assert!(
+        e.contains(&format!("host.keys.release: token {btab} is a capture of module 'm2'; a module releases only its own captures")),
+        "{e}"
+    );
+    assert_eq!(press(&h, "Space", W1), Some(Capture::Take { owner: 2 }), "B's capture stands");
+    run(&a, "host.keys.release(atab)");
+    assert_eq!(press(&h, "Tab", W1), None, "A's own token releases it");
+    // Stale: released already, or replaced; nobody's capture now, so nothing to refuse.
+    run(&a, "host.keys.release(atab)");
+    run(&b, r#"old = btab; btab = host.keys.capture("Space", function() heard[#heard + 1] = "B space again" end)"#);
+    let old: i64 = b.load("return old").eval().unwrap();
+    a.globals().set("old", old).unwrap();
+    run(&a, "host.keys.release(old)");
+    assert_eq!(press(&h, "Space", W1), Some(Capture::Take { owner: 2 }));
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
 }

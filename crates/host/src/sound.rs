@@ -94,12 +94,24 @@ pub(crate) fn needs_reopen(failed: bool, default_then: Option<&str>, default_now
     failed || default_now.is_some_and(|now| default_then != Some(now))
 }
 
+/// What `host.sound.play` answers when no output could be opened: `no audio output device`, and
+/// the audio system's words — why the default device would not open — as its detail, where it
+/// said any; `said` is `None` when the system has no output device at all.
+pub(crate) fn no_device(said: Option<String>) -> HostError {
+    let e = HostError::of(&sound::NO_DEVICE);
+    match said {
+        Some(said) => e.with_detail(said),
+        None => e,
+    }
+}
+
 impl Output {
     /// Opens the system's default output device, or — as rodio's `try_default` does — the first
-    /// other device that opens when the default will not.
-    pub(crate) fn open() -> Result<Output, String> {
+    /// other device that opens when the default will not. Otherwise the audio system's words for
+    /// the default device that would not open, or `None` when there is no output device at all.
+    pub(crate) fn open() -> Result<Output, Option<String>> {
         let host = cpal::default_host();
-        let default = host.default_output_device().ok_or_else(|| "no audio output device".to_string())?;
+        let default = host.default_output_device().ok_or(None)?;
         let default_then = default.name().ok();
         let mut out = match Output::open_on(&default) {
             Ok(out) => out,
@@ -107,7 +119,7 @@ impl Output {
                 .output_devices()
                 .ok()
                 .and_then(|mut all| all.find_map(|d| Output::open_on(&d).ok()))
-                .ok_or(first)?,
+                .ok_or(Some(first))?,
         };
         out.default_then = default_then;
         Ok(out)
@@ -224,6 +236,18 @@ mod tests {
         assert_eq!(e.reason(), &sound::INVALID, "{e}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No output opened: the message says so once, and the audio system's words, where it said
+    /// any, are the detail — not a second copy of the message after it.
+    #[test]
+    fn no_output_device_is_said_once_and_the_systems_words_are_the_detail() {
+        let none = no_device(None);
+        assert_eq!((none.reason(), none.message(), none.detail()), (&sound::NO_DEVICE, "no audio output device", None));
+        let refused = no_device(Some("The requested device is not available".into()));
+        assert_eq!(refused.message(), "no audio output device");
+        assert_eq!(refused.detail(), Some("The requested device is not available"));
+        assert_eq!(sound::NO_DEVICE.message, "no audio output device", "no `…`: nothing is formatted into it");
     }
 
     #[test]

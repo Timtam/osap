@@ -515,11 +515,11 @@ The page's window as [`host.window`](./window.md#table-shapes-macos) gives this 
 
 Sends the module a value from the page's own script; it arrives at [`onMessage`](#host-gui-webview).
 
-**The page's side.** The host puts a small script into every page before the page's own, and it gives the page one object, `platform`: this function, [`platform.onmessage`](#platform-onmessage) for what the module posts, and `platform.errors` for the codes of an error value. It hides which engine carries the messages, so a page is written once. The same script makes `window.close()` do nothing: a page is closed by its module, not by itself. The page's own script comes from its own files — inline scripts do not run ([below](#what-a-page-is-served-and-what-it-may-not-do)).
+**The page's side.** The host puts a small script into every page before the page's own, and it gives the page one object, `platform`: this function, [`platform.onmessage`](#platform-onmessage) for what the module posts, and [`platform.errors`](#platform-errors) for the codes of an error value. It hides which engine carries the messages, so a page is written once. The same script makes `window.close()` do nothing: a page is closed by its module, not by itself. The page's own script comes from its own files — inline scripts do not run ([below](#what-a-page-is-served-and-what-it-may-not-do)).
 
 The value goes through `JSON.stringify` in the page, and the module's `onMessage` receives it decoded: an object is a table. `platform.post()` with no value, or `undefined`, sends `null`, which `onMessage` receives as `nil`. A message larger than the host takes is refused here, at once ([Returns](#platform-post-returns)). Nothing else is answered here: a message that is not the page's own, or one the module's VM cannot decode, is dropped where it arrives with a line in the log, and the page is told nothing.
 
-**`platform.errors`** holds the codes of the host's [error values](./errors.md#error-values), as `host.errors` does for a module: `platform.errors.NOT_READY` is `"not_ready"`. It is frozen, and a name it does not have throws a `TypeError` listing the codes — except the four JavaScript itself asks an object for, `then`, `toJSON`, `toString` and `valueOf`, which read as `undefined` as on any object without them, so `JSON.stringify(platform.errors)` gives the codes and `await` or an async function's `return` hands it back as it is. Turning it into a string, `String(platform.errors)` or a template literal, throws, as it does for any object without a prototype. A module that posts an error value — `page:post({ ok = false, error = err })` — hands the page `{ ok: false, error: { code, message, detail } }`, `detail` only when the error has one, and the page compares `error.code` with these, never the message.
+**`platform.errors`** holds the codes of the host's [error values](./errors.md#error-values), which a page compares an error the module posts with ([its entry](#platform-errors)).
 
 ```html
 <!-- ui/index.html -->
@@ -551,7 +551,12 @@ platform.onmessage = (m) => {
 
 - `{ ok: true }` — the message's JSON text was handed to the engine, on its way to the module. It does not say that `onMessage` ran: a message dropped where it arrives is not told to the page.
 - `{ ok: false, error: { code: "too_large", message } }` — at once, with nothing sent: the message's JSON text is more than 1 MiB (1,048,576 bytes) in UTF-8, which the host would drop where it arrives. The page compares `error.code` with `platform.errors.TOO_LARGE`, never the message.
-- A value `JSON.stringify` makes no text of — a function, a symbol — answers `{ ok: true }` with no text handed over. What the engine and the module make of that is not measured yet; send a value JSON can hold.
+- A value `JSON.stringify` makes no text of — a function, a symbol — is handed to the engine's channel as `undefined`, and `post` answers `{ ok: true }` unless that channel throws. **Not measured yet**: whether it throws, and what the host and the module's `onMessage` are then handed. `page-check` has a case for it since 2026-10-24, which has not run yet (its lines `platform.post given a function: …` and `… a symbol: …`, [building on macOS](../building-on-macos.md#page-check)), and nothing measures it in WebView2 (TODO.md). Send a value JSON can hold: `platform.post(String(value))`, or a table of what the module needs.
+
+```js
+// Not platform.post(handler): a function is no message. Name what the module is to do instead.
+platform.post({ action: "next" });
+```
 
 ### Errors {#platform-post-errors}
 
@@ -563,11 +568,53 @@ None of these is thrown. The one error comes as the `error` field of the answer.
 
 **Raises** — in the page, as a thrown `TypeError` — for what `JSON.stringify` cannot write: a value that contains itself, or a `BigInt`. A `toJSON` method of the page's own that throws throws through it.
 
+## platform.errors {#platform-errors}
+
+**Signature:** `platform.errors` → `{ [name]: string }`
+
+The codes of the host's [error values](./errors.md#error-values), in the page's own script: `platform.errors.NOT_READY` is `"not_ready"`, as [`host.errors`](./errors.md#host-errors) holds them for a module — the host's 19, not the overlay runtime's codes. A field of the [`platform`](#platform-post) object, not a function. A module that posts an error value — `page:post({ ok = false, error = err })` — hands the page `{ ok: false, error: { code, message, detail } }`, `detail` only when the error has one, and the page compares `error.code` with these, never the message.
+
+It is frozen, and a name it does not have throws, so a misspelt constant fails where it is written rather than as a comparison that is never true — except the four names JavaScript itself asks an object for, `then`, `toJSON`, `toString` and `valueOf`, which read as `undefined` as on any object without them: `JSON.stringify(platform.errors)` gives the codes, and `await` or an async function's `return` hands it back as it is.
+
+```js
+// ui/page.js — a preset the module could not find, said in the page's own words.
+platform.onmessage = (m) => {
+  if (m.ok === false && m.error.code === platform.errors.NOT_FOUND) {
+    document.getElementById("status").textContent = "No such preset.";
+  }
+};
+```
+
+### Returns {#platform-errors-returns}
+
+- An object without a prototype, the same one for the life of the document: the 19 constants, each name the code in upper case and its value the code — `NOT_READY: "not_ready"` to `FAILED: "failed"`, the table of [`host.errors`](./errors.md#host-errors). `Object.keys(platform.errors)` gives the 19 names.
+- `undefined` for `then`, `toJSON`, `toString`, `valueOf` and any symbol.
+
+### Errors {#platform-errors-errors}
+
+None. It never answers an error value.
+
+**Raises** — in the page, as a thrown `TypeError` — for a name it does not have: `platform.errors has no 'NOT_REDY'; the codes are NOT_READY, NOT_SUPPORTED, …`, every code named. Turning it into a string, `String(platform.errors)` or a template literal, throws a `TypeError`, as it does for any object without a prototype. Writing to it changes nothing — it is frozen — and throws a `TypeError` in strict code, as for any frozen object.
+
+### Windows {#platform-errors-windows}
+
+The same object in WebView2's pages.
+
+### macOS {#platform-errors-macos}
+
+The same object in WebKit's pages.
+
 ## platform.onmessage {#platform-onmessage}
 
 **Signature:** `platform.onmessage = (value) => { … }`
 
-Receives what the module posts with [`page:post`](#page-post): each value parsed, one call each, in the order they were posted. Messages that reach the page before it sets this wait for it, up to 256; more than that are dropped, with no word in the page or the log. A handler that throws does not stop the next message: its error is thrown again on its own, where the page's console would see it.
+Receives what the module posts with [`page:post`](#page-post): each value parsed, one call each, in the order they were posted. Messages that reach the page before it sets this wait for it, up to 256; more than that are dropped. The page is told nothing, and the host's log says so under `[gui]`, once at the first drop and once with the count when a handler is set and takes the ones that waited — then the count begins again, so a run of drops is two lines, not one per message:
+
+`page '<title>': its platform object says: a message of the module's was dropped: 256 wait already for platform.onmessage, the most that wait`
+
+`page '<title>': its platform object says: 3 message(s) of the module's were dropped in all before platform.onmessage was set`
+
+A page that never sets one has only the first line. The first twenty such lines of a page are logged, and the rest only counted. Until 2026-10-24 the drops said nothing. A handler that throws does not stop the next message: its error is thrown again on its own, where the page's console would see it.
 
 The page's own script puts data into the document as **text**, with `textContent`: names read off the screen, preset names from a file and file names are data somebody else wrote, and put in with `innerHTML` they could become part of the page.
 

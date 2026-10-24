@@ -466,11 +466,11 @@ fn the_length_is_posted_as_not_read_where_no_read_came_after_its_change() {
         S.owns = function(_, _, y) return y <= 760 end
         T.words({ ["sq length"] = "12 BEATS" })
         length(32)
-        T.ok(#T.inputs("drag") == 2 and T.lastPost("error").text == "something else is covering The DRUM SQ length"
+        T.ok(#T.inputs("drag") == 2 and T.lastPost("error").text == "something else is covering The DRUM SQ length, or its window is gone"
           and T.lastPost("state").state.osc_panel.drum_sq_length_steps == 64, T.lastPost("error").text)
         T.words({ ["sq length"] = "12 BEATS" })
         length(32, "double")
-        T.ok(#T.inputs("drag") == 2 and T.lastPost("error").text == "something else is covering The DRUM SQ length"
+        T.ok(#T.inputs("drag") == 2 and T.lastPost("error").text == "something else is covering The DRUM SQ length, or its window is gone"
           and T.lastPost("state").state.osc_panel.drum_sq_length_steps == nil, T.lastPost("error").text)
         S.owns = true
         -- Another application after the double-click, from LENGTH read 32.

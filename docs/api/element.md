@@ -496,6 +496,15 @@ Asks a named element what it reports about its **own** state, rather than inferr
 
 It is **expensive**: the same raw tree walk as `pluginLocate`, measured at 60–300 ms on the message pump against roughly 17 ms for a single pixel read through the standard path. It is the fallback for what a cheap pixel probe cannot answer, never the primary route. And a missing `toggle` is not "off" — Kontakt's Side and Info panes carry no state at all, so a module that turned that into `false` would be inventing an answer.
 
+As with `find`, an **empty `name`** matches any element of the given type — the first the walk meets — on both platforms.
+
+```luau
+local U = host.element.type
+local fg = host.window.active()
+-- The state of the first check box inside the plug-in, whatever it is called.
+local st = fg and host.element.stateProbe(fg.id, "Kontakt 8", "", U.CheckBox)
+```
+
 ```luau
 local U = host.element.type
 -- Kontakt's status-bar toggles publish as plain Buttons, so the type says nothing and the
@@ -533,7 +542,7 @@ None of these is raised.
 
 `legacyState` is a real `LegacyIAccessible` state word, so bits beyond CHECKED (`0x10`) carry information: `0x08` PRESSED, `0x04` FOCUSED, `0x100000` FOCUSABLE. Read them with care — Kontakt's Side and Info panes were seen going `0x100000` → `0x100004` across a press, and that `0x4` is the consequence of our own click rather than a panel state.
 
-The search is confined to elements named `containerName` with control type Window or Pane (the `ni::qt::QuickWindow` class preferred over the window host), and a window with no container of that name answers `nil` without looking further. The same walks as [`pluginLocate`](#host-element-pluginlocate), with the same bounds: one stopped at its bound before the end that found nothing answers `nil, err`. `name` is compared exactly here, so an empty one matches only an element without a name; on macOS it matches any element of the type.
+The search is confined to elements named `containerName` with control type Window or Pane (the `ni::qt::QuickWindow` class preferred over the window host), and a window with no container of that name answers `nil` without looking further. The same walks as [`pluginLocate`](#host-element-pluginlocate), with the same bounds: one stopped at its bound before the end that found nothing answers `nil, err`. An empty `name` matches any element of the type, as on macOS and in every other call here, and any other is compared exactly; until 2026-10-24 an empty one matched only an element without a name here.
 
 ### macOS {#host-element-stateprobe-macos}
 

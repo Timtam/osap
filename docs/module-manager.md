@@ -324,7 +324,12 @@ The log has a `[manager]` line for each, and one that counts what the reload did
 
 The combination is awkward on purpose: it rebuilds every VM in the application, and it
 has to be impossible to hit by accident while working in a plugin. If something else on
-the system already owns it, the app logs that at startup and carries on without it.
+the system already owns it, the app logs that at startup and carries on without it, and tries
+the key again whenever the host next works out who holds which key, as for the
+[quit key](#quit-key). That something is never a module: modules load before the application
+registers its keys, and [`host.hotkey.register`](api/hotkey.md#host-hotkey-register-errors)
+refuses the reload and the quit key to every module, in any spelling (`taken`, `… is Automation
+Platform's own key, …`), so none can hold either first.
 
 ### Quit: Ctrl+Alt+Shift+Win+Q, or Control-Shift-Command-Q on a Mac {#quit-key}
 
@@ -378,8 +383,14 @@ Among the log's start lines, the two keys are named one after the other:
 
 and a press writes `[keys] hotkey Ctrl+Alt+Shift+Win+Q arrived` and `[manager]
 Ctrl+Alt+Shift+Win+Q was pressed: the application quits, as the tray's Quit does`. If
-something else already owns the combination, the start line says `quit hotkey … unavailable`
-with the reason, and the tray's Quit is the way out.
+something else already owns the combination — another program, never a module, as for the
+reload key — the start line says `quit hotkey … unavailable` with the reason, and the tray's Quit
+is the way out. The key is tried again whenever the
+host next works out who holds which key — at any module's next hotkey registration or
+release, and at every change to the enabled set — before any module's claim, and the line
+`[manager] Ctrl+Alt+Shift+Win+Q quits the application — held now, refused at start` says
+when it is held; the reload key the same way. On a Mac it is also what follows a hotkey
+handler that could not be installed ([`host.hotkey.register`](api/hotkey.md#host-hotkey-register-errors)).
 
 ### Uninstall
 

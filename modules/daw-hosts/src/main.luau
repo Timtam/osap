@@ -5,8 +5,9 @@
 -- ReaHotkey is Windows-only.
 --
 -- ADDING A DAW IS ADDING ITS ENTRIES HERE, and nothing else (the maintainer's decision of
--- 2026-09-27). An entry is a window matcher (host.window.test ignores the other fields) plus what
--- the DAW, and only the DAW, knows about its plug-in windows:
+-- 2026-09-27). An entry is a window matcher plus what the DAW, and only the DAW, knows about its
+-- plug-in windows — fields the runtime and the focus key leave out of the matcher they test, as
+-- host.window raises for a key no matcher has:
 --
 --   app / title / windows / macos / linux   which windows are this DAW's plug-in windows
 --   chrome        control classes (Lua patterns, one plain list, not OS-keyed) meaning the
@@ -57,8 +58,8 @@
 -- list, transport, …), NOT the embedded plugin". A plugin overlay uses these to gate
 -- activation, so it does not fire while the plugin is merely selected/visible but the user is
 -- browsing the FX list. Lua patterns over the raw window class; mirrors ReaHotkey's
--- InPluginControl REAPER exclusion list. (Carried on the matcher as an extra field;
--- host.window.test ignores it.)
+-- InPluginControl REAPER exclusion list. (Carried on the entry as a field of its own, which the
+-- matcher tested leaves out: `entryMatcher` below.)
 local reaper_chrome = {
   "^SysListView32", -- the FX list (and other list views)
   "^SysTreeView32",
@@ -399,12 +400,29 @@ local function pluginOriginFor(originOf, w)
   return originByWindow[key]
 end
 
+-- An entry's matcher: the entry without the fields of its own the header lists — host.window's
+-- find raises for a key a matcher does not have. The overlay runtime takes an entry's matcher the
+-- same way (its ENTRY_FIELDS). Made once per entry: the entries do not change.
+local ENTRY_FIELDS = { "chrome", "pluginOrigin", "swallowsFirstClick", "focusTarget", "focusKey", "daw" }
+local matcherOfEntry = {}
+local function entryMatcher(entry)
+  local m = matcherOfEntry[entry]
+  if m == nil then
+    m = {}
+    for k, v in pairs(entry) do
+      if not table.find(ENTRY_FIELDS, k) then m[k] = v end
+    end
+    matcherOfEntry[entry] = m
+  end
+  return m
+end
+
 -- The first plug-in window of entry `entry`, or nil: a window its matcher takes, and its
 -- `focusTarget` too where it has one (REAPER's, whose matcher takes every dialog of the process
 -- on Windows).
 local function pluginWindowOf(entry)
-  if not entry.focusTarget then return host.window.find(entry) end
-  for _, w in ipairs(host.window.findAll(entry)) do
+  if not entry.focusTarget then return host.window.find(entryMatcher(entry)) end
+  for _, w in ipairs(host.window.findAll(entryMatcher(entry))) do
     if host.window.test(entry.focusTarget, w) then return w end
   end
   return nil
@@ -622,6 +640,9 @@ return {
   ableton = ableton,
   logic = logic,
   all = all,
+  -- An entry's matcher, for a tool that tests windows against the entries itself (the HTML
+  -- probe): host.window raises for the entry's own fields.
+  matcher = entryMatcher,
 
   -- Runs in this module's own VM only — never in the copy a dependent holds — so the
   -- shortcut exists once no matter how many plugin modules require this one. A combination

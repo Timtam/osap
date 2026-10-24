@@ -380,8 +380,9 @@ Three more rules worth knowing:
   where one field differs and the rest of the matcher does not.
 - **`class` belongs inside a platform block.** Only `title`, `app`, `os`, the platform blocks
   and `where` are read at the top level; a top-level `class` — where AutoHotkey's `ahk_class`
-  habit puts it — is ignored without an error, and the matcher then matches every window of
-  the application. The full list of keys is under [Matchers](api/window.md#matchers).
+  habit puts it — raises (`matcher has no key 'class'; a window class goes in the block of its
+  platform: windows = { class = … }`), as any key a matcher does not have does. The full list of
+  keys is under [Matchers](api/window.md#matchers).
 
 The embedded binding has one more of these, for the same reason — a plugin's own control has a
 window class on Windows and, where it publishes one at all, an accessibility role on macOS:

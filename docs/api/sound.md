@@ -60,7 +60,7 @@ None of these is raised. Each comes as the second value. The file is checked fir
 | `not_found` | return | A file outside the module's package that is not there. The message has the path as it was resolved, and the system's words. | `cannot play '…': …` | both |
 | `invalid` | return | A file outside the package that is there and is not a sound it decodes. It decodes WAV, FLAC, Ogg Vorbis and MP3. The message has the decoder's words. | `cannot play '…': …` | both |
 | `failed` | return | A file outside the package that is there and cannot be opened: no right to read it, a folder, another program holding it. | `cannot play '…': …` | both |
-| `unavailable` | return | The file is a sound, and no output device could be opened. The message has the audio system's words. Nothing is held open: the next sound tries again. | `no audio output device: …` | both |
+| `unavailable` | return | The file is a sound, and no output device could be opened: the system has none, or none would open. `err.detail` has the audio system's words for the default device that would not open, and is `nil` when there is no device at all; the `[sound]` line has them after the message. Nothing is held open: the next sound tries again. | `no audio output device` | both |
 
 **Raises** for a mistake in the call:
 

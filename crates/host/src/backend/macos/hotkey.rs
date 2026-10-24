@@ -364,7 +364,7 @@ fn install_handler() -> Result<(), HostError> {
     if status != noErr {
         let msg = format!(
             "could not install the Carbon hotkey handler (InstallEventHandler returned \
-             {status}); no global shortcut will work in this session"
+             {status}); no global shortcut works until it is installed, which the next refresh tries again"
         );
         crate::logging::line("macos", &msg);
         return Err(HostError::with(&crate::errors::hotkey::NO_HANDLER, msg));

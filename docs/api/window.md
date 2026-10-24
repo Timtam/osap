@@ -96,9 +96,16 @@ A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTr
 - `windows` / `macos` / `linux` — per-OS blocks. If any platform block is present but the current OS is not among them, the matcher fails. The current-OS block may contain `title` and `app` (as above), `class` (a field matcher against the window class), and on macOS `axRole`, `axSubrole` and `axIdentifier` (field matchers against the three parts of the macOS `class` string).
 - `where` — a `function(win) -> boolean` escape-hatch predicate, evaluated last.
 
-**Every other key is ignored without an error.** That includes a `class` at the top level, outside a platform block: `{ app = { name = "reaper" }, class = "REAPERwnd" }` matches every window REAPER has. The window class lives in the `windows` or `macos` block, where AutoHotkey's `ahk_class` would be. Keys from other designs — `controlClass`, `wmClass`, `exe` at the top level — are ignored the same way. A window table is plain data too: it has fields and no methods.
+**Any other key raises**, at every level, and so does a key of the wrong type: `find`, `findAll`, `test` and `onTrigger` check the whole matcher at the caller's line before anything is listed or tested, since the matcher alone decides it ([Return or raise](./errors.md#return-or-raise)). A matcher that is not a table raises (`host.window.find: the matcher is a table, not a string`), and so does a `class` at the top level, outside a platform block — the window class lives in the `windows` or `macos` block, where AutoHotkey's `ahk_class` would be: `{ app = { name = "reaper" }, class = "REAPERwnd" }` raises `host.window.find: matcher has no key 'class'; a window class goes in the block of its platform: windows = { class = … }`. Keys from other designs — `controlClass`, `wmClass`, `exe` at the top level — raise the same way (`matcher has no key 'exe'; its keys are title, app, os, windows, macos, linux and where`). The checks, each message after the call's name:
 
-**The keys above of the wrong type** are checked only by [`onTrigger`](#host-window-ontrigger), which raises when it registers. `find`, `findAll`, `test` and the overlay's bindings do not check: there an `app` given as a string constrains nothing — `{ app = "game.exe" }` matches every window — and neither does a string block for the platform in use (a block for another platform still makes the matcher fail, as any would); a `where` that is not a function is skipped; and an `os` that is not a table, an `app` that is a number or a boolean, or such a block for the platform in use, raises from inside the call.
+- the top level: only the seven keys above;
+- `app`, at the top level and in a block: a table (`matcher.app is a table, not a string`) of `name`, `exe`, `bundleId` and `pid`, `pid` a number;
+- `os`: a list of strings (`matcher.os[2] is a string, not a number`);
+- a platform block — the other platforms' too, so that a mistake in one shows on whichever platform the module is tried on: a table of `title`, `app`, `class`, `axRole`, `axSubrole` and `axIdentifier` (`matcher.windows has no key 'clas'; a platform block's keys are …`);
+- `where`: a function;
+- every field matcher: below.
+
+Until 2026-10-24 none of this raised outside `onTrigger`, which checked only the types of `app`, `os`, `where` and the blocks: a string matcher, a string `app` and a misspelt key constrained nothing, so they matched every window. A window table is plain data too: it has fields and no methods.
 
 A **field matcher** is either a string (case-insensitive equality) or a table with one of:
 
@@ -107,7 +114,7 @@ A **field matcher** is either a string (case-insensitive equality) or a table wi
 - `pattern` / `regex` — Luau string pattern (both evaluated as Luau patterns; **case-sensitive**)
 - `not` — negates a nested field matcher
 
-A table with none of these keys — a misspelt `{ equals = "REAPER" }` — matches nothing, silently. A table with several uses the first one present in the order `not`, `exact`, `contains`, `prefix`, `suffix`, `pattern`, `regex`, and ignores the rest. A field matcher may itself be keyed by platform — `title = { windows = "REAPER", macos = { prefix = "REAPER" } }` — and then matches nothing on a platform it does not name.
+Each of them holds a string, and `not` a field matcher. A key that is none of these raises — a misspelt `{ equals = "REAPER" }` raises `matcher.title has no key 'equals'; a field matcher's keys are not, exact, contains, prefix, suffix, pattern and regex` — and so does a field matcher that is neither a string nor a table (`matcher.title is a string or a table, not a number`) and a mode's value that is not a string (`matcher.title.contains is a string, not a number`). An empty table matches nothing. A table with several uses the first one present in the order `not`, `exact`, `contains`, `prefix`, `suffix`, `pattern`, `regex`, and ignores the rest. A field matcher may itself be keyed by platform — `title = { windows = "REAPER", macos = { prefix = "REAPER" } }` — and then matches nothing on a platform it does not name; such a table holds only `windows`, `macos` and `linux`, each a field matcher that is not keyed by platform again. A `pattern` or `regex` that is not a valid Luau pattern is not checked: it raises from inside the call when it is tested against a window.
 
 ```luau
 -- Match REAPER's main window on Windows only, title containing "REAPER".
@@ -527,7 +534,7 @@ A window of this application's own is focused with AppKit's calls instead: broug
 
 **Signature:** `host.window.controls(win: Window?) -> { Control }`
 
-Returns the child [control tables](#control-table) of `win` (its `id` is used), or of the active window when omitted. Returns an empty table if no window applies. Used to detect embedded plugins by control class/geometry.
+Returns the child [control tables](#control-table) of `win` (its `id` is used), or of the active window when omitted — the one [`active()`](#host-window-active) answers in the same epoch. Returns an empty table if no window applies. Used to detect embedded plugins by control class/geometry.
 
 ```luau
 for _, c in ipairs(host.window.controls()) do
@@ -535,12 +542,16 @@ for _, c in ipairs(host.window.controls()) do
     host.log.info("plugin control id=" .. c.id)
   end
 end
+
+-- Left out, the window is active()'s: the two agree within an epoch.
+local w = host.window.active()
+local inside = host.window.controls()   -- the same as host.window.controls(w), or {} when w is nil
 ```
 
 ### Returns {#host-window-controls-returns}
 
-- `{ Control }` — the [control tables](#control-table) inside the window, which ones differing by platform (below). The list for a window id is kept for the epoch. With `win` left out, the window in front is asked afresh at every call — not the epoch's [`active()`](#host-window-active) answer, so the two can name different windows.
-- `{}` — no window applies, or it holds nothing listed: `win` left out with no window in front, an id that names no window, a window with no visible child (Windows) or no container (macOS), and on macOS a window of this application's own. Never `nil`.
+- `{ Control }` — the [control tables](#control-table) inside the window, which ones differing by platform (below). The list for a window id is kept for the epoch. With `win` left out, the window is the epoch's [`active()`](#host-window-active) answer, the same window `active()` names in that epoch — so in a [`host.timer.every`](./timer.md#host-timer-every) poll it can be one that has left the front since, as `active()`'s can. Until 2026-10-24 a `controls()` without `win` asked the system again for the window in front, at every call.
+- `{}` — no window applies, or it holds nothing listed: `win` left out with no window in front as the epoch saw it (`active()` answering `nil`), an id that names no window, a window with no visible child (Windows) or no container (macOS), and on macOS a window of this application's own. Never `nil`.
 
 ### Errors {#host-window-controls-errors}
 
@@ -627,7 +638,8 @@ end
 
 - `true` — the window drawn at the point belongs to the same top-level window as `id`.
 - `false` — another window is drawn there: another application's, or another top-level window of the same application. Only this should stop a click.
-- `nil` — the platform cannot say. On Windows no window is at the point — it is off every screen — or `id` names no window; on macOS any of the cases below; and always in the build for other systems. Read it as permission.
+- `false` too, on Windows, for an `id` that names no window — `0`, or a window closed since: a window that is not there owns nothing, so a click checked against it is stopped.
+- `nil` — the platform cannot say. On Windows no window is at the point — it is off every screen; on macOS any of the cases below; and always in the build for other systems. Read it as permission.
 
 ### Errors {#host-window-ownspoint-errors}
 
@@ -637,7 +649,7 @@ None. It never answers an error value.
 
 ### Windows {#host-window-ownspoint-windows}
 
-Implemented with `WindowFromPoint` + `GetAncestor(GA_ROOT)` on both sides. `WindowFromPoint` is the window manager's own hit test, so a click-through window (`WS_EX_TRANSPARENT`) is correctly seen through rather than treated as a cover. `windowsOf` lists windows by their `HWND`, so with `listed` the question is the same one about the same number.
+Implemented with `WindowFromPoint` + `GetAncestor(GA_ROOT)` on both sides. `WindowFromPoint` is the window manager's own hit test, so a click-through window (`WS_EX_TRANSPARENT`) is correctly seen through rather than treated as a cover. `windowsOf` lists windows by their `HWND`, so with `listed` the question is the same one about the same number. An `id` that `IsWindow` says is no window — `0`, a window closed since, a number made up — answers `false` before the point is looked at, with `listed` too. A handle Windows has given to another window since is that window's, and is answered as such (see [Table shapes](#table-shapes-windows)).
 
 ### macOS {#host-window-ownspoint-macos}
 
@@ -666,7 +678,13 @@ local reaper = host.window.find({ app = { name = "reaper" } })
 
 None. It never answers an error value.
 
-**Raises** from inside the call, since the matcher is not checked (see [Matchers](#matchers)): a `matcher` that is `nil`, a number or a boolean (`attempt to index nil with 'app'`) — a string raises nothing and matches every window; an `os` that is not a table, an `app` that is a number or a boolean, and such a block for the platform in use; a field matcher whose value is a table where a string goes, or a `pattern` or `regex` that is not a valid Luau pattern; and whatever a `where` function raises. All but the first raise only when there is a window or an application to test the matcher against, so the same mistake can pass while nothing is listed.
+**Raises** for a mistake in the matcher, at the caller's line and before anything is listed, with a message that begins `host.window.find: `: a `matcher` that is not a table (`the matcher is a table, not a string`), a key no matcher has at any level, and a key of the wrong type — every check is under [Matchers](#matchers). Two raise from inside the call instead, and only when there is a window to test the matcher against, so they can pass while nothing is listed: a `pattern` or `regex` that is not a valid Luau pattern, and whatever a `where` function raises.
+
+```luau
+-- The matcher is checked whatever is running: a misspelt key raises here, at once.
+local ok, e = pcall(host.window.find, { titel = "REAPER" })
+-- e: "host.window.find: matcher has no key 'titel'; its keys are title, app, os, windows, macos, linux and where"
+```
 
 ## host.window.findAll(matcher) {#host-window-findall}
 
@@ -686,13 +704,15 @@ local editors = host.window.findAll({ title = { contains = "Notepad" } })
 
 None. It never answers an error value.
 
-**Raises** from inside the call, as [`find`](#host-window-find-errors) does.
+**Raises** for a mistake in the matcher, as [`find`](#host-window-find-errors) does, its message beginning `host.window.findAll: `.
 
 ## host.window.test(matcher, win) {#host-window-test}
 
 **Signature:** `host.window.test(matcher: Matcher, win: Window) -> boolean`
 
 (prelude) Returns whether the given window table satisfies `matcher` (the same logic `find`/`findAll` apply). Used by overlay attach contexts.
+
+The matcher is checked at every call, as [`find`](#host-window-find) checks it — a few table lookups beside the test itself — so a matcher with a mistake raises at its first test: for an overlay bound by it, at the overlay's first evaluation, and the log writes it as the error of the handler that ran the evaluation, the first time it comes — `[timer] [com.example.synth] …host.window.test: matcher has no key 'class'; …` for the first evaluation, which a timer of the runtime's runs, `[window trigger]` or `[focus change]` for a later one — and the module's error dialog shows it once ([Errors are contained](../module-runtime-and-lifecycle.md#runtime-model)).
 
 ```luau
 local w = host.window.active()
@@ -707,7 +727,7 @@ if w and host.window.test({ windows = { class = "REAPERwnd" } }, w) then ... end
 
 None. It never answers an error value.
 
-**Raises** from inside the call, as [`find`](#host-window-find-errors) does, and for a `win` that is not a table as soon as the matcher reads one of its fields; a matcher that reads none, such as `{}`, answers `true` for anything.
+**Raises** for a mistake in the matcher, as [`find`](#host-window-find-errors) does, its message beginning `host.window.test: `, at every call; and for a `win` that is not a table, whatever the matcher reads (`host.window.test: the window is a table, not a nil`).
 
 ## host.window.onTrigger(matcher, opts, cb) {#host-window-ontrigger}
 
@@ -717,7 +737,7 @@ None. It never answers an error value.
 
 **The options can be left out.** `onTrigger(matcher, cb)` is `onTrigger(matcher, nil, cb)`: it fires on every matching activation and asks for no report of the window already in front. A function in the second place is taken as the callback when there is no third argument.
 
-**A bad registration raises from `onTrigger` itself**, at the caller's line, and nothing is registered: a `cb` that is not a function (`host.window.onTrigger: the callback is a function, not a nil`), a `matcher` that is neither a table nor `nil`, an `opts` that is neither a table nor `nil`, and an `initial` that is not `true` or `false` (below). The matcher's keys whose type decides what they mean are checked too: an `app`, `os` or platform block (`windows`, `macos`, `linux`) that is not a table, an `app` inside a platform block that is not a table, and a `where` that is not a function raise — `{ app = "game.exe" }` raises `host.window.onTrigger: matcher.app is a table, not a string`, where it would otherwise fire for every window. Nothing else about a matcher is checked: a misspelt key is ignored, and a field matcher that is not a string or a table, or a table with none of its keys, matches nothing (see [Matchers](#matchers)).
+**A bad registration raises from `onTrigger` itself**, at the caller's line, and nothing is registered: a `cb` that is not a function (`host.window.onTrigger: the callback is a function, not a nil`), a `matcher` that is neither a table nor `nil`, an `opts` that is neither a table nor `nil`, and an `initial` that is not `true` or `false` (below). The matcher is checked whole, as [`find`](#host-window-find-errors) checks it ([Matchers](#matchers)): a key no matcher has, at any level, and a key of the wrong type raise — `{ app = "game.exe" }` raises `host.window.onTrigger: matcher.app is a table, not a string`, where it would otherwise fire for every window, and a misspelt `{ titel = "Game" }` raises `host.window.onTrigger: matcher has no key 'titel'; …`, where it was ignored until 2026-10-24.
 
 Registration is plain table work in the prelude, on the main thread, with no system call — except that `initial = true` queues the module for the report described next.
 
@@ -762,7 +782,7 @@ end)
 
 None. It never answers an error value. Its callback is handed none either.
 
-**Raises** for a mistake in the call, at the caller's line, with nothing registered: a `cb` that is not a function (`host.window.onTrigger: the callback is a function, not a nil`); a `matcher` or `opts` that is neither a table nor `nil`; an `initial` that is not `true` or `false`; a matcher's `app`, `os`, platform block or a block's `app` that is not a table, and a `where` that is not a function (`host.window.onTrigger: matcher.app is a table, not a string`). An error the callback raises later is logged, and skips the module's later triggers for that change (above).
+**Raises** for a mistake in the call, at the caller's line, with nothing registered: a `cb` that is not a function (`host.window.onTrigger: the callback is a function, not a nil`); a `matcher` or `opts` that is neither a table nor `nil`; an `initial` that is not `true` or `false`; and every mistake in the matcher [`find`](#host-window-find-errors) raises for — a key no matcher has, a key of the wrong type (`host.window.onTrigger: matcher.app is a table, not a string`). An error the callback raises later is logged, and skips the module's later triggers for that change (above).
 
 ### Windows {#host-window-ontrigger-windows}
 

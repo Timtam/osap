@@ -1930,7 +1930,7 @@ fn prime_clicks_once_at_arrival_only_with_the_entrys_field_and_the_modules_point
         T.trip()
         T.land()
         T.runDue()
-        T.ok(S.acts == 2 and T.count("the prime at 105,55 is covered by another window — not clicked") == 1, T.dump())
+        T.ok(S.acts == 2 and T.count("the prime at 105,55 is covered by another window, or the window is gone — not clicked") == 1, T.dump())
         T.runDue()
     "##);
     run(r##"

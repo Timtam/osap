@@ -271,7 +271,7 @@ function D.answer(o, trip, label, done)
       boxShot(origin, k, rect, box, label)
       local x, y = math.floor(box.yes[1] + 0.5), math.floor(box.yes[2] + 0.5)
       local ok, mine = pcall(host.window.ownsPoint, origin.id, x, y)
-      if ok and mine == false then return done(false, "something else is covering the warning box's YES") end
+      if ok and mine == false then return done(false, "something else is covering the warning box's YES, or its window is gone") end
       host.input.click(x, y)
       clicked = true
       return look()

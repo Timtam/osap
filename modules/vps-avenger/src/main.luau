@@ -118,8 +118,8 @@ local function pointAt(o, label, x, y, quiet)
   end
   local ok, mine = pcall(host.window.ownsPoint, origin.id, x, y)
   if ok and mine == false then
-    host.log.info(string.format("[avenger] '%s' at (%d,%d): another window is drawn there — not clicking", label, x, y))
-    return refuse("something else is covering " .. label)
+    host.log.info(string.format("[avenger] '%s' at (%d,%d): another window is drawn there, or the window is gone — not clicking", label, x, y))
+    return refuse("something else is covering " .. label .. ", or its window is gone")
   end
   return x, y
 end

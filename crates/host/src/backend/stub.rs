@@ -180,27 +180,35 @@ impl Backend for StubBackend {
     fn mouse_scroll(&self, _x: i32, _y: i32, _delta: i32) -> Result<(), HostError> {
         Ok(())
     }
-    fn key_post(&self, _hwnd: isize, _key: &str) -> Result<(), KeyRefusal> {
-        Ok(())
+    // No window to post to: answered as `key_send` is, as a way of acting this platform does not
+    // have — a key name that is not one still raises, as everywhere.
+    fn key_post(&self, _hwnd: isize, key: &str) -> Result<(), KeyRefusal> {
+        super::key_to_vk(key).ok_or_else(|| format!("unknown key '{key}'"))?;
+        Err(KeyRefusal::Answer(HostError::of(&common::NOT_YET)))
     }
 
     // No input to send it to: answered, as a way of acting this platform does not have — unless a
     // test takes it, and then it reaches the program as the hook lets a key `host.input.send` sent
     // go on (`send_through`).
-    fn key_send(&self, combo: &str) -> Result<(), KeyRefusal> {
+    fn key_send(&self, combo: &str) -> super::KeySend {
         if !self.sends.get() {
-            return Err(KeyRefusal::Answer(HostError::of(&common::NOT_YET)));
+            return super::KeySend::all_or_nothing(Err(KeyRefusal::Answer(HostError::of(&common::NOT_YET))));
         }
-        super::parse_key_spec(combo)?;
+        if let Err(why) = super::parse_key_spec(combo) {
+            return super::KeySend::all_or_nothing(Err(KeyRefusal::Mistake(why)));
+        }
         self.send_through();
-        Ok(())
+        super::KeySend::all_or_nothing(Ok(()))
     }
     fn type_text(&self, _text: &str) -> Result<(), HostError> {
         Ok(())
     }
 
     // No hotkey to hold: answered, as a way of being called this platform does not have.
+    // A spec that does not parse raises, as on Windows and a Mac: a mistake in the call, whatever
+    // the platform. Until 2026-10-24 it was answered as every other spec here.
     fn register_hotkey(&self, _id: i32, spec: &str) -> Result<(), KeyRefusal> {
+        super::parse_key_spec(spec).map_err(|e| format!("could not parse the hotkey spec '{spec}': {e}"))?;
         Err(KeyRefusal::Answer(HostError::with(
             &hotkey::STUB,
             format!("hotkeys are not implemented on this platform yet (spec '{spec}')"),

@@ -39,11 +39,19 @@ Returns the object that dependency `id` exported, where `id` is a module declare
 in this module's manifest `dependencies`. Raises `required module '<id>' is not loaded or
 exports nothing` when there is nothing to return — use
 [`host.tryRequire`](./tryrequire.md#host-tryrequire) for an optional dependency that may be
-absent. **A `code_module` this module does not declare is not evaluated into its VM.**
-Requiring one anyway reaches only the legacy data path below, and a runtime whose table holds
-functions has no data export there, so that raises the message above although the runtime is
-loaded: list it under `dependencies` (or `optional_dependencies`). `id` is a string; a number
-is read as its digits, and anything else raises.
+absent. **Only a declared dependency comes back**, by either path below: one that this module,
+or a `code_module` evaluated into its VM, lists under `dependencies` or `optional_dependencies`.
+A `code_module` nobody here declares is not evaluated into the VM, and a data dependency nobody
+here declares is not looked up, though it is loaded; requiring either raises `required module
+'<id>' is not a declared dependency: …`, which names the fix. `id` is a string; a number is read
+as its digits, and anything else raises.
+
+```luau
+-- module.toml: dependencies = ["com.platform.overlay"]
+local O = host.require("com.platform.overlay")     -- declared: the runtime, functions intact
+local ok, err = pcall(host.require, "com.example.preset-library")
+if not ok then host.log.info(tostring(err)) end    -- not declared: "… is not a declared dependency: …"
+```
 
 **Cost.** For a `code_module`, a lookup in this VM's table of evaluated dependencies, so the
 same live table comes back on every call. For a legacy data dependency, the data is converted
@@ -64,6 +72,12 @@ keep the result. Both on the main thread, like every Lua call.
   id.
 - Otherwise (a legacy data dependency), it returns a fresh Luau value mirroring
   the plain **data** the dependency exported (functions can't cross a VM this way).
+  **Its arrays carry a protected metatable**, the one the conversion gives every list: on
+  each list in it — `lib.presets` below — `getmetatable` answers `false`, and `setmetatable`,
+  `table.clone` and `table.freeze` raise (`cannot change a protected metatable`, `table has a
+  protected metatable`). Reading it, `#`, `ipairs` and writing into it work, and a table of
+  keys has no metatable. To freeze or clone a list, copy it first:
+  `local copy = {} for i, v in ipairs(lib.presets) do copy[i] = v end`.
 
 ```luau
 -- a code_module dependency exposing functions:
@@ -104,7 +118,7 @@ for _, p in ipairs(lib.presets) do ... end
 - For a legacy data dependency: a fresh Luau copy of the plain data its entry returned, at every call.
 - Never `nil`: where there is nothing to return it raises. [`host.tryRequire`](./tryrequire.md#host-tryrequire) answers `nil` there instead.
 
-The data path does not read the manifest. A data export comes back for any module that has loaded, declared here or not; declaring it under `dependencies` is what says this module needs it.
+Both paths read the declarations: an id that neither this module nor a `code_module` evaluated into its VM lists under `dependencies` or `optional_dependencies` raises, whether or not that module has loaded.
 
 ### Errors {#host-require-errors}
 
@@ -112,7 +126,8 @@ None. It never answers an error value.
 
 **Raises** for a mistake in the call:
 
-- nothing to return — `required module '…' is not loaded or exports nothing`: the module is not installed or did not load; it is a `code_module` this module lists under neither `dependencies` nor `optional_dependencies`, so it was not evaluated into this VM, and a table of functions has no data export; or its entry returned no table of plain data. An optional dependency that may be absent is asked for with [`host.tryRequire`](./tryrequire.md#host-tryrequire) instead.
+- an `id` nobody here declares — `required module '…' is not a declared dependency: list it under dependencies (or optional_dependencies) in the module.toml of the module that requires it`: neither this module nor a `code_module` evaluated into its VM lists it, whether it is a `code_module`, which is then not evaluated into this VM, or a data dependency that has loaded;
+- nothing to return for a declared one — `required module '…' is not loaded or exports nothing`: the module is not installed or did not load, or its entry returned no table of plain data. An optional dependency that may be absent is asked for with [`host.tryRequire`](./tryrequire.md#host-tryrequire) instead.
 - an `id` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8.
 
 A dependency whose code fails as it is evaluated into this VM does not raise here: it fails this module's load, before its entry runs (`error running dependency '…' of '…'`).

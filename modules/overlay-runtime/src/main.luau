@@ -1747,7 +1747,7 @@ local function refuseOutside(self, c, x, y)
     if ok and mine == false then
       local err = fail("covered_point", nil, tostring(c.label), x, y)
       host.log.info(tostring(self.label) .. ": " .. err)
-      host.speech.output("something else is covering " .. (c.label or "that control"),
+      host.speech.output("something else is covering " .. (c.label or "that control") .. ", or its window is gone",
         { interrupt = true })
       return err
     end
@@ -5790,6 +5790,26 @@ function O.hosts(...)
   return out
 end
 
+-- A DAW entry's own fields, beside its matcher keys (docs/daw-hosts.md, "The entry"): what the
+-- runtime reads of it, and what daw-hosts' focus key does. host.window.test raises for a key a
+-- matcher does not have, so an entry is tested by its matcher alone, `entryMatcher`.
+local ENTRY_FIELDS = { "chrome", "pluginOrigin", "swallowsFirstClick", "focusTarget", "focusKey", "daw" }
+-- Per entry, its matcher: the entry without those fields. Made once; weak keys, as an entry lives
+-- as long as the binding that lists it.
+local matcherOfEntry = setmetatable({}, { __mode = "k" })
+
+local function entryMatcher(entry)
+  local m = matcherOfEntry[entry]
+  if m == nil then
+    m = {}
+    for k, v in pairs(entry) do
+      if not table.find(ENTRY_FIELDS, k) then m[k] = v end
+    end
+    matcherOfEntry[entry] = m
+  end
+  return m
+end
+
 -- One resolved origin per (spec, epoch), shared by every overlay bound to that spec.
 -- See the note in attachEmbedded for why this is not per overlay. Weak keys: an entry
 -- lives exactly as long as the spec it answers for.
@@ -6548,7 +6568,7 @@ function Overlay:attachEmbedded(spec, opts)
     if panels and stay.win ~= nil and not inStayWindow(active) then endStay() end
     local entry = nil
     for _, h in ipairs(hosts) do
-      if host.window.test(h, active) then
+      if host.window.test(entryMatcher(h), active) then
         entry = h
         break
       end
@@ -6785,7 +6805,7 @@ function Overlay:attachEmbedded(spec, opts)
     local entry = held.entry
     if not entry then
       for _, h in ipairs(hosts) do
-        if host.window.test(h, win) then
+        if host.window.test(entryMatcher(h), win) then
           entry = h
           break
         end
@@ -8479,7 +8499,7 @@ function Overlay:_pickEnd(word, detail)
   elseif word == "unplaced" then
     return notChosen(fail("item_unplaced", nil, tostring(detail)), label .. " is not available now")
   elseif word == "covered" then
-    return notChosen(detail, "something else is covering " .. label)
+    return notChosen(detail, "something else is covering " .. label .. ", or its window is gone")
   elseif word == "untaken" then
     local clicks, x, y = k and k.clicks or 0, k and k.x or 0, k and k.y or 0
     return notChosen(detail and fail("untaken_submenu", nil, clicks, x, y) or fail("untaken", nil, clicks, x, y),
@@ -9662,7 +9682,7 @@ function pg.primeClick(P, o)
     return
   end
   if host.window.ownsPoint(o:hwnd(), x, y) == false then
-    pg.plog(P, "the prime at %d,%d is covered by another window — not clicked", x, y)
+    pg.plog(P, "the prime at %d,%d is covered by another window, or the window is gone — not clicked", x, y)
     return
   end
   host.input.click(x, y)
@@ -10517,7 +10537,9 @@ function Trip:handOver(spec)
       self.label, tostring(busy.t.label))
     return false, fail("keys_held", nil, tostring(busy.t.label))
   end
-  if not self:inFront() then return false, fail("no_keyboard") end
+  -- inFront has given the trip up: the give-up's own error value, the one onGiveUp hears for the
+  -- same moment — `moved_on` for another application's window in front, `not_in_front` otherwise.
+  if not self:inFront() then return false, rawget(self, "err") or fail("no_keyboard") end
   local W = P.held.window
   -- What the record holds from before is no end of this one: a Return that reached a menu earlier.
   local okB, before = pcall(host.keys.passedThrough)
@@ -11691,8 +11713,13 @@ end
 
 -- Crops `size` pixels around the FOCUSED control and writes it as a template. The size a
 -- template wants is the thing that distinguishes it plus a little of its surroundings —
--- too tight matches everywhere, too loose breaks when anything near it changes.
+-- too tight matches everywhere, too loose breaks when anything near it changes. Active only, as
+-- the capture methods are: an overlay not in front would be cropped from the origin it last had.
 function Overlay:calibrationCrop(size)
+  if not self.active then
+    host.log.info("[calibrate] the overlay is not active, so nothing is cropped")
+    return false, fail("not_active")
+  end
   local c = self.controls[self.focus]
   if not c then return false, fail("no_focus") end
   local x, y = calibrationPoint(self, c)
@@ -11713,7 +11740,9 @@ end
 
 -- Counts every match of the focused control's template across the coordinate window.
 -- Exactly one is what you want before clicking it blindly; two means it will eventually
--- click the wrong one, and none means the control silently never fires.
+-- click the wrong one, and none means the control silently never fires. A crop never written is
+-- answered, not raised: it is calibration output, not part of the runtime's package, which a
+-- search raises for (a control's own images are its module's, and still raise when missing).
 function Overlay:calibrationVerify()
   local c = self.controls[self.focus]
   local o = self:origin()
@@ -11722,7 +11751,12 @@ function Overlay:calibrationVerify()
   local image = c.onImage or c.offImage
   if not image then
     local name = string.gsub(tostring(c.label or "control"), "[^%w]", "-")
-    image = host.path("calibration/" .. name .. ".png")
+    local crop = "calibration/" .. name .. ".png"
+    image = host.path(crop)
+    if not host.resource.exists(crop) then
+      host.log.info(string.format("[calibrate] %s: no matches counted — no crop of it at %s", tostring(c.label), image))
+      return nil, fail("no_crop", nil, tostring(c.label), image)
+    end
   end
   local hits, err = host.screen.imageSearchAll(image, {
     region = { o.client.x, o.client.y, o.client.x + o.bounds.w, o.client.y + o.bounds.h },

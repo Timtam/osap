@@ -314,6 +314,36 @@ struct ArbiterClaim {
     matching: bool,
 }
 
+/// The module whose claim `handle` on `slot` is, while it stands; `None` for an unknown slot, or a
+/// handle that is no claim on it.
+fn claim_owner(map: &HashMap<String, ArbiterSlot>, slot: &str, handle: i64) -> Option<usize> {
+    map.get(slot)?.claims.iter().find(|c| c.handle == handle).map(|c| c.module_idx)
+}
+
+/// What `host.arbiter.<call>` raises for claim `handle` on `slot`, which module `owner` holds.
+fn foreign_claim(call: &str, slot: &str, handle: i64, owner: &str) -> String {
+    format!(
+        "host.arbiter.{call}: claim {handle} on slot '{slot}' belongs to module '{owner}'; a module \
+         reports and withdraws only its own claims"
+    )
+}
+
+/// `Shared::own_claim`'s decision for module `idx` (`ids` names the modules): the message to raise
+/// when claim `handle` on `slot` is another module's, `None` when it is the caller's own or no
+/// claim at all.
+fn foreign_claim_of(
+    map: &HashMap<String, ArbiterSlot>,
+    ids: &[String],
+    call: &str,
+    slot: &str,
+    handle: i64,
+    idx: usize,
+) -> Option<String> {
+    let other = claim_owner(map, slot, handle).filter(|&o| o != idx)?;
+    let owner = ids.get(other).map(String::as_str).unwrap_or("?");
+    Some(foreign_claim(call, slot, handle, owner))
+}
+
 /// A competition group of overlays: at most one claim (the matching one of
 /// highest specificity) is active at a time.
 #[derive(Default)]
@@ -347,6 +377,10 @@ struct Shared {
     /// reason. Its press needs no module list, so it is answered where it arrives
     /// ([`Shared::quit_by_key`]), and the window's tick that ran it ends the window loop.
     quit_hotkey_id: Cell<i32>,
+    /// The app's own reload and quit keys the backend refused in `run`: another program held one,
+    /// or a Mac's hotkey handler would not install. `refresh_hotkeys` tries them again, before
+    /// any module's claim, as it tries a module's claim the system refused ([`retry_own_keys`]).
+    own_keys_unheld: RefCell<Vec<OwnKey>>,
     /// Audio output, opened lazily on first `host.sound.play` so we don't hold
     /// the audio device at startup — this tool overlays audio software, and
     /// grabbing the device can interrupt it. Opened again when it failed, when the default
@@ -548,6 +582,27 @@ struct Shared {
 /// whose programs answer, each within its half second; what is not given back by then, the next
 /// start gives back.
 const GIVE_BACK_AT_EXIT: std::time::Duration = std::time::Duration::from_millis(2000);
+
+/// The epoch's foreground window out of `obs`, asking `ask` only when the epoch has none yet: the
+/// first question of an epoch reaches the system, and every later one is served what it answered.
+/// The cache is let go of while `ask` runs, as every observation does, since the backend's answer
+/// can take long.
+fn kept_active<'a>(
+    obs: impl Fn() -> std::cell::RefMut<'a, Observations>,
+    ask: impl FnOnce() -> Option<backend::WinInfo>,
+) -> Option<backend::WinInfo> {
+    {
+        let mut o = obs();
+        o.asked += 1;
+        if let Some(w) = o.active.clone() {
+            o.served += 1;
+            return w;
+        }
+    }
+    let w = ask();
+    obs().active = Some(w.clone());
+    w
+}
 
 /// Names a single OS observation that blocked the pump thread for a long time.
 ///
@@ -762,6 +817,21 @@ impl Shared {
             obs.profile_cb = ProfileCbCost::default();
         }
         obs
+    }
+
+    /// The foreground window as this epoch saw it: asked of the backend once, and kept, a `None`
+    /// included. `host.window.active()` answers it, and so does `controls()` asked without a
+    /// window, so the two never name different windows in one epoch.
+    fn epoch_active(&self) -> Option<backend::WinInfo> {
+        kept_active(
+            || self.observations(),
+            || {
+                let t = Instant::now();
+                let w = self.backend.active_window();
+                slow_observation("window.active", "", t);
+                w
+            },
+        )
     }
 
     /// Marks the world as possibly changed (see the `epoch` field).
@@ -1080,6 +1150,29 @@ fn hotkey_winners(
     best.into_iter().map(|(b, (_, _, id))| (b, id)).collect()
 }
 
+/// One of the app's own keys `run` could not register: its id, its canonical spelling and what it
+/// does, for the log line ("reloads every module").
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OwnKey {
+    id: i32,
+    shown: String,
+    does: &'static str,
+}
+
+/// The app's own keys `unheld`, tried again: one `register` takes now is said, `<key> <does> —
+/// held now, refused at start`, and the rest are answered, for the next refresh. Lifted out of
+/// `refresh_hotkeys`, as `hotkey_winners` is, so the retry is tested without an OS.
+fn retry_own_keys(unheld: Vec<OwnKey>, register: impl Fn(i32, &str) -> Result<(), backend::KeyRefusal>) -> Vec<OwnKey> {
+    let mut still = Vec::new();
+    for key in unheld {
+        match register(key.id, &key.shown) {
+            Ok(()) => logging::line("manager", &format!("{} {} — held now, refused at start", key.shown, key.does)),
+            Err(_) => still.push(key),
+        }
+    }
+    still
+}
+
 /// Why hotkey `id` of `regs`, just registered and refreshed, is not held at the system now — what
 /// `host.hotkey.register` answers beside its id, a partial answer (D32 of the typed-errors plan) —
 /// or `None` when it is. `None` for a disabled module too (`enabled`): its claims are not made
@@ -1310,6 +1403,14 @@ impl Shared {
             if let Some(reg) = self.hotkeys.borrow_mut().get_mut(&id) {
                 reg.live = false;
             }
+        }
+        // The app's own keys `run` could not register, before any module's claim: a key the user
+        // has no other way to press than the one combination. Taken out of the cell for the OS
+        // calls, so no borrow is held across them.
+        let unheld = std::mem::take(&mut *self.own_keys_unheld.borrow_mut());
+        if !unheld.is_empty() {
+            let still = retry_own_keys(unheld, |id, spec| self.backend.register_hotkey(id, spec));
+            self.own_keys_unheld.borrow_mut().extend(still);
         }
         let mut refused_now = Vec::new();
         for (id, spec, idx, foreground) in claim {
@@ -1762,6 +1863,7 @@ impl Shared {
     /// would be swallowed and a hotkey's press lost.
     fn give_keys_back_at_exit(&self) {
         self.backend.set_captured_keys(&[]);
+        self.own_keys_unheld.borrow_mut().clear();
         let held: Vec<i32> = self.hotkeys.borrow().iter().filter(|(_, r)| r.live).map(|(id, _)| *id).collect();
         for id in held.into_iter().chain([self.reload_hotkey_id.get(), self.quit_hotkey_id.get()]) {
             self.backend.unregister_hotkey(id);
@@ -1997,6 +2099,17 @@ impl Shared {
             matching: false,
         });
         handle
+    }
+
+    /// `host.arbiter.setMatching`'s and `unregister`'s check, before either acts: a claim another
+    /// module holds raises (`foreign_claim_of`). Handles are small numbers, and one module must not
+    /// move a slot for another, or withdraw its claim, by guessing one. An unknown slot or handle is
+    /// not refused here: the call answers it as it always did.
+    fn own_claim(&self, call: &str, slot: &str, handle: i64, idx: usize) -> mlua::Result<()> {
+        match foreign_claim_of(&self.arbiter.borrow(), &self.ids.borrow(), call, slot, handle, idx) {
+            Some(message) => Err(mlua::Error::external(message)),
+            None => Ok(()),
+        }
     }
 
     /// Reports whether claim `handle` currently matches in `slot`; re-elects the
@@ -2816,6 +2929,110 @@ pub(crate) fn quiet_expected_panics() {
 mod hotkey_conflict_tests {
     use super::*;
 
+    /// `host.arbiter.setMatching` and `unregister` act on the calling module's own claims only: a
+    /// claim another module holds raises, naming that module, before the slot is touched. An unknown
+    /// slot, or a handle that is no claim on the slot named, is not refused by the check (the calls
+    /// answer those as they did). Until 2026-10-24 any module could report or withdraw any claim.
+    #[test]
+    fn a_module_reports_and_withdraws_only_its_own_arbiter_claims() {
+        let lua = Lua::new();
+        let f = lua.create_function(|_, ()| Ok(())).unwrap();
+        let claim = |handle: i64, module_idx: usize| ArbiterClaim {
+            handle,
+            module_idx,
+            specificity: 20,
+            lua: lua.clone(),
+            on_activate: lua.create_registry_value(f.clone()).unwrap(),
+            on_deactivate: lua.create_registry_value(f.clone()).unwrap(),
+            matching: false,
+        };
+        let mut map: HashMap<String, ArbiterSlot> = HashMap::new();
+        map.entry("kontakt".into()).or_default().claims.extend([claim(1, 3), claim(2, 4)]);
+        assert_eq!(claim_owner(&map, "kontakt", 1), Some(3));
+        assert_eq!(claim_owner(&map, "kontakt", 2), Some(4));
+        assert_eq!(claim_owner(&map, "kontakt", 7), None, "no such claim");
+        assert_eq!(claim_owner(&map, "other", 1), None, "not a claim on that slot");
+        assert_eq!(
+            foreign_claim("setMatching", "kontakt", 2, "com.example.b"),
+            "host.arbiter.setMatching: claim 2 on slot 'kontakt' belongs to module 'com.example.b'; a module reports and \
+             withdraws only its own claims"
+        );
+        let api = super::ocr_wiring_tests::body(include_str!("lib.rs"), concat!("fn install", "_host_api("));
+        for (check, act) in [
+            ("sh.own_claim(\"setMatching\", &slot, handle, idx)?;", "sh.arbiter_set_matching(&slot, handle, matching);"),
+            ("sh.own_claim(\"unregister\", &slot, handle, idx)?;", "sh.arbiter_unregister(&slot, handle);"),
+        ] {
+            let at = api.find(check).unwrap_or_else(|| panic!("{check}"));
+            assert!(at < api.find(act).unwrap_or_else(|| panic!("{act}")), "{check} before {act}");
+        }
+        let ids: Vec<String> = ["a", "b", "c", "com.example.a", "com.example.b"].map(String::from).into();
+        assert_eq!(foreign_claim_of(&map, &ids, "unregister", "kontakt", 1, 3), None, "the caller's own claim");
+        assert_eq!(
+            foreign_claim_of(&map, &ids, "unregister", "kontakt", 2, 3),
+            Some(foreign_claim("unregister", "kontakt", 2, "com.example.b")),
+            "another module's claim"
+        );
+        assert_eq!(foreign_claim_of(&map, &ids, "setMatching", "kontakt", 7, 3), None, "no such claim");
+        assert_eq!(foreign_claim_of(&map, &ids, "setMatching", "other", 2, 3), None, "not a claim on that slot");
+        let own = super::ocr_wiring_tests::body(include_str!("lib.rs"), concat!("fn own", "_claim("));
+        assert!(own.contains("Some(message) => Err(mlua::Error::external(message)),"));
+    }
+
+    /// No module may claim the application's own reload and quit keys, on any platform, in any
+    /// spelling of their combination: `taken`, naming the application and what the key does there.
+    /// A combination that is the other platform's own key, or one key off, is a module's like any.
+    /// The keys are no combination the system keeps, so this is the refusal they meet; and the
+    /// binding asks before anything is recorded or registered. Until 2026-10-24 a module's claim
+    /// was made, and on Windows took the key from the application, whose keys are registered after
+    /// the modules have loaded.
+    #[test]
+    fn a_module_cannot_claim_the_applications_own_keys() {
+        use backend::KeyOs;
+        for (os, spec, does) in [
+            (KeyOs::Windows, "Ctrl+Alt+Shift+Win+F5", "reloads every module"),
+            (KeyOs::Windows, "win+shift+alt+ctrl+q", "quits the application"),
+            (KeyOs::Linux, "Ctrl+Shift+Win+Alt+F5", "reloads every module"),
+            (KeyOs::Macos, "Cmd+Shift+F5", "reloads every module"),
+            (KeyOs::Macos, "Ctrl+Shift+F5", "reloads every module"),
+            (KeyOs::Macos, "Meta+Cmd+Shift+Q", "quits the application"),
+        ] {
+            let e = own_key_refusal(os, spec).unwrap_or_else(|| panic!("{spec} on {os:?} was not refused"));
+            assert_eq!(e.reason(), &errors::hotkey::APP_KEY);
+            assert_eq!(e.code(), errors::Code::Taken);
+            let said = e.to_string();
+            assert!(said.starts_with(&format!("the hotkey '{spec}' (")), "{said}");
+            assert!(
+                said.ends_with(&format!(") is Automation Platform's own key, which {does}, and cannot be registered. Choose another combination")),
+                "{said}"
+            );
+        }
+        for (os, spec) in [
+            (KeyOs::Windows, "Cmd+Shift+F5"),
+            (KeyOs::Macos, "Ctrl+Alt+Shift+Win+F5"),
+            (KeyOs::Windows, "Ctrl+Alt+Shift+Win+F6"),
+            (KeyOs::Windows, "Ctrl+Alt+Shift+F5"),
+            (KeyOs::Macos, "Cmd+Shift+Q"),
+            (KeyOs::Windows, "Ctrl+Alt+Shift+Win+"),
+        ] {
+            assert!(own_key_refusal(os, spec).is_none(), "{spec} on {os:?}");
+        }
+        for os in [KeyOs::Windows, KeyOs::Macos, KeyOs::Linux] {
+            for (spec, _) in own_keys_for(os) {
+                assert!(backend::hotkey_refusal_for(os, spec).is_none(), "{spec} on {os:?} is kept by the system");
+            }
+        }
+        assert_eq!(own_keys_for(backend::KeyOs::CURRENT).map(|(s, _)| s), [RELOAD_HOTKEY_SPEC, QUIT_HOTKEY_SPEC]);
+        // Split, so that the first place the signature is written stays the function's
+        // (`ocr_wiring_tests::body`).
+        let api = super::ocr_wiring_tests::body(include_str!("lib.rs"), concat!("fn install", "_host_api("));
+        let register = &api[api.find("host_call!(\"host.hotkey.register\");").expect("register")..];
+        let refused = register.find("if let Some(e) = own_key_refusal(backend::KeyOs::CURRENT, &spec) {").expect("the own keys");
+        assert!(register[refused..].starts_with(
+            "if let Some(e) = own_key_refusal(backend::KeyOs::CURRENT, &spec) {\n                return errors_lua::with_error(lua, mlua::Value::Nil, &e);"
+        ));
+        assert!(refused < register.find("let id = sh.alloc_id();").expect("the id"), "before anything is recorded");
+    }
+
     /// Where a press of a hotkey goes when it runs — at once, or after it waited in its busy
     /// module's mailbox: to its registration while that is there, holds the combination and the
     /// module is on; else to the module's own new registration of the same combination, while the
@@ -2953,6 +3170,39 @@ mod hotkey_conflict_tests {
         assert_eq!(not_held(&regs, &[true, true], None, 9, &[]), None, "no such claim");
         regs.insert(3, reg(0, Some(J), false));
         assert_eq!(not_held(&regs, &[true], None, 3, &[]), None, "nobody else wants J: nothing to say");
+    }
+
+    /// The app's own keys `run` could not register are tried again at every refresh: one the
+    /// backend takes now leaves the list, one it refuses again stays for the next, and a key taken
+    /// is not asked for again (where they are tried: `ocr_wiring_tests`, after `run` in this file,
+    /// which `body` must find first).
+    #[test]
+    fn the_apps_own_keys_refused_at_start_are_tried_again_at_every_refresh() {
+        use crate::backend::KeyRefusal;
+        use crate::errors::hotkey;
+        use std::cell::RefCell;
+        let key = |id: i32, shown: &str, does: &'static str| OwnKey { id, shown: shown.to_string(), does };
+        let asked = RefCell::new(Vec::new());
+        let refusing = |taken: &'static [i32]| {
+            let asked = &asked;
+            move |id: i32, spec: &str| {
+                asked.borrow_mut().push((id, spec.to_string()));
+                if taken.contains(&id) {
+                    Ok(())
+                } else {
+                    Err(KeyRefusal::Answer(HostError::with(&hotkey::NO_HANDLER, "could not install the Carbon hotkey handler (InstallEventHandler returned -50); no global shortcut works until it is installed, which the next refresh tries again".into())))
+                }
+            }
+        };
+        let both = vec![key(1, "Ctrl+Alt+Shift+Win+F5", "reloads every module"), key(2, "Ctrl+Alt+Shift+Win+Q", "quits the application")];
+        let still = retry_own_keys(both.clone(), refusing(&[]));
+        assert_eq!(still, both, "refused again: both stay");
+        let still = retry_own_keys(still, refusing(&[2]));
+        assert_eq!(still, vec![key(1, "Ctrl+Alt+Shift+Win+F5", "reloads every module")], "the quit key is held now");
+        asked.borrow_mut().clear();
+        let still = retry_own_keys(still, refusing(&[1, 2]));
+        assert!(still.is_empty());
+        assert_eq!(*asked.borrow(), vec![(1, "Ctrl+Alt+Shift+Win+F5".to_string())], "a key held is not asked for again");
     }
 
     /// Ctrl+Alt+H, wanted by two modules.
@@ -3861,6 +4111,10 @@ mod initial_trigger_tests {
             ("host.window.onTrigger({ windows = 'Game' }, function() end)", "matcher.windows is a table, not a string"),
             ("host.window.onTrigger({ macos = { app = 'Game' } }, function() end)", "matcher.macos.app is a table, not a string"),
             ("host.window.onTrigger({ where = true }, {}, function() end)", "matcher.where is a function, not a boolean"),
+            // And a key no matcher has, as find, findAll and test raise for it.
+            ("host.window.onTrigger({ titel = 'Game' }, function() end)", "matcher has no key 'titel'"),
+            ("host.window.onTrigger({ class = 'GameWindow' }, function() end)", "matcher has no key 'class'"),
+            ("host.window.onTrigger({ title = { equals = 'Game' } }, function() end)", "matcher.title has no key 'equals'"),
             ("host.window.onFocus(nil)", "onFocus: the callback is a function, not a nil"),
         ] {
             let e = raise(call);
@@ -3897,27 +4151,76 @@ mod initial_trigger_tests {
         assert_eq!(count(&lua, "shapedHits"), 1);
     }
 
-    /// `test` (like `find` and `findAll`) does not check a matcher's shape, as window.md's
-    /// Matchers section says: a string `app`, or a string block for this platform, constrains
-    /// nothing; a `where` that is not a function is skipped; an `os` that is not a table raises
-    /// from inside the call.
+    /// `find`, `findAll` and `test` check the matcher as `onTrigger` does, at the caller's line and
+    /// before anything is listed (window.md, Matchers): a matcher that is not a table, a key no
+    /// matcher has at any level — a block for another platform's too — and a key of the wrong type
+    /// raise. Until the answer of 2026-10-24 a string matcher and a string `app` matched every
+    /// window, a `class` at the top level and a misspelt key were read by nobody, and a `where`
+    /// that is not a function was skipped. A well-formed matcher answers as before.
     #[test]
-    fn test_takes_a_misshapen_matcher_as_window_md_says() {
+    fn find_find_all_and_test_raise_for_a_matcher_no_window_could_be_judged_by() {
         let (lua, full) = vm(&["window"]);
         let win = win_to_table(&lua, &window_titled("Desktop")).unwrap();
-        let test = |m: &str| -> mlua::Result<bool> {
-            lua.load(format!("local host, win = ...\nreturn host.window.test({m}, win)"))
-                .call::<bool>((&full, &win))
+        // What `find` and `findAll` list from, counted: a matcher that raises lists nothing.
+        lua.globals().set("listed", 0).unwrap();
+        lua.load(
+            r#"local host, win = ...
+            host.window.list = function() listed += 1 return { win } end
+            host.window.apps = function() return { { pid = 42, name = "game", exe = "game.exe", bundleId = "" } } end"#,
+        )
+        .call::<()>((&full, &win))
+        .unwrap();
+        let ask = |call: &str, m: &str| -> mlua::Result<mlua::Value> {
+            lua.load(format!("local host, win = ...\nreturn {call}({m}{})", if call.ends_with("test") { ", win" } else { "" }))
+                .set_name("=game.luau")
+                .call::<mlua::Value>((&full, &win))
         };
-        assert_eq!(test("{ app = 'game.exe', title = 'Desktop' }").unwrap(), true);
-        assert_eq!(test("{ app = 'nothing.exe' }").unwrap(), true, "a string app constrains nothing");
-        assert_eq!(test("{ windows = 'NoSuchClass' }").unwrap(), true, "nor does a string block for this platform");
-        assert_eq!(test("{ macos = 'x' }").unwrap(), false, "a block for another platform still gates");
-        assert_eq!(test("{ where = 1 }").unwrap(), true, "a where that is not a function is skipped");
-        assert!(test("{ os = 'windows' }").is_err(), "an os that is not a table raises");
-        assert!(test("{ app = 5 }").is_err(), "an app that is a number raises");
-        assert!(test("{ windows = true }").is_err(), "so does a boolean block for this platform");
-        assert_eq!(test("{ macos = 5 }").unwrap(), false, "one for another platform only gates");
+        for (m, says) in [
+            ("'Desktop'", "the matcher is a table, not a string"),
+            ("nil", "the matcher is a table, not a nil"),
+            ("{ app = 'game.exe' }", "matcher.app is a table, not a string"),
+            ("{ titel = 'Desktop' }", "matcher has no key 'titel'; its keys are title, app, os, windows, macos, linux and where"),
+            ("{ 'Desktop' }", "matcher has no key 1; its keys are"),
+            ("{ app = { name = 'game' }, class = 'GameWindow' }", "matcher has no key 'class'; a window class goes in the block of its platform: windows = { class = … }"),
+            ("{ app = { nmae = 'game' } }", "matcher.app has no key 'nmae'; its keys are name, exe, bundleId and pid"),
+            ("{ app = { pid = '42' } }", "matcher.app.pid is a number, not a string"),
+            ("{ windows = { clas = 'GameWindow' } }", "matcher.windows has no key 'clas'; a platform block's keys are title, app, class, axRole, axSubrole and axIdentifier"),
+            ("{ macos = { axRol = 'AXWindow' } }", "matcher.macos has no key 'axRol'"),
+            ("{ windows = 'NoSuchClass' }", "matcher.windows is a table, not a string"),
+            ("{ macos = 5 }", "matcher.macos is a table, not a number"),
+            ("{ title = { equals = 'Desktop' } }", "matcher.title has no key 'equals'; a field matcher's keys are not, exact, contains, prefix, suffix, pattern and regex"),
+            ("{ title = 5 }", "matcher.title is a string or a table, not a number"),
+            ("{ title = { contains = 5 } }", "matcher.title.contains is a string, not a number"),
+            ("{ title = { ['not'] = { exactly = 'x' } } }", "matcher.title.not has no key 'exactly'"),
+            ("{ title = { windows = 'Desktop', exact = 'x' } }", "matcher.title has no key 'exact'; a field matcher keyed by platform has windows, macos and linux"),
+            ("{ title = { windows = { macos = 'x' } } }", "matcher.title.windows has no key 'macos'"),
+            ("{ windows = { class = { prefix = true } } }", "matcher.windows.class.prefix is a string, not a boolean"),
+            ("{ os = 'windows' }", "matcher.os is a table, not a string"),
+            ("{ os = { 'windows', 5 } }", "matcher.os[2] is a string, not a number"),
+            ("{ os = { windows = true } }", "matcher.os has no key 'windows'; it is a list of platform names"),
+            ("{ where = 1 }", "matcher.where is a function, not a number"),
+        ] {
+            for call in ["host.window.find", "host.window.findAll", "host.window.test"] {
+                let e = ask(call, m).expect_err(&format!("{call}({m})")).to_string();
+                assert!(e.contains(&format!("{call}: {says}")), "{call}({m}): {e}");
+                assert!(e.contains("game.luau:2:"), "{call}({m}) should point at the caller: {e}");
+            }
+        }
+        assert_eq!(count(&lua, "listed"), 0, "a matcher that raises lists nothing");
+        // Well-formed: answered as before.
+        let yes = |call: &str, m: &str| ask(call, m).unwrap();
+        assert_eq!(yes("host.window.test", "{ app = { exe = 'game.exe' }, title = 'Desktop' }"), mlua::Value::Boolean(true));
+        assert_eq!(yes("host.window.test", "{ macos = { axRole = 'AXWindow' } }"), mlua::Value::Boolean(false), "a block for another platform gates");
+        assert_eq!(yes("host.window.test", "{}"), mlua::Value::Boolean(true));
+        assert_eq!(
+            yes("host.window.test", "{ title = { windows = { ['not'] = { prefix = 'Arcade' } }, macos = 'x' }, os = { 'windows' }, where = function(w) return true end }"),
+            mlua::Value::Boolean(true)
+        );
+        assert!(matches!(yes("host.window.find", "{ windows = { class = 'GameWindow', app = { pid = 42 } } }"), mlua::Value::Table(_)));
+        assert!(matches!(yes("host.window.findAll", "{ title = { contains = 'desk' } }"), mlua::Value::Table(t) if t.raw_len() == 1));
+        // `test` takes a window table, nothing else, whatever the matcher reads.
+        let e = lua.load("local host = ...\nreturn host.window.test({}, nil)").set_name("=game.luau").call::<bool>(&full).unwrap_err().to_string();
+        assert!(e.contains("host.window.test: the window is a table, not a nil") && e.contains("game.luau:2:"), "{e}");
     }
 
     /// The host's queue: one entry per module, `reprime` sticks, and only enabled modules
@@ -4494,6 +4797,14 @@ fn populate_vm(
     // Which picture this VM's screen and OCR reads see, from the manifests just read — so a
     // reload after editing `[screen]` needs nothing else refreshed. Before any code runs.
     capture_source::apply(lua, id, &module.manifest, &mut code_deps);
+    // What this VM's code may ask `host.require` for by the data path: every id its module and
+    // its code dependencies declare, as the code path has every code module among them (`required`).
+    let declared = lua.create_table()?;
+    let own = module.manifest.dependencies.iter().chain(&module.manifest.optional_dependencies);
+    for spec in own.chain(code_deps.iter().flat_map(|d| &d.deps)) {
+        declared.set(module_manifest::dep_id(spec), true)?;
+    }
+    lua.set_named_registry_value(DECLARED_DEPS, declared)?;
     for capture_source::CodeDep { id: dep_id, entry: dep_entry, entry_rel: dep_rel, .. } in &code_deps {
         let dep_code = read_luau_source(dep_entry).with_context(|| {
             format!("dependency '{dep_id}' entry not readable: {}", dep_entry.display())
@@ -5280,6 +5591,7 @@ impl Manager {
             reload_hotkey_id: Cell::new(0),
             reload_all: Cell::new(false),
             quit_hotkey_id: Cell::new(0),
+            own_keys_unheld: RefCell::new(Vec::new()),
             audio: RefCell::new(None),
             next_id: Cell::new(0),
             roots: RefCell::new(Vec::new()),
@@ -5504,7 +5816,8 @@ impl Manager {
                 // Registered HERE, not in `new`: on Windows a hotkey is delivered to the
                 // thread that registered it, and this is the thread whose loop pumps below.
                 // A failure is logged rather than fatal — the combination could already be
-                // held by something else, and everything apart from this key still works.
+                // held by something else, and everything apart from this key still works — and
+                // the key is tried again at every refresh of the hotkeys (`own_keys_unheld`).
                 // Logged either way: the key has no visible presence at all, so "did it
                 // even register" is otherwise unanswerable after the fact. The quit key the same
                 // way, on the line after the reload key's.
@@ -5516,7 +5829,10 @@ impl Manager {
                     // one chord once rather than the token and the chord side by side.
                     match self.shared.backend.register_hotkey(id, &shown) {
                         Ok(()) => logging::line("manager", &format!("{shown} {does}")),
-                        Err(e) => logging::line("manager", &format!("{which} hotkey {shown} unavailable: {e}")),
+                        Err(e) => {
+                            logging::line("manager", &format!("{which} hotkey {shown} unavailable: {e}; tried again at every refresh of the hotkeys"));
+                            self.shared.own_keys_unheld.borrow_mut().push(OwnKey { id, shown, does });
+                        }
                     }
                 }
                 let module_infos = all_rows(&self.shared, &self.modules.borrow());
@@ -6232,6 +6548,37 @@ fn quit_hotkey_shown() -> String {
 /// canonical spelling on this platform, like every module hotkey's.
 fn own_hotkey_shown(spec: &str) -> String {
     backend::normalize_spec_for(backend::KeyOs::CURRENT, spec).unwrap_or_else(|| spec.to_string())
+}
+
+/// The application's own keys on `os`, each with what it does: the reload key and the quit key.
+fn own_keys_for(os: backend::KeyOs) -> [(&'static str, &'static str); 2] {
+    match os {
+        backend::KeyOs::Macos => [(RELOAD_HOTKEY_MACOS, "reloads every module"), (QUIT_HOTKEY_MACOS, "quits the application")],
+        backend::KeyOs::Windows | backend::KeyOs::Linux => {
+            [(RELOAD_HOTKEY_WINDOWS, "reloads every module"), (QUIT_HOTKEY_WINDOWS, "quits the application")]
+        }
+    }
+}
+
+/// `host.hotkey.register`'s answer for `spec` when it is one of the application's own keys on
+/// `os`, by its combination in any spelling: `taken`, naming the application and what the key does.
+///
+/// Refused by the host itself, on every platform, rather than left to the system. Modules load
+/// before the application registers its keys (`run`), so a module's claim of one was made first:
+/// on Windows `RegisterHotKey` then refused the application its own key, and on a Mac what Carbon
+/// does with a second registration of a combination was never measured. Either way the key that
+/// reloads or quits from anywhere would be a module's, and the user's way out gone.
+fn own_key_refusal(os: backend::KeyOs, spec: &str) -> Option<HostError> {
+    let (vk, mask) = backend::key_spec(spec)?;
+    let (_, does) = own_keys_for(os).into_iter().find(|(own, _)| backend::key_spec(own) == Some((vk, mask)))?;
+    let shown = backend::describe_key_for(os, vk, mask, backend::KeyStyle::Short);
+    Some(HostError::with(
+        &errors::hotkey::APP_KEY,
+        format!(
+            "the hotkey '{spec}' ({shown}) is Automation Platform's own key, which {does}, and cannot be \
+             registered. Choose another combination"
+        ),
+    ))
 }
 
 /// What a stall's stop finds among the hotkey presses it drops (`Shared::answer_own_keys`).
@@ -7415,6 +7762,40 @@ fn hands_over_its_host(exported: &Table, host_dep: &Table) -> bool {
         .any(|(_, v)| matches!(v, mlua::Value::Table(t) if &t == host_dep))
 }
 
+/// The named-registry key of the ids a VM's code declares as dependencies: what its module and
+/// each code dependency evaluated into it name under `dependencies` or `optional_dependencies`
+/// (`populate_vm`). Out of reach of Luau code, as `__module_exports` is.
+const DECLARED_DEPS: &str = "__module_declared";
+
+/// What `host.require` (`must`) and `host.tryRequire` answer for `id` in `lua`'s VM: the code
+/// module evaluated into it, its functions intact; else the data export of a module this VM's code
+/// declares; else a raise, or `nil`.
+///
+/// The data path reads the declaration as the code path does. A code module is in
+/// `__module_exports` only when something in the VM declares it, but a data export used to come
+/// back for any module that had loaded, declared or not — so a module that leaned on one it never
+/// named worked until the other was uninstalled, and nothing said why it stopped. Undeclared, the
+/// id raises in `require`, naming the fix, and is `nil` to `tryRequire`, as an undeclared code
+/// module always was.
+fn required(lua: &Lua, exports: &HashMap<String, serde_json::Value>, id: &str, must: bool) -> mlua::Result<mlua::Value> {
+    if let Ok(reg) = lua.named_registry_value::<Table>("__module_exports") {
+        let m: mlua::Value = reg.get(id)?;
+        if !m.is_nil() {
+            return Ok(m);
+        }
+    }
+    let declared = lua.named_registry_value::<Table>(DECLARED_DEPS).is_ok_and(|t| t.get::<bool>(id).unwrap_or(false));
+    match exports.get(id) {
+        Some(v) if declared => lua.to_value(v),
+        _ if !must => Ok(mlua::Value::Nil),
+        _ if !declared => Err(mlua::Error::external(format!(
+            "required module '{id}' is not a declared dependency: list it under dependencies (or \
+             optional_dependencies) in the module.toml of the module that requires it"
+        ))),
+        _ => Err(mlua::Error::external(format!("required module '{id}' is not loaded or exports nothing"))),
+    }
+}
+
 /// A view over `full` that refuses the gated namespaces `caps` does not name.
 ///
 /// A VIEW rather than a trimmed table, because `full` is also what a code dependency's
@@ -7521,9 +7902,14 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
         // the token, not (vk, mask, module_idx), means one overlay deactivating cannot
         // drop a key another overlay in the same module has since re-captured. An
         // unknown/stale token (already superseded by a later capture) is a harmless
-        // no-op.
+        // no-op. A token of a capture another module holds raises, as a mistake in the call:
+        // tokens are small numbers, and one module must not drop another's key by guessing one
+        // (`host.gamepad.off` keeps its listeners the same way, answering `false`).
         lua.create_function(move |_, token: i64| {
             host_call!("host.keys.release");
+            if let Some(other) = sh.captures().owner_of(token).filter(|&o| o != idx) {
+                return Err(mlua::Error::external(foreign_capture(token, &sh.key_module_id(other))));
+            }
             if sh.captures().release(token) {
                 sh.refresh_captured();
             }
@@ -7591,6 +7977,11 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
         })?,
     )?;
     Ok(())
+}
+
+/// What `host.keys.release` raises for the token of a capture module `owner` holds.
+fn foreign_capture(token: i64, owner: &str) -> String {
+    format!("host.keys.release: token {token} is a capture of module '{owner}'; a module releases only its own captures")
 }
 
 impl captures::KeyHost for Shared {
@@ -7668,25 +8059,14 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // is evaluated *inside this VM* (top-down loading), so this returns its module
     // object with functions intact (looked up in the per-VM `__module_exports`
     // registry). Otherwise it falls back to the legacy cross-VM path: the
-    // dependency's serialized data export (functions can't cross VMs that way).
+    // dependency's serialized data export (functions can't cross VMs that way) — for an id
+    // this VM's code declares only, as the code path has only what was declared (`required`).
     let sh = shared.clone();
     host.set(
         "require",
         lua.create_function(move |lua, id: String| -> mlua::Result<mlua::Value> {
             host_call!("host.require");
-            if let Ok(reg) = lua.named_registry_value::<mlua::Table>("__module_exports") {
-                let m: mlua::Value = reg.get(id.as_str())?;
-                if !m.is_nil() {
-                    return Ok(m);
-                }
-            }
-            let exports = sh.exports.borrow();
-            match exports.get(&id) {
-                Some(v) => lua.to_value(v),
-                None => Err(mlua::Error::external(format!(
-                    "required module '{id}' is not loaded or exports nothing"
-                ))),
-            }
+            required(lua, &sh.exports.borrow(), &id, true)
         })?,
     )?;
 
@@ -7698,17 +8078,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "tryRequire",
         lua.create_function(move |lua, id: String| -> mlua::Result<mlua::Value> {
             host_call!("host.tryRequire");
-            if let Ok(reg) = lua.named_registry_value::<mlua::Table>("__module_exports") {
-                let m: mlua::Value = reg.get(id.as_str())?;
-                if !m.is_nil() {
-                    return Ok(m);
-                }
-            }
-            let exports = sh.exports.borrow();
-            match exports.get(&id) {
-                Some(v) => lua.to_value(v),
-                None => Ok(mlua::Value::Nil),
-            }
+            required(lua, &sh.exports.borrow(), &id, false)
         })?,
     )?;
 
@@ -7825,6 +8195,12 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             // A tap raises: a mistake in the call on every platform. A key this platform keeps or
             // has no key code for is answered `nil, err` (D31 of the typed-errors plan): the same
             // spec is fine on the other platform, so it is the platform that decides.
+            //
+            // The application's own reload and quit keys are answered `nil, err` (`taken`) the same
+            // way, before anything is recorded: no module may hold them (`own_key_refusal`).
+            if let Some(e) = own_key_refusal(backend::KeyOs::CURRENT, &spec) {
+                return errors_lua::with_error(lua, mlua::Value::Nil, &e);
+            }
             let (binding, spec) = match backend::hotkey_claim_for(backend::KeyOs::CURRENT, &spec) {
                 Ok(claim) => claim,
                 Err(refusal) => return hotkey_refused(lua, refusal),
@@ -8159,25 +8535,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "active",
         lua.create_function(move |lua, ()| {
             host_call!("host.window.active");
-            let cached = {
-                let mut obs = sh.observations();
-                obs.asked += 1;
-                match obs.active.clone() {
-                    Some(w) => {
-                        obs.served += 1;
-                        w
-                    }
-                    None => {
-                        drop(obs);
-                        let t = Instant::now();
-                        let w = sh.backend.active_window();
-                        slow_observation("window.active", "", t);
-                        sh.observations().active = Some(w.clone());
-                        w
-                    }
-                }
-            };
-            match cached {
+            match sh.epoch_active() {
                 Some(w) => Ok(Some(win_to_table(lua, &w)?)),
                 None => Ok(None),
             }
@@ -8189,7 +8547,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     win.set("foreground", foreground_fn(lua, move || sh.backend.foreground_window())?)?;
     // host.window.controls(win?) — child controls (class + geometry) of a window
-    // (the active one if omitted), for detecting embedded plugins.
+    // (the active one if omitted, the epoch's, as `active()` answers it), for detecting embedded
+    // plugins.
     let sh = shared.clone();
     win.set(
         "controls",
@@ -8197,7 +8556,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             host_call!("host.window.controls");
             let hwnd: isize = match win_arg {
                 Some(t) => t.get("id")?,
-                None => match sh.backend.active_window() {
+                None => match sh.epoch_active() {
                     Some(w) => w.hwnd,
                     None => return Ok(lua.create_table()?),
                 },
@@ -8674,10 +9033,16 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "send",
         lua.create_function(move |lua, combo: String| {
             host_call!("host.input.send");
-            // At once: a picture of this module's still out may show it (said once in the log).
-            sh.note_acting(lua, "host.input.send");
-            sh.bump_input_epoch();
-            key_answer(lua, sh.backend.key_send(&combo))
+            let sent = sh.backend.key_send(&combo);
+            // Only a key event that went out acted: a send that raised, or was refused with nothing
+            // sent, turns nothing over and is noted nowhere. After the send, as a posted click is —
+            // the program has yet to read the key when the counter moves (`KeySend`).
+            if sent.went_out {
+                // A picture of this module's still out may show it (said once in the log).
+                sh.note_acting(lua, "host.input.send");
+                sh.bump_input_epoch();
+            }
+            key_answer(lua, sent.answer)
         })?,
     )?;
     let sh = shared.clone();
@@ -8732,9 +9097,13 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 // next sound when there is none.
                 match sound::Output::open() {
                     Ok(out) => *audio = Some(out),
-                    Err(e) => {
-                        let e = HostError::with(&errors::sound::NO_DEVICE, format!("no audio output device: {e}"));
-                        logging::line("sound", &e.to_string());
+                    Err(said) => {
+                        let e = sound::no_device(said);
+                        let line = match e.detail() {
+                            Some(said) => format!("{e}: {said}"),
+                            None => e.to_string(),
+                        };
+                        logging::line("sound", &line);
                         return errors_lua::with_error(lua, mlua::Value::Boolean(false), &e);
                     }
                 }
@@ -8794,7 +9163,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             move |lua, (key, default, opts): (String, mlua::Value, Option<Table>)| {
                 host_call!("host.settings.define");
                 let def = lua_to_value(&default)?;
-                let field = field_from(&key, &def, opts.as_ref());
+                let field = field_from(&key, &def, opts.as_ref())?;
                 let id = sh.ids.borrow()[idx].clone();
                 sh.schemas.borrow_mut()[idx].insert(key.clone(), field);
                 let current = {
@@ -8909,6 +9278,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "setMatching",
         lua.create_function(move |_, (slot, handle, matching): (String, i64, bool)| {
             host_call!("host.arbiter.setMatching");
+            sh.own_claim("setMatching", &slot, handle, idx)?;
             sh.arbiter_set_matching(&slot, handle, matching);
             Ok(())
         })?,
@@ -8918,6 +9288,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "unregister",
         lua.create_function(move |_, (slot, handle): (String, i64)| {
             host_call!("host.arbiter.unregister");
+            sh.own_claim("unregister", &slot, handle, idx)?;
             sh.arbiter_unregister(&slot, handle);
             Ok(())
         })?,
@@ -9260,6 +9631,98 @@ mod optional_code_dep_tests {
         assert_eq!(info.limit_mib(), 256 + 256 + 512 + 256);
         assert_eq!(info.name_of("com.t.a").as_deref(), Some("COM.T.A"), "names from the manifests");
     }
+
+    /// `host.require` and `host.tryRequire` by the data path read the declaration as the code path
+    /// does: a module's data comes back only for an id this VM's code declares. An id nobody here
+    /// declares raises in `require`, naming the fix, whether the other module exports data or not,
+    /// and is `nil` to `tryRequire`; a declared one that exports nothing raises as it did. A code
+    /// module evaluated into the VM comes back whatever the data says. Until 2026-10-24 any loaded
+    /// module's data came back, declared or not. `populate_vm` files the declarations of the module
+    /// and of every code dependency evaluated into its VM, by id, before any code runs.
+    #[test]
+    fn a_data_export_comes_back_only_for_a_declared_dependency() {
+        let lua = Lua::new();
+        let mut exports = HashMap::new();
+        exports.insert("com.t.data".to_string(), serde_json::json!({ "version": 3 }));
+        exports.insert("com.t.other".to_string(), serde_json::json!({ "version": 4 }));
+        let code = lua.create_table().unwrap();
+        code.set("name", "code").unwrap();
+        let reg = lua.create_table().unwrap();
+        reg.set("com.t.code", code).unwrap();
+        lua.set_named_registry_value("__module_exports", reg).unwrap();
+        let declared = lua.create_table().unwrap();
+        for id in ["com.t.data", "com.t.code", "com.t.absent"] {
+            declared.set(id, true).unwrap();
+        }
+        lua.set_named_registry_value(DECLARED_DEPS, declared).unwrap();
+
+        let got = |id: &str, must: bool| required(&lua, &exports, id, must);
+        let data = got("com.t.data", true).unwrap();
+        assert!(matches!(&data, mlua::Value::Table(t) if t.get::<i64>("version").unwrap() == 3));
+        assert!(matches!(got("com.t.data", false).unwrap(), mlua::Value::Table(_)));
+        assert!(matches!(got("com.t.code", true).unwrap(), mlua::Value::Table(t) if t.get::<String>("name").unwrap() == "code"));
+        let undeclared = got("com.t.other", true).unwrap_err().to_string();
+        assert!(
+            undeclared.contains(
+                "required module 'com.t.other' is not a declared dependency: list it under dependencies (or \
+                 optional_dependencies) in the module.toml of the module that requires it"
+            ),
+            "{undeclared}"
+        );
+        assert!(got("com.t.other", false).unwrap().is_nil(), "undeclared: nil to tryRequire");
+        assert!(got("com.t.nowhere", true).unwrap_err().to_string().contains("is not a declared dependency"));
+        let absent = got("com.t.absent", true).unwrap_err().to_string();
+        assert!(absent.contains("required module 'com.t.absent' is not loaded or exports nothing"), "{absent}");
+        assert!(got("com.t.absent", false).unwrap().is_nil());
+
+        const LIB: &str = include_str!("lib.rs");
+        let pv = super::ocr_wiring_tests::body(LIB, "fn populate_vm(");
+        let filed = pv.find("lua.set_named_registry_value(DECLARED_DEPS, declared)?;").expect("the declarations filed");
+        assert!(pv.contains("module.manifest.dependencies.iter().chain(&module.manifest.optional_dependencies);"));
+        assert!(pv.contains("for spec in own.chain(code_deps.iter().flat_map(|d| &d.deps)) {"));
+        assert!(pv.contains("declared.set(module_manifest::dep_id(spec), true)?;"));
+        assert!(filed < pv.find("for capture_source::CodeDep {").expect("the code dependencies run"), "before any code runs");
+        let api = super::ocr_wiring_tests::body(LIB, "fn install_host_api(");
+        assert!(api.contains("required(lua, &sh.exports.borrow(), &id, true)"));
+        assert!(api.contains("required(lua, &sh.exports.borrow(), &id, false)"));
+    }
+
+    /// What require.md says of a data export's arrays: each comes back with the converter's
+    /// protected metatable, so `getmetatable` answers `false` and `setmetatable`, `table.clone` and
+    /// `table.freeze` raise on it, while reading, `#`, `ipairs` and writing work. A table of keys has
+    /// no metatable. A copy made field by field is a plain table.
+    #[test]
+    fn a_data_exports_arrays_carry_a_protected_metatable() {
+        let lua = Lua::new();
+        let mut exports = HashMap::new();
+        exports.insert("com.t.data".to_string(), serde_json::json!({ "presets": ["a", "b"], "meta": { "v": 1 } }));
+        let declared = lua.create_table().unwrap();
+        declared.set("com.t.data", true).unwrap();
+        lua.set_named_registry_value(DECLARED_DEPS, declared).unwrap();
+        lua.globals().set("lib", required(&lua, &exports, "com.t.data", true).unwrap()).unwrap();
+        let said = |code: &str| lua.load(code).exec().unwrap_err().to_string();
+        assert!(lua
+            .load(
+                "local p = lib.presets\n\
+                 assert(getmetatable(p) == false and getmetatable(lib) == nil and getmetatable(lib.meta) == nil)\n\
+                 assert(#p == 2 and p[1] == 'a')\n\
+                 local n = 0 for _ in ipairs(p) do n += 1 end assert(n == 2)\n\
+                 p[3] = 'c' assert(#p == 3)\n\
+                 local copy = {} for i, v in ipairs(p) do copy[i] = v end\n\
+                 assert(getmetatable(copy) == nil and table.isfrozen(table.freeze(copy)))\n\
+                 return true"
+            )
+            .eval::<bool>()
+            .unwrap());
+        for (code, words) in [
+            ("setmetatable(lib.presets, {})", "cannot change a protected metatable"),
+            ("table.clone(lib.presets)", "table has a protected metatable"),
+            ("table.freeze(lib.presets)", "table has a protected metatable"),
+        ] {
+            let e = said(code);
+            assert!(e.contains(words), "{code}: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -9329,6 +9792,52 @@ mod source_and_option_tests {
     use super::*;
 
     const BOM: &str = "\u{feff}";
+
+    /// `host.settings.define`'s `opts`, read strictly: each mistake raises, naming the call and
+    /// what was wrong, and a good table fills the schema as before. A hole the list's length reaches
+    /// is an entry that is not a string, one past it a key beside the list. Until 2026-10-24 none of
+    /// these raised: a number label and a numeric-string bound were taken, the rest ignored.
+    #[test]
+    fn a_settings_definitions_bad_option_raises() {
+        let lua = Lua::new();
+        let field = |default: settings::Value, opts: &str| {
+            let t: Option<Table> = lua.load(opts).eval().unwrap();
+            field_from("speed", &default, t.as_ref())
+        };
+        let num = || settings::Value::Float(1.0);
+        let text = || settings::Value::Str("fast".into());
+        for (default, opts, said) in [
+            (num(), "return { mx = 4 }", "host.settings.define: 'mx' is not an option; the options are label, min, max and oneOf"),
+            (num(), "return { 4 }", "host.settings.define: a number key is not an option"),
+            (num(), "return { label = 5 }", "host.settings.define: label is a string, not a number"),
+            (num(), "return { min = '0' }", "host.settings.define: min is a number, not a string"),
+            (num(), "return { max = 0/0 }", "host.settings.define: max is a number, not NaN"),
+            (num(), "return { min = 5, max = 1 }", "host.settings.define: min 5 is above max 1, so no value could be set"),
+            (text(), "return { max = 3 }", "host.settings.define: max bounds a number setting, and 'speed' is a string"),
+            (num(), "return { oneOf = { 'a' } }", "host.settings.define: oneOf lists the choices of a string setting, and 'speed' is a number"),
+            (text(), "return { oneOf = 'fast' }", "host.settings.define: oneOf is a list of strings, not a string"),
+            (text(), "return { oneOf = { 'fast', 2 } }", "host.settings.define: oneOf's entry 2 is a string, not a number"),
+            (text(), "return { oneOf = { 'fast', safe = true } }", "host.settings.define: oneOf is a list of strings, and has keys of its own beside them"),
+            (text(), "return { oneOf = {} }", "host.settings.define: oneOf lists no choice"),
+            (text(), "return { oneOf = { 'fast', nil, 'safe' } }", "host.settings.define: oneOf's entry 2 is a string, not a nil"),
+            (
+                text(),
+                "local t = { 'fast' }; t[3] = 'safe'; return { oneOf = t }",
+                "host.settings.define: oneOf is a list of strings, and has keys of its own beside them",
+            ),
+        ] {
+            let e = field(default, opts).unwrap_err().to_string();
+            assert!(e.contains(said), "{opts}: {e}");
+        }
+        let f = field(num(), "return { label = 'Playback speed', min = 0.25, max = 4 }").unwrap();
+        assert_eq!((f.label.as_str(), f.min, f.max, f.choices), ("Playback speed", Some(0.25), Some(4.0), None));
+        let f = field(text(), "return { oneOf = { 'fast', 'safe' } }").unwrap();
+        assert_eq!((f.label.as_str(), f.choices), ("speed", Some(vec!["fast".to_string(), "safe".to_string()])));
+        assert!(field(num(), "return { min = 1, max = 1 }").is_ok(), "one value is a range");
+        assert!(field(settings::Value::Bool(true), "return nil").is_ok());
+        let api = super::ocr_wiring_tests::body(include_str!("lib.rs"), concat!("fn install", "_host_api("));
+        assert!(api.contains("let field = field_from(&key, &def, opts.as_ref())?;"), "raised, before anything is filed");
+    }
 
     fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
         let p = dir.join(name);
@@ -9534,7 +10043,7 @@ mod source_and_option_tests {
         let play = from("\"play\",", "host.set(\"sound\", sound)?;");
         let read = play.find("let source = match sound::source(&root, &path)? {").expect("the file read first");
         assert!(read < play.find("let mut audio = sh.audio.borrow_mut();").unwrap(), "before the output, so a mistake raises with no device too");
-        assert!(play.contains("errors::sound::NO_DEVICE") && play.contains("Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Boolean(true)]))"));
+        assert!(play.contains("let e = sound::no_device(said);") && play.contains("Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Boolean(true)]))"));
         assert_eq!(play.matches("return errors_lua::with_error(lua, mlua::Value::Boolean(false), &e);").count(), 2, "the file, the device");
         let watch = from("\"onChange\",", "host.set(\"settings\"");
         let checked = watch.find("if !sh.schemas.borrow()[idx].contains_key(&key) {\n                return Err(undefined_setting(&key));").expect("checked");
@@ -9594,8 +10103,16 @@ fn value_to_lua(lua: &Lua, v: &settings::Value) -> mlua::Result<mlua::Value> {
     })
 }
 
-/// Builds a setting's schema from its `define(key, default, opts)` call.
-fn field_from(key: &str, default: &settings::Value, opts: Option<&Table>) -> settings::Field {
+/// The schema `host.settings.define` files for `key`, from its `default` and its `opts`, read
+/// strictly (D2): a key other than the four, a value of another type, a NaN bound, a `min` above
+/// the `max`, a bound on a setting that is no number, and a `oneOf` on one that is no string, or
+/// one that lists anything but strings, has keys beside its list, or is empty, raise — naming the
+/// call and what was wrong — before anything is filed or stored. Until 2026-10-24 a number label,
+/// a bound that is a numeric string and number entries of `oneOf` were taken as their digits or
+/// their number, and every other mistake was left without a word, so a misspelt `mx` left a
+/// setting unbounded that its module meant to bound.
+fn field_from(key: &str, default: &settings::Value, opts: Option<&Table>) -> mlua::Result<settings::Field> {
+    const CALL: &str = "host.settings.define";
     let mut field = settings::Field {
         kind: default.kind(),
         label: key.to_string(),
@@ -9604,24 +10121,65 @@ fn field_from(key: &str, default: &settings::Value, opts: Option<&Table>) -> set
         max: None,
         choices: None,
     };
-    if let Some(o) = opts {
-        if let Ok(l) = o.get::<String>("label") {
-            field.label = l;
+    let Some(o) = opts else { return Ok(field) };
+    taps::only_options(opts, CALL, &["label", "min", "max", "oneOf"])?;
+    let raise = |what: String| mlua::Error::external(format!("{CALL}: {what}"));
+    let kind = match field.kind {
+        settings::Kind::Bool => "a boolean",
+        settings::Kind::Number => "a number",
+        settings::Kind::Str => "a string",
+    };
+    match o.get::<mlua::Value>("label")? {
+        mlua::Value::Nil => {}
+        mlua::Value::String(s) => field.label = s.to_str()?.to_string(),
+        other => return Err(raise(format!("label is a string, not a {}", json::luau_type(&other)))),
+    }
+    for (name, slot) in [("min", &mut field.min), ("max", &mut field.max)] {
+        let n = match o.get::<mlua::Value>(name)? {
+            mlua::Value::Nil => continue,
+            mlua::Value::Integer(i) => i as f64,
+            mlua::Value::Number(n) => n,
+            other => return Err(raise(format!("{name} is a number, not a {}", json::luau_type(&other)))),
+        };
+        if n.is_nan() {
+            return Err(raise(format!("{name} is a number, not NaN")));
         }
-        if let Ok(m) = o.get::<f64>("min") {
-            field.min = Some(m);
+        if field.kind != settings::Kind::Number {
+            return Err(raise(format!("{name} bounds a number setting, and '{key}' is {kind}")));
         }
-        if let Ok(m) = o.get::<f64>("max") {
-            field.max = Some(m);
-        }
-        if let Ok(choices) = o.get::<Table>("oneOf") {
-            let list: Vec<String> = choices.sequence_values::<String>().flatten().collect();
-            if !list.is_empty() {
-                field.choices = Some(list);
-            }
+        *slot = Some(n);
+    }
+    if let (Some(min), Some(max)) = (field.min, field.max) {
+        if min > max {
+            return Err(raise(format!("min {min} is above max {max}, so no value could be set")));
         }
     }
-    field
+    match o.get::<mlua::Value>("oneOf")? {
+        mlua::Value::Nil => {}
+        mlua::Value::Table(list) => {
+            if field.kind != settings::Kind::Str {
+                return Err(raise(format!("oneOf lists the choices of a string setting, and '{key}' is {kind}")));
+            }
+            let n = list.raw_len();
+            let mut choices = Vec::with_capacity(n);
+            for i in 1..=n {
+                match list.raw_get::<mlua::Value>(i)? {
+                    mlua::Value::String(s) => choices.push(s.to_str()?.to_string()),
+                    other => return Err(raise(format!("oneOf's entry {i} is a string, not a {}", json::luau_type(&other)))),
+                }
+            }
+            // A key the list's length does not reach — `{ fast = true }`, a hole — would be dropped.
+            if list.clone().pairs::<mlua::Value, mlua::Value>().count() != n {
+                return Err(raise("oneOf is a list of strings, and has keys of its own beside them".to_string()));
+            }
+            if choices.is_empty() {
+                return Err(raise("oneOf lists no choice".to_string()));
+            }
+            field.choices = Some(choices);
+        }
+        other => return Err(raise(format!("oneOf is a list of strings, not a {}", json::luau_type(&other)))),
+    }
+    Ok(field)
 }
 
 /// The named-registry key under which each VM keeps the host's own handle on its
@@ -11071,12 +11629,62 @@ mod ocr_wiring_tests {
         })();
         assert_eq!(parsed, Err(crate::backend::KeyRefusal::Mistake("'Ctrl+' has no key".into())));
         let stub = crate::backend::stub::StubBackend::default();
-        assert_eq!(stub.key_send("Ctrl+S"), Err(crate::backend::KeyRefusal::Answer(HostError::of(&common::NOT_YET))));
-        assert_eq!(stub.key_post(1, "F5"), Ok(()));
+        let refused = stub.key_send("Ctrl+S");
+        assert_eq!(refused.answer, Err(crate::backend::KeyRefusal::Answer(HostError::of(&common::NOT_YET))));
+        assert!(!refused.went_out, "a refused send sent nothing");
+        // Taken, as a test lets it through: it went out; a spec that does not parse sent nothing.
+        stub.set_sends(true);
+        assert_eq!(stub.key_send("Ctrl+S"), crate::backend::KeySend { answer: Ok(()), went_out: true });
+        let mistake = stub.key_send("Ctrl+");
+        assert!(matches!(mistake.answer, Err(crate::backend::KeyRefusal::Mistake(_))) && !mistake.went_out);
+        stub.set_sends(false);
+        // Nor a window to post to (until 2026-10-24 it answered `Ok` and posted nothing); a key name
+        // that is not one raises there too.
+        assert_eq!(stub.key_post(1, "F5"), Err(crate::backend::KeyRefusal::Answer(HostError::of(&common::NOT_YET))));
+        assert!(matches!(stub.key_post(1, "Ctrl+S"), Err(crate::backend::KeyRefusal::Mistake(_))));
         // The stub has no page window, no press, no posted click and no focus.
         assert_eq!(stub.focus_window(1), Err(HostError::of(&common::NOT_YET)));
         assert_eq!(stub.mouse_click_posted(1, 0, 0, crate::backend::MouseButton::Left, true), Err(HostError::of(&common::NOT_YET)));
         assert!(stub.mouse_click_noactivate(1, 0, 0, crate::backend::MouseButton::Left, 0).is_err_and(|e| e == HostError::of(&common::NOT_YET)));
+    }
+
+    /// The stub's hotkeys: a spec that parses is answered `not_supported`, as the build for other
+    /// systems has none, and one that does not parse raises with the parser's words, as on Windows
+    /// and a Mac — through `hotkey_refused`, which raises a `Mistake`. Until 2026-10-24 the stub
+    /// answered both alike.
+    #[test]
+    fn the_stubs_hotkey_raises_for_a_spec_that_does_not_parse() {
+        use crate::backend::{Backend, KeyRefusal};
+        use crate::errors::hotkey;
+        let stub = crate::backend::stub::StubBackend::default();
+        let refused = stub.register_hotkey(1, "Ctrl+Shift+F9").unwrap_err();
+        assert!(matches!(&refused, KeyRefusal::Answer(e) if e.reason() == &hotkey::STUB), "{refused:?}");
+        for spec in ["Ctrl+Shfit+F9", "Ctrl+", "F99"] {
+            let mistake = stub.register_hotkey(1, spec).unwrap_err();
+            assert!(
+                matches!(&mistake, KeyRefusal::Mistake(why) if why.starts_with(&format!("could not parse the hotkey spec '{spec}': "))),
+                "{spec}: {mistake:?}"
+            );
+            assert!(matches!(stub.register_foreground_hotkey(1, spec), Err(KeyRefusal::Mistake(_))), "{spec}, foreground");
+            let lua = Lua::new();
+            assert!(crate::hotkey_refused(&lua, mistake).is_err(), "{spec}: raised, not answered");
+        }
+    }
+
+    /// `host.input.send` turns `host.inputEpoch()` over only when a key event went out, after the
+    /// send: one that raised, or was refused with nothing sent, acted on nothing and is noted
+    /// nowhere. Until 2026-10-24 it turned the counter over before anything was checked.
+    #[test]
+    fn a_send_turns_the_input_epoch_over_only_when_a_key_went_out() {
+        let api = body(LIB, "fn install_host_api(");
+        let send = bindings(api, "input").into_iter().find(|b| b.0 == "send").expect("host.input.send").1;
+        let asked = send.find("let sent = sh.backend.key_send(&combo);").expect("the send");
+        let gate = send.find("if sent.went_out {").expect("gated on what went out");
+        let noted = send.find("sh.note_acting(lua, \"host.input.send\");").expect("noted");
+        let bumped = send.find("sh.bump_input_epoch();").expect("turned over");
+        assert!(asked < gate && gate < noted && gate < bumped, "{send}");
+        assert_eq!(send.matches("bump_input_epoch").count(), 1, "{send}");
+        assert!(send.contains("key_answer(lua, sent.answer)"), "{send}");
     }
 
     /// Every `host.input` call that acts, and `host.window.focus`, acts at once and notes it
@@ -13079,6 +13687,22 @@ mod quit_key_wiring_tests {
         assert!(back.contains("self.backend.unregister_hotkey(id);"));
     }
 
+    /// The app's own keys `run` could not register (`retry_own_keys`, tested in
+    /// `hotkey_conflict_tests`): `run` files a refusal, every refresh tries them after its releases
+    /// and before any module's claim, and the way out empties the list before it gives the keys back.
+    #[test]
+    fn the_apps_own_keys_refused_at_start_go_through_every_refresh() {
+        let run = body(LIB, "pub fn run(&mut self) -> Result<()>");
+        assert!(run.contains("self.shared.own_keys_unheld.borrow_mut().push(OwnKey { id, shown, does });"), "a refusal at start is filed");
+        let refresh = body(LIB, "fn refresh_hotkeys(&self)");
+        let released = refresh.find("for id in release {").expect("the releases");
+        let retried = refresh.find("let still = retry_own_keys(unheld, |id, spec| self.backend.register_hotkey(id, spec));").expect("the retry");
+        let claimed = refresh.find("for (id, spec, idx, foreground) in claim {").expect("the claims");
+        assert!(released < retried && retried < claimed, "after the releases, before the claims");
+        let back = body(LIB, "fn give_keys_back_at_exit(&self)");
+        assert!(back.find("self.own_keys_unheld.borrow_mut().clear();").expect("emptied") < back.find("self.backend.unregister_hotkey(id);").expect("given back"));
+    }
+
     /// The tray icon is taken away on every way out, through one removal that acts once
     /// (`Tray` in gui.rs, where that is tested): in `quit`, the one end of the window loop for
     /// the quit key, the tray's and the window's Quit, a Mac's Command-Q and a Quit that ended
@@ -13118,5 +13742,71 @@ mod quit_key_wiring_tests {
         assert!(!GUI.contains("taskbar.destroy(") && !GUI.contains("icon.destroy("), "the icon is never destroyed");
         let once = body(GUI, "    fn remove(&self) {\n        if !self.removed");
         assert!(once.contains("if !self.removed.replace(true) && self.removes {\n            self.icon.remove();"));
+    }
+}
+
+#[cfg(test)]
+mod epoch_active_tests {
+    use super::ocr_wiring_tests::{bindings, body};
+    use super::{kept_active, Observations};
+    use std::cell::{Cell, RefCell};
+
+    fn window(hwnd: isize) -> crate::backend::WinInfo {
+        crate::backend::WinInfo {
+            hwnd,
+            title: "w".into(),
+            class: String::new(),
+            pid: 1,
+            exe: String::new(),
+            bundle_id: String::new(),
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+            client_x: 0,
+            client_y: 0,
+            client_w: 1,
+            client_h: 1,
+        }
+    }
+
+    /// One question to the system per epoch, a `None` kept as well: every later one is served what
+    /// the first was answered, though the window in front changed meanwhile.
+    #[test]
+    fn the_epochs_window_in_front_is_asked_once_and_kept() {
+        let obs = RefCell::new(Observations::default());
+        let asked = Cell::new(0);
+        let front = Cell::new(1);
+        let ask = || {
+            asked.set(asked.get() + 1);
+            Some(window(front.get()))
+        };
+        assert_eq!(kept_active(|| obs.borrow_mut(), ask).map(|w| w.hwnd), Some(1));
+        front.set(2);
+        assert_eq!(kept_active(|| obs.borrow_mut(), ask).map(|w| w.hwnd), Some(1), "the epoch's answer");
+        assert_eq!(asked.get(), 1);
+        assert_eq!((obs.borrow().asked, obs.borrow().served), (2, 1));
+        let none = RefCell::new(Observations::default());
+        let nothing = || {
+            asked.set(asked.get() + 1);
+            None
+        };
+        assert_eq!(kept_active(|| none.borrow_mut(), nothing), None);
+        assert_eq!(kept_active(|| none.borrow_mut(), ask), None, "no window in front is kept too");
+        assert_eq!(asked.get(), 2);
+    }
+
+    /// `controls()` without a window takes the epoch's window in front, as `active()` does: it asked
+    /// the backend afresh, so the two could name different windows in one epoch.
+    #[test]
+    fn controls_without_a_window_takes_the_epochs_window_in_front() {
+        const LIB: &str = include_str!("lib.rs");
+        let api = body(LIB, "fn install_host_api(");
+        let win = bindings(api, "win");
+        for name in ["active", "controls"] {
+            let text = win.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.window.{name}")).1;
+            assert!(text.contains("sh.epoch_active()"), "host.window.{name}");
+        }
+        assert!(!api.contains("sh.backend.active_window()"), "only through the epoch");
     }
 }

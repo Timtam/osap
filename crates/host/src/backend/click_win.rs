@@ -43,7 +43,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Graphics::Gdi::{MonitorFromWindow, ScreenToClient, MONITOR_DEFAULTTONEAREST};
 use windows_sys::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::HiDpi::{
     AreDpiAwarenessContextsEqual, GetAwarenessFromDpiAwarenessContext, GetDpiForMonitor,
@@ -125,6 +125,49 @@ pub(super) fn target(window: isize, x: i32, y: i32) -> Result<HWND, HostError> {
         }
         Ok(at)
     }
+}
+
+/// Whether input this process sends reaches a window of a process at integrity level `target`,
+/// this one being at `own` and holding UIAccess or not (the levels as
+/// `hook_watch_thread::process_level` reads them: 0x2000 medium, 0x3000 high). Windows drops input
+/// on its way into a process of higher rights (the User Interface Privilege Isolation), unless the
+/// sender holds UIAccess. A level that could not be read is taken to reach: nothing says it does not.
+pub(super) fn input_reaches(own: Option<u32>, ui_access: bool, target: Option<u32>) -> bool {
+    match (own, target) {
+        (Some(own), Some(target)) => ui_access || target <= own,
+        _ => true,
+    }
+}
+
+/// This application's integrity level and whether it holds UIAccess: read once, as neither changes
+/// while it runs.
+fn own_rights() -> (Option<u32>, bool) {
+    static OWN: std::sync::OnceLock<(Option<u32>, bool)> = std::sync::OnceLock::new();
+    // SAFETY: the pseudo handle of this process needs no closing; the token is closed by both.
+    *OWN.get_or_init(|| unsafe {
+        let me = GetCurrentProcess();
+        (super::hook_watch_thread::process_level(me), super::hook_watch_thread::process_ui_access(me))
+    })
+}
+
+/// Whether the program of `at` — the window a click through the system's input goes into — runs
+/// with higher rights than this application ([`input_reaches`]). Such a click is dropped on its way
+/// in, and `SendInput` counts it as taken all the same: neither its answer nor its last error says
+/// so. Asks the program nothing — its process's token is read, a local query — so it is cheap on the
+/// event loop. A window whose process or level cannot be read is not refused.
+pub(super) fn higher_rights(at: HWND) -> bool {
+    higher_rights_with(at, own_rights(), super::hook_watch_thread::level_of_pid)
+}
+
+/// [`higher_rights`] with this application's rights `own` (its level, and whether it holds
+/// UIAccess) and the lookup `level_of` of a process's level by its id given.
+fn higher_rights_with(at: HWND, own: (Option<u32>, bool), level_of: impl Fn(u32) -> Option<u32>) -> bool {
+    let mut pid = 0u32;
+    // SAFETY: a plain query; it validates the handle.
+    if unsafe { GetWindowThreadProcessId(at, &mut pid) } == 0 {
+        return false;
+    }
+    !input_reaches(own.0, own.1, level_of(pid))
 }
 
 /// A window's class name, for the log.
@@ -837,6 +880,62 @@ pub(super) fn left_over_job() -> Option<ActJob> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Input reaches a process of the same rights or lower, and one of higher rights only from a
+    /// sender with UIAccess; a level not read is not refused. This process's own rights are read
+    /// (medium for an ordinary test run, high in an elevated shell), and its own windows' program —
+    /// itself — is never of higher rights; a handle that is no window is not refused either, as the
+    /// window check before it answers that.
+    #[test]
+    fn a_click_goes_through_the_input_only_into_a_program_of_no_higher_rights() {
+        const MEDIUM: u32 = 0x2000;
+        const MEDIUM_UI_ACCESS: u32 = 0x2010;
+        const HIGH: u32 = 0x3000;
+        const SYSTEM: u32 = 0x4000;
+        assert!(input_reaches(Some(MEDIUM), false, Some(MEDIUM)));
+        assert!(input_reaches(Some(MEDIUM), false, Some(0x1000)), "a low process");
+        assert!(!input_reaches(Some(MEDIUM), false, Some(HIGH)), "an elevated program");
+        assert!(!input_reaches(Some(MEDIUM), false, Some(MEDIUM_UI_ACCESS)), "a program with UIAccess");
+        assert!(input_reaches(Some(MEDIUM_UI_ACCESS), true, Some(HIGH)), "UIAccess reaches it");
+        assert!(input_reaches(Some(HIGH), false, Some(HIGH)), "this application elevated too");
+        assert!(!input_reaches(Some(HIGH), false, Some(SYSTEM)));
+        assert!(input_reaches(Some(MEDIUM), false, None), "a level not read");
+        assert!(input_reaches(None, false, Some(HIGH)), "our own not read");
+        let (own, _) = own_rights();
+        assert!(own.is_some_and(|l| (0x1000..=0x4000).contains(&l)), "{own:?}");
+        assert_eq!(super::super::hook_watch_thread::level_of_pid(std::process::id()), own);
+        assert!(!higher_rights(std::ptr::null_mut()));
+        // A real window, its program's level given: the desktop's window, which every session has
+        // and which nothing here draws, activates or sends anything to.
+        // SAFETY: a plain query.
+        let desktop = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetDesktopWindow() };
+        let asked = std::cell::Cell::new(0u32);
+        let level = |answer: Option<u32>| {
+            let asked = &asked;
+            move |pid: u32| {
+                asked.set(pid);
+                answer
+            }
+        };
+        assert!(higher_rights_with(desktop, (Some(MEDIUM), false), level(Some(HIGH))), "an elevated program");
+        assert_ne!(asked.get(), 0, "asked for the window's own process");
+        assert!(!higher_rights_with(desktop, (Some(MEDIUM), false), level(Some(MEDIUM))), "one of the same rights");
+        assert!(!higher_rights_with(desktop, (Some(MEDIUM_UI_ACCESS), true), level(Some(HIGH))), "UIAccess");
+        assert!(!higher_rights_with(desktop, (Some(MEDIUM), false), level(None)), "a level not read");
+        asked.set(0);
+        assert!(!higher_rights_with(std::ptr::null_mut(), (Some(MEDIUM), false), level(Some(HIGH))), "no window");
+        assert_eq!(asked.get(), 0, "no process asked for a handle that is no window");
+        let wired = crate::ocr_wiring_tests::body(include_str!("click_win.rs"), "pub(super) fn higher_rights(at: HWND) -> bool");
+        assert!(wired.contains("higher_rights_with(at, own_rights(), super::hook_watch_thread::level_of_pid)"), "{wired}");
+        // Asked after the window check, which names the window the click goes into, and only for a
+        // click through the system's input: a posted one hears error 5 from `PostMessageW`, and the
+        // no-activate one from its question (`refused`).
+        const BACKEND: &str = include_str!("windows.rs");
+        let check = crate::ocr_wiring_tests::body(BACKEND, "fn click_check(&self, window: isize, x: i32, y: i32)");
+        let at = check.find("let at = super::click_win::target(window, x, y)?;").expect("the window check");
+        let higher = check.find("if super::click_win::higher_rights(at) {").expect("the rights");
+        assert!(at < higher && check[higher..].contains("return Err(HostError::of(&crate::errors::input::HIGHER));"));
+    }
 
     /// A posted click refused part-way says what stayed posted, in order: nothing, the move, or the
     /// move and the press without its release.

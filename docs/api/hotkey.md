@@ -123,6 +123,18 @@ single module its own earliest registration does. Load order rather than raw reg
 order, so that reloading a module does not cost it its own key: it comes back with a fresh
 registration that would otherwise look like the newest claim on the combination.
 
+The application's own [reload key](../module-manager.md#reload-key) and
+[quit key](../module-manager.md#quit-key) are no claim at all: they are the user's way back from
+anywhere, so `register` refuses them to every module, on every platform and in any spelling, with
+`nil, err` (`taken`), and records nothing.
+
+```luau
+-- On a Mac this is Command+Shift+F5, the reload key, and is refused; on Windows it is
+-- Ctrl+Shift+F5, a combination like any other.
+local id, err = host.hotkey.register("Cmd+Shift+F5", function() end)
+if not id and err.code == host.errors.TAKEN then host.log.info("not claimed: " .. err) end
+```
+
 A module the application [stopped](../module-runtime-and-lifecycle.md#limits) — a callback
 ran too long or out of memory — gives up its combinations at once, as a disabled one does, so
 they go to the program in front or to a waiting claim. Presses of a hotkey made while that
@@ -169,9 +181,9 @@ newer copy and hold keys; quit it from its tray icon.
 **`register` can answer two values that both count: an `id` and an error value.** That is a [partial answer](./errors.md#partial-answers). The claim is made and stands, so keep the id. But the combination is **not held at this moment**, and a press does not reach the callback until it is. A test of `id` alone takes this answer for a hotkey that works, and `if err then return end` throws away a claim that may be held a minute later. Test the two values apart.
 :::
 
-- `id` — the claim is made and held now: the next press runs the callback. A disabled module gets the id alone for every spec this platform can hold, because its claims are not made until it is enabled; it is not told then whether they are held. A spec this platform can never hold is answered `nil, err` all the same.
+- `id` — the claim is made and held now: the next press runs the callback. A disabled module gets the id alone for every spec this platform can hold, because its claims are not made until it is enabled; it is not told then whether they are held. The application's own keys are the exception: they answer `nil, err` (`taken`) for every module, enabled or not. A spec this platform can never hold is answered `nil, err` all the same.
 - `id, err` — **a partial answer**: the claim is made and stands, and it is not held now. It is tried again whenever the host next works out who holds which key: at any module's next registration or release, and at every change to the enabled set ([A registration is a claim](#a-registration-is-a-claim-not-a-guarantee)). A parked macOS letter is held as soon as a layout that types it is selected. `err.code` is `taken`, `not_supported` or `failed`, below. [`unregister`](#host-hotkey-unregister) gives the claim up as it gives up a held one.
-- `nil, err` — nothing was registered: this platform can never hold the spec. `err.code` is `taken` or `not_supported`, below.
+- `nil, err` — nothing was registered: this platform can never hold the spec, or it is one of the application's own keys, which no module holds. `err.code` is `taken` or `not_supported`, below.
 
 The callback is handed `press`, a table `{ count = n }`: a whole number from 1, the press's place in its quick sequence; with `taps = "final"`, the number of presses the sequence ended with ([Quick repeats](#quick-repeats-once-twice-three-times)). A new table for every press.
 
@@ -195,30 +207,31 @@ end
 
 None of these is raised. Each comes as the second value, in one of two answers.
 
-**`nil, err` — nothing is registered.** This platform can never hold the spec.
+**`nil, err` — nothing is registered.** This platform can never hold the spec, or the application holds it.
 
 | code | arrives | when | message | platform |
 |---|---|---|---|---|
 | `taken` | return | The system keeps the combination for itself, the `reserved` reason of [`check`](./keys.md#host-keys-check). The message names the combination and what the system uses it for. | `the hotkey '…' (…) is kept by the system and cannot be registered: …. Choose another combination` | both |
+| `taken` | return | The combination is one of this application's own keys, the [reload key](../module-manager.md#reload-key) or the [quit key](../module-manager.md#quit-key) of this platform, in any spelling: no module may hold either. The message names the combination and what the key does. | `the hotkey '…' (…) is Automation Platform's own key, which …, and cannot be registered. Choose another combination` | both, other |
 | `not_supported` | return | A key macOS has no key code for, `F21`–`F24`. | `the hotkey '…' (…) cannot be registered: macOS has no key code for …. Choose another key` | macOS |
 | `not_supported` | return | `NumpadEnter`, with any modifiers: Windows gives the keypad's Enter no virtual key of its own, so `RegisterHotKey` cannot hold it apart from Enter (the `no_keycode` reason of [`check`](./keys.md#host-keys-check)). | `the hotkey '…' (…) cannot be registered: Windows has no virtual key for the keypad's Enter apart from Enter's, and RegisterHotKey would take both. Capture it with host.keys.capture, or choose another key` | Windows |
-| `not_supported` | return | The build for other systems has no hotkeys. Every spec of an enabled module answers this, and there a spec that does not parse answers it too, from any module, instead of raising. Nothing is kept. A disabled module gets the id alone for a spec that parses, as everywhere, and its claim is refused when it is enabled. | `hotkeys are not implemented on this platform yet (spec '…')` | other |
+| `not_supported` | return | The build for other systems has no hotkeys. Every spec of an enabled module that parses answers this; one that does not parse raises there too, as everywhere. Nothing is kept. A disabled module gets the id alone for a spec that parses, as everywhere, and its claim is refused when it is enabled. | `hotkeys are not implemented on this platform yet (spec '…')` | other |
 
 **`id, err` — the partial answer: the claim is made and stands, and is not held now.** Keep the id.
 
 | code | arrives | when | message | platform |
 |---|---|---|---|---|
 | `taken` | return | Another enabled module holds the combination, or an earlier registration of this module's own does — the module's earliest registration of a combination keeps it. The claim is held once that one lets go. | `module '…' holds this combination` | both |
-| `taken` | return | Windows refused the combination, because another program holds it, or this application's own reload or quit key is on it. The claim refused is this one, or the earlier claim of the combination that would hold it before this one. It is tried again. | `RegisterHotKey failed for '…' (already in use by another app?)` | Windows |
+| `taken` | return | Windows refused the combination, because another program holds it. The claim refused is this one, or the earlier claim of the combination that would hold it before this one. It is tried again. | `RegisterHotKey failed for '…' (already in use by another app?)` | Windows |
 | `taken` | return | macOS refused the combination, most likely because another application holds it. The claim refused is this one, or the earlier claim of the combination that would hold it before this one. It is tried again. | `macOS refused the shortcut '…' (RegisterEventHotKey returned …); another application probably already uses it system-wide` | macOS |
 | `not_supported` | return | A letter that no key of the current keyboard layout types. The claim is parked, and held as soon as a layout that types the letter is selected. | `no key of the current keyboard layout types this letter` | macOS |
-| `failed` | return | The Carbon handler every hotkey arrives through could not be installed, so no hotkey is held. The claim is tried again, the handler with it. | `could not install the Carbon hotkey handler (InstallEventHandler returned …); no global shortcut will work in this session` | macOS |
+| `failed` | return | The Carbon handler every hotkey arrives through could not be installed, so no hotkey is held, the application's own reload and quit keys neither. The claim is tried again whenever the host next works out who holds which key, the handler first, and so are the application's keys. | `could not install the Carbon hotkey handler (InstallEventHandler returned …); no global shortcut works until it is installed, which the next refresh tries again` | macOS |
 
 The dialogs and log lines of [A registration is a claim](#a-registration-is-a-claim-not-a-guarantee) come as before, beside the error value.
 
 **Raises** for a mistake in the call — each a module author's to fix, and each with a message that says why:
 
-- a spec the shared parser cannot read at all: an unknown modifier or key name, and the message names the part (the build for other systems answers it instead, above);
+- a spec the shared parser cannot read at all: an unknown modifier or key name, and the message names the part — on every platform, the build for other systems too;
 - a `"<modifier> tap"`, which is something [`host.keys.capture`](./keys.md#host-keys-capture) watches and no system registers: `the hotkey '…' (…) is a modifier pressed on its own, which cannot be a global hotkey: capture it with host.keys.capture instead`;
 - a `spec` that is neither a string nor a number, or a `callback` that is not a function;
 - an `opts` that is neither a table nor `nil`; a key in it other than `foreground`, `taps` and `within` (`host.hotkey.register: '…' is not an option; the options are foreground, taps and within`); a `foreground` that is not `true`, `false` or `nil` (`host.hotkey.register: foreground is true or false, not a …`); a `taps` other than `"every"`, `"final"` or `nil` (`host.hotkey.register: taps is "every" or "final", not "twice"`); a `within` that is not a number of milliseconds from 100 to 5000 once its fraction is cut — another number, `nan`, or not a number at all (`host.hotkey.register: within is a number of milliseconds from 100 to 5000, not 50`).

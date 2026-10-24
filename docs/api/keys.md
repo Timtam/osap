@@ -238,7 +238,9 @@ What this platform does with a combination, structurally. `resolved` is [`normal
 
 The reasons are structural on purpose: they are what the platform does, never what another program happens to hold. JAWS and NVDA take keys of their own and both are extensible, so a key `check` passes can still be a screen reader's; see the note under [the key spec](#key-spec-string-format). [`host.keys.capture`](#host-keys-capture) raises only for `parse`.
 
-`opts.layout = false` leaves the keyboard layout unasked, so `altgr` and `composes` are never reported and nothing but the string is read. The overlay runtime asks that way, at every bind and every hotkey sync, because it needs only the reasons `register` refuses. Default `true`.
+The application's own reload and quit keys ([the module manager](../module-manager.md)) have no reason of their own: `check` answers `ok = true` for them, and `register` refuses them all the same, with `nil, err` (`taken`, `… is Automation Platform's own key, …`), in any spelling. A module that vets a key with `check` before it registers hears that refusal from `register`.
+
+`opts.layout = false` leaves the keyboard layout unasked, so `altgr` and `composes` are never reported and nothing but the string is read. The overlay runtime asks that way, at every bind and every hotkey sync, because it needs only the reasons `register` refuses; the application's own keys it hears from `register`. Default `true`.
 
 Cost: string work, plus — only for the shapes that can be `altgr` or `composes`, and only with `layout` left on — one question to the keyboard layout. Main thread, like every Lua call. No capability needed (see [`normalize`](#host-keys-normalize)); unlike `normalize` and `describe` it reads something besides the string, the character the current layout types with the chord.
 
@@ -405,7 +407,7 @@ There is **no screen-reader pass-through rule**. Caps Lock contributes no modifi
 
 **Signature:** `host.keys.release(token: number)` → `nil`
 
-Undoes the exact capture identified by the `token` [`host.keys.capture`](#host-keys-capture) returned, recomputing the global captured set so the key reaches apps normally again (unless another capture still holds it). Keying on the token — not `(vk, mask, module)` — means one overlay releasing a key cannot drop another overlay in the same module that has since re-captured it. An unknown/stale token (already superseded by a later capture of the same key) is a harmless no-op.
+Undoes the exact capture identified by the `token` [`host.keys.capture`](#host-keys-capture) returned, recomputing the global captured set so the key reaches apps normally again (unless another capture still holds it). Keying on the token — not `(vk, mask, module)` — means one overlay releasing a key cannot drop another overlay in the same module that has since re-captured it. An unknown/stale token (already superseded by a later capture of the same key) is a harmless no-op. **A module releases only its own captures**: the token of a capture another module holds raises, and that capture stands. A token is the module's whose VM made the capture, so a code dependency's capture, made in your VM, is yours to release. Costs a look through the captures, microseconds, and the key set handed to the keyboard hook again when a capture went.
 
 ```luau
 local tok = host.keys.capture("Tab", onTab)
@@ -421,7 +423,7 @@ Nothing, whether or not the token named a capture still standing.
 
 None. It never answers an error value.
 
-**Raises** for a mistake in the call: a `token` that is not a number — `nil`, a boolean or a table. Nothing checks the token against the calling module: a token another module was given releases that module's capture. Keep tokens to yourself.
+**Raises** for a mistake in the call: a `token` that is not a number — `nil`, a boolean or a table; the token of a capture another module holds now — `host.keys.release: token 12 is a capture of module 'com.example.other'; a module releases only its own captures`. A token no capture holds now — released already, replaced by a later capture of the same key, or never given — releases nothing and raises nothing, whoever it was given to: the host does not remember whose it was.
 
 ## host.keys.releaseAll() {#host-keys-releaseall}
 

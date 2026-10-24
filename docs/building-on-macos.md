@@ -463,7 +463,11 @@ Each of these is a line `check …: ok` or `check …: FAILED` with what was see
   gets its other one.
 
 The rest is data: WebKit's version, the build's and the load's times, the round trip with the page
-off screen and on it, two clicks posted into the tool page shown without the keyboard while the
+off screen and on it, what `platform.post` makes of a function and of a symbol — the page's own
+line of what it answered or threw, and every message the host was handed between the page's two
+markers around it, its text written out and whether it is JSON, which a module's `onMessage` is
+handed, or not, which the host drops with a line in the log (`web view | platform.post given a
+function: …`) — two clicks posted into the tool page shown without the keyboard while the
 application in front is another — what the page saw of each, and whether the front, this
 application's activation and the page window's key state changed (the first may make the window key
 without reaching the page: its web view does not take the first mouse) — what the page says of itself (`isSecureContext`, `navigator.clipboard`,

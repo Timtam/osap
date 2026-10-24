@@ -1275,9 +1275,14 @@ pub(crate) fn languages_value<H: ReadHost>(h: &H, lua: &Lua) -> mlua::Result<Tab
 
 /// `host.ocr.resolveLanguage(tag | {tag} | nil)`: the tag, or `nil, err` (D34 of the typed-errors
 /// plan) — `not_ready` before the list is published, `unavailable` for a language nothing here
-/// reads, in the words a reading of it would fail with.
+/// reads, in the words a reading of it would fail with, and `not_supported` on a platform with no
+/// recogniser, where a reading fails with that too: nothing the user can install or switch on
+/// there would make a language readable (it answered `unavailable` until 2026-10-24).
 pub(crate) fn resolve_value<H: ReadHost>(h: &H, lua: &Lua, v: &Value) -> mlua::Result<mlua::MultiValue> {
     let req = lang_request(v, "host.ocr.resolveLanguage")?;
+    if !h.ocr().has_recogniser() {
+        return errors_lua::with_error(lua, Value::Nil, &HostError::of(&ocr::NO_RECOGNISER));
+    }
     let Some(langs) = known_langs(h) else {
         return errors_lua::with_error(lua, Value::Nil, &HostError::of(&ocr::LANGUAGES_NOT_KNOWN));
     };

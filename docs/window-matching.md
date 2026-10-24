@@ -44,9 +44,9 @@ local matcher = {
 
 **Evaluation:** shared fields AND the block for the current OS. **If blocks are present but none for the current OS → no match on that OS** (OS gating for free). The `where` predicate runs **last** — cascade: cheap structured fields first (title/app/class), then callback/image/OCR only on candidates (like ReaHotkey).
 
-**Match modes per field:** a plain string (case-insensitive equality), or a table with one of `exact`, `contains`, `prefix`, `suffix` (all case-insensitive), `pattern` / `regex` (both Luau string patterns, case-sensitive), `not`. A table with none of them matches nothing; the exact precedence is in the [reference](api/window.md#matchers).
+**Match modes per field:** a plain string (case-insensitive equality), or a table with one of `exact`, `contains`, `prefix`, `suffix` (all case-insensitive), `pattern` / `regex` (both Luau string patterns, case-sensitive), `not`. An empty table matches nothing, and a key that is none of them raises; the exact precedence is in the [reference](api/window.md#matchers).
 
-**Keys that are read**, and no others: `title`, `app` (`name`, `exe`, `bundleId`, `pid`), `os`, the `windows` / `macos` / `linux` blocks (each taking `title`, `app`, `class`, and on macOS `axRole`, `axSubrole`, `axIdentifier`), and `where`. **Any other key is ignored without an error** — a top-level `class`, or `controlClass`, included — so a misplaced field widens the match rather than failing.
+**Keys that are read**, and no others: `title`, `app` (`name`, `exe`, `bundleId`, `pid`), `os`, the `windows` / `macos` / `linux` blocks (each taking `title`, `app`, `class`, and on macOS `axRole`, `axSubrole`, `axIdentifier`), and `where`. **Any other key raises** (since 2026-10-24) — a top-level `class`, or `controlClass`, included — at the call that is given the matcher, `find`, `findAll`, `test` or `onTrigger`: a misplaced field used to widen the match rather than fail.
 
 **Not built from the original design:** the `host.match { … }` constructor (a matcher is the table itself); `controlClass` for a child control's class (walk [`host.window.controls`](api/window.md#host-window-controls) in `where`, or use an embedded binding); the `linux` block's `wmClass` / `appId` (the `linux` key gates, but no Linux backend fills anything in).
 
@@ -65,8 +65,8 @@ inside a platform block:
 ```
 
 A `class` keyed by platform at the **top level** — `class = { windows = …, macos = … }` — is
-not one of those fields: it is ignored, and the matcher then matches any window whose title
-contains "Kontakt". The class goes in the platform blocks, as above.
+not one of those fields: it raises (`matcher has no key 'class'; a window class goes in the block of
+its platform: …`). The class goes in the platform blocks, as above.
 
 A field that names platforms and not the current one does **not** match — the same rule the
 blocks follow, and for the same reason: a field that quietly matched everything on a fourth

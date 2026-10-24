@@ -322,7 +322,13 @@ and to build it as soon as the usage allows.
       no longer runs; the docs no longer say no call leaves anything down. `text` on Windows counts a
       character once its press was taken, since the press delivers it (it reported one too few). Not answered still:
       input Windows drops on its way into a program of higher rights (UIPI), which `SendInput`
-      counts as taken. **Windows try**: a module that moves, clicks or types while the lock screen
+      counts as taken — since 2026-10-24 (the thirty answers) only for input with no target
+      window, which cannot know: a click given a `window` asks the rights of the window's program
+      first and answers `denied`, as a posted click does (click_win.rs, `higher_rights`).
+      **Decided** (the thirty answers): a Windows `mouseUp` whose movement was not taken answers
+      `false`, although the release then went out on its own — it did not land where it was asked,
+      and the button stays in `held()`, which is the safe direction (input.md says so).
+      **Windows try**: a module that moves, clicks or types while the lock screen
       or a UAC prompt is up answers `false` with an error number (5 expected), and nothing is left
       held; `cursorPos` there logs once; whether a drag begun just before the lock screen comes up
       ever answers `the button is still down`, and its button is then in `held()`. **What a Mac has to show**: clicks, drags, the
@@ -370,13 +376,25 @@ and to build it as soon as the usage allows.
       `UIA_E_TIMEOUT` and element.rs leaves questions behind only an unanswered one; a region cut
       from its bounding box is inside it, as windows.rs's `ocr_crop_tests` shows over 2000 random
       sets. Their entries are empty, each says why, and the rows are gone (element.md, ocr.md).
-- [ ] **Messages kept word for word that should change.** The host's "cannot wait here" messages
+- [x] **Messages kept word for word that should change.** The host's "cannot wait here" messages
       name the callback's parameter `why` (task.rs); `hotkey::NO_HANDLER` says "no global shortcut
       will work in this session", though the handler is installed again at the next refresh; a
       missing default audio device reads `no audio output device: no audio output device`, because
       sound.rs puts the error's own text after its own; the runtime's three "its `…` function"
       messages hold backticks, which a table cell shows only between double backticks.
-- [ ] **Open questions the docs revision found.** Each page says what the code does today; these ask
+
+      **Built** (2026-10-24, the thirty answers). The "cannot wait here" messages and the timer's
+      line name the callback's error `err` (`callback_form`, held to it by a test; screen.md shows
+      them). `hotkey::NO_HANDLER` says "no global shortcut works until it is installed, which the
+      next refresh tries again", after a check of every refresh path: each call of
+      `refresh_hotkeys` claims again every claim not held, and a Mac's `register` tries the handler
+      first; but the application's own reload and quit keys were registered once, in `run`, and
+      never again. They are tried again at every refresh now, on both systems, before any module's
+      claim (`own_keys_unheld`, `retry_own_keys`, tested; module-manager.md). A missing audio device
+      reads `no audio output device`, the audio system's words its `detail` and in the `[sound]`
+      line (`sound::no_device`). The runtime's three region messages read `its region function …`,
+      and api-index.py refuses a reason whose message holds a backtick.
+- [x] **Open questions the docs revision found.** Each page says what the code does today; these ask
       whether it should:
       - overlay: `trip:handOver` answers `not_in_front` at the call while `onGiveUp` hears
         `moved_on` for the same moment (hand on the give-up's own error?); `O:calibrationCrop` does
@@ -408,6 +426,102 @@ and to build it as soon as the usage allows.
         do not check that the claim is the calling module's; a data dependency's arrays come back
         with a protected metatable, so `setmetatable`, `table.clone` and `table.freeze` raise on
         them, which no page says.
+
+      **The overlay's, built** (2026-10-24, the thirty answers; the runtime is 0.12.1).
+      `trip:handOver` answers the give-up's own error value at the call, `moved_on` or
+      `not_in_front`, the table `onGiveUp` is handed for the same moment, and a module tests
+      `trip.live` to know that the trip is given up (VPS Avenger's hand-overs and the pages'
+      examples do). `O:calibrationCrop` answers `not_in_front` on an overlay that is not active, as
+      the capture methods do. `O:calibrationVerify` answers `not_found` (`no crop of '…' was
+      written: … is not there`) where its search raised for a crop never written.
+      `O.menuTests.drawn`, `tabs:onTab`, `trip.label`, `trip.live` and `trip.overlay` have entries of
+      their own in overlay.md (api-index.py: three FIELDS and the `tabs` prefix). Left as they are,
+      and said in their entries: `drawn` reads no key it does not have, and `onTab` checks no `n`.
+
+      **The window, element, gui and input questions, built** (2026-10-24, the thirty answers).
+      `controls()` without `win` takes the epoch's `active()` (`Shared::epoch_active`, which both ask).
+      Windows `ownsPoint` answers `false` for an id that names no window (`IsWindow`), with `listed`
+      too, so every caller in the tree that says `covered` (the runtime's `refuseOutside`,
+      `_pickCovered` and prime, Avenger's clicks and warning box, the page example) says `…, or its
+      window is gone` as well. `find`, `findAll`, `test` and `onTrigger` check the whole matcher at the caller's line: a
+      matcher that is not a table, a key no matcher has at any level (the other platforms' blocks
+      too) and a key of the wrong type raise, and `test` raises for a `win` that is not a table
+      (window_prelude.luau, `matcherProblem`). A DAW entry carries fields of its own beside its
+      matcher keys, so the overlay runtime (0.12.1, `entryMatcher`) and daw-hosts (0.2.3, its focus
+      key and the new `daw.matcher`, which the HTML probe uses) test an entry without them; the six
+      fields are named in both and in docs/daw-hosts.md. Windows `stateProbe` with an empty `name`
+      takes any element of the type, as every other walk does (uia.rs, `named`). The stub's question
+      was `host.input.post`, not `page:post`, whose build for other systems answered `not_supported`
+      already: `key_post` there answers `not_supported` now, as `send` does. `send` turns over
+      `host.inputEpoch()` only when a key event went out, after the send (`Backend::key_send` answers
+      a `KeySend`; Windows knows it from `SendInput`'s count). A page's messages past the 256 that
+      wait for `onmessage` are said in the log, once at the first drop and with their count when a
+      handler takes the rest, through the shim's note, which Windows' page takes for its log now as a
+      Mac's did. `platform.post` given a function or a symbol has a case in page-check (`odd_posts`,
+      data), not run yet: gui.md says it is not measured (the item below). `platform.errors` has an
+      entry of its own in gui.md (api-index.py's FIELDS).
+
+      **The keys, hotkey, ocr, require, settings and arbiter questions, built** (2026-10-24, the
+      thirty answers). `host.keys.release` raises for the token of a capture another module holds,
+      and that capture stands (`Captures::owner_of`); a token no capture holds now is a no-op,
+      whoever it was given to. The stub's `register_hotkey` parses first, so a spec that does not
+      parse raises there as on Windows and a Mac. `host.hotkey.register` refuses the application's
+      own reload and quit keys to every module, on every platform and in any spelling, `nil, err`
+      with `taken` (`hotkey::APP_KEY`, `own_key_refusal`): modules load before `run` registers those
+      keys, so on Windows a module's claim took them from the application. On the build for other
+      systems `resolveLanguage` answers `not_supported` (`ocr::NO_RECOGNISER`,
+      `Service::has_recogniser`). `host.require`'s data path answers only an id the VM's code
+      declares — the module or a code dependency evaluated into it (`required`, `DECLARED_DEPS`) —
+      and raises `… is not a declared dependency: …` otherwise; `tryRequire` answers `nil` there.
+      `host.settings.set` raises for NaN (`Field::validate`), and `define` reads `opts` strictly
+      (`field_from`: unknown keys, wrong types, NaN bounds, `min` above `max`, bounds on a setting
+      that is no number, `oneOf` on one that is no string, or listing anything but strings, with
+      keys beside its list, or empty).
+      `host.arbiter.setMatching` and `unregister` raise for a claim another module holds
+      (`Shared::own_claim`). require.md says that a data dependency's arrays carry a protected
+      metatable (tested; the item below for later). The four points stage B raised: a Mac's walk
+      goes on after a read the application did not answer until a Mac session has counted (the
+      item below); `mouseUp` keeps `false` and a click given a `window` answers `denied` for a
+      program of higher rights (the input item above); the lint keeps `tostring` (the lint's item
+      below).
+- [ ] **What `platform.post` makes of a function or a symbol.** `JSON.stringify` writes no text for
+      either, so the shim hands the engine's channel `undefined` and answers `{ ok: true }` unless
+      the channel throws. page-check has a case for it since 2026-10-24, as data, which has not run yet: its lines
+      `web view | platform.post given a function: …` and `… a symbol: …` say what the page answered
+      or threw and every message the host was handed between the page's two markers, written out,
+      with whether it is JSON. Read them in the next run of the macOS workflow and write into gui.md
+      (`platform.post`'s Returns) the raise or the value that arrives, in place of "Not measured
+      yet". WebView2 is measured by nothing: a button of the HTML probe (tools/html-probe) that
+      posts both, with the maintainer at the machine, would say it on Windows.
+- [ ] **A data dependency's arrays: plain frozen copies?** `host.require` and `host.tryRequire`
+      hand a legacy data dependency's lists out with the conversion's protected metatable (mlua's
+      array metatable, `__metatable = false`), so `getmetatable` answers `false` and
+      `setmetatable`, `table.clone` and `table.freeze` raise on them (lib.rs,
+      `a_data_exports_arrays_carry_a_protected_metatable`; require.md says so since 2026-10-24).
+      Decide whether to hand out plain copies instead, frozen or not (`SerializeOptions` with
+      `set_array_metatable(false)`, then `table.freeze`). No module in the tree has a data
+      dependency, so nothing hangs on it yet; a freeze would make writing into the copy raise.
+- [ ] **Should one read a Mac application does not answer stop the rest of the walk?** On
+      Windows an unanswered read (`UIA_E_TIMEOUT`) ends the question and leaves the questions
+      behind it unasked; on a Mac the walk goes on, so every later read of a wedged application
+      can wait up to 1 s. The recommendation (the thirty answers, 2026-10-24) is to stop the walk
+      as Windows does — but only once a Mac session has counted how often a **healthy** plug-in
+      answers `kAXErrorCannotComplete` for a single element: if one element of a working plug-in
+      says it now and then, stopping would make its identity checks fail. To measure: in Logic
+      (Avenger) and REAPER (Kontakt, sforzando), with the plug-in idle and while it draws, the
+      number of `kAXErrorCannotComplete` answers per walk and per element, over some minutes of
+      rechecks; and whether those answers come from the same element each time. No line says that
+      yet: the one line there is, `[macos] accessibility could not complete reading <attribute> …`
+      (ax.rs, `note_error`), comes once every 5 s at most and names no element or walk, `note_busy`
+      logs nothing, and `the program did not answer: …` is the error value's message
+      (`element::NOT_ANSWERING`), not a line. So before that session a probe counter or a trace has
+      to be added — each `CannotComplete` with its walk, its element (role, title, path) and its
+      attribute, counted per walk — for the session to read. Change nothing in the walk before that.
+- [ ] **`host.keys.check` and the application's own keys.** `check` answers `ok = true` with no
+      reason for the application's reload and quit keys, and `register` refuses them (`taken`,
+      `hotkey::APP_KEY`, since 2026-10-24); keys.md says so. Decide whether `check` gets a reason of
+      its own for them (a word for its table, `ok` false, and the overlay runtime's REFUSES_HOTKEY),
+      so that a module vetting a key with `check` hears it before `register`.
 - [ ] **The lint's limits.** check-docs.ps1 takes a hook's `how` only inside the hook, found by its
       indentation, and does not see a table keyed by host.keys.check's words (the runtime's
       REFUSES_HOTKEY). `string.format("%s", err)` and `assert(ok, err)` raise for an error value,
@@ -423,7 +537,10 @@ and to build it as soon as the usage allows.
       check's `reasons` has its literal's keys held to the words (REFUSES_HOTKEY). A hook given a
       function by name (`onClose = closed`) makes that function's `how` the hook's. Left: a `how`
       handed on to another function, and a format put together from parts (`(PREFIX .. "%s")`),
-      whose specifiers are not read.
+      whose specifiers are not read. **Decided** (2026-10-24, the thirty answers): `tostring`
+      stays, where the item first asked for a rename to `word`. It is the idiom errors.md teaches
+      and needs no scope followed; a sentence is renamed only where a function's error and its
+      sentence share a name.
 - [x] **The runtime's `passes` is kept by hand.** errors.luau's `passes` says which host calls'
       errors each runtime entry hands on, and api-index.py holds overlay.md's link rows to it both
       ways; nothing holds `passes` itself to main.luau. A runtime method that starts handing on a
@@ -957,6 +1074,67 @@ into the changelog with that release.
   automation object or condition cannot be made answers `nil` and `failed`, where it found nothing.
 - **A Mac's text read whose content crop cannot be drawn is `"failed"`** (2026-10-24), with the
   error `the picture could not be drawn for the recogniser`, where it was `"none"`.
+- **The overlay runtime 0.12.1's answers** (2026-10-24, the thirty answers). A `trip:handOver`
+  refused because the plug-in is not in front answers the error value the trip's `onGiveUp` is
+  handed: `moved_on` where a window of another application is in front, which was
+  `not_in_front`. Code that returns on `NOT_IN_FRONT` alone goes on with a trip given up already;
+  test `trip.live`. `O:calibrationCrop` answers `false, err` (`not_in_front`) on an overlay that is
+  not active, where it cropped from the origin it last had. `O:calibrationVerify` answers
+  `nil, err` (`not_found`) for a crop never written, where it raised.
+- **Messages that changed, their codes as they were** (2026-10-24, the thirty answers). A missing
+  audio device's is `no audio output device`, the audio system's words in `detail`, where they
+  followed it (`no audio output device: …`). A Mac's hotkey handler that would not install says
+  `…; no global shortcut works until it is installed, which the next refresh tries again`. The
+  overlay runtime's region function's three name the field without backticks (`its region
+  function raised: …`). The "cannot wait here" messages and the timer's line name the callback's
+  error `err` (`function(snap, err) … end`).
+- **A window matcher with a mistake in it raises** (2026-10-24, the thirty answers).
+  `host.window.find`, `findAll` and `test` check the whole matcher at the caller's line, as
+  `onTrigger` does, and `onTrigger` checks the keys now as well as their types: a matcher that is
+  not a table (`host.window.find: the matcher is a table, not a string`), a key no matcher has at
+  any level — a `class` at the top level, a misspelt `titel`, `{ equals = … }` in a field matcher —
+  and a key of the wrong type raise. They matched every window, or nothing, without a word: a string
+  matcher, a string `app` and a misspelt key constrained nothing. `test` raises for a `win` that is
+  not a table. A matcher with extra fields of its own raises: the overlay runtime (0.12.1) and
+  daw-hosts (0.2.3) test a DAW entry without its six fields (docs/daw-hosts.md), so an entry with
+  another raises at its first test, and a module that tests an entry itself takes `daw.matcher(entry)`.
+- **Answers that changed** (2026-10-24, the thirty answers). `host.window.controls()` without
+  `win` lists the window the epoch's `host.window.active()` names, where it asked the system again
+  at every call, so in a poll it can be a window that has left the front since. On Windows
+  `host.window.ownsPoint` answers `false` for an id that names no window, where it answered `nil`,
+  which reads as permission, so the overlay runtime's `covered` (0.12.1) and VPS Avenger's say
+  `…, or its window is gone`; and `host.element.stateProbe` with an empty `name` takes any element
+  of the type, as on a Mac, where it took only an element without a name. `host.input.post` on the
+  build for other systems answers `false, err` (`not_supported`), where it answered `true` and
+  posted nothing, and raises for a key name that is not one, as everywhere, where it answered
+  `true`.
+  `host.input.send` turns over `host.inputEpoch()` only when a key event went out — not when it
+  raises, or answers `false` with nothing sent — and after the send rather than before it.
+  `host.ocr.resolveLanguage` on the build for other systems answers `nil, err` with
+  `not_supported` (`no text recogniser on this platform`), where it answered `unavailable`. On
+  Windows `host.input.click` given a `window`, through the system's input, answers `false, err`
+  (`denied`) when the program of the window it goes into runs with higher rights, where it
+  answered `true` and Windows dropped the click. `host.hotkey.register` answers `nil, err`
+  (`taken`, `… is Automation Platform's own key, …`) for the application's own reload or quit
+  combination, on every platform, where it made the claim — and on Windows took the key from the
+  application. `host.tryRequire` answers `nil` for a data dependency nothing in the module's VM
+  declares, where it handed over its data.
+- **Calls that raise for a mistake they let pass** (2026-10-24, the thirty answers).
+  `host.keys.release` given the token of a capture another module holds raises (`… is a capture
+  of module '…'; a module releases only its own captures`), where it released that capture; and
+  so do `host.arbiter.setMatching` and `unregister` given another module's claim (`… belongs to
+  module '…'; …`), where they moved the slot or withdrew it. `host.require` raises for an id
+  nothing in the module's VM declares, its data path too (`required module '…' is not a declared
+  dependency: …`), where it handed over any loaded module's data. `host.settings.set` raises for
+  NaN (`must be a number, not NaN`), which passed `min` and `max`; `host.settings.define` raises
+  for a key of `opts` other than `label`, `min`, `max` and `oneOf`, a value of another type, a NaN
+  bound, a `min` above the `max`, a bound on a setting that is no number and a `oneOf` on one
+  that is no string, or one with an entry that is not a string, keys beside its list or no entry.
+  Each was ignored but three, which were taken: a number `label` as its digits, a `min` or `max`
+  string that reads as a number as that number, and number entries of `oneOf` as their digits; an
+  empty `oneOf` set no choices, and the keys beside its list were dropped. On the build for
+  other systems `host.hotkey.register` raises for a spec that does not parse, as Windows and a
+  Mac do, where it answered `nil, err`.
 
 ## Implementation
 

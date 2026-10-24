@@ -2264,7 +2264,7 @@ fn previous_and_next_say_the_new_name_once_it_is_on_screen() {
         S.owns = function(id) return id ~= 31 end
         local clicks = #S.clicks
         T.pressAt(header, 3)
-        T.ok(#S.clicks == clicks and T.lastSaid() == "something else is covering Next preset", T.said())
+        T.ok(#S.clicks == clicks and T.lastSaid() == "something else is covering Next preset, or its window is gone", T.said())
     "##);
 }
 

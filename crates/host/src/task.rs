@@ -213,18 +213,18 @@ fn library_of(call: &str) -> &str {
 fn callback_form(call: &str) -> Option<&'static str> {
     match call {
         "host.ocr.recognize" => Some("host.ocr.recognize(what, opts, function(reading) … end)"),
-        "host.screen.snapshot" => Some("host.screen.snapshot(opts, function(snap, why) … end)"),
-        "host.screen.pixel" => Some("host.screen.pixel(x, y, opts, function(colour, why) … end)"),
-        "host.screen.pixels" => Some("host.screen.pixels(points, opts, function(colours, why) … end)"),
-        "host.screen.profile" => Some("host.screen.profile(opts, function(profile, why) … end)"),
-        "host.screen.cells" => Some("host.screen.cells(opts, function(cells, why) … end)"),
-        "host.screen.matchCells" => Some("host.screen.matchCells(opts, states, function(match, why) … end)"),
-        "host.screen.template" => Some("host.screen.template(spec, function(template, why) … end)"),
-        "Snapshot:crop" => Some("s:crop(region, function(crop, why) … end)"),
-        "host.screen.imageSearch" => Some("host.screen.imageSearch(template, opts, function(hit, why) … end)"),
-        "host.screen.imageSearchAll" => Some("host.screen.imageSearchAll(template, opts, function(hits, why) … end)"),
-        "host.screen.save" => Some("host.screen.save(path, opts, function(saved, why) … end)"),
-        "host.screen.saveMarked" => Some("host.screen.saveMarked(path, opts, function(saved, why) … end)"),
+        "host.screen.snapshot" => Some("host.screen.snapshot(opts, function(snap, err) … end)"),
+        "host.screen.pixel" => Some("host.screen.pixel(x, y, opts, function(colour, err) … end)"),
+        "host.screen.pixels" => Some("host.screen.pixels(points, opts, function(colours, err) … end)"),
+        "host.screen.profile" => Some("host.screen.profile(opts, function(profile, err) … end)"),
+        "host.screen.cells" => Some("host.screen.cells(opts, function(cells, err) … end)"),
+        "host.screen.matchCells" => Some("host.screen.matchCells(opts, states, function(match, err) … end)"),
+        "host.screen.template" => Some("host.screen.template(spec, function(template, err) … end)"),
+        "Snapshot:crop" => Some("s:crop(region, function(crop, err) … end)"),
+        "host.screen.imageSearch" => Some("host.screen.imageSearch(template, opts, function(hit, err) … end)"),
+        "host.screen.imageSearchAll" => Some("host.screen.imageSearchAll(template, opts, function(hits, err) … end)"),
+        "host.screen.save" => Some("host.screen.save(path, opts, function(saved, err) … end)"),
+        "host.screen.saveMarked" => Some("host.screen.saveMarked(path, opts, function(saved, err) … end)"),
         _ => None,
     }
 }
@@ -1462,6 +1462,10 @@ mod tests {
             "host.screen.saveMarked",
         ] {
             let form = callback_form(call).expect("every call that waits has a callback form");
+            // The callback's error is `err`, as every page names it; a reading has none of its own.
+            if call != "host.ocr.recognize" {
+                assert!(form.ends_with(", err) … end)"), "{form}");
+            }
             for case in CASES {
                 let m = wait_message(call, case);
                 assert!(m.starts_with(&format!("{call} cannot wait ")), "{m}");
@@ -1484,7 +1488,7 @@ mod tests {
             wait_message("host.screen.save", Case::Outside),
             "host.screen.save cannot wait here: this runs outside every event of the module — its top level, an \
              included file's, or a function the host calls between its events. Call it from a handler, such as \
-             host.timer.after(0, …), or pass a callback, host.screen.save(path, opts, function(saved, why) … end)"
+             host.timer.after(0, …), or pass a callback, host.screen.save(path, opts, function(saved, err) … end)"
         );
     }
 
@@ -1531,7 +1535,7 @@ mod tests {
         assert_eq!(
             timer_wait_line("m", 40, "host.screen.save", "m/src/main.luau:12", &keys[..1]),
             "[m] a timer waited 40 ms for host.screen.save at m/src/main.luau:12; 1 key(s) (Tab) waited behind it — a \
-             poll should not wait: host.screen.save(path, opts, function(saved, why) … end)"
+             poll should not wait: host.screen.save(path, opts, function(saved, err) … end)"
         );
         assert_eq!(
             timer_wait_line("m", 40, "host.screen.size", "m/src/main.luau:12", &keys[..1]),

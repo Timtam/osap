@@ -343,8 +343,8 @@ fn a_hotspot_toggle_clicks_nothing_once_another_window_came_to_the_front_during_
         T.handled(o.activate, o, 3)
         assert(S.pixels == 2 and #S.clicks == 0, "a click on the window drawn over it: " .. T.dump())
         assert(#S.after == timers, "nothing waits to announce it")
-        assert(T.count("Synth: 'Mute' at (120,80) is inside our window's frame but another window is drawn there "
-          .. "— not clicking") == 1, T.dump())
+        assert(T.count("Synth: 'Mute' at (120,80) is inside our window's frame but another window is drawn there, "
+          .. "or the window is gone — not clicking") == 1, T.dump())
         rawset(T.host.window, "ownsPoint", owns)
         T.during(nil)
         T.handled(o.activate, o, 3)
@@ -725,7 +725,7 @@ fn a_recognize_in_a_text_hook_waits_and_its_reading_is_said() {
 // The runtime's version.
 // ---------------------------------------------------------------------------------------------
 
-/// The runtime is 0.12.0 (calibration as its own setting, `O.calibrating()`, a static text's
+/// The runtime is 0.12.1 (calibration as its own setting, `O.calibrating()`, a static text's
 /// `hotkey`, the checks after its own pixels, `O:probe`, letting go in front of this
 /// application's own windows, its accessibility menu tests asked off the event loop, the
 /// check after a calibrating run's waited picture before a press, a slider's after each of its
@@ -733,16 +733,17 @@ fn a_recognize_in_a_text_hook_waits_and_its_reading_is_said() {
 /// an overlay's page, `identify`'s `again` and O:watch's count of readings, and the drawn menu
 /// test with a test's `before`, `O.doubleClick`'s button and callback, a trip's hand-over, a menu
 /// item's submenu with a test's `chained`, its error values with O.errors, and a hotkey's press
-/// handed on to a control's `onActivate` and a hand-over's `onKey`), so a module that depends on
-/// `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads against it, and
-/// so does one that asks for 0.4, 0.4.1, 0.5, 0.5.6, 0.6, 0.7, 0.8, 0.9, 0.10, 0.11 or 0.12, and
-/// neither against anything older.
+/// handed on to a control's `onActivate` and a hand-over's `onKey`, and a refused hand-over's and
+/// the calibration methods' answers), so a module that depends on `"com.platform.overlay >= 0.2"`
+/// — as one that takes a mark has to — still loads against it, and so does one that asks for 0.4,
+/// 0.4.1, 0.5, 0.5.6, 0.6, 0.7, 0.8, 0.9, 0.10, 0.11, 0.12 or 0.12.1, and neither against anything
+/// older.
 #[test]
 fn the_runtime_is_0_12_so_a_module_that_asks_for_0_2_loads() {
     let m = module_manifest::ModuleManifest::parse(include_str!("../../../modules/overlay-runtime/module.toml"))
         .expect("the runtime's manifest parses");
     assert_eq!(m.id, "com.platform.overlay");
-    assert_eq!(m.version, "0.12.0");
+    assert_eq!(m.version, "0.12.1");
     for spec in [
         "com.platform.overlay >= 0.2",
         "com.platform.overlay >= 0.3",
@@ -757,6 +758,7 @@ fn the_runtime_is_0_12_so_a_module_that_asks_for_0_2_loads() {
         "com.platform.overlay >= 0.10",
         "com.platform.overlay >= 0.11",
         "com.platform.overlay >= 0.12",
+        "com.platform.overlay >= 0.12.1",
     ] {
         let req = module_manifest::dep_constraint(spec).unwrap();
         let id = module_manifest::dep_id(spec);
@@ -964,10 +966,11 @@ fn a_key_the_host_cannot_capture_is_held_by_nothing_and_a_pair_is_whole_or_none(
 }
 
 /// The calibration and capture methods answer why they did nothing (D40): the overlay not active
-/// (`not_in_front`), no such control or none focused (`not_found`), nothing to crop around
-/// (`unplaced`), and host.screen.save's own error where the picture was not written — the same
-/// table, for captureAll the first shot's of all it tried; calibrationVerify answers the count, or
-/// nil and the search's own error.
+/// (`not_in_front`, a crop's too, which is not cut from a stale origin), no such control or none
+/// focused (`not_found`), nothing to crop around (`unplaced`), and host.screen.save's own error
+/// where the picture was not written — the same table, for captureAll the first shot's of all it
+/// tried; calibrationVerify answers the count, `not_found` for a crop never written, with nothing
+/// searched, or nil and the search's own error.
 #[test]
 fn the_calibration_and_capture_methods_answer_why_they_did_not() {
     run(r#"
@@ -979,6 +982,10 @@ fn the_calibration_and_capture_methods_answer_why_they_did_not() {
         assert(ok == false and T.is(err, "not_in_front", "the overlay is not active"), T.what(err))
         ok, err = o:captureFull("C:/x.png")
         assert(ok == false and T.is(err, "not_in_front"), T.what(err))
+        o.focus = 1
+        ok, err = o:calibrationCrop()
+        assert(ok == false and T.is(err, "not_in_front", "the overlay is not active"), T.what(err))
+        assert(T.count("[calibrate] the overlay is not active, so nothing is cropped") == 1, T.dump())
         T.front(o)
         ok, err = o:captureControl("Nope", "C:/x.png")
         assert(ok == false and T.is(err, "not_found", "no control labelled 'Nope' with a region"), T.what(err))
@@ -1024,8 +1031,15 @@ fn the_calibration_and_capture_methods_answer_why_they_did_not() {
         ok, err = T.handled(o.calibrationCrop, o)
         assert(ok == false and rawequal(err, unwritten), T.what(err))
         rawset(T.host.screen, "save", save)
-        rawset(T.host.screen, "imageSearchAll", function() return {}, T.E("failed", "the template could not be read") end)
+        local searched = 0
+        rawset(T.host.screen, "imageSearchAll", function() searched += 1; return {}, T.E("failed", "the template could not be read") end)
         local n, verr = T.handled(o.calibrationVerify, o)
+        assert(n == nil and T.is(verr, "not_found", "no crop of 'Preset' was written: "
+          .. "C:/modules/overlay-runtime/calibration/Preset.png is not there") and searched == 0, T.what(verr))
+        assert(T.count("[calibrate] Preset: no matches counted — no crop of it at "
+          .. "C:/modules/overlay-runtime/calibration/Preset.png") == 1, T.dump())
+        S.exists["calibration/Preset.png"] = true
+        n, verr = T.handled(o.calibrationVerify, o)
         assert(n == nil and T.is(verr, "failed", "the template could not be read"), T.what(verr))
         assert(T.count("[calibrate] Preset: no matches counted for C:/modules/overlay-runtime/calibration/Preset.png — "
           .. "the template could not be read") == 1, T.dump())

@@ -532,7 +532,7 @@ function Am.run(o, trip, spec)
   local handed, errH = trip:handOver({ kind = "keys", keys = Am.KEYS, onKey = onKey, onEnd = onEnd })
   if not handed then
     release(held)
-    if errH.code == O.errors.NOT_IN_FRONT then return end
+    if not trip.live then return end -- given up already: onGiveUp posts it
     log("nothing pressed — the keyboard was not handed over (%s)", tostring(errH))
     return trip:done({ part = before, error = Am.NO_KEYBOARD })
   end

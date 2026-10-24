@@ -117,10 +117,11 @@ def namespace(heading):
     if h.startswith('O:') or h.startswith('O.') or h.startswith('Bindings'):
         return 'Overlay'
     # The methods of the objects a call hands out belong with the call: the trip O:inPlugin
-    # hands an act and the binding `O.window` makes, with the overlay; the page
-    # `host.gui.webview` returns, and the page's own `platform`, with host.gui; a snapshot, with
-    # host.screen. Without these, `Snapshot:crop` and `platform.post` were filed under Concepts.
-    for prefix, ns in (('trip', 'Overlay'), ('Binding', 'Overlay'), ('page', 'host.gui'),
+    # hands an act, the binding `O.window` makes and the handle of O:addTabControl, with the
+    # overlay; the page `host.gui.webview` returns, and the page's own `platform`, with host.gui; a
+    # snapshot, with host.screen. Without these, `Snapshot:crop` and `platform.post` were filed
+    # under Concepts.
+    for prefix, ns in (('trip', 'Overlay'), ('Binding', 'Overlay'), ('tabs', 'Overlay'), ('page', 'host.gui'),
                        ('platform', 'host.gui'), ('Snapshot', 'host.screen')):
         if h.startswith(prefix + ':') or h.startswith(prefix + '.'):
             return ns
@@ -816,8 +817,9 @@ def undocumented(entries):
 # both. Named rather than guessed from the title's punctuation: `O.contentSize(origin)` and
 # `O.calibrating()` read as calls and are fields, `O.menuTests` reads as a field and is a concept.
 FIELDS = {
-    'page-window', 'host-os-current', 'host-errors', 'host-element-type',
+    'page-window', 'platform-errors', 'host-os-current', 'host-errors', 'host-element-type',
     'o-layer', 'o-state', 'o-away', 'o-calibrating', 'o-contentsize', 'o-stategeneration', 'o-errors',
+    'trip-label', 'trip-live', 'trip-overlay',
 }
 CONCEPTS = {
     'error-values', 'partial-answers', 'return-or-raise', 'where-an-error-value-arrives',
@@ -1403,9 +1405,8 @@ def entry_problems(e, body, reasons, groups, codes, pages, passes):
         if m.group(1) not in codes:
             problems.append('the row `' + m.group(1) + '` names no code of host.errors or the runtime\'s')
             continue
-        # A message is a code span; one that holds a backtick itself — the runtime's "its `…`
-        # function raised" — is written between double backticks, as Markdown allows.
-        messages = [a or b for a, b in re.findall(r'``\s?(.+?)\s?``|`([^`]+)`', message)]
+        # A message is a code span, and holds no backtick of its own (reason_problems).
+        messages = re.findall(r'`([^`]+)`', message)
         if not messages:
             problems.append('the row `' + m.group(1) + '` has no message in backticks to compare')
         for msg in messages:
@@ -1452,6 +1453,12 @@ def reason_problems(entries):
         problems.append(ERRORS_RS + ': ' + str(unread) + ' Reason(s) not written the way this tool reads one')
     if runtime_unread:
         problems.append(ERRORS_LUAU + ': ' + str(runtime_unread) + ' reason(s) not written the way this tool reads one')
+    # An Errors table shows a message as a code span, which can hold a backtick only between double
+    # backticks: a message is written without one.
+    for r in reasons:
+        if '`' in r['message']:
+            problems.append(r['source'] + ': ' + r['name'] + ' has a backtick in its message, which an Errors table '
+                            'shows only between double backticks: write it without')
     for r in reasons:
         for a in r['entries']:
             if a not in pages and a not in groups:

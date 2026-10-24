@@ -42,7 +42,7 @@ the only way to notice something that appears with no event at all.
 
 **The failure this design is most prone to is silent.** Slots are strings typed independently in modules that never see each other, so a typo does not error — it quietly creates a private slot where that overlay wins every time, or never competes at all. A slot with one participant is perfectly legal, so nothing else can notice. `participants` exists for exactly that, and every failure here is invisible to somebody who cannot see the screen.
 
-**No call here answers an [error value](./errors.md#error-values), and none fails at run time.** An unknown slot or handle is not an error — `setMatching` writes a line to the log, `unregister` says nothing — and an error raised in `onActivate` or `onDeactivate` goes to the log alone ([`register`](#host-arbiter-register-errors)). Each entry's **Errors** says what raises for a mistake in the call. Two raises can come from any call here ([Return or raise](./errors.md#return-or-raise)): reaching `host.arbiter` from code whose module did not declare `arbiter` raises `module '…' used host.arbiter without declaring it — …` ([What to declare](#declare)), and a module that has run too long is stopped with `stopped by the host: …` ([the limits](../module-runtime-and-lifecycle.md#limits)).
+**No call here answers an [error value](./errors.md#error-values), and none fails at run time.** A module reports for and withdraws only its own claims; another module's handle raises. An unknown slot or handle is not an error — `setMatching` writes a line to the log, `unregister` says nothing — and an error raised in `onActivate` or `onDeactivate` goes to the log alone ([`register`](#host-arbiter-register-errors)). Each entry's **Errors** says what raises for a mistake in the call. Two raises can come from any call here ([Return or raise](./errors.md#return-or-raise)): reaching `host.arbiter` from code whose module did not declare `arbiter` raises `module '…' used host.arbiter without declaring it — …` ([What to declare](#declare)), and a module that has run too long is stopped with `stopped by the host: …` ([the limits](../module-runtime-and-lifecycle.md#limits)).
 
 ## What to declare {#declare}
 
@@ -101,6 +101,8 @@ One exception to "in that order": a claim of a module the application stopped (i
 
 Call it on every re-check, not only on a change — the arbiter keeps the last thing each claim reported and compares for itself.
 
+**A module reports only for its own claims.** A claim is the module's whose VM registered it — a code dependency's, made in your VM, is yours — and the `handle` of a claim another module holds raises, so that no module can move a slot for another by guessing a handle. Costs a look through the slot's claims before the election, microseconds.
+
 ```luau
 -- Reported on every window/focus event and on the poll, if there is one.
 host.arbiter.setMatching(self._slot, self._claim, matched)
@@ -116,13 +118,13 @@ None. It never answers an error value.
 
 **An unknown slot or handle is not an error.** For a `slot` nobody registered on, or a `handle` that is no claim on it, nothing changes, and the log says `setMatching: unknown slot '…'` or `setMatching: unknown handle … in slot '…'`.
 
-**Raises** for a mistake in the call: a `slot` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8; a `handle` that is not a number (a fraction is cut toward zero). `matching` never raises. It is read as a condition is: `nil` and `false` are false, and anything else is true, `0` and `"false"` among them.
+**Raises** for a mistake in the call, and then nothing is reported and nothing elected: a `slot` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8; a `handle` that is not a number (a fraction is cut toward zero); the `handle` of a claim on `slot` that another module holds — `host.arbiter.setMatching: claim 7 on slot 'kontakt' belongs to module 'com.example.other'; a module reports and withdraws only its own claims`. `matching` never raises. It is read as a condition is: `nil` and `false` are false, and anything else is true, `0` and `"false"` among them.
 
 ## host.arbiter.unregister(slot, handle) {#host-arbiter-unregister}
 
 **Signature:** `host.arbiter.unregister(slot: string, handle) -> nil`
 
-Withdraws the claim and promotes whoever is next. The withdrawing claim's `onDeactivate` runs first if it was the one active, so a module that is being disabled or unloaded tears its own state down before the callbacks are freed.
+Withdraws the claim and promotes whoever is next. The withdrawing claim's `onDeactivate` runs first if it was the one active, so a module that is being disabled or unloaded tears its own state down before the callbacks are freed. A module withdraws only its own claims, as it reports only for them ([`setMatching`](#host-arbiter-setmatching)).
 
 ```luau
 -- A module being disabled gives its slot back rather than staying registered and inert.
@@ -140,9 +142,9 @@ end
 
 None. It never answers an error value.
 
-**An unknown slot or handle is not an error**: nothing happens, and nothing is logged, so unregistering a claim twice is harmless.
+**An unknown slot or handle is not an error**: nothing happens, and nothing is logged, so unregistering a claim twice is harmless — whoever the claim was.
 
-**Raises** for a mistake in the call: a `slot` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8; a `handle` that is not a number.
+**Raises** for a mistake in the call, and then nothing is withdrawn: a `slot` that is neither a string nor a number (a number is read as its digits), or a string that is not valid UTF-8; a `handle` that is not a number; the `handle` of a claim on `slot` that another module holds — `host.arbiter.unregister: claim 7 on slot 'kontakt' belongs to module 'com.example.other'; a module reports and withdraws only its own claims`.
 
 ## host.arbiter.winner(slot) {#host-arbiter-winner}
 

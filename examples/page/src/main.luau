@@ -190,7 +190,7 @@ local function arrived(w)
   mine.stage = "read"
   local x, y = pointIn(w, mine.point)
   if host.window.ownsPoint(w.id, x, y) == false then
-    comeBack(w, "Something covers Notepad there; nothing was clicked.")
+    comeBack(w, "Something covers Notepad there, or it has closed; nothing was clicked.")
     return
   end
   host.input.click(x, y)

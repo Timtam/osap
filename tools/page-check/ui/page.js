@@ -1,5 +1,7 @@
 // page-check's page script (crates/host/src/backend/macos/page_check.rs). It answers the check's
-// commands; every message both ways is a plain string, so the check reads it without a JSON parser.
+// commands; every message both ways is a plain string, so the check reads it without a JSON parser
+// — but for the one `post-odd` posts between its markers, a function or a symbol, whose text the
+// check writes out with whether it parses as JSON.
 "use strict";
 
 const field = document.getElementById("field");
@@ -61,6 +63,20 @@ const commands = {
   "focus-button": () => {
     button.focus();
     platform.post("focused " + (document.activeElement === button ? "button" : "other"));
+  },
+  // A value JSON.stringify writes no text for — a function, a symbol — between two markers: what
+  // platform.post answers or throws here, and, to the check, what the host was handed between them.
+  "post-odd": (kind) => {
+    const value = kind === "function" ? () => 1 : Symbol("page-check");
+    platform.post("odd-before " + kind);
+    let said;
+    try {
+      const answer = platform.post(value);
+      said = "answered ok=" + (answer && answer.ok) + (answer && answer.error ? " code=" + answer.error.code : "");
+    } catch (err) {
+      said = "threw a " + err.name;
+    }
+    platform.post("odd-after " + kind + " " + said);
   },
 };
 

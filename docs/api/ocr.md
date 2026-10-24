@@ -391,7 +391,7 @@ host.log.info("text recognition reads: " .. table.concat(langs, ", "))
 ### Returns {#host-ocr-languages-returns}
 
 - A new list of tags at every call, as the platform spells them, each once. First comes the one a read without `lang` uses.
-- `{}` — the list is not known yet, in the first moments after the application starts; or nothing on this machine reads text; or the build for other systems, always. [`resolveLanguage`](#host-ocr-resolvelanguage) tells the first apart: it answers `not_ready` then.
+- `{}` — the list is not known yet, in the first moments after the application starts; or nothing on this machine reads text; or the build for other systems, always. [`resolveLanguage`](#host-ocr-resolvelanguage) tells the three apart: it answers `not_ready` for the first, `unavailable` for the second and `not_supported` for the third.
 
 ### Errors {#host-ocr-languages-errors}
 
@@ -428,7 +428,7 @@ end)
 ### Returns {#host-ocr-resolvelanguage-returns}
 
 - A string — the platform's tag, as [`languages`](#host-ocr-languages) spells it.
-- `nil, err` — no tag: the list is not known yet, or nothing here reads it. `err.code` is under Errors. For `unavailable` it is the error value a read in that language fails with.
+- `nil, err` — no tag: the list is not known yet, nothing here reads it, or nothing on this platform reads any text. `err.code` is under Errors. For `unavailable` and `not_supported` it is the error value a read in that language fails with.
 
 ### Errors {#host-ocr-resolvelanguage-errors}
 
@@ -437,7 +437,8 @@ None of these is raised. Each comes as the second value.
 | code | arrives | when | message | platform |
 |---|---|---|---|---|
 | `not_ready` | return | The list of languages is not known yet, in the first moments after the application starts (see [`languages`](#host-ocr-languages)). Ask again later. | `the recognition languages are not known yet` | both |
-| `unavailable` | return | Nothing here reads it: a tag, or every tag of a list, that matches no language here; or `nil` on a machine with no language at all. The message ends with what to do ([Recognition language](#recognition-language)): `language: de is not available here (available: en-US, fr-FR). …`. On the build for other systems every call answers this. | `language: … is not available here (available: …). …`, `language: none of … is available here (available: …). …`, `language: no text recognition language is available here. …` | both, other |
+| `unavailable` | return | Nothing here reads it: a tag, or every tag of a list, that matches no language here; or `nil` on a machine with no language at all. The message ends with what to do ([Recognition language](#recognition-language)): `language: de is not available here (available: en-US, fr-FR). …`. | `language: … is not available here (available: …). …`, `language: none of … is available here (available: …). …`, `language: no text recognition language is available here. …` | both |
+| `not_supported` | return | The build for other systems has no text recogniser, so no language resolves there, `nil` neither: every call answers this, as every read there fails with it. | `no text recogniser on this platform` | other |
 
 **Raises** for a mistake in the call: a `lang` that is neither a well-formed tag, a non-empty list of them nor `nil` — `"english"`, `"de--DE"`, `""`, `{}` or a number. Each message begins `host.ocr.resolveLanguage:`.
 

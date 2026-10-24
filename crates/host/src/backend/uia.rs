@@ -925,11 +925,8 @@ fn element_plugin_locate(
                 if t != control_type {
                     return true;
                 }
-                if !name.is_empty() {
-                    let n = noted(el.CurrentName()).map(|b| b.to_string()).unwrap_or_default();
-                    if n != name {
-                        return true;
-                    }
+                if !named(name, || noted(el.CurrentName()).map(|b| b.to_string()).unwrap_or_default()) {
+                    return true;
                 }
                 if let Some(r) = noted(el.CurrentBoundingRectangle()) {
                     if r.right > r.left && r.bottom > r.top {
@@ -948,6 +945,14 @@ fn element_plugin_locate(
         }
         None
     })
+}
+
+/// Whether an element's Name is the one asked for, read only when it has to be: an empty `wanted`
+/// takes any element of the type, as everywhere else in host.element. `pluginLocate`'s walk and
+/// `stateProbe`'s both ask it; `stateProbe`'s compared the Name exactly until 2026-10-24, so an
+/// empty name took only an element without one.
+fn named(wanted: &str, name: impl FnOnce() -> String) -> bool {
+    wanted.is_empty() || name() == wanted
 }
 
 /// What a named element says about its own STATE, as a diagnostic string.
@@ -981,8 +986,7 @@ fn element_state_probe(
                 if t != control_type {
                     return true;
                 }
-                let n = noted(el.CurrentName()).map(|b| b.to_string()).unwrap_or_default();
-                if n != name {
+                if !named(name, || noted(el.CurrentName()).map(|b| b.to_string()).unwrap_or_default()) {
                     return true;
                 }
                 // Toggle first (UIA_TogglePatternId = 10015); -1 when the pattern is absent,
@@ -1202,6 +1206,34 @@ fn element_focus_put(hwnd: isize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An empty name takes any element of the type, its Name not even read; any other is compared
+    /// exactly. `stateProbe`'s walk and `pluginLocate`'s both ask so: until 2026-10-24 `stateProbe`
+    /// compared the Name exactly, and an empty one took only an element without a name.
+    #[test]
+    fn an_empty_name_takes_any_element_of_the_type_in_every_walk() {
+        let read = std::cell::Cell::new(0);
+        let r = &read;
+        let name = move |n: &'static str| {
+            move || {
+                r.set(r.get() + 1);
+                n.to_string()
+            }
+        };
+        assert!(named("", name("Keyboard")));
+        assert!(named("", name("")));
+        assert_eq!(read.get(), 0, "an empty name reads no Name");
+        assert!(named("Keyboard", name("Keyboard")));
+        assert!(!named("Keyboard", name("keyboard")), "compared exactly");
+        assert!(!named("Keyboard", name("")));
+        const SRC: &str = include_str!("uia.rs");
+        for f in ["fn element_state_probe(", "fn element_plugin_locate("] {
+            let body = &SRC[SRC.find(f).unwrap()..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            assert!(body.contains("if !named(name, || noted(el.CurrentName())"), "{f}");
+            assert!(!body.contains("n != name"), "{f} compares the name itself");
+        }
+    }
 
     /// An action that failed is said in the words a module is told, under its code: rights, time,
     /// the element, the program; anything else with its number.

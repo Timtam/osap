@@ -252,7 +252,7 @@ fn a_covered_item_is_not_clicked() {
         T.popup(300, 362, 80, 120, 200)
         T.tick(1)
         assert(#S.clicks == 1, "only the opener")
-        assert(S.speech[#S.speech].text == "something else is covering Load preset", T.said())
+        assert(S.speech[#S.speech].text == "something else is covering Load preset, or its window is gone", T.said())
         assert(T.count("not chosen — (372,100) is inside the menu's window id 300, but another window is drawn there") == 1, T.dump())
         -- Covered only on the retry: the first click was made, the second is not.
         T.closePopups()
@@ -265,7 +265,7 @@ fn a_covered_item_is_not_clicked() {
         local clicks = #S.clicks
         T.tick(1)
         assert(#S.clicks == clicks, "not clicked again")
-        assert(S.speech[#S.speech].text == "something else is covering Load preset", T.said())
+        assert(S.speech[#S.speech].text == "something else is covering Load preset, or its window is gone", T.said())
     "##);
 }
 
@@ -558,7 +558,7 @@ fn a_menu_painted_inside_the_plugin_is_checked_like_any_click() {
         S.hit = { x = 362, y = 80, w = 120, h = 200 }
         T.tick(1)
         assert(#S.clicks == 3, "only the opener: " .. #S.clicks)
-        assert(S.speech[#S.speech].text == "something else is covering Load preset", T.said())
+        assert(S.speech[#S.speech].text == "something else is covering Load preset, or its window is gone", T.said())
         assert(T.count("not chosen — refused, and said") == 1, T.dump())
     "##);
 }
@@ -585,7 +585,7 @@ fn on_a_mac_the_menus_window_is_asked_about_by_its_number_in_the_window_list() {
         S.owns = function(id) return id ~= 301 end
         T.popup(301, 362, 80, 120, 200)
         T.tick(1)
-        assert(#S.clicks == 3 and S.speech[#S.speech].text == "something else is covering Load preset", T.said())
+        assert(#S.clicks == 3 and S.speech[#S.speech].text == "something else is covering Load preset, or its window is gone", T.said())
         assert(T.count("(372,100) is inside the menu's window 301 of the window list, but another window is drawn there") == 1, T.dump())
     "##);
 }
@@ -890,7 +890,7 @@ fn an_opener_whose_overlay_moved_on_while_its_picture_was_taken_is_not_clicked()
         end)
         assert(chosen == false and #S.clicks == 1 and T.is(done[2], "covered"), "chosen under a cover: " .. T.what(done[2]))
         assert(T.count("Avenger: 'Zoom' at (380,64) is inside our window's frame but another window is "
-          .. "drawn there — not clicking") == 1, T.dump())
+          .. "drawn there, or the window is gone — not clicking") == 1, T.dump())
         assert(o._pick == pick and pressed == 1 and #S.asyncs == 2 and pictures[#pictures].released,
           "a refused press ended the last one's pick, counted, or kept its picture")
         S.owns, cover = true, false

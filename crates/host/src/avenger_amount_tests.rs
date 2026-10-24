@@ -700,7 +700,7 @@ fn a_refused_hand_over_or_press_point_presses_nothing() {
         T.tripFrom({ action = "macro_amount", args = { index = 1 }, focused = true }, W)
         T.settle()
         T.ok(not S.holding["PageUp"] and #T.inputs("down") == 0, "nothing captured or pressed")
-        T.ok(T.lastPost("error").text == "something else is covering A macro's amount", tostring(T.lastPost("error").text))
+        T.ok(T.lastPost("error").text == "something else is covering A macro's amount, or its window is gone", tostring(T.lastPost("error").text))
         T.ok(T.held() == 0, "the picture let go")
         S.owns = true
         -- A knob the page cannot have meant: refused at once, with no trip.

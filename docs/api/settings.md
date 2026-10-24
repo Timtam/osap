@@ -72,9 +72,21 @@ local mode  = host.settings.define("mode", "fast", { oneOf = { "fast", "safe" } 
 
 None. It never answers an error value.
 
-**Raises** for a mistake in the call: a `key` that is neither a string nor a number (a number is read as its digits); a `default` that is not a boolean, a number or a string (`settings value must be a boolean, number, or string`); a string that is not valid UTF-8; an `opts` that is neither a table nor `nil`.
+**Raises** for a mistake in the call, and then nothing is defined or stored: a `key` that is neither a string nor a number (a number is read as its digits); a `default` that is not a boolean, a number or a string (`settings value must be a boolean, number, or string`); a string that is not valid UTF-8; an `opts` that is neither a table nor `nil`; and a mistake inside `opts`, each message beginning `host.settings.define:`:
 
-**Nothing inside `opts` raises.** A key other than `label`, `min`, `max` and `oneOf` is ignored, a misspelt one included, and so is a `label` that is neither a string nor a number, a `min` or `max` that does not read as a number, a `oneOf` that is not a table, and each entry of `oneOf` that is neither a string nor a number. A `oneOf` with no entry left sets no choices. So when `set` takes a value you meant to bound, check how `opts` is spelt.
+- a key other than `label`, `min`, `max` and `oneOf` — `host.settings.define: 'mx' is not an option; the options are label, min, max and oneOf`;
+- a `label` that is not a string — `label is a string, not a number`;
+- a `min` or `max` that is not a number, or is NaN — `min is a number, not a string`, `max is a number, not NaN` — or that bounds a setting whose default is not a number — `max bounds a number setting, and 'mode' is a string`;
+- a `min` above the `max` — `min 5 is above max 1, so no value could be set`; the two equal are a range of one value;
+- a `oneOf` that is not a table — `oneOf is a list of strings, not a string`; one with an entry that is not a string — `oneOf's entry 2 is a string, not a number`, and a hole the list's length reaches, as in `{ "fast", nil, "safe" }`, is such an entry: `oneOf's entry 2 is a string, not a nil`; one with keys beside its list, a hole past the list's length among them (`t = { "fast" }; t[3] = "safe"`) — `oneOf is a list of strings, and has keys of its own beside them`; an empty one — `oneOf lists no choice`; and one on a setting whose default is not a string — `oneOf lists the choices of a string setting, and 'speed' is a number`.
+
+Until 2026-10-24 none of these raised. A number `label` was taken as its digits, a `min` or `max` string that reads as a number as that number (`min = "0"` bounded the setting at 0), and number entries of `oneOf` as their digits; an empty `oneOf` set no choices, the keys beside its list and the entries past a hole were dropped, and every other mistake above was left without a word.
+
+```luau
+-- A misspelt bound raises at the define, rather than leaving the setting unbounded.
+local ok, why = pcall(host.settings.define, "speed", 1.0, { mx = 4 })
+-- ok == false; why: "host.settings.define: 'mx' is not an option; the options are label, min, max and oneOf"
+```
 
 ## host.settings.get(key) {#host-settings-get}
 
@@ -130,6 +142,7 @@ None. It never answers an error value.
 - a `key` this module never `define`d — `setting 'speeed' was not defined`;
 - a `value` that is not a boolean, a number or a string — `settings value must be a boolean, number, or string` — or a string that is not valid UTF-8;
 - a `value` of another kind than the default's — `setting 'mode': expected Str, got Number`, the kinds being `Bool`, `Number` and `Str`;
+- a NaN, for any number setting, bounded or not — `setting 'speed': must be a number, not NaN`;
 - a number below `min` or above `max` — `setting 'speed': must be >= 0.25`, `setting 'speed': must be <= 4`;
 - a string that is not one of `oneOf` — `setting 'mode': must be one of ["fast", "safe"]`;
 - a `key` that is neither a string nor a number.

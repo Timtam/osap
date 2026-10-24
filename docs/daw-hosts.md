@@ -15,11 +15,11 @@ local daw = host.require("com.platform.daw-hosts")
 ov:attachEmbedded({ hosts = daw.all, control = { windows = "^Plugin%x+$" }, identify = isMine })
 ```
 
-`daw.all` is every entry, flattened. `daw.reaper`, `daw.ableton` and `daw.logic` are the same entries per DAW, for a tool that has to tell them apart; a plug-in module that bound with one of them would be recognised in that DAW only.
+`daw.all` is every entry, flattened. `daw.reaper`, `daw.ableton` and `daw.logic` are the same entries per DAW, for a tool that has to tell them apart; a plug-in module that bound with one of them would be recognised in that DAW only. `daw.matcher(entry)` is an entry's matcher, the entry without its own fields (below), for a tool that tests a window against the entries itself — the HTML probe does: `host.window.test(daw.matcher(entry), w)`. The same table for the same entry every time.
 
 ## The entry {#entry}
 
-An entry is a [window matcher](api/window.md#matchers) — `host.window.test` reads its matcher keys and ignores the rest — with these fields beside it:
+An entry is a [window matcher](api/window.md#matchers) with these fields beside it. The overlay runtime and the focus key test an entry by its matcher alone — the entry without the fields below that are not matcher keys (`chrome`, `pluginOrigin`, `focusTarget`, `focusKey`, `daw`, `swallowsFirstClick`) — because `host.window.test` raises for a key no matcher has. So any other key in an entry raises at the first test of it: a field of the entry that is new has to be added to both lists, the runtime's `ENTRY_FIELDS` and daw-hosts' own.
 
 | Field | Platforms | What it says |
 | --- | --- | --- |

@@ -80,6 +80,10 @@ impl Field {
             return Err(format!("expected {:?}, got {:?}", self.kind, v.kind()));
         }
         if let Some(n) = v.as_f64() {
+            // Before the bounds: every comparison with NaN is false, so it passed both.
+            if n.is_nan() {
+                return Err("must be a number, not NaN".to_string());
+            }
             if let Some(min) = self.min {
                 if n < min {
                     return Err(format!("must be >= {min}"));
@@ -494,6 +498,30 @@ fn migrate_legacy() -> Option<Store> {
     store.save();
     let _ = std::fs::rename(&legacy, dir().join("disabled-modules.txt.bak"));
     Some(store)
+}
+
+#[cfg(test)]
+mod field_tests {
+    use super::*;
+
+    fn number(min: Option<f64>, max: Option<f64>) -> Field {
+        Field { kind: Kind::Number, label: "speed".into(), default: Value::Float(1.0), min, max, choices: None }
+    }
+
+    /// A NaN is refused for every number setting, bounded or not: every comparison with NaN is
+    /// false, so until 2026-10-24 it passed `min` and `max` both and was stored. The bounds and an
+    /// infinity are judged as before.
+    #[test]
+    fn a_nan_is_no_value_of_a_number_setting() {
+        for field in [number(Some(0.25), Some(4.0)), number(Some(0.0), None), number(None, None)] {
+            assert_eq!(field.validate(&Value::Float(f64::NAN)), Err("must be a number, not NaN".to_string()), "{field:?}");
+            assert_eq!(field.validate(&Value::Float(1.0)), Ok(()));
+        }
+        let bounded = number(Some(0.25), Some(4.0));
+        assert_eq!(bounded.validate(&Value::Float(0.1)), Err("must be >= 0.25".to_string()));
+        assert_eq!(bounded.validate(&Value::Float(f64::INFINITY)), Err("must be <= 4".to_string()));
+        assert_eq!(number(None, None).validate(&Value::Float(f64::INFINITY)), Ok(()));
+    }
 }
 
 #[cfg(test)]

@@ -323,8 +323,9 @@ impl Backend for MacBackend {
         input::key_post(hwnd, key)
     }
 
-    fn key_send(&self, combo: &str) -> Result<(), super::KeyRefusal> {
-        input::key_send(combo)
+    // Every event is made before the first is posted, so a send that is refused sent nothing.
+    fn key_send(&self, combo: &str) -> super::KeySend {
+        super::KeySend::all_or_nothing(input::key_send(combo))
     }
 
     fn type_text(&self, text: &str) -> Result<(), crate::errors::HostError> {

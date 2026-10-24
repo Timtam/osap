@@ -85,7 +85,7 @@ The calls in this table are the only ones that answer this way. No other call of
 | [`host.element.rawDump`](./element.md#host-element-rawdump-returns) | `list, err` | the elements read before the walk stopped | the walk met its bound — 4000 elements on Windows, 2000 on a Mac (`too_large`), or 5 seconds (`timeout`) — or the program stopped answering on the way (`timeout`, `denied` or `gone`) |
 | [`host.hotkey.register`](./hotkey.md#host-hotkey-register-returns) | `id, err` | the hotkey's id: the claim is made, and it is tried again whenever it can be held | why it is not held now: another module or another program holds it, or the system refused it (`taken`); a macOS letter the current keyboard layout does not type (`not_supported`); the Mac's hotkey handler could not be installed (`failed`) |
 
-The same calls can also answer with the first value missing. A dump that read nothing answers `{}, err`. A combination the system keeps, or one with no key code here, is not claimed at all: `host.hotkey.register` answers `nil, err`. A `show` not done as asked answers `false, err`, and its Errors table says where the page is then.
+The same calls can also answer with the first value missing. A dump that read nothing answers `{}, err`. A combination the system keeps, one with no key code here, or one of the application's own keys, is not claimed at all: `host.hotkey.register` answers `nil, err`. A `show` not done as asked answers `false, err`, and its Errors table says where the page is then.
 
 So read the two values for what each says, rather than reading the first as "it worked":
 
@@ -183,7 +183,7 @@ local function said(err) return SAY[err.code] or tostring(err) end
 
 **Code written against sentences stops matching, silently.** Before the conversion a call answered a sentence, such as `false, "not ready yet"`, and a module compared `why == "not ready yet"`. Now the second value is a table, and that comparison is false without a word. Code that only tests it (`if why then`), logs it or puts it in a sentence (`"x: " .. why`) keeps working. `string.find(why, …)`, `why:find(…)`, `table.concat` over it and the rest of the string functions raise ([Error values](#error-values)). A module that depends on the overlay runtime is not protected by its version, since a dependency is a lower bound only.
 
-**A page compares the same codes**, under `platform.errors`: the module posts `{ ok = false, error = err }`, and the page tests `m.error.code === platform.errors.NOT_READY` ([the page's side](./gui.md#platform-post)). `platform.errors` holds the host's 19 codes, not the overlay runtime's.
+**A page compares the same codes**, under `platform.errors`: the module posts `{ ok = false, error = err }`, and the page tests `m.error.code === platform.errors.NOT_READY` ([`platform.errors`](./gui.md#platform-errors)). `platform.errors` holds the host's 19 codes, not the overlay runtime's.
 
 ## host.errors {#host-errors}
 

@@ -853,6 +853,32 @@ fn the_language_list_answers_at_once_and_is_known_before_the_recogniser_answers_
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
 }
 
+/// On a platform with no recogniser — the build for other systems — `resolveLanguage` answers
+/// `nil, err` with `not_supported`, the error a read there fails with, for every language and for
+/// `nil`: nothing the user installs makes one readable. A malformed tag still raises first, and
+/// `languages` is `{}`. Until 2026-10-24 it answered `unavailable`.
+#[test]
+fn without_a_recogniser_no_language_resolves_and_the_platform_is_said() {
+    let h = holder(Service::spawn(OcrWorker { present: false, ..worker() }));
+    let lua = vm(&h, 1);
+    run(
+        &lua,
+        "listed = #host.ocr.languages()\n\
+         one, oneWhy = host.ocr.resolveLanguage('en')\n\
+         list, listWhy = host.ocr.resolveLanguage({ 'de', 'en' })\n\
+         mine, mineWhy = host.ocr.resolveLanguage(nil)\n\
+         raised = not pcall(host.ocr.resolveLanguage, 'english')\n",
+    );
+    assert!(yes(&lua, "return listed == 0 and one == nil and list == nil and mine == nil and raised"));
+    for why in ["oneWhy", "listWhy", "mineWhy"] {
+        assert!(
+            yes(&lua, &format!("return {why}.code == 'not_supported' and tostring({why}) == 'no text recogniser on this platform'")),
+            "{why}"
+        );
+    }
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+}
+
 /// A module that acts while a read of its own is out acts at once — `host.input.*` and
 /// `host.window.focus` note it and go on (lib.rs holds that this is all they do first): the
 /// picture is still being taken when the note returns. The log says so once a session per module
