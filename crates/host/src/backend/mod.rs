@@ -229,6 +229,20 @@ mod macos_evidence;
 #[path = "macos/post_click.rs"]
 mod macos_post_click;
 
+/// And what the event tap's callback hands the run-loop observer to write down: a key and its mask
+/// in one atomic word, and a slot per reason a key is let through — so that no line is written
+/// inside the callback, and none is lost on the way out of it.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/tap_handoff.rs"]
+mod macos_tap_handoff;
+
+/// And the reads an application could not complete inside one accessibility walk: which element,
+/// which attribute, how many walks of a kind in an application met one — the line the next Mac
+/// session reads to say whether a plug-in that works ever answers so, once in five seconds at most.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/unanswered.rs"]
+mod macos_unanswered;
+
 /// Where a permission stands, for something that has to SHOW it rather than log it.
 ///
 /// `Missing` and `Unknown` are constructed on macOS only, which is the whole point of the
@@ -4357,6 +4371,60 @@ mod capture_decision_tests {
         assert!(body("fn pass_words(why: PassWhy)").contains("PassWhy::OwnWindow =>"));
     }
 
+    /// The Mac tap's callback writes no line but the trace lines a tester switches on: a captured key
+    /// it let through, the first key it suppressed and a key the locked set let through are left in
+    /// atomics (`macos/tap_handoff.rs`, whose rules are tested in `macos_tap_handoff`), and the
+    /// run-loop observer writes them, as it writes the switch-offs the callback counts. Held where it
+    /// is written, since no test here runs the tap.
+    #[test]
+    fn the_mac_tap_writes_its_lines_from_the_observer() {
+        const TAP: &str = include_str!("macos/tap.rs");
+        let body = |sig: &str| {
+            let at = TAP.find(sig).unwrap_or_else(|| panic!("{sig}"));
+            let end = TAP[at..].find("\n}\n").unwrap();
+            &TAP[at..at + end]
+        };
+        // Everything the callback runs of this file.
+        for sig in [
+            "unsafe extern \"C-unwind\" fn tap_callback(",
+            "fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool)",
+            "fn modifier_changed(keycode: u16, flags: CGEventFlags)",
+            "fn note_lateness(ev: &CGEvent, keycode: u16)",
+            "fn note_menu_pass(owner: u32, vk: u32, mask: u8)",
+            "fn forget_held_keys()",
+            "fn note_on()",
+            "fn note_suppressed(keycode: u16)",
+            "fn take_suppressed(keycode: u16) -> bool",
+            "pub(super) fn held_back(keycode: u16) -> bool",
+        ] {
+            assert!(!body(sig).contains("logging::line("), "{sig} writes a line");
+        }
+        let cb = body("unsafe extern \"C-unwind\" fn tap_callback(");
+        assert!(cb.contains("if let Some(slot) = GATE_PASSED.get(tap_handoff::slot(why)) {\n                slot.store(tap_handoff::pack(vk, mask), Ordering::Relaxed);\n            }\n            return through();"));
+        assert!(cb.contains("if !FIRST_SUPPRESSION.swap(true, Ordering::Relaxed) {\n        FIRST_SUPPRESSED.store(tap_handoff::pack(vk, mask), Ordering::Relaxed);\n    }"));
+        assert!(body("fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool)").contains("LOCKED_OUT.fetch_add(1, Ordering::Relaxed);\n            return None;"));
+        let observer = body("unsafe extern \"C-unwind\" fn watchdog_observer(");
+        for report in ["report_disabled();", "report_first_suppression();", "report_gate_pass();", "report_locked_out();"] {
+            assert!(observer.contains(report), "the observer no longer calls `{report}`");
+        }
+        // Each slot emptied where its line is written, and nowhere else.
+        let gate = body("fn report_gate_pass() {");
+        assert!(gate.contains("for why in tap_handoff::REASONS {"));
+        assert!(gate.contains("tap_handoff::unpack(GATE_PASSED[slot].swap(0, Ordering::Relaxed))"));
+        assert!(gate.contains("if !due(&GATE_SAID_MS[slot], 3000) {"), "three quiet seconds per reason");
+        assert_eq!(TAP.matches("GATE_PASSED.get(").count(), 1, "stored by the callback, in a slot looked up");
+        assert_eq!(TAP.matches("GATE_PASSED[").count(), 2, "looked at and taken by the report");
+        assert!(
+            TAP.contains("static GATE_PASSED: [AtomicU64; tap_handoff::REASONS.len()]")
+                && TAP.contains("static GATE_SAID_MS: [AtomicU64; tap_handoff::REASONS.len()]"),
+            "a slot for each reason listed"
+        );
+        assert!(body("fn report_first_suppression() {").contains("tap_handoff::unpack(FIRST_SUPPRESSED.swap(0, Ordering::Relaxed))"));
+        assert_eq!(TAP.matches("FIRST_SUPPRESSED.").count(), 3);
+        assert!(body("fn report_locked_out() {").contains("let n = LOCKED_OUT.swap(0, Ordering::Relaxed);"));
+        assert_eq!(TAP.matches("LOCKED_OUT.").count(), 3);
+    }
+
     /// A key held since a capture took it does not repeat into our own window, which would never
     /// see it come up; every other repeat, and every key pressed there, is decided as ever.
     #[test]
@@ -5277,7 +5345,7 @@ mod not_known_tests {
         for sig in ["pub(super) fn attribute(", "pub(super) fn attribute_element_checked(", "pub(super) fn element_gone("] {
             assert!(body(AX, sig).contains("note_busy(element_pid(el));"), "{sig}");
         }
-        let walk = body(AX, "fn walk(\n");
+        let walk = body(AX, "fn walk_from(\n");
         let refused = walk.find("if !budget.spend() {").unwrap();
         assert!(walk[refused..].starts_with("if !budget.spend() {\n        // A module's question is told which bound"));
         assert!(walk[refused..refused + 300].contains("if let Some(why) = budget.cut() {\n            not_known(why);"));
@@ -5285,6 +5353,88 @@ mod not_known_tests {
         for f in ["pub fn find(", "pub fn find_any(", "pub fn locate(", "pub fn locate_via(", "pub fn plugin_locate(", "pub fn dump(", "pub fn state_probe(", "pub fn class_nav_point(", "pub fn focus_step(", "pub fn focus_within("] {
             assert!(body(AX, f).contains("root_of(hwnd, "), "{f}");
         }
+    }
+
+    /// Every read a Mac's walk makes that the application could not complete is counted with its
+    /// element, and a walk that met one writes its line (`macos/unanswered.rs`, whose rules are
+    /// tested in `macos_unanswered`): the walk begins the count, its steps say where they are, the
+    /// reads' funnel notes each such answer, and the walk ends the count — going on past the reads
+    /// as before. Held where it is written: only a Mac runs it.
+    #[test]
+    fn a_mac_walk_counts_the_reads_its_application_did_not_complete() {
+        const AX: &str = include_str!("macos/ax.rs");
+        let body = |sig: &str| {
+            let at = AX.find(sig).unwrap_or_else(|| panic!("{sig}"));
+            let end = AX[at..].find("\n}\n").unwrap();
+            &AX[at..at + end]
+        };
+        let at = |f: &str, s: &str| f.find(s).unwrap_or_else(|| panic!("no `{s}`"));
+        let walk = body("fn walk(\n");
+        let begun = at(walk, "let counting = unanswered::begin(budget.kind().words());");
+        let walked = at(walk, "let on = walk_from(el, depth, max_depth, budget, visit);");
+        let ended = at(walk, "if let Some(line) = counting.end(Instant::now(), || element_pid(el), exe_for_pid) {\n            crate::logging::line(\"macos\", &line);");
+        assert!(begun < walked && walked < ended);
+        assert!(walk[walked..ended].contains("if let Some(counting) = counting {"), "only the walk that began the count ends it");
+        let from = body("fn walk_from(\n");
+        assert!(at(from, "let snap = snapshot(el);\n    unanswered::read(&snap.role, &snap.title);") < at(from, "match visit(el, &snap, depth) {"));
+        assert!(from.contains(concat!(
+            "for (i, child) in children(el).into_iter().enumerate() {\n",
+            "        unanswered::enter(i);\n",
+            "        let on = walk_from(&child, depth + 1, max_depth, budget, visit);\n",
+            "        unanswered::leave();\n",
+            "        if !on {\n",
+            "            return false;\n",
+            "        }\n",
+            "    }\n",
+        )));
+        assert_eq!(AX.matches("walk_from(").count(), 3, "every walk is begun at `walk`: its definition, `walk`'s call, its own");
+        // Each such answer, through the funnel every read of a walk passes — the attributes one at
+        // a time, the batched read and each slot of it — and the one read of a walk that bypasses it.
+        assert!(body("fn note_error(err: AXError, what: &str) {").contains("AXError::CannotComplete => {\n            unanswered::note(what);"));
+        assert!(body("pub(super) fn attribute(").contains("note_error(err, &name.to_string());"));
+        let batched = body("fn snapshot_batched(");
+        assert!(batched.contains("note_error(err, \"multiple attributes\");"));
+        assert!(
+            batched.contains(concat!(
+                "if failed == Some(AXError::CannotComplete) {\n",
+                "            if let Some(name) = keys.get(i) {\n",
+                "                unanswered::note(&name.to_string());",
+            )),
+            "a slot whose own read was not completed"
+        );
+        assert!(body("fn ax_value_error(v: &AXValue) -> Option<AXError> {").contains("v.value(AXValueType::AXError, ptr)"));
+        assert!(body("fn is_focusable(el: &AXUIElement) -> bool {").contains("if err == AXError::CannotComplete {\n            unanswered::note(\"whether AXFocused is settable\");\n        }\n        return false;"));
+        assert_eq!(AX.matches("unanswered::note(").count(), 3);
+    }
+
+    /// A Mac's read of where the keyboard is, skipped for the not-answering quarantine or failed
+    /// into it, arms one focus round for the end of the quarantine (`queue::arm_after_busy`); the
+    /// drain runs it in the ladder's one round; and the end it is armed for is the instant `is_busy`
+    /// stops refusing from, read from the same entry. Held where it is written: only a Mac runs it.
+    #[test]
+    fn a_mac_focus_read_met_by_the_quarantine_is_read_again_when_it_ends() {
+        const AX: &str = include_str!("macos/ax.rs");
+        const QUEUE: &str = include_str!("macos/queue.rs");
+        let body = |src: &'static str, sig: &str| {
+            let at = src.find(sig).unwrap_or_else(|| panic!("{sig}"));
+            let end = src[at..].find("\n}\n").unwrap();
+            &src[at..at + end]
+        };
+        let chain = body(AX, "pub fn window_focus_chain() -> Vec<ControlInfo> {");
+        assert!(chain.contains("if skip_busy(p, \"focus_chain\") {\n            focus_after_busy(p);\n            return Vec::new();"), "skipped");
+        assert!(chain.contains("note_busy(p);\n                    focus_after_busy(p);"), "the read of the focused element failed into it");
+        assert!(chain.contains("Some(p) => focus_after_busy(p),\n                    None => note_focus_unreadable(front, \"no focused element and no front window\"),"), "the window in front was not asked");
+        let last = chain.find("for p in front.into_iter().chain([pid]) {\n        focus_after_busy(p);\n    }").expect("a link's read failed into it");
+        assert!(chain.find("handles::adopt(&links, window);").unwrap() < last, "after every read of the chain");
+        assert_eq!(chain.matches("focus_after_busy(").count(), 4);
+        assert!(body(AX, "fn focus_after_busy(pid: i32) {").contains("if let Some(until) = busy_until(pid) {\n        super::queue::arm_after_busy(until);"));
+        assert!(body(AX, "fn busy_until(pid: i32) -> Option<Instant> {").contains("b.borrow().get(&pid).copied().filter(|until| *until > Instant::now())"));
+        assert!(body(AX, "pub(super) fn is_busy(pid: i32) -> bool {").contains("Some(until) if *until > Instant::now() => true,"), "the same comparison");
+        assert!(body(QUEUE, "pub fn arm_after_busy(until: Instant) {").contains("AFTER_BUSY.with(|a| a.set(Some(until)));"));
+        let drain = body(QUEUE, "pub fn drain(events: &mut dyn HostEvents)");
+        assert!(drain.contains("Some(at) if at <= now => {\n            a.set(None);\n            true\n        }"), "once, from its instant on");
+        assert!(drain.contains("if due > 0 || after_busy {\n        events.on_focus_change();\n    }"), "in the ladder's one round");
+        assert_eq!(QUEUE.matches("AFTER_BUSY.with(").count(), 2, "armed and taken, nowhere else");
     }
 }
 

@@ -34,6 +34,19 @@ pub(crate) enum Walk {
     Host,
 }
 
+impl Walk {
+    /// What the walk is for, as a log line names it (`unanswered.rs`: `an accessibility search
+    /// walk in …`).
+    pub(crate) fn words(self) -> &'static str {
+        match self {
+            Walk::Search => "search",
+            Walk::Focus => "focus",
+            Walk::Dump => "dump",
+            Walk::Host => "controls",
+        }
+    }
+}
+
 pub(crate) struct Budget {
     walk: Walk,
     nodes: i32,
@@ -104,6 +117,11 @@ impl Budget {
     /// How many nodes are left, for the callers that report how many were visited.
     pub(crate) fn nodes_left(&self) -> i32 {
         self.nodes
+    }
+
+    /// What the walk is for.
+    pub(crate) fn kind(&self) -> Walk {
+        self.walk
     }
 
     pub(crate) fn ran_out_of_time(&self) -> bool {
@@ -221,6 +239,17 @@ mod tests {
         }
         assert_eq!(b.nodes_left(), left, "and spends nothing");
         assert!(!b.ran_out_of_nodes());
+    }
+
+    /// A walk carries what it is for, and says it in the words of the line a walk writes when an
+    /// application did not complete one of its reads (`unanswered.rs`), each kind its own.
+    #[test]
+    fn a_walk_says_what_it_is_for() {
+        let t = Instant::now();
+        for (walk, words) in [(Walk::Search, "search"), (Walk::Focus, "focus"), (Walk::Dump, "dump"), (Walk::Host, "controls")] {
+            assert_eq!(Budget::starting_at(walk, 1, Duration::from_secs(1), t).kind(), walk);
+            assert_eq!(walk.words(), words);
+        }
     }
 
     /// What a module is told of each bound of each walk: nothing for a walk that reached the end —

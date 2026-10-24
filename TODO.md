@@ -535,6 +535,24 @@ and to build it as soon as the usage allows.
       (`element::NOT_ANSWERING`), not a line. So before that session a probe counter or a trace has
       to be added — each `CannotComplete` with its walk, its element (role, title, path) and its
       attribute, counted per walk — for the session to read. Change nothing in the walk before that.
+      **The count is built (2026-10-24, package 14); the question waits for the session.** A walk
+      that met such a read writes one line as it ends (ax.rs `walk`, `unanswered.rs`): `[macos] an
+      accessibility search walk in REAPER, under AXWindow 'FX: Track 1', met 2 read(s) the
+      application could not complete (kAXErrorCannotComplete) at 1 element(s): at 2.1, AXGroup
+      'Main': AXChildren ×2; 37 element(s) read — 1 of 412 search walk(s) in REAPER so far met
+      one` — each element by its place (the child numbers from the walk's root) with its role and
+      title as the walk read them, each attribute with how often, and the walks of its kind in that
+      application (by process) so far, those that met none counted too (kinds `search`, `focus`,
+      `dump`, `controls`; six elements named, the rest counted). One line in 5 s at most for a kind
+      in an application: the walks that met one in between are counted into the next line (`; N
+      more such walk(s) since the last line`), their elements named nowhere. Counted through
+      `note_error`'s `CannotComplete`, which every attribute read and the batched read of a walk
+      pass, in each slot of a batched read that answered (the slot holds its own read's error), and
+      in `is_focusable`, which noted it nowhere; the walk goes on as before. element.md ("Asking
+      without waiting", macOS) says the line. For the session: whether a working plug-in's lines
+      name the same place each time, and the rate from the "so far" counts — bearing in mind that
+      a read not answered on its own quarantines the application for 5 s, and the walks not made
+      in them are in neither count.
 - [ ] **`host.keys.check` and the application's own keys.** `check` answers `ok = true` with no
       reason for the application's reload and quit keys, and `register` refuses them (`taken`,
       `hotkey::APP_KEY`, since 2026-10-24); keys.md says so. Decide whether `check` gets a reason of
@@ -880,10 +898,28 @@ them:
       moves between steps. With 5 built: Size, Load, Initialize and the redo list from the ring and
       from the page with Calibrate ticked, and the log and the calibration folder sent back; with
       slice 5, its own steps ("What the Mac tester confirms for slice 5", VPS Avenger's page).
-- [ ] **7. Follow-ups of 2a (not built).** (a) The host's busy quarantine: when a focus read is
+- [ ] **7. Follow-ups of 2a ((a) built).** (a) The host's busy quarantine: when a focus read is
       skipped or fails for it, arm one focus round for when it ends (`BUSY_PENALTY`, ax.rs), as
       `arm_recheck_ladder` (queue.rs) places its last rungs past it — a bound on looking, so the
       visit to the DAW's chrome that 2a's residual leaves unseen is read once the DAW answers.
+      **Built (2026-10-24, package 14):** `window_focus_chain` arms one focus round for the end of
+      the quarantine wherever its read is skipped for it or fails into it — the front application
+      skipped, its focused element's read failing, no window in front while it is quarantined, a
+      link's read failing (`ax::focus_after_busy`, from the same entry `is_busy` compares with) —
+      and the drain runs it with the ladder's rungs, in one round (`queue::arm_after_busy`). One
+      round, the latest replacing it; an application that goes on not answering fails the round's
+      read too, which arms the next, so it is asked every five or six seconds while something
+      reads the chain (the quarantine's own rate, no cap). It repeats so too while the application
+      answers everything but one read of the chain, failing that one so each time — its focused
+      element's read while a drawn plug-in view has the keyboard, if the error Logic answers there
+      (not logged yet) is `CannotComplete`, or a remote view's link whose `AXParent` always fails so:
+      a focus round, with every overlay's `_recheck` and `watchStay`, every five or six seconds for
+      as long as the keyboard stays there (the review, 2026-10-24). Decide whether to cap it — one
+      round per stretch of not answering — once the Mac session has said which error that is.
+      window.md (focusChain "Read again when the quarantine ends", onFocus macOS) and overlay.md's
+      residual say so; pinned in backend/mod.rs
+      (`a_mac_focus_read_met_by_the_quarantine_is_read_again_when_it_ends`). The Mac session
+      confirms it with a visit to the DAW's chrome while the DAW is busy.
       (b) daw-hosts' focus key on an empty chain after focusing a Logic plug-in window says "could
       not tell" and does nothing (l.2102-2106): it could at least ask the overlays to look again.
       (c) An overlay never begins on an unreadable chain, so a reload with the keyboard already in
@@ -10117,11 +10153,22 @@ kind of place that says how long the first held the loop.
       of the overlay goes to the application until the overlay comes to the front again. If that
       happens: a fallback that heals — the frontmost application's remembered window, the one the
       overlay matched on — is the maintainer's call (b0-final.md chose the tap's window).
-- [ ] **The Mac event tap writes log lines inside its callback** (found reviewing K; older than
+- [x] **The Mac event tap writes log lines inside its callback** (found reviewing K; older than
       K): `report_gate_pass` formats and writes a line there, at most once every 3 s per reason,
       and the first suppression once per session — while the callback's own comment says a file
       write there is the delay that gets the tap switched off. Hand both to the run-loop observer,
       as `report_disabled` is (an atomic slot for the key, the mask and the reason).
+      **Built (2026-10-24, package 14).** The callback stores what each line needs in an atomic —
+      the key and its mask in one word, a slot per reason a key is let through (`tap_handoff.rs`),
+      and one more for the first key it suppressed — and the run-loop observer writes the lines
+      (`report_gate_pass`, `report_first_suppression`), in their old words. The three quiet
+      seconds are kept per reason now; the old rule remembered only the last reason said, so two
+      reasons taking turns wrote a line each time. The third line written in there went too: a
+      key `decide` let through because the captured set was locked is counted, and the observer
+      says how many, once in five seconds at most (`report_locked_out`). The callback writes no
+      line now but the trace lines a tester switches on; pinned in backend/mod.rs
+      (`the_mac_tap_writes_its_lines_from_the_observer`), the packing tested in
+      `macos_tap_handoff`.
 - [x] **Step B1a, every callback a handler of its module** (b0-final.md): each event a module
       hears — hotkey, captured key, controller event, timer, window trigger, the report of the
       window in front, focus change, the answer of a read, an image search or a snapshot, a

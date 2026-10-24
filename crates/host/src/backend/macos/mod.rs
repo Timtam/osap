@@ -91,6 +91,12 @@ mod question;
 /// and handed to the host as `SystemEvent`s. See the file.
 mod system;
 mod tap;
+/// What the event tap's callback leaves for the run-loop observer to write down. Pure; see the
+/// file.
+mod tap_handoff;
+/// The reads an application could not complete inside one accessibility walk, counted for the
+/// log. Pure; see the file.
+mod unanswered;
 mod watch;
 
 /// The backing-store image a snapshot keeps; `backend::frame` names it as the platform's.

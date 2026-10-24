@@ -65,7 +65,7 @@ use objc2_core_graphics::{
     CGGetEventTapList,
 };
 
-use super::{key_age, keys, queue, watch};
+use super::{key_age, keys, queue, tap_handoff, watch};
 use crate::backend::{capture_decision, menu_flag_owners, Capture, Captured, OwnerKeys, PassWhy, Pressed, Taken, MASK_TAP};
 use crate::errors::HostError;
 use crate::logging;
@@ -132,6 +132,21 @@ const _: () = assert!(keys::CG_FLAG_COMMAND == CGEventFlags::MaskCommand.0);
 /// on macOS a tap that was never granted Input Monitoring is indistinguishable in the log
 /// from one that works, unless something says so when it first does work.
 static FIRST_SUPPRESSION: AtomicBool = AtomicBool::new(false);
+/// That first key, its vk and mask (`tap_handoff::pack`), for the observer to say once
+/// ([`report_first_suppression`]); 0 before it and once said.
+static FIRST_SUPPRESSED: AtomicU64 = AtomicU64::new(0);
+
+/// The captured keys let through since the observer last looked, one slot per reason
+/// (`tap_handoff::slot`): the last such key's vk and mask, packed, 0 while there is none. One
+/// relaxed store in the callback; taken and written down by [`report_gate_pass`]. As long as the
+/// list of reasons, which `tap_handoff` holds to its slots.
+static GATE_PASSED: [AtomicU64; tap_handoff::REASONS.len()] = [const { AtomicU64::new(0) }; tap_handoff::REASONS.len()];
+/// When the observer last said each reason's line, for its quiet three seconds ([`due`]).
+static GATE_SAID_MS: [AtomicU64; tap_handoff::REASONS.len()] = [const { AtomicU64::new(0) }; tap_handoff::REASONS.len()];
+
+/// Keys let through because the captured set was locked when they came ([`decide`]), since the
+/// observer last wrote it down ([`report_locked_out`]).
+static LOCKED_OUT: AtomicU32 = AtomicU32::new(0);
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
@@ -904,6 +919,9 @@ unsafe extern "C-unwind" fn watchdog_observer(
     _info: *mut c_void,
 ) {
     report_disabled();
+    report_first_suppression();
+    report_gate_pass();
+    report_locked_out();
     health_check();
     report_lateness();
 }
@@ -911,7 +929,10 @@ unsafe extern "C-unwind" fn watchdog_observer(
 /// Everything the callback is allowed to do, and no more: match a table, push, return.
 ///
 /// Anything slower than that gets the tap switched off by the system, and a switched-off tap
-/// is indistinguishable, from the user's side, from an overlay that has stopped working.
+/// is indistinguishable, from the user's side, from an overlay that has stopped working. So it
+/// writes no line either, but for the trace lines a tester switches on: what a line needs is left
+/// in an atomic, and the run-loop observer writes it at the next turn of the loop
+/// ([`watchdog_observer`]).
 unsafe extern "C-unwind" fn tap_callback(
     _proxy: CGEventTapProxy,
     etype: CGEventType,
@@ -1062,8 +1083,12 @@ unsafe extern "C-unwind" fn tap_callback(
             //
             // Rate-limited on the reason rather than on the key, because a reason that holds
             // holds for as long as a menu is open or a window is not frontmost, and one line per
-            // keystroke would bury the log it is meant to explain.
-            report_gate_pass(vk, mask, why);
+            // keystroke would bury the log it is meant to explain. Written by the observer
+            // (`report_gate_pass`), not here: one store in the reason's slot — a slot looked up,
+            // not indexed, so a reason left off the list goes unsaid instead of panicking in here.
+            if let Some(slot) = GATE_PASSED.get(tap_handoff::slot(why)) {
+                slot.store(tap_handoff::pack(vk, mask), Ordering::Relaxed);
+            }
             return through();
         }
         Some(Capture::Take { owner }) => owner,
@@ -1083,14 +1108,9 @@ unsafe extern "C-unwind" fn tap_callback(
     // Its symptom is the absence of a trace line the tester does not have switched on, which
     // means the log reads exactly the same as a working session. One positive statement is
     // worth more than any number of negative ones — after it, this costs a relaxed swap per
-    // keystroke and no allocation.
+    // keystroke and no allocation. Said by the observer (`report_first_suppression`), not here.
     if !FIRST_SUPPRESSION.swap(true, Ordering::Relaxed) {
-        logging::line(
-            "macos",
-            &format!(
- "the event tap suppressed its first key (vk {vk:#04x} mask {mask}) — the tap is live, with whatever permissions it needs"
-            ),
-        );
+        FIRST_SUPPRESSED.store(tap_handoff::pack(vk, mask), Ordering::Relaxed);
     }
 
     logging::trace("macos", || format!("tap: captured vk {vk:#04x} mask {mask} for module {owner}"));
@@ -1209,13 +1229,8 @@ fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool) -> Option<(u32, Opti
         Ok(state) => state,
         Err(TryLockError::Poisoned(p)) => p.into_inner(),
         Err(TryLockError::WouldBlock) => {
-            if due(&LAST_LOCK_FAIL_MS, 5000) {
-                logging::line(
-                    "macos",
-                    "the captured-key set was locked when a key arrived — the key was let \
-                     through; the tap and the pump are no longer on one thread",
-                );
-            }
+            // Said by the observer (`report_locked_out`): this runs inside the callback.
+            LOCKED_OUT.fetch_add(1, Ordering::Relaxed);
             return None;
         }
     };
@@ -1296,46 +1311,78 @@ pub fn take_menu_pass_through(owner: u32) -> Vec<(u32, u8)> {
     MENU_PASS.with(|m| crate::backend::take_menu_passes(&mut m.borrow_mut(), owner))
 }
 
-/// One line per reason, at most every few seconds. See the call site for why it exists.
+/// Writes the captured keys the callback let through ([`GATE_PASSED`]): one line per reason, at
+/// most every three seconds, naming the last such key since the observer last looked. See the
+/// callback for why the line exists. Called by the observer on every turn of the run loop: four
+/// relaxed loads when there is nothing to say.
 ///
 /// A key let through to one of our own windows is the counterpart of the Windows hook being out
 /// of the chain there, and is said in its words, under `keys`, with the window's title.
-fn report_gate_pass(vk: u32, mask: u8, why: PassWhy) {
-    const QUIET: std::time::Duration = std::time::Duration::from_secs(3);
-    thread_local! {
-        static LAST: std::cell::RefCell<Option<(PassWhy, Instant)>> =
-            const { std::cell::RefCell::new(None) };
-    }
-    let say = LAST.with(|last| {
-        let mut last = last.borrow_mut();
-        match *last {
-            Some((reason, at)) if reason == why && at.elapsed() < QUIET => false,
-            _ => {
-                *last = Some((why, Instant::now()));
-                true
-            }
+fn report_gate_pass() {
+    for why in tap_handoff::REASONS {
+        let slot = tap_handoff::slot(why);
+        if GATE_PASSED[slot].load(Ordering::Relaxed) == 0 {
+            continue;
         }
-    });
-    if !say {
-        return;
-    }
-    if why == PassWhy::OwnWindow {
+        let Some((vk, mask)) = tap_handoff::unpack(GATE_PASSED[slot].swap(0, Ordering::Relaxed)) else {
+            continue;
+        };
+        if !due(&GATE_SAID_MS[slot], 3000) {
+            continue;
+        }
+        if why == PassWhy::OwnWindow {
+            logging::line(
+                "keys",
+                &format!(
+                    "the tap lets keys through while one of our windows has the keyboard ('{}'): a \
+                     captured key, vk {vk:#04x} mask {mask}, went to it",
+                    super::own::key_title()
+                ),
+            );
+            continue;
+        }
         logging::line(
-            "keys",
+            "macos",
             &format!(
-                "the tap lets keys through while one of our windows has the keyboard ('{}'): a \
-                 captured key, vk {vk:#04x} mask {mask}, went to it",
-                super::own::key_title()
+                "a key the overlay had claimed reached the application instead: vk {vk:#04x} \
+                 mask {mask}, because {}",
+                pass_words(why)
             ),
         );
+    }
+}
+
+/// Says the first key the tap suppressed ([`FIRST_SUPPRESSED`]), once — see the callback for why.
+/// Called by the observer on every turn of the run loop: one relaxed load after it is said.
+fn report_first_suppression() {
+    if FIRST_SUPPRESSED.load(Ordering::Relaxed) == 0 {
         return;
     }
+    let Some((vk, mask)) = tap_handoff::unpack(FIRST_SUPPRESSED.swap(0, Ordering::Relaxed)) else {
+        return;
+    };
     logging::line(
         "macos",
         &format!(
-            "a key the overlay had claimed reached the application instead: vk {vk:#04x} \
-             mask {mask}, because {}",
-            pass_words(why)
+            "the event tap suppressed its first key (vk {vk:#04x} mask {mask}) — the tap is live, with \
+             whatever permissions it needs"
+        ),
+    );
+}
+
+/// Says the keys [`decide`] let through because the captured set was locked when they came
+/// ([`LOCKED_OUT`]), at most once every five seconds. Called by the observer on every turn of the
+/// run loop: one relaxed load when there is nothing to say.
+fn report_locked_out() {
+    if LOCKED_OUT.load(Ordering::Relaxed) == 0 || !due(&LAST_LOCK_FAIL_MS, 5000) {
+        return;
+    }
+    let n = LOCKED_OUT.swap(0, Ordering::Relaxed);
+    logging::line(
+        "macos",
+        &format!(
+            "the captured-key set was locked when {n} key(s) arrived — they were let through; the tap \
+             and the pump are no longer on one thread"
         ),
     );
 }

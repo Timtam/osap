@@ -70,6 +70,7 @@ use super::budget::{Budget, Walk};
 use super::question::not_known;
 use super::front_memory::{Memory, Recall};
 use super::handles;
+use super::unanswered;
 use crate::backend::{ControlInfo, DumpNode, WinInfo};
 
 /// How long any one accessibility call may take before it is abandoned, in seconds.
@@ -403,6 +404,21 @@ pub(super) fn is_busy(pid: i32) -> bool {
     })
 }
 
+/// When the quarantine of `pid` ends, while it is in one: the instant [`is_busy`] answers `false`
+/// from.
+fn busy_until(pid: i32) -> Option<Instant> {
+    BUSY_UNTIL.with(|b| b.borrow().get(&pid).copied().filter(|until| *until > Instant::now()))
+}
+
+/// A read of where the keyboard is was skipped for `pid`'s quarantine, or failed into it: one focus
+/// round is armed for the moment the quarantine ends (`queue::arm_after_busy`), so where the
+/// keyboard went meanwhile is read once the application answers. Nothing while it is not in one.
+fn focus_after_busy(pid: i32) {
+    if let Some(until) = busy_until(pid) {
+        super::queue::arm_after_busy(until);
+    }
+}
+
 /// Whether to give up on a call into an application that is not answering.
 ///
 /// The quarantine only ever meant anything at the two places that consulted it. Everything
@@ -436,6 +452,9 @@ fn skip_busy(pid: i32, what: &str) -> bool {
 /// `APIDisabled` means the Accessibility permission was never granted and *every* call from
 /// now on will fail the same way, and `CannotComplete` means the plugin is not answering.
 /// A tester who can only send us a log file needs those three to read differently.
+///
+/// Inside a walk, each `CannotComplete` is also counted with its element, for the walk's own line
+/// (`unanswered.rs`): this line names neither, and says one in five seconds at most.
 fn note_error(err: AXError, what: &str) {
     match err {
         AXError::AttributeUnsupported | AXError::NoValue | AXError::ActionUnsupported => {}
@@ -454,6 +473,7 @@ fn note_error(err: AXError, what: &str) {
             }
         }
         AXError::CannotComplete => {
+            unanswered::note(what);
             let now = Instant::now();
             let due = LAST_BUSY
                 .with(|c| c.get())
@@ -676,6 +696,13 @@ fn ax_value_size(v: &AXValue) -> Option<CGSize> {
     unsafe { v.value(AXValueType::CGSize, ptr) }.then_some(out)
 }
 
+/// The error a value holds when it is a failed read's placeholder (`kAXValueAXErrorType`).
+fn ax_value_error(v: &AXValue) -> Option<AXError> {
+    let mut out = AXError::Success;
+    let ptr = NonNull::from(&mut out).cast::<c_void>();
+    unsafe { v.value(AXValueType::AXError, ptr) }.then_some(out)
+}
+
 // ---------------------------------------------------------------------------------------
 // Reading a whole element in one round trip
 // ---------------------------------------------------------------------------------------
@@ -785,6 +812,17 @@ fn snapshot_batched(el: &AXUIElement) -> Option<Snap> {
             ),
         );
         return None;
+    }
+    // The call succeeded, but a slot can hold the error of its own read (options 0, above): one the
+    // application could not complete is counted for the walk's line, as `note_error` counts a read
+    // made alone (`unanswered.rs`).
+    for i in 0..SNAP_ATTRS {
+        let failed = typed.get(i).and_then(|v| v.downcast_ref::<AXValue>().and_then(ax_value_error));
+        if failed == Some(AXError::CannotComplete) {
+            if let Some(name) = keys.get(i) {
+                unanswered::note(&name.to_string());
+            }
+        }
     }
 
     let text = |i: usize| -> String {
@@ -916,7 +954,32 @@ pub(super) fn join_class(s: &Snap) -> String {
 /// call site — and a bound is not a nicety on this platform: these trees are written by
 /// plugin vendors, one of them will be cyclic or merely enormous, and the thread that would
 /// pay for it is the one carrying the keyboard. Returns `false` if `visit` stopped the walk.
+///
+/// Each read in it that the application could not complete is counted with the element it was of,
+/// and a walk that met one writes a line of its own (`unanswered.rs`), once in five seconds at most
+/// for its kind in its application — for the Mac session that is to say whether a plug-in that
+/// works ever answers so. The walk goes on past them as before.
 fn walk(
+    el: &AXUIElement,
+    depth: i32,
+    max_depth: i32,
+    budget: &mut Budget,
+    visit: &mut impl FnMut(&AXUIElement, &Snap, i32) -> WalkStep,
+) -> bool {
+    // Ended below; dropped by a panic in the walk, it stops the count all the same.
+    let counting = unanswered::begin(budget.kind().words());
+    let on = walk_from(el, depth, max_depth, budget, visit);
+    if let Some(counting) = counting {
+        // The application is asked for after the walk, and named only for a line to write.
+        if let Some(line) = counting.end(Instant::now(), || element_pid(el), exe_for_pid) {
+            crate::logging::line("macos", &line);
+        }
+    }
+    on
+}
+
+/// [`walk`]'s steps, from `el` down, saying where they are for the count of reads not completed.
+fn walk_from(
     el: &AXUIElement,
     depth: i32,
     max_depth: i32,
@@ -959,13 +1022,17 @@ fn walk(
         return true;
     }
     let snap = snapshot(el);
+    unanswered::read(&snap.role, &snap.title);
     match visit(el, &snap, depth) {
         WalkStep::Stop => return false,
         WalkStep::Skip => return true,
         WalkStep::Descend => {}
     }
-    for child in children(el) {
-        if !walk(&child, depth + 1, max_depth, budget, visit) {
+    for (i, child) in children(el).into_iter().enumerate() {
+        unanswered::enter(i);
+        let on = walk_from(&child, depth + 1, max_depth, budget, visit);
+        unanswered::leave();
+        if !on {
             return false;
         }
     }
@@ -2780,8 +2847,13 @@ pub fn window_focus_chain() -> Vec<ControlInfo> {
         });
         return Vec::new();
     }
+    // Not asked while the application is in the quarantine, and read again when that ends
+    // (`focus_after_busy`), here and wherever below a read fails into it: an empty chain keeps an
+    // overlay's stay in its window (the overlay runtime), so a visit to the application's own
+    // controls meanwhile would otherwise go unseen until something else brought a round.
     if let Some(p) = front {
         if skip_busy(p, "focus_chain") {
+            focus_after_busy(p);
             return Vec::new();
         }
     }
@@ -2799,8 +2871,9 @@ pub fn window_focus_chain() -> Vec<ControlInfo> {
             Some((w, p)) => (Some(w), p),
             None => {
                 // Not while the application is quarantined as busy: that is no answer from it.
-                if !front.is_some_and(is_busy) {
-                    note_focus_unreadable(front, "no focused element and no front window");
+                match front.filter(|&p| is_busy(p)) {
+                    Some(p) => focus_after_busy(p),
+                    None => note_focus_unreadable(front, "no focused element and no front window"),
                 }
                 (None, 0)
             }
@@ -2809,6 +2882,7 @@ pub fn window_focus_chain() -> Vec<ControlInfo> {
             if err == AXError::CannotComplete {
                 if let Some(p) = front {
                     note_busy(p);
+                    focus_after_busy(p);
                 }
             } else if !matches!(err, AXError::APIDisabled | AXError::NotImplemented) {
                 note_focus_unreadable(front, err_name(err));
@@ -2878,6 +2952,11 @@ pub fn window_focus_chain() -> Vec<ControlInfo> {
     if let Some(window) = out.last().map(|c| c.hwnd).filter(|&w| handles::owner_of(w) == w) {
         let links: Vec<isize> = out.iter().map(|c| c.hwnd).collect();
         handles::adopt(&links, window);
+    }
+    // A read of a link, or of the window in front, that failed into the quarantine leaves the chain
+    // short of it: read again when that ends.
+    for p in front.into_iter().chain([pid]) {
+        focus_after_busy(p);
     }
     let ms = t.elapsed().as_millis();
     crate::logging::trace("macos", || {
@@ -3725,6 +3804,10 @@ fn is_focusable(el: &AXUIElement) -> bool {
     let mut settable: u8 = 0;
     let err = unsafe { el.is_attribute_settable(a_focused(), NonNull::from(&mut settable)) };
     if err != AXError::Success {
+        // Noted nowhere else, and asked only inside a focus walk: counted for its line.
+        if err == AXError::CannotComplete {
+            unanswered::note("whether AXFocused is settable");
+        }
         return false;
     }
     settable != 0

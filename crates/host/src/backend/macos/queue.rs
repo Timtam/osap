@@ -27,6 +27,9 @@ thread_local! {
     static FOCUS_DIRTY: Cell<bool> = const { Cell::new(false) };
     /// Deadlines for the re-check ladder — see `drain`.
     static RECHECKS: RefCell<Vec<Instant>> = RefCell::new(Vec::new());
+    /// The one focus round armed for the end of an application's not-answering quarantine — see
+    /// [`arm_after_busy`].
+    static AFTER_BUSY: Cell<Option<Instant>> = const { Cell::new(None) };
     /// When the last drain began taking the presses, [`HOTKEYS`] first and [`KEYS`] after them
     /// ([`taken_at`]).
     static TAKEN: Cell<Option<Instant>> = const { Cell::new(None) };
@@ -124,10 +127,30 @@ fn arm_recheck_ladder() {
     });
 }
 
+/// Arms one focus round for `until`, the end of an application's not-answering quarantine: a read
+/// of where the keyboard is was skipped for it, or failed into it (`ax::focus_after_busy`).
+///
+/// While the quarantine lasts every read of the focus chain answers empty, and the overlay runtime
+/// keeps a plug-in's stay through an empty chain in the same window (docs/api/overlay.md, "A
+/// verdict is kept for a stay") — so a visit to the DAW's own controls made meanwhile went unseen
+/// until something else brought a round, the overlay holding its keys over them. This bounds that:
+/// one round as the quarantine ends, whose read is put to the application again. One, the latest
+/// replacing it: the latest read was of the application in front. An application that goes on not
+/// answering fails that read too, which puts it in the quarantine again and arms the next round —
+/// one read every five or six seconds, the quarantine's own rate, and only while something asks
+/// where the keyboard is.
+///
+/// Not a rung of the ladder above, which is armed only while nothing is pending: a ladder of an
+/// untitled window would keep this out, and this one would keep the ladder out.
+pub fn arm_after_busy(until: Instant) {
+    AFTER_BUSY.with(|a| a.set(Some(until)));
+}
+
 /// Hands everything queued since the last call to the host, in the order the host needs:
 /// system events — a wake, a lock, a display change (`system.rs`) — first (step 0), then
 /// hotkeys (1), window activations (2), captured keys (3), game-controller events (4), **one**
-/// focus change if anything dirtied it (5), and any re-check that has come due (6).
+/// focus change if anything dirtied it (5), and any re-check that has come due (6) — a rung of the
+/// ladder, or the round at the end of a quarantine ([`arm_after_busy`]), one round for them all.
 ///
 /// System events first: a wake or a display change turns the host's epochs over, and what
 /// follows in the same drain must not be answered from a cache taken before it. For a system
@@ -184,7 +207,16 @@ pub fn drain(events: &mut dyn HostEvents) {
         r.retain(|d| *d > now);
         n
     });
-    if due > 0 {
+    // And the round armed for the end of a quarantine, in the same one: from its instant on the
+    // application is asked again (`ax::is_busy`).
+    let after_busy = AFTER_BUSY.with(|a| match a.get() {
+        Some(at) if at <= now => {
+            a.set(None);
+            true
+        }
+        _ => false,
+    });
+    if due > 0 || after_busy {
         events.on_focus_change();
     }
 }
