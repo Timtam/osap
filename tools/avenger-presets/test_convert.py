@@ -3,12 +3,15 @@
 
     python -m unittest discover -s tools/avenger-presets
 
-The made-up export has what the real one has: the two rosters that are kept, and one that must
-never leave it — a list of what one owner has, naming an expansion the export has no preset list
-for, and one it has a preset list for that the catalog does not name. What these check first is
-that nothing of that list, not its key, not its name, not the name only it gives, reaches the data
-module or anything the converter prints; then that the expansion with a preset list is kept, as
-every one with a preset list is, where the catalog's order puts it.
+The made-up export has what the real one has: the four rosters that are kept — two of them
+personal, under the keys the project's tool offers them by, the one exception to naming a person
+(the maintainer's decision of 2026-10-24) — and one that must never leave it: a list of what
+another owner has, naming an expansion the export has no preset list for, and one it has a preset
+list for that the catalog does not name. What these check first is that nothing of that list, not
+its key, not its name, not the name only it gives, reaches the data module or anything the
+converter prints; then that the expansion with a preset list is kept, as every one with a preset
+list is, where the catalog's order puts it; and that the four rosters are written in the tool's
+order, with its labels, an expansion without data kept in its roster's list.
 """
 import contextlib
 import io
@@ -20,8 +23,12 @@ from pathlib import Path
 
 import convert
 
-# Stand-ins for the kind of thing the converter must drop. No real person is named anywhere here.
+# Stand-ins for the kind of thing the converter must drop. No real person is named here but in the
+# two keys of the rosters the tool offers by name (convert.ALLOW).
 OWNER_ROSTER = "Expansions Owner Seven"
+# An expansion the second personal roster lists that the export has no preset list for: kept in
+# that roster's list, as the tool keeps it.
+NO_DATA = "Ghost Pack"
 # A name only the owner's list gives, with no preset list: never written.
 UNLISTED = "Phantom Pack"
 # An expansion the catalog does not name, with its preset list: kept, between Alpha and Beta, as
@@ -36,6 +43,8 @@ def export(**changes):
     xp = {
         "Expansions Complete": "Alpha\nBeta",
         "Expansions Factory Standard": "Alpha",
+        convert.ALLOW[2]: f"Alpha\n{EXTRA}\nBeta",
+        convert.ALLOW[3]: f"Beta\n{NO_DATA}",
         OWNER_ROSTER: f"Alpha\n{EXTRA}\n{UNLISTED}",
         "XP Alpha": "Arp\nBass",
         "XP-AlphaPresetList": "BA One\nBA Two\nAR One\nAR Two",
@@ -115,6 +124,33 @@ class Converter(unittest.TestCase):
                                              "macros": [["Tone", "", "Macro 6", "", "Wide"]]}])
         self.assertIn(f"kept 1 expansion(s) the catalog does not name, each where its order puts it: {EXTRA}",
                       printed)
+
+    def test_the_four_rosters_in_the_tools_order_with_its_labels(self):
+        code, printed, files = run(*export())
+        self.assertEqual(code, 0, printed)
+        index = json.loads(files["data/index.json"])
+        self.assertEqual(index["rosters"], [
+            {"name": "Factory Standard", "expansions": ["Alpha"]},
+            {"name": "Complete", "expansions": ["Alpha", "Beta"]},
+            {"name": convert.label(convert.ALLOW[2]), "expansions": ["Alpha", EXTRA, "Beta"]},
+            {"name": convert.label(convert.ALLOW[3]), "expansions": ["Beta", NO_DATA]},
+        ])
+        self.assertEqual([convert.label(k) for k in convert.ALLOW[:2]], ["Factory Standard", "Complete"])
+        # The one without data is counted, not named, in what is printed.
+        self.assertIn("without data in the export: Factory Standard 0, Complete 0, ", printed)
+        self.assertIn(f"{convert.label(convert.ALLOW[3])} 1", printed)
+        self.assertNotIn(NO_DATA, printed)
+        # Still there for older readers.
+        self.assertEqual(index["factoryStandard"], ["Alpha"])
+        self.assertIn("left out: 1 roster list(s) not on the allowlist", printed)
+
+    def test_an_allowed_roster_missing_writes_nothing(self):
+        xp, osc, macro = export()
+        del xp[convert.ALLOW[3]]
+        code, printed, files = run(xp, osc, macro)
+        self.assertEqual(code, 1, printed)
+        self.assertIn(f"the roster {convert.ALLOW[3]!r} is missing or empty", printed)
+        self.assertEqual(files, {})
 
     def test_the_catalogs_order(self):
         # Factory and Factory 2 first; the rest alphabetical without regard to case; the catalog's

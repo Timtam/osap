@@ -16,7 +16,7 @@ The export it was made from is dated 2026-09-26. An expansion released after tha
 | `data/expansions/<name>.json` | One file per expansion: its categories, and every preset's oscillators and macros. 2 to 110 KB each. |
 | `NOTICE` | Where the data comes from, and its licence. |
 
-134 files; the 130 of data are 2.77 MB. Nothing here says who owns which expansion: of the exports' rosters the converter keeps the catalog's and nothing else, and of their expansions every one with a preset list (`tools/avenger-presets/README.md`).
+134 files; the 130 of data are 2.77 MB. Of the exports' rosters — lists of expansions — the converter keeps exactly the four the project's tool offers, and of their expansions every one with a preset list (`tools/avenger-presets/README.md`). Two of the four are personal rosters, by the names the tool gives them: since 1.3.0 they are here as the tool offers them, the maintainer's decision of 2026-10-24, made knowing that they say who owns which expansions; every other roster stays out.
 
 ## The format (format 1)
 
@@ -28,6 +28,7 @@ Every file is one JSON object in UTF-8, written by the converter with one expans
 {"format":1,
 "exported":"2026-09-26 18:57",
 "factoryStandard":["Factory","Factory 2","Synthstruments"],
+"rosters":[{"name":"Factory Standard","expansions":["Factory","Factory 2","Synthstruments"]},{"name":"Complete","expansions":[…]}, …],
 "expansions":[
 {"name":"Factory","file":"data/expansions/factory.json","presets":["AR A State of Trance", …]},
 …
@@ -36,8 +37,9 @@ Every file is one JSON object in UTF-8, written by the converter with one expans
 
 - `format` — 1. The reader refuses any other number.
 - `exported` — when the export was made, from its file name.
-- `factoryStandard` — the expansions every owner of Avenger has.
-- `expansions` — every expansion, in the catalog's order: Factory and Factory 2 first, the rest alphabetical without regard to case. The five the project's catalog does not name are where that rule puts them (Quantum State between Psy 2 and Retrowave 80s), and so is the list "Complete" the overlay shows; where the catalog's own order is not alphabetical — 8 Bit Era before 16 Bit Era, Trance One to Trance Four by their numbers — it is kept. `file` is the expansion's file, relative to this folder. `presets` are its preset names in the export's order — **category block after category block, and alphabetical within a block; not alphabetical overall**. That is the order the project's tool steps through with ◀ and ▶; that Avenger does the same is what the overlay's log checks (TODO.md, "VPS Avenger").
+- `factoryStandard` — the expansions every owner of Avenger has. Kept beside `rosters` for a reader before 1.3.0.
+- `rosters` — since 1.3.0, the lists of expansions the project's tool offers, in its order and by its labels: "Factory Standard"; "Complete", the tool's catalog of 124; "Nyhdroe" (129) and "Joyman" (63). Each lists its expansions in its own order; an expansion a roster lists that has no data here stays in its list, as the tool keeps it — one of Joyman's in the 2026-09-26 export. The field was added, so the format stays 1.
+- `expansions` — every expansion, in the catalog's order: Factory and Factory 2 first, the rest alphabetical without regard to case. The five the project's catalog does not name are where that rule puts them (Quantum State between Psy 2 and Retrowave 80s), and so are they in the roster "Nyhdroe", which lists all 129 in this order; since 1.3.0 the list "Complete" the overlay shows is the tool's 124, without them. Where the catalog's own order is not alphabetical — 8 Bit Era before 16 Bit Era, Trance One to Trance Four by their numbers — it is kept. `file` is the expansion's file, relative to this folder. `presets` are its preset names in the export's order — **category block after category block, and alphabetical within a block; not alphabetical overall**. That is the order the project's tool steps through with ◀ and ▶; that Avenger does the same is what the overlay's log checks (TODO.md, "VPS Avenger").
 
 **`data/expansions/<name>.json`**
 
@@ -93,7 +95,7 @@ end
 When the avenger_control project exports a new database — new expansions, corrected names — run the converter on it and raise the version, so that the module manager's update check sees a new one:
 
 ```
-python tools/avenger-presets/convert.py <folder with the three exports> --version 1.3.0
+python tools/avenger-presets/convert.py <folder with the three exports> --version 1.4.0
 ```
 
 It rewrites `module.toml` and `data/`, and leaves `src/`, this README and `NOTICE` alone. [`tools/avenger-presets/README.md`](../../tools/avenger-presets/README.md) says what it checks and what it drops.

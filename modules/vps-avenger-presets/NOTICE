@@ -9,9 +9,11 @@ The avenger_control tool has not been published and has no licence of its own.
 LICENCE: these files are licensed as the rest of this repository, GPL-3.0-or-later (module.toml's
 `license`).
 
-What is not here: nothing about who owns which expansion. tools/avenger-presets/convert.py keeps
-only the catalog's two rosters, "Complete" and "Factory Standard", and every expansion the exports
-have a preset list for, and drops every other roster unread.
+What is here of the rosters: exactly the four the avenger_control tool offers — "Factory
+Standard", "Complete", and the two personal rosters it offers by name — by the maintainer's
+decision of 2026-10-24, an exception for exactly those two. tools/avenger-presets/convert.py keeps
+those four and every expansion the exports have a preset list for, and drops every other roster
+unread.
 
 VPS Avenger, its expansions and their names belong to their makers. They are named here to say
 what this data describes; this project is not affiliated with them.

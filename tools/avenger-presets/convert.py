@@ -13,11 +13,16 @@ format tools/avenger-presets/README.md and the data module's README describe.
     python tools/avenger-presets/convert.py <folder> --out <data module folder> --version 1.1.0
 
 **The rosters kept are an allowlist.** The exports also carry lists of which expansions particular
-people own, named after them. None of that is anybody else's business: only the two rosters in
-ALLOW are read — the catalog, "Complete", and "Factory Standard", what every owner of Avenger has.
-Every other roster is dropped without its key or its name, or the name of anything only it holds,
-ever being written: not to the output, not to the screen, not to an error. Counts are said, never
-names.
+people own, named after them. Only the four rosters in ALLOW are read, in the order and with the
+labels the project's tool offers them (its preset_db.py, ROSTER_KEY_OPTIONS and roster_label):
+"Factory Standard", what every owner of Avenger has; "Complete", the catalog; and the two
+personal rosters the tool offers by name — the maintainer's decision of 2026-10-24, made knowing
+that it makes those two people's names and their purchases public, an explicit exception for
+exactly these two. Every other roster (one in the export of 2026-09-26) is dropped without its key
+or its name, or the name of anything only it holds, ever being written: not to the output, not to
+the screen, not to an error. Counts are said, never names. An expansion a roster lists that the
+export has no preset list for stays in that roster's list, as the tool keeps it "so the count
+matches reality", and is counted, not named.
 
 **The expansions kept are every one with a preset list** (the maintainer's decision of
 2026-10-18): the catalog's, and those it does not name — five in the export of 2026-09-26 —
@@ -52,10 +57,16 @@ MODULE_ID = "com.platform.vps-avenger-presets"
 # the database to this repository without restriction, so both are the repository's (NOTICE).
 LICENSE = "GPL-3.0-or-later"
 
-# The only rosters read. Every other "Expansions …" key is somebody's own list and is dropped.
+# The only rosters read, in the order the tool offers them; their labels drop "Expansions ". Every
+# other "Expansions …" key is somebody's own list and is dropped.
 CATALOG = "Expansions Complete"
 FACTORY = "Expansions Factory Standard"
-ALLOW = (CATALOG, FACTORY)
+ALLOW = (FACTORY, CATALOG, "Expansions Nyhdroe", "Expansions Joyman")
+
+
+def label(key):
+    """A roster's label, as the tool's roster_label gives it: its key without "Expansions "."""
+    return key[len("Expansions "):]
 
 # The catalog's first expansions, before its alphabetical rest (ordered()).
 FIRST = ("Factory", "Factory 2")
@@ -316,7 +327,9 @@ def convert(xp, osc, macro, problems):
         files[rel] = {"format": FORMAT, "name": expansion, "categories": cats, "presets": entries}
     if problems.errors:
         return None
-    return {"format": FORMAT, "factoryStandard": factory, "expansions": expansions}, files
+    # The rosters, each in its own order, an expansion with no data kept in its list.
+    rosters = [{"name": label(key), "expansions": lines(xp[key])} for key in ALLOW]
+    return {"format": FORMAT, "factoryStandard": factory, "rosters": rosters, "expansions": expansions}, files
 
 
 def dropped(xp):
@@ -324,6 +337,13 @@ def dropped(xp):
     leaves this function. (Every expansion with a preset list is kept, so none is left out; what
     else the exports hold is in used_keys' counts.)"""
     return sum(1 for k in xp if k.startswith("Expansions ") and k not in ALLOW)
+
+
+def without_data(index):
+    """How many of the rosters' expansions have no preset list in the export: a count, by roster
+    label (the allowed rosters' labels only)."""
+    have = {e["name"] for e in index["expansions"]}
+    return {r["name"]: sum(1 for e in r["expansions"] if e not in have) for r in index["rosters"]}
 
 
 def used_keys(xp, osc, macro, index):
@@ -361,7 +381,7 @@ def dump(value):
 def index_text(index, exported):
     """index.json: one expansion per line, so a new export's diff reads by expansion."""
     head = [f'"format":{FORMAT}', f'"exported":{dump(exported)}',
-            f'"factoryStandard":{dump(index["factoryStandard"])}']
+            f'"factoryStandard":{dump(index["factoryStandard"])}', f'"rosters":{dump(index["rosters"])}']
     rows = ",\n".join(dump(e) for e in index["expansions"])
     return "{" + ",\n".join(head) + ',\n"expansions":[\n' + rows + "\n]}\n"
 
@@ -472,6 +492,9 @@ def main(argv=None):
     # Expansion names, written to the data module as well: never a roster's.
     print(f"kept {len(others)} expansion(s) the catalog does not name, each where its order puts it"
           + (": " + ", ".join(others) if others else ""))
+    print("rosters: " + "; ".join(f"{r['name']} {len(r['expansions'])}" for r in index["rosters"])
+          + " expansion(s); without data in the export: "
+          + ", ".join(f"{n} {c}" for n, c in without_data(index).items()))
     print(f"left out: {rosters} roster list(s) not on the allowlist; keys not read: {unused['xp']} in "
           f"the catalog export, {unused['osc']} in the oscillator export, {unused['macro']} in the macro "
           "export")
