@@ -3360,6 +3360,67 @@ mod recognise_each_tests {
     }
 }
 
+/// A key spec a shipped module, tool or example writes, as [`shipped_key_specs`] reads it.
+#[cfg(test)]
+pub(crate) struct ShippedKey {
+    pub file: std::path::PathBuf,
+    pub spec: String,
+    /// The platforms it is asked on: the one whose entry of a `host.os.pick` it is, both otherwise.
+    pub oses: &'static [KeyOs],
+}
+
+/// Every key spec the Luau of modules/, tools/ and examples/ writes: each string literal that
+/// parses as one, a tap included.
+///
+/// Read from the sources rather than listed, so a key added later is read too. A literal written
+/// as one platform's entry of a `host.os.pick` (`windows = "…"`, `linux = "…"`, `macos = "…"`) is
+/// that platform's only — the overlay runtime's tab keys are Ctrl+Tab on Windows and Control+Tab
+/// (`Meta+Tab`) on a Mac, where Ctrl+Tab would be Command+Tab, the application switcher. Linux's
+/// entry is read the Windows way. Per line, so one stray quote in a comment cannot turn the rest
+/// of a file inside out; comments are read too, which only means more specs.
+#[cfg(test)]
+pub(crate) fn shipped_key_specs() -> Vec<ShippedKey> {
+    use KeyOs::{Macos, Windows};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    let mut stack: Vec<std::path::PathBuf> = ["modules", "tools", "examples"].iter().map(|d| root.join(d)).collect();
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "luau") {
+                files.push(p);
+            }
+        }
+    }
+    assert!(files.len() > 20, "the module sources were not found under {}", root.display());
+    let mut keys = Vec::new();
+    for file in files {
+        let text = std::fs::read_to_string(&file).unwrap();
+        for line in text.lines() {
+            let parts: Vec<&str> = line.split('"').collect();
+            for i in (1..parts.len()).step_by(2) {
+                let spec = parts[i];
+                if spec.len() > 40 || key_spec(spec).is_none() {
+                    continue;
+                }
+                let entry = parts[i - 1].trim_end();
+                let oses: &'static [KeyOs] = if entry.ends_with("macos =") {
+                    &[Macos]
+                } else if entry.ends_with("windows =") || entry.ends_with("linux =") {
+                    &[Windows]
+                } else {
+                    &[Windows, Macos]
+                };
+                keys.push(ShippedKey { file: file.clone(), spec: spec.to_string(), oses });
+            }
+        }
+    }
+    keys
+}
+
 #[cfg(test)]
 mod key_grammar_tests {
     use super::*;
@@ -4106,59 +4167,29 @@ mod key_grammar_tests {
         }
     }
 
-    /// No key a shipped module, tool or example asks for becomes refused, on either platform.
-    ///
-    /// Read from the sources rather than listed, so a key added later is checked too: every
-    /// string literal in their Luau that parses as a key spec. A literal on a line that is one
-    /// platform's entry of a `host.os.pick` (`windows = "…"`, `macos = "…"`) is that platform's
-    /// only — the overlay runtime's tab keys are Ctrl+Tab on Windows and Control+Tab (`Meta+Tab`)
-    /// on a Mac, where Ctrl+Tab would be Command+Tab, the application switcher.
+    /// No key a shipped module, tool or example asks for becomes refused, on either platform: each
+    /// one [`shipped_key_specs`] reads, on the platforms it is asked on. A tap is a capture only,
+    /// and so is the keypad's Enter on Windows in examples/taps, which asks for a hotkey on it to
+    /// hear the refusal; anywhere else a hotkey on it is caught here.
     #[test]
     fn no_shipped_key_is_refused() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut files = Vec::new();
-        let mut stack: Vec<std::path::PathBuf> =
-            ["modules", "tools", "examples"].iter().map(|d| root.join(d)).collect();
-        while let Some(dir) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    stack.push(p);
-                } else if p.extension().is_some_and(|x| x == "luau") {
-                    files.push(p);
-                }
-            }
-        }
-        assert!(files.len() > 20, "the module sources were not found under {}", root.display());
         let mut seen = 0;
         let mut picked_for_a_mac = 0;
-        for f in files {
-            let text = std::fs::read_to_string(&f).unwrap();
-            // Per line, so one stray quote in a comment cannot turn the rest of the file inside
-            // out; comments are scanned too, which only means more specs checked.
-            for line in text.lines() {
-                let oses: &[KeyOs] = if line.contains("macos =") {
-                    &[Macos]
-                } else if line.contains("windows =") || line.contains("linux =") {
-                    &[Windows]
-                } else {
-                    &[Windows, Macos]
-                };
-                for lit in line.split('"').skip(1).step_by(2) {
-                    // A tap is a capture only; one written in a module is one it captures.
-                    let tap = key_spec(lit).is_some_and(|(_, m)| m & MASK_TAP != 0);
-                    if lit.len() > 40 || key_spec(lit).is_none() || tap {
-                        continue;
-                    }
-                    seen += 1;
-                    if oses == [Macos] {
-                        picked_for_a_mac += 1;
-                    }
-                    for &os in oses {
-                        assert_eq!(hotkey_refusal_for(os, lit), None, "{} asks for '{lit}'", f.display());
-                    }
+        for key in shipped_key_specs() {
+            let (vk, mask) = key_spec(&key.spec).unwrap();
+            // A tap is a capture only; one written in a module is one it captures.
+            if mask & MASK_TAP != 0 {
+                continue;
+            }
+            seen += 1;
+            if key.oses == [Macos] {
+                picked_for_a_mac += 1;
+            }
+            for &os in key.oses {
+                if os == Windows && vk == VK_NUMPAD_ENTER && key.file.ends_with("examples/taps/src/main.luau") {
+                    continue;
                 }
+                assert_eq!(hotkey_refusal_for(os, &key.spec), None, "{} asks for '{}'", key.file.display(), key.spec);
             }
         }
         assert!(seen > 20, "only {seen} key specs found; the scan is not reading the modules");

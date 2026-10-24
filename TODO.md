@@ -61,6 +61,39 @@ and to build it as soon as the usage allows.
       registration gone), windows.rs (a press the hook let through has its own key-down, the tick
       clock's stamp), the runtime's in overlay_runtime_marks_tests.rs and
       overlay_handover_tests.rs.
+- [x] **The test module for these checks: `examples/taps`** (package 1 of the triage of 2026-10-24;
+      built 2026-10-24). Every key says its press's count: a count that goes on waits behind the one
+      before it, a 1 and a held key's repeat cut off. Windows / Mac: Ctrl+Alt+J / Cmd+Shift+F1, a
+      hotkey; Ctrl+Alt+K / Cmd+Shift+F2, `taps = "final"`, "final" and the count; Ctrl+Alt+L /
+      Cmd+Shift+F3 sends F13 at every press, its own keys still down; Ctrl+Alt+P / Cmd+Option+F1 the
+      captures, in turn: all of them (Ctrl+Alt+Y / Cmd+Option+F3 and Numpad1 saying the count,
+      NumpadEnter and Return their name and the count, in every window); Return without NumpadEnter,
+      and a hotkey on NumpadEnter (Windows refuses it, and that is said); that hotkey alone; off;
+      Ctrl+Alt+W / Cmd+Option+F2 reads the screen for two seconds in its handler, so presses made
+      meanwhile wait. Command+Shift with F4 to F12 are the window probe's (F9, F10), the other
+      tools' and the host's own on a Mac, hence Option+Command there (not F5: Accessibility
+      Shortcuts). Ctrl+Alt / Cmd+Shift with the keypad's Add, Subtract and Multiply, and off the
+      keypad Ctrl+Alt+D, R and V / Cmd+Option+F6, F7 and F8, say their count and, once the
+      modifiers are up (asked every 15 ms, three seconds at most, one press waiting at a time), send
+      Numpad5 (Numpad1 on a Mac, the key its check names), send NumpadEnter, and post NumpadDivide
+      to the control that has the keyboard (the focus chain's first link, else the window in front;
+      the log names it). An `onTrigger { initial = true }` on every window says and logs each report
+      and activation (`Trigger: <title>`, `trigger N`) and, a second later, asks for a picture of the
+      window, through desktop duplication on Windows (its manifest's `[screen]`), and logs the ask
+      and the wait: asked in the callback, the picture would wait for the rest of the opening the
+      host started just before it, as for one it started itself. The log lists the hotkeys in the
+      platform's words at load, and each captured key as it is captured. Tests: key_scope_tests.rs,
+      `the_taps_module_on_windows` and `the_taps_module_on_a_mac`: the module's own source and
+      manifest, with only the namespaces it declares, over the host's captures, count, `"final"`
+      tick and recognize wait, the window prelude, and each platform's hotkey rules; every key
+      pressed, and the paths a Mac without Accessibility takes first (no hook, nothing sent, no
+      window to post to). Its keys that hold a modifier are checked against every key another
+      shipped module, tool or example writes for that platform (`shipped_key_specs`, backend/mod.rs,
+      which reads a `host.os.pick` entry per literal now) and against `check`. They run in CI on both
+      systems (`cargo test`). The shipped-keys scan (`no_shipped_key_is_refused`) leaves the keypad's
+      Enter on Windows to the captures in examples/taps alone, which asks for the hotkey on purpose;
+      anywhere else a hotkey on it fails the scan. Not in the module: an overlay, which the last
+      sentence of the Windows item below needs, with a control that says the count.
 - [ ] **Windows, to try with NVDA** (a test module whose hotkey and whose captured key say
       `press.count`): one, two and three quick presses say 1, 1 2, 1 2 3, and slow ones 1 each; a
       slower double-click speed in the Mouse settings lets the presses come further apart, read at
@@ -74,6 +107,9 @@ and to build it as soon as the usage allows.
       `taps = "final"` nothing is said until the presses stop, then the count once, and a press of
       another key says it at once; presses made while the module waits for a read keep their counts.
       An overlay control's hotkey pressed twice hands `onActivate` a 2.
+      With `examples/taps` (above): the hotkey Ctrl+Alt+J; the captured keys Ctrl+Alt+Y and Numpad1,
+      once Ctrl+Alt+P turned the captures on; `"final"` on Ctrl+Alt+K; the read on Ctrl+Alt+W. The
+      overlay's sentence needs an overlay of its own, which the module does not have.
 - [ ] **A Mac, to try with VoiceOver**, the same with a Command+Shift+F-key hotkey: three quick
       presses say 1 2 3, with and without a module capturing a key; with no module capturing a key
       (Carbon alone, no tap) a letter typed between two presses does not end the count; with a
@@ -82,6 +118,12 @@ and to build it as soon as the usage allows.
       `own` in `queue.rs` is to be 0; the double-click speed in System Settings (Accessibility,
       Pointer Control) is the interval; a captured key held down says its press's count at every
       repeat.
+      With `examples/taps`: Cmd+Shift+F1; Cmd+Option+F1 turns the captures on (the tap in) and,
+      pressed three more times, off; Cmd+Option+F3 and Numpad1 are the captured keys. The tap,
+      once in, stays in until the application quits, the captures off or not: do the part
+      with Carbon alone first, before the first Cmd+Option+F1 and with no other module that
+      captures a key loaded (html-probe captures Cmd+Shift+F12 as it loads), or after a restart;
+      the parts with the tap in after it.
 - [x] **Numpad keys in the key spec** (decided by the maintainer on 2026-10-23, with no note on the
       screen readers' use of the keypad; built 2026-10-23). `Numpad0`–`Numpad9`, `NumpadEnter`,
       `NumpadAdd`, `NumpadSubtract`, `NumpadMultiply`, `NumpadDivide`, `NumpadDecimal`: the W3C
@@ -138,6 +180,13 @@ and to build it as soon as the usage allows.
       a program that tells the two apart (REAPER's key list); `host.input.post` of NumpadDivide is
       the keypad's divide to a program that reads the scan code; a hotkey's callback that sends a
       key at every press says 1 2 3 for three quick presses.
+      With `examples/taps`: Ctrl+Alt+P for the captures (Numpad1, and NumpadEnter beside Return —
+      the module's own Return, not an overlay's); Ctrl+Alt with the keypad's Add, Subtract and
+      Multiply, or Ctrl+Alt+D, R and V on a keyboard without a keypad, send Numpad5, send
+      NumpadEnter (with the captures off, which would take it) and post NumpadDivide once Ctrl+Alt
+      are up — to the control that has the keyboard, Notepad's text field say, which the log names;
+      Ctrl+Alt+L sends at every press. Numpad1, the keypad's Enter and the keypad's hotkeys need a
+      keypad.
 - [ ] **A Mac, to try: the keypad** (with VoiceOver): a capture of Numpad1 and a Command+Shift
       hotkey on a keypad key count 1 2 3; NumpadEnter captured takes the keypad's Enter and Return
       the main one, and with no NumpadEnter captured Return takes both; `host.input.send("Numpad1")`
@@ -145,6 +194,13 @@ and to build it as soon as the usage allows.
       key; a key a callback sends at every press of a hotkey, with the tap in, does not end its
       count; a hotkey on NumpadEnter does not fire while a capture of Return is in scope (the tap
       takes the key first).
+      With `examples/taps`: Cmd+Option+F1 in turn — Numpad1 and NumpadEnter beside Return; Return
+      without NumpadEnter, and the hotkey on NumpadEnter, which must say Return; that hotkey alone,
+      which says hotkey; off. The keypad hotkeys are Cmd+Shift with Add, Subtract and Multiply, and
+      Cmd+Option+F6, F7 and F8 do the same on a keyboard without a keypad (a MacBook's own); the
+      first sends Numpad1, with the captures off (their capture of Numpad1 would take it).
+      Cmd+Shift+F3 sends at every press; with the tap in, that is after the first Cmd+Option+F1.
+      Numpad1, the keypad's Enter and the keypad hotkeys need a keypad.
 
 ## The tray icon left behind on Windows after the quit key (2026-10-21, from users)
 
@@ -4984,6 +5040,14 @@ window of the application open, or in a shipped module.
       module from the manager reports the manager window (it is in front then), so that case
       fires only on the next activation of the game — worth hearing once with NVDA to be sure
       it reads as intended.
+      `examples/taps` has such a trigger, on every window: each report and activation is said
+      (`Trigger: <title>`) and logged (`trigger N: …`), and a second later it asks for a picture
+      through duplication (`trigger N: asks for its picture`, then `… was taken after … ms`). The
+      opening came first when the log has `desktop duplication of … opened in … ms` before the ask
+      line, and the picture's wait is a frame's (the first one's with the first-read comparison),
+      not the opening's; without the head start, that line comes after the ask, and the wait holds
+      the opening. An opening that takes longer than the second (a cold graphics driver) also comes
+      after it.
 - [ ] **macOS, never run on a Mac: `onTrigger { initial = true }`** — the only report a game
       that is already frontmost at load gets there, asked through `ax::active_window()` from
       the tick. Check it with an application already in front at load, and with one that does
@@ -4993,6 +5057,7 @@ window of the application open, or in a shipped module.
       and at that moment that is our own manager; check that the answer comes at once rather
       than after a timeout on our own process. A module without an `initial` trigger does not
       ask.
+      `examples/taps` has such a trigger (above); the Mac ignores its `[screen]`.
 - [x] **No module uses the three yet.** The overlay runtime still works around the missing
       cancel with generation counters (`Overlay:afterIdle`), and checks the window in front at
       load itself (`_recheck` after registering). Moving it onto `cancel` and

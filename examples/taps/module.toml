@@ -1,0 +1,20 @@
+id = "com.example.taps"
+name = "Quick Repeats Test"
+version = "0.1.0"
+engine_api = ">=0.1, <0.2"
+entry = "src/main.luau"
+license = "MIT"
+
+[capabilities]
+# `hotkey` and `keys` for the keys it counts, `input` for the keys it sends and posts, `timer` to
+# wait until the modifiers are up before it does and to ask for its window's picture a second
+# after the report, `window` for that report and the control it posts to, `ocr` for the reads it
+# waits for, `screen` for the picture, `speech` for the counts, `log` for its keys and what they
+# were answered.
+require = ["hotkey", "keys", "input", "timer", "window", "ocr", "screen", "speech", "log"]
+
+# The window trigger's picture goes through desktop duplication on Windows, whose opening the host
+# starts before the trigger's first callback (docs/api/screen.md, Opened ahead of time). A Mac
+# ignores the table.
+[screen]
+capture = "duplication"

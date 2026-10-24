@@ -24,6 +24,11 @@
 //! it (`Pressed::queued`, which the tests set), a hotkey by the press the pump hands over
 //! (`hotkey_arrive_in`); the tick that hands a `"final"` binding its sequence is
 //! [`taps::tick`], the pump having taken the presses queued until a moment the test names.
+//!
+//! **The test module `examples/taps`**, which the live checks of quick repeats, the keypad and
+//! the report of the window in front press their keys in, is loaded at the end of the file for
+//! Windows and for a Mac, as the host loads it — its source and only the namespaces its manifest
+//! declares — over the same holder, and every key it registers or captures pressed.
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
@@ -1731,4 +1736,465 @@ fn a_module_releases_its_own_captures_only() {
     run(&a, "host.keys.release(old)");
     assert_eq!(press(&h, "Space", W1), Some(Capture::Take { owner: 2 }));
     assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+// ── The test module, examples/taps ──────────────────────────────────────────────────────────────
+
+/// The namespaces the test module is given: what its manifest must declare, and all the host
+/// table it has besides `host.os` and `host.now`, so a call into another one fails here as the
+/// capability gate fails it.
+const TAPS_NAMESPACES: [&str; 9] = ["hotkey", "keys", "input", "timer", "window", "ocr", "screen", "speech", "log"];
+
+/// What `examples/taps` asks of the host and records, beside its VM: `host.window`'s trigger
+/// prelude and `host.os.pick` are the real ones, `host.keys` is the host's own captures with
+/// `describe` for `os`, `host.ocr.recognize` the real wait, and `host.hotkey.register` the real
+/// binding's rules — its options, the application's own keys and `hotkey_claim_for` for `os` —
+/// with a claim recorded as held. Everything else is recorded in Luau: `said` (a line that
+/// interrupts ends in `!`), `logged`, `sent`, `posted`, the `timers` armed and the `snaps` asked
+/// for. `clock` is `host.now()`, `modsDown` what `host.keys.modifiersDown()` answers, `front`
+/// the window `host.window.foreground()` answers, and `chain` what `host.window.focusChain()` does.
+struct TapsModule {
+    lua: Lua,
+    os: backend::KeyOs,
+    /// The id each spec the module registered was given last, by the spec its source wrote.
+    ids: Rc<RefCell<HashMap<String, i32>>>,
+}
+
+impl TapsModule {
+    fn id(&self, spec: &str) -> i32 {
+        *self.ids.borrow().get(spec).unwrap_or_else(|| panic!("{spec} was never registered"))
+    }
+    /// `windows` on Windows, `macos` on a Mac: the module's `host.os.pick`.
+    fn key<'a>(&self, windows: &'a str, macos: &'a str) -> &'a str {
+        if self.os == backend::KeyOs::Windows { windows } else { macos }
+    }
+    fn describe(&self, spec: &str) -> String {
+        backend::describe_spec_for(self.os, spec, backend::KeyStyle::Spoken).unwrap()
+    }
+    /// What it said since the last call, joined; an interrupting line ends in `!`.
+    fn said(&self) -> String {
+        let joined = "local out = {}
+            for _, s in ipairs(said) do out[#out + 1] = s.text .. (s.cut and '!' or '') end
+            said = {}
+            return table.concat(out, ' | ')";
+        self.lua.load(joined).eval().unwrap()
+    }
+    /// The Luau list `name` since the last call, joined, emptied.
+    fn take(&self, name: &str) -> String {
+        self.lua.load(format!("local t = {name}; {name} = {{}}; return table.concat(t, ' | ')")).eval().unwrap()
+    }
+}
+
+/// `examples/taps`, loaded as module 1 for `os`, its window in front W1 — see [`TapsModule`].
+fn load_taps(h: &Rc<Host>, os: backend::KeyOs) -> TapsModule {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/taps");
+    let manifest = module_manifest::ModuleManifest::parse(&std::fs::read_to_string(root.join("module.toml")).unwrap()).unwrap();
+    for ns in TAPS_NAMESPACES {
+        assert!(manifest.capabilities.require.iter().any(|r| r == ns), "module.toml does not declare {ns}");
+    }
+    assert_eq!(manifest.screen.capture.as_deref(), Some("duplication"), "the trigger's picture goes through duplication");
+    let lua = vm(h, 1);
+    let host: mlua::Table = lua.globals().get("host").unwrap();
+    let keys: mlua::Table = host.get("keys").unwrap();
+    let describe = lua.create_function(move |_, spec: String| Ok(backend::describe_spec_for(os, &spec, backend::KeyStyle::Spoken)));
+    keys.set("describe", describe.unwrap()).unwrap();
+    let ids: Rc<RefCell<HashMap<String, i32>>> = Rc::default();
+    let hotkey = lua.create_table().unwrap();
+    let (hh, by_spec, next) = (h.clone(), ids.clone(), Cell::new(100));
+    let register = lua
+        .create_function(move |lua, (spec, cb, opts): (String, Function, Option<mlua::Table>)| {
+            let (foreground, taps) = crate::hotkey_opts(opts.as_ref())?;
+            if let Some(e) = crate::own_key_refusal(os, &spec) {
+                return crate::errors_lua::with_error(lua, Value::Nil, &e);
+            }
+            let (binding, canonical) = match backend::hotkey_claim_for(os, &spec) {
+                Ok(claim) => claim,
+                Err(refusal) => return crate::hotkey_refused(lua, refusal),
+            };
+            let id = next.get();
+            next.set(id + 1);
+            let cb = lua.create_registry_value(cb)?;
+            let reg = crate::HotkeyReg { module_idx: 1, lua: lua.clone(), cb, spec: canonical, binding, live: true, foreground, taps };
+            hh.hotkeys.borrow_mut().insert(id, reg);
+            by_spec.borrow_mut().insert(spec, id);
+            Ok(mlua::MultiValue::from_vec(vec![Value::Integer(id as i64)]))
+        })
+        .unwrap();
+    hotkey.set("register", register).unwrap();
+    let hh = h.clone();
+    let unregister = lua
+        .create_function(move |_, id: i32| {
+            hh.hotkeys.borrow_mut().remove(&id);
+            Ok(())
+        })
+        .unwrap();
+    hotkey.set("unregister", unregister).unwrap();
+    host.set("hotkey", hotkey).unwrap();
+    let input = lua.create_table().unwrap();
+    let hh = h.clone();
+    let send = lua
+        .create_function(move |lua, combo: String| {
+            lua.globals().get::<mlua::Table>("sent")?.push(combo.as_str())?;
+            crate::key_answer(lua, hh.backend.key_send(&combo).answer)
+        })
+        .unwrap();
+    input.set("send", send).unwrap();
+    host.set("input", input).unwrap();
+    for ns in ["os", "window"] {
+        host.set(ns, lua.create_table().unwrap()).unwrap();
+    }
+    let os_name = if os == backend::KeyOs::Windows { "windows" } else { "macos" };
+    run(
+        &lua,
+        &format!(
+            r#"said, logged, sent, posted, timers, snaps, clock, modsDown, initialAsked, chain = {{}}, {{}}, {{}}, {{}}, {{}}, {{}}, 0, false, 0, {{}}
+            front = {{ id = {W1}, title = "Untitled - Notepad", class = "Notepad", own = false,
+              app = {{ name = "notepad", exe = "notepad.exe", pid = 7 }},
+              bounds = {{ x = 0, y = 0, w = 800, h = 600 }}, client = {{ x = 8, y = 31, w = 784, h = 561 }} }}
+            host.os.current = "{os_name}"
+            host.now = function() return clock end
+            host.speech = {{ output = function(text, opts)
+              said[#said + 1] = {{ text = text, cut = not (opts and opts.interrupt == false) }}
+            end }}
+            host.log = {{ info = function(line) logged[#logged + 1] = line end }}
+            host.timer = {{ after = function(ms, cb) timers[#timers + 1] = {{ ms = ms, cb = cb }} end }}
+            host.screen = {{ snapshot = function(opts, cb)
+              assert(type(cb) == "function", "a snapshot with a callback")
+              snaps[#snaps + 1] = {{ opts = opts, cb = cb }}
+            end }}
+            host.keys.modifiersDown = function() return modsDown end
+            host.input.post = function(id, key) posted[#posted + 1] = id .. " " .. key; return true end
+            host.window.foreground = function() return front end
+            host.window.focusChain = function() return chain end
+            host.window._requestInitial = function() initialAsked += 1 end"#
+        ),
+    );
+    crate::install_window_prelude(&lua, &host).unwrap();
+    let names: Vec<String> = host.pairs::<String, Value>().map(|p| p.unwrap().0).collect();
+    for name in &names {
+        assert!(["os", "now"].contains(&name.as_str()) || TAPS_NAMESPACES.contains(&name.as_str()), "host.{name} is not the module's");
+    }
+    let source = std::fs::read_to_string(root.join("src/main.luau")).unwrap();
+    if let Err(e) = lua.load(&source).set_name("=examples/taps/src/main.luau").exec() {
+        panic!("{e}");
+    }
+    TapsModule { lua, os, ids }
+}
+
+/// A key-down of `vk` with modifiers `mask` the hook took for module 1 in W1, queued `ms` after
+/// `t0`: [`tap`] for a key read by the hook's rule rather than by its spec.
+fn tap_vk(h: &Host, vk: u32, mask: u8, t0: Instant, ms: u64) -> Arrived {
+    let pressed = Pressed { queued: Some(t0 + Duration::from_millis(ms)), ..at(h, W1) };
+    captures::arrive(h, vk, mask, 1, false, pressed)
+}
+
+/// The keypad's Enter as the hook reads it by the captures it was handed last: `NumpadEnter`
+/// while one is captured in the window in front, `Return` otherwise.
+fn keypad_enter(h: &Host) -> u32 {
+    let (set, owners) = h.backend.keys();
+    backend::keypad_enter_as(&set, &owners, 0, W1)
+}
+
+/// Runs the timer the module armed first, as a handler: a poll for the modifiers, 15 ms.
+fn fire_timer(h: &Host, m: &TapsModule) -> Delivered {
+    fire_timer_of(h, m, 15)
+}
+
+/// Runs the timer the module armed first, which must be one of `ms`, as a handler.
+fn fire_timer_of(h: &Host, m: &TapsModule, ms: u32) -> Delivered {
+    event(h, &m.lua, 1, &format!("local t = table.remove(timers, 1); assert(t.ms == {ms}, t.ms); t.cb()"))
+}
+
+/// The keys of the test module on its platform that hold a modifier — its hotkeys and `chord`, its
+/// captured one — are nobody else's: no other shipped module, tool or example asks for one there,
+/// and `check` finds nothing against any (the characters a layout types aside, which only the
+/// running system can say). The window probe is loaded in every test session, and of two claims
+/// of one key only the first is held. The bare keys are left out: Return, the keypad's Enter and
+/// Numpad1 are captured beside an overlay's on purpose.
+fn assert_taps_keys_are_its_own(m: &TapsModule, chord: &str) {
+    let mut own: Vec<String> = m.ids.borrow().keys().cloned().collect();
+    own.push(chord.to_string());
+    own.retain(|s| backend::key_spec(s).is_some_and(|(_, mask)| mask != 0));
+    assert_eq!(own.len(), 12, "{own:?}");
+    for spec in &own {
+        let check = backend::check_spec_for(m.os, spec, |_, _| None);
+        assert!(check.reasons.is_empty(), "{spec} on {:?}: {:?}", m.os, check.reasons);
+    }
+    for other in backend::shipped_key_specs() {
+        if other.file.ends_with("examples/taps/src/main.luau") || !other.oses.contains(&m.os) {
+            continue;
+        }
+        let theirs = backend::key_spec(&other.spec);
+        if let Some(mine) = own.iter().find(|s| backend::key_spec(s) == theirs) {
+            panic!("{} asks for '{}', the test module's {mine} on {:?}", other.file.display(), other.spec, m.os);
+        }
+    }
+}
+
+/// Every key of the test module, pressed as the live checks press it, on `os`: each says its
+/// press's count — 1, 2, 3 for quick presses, 1 again after the interval, a count that goes on
+/// queued behind the one before and a 1 or a repeat cutting off — through the host's own count;
+/// the `"final"` hotkey once, when the tick ends its sequence; the hotkey that sends at every press
+/// counts on, the keys it sent ending no count; presses made while its read waits keep their
+/// counts. The captures go on and off in turn — the keypad's Enter is NumpadEnter's beside Return,
+/// and Return's without it — and the hotkey on NumpadEnter is refused on Windows and held on a
+/// Mac. The keypad's sends wait until the modifiers are up, one at a time, and give up after three
+/// seconds; the post goes to the control that has the keyboard. The report of the window in front
+/// is asked at load and said once, and its picture asked for a second later and logged. What a
+/// Mac without Accessibility meets first is said: no hook, nothing sent, no window to post to.
+/// None of its keys is another shipped module's.
+fn the_taps_module_on(os: backend::KeyOs) {
+    let h = host();
+    h.backend.set_front(W1);
+    h.backend.set_sends(true);
+    let m = load_taps(&h, os);
+    let win = os == backend::KeyOs::Windows;
+    let (count, captures) = (m.key("Ctrl+Alt+J", "Cmd+Shift+F1"), m.key("Ctrl+Alt+P", "Cmd+Option+F1"));
+    let chord = m.key("Ctrl+Alt+Y", "Cmd+Option+F3");
+    assert_eq!(
+        m.said(),
+        format!(
+            "Quick repeats test ready. {} says its count, {} turns the captures on. The log lists every key.!",
+            m.describe(count),
+            m.describe(captures)
+        )
+    );
+    let logged = m.take("logged");
+    assert_eq!(logged.split(" | ").count(), 11, "a line for every hotkey: {logged}");
+    assert!(!logged.contains("not registered") && !logged.contains("not held"), "{logged}");
+    assert!(logged.starts_with(&format!("{}: says its count", m.describe(count))), "{logged}");
+    assert!(h.backend.keys().0.is_empty(), "nothing captured until the captures are turned on");
+    assert!(yes(&m.lua, "return initialAsked == 1"), "the report of the window in front is asked once");
+    assert_taps_keys_are_its_own(&m, chord);
+
+    // The report: on the next pass, with the window in front, once; its picture asked for a
+    // second later.
+    assert_eq!(event(&h, &m.lua, 1, "assert(host.window._dispatchInitial(front, false) == 1)"), Delivered::Ran);
+    assert_eq!(m.said(), "Trigger: Untitled - Notepad");
+    assert_eq!(m.take("logged"), "trigger 1: Untitled - Notepad (notepad)");
+    assert!(yes(&m.lua, "return #snaps == 0 and #timers == 1"), "no picture asked in the callback");
+    assert_eq!(fire_timer_of(&h, &m, 1000), Delivered::Ran);
+    assert_eq!(m.take("logged"), "trigger 1: asks for its picture");
+    assert!(yes(&m.lua, "local s = snaps[1]; return #snaps == 1 and s.opts.region.window == front and s.opts.region.fraction[3] == 0.5"));
+    let answer = "local s = table.remove(snaps, 1); s.cb({ release = function() released = true end }, nil, { waited = 3, frames = 1 })";
+    assert_eq!(event(&h, &m.lua, 1, answer), Delivered::Ran);
+    assert_eq!(m.take("logged"), "trigger 1: its picture was taken after 3 ms");
+    assert!(yes(&m.lua, "return released"), "the picture let go of");
+    assert_eq!(event(&h, &m.lua, 1, "assert(host.window._dispatchInitial(front, false) == 0)"), Delivered::Ran);
+    assert_eq!(m.said(), "", "used up");
+
+    // The hotkey: 1, 2, 3, and 1 again past the interval.
+    let t0 = Instant::now();
+    let ran = Some(taps::Handed::Delivered(Delivered::Ran));
+    for ms in [0, 100, 200, 1000] {
+        assert_eq!(hotkey_press(&h, m.id(count), t0, ms, 0), ran);
+    }
+    assert_eq!(m.said(), "1! | 2 | 3 | 1!");
+
+    // taps = "final": once the presses stop.
+    let fin = m.id(m.key("Ctrl+Alt+K", "Cmd+Shift+F2"));
+    for ms in [2000, 2100, 2200] {
+        assert_eq!(hotkey_press(&h, fin, t0, ms, 0), Some(taps::Handed::Kept));
+    }
+    tick(&h, t0, 2699);
+    assert_eq!(m.said(), "");
+    tick(&h, t0, 2700);
+    assert_eq!(m.said(), "final 3");
+
+    // A key sent at every press ends no count.
+    let through = h.backend.taps_through();
+    for ms in [3000, 3100, 3200] {
+        assert_eq!(hotkey_press(&h, m.id(m.key("Ctrl+Alt+L", "Cmd+Shift+F3")), t0, ms, 0), ran);
+    }
+    assert_eq!(m.said(), "1! | 2 | 3");
+    assert_eq!(m.take("sent"), "F13 | F13 | F13");
+    assert_eq!(h.backend.taps_through(), through);
+
+    // Presses made while its read waits wait behind it, with their counts.
+    let waits = m.id(m.key("Ctrl+Alt+W", "Cmd+Option+F2"));
+    assert_eq!(hotkey_press(&h, waits, t0, 4000, 0), Some(taps::Handed::Delivered(Delivered::Parked)));
+    assert_eq!(m.said(), "Reading for two seconds.!");
+    for ms in [4100, 4200, 4300] {
+        assert_eq!(hotkey_press(&h, m.id(count), t0, ms, 0), Some(taps::Handed::Delivered(Delivered::Queued)));
+    }
+    assert_eq!(m.said(), "", "nothing runs while the read waits");
+    run(&m.lua, "clock += 2000");
+    settle(&h, 1);
+    mailbox::run_queued(&*h);
+    assert_eq!(m.said(), "1! | 2 | 3");
+    assert_eq!(m.take("logged"), "waited 2000 ms for 1 read(s)");
+
+    // The captures on: all four, everywhere.
+    assert_eq!(hotkey_press(&h, m.id(captures), t0, 6000, 0), ran);
+    let (numpad_enter, ret) = (m.describe("NumpadEnter"), m.describe("Return"));
+    assert_eq!(
+        m.said(),
+        format!("Captures on: {}, {}, {numpad_enter} and {ret}.!", m.describe(chord), m.describe("Numpad1"))
+    );
+    let captured = |name: &str, named: bool| format!("{name}: captured, says {}its count", if named { "its name and " } else { "" });
+    let (chord_line, numpad1_line) = (captured(&m.describe(chord), false), captured(&m.describe("Numpad1"), false));
+    let (ret_line, enter_line) = (captured(&ret, true), captured(&numpad_enter, true));
+    assert_eq!(m.take("logged"), format!("{chord_line} | {numpad1_line} | {ret_line} | {enter_line}"));
+    assert_eq!(h.backend.keys().0.len(), 4);
+    for spec in [chord, "Numpad1", "Return"] {
+        assert_eq!(press(&h, spec, W2), Some(Capture::Take { owner: 1 }), "{spec}, in any window");
+    }
+    for ms in [7000, 7100, 7200] {
+        assert_eq!(tap(&h, "Numpad1", false, t0, ms), RAN);
+    }
+    assert_eq!(tap(&h, "Numpad1", true, t0, 7230), RAN);
+    assert_eq!(tap(&h, chord, false, t0, 8000), RAN);
+    assert_eq!(tap(&h, chord, false, t0, 8100), RAN);
+    assert_eq!(m.said(), "1! | 2 | 3 | 3! | 1! | 2", "a repeat says its press's count again, cutting off");
+    assert_eq!(keypad_enter(&h), backend::VK_NUMPAD_ENTER, "the keypad's Enter is NumpadEnter's");
+    assert_eq!(tap_vk(&h, backend::VK_NUMPAD_ENTER, 0, t0, 9000), RAN);
+    assert_eq!(tap(&h, "Return", false, t0, 9100), RAN);
+    assert_eq!(m.said(), format!("{numpad_enter} 1! | {ret} 1!"));
+
+    // Return without NumpadEnter, and a hotkey on NumpadEnter: refused on Windows, held on a Mac.
+    assert_eq!(hotkey_press(&h, m.id(captures), t0, 10000, 0), ran);
+    let enter_held = h.hotkeys.borrow().values().any(|r| r.binding == Some((backend::VK_NUMPAD_ENTER, 0)));
+    assert_eq!(enter_held, !win);
+    let step2 = format!("{numpad_enter} not captured: {ret} takes both. ");
+    let line = m.take("logged");
+    let (captures_line, enter_hotkey) = line.split_at(line.rfind(" | ").unwrap());
+    assert_eq!(captures_line, format!("{chord_line} | {numpad1_line} | {ret_line}"));
+    let enter_hotkey = &enter_hotkey[3..];
+    if win {
+        assert_eq!(m.said(), format!("{step2}{numpad_enter} is no hotkey here; the log says why.!"));
+        assert!(enter_hotkey.starts_with(&format!("{numpad_enter}: says hotkey, its name and its count — not registered: ")), "{line}");
+        assert!(enter_hotkey.contains("Windows has no virtual key for the keypad's Enter"), "{line}");
+    } else {
+        assert_eq!(m.said(), format!("{step2}A hotkey on {numpad_enter}.!"));
+        assert_eq!(enter_hotkey, format!("{numpad_enter}: says hotkey, its name and its count"));
+    }
+    assert_eq!(h.backend.keys().0.len(), 3);
+    assert_eq!(keypad_enter(&h), backend::VK_RETURN, "the keypad's Enter is Return's");
+    assert_eq!(tap_vk(&h, keypad_enter(&h), 0, t0, 11000), RAN);
+    assert_eq!(m.said(), format!("{ret} 1!"));
+
+    // The hotkey alone where the platform has it, then off.
+    assert_eq!(hotkey_press(&h, m.id(captures), t0, 12000, 0), ran);
+    assert!(h.backend.keys().0.is_empty());
+    if win {
+        assert_eq!(m.said(), "Captures off.!");
+    } else {
+        assert_eq!(m.said(), format!("Captures off. Only the hotkey on {numpad_enter}.!"));
+        assert_eq!(hotkey_press(&h, m.id("NumpadEnter"), t0, 13000, 0), ran);
+        assert_eq!(m.said(), format!("hotkey {numpad_enter} 1!"));
+        assert_eq!(hotkey_press(&h, m.id(captures), t0, 14000, 0), ran);
+        assert_eq!(m.said(), "Captures off.!");
+    }
+    assert!(!h.hotkeys.borrow().values().any(|r| r.binding == Some((backend::VK_NUMPAD_ENTER, 0))), "the hotkey on NumpadEnter is gone");
+    m.take("logged");
+
+    // The keypad's sends: once the modifiers are up, one waiting at a time.
+    let digit = m.id(m.key("Ctrl+Alt+NumpadAdd", "Cmd+Shift+NumpadAdd"));
+    run(&m.lua, "modsDown = true");
+    assert_eq!(hotkey_press(&h, digit, t0, 20000, 0), ran);
+    assert_eq!(hotkey_press(&h, digit, t0, 20100, 0), ran);
+    assert_eq!(m.said(), "1! | 2");
+    assert!(yes(&m.lua, "return #timers == 1"), "one waits");
+    assert_eq!(fire_timer(&h, &m), Delivered::Ran);
+    assert_eq!(m.take("sent"), "", "not while the modifiers are down");
+    run(&m.lua, "modsDown = false");
+    assert_eq!(fire_timer(&h, &m), Delivered::Ran);
+    let digit_sent = m.key("Numpad5", "Numpad1");
+    assert_eq!(m.take("sent"), digit_sent);
+    assert!(yes(&m.lua, "return #timers == 0"));
+    run(&m.lua, "modsDown = true");
+    assert_eq!(hotkey_press(&h, m.id(m.key("Ctrl+Alt+NumpadSubtract", "Cmd+Shift+NumpadSubtract")), t0, 21000, 0), ran);
+    run(&m.lua, "modsDown = false");
+    assert_eq!(fire_timer(&h, &m), Delivered::Ran);
+    assert_eq!(m.take("sent"), "NumpadEnter");
+    run(&m.lua, "modsDown = true");
+    assert_eq!(hotkey_press(&h, m.id(m.key("Ctrl+Alt+NumpadMultiply", "Cmd+Shift+NumpadMultiply")), t0, 22000, 0), ran);
+    run(&m.lua, "modsDown = false");
+    assert_eq!(fire_timer(&h, &m), Delivered::Ran);
+    assert_eq!(m.take("posted"), format!("{W1} NumpadDivide"), "the window in front, with no focus chain");
+    assert_eq!(m.take("logged"), format!("posts NumpadDivide to {W1} (Notepad)"));
+    assert_eq!(m.said(), "1! | 1!", "each the first press of its key");
+    // Held down for three seconds: nothing sent, and said.
+    run(&m.lua, "modsDown = true");
+    assert_eq!(hotkey_press(&h, digit, t0, 23000, 0), ran);
+    let mut polls = 0;
+    while yes(&m.lua, "return #timers > 0") {
+        assert_eq!(fire_timer(&h, &m), Delivered::Ran);
+        polls += 1;
+        assert!(polls < 300, "it never gave up");
+    }
+    assert_eq!(polls, 199);
+    assert_eq!(m.said(), "1! | Nothing sent: the modifiers were held down for three seconds.!");
+    assert_eq!(m.take("sent"), "");
+    run(&m.lua, "modsDown = false");
+    // Off the keypad, the same three; the post to the control that has the keyboard.
+    let (digit_off, enter_off) = (m.key("Ctrl+Alt+D", "Cmd+Option+F6"), m.key("Ctrl+Alt+R", "Cmd+Option+F7"));
+    let post = m.id(m.key("Ctrl+Alt+NumpadMultiply", "Cmd+Shift+NumpadMultiply"));
+    let post_off = m.id(m.key("Ctrl+Alt+V", "Cmd+Option+F8"));
+    assert_eq!(hotkey_press(&h, m.id(digit_off), t0, 26000, 0), ran);
+    assert_eq!(hotkey_press(&h, m.id(enter_off), t0, 26100, 0), ran);
+    assert_eq!(m.take("sent"), format!("{digit_sent} | NumpadEnter"));
+    run(&m.lua, "chain = { { id = 4242, class = 'Edit' }, { id = front.id, class = front.class } }");
+    assert_eq!(hotkey_press(&h, post_off, t0, 26200, 0), ran);
+    assert_eq!(m.take("posted"), "4242 NumpadDivide");
+    assert_eq!(m.take("logged"), "posts NumpadDivide to 4242 (Edit)");
+    assert_eq!(m.said(), "1! | 1! | 1!");
+
+    // What a Mac without Accessibility meets first. No hook: said, logged, and the next press
+    // starts the steps again.
+    let refused = "SetWindowsHookExW(WH_KEYBOARD_LL) failed (error 5)";
+    h.backend.refuse_hook(Some(crate::errors::HostError::with(&crate::errors::keys::HOOK_REFUSED, refused.into())));
+    assert_eq!(hotkey_press(&h, m.id(captures), t0, 30000, 0), ran);
+    assert_eq!(m.said(), format!("Keys cannot be captured: {refused}!"));
+    assert_eq!(m.take("logged"), format!("{}: not captured: {refused}", m.describe(chord)));
+    assert!(h.backend.keys().0.is_empty());
+    h.backend.refuse_hook(None);
+    assert_eq!(hotkey_press(&h, m.id(captures), t0, 31000, 0), ran);
+    assert!(m.said().starts_with("Captures on: "), "step 1 again");
+    let mut ms = 32000;
+    while m.said() != "Captures off.!" {
+        assert!(ms < 36000, "the captures never went off");
+        assert_eq!(hotkey_press(&h, m.id(captures), t0, ms, 0), ran);
+        ms += 1000;
+    }
+    m.take("logged");
+    // Nothing sent: said, by the hotkey that sends and by a keypad trigger.
+    let not_yet = crate::errors::HostError::of(&crate::errors::common::NOT_YET).message().to_string();
+    h.backend.set_sends(false);
+    assert_eq!(hotkey_press(&h, m.id(m.key("Ctrl+Alt+L", "Cmd+Shift+F3")), t0, 40000, 0), ran);
+    assert_eq!(m.said(), format!("1! | not sent: {not_yet}"));
+    assert_eq!(hotkey_press(&h, digit, t0, 41000, 0), ran);
+    assert_eq!(m.said(), format!("1! | Not sent: {not_yet}!"));
+    h.backend.set_sends(true);
+    m.take("sent");
+    // No window in front, and no focus chain: nothing posted, and said.
+    run(&m.lua, "chain = {}; window = front; front = nil");
+    assert_eq!(hotkey_press(&h, post, t0, 42000, 0), ran);
+    assert_eq!(m.said(), "1! | No window in front to post to.!");
+    assert_eq!(m.take("posted"), "");
+    run(&m.lua, "front = window");
+
+    // Another window in front: an activation is reported too.
+    let calculator = r#"local calc = { id = 9, title = "Calculator", app = { name = "calc" }, client = front.client }
+        assert(host.window._dispatchActivate(calc) == 1)"#;
+    assert_eq!(event(&h, &m.lua, 1, calculator), Delivered::Ran);
+    assert_eq!(m.said(), "Trigger: Calculator");
+    assert_eq!(m.take("logged"), "trigger 2: Calculator (calc)");
+    assert_eq!(fire_timer_of(&h, &m, 1000), Delivered::Ran);
+    let gone = "local s = table.remove(snaps, 1); s.cb(nil, 'the window is gone', { waited = 0, frames = 0 })";
+    assert_eq!(event(&h, &m.lua, 1, gone), Delivered::Ran);
+    assert_eq!(m.take("logged"), "trigger 2: asks for its picture | trigger 2: its picture failed (the window is gone) after 0 ms");
+    assert!(yes(&m.lua, "return #timers == 0 and #snaps == 0"));
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+    assert_eq!(h.tasks.len(), 0);
+}
+
+#[test]
+fn the_taps_module_on_windows() {
+    the_taps_module_on(backend::KeyOs::Windows);
+}
+
+#[test]
+fn the_taps_module_on_a_mac() {
+    the_taps_module_on(backend::KeyOs::Macos);
 }
